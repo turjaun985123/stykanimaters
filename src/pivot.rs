@@ -1176,7 +1176,7 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
             let y = r.f32()?;
             r.f64()?; // camera angle: not modelled
             let zoom = r.f32()?;
-            camera.push(CameraKey { frame: fi, x, y, zoom });
+            camera.push(CameraKey { frame: fi, x, y, zoom, angle: 0.0 });
         }
         raw_frames.push((duration.max(1) as f32, bg_id, objects));
     }
@@ -1713,6 +1713,7 @@ mod tests {
             x: 500.0,
             y: 300.0,
             zoom: 1.5,
+            angle: 0.0,
         });
         let bytes = export_piv_v5(&project);
         // The export is zlib-wrapped, like the files StykAnimate

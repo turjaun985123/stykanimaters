@@ -457,6 +457,9 @@ pub struct CameraKey {
     pub x: f32,
     pub y: f32,
     pub zoom: f32,
+    /// Camera rotation in degrees (wave 6); 0 for all pre-v7 files.
+    #[serde(default)]
+    pub angle: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -776,6 +779,33 @@ impl Project {
         default
     }
 
+    /// Interpolated camera rotation (degrees) at `frame`, using the
+    /// shortest angular path between keys. 0 when no keys exist.
+    pub fn camera_angle_at(&self, frame: f32) -> f32 {
+        if self.camera.is_empty() {
+            return 0.0;
+        }
+        let mut keys: Vec<&CameraKey> = self.camera.iter().collect();
+        keys.sort_by_key(|k| k.frame);
+        let first = keys[0];
+        if frame <= first.frame as f32 {
+            return first.angle;
+        }
+        let last = keys[keys.len() - 1];
+        if frame >= last.frame as f32 {
+            return last.angle;
+        }
+        for w in keys.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if frame >= a.frame as f32 && frame <= b.frame as f32 {
+                let t = (frame - a.frame as f32) / (b.frame - a.frame).max(1) as f32;
+                let d = norm_deg(b.angle - a.angle);
+                return norm_deg(a.angle + d * t);
+            }
+        }
+        last.angle
+    }
+
     fn camera_zoom_at(&self, frame: f32) -> f32 {
         let mut keys: Vec<&CameraKey> = self.camera.iter().collect();
         keys.sort_by_key(|k| k.frame);
@@ -807,7 +837,7 @@ impl Project {
             k.y = y;
             k.zoom = zoom;
         } else {
-            self.camera.push(CameraKey { frame, x, y, zoom });
+            self.camera.push(CameraKey { frame, x, y, zoom, angle: 0.0 });
             self.camera.sort_by_key(|k| k.frame);
         }
     }
