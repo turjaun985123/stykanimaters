@@ -51,6 +51,48 @@ pub fn norm_deg(a: f32) -> f32 {
 
 /// One joint of a figure. The segment runs from the parent's position to
 /// this node's position; `rest_angle` is relative to the parent segment.
+/// End-cap rendering for a segment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum CapKind {
+    #[default]
+    Round,
+    Square,
+    Point,
+}
+
+/// Per-segment rendering style (wave 4 prep; rendered by export/svg).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NodeStyle {
+    /// Width multiplier at the far end (1.0 = uniform, 0.2 = sharp taper).
+    pub taper: f32,
+    pub cap: CapKind,
+    /// Gradient end colour; `None` = solid.
+    pub color2: Option<u32>,
+    /// 0.0..=1.0 opacity multiplier.
+    pub opacity: f32,
+}
+
+impl Default for NodeStyle {
+    fn default() -> Self {
+        NodeStyle { taper: 1.0, cap: CapKind::Round, color2: None, opacity: 1.0 }
+    }
+}
+
+/// Media attached to a segment: a sprite from the project's asset
+/// table, or a text label drawn along the segment.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SegmentMedia {
+    Image { asset: usize },
+    Text { content: String, size: f32 },
+}
+
+/// A named image in the project's asset table (PNG bytes).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImageAsset {
+    pub name: String,
+    pub png: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeDef {
     pub name: String,
@@ -72,6 +114,10 @@ pub struct NodeDef {
     pub ik_end: bool,
     #[serde(default)]
     pub shape: Shape,
+    #[serde(default)]
+    pub style: NodeStyle,
+    #[serde(default)]
+    pub media: Option<SegmentMedia>,
 }
 
 fn default_thickness() -> f32 {
@@ -113,6 +159,8 @@ impl FigureDef {
             color: None,
             ik_end: false,
             shape: Shape::Line,
+            style: NodeStyle::default(),
+            media: None,
         };
         let mut nodes = vec![
             n("hips", None, 0.0, 0.0),        // 0 root
@@ -152,6 +200,8 @@ impl FigureDef {
             color: None,
             ik_end: false,
             shape: Shape::Line,
+            style: NodeStyle::default(),
+            media: None,
         };
         let mut nodes = vec![
             n("pelvis", None, 0.0, 0.0),              // 0 root (rear)
@@ -191,6 +241,8 @@ impl FigureDef {
             color: None,
             ik_end: false,
             shape: Shape::Line,
+            style: NodeStyle::default(),
+            media: None,
         };
         let mut nodes = vec![
             n("hips", None, 0.0, 0.0),
@@ -356,6 +408,12 @@ pub struct Stroke {
     pub points: Vec<V2>,
     pub color: u32,
     pub width: f32,
+    /// Per-point widths for pressure strokes; empty = uniform `width`.
+    #[serde(default)]
+    pub widths: Vec<f32>,
+    /// Closed-shape fill colour for this stroke, when filled.
+    #[serde(default)]
+    pub fill: Option<u32>,
 }
 
 /// An audio file placed on the timeline (used by MP4 export).
@@ -491,6 +549,8 @@ pub struct Project {
     pub clips: Vec<ClipDef>,
     #[serde(default)]
     pub fx_clips: Vec<FxClipEntry>,
+    #[serde(default)]
+    pub assets: Vec<ImageAsset>,
 }
 
 impl Project {
@@ -533,6 +593,7 @@ impl Project {
             audio: Vec::new(),
             clips: Vec::new(),
             fx_clips: Vec::new(),
+            assets: Vec::new(),
         }
     }
 

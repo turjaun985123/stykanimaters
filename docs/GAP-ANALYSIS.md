@@ -2,13 +2,14 @@
 
 Measured 2026-11-07 against StykAnimate-App @ def97214.
 Original: ~85,800 lines of JS in `src/` alone (655 modules), plus a
-Python codec backend and native helpers. This port: ~2,900 lines of
-Rust, 31 tests. By headline feature rows below the port now stands
-at roughly four-fifths: 14 rows DONE or DONE-equivalent, 6 PARTIAL,
-4 MISSING. The missing rows are the deepest subsystems: the Stick Nodes `.nodes` corpus decoder, true
-3D figures, the raster drawing engine's depth (tiles, pressure,
-wet ink), an audio editor, .piv v5 export, and 27-language
-localisation + touch.
+Python codec backend and native helpers. This port: ~7,600 lines of
+Rust, 64 tests. By headline feature rows below the port now stands
+at roughly two-thirds done-equivalent: 16 rows DONE or DONE-equivalent, 6 PARTIAL,
+2 MISSING. The missing rows are the deepest subsystems: true
+3D figures and touch UI. The partials are depth, not absence:
+drawing (no brushes/fill), audio (playback only), movieclips (no
+nested-timeline editor), keyframe graph, localisation (3 of 27
+languages), and Stick Nodes animation containers.
 Interop is verified both directions against the original's own
 Python codec, including .piv v5 files produced by its encoder. Status key: DONE / PARTIAL / MISSING.
 

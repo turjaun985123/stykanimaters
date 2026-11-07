@@ -516,6 +516,8 @@ fn convert(fig: &RawFigure) -> (FigureDef, u32) {
 
     let mut nodes: Vec<NodeDef> = Vec::with_capacity(n + 1);
     nodes.push(NodeDef {
+        style: crate::model::NodeStyle::default(),
+        media: None,
         name: "origin".into(),
         parent: None,
         length: 0.0,
@@ -541,6 +543,8 @@ fn convert(fig: &RawFigure) -> (FigureDef, u32) {
             _ => Shape::Line,
         };
         nodes.push(NodeDef {
+        style: crate::model::NodeStyle::default(),
+        media: None,
             name: format!("{} {}", kind_name(node.kind), node.id),
             parent: Some(node.parent.map(|p| p + 1).unwrap_or(0)),
             length: if i == 0 { 0.0 } else { eff_len[i] },
@@ -613,6 +617,7 @@ pub fn import_nodes(data: &[u8]) -> Result<Project, String> {
         audio: Vec::new(),
         clips: Vec::new(),
         fx_clips: Vec::new(),
+        assets: Vec::new(),
     })
 }
 

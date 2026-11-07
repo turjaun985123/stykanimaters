@@ -354,6 +354,8 @@ impl EditorCore {
             color: None,
             ik_end: false,
             shape: crate::model::Shape::Line,
+            style: crate::model::NodeStyle::default(),
+            media: None,
         });
         for frame in &mut self.project.frames {
             frame.poses[fi].angles.push(0.0);
@@ -992,6 +994,8 @@ impl EditorCore {
             points: vec![p],
             color,
             width: 4.0,
+            widths: Vec::new(),
+            fill: None,
         });
         self.drawing = true;
     }

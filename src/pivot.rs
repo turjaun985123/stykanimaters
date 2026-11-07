@@ -237,6 +237,8 @@ fn parse_figure(r: &mut Reader, version4: bool) -> Result<(FigureDef, String, Ve
         }
     };
     let mut nodes = vec![NodeDef {
+        style: crate::model::NodeStyle::default(),
+        media: None,
         name: "origin".into(),
         parent: None,
         length: 0.0,
@@ -259,6 +261,8 @@ fn parse_figure(r: &mut Reader, version4: bool) -> Result<(FigureDef, String, Ve
             _ => Shape::Line,
         };
         nodes.push(NodeDef {
+        style: crate::model::NodeStyle::default(),
+        media: None,
             name: format!("segment {}", seg.id),
             parent: Some(index_of_id[&seg.parent_id]),
             length: seg.length,
@@ -611,6 +615,7 @@ fn assemble(
         audio: Vec::new(),
         clips: Vec::new(),
         fx_clips: Vec::new(),
+        assets: Vec::new(),
     }
 }
 
@@ -985,6 +990,8 @@ fn parse_figure_v5(r: &mut Reader) -> Result<FigType, String> {
         abs_of_id.insert(seg.id, rad_to_deg(seg.angle_rad));
     }
     let mut nodes = vec![NodeDef {
+        style: crate::model::NodeStyle::default(),
+        media: None,
         name: "origin".into(),
         parent: None,
         length: 0.0,
@@ -1006,6 +1013,8 @@ fn parse_figure_v5(r: &mut Reader) -> Result<FigType, String> {
             _ => Shape::Line,
         };
         nodes.push(NodeDef {
+        style: crate::model::NodeStyle::default(),
+        media: None,
             name: format!("segment {}", seg.id),
             parent: Some(index_of_id[&seg.parent_id]),
             length: seg.length,
@@ -1251,6 +1260,7 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
         audio: Vec::new(),
         clips: Vec::new(),
         fx_clips: Vec::new(),
+        assets: Vec::new(),
     })
 }
 
