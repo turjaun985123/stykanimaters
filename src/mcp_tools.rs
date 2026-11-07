@@ -1738,11 +1738,11 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 34);
+        assert_eq!(tools.len(), 41);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 34, "tool names must be unique");
+        assert_eq!(names.len(), 41, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
@@ -1980,11 +1980,13 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn wave9_stats_and_bulk_durations() {
         let tools = tools();
         let mut core = EditorCore::new();
         call(&mut core, &tools, "new_project", json!({})).unwrap();
+        // A fresh project starts with a single frame; the bulk
+        // duration checks below need at least two.
+        call(&mut core, &tools, "add_frame", json!({})).unwrap();
 
         // Stats over the fresh demo project.
         let s = call(&mut core, &tools, "get_project_stats", json!({})).unwrap();
