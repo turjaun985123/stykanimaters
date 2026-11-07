@@ -77,29 +77,9 @@ pub fn group_rows() -> Vec<(&'static str, &'static str)> {
 /// One keyboard-shortcut row: a small pill holding the key label,
 /// then the action it performs.
 fn shortcut_row(key: &str, action: &str) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .child(
-            div()
-                .px(px(6.0))
-                .py(px(2.0))
-                .rounded(px(999.0))
-                .bg(rgb(0x2C313A))
-                .border_1()
-                .border_color(rgb(C_BORDER))
-                .text_size(px(11.0))
-                .text_color(rgb(C_INK))
-                .child(key.to_string()),
-        )
-        .child(
-            div()
-                .flex_1()
-                .text_size(px(12.0))
-                .text_color(rgb(C_MUTED))
-                .child(action.to_string()),
-        )
+    // Delegates to the shared key-cap component (ui::kbd),
+    // which matches this row's metrics.
+    crate::ui_kbd::shortcut_row(key, action)
 }
 
 /// One tool-group row: the group's name, then its description.

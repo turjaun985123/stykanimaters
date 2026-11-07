@@ -799,14 +799,9 @@ impl EditorView {
                     ),
             );
         if infos.is_empty() {
-            return col.child(
-                div()
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .text_size(px(12.0))
-                    .text_color(rgb(0x9AA3B2))
-                    .child("No FX clips in this project."),
-            );
+            return col.child(crate::ui_empty::empty_line(
+                "No FX clips in this project.",
+            ));
         }
         for info in infos {
             let i = info.index;
@@ -864,6 +859,29 @@ impl EditorView {
                     cx.notify();
                 })));
             col = col.child(row);
+            // Span bar (ui::clip_row): where this clip sits on
+            // the project timeline.
+            let total = core.project.frames.len().max(1) as f32;
+            let colour = core
+                .project
+                .fx_clips
+                .get(i)
+                .map(|e| e.clip.color)
+                .unwrap_or(0xFFC6_5D);
+            col = col.child(crate::ui_clip_row::clip_row(
+                crate::ui_clip_row::ClipRowData {
+                    name: format!(
+                        "{} · fig {} node {}",
+                        info.kind,
+                        info.figure + 1,
+                        info.node
+                    ),
+                    kind_label: info.kind.to_string(),
+                    colour,
+                    start_frac: info.start / total,
+                    end_frac: info.end / total,
+                },
+            ));
         }
         col
     }
@@ -1226,28 +1244,15 @@ impl EditorView {
             Self::weather_wind_step,
             cx,
         );
-        div()
-            .flex_col()
-            .w_full()
-            .bg(rgb(C_PANEL))
-            .border_1()
-            .border_color(rgb(C_BORDER))
-            .rounded(px(8.0))
-            .p(px(8.0))
-            .gap(px(6.0))
-            .child(
-                top_bar()
-                    .child(section_label("Weather"))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(C_MUTED))
-                            .child(summary),
-                    ),
-            )
-            .child(kind_row)
-            .child(amount_row)
-            .child(wind_row)
+        crate::ui_panel::panel_shell(
+            crate::ui_panel::PanelSpec::new("Weather").with_subtitle(summary),
+            div()
+                .flex_col()
+                .gap(px(6.0))
+                .child(kind_row)
+                .child(amount_row)
+                .child(wind_row),
+        )
     }
 
     /// Weather panel stepper backing: adjust the live
@@ -2390,6 +2395,38 @@ impl Render for EditorView {
         let dope_map = crate::ui_dope::keyframe_map(&core.project);
         let dopesheet = crate::ui_dope::dopesheet(&dope_map, core.current, &dope_names);
 
+        // Timeline ruler + scrubber (ui components): frame numbers,
+        // loop shading and keyframe dots aligned with the chips,
+        // over a slim playhead track.
+        let key_union: Vec<bool> = (0..core.project.frames.len())
+            .map(|f| {
+                dope_map
+                    .iter()
+                    .any(|row| row.get(f).copied().unwrap_or(false))
+            })
+            .collect();
+        let ruler = crate::ui_timeline_ruler::ruler(
+            core.project.frames.len(),
+            core.current,
+            core.loop_range,
+            &key_union,
+        );
+        let key_fracs: Vec<f32> = if core.project.frames.len() > 1 {
+            key_union
+                .iter()
+                .enumerate()
+                .filter(|(_, k)| **k)
+                .map(|(f, _)| f as f32 / (core.project.frames.len() - 1) as f32)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let scrubber = crate::ui_scrubber::scrubber(
+            core.playhead,
+            core.project.frames.len(),
+            &key_fracs,
+        );
+
         // Home panel: saved projects (from the library scan) with
         // an Open button each, plus the recents list. Built only
         // while shown; it replaces the canvas in the middle row.
@@ -2414,6 +2451,9 @@ impl Render for EditorView {
                         }))),
                 )
                 .child(section_label("Home — saved projects in ./projects"));
+            panel = panel.child(crate::ui_stat_grid::stat_grid(
+                &crate::stats::project_stats(&core.project),
+            ));
             let entries = crate::projects::scan(std::path::Path::new("projects"));
             let mut listed = 0usize;
             for (i, info) in entries.iter().enumerate() {
@@ -3786,6 +3826,8 @@ impl Render for EditorView {
                     .p(px(8.0))
                     .bg(rgb(bar_bg))
                     .child(dopesheet)
+                    .child(ruler)
+                    .child(scrubber)
                     .child(
                         top_bar()
                             .child(section_label("Timeline"))
