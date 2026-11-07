@@ -11,13 +11,15 @@ use std::time::Duration;
 pub struct EditorView {
     core: EditorCore,
     canvas_bounds: Rc<RefCell<Bounds<Pixels>>>,
+    focus_handle: FocusHandle,
 }
 
 impl EditorView {
-    pub fn new() -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         EditorView {
             core: EditorCore::new(),
             canvas_bounds: Rc::new(RefCell::new(Bounds::default())),
+            focus_handle: cx.focus_handle(),
         }
     }
 
@@ -44,17 +46,13 @@ impl EditorView {
         if self.core.playing {
             cx.spawn(async move |this, cx| {
                 loop {
-                    let fps = match this.read_with(cx, |view: &EditorView, _| view.core.project.fps) {
-                        Ok(f) => f,
-                        Err(_) => break,
-                    };
                     cx.background_executor()
-                        .timer(Duration::from_millis((1000.0 / fps.max(1.0)) as u64))
+                        .timer(Duration::from_millis(33))
                         .await;
                     let keep = this
                         .update(cx, |view, cx| {
                             if view.core.playing {
-                                view.core.advance();
+                                view.core.advance_play(0.033);
                                 cx.notify();
                                 true
                             } else {
@@ -79,17 +77,29 @@ struct DrawData {
     background: u32,
     /// (segments (a, b, colour, thickness), joints, heads, figure colour)
     figures: Vec<(Vec<(V2, V2, u32, f32)>, Vec<V2>, Vec<V2>, u32)>,
+    /// (centre, shape, length, colour, thickness) shape segments
+    shapes: Vec<(V2, crate::model::Shape, f32, u32, f32)>,
     onion: Vec<(Vec<(V2, V2)>, u32)>,
     selected: Option<(usize, usize)>,
     cam: (f32, f32, f32),
+    /// Motion paths: one polyline per visible figure (root), plus the
+    /// selected joint's path appended last when enabled.
+    paths: Vec<Vec<V2>>,
+    particles: Vec<(V2, f32, u32, f32)>,
 }
 
 impl EditorView {
     fn draw_data(&self) -> DrawData {
         let core = &self.core;
+        let display = core.display_frame();
         let mut figures = Vec::new();
+        let mut shapes = Vec::new();
         for fi in 0..core.project.figures.len() {
-            let pos = core.positions(core.current, fi);
+            if core.project.figures[fi].hidden {
+                figures.push((Vec::new(), Vec::new(), Vec::new(), core.project.figures[fi].color));
+                continue;
+            }
+            let pos = core.positions_f(display, fi);
             let def = &core.project.figures[fi].def;
             let mut segs = Vec::new();
             let mut heads = Vec::new();
@@ -102,11 +112,19 @@ impl EditorView {
                     heads.push(pos[i]);
                 }
             }
+            for (i, node) in def.nodes.iter().enumerate() {
+                if !matches!(node.shape, crate::model::Shape::Line) {
+                    shapes.push((pos[i], node.shape, node.length, node.color.unwrap_or(fig_color), node.thickness));
+                }
+            }
             figures.push((segs, pos, heads, fig_color));
         }
         let mut onion = Vec::new();
         if core.onion && core.current > 0 {
             for fi in 0..core.project.figures.len() {
+                if core.project.figures[fi].hidden {
+                    continue;
+                }
                 let pos = core.positions(core.current - 1, fi);
                 let def = &core.project.figures[fi].def;
                 let mut segs = Vec::new();
@@ -118,19 +136,49 @@ impl EditorView {
                 onion.push((segs, core.project.figures[fi].color));
             }
         }
+        let mut paths = Vec::new();
+        if core.show_paths {
+            for fi in 0..core.project.figures.len() {
+                if core.project.figures[fi].hidden {
+                    continue;
+                }
+                paths.push(
+                    (0..core.frame_count())
+                        .map(|f| core.positions(f, fi)[0])
+                        .collect::<Vec<V2>>(),
+                );
+            }
+            if let Some(ni) = core.selected_node {
+                let fi = core.selected_figure;
+                if ni < core.project.figures[fi].def.nodes.len() {
+                    paths.push(
+                        (0..core.frame_count())
+                            .map(|f| core.positions(f, fi)[ni])
+                            .collect::<Vec<V2>>(),
+                    );
+                }
+            }
+        }
+        let particles = crate::export::particles_at(&core.project, display)
+            .into_iter()
+            .map(|(p, r, c, a)| (p, r, ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32, a))
+            .collect();
         DrawData {
             stage: core.project.stage,
             background: core.project.background,
             figures,
+            shapes,
             onion,
             selected: self.core.selected_node.map(|n| (self.core.selected_figure, n)),
-            cam: core.camera_here(),
+            cam: core.project.camera_at(display),
+            paths,
+            particles,
         }
     }
 }
 
 fn btn(
-    id: &'static str,
+    id: impl Into<ElementId>,
     label: &'static str,
     active: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -150,7 +198,8 @@ fn btn(
 }
 
 impl Render for EditorView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window.focus(&self.focus_handle);
         let core = &self.core;
         let frame_label = format!("Frame {} / {}", core.current + 1, core.frame_count());
         let fps_label = format!("{} fps", core.project.fps as i32);
@@ -160,6 +209,20 @@ impl Render for EditorView {
         let cam_mode = core.camera_mode;
         let (ccx, ccy, czoom) = core.camera_here();
         let cam_label = format!("cam ({ccx:.0}, {ccy:.0}) x{czoom:.2} · {} key(s)", core.project.camera.len());
+        let (root_bg, bar_bg, row_bg) = if core.light_theme {
+            (0xE9EBEF, 0xD9DCE2, 0xD0D4DB)
+        } else {
+            (0x191C21, 0x21252D, 0x1D2129)
+        };
+        let tween_on = core.project.tween_playback;
+        let follow_on = core.project.camera_follow.is_some();
+        let paths_on = core.show_paths;
+        let easing_label = format!("Easing: {}", core.project.easing.label());
+        let lib_name = core
+            .library
+            .get(core.library_index)
+            .map(|(n, _)| n.clone())
+            .unwrap_or_else(|| "Library".into());
 
         let data = self.draw_data();
         let bounds_slot = self.canvas_bounds.clone();
@@ -173,6 +236,69 @@ impl Render for EditorView {
         )
         .flex_1()
         .w_full();
+
+        let mut sidebar = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .p(px(6.0))
+            .w(px(168.0))
+            .bg(rgb(bar_bg))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(0x9AA3B2))
+                    .child("FIGURES (layers)"),
+            );
+        for (fi, fig) in core.project.figures.iter().enumerate() {
+            let selected = fi == core.selected_figure;
+            let name = fig.name.clone();
+            let hidden = fig.hidden;
+            sidebar = sidebar.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(3.0))
+                    .child(
+                        div()
+                            .id(("fig-sel", fi))
+                            .flex_1()
+                            .px(px(6.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .cursor_pointer()
+                            .bg(if selected { rgb(0x3D5A99) } else { rgb(0x2C313A) })
+                            .text_size(px(12.0))
+                            .text_color(rgb(0xE8E8EC))
+                            .on_click(cx.listener(move |view, _ev, _w, cx| {
+                                view.core.select_figure(fi);
+                                cx.notify();
+                            }))
+                            .child(name),
+                    )
+                    .child(btn(("fig-up", fi), "^", false, cx.listener(move |view, _ev, _w, cx| {
+                        view.core.select_figure(fi);
+                        view.core.move_figure(1);
+                        cx.notify();
+                    })))
+                    .child(btn(("fig-dn", fi), "v", false, cx.listener(move |view, _ev, _w, cx| {
+                        view.core.select_figure(fi);
+                        view.core.move_figure(-1);
+                        cx.notify();
+                    })))
+                    .child(btn(("fig-eye", fi), if hidden { "off" } else { "eye" }, hidden, cx.listener(move |view, _ev, _w, cx| {
+                        view.core.select_figure(fi);
+                        view.core.toggle_figure_hidden();
+                        cx.notify();
+                    })))
+                    .child(btn(("fig-del", fi), "x", false, cx.listener(move |view, _ev, _w, cx| {
+                        view.core.select_figure(fi);
+                        view.core.delete_figure();
+                        cx.notify();
+                    }))),
+            );
+        }
 
         let mut timeline = div().flex().flex_row().gap(px(6.0));
         for i in 0..core.frame_count() {
@@ -200,7 +326,35 @@ impl Render for EditorView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x191C21))
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|view, ev: &KeyDownEvent, _w, cx| {
+                let key = ev.keystroke.key.as_str();
+                let ctrl = ev.keystroke.modifiers.control;
+                let shift = ev.keystroke.modifiers.shift;
+                match (key, ctrl, shift) {
+                    ("z", true, false) => view.core.undo(),
+                    ("z", true, true) | ("y", true, _) => view.core.redo(),
+                    ("left", _, _) => {
+                        let n = view.core.frame_count();
+                        view.core.goto((view.core.current + n - 1) % n);
+                    }
+                    ("right", _, _) => {
+                        let n = view.core.frame_count();
+                        view.core.goto((view.core.current + 1) % n);
+                    }
+                    ("space", _, _) => {
+                        view.toggle_play(cx);
+                        return;
+                    }
+                    ("n", false, _) => view.core.add_frame(),
+                    ("i", false, _) => view.core.insert_inbetween(),
+                    ("o", false, _) => view.core.onion = !view.core.onion,
+                    ("c", false, _) => view.core.camera_mode = !view.core.camera_mode,
+                    _ => return,
+                }
+                cx.notify();
+            }))
+            .bg(rgb(root_bg))
             .on_mouse_down(MouseButton::Left, cx.listener(|view, ev: &MouseDownEvent, _w, cx| {
                 let p = view.to_stage(ev.position);
                 if view.core.camera_mode {
@@ -230,7 +384,7 @@ impl Render for EditorView {
                     .items_center()
                     .gap(px(6.0))
                     .p(px(8.0))
-                    .bg(rgb(0x21252D))
+                    .bg(rgb(bar_bg))
                     .child(btn("play", if playing { "Pause" } else { "Play" }, playing, cx.listener(|view, _ev, _w, cx| {
                         view.toggle_play(cx);
                     })))
@@ -256,6 +410,18 @@ impl Render for EditorView {
                     })))
                     .child(btn("undo", "Undo", false, cx.listener(|view, _ev, _w, cx| {
                         view.core.undo();
+                        cx.notify();
+                    })))
+                    .child(btn("redo", "Redo", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.redo();
+                        cx.notify();
+                    })))
+                    .child(btn("copy-frame", "Copy frame", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.copy_frame();
+                        cx.notify();
+                    })))
+                    .child(btn("paste-frame", "Paste frame", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.paste_frame();
                         cx.notify();
                     })))
                     .child(btn("save", "Save", false, cx.listener(|view, _ev, _w, cx| {
@@ -286,7 +452,7 @@ impl Render for EditorView {
                     .gap(px(6.0))
                     .px(px(8.0))
                     .py(px(4.0))
-                    .bg(rgb(0x1D2129))
+                    .bg(rgb(row_bg))
                     .child(btn("inbetween", "Inbetween", false, cx.listener(|view, _ev, _w, cx| {
                         view.core.insert_inbetween();
                         cx.notify();
@@ -319,6 +485,10 @@ impl Render for EditorView {
                         view.core.cycle_node_color();
                         cx.notify();
                     })))
+                    .child(btn("node-shape", "Shape", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.cycle_shape();
+                        cx.notify();
+                    })))
                     .child(btn("add-quad", "+ Quadruped", false, cx.listener(|view, _ev, _w, cx| {
                         view.core.add_quadruped();
                         cx.notify();
@@ -337,7 +507,7 @@ impl Render for EditorView {
                     .gap(px(6.0))
                     .px(px(8.0))
                     .py(px(4.0))
-                    .bg(rgb(0x1D2129))
+                    .bg(rgb(row_bg))
                     .child(btn("cam-mode", "Camera mode", cam_mode, cx.listener(|view, _ev, _w, cx| {
                         view.core.camera_mode = !view.core.camera_mode;
                         view.core.status = if view.core.camera_mode {
@@ -370,14 +540,104 @@ impl Render for EditorView {
                             .child(cam_label),
                     ),
             )
-            .child(canvas)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(rgb(row_bg))
+                    .child(btn("fps-dn", "FPS -", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.adjust_fps(-1.0);
+                        cx.notify();
+                    })))
+                    .child(btn("fps-up", "FPS +", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.adjust_fps(1.0);
+                        cx.notify();
+                    })))
+                    .child(btn("dur-dn", "Dur -", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.adjust_frame_duration(0.5);
+                        cx.notify();
+                    })))
+                    .child(btn("dur-up", "Dur +", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.adjust_frame_duration(2.0);
+                        cx.notify();
+                    })))
+                    .child(btn("tween", "Tween play", tween_on, cx.listener(|view, _ev, _w, cx| {
+                        view.core.toggle_tween_playback();
+                        cx.notify();
+                    })))
+                    .child(btn("easing", Box::leak(easing_label.into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.cycle_easing();
+                        cx.notify();
+                    })))
+                    .child(btn("follow", "Follow cam", follow_on, cx.listener(|view, _ev, _w, cx| {
+                        view.core.toggle_camera_follow();
+                        cx.notify();
+                    })))
+                    .child(btn("paths", "Paths", paths_on, cx.listener(|view, _ev, _w, cx| {
+                        view.core.show_paths = !view.core.show_paths;
+                        cx.notify();
+                    })))
+                    .child(btn("fx-burst", "FX Burst", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.add_particle(0);
+                        cx.notify();
+                    })))
+                    .child(btn("fx-sparkle", "FX Sparkle", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.add_particle(1);
+                        cx.notify();
+                    })))
+                    .child(btn("fx-smoke", "FX Smoke", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.add_particle(2);
+                        cx.notify();
+                    })))
+                    .child(btn("fx-clear", "Clear FX", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.clear_particles();
+                        cx.notify();
+                    })))
+                    .child(btn("lib-cycle", Box::leak(format!("Lib: {lib_name}").into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.cycle_library();
+                        cx.notify();
+                    })))
+                    .child(btn("lib-insert", "Insert lib fig", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.insert_library_figure();
+                        cx.notify();
+                    })))
+                    .child(btn("lib-save", "Save fig to lib", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.save_figure_to_library();
+                        cx.notify();
+                    })))
+                    .child(btn("export-mp4", "Export MP4", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.export_mp4();
+                        cx.notify();
+                    })))
+                    .child(btn("export-sheet", "Spritesheet", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.export_sheet();
+                        cx.notify();
+                    })))
+                    .child(btn("theme", if core.light_theme { "Dark theme" } else { "Light theme" }, false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.light_theme = !view.core.light_theme;
+                        cx.notify();
+                    }))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .child(sidebar)
+                    .child(canvas),
+            )
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
                     .p(px(8.0))
-                    .bg(rgb(0x21252D))
+                    .bg(rgb(bar_bg))
                     .child(timeline)
                     .child(
                         div()
@@ -425,6 +685,13 @@ fn paint_stage(window: &mut Window, bounds: Bounds<Pixels>, data: &DrawData) {
     for (segs, color) in &data.onion {
         stroke(window, segs, rgba((color << 8) | 0x4D), 5.0 * s);
     }
+    // Motion paths (root trails + selected joint trail).
+    for path in &data.paths {
+        if path.len() > 1 {
+            let segs: Vec<(V2, V2)> = path.windows(2).map(|w| (w[0], w[1])).collect();
+            stroke(window, &segs, rgba(0x9AA3B2 << 8 | 0x66), 1.5 * s.max(0.5));
+        }
+    }
     for (fi, (segs, joints, heads, color)) in data.figures.iter().enumerate() {
         for (a, b, seg_color, thickness) in segs {
             stroke_seg(window, *a, *b, *seg_color, thickness * s);
@@ -437,6 +704,7 @@ fn paint_stage(window: &mut Window, bounds: Bounds<Pixels>, data: &DrawData) {
                 window.paint_path(path, rgb(*color));
             }
         }
+        let _ = fi;
         // Joint handles.
         for (ni, j) in joints.iter().enumerate() {
             let selected = data.selected == Some((fi, ni));
@@ -446,6 +714,48 @@ fn paint_stage(window: &mut Window, bounds: Bounds<Pixels>, data: &DrawData) {
             if let Ok(path) = pb.build() {
                 window.paint_path(path, if selected { rgb(0xFFC65D) } else { rgb(0xFF5D5D) });
             }
+        }
+    }
+    // Shape segments: circles and regular polygons.
+    for (centre, shape, length, color, thickness) in &data.shapes {
+        let r = length / 2.0 * s;
+        match shape {
+            crate::model::Shape::Circle => {
+                let mut pb = PathBuilder::stroke(px(thickness * s));
+                trace_circle(&mut pb, map(*centre), r);
+                if let Ok(path) = pb.build() {
+                    window.paint_path(path, rgb(*color));
+                }
+            }
+            crate::model::Shape::Polygon(sides) => {
+                let sides = (*sides).max(3) as usize;
+                let mut pb = PathBuilder::stroke(px(thickness * s));
+                for k in 0..=sides {
+                    let a = k as f32 / sides as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                    let pt = point(
+                        map(*centre).x + px(r * a.cos()),
+                        map(*centre).y + px(r * a.sin()),
+                    );
+                    if k == 0 {
+                        pb.move_to(pt);
+                    } else {
+                        pb.line_to(pt);
+                    }
+                }
+                if let Ok(path) = pb.build() {
+                    window.paint_path(path, rgb(*color));
+                }
+            }
+            crate::model::Shape::Line => {}
+        }
+    }
+    // Particles.
+    for (p, r, color, alpha) in &data.particles {
+        let a = (*alpha * 255.0) as u32;
+        let mut pb = PathBuilder::fill();
+        trace_circle(&mut pb, map(*p), (r * s).max(0.8));
+        if let Ok(path) = pb.build() {
+            window.paint_path(path, rgba((color << 8) | a));
         }
     }
 }

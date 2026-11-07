@@ -70,10 +70,28 @@ pub struct NodeDef {
     /// True for hands/feet: dragging this node solves two-bone IK.
     #[serde(default)]
     pub ik_end: bool,
+    #[serde(default)]
+    pub shape: Shape,
 }
 
 fn default_thickness() -> f32 {
     5.0
+}
+
+/// What a node draws as: a plain segment, a circle, or a regular
+/// polygon (sides >= 3), centred on the node's position with radius
+/// half its length.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Shape {
+    Line,
+    Circle,
+    Polygon(u8),
+}
+
+impl Default for Shape {
+    fn default() -> Self {
+        Shape::Line
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -94,6 +112,7 @@ impl FigureDef {
             thickness: 5.0,
             color: None,
             ik_end: false,
+            shape: Shape::Line,
         };
         let mut nodes = vec![
             n("hips", None, 0.0, 0.0),        // 0 root
@@ -132,6 +151,7 @@ impl FigureDef {
             thickness: 5.0,
             color: None,
             ik_end: false,
+            shape: Shape::Line,
         };
         let mut nodes = vec![
             n("pelvis", None, 0.0, 0.0),              // 0 root (rear)
@@ -170,6 +190,7 @@ impl FigureDef {
             thickness: 6.0,
             color: None,
             ik_end: false,
+            shape: Shape::Line,
         };
         let mut nodes = vec![
             n("hips", None, 0.0, 0.0),
@@ -312,11 +333,20 @@ pub struct FigureInstance {
     pub name: String,
     pub color: u32,
     pub def: FigureDef,
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Frame {
     pub poses: Vec<Pose>,
+    /// Hold time multiplier: 2.0 shows this frame twice as long.
+    #[serde(default = "default_duration")]
+    pub duration: f32,
+}
+
+fn default_duration() -> f32 {
+    1.0
 }
 
 /// One camera keyframe: at `frame`, the camera centres stage point
@@ -327,6 +357,68 @@ pub struct CameraKey {
     pub x: f32,
     pub y: f32,
     pub zoom: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Easing {
+    Linear,
+    Smooth,
+    EaseIn,
+    EaseOut,
+}
+
+impl Default for Easing {
+    fn default() -> Self {
+        Easing::Linear
+    }
+}
+
+impl Easing {
+    pub fn apply(&self, t: f32) -> f32 {
+        match self {
+            Easing::Linear => t,
+            Easing::Smooth => t * t * (3.0 - 2.0 * t),
+            Easing::EaseIn => t * t,
+            Easing::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
+        }
+    }
+    pub fn next(&self) -> Easing {
+        match self {
+            Easing::Linear => Easing::Smooth,
+            Easing::Smooth => Easing::EaseIn,
+            Easing::EaseIn => Easing::EaseOut,
+            Easing::EaseOut => Easing::Linear,
+        }
+    }
+    pub fn label(&self) -> &'static str {
+        match self {
+            Easing::Linear => "linear",
+            Easing::Smooth => "smooth",
+            Easing::EaseIn => "ease-in",
+            Easing::EaseOut => "ease-out",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ParticleKind {
+    Burst,
+    Sparkle,
+    Smoke,
+}
+
+/// A deterministic particle effect anchored to a figure node (or a
+/// fixed stage point when `figure` is None), starting at `frame`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ParticleEvent {
+    pub frame: usize,
+    pub figure: Option<usize>,
+    pub node: Option<usize>,
+    pub x: f32,
+    pub y: f32,
+    pub kind: ParticleKind,
+    pub color: u32,
+    pub seed: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -340,15 +432,27 @@ pub struct Project {
     pub frames: Vec<Frame>,
     #[serde(default)]
     pub camera: Vec<CameraKey>,
+    /// When true, playback and GIF export interpolate between
+    /// authored frames using `easing`.
+    #[serde(default)]
+    pub tween_playback: bool,
+    #[serde(default)]
+    pub easing: Easing,
+    /// Camera follows this figure's root when set (zoom still from keys).
+    #[serde(default)]
+    pub camera_follow: Option<usize>,
+    #[serde(default)]
+    pub particles: Vec<ParticleEvent>,
 }
 
 impl Project {
     pub fn new_demo() -> Self {
         let def = FigureDef::humanoid();
-        let mut figures = vec![FigureInstance {
+        let figures = vec![FigureInstance {
             name: "Styk".into(),
             color: 0xE8E8EC,
             def: def.clone(),
+            hidden: false,
         }];
         let center = [480.0, 470.0];
         let mut frames = Vec::new();
@@ -361,9 +465,9 @@ impl Project {
             pose.angles[5] = -118.0 - wave * 2.2; // raise right arm (wave < 0 lifts)
             pose.angles[6] = -4.0 - wave * 0.8;
             let _ = i;
-            frames.push(Frame { poses: vec![pose] });
+            frames.push(Frame { poses: vec![pose], duration: 1.0 });
         }
-        figures.shrink_to_fit();
+
         Project {
             name: "Untitled".into(),
             fps: 12.0,
@@ -372,13 +476,55 @@ impl Project {
             figures,
             frames,
             camera: Vec::new(),
+            tween_playback: false,
+            easing: Easing::Linear,
+            camera_follow: None,
+            particles: Vec::new(),
         }
+    }
+
+    /// Poses of every figure at a fractional frame time. Without
+    /// tween playback this is the authored frame (fraction ignored);
+    /// with it, poses lerp between neighbouring frames with easing.
+    pub fn poses_at(&self, frame_f: f32) -> Vec<Pose> {
+        if self.frames.is_empty() {
+            return Vec::new();
+        }
+        let last = self.frames.len() - 1;
+        let f = frame_f.clamp(0.0, last as f32);
+        let i = f.floor() as usize;
+        if !self.tween_playback || i >= last || (f - i as f32) < 0.0001 {
+            return self.frames[i].poses.clone();
+        }
+        let t = self.easing.apply(f - i as f32);
+        self.frames[i]
+            .poses
+            .iter()
+            .zip(self.frames[i + 1].poses.iter())
+            .map(|(a, b)| a.lerp(b, t))
+            .collect()
+    }
+
+    /// Total playback length in seconds, honouring frame durations.
+    pub fn total_seconds(&self) -> f32 {
+        self.frames.iter().map(|f| f.duration).sum::<f32>() / self.fps.max(1.0)
     }
 
     /// Camera (centre x, centre y, zoom) at a fractional frame time.
     /// With no keys the camera frames the whole stage.
     pub fn camera_at(&self, frame: f32) -> (f32, f32, f32) {
         let default = (self.stage[0] / 2.0, self.stage[1] / 2.0, 1.0);
+        if let Some(fi) = self.camera_follow {
+            if fi < self.figures.len() && !self.frames.is_empty() {
+                let poses = self.poses_at(frame);
+                let zoom = if self.camera.is_empty() {
+                    1.0
+                } else {
+                    self.camera_zoom_at(frame)
+                };
+                return (poses[fi].root[0], poses[fi].root[1], zoom);
+            }
+        }
         if self.camera.is_empty() {
             return default;
         }
@@ -404,6 +550,30 @@ impl Project {
             }
         }
         default
+    }
+
+    fn camera_zoom_at(&self, frame: f32) -> f32 {
+        let mut keys: Vec<&CameraKey> = self.camera.iter().collect();
+        keys.sort_by_key(|k| k.frame);
+        if keys.is_empty() {
+            return 1.0;
+        }
+        let first = keys[0];
+        if frame <= first.frame as f32 {
+            return first.zoom;
+        }
+        let last = keys[keys.len() - 1];
+        if frame >= last.frame as f32 {
+            return last.zoom;
+        }
+        for w in keys.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if frame >= a.frame as f32 && frame <= b.frame as f32 {
+                let t = (frame - a.frame as f32) / (b.frame - a.frame).max(1) as f32;
+                return a.zoom + (b.zoom - a.zoom) * t;
+            }
+        }
+        1.0
     }
 
     /// Insert or replace the camera key at `frame`.
@@ -434,6 +604,7 @@ impl Project {
             name: name.into(),
             color,
             def,
+            hidden: false,
         });
         for frame in &mut self.frames {
             frame.poses.push(pose.clone());
@@ -496,6 +667,29 @@ mod tests {
         assert_eq!((x, z), (680.0, 2.0));
         assert!(project.remove_camera_key(4));
         assert_eq!(project.camera.len(), 1);
+    }
+
+    #[test]
+    fn tween_poses_at_interpolates_with_easing() {
+        let mut project = Project::new_demo();
+        assert_eq!(project.poses_at(0.5)[0].root[0], 480.0); // no tween: authored frame
+        project.tween_playback = true;
+        project.easing = Easing::Linear;
+        let mid = project.poses_at(0.5);
+        assert!((mid[0].root[0] - 487.0).abs() < 0.01, "root {}", mid[0].root[0]);
+        project.easing = Easing::EaseIn; // t^2 = 0.25 at halfway
+        let eased = project.poses_at(0.5);
+        assert!((eased[0].root[0] - 483.5).abs() < 0.01, "root {}", eased[0].root[0]);
+    }
+
+    #[test]
+    fn durations_expand_and_total_time() {
+        let mut project = Project::new_demo();
+        project.frames[0].duration = 2.0;
+        project.frames[1].duration = 3.0;
+        let expanded = crate::export::expanded_frames(&project);
+        assert_eq!(expanded.len(), 2 + 3 + 1 + 1 + 1);
+        assert!((project.total_seconds() - 8.0 / 12.0).abs() < 0.001);
     }
 
     #[test]

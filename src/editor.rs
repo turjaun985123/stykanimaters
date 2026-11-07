@@ -3,7 +3,10 @@
 //! undo snapshots, save/load and export triggers. The GPUI layer in
 //! `app.rs` only translates mouse events and buttons into these calls.
 
-use crate::export::{export_gif as render_gif, export_png_sequence};
+use crate::export::{
+    export_gif as render_gif, export_mp4 as render_mp4, export_png_sequence,
+    export_spritesheet as render_sheet,
+};
 use crate::model::{
     aim_node, apply_ik, dist, evaluate, FigureDef, NodeDef, Project, V2,
 };
@@ -30,6 +33,13 @@ pub struct EditorCore {
     camera_last: Option<V2>,
     pub status: String,
     undo: Vec<String>,
+    redo: Vec<String>,
+    clipboard: Option<crate::model::Frame>,
+    pub playhead: f32,
+    pub show_paths: bool,
+    pub light_theme: bool,
+    pub library: Vec<(String, FigureDef)>,
+    pub library_index: usize,
 }
 
 const FIGURE_COLORS: [u32; 6] = [0xE8E8EC, 0xFF5D5D, 0x5DB2FF, 0x7BE495, 0xFFC65D, 0xC792FF];
@@ -48,7 +58,46 @@ impl EditorCore {
             camera_last: None,
             status: "Drag a joint to pose. Hands and feet use IK; drag the hips to move.".into(),
             undo: Vec::new(),
+            redo: Vec::new(),
+            clipboard: None,
+            playhead: 0.0,
+            show_paths: false,
+            light_theme: false,
+            library: Self::load_library(),
+            library_index: 0,
         }
+    }
+
+    /// The local figure library: JSON figure definitions from
+    /// `./library/`, plus three built-ins so it is never empty.
+    fn load_library() -> Vec<(String, FigureDef)> {
+        let mut lib: Vec<(String, FigureDef)> = vec![
+            ("Built-in: Humanoid".into(), FigureDef::humanoid()),
+            ("Built-in: Quadruped".into(), FigureDef::quadruped()),
+            ("Built-in: Mini".into(), FigureDef::simple()),
+        ];
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("library");
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut files: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+                .collect();
+            files.sort();
+            for f in files {
+                if let Ok(text) = std::fs::read_to_string(&f) {
+                    if let Ok(def) = serde_json::from_str::<FigureDef>(&text) {
+                        let name = f
+                            .file_stem()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "Figure".into());
+                        lib.push((name, def));
+                    }
+                }
+            }
+        }
+        lib
     }
 
     pub fn frame_count(&self) -> usize {
@@ -67,11 +116,30 @@ impl EditorCore {
             if self.undo.len() > 60 {
                 self.undo.remove(0);
             }
+            self.redo.clear();
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if let Some(s) = self.redo.pop() {
+            if let Ok(current) = serde_json::to_string(&self.project) {
+                self.undo.push(current);
+            }
+            if let Ok(p) = serde_json::from_str::<Project>(&s) {
+                self.project = p;
+                self.current = self.current.min(self.project.frames.len().saturating_sub(1));
+                self.status = "Redone.".into();
+            }
+        } else {
+            self.status = "Nothing to redo.".into();
         }
     }
 
     pub fn undo(&mut self) {
         if let Some(s) = self.undo.pop() {
+            if let Ok(current) = serde_json::to_string(&self.project) {
+                self.redo.push(current);
+            }
             if let Ok(p) = serde_json::from_str::<Project>(&s) {
                 self.project = p;
                 self.current = self.current.min(self.project.frames.len().saturating_sub(1));
@@ -173,7 +241,10 @@ impl EditorCore {
     pub fn add_frame(&mut self) {
         self.snapshot();
         let poses = self.project.frames[self.current].poses.clone();
-        self.project.frames.insert(self.current + 1, crate::model::Frame { poses });
+        let duration = self.project.frames[self.current].duration;
+        self.project
+            .frames
+            .insert(self.current + 1, crate::model::Frame { poses, duration });
         self.current += 1;
         self.status = format!("Frame {} added.", self.current + 1);
     }
@@ -221,9 +292,10 @@ impl EditorCore {
             .zip(b.iter())
             .map(|(pa, pb)| pa.lerp(pb, 0.5))
             .collect();
-        self.project
-            .frames
-            .insert(self.current + 1, crate::model::Frame { poses });
+        self.project.frames.insert(
+            self.current + 1,
+            crate::model::Frame { poses, duration: 1.0 },
+        );
         self.current += 1;
         self.status = format!("Inbetween inserted at frame {}.", self.current + 1);
     }
@@ -250,6 +322,7 @@ impl EditorCore {
             thickness: 5.0,
             color: None,
             ik_end: false,
+            shape: crate::model::Shape::Line,
         });
         for frame in &mut self.project.frames {
             frame.poses[fi].angles.push(0.0);
@@ -318,6 +391,20 @@ impl EditorCore {
         Some(0x232830),
     ];
 
+    /// Cycle the selected segment's shape: line -> circle -> triangle
+    /// -> square -> pentagon -> line.
+    pub fn cycle_shape(&mut self) {
+        let Some(ni) = self.selected_node else { return };
+        let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
+        node.shape = match node.shape {
+            crate::model::Shape::Line => crate::model::Shape::Circle,
+            crate::model::Shape::Circle => crate::model::Shape::Polygon(3),
+            crate::model::Shape::Polygon(n) if n < 6 => crate::model::Shape::Polygon(n + 1),
+            crate::model::Shape::Polygon(_) => crate::model::Shape::Line,
+        };
+        self.status = format!("{} shape: {:?}.", node.name, node.shape);
+    }
+
     pub fn cycle_node_color(&mut self) {
         let Some(ni) = self.selected_node else { return };
         let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
@@ -378,13 +465,46 @@ impl EditorCore {
     pub fn goto(&mut self, frame: usize) {
         if frame < self.project.frames.len() {
             self.current = frame;
+            self.playhead = frame as f32;
         }
     }
 
     pub fn advance(&mut self) {
         if !self.project.frames.is_empty() {
             self.current = (self.current + 1) % self.project.frames.len();
+            self.playhead = self.current as f32;
         }
+    }
+
+    /// Advance the playhead by wall-clock seconds, honouring fps and
+    /// per-frame durations. Loops at the end.
+    pub fn advance_play(&mut self, dt_secs: f32) {
+        let n = self.project.frames.len();
+        if n == 0 {
+            return;
+        }
+        let duration = self.project.frames[self.current].duration.max(0.05);
+        self.playhead += dt_secs * self.project.fps.max(1.0) / duration;
+        while self.playhead >= n as f32 {
+            self.playhead -= n as f32;
+        }
+        self.current = (self.playhead.floor() as usize).min(n - 1);
+    }
+
+    /// Frame time the canvas should draw: fractional while playing
+    /// with tween playback on, otherwise the authored frame.
+    pub fn display_frame(&self) -> f32 {
+        if self.playing && self.project.tween_playback {
+            self.playhead
+        } else {
+            self.current as f32
+        }
+    }
+
+    pub fn positions_f(&self, frame_f: f32, fi: usize) -> Vec<V2> {
+        let poses = self.project.poses_at(frame_f);
+        let fig = &self.project.figures[fi];
+        evaluate(&fig.def, &poses[fi])
     }
 
     pub fn save_path() -> PathBuf {
@@ -422,6 +542,202 @@ impl EditorCore {
         }
     }
 
+    // ---- Figure / layer management ----
+
+    pub fn delete_figure(&mut self) {
+        if self.project.figures.len() <= 1 {
+            self.status = "Keep at least one figure.".into();
+            return;
+        }
+        self.snapshot();
+        let fi = self.selected_figure.min(self.project.figures.len() - 1);
+        self.project.figures.remove(fi);
+        for frame in &mut self.project.frames {
+            frame.poses.remove(fi);
+        }
+        self.project
+            .particles
+            .retain(|e| e.figure.map(|f| f != fi).unwrap_or(true));
+        self.selected_figure = fi.min(self.project.figures.len() - 1);
+        self.selected_node = None;
+        self.status = "Figure deleted.".into();
+    }
+
+    /// Move the selected figure later (drawn on top) or earlier.
+    pub fn move_figure(&mut self, dir: i32) {
+        let fi = self.selected_figure;
+        let target = fi as i32 + dir;
+        if target < 0 || target as usize >= self.project.figures.len() {
+            return;
+        }
+        self.snapshot();
+        let target = target as usize;
+        self.project.figures.swap(fi, target);
+        for frame in &mut self.project.frames {
+            frame.poses.swap(fi, target);
+        }
+        self.selected_figure = target;
+        self.status = "Figure order changed.".into();
+    }
+
+    pub fn toggle_figure_hidden(&mut self) {
+        let fi = self.selected_figure;
+        let fig = &mut self.project.figures[fi];
+        fig.hidden = !fig.hidden;
+        self.status = format!("{} {}.", fig.name, if fig.hidden { "hidden" } else { "shown" });
+    }
+
+    pub fn select_figure(&mut self, fi: usize) {
+        if fi < self.project.figures.len() {
+            self.selected_figure = fi;
+            self.selected_node = None;
+        }
+    }
+
+    // ---- Frame clipboard, timing, project settings ----
+
+    pub fn copy_frame(&mut self) {
+        self.clipboard = Some(self.project.frames[self.current].clone());
+        self.status = format!("Frame {} copied.", self.current + 1);
+    }
+
+    pub fn paste_frame(&mut self) {
+        let Some(frame) = self.clipboard.clone() else {
+            self.status = "Nothing copied yet.".into();
+            return;
+        };
+        if frame.poses.len() != self.project.figures.len() {
+            self.status = "Copied frame has a different figure count.".into();
+            return;
+        }
+        self.snapshot();
+        self.project.frames.insert(self.current + 1, frame);
+        self.current += 1;
+        self.status = format!("Frame pasted at {}.", self.current + 1);
+    }
+
+    pub fn adjust_frame_duration(&mut self, factor: f32) {
+        let frame = &mut self.project.frames[self.current];
+        frame.duration = (frame.duration * factor).clamp(0.25, 8.0);
+        self.status = format!("Frame {} duration {:.2}x.", self.current + 1, frame.duration);
+    }
+
+    pub fn adjust_fps(&mut self, delta: f32) {
+        self.project.fps = (self.project.fps + delta).clamp(1.0, 60.0);
+        self.status = format!("{} fps.", self.project.fps as i32);
+    }
+
+    pub fn cycle_easing(&mut self) {
+        self.project.easing = self.project.easing.next();
+        self.status = format!("Easing: {}.", self.project.easing.label());
+    }
+
+    pub fn toggle_tween_playback(&mut self) {
+        self.project.tween_playback = !self.project.tween_playback;
+        self.status = format!(
+            "Tween playback {}.",
+            if self.project.tween_playback { "on" } else { "off" }
+        );
+    }
+
+    pub fn toggle_camera_follow(&mut self) {
+        self.project.camera_follow = if self.project.camera_follow == Some(self.selected_figure) {
+            None
+        } else {
+            Some(self.selected_figure)
+        };
+        self.status = match self.project.camera_follow {
+            Some(fi) => format!("Camera follows {}.", self.project.figures[fi].name),
+            None => "Camera follow off.".into(),
+        };
+    }
+
+    // ---- Particles ----
+
+    const PARTICLE_KINDS: [crate::model::ParticleKind; 3] = [
+        crate::model::ParticleKind::Burst,
+        crate::model::ParticleKind::Sparkle,
+        crate::model::ParticleKind::Smoke,
+    ];
+
+    pub fn add_particle(&mut self, kind_idx: usize) {
+        self.snapshot();
+        let fi = self.selected_figure;
+        let (figure, node, x, y) = match self.selected_node {
+            Some(ni) => {
+                let pos = self.positions(self.current, fi);
+                (Some(fi), Some(ni), pos[ni][0], pos[ni][1])
+            }
+            None => {
+                let pos = self.positions(self.current, fi);
+                (Some(fi), Some(0), pos[0][0], pos[0][1])
+            }
+        };
+        let color = self.project.figures[fi].color;
+        let seed = (self.project.particles.len() as u32)
+            .wrapping_mul(2654435761)
+            .wrapping_add(12345);
+        self.project.particles.push(crate::model::ParticleEvent {
+            frame: self.current,
+            figure,
+            node,
+            x,
+            y,
+            kind: Self::PARTICLE_KINDS[kind_idx % Self::PARTICLE_KINDS.len()],
+            color,
+            seed,
+        });
+        self.status = "Particle effect added on this frame.".into();
+    }
+
+    pub fn clear_particles(&mut self) {
+        self.snapshot();
+        self.project.particles.clear();
+        self.status = "Particle effects cleared.".into();
+    }
+
+    // ---- Library ----
+
+    pub fn cycle_library(&mut self) {
+        if !self.library.is_empty() {
+            self.library_index = (self.library_index + 1) % self.library.len();
+            self.status = format!("Library: {}", self.library[self.library_index].0);
+        }
+    }
+
+    pub fn insert_library_figure(&mut self) {
+        if self.library.is_empty() {
+            return;
+        }
+        self.snapshot();
+        let (name, def) = self.library[self.library_index].clone();
+        let idx = self.project.figures.len();
+        let color = FIGURE_COLORS[idx % FIGURE_COLORS.len()];
+        let root = [300.0 + 80.0 * idx as f32, 450.0];
+        self.project.add_figure_with(def, &name, color, root);
+        self.selected_figure = idx;
+        self.selected_node = None;
+        self.status = format!("Inserted {name} from the library.");
+    }
+
+    pub fn save_figure_to_library(&mut self) {
+        let fig = &self.project.figures[self.selected_figure];
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("library");
+        let file = dir.join(format!("{}.json", fig.name.replace(' ', "-").to_lowercase()));
+        let result = std::fs::create_dir_all(&dir)
+            .and_then(|_| serde_json::to_string_pretty(&fig.def).map_err(std::io::Error::other))
+            .and_then(|text| std::fs::write(&file, text));
+        match result {
+            Ok(()) => {
+                self.library = Self::load_library();
+                self.status = format!("Saved {} to the library.", fig.name);
+            }
+            Err(e) => self.status = format!("Library save failed: {e}"),
+        }
+    }
+
     pub fn export_gif(&mut self) {
         let path = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
@@ -430,6 +746,28 @@ impl EditorCore {
         match render_gif(&self.project, &path) {
             Ok(n) => self.status = format!("Exported {n}-frame GIF to {}", path.display()),
             Err(e) => self.status = format!("GIF export failed: {e}"),
+        }
+    }
+
+    pub fn export_mp4(&mut self) {
+        let path = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("export")
+            .join("animation.mp4");
+        match render_mp4(&self.project, &path) {
+            Ok(n) => self.status = format!("Exported {n}-frame MP4 to {}", path.display()),
+            Err(e) => self.status = format!("MP4 export failed: {e}"),
+        }
+    }
+
+    pub fn export_sheet(&mut self) {
+        let path = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("export")
+            .join("spritesheet.png");
+        match render_sheet(&self.project, &path) {
+            Ok(n) => self.status = format!("Exported {n}-frame spritesheet."),
+            Err(e) => self.status = format!("Spritesheet failed: {e}"),
         }
     }
 
@@ -474,6 +812,45 @@ mod tests {
         core.selected_node = Some(1); // chest has children
         core.delete_segment();
         assert_eq!(core.project.figures[0].def.nodes.len(), nodes_before);
+    }
+
+    #[test]
+    fn redo_restores_an_undone_frame_add() {
+        let mut core = EditorCore::new();
+        let n = core.frame_count();
+        core.add_frame();
+        assert_eq!(core.frame_count(), n + 1);
+        core.undo();
+        assert_eq!(core.frame_count(), n);
+        core.redo();
+        assert_eq!(core.frame_count(), n + 1);
+    }
+
+    #[test]
+    fn figure_delete_and_reorder_keep_poses_aligned() {
+        let mut core = EditorCore::new();
+        core.add_figure();
+        core.add_quadruped();
+        assert_eq!(core.project.figures.len(), 3);
+        core.select_figure(0);
+        core.move_figure(1);
+        assert_eq!(core.selected_figure, 1);
+        for frame in &core.project.frames {
+            assert_eq!(frame.poses.len(), 3);
+        }
+        core.delete_figure();
+        assert_eq!(core.project.figures.len(), 2);
+        for frame in &core.project.frames {
+            assert_eq!(frame.poses.len(), 2);
+        }
+    }
+
+    #[test]
+    fn frame_clipboard_roundtrip() {
+        let mut core = EditorCore::new();
+        core.copy_frame();
+        core.paste_frame();
+        assert_eq!(core.frame_count(), 6);
     }
 
     #[test]

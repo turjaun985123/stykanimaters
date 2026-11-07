@@ -48,6 +48,24 @@ libx11-dev cmake clang pkg-config`.
   interpolation between keys. Camera mode pans by dragging the
   canvas; zoom buttons key the current frame. The editor view and
   both exporters render through the same camera.
+- **Layers sidebar** — figures listed as layers: select, reorder
+  (draw order), hide/show, delete. Plus redo, frame copy/paste,
+  per-frame durations, editable fps, and keyboard shortcuts
+  (arrows, space, N, I, O, C, Ctrl+Z / Ctrl+Shift+Z).
+- **Tween playback** — optional interpolation between authored
+  frames with linear / smooth / ease-in / ease-out easing, in the
+  editor, GIF and MP4 exports.
+- **Shapes** — segments can be lines, circles, or regular polygons
+  (3-6 sides): shields, wheels, signs.
+- **Particles** — deterministic burst / sparkle / smoke effects
+  anchored to a joint on a chosen frame, rendered identically in
+  the editor and every export.
+- **Local figure library** — save figure definitions to
+  `./library/*.json` and insert them into any project; three
+  built-ins included.
+- **More exports** — MP4 (H.264, via the system `ffmpeg`) and a
+  spritesheet PNG join the PNG sequence and GIF.
+- **Themes** — dark and light editor palettes.
 - **Save / Load** — the project serializes to `project.styk.json`
   next to where you launched the app.
 - **PNG + GIF export** (`src/export.rs`) — a CPU rasterizer (2x
@@ -71,8 +89,9 @@ The original app is large; this is the working core loop, not the
 whole feature list. Still to come, roughly in the original's shape:
 `.piv` / `.stk` / Stick Nodes import (needs real fixture files to
 reverse the binary layouts byte-for-byte — dropping a Pivot-made
-`.stk` into this repo is the fastest way to unblock it), shaped
-segments (circles, polygons, sprites, text), layers and the
-advanced keyframe timeline with easing curves, camera follow
-targets, particles/VFX clips, MP4/WebM export, sounds, and the
-home/project library screen.
+`.stk` into this repo is the fastest way to unblock it), sprite
+and text segments, a keyframe graph editor with layer folders and
+property channels, particle clips with beams/auras, WebM/APNG/SVG
+export, sounds, movieclips, 3D figures, localisation, and the
+home/project library screen. See `docs/GAP-ANALYSIS.md` for the
+full measured comparison.

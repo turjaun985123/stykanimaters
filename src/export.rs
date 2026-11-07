@@ -3,7 +3,7 @@
 //! evaluated segments as round-capped thick lines and the head as a
 //! ring, with 2x supersampling for anti-aliasing.
 
-use crate::model::{dist, evaluate, Project};
+use crate::model::{dist, evaluate, ParticleKind, Project, Shape, V2};
 use image::{ImageBuffer, Rgb};
 use std::path::Path;
 
@@ -29,10 +29,85 @@ fn seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     dist(p, c)
 }
 
-/// Render one frame index to an RGB buffer at the project stage
-/// size. The frame's camera (centre + zoom, interpolated between
-/// keys) is applied, as are per-segment colours and thicknesses.
+/// Deterministic per-particle random in [0, 1) from a seed + index.
+fn prand(seed: u32, i: u32, salt: u32) -> f32 {
+    let mut h = seed ^ i.wrapping_mul(0x9E37_79B9) ^ salt.wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7FEB_352D);
+    h ^= h >> 15;
+    (h % 100_000) as f32 / 100_000.0
+}
+
+/// Live particles at fractional frame time `f`:
+/// (centre, radius, colour, alpha). Closed-form and deterministic —
+/// the same frame always renders identically.
+pub fn particles_at(project: &Project, f: f32) -> Vec<(V2, f32, [u8; 3], f32)> {
+    let mut out = Vec::new();
+    let fps = project.fps.max(1.0);
+    for ev in &project.particles {
+        let age = f - ev.frame as f32;
+        let life = 0.7 * fps;
+        if age < 0.0 || age > life {
+            continue;
+        }
+        let t = age / life; // 0..1 through the effect
+        let age_s = age / fps;
+        let origin = [ev.x, ev.y];
+        let color = rgb(ev.color);
+        let (count, base_size) = match ev.kind {
+            ParticleKind::Burst => (26, 3.2),
+            ParticleKind::Sparkle => (14, 2.6),
+            ParticleKind::Smoke => (12, 5.0),
+        };
+        for i in 0..count {
+            let a = prand(ev.seed, i, 1) * std::f32::consts::TAU;
+            let r1 = prand(ev.seed, i, 2);
+            let (pos, size, alpha) = match ev.kind {
+                ParticleKind::Burst => {
+                    let speed = 40.0 + r1 * 110.0;
+                    let d = speed * age_s * (1.0 - 0.45 * t);
+                    (
+                        [origin[0] + a.cos() * d, origin[1] + a.sin() * d + 30.0 * age_s * age_s],
+                        base_size * (1.0 - 0.6 * t),
+                        1.0 - t,
+                    )
+                }
+                ParticleKind::Sparkle => {
+                    let d = 8.0 + r1 * 26.0;
+                    let twinkle = 0.55 + 0.45 * (age * 1.7 + i as f32 * 2.3).sin();
+                    (
+                        [origin[0] + a.cos() * d, origin[1] + a.sin() * d - 12.0 * age_s],
+                        base_size * twinkle.max(0.2),
+                        (1.0 - t) * twinkle,
+                    )
+                }
+                ParticleKind::Smoke => {
+                    let d = 4.0 + r1 * 16.0;
+                    (
+                        [origin[0] + a.cos() * d + 6.0 * age_s, origin[1] - 26.0 * age_s + a.sin() * d * 0.4],
+                        base_size + 10.0 * t,
+                        0.32 * (1.0 - t),
+                    )
+                }
+            };
+            if alpha > 0.01 {
+                out.push((pos, size.max(0.4), color, alpha.clamp(0.0, 1.0)));
+            }
+        }
+    }
+    out
+}
+
+/// Render one frame index to an RGB buffer at the project stage size.
 pub fn render_frame(project: &Project, frame_idx: usize) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    render_frame_at(project, frame_idx as f32)
+}
+
+/// Render at a fractional frame time (tween poses, camera and
+/// particles all evaluate at `f`). The camera (centre + zoom,
+/// interpolated between keys) is applied, as are per-segment
+/// colours, thicknesses and shape segments.
+pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     let ss = 2u32; // supersample factor
     let (w, h) = (
         project.stage[0] as u32 * ss,
@@ -40,8 +115,8 @@ pub fn render_frame(project: &Project, frame_idx: usize) -> ImageBuffer<Rgb<u8>,
     );
     let bg = rgb(project.background);
     let mut buf = ImageBuffer::from_pixel(w, h, Rgb(bg));
-    let frame = &project.frames[frame_idx];
-    let (cam_x, cam_y, zoom) = project.camera_at(frame_idx as f32);
+    let poses = project.poses_at(frame_f);
+    let (cam_x, cam_y, zoom) = project.camera_at(frame_f);
     let view = |p: [f32; 2]| -> [f32; 2] {
         [
             ((p[0] - cam_x) * zoom + project.stage[0] / 2.0) * ss as f32,
@@ -50,11 +125,17 @@ pub fn render_frame(project: &Project, frame_idx: usize) -> ImageBuffer<Rgb<u8>,
     };
     let head_r = 17.0f32 * zoom * ss as f32;
 
-    // Collect drawables: (a, b, color, half-width) and (centre, color, half-width).
+    // Collect drawables: segments (a, b, color, half-width), head
+    // rings (centre, color, half-width), shape circles and polygons.
     let mut segments: Vec<([f32; 2], [f32; 2], [u8; 3], f32)> = Vec::new();
     let mut heads: Vec<([f32; 2], [u8; 3], f32)> = Vec::new();
+    let mut rings: Vec<([f32; 2], f32, [u8; 3], f32)> = Vec::new();
+    let mut polys: Vec<(Vec<[f32; 2]>, [u8; 3], f32)> = Vec::new();
     for (fi, fig) in project.figures.iter().enumerate() {
-        let pose = &frame.poses[fi];
+        if fig.hidden {
+            continue;
+        }
+        let pose = &poses[fi];
         let pos = evaluate(&fig.def, pose);
         for (i, node) in fig.def.nodes.iter().enumerate() {
             let color = rgb(node.color.unwrap_or(fig.color));
@@ -65,8 +146,29 @@ pub fn render_frame(project: &Project, frame_idx: usize) -> ImageBuffer<Rgb<u8>,
             if node.head {
                 heads.push((view(pos[i]), color, half));
             }
+            match node.shape {
+                Shape::Circle => {
+                    rings.push((view(pos[i]), node.length / 2.0 * zoom * ss as f32, color, half));
+                }
+                Shape::Polygon(sides) => {
+                    let sides = (sides.max(3)) as usize;
+                    let r = node.length / 2.0;
+                    let verts: Vec<[f32; 2]> = (0..sides)
+                        .map(|k| {
+                            let a = k as f32 / sides as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                            view([pos[i][0] + a.cos() * r, pos[i][1] + a.sin() * r])
+                        })
+                        .collect();
+                    polys.push((verts, color, half));
+                }
+                Shape::Line => {}
+            }
         }
     }
+    let particles: Vec<([f32; 2], f32, [u8; 3], f32)> = particles_at(project, frame_f)
+        .into_iter()
+        .map(|(p, r, c, a)| (view(p), r * zoom * ss as f32, c, a))
+        .collect();
 
     for y in 0..h {
         for x in 0..w {
@@ -81,6 +183,28 @@ pub fn render_frame(project: &Project, frame_idx: usize) -> ImageBuffer<Rgb<u8>,
                 let d = dist(p, *c);
                 if (d - head_r).abs() <= *half {
                     px = *color;
+                }
+            }
+            for (c, r, color, half) in &rings {
+                let d = dist(p, *c);
+                if (d - r).abs() <= *half {
+                    px = *color;
+                }
+            }
+            for (verts, color, half) in &polys {
+                for k in 0..verts.len() {
+                    if seg_dist(p, verts[k], verts[(k + 1) % verts.len()]) <= *half {
+                        px = *color;
+                    }
+                }
+            }
+            for (c, r, color, alpha) in &particles {
+                if dist(p, *c) <= *r {
+                    px = [
+                        (px[0] as f32 * (1.0 - alpha) + color[0] as f32 * alpha) as u8,
+                        (px[1] as f32 * (1.0 - alpha) + color[1] as f32 * alpha) as u8,
+                        (px[2] as f32 * (1.0 - alpha) + color[2] as f32 * alpha) as u8,
+                    ];
                 }
             }
             buf.put_pixel(x, y, Rgb(px));
@@ -115,6 +239,50 @@ pub fn render_frame(project: &Project, frame_idx: usize) -> ImageBuffer<Rgb<u8>,
     out
 }
 
+/// Authored frame indices expanded by per-frame durations
+/// (a frame with duration 2 appears twice, rounded, min once).
+pub fn expanded_frames(project: &Project) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (i, frame) in project.frames.iter().enumerate() {
+        let reps = (frame.duration.round() as usize).max(1);
+        for _ in 0..reps {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// Fractional authored-frame time for a playback time in seconds,
+/// walking the per-frame durations.
+fn authored_at(project: &Project, seconds: f32) -> f32 {
+    let fps = project.fps.max(1.0);
+    let mut t = seconds * fps; // in frame units
+    for (i, frame) in project.frames.iter().enumerate() {
+        if t < frame.duration {
+            return i as f32 + t / frame.duration;
+        }
+        t -= frame.duration;
+    }
+    (project.frames.len() - 1) as f32
+}
+
+/// Frame times (fractional authored frames) for a full pass at the
+/// project fps: tween-sampled when tween playback is on, otherwise
+/// the duration-expanded authored frames.
+fn sample_times(project: &Project) -> Vec<f32> {
+    if project.tween_playback {
+        let count = (project.total_seconds() * project.fps.max(1.0)).ceil().max(1.0) as usize;
+        (0..count)
+            .map(|k| authored_at(project, k as f32 / project.fps.max(1.0)))
+            .collect()
+    } else {
+        expanded_frames(project)
+            .into_iter()
+            .map(|i| i as f32)
+            .collect()
+    }
+}
+
 /// Export the animation as a looping GIF at the project fps.
 pub fn export_gif(project: &Project, path: &Path) -> std::io::Result<usize> {
     use image::codecs::gif::{GifEncoder, Repeat};
@@ -127,17 +295,64 @@ pub fn export_gif(project: &Project, path: &Path) -> std::io::Result<usize> {
         .set_repeat(Repeat::Infinite)
         .map_err(std::io::Error::other)?;
     let delay = image::Delay::from_numer_denom_ms((1000.0 / project.fps.max(1.0)) as u32, 1);
+    let times = sample_times(project);
     let mut frames = Vec::new();
-    for i in 0..project.frames.len() {
-        let img = image::DynamicImage::ImageRgb8(render_frame(project, i)).to_rgba8();
-        frames.push(
-            image::Frame::from_parts(img, 0, 0, delay),
-        );
+    for t in &times {
+        let img = image::DynamicImage::ImageRgb8(render_frame_at(project, *t)).to_rgba8();
+        frames.push(image::Frame::from_parts(img, 0, 0, delay));
     }
-    encoder
-        .encode_frames(frames)
-        .map_err(std::io::Error::other)?;
-    Ok(project.frames.len())
+    let n = frames.len();
+    encoder.encode_frames(frames).map_err(std::io::Error::other)?;
+    Ok(n)
+}
+
+/// Export an MP4 by rendering PNG frames and encoding them with the
+/// system `ffmpeg` (H.264, yuv420p). Errors if ffmpeg is missing.
+pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = std::env::temp_dir().join(format!("styk-mp4-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp)?;
+    let times = sample_times(project);
+    for (k, t) in times.iter().enumerate() {
+        render_frame_at(project, *t)
+            .save(tmp.join(format!("frame-{:04}.png", k + 1)))
+            .map_err(std::io::Error::other)?;
+    }
+    let result = std::process::Command::new("ffmpeg")
+        .args(["-y", "-framerate", &format!("{}", project.fps.max(1.0) as i32),
+               "-i", tmp.join("frame-%04d.png").to_str().unwrap_or(""),
+               "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+               path.to_str().unwrap_or("")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = std::fs::remove_dir_all(&tmp);
+    match result {
+        Ok(status) if status.success() => Ok(times.len()),
+        Ok(status) => Err(std::io::Error::other(format!("ffmpeg exited with {status}"))),
+        Err(e) => Err(std::io::Error::other(format!("could not run ffmpeg: {e}"))),
+    }
+}
+
+/// Export all authored frames as one spritesheet PNG (grid layout).
+pub fn export_spritesheet(project: &Project, path: &Path) -> std::io::Result<usize> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let n = project.frames.len();
+    let (w, h) = (project.stage[0] as u32, project.stage[1] as u32);
+    let cols = (n as f32).sqrt().ceil() as u32;
+    let rows = (n as u32 + cols - 1) / cols;
+    let mut sheet = ImageBuffer::new(w * cols, h * rows);
+    for i in 0..n {
+        let img = render_frame(project, i);
+        let (ox, oy) = ((i as u32 % cols) * w, (i as u32 / cols) * h);
+        image::imageops::overlay(&mut sheet, &img, ox as i64, oy as i64);
+    }
+    sheet.save(path).map_err(std::io::Error::other)?;
+    Ok(n)
 }
 
 /// Export every frame as `frame-0001.png`, `frame-0002.png`, ... in `dir`.
@@ -203,6 +418,58 @@ mod tests {
         project.set_camera_key(2, 420.0, 390.0, 1.6);
         render_frame(&project, 2).save("/tmp/styk-quad.png").unwrap();
         render_frame(&project, 0).save("/tmp/styk-quad-wide.png").unwrap();
+    }
+
+    #[test]
+    fn particles_are_deterministic_and_live_mid_effect() {
+        let mut project = Project::new_demo();
+        project.particles.push(crate::model::ParticleEvent {
+            frame: 1,
+            figure: Some(0),
+            node: Some(6),
+            x: 300.0,
+            y: 300.0,
+            kind: ParticleKind::Burst,
+            color: 0xFFC65D,
+            seed: 42,
+        });
+        let a = particles_at(&project, 3.0);
+        let b = particles_at(&project, 3.0);
+        assert_eq!(a.len(), b.len());
+        assert!(!a.is_empty(), "burst should be alive 2 frames in");
+        assert!(particles_at(&project, 40.0).is_empty(), "and long dead later");
+    }
+
+    #[test]
+    fn mp4_export_produces_a_video_file() {
+        let project = Project::new_demo();
+        let path = std::path::Path::new("/tmp/styk-test.mp4");
+        export_mp4(&project, path).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        assert!(bytes.len() > 3000, "mp4 too small: {}", bytes.len());
+        assert_eq!(&bytes[4..8], b"ftyp", "not an MP4 container");
+    }
+
+    #[test]
+    fn write_shapes_and_particles_for_visual_check() {
+        let mut project = Project::new_demo();
+        // Give the demo figure a circle "shield" on the left hand and
+        // a triangular segment on the right hand, plus a burst.
+        project.figures[0].def.nodes[4].shape = Shape::Circle;
+        project.figures[0].def.nodes[4].length = 44.0;
+        project.figures[0].def.nodes[6].shape = Shape::Polygon(3);
+        project.figures[0].def.nodes[6].length = 40.0;
+        project.particles.push(crate::model::ParticleEvent {
+            frame: 2,
+            figure: Some(0),
+            node: Some(6),
+            x: 620.0,
+            y: 300.0,
+            kind: ParticleKind::Burst,
+            color: 0xFFC65D,
+            seed: 7,
+        });
+        render_frame_at(&project, 4.0).save("/tmp/styk-shapes.png").unwrap();
     }
 
     #[test]
