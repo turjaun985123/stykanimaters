@@ -30,4 +30,5 @@ pub mod style;
 pub mod svg;
 pub mod text_edit;
 pub mod touch;
+pub mod ui_kit;
 pub mod vfx;

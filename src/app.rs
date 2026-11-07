@@ -3,6 +3,8 @@
 
 use crate::editor::EditorCore;
 use crate::model::V2;
+#[allow(unused_imports)]
+use crate::ui_kit::*;
 use crate::touch::{Gesture, PointerEvent, PointerKind, MOUSE_POINTER_ID};
 use gpui::*;
 use std::cell::RefCell;
@@ -426,17 +428,23 @@ impl EditorView {
         let core = &self.core;
         let clips = &core.project.audio;
         let mut col = div()
-            .flex()
             .flex_col()
             .w_full()
-            .bg(rgb(row_bg))
+            .bg(rgb(C_PANEL))
+            .border_1()
+            .border_color(rgb(C_BORDER))
+            .rounded(px(8.0))
+            .p(px(8.0))
+            .gap(px(6.0))
             .child(
-                div()
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .text_size(px(12.0))
-                    .text_color(rgb(0x9AA3B2))
-                    .child(format!("Audio — {} clip(s)", clips.len())),
+                top_bar()
+                    .child(section_label("Audio"))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(C_MUTED))
+                            .child(format!("Audio — {} clip(s)", clips.len())),
+                    ),
             );
         if clips.is_empty() {
             return col.child(
@@ -1012,42 +1020,45 @@ impl Render for EditorView {
                 crate::graph::ChannelTarget::RootY => "root Y".to_string(),
                 crate::graph::ChannelTarget::Length(ni) => format!("joint {ni} length"),
             };
-            let header = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(8.0))
-                .py(px(4.0))
+            let header = top_bar()
+                .child(section_label("Graph"))
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(0x9AA3B2))
+                        .text_color(rgb(C_MUTED))
                         .child(format!(
                             "Graph — figure {} · {}",
                             core.selected_figure + 1,
                             target_label
                         )),
                 )
-                .child(btn("graph-ch-angle", "Angle", self.graph_channel == GraphChannelSel::Angle, cx.listener(|view, _ev, _w, cx| {
-                    view.graph_channel = GraphChannelSel::Angle;
-                    cx.notify();
-                })))
-                .child(btn("graph-ch-rootx", "RootX", self.graph_channel == GraphChannelSel::RootX, cx.listener(|view, _ev, _w, cx| {
-                    view.graph_channel = GraphChannelSel::RootX;
-                    cx.notify();
-                })))
-                .child(btn("graph-ch-rooty", "RootY", self.graph_channel == GraphChannelSel::RootY, cx.listener(|view, _ev, _w, cx| {
-                    view.graph_channel = GraphChannelSel::RootY;
-                    cx.notify();
-                })));
+                .child(div().flex_1())
+                .child(
+                    group_row()
+                        .child(btn("graph-ch-angle", "Angle", self.graph_channel == GraphChannelSel::Angle, cx.listener(|view, _ev, _w, cx| {
+                            view.graph_channel = GraphChannelSel::Angle;
+                            cx.notify();
+                        })))
+                        .child(btn("graph-ch-rootx", "RootX", self.graph_channel == GraphChannelSel::RootX, cx.listener(|view, _ev, _w, cx| {
+                            view.graph_channel = GraphChannelSel::RootX;
+                            cx.notify();
+                        })))
+                        .child(btn("graph-ch-rooty", "RootY", self.graph_channel == GraphChannelSel::RootY, cx.listener(|view, _ev, _w, cx| {
+                            view.graph_channel = GraphChannelSel::RootY;
+                            cx.notify();
+                        }))),
+                );
             Some(
                 div()
-                    .flex()
                     .flex_col()
                     .h(px(170.0))
                     .w_full()
-                    .bg(rgb(row_bg))
+                    .bg(rgb(C_PANEL))
+                    .border_1()
+                    .border_color(rgb(C_BORDER))
+                    .rounded(px(8.0))
+                    .p(px(8.0))
+                    .gap(px(6.0))
                     .child(header)
                     .child(gcanvas),
             )
@@ -1085,19 +1096,12 @@ impl Render for EditorView {
         .flex_1()
         .w_full();
 
-        let mut sidebar = div()
+        let mut sidebar = side_panel()
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .p(px(6.0))
             .w(px(168.0))
-            .bg(rgb(bar_bg))
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(0x9AA3B2))
-                    .child(tr("figures_layers")),
-            );
+            .child(section_label("Figures"));
         for (fi, fig) in core.project.figures.iter().enumerate() {
             let selected = fi == core.selected_figure;
             let name = fig.name.clone();
@@ -1108,17 +1112,25 @@ impl Render for EditorView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(3.0))
+                    .gap(px(4.0))
+                    .p(px(6.0))
+                    .rounded(px(6.0))
+                    .bg(if selected { rgb(0x3D5A99) } else { rgb(row_bg) })
+                    .child(
+                        div()
+                            .w(px(10.0))
+                            .h(px(10.0))
+                            .rounded(px(999.0))
+                            .bg(rgb(fig.color)),
+                    )
                     .child(
                         div()
                             .id(("fig-sel", fi))
                             .flex_1()
                             .px(px(6.0))
                             .py(px(4.0))
-                            .rounded(px(4.0))
                             .cursor_pointer()
-                            .bg(if selected { rgb(0x3D5A99) } else { rgb(0x2C313A) })
-                            .text_size(px(12.0))
+                            .text_size(px(13.0))
                             .text_color(rgb(0xE8E8EC))
                             .on_click(cx.listener(move |view, _ev, _w, cx| {
                                 view.core.select_figure(fi);
@@ -1161,20 +1173,24 @@ impl Render for EditorView {
             );
         }
 
-        let mut timeline = div().flex().flex_row().gap(px(6.0));
+        let mut timeline = div().flex().flex_row().gap(px(4.0));
         for i in 0..core.frame_count() {
             let is_current = i == core.current;
             timeline = timeline.child(
                 div()
                     .id(("frame", i))
-                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .min_w(px(26.0))
+                    .px(px(6.0))
                     .py(px(6.0))
-                    .rounded(px(4.0))
+                    .rounded(px(6.0))
                     .cursor_pointer()
-                    .bg(if is_current { rgb(0x3D5A99) } else { rgb(0x2C313A) })
-                    .hover(|s| s.bg(rgb(0x3A4150)))
+                    .bg(if is_current { rgb(C_ACCENT) } else { rgb(0x2C313A) })
+                    .hover(|s| s.bg(rgb(C_BORDER)))
                     .text_size(px(12.0))
-                    .text_color(rgb(0xE8E8EC))
+                    .text_color(rgb(C_INK))
                     .on_click(cx.listener(move |view, _ev, _w, cx| {
                         view.core.goto(i);
                         cx.notify();
@@ -1191,15 +1207,22 @@ impl Render for EditorView {
                 .flex()
                 .flex_col()
                 .flex_1()
-                .gap(px(6.0))
-                .p(px(12.0))
-                .bg(rgb(row_bg))
+                .gap(px(10.0))
+                .p(px(16.0))
+                .bg(rgb(C_PANEL))
+                .border_1()
+                .border_color(rgb(C_BORDER))
+                .rounded(px(12.0))
                 .child(
-                    div()
-                        .text_size(px(15.0))
-                        .text_color(rgb(0xE8E8EC))
-                        .child("Home — saved projects in ./projects"),
-                );
+                    top_bar()
+                        .child(brand())
+                        .child(div().flex_1())
+                        .child(btn("home-close", "Close", false, cx.listener(|view, _ev, _w, cx| {
+                            view.show_home = false;
+                            cx.notify();
+                        }))),
+                )
+                .child(section_label("Home — saved projects in ./projects"));
             let entries = crate::projects::scan(std::path::Path::new("projects"));
             let mut listed = 0usize;
             for (i, info) in entries.iter().enumerate() {
@@ -1215,8 +1238,8 @@ impl Render for EditorView {
                 }
                 listed += 1;
                 let line = format!(
-                    "{} — {} figure(s), {} frame(s), {} fps",
-                    info.name, info.figures, info.frames, info.fps as i32
+                    "{} figure(s), {} frame(s), {} fps",
+                    info.figures, info.frames, info.fps as i32
                 );
                 let path = info.path.clone();
                 let name = info.name.clone();
@@ -1226,11 +1249,19 @@ impl Render for EditorView {
                         .flex_row()
                         .items_center()
                         .gap(px(8.0))
+                        .p(px(8.0))
+                        .rounded(px(8.0))
                         .child(
                             div()
                                 .flex_1()
                                 .text_size(px(13.0))
-                                .text_color(rgb(0xE8E8EC))
+                                .text_color(rgb(C_INK))
+                                .child(name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(C_MUTED))
                                 .child(line),
                         )
                         .child(btn(("home-open", i), "Open", false, cx.listener(move |view, _ev, _w, cx| {
@@ -1242,47 +1273,71 @@ impl Render for EditorView {
             if listed == 0 {
                 panel = panel.child(
                     div()
-                        .text_size(px(13.0))
-                        .text_color(rgb(0x9AA3B2))
+                        .text_size(px(12.0))
+                        .text_color(rgb(C_MUTED))
                         .child("No saved projects yet — use \"Save project\" to add one."),
                 );
             }
-            panel = panel.child(
-                div()
-                    .pt(px(10.0))
-                    .text_size(px(12.0))
-                    .text_color(rgb(0x9AA3B2))
-                    .child("Recent projects:"),
-            );
+            panel = panel.child(section_label("Recent projects"));
             let recents = crate::shell::recents();
             if recents.is_empty() {
                 panel = panel.child(
                     div()
-                        .text_size(px(13.0))
-                        .text_color(rgb(0x9AA3B2))
+                        .text_size(px(12.0))
+                        .text_color(rgb(C_MUTED))
                         .child("(none yet)"),
                 );
             }
             for name in recents {
                 panel = panel.child(
                     div()
+                        .px(px(8.0))
                         .text_size(px(13.0))
-                        .text_color(rgb(0xE8E8EC))
+                        .text_color(rgb(C_INK))
                         .child(format!("- {name}")),
                 );
             }
-            panel = panel.child(btn("home-close", "Close", false, cx.listener(|view, _ev, _w, cx| {
-                view.show_home = false;
-                cx.notify();
-            })));
             Some(panel)
         } else {
             None
         };
 
-        let middle = div().flex().flex_row().flex_1().child(sidebar);
-        // The stage column: canvas on top, graph panel under it.
-        let stage_col = div().flex().flex_col().flex_1().w_full().child(canvas);
+        let middle = div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .gap(px(0.0))
+            .child(sidebar);
+        // The stage column: framed canvas on top, a quiet hint row
+        // under it, then the graph / audio panels.
+        let framed_canvas = div()
+            .flex()
+            .flex_1()
+            .border_1()
+            .border_color(rgb(C_BORDER))
+            .rounded(px(8.0))
+            .overflow_hidden()
+            .child(canvas);
+        let hint_row = div()
+            .flex()
+            .flex_row()
+            .gap(px(8.0))
+            .items_center()
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(C_MUTED))
+                    .child("Drag a joint to pose · Hands and feet use IK · Drag the hips to move"),
+            );
+        let stage_col = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .p(px(8.0))
+            .gap(px(6.0))
+            .child(framed_canvas)
+            .child(hint_row);
         let stage_col = match graph_panel {
             Some(panel) => stage_col.child(panel),
             None => stage_col,
@@ -1457,34 +1512,21 @@ impl Render for EditorView {
                 }
             }))
             .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
+                top_bar()
                     .p(px(8.0))
                     .bg(rgb(bar_bg))
-                    .child(btn("play", if playing { tr("pause") } else { tr("play") }, playing, cx.listener(|view, _ev, _w, cx| {
-                        view.toggle_play(cx);
-                    })))
-                    .child(btn("add-frame", tr("add_frame"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.add_frame();
+                    .child(brand())
+                    .child(vsep())
+                    .child(btn("save", tr("save"), false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.save();
                         cx.notify();
                     })))
-                    .child(btn("dup-frame", tr("duplicate_frame"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.duplicate_frame();
+                    .child(btn("load", tr("load"), false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.load();
                         cx.notify();
                     })))
-                    .child(btn("del-frame", tr("delete_frame"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.delete_frame();
-                        cx.notify();
-                    })))
-                    .child(btn("onion", tr("onion_skin"), onion_on, cx.listener(|view, _ev, _w, cx| {
-                        view.core.onion = !view.core.onion;
-                        cx.notify();
-                    })))
-                    .child(btn("add-figure", tr("add_figure"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.add_figure();
+                    .child(btn("export", tr("export_png"), false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.export_png();
                         cx.notify();
                     })))
                     .child(btn("undo", tr("undo"), false, cx.listener(|view, _ev, _w, cx| {
@@ -1503,6 +1545,7 @@ impl Render for EditorView {
                         view.core.paste_frame();
                         cx.notify();
                     })))
+                    .child(div().flex_1())
                     .child(btn("graph", "Graph", graph_on, cx.listener(|view, _ev, _w, cx| {
                         view.show_graph = !view.show_graph;
                         if view.show_graph {
@@ -1521,501 +1564,609 @@ impl Render for EditorView {
                         }
                         cx.notify();
                     })))
-                    .child(btn("save", tr("save"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.save();
-                        cx.notify();
-                    })))
-                    .child(btn("load", tr("load"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.load();
-                        cx.notify();
-                    })))
-                    .child(btn("export", tr("export_png"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.export_png();
-                        cx.notify();
-                    })))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(rgb(0x9AA3B2))
-                            .child(format!("{}   ·   {}", frame_label, fps_label)),
-                    ),
+                    .child(info_chip(frame_label.clone(), false))
+                    .child(info_chip(fps_label.clone(), false)),
             )
             .child(
                 div()
                     .flex()
-                    .flex_row()
                     .flex_wrap()
-                    .items_center()
                     .gap(px(6.0))
                     .px(px(8.0))
                     .py(px(4.0))
-                    .bg(rgb(row_bg))
-                    .child(btn("inbetween", tr("inbetween"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.insert_inbetween();
-                        cx.notify();
-                    })))
-                    .child(btn("add-seg", tr("add_segment"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.add_segment();
-                        cx.notify();
-                    })))
-                    .child(btn("del-seg", tr("delete_segment"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.delete_segment();
-                        cx.notify();
-                    })))
-                    .child(btn("len-up", tr("len_plus"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.adjust_length(4.0);
-                        cx.notify();
-                    })))
-                    .child(btn("len-dn", tr("len_minus"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.adjust_length(-4.0);
-                        cx.notify();
-                    })))
-                    .child(btn("thick-up", tr("thick_plus"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.adjust_thickness(1.0);
-                        cx.notify();
-                    })))
-                    .child(btn("thick-dn", tr("thick_minus"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.adjust_thickness(-1.0);
-                        cx.notify();
-                    })))
-                    .child(btn("node-color", "Seg colour", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.cycle_node_color();
-                        cx.notify();
-                    })))
-                    .child(btn("node-shape", tr("shape"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.cycle_shape();
-                        cx.notify();
-                    })))
-                    .child(btn("draw-mode", tr("draw"), draw_on, cx.listener(|view, _ev, _w, cx| {
-                        view.core.draw_mode = !view.core.draw_mode;
-                        view.core.status = if view.core.draw_mode {
-                            "Draw mode: drag on the canvas to paint a stroke on this frame.".into()
-                        } else {
-                            "Pose mode.".into()
-                        };
-                        cx.notify();
-                    })))
-                    .child(btn("clear-drawing", tr("clear_drawing"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.clear_frame_drawings();
-                        cx.notify();
-                    })))
-                    .child(btn("add-quad", "+ Quadruped", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.add_quadruped();
-                        cx.notify();
-                    })))
-                    .child(btn("add-mini", "+ Mini", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.add_simple();
-                        cx.notify();
-                    }))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .bg(rgb(row_bg))
-                    .child(btn("cam-mode", tr("camera_mode"), cam_mode, cx.listener(|view, _ev, _w, cx| {
-                        view.core.camera_mode = !view.core.camera_mode;
-                        view.core.status = if view.core.camera_mode {
-                            "Camera mode: drag the canvas to pan. Keys are set per frame.".into()
-                        } else {
-                            "Pose mode.".into()
-                        };
-                        cx.notify();
-                    })))
-                    .child(btn("cam-zin", tr("cam_zoom_plus"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.camera_zoom_by(1.2);
-                        cx.notify();
-                    })))
-                    .child(btn("cam-zout", tr("cam_zoom_minus"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.camera_zoom_by(1.0 / 1.2);
-                        cx.notify();
-                    })))
-                    .child(btn("cam-clear", "Clear cam key", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.camera_clear_key();
-                        cx.notify();
-                    })))
-                    .child(btn("export-gif", tr("export_gif"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.export_gif();
-                        cx.notify();
-                    })))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(0x9AA3B2))
-                            .child(cam_label),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .bg(rgb(row_bg))
-                    .child(btn("fps-dn", "FPS -", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.adjust_fps(-1.0);
-                        cx.notify();
-                    })))
-                    .child(btn("fps-up", "FPS +", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.adjust_fps(1.0);
-                        cx.notify();
-                    })))
-                    .child(btn("dur-dn", "Dur -", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.adjust_frame_duration(0.5);
-                        cx.notify();
-                    })))
-                    .child(btn("dur-up", "Dur +", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.adjust_frame_duration(2.0);
-                        cx.notify();
-                    })))
-                    .child(btn("tween", tr("tween_play"), tween_on, cx.listener(|view, _ev, _w, cx| {
-                        view.core.toggle_tween_playback();
-                        cx.notify();
-                    })))
-                    .child(btn("easing", Box::leak(easing_label.into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.cycle_easing();
-                        cx.notify();
-                    })))
-                    .child(btn("follow", tr("follow_cam"), follow_on, cx.listener(|view, _ev, _w, cx| {
-                        view.core.toggle_camera_follow();
-                        cx.notify();
-                    })))
-                    .child(btn("paths", "Paths", paths_on, cx.listener(|view, _ev, _w, cx| {
-                        view.core.show_paths = !view.core.show_paths;
-                        cx.notify();
-                    })))
-                    .child(btn("fx-burst", tr("fx_burst"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.add_particle(0);
-                        cx.notify();
-                    })))
-                    .child(btn("fx-sparkle", tr("fx_sparkle"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.add_particle(1);
-                        cx.notify();
-                    })))
-                    .child(btn("fx-smoke", tr("fx_smoke"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.add_particle(2);
-                        cx.notify();
-                    })))
-                    .child(btn("fx-clear", tr("clear_fx"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.clear_particles();
-                        cx.notify();
-                    })))
-                    .child(btn("lib-cycle", Box::leak(format!("Lib: {lib_name}").into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.cycle_library();
-                        cx.notify();
-                    })))
-                    .child(btn("lib-insert", "Insert lib fig", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.insert_library_figure();
-                        cx.notify();
-                    })))
-                    .child(btn("lib-save", "Save fig to lib", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.save_figure_to_library();
-                        cx.notify();
-                    })))
-                    .child(btn("export-mp4", "Export MP4", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.export_mp4();
-                        cx.notify();
-                    })))
-                    .child(btn("export-sheet", tr("spritesheet"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.export_sheet();
-                        cx.notify();
-                    })))
-                    .child(btn("theme", if core.light_theme { tr("dark_theme") } else { tr("light_theme") }, false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.light_theme = !view.core.light_theme;
-                        cx.notify();
-                    })))
-                    .child(btn("onion-range", "Onion +", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.cycle_onion_frames();
-                        cx.notify();
-                    })))
-                    .child(btn("import-piv", tr("import_piv"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.import_piv();
-                        cx.notify();
-                    })))
-                    .child(btn("import-stk", tr("import_stk"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.import_stk();
-                        cx.notify();
-                    })))
-                    .child(btn("export-piv", tr("export_piv"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.export_piv();
-                        cx.notify();
-                    })))
-                    .child(btn("export-stk", tr("export_stk"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.export_stk();
-                        cx.notify();
-                    })))
-                    .child(btn("add-audio", tr("add_audio"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.add_audio_clip();
-                        cx.notify();
-                    })))
-                    .child(btn("make-clip", tr("make_clip"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.make_clip_from_figure();
-                        cx.notify();
-                    })))
-                    .child(btn("insert-clip", tr("insert_clip"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.insert_clip_figure();
-                        cx.notify();
-                    })))
-                    .child(btn("export-webm", tr("export_webm"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.export_webm();
-                        cx.notify();
-                    })))
-                    .child(btn("export-svg", tr("export_svg"), false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.export_svg();
-                        cx.notify();
-                    })))
-                    .child(btn("save-proj", "Save project", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.save_named_project();
-                        // Keep the recovery snapshot and the recents
-                        // list in step with explicit saves.
-                        let _ = crate::shell::write_recovery(&view.core.project);
-                        crate::shell::touch_recent(&view.core.project.name);
-                        cx.notify();
-                    })))
-                    .child(btn("cycle-proj", "Projects >", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.cycle_project_file();
-                        cx.notify();
-                    })))
-                    .child(btn("open-proj", "Open project", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.open_project_file();
-                        cx.notify();
-                    })))
-                    .child(btn("open-dlg", "Open...", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.open_via_dialog();
-                        cx.notify();
-                    })))
-                    .child(btn("save-dlg", "Save...", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.save_via_dialog();
-                        cx.notify();
-                    })))
-                    .child(btn("text-seg", "Text seg", false, cx.listener(|view, _ev, _w, cx| {
-                        match view.core.selected_node {
-                            Some(ni) => match crate::text_edit::TextEdit::begin(&view.core.project, view.core.selected_figure, ni) {
-                                Some(te) => {
-                                    view.core.status = format!("Text: {}", te.display());
-                                    view.text_edit = Some(te);
-                                }
-                                None => view.core.status = "No such segment.".into(),
-                            },
-                            None => view.core.status = "Click a joint first, then Text seg.".into(),
-                        }
-                        cx.notify();
-                    })))
-                    .child(btn("key-graph", "Key graph", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.key_graph_angle();
-                        cx.notify();
-                    })))
-                    .child(btn("clr-graph", "Clr graph", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.clear_graph();
-                        cx.notify();
-                    })))
-                    .child(btn("weather", "Weather", false, cx.listener(|view, _ev, _w, cx| {
-                        use crate::vfx::{Weather, WeatherKind};
-                        let (next, label) = match &view.core.project.weather {
-                            None => (Some(Weather { kind: WeatherKind::Rain, amount: 90.0, wind: 25.0 }), "Weather: rain."),
-                            Some(w) => match w.kind {
-                                WeatherKind::Rain => (Some(Weather { kind: WeatherKind::Snow, amount: 90.0, wind: 12.0 }), "Weather: snow."),
-                                WeatherKind::Snow => (Some(Weather { kind: WeatherKind::Fireflies, amount: 60.0, wind: 4.0 }), "Weather: fireflies."),
-                                WeatherKind::Fireflies => (None, "Weather: off."),
-                            },
-                        };
-                        view.core.project.weather = next;
-                        view.core.status = label.into();
-                        cx.notify();
-                    })))
-                    .child(btn("mode-3d", "3D mode", self.core.fig3.is_some(), cx.listener(|view, _ev, _w, cx| {
-                        if view.core.fig3.is_some() {
-                            view.core.exit_3d();
-                        } else {
-                            view.core.enter_3d();
-                        }
-                        cx.notify();
-                    })))
-                    .child(btn("joint-3d", "Joint>", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.fig3_select_next();
-                        cx.notify();
-                    })))
-                    .child(btn("rotx-3d", "RotX", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.fig3_rotate(0, 15.0);
-                        cx.notify();
-                    })))
-                    .child(btn("roty-3d", "RotY", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.fig3_rotate(1, 15.0);
-                        cx.notify();
-                    })))
-                    .child(btn("rotz-3d", "RotZ", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.fig3_rotate(2, 15.0);
-                        cx.notify();
-                    })))
-                    .child(btn("orbit-3d", "Orbit", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.fig3_orbit(15.0, 0.0);
-                        cx.notify();
-                    })))
-                    .child(btn("bake-3d", "Bake 3D", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.fig3_bake();
-                        cx.notify();
-                    })))
-                    .child(btn("cam-rot", "Cam rot +15", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.rotate_camera(15.0);
-                        cx.notify();
-                    })))
-                    .child(btn("smooth-strokes", "Smooth", false, cx.listener(|view, _ev, _w, cx| {
-                        let n = crate::draw_ops::smooth_frame(&mut view.core.project, view.core.current, 1);
-                        view.core.status = format!("Smoothed {n} stroke(s) on this frame.");
-                        cx.notify();
-                    })))
-                    .child(btn("norm-audio", "Norm last", false, cx.listener(|view, _ev, _w, cx| {
-                        let n = view.core.project.audio.len();
-                        if n == 0 {
-                            view.core.status = "No audio clips.".into();
-                        } else {
-                            view.core.audio_normalize(n - 1);
-                        }
-                        cx.notify();
-                    })))
-                    .child(btn("split-audio", "Split@cur", false, cx.listener(|view, _ev, _w, cx| {
-                        let n = view.core.project.audio.len();
-                        if n == 0 {
-                            view.core.status = "No audio clips.".into();
-                        } else {
-                            let at = view.core.current;
-                            view.core.audio_split(n - 1, at);
-                        }
-                        cx.notify();
-                    })))
-                    .child(btn("xfade-audio", "Xfade", false, cx.listener(|view, _ev, _w, cx| {
-                        if view.core.project.audio.len() < 2 {
-                            view.core.status = "Need two audio clips to crossfade.".into();
-                        } else {
-                            view.core.audio_crossfade(0);
-                        }
-                        cx.notify();
-                    }))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.0))
-                    .p(px(8.0))
                     .bg(rgb(bar_bg))
-                    .child(btn("export-v5", "Export .piv v5", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.export_v5_file();
-                        cx.notify();
-                    })))
-                    .child(btn("export-apng", "Export APNG", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.export_apng_file();
-                        cx.notify();
-                    })))
-                    .child(btn("export-jpeg", "Export JPEG", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.export_jpeg_dir();
-                        cx.notify();
-                    })))
-                    .child(btn("import-nodes", "Import .nodes", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.import_nodes_file();
-                        cx.notify();
-                    })))
-                    .child(btn("lang", Box::leak(lang_label.into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.cycle_lang();
-                        cx.notify();
-                    })))
-                    .child(btn("frame-easing", Box::leak(fease_label.into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.cycle_frame_easing();
-                        cx.notify();
-                    })))
-                    .child(btn("fxclip-beam", "FX clip Beam", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.add_fx_clip(crate::vfx::ClipKind::Beam);
-                        cx.notify();
-                    })))
-                    .child(btn("fxclip-aura", "FX clip Aura", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.add_fx_clip(crate::vfx::ClipKind::Aura);
-                        cx.notify();
-                    })))
-                    .child(btn("fxclip-trail", "FX clip Trail", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.add_fx_clip(crate::vfx::ClipKind::Trail);
-                        cx.notify();
-                    })))
-                    .child(btn("home", "Home", show_home, cx.listener(|view, _ev, _w, cx| {
-                        view.show_home = !view.show_home;
-                        if view.show_home {
-                            // Snapshot the current work as the
-                            // recovery file whenever Home is opened.
-                            let _ = crate::shell::write_recovery(&view.core.project);
-                        }
-                        cx.notify();
-                    })))
-                    .child(btn("recover", "Recover", false, cx.listener(|view, _ev, _w, cx| {
-                        match crate::shell::read_recovery() {
-                            Some(project) => {
-                                view.core.project = project;
-                                view.core.current = 0;
-                                view.core.playhead = 0.0;
-                                view.core.selected_figure = 0;
-                                view.core.selected_node = None;
-                                view.core.status =
-                                    "Recovered the snapshot from ./projects/.recovery.json.".into();
-                            }
-                            None => {
-                                view.core.status =
-                                    "No recovery snapshot found in ./projects/.".into();
-                            }
-                        }
-                        cx.notify();
-                    })))
-                    .child(btn("stage-w-dn", "Stage W -", false, cx.listener(|view, _ev, _w, cx| {
-                        view.adjust_stage(-40.0, 0.0);
-                        cx.notify();
-                    })))
-                    .child(btn("stage-w-up", "Stage W +", false, cx.listener(|view, _ev, _w, cx| {
-                        view.adjust_stage(40.0, 0.0);
-                        cx.notify();
-                    })))
-                    .child(btn("stage-h-dn", "Stage H -", false, cx.listener(|view, _ev, _w, cx| {
-                        view.adjust_stage(0.0, -40.0);
-                        cx.notify();
-                    })))
-                    .child(btn("stage-h-up", "Stage H +", false, cx.listener(|view, _ev, _w, cx| {
-                        view.adjust_stage(0.0, 40.0);
-                        cx.notify();
-                    })))
-                    .child(btn("import-stknds", "Import .stknds", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.import_nodes_anim_file();
-                        cx.notify();
-                    })))
-                    .child(btn("node-cap", "Seg cap", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.cycle_node_cap();
-                        cx.notify();
-                    })))
-                    .child(btn("node-taper", "Taper", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.cycle_node_taper();
-                        cx.notify();
-                    })))
-                    .child(btn("node-gradient", "Gradient", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.cycle_node_gradient();
-                        cx.notify();
-                    })))
-                    .child(btn("node-image", "Img seg", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.attach_image_to_node();
-                        cx.notify();
-                    })))
-                    .child(btn("node-media-clear", "Clear media", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.clear_node_media();
-                        cx.notify();
-                    })))
-                    .child(btn("mixdown", "Mixdown", false, cx.listener(|view, _ev, _w, cx| {
-                        view.core.mixdown_audio();
-                        cx.notify();
-                    }))),
+                    .child(
+                        tool_group("Transport").child(
+                            group_row()
+                                .child(btn("play", if playing { tr("pause") } else { tr("play") }, playing, cx.listener(|view, _ev, _w, cx| {
+                                    view.toggle_play(cx);
+                                })))
+                                .child(btn("add-frame", tr("add_frame"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_frame();
+                                    cx.notify();
+                                })))
+                                .child(btn("dup-frame", tr("duplicate_frame"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.duplicate_frame();
+                                    cx.notify();
+                                })))
+                                .child(btn("del-frame", tr("delete_frame"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.delete_frame();
+                                    cx.notify();
+                                })))
+                                .child(btn("onion", tr("onion_skin"), onion_on, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.onion = !view.core.onion;
+                                    cx.notify();
+                                }))))
+                    ),
+                    .child(
+                        tool_group("Figure").child(
+                            group_row()
+                                .child(btn("add-figure", tr("add_figure"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_figure();
+                                    cx.notify();
+                                }))))
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_start()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(rgb(row_bg))
+                    .child(
+                        tool_group("Frames").child(
+                            group_row()
+                                .child(btn("inbetween", tr("inbetween"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.insert_inbetween();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Segments").child(
+                            group_row()
+                                .child(btn("add-seg", tr("add_segment"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_segment();
+                                    cx.notify();
+                                })))
+                                .child(btn("del-seg", tr("delete_segment"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.delete_segment();
+                                    cx.notify();
+                                })))
+                                .child(btn("len-up", tr("len_plus"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.adjust_length(4.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("len-dn", tr("len_minus"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.adjust_length(-4.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("thick-up", tr("thick_plus"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.adjust_thickness(1.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("thick-dn", tr("thick_minus"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.adjust_thickness(-1.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("node-color", "Seg colour", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.cycle_node_color();
+                                    cx.notify();
+                                })))
+                                .child(btn("node-shape", tr("shape"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.cycle_shape();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Figures").child(
+                            group_row()
+                                .child(btn("add-quad", "+ Quadruped", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_quadruped();
+                                    cx.notify();
+                                })))
+                                .child(btn("add-mini", "+ Mini", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_simple();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Draw").child(
+                            group_row()
+                                .child(btn("draw-mode", tr("draw"), draw_on, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.draw_mode = !view.core.draw_mode;
+                                    view.core.status = if view.core.draw_mode {
+                                        "Draw mode: drag on the canvas to paint a stroke on this frame.".into()
+                                    } else {
+                                        "Pose mode.".into()
+                                    };
+                                    cx.notify();
+                                })))
+                                .child(btn("clear-drawing", tr("clear_drawing"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.clear_frame_drawings();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Camera").child(
+                            group_row()
+                                .child(btn("cam-mode", tr("camera_mode"), cam_mode, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.camera_mode = !view.core.camera_mode;
+                                    view.core.status = if view.core.camera_mode {
+                                        "Camera mode: drag the canvas to pan. Keys are set per frame.".into()
+                                    } else {
+                                        "Pose mode.".into()
+                                    };
+                                    cx.notify();
+                                })))
+                                .child(btn("cam-zin", tr("cam_zoom_plus"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.camera_zoom_by(1.2);
+                                    cx.notify();
+                                })))
+                                .child(btn("cam-zout", tr("cam_zoom_minus"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.camera_zoom_by(1.0 / 1.2);
+                                    cx.notify();
+                                })))
+                                .child(btn("cam-clear", "Clear cam key", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.camera_clear_key();
+                                    cx.notify();
+                                })))
+                                .child(btn("export-gif", tr("export_gif"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_gif();
+                                    cx.notify();
+                                })))
+                                .child(info_chip(cam_label, false))
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(rgb(row_bg))
+                    .child(
+                        tool_group("Playback").child(
+                            group_row()
+                                .child(btn("fps-dn", "FPS -", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.adjust_fps(-1.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("fps-up", "FPS +", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.adjust_fps(1.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("dur-dn", "Dur -", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.adjust_frame_duration(0.5);
+                                    cx.notify();
+                                })))
+                                .child(btn("dur-up", "Dur +", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.adjust_frame_duration(2.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("tween", tr("tween_play"), tween_on, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.toggle_tween_playback();
+                                    cx.notify();
+                                })))
+                                .child(btn("easing", Box::leak(easing_label.into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.cycle_easing();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Effects").child(
+                            group_row()
+                                .child(btn("fx-burst", tr("fx_burst"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_particle(0);
+                                    cx.notify();
+                                })))
+                                .child(btn("fx-sparkle", tr("fx_sparkle"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_particle(1);
+                                    cx.notify();
+                                })))
+                                .child(btn("fx-smoke", tr("fx_smoke"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_particle(2);
+                                    cx.notify();
+                                })))
+                                .child(btn("fx-clear", tr("clear_fx"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.clear_particles();
+                                    cx.notify();
+                                })))
+                                .child(btn("paths", "Paths", paths_on, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.show_paths = !view.core.show_paths;
+                                    cx.notify();
+                                })))
+                                .child(btn("follow", tr("follow_cam"), follow_on, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.toggle_camera_follow();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Library & Clips").child(
+                            group_row()
+                                .child(btn("lib-cycle", Box::leak(format!("Lib: {lib_name}").into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.cycle_library();
+                                    cx.notify();
+                                })))
+                                .child(btn("lib-insert", "Insert lib fig", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.insert_library_figure();
+                                    cx.notify();
+                                })))
+                                .child(btn("lib-save", "Save fig to lib", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.save_figure_to_library();
+                                    cx.notify();
+                                })))
+                                .child(btn("make-clip", tr("make_clip"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.make_clip_from_figure();
+                                    cx.notify();
+                                })))
+                                .child(btn("insert-clip", tr("insert_clip"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.insert_clip_figure();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Export").child(
+                            group_row()
+                                .child(btn("export-mp4", "Export MP4", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_mp4();
+                                    cx.notify();
+                                })))
+                                .child(btn("export-sheet", tr("spritesheet"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_sheet();
+                                    cx.notify();
+                                })))
+                                .child(btn("export-webm", tr("export_webm"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_webm();
+                                    cx.notify();
+                                })))
+                                .child(btn("export-svg", tr("export_svg"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_svg();
+                                    cx.notify();
+                                })))
+                                .child(btn("export-piv", tr("export_piv"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_piv();
+                                    cx.notify();
+                                })))
+                                .child(btn("export-stk", tr("export_stk"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_stk();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Projects").child(
+                            group_row()
+                                .child(btn("save-proj", "Save project", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.save_named_project();
+                                    // Keep the recovery snapshot and the recents
+                                    // list in step with explicit saves.
+                                    let _ = crate::shell::write_recovery(&view.core.project);
+                                    crate::shell::touch_recent(&view.core.project.name);
+                                    cx.notify();
+                                })))
+                                .child(btn("cycle-proj", "Projects >", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.cycle_project_file();
+                                    cx.notify();
+                                })))
+                                .child(btn("open-proj", "Open project", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.open_project_file();
+                                    cx.notify();
+                                })))
+                                .child(btn("open-dlg", "Open...", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.open_via_dialog();
+                                    cx.notify();
+                                })))
+                                .child(btn("save-dlg", "Save...", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.save_via_dialog();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Import").child(
+                            group_row()
+                                .child(btn("import-piv", tr("import_piv"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.import_piv();
+                                    cx.notify();
+                                })))
+                                .child(btn("import-stk", tr("import_stk"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.import_stk();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("View").child(
+                            group_row()
+                                .child(btn("theme", if core.light_theme { tr("dark_theme") } else { tr("light_theme") }, false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.light_theme = !view.core.light_theme;
+                                    cx.notify();
+                                })))
+                                .child(btn("onion-range", "Onion +", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.cycle_onion_frames();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Audio & Text").child(
+                            group_row()
+                                .child(btn("add-audio", tr("add_audio"), false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_audio_clip();
+                                    cx.notify();
+                                })))
+                                .child(btn("text-seg", "Text seg", false, cx.listener(|view, _ev, _w, cx| {
+                                    match view.core.selected_node {
+                                        Some(ni) => match crate::text_edit::TextEdit::begin(&view.core.project, view.core.selected_figure, ni) {
+                                            Some(te) => {
+                                                view.core.status = format!("Text: {}", te.display());
+                                                view.text_edit = Some(te);
+                                            }
+                                            None => view.core.status = "No such segment.".into(),
+                                        },
+                                        None => view.core.status = "Click a joint first, then Text seg.".into(),
+                                    }
+                                    cx.notify();
+                                })))
+                                .child(btn("key-graph", "Key graph", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.key_graph_angle();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("3D").child(
+                            group_row()
+                                .child(btn("mode-3d", "3D mode", self.core.fig3.is_some(), cx.listener(|view, _ev, _w, cx| {
+                                    if view.core.fig3.is_some() {
+                                        view.core.exit_3d();
+                                    } else {
+                                        view.core.enter_3d();
+                                    }
+                                    cx.notify();
+                                })))
+                                .child(btn("joint-3d", "Joint>", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.fig3_select_next();
+                                    cx.notify();
+                                })))
+                                .child(btn("rotx-3d", "RotX", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.fig3_rotate(0, 15.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("roty-3d", "RotY", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.fig3_rotate(1, 15.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("rotz-3d", "RotZ", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.fig3_rotate(2, 15.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("orbit-3d", "Orbit", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.fig3_orbit(15.0, 0.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("bake-3d", "Bake 3D", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.fig3_bake();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Scene").child(
+                            group_row()
+                                .child(btn("weather", "Weather", false, cx.listener(|view, _ev, _w, cx| {
+                                    use crate::vfx::{Weather, WeatherKind};
+                                    let (next, label) = match &view.core.project.weather {
+                                        None => (Some(Weather { kind: WeatherKind::Rain, amount: 90.0, wind: 25.0 }), "Weather: rain."),
+                                        Some(w) => match w.kind {
+                                            WeatherKind::Rain => (Some(Weather { kind: WeatherKind::Snow, amount: 90.0, wind: 12.0 }), "Weather: snow."),
+                                            WeatherKind::Snow => (Some(Weather { kind: WeatherKind::Fireflies, amount: 60.0, wind: 4.0 }), "Weather: fireflies."),
+                                            WeatherKind::Fireflies => (None, "Weather: off."),
+                                        },
+                                    };
+                                    view.core.project.weather = next;
+                                    view.core.status = label.into();
+                                    cx.notify();
+                                })))
+                                .child(btn("cam-rot", "Cam rot +15", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.rotate_camera(15.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("clr-graph", "Clr graph", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.clear_graph();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Audio Ops").child(
+                            group_row()
+                                .child(btn("norm-audio", "Norm last", false, cx.listener(|view, _ev, _w, cx| {
+                                    let n = view.core.project.audio.len();
+                                    if n == 0 {
+                                        view.core.status = "No audio clips.".into();
+                                    } else {
+                                        view.core.audio_normalize(n - 1);
+                                    }
+                                    cx.notify();
+                                })))
+                                .child(btn("split-audio", "Split@cur", false, cx.listener(|view, _ev, _w, cx| {
+                                    let n = view.core.project.audio.len();
+                                    if n == 0 {
+                                        view.core.status = "No audio clips.".into();
+                                    } else {
+                                        let at = view.core.current;
+                                        view.core.audio_split(n - 1, at);
+                                    }
+                                    cx.notify();
+                                })))
+                                .child(btn("xfade-audio", "Xfade", false, cx.listener(|view, _ev, _w, cx| {
+                                    if view.core.project.audio.len() < 2 {
+                                        view.core.status = "Need two audio clips to crossfade.".into();
+                                    } else {
+                                        view.core.audio_crossfade(0);
+                                    }
+                                    cx.notify();
+                                })))
+                                .child(btn("mixdown", "Mixdown", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.mixdown_audio();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Formats").child(
+                            group_row()
+                                .child(btn("export-v5", "Export .piv v5", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_v5_file();
+                                    cx.notify();
+                                })))
+                                .child(btn("export-apng", "Export APNG", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_apng_file();
+                                    cx.notify();
+                                })))
+                                .child(btn("export-jpeg", "Export JPEG", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_jpeg_dir();
+                                    cx.notify();
+                                })))
+                                .child(btn("import-nodes", "Import .nodes", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.import_nodes_file();
+                                    cx.notify();
+                                })))
+                                .child(btn("import-stknds", "Import .stknds", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.import_nodes_anim_file();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Stage & Language").child(
+                            group_row()
+                                .child(btn("stage-w-dn", "Stage W -", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.adjust_stage(-40.0, 0.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("stage-w-up", "Stage W +", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.adjust_stage(40.0, 0.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("stage-h-dn", "Stage H -", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.adjust_stage(0.0, -40.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("stage-h-up", "Stage H +", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.adjust_stage(0.0, 40.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("lang", Box::leak(lang_label.into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.cycle_lang();
+                                    cx.notify();
+                                })))
+                                .child(btn("frame-easing", Box::leak(fease_label.into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.cycle_frame_easing();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Effects 2").child(
+                            group_row()
+                                .child(btn("fxclip-beam", "FX clip Beam", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Beam);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-aura", "FX clip Aura", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Aura);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-trail", "FX clip Trail", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Trail);
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Home").child(
+                            group_row()
+                                .child(btn("home", "Home", show_home, cx.listener(|view, _ev, _w, cx| {
+                                    view.show_home = !view.show_home;
+                                    if view.show_home {
+                                        // Snapshot the current work as the
+                                        // recovery file whenever Home is opened.
+                                        let _ = crate::shell::write_recovery(&view.core.project);
+                                    }
+                                    cx.notify();
+                                })))
+                                .child(btn("recover", "Recover", false, cx.listener(|view, _ev, _w, cx| {
+                                    match crate::shell::read_recovery() {
+                                        Some(project) => {
+                                            view.core.project = project;
+                                            view.core.current = 0;
+                                            view.core.playhead = 0.0;
+                                            view.core.selected_figure = 0;
+                                            view.core.selected_node = None;
+                                            view.core.status =
+                                                "Recovered the snapshot from ./projects/.recovery.json.".into();
+                                        }
+                                        None => {
+                                            view.core.status =
+                                                "No recovery snapshot found in ./projects/.".into();
+                                        }
+                                    }
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Segment Style").child(
+                            group_row()
+                                .child(btn("node-cap", "Seg cap", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.cycle_node_cap();
+                                    cx.notify();
+                                })))
+                                .child(btn("node-taper", "Taper", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.cycle_node_taper();
+                                    cx.notify();
+                                })))
+                                .child(btn("node-gradient", "Gradient", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.cycle_node_gradient();
+                                    cx.notify();
+                                })))
+                                .child(btn("node-image", "Img seg", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.attach_image_to_node();
+                                    cx.notify();
+                                })))
+                                .child(btn("node-media-clear", "Clear media", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.clear_node_media();
+                                    cx.notify();
+                                })))
+                        ),
+                    )
+                    .child(
+                        tool_group("Strokes").child(
+                            group_row()
+                                .child(btn("smooth-strokes", "Smooth", false, cx.listener(|view, _ev, _w, cx| {
+                                    let n = crate::draw_ops::smooth_frame(&mut view.core.project, view.core.current, 1);
+                                    view.core.status = format!("Smoothed {n} stroke(s) on this frame.");
+                                    cx.notify();
+                                })))
+                        ),
+                    )
             )
             .child(middle)
             .child(
@@ -2025,11 +2176,15 @@ impl Render for EditorView {
                     .gap(px(6.0))
                     .p(px(8.0))
                     .bg(rgb(bar_bg))
-                    .child(timeline)
+                    .child(
+                        top_bar()
+                            .child(section_label("Timeline"))
+                            .child(timeline.flex_1()),
+                    )
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(0x9AA3B2))
+                            .text_color(rgb(C_MUTED))
                             .child(status),
                     ),
             )
