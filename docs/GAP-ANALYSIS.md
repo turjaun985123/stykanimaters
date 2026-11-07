@@ -222,7 +222,7 @@ its own animated bake had already grown to 4.
 - **Drawing depth.** The original's raster engine is still much
   deeper: tiles, on-canvas text, flood-fill at scale, a far
   larger brush system. The port has a solid vector-stroke subset.
-- **VFX volume.** 14 deterministic clip kinds + weather vs the
+- **VFX volume.** 21 deterministic clip kinds + weather vs the
   original's ~6,600-line system. (The MCP kind gap is closed:
   `add_fx_clip` accepts all 14 kinds and `fx_list`/`fx_move`/
   `fx_resize`/`fx_duplicate`/`fx_delete` manage clips.)
@@ -245,7 +245,7 @@ its own animated bake had already grown to 4.
 - **Localisation polish.** 28 languages of machine-produced
   strings vs the original's 27 human-maintained ones.
 
-## Wave 9 (in progress, 2026-11-08)
+## Wave 9 (delivered, 2026-11-08 — CI run 42403754079 green, 421 tests)
 
 The current wave, landed in the working tree and pending CI
 verification (per the repo rule, CI is the first build/test any
@@ -275,14 +275,15 @@ of this gets). Themes:
 Nothing in this section is CI-verified yet; statuses move to
 the per-wave tables above once the run is green.
 
-## Wave 10 (in progress, 2026-11-08)
+## Wave 10 (delivered, 2026-11-08 — CI run 42409358708 green, 622 tests)
 
 Twenty code agents, aimed at the top remaining gaps listed in
-docs/COMPARISON.md. Everything below is implemented in Wave 10;
-CI verification happens at integration (per the repo rule, CI
-is the first build/test any of this gets), so no item here is
-claimed verified yet. (Wave 9, described above as pending, has
-since passed CI: 421 tests green, run 42403754079.)
+docs/COMPARISON.md. Everything below was implemented in Wave 10
+and verified at integration per the repo rule (CI is the first
+build/test any of this gets): after three fix commits (a dangling
+#[cfg(test)] in export.rs, a stale i18n test, a wrong buffer-size
+assumption in the determinism test), CI run 42409358708 passed
+with 622 tests green.
 
 - **Live audio mixing** — playback now mixes ALL clips audible
   at the playhead; the first-audible-clip-only, single-stream
