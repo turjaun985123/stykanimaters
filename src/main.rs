@@ -2,6 +2,8 @@ mod app;
 mod editor;
 mod export;
 mod model;
+mod pivot;
+mod svg;
 
 use gpui::{App, AppContext, Application, WindowOptions};
 

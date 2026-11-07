@@ -335,6 +335,34 @@ pub struct FigureInstance {
     pub def: FigureDef,
     #[serde(default)]
     pub hidden: bool,
+    /// When set, this instance is a movieclip: its pose comes from
+    /// `Project::clips[clip]` looping, not from the timeline frames.
+    #[serde(default)]
+    pub clip: Option<usize>,
+}
+
+/// A movieclip: a self-contained looping animation of one figure.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClipDef {
+    pub name: String,
+    pub def: FigureDef,
+    pub frames: Vec<Pose>,
+}
+
+/// A freehand brush stroke drawn on one frame.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Stroke {
+    pub frame: usize,
+    pub points: Vec<V2>,
+    pub color: u32,
+    pub width: f32,
+}
+
+/// An audio file placed on the timeline (used by MP4 export).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AudioClip {
+    pub path: String,
+    pub start_frame: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -443,6 +471,12 @@ pub struct Project {
     pub camera_follow: Option<usize>,
     #[serde(default)]
     pub particles: Vec<ParticleEvent>,
+    #[serde(default)]
+    pub strokes: Vec<Stroke>,
+    #[serde(default)]
+    pub audio: Vec<AudioClip>,
+    #[serde(default)]
+    pub clips: Vec<ClipDef>,
 }
 
 impl Project {
@@ -453,6 +487,7 @@ impl Project {
             color: 0xE8E8EC,
             def: def.clone(),
             hidden: false,
+            clip: None,
         }];
         let center = [480.0, 470.0];
         let mut frames = Vec::new();
@@ -480,6 +515,9 @@ impl Project {
             easing: Easing::Linear,
             camera_follow: None,
             particles: Vec::new(),
+            strokes: Vec::new(),
+            audio: Vec::new(),
+            clips: Vec::new(),
         }
     }
 
@@ -494,15 +532,39 @@ impl Project {
         let f = frame_f.clamp(0.0, last as f32);
         let i = f.floor() as usize;
         if !self.tween_playback || i >= last || (f - i as f32) < 0.0001 {
-            return self.frames[i].poses.clone();
+            let mut poses = self.frames[i].poses.clone();
+            self.apply_clips(&mut poses, f);
+            return poses;
         }
         let t = self.easing.apply(f - i as f32);
-        self.frames[i]
+        let mut poses: Vec<Pose> = self.frames[i]
             .poses
             .iter()
             .zip(self.frames[i + 1].poses.iter())
             .map(|(a, b)| a.lerp(b, t))
-            .collect()
+            .collect();
+        self.apply_clips(&mut poses, f);
+        poses
+    }
+
+    /// Replace the poses of movieclip instances with their looping
+    /// clip poses at frame time `f`.
+    fn apply_clips(&self, poses: &mut [Pose], f: f32) {
+        for (fi, inst) in self.figures.iter().enumerate() {
+            let Some(ci) = inst.clip else { continue };
+            let Some(clip) = self.clips.get(ci) else { continue };
+            if clip.frames.is_empty() || fi >= poses.len() {
+                continue;
+            }
+            let n = clip.frames.len();
+            let idx = (f.floor() as usize) % n;
+            poses[fi] = if self.tween_playback && n > 1 {
+                let t = self.easing.apply(f - f.floor());
+                clip.frames[idx].lerp(&clip.frames[(idx + 1) % n], t)
+            } else {
+                clip.frames[idx].clone()
+            };
+        }
     }
 
     /// Total playback length in seconds, honouring frame durations.
@@ -605,6 +667,7 @@ impl Project {
             color,
             def,
             hidden: false,
+            clip: None,
         });
         for frame in &mut self.frames {
             frame.poses.push(pose.clone());

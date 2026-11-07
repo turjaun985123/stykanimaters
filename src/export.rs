@@ -165,6 +165,20 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
             }
         }
     }
+    // Brush strokes belonging to the authored frame under `frame_f`.
+    let authored = (frame_f.floor() as usize).min(project.frames.len().saturating_sub(1));
+    for stroke in &project.strokes {
+        if stroke.frame == authored {
+            for w in stroke.points.windows(2) {
+                segments.push((
+                    view(w[0]),
+                    view(w[1]),
+                    rgb(stroke.color),
+                    stroke.width / 2.0 * zoom * ss as f32,
+                ));
+            }
+        }
+    }
     let particles: Vec<([f32; 2], f32, [u8; 3], f32)> = particles_at(project, frame_f)
         .into_iter()
         .map(|(p, r, c, a)| (view(p), r * zoom * ss as f32, c, a))
@@ -306,13 +320,39 @@ pub fn export_gif(project: &Project, path: &Path) -> std::io::Result<usize> {
     Ok(n)
 }
 
-/// Export an MP4 by rendering PNG frames and encoding them with the
-/// system `ffmpeg` (H.264, yuv420p). Errors if ffmpeg is missing.
+/// Export an MP4 (H.264, yuv420p) via the system `ffmpeg`. When
+/// the project has an audio clip whose file exists, it is muxed in
+/// at its start frame. Errors if ffmpeg is missing.
 pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
+    let has_audio = project
+        .audio
+        .first()
+        .map(|c| std::path::Path::new(&c.path).exists())
+        .unwrap_or(false);
+    if !has_audio {
+        return ffmpeg_encode(project, path, &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
+    }
+    let silent = std::env::temp_dir().join(format!("styk-silent-{}.mp4", std::process::id()));
+    let n = ffmpeg_encode(project, &silent, &["-c:v", "libx264", "-pix_fmt", "yuv420p"])?;
+    let muxed = mux_audio(project, &silent, path)?;
+    let _ = std::fs::remove_file(&silent);
+    if muxed {
+        Ok(n)
+    } else {
+        Err(std::io::Error::other("audio mux failed"))
+    }
+}
+
+/// Encode rendered frames with ffmpeg using the given video args.
+fn ffmpeg_encode(
+    project: &Project,
+    path: &Path,
+    video_args: &[&str],
+) -> std::io::Result<usize> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = std::env::temp_dir().join(format!("styk-mp4-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("styk-enc-{}", std::process::id()));
     std::fs::create_dir_all(&tmp)?;
     let times = sample_times(project);
     for (k, t) in times.iter().enumerate() {
@@ -320,11 +360,17 @@ pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
             .save(tmp.join(format!("frame-{:04}.png", k + 1)))
             .map_err(std::io::Error::other)?;
     }
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-framerate".into(),
+        format!("{}", project.fps.max(1.0) as i32),
+        "-i".into(),
+        tmp.join("frame-%04d.png").to_string_lossy().into_owned(),
+    ];
+    args.extend(video_args.iter().map(|a| a.to_string()));
+    args.push(path.to_string_lossy().into_owned());
     let result = std::process::Command::new("ffmpeg")
-        .args(["-y", "-framerate", &format!("{}", project.fps.max(1.0) as i32),
-               "-i", tmp.join("frame-%04d.png").to_str().unwrap_or(""),
-               "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-               path.to_str().unwrap_or("")])
+        .args(&args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
@@ -334,6 +380,48 @@ pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
         Ok(status) => Err(std::io::Error::other(format!("ffmpeg exited with {status}"))),
         Err(e) => Err(std::io::Error::other(format!("could not run ffmpeg: {e}"))),
     }
+}
+
+/// Export a WebM (VP9). Frames are opaque; the alpha channel is
+/// present but fully opaque.
+pub fn export_webm(project: &Project, path: &Path) -> std::io::Result<usize> {
+    ffmpeg_encode(project, path, &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"])
+}
+
+/// Mux the project's first audio clip (if its file exists) into an
+/// already-encoded silent MP4, offset by its start frame.
+pub fn mux_audio(project: &Project, video: &Path, out: &Path) -> std::io::Result<bool> {
+    let Some(clip) = project.audio.first() else {
+        return Ok(false);
+    };
+    if !std::path::Path::new(&clip.path).exists() {
+        return Ok(false);
+    }
+    let offset = clip.start_frame as f32 / project.fps.max(1.0);
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-i",
+            video.to_str().unwrap_or(""),
+            "-itsoffset",
+            &format!("{offset:.3}"),
+            "-i",
+            &clip.path,
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-shortest",
+            out.to_str().unwrap_or(""),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    Ok(status.success())
 }
 
 /// Export all authored frames as one spritesheet PNG (grid layout).
@@ -470,6 +558,16 @@ mod tests {
             seed: 7,
         });
         render_frame_at(&project, 4.0).save("/tmp/styk-shapes.png").unwrap();
+    }
+
+    #[test]
+    fn webm_export_produces_a_webm_file() {
+        let project = Project::new_demo();
+        let path = std::path::Path::new("/tmp/styk-test.webm");
+        export_webm(&project, path).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        assert!(bytes.len() > 2000, "webm too small: {}", bytes.len());
+        assert_eq!(&bytes[0..4], &[0x1A, 0x45, 0xDF, 0xA3], "not an EBML/WebM file");
     }
 
     #[test]

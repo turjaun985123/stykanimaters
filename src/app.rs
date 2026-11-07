@@ -79,13 +79,14 @@ struct DrawData {
     figures: Vec<(Vec<(V2, V2, u32, f32)>, Vec<V2>, Vec<V2>, u32)>,
     /// (centre, shape, length, colour, thickness) shape segments
     shapes: Vec<(V2, crate::model::Shape, f32, u32, f32)>,
-    onion: Vec<(Vec<(V2, V2)>, u32)>,
+    onion: Vec<(Vec<(V2, V2)>, u32, u8)>,
     selected: Option<(usize, usize)>,
     cam: (f32, f32, f32),
     /// Motion paths: one polyline per visible figure (root), plus the
     /// selected joint's path appended last when enabled.
     paths: Vec<Vec<V2>>,
     particles: Vec<(V2, f32, u32, f32)>,
+    strokes: Vec<(Vec<V2>, u32, f32)>,
 }
 
 impl EditorView {
@@ -133,7 +134,27 @@ impl EditorView {
                         segs.push((pos[p], pos[i]));
                     }
                 }
-                onion.push((segs, core.project.figures[fi].color));
+                onion.push((segs, core.project.figures[fi].color, 0x4D));
+            }
+            // Older onion frames, fainter.
+            for back in 2..=(core.onion_frames as usize) {
+                if core.current < back {
+                    break;
+                }
+                for fi in 0..core.project.figures.len() {
+                    if core.project.figures[fi].hidden {
+                        continue;
+                    }
+                    let pos = core.positions(core.current - back, fi);
+                    let def = &core.project.figures[fi].def;
+                    let mut segs = Vec::new();
+                    for (i, node) in def.nodes.iter().enumerate() {
+                        if let Some(p) = node.parent {
+                            segs.push((pos[p], pos[i]));
+                        }
+                    }
+                    onion.push((segs, core.project.figures[fi].color, 0x26));
+                }
             }
         }
         let mut paths = Vec::new();
@@ -163,6 +184,13 @@ impl EditorView {
             .into_iter()
             .map(|(p, r, c, a)| (p, r, ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32, a))
             .collect();
+        let strokes = core
+            .project
+            .strokes
+            .iter()
+            .filter(|s| s.frame == core.current)
+            .map(|s| (s.points.clone(), s.color, s.width))
+            .collect();
         DrawData {
             stage: core.project.stage,
             background: core.project.background,
@@ -173,6 +201,7 @@ impl EditorView {
             cam: core.project.camera_at(display),
             paths,
             particles,
+            strokes,
         }
     }
 }
@@ -207,6 +236,7 @@ impl Render for EditorView {
         let playing = core.playing;
         let onion_on = core.onion;
         let cam_mode = core.camera_mode;
+        let draw_on = core.draw_mode;
         let (ccx, ccy, czoom) = core.camera_here();
         let cam_label = format!("cam ({ccx:.0}, {ccy:.0}) x{czoom:.2} · {} key(s)", core.project.camera.len());
         let (root_bg, bar_bg, row_bg) = if core.light_theme {
@@ -357,7 +387,10 @@ impl Render for EditorView {
             .bg(rgb(root_bg))
             .on_mouse_down(MouseButton::Left, cx.listener(|view, ev: &MouseDownEvent, _w, cx| {
                 let p = view.to_stage(ev.position);
-                if view.core.camera_mode {
+                if view.core.draw_mode {
+                    view.core.begin_draw(p);
+                    cx.notify();
+                } else if view.core.camera_mode {
                     view.core.begin_camera_drag(p);
                     cx.notify();
                 } else if view.core.begin_drag(p) {
@@ -365,14 +398,21 @@ impl Render for EditorView {
                 }
             }))
             .on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, _w, cx| {
-                if view.core.dragging.is_some() {
+                if view.core.draw_mode {
+                    let p = view.to_stage(ev.position);
+                    view.core.draw_to(p);
+                    cx.notify();
+                } else if view.core.dragging.is_some() {
                     let p = view.to_stage(ev.position);
                     view.core.drag_to(p);
                     cx.notify();
                 }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|view, _ev: &MouseUpEvent, _w, cx| {
-                if view.core.dragging.is_some() {
+                if view.core.draw_mode {
+                    view.core.end_draw();
+                    cx.notify();
+                } else if view.core.dragging.is_some() {
                     view.core.end_drag();
                     cx.notify();
                 }
@@ -487,6 +527,19 @@ impl Render for EditorView {
                     })))
                     .child(btn("node-shape", "Shape", false, cx.listener(|view, _ev, _w, cx| {
                         view.core.cycle_shape();
+                        cx.notify();
+                    })))
+                    .child(btn("draw-mode", "Draw", draw_on, cx.listener(|view, _ev, _w, cx| {
+                        view.core.draw_mode = !view.core.draw_mode;
+                        view.core.status = if view.core.draw_mode {
+                            "Draw mode: drag on the canvas to paint a stroke on this frame.".into()
+                        } else {
+                            "Pose mode.".into()
+                        };
+                        cx.notify();
+                    })))
+                    .child(btn("clear-drawing", "Clear drawing", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.clear_frame_drawings();
                         cx.notify();
                     })))
                     .child(btn("add-quad", "+ Quadruped", false, cx.listener(|view, _ev, _w, cx| {
@@ -621,6 +674,58 @@ impl Render for EditorView {
                     .child(btn("theme", if core.light_theme { "Dark theme" } else { "Light theme" }, false, cx.listener(|view, _ev, _w, cx| {
                         view.core.light_theme = !view.core.light_theme;
                         cx.notify();
+                    })))
+                    .child(btn("onion-range", "Onion +", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.cycle_onion_frames();
+                        cx.notify();
+                    })))
+                    .child(btn("import-piv", "Import .piv", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.import_piv();
+                        cx.notify();
+                    })))
+                    .child(btn("import-stk", "Import .stk", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.import_stk();
+                        cx.notify();
+                    })))
+                    .child(btn("export-piv", "Export .piv", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.export_piv();
+                        cx.notify();
+                    })))
+                    .child(btn("export-stk", "Export .stk", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.export_stk();
+                        cx.notify();
+                    })))
+                    .child(btn("add-audio", "Add audio", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.add_audio_clip();
+                        cx.notify();
+                    })))
+                    .child(btn("make-clip", "Make clip", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.make_clip_from_figure();
+                        cx.notify();
+                    })))
+                    .child(btn("insert-clip", "Insert clip", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.insert_clip_figure();
+                        cx.notify();
+                    })))
+                    .child(btn("export-webm", "WebM", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.export_webm();
+                        cx.notify();
+                    })))
+                    .child(btn("export-svg", "SVG", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.export_svg();
+                        cx.notify();
+                    })))
+                    .child(btn("save-proj", "Save project", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.save_named_project();
+                        cx.notify();
+                    })))
+                    .child(btn("cycle-proj", "Projects >", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.cycle_project_file();
+                        cx.notify();
+                    })))
+                    .child(btn("open-proj", "Open project", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.open_project_file();
+                        cx.notify();
                     }))),
             )
             .child(
@@ -682,8 +787,15 @@ fn paint_stage(window: &mut Window, bounds: Bounds<Pixels>, data: &DrawData) {
         }
     };
     // Onion skin (previous frame) first, translucent.
-    for (segs, color) in &data.onion {
-        stroke(window, segs, rgba((color << 8) | 0x4D), 5.0 * s);
+    for (segs, color, alpha) in &data.onion {
+        stroke(window, segs, rgba((color << 8) | *alpha as u32), 5.0 * s);
+    }
+    // Brush strokes for this frame, under the figures.
+    for (points, color, width) in &data.strokes {
+        if points.len() > 1 {
+            let segs: Vec<(V2, V2)> = points.windows(2).map(|w| (w[0], w[1])).collect();
+            stroke(window, &segs, rgb(*color), width * s);
+        }
     }
     // Motion paths (root trails + selected joint trail).
     for path in &data.paths {

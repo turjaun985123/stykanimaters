@@ -5,7 +5,7 @@
 
 use crate::export::{
     export_gif as render_gif, export_mp4 as render_mp4, export_png_sequence,
-    export_spritesheet as render_sheet,
+    export_spritesheet as render_sheet, export_webm as render_webm,
 };
 use crate::model::{
     aim_node, apply_ik, dist, evaluate, FigureDef, NodeDef, Project, V2,
@@ -40,6 +40,13 @@ pub struct EditorCore {
     pub light_theme: bool,
     pub library: Vec<(String, FigureDef)>,
     pub library_index: usize,
+    /// Draw mode: canvas drags paint brush strokes on this frame.
+    pub draw_mode: bool,
+    drawing: bool,
+    /// How many previous frames the onion skin shows (1..=3).
+    pub onion_frames: u8,
+    pub project_files: Vec<PathBuf>,
+    pub project_index: usize,
 }
 
 const FIGURE_COLORS: [u32; 6] = [0xE8E8EC, 0xFF5D5D, 0x5DB2FF, 0x7BE495, 0xFFC65D, 0xC792FF];
@@ -65,7 +72,28 @@ impl EditorCore {
             light_theme: false,
             library: Self::load_library(),
             library_index: 0,
+            draw_mode: false,
+            drawing: false,
+            onion_frames: 1,
+            project_files: Self::list_project_files(),
+            project_index: 0,
         }
+    }
+
+    fn list_project_files() -> Vec<PathBuf> {
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("projects");
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        files
     }
 
     /// The local figure library: JSON figure definitions from
@@ -749,6 +777,253 @@ impl EditorCore {
         }
     }
 
+    // ---- Pivot formats ----
+
+    fn first_file_with(&self, dir: &str, exts: &[&str]) -> Option<PathBuf> {
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(dir);
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| {
+                        p.extension()
+                            .map(|x| exts.iter().any(|e| x.eq_ignore_ascii_case(e)))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        files.into_iter().next()
+    }
+
+    pub fn import_piv(&mut self) {
+        let Some(path) = self.first_file_with("import", &["piv"]) else {
+            self.status = "Put a .piv file in ./import/ first.".into();
+            return;
+        };
+        match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| crate::pivot::import_piv(&b)) {
+            Ok(project) => {
+                self.project = project;
+                self.current = 0;
+                self.playhead = 0.0;
+                self.selected_figure = 0;
+                self.selected_node = None;
+                self.undo.clear();
+                self.redo.clear();
+                self.status = format!("Imported {}", path.display());
+            }
+            Err(e) => self.status = format!("Import failed: {e}"),
+        }
+    }
+
+    pub fn import_stk(&mut self) {
+        let Some(path) = self.first_file_with("import", &["stk"]) else {
+            self.status = "Put a .stk file in ./import/ first.".into();
+            return;
+        };
+        match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| crate::pivot::import_stk(&b)) {
+            Ok((def, name)) => {
+                self.snapshot();
+                let idx = self.project.figures.len();
+                let color = FIGURE_COLORS[idx % FIGURE_COLORS.len()];
+                let label = if name.is_empty() { "Imported figure".to_string() } else { name };
+                self.project.add_figure_with(def, &label, color, [320.0, 450.0]);
+                self.selected_figure = idx;
+                self.status = format!("Imported figure from {}", path.display());
+            }
+            Err(e) => self.status = format!("STK import failed: {e}"),
+        }
+    }
+
+    pub fn export_piv(&mut self) {
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("export");
+        let path = dir.join("animation.piv");
+        let bytes = crate::pivot::export_piv_v3(&self.project);
+        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, bytes)) {
+            Ok(()) => self.status = format!("Exported Pivot .piv (v3) to {}", path.display()),
+            Err(e) => self.status = format!("PIV export failed: {e}"),
+        }
+    }
+
+    pub fn export_stk(&mut self) {
+        let fig = &self.project.figures[self.selected_figure];
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("export");
+        let path = dir.join(format!("{}.stk", fig.name.replace(' ', "-").to_lowercase()));
+        let bytes = crate::pivot::export_stk(&fig.def, &fig.name);
+        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, bytes)) {
+            Ok(()) => self.status = format!("Exported {}.stk", fig.name),
+            Err(e) => self.status = format!("STK export failed: {e}"),
+        }
+    }
+
+    // ---- Drawing ----
+
+    pub fn begin_draw(&mut self, p: V2) {
+        let color = self.project.figures[self.selected_figure].color;
+        self.project.strokes.push(crate::model::Stroke {
+            frame: self.current,
+            points: vec![p],
+            color,
+            width: 4.0,
+        });
+        self.drawing = true;
+    }
+
+    pub fn draw_to(&mut self, p: V2) {
+        if !self.drawing {
+            return;
+        }
+        if let Some(stroke) = self.project.strokes.last_mut() {
+            let last = *stroke.points.last().unwrap();
+            if dist(last, p) > 2.0 {
+                stroke.points.push(p);
+            }
+        }
+    }
+
+    pub fn end_draw(&mut self) {
+        if self.drawing {
+            self.drawing = false;
+            if let Some(stroke) = self.project.strokes.last_mut() {
+                let n = stroke.points.len();
+                self.status = format!("Stroke drawn ({n} points).");
+            }
+        }
+    }
+
+    pub fn clear_frame_drawings(&mut self) {
+        let before = self.project.strokes.len();
+        self.project.strokes.retain(|s| s.frame != self.current);
+        self.status = format!("Cleared {} stroke(s) on this frame.", before - self.project.strokes.len());
+    }
+
+    // ---- Audio ----
+
+    pub fn add_audio_clip(&mut self) {
+        let Some(path) = self.first_file_with("audio", &["wav", "mp3", "ogg"]) else {
+            self.status = "Put an audio file (.wav/.mp3/.ogg) in ./audio/ first.".into();
+            return;
+        };
+        self.snapshot();
+        self.project.audio.push(crate::model::AudioClip {
+            path: path.to_string_lossy().into_owned(),
+            start_frame: self.current,
+        });
+        self.status = format!("Audio clip added at frame {}: {}", self.current + 1, path.display());
+    }
+
+    // ---- Movieclips ----
+
+    pub fn make_clip_from_figure(&mut self) {
+        self.snapshot();
+        let fi = self.selected_figure;
+        let fig = &self.project.figures[fi];
+        let frames: Vec<crate::model::Pose> = self
+            .project
+            .frames
+            .iter()
+            .map(|f| f.poses[fi].clone())
+            .collect();
+        let name = format!("{} clip", fig.name);
+        self.project.clips.push(crate::model::ClipDef {
+            name: name.clone(),
+            def: fig.def.clone(),
+            frames,
+        });
+        let ci = self.project.clips.len() - 1;
+        self.project.figures[fi].clip = Some(ci);
+        self.status = format!("{name} created; this figure now loops its own timeline.");
+    }
+
+    pub fn insert_clip_figure(&mut self) {
+        if self.project.clips.is_empty() {
+            self.status = "No movieclips yet — select a figure and use Make clip.".into();
+            return;
+        }
+        self.snapshot();
+        let ci = 0;
+        let clip = self.project.clips[ci].clone();
+        let idx = self.project.figures.len();
+        let color = FIGURE_COLORS[(idx + 3) % FIGURE_COLORS.len()];
+        self.project
+            .add_figure_with(clip.def.clone(), &clip.name, color, [380.0 + 40.0 * idx as f32, 450.0]);
+        self.project.figures[idx].clip = Some(ci);
+        self.selected_figure = idx;
+        self.status = format!("Inserted movieclip {}.", clip.name);
+    }
+
+    // ---- Named projects ----
+
+    pub fn save_named_project(&mut self) {
+        let slug = self
+            .project
+            .name
+            .to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric(), "-");
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("projects");
+        let path = dir.join(format!("{slug}.json"));
+        let result = std::fs::create_dir_all(&dir)
+            .and_then(|_| serde_json::to_string_pretty(&self.project).map_err(std::io::Error::other))
+            .and_then(|text| std::fs::write(&path, text));
+        match result {
+            Ok(()) => {
+                self.project_files = Self::list_project_files();
+                self.status = format!("Project saved to {}", path.display());
+            }
+            Err(e) => self.status = format!("Project save failed: {e}"),
+        }
+    }
+
+    pub fn cycle_project_file(&mut self) {
+        if self.project_files.is_empty() {
+            self.project_files = Self::list_project_files();
+        }
+        if !self.project_files.is_empty() {
+            self.project_index = (self.project_index + 1) % self.project_files.len();
+            self.status = format!(
+                "Project: {}",
+                self.project_files[self.project_index].display()
+            );
+        } else {
+            self.status = "No saved projects in ./projects/ yet.".into();
+        }
+    }
+
+    pub fn open_project_file(&mut self) {
+        let Some(path) = self.project_files.get(self.project_index).cloned() else {
+            self.status = "No project selected.".into();
+            return;
+        };
+        match std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|s| serde_json::from_str::<Project>(&s).map_err(|e| e.to_string()))
+        {
+            Ok(project) => {
+                self.project = project;
+                self.current = 0;
+                self.playhead = 0.0;
+                self.selected_figure = 0;
+                self.selected_node = None;
+                self.status = format!("Opened {}", path.display());
+            }
+            Err(e) => self.status = format!("Open failed: {e}"),
+        }
+    }
+
+    pub fn cycle_onion_frames(&mut self) {
+        self.onion_frames = self.onion_frames % 3 + 1;
+        self.status = format!("Onion skin: {} previous frame(s).", self.onion_frames);
+    }
+
     pub fn export_mp4(&mut self) {
         let path = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
@@ -757,6 +1032,28 @@ impl EditorCore {
         match render_mp4(&self.project, &path) {
             Ok(n) => self.status = format!("Exported {n}-frame MP4 to {}", path.display()),
             Err(e) => self.status = format!("MP4 export failed: {e}"),
+        }
+    }
+
+    pub fn export_webm(&mut self) {
+        let path = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("export")
+            .join("animation.webm");
+        match render_webm(&self.project, &path) {
+            Ok(n) => self.status = format!("Exported {n}-frame WebM."),
+            Err(e) => self.status = format!("WebM export failed: {e}"),
+        }
+    }
+
+    pub fn export_svg(&mut self) {
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("export")
+            .join("svg");
+        match crate::svg::export_svg(&self.project, &dir) {
+            Ok(n) => self.status = format!("Exported {n} SVG frames to {}", dir.display()),
+            Err(e) => self.status = format!("SVG export failed: {e}"),
         }
     }
 
@@ -851,6 +1148,31 @@ mod tests {
         core.copy_frame();
         core.paste_frame();
         assert_eq!(core.frame_count(), 6);
+    }
+
+    #[test]
+    fn drawing_strokes_attach_to_the_frame() {
+        let mut core = EditorCore::new();
+        core.begin_draw([100.0, 100.0]);
+        core.draw_to([140.0, 120.0]);
+        core.draw_to([180.0, 110.0]);
+        core.end_draw();
+        assert_eq!(core.project.strokes.len(), 1);
+        assert_eq!(core.project.strokes[0].points.len(), 3);
+        core.clear_frame_drawings();
+        assert!(core.project.strokes.is_empty());
+    }
+
+    #[test]
+    fn movieclip_loops_independently_of_the_timeline() {
+        let mut core = EditorCore::new();
+        core.make_clip_from_figure();
+        assert_eq!(core.project.clips.len(), 1);
+        assert_eq!(core.project.figures[0].clip, Some(0));
+        // Corrupt the timeline pose; the clip pose must not follow.
+        core.project.frames[0].poses[0].root = [0.0, 0.0];
+        let poses = core.project.poses_at(0.0);
+        assert!(poses[0].root[0] > 400.0, "clip kept its own root, got {:?}", poses[0].root);
     }
 
     #[test]

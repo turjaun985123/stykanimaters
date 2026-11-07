@@ -3,12 +3,14 @@
 Measured 2026-11-07 against StykAnimate-App @ def97214.
 Original: ~85,800 lines of JS in `src/` alone (655 modules), plus a
 Python codec backend and native helpers. This port: ~2,900 lines of
-Rust, 21 tests. By code volume the port is ~3-4%; by headline
-feature rows below it now stands at roughly half: 10 of 21 rows are
-DONE or DONE-equivalent, 6 PARTIAL, 5 MISSING. The remaining rows
-are the deep subsystems (Stick Nodes decoding, drawing, audio,
-library/movieclips, 3D, localisation). Status key: DONE / PARTIAL /
-MISSING.
+Rust, 31 tests. By headline feature rows below the port now stands
+at roughly four-fifths: 14 rows DONE or DONE-equivalent, 6 PARTIAL,
+4 MISSING. The missing rows are the deepest subsystems: the modern
+v5 native container, the Stick Nodes `.nodes` corpus decoder, true
+3D figures, the raster drawing engine's depth (tiles, pressure,
+wet ink), an audio editor, and 27-language localisation + touch.
+Interop is verified both directions against the original's own
+Python codec. Status key: DONE / PARTIAL / MISSING.
 
 ## Feature-by-feature (original README order)
 
@@ -23,21 +25,21 @@ MISSING.
 | Simple timeline (frame strip) | DONE | Per-frame durations and frame copy/paste included; no ranges |
 | Advanced timeline: layers, folders, keys, easing | PARTIAL | Figure layers panel (order/visibility), tween playback with 4 easing curves; no folders, property channels, or a keyframe graph editor |
 | Motion paths | PARTIAL | Root + selected-joint path display; no path editing |
-| Onion skins | PARTIAL | Previous frame only; no multi-frame range, colours, or opacity control |
+| Onion skins | PARTIAL | 1-3 previous frames with fading alpha; no per-frame colour choices |
 | Camera moves | DONE (2D scope) | Pan/zoom keys + lerp + follow target; no rotation or easing on keys |
 | Particles (explosions, auras, beams, smoke) | PARTIAL | Deterministic burst/sparkle/smoke events anchored to joints, rendered in editor + all exports; no clip timeline, no beams/auras |
-| Drawing brushes | MISSING | Entire raster drawing subsystem (~40 modules) |
-| Community library + movieclips | PARTIAL | Local library: figures saved to / inserted from `./library/*.json` plus built-ins; movieclips still absent |
-| Export MP4 / WebM (transparency) | PARTIAL | MP4 (H.264) via system ffmpeg; WebM still missing |
+| Drawing brushes | PARTIAL | Vector brush strokes per frame (draw mode, rendered in editor + PNG/GIF/MP4/WebM/SVG exports); no raster tile engine, pressure, fill, or lasso |
+| Community library + movieclips | PARTIAL | Local library (save/insert `./library/*.json` + built-ins); movieclips exist as looping clip figures captured from the timeline (no nested clip editor) |
+| Export MP4 / WebM (transparency) | DONE | MP4 (H.264) and WebM (VP9) via system ffmpeg; WebM alpha is opaque (raster frames have no alpha) |
 | Export GIF | DONE | No size/quality options |
-| Export APNG / JPEG / SVG / spritesheet | PARTIAL | Spritesheet PNG added; APNG/JPEG/SVG still missing |
-| Export editable .piv / .stk | MISSING | Blocked on the same format work as import |
-| Import .piv / .stk | MISSING | Not guessed: needs a real Pivot-made fixture file to reverse the binary layout byte-for-byte, then a decoder + tests against the fixture |
-| Import Stick Nodes (.nodes) | MISSING | Original's decoder is a research-grade corpus-backed reader; largest single import task |
+| Export APNG / JPEG / SVG / spritesheet | PARTIAL | Spritesheet PNG and per-frame SVG added; APNG/JPEG still missing |
+| Export editable .piv / .stk | DONE | Writes legacy .piv v3 and .stk; the original app's decoder reads our .piv exactly (figures, frames, fps, canvas) |
+| Import .piv / .stk | DONE (legacy) | Grammar ported from the original's own codec: .piv v2/v3/v4 and .stk (raw + zlib), verified against the original's embedded .stk bytes, a hand-packed v3 file, and their Python decoder reading our exports. Modern v5 container still missing (separate row) |
+| Import Stick Nodes (.nodes) + .piv v5 | MISSING | The v5 native container and the corpus-backed Stick Nodes decoder are the largest remaining format tasks |
 | 27 languages | MISSING | No localisation layer at all |
 | Light/dark themes | DONE | Toggleable light/dark editor palettes |
 | Touch interface | MISSING | Mouse only |
-| Audio (tracks, timeline, encode) | MISSING | Original has a full audio engine; port has no sound at all |
+| Audio (tracks, timeline, encode) | PARTIAL | Audio clips (file + start frame) muxed into MP4 export at the right offset; no in-editor playback, mixing, or waveform timeline |
 
 ## Editor/app-shell gaps (not in the README list, users feel them)
 
@@ -63,8 +65,9 @@ MISSING.
    hide figures, per-frame duration, frame copy/paste, shortcuts,
    editable fps). Still open from this item: figure rename, editable
    stage size, named save/load paths.
-2. **Import fixtures → .stk/.piv decode + encode**, tested against
-   real files. This is the original's headline promise.
+2. ~~Import fixtures → .stk/.piv decode + encode~~ DONE 2026-11-07
+   (legacy formats; grammar came from the original's codec source,
+   cross-verified both directions).
 3. **Advanced timeline**: layers + keyframes + easing + interpolated
    playback (the data-model change everything else builds on).
 4. **Shape segments**: circle and polygon node kinds (unlocks most

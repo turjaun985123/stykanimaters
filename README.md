@@ -66,6 +66,17 @@ libx11-dev cmake clang pkg-config`.
 - **More exports** — MP4 (H.264, via the system `ffmpeg`) and a
   spritesheet PNG join the PNG sequence and GIF.
 - **Themes** — dark and light editor palettes.
+- **Pivot formats** — import `.piv` (legacy versions 2, 3, 4) and
+  `.stk` from the `import/` folder; export `.piv` v3 and `.stk`
+  to `export/`. The grammar is ported from the original app's own
+  codec and cross-verified against it in both directions.
+- **Drawing** — a Draw mode paints freehand brush strokes on the
+  current frame; strokes render in the editor and all exports.
+- **Audio** — clips from the `audio/` folder are placed at a frame
+  and muxed into MP4 exports at the right offset.
+- **Movieclips** — capture a figure's timeline as a clip; clip
+  figures loop their own animation inside any project.
+- **Named projects** — save/open projects under `projects/`.
 - **Save / Load** — the project serializes to `project.styk.json`
   next to where you launched the app.
 - **PNG + GIF export** (`src/export.rs`) — a CPU rasterizer (2x
@@ -87,11 +98,10 @@ libx11-dev cmake clang pkg-config`.
 
 The original app is large; this is the working core loop, not the
 whole feature list. Still to come, roughly in the original's shape:
-`.piv` / `.stk` / Stick Nodes import (needs real fixture files to
-reverse the binary layouts byte-for-byte — dropping a Pivot-made
-`.stk` into this repo is the fastest way to unblock it), sprite
-and text segments, a keyframe graph editor with layer folders and
-property channels, particle clips with beams/auras, WebM/APNG/SVG
-export, sounds, movieclips, 3D figures, localisation, and the
-home/project library screen. See `docs/GAP-ANALYSIS.md` for the
-full measured comparison.
+The modern v5 native container and Stick Nodes `.nodes` import,
+sprite and text segments, a keyframe graph editor with layer
+folders and property channels, particle clips with beams/auras,
+APNG/JPEG export, an audio editor with playback, raster drawing
+depth (pressure, fill, tiles), 3D figures, localisation, touch,
+and the home screen. See `docs/GAP-ANALYSIS.md` for the full
+measured comparison.

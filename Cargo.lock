@@ -5066,6 +5066,7 @@ dependencies = [
 name = "stykanimate-rs"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "gpui",
  "image",
  "serde",
