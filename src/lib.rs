@@ -1,5 +1,5 @@
 //! StykAnimate-RS library: model, editor core, formats, exporters.
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 //! The GPUI binary (src/main.rs) and the MCP server binary
 //! (src/bin/mcp_server.rs) are both built on this library.
 
