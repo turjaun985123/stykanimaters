@@ -168,7 +168,7 @@ fn toast_row(toast: &Toast) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{ToastKind, ToastQueue, MAX_TOASTS};
 
     fn texts(queue: &ToastQueue) -> Vec<&str> {
         queue.items().iter().map(|t| t.text.as_str()).collect()

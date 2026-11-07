@@ -129,8 +129,8 @@ pub fn dopesheet(map: &[Vec<bool>], current: usize, names: &[String]) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::model::{FigureDef, FigureInstance, Frame};
+    use super::keyframe_map;
+    use crate::model::{FigureDef, FigureInstance, Frame, Pose, Project};
 
     fn figure(name: &str) -> FigureInstance {
         FigureInstance {

@@ -88,7 +88,8 @@ fn paint_curve(window: &mut Window, bounds: Bounds<Pixels>, easing: Easing) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::easing_name;
+    use crate::model::Easing;
 
     #[test]
     fn easing_name_covers_every_variant() {

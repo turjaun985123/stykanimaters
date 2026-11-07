@@ -172,7 +172,7 @@ pub fn help_panel(shortcuts: &[(&str, &str)], groups: &[(&str, &str)]) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{group_rows, shortcut_rows};
 
     #[test]
     fn shortcut_rows_has_exactly_19_rows() {
