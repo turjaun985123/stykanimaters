@@ -801,6 +801,8 @@ mod tests {
             stage: [200.0, 200.0],
             background: 0x000000,
             figures: vec![FigureInstance {
+                locked: false,
+                opacity: 1.0,
                 name: "F".into(),
                 color: 0xFFFFFF,
                 def: FigureDef {
@@ -827,6 +829,10 @@ mod tests {
             clips: Vec::new(),
             fx_clips: Vec::new(),
             assets: Vec::new(),
+            channels: Vec::new(),
+            sprites: Vec::new(),
+            texts: Vec::new(),
+            weather: None,
         }
     }
 

@@ -415,6 +415,8 @@ mod tests {
     /// green PNG (aspect 2.0).
     fn demo_project() -> Project {
         let fig = FigureInstance {
+            locked: false,
+            opacity: 1.0,
             name: "Media".into(),
             color: 0xFF0000,
             def: FigureDef {
@@ -467,6 +469,10 @@ mod tests {
                 name: "green".into(),
                 png: png_bytes(4, 2, Rgba([0, 200, 0, 255])),
             }],
+            channels: Vec::new(),
+            sprites: Vec::new(),
+            texts: Vec::new(),
+            weather: None,
         }
     }
 

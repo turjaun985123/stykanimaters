@@ -1700,6 +1700,8 @@ fn build_timeline(
     let figures_out = slots
         .into_iter()
         .map(|s| FigureInstance {
+            locked: false,
+            opacity: 1.0,
             name: s.name,
             color: s.color,
             def: s.def,
@@ -1728,6 +1730,10 @@ fn empty_project(name: String, fps: f32, auto_tween: bool) -> Project {
         clips: Vec::new(),
         fx_clips: Vec::new(),
         assets: Vec::new(),
+        channels: Vec::new(),
+        sprites: Vec::new(),
+        texts: Vec::new(),
+        weather: None,
     }
 }
 

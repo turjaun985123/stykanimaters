@@ -563,6 +563,8 @@ fn assemble(
             }
         }
         figures.push(FigureInstance {
+            locked: false,
+            opacity: 1.0,
             name: if ty.name.is_empty() {
                 format!("Figure {}", slot + 1)
             } else {
@@ -616,6 +618,10 @@ fn assemble(
         clips: Vec::new(),
         fx_clips: Vec::new(),
         assets: Vec::new(),
+        channels: Vec::new(),
+        sprites: Vec::new(),
+        texts: Vec::new(),
+        weather: None,
     }
 }
 
@@ -1204,6 +1210,8 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
             }
         }
         figures.push(FigureInstance {
+            locked: false,
+            opacity: 1.0,
             name: if ty.name.is_empty() {
                 format!("Figure {}", i + 1)
             } else {
@@ -1261,6 +1269,10 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
         clips: Vec::new(),
         fx_clips: Vec::new(),
         assets: Vec::new(),
+        channels: Vec::new(),
+        sprites: Vec::new(),
+        texts: Vec::new(),
+        weather: None,
     })
 }
 

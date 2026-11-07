@@ -391,6 +391,16 @@ pub struct FigureInstance {
     /// `Project::clips[clip]` looping, not from the timeline frames.
     #[serde(default)]
     pub clip: Option<usize>,
+    /// Locked figures cannot be selected or posed in the editor.
+    #[serde(default)]
+    pub locked: bool,
+    /// Layer opacity multiplier (1.0 = opaque).
+    #[serde(default = "default_opacity")]
+    pub opacity: f32,
+}
+
+fn default_opacity() -> f32 {
+    1.0
 }
 
 /// A movieclip: a self-contained looping animation of one figure.
@@ -512,6 +522,65 @@ pub struct ParticleEvent {
 }
 
 /// A timed VFX clip (see `vfx.rs`) anchored to one figure's node.
+
+/// One keyframed transform for a sprite/text instance.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct InstanceKey {
+    pub frame: f32,
+    pub x: f32,
+    pub y: f32,
+    pub scale: f32,
+    pub angle: f32,
+}
+
+/// A free-floating image (from Project.assets) placed on the stage
+/// with keyframed transforms — how Stick Nodes sprite instances are
+/// modelled.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpriteInstance {
+    pub asset: usize,
+    pub keys: Vec<InstanceKey>,
+}
+
+/// A free-floating text label with keyframed transforms.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextInstance {
+    pub content: String,
+    pub size: f32,
+    pub color: u32,
+    pub keys: Vec<InstanceKey>,
+}
+
+impl InstanceKey {
+    /// Linear interpolation of a key list at `frame_f` (clamped).
+    pub fn sample(keys: &[InstanceKey], frame_f: f32) -> Option<InstanceKey> {
+        if keys.is_empty() {
+            return None;
+        }
+        if frame_f <= keys[0].frame {
+            return Some(keys[0]);
+        }
+        for w in keys.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if frame_f <= b.frame {
+                let t = if b.frame > a.frame {
+                    (frame_f - a.frame) / (b.frame - a.frame)
+                } else {
+                    0.0
+                };
+                return Some(InstanceKey {
+                    frame: frame_f,
+                    x: a.x + (b.x - a.x) * t,
+                    y: a.y + (b.y - a.y) * t,
+                    scale: a.scale + (b.scale - a.scale) * t,
+                    angle: a.angle + (b.angle - a.angle) * t,
+                });
+            }
+        }
+        keys.last().copied()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FxClipEntry {
     pub clip: crate::vfx::ParticleClip,
@@ -551,12 +620,24 @@ pub struct Project {
     pub fx_clips: Vec<FxClipEntry>,
     #[serde(default)]
     pub assets: Vec<ImageAsset>,
+    /// Property channels for the graph editor (see graph.rs).
+    #[serde(default)]
+    pub channels: Vec<crate::graph::Channel>,
+    #[serde(default)]
+    pub sprites: Vec<SpriteInstance>,
+    #[serde(default)]
+    pub texts: Vec<TextInstance>,
+    /// Continuous weather effect over the whole timeline.
+    #[serde(default)]
+    pub weather: Option<crate::vfx::Weather>,
 }
 
 impl Project {
     pub fn new_demo() -> Self {
         let def = FigureDef::humanoid();
         let figures = vec![FigureInstance {
+            locked: false,
+            opacity: 1.0,
             name: "Styk".into(),
             color: 0xE8E8EC,
             def: def.clone(),
@@ -594,6 +675,10 @@ impl Project {
             clips: Vec::new(),
             fx_clips: Vec::new(),
             assets: Vec::new(),
+            channels: Vec::new(),
+            sprites: Vec::new(),
+            texts: Vec::new(),
+            weather: None,
         }
     }
 
@@ -740,6 +825,8 @@ impl Project {
     pub fn add_figure_with(&mut self, def: FigureDef, name: &str, color: u32, root: V2) {
         let pose = def.rest_pose(root);
         self.figures.push(FigureInstance {
+            locked: false,
+            opacity: 1.0,
             name: name.into(),
             color,
             def,

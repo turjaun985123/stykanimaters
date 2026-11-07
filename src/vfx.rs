@@ -193,6 +193,25 @@ pub fn clip_particles(
     out
 }
 
+
+/// Continuous weather over the whole timeline (wave-5 prep;
+/// emission lives in vfx.rs, rendering in export.rs).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Weather {
+    pub kind: WeatherKind,
+    /// Particles per frame at steady state (0..=200).
+    pub amount: f32,
+    /// Horizontal drift in stage units per second.
+    pub wind: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WeatherKind {
+    Rain,
+    Snow,
+    Fireflies,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

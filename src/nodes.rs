@@ -597,6 +597,8 @@ pub fn import_nodes(data: &[u8]) -> Result<Project, String> {
         stage,
         background: 0x232830,
         figures: vec![FigureInstance {
+            locked: false,
+            opacity: 1.0,
             name: "Stick Nodes figure".into(),
             color,
             def,
@@ -618,6 +620,10 @@ pub fn import_nodes(data: &[u8]) -> Result<Project, String> {
         clips: Vec::new(),
         fx_clips: Vec::new(),
         assets: Vec::new(),
+        channels: Vec::new(),
+        sprites: Vec::new(),
+        texts: Vec::new(),
+        weather: None,
     })
 }
 
