@@ -2789,7 +2789,7 @@ mod tests {
         let figure_slots = r.u16().unwrap() as usize;
         let mut seg_counts = Vec::new();
         for _ in 2..figure_slots {
-            let def = parse_figure(&mut r, true).unwrap();
+            let (def, ..) = parse_figure(&mut r, true).unwrap();
             seg_counts.push(def.nodes.len() - 1);
         }
         let frame_count = r.u32().unwrap() as usize;
