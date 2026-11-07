@@ -1886,7 +1886,8 @@ mod range_export_tests {
     /// crate's GIF decoder.
     fn gif_frame_count(path: &Path) -> usize {
         let file = std::fs::File::open(path).unwrap();
-        let decoder = image::codecs::gif::GifDecoder::new(file).unwrap();
+        let decoder =
+            image::codecs::gif::GifDecoder::new(std::io::BufReader::new(file)).unwrap();
         decoder.into_frames().count()
     }
 
