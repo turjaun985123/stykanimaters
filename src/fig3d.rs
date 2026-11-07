@@ -97,6 +97,32 @@ pub struct Proj {
     pub scale: f32,
 }
 
+/// Runtime state for editing one 3D figure inside the 2D editor: the
+/// figure being posed, its current pose and camera, and the selected
+/// node index. Deliberately not serialised — it is editor session
+/// state, like the 2D selection; baking (see `EditorCore::fig3_bake`)
+/// is what turns it into a normal 2D figure in the project.
+#[derive(Clone, Debug)]
+pub struct Fig3State {
+    pub figure: Figure3,
+    pub pose: Pose3,
+    pub camera: Camera3,
+    pub selected: usize,
+}
+
+/// The orbit camera a fresh 3D editing session starts with: on +Z,
+/// level, 400 units out, 40-degree vertical FOV, aimed at the world
+/// origin (where a session figure's root sits).
+pub fn default_camera() -> Camera3 {
+    Camera3 {
+        yaw: 0.0,
+        pitch: 0.0,
+        distance: 400.0,
+        fov_deg: 40.0,
+        target: [0.0, 0.0, 0.0],
+    }
+}
+
 // ---------------------------------------------------------------------
 // Small vector / matrix helpers (row-major 3x3, column vectors).
 // ---------------------------------------------------------------------
@@ -341,6 +367,62 @@ pub fn segments2d(fig: &Figure3, pts: &[Proj]) -> Vec<(V2, V2, f32)> {
     out
 }
 
+// ---------------------------------------------------------------------
+// Baking a posed 3D figure into 2D figure-definition data.
+// ---------------------------------------------------------------------
+
+/// Per-node data for baking a posed 3D figure into a 2D figure
+/// definition (consumed by `EditorCore::fig3_bake` in the editor).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BakeNode {
+    /// Projected stage position of this node.
+    pub xy: V2,
+    /// Projected distance to the parent node (0 for the root).
+    pub length: f32,
+    /// Absolute direction of the segment parent -> this node, in the
+    /// 2D model's angle convention ([`crate::model::angle_of`]);
+    /// 0 for the root, whose children measure from absolute 0.
+    pub abs_angle: f32,
+    /// Segment thickness in stage units: [`SEGMENT_THICKNESS`] scaled
+    /// by the mean of the two endpoints' projection scales.
+    pub thickness: f32,
+}
+
+/// Evaluate and project a figure, reduced to one [`BakeNode`] per
+/// node, in node order. A 2D definition built with these lengths and
+/// with relative angles `norm_deg(abs_angle - parent.abs_angle)`
+/// evaluates back to these projected points (up to float error),
+/// because the 2D evaluator telescopes relative angles the same way
+/// the other importers rely on.
+pub fn bake_nodes(fig: &Figure3, pose: &Pose3, cam: &Camera3, stage: [f32; 2]) -> Vec<BakeNode> {
+    let world = evaluate3(fig, pose);
+    let proj = project(&world, cam, stage);
+    fig.nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| match node.parent {
+            None => BakeNode {
+                xy: proj[i].xy,
+                length: 0.0,
+                abs_angle: 0.0,
+                thickness: SEGMENT_THICKNESS * proj[i].scale,
+            },
+            Some(p) => {
+                let d = [
+                    proj[i].xy[0] - proj[p].xy[0],
+                    proj[i].xy[1] - proj[p].xy[1],
+                ];
+                BakeNode {
+                    xy: proj[i].xy,
+                    length: (d[0] * d[0] + d[1] * d[1]).sqrt(),
+                    abs_angle: crate::model::angle_of(d),
+                    thickness: SEGMENT_THICKNESS * (proj[i].scale + proj[p].scale) / 2.0,
+                }
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +579,45 @@ mod tests {
         let far = project(&world, &Camera3 { distance: 800.0, ..cam() }, stage);
         let segs_far = segments2d(&fig, &far);
         assert!(segs_far[0].2 < segs[0].2, "{} vs {}", segs_far[0].2, segs[0].2);
+    }
+
+    #[test]
+    fn default_camera_matches_documented_orbit() {
+        let c = default_camera();
+        assert_eq!((c.yaw, c.pitch, c.distance, c.fov_deg), (0.0, 0.0, 400.0, 40.0));
+        assert_eq!(c.target, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn bake_nodes_match_projection_for_rest_pose() {
+        let fig = humanoid3();
+        let stage = [960.0, 720.0];
+        let pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        let cam = default_camera();
+        let baked = bake_nodes(&fig, &pose, &cam, stage);
+        let world = evaluate3(&fig, &pose);
+        let proj = project(&world, &cam, stage);
+        assert_eq!(baked.len(), fig.nodes.len());
+        for (b, p) in baked.iter().zip(&proj) {
+            assert_eq!(b.xy, p.xy);
+        }
+        // Chest is 30 world units straight up from the hips: its
+        // projected length is 30 * scale and its direction is
+        // stage-up, which is angle 180 in the 2D convention.
+        let scale = proj[0].scale;
+        assert!(
+            (baked[1].length - 30.0 * scale).abs() < 0.05,
+            "chest length {}",
+            baked[1].length
+        );
+        assert!(
+            (baked[1].abs_angle - 180.0).abs() < 0.05,
+            "chest angle {}",
+            baked[1].abs_angle
+        );
+        assert_eq!(baked[0].length, 0.0);
+        assert_eq!(baked[0].abs_angle, 0.0);
+        assert!(baked[1].thickness > 0.0);
     }
 
     #[test]

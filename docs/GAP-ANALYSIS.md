@@ -130,3 +130,23 @@ now present in some verified form. Remaining gaps are integration
 and depth: 3D in the editor, touch wiring, graph-editor UI, text
 authoring, native file dialogs, sprite/joins modelling for Stick
 Nodes animation files, and the original's drawing/audio depth.
+
+## Wave 5 — integration (2026-11-07)
+
+Central prep added Project.channels/sprites/texts/weather and
+FigureInstance.locked/opacity. Ten agents then landed: touch wired
+into the canvas (gesture-driven posing); a 3D editor mode with
+bake-to-2D (projected joints match within 0.5 px); graph channel
+editing ops + a panel view-model; a text-authoring state machine,
+wired to the keyboard; native file dialogs via zenity/kdialog
+(folder-flow fallback); Stick Nodes sprite/text instances modelled
+(real pixel extraction) and rendered; drawing round 2 (Chaikin
+smoothing, resampling, nib shapes, splitting eraser); continuous
+weather (rain/snow/fireflies) + confetti and shock-ring clips;
+audio depth (peak/RMS, normalise, trim, split, crossfade); and a
+layers engine (solo/lock/opacity/move with full reference
+remapping). Integration wired all of it into the UI: sidebar
+lock/solo/opacity buttons, weather and 3D controls, graph key
+authoring with live application in positions_f, locked figures
+refusing drags, solo-aware canvas, per-figure opacity in canvas
+and rasterizer. 232 tests green.

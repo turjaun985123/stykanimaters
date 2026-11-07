@@ -3,10 +3,11 @@
 
 use crate::editor::EditorCore;
 use crate::model::V2;
+use crate::touch::{Gesture, PointerEvent, PointerKind};
 use gpui::*;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct EditorView {
     core: EditorCore,
@@ -16,6 +17,14 @@ pub struct EditorView {
     /// When true, the home panel (saved projects + recents)
     /// replaces the canvas area.
     show_home: bool,
+    /// Gesture recogniser for canvas pointer input (wave 5).
+    /// GPUI mouse events feed it as pointer id 0; where GPUI
+    /// delivers real touch pointers, the same path serves them.
+    recognizer: crate::touch::Recognizer,
+    /// Monotonic clock the recogniser's timestamps come from.
+    clock: Instant,
+    /// Active text-authoring session for a segment (wave 5).
+    text_edit: Option<crate::text_edit::TextEdit>,
 }
 
 impl EditorView {
@@ -26,6 +35,9 @@ impl EditorView {
             focus_handle: cx.focus_handle(),
             player: crate::audio::AudioPlayer::new(),
             show_home: false,
+            recognizer: crate::touch::Recognizer::new(),
+            clock: Instant::now(),
+            text_edit: None,
         }
     }
 
@@ -82,6 +94,95 @@ impl EditorView {
         [cam[0] + dx / scale, cam[1] + dy / scale]
     }
 
+    /// Milliseconds on the view's monotonic clock — the epoch
+    /// the gesture recogniser's events and ticks share.
+    fn now_ms(&self) -> u64 {
+        self.clock.elapsed().as_millis() as u64
+    }
+
+    /// Apply one recognised gesture to the editor core. Dragging
+    /// drives the same begin/drag/end handlers the mouse path
+    /// used before the recogniser was wired in; `begin_drag`
+    /// itself refuses to start while playing, and the tap /
+    /// long-press selection below mirrors that refusal.
+    fn apply_gesture(&mut self, gesture: Gesture) {
+        match gesture {
+            Gesture::DragStart { pos } => {
+                self.core.begin_drag(pos);
+            }
+            Gesture::Drag { pos, .. } => {
+                // drag_to takes the absolute position; the
+                // gesture's delta is for relative-motion users.
+                self.core.drag_to(pos);
+            }
+            Gesture::DragEnd => {
+                if self.core.dragging.is_some() {
+                    self.core.end_drag();
+                }
+            }
+            Gesture::Tap { pos } => {
+                if !self.core.playing {
+                    if let Some((fi, ni)) = self.core.hit_test(pos) {
+                        self.core.selected_figure = fi;
+                        self.core.selected_node = Some(ni);
+                    }
+                }
+            }
+            Gesture::LongPress { pos } => {
+                // Context action v1: select the figure and say so.
+                if !self.core.playing {
+                    if let Some((fi, ni)) = self.core.hit_test(pos) {
+                        self.core.selected_figure = fi;
+                        self.core.selected_node = Some(ni);
+                        let name = self.core.project.figures[fi].name.clone();
+                        self.core.status = format!("{name} selected (long-press).");
+                    }
+                }
+            }
+            // A mouse is a single pointer, so pinch gestures
+            // cannot arise from the events fed here; where GPUI
+            // delivers real multi-touch pointers they will land
+            // in these arms, and camera handling for them is a
+            // later step.
+            Gesture::PinchStart { .. } | Gesture::Pinch { .. } | Gesture::PinchEnd => {}
+        }
+    }
+
+    fn apply_gestures(&mut self, gestures: Vec<Gesture>) {
+        for gesture in gestures {
+            self.apply_gesture(gesture);
+        }
+    }
+
+    /// Run the recogniser's clock — the only source of
+    /// `LongPress` — and apply whatever it emits. Returns
+    /// whether any gesture was applied.
+    fn tick_gestures(&mut self) -> bool {
+        let now = self.now_ms();
+        let gestures = self.recognizer.on_tick(now);
+        let applied = !gestures.is_empty();
+        self.apply_gestures(gestures);
+        applied
+    }
+
+    /// Feed one canvas pointer event (stage coordinates; the
+    /// mouse is pointer id 0) into the recogniser and apply the
+    /// resulting gestures. Elapsed time is checked first, so a
+    /// long-press that matured since the previous event fires
+    /// before this event is processed. Returns whether any
+    /// gesture was applied, so callers can skip needless
+    /// repaints.
+    fn feed_pointer(&mut self, kind: PointerKind, pos: V2) -> bool {
+        let ticked = self.tick_gestures();
+        let now = self.now_ms();
+        let gestures = self
+            .recognizer
+            .on_event(PointerEvent { id: 0, pos, kind, t_ms: now });
+        let applied = !gestures.is_empty();
+        self.apply_gestures(gestures);
+        ticked || applied
+    }
+
     fn toggle_play(&mut self, cx: &mut Context<Self>) {
         self.core.playing = !self.core.playing;
         if self.core.playing {
@@ -117,6 +218,10 @@ impl EditorView {
                                 if !view.core.playing {
                                     view.player.stop();
                                 }
+                                // Keep the gesture clock running
+                                // so a held pointer can long-press
+                                // during playback.
+                                view.tick_gestures();
                                 cx.notify();
                                 true
                             } else {
@@ -166,8 +271,9 @@ impl EditorView {
         let display = core.display_frame();
         let mut figures = Vec::new();
         let mut shapes = Vec::new();
+        let visible = crate::layers::visible_figures(&core.project, core.solo);
         for fi in 0..core.project.figures.len() {
-            if core.project.figures[fi].hidden {
+            if !visible[fi] {
                 figures.push((Vec::new(), Vec::new(), Vec::new(), core.project.figures[fi].color));
                 continue;
             }
@@ -175,7 +281,13 @@ impl EditorView {
             let def = &core.project.figures[fi].def;
             let mut segs = Vec::new();
             let mut heads = Vec::new();
-            let fig_color = core.project.figures[fi].color;
+            // Canvas fade for layer opacity (the rasterizer uses
+            // true alpha for segments; the canvas blends to bg).
+            let fig_color = crate::style::lerp_color(
+                core.project.background,
+                core.project.figures[fi].color,
+                core.project.figures[fi].opacity.clamp(0.05, 1.0),
+            );
             for (i, node) in def.nodes.iter().enumerate() {
                 if let Some(p) = node.parent {
                     segs.push((pos[p], pos[i], node.color.unwrap_or(fig_color), node.thickness));
@@ -291,6 +403,25 @@ impl EditorView {
                 }
             }
         }
+        if let Some(w) = &core.project.weather {
+            for (p, r, c, a) in crate::vfx::weather_particles(w, display, core.project.stage, core.project.fps) {
+                particles.push((p, r, ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32, a));
+            }
+        }
+        // 3D session preview: the projected figure rides along as an
+        // extra cyan "figure" so the canvas shows what Bake will make.
+        if let Some(st) = &core.fig3 {
+            let baked = crate::fig3d::bake_nodes(&st.figure, &st.pose, &st.camera, core.project.stage);
+            let mut segs = Vec::new();
+            let mut joints = Vec::new();
+            for (i, bn) in baked.iter().enumerate() {
+                joints.push(bn.xy);
+                if let Some(p) = st.figure.nodes[i].parent {
+                    segs.push((baked[p].xy, bn.xy, 0x35C4D8, bn.thickness));
+                }
+            }
+            figures.push((segs, joints, Vec::new(), 0x35C4D8));
+        }
         let strokes = core
             .project
             .strokes
@@ -395,6 +526,7 @@ impl Render for EditorView {
             let selected = fi == core.selected_figure;
             let name = fig.name.clone();
             let hidden = fig.hidden;
+            let solo = core.solo == Some(fi);
             sidebar = sidebar.child(
                 div()
                     .flex()
@@ -420,12 +552,24 @@ impl Render for EditorView {
                     )
                     .child(btn(("fig-up", fi), "^", false, cx.listener(move |view, _ev, _w, cx| {
                         view.core.select_figure(fi);
-                        view.core.move_figure(1);
+                        view.core.move_figure_full(1);
                         cx.notify();
                     })))
                     .child(btn(("fig-dn", fi), "v", false, cx.listener(move |view, _ev, _w, cx| {
                         view.core.select_figure(fi);
-                        view.core.move_figure(-1);
+                        view.core.move_figure_full(-1);
+                        cx.notify();
+                    })))
+                    .child(btn(("fig-lock", fi), if fig.locked { "lock" } else { "open" }, fig.locked, cx.listener(move |view, _ev, _w, cx| {
+                        view.core.toggle_figure_lock(fi);
+                        cx.notify();
+                    })))
+                    .child(btn(("fig-solo", fi), "solo", solo, cx.listener(move |view, _ev, _w, cx| {
+                        view.core.toggle_solo(fi);
+                        cx.notify();
+                    })))
+                    .child(btn(("fig-opac", fi), "opac", false, cx.listener(move |view, _ev, _w, cx| {
+                        view.core.cycle_figure_opacity(fi);
                         cx.notify();
                     })))
                     .child(btn(("fig-eye", fi), if hidden { "off" } else { "eye" }, hidden, cx.listener(move |view, _ev, _w, cx| {
@@ -575,6 +719,50 @@ impl Render for EditorView {
                 let key = ev.keystroke.key.as_str();
                 let ctrl = ev.keystroke.modifiers.control;
                 let shift = ev.keystroke.modifiers.shift;
+                // Text authoring captures the keyboard while active.
+                if view.text_edit.is_some() {
+                    match key {
+                        "enter" => {
+                            let te = view.text_edit.take().unwrap();
+                            view.core.status = if te.commit(&mut view.core.project) {
+                                "Text set.".into()
+                            } else {
+                                "Text target no longer exists.".into()
+                            };
+                        }
+                        "escape" => {
+                            view.text_edit = None;
+                            view.core.status = "Text edit cancelled.".into();
+                        }
+                        "backspace" => {
+                            let te = view.text_edit.as_mut().unwrap();
+                            te.backspace();
+                            view.core.status = format!("Text: {}", te.display());
+                        }
+                        "delete" => {
+                            let te = view.text_edit.as_mut().unwrap();
+                            te.delete();
+                            view.core.status = format!("Text: {}", te.display());
+                        }
+                        "left" => view.text_edit.as_mut().unwrap().move_cursor(-1),
+                        "right" => view.text_edit.as_mut().unwrap().move_cursor(1),
+                        "home" => view.text_edit.as_mut().unwrap().home(),
+                        "end" => view.text_edit.as_mut().unwrap().end(),
+                        _ => {
+                            if !ctrl {
+                                if let Some(kc) = &ev.keystroke.key_char {
+                                    let te = view.text_edit.as_mut().unwrap();
+                                    for c in kc.chars() {
+                                        te.push_char(c);
+                                    }
+                                    view.core.status = format!("Text: {}", te.display());
+                                }
+                            }
+                        }
+                    }
+                    cx.notify();
+                    return;
+                }
                 match (key, ctrl, shift) {
                     ("z", true, false) => view.core.undo(),
                     ("z", true, true) | ("y", true, _) => view.core.redo(),
@@ -607,7 +795,10 @@ impl Render for EditorView {
                 } else if view.core.camera_mode {
                     view.core.begin_camera_drag(p);
                     cx.notify();
-                } else if view.core.begin_drag(p) {
+                } else {
+                    // Pose mode goes through the gesture
+                    // recogniser (mouse = pointer id 0).
+                    view.feed_pointer(PointerKind::Down, p);
                     cx.notify();
                 }
             }))
@@ -616,18 +807,35 @@ impl Render for EditorView {
                     let p = view.to_stage(ev.position);
                     view.core.draw_to(p);
                     cx.notify();
-                } else if view.core.dragging.is_some() {
+                } else if matches!(view.core.dragging, Some(crate::editor::DragKind::Camera)) {
+                    // A camera drag in progress owns the move,
+                    // even if camera mode was toggled mid-drag.
                     let p = view.to_stage(ev.position);
                     view.core.drag_to(p);
                     cx.notify();
+                } else if !view.core.camera_mode {
+                    let p = view.to_stage(ev.position);
+                    if view.feed_pointer(PointerKind::Move, p) {
+                        cx.notify();
+                    }
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|view, _ev: &MouseUpEvent, _w, cx| {
+            .on_mouse_up(MouseButton::Left, cx.listener(|view, ev: &MouseUpEvent, _w, cx| {
                 if view.core.draw_mode {
                     view.core.end_draw();
                     cx.notify();
-                } else if view.core.dragging.is_some() {
+                } else if matches!(view.core.dragging, Some(crate::editor::DragKind::Camera)) {
                     view.core.end_drag();
+                    cx.notify();
+                } else {
+                    let p = view.to_stage(ev.position);
+                    view.feed_pointer(PointerKind::Up, p);
+                    if view.core.dragging.is_some() {
+                        // A drag the recogniser does not own
+                        // (input mode was toggled mid-drag):
+                        // end it here rather than leaving it stuck.
+                        view.core.end_drag();
+                    }
                     cx.notify();
                 }
             }))
@@ -943,6 +1151,81 @@ impl Render for EditorView {
                     })))
                     .child(btn("open-proj", "Open project", false, cx.listener(|view, _ev, _w, cx| {
                         view.core.open_project_file();
+                        cx.notify();
+                    })))
+                    .child(btn("open-dlg", "Open...", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.open_via_dialog();
+                        cx.notify();
+                    })))
+                    .child(btn("save-dlg", "Save...", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.save_via_dialog();
+                        cx.notify();
+                    })))
+                    .child(btn("text-seg", "Text seg", false, cx.listener(|view, _ev, _w, cx| {
+                        match view.core.selected_node {
+                            Some(ni) => match crate::text_edit::TextEdit::begin(&view.core.project, view.core.selected_figure, ni) {
+                                Some(te) => {
+                                    view.core.status = format!("Text: {}", te.display());
+                                    view.text_edit = Some(te);
+                                }
+                                None => view.core.status = "No such segment.".into(),
+                            },
+                            None => view.core.status = "Click a joint first, then Text seg.".into(),
+                        }
+                        cx.notify();
+                    })))
+                    .child(btn("key-graph", "Key graph", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.key_graph_angle();
+                        cx.notify();
+                    })))
+                    .child(btn("clr-graph", "Clr graph", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.clear_graph();
+                        cx.notify();
+                    })))
+                    .child(btn("weather", "Weather", false, cx.listener(|view, _ev, _w, cx| {
+                        use crate::vfx::{Weather, WeatherKind};
+                        let (next, label) = match &view.core.project.weather {
+                            None => (Some(Weather { kind: WeatherKind::Rain, amount: 90.0, wind: 25.0 }), "Weather: rain."),
+                            Some(w) => match w.kind {
+                                WeatherKind::Rain => (Some(Weather { kind: WeatherKind::Snow, amount: 90.0, wind: 12.0 }), "Weather: snow."),
+                                WeatherKind::Snow => (Some(Weather { kind: WeatherKind::Fireflies, amount: 60.0, wind: 4.0 }), "Weather: fireflies."),
+                                WeatherKind::Fireflies => (None, "Weather: off."),
+                            },
+                        };
+                        view.core.project.weather = next;
+                        view.core.status = label.into();
+                        cx.notify();
+                    })))
+                    .child(btn("mode-3d", "3D mode", self.core.fig3.is_some(), cx.listener(|view, _ev, _w, cx| {
+                        if view.core.fig3.is_some() {
+                            view.core.exit_3d();
+                        } else {
+                            view.core.enter_3d();
+                        }
+                        cx.notify();
+                    })))
+                    .child(btn("joint-3d", "Joint>", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.fig3_select_next();
+                        cx.notify();
+                    })))
+                    .child(btn("rotx-3d", "RotX", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.fig3_rotate(0, 15.0);
+                        cx.notify();
+                    })))
+                    .child(btn("roty-3d", "RotY", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.fig3_rotate(1, 15.0);
+                        cx.notify();
+                    })))
+                    .child(btn("rotz-3d", "RotZ", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.fig3_rotate(2, 15.0);
+                        cx.notify();
+                    })))
+                    .child(btn("orbit-3d", "Orbit", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.fig3_orbit(15.0, 0.0);
+                        cx.notify();
+                    })))
+                    .child(btn("bake-3d", "Bake 3D", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.fig3_bake();
                         cx.notify();
                     }))),
             )

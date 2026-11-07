@@ -49,6 +49,11 @@ pub struct EditorCore {
     pub project_index: usize,
     /// UI language for toolbar labels (see i18n.rs).
     pub lang: crate::i18n::Lang,
+    /// Active 3D editing session (fig3d), if any. Runtime only:
+    /// undo snapshots cover the project, not this state.
+    pub fig3: Option<crate::fig3d::Fig3State>,
+    /// Wave 5: solo figure (layers) — display/edit focus.
+    pub solo: Option<usize>,
 }
 
 const FIGURE_COLORS: [u32; 6] = [0xE8E8EC, 0xFF5D5D, 0x5DB2FF, 0x7BE495, 0xFFC65D, 0xC792FF];
@@ -80,6 +85,8 @@ impl EditorCore {
             project_files: Self::list_project_files(),
             project_index: 0,
             lang: crate::i18n::Lang::En,
+            fig3: None,
+            solo: None,
         }
     }
 
@@ -205,6 +212,10 @@ impl EditorCore {
         let Some((fi, ni)) = self.hit_test(p) else {
             return false;
         };
+        if self.project.figures[fi].locked {
+            self.status = "Figure is locked — unlock it in the layers list.".into();
+            return false;
+        }
         self.snapshot();
         self.selected_figure = fi;
         self.selected_node = Some(ni);
@@ -535,9 +546,155 @@ impl EditorCore {
     }
 
     pub fn positions_f(&self, frame_f: f32, fi: usize) -> Vec<V2> {
-        let poses = self.project.poses_at(frame_f);
-        let fig = &self.project.figures[fi];
-        evaluate(&fig.def, &poses[fi])
+        if self.project.channels.is_empty() {
+            let poses = self.project.poses_at(frame_f);
+            let fig = &self.project.figures[fi];
+            evaluate(&fig.def, &poses[fi])
+        } else {
+            // Wave 5: graph channels override the sampled pose/def.
+            let r = crate::graph::apply_channels(&self.project, &self.project.channels, frame_f);
+            evaluate(&r.defs[fi], &r.poses[fi])
+        }
+    }
+
+    // ---- Wave 5 integration ops -------------------------------------
+    /// Reorder the selected figure with the full layers engine:
+    /// poses, graph channels, FX clips, particle refs and camera
+    /// follow all travel with the figure.
+    pub fn move_figure_full(&mut self, dir: i32) {
+        let fi = self.selected_figure;
+        let n = self.project.figures.len();
+        if n == 0 {
+            return;
+        }
+        let to = (fi as i32 + dir).clamp(0, n as i32 - 1) as usize;
+        if to == fi {
+            return;
+        }
+        self.snapshot();
+        if crate::layers::move_figure(&mut self.project, fi, dir) {
+            self.selected_figure = crate::layers::remapped_index(self.selected_figure, fi, to);
+            if let Some(solo) = self.solo {
+                self.solo = Some(crate::layers::remapped_index(solo, fi, to));
+            }
+            self.status = format!("Figure moved to position {}.", to + 1);
+        }
+    }
+
+
+
+    pub fn toggle_figure_lock(&mut self, fi: usize) {
+        match crate::layers::toggle_lock(&mut self.project, fi) {
+            Some(locked) => {
+                self.status = format!("Figure {} {}.", fi + 1, if locked { "locked" } else { "unlocked" })
+            }
+            None => self.status = "No such figure.".into(),
+        }
+    }
+
+    pub fn cycle_figure_opacity(&mut self, fi: usize) {
+        match crate::layers::cycle_opacity(&mut self.project, fi) {
+            Some(o) => self.status = format!("Figure {} opacity {:.0}%.", fi + 1, o * 100.0),
+            None => self.status = "No such figure.".into(),
+        }
+    }
+
+    pub fn toggle_solo(&mut self, fi: usize) {
+        if self.solo == Some(fi) {
+            self.solo = None;
+            self.status = "Solo off.".into();
+        } else if fi < self.project.figures.len() {
+            self.solo = Some(fi);
+            self.status = format!("Solo: figure {}.", fi + 1);
+        }
+    }
+
+    /// Key the selected node's angle on a graph channel at the current
+    /// frame, using its current keyframed value.
+    pub fn key_graph_angle(&mut self) {
+        let Some(ni) = self.selected_node else {
+            self.status = "Select a joint first, then Key graph.".into();
+            return;
+        };
+        let fi = self.selected_figure;
+        let frame = self.current as f32;
+        let value = self
+            .project
+            .frames
+            .get(self.current)
+            .and_then(|f| f.poses.get(fi))
+            .and_then(|p| p.angles.get(ni).copied())
+            .unwrap_or(0.0);
+        let ch = crate::graph::channel_mut(
+            &mut self.project.channels,
+            fi,
+            crate::graph::ChannelTarget::Angle(ni),
+        );
+        ch.add_key(frame, value);
+        self.status = format!("Graph key: figure {} joint {} = {value:.0}° @ frame {}.", fi + 1, ni, self.current + 1);
+    }
+
+    /// Remove all graph channels (the Graph panel edits them in a
+    /// later pass; clearing must always be possible).
+    pub fn clear_graph(&mut self) {
+        self.project.channels.clear();
+        self.status = "Graph channels cleared.".into();
+    }
+
+    pub fn open_via_dialog(&mut self) {
+        if crate::dialogs::available_tool().is_none() {
+            self.status =
+                "No dialog tool (zenity/kdialog) on this system — use the project list instead."
+                    .into();
+            return;
+        }
+        let filters = vec![crate::dialogs::FileFilter::new(
+            "StykAnimate project",
+            &["*.json"],
+        )];
+        let Some(path) = crate::dialogs::open_file("Open project", &filters) else {
+            self.status = "Open cancelled.".into();
+            return;
+        };
+        match std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|txt| serde_json::from_str::<Project>(&txt).ok())
+        {
+            Some(p) => {
+                self.project = p;
+                self.current = 0;
+                self.selected_figure = 0;
+                self.selected_node = None;
+                self.solo = None;
+                self.status = format!("Opened {}", path.display());
+            }
+            None => self.status = format!("Could not open {} as a project.", path.display()),
+        }
+    }
+
+    pub fn save_via_dialog(&mut self) {
+        if crate::dialogs::available_tool().is_none() {
+            self.status =
+                "No dialog tool (zenity/kdialog) on this system — use Save project instead."
+                    .into();
+            return;
+        }
+        let filters = vec![crate::dialogs::FileFilter::new(
+            "StykAnimate project",
+            &["*.json"],
+        )];
+        let Some(path) = crate::dialogs::save_file("Save project", &filters, "project.styk.json")
+        else {
+            self.status = "Save cancelled.".into();
+            return;
+        };
+        match serde_json::to_string_pretty(&self.project)
+            .map_err(std::io::Error::other)
+            .and_then(|txt| std::fs::write(&path, txt))
+        {
+            Ok(()) => self.status = format!("Saved to {}", path.display()),
+            Err(e) => self.status = format!("Save failed: {e}"),
+        }
     }
 
     pub fn save_path() -> PathBuf {
@@ -1442,6 +1599,149 @@ impl EditorCore {
             Err(e) => self.status = format!("Export failed: {e}"),
         }
     }
+
+    // ---- 3D figures (fig3d session, manipulation, bake to 2D) ----
+
+    /// Enter 3D mode: load the 3D humanoid at rest with the default
+    /// orbit camera. If a 3D session is already active it is kept
+    /// as-is (pose and camera preserved).
+    pub fn enter_3d(&mut self) {
+        if self.fig3.is_some() {
+            self.status = "3D mode is already active.".into();
+            return;
+        }
+        let figure = crate::fig3d::humanoid3();
+        let pose = crate::fig3d::Pose3::rest(&figure, [0.0, 0.0, 0.0]);
+        self.fig3 = Some(crate::fig3d::Fig3State {
+            figure,
+            pose,
+            camera: crate::fig3d::default_camera(),
+            selected: 0,
+        });
+        self.status = "3D mode: posing the 3D humanoid. Bake turns it into a 2D figure.".into();
+    }
+
+    /// Leave 3D mode, discarding the 3D session. Figures already
+    /// baked into the project stay.
+    pub fn exit_3d(&mut self) {
+        if self.fig3.take().is_some() {
+            self.status = "Exited 3D mode.".into();
+        } else {
+            self.status = "Not in 3D mode.".into();
+        }
+    }
+
+    /// Cycle the selected 3D joint to the next node.
+    pub fn fig3_select_next(&mut self) {
+        let msg = match &mut self.fig3 {
+            Some(st) if !st.figure.nodes.is_empty() => {
+                st.selected = (st.selected + 1) % st.figure.nodes.len();
+                format!("3D joint: {}.", st.figure.nodes[st.selected].name)
+            }
+            _ => "Enter 3D mode first.".into(),
+        };
+        self.status = msg;
+    }
+
+    /// Rotate the selected 3D joint by `delta_deg` around one Euler
+    /// axis (0 = X, 1 = Y, 2 = Z; order documented in fig3d).
+    pub fn fig3_rotate(&mut self, axis: usize, delta_deg: f32) {
+        let msg = match &mut self.fig3 {
+            Some(st) if axis < 3 && !st.figure.nodes.is_empty() => {
+                let sel = st.selected.min(st.figure.nodes.len() - 1);
+                while st.pose.rotations.len() < st.figure.nodes.len() {
+                    st.pose.rotations.push([0.0; 3]);
+                }
+                st.pose.rotations[sel][axis] += delta_deg;
+                format!(
+                    "3D {} rotated to {:.0} deg on axis {}.",
+                    st.figure.nodes[sel].name,
+                    st.pose.rotations[sel][axis],
+                    "XYZ".chars().nth(axis).unwrap()
+                )
+            }
+            Some(_) => "Rotation axis must be 0 (X), 1 (Y) or 2 (Z).".into(),
+            None => "Enter 3D mode first.".into(),
+        };
+        self.status = msg;
+    }
+
+    /// Orbit the 3D camera by the given yaw/pitch deltas in degrees.
+    /// Pitch clamps to +-89.9, the same clamp the projector applies,
+    /// so the stored camera never degenerates.
+    pub fn fig3_orbit(&mut self, dyaw: f32, dpitch: f32) {
+        let msg = match &mut self.fig3 {
+            Some(st) => {
+                st.camera.yaw += dyaw;
+                st.camera.pitch = (st.camera.pitch + dpitch).clamp(-89.9, 89.9);
+                format!(
+                    "3D camera: yaw {:.0}, pitch {:.0}.",
+                    st.camera.yaw, st.camera.pitch
+                )
+            }
+            None => "Enter 3D mode first.".into(),
+        };
+        self.status = msg;
+    }
+
+    /// Bake the current 3D pose into a new 2D figure in the project.
+    /// Projected segment lengths and directions become the figure
+    /// definition (origin node + one node per 3D joint, parent
+    /// structure preserved, thickness scaled by projected scale —
+    /// the same conversion the file importers use). The pose is
+    /// stored as the definition's rest pose, so the held-pose
+    /// convention of `add_figure_with` puts it on every frame.
+    pub fn fig3_bake(&mut self) {
+        let built = self.fig3.as_ref().map(|st| {
+            let baked = crate::fig3d::bake_nodes(
+                &st.figure,
+                &st.pose,
+                &st.camera,
+                self.project.stage,
+            );
+            let mut abs = vec![0.0f32; baked.len()];
+            let mut nodes = Vec::with_capacity(baked.len());
+            for (i, bn) in baked.iter().enumerate() {
+                let n3 = &st.figure.nodes[i];
+                abs[i] = bn.abs_angle;
+                let parent_abs = n3.parent.map(|p| abs[p]).unwrap_or(0.0);
+                nodes.push(NodeDef {
+                    name: n3.name.clone(),
+                    parent: n3.parent,
+                    length: bn.length,
+                    rest_angle: crate::model::norm_deg(bn.abs_angle - parent_abs),
+                    head: n3.head,
+                    bend: 1.0,
+                    thickness: bn.thickness,
+                    color: None,
+                    ik_end: false,
+                    shape: crate::model::Shape::Line,
+                    style: crate::model::NodeStyle::default(),
+                    media: None,
+                });
+            }
+            let root = baked.first().map(|b| b.xy).unwrap_or([0.0, 0.0]);
+            (
+                FigureDef { nodes },
+                format!("{} (3D)", st.figure.name),
+                st.figure.color,
+                root,
+            )
+        });
+        let Some((def, name, color, root)) = built else {
+            self.status = "Enter 3D mode first.".into();
+            return;
+        };
+        self.snapshot();
+        let idx = self.project.figures.len();
+        self.project.add_figure_with(def, &name, color, root);
+        self.selected_figure = idx;
+        self.selected_node = None;
+        self.status = format!(
+            "Baked 3D pose into 2D figure {} ({name}), held on all frames.",
+            idx + 1
+        );
+    }
 }
 
 impl Default for EditorCore {
@@ -1454,6 +1754,104 @@ impl Default for EditorCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fig3_enter_exit_and_noop_bake() {
+        let mut core = EditorCore::new();
+        assert!(core.fig3.is_none());
+        let figures_before = core.project.figures.len();
+        core.fig3_bake();
+        assert_eq!(
+            core.project.figures.len(),
+            figures_before,
+            "bake without a 3D session is a no-op"
+        );
+        core.enter_3d();
+        assert!(core.fig3.is_some());
+        // Re-entering keeps the live session: a rotation survives it.
+        core.fig3_rotate(2, 30.0);
+        core.enter_3d();
+        let st = core.fig3.as_ref().unwrap();
+        assert_eq!(st.pose.rotations[st.selected][2], 30.0);
+        core.exit_3d();
+        assert!(core.fig3.is_none());
+        core.exit_3d(); // a second exit is a harmless no-op
+        assert!(core.fig3.is_none());
+    }
+
+    #[test]
+    fn fig3_bake_joints_match_projection() {
+        let mut core = EditorCore::new();
+        core.enter_3d();
+        // Expected stage points straight from the fig3d pipeline.
+        let expected = {
+            let st = core.fig3.as_ref().unwrap();
+            let world = crate::fig3d::evaluate3(&st.figure, &st.pose);
+            crate::fig3d::project(&world, &st.camera, core.project.stage)
+                .iter()
+                .map(|p| p.xy)
+                .collect::<Vec<_>>()
+        };
+        let figures_before = core.project.figures.len();
+        core.fig3_bake();
+        assert_eq!(core.project.figures.len(), figures_before + 1);
+        let fi = core.project.figures.len() - 1;
+        assert_eq!(core.selected_figure, fi);
+        assert_eq!(core.project.figures[fi].def.nodes.len(), expected.len());
+        for frame in &core.project.frames {
+            assert_eq!(frame.poses.len(), core.project.figures.len());
+        }
+        // The baked figure's evaluated joints equal the projected 3D
+        // points in every frame (the bake is held as the rest pose).
+        for f in 0..core.frame_count() {
+            let joints = core.positions(f, fi);
+            assert_eq!(joints.len(), expected.len());
+            for (j, e) in joints.iter().zip(&expected) {
+                assert!(
+                    (j[0] - e[0]).abs() < 0.5 && (j[1] - e[1]).abs() < 0.5,
+                    "frame {f}: joint {j:?} != projected {e:?}"
+                );
+            }
+        }
+        // Undo removes the baked figure again.
+        core.undo();
+        assert_eq!(core.project.figures.len(), figures_before);
+    }
+
+    #[test]
+    fn fig3_rotate_and_orbit_change_the_bake() {
+        let mut core = EditorCore::new();
+        core.enter_3d();
+        core.fig3_bake();
+        let first = core.positions(0, core.project.figures.len() - 1);
+        // Swing the left upper arm about Z: the left hand must move.
+        core.fig3.as_mut().unwrap().selected = 3; // upperArm.L
+        core.fig3_rotate(2, 90.0);
+        core.fig3_bake();
+        let second = core.positions(0, core.project.figures.len() - 1);
+        let hand_l = 5;
+        assert!(
+            dist(first[hand_l], second[hand_l]) > 5.0,
+            "hand.L should move: {:?} -> {:?}",
+            first[hand_l],
+            second[hand_l]
+        );
+        // Orbiting 180 degrees mirrors the figure on stage: the
+        // right hand flips to the other side of the root.
+        core.fig3_orbit(180.0, 0.0);
+        assert_eq!(core.fig3.as_ref().unwrap().camera.yaw, 180.0);
+        core.fig3_bake();
+        let third = core.positions(0, core.project.figures.len() - 1);
+        let root_x = third[0][0];
+        let hand_r = 8;
+        assert!(
+            (second[hand_r][0] - root_x) * (third[hand_r][0] - root_x) < 0.0,
+            "hand.R should mirror: {} vs {} around root {}",
+            second[hand_r][0],
+            third[hand_r][0],
+            root_x
+        );
+    }
 
     #[test]
     fn builder_add_and_delete_segment_stays_consistent() {
@@ -1641,5 +2039,49 @@ mod tests {
         // Demo frames 0 and 1 have root_x 480 and 494: midpoint 487.
         let root = core.project.frames[1].poses[0].root;
         assert!((root[0] - 487.0).abs() < 0.01, "root {root:?}");
+    }
+
+    #[test]
+    fn wave5_locked_figure_refuses_drag() {
+        let mut c = EditorCore::new();
+        let pos = c.positions(0, 0);
+        let hand = pos[pos.len() - 1];
+        c.project.figures[0].locked = true;
+        assert!(!c.begin_drag(hand), "locked figure must refuse drags");
+        c.toggle_figure_lock(0);
+        assert!(c.begin_drag(hand), "unlocked figure drags again");
+        c.end_drag();
+    }
+
+    #[test]
+    fn wave5_graph_key_drives_positions() {
+        let mut c = EditorCore::new();
+        c.selected_node = Some(2);
+        c.key_graph_angle();
+        assert_eq!(c.project.channels.len(), 1);
+        let base = c.positions_f(0.0, 0);
+        // Rewrite the channel to a very different angle at frame 0 and
+        // confirm positions_f (the editor's sampling path) follows it.
+        c.project.channels[0].keys[0].value += 120.0;
+        // Hermite with a single key holds its value everywhere.
+        let moved = c.positions_f(0.0, 0);
+        assert!(
+            (moved[2][0] - base[2][0]).abs() + (moved[2][1] - base[2][1]).abs() > 1.0,
+            "graph channel must change the sampled pose"
+        );
+        c.clear_graph();
+        assert!(c.project.channels.is_empty());
+    }
+
+    #[test]
+    fn wave5_move_figure_full_remaps_selection_and_solo() {
+        let mut c = EditorCore::new();
+        c.add_figure(); // two figures
+        assert_eq!(c.project.figures.len(), 2);
+        c.selected_figure = 0;
+        c.solo = Some(0);
+        c.move_figure_full(1);
+        assert_eq!(c.selected_figure, 1);
+        assert_eq!(c.solo, Some(1));
     }
 }

@@ -524,7 +524,40 @@ maps the result onto `crate::model::Project`:
   the same figure (and no joins) become `model::ClipDef`s; main
   timeline instances referencing them become clip instances, with the
   clip's pose roots offset so the clip's first-frame root lands on the
-  placement point (first placement wins).
+  placement point (first placement wins). Sprite instances inside a
+  movieclip do not block this conversion, but they are not carried
+  into the `ClipDef` either (see below).
+* **Sprite library images** become `Project.assets`: the stored raw
+  pixels (RGB or RGBA, row-major, top-down — the layout the original
+  passes straight to its PNG encoder) are repacked losslessly as
+  PNG, one asset per image entry, in library order. Group members
+  are resolved to image entries at parse time (`.stknds`: local
+  indices; `.nodemc`: source-library ids — with the original
+  decoder's duplicate-id and dangling-reference errors preserved).
+* **Sprite instances** on a timeline (`.stknds` main frames, and a
+  `.nodemc`'s own frames) become `Project.sprites` tracks, keyed by
+  (instance type, instance id) in first-appearance order. Each
+  appearance contributes an `InstanceKey` { frame, x, y,
+  scale = |scaleX|, angle = file rotation } — the same placement
+  rule the original adapter uses (it likewise keeps only |scaleX|
+  as the object scale and the |scaleY/scaleX| ratio as metadata).
+  Group instances display the member at `groupFrame`; if the frame
+  is out of range the first member is used (the original's semantic
+  validator rejects such files; this importer stays lenient). A
+  track's image is fixed at first appearance, mirroring the figure
+  slots' hold rule; sampling interpolates between appearances and
+  holds outside them.
+* **Main-frame texts** (`.stknds`) become `Project.texts` tracks,
+  keyed by text id (the stored id, or the frame-local index before
+  version 176 — the original record reader's fallback). Content and
+  colour come from the record; `size` is the adapter's base font
+  size 48 and the per-frame scale rides on the keys, so the drawn
+  glyph height is 48 × scale. The stored (x, y) is an alignment
+  anchor — `align` 8: start, 16: end, anything else: centre — and
+  is converted to the text centre the model stores, using the
+  bitmap font's advance ((4n − 1) cells of size/5 for n characters).
+  Content is fixed at first appearance; later appearances still
+  keyframe the transform.
 * A `.nodemc` becomes a timeline project of its own frames (not a
   clip), so it stays editable.
 * `.stknds` background: the first main frame's `backgroundColor`
@@ -532,13 +565,24 @@ maps the result onto `crate::model::Project`:
 
 **Parsed byte-exactly but not modelled** (mirroring the original
 adapter's own "stored poses preserved, dynamics not recreated" stance)
-* Sprite instances and sprite pixel data, main-frame texts, sounds
-  (external references only — there are no bytes to import), joins,
-  camera records and bindings (semantics unestablished upstream,
-  §12.2), style/filter blocks, thumbnails, trailer editor state,
-  movieclip instance playback cursors / play modes / rotation / flips
-  (the model's clip playback loops from the clip start), and instance
-  scale changes after an instance's first frame.
+* Sounds (external references only — there are no bytes to import),
+  joins, camera records and bindings (semantics unestablished
+  upstream, §12.2), style/filter blocks, thumbnails, trailer editor
+  state, movieclip instance playback cursors / play modes / rotation
+  / flips (the model's clip playback loops from the clip start), and
+  figure-instance scale changes after an instance's first frame.
+* Sprite-instance detail beyond the placement rule above: the
+  |scaleY/scaleX| ratio, flipX/flipY, instance and library pivots
+  (the model anchors sprite images at their centre — the adapter
+  likewise retains pivots as metadata only), corner distortions,
+  and smart-stretch parameters. A sprite track whose group cursor
+  moves between members keeps the member resolved at first
+  appearance.
+* Text detail beyond the above: opacity, shadow, and the font table
+  (texts render in the built-in 3×5 bitmap font).
+* Sprite/text instances inside library movieclips are not carried
+  into `ClipDef`s (a `ClipDef` has no sprite/text tracks); only a
+  clip's figure track converts.
 * Multi-figure or joined movieclips are not converted to `ClipDef`s;
   main-timeline instances referencing them are skipped.
 

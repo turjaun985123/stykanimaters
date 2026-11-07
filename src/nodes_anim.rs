@@ -13,13 +13,17 @@
 //! exact EOF) and mapped onto the model: figure instances become
 //! project figure slots keyed by instance id, pose records become
 //! model poses with the `layoutFigure` accumulation rules, and
-//! single-figure movieclips become `ClipDef`s. Sprites, texts,
-//! sounds, joins, camera records and filter blocks are consumed
-//! precisely but not modelled — the same "stored poses preserved,
-//! dynamics not recreated" stance the original adapter takes.
+//! single-figure movieclips become `ClipDef`s. Sprite library
+//! images are extracted to PNG assets and sprite instances (main /
+//! `.nodemc` timelines) become `SpriteInstance` key tracks;
+//! main-frame texts become `TextInstance` key tracks. Sounds, joins,
+//! camera records and filter blocks are consumed precisely but not
+//! modelled — the same "stored poses preserved, dynamics not
+//! recreated" stance the original adapter takes.
 
 use crate::model::{
-    norm_deg, ClipDef, Easing, FigureDef, FigureInstance, Frame, NodeDef, Pose, Project, Shape,
+    norm_deg, ClipDef, Easing, FigureDef, FigureInstance, Frame, ImageAsset, InstanceKey,
+    NodeDef, Pose, Project, Shape, SpriteInstance, TextInstance,
 };
 use std::collections::HashMap;
 use std::io::Read as _;
@@ -733,9 +737,35 @@ struct LibFigure {
     color: u32,
 }
 
-#[derive(Clone, Copy)]
-struct SpriteMeta {
-    kind: u8, // 0 image, 1 group
+/// One sprite library entry. Group members are resolved to local
+/// library indices of *image* entries at parse time (for `.nodemc`
+/// the file stores source-library ids; the resolution mirrors the
+/// original decoder, which also fails on dangling references).
+#[derive(Clone)]
+enum SpriteLib {
+    Image(SpriteImage),
+    Group { members: Vec<usize> },
+}
+
+impl SpriteLib {
+    fn kind(&self) -> u8 {
+        match self {
+            SpriteLib::Image(_) => 0,
+            SpriteLib::Group { .. } => 1,
+        }
+    }
+}
+
+/// A sprite library image: raw pixels (RGB or RGBA, row-major,
+/// top-down — the layout the original passes straight to its PNG
+/// encoder).
+#[derive(Clone)]
+struct SpriteImage {
+    name: String,
+    width: u32,
+    height: u32,
+    alpha: bool,
+    pixels: Vec<u8>,
 }
 
 struct RawInstance {
@@ -747,6 +777,25 @@ struct RawInstance {
     y: f32,
     color: u32,
     poses: Vec<PoseRec>,
+    // Sprite instances (type 2/3) only; defaults elsewhere.
+    scale_x: f32,
+    rotation: f32,
+    group_frame: i32,
+}
+
+/// A main-frame text record (`readProjectText`). `id` is the stored
+/// id when the container version has one (v >= 176); before that it
+/// is the text's index within its frame — the same fallback the
+/// original decoder's record reader applies.
+struct RawText {
+    id: i32,
+    x: f32,
+    y: f32,
+    scale: f32,
+    content: String,
+    color: u32,
+    align: i32,
+    rotation: f32,
 }
 
 struct MainSettings {
@@ -763,6 +812,9 @@ struct RawFrame {
     instances: Vec<RawInstance>,
     joins: usize,
     settings: Option<MainSettings>,
+    /// Main-frame texts; always empty for clip frames (the format
+    /// stores texts only in `.stknds` main frames).
+    texts: Vec<RawText>,
 }
 
 /// A parsed library movieclip. Only name/frames feed the model
@@ -837,7 +889,7 @@ fn read_instance(
     b: i32,
     clip_ctx: bool,
     figures: &[LibFigure],
-    sprites: &[SpriteMeta],
+    sprites: &[SpriteLib],
     expected_clips: usize,
     layouts: &(PoseLayout, PoseLayout),
 ) -> Result<RawInstance, String> {
@@ -861,10 +913,10 @@ fn read_instance(
         1 if asset >= expected_clips => {
             return Err(format!("movieclip asset {asset} does not exist"));
         }
-        2 if sprites.get(asset).map(|s| s.kind) != Some(0) => {
+        2 if sprites.get(asset).map(|s| s.kind()) != Some(0) => {
             return Err(format!("sprite asset {asset} is not an image"));
         }
-        3 if sprites.get(asset).map(|s| s.kind) != Some(1) => {
+        3 if sprites.get(asset).map(|s| s.kind()) != Some(1) => {
             return Err(format!("sprite asset {asset} is not a group"));
         }
         _ => {}
@@ -877,6 +929,8 @@ fn read_instance(
     read_style(r, v, b)?;
     let (mut x, mut y, mut color) = (0.0f32, 0.0f32, 0xFFFFFFu32);
     let mut poses: Vec<PoseRec> = Vec::new();
+    // Sprite-instance fields (type 2/3); defaults for other types.
+    let (mut scale_x, mut rotation, mut group_frame) = (1.0f32, 0.0f32, 0i32);
     match ty {
         0 => {
             x = r.f32()?;
@@ -953,21 +1007,24 @@ fn read_instance(
                 r.u8()?; // legacySpriteByte0
                 r.u8()?; // legacySpriteByte1
             }
-            r.f32()?; // scaleXYRatio
-            r.f32()?; // scaleX
-            r.f32()?; // scaleY
+            r.f32()?; // scaleXYRatio (editor value; not used by the
+                       // original adapter either)
+            scale_x = r.f32()?;
+            r.f32()?; // scaleY: only |scaleX| is modelled (§17 of
+                      // the spec); the adapter likewise keeps the
+                      // |scaleY/scaleX| ratio as metadata only
             if b >= 110 {
                 for _ in 0..8 {
                     r.f32()?; // corner distortion Tl/Tr/Bl/Br
                 }
             }
-            r.f32()?; // pivotX
-            r.f32()?; // pivotY
+            r.f32()?; // pivotX (not modelled; the adapter retains
+            r.f32()?; // pivotY  pivots as metadata too)
             x = r.f32()?;
             y = r.f32()?;
-            r.f32()?; // rotation
-            r.flag()?; // flipX
-            r.flag()?; // flipY
+            rotation = r.f32()?;
+            r.flag()?; // flipX (not modelled, §17)
+            r.flag()?; // flipY (not modelled, §17)
             r.flag()?; // persistent
             if b >= 78 {
                 r.i8()?; // tweenMode
@@ -983,7 +1040,7 @@ fn read_instance(
                 }
             }
             if ty == 3 {
-                r.i32()?; // groupFrame
+                group_frame = r.i32()?;
             }
         }
     }
@@ -996,6 +1053,9 @@ fn read_instance(
         y,
         color,
         poses,
+        scale_x,
+        rotation,
+        group_frame,
     })
 }
 
@@ -1021,7 +1081,7 @@ fn read_clip_frame(
     v: i32,
     b: i32,
     figures: &[LibFigure],
-    sprites: &[SpriteMeta],
+    sprites: &[SpriteLib],
     expected_clips: usize,
     sounds_len: usize,
     layouts: &(PoseLayout, PoseLayout),
@@ -1045,6 +1105,7 @@ fn read_clip_frame(
         instances,
         joins,
         settings: None,
+        texts: Vec::new(),
     })
 }
 
@@ -1099,23 +1160,25 @@ fn read_main_settings(r: &mut Reader, v: i32) -> Result<MainSettings, String> {
     })
 }
 
-/// Main-frame text record (`readProjectText`): consumed, not modelled.
-fn read_text(r: &mut Reader, v: i32) -> Result<(), String> {
-    if v >= 176 {
-        r.i32()?; // id
-    }
+/// Main-frame text record (`readProjectText`). The stored id is
+/// read when the version has one (v >= 176); before that, the
+/// frame-local `index` is the id (the original record reader's
+/// default for the field).
+fn read_text(r: &mut Reader, v: i32, index: i32) -> Result<RawText, String> {
+    let id = if v >= 176 { r.i32()? } else { index };
     if v >= 244 {
-        r.i32()?; // fontIndex
+        r.i32()?; // fontIndex (font table not modelled, §17)
     }
-    r.f32()?; // x
-    r.f32()?; // y
-    r.f32()?; // scale
-    r.string()?; // text
-    r.color()?;
-    r.i32()?; // align
+    let x = r.f32()?;
+    let y = r.f32()?;
+    let scale = r.f32()?;
+    let content = r.string()?;
+    let color = r.color()?;
+    let align = r.i32()?;
+    let mut rotation = 0.0f32;
     if v >= 237 {
-        r.f32()?; // rotation
-        r.f32()?; // opacity
+        rotation = r.f32()?;
+        r.f32()?; // opacity (TextInstance has no opacity field)
     }
     if v >= 310 {
         r.flag()?; // aboveBars
@@ -1125,7 +1188,16 @@ fn read_text(r: &mut Reader, v: i32) -> Result<(), String> {
         r.flag()?; // hasShadow
         r.color()?; // shadowColor
     }
-    Ok(())
+    Ok(RawText {
+        id,
+        x,
+        y,
+        scale,
+        content,
+        color,
+        align,
+        rotation,
+    })
 }
 
 /// Frame camera record (`readCamera`): consumed, not modelled —
@@ -1190,7 +1262,7 @@ fn read_main_frame(
     v: i32,
     b: i32,
     figures: &[LibFigure],
-    sprites: &[SpriteMeta],
+    sprites: &[SpriteLib],
     clips_len: usize,
     sounds_len: usize,
     layouts: &(PoseLayout, PoseLayout),
@@ -1205,10 +1277,11 @@ fn read_main_frame(
         instances.push(read_instance(r, v, b, false, figures, sprites, clips_len, layouts)?);
     }
     let joins = read_joins(r, b, v >= 174)?;
+    let mut texts = Vec::new();
     if v >= 150 {
         let nt = r.count(10_000)?;
-        for _ in 0..nt {
-            read_text(r, v)?;
+        for i in 0..nt {
+            texts.push(read_text(r, v, i as i32)?);
         }
     }
     read_camera(r, v)?;
@@ -1216,6 +1289,7 @@ fn read_main_frame(
         instances,
         joins,
         settings: Some(settings),
+        texts,
     })
 }
 
@@ -1370,8 +1444,12 @@ fn read_trailer(r: &mut Reader, v: i32, b: i32) -> Result<(), String> {
     Ok(())
 }
 
-/// One sprite library image body (shared by both containers).
-fn read_sprite_image_body(r: &mut Reader, b: i32) -> Result<(), String> {
+/// One sprite library image body (shared by both containers):
+/// returns (width, height, has-alpha, raw pixels). The library
+/// pivot/fields are consumed but not retained — the model's sprite
+/// instances anchor images at their centre (see §17 of the spec),
+/// the same treatment the original adapter gives pivots.
+fn read_sprite_image_body(r: &mut Reader, b: i32) -> Result<(u32, u32, bool, Vec<u8>), String> {
     let alpha = r.flag()?;
     r.flag()?; // flag1
     r.f32()?; // pivotX
@@ -1391,12 +1469,29 @@ fn read_sprite_image_body(r: &mut Reader, b: i32) -> Result<(), String> {
     if n as u64 != (w as u64) * (h as u64) * channels {
         return Err("image byte count does not match dimensions/channels".into());
     }
-    r.skip(n)?; // raw pixels: consumed, not modelled
+    let pixels = r.take(n)?.to_vec();
+    Ok((w as u32, h as u32, alpha, pixels))
+}
+
+/// Validate group members against a finished sprite library:
+/// every member must reference an *image* entry (both original
+/// container parsers reject anything else).
+fn validate_group_members(sprites: &[SpriteLib]) -> Result<(), String> {
+    for s in sprites {
+        if let SpriteLib::Group { members } = s {
+            for &m in members {
+                if !matches!(sprites.get(m), Some(SpriteLib::Image(_))) {
+                    return Err(format!("sprite group references non-image {m}"));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
-/// `.stknds` sprite library (v >= 400).
-fn read_sprite_library(r: &mut Reader, b: i32) -> Result<Vec<SpriteMeta>, String> {
+/// `.stknds` sprite library (v >= 400). Group members are local
+/// library indices.
+fn read_sprite_library(r: &mut Reader, b: i32) -> Result<Vec<SpriteLib>, String> {
     let count = r.count(MAX_ASSETS)?;
     let mut sprites = Vec::new();
     for _ in 0..count {
@@ -1404,17 +1499,30 @@ fn read_sprite_library(r: &mut Reader, b: i32) -> Result<Vec<SpriteMeta>, String
         if ty > 1 {
             return Err(format!("unknown sprite type {ty}"));
         }
-        r.string()?; // name
+        let name = r.string()?;
         if ty == 1 {
             let n = r.count(MAX_ASSETS)?;
+            let mut members = Vec::with_capacity(n);
             for _ in 0..n {
-                r.i32()?; // member index
+                let m = r.i32()?; // member index
+                if m < 0 {
+                    return Err(format!("negative sprite group member {m}"));
+                }
+                members.push(m as usize);
             }
+            sprites.push(SpriteLib::Group { members });
         } else {
-            read_sprite_image_body(r, b)?;
+            let (width, height, alpha, pixels) = read_sprite_image_body(r, b)?;
+            sprites.push(SpriteLib::Image(SpriteImage {
+                name,
+                width,
+                height,
+                alpha,
+                pixels,
+            }));
         }
-        sprites.push(SpriteMeta { kind: ty });
     }
+    validate_group_members(&sprites)?;
     Ok(sprites)
 }
 
@@ -1534,6 +1642,233 @@ fn frame_duration(
     (hold + tween).clamp(1.0, 65535.0)
 }
 
+/// Encode a sprite library image as a PNG asset. The stored
+/// pixels are RGB(A), row-major, top-down — the layout the
+/// original passes straight to its PNG encoder — so this is a
+/// lossless repackage, never a resample.
+fn encode_sprite_png(img: &SpriteImage) -> Option<Vec<u8>> {
+    if img.width == 0 || img.height == 0 {
+        return None;
+    }
+    let channels = if img.alpha { 4usize } else { 3usize };
+    if img.pixels.len() != (img.width as usize) * (img.height as usize) * channels {
+        return None;
+    }
+    let mut rgba = Vec::with_capacity((img.width as usize) * (img.height as usize) * 4);
+    if img.alpha {
+        rgba.extend_from_slice(&img.pixels);
+    } else {
+        for px in img.pixels.chunks_exact(3) {
+            rgba.extend_from_slice(px);
+            rgba.push(255);
+        }
+    }
+    let buf = image::RgbaImage::from_raw(img.width, img.height, rgba)?;
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(buf)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .ok()?;
+    Some(out)
+}
+
+/// Build the project asset table from a sprite library: one asset
+/// per image entry, in library order. Returns the assets and, per
+/// library index, the project asset index (None for groups and for
+/// images that fail to encode).
+fn sprite_assets(sprites: &[SpriteLib]) -> (Vec<ImageAsset>, Vec<Option<usize>>) {
+    let mut assets = Vec::new();
+    let mut map = Vec::with_capacity(sprites.len());
+    for s in sprites {
+        match s {
+            SpriteLib::Image(img) => match encode_sprite_png(img) {
+                Some(png) => {
+                    map.push(Some(assets.len()));
+                    assets.push(ImageAsset {
+                        name: img.name.clone(),
+                        png,
+                    });
+                }
+                None => map.push(None),
+            },
+            SpriteLib::Group { .. } => map.push(None),
+        }
+    }
+    (assets, map)
+}
+
+/// The library *image* a sprite instance displays: itself for
+/// type 2; for a group, the member at `group_frame` (falling back
+/// to the first member when the frame is out of range — the
+/// original's semantic validator rejects such files; this importer
+/// stays lenient there, as it does for clip cursors).
+fn resolve_sprite_image(sprites: &[SpriteLib], inst: &RawInstance) -> Option<usize> {
+    match inst.ty {
+        2 => match sprites.get(inst.asset) {
+            Some(SpriteLib::Image(_)) => Some(inst.asset),
+            _ => None,
+        },
+        3 => match sprites.get(inst.asset) {
+            Some(SpriteLib::Group { members }) => {
+                if members.is_empty() {
+                    None
+                } else if (0..members.len() as i32).contains(&inst.group_frame) {
+                    Some(members[inst.group_frame as usize])
+                } else {
+                    members.first().copied()
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Base glyph height (stage units) of an unscaled project text.
+/// The original adapter builds its text figures at font size 48,
+/// and per-frame `scale` multiplies it — so the model's
+/// `TextInstance.size` is this constant and the key scale carries
+/// the file's value.
+const TEXT_BASE_SIZE: f32 = 48.0;
+
+/// Stage position of a text's centre. The stored (x, y) is an
+/// anchor whose meaning follows `align` — 8: start of the text,
+/// 16: end, anything else: centre — mirroring the shift the
+/// original adapter applies. The width estimate uses the bitmap
+/// font `media.rs` draws with: (4n − 1) cells of size/5.
+fn text_centre(text: &RawText) -> [f32; 2] {
+    let n = text.content.chars().count() as f32;
+    let height = TEXT_BASE_SIZE * text.scale;
+    let width = if n > 0.0 {
+        (4.0 * n - 1.0) * height / 5.0
+    } else {
+        0.0
+    };
+    let factor = match text.align {
+        8 => 0.5,
+        16 => -0.5,
+        _ => 0.0,
+    };
+    if factor == 0.0 || width == 0.0 {
+        return [text.x, text.y];
+    }
+    let rad = text.rotation.to_radians();
+    [
+        text.x + factor * width * rad.cos(),
+        text.y + factor * width * rad.sin(),
+    ]
+}
+
+/// Build sprite/text instance tracks from parsed timeline frames
+/// (`.stknds` main frames, or a `.nodemc`'s own frames — library
+/// movieclip frames are *not* timelines and are not passed here).
+///
+/// Tracks are keyed in first-appearance order — sprites by
+/// (instance type, instance id), like the figure slots, texts by
+/// text id. A key is recorded at every frame the instance appears
+/// in (the model's `InstanceKey::sample` then interpolates between
+/// appearances and holds outside them, mirroring figure holds).
+/// Sprite content/colour are fixed at first appearance: a sprite
+/// whose resolved image changes later keeps its first image (the
+/// figure slots' hold rule), and a text whose content changes
+/// keeps its first content.
+fn build_instance_tracks(
+    frames_raw: &[RawFrame],
+    sprites: &[SpriteLib],
+    sprite_asset: &[Option<usize>],
+) -> (Vec<SpriteInstance>, Vec<TextInstance>) {
+    let mut out_sprites: Vec<SpriteInstance> = Vec::new();
+    let mut sprite_tracks: HashMap<(i32, i32), usize> = HashMap::new();
+    let mut out_texts: Vec<TextInstance> = Vec::new();
+    let mut text_tracks: HashMap<i32, usize> = HashMap::new();
+    for (fi, frame) in frames_raw.iter().enumerate() {
+        for inst in &frame.instances {
+            if inst.ty != 2 && inst.ty != 3 {
+                continue;
+            }
+            let Some(lib_idx) = resolve_sprite_image(sprites, inst) else {
+                continue;
+            };
+            let Some(asset) = sprite_asset.get(lib_idx).copied().flatten() else {
+                continue;
+            };
+            let key = InstanceKey {
+                frame: fi as f32,
+                x: inst.x,
+                y: inst.y,
+                scale: inst.scale_x.abs(),
+                angle: inst.rotation,
+            };
+            let track_key = (inst.ty, inst.id);
+            match sprite_tracks.get(&track_key) {
+                Some(&ti) => {
+                    let track = &mut out_sprites[ti];
+                    if track.asset == asset {
+                        match track.keys.last_mut() {
+                            Some(last) if last.frame == key.frame => *last = key,
+                            _ => track.keys.push(key),
+                        }
+                    }
+                    // else: image changed after first appearance —
+                    // the first image is kept (see fn docs).
+                }
+                None => {
+                    sprite_tracks.insert(track_key, out_sprites.len());
+                    out_sprites.push(SpriteInstance {
+                        asset,
+                        keys: vec![key],
+                    });
+                }
+            }
+        }
+        for text in &frame.texts {
+            let centre = text_centre(text);
+            let key = InstanceKey {
+                frame: fi as f32,
+                x: centre[0],
+                y: centre[1],
+                scale: text.scale,
+                angle: text.rotation,
+            };
+            match text_tracks.get(&text.id) {
+                Some(&ti) => {
+                    let track = &mut out_texts[ti];
+                    match track.keys.last_mut() {
+                        Some(last) if last.frame == key.frame => *last = key,
+                        _ => track.keys.push(key),
+                    }
+                }
+                None => {
+                    text_tracks.insert(text.id, out_texts.len());
+                    out_texts.push(TextInstance {
+                        content: text.content.clone(),
+                        size: TEXT_BASE_SIZE,
+                        color: text.color,
+                        keys: vec![key],
+                    });
+                }
+            }
+        }
+    }
+    (out_sprites, out_texts)
+}
+
+/// The one figure instance a clip frame may hold for the clip to
+/// convert (sprite instances alongside it no longer block
+/// conversion — they simply are not carried into the `ClipDef`;
+/// see §17 of the spec).
+fn clip_figure_instance(frame: &RawFrame) -> Option<&RawInstance> {
+    let mut found = None;
+    for inst in &frame.instances {
+        if inst.ty == 0 {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(inst);
+        }
+    }
+    found
+}
+
 /// Convert a library movieclip to a `ClipDef` when every frame
 /// holds exactly one figure instance of the same figure and no
 /// joins — the only shape `model::ClipDef` can represent.
@@ -1543,21 +1878,18 @@ fn convert_clip(
     container_build: i32,
 ) -> Option<(ClipDef, usize, u32)> {
     let first = clip.frames.first()?;
-    if first.instances.len() != 1 || first.joins != 0 {
+    if first.joins != 0 {
         return None;
     }
-    let inst0 = &first.instances[0];
-    if inst0.ty != 0 {
-        return None;
-    }
+    let inst0 = clip_figure_instance(first)?;
     let asset = inst0.asset;
     let mut poses = Vec::with_capacity(clip.frames.len());
     for frame in &clip.frames {
-        if frame.instances.len() != 1 || frame.joins != 0 {
+        if frame.joins != 0 {
             return None;
         }
-        let inst = &frame.instances[0];
-        if inst.ty != 0 || inst.asset != asset {
+        let inst = clip_figure_instance(frame)?;
+        if inst.asset != asset {
             return None;
         }
         poses.push(convert_pose(inst, &figures[asset].scan, container_build));
@@ -1603,7 +1935,7 @@ fn build_timeline(
     for frame in frames_raw {
         for inst in &frame.instances {
             if inst.ty != 0 && inst.ty != 1 {
-                continue; // sprites are not modelled
+                continue; // sprites become instance tracks, not figure slots
             }
             let key = (inst.ty, inst.id);
             if slot_index.contains_key(&key) {
@@ -1883,11 +2215,16 @@ fn parse_stknds(payload: &[u8]) -> Result<Project, String> {
         &clip_first_roots,
         build,
     );
+    let (assets, sprite_asset) = sprite_assets(&sprites);
+    let (sprites_out, texts_out) = build_instance_tracks(&frames_raw, &sprites, &sprite_asset);
     let mut project = empty_project(name, fps as f32, auto_tween);
     project.background = background;
     project.figures = figures_out;
     project.frames = frames;
     project.clips = clips;
+    project.assets = assets;
+    project.sprites = sprites_out;
+    project.texts = texts_out;
     Ok(project)
 }
 
@@ -1988,38 +2325,85 @@ fn parse_nodemc(payload: &[u8]) -> Result<Project, String> {
         &HashMap::new(),
         build,
     );
+    let (assets, sprite_asset) = sprite_assets(&sprites);
+    // A .nodemc's frames are its own timeline, so its sprite
+    // instances model directly (clip frames carry no texts).
+    let (sprites_out, texts_out) = build_instance_tracks(&frames_raw, &sprites, &sprite_asset);
     let mut project = empty_project(name, fps as f32, auto_tween);
     project.figures = figures_out;
     project.frames = frames;
+    project.assets = assets;
+    project.sprites = sprites_out;
+    project.texts = texts_out;
     Ok(project)
 }
 
 /// `.nodemc` sprite entries when the count was read earlier in the
 /// header (the count precedes the thumbnails/settings in the byte
-/// stream, but the entries sit after the figure library).
+/// stream, but the entries sit after the figure library). Group
+/// members are *source-library ids*, resolved here through the
+/// entries' own source ids — the original decoder's rule, including
+/// its duplicate-id and dangling-reference errors.
 fn read_sprite_library_mc_count(
     r: &mut Reader,
     b: i32,
     count: usize,
-) -> Result<Vec<SpriteMeta>, String> {
-    let mut sprites = Vec::new();
+) -> Result<Vec<SpriteLib>, String> {
+    enum Tmp {
+        Image(SpriteImage),
+        Group { source_members: Vec<i32> },
+    }
+    let mut source_ids: HashMap<i32, usize> = HashMap::new();
+    let mut tmp: Vec<Tmp> = Vec::with_capacity(count);
     for _ in 0..count {
         let ty = r.u8()?;
         if ty > 1 {
             return Err(format!("unknown sprite type {ty}"));
         }
-        r.string()?; // name
-        r.i32()?; // sourceLibraryId
+        let name = r.string()?;
+        let source_id = r.i32()?;
+        if source_ids.insert(source_id, tmp.len()).is_some() {
+            return Err(format!("duplicate movie-clip sprite library id {source_id}"));
+        }
         if ty == 1 {
             let n = r.count(MAX_ASSETS)?;
+            let mut source_members = Vec::with_capacity(n);
             for _ in 0..n {
-                r.i32()?; // source member id
+                source_members.push(r.i32()?); // source member id
             }
+            tmp.push(Tmp::Group { source_members });
         } else {
-            read_sprite_image_body(r, b)?;
+            let (width, height, alpha, pixels) = read_sprite_image_body(r, b)?;
+            tmp.push(Tmp::Image(SpriteImage {
+                name,
+                width,
+                height,
+                alpha,
+                pixels,
+            }));
         }
-        sprites.push(SpriteMeta { kind: ty });
     }
+    let mut sprites = Vec::with_capacity(tmp.len());
+    for entry in tmp {
+        match entry {
+            Tmp::Image(img) => sprites.push(SpriteLib::Image(img)),
+            Tmp::Group { source_members } => {
+                let mut members = Vec::with_capacity(source_members.len());
+                for id in source_members {
+                    match source_ids.get(&id) {
+                        Some(&idx) => members.push(idx),
+                        None => {
+                            return Err(format!(
+                                "sprite group references missing source id {id}"
+                            ));
+                        }
+                    }
+                }
+                sprites.push(SpriteLib::Group { members });
+            }
+        }
+    }
+    validate_group_members(&sprites)?;
     Ok(sprites)
 }
 
@@ -2423,6 +2807,464 @@ mod tests {
                 want_end
             );
         }
+    }
+
+    /// Sprite library image body at 431/117 (field order per
+    /// `read_sprite_image_body`).
+    fn sprite_image_body_431_117(b: &mut B, alpha: bool, w: i32, h: i32, pixels: &[u8]) {
+        b.flag(alpha);
+        b.flag(false); // flag1
+        b.f32(0.5); // pivotX
+        b.f32(0.5); // pivotY
+        b.f32(0.0); // field2
+        b.f32(0.0); // field3
+        b.flag(true); // samplingFlag (build >= 9)
+        b.i32(w);
+        b.i32(h);
+        b.i32(pixels.len() as i32); // pixelBytes
+        b.raw(pixels);
+    }
+
+    /// Sprite instance record at 431/117 (field order per
+    /// `read_instance`'s sprite branch).
+    #[allow(clippy::too_many_arguments)]
+    fn sprite_instance_431_117(
+        b: &mut B,
+        ty: i32,
+        asset: i32,
+        id: i32,
+        scale_x: f32,
+        scale_y: f32,
+        x: f32,
+        y: f32,
+        rotation: f32,
+        group_frame: Option<i32>,
+    ) {
+        b.i32(ty);
+        b.i32(asset);
+        b.i32(id);
+        style_431_117(b);
+        b.flag(false); // useParentFilters
+        b.f32(1.0); // scaleXYRatio
+        b.f32(scale_x);
+        b.f32(scale_y);
+        for _ in 0..8 {
+            b.f32(0.0); // corner distortions (build >= 110)
+        }
+        b.f32(0.5); // pivotX
+        b.f32(0.5); // pivotY
+        b.f32(x);
+        b.f32(y);
+        b.f32(rotation);
+        b.flag(false); // flipX
+        b.flag(false); // flipY
+        b.flag(false); // persistent
+        b.i8(0); // tweenMode (build >= 78)
+        b.flag(true); // visibleInOnionSkin (build >= 15)
+        b.i32(0); // lockState
+        b.i32(0); // smartStretchState
+        if let Some(gf) = group_frame {
+            b.i32(gf); // groupFrame (type 3 only)
+        }
+    }
+
+    /// `hand_packed_clip` plus a sprite: the library holds one 2x2
+    /// RGBA image "Dot" (source id 42) and the single clip frame
+    /// holds the figure instance and a sprite instance (id 9,
+    /// scale 3, at (500, 120), rotated 30 degrees).
+    fn hand_packed_clip_with_sprite() -> Vec<u8> {
+        let mut b = B::default();
+        b.i32(431); // version
+        b.i32(117); // build
+        b.string("Clip S");
+        b.i32(1); // frameCount
+        b.i32(1); // figureCount
+        b.i32(1); // spriteCount (v >= 400)
+        b.i32(0); // soundCount
+        b.i32(0); // thumbnailCount
+        b.i32(0); // thumbnailWidth
+        b.i32(0); // thumbnailHeight
+        b.i32(24); // settings.fps
+        b.i32(2); // settings.tweenCount
+        b.flag(false); // settings.autoTween
+        b.flag(false); // settings.clipFlag
+        b.i32(10); // settings.nextInstanceId
+        b.string("Synthetic rig");
+        b.raw(&modern_nodes());
+        // Sprite library entry (after the figure library).
+        b.raw(&[0]); // type: image
+        b.string("Dot");
+        b.i32(42); // sourceLibraryId
+        sprite_image_body_431_117(
+            &mut b,
+            true,
+            2,
+            2,
+            &[
+                255, 0, 0, 255, // red
+                0, 255, 0, 255, // green
+                0, 0, 255, 255, // blue
+                255, 255, 0, 255, // yellow
+            ],
+        );
+        // One clip frame (readClipFrame).
+        b.f32(1.0); // volume
+        b.f32(0.0); // pan
+        b.f32(1.0); // pitch
+        b.i32(-1); // soundIndex
+        b.i32(2); // instance count
+        // Figure instance (same fields as hand_packed_clip).
+        b.i32(0); // type
+        b.i32(0); // assetIndex
+        b.i32(5); // header id
+        b.f32(1.0); // header scale
+        style_431_117(&mut b);
+        b.f32(300.0); // x
+        b.f32(200.0); // y
+        b.color(255, 255, 255, 255); // white
+        b.flag(false); // isLocked
+        b.flag(false); // persistent
+        b.flag(true); // visibleInOnionSkin
+        b.flag(false); // tweenColors
+        b.i8(0); // tweenMode
+        b.flag(false); // scaleJoinedFigures
+        b.flag(false); // pushJoinedFigures
+        b.flag(false); // setStateOfJoins
+        b.i32(0); // joinsState
+        b.flag(false); // useParentFilters
+        b.i32(-1); // lockedNodeId
+        b.f32(0.0); // lockedNodeX
+        b.f32(0.0); // lockedNodeY
+        pose_431_117(&mut b, 0.0, 0.0, 4); // root pose
+        pose_431_117(&mut b, 45.0, 80.0, 4); // segment pose
+        // Sprite instance.
+        sprite_instance_431_117(&mut b, 2, 0, 9, 3.0, 3.0, 500.0, 120.0, 30.0, None);
+        b.i32(0); // joins count
+        b.v
+    }
+
+    #[test]
+    fn nodemc_sprite_instance_imports_as_asset_and_track() {
+        let project = import_nodes_animation(&hand_packed_clip_with_sprite()).unwrap();
+        assert_eq!(project.figures.len(), 1, "figure instance still imports");
+        // The sprite's raw RGBA pixels became a PNG asset, losslessly.
+        assert_eq!(project.assets.len(), 1);
+        assert_eq!(project.assets[0].name, "Dot");
+        let img = image::load_from_memory(&project.assets[0].png)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!((img.width(), img.height()), (2, 2));
+        assert_eq!(*img.get_pixel(0, 0), image::Rgba([255, 0, 0, 255]));
+        assert_eq!(*img.get_pixel(1, 0), image::Rgba([0, 255, 0, 255]));
+        assert_eq!(*img.get_pixel(0, 1), image::Rgba([0, 0, 255, 255]));
+        assert_eq!(*img.get_pixel(1, 1), image::Rgba([255, 255, 0, 255]));
+        // And its per-frame transform became a SpriteInstance track.
+        assert_eq!(project.sprites.len(), 1);
+        let track = &project.sprites[0];
+        assert_eq!(track.asset, 0);
+        assert_eq!(track.keys.len(), 1);
+        let k = track.keys[0];
+        assert_eq!(k.frame, 0.0);
+        assert_eq!((k.x, k.y), (500.0, 120.0));
+        assert_eq!(k.scale, 3.0);
+        assert_eq!(k.angle, 30.0);
+        assert!(project.texts.is_empty());
+    }
+
+    /// Project header at 431/117 (field order per
+    /// `read_project_header`).
+    fn project_header_431_117(b: &mut B) {
+        b.flag(false); // editorFlagD (build >= 16)
+        b.flag(false); // editorFlagE (v >= 244)
+        b.string(""); // projectCredit
+        b.color(0, 0, 0, 0); // editorColor
+        b.i32(24); // fps
+        b.i32(2); // tweenCount
+        b.flag(false); // editorFlagB
+        b.flag(false); // editorFlagZ
+        b.flag(false); // editorFlagA
+        b.flag(false); // editorFlagC
+        b.flag(false); // autoTween
+        b.flag(false); // timelineFlagC
+        b.i32(0); // selectedFrame
+        b.i32(5); // nextTextId
+        b.i32(10); // nextInstanceId
+        b.i32(3); // nextLibraryId
+        b.i32(0); // fontUsage count (v >= 400)
+        b.i32(0); // editor list 1
+        b.i32(0); // editor list 2
+        b.i32(0); // editor list 3
+        b.i32(0); // outer map count
+    }
+
+    /// Main-frame settings at 431/117 (field order per
+    /// `read_main_settings`); background #785a3c.
+    fn main_settings_431_117(b: &mut B) {
+        b.flag(false); // isTweened
+        b.flag(false); // useImageBackground
+        b.flag(false); // useGradient
+        b.flag(false); // expandedGradient
+        b.flag(false); // stopSounds
+        b.flag(false); // isDelayed
+        b.f32(0.0); // delaySeconds (present whenever v >= 200)
+        b.flag(false); // slowMotion
+        b.i32(0); // slowMotionTweenFrames
+        b.flag(false); // repeating
+        b.i32(0); // repeatBackFrames
+        b.i32(0); // repeatLoops
+        b.flag(false); // tweenWhenRepeating
+        b.flag(false); // cameraDuringDelay
+        b.flag(false); // easeIn
+        b.flag(false); // easeOut
+        b.i16(0); // interpolation
+        b.color(255, 0x3C, 0x5A, 0x78); // background -> 0x785A3C
+        b.color(255, 0, 0, 0); // backgroundGradientColor
+        b.i32(-1); // soundIndex
+        b.f32(1.0); // soundVolume
+        b.f32(0.0); // soundPan
+        b.f32(1.0); // soundPitch
+    }
+
+    /// Frame camera at 431/117 (field order per `read_camera`).
+    fn camera_431_117(b: &mut B) {
+        b.f32(1.0); // zoom
+        b.f32(0.0); // x
+        b.f32(0.0); // y
+        b.f32(0.0); // rotation
+        b.flag(false); // wobbleXY
+        b.flag(false); // wobbleRotation
+        b.flag(false); // wobbleScale
+        b.i32(0); // wobbleXYIntensity
+        b.f32(0.0); // wobbleRotationIntensity
+        b.f32(0.0); // wobbleSpeed
+        b.flag(false); // widescreen
+        b.i32(0); // bindings count
+        b.i32(0); // secondary bindings count
+    }
+
+    /// Main-frame text at 431/117 (field order per `read_text`),
+    /// red, unrotated, no shadow.
+    fn text_431_117(b: &mut B, id: i32, x: f32, y: f32, scale: f32, text: &str, align: i32) {
+        b.i32(id); // id (v >= 176)
+        b.i32(0); // fontIndex (v >= 244)
+        b.f32(x);
+        b.f32(y);
+        b.f32(scale);
+        b.string(text);
+        b.color(255, 0, 0, 255); // red -> 0xFF0000
+        b.i32(align);
+        b.f32(0.0); // rotation (v >= 237)
+        b.f32(1.0); // opacity
+        b.flag(false); // aboveBars (v >= 310)
+        b.flag(false); // isLocked
+        b.flag(false); // hasShadow (v >= 242)
+        b.color(0, 0, 0, 0); // shadowColor
+    }
+
+    /// Project trailer at 431/117 (field order per `read_trailer`).
+    fn trailer_431_117(b: &mut B) {
+        b.i32(0); // tweenLinks count (v >= 237)
+        b.i32(0); // selectionMode (v >= 251)
+        for _ in 0..5 {
+            b.f32(0.0); // parameter[i]
+        }
+        b.i32(0); // selectedAsset
+        b.flag(false); // flag_i
+        b.flag(false); // flag_j
+        b.flag(false); // flag_k
+        b.flag(false); // flag_l
+        b.flag(false); // flag_m
+        b.flag(false); // flag_n
+        b.flag(false); // flag_o
+        b.flag(false); // flag_p
+        b.flag(false); // flag_r (build >= 84)
+        b.flag(false); // flag_s
+        b.flag(false); // flag_t
+        b.flag(false); // flag_u
+        b.i8(0); // mode (build >= 79)
+        for _ in 0..7 {
+            b.color(0, 0, 0, 0); // palette
+        }
+        b.i32(0); // editorPairs count (v >= 319)
+    }
+
+    /// A `.stknds` project packed byte-by-byte at 431/117: no
+    /// figures; a sprite library with one 2x1 RGB image "Px"
+    /// (red, blue) and a group wrapping it; two main frames.
+    /// Frame 0 holds an image sprite (id 7), a group sprite
+    /// (id 8), and two texts (id 3 centred anchor, id 4
+    /// start-anchored); frame 1 moves sprite 7 and text 3.
+    fn hand_packed_project_with_sprites_and_text() -> Vec<u8> {
+        let mut b = B::default();
+        b.i32(431); // version
+        b.i32(117); // build (v >= 401)
+        b.string("Proj S");
+        project_header_431_117(&mut b);
+        b.i32(0); // figure count
+        b.i32(0); // sound count (v >= 160)
+        b.i32(2); // sprite library count (v >= 400)
+        b.raw(&[0]); // image
+        b.string("Px");
+        sprite_image_body_431_117(&mut b, false, 2, 1, &[255, 0, 0, 0, 0, 255]);
+        b.raw(&[1]); // group
+        b.string("Grp");
+        b.i32(1); // member count
+        b.i32(0); // member: image 0
+        b.i32(0); // clip count (v >= 300)
+        b.i32(2); // frame count
+        // Frame 0.
+        main_settings_431_117(&mut b);
+        b.i32(2); // instance count
+        sprite_instance_431_117(&mut b, 2, 0, 7, 2.0, 2.0, 400.0, 300.0, 0.0, None);
+        sprite_instance_431_117(&mut b, 3, 1, 8, 1.0, 1.0, 100.0, 100.0, 45.0, Some(0));
+        b.i32(0); // joins count
+        b.i32(2); // text count
+        text_431_117(&mut b, 3, 200.0, 500.0, 2.0, "HI", 0);
+        text_431_117(&mut b, 4, 200.0, 560.0, 2.0, "HI", 8);
+        camera_431_117(&mut b);
+        // Frame 1.
+        main_settings_431_117(&mut b);
+        b.i32(1); // instance count
+        sprite_instance_431_117(&mut b, 2, 0, 7, 4.0, 4.0, 440.0, 300.0, 90.0, None);
+        b.i32(0); // joins count
+        b.i32(1); // text count
+        text_431_117(&mut b, 3, 260.0, 500.0, 2.0, "HI", 0);
+        camera_431_117(&mut b);
+        trailer_431_117(&mut b);
+        b.v
+    }
+
+    fn key_eq(k: &InstanceKey, frame: f32, x: f32, y: f32, scale: f32, angle: f32) {
+        assert_eq!(k.frame, frame, "key frame");
+        assert!((k.x - x).abs() < 0.01, "key x {} want {x}", k.x);
+        assert!((k.y - y).abs() < 0.01, "key y {} want {y}", k.y);
+        assert!((k.scale - scale).abs() < 0.01, "key scale {}", k.scale);
+        assert!((k.angle - angle).abs() < 0.01, "key angle {}", k.angle);
+    }
+
+    #[test]
+    fn stknds_sprites_and_texts_import_as_tracks() {
+        let project = import_nodes_animation(&hand_packed_project_with_sprites_and_text())
+            .expect("hand-packed project imports");
+        assert_eq!(project.name, "Proj S");
+        assert_eq!(project.background, 0x785A3C);
+        assert_eq!(project.frames.len(), 2);
+        assert!(project.figures.is_empty());
+        // One image in the library -> one PNG asset (RGB expanded
+        // to opaque RGBA): red, blue.
+        assert_eq!(project.assets.len(), 1);
+        assert_eq!(project.assets[0].name, "Px");
+        let img = image::load_from_memory(&project.assets[0].png)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!((img.width(), img.height()), (2, 1));
+        assert_eq!(*img.get_pixel(0, 0), image::Rgba([255, 0, 0, 255]));
+        assert_eq!(*img.get_pixel(1, 0), image::Rgba([0, 0, 255, 255]));
+        // Two sprite tracks, first-appearance order. The group
+        // instance resolves through groupFrame 0 to the image.
+        assert_eq!(project.sprites.len(), 2);
+        assert_eq!(project.sprites[0].asset, 0);
+        assert_eq!(project.sprites[0].keys.len(), 2);
+        key_eq(&project.sprites[0].keys[0], 0.0, 400.0, 300.0, 2.0, 0.0);
+        key_eq(&project.sprites[0].keys[1], 1.0, 440.0, 300.0, 4.0, 90.0);
+        assert_eq!(project.sprites[1].asset, 0);
+        assert_eq!(project.sprites[1].keys.len(), 1);
+        key_eq(&project.sprites[1].keys[0], 0.0, 100.0, 100.0, 1.0, 45.0);
+        // Two text tracks. Base size 48 (the adapter's font size);
+        // the per-frame scale rides on the keys.
+        assert_eq!(project.texts.len(), 2);
+        let t0 = &project.texts[0];
+        assert_eq!(t0.content, "HI");
+        assert_eq!(t0.size, 48.0);
+        assert_eq!(t0.color, 0xFF0000);
+        assert_eq!(t0.keys.len(), 2);
+        key_eq(&t0.keys[0], 0.0, 200.0, 500.0, 2.0, 0.0);
+        key_eq(&t0.keys[1], 1.0, 260.0, 500.0, 2.0, 0.0);
+        // align 8 anchors at the text start: "HI" at size 96 is
+        // (4*2-1) * 96/5 = 134.4 wide, so the centre sits half a
+        // width to the right of the anchor.
+        let t1 = &project.texts[1];
+        assert_eq!(t1.keys.len(), 1);
+        key_eq(&t1.keys[0], 0.0, 267.2, 560.0, 2.0, 0.0);
+    }
+
+    #[test]
+    fn clip_with_sprite_sibling_still_converts() {
+        let bytes = modern_nodes();
+        let scan = scan_figure(&bytes, 0).unwrap();
+        let (def, color) = figure_def(&bytes, &scan);
+        let figures = vec![LibFigure {
+            name: "Rig".into(),
+            scan,
+            def,
+            color,
+        }];
+        let fig_inst = |x: f32| RawInstance {
+            ty: 0,
+            asset: 0,
+            id: 5,
+            scale: 1.0,
+            x,
+            y: 200.0,
+            color: 0xFFFFFF,
+            poses: vec![
+                PoseRec {
+                    local_angle: 0.0,
+                    length: 0.0,
+                    scale: 1.0,
+                    use_segment_scale: false,
+                },
+                PoseRec {
+                    local_angle: 45.0,
+                    length: 80.0,
+                    scale: 1.0,
+                    use_segment_scale: false,
+                },
+            ],
+            scale_x: 1.0,
+            rotation: 0.0,
+            group_frame: 0,
+        };
+        let sprite_inst = || RawInstance {
+            ty: 2,
+            asset: 0,
+            id: 9,
+            scale: 1.0,
+            x: 10.0,
+            y: 20.0,
+            color: 0xFFFFFF,
+            poses: Vec::new(),
+            scale_x: 2.0,
+            rotation: 30.0,
+            group_frame: 0,
+        };
+        let frame = |instances: Vec<RawInstance>| RawFrame {
+            instances,
+            joins: 0,
+            settings: None,
+            texts: Vec::new(),
+        };
+        // One figure + one sprite per frame: converts (the sprite
+        // is not carried into the ClipDef).
+        let clip = RawClip {
+            name: "C".into(),
+            fps: 24,
+            tween_count: 2,
+            auto_tween: false,
+            frames: vec![
+                frame(vec![fig_inst(300.0), sprite_inst()]),
+                frame(vec![fig_inst(320.0), sprite_inst()]),
+            ],
+        };
+        let (def, asset, _) = convert_clip(&clip, &figures, 117).expect("clip converts");
+        assert_eq!(asset, 0);
+        assert_eq!(def.frames.len(), 2);
+        // Two figure instances in a frame still block conversion.
+        let clip2 = RawClip {
+            frames: vec![frame(vec![fig_inst(300.0), fig_inst(310.0)])],
+            ..clip
+        };
+        assert!(convert_clip(&clip2, &figures, 117).is_none());
     }
 
     #[test]

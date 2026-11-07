@@ -1,11 +1,14 @@
 mod app;
+mod dialogs;
 mod audio;
 mod audio_edit;
 mod editor;
 mod export;
 mod fig3d;
 mod graph;
+mod graph_panel;
 mod i18n;
+mod layers;
 mod media;
 mod model;
 mod nodes;
@@ -16,6 +19,7 @@ mod projects;
 mod shell;
 mod style;
 mod svg;
+mod text_edit;
 mod touch;
 mod vfx;
 

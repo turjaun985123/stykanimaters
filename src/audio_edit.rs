@@ -1,5 +1,7 @@
 //! Audio editor backend: minimal PCM16 WAV I/O, waveform peaks,
-//! a real multi-clip mixdown, and playback scheduling.
+//! a real multi-clip mixdown, playback scheduling, and editing
+//! operations: peak/RMS metering, normalisation, trim, split,
+//! crossfade joins, and timeline clip splitting.
 //!
 //! Std-only, no decoding crates: WAV files are parsed and written
 //! by hand (RIFF/WAVE, PCM format 1, 16-bit, mono or stereo).
@@ -118,6 +120,88 @@ pub fn write_wav(data: &WavData) -> Vec<u8> {
         out.extend_from_slice(&v.to_le_bytes());
     }
     out
+}
+
+/// Peak amplitude (max absolute sample) over all channels.
+/// Empty audio peaks at 0.0.
+pub fn peak(data: &WavData) -> f32 {
+    data.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+}
+
+/// RMS (root-mean-square) amplitude over all channels — a loudness
+/// proxy. Empty audio has RMS 0.0.
+pub fn rms(data: &WavData) -> f32 {
+    if data.samples.is_empty() {
+        return 0.0;
+    }
+    let sum: f32 = data.samples.iter().map(|s| s * s).sum();
+    (sum / data.samples.len() as f32).sqrt()
+}
+
+/// Scale all samples in place so the peak equals `target_peak`,
+/// and return the gain that was applied.
+///
+/// `target_peak` is clamped to 0.0..=1.0. Silent input (peak 0,
+/// including empty audio) is a no-op and returns 1.0 (unity gain) —
+/// there is nothing to scale. A target of 0.0 silences the data
+/// and returns 0.0.
+pub fn normalize(data: &mut WavData, target_peak: f32) -> f32 {
+    let target = target_peak.clamp(0.0, 1.0);
+    let p = peak(data);
+    if p == 0.0 {
+        return 1.0;
+    }
+    let gain = target / p;
+    for s in data.samples.iter_mut() {
+        *s *= gain;
+    }
+    gain
+}
+
+/// Seconds to a frame index in `data`, rounded and clamped to the
+/// data range — the same rounding `mix` uses for clip offsets.
+fn secs_to_frame(data: &WavData, secs: f32) -> usize {
+    let f = (secs.max(0.0) * data.sample_rate as f32).round() as usize;
+    f.min(data.frames())
+}
+
+/// Frame-accurate slice `[start_secs, end_secs)` of `data`,
+/// clamped to the data range. If `end <= start` after clamping the
+/// result is an empty (0-frame) `WavData` with the same rate and
+/// channel count.
+pub fn trim(data: &WavData, start_secs: f32, end_secs: f32) -> WavData {
+    let start = secs_to_frame(data, start_secs);
+    let end = secs_to_frame(data, end_secs);
+    let ch = data.channels as usize;
+    let samples = if end <= start || ch == 0 {
+        Vec::new()
+    } else {
+        data.samples[start * ch..end * ch].to_vec()
+    };
+    WavData {
+        sample_rate: data.sample_rate,
+        channels: data.channels,
+        samples,
+    }
+}
+
+/// Split `data` into two halves at `at_secs` (clamped to the data
+/// range). The halves concatenate back to the original
+/// sample-for-sample: `split_wav(d, t).0.samples ++ .1.samples ==
+/// d.samples`.
+pub fn split_wav(data: &WavData, at_secs: f32) -> (WavData, WavData) {
+    let at = secs_to_frame(data, at_secs);
+    let ch = data.channels as usize;
+    let cut = (at * ch).min(data.samples.len());
+    let mk = |samples: Vec<f32>| WavData {
+        sample_rate: data.sample_rate,
+        channels: data.channels,
+        samples,
+    };
+    (
+        mk(data.samples[..cut].to_vec()),
+        mk(data.samples[cut..].to_vec()),
+    )
 }
 
 /// Max-abs amplitude per bucket across all channels, for waveform
@@ -264,6 +348,69 @@ pub fn mix(clips: &[MixClip]) -> Result<WavData, String> {
     })
 }
 
+/// Join `a` and `b` with a linear crossfade: `b` starts
+/// `fade_secs` before `a` ends, `a` ramps down while `b` ramps up,
+/// and the total length is `a + b - fade` frames.
+///
+/// The output takes `a`'s sample rate and channel count; `b` is
+/// converted to match (resampled by linear interpolation, channels
+/// mapped mono<->stereo) via the same `convert` helper `mix` uses.
+/// The ramp follows `mix`'s fade convention: at fade frame `j` of
+/// `F`, progress is `j / F`, so the first fade frame is still pure
+/// `a` and full `b` begins with the first frame after the overlap.
+/// Output is hard-clamped to -1..=1.
+///
+/// Errors: either side has no frames, `a` has a zero sample rate,
+/// or the fade is longer than either side (after conversion).
+pub fn crossfade_mix(a: &WavData, b: &WavData, fade_secs: f32) -> Result<WavData, String> {
+    if a.sample_rate == 0 {
+        return Err("crossfade: bad sample rate".into());
+    }
+    let a_frames = a.frames();
+    if a_frames == 0 {
+        return Err("crossfade: first clip is empty".into());
+    }
+    let b_buf = convert(b, a.sample_rate, a.channels);
+    let ch = a.channels as usize;
+    let b_frames = if ch == 0 { 0 } else { b_buf.len() / ch };
+    if b_frames == 0 {
+        return Err("crossfade: second clip is empty".into());
+    }
+    let fade = (fade_secs.max(0.0) * a.sample_rate as f32).round() as usize;
+    if fade > a_frames || fade > b_frames {
+        return Err(format!(
+            "crossfade: fade of {fade} frames exceeds a source ({a_frames}/{b_frames} frames)"
+        ));
+    }
+    let total = a_frames + b_frames - fade;
+    let mut out = vec![0.0f32; total * ch];
+    // a verbatim up to and including its tail into the fade region,
+    // b verbatim after the overlap; the overlap is summed below.
+    out[..a_frames * ch].copy_from_slice(&a.samples[..a_frames * ch]);
+    let b_start = a_frames - fade;
+    for j in fade..b_frames {
+        let dst = (b_start + j) * ch;
+        out[dst..dst + ch].copy_from_slice(&b_buf[j * ch..j * ch + ch]);
+    }
+    if fade > 0 {
+        for j in 0..fade {
+            let p = j as f32 / fade as f32;
+            let ai = (b_start + j) * ch;
+            for c in 0..ch {
+                out[ai + c] = a.samples[ai + c] * (1.0 - p) + b_buf[j * ch + c] * p;
+            }
+        }
+    }
+    for s in out.iter_mut() {
+        *s = s.clamp(-1.0, 1.0);
+    }
+    Ok(WavData {
+        sample_rate: a.sample_rate,
+        channels: a.channels,
+        samples: out,
+    })
+}
+
 /// Which project audio clips are sounding at `playhead_secs`, and
 /// at what offset (seconds) into each clip — the schedule the app
 /// needs for multi-clip playback.
@@ -293,6 +440,39 @@ pub fn audible_at(
         }
     }
     out
+}
+
+/// Split a timeline clip placement at `at_frame` into two clips.
+/// `dur_frames` is the clip's duration in frames, probed by the
+/// caller (e.g. from `read_wav` at the project fps) — `AudioClip`
+/// itself stores no duration. Returns `Some((first, second))` only
+/// when `at_frame` lies strictly inside the clip's span
+/// (`start_frame < at_frame < start_frame + dur_frames`); the first
+/// clip keeps the original start, the second starts at `at_frame`.
+///
+/// Both halves keep the same `path`: this splits the *timeline
+/// placement* only. Actually cutting the audio file is `trim`'s
+/// job, and `AudioClip` has no source-offset field, so playback of
+/// the second half still begins at the file's start — a model
+/// limitation callers must be aware of.
+pub fn split_clip(
+    clip: &crate::model::AudioClip,
+    at_frame: usize,
+    dur_frames: usize,
+) -> Option<(crate::model::AudioClip, crate::model::AudioClip)> {
+    if at_frame <= clip.start_frame || at_frame >= clip.start_frame + dur_frames {
+        return None;
+    }
+    Some((
+        crate::model::AudioClip {
+            path: clip.path.clone(),
+            start_frame: clip.start_frame,
+        },
+        crate::model::AudioClip {
+            path: clip.path.clone(),
+            start_frame: at_frame,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -489,5 +669,190 @@ mod tests {
         // Unknown duration -> clip omitted.
         let none_durations = |_: &str| None;
         assert!(audible_at(&clips, 0.5, 24.0, &none_durations).is_empty());
+    }
+
+    fn ramp_wav(rate: u32, frames: usize) -> WavData {
+        // Distinct value per frame so slice boundaries are checkable.
+        WavData {
+            sample_rate: rate,
+            channels: 1,
+            samples: (0..frames).map(|i| i as f32 * 0.0001).collect(),
+        }
+    }
+
+    #[test]
+    fn peak_and_rms_of_known_signal() {
+        // Exact arithmetic on a small vector:
+        // squares sum to 0.5625 over 4 samples -> mean 0.140625,
+        // rms = sqrt(0.140625) = 0.375 exactly.
+        let data = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.0, 0.5, -0.5, 0.25],
+        };
+        assert_eq!(peak(&data), 0.5);
+        assert!((rms(&data) - 0.375).abs() < 1e-6, "rms {}", rms(&data));
+
+        // A dense 0.8-amplitude sine: peak near 0.8, rms near 0.8/sqrt(2).
+        let rate = 44100u32;
+        let samples: Vec<f32> = (0..rate as usize)
+            .map(|i| 0.8 * (i as f32 * 2.0 * std::f32::consts::PI * 440.0 / rate as f32).sin())
+            .collect();
+        let sine = WavData {
+            sample_rate: rate,
+            channels: 1,
+            samples,
+        };
+        assert!((peak(&sine) - 0.8).abs() < 0.001, "peak {}", peak(&sine));
+        assert!(
+            (rms(&sine) - 0.8 / std::f32::consts::SQRT_2).abs() < 0.001,
+            "rms {}",
+            rms(&sine)
+        );
+
+        let empty = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: Vec::new(),
+        };
+        assert_eq!(peak(&empty), 0.0);
+        assert_eq!(rms(&empty), 0.0);
+    }
+
+    #[test]
+    fn normalize_scales_to_target_peak() {
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 2,
+            samples: vec![0.25, -0.125, 0.1, -0.05],
+        };
+        let gain = normalize(&mut data, 0.9);
+        assert!((gain - 3.6).abs() < 1e-5, "gain {gain}");
+        assert!((peak(&data) - 0.9).abs() < 1e-6);
+        assert!((data.samples[1] - (-0.45)).abs() < 1e-6);
+
+        // Target above 1.0 clamps to full scale.
+        let mut data2 = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.5, -0.25],
+        };
+        let gain2 = normalize(&mut data2, 2.0);
+        assert!((gain2 - 2.0).abs() < 1e-6);
+        assert!((peak(&data2) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normalize_silent_is_noop_returning_unity() {
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.0, 0.0, 0.0],
+        };
+        assert_eq!(normalize(&mut data, 0.9), 1.0);
+        assert_eq!(data.samples, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn trim_is_frame_accurate_and_clamped() {
+        let data = ramp_wav(8000, 8000); // 1 second
+        let t = trim(&data, 0.25, 0.5);
+        assert_eq!(t.frames(), 2000);
+        assert_eq!(t.sample_rate, 8000);
+        assert_eq!(t.channels, 1);
+        assert_eq!(t.samples[0], data.samples[2000]);
+        assert_eq!(t.samples[1999], data.samples[3999]);
+
+        // Out-of-range requests clamp to the data.
+        assert_eq!(trim(&data, -1.0, 99.0).frames(), 8000);
+        // end <= start -> empty, but rate/channels preserved.
+        let empty = trim(&data, 0.5, 0.5);
+        assert_eq!(empty.frames(), 0);
+        assert_eq!(empty.sample_rate, 8000);
+        assert_eq!(empty.channels, 1);
+        assert_eq!(trim(&data, 0.75, 0.25).frames(), 0);
+    }
+
+    #[test]
+    fn split_wav_concatenates_back_exactly() {
+        let data = ramp_wav(8000, 8000);
+        let (a, b) = split_wav(&data, 0.3);
+        assert_eq!(a.frames(), 2400);
+        assert_eq!(b.frames(), 5600);
+        let mut joined = a.samples.clone();
+        joined.extend_from_slice(&b.samples);
+        assert_eq!(joined, data.samples, "halves must reassemble exactly");
+
+        // Splits at the extremes leave one side empty.
+        let (a0, b0) = split_wav(&data, 0.0);
+        assert_eq!(a0.frames(), 0);
+        assert_eq!(b0.samples, data.samples);
+        let (a1, b1) = split_wav(&data, 5.0);
+        assert_eq!(a1.samples, data.samples);
+        assert_eq!(b1.frames(), 0);
+    }
+
+    #[test]
+    fn crossfade_midpoint_averages_and_length_formula_holds() {
+        // 0.2 s each at 8000 Hz, fade 0.1 s (800 frames):
+        // total = 1600 + 1600 - 800 = 2400 frames.
+        let a = const_wav(8000, 0.2, 0.4);
+        let b = const_wav(8000, 0.2, 0.8);
+        let out = crossfade_mix(&a, &b, 0.1).unwrap();
+        assert_eq!(out.frames(), 2400);
+        assert_eq!(out.sample_rate, 8000);
+        let at = |f: usize| out.samples[f];
+        assert!((at(0) - 0.4).abs() < 1e-6, "pure a before fade: {}", at(0));
+        assert!((at(799) - 0.4).abs() < 1e-6);
+        // Fade runs frames 800..1600; frame 1200 is p = 0.5 exactly.
+        assert!(
+            (at(1200) - 0.6).abs() < 1e-6,
+            "midpoint should average the sources: {}",
+            at(1200)
+        );
+        assert!((at(1600) - 0.8).abs() < 1e-6, "pure b after fade: {}", at(1600));
+        assert!((at(2399) - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn crossfade_rejects_overlong_fade_and_converts_channels() {
+        let a = const_wav(8000, 0.2, 0.4);
+        let b = const_wav(8000, 0.2, 0.8);
+        assert!(crossfade_mix(&a, &b, 0.3).is_err(), "fade longer than a source");
+
+        // Stereo b (0.8 on both channels) into mono a: averaged to
+        // the same 0.8, so the midpoint still averages 0.4 and 0.8.
+        let stereo_b = WavData {
+            sample_rate: 8000,
+            channels: 2,
+            samples: vec![0.8; 1600 * 2],
+        };
+        let out = crossfade_mix(&a, &stereo_b, 0.1).unwrap();
+        assert_eq!(out.channels, 1);
+        assert_eq!(out.frames(), 2400);
+        assert!((out.samples[1200] - 0.6).abs() < 1e-5);
+    }
+
+    #[test]
+    fn split_clip_boundaries() {
+        // Clip spans frames 24..72 (start 24, probed duration 48).
+        let clip = AudioClip {
+            path: "x.wav".into(),
+            start_frame: 24,
+        };
+        let (first, second) = split_clip(&clip, 48, 48).unwrap();
+        assert_eq!(first.start_frame, 24);
+        assert_eq!(first.path, "x.wav");
+        assert_eq!(second.start_frame, 48);
+        assert_eq!(second.path, "x.wav");
+
+        // At the start, at the end, past the end, before the start:
+        // none of these are strictly inside the span.
+        assert!(split_clip(&clip, 24, 48).is_none());
+        assert!(split_clip(&clip, 72, 48).is_none());
+        assert!(split_clip(&clip, 200, 48).is_none());
+        assert!(split_clip(&clip, 10, 48).is_none());
+        // Zero duration has no inside.
+        assert!(split_clip(&clip, 48, 0).is_none());
     }
 }

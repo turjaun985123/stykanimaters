@@ -35,6 +35,12 @@ pub enum ClipKind {
     /// A fading chain of ghosts trailing behind the anchor,
     /// opposite `angle`, spaced `length / 8` apart.
     Trail,
+    /// A celebratory pop: multi-coloured pieces that arc up,
+    /// flutter, and fall back under gravity.
+    Confetti,
+    /// An expanding ring of motes: the ring radius grows linearly
+    /// to `length` while the motes fade out.
+    ShockRing,
 }
 
 /// A timed particle effect. `start` and `duration` are in frames;
@@ -60,6 +66,17 @@ fn prand(seed: u32, i: u32, salt: u32) -> f32 {
     h = h.wrapping_mul(0x7FEB_352D);
     h ^= h >> 15;
     (h % 100_000) as f32 / 100_000.0
+}
+
+/// Cycle a colour's channels (r,g,b) -> (g,b,r) -> (b,r,g).
+/// A cheap hue-ish rotation used to build the confetti palette
+/// from a clip's single base colour.
+fn rotate_channels(c: [u8; 3], k: u32) -> [u8; 3] {
+    match k % 3 {
+        0 => c,
+        1 => [c[1], c[2], c[0]],
+        _ => [c[2], c[0], c[1]],
+    }
 }
 
 fn rgb(hex: u32) -> [u8; 3] {
@@ -103,6 +120,16 @@ pub fn clip_particles(
     let push = |out: &mut Vec<([f32; 2], f32, [u8; 3], f32)>, pos: V2, size: f32, alpha: f32| {
         if alpha > 0.01 {
             out.push((pos, size.max(0.4), color, alpha.clamp(0.0, 1.0)));
+        }
+    };
+    // Same, with a per-particle colour (confetti's palette).
+    let push_c = |out: &mut Vec<([f32; 2], f32, [u8; 3], f32)>,
+                  pos: V2,
+                  size: f32,
+                  alpha: f32,
+                  col: [u8; 3]| {
+        if alpha > 0.01 {
+            out.push((pos, size.max(0.4), col, alpha.clamp(0.0, 1.0)));
         }
     };
 
@@ -189,6 +216,50 @@ pub fn clip_particles(
                 push(&mut out, pos, 5.5 * (1.0 - 0.05 * k as f32), alpha);
             }
         }
+        ClipKind::Confetti => {
+            // Six-piece palette: the clip colour under three channel
+            // rotations, at full and 65% brightness.
+            let palette: [[u8; 3]; 6] = std::array::from_fn(|k| {
+                let rot = rotate_channels(color, k as u32);
+                let f = if k < 3 { 1.0 } else { 0.65 };
+                [
+                    (rot[0] as f32 * f) as u8,
+                    (rot[1] as f32 * f) as u8,
+                    (rot[2] as f32 * f) as u8,
+                ]
+            });
+            for i in 0..28 {
+                let a = prand(seed, i, 1) * std::f32::consts::TAU;
+                let reach = 26.0 + prand(seed, i, 2) * 84.0;
+                let ease = 1.0 - (1.0 - t) * (1.0 - t);
+                let arc = 46.0 + prand(seed, i, 3) * 64.0;
+                // Sideways flutter that grows as the piece falls.
+                let flutter =
+                    7.0 * (local * 0.9 + prand(seed, i, 4) * std::f32::consts::TAU).sin() * t;
+                let pos = [
+                    anchor[0] + a.cos() * reach * ease + flutter,
+                    anchor[1] + a.sin() * reach * ease * 0.6 + arc * (2.0 * t * t - t) * 2.0,
+                ];
+                // Pieces tumble: apparent width oscillates.
+                let spin = 0.55
+                    + 0.45 * (local * 1.3 + prand(seed, i, 5) * std::f32::consts::TAU)
+                        .sin()
+                        .abs();
+                let alpha = (1.0 - t * t) * (0.75 + 0.25 * prand(seed, i, 6));
+                push_c(&mut out, pos, 3.0 * spin, alpha, palette[(i % 6) as usize]);
+            }
+        }
+        ClipKind::ShockRing => {
+            // One clean expanding ring: radius = t * length, fading.
+            let radius = t * clip.length.max(0.0);
+            for k in 0..36u32 {
+                let a = (k as f32 / 36.0) * std::f32::consts::TAU
+                    + (prand(seed, k, 1) - 0.5) * 0.06;
+                let r = (radius + (prand(seed, k, 2) - 0.5) * 4.0).max(0.0);
+                let pos = [anchor[0] + a.cos() * r, anchor[1] + a.sin() * r];
+                push(&mut out, pos, 3.2 * (1.0 - 0.45 * t), (1.0 - t) * 0.9);
+            }
+        }
     }
     out
 }
@@ -212,6 +283,117 @@ pub enum WeatherKind {
     Fireflies,
 }
 
+/// Wrap a coordinate into `[0, m)`. The weather field lives on a
+/// torus: positions are computed modulo the stage size, so a
+/// particle that leaves one edge re-enters at the opposite one.
+fn wrap(v: f32, m: f32) -> f32 {
+    if m > 0.0 {
+        v.rem_euclid(m)
+    } else {
+        0.0
+    }
+}
+
+/// Live weather particles at fractional frame time `frame_f`:
+/// (centre, radius, colour, alpha), in stage coordinates.
+///
+/// Emission is closed-form and stateless, like everything else in
+/// this module. Each particle `i` owns a fixed home position and
+/// phase, spread over the stage by the shared `prand` hash, and its
+/// position is a pure function of `(i, frame_f)`:
+///
+/// - Rain and snow fall: `y = wrap(home_y + speed_i * t)`. The
+///   fall wraps modulo the stage height, so drops leaving the
+///   bottom re-enter at the top — at any instant the field is
+///   uniformly filled, with no spawn or death bookkeeping.
+/// - Wind drifts `x` the same way, modulo the stage width; rain
+///   additionally slants — its sideways offset grows with the
+///   distance fallen, so stronger wind means a more slanted fall.
+/// - Snow adds a per-flake sinusoidal sway on top of the drift.
+/// - Fireflies wander around their home on slow Lissajous paths
+///   (sums of sines), drift at half the wind speed, and pulse.
+///
+/// `t` is `frame_f / fps` seconds (30 fps assumed if `fps` is not
+/// positive), so speeds are in stage units per second and look the
+/// same at any project frame rate. The particle count is
+/// `amount` rounded, clamped to `0..=200`.
+pub fn weather_particles(
+    w: &Weather,
+    frame_f: f32,
+    stage: [f32; 2],
+    fps: f32,
+) -> Vec<(V2, f32, [u8; 3], f32)> {
+    let sw = stage[0].max(1.0);
+    let sh = stage[1].max(1.0);
+    let count = w.amount.round().clamp(0.0, 200.0) as usize;
+    let mut out = Vec::with_capacity(count);
+    if count == 0 {
+        return out;
+    }
+    let secs = frame_f / if fps > 0.0 { fps } else { 30.0 };
+    let wind = w.wind;
+    for i in 0..count as u32 {
+        let p = match w.kind {
+            WeatherKind::Rain => {
+                let seed = 0x9A17_0001;
+                let bx = prand(seed, i, 1) * sw;
+                let off = prand(seed, i, 2) * sh;
+                let speed = 520.0 + prand(seed, i, 3) * 320.0;
+                let travel = off + speed * secs;
+                let y = wrap(travel, sh);
+                let slant = (wind / 600.0).clamp(-0.6, 0.6);
+                let x = wrap(bx + wind * secs + travel * slant, sw);
+                let alpha = 0.38 + 0.24 * prand(seed, i, 4);
+                ([x, y], 1.2, [198, 220, 242], alpha)
+            }
+            WeatherKind::Snow => {
+                let seed = 0x9A17_0002;
+                let bx = prand(seed, i, 1) * sw;
+                let off = prand(seed, i, 2) * sh;
+                let speed = 26.0 + prand(seed, i, 3) * 40.0;
+                let y = wrap(off + speed * secs, sh);
+                let sway_amp = 8.0 + prand(seed, i, 4) * 14.0;
+                let sway_freq = 0.6 + prand(seed, i, 5) * 1.2;
+                let phase = prand(seed, i, 6) * std::f32::consts::TAU;
+                let x = wrap(
+                    bx + wind * secs + sway_amp * (sway_freq * secs + phase).sin(),
+                    sw,
+                );
+                let size = 1.5 + prand(seed, i, 7);
+                let alpha = 0.65 + 0.3 * prand(seed, i, 8);
+                ([x, y], size, [248, 250, 255], alpha)
+            }
+            WeatherKind::Fireflies => {
+                let seed = 0x9A17_0003;
+                let hx = prand(seed, i, 1) * sw;
+                let hy = prand(seed, i, 2) * sh;
+                let fm = 0.7 + prand(seed, i, 3) * 0.6;
+                let ox = 30.0 * (0.31 * fm * secs + prand(seed, i, 4) * std::f32::consts::TAU).sin()
+                    + 12.0 * (0.83 * fm * secs + prand(seed, i, 5) * std::f32::consts::TAU).sin();
+                let oy = 24.0 * (0.26 * fm * secs + prand(seed, i, 6) * std::f32::consts::TAU).sin()
+                    + 10.0 * (0.71 * fm * secs + prand(seed, i, 7) * std::f32::consts::TAU).sin();
+                let x = wrap(hx + wind * secs * 0.5 + ox, sw);
+                let y = wrap(hy + oy, sh);
+                let alpha = 0.55
+                    + 0.35
+                        * ((1.2 + prand(seed, i, 8) * 1.4) * secs
+                            + prand(seed, i, 9) * std::f32::consts::TAU)
+                            .sin();
+                let size = 1.6 + prand(seed, i, 10) * 0.9;
+                let g = prand(seed, i, 11);
+                let col = [
+                    (232.0 - 64.0 * g) as u8,
+                    (216.0 + 14.0 * g) as u8,
+                    (106.0 + 4.0 * g) as u8,
+                ];
+                ([x, y], size, col, alpha)
+            }
+        };
+        out.push(p);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,13 +410,15 @@ mod tests {
         }
     }
 
-    const KINDS: [ClipKind; 6] = [
+    const KINDS: [ClipKind; 8] = [
         ClipKind::Burst,
         ClipKind::Sparkle,
         ClipKind::Smoke,
         ClipKind::Beam,
         ClipKind::Aura,
         ClipKind::Trail,
+        ClipKind::Confetti,
+        ClipKind::ShockRing,
     ];
 
     #[test]
@@ -331,6 +515,168 @@ mod tests {
             assert!(along <= 0.01, "ghost ahead of the anchor: {along}");
             assert!(*alpha > 0.0 && *alpha <= 0.55);
         }
+    }
+
+
+    #[test]
+    fn confetti_uses_several_colours() {
+        let c = clip(ClipKind::Confetti);
+        let ps = clip_particles(&c, 16.0, [300.0, 300.0]);
+        assert!(!ps.is_empty());
+        let mut colours: Vec<[u8; 3]> = ps.iter().map(|p| p.2).collect();
+        colours.sort();
+        colours.dedup();
+        assert!(
+            colours.len() >= 3,
+            "confetti should mix colours from the palette, got {colours:?}"
+        );
+    }
+
+    #[test]
+    fn confetti_pops_up_then_falls() {
+        let c = clip(ClipKind::Confetti);
+        let anchor = [300.0, 300.0];
+        let mean_y = |frame: f32| {
+            let ps = clip_particles(&c, frame, anchor);
+            assert!(!ps.is_empty());
+            ps.iter().map(|p| p.0[1]).sum::<f32>() / ps.len() as f32
+        };
+        assert!(
+            mean_y(c.start + c.duration * 0.12) < anchor[1],
+            "confetti should be above the anchor early (popped up)"
+        );
+        assert!(
+            mean_y(c.start + c.duration * 0.9) > anchor[1],
+            "confetti should have fallen below the anchor late"
+        );
+    }
+
+    #[test]
+    fn shock_ring_expands_and_fades() {
+        let c = clip(ClipKind::ShockRing); // length 160
+        let anchor = [300.0, 300.0];
+        let stats = |frame: f32| {
+            let ps = clip_particles(&c, frame, anchor);
+            assert!(!ps.is_empty());
+            let r = ps
+                .iter()
+                .map(|p| ((p.0[0] - anchor[0]).powi(2) + (p.0[1] - anchor[1]).powi(2)).sqrt())
+                .sum::<f32>()
+                / ps.len() as f32;
+            let a = ps.iter().map(|p| p.3).sum::<f32>() / ps.len() as f32;
+            (r, a)
+        };
+        let (r1, a1) = stats(c.start + c.duration * 0.25);
+        let (r2, a2) = stats(c.start + c.duration * 0.75);
+        assert!((r1 - 40.0).abs() < 4.0, "ring radius at t=0.25 is {r1}, want ~40");
+        assert!((r2 - 120.0).abs() < 4.0, "ring radius at t=0.75 is {r2}, want ~120");
+        assert!(r2 > r1, "ring should expand");
+        assert!(a2 < a1, "ring should fade ({a1} -> {a2})");
+    }
+
+    // ---- Weather ----
+
+    fn weather(kind: WeatherKind, amount: f32, wind: f32) -> Weather {
+        Weather { kind, amount, wind }
+    }
+
+    const STAGE: [f32; 2] = [960.0, 720.0];
+    const WEATHER_KINDS: [WeatherKind; 3] =
+        [WeatherKind::Rain, WeatherKind::Snow, WeatherKind::Fireflies];
+
+    #[test]
+    fn weather_is_deterministic() {
+        for kind in WEATHER_KINDS {
+            let w = weather(kind, 80.0, 12.0);
+            let a = weather_particles(&w, 37.5, STAGE, 30.0);
+            let b = weather_particles(&w, 37.5, STAGE, 30.0);
+            assert_eq!(a, b, "{kind:?} differs between identical calls");
+            assert!(!a.is_empty());
+        }
+    }
+
+    #[test]
+    fn weather_count_respects_amount_and_clamps() {
+        let at = |kind, amount| {
+            weather_particles(&weather(kind, amount, 0.0), 0.0, STAGE, 30.0).len()
+        };
+        assert_eq!(at(WeatherKind::Rain, 40.0), 40);
+        assert_eq!(at(WeatherKind::Rain, 10.4), 10, "amount is rounded");
+        assert_eq!(at(WeatherKind::Snow, 0.0), 0);
+        assert_eq!(at(WeatherKind::Snow, -5.0), 0, "negative clamps to 0");
+        assert_eq!(at(WeatherKind::Fireflies, 999.0), 200, "clamped to 200");
+    }
+
+    #[test]
+    fn weather_stays_on_stage() {
+        for kind in WEATHER_KINDS {
+            let w = weather(kind, 120.0, 60.0);
+            for frame in [0.0, 13.7, 400.25, 5000.0] {
+                for (p, _, _, _) in weather_particles(&w, frame, STAGE, 30.0) {
+                    assert!(
+                        (0.0..STAGE[0]).contains(&p[0]) && (0.0..STAGE[1]).contains(&p[1]),
+                        "{kind:?} particle off stage at {p:?} (frame {frame})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rain_falls_fast() {
+        let w = weather(WeatherKind::Rain, 60.0, 0.0);
+        let a = weather_particles(&w, 10.0, STAGE, 30.0);
+        let b = weather_particles(&w, 13.0, STAGE, 30.0); // 0.1 s later
+        assert_eq!(a.len(), b.len());
+        for (pa, pb) in a.iter().zip(&b) {
+            // Forward motion modulo the wrap: 0.1 s of fall is
+            // 52..84 units, never backwards or a full wrap.
+            let dy = (pb.0[1] - pa.0[1]).rem_euclid(STAGE[1]);
+            assert!(
+                (20.0..STAGE[1] * 0.5).contains(&dy),
+                "rain drop moved {dy} in 0.1 s"
+            );
+        }
+    }
+
+    #[test]
+    fn snow_sways_sideways() {
+        // No wind: pure drift would keep every flake's x fixed.
+        // Sinusoidal sway must push some flakes left, others right.
+        let w = weather(WeatherKind::Snow, 60.0, 0.0);
+        let a = weather_particles(&w, 0.0, STAGE, 30.0);
+        let b = weather_particles(&w, 45.0, STAGE, 30.0); // 1.5 s later
+        let mut dxs: Vec<f32> = a
+            .iter()
+            .zip(&b)
+            .map(|(pa, pb)| {
+                (pb.0[0] - pa.0[0] + STAGE[0] * 0.5).rem_euclid(STAGE[0]) - STAGE[0] * 0.5
+            })
+            .collect();
+        dxs.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        assert!(dxs[0] < -1.0, "no flake swayed left: min dx {}", dxs[0]);
+        assert!(
+            dxs[dxs.len() - 1] > 1.0,
+            "no flake swayed right: max dx {}",
+            dxs[dxs.len() - 1]
+        );
+    }
+
+    #[test]
+    fn firefly_alpha_pulses() {
+        let w = weather(WeatherKind::Fireflies, 1.0, 0.0);
+        let mut lo = 1.0f32;
+        let mut hi = 0.0f32;
+        for f in 0..240 {
+            // 8 s at 30 fps: at least one full pulse period.
+            let ps = weather_particles(&w, f as f32, STAGE, 30.0);
+            assert_eq!(ps.len(), 1);
+            lo = lo.min(ps[0].3);
+            hi = hi.max(ps[0].3);
+        }
+        assert!(lo < 0.35, "firefly never dims: min alpha {lo}");
+        assert!(hi > 0.75, "firefly never glows: max alpha {hi}");
+        assert!(lo >= 0.19 && hi <= 0.91, "alpha outside the 0.2..0.9 band");
     }
 
     #[test]

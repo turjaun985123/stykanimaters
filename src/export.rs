@@ -215,7 +215,14 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
         let pos = evaluate(&fig.def, pose);
         for (i, node) in fig.def.nodes.iter().enumerate() {
             let color_hex = node.color.unwrap_or(fig.color);
-            let color = rgb(color_hex);
+            // Figure opacity: heads/rings/polys have no alpha
+            // plumbing, so they fade toward the background (segments
+            // above use true alpha via StyledSeg.opacity).
+            let color = rgb(crate::style::lerp_color(
+                project.background,
+                color_hex,
+                fig.opacity.clamp(0.0, 1.0),
+            ));
             let half = node.thickness / 2.0 * zoom * ss as f32;
             if let Some(p) = node.parent {
                 let style = node.style;
@@ -233,7 +240,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                     half_far,
                     color_near: color_hex,
                     color_far: style.color2.unwrap_or(color_hex),
-                    opacity: style.opacity,
+                    opacity: style.opacity * fig.opacity.clamp(0.0, 1.0),
                     cap: style.cap,
                 });
             }
@@ -294,6 +301,13 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                     }
                 }
             }
+        }
+    }
+    if let Some(weather) = &project.weather {
+        for (p, r, c, a) in
+            crate::vfx::weather_particles(weather, frame_f, project.stage, project.fps)
+        {
+            particles.push((view(p), r * zoom * ss as f32, c, a));
         }
     }
 
@@ -1016,5 +1030,33 @@ mod media_integration_tests {
             .filter(|(a, b)| a != b)
             .count();
         assert!(diff > 50, "sprite should change the render ({diff} px)");
+    }
+}
+
+#[cfg(test)]
+mod weather_integration_tests {
+    use super::*;
+
+    #[test]
+    fn weather_changes_the_rendered_frame() {
+        // Integration guard for the wave-5 weather pass: the same
+        // project rendered with and without rain must differ, and
+        // the frame keeps its stage size either way.
+        let mut project = Project::new_demo();
+        project.weather = Some(crate::vfx::Weather {
+            kind: crate::vfx::WeatherKind::Rain,
+            amount: 150.0,
+            wind: 40.0,
+        });
+        let with = render_frame_at(&project, 3.0);
+        assert_eq!((with.width(), with.height()), (960, 720));
+        project.weather = None;
+        let without = render_frame_at(&project, 3.0);
+        let diff = with
+            .pixels()
+            .zip(without.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(diff > 50, "rain should change the render ({diff} px)");
     }
 }

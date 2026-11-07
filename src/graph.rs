@@ -82,6 +82,82 @@ impl Channel {
             .sort_by(|a, b| a.frame.partial_cmp(&b.frame).unwrap_or(std::cmp::Ordering::Equal));
     }
 
+    /// Index of the key whose frame is closest to `frame`, when
+    /// that distance is within `tol`; `None` otherwise.
+    fn nearest_key_index(&self, frame: f32, tol: f32) -> Option<usize> {
+        let mut best: Option<(usize, f32)> = None;
+        for (i, k) in self.keys.iter().enumerate() {
+            let d = (k.frame - frame).abs();
+            if d <= tol && best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((i, d));
+            }
+        }
+        best.map(|(i, _)| i)
+    }
+
+    /// Insert a flat-tangent key at (`frame`, `value`), keeping
+    /// keys sorted. If a key already sits at the same frame (within
+    /// 0.01), it is replaced wholesale — new value, flat tangents —
+    /// rather than duplicated.
+    pub fn add_key(&mut self, frame: f32, value: f32) {
+        if let Some(idx) = self.nearest_key_index(frame, 0.01) {
+            self.keys[idx] = Key::flat(frame, value);
+            self.sort_keys();
+            return;
+        }
+        let pos = self.keys.partition_point(|k| k.frame < frame);
+        self.keys.insert(pos, Key::flat(frame, value));
+    }
+
+    /// Remove the key nearest to `frame`, when one is within 0.5
+    /// frames of it. Returns whether a key was removed.
+    pub fn remove_key(&mut self, frame: f32) -> bool {
+        match self.nearest_key_index(frame, 0.5) {
+            Some(idx) => {
+                self.keys.remove(idx);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Move the key nearest to `from` (within 0.5 frames) to
+    /// (`to_frame`, `to_value`), keeping its tangents and the
+    /// sorted order. If another key already sits at `to_frame`
+    /// (within 0.01), the moved key replaces it. Returns whether a
+    /// key was moved.
+    pub fn move_key(&mut self, from: f32, to_frame: f32, to_value: f32) -> bool {
+        let Some(idx) = self.nearest_key_index(from, 0.5) else {
+            return false;
+        };
+        let mut key = self.keys.remove(idx);
+        key.frame = to_frame;
+        key.value = to_value;
+        if let Some(other) = self
+            .keys
+            .iter()
+            .position(|k| (k.frame - to_frame).abs() <= 0.01)
+        {
+            self.keys.remove(other);
+        }
+        let pos = self.keys.partition_point(|k| k.frame < key.frame);
+        self.keys.insert(pos, key);
+        true
+    }
+
+    /// Set both tangents of the key nearest to `frame` (within 0.5
+    /// frames). Returns whether such a key was found.
+    pub fn set_tangents(&mut self, frame: f32, in_tan: f32, out_tan: f32) -> bool {
+        match self.nearest_key_index(frame, 0.5) {
+            Some(idx) => {
+                self.keys[idx].in_tan = in_tan;
+                self.keys[idx].out_tan = out_tan;
+                true
+            }
+            None => false,
+        }
+    }
+
     fn is_angle(&self) -> bool {
         matches!(self.target, ChannelTarget::Angle(_))
     }
@@ -158,6 +234,30 @@ impl Channel {
 pub struct ChannelResult {
     pub poses: Vec<Pose>,
     pub defs: Vec<FigureDef>,
+}
+
+/// Find the channel for (`figure`, `target`) in `channels`, or
+/// create an empty one there, and return it mutably. Editors call
+/// this before adding a first key so they never have to special-
+/// case a missing channel.
+pub fn channel_mut<'a>(
+    channels: &'a mut Vec<Channel>,
+    figure: usize,
+    target: ChannelTarget,
+) -> &'a mut Channel {
+    if let Some(pos) = channels
+        .iter()
+        .position(|c| c.figure == figure && c.target == target)
+    {
+        &mut channels[pos]
+    } else {
+        channels.push(Channel {
+            figure,
+            target,
+            keys: Vec::new(),
+        });
+        channels.last_mut().expect("just pushed a channel")
+    }
 }
 
 /// Evaluate every channel at `frame_f` on top of the project's own
@@ -354,5 +454,143 @@ mod tests {
         let out = apply_channels(&project, &channels, 0.0);
         assert_eq!(out.poses.len(), 1);
         assert!(approx(out.poses[0].root[0], 480.0), "nothing overridden");
+    }
+
+    #[test]
+    fn add_key_inserts_sorted_and_replaces_same_frame() {
+        let mut ch = channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(0.0, 0.0), Key::flat(10.0, 100.0)],
+        );
+        ch.add_key(5.0, 40.0);
+        assert_eq!(ch.keys.len(), 3);
+        assert!(
+            approx(ch.keys[0].frame, 0.0)
+                && approx(ch.keys[1].frame, 5.0)
+                && approx(ch.keys[2].frame, 10.0),
+            "keys stay sorted: {:?}",
+            ch.keys
+        );
+        assert!(approx(ch.keys[1].value, 40.0));
+        assert!(
+            approx(ch.keys[1].in_tan, 0.0) && approx(ch.keys[1].out_tan, 0.0),
+            "inserted keys have flat tangents"
+        );
+        // Within 0.01 of an existing frame: replace, don't duplicate.
+        // The replacement key sits at the exact new frame.
+        ch.add_key(10.005, 111.0);
+        assert_eq!(ch.keys.len(), 3, "same-frame add must not duplicate");
+        assert!(approx(ch.keys[2].frame, 10.005), "key moved to the new frame");
+        assert!(approx(ch.keys[2].value, 111.0), "value replaced");
+        assert!(approx(ch.value_at(10.005), 111.0), "exact at the key");
+    }
+
+    #[test]
+    fn add_key_replacement_resets_tangents() {
+        let mut ch = channel(
+            ChannelTarget::RootX,
+            vec![Key {
+                frame: 5.0,
+                value: 1.0,
+                in_tan: 3.0,
+                out_tan: -2.0,
+            }],
+        );
+        ch.add_key(5.0, 9.0);
+        assert_eq!(ch.keys.len(), 1);
+        assert!(approx(ch.keys[0].value, 9.0));
+        assert!(
+            approx(ch.keys[0].in_tan, 0.0) && approx(ch.keys[0].out_tan, 0.0),
+            "replacement is a fresh flat key"
+        );
+    }
+
+    #[test]
+    fn remove_key_takes_nearest_within_half_frame() {
+        let mut ch = channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(5.0, 50.0),
+                Key::flat(10.0, 100.0),
+            ],
+        );
+        assert!(ch.remove_key(5.4), "0.4 away is within tolerance");
+        assert_eq!(ch.keys.len(), 2);
+        assert!(approx(ch.keys[1].frame, 10.0), "the 5-frame key went");
+        assert!(!ch.remove_key(7.0), "2+ frames from any key: no removal");
+        assert_eq!(ch.keys.len(), 2, "failed removal changes nothing");
+        let mut empty = channel(ChannelTarget::RootX, vec![]);
+        assert!(!empty.remove_key(0.0), "empty channel: nothing to remove");
+    }
+
+    #[test]
+    fn move_key_keeps_order_and_updates_value() {
+        let mut ch = channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 0.0),
+                Key {
+                    frame: 5.0,
+                    value: 50.0,
+                    in_tan: 1.0,
+                    out_tan: 1.0,
+                },
+                Key::flat(10.0, 100.0),
+            ],
+        );
+        assert!(ch.move_key(5.0, 2.0, 25.0));
+        assert_eq!(ch.keys.len(), 3);
+        assert!(
+            approx(ch.keys[0].frame, 0.0)
+                && approx(ch.keys[1].frame, 2.0)
+                && approx(ch.keys[2].frame, 10.0),
+            "order restored after move: {:?}",
+            ch.keys
+        );
+        assert!(approx(ch.keys[1].value, 25.0), "value moved with the key");
+        assert!(approx(ch.keys[1].in_tan, 1.0), "tangents travel with the key");
+        assert!(!ch.move_key(7.5, 8.0, 0.0), "no key near 7.5 to move");
+        // Moving onto another key's frame replaces that key.
+        assert!(ch.move_key(2.0, 10.0, 90.0));
+        assert_eq!(ch.keys.len(), 2, "destination key replaced");
+        assert!(approx(ch.value_at(10.0), 90.0));
+    }
+
+    #[test]
+    fn set_tangents_finds_key_and_changes_curve() {
+        let mut ch = channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(0.0, 0.0), Key::flat(10.0, 100.0)],
+        );
+        assert!(approx(ch.value_at(5.0), 50.0), "flat tangents: midpoint 50");
+        assert!(ch.set_tangents(0.0, 0.0, 2.0));
+        assert!(approx(ch.keys[0].out_tan, 2.0));
+        assert!(
+            ch.value_at(5.0) > 50.0,
+            "steeper out-tangent lifts the curve"
+        );
+        assert!(!ch.set_tangents(4.0, 1.0, 1.0), "no key within 0.5 of 4");
+    }
+
+    #[test]
+    fn channel_mut_creates_then_reuses() {
+        let mut channels: Vec<Channel> = Vec::new();
+        {
+            let ch = channel_mut(&mut channels, 2, ChannelTarget::Angle(3));
+            assert_eq!(ch.figure, 2);
+            assert_eq!(ch.target, ChannelTarget::Angle(3));
+            assert!(ch.keys.is_empty(), "fresh channel has no keys");
+            ch.add_key(0.0, 10.0);
+        }
+        assert_eq!(channels.len(), 1, "one channel created");
+        {
+            let ch = channel_mut(&mut channels, 2, ChannelTarget::Angle(3));
+            assert_eq!(ch.keys.len(), 1, "same channel returned, keys kept");
+        }
+        assert_eq!(channels.len(), 1, "reuse must not duplicate");
+        channel_mut(&mut channels, 2, ChannelTarget::RootX).add_key(1.0, 5.0);
+        channel_mut(&mut channels, 0, ChannelTarget::Angle(3)).add_key(1.0, 5.0);
+        assert_eq!(channels.len(), 3, "figure and target both distinguish");
     }
 }

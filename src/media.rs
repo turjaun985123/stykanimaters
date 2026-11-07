@@ -13,6 +13,15 @@
 //! width / height, so sprites are never stretched. Text sits at the
 //! segment midpoint, rotated along the segment direction.
 //!
+//! Free-standing instances (`Project.sprites` / `Project.texts`,
+//! keyframed with `InstanceKey`s — e.g. imported from Stick Nodes
+//! animation files) are placed by the same [`media_items`] pass,
+//! after the segment media, so instances draw on top. A sprite
+//! instance's `InstanceKey` gives its centre, rotation and scale:
+//! the drawn quad is the image's pixel size times the key scale,
+//! rotated about the centre. A text instance draws with glyph
+//! height `size * key.scale` rotated by the key angle.
+//!
 //! Text is drawn with a built-in 3x5 bitmap font — no font files, no
 //! platform dependencies, fully deterministic. The charset is
 //! deliberately small: `A-Z` (lowercase is folded to uppercase),
@@ -29,7 +38,7 @@
 //! - PNG assets are decoded on each call (no cache): fine for
 //!   export-time compositing, not a per-frame editor hot path.
 
-use crate::model::{evaluate, Project, SegmentMedia, V2};
+use crate::model::{evaluate, InstanceKey, Project, SegmentMedia, V2};
 use image::{Rgba, RgbaImage};
 
 /// One piece of segment media placed in stage space for a frame.
@@ -63,20 +72,28 @@ fn scale(a: V2, s: f32) -> V2 {
     [a[0] * s, a[1] * s]
 }
 
-/// Width / height of asset `idx`, or None when it is missing or
-/// its PNG bytes do not decode.
-fn png_aspect(project: &Project, idx: usize) -> Option<f32> {
+/// Pixel dimensions of asset `idx`, or None when it is missing
+/// or its PNG bytes do not decode.
+fn png_dims(project: &Project, idx: usize) -> Option<(u32, u32)> {
     let asset = project.assets.get(idx)?;
     let img = image::load_from_memory(&asset.png).ok()?;
     let (w, h) = (img.width(), img.height());
-    if h == 0 {
+    if w == 0 || h == 0 {
         return None;
     }
+    Some((w, h))
+}
+
+/// Width / height of asset `idx`, or None when it is missing or
+/// its PNG bytes do not decode.
+fn png_aspect(project: &Project, idx: usize) -> Option<f32> {
+    let (w, h) = png_dims(project, idx)?;
     Some(w as f32 / h as f32)
 }
 
-/// All media items visible at fractional frame time `frame_f`,
-/// in figure order, then node order.
+/// All media items visible at fractional frame time `frame_f`:
+/// segment media in figure order, then node order; then sprite
+/// instances; then text instances (instances draw on top).
 pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
     let mut out = Vec::new();
     let poses = project.poses_at(frame_f);
@@ -128,6 +145,53 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
                 }
             }
         }
+    }
+    // Free-standing sprite instances: the image's pixel size times
+    // the sampled key scale, centred at the key position, rotated
+    // by the key angle (y-down rotation, as for text).
+    for inst in &project.sprites {
+        let Some(key) = InstanceKey::sample(&inst.keys, frame_f) else {
+            continue;
+        };
+        if key.scale <= 0.0 {
+            continue;
+        }
+        let Some((w, h)) = png_dims(project, inst.asset) else {
+            continue;
+        };
+        let c = [key.x, key.y];
+        let rad = key.angle.to_radians();
+        let u = [rad.cos(), rad.sin()];
+        let v = [-rad.sin(), rad.cos()];
+        let hu = scale(u, w as f32 * key.scale / 2.0);
+        let hv = scale(v, h as f32 * key.scale / 2.0);
+        out.push(MediaItem::Image {
+            corners: [
+                sub(sub(c, hu), hv),
+                sub(add(c, hu), hv),
+                add(add(c, hu), hv),
+                add(sub(c, hu), hv),
+            ],
+            asset: inst.asset,
+        });
+    }
+    // Free-standing text instances: `size` is the unscaled glyph
+    // height; the key scale multiplies it.
+    for text in &project.texts {
+        let Some(key) = InstanceKey::sample(&text.keys, frame_f) else {
+            continue;
+        };
+        let size = text.size * key.scale;
+        if size <= 0.0 {
+            continue;
+        }
+        out.push(MediaItem::Text {
+            pos: [key.x, key.y],
+            angle_deg: key.angle,
+            content: text.content.clone(),
+            size,
+            color: text.color,
+        });
     }
     out
 }
@@ -375,6 +439,7 @@ mod tests {
     use super::*;
     use crate::model::{
         Easing, FigureDef, FigureInstance, Frame, ImageAsset, NodeDef, NodeStyle, Pose, Shape,
+        SpriteInstance, TextInstance,
     };
     use std::io::Cursor;
 
@@ -561,5 +626,143 @@ mod tests {
         }
         assert_eq!(glyph_rows('a'), glyph_rows('A'));
         assert_eq!(glyph_rows('~'), glyph_rows('?'), "unknown -> ?");
+    }
+
+    fn image_items(items: &[MediaItem]) -> Vec<([V2; 4], usize)> {
+        items
+            .iter()
+            .filter_map(|i| match i {
+                MediaItem::Image { corners, asset } => Some((*corners, *asset)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sprite_instance_item_geometry_and_sampling() {
+        let mut project = demo_project();
+        project.sprites.push(SpriteInstance {
+            asset: 0,
+            keys: vec![
+                InstanceKey {
+                    frame: 0.0,
+                    x: 300.0,
+                    y: 200.0,
+                    scale: 10.0,
+                    angle: 0.0,
+                },
+                InstanceKey {
+                    frame: 2.0,
+                    x: 340.0,
+                    y: 200.0,
+                    scale: 10.0,
+                    angle: 90.0,
+                },
+            ],
+        });
+        // Frame 0: asset is 4x2 px, scale 10 -> 40x20 quad at
+        // (300, 200), unrotated.
+        let items = media_items(&project, 0.0);
+        let images = image_items(&items);
+        let (corners, _) = images.last().expect("sprite instance item");
+        assert!(close(corners[0], [280.0, 190.0]), "c0 {corners:?}");
+        assert!(close(corners[1], [320.0, 190.0]), "c1 {corners:?}");
+        assert!(close(corners[2], [320.0, 210.0]), "c2 {corners:?}");
+        assert!(close(corners[3], [280.0, 210.0]), "c3 {corners:?}");
+        // Frame 1: keys interpolate — centre (320, 200).
+        let items = media_items(&project, 1.0);
+        let images = image_items(&items);
+        let (corners, _) = images.last().expect("sprite instance item");
+        let centre = scale(add(corners[0], corners[2]), 0.5);
+        assert!(close(centre, [320.0, 200.0]), "centre {centre:?}");
+        // Frame 2: rotated 90 degrees — the quad is 20 wide, 40 tall.
+        let items = media_items(&project, 2.0);
+        let images = image_items(&items);
+        let (corners, _) = images.last().expect("sprite instance item");
+        assert!(close(corners[0], [350.0, 180.0]), "c0 {corners:?}");
+        assert!(close(corners[1], [350.0, 220.0]), "c1 {corners:?}");
+    }
+
+    #[test]
+    fn text_instance_item_uses_size_times_key_scale() {
+        let mut project = demo_project();
+        project.texts.push(TextInstance {
+            content: "YO".into(),
+            size: 25.0,
+            color: 0x0000FF,
+            keys: vec![InstanceKey {
+                frame: 0.0,
+                x: 100.0,
+                y: 400.0,
+                scale: 2.0,
+                angle: 0.0,
+            }],
+        });
+        let items = media_items(&project, 0.0);
+        // The instance text comes after the segment "HI" text.
+        let text = items.iter().rev().find_map(|i| match i {
+            MediaItem::Text {
+                pos,
+                content,
+                size,
+                color,
+                ..
+            } => Some((pos, content, size, color)),
+            _ => None,
+        });
+        let (pos, content, size, color) = text.expect("a text instance item");
+        assert!(close(*pos, [100.0, 400.0]), "pos {pos:?}");
+        assert_eq!(content, "YO");
+        assert_eq!(*size, 50.0, "25 * key scale 2");
+        assert_eq!(*color, 0x0000FF);
+    }
+
+    #[test]
+    fn composite_instances_draw_over_segment_media() {
+        let mut project = demo_project();
+        project.assets.push(ImageAsset {
+            name: "red".into(),
+            png: png_bytes(2, 2, Rgba([255, 0, 0, 255])),
+        });
+        // Red sprite instance (2x2 px * scale 10 = 20x20) centred
+        // on the segment image's centre (150, 100).
+        project.sprites.push(SpriteInstance {
+            asset: 1,
+            keys: vec![InstanceKey {
+                frame: 0.0,
+                x: 150.0,
+                y: 100.0,
+                scale: 10.0,
+                angle: 0.0,
+            }],
+        });
+        project.texts.push(TextInstance {
+            content: "H".into(),
+            size: 25.0,
+            color: 0x0000FF,
+            keys: vec![InstanceKey {
+                frame: 0.0,
+                x: 100.0,
+                y: 250.0,
+                scale: 1.0,
+                angle: 0.0,
+            }],
+        });
+        let mut img = RgbaImage::from_pixel(400, 300, Rgba([255, 255, 255, 255]));
+        composite_media(&project, 0.0, &mut img, &|p| p);
+        // The instance sprite paints over the segment's green.
+        assert_eq!(*img.get_pixel(150, 100), Rgba([255, 0, 0, 255]));
+        // Green still visible outside the instance quad.
+        assert_eq!(*img.get_pixel(110, 80), Rgba([0, 200, 0, 255]));
+        // The text instance stamps blue glyph pixels in its band.
+        let mut blue = 0;
+        for y in 238..262 {
+            for x in 80..120 {
+                if *img.get_pixel(x, y) == Rgba([0, 0, 255, 255]) {
+                    blue += 1;
+                }
+            }
+        }
+        assert!(blue > 10, "text instance painted only {blue} blue pixels");
     }
 }
