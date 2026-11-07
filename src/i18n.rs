@@ -2475,9 +2475,11 @@ mod tests {
         assert_eq!(t(Lang::Bn, "transport_last"), "শেষ ফ্রেম");
         assert_eq!(t(Lang::Es, "transport_first"), "Primer fotograma");
         assert_eq!(t(Lang::Es, "dopesheet"), "Hoja de tiempos");
+        // Wave 10 authored translations.
+        assert_eq!(t(Lang::Fr, "export_centre"), "Centre d'exportation");
+        assert_eq!(t(Lang::ZhHans, "weather_panel"), "天气面板");
         // Not-yet-authored languages carry the English value.
-        assert_eq!(t(Lang::Fr, "export_centre"), t(Lang::En, "export_centre"));
-        assert_eq!(t(Lang::ZhHans, "weather_panel"), t(Lang::En, "weather_panel"));
+        assert_eq!(t(Lang::Ar, "export_centre"), t(Lang::En, "export_centre"));
     }
 
     #[test]
