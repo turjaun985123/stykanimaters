@@ -2243,6 +2243,7 @@ fn build_timeline(
             poses,
             duration: durations.get(fi).copied().unwrap_or(1.0),
             easing: None,
+            bends: Vec::new(),
         });
     }
     if frames.is_empty() {
@@ -2253,6 +2254,7 @@ fn build_timeline(
                 .collect(),
             duration: 1.0,
             easing: None,
+            bends: Vec::new(),
         });
     }
     let figures_out = slots

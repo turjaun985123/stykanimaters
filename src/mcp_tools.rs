@@ -276,7 +276,7 @@ fn tool_new_project(core: &mut EditorCore, args: &Value) -> Result<Value, String
             locked: false,
             opacity: 1.0,
         }],
-        frames: vec![Frame { poses: vec![pose], duration: 1.0, easing: None }],
+        frames: vec![Frame { poses: vec![pose], duration: 1.0, easing: None, bends: Vec::new() }],
         camera: Vec::new(),
         tween_playback: false,
         easing: crate::model::Easing::Linear,

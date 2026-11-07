@@ -286,7 +286,7 @@ impl EditorCore {
         let duration = self.project.frames[self.current].duration;
         self.project
             .frames
-            .insert(self.current + 1, crate::model::Frame { poses, duration, easing: None });
+            .insert(self.current + 1, crate::model::Frame { poses, duration, easing: None, bends: Vec::new() });
         self.current += 1;
         self.status = format!("Frame {} added.", self.current + 1);
     }
@@ -336,7 +336,7 @@ impl EditorCore {
             .collect();
         self.project.frames.insert(
             self.current + 1,
-            crate::model::Frame { poses, duration: 1.0, easing: None },
+            crate::model::Frame { poses, duration: 1.0, easing: None, bends: Vec::new() },
         );
         self.current += 1;
         self.status = format!("Inbetween inserted at frame {}.", self.current + 1);

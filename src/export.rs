@@ -840,6 +840,7 @@ mod tests {
             poses: Vec::new(),
             duration: 1.0,
             easing: None,
+            bends: Vec::new(),
         }];
         project.strokes = vec![crate::model::Stroke {
             frame: 0,
@@ -1017,6 +1018,7 @@ mod tests {
                 }],
                 duration: 1.0,
                 easing: None,
+                bends: Vec::new(),
             }],
             camera: Vec::new(),
             tween_playback: false,

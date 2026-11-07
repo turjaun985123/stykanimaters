@@ -595,13 +595,14 @@ fn assemble(
             }
         }
         last_poses = poses.clone();
-        frames.push(Frame { poses, duration: *duration, easing: None });
+        frames.push(Frame { poses, duration: *duration, easing: None, bends: Vec::new() });
     }
     if frames.is_empty() {
         frames.push(Frame {
             poses: last_poses,
             duration: 1.0,
             easing: None,
+            bends: Vec::new(),
         });
     }
     Project {
@@ -1248,13 +1249,14 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
             poses[ii] = pose_from_abs(&figures[ii].def, &ty.rest_abs, &o.angles, o.root);
         }
         last_poses = poses.clone();
-        frames.push(Frame { poses, duration: *duration, easing: None });
+        frames.push(Frame { poses, duration: *duration, easing: None, bends: Vec::new() });
     }
     if frames.is_empty() {
         frames.push(Frame {
             poses: last_poses,
             duration: 1.0,
             easing: None,
+            bends: Vec::new(),
         });
     }
     let background = raw_frames

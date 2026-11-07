@@ -38,6 +38,25 @@ pub fn angle_of(v: V2) -> f32 {
     v[0].atan2(v[1]) * 360.0 / TAU
 }
 
+/// Midpoint of the circular arc from `a` to `b` whose total bend
+/// is `bend_rad` (the chord's midpoint pushed along the left
+/// normal by (chord/2)·tan(bend/4)). Zero bend returns the chord
+/// midpoint. Used to render bent segments as two straight pieces.
+pub fn bend_mid(a: V2, b: V2, bend_rad: f32) -> V2 {
+    let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+    if bend_rad == 0.0 {
+        return mid;
+    }
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+    if len < 0.001 {
+        return mid;
+    }
+    let off = len / 2.0 * (bend_rad / 4.0).tan();
+    let n = [-d[1] / len, d[0] / len];
+    [mid[0] + n[0] * off, mid[1] + n[1] * off]
+}
+
 pub fn norm_deg(a: f32) -> f32 {
     let mut a = a % 360.0;
     if a > 180.0 {
@@ -443,6 +462,11 @@ pub struct Frame {
     /// `None` inherits the project-wide easing.
     #[serde(default)]
     pub easing: Option<Easing>,
+    /// Per-figure, per-node segment bend in radians (wave 7):
+    /// outer index = figure, inner = node. Empty (or a short inner
+    /// vec) means straight segments. Pivot's bend arcs live here.
+    #[serde(default)]
+    pub bends: Vec<Vec<f32>>,
 }
 
 fn default_duration() -> f32 {
@@ -658,7 +682,7 @@ impl Project {
             pose.angles[5] = -118.0 - wave * 2.2; // raise right arm (wave < 0 lifts)
             pose.angles[6] = -4.0 - wave * 0.8;
             let _ = i;
-            frames.push(Frame { poses: vec![pose], duration: 1.0, easing: None });
+            frames.push(Frame { poses: vec![pose], duration: 1.0, easing: None, bends: Vec::new() });
         }
 
         Project {
@@ -710,6 +734,38 @@ impl Project {
             .collect();
         self.apply_clips(&mut poses, f);
         poses
+    }
+
+    /// Interpolated per-node bends (radians) for figure `fi` at
+    /// fractional frame time `frame_f`, mirroring `poses_at`'s
+    /// indexing: empty when the frames carry no bend data.
+    pub fn bends_at(&self, frame_f: f32, fi: usize) -> Vec<f32> {
+        let n = self.figures.get(fi).map(|f| f.def.nodes.len()).unwrap_or(0);
+        if n == 0 || self.frames.is_empty() {
+            return Vec::new();
+        }
+        let get = |idx: usize| -> Vec<f32> {
+            let mut v = self
+                .frames
+                .get(idx)
+                .and_then(|f| f.bends.get(fi))
+                .cloned()
+                .unwrap_or_default();
+            v.resize(n, 0.0);
+            v
+        };
+        let last = self.frames.len() - 1;
+        let f = frame_f.clamp(0.0, last as f32);
+        let i = f.floor() as usize;
+        let frac = f - i as f32;
+        if !self.tween_playback || i >= last || frac < 0.0001 {
+            let v = get(i);
+            return if v.iter().all(|b| *b == 0.0) { Vec::new() } else { v };
+        }
+        let a = get(i);
+        let b = get(i + 1);
+        let v: Vec<f32> = a.iter().zip(b.iter()).map(|(x, y)| x + (y - x) * frac).collect();
+        if v.iter().all(|b| *b == 0.0) { Vec::new() } else { v }
     }
 
     /// Replace the poses of movieclip instances with their looping

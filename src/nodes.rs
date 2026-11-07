@@ -609,6 +609,7 @@ pub fn import_nodes(data: &[u8]) -> Result<Project, String> {
             poses: vec![pose],
             duration: 1.0,
             easing: None,
+            bends: Vec::new(),
         }],
         camera: Vec::new(),
         tween_playback: false,
