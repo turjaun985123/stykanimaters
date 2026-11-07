@@ -57,9 +57,12 @@ Python codec, including .piv v5 files produced by its encoder. Status key: DONE 
 - Playback honours per-frame durations and can tween between
   frames with easing; still no scrub bar or loop range.
 - GUI rendering is CPU path painting; the original is WebGPU. Fine
-  at stick-figure scale, but the port's editor has never been
-  visually verified on a real display (this dev VM's virtual
-  display + software Vulkan shows black screenshots).
+  at stick-figure scale. (Updated 2026-11-08: the editor HAS now
+  been visually verified on a real display — the user ran the
+  CI-built binary on their own Linux PC and sent a screenshot of
+  the editor open with the demo project loaded. This dev VM's
+  virtual display + software Vulkan still shows black screenshots,
+  so visual checks happen on the user's machine.)
 
 ## Suggested build order
 
@@ -175,3 +178,69 @@ scripted MCP session over the real binary built a project, posed
 it, added rain + confetti + a graph key + a rotating camera,
 rendered PNG/GIF, read a frame back as base64, saved JSON and
 exported a .piv the original's decoder accepts. 289 tests green.
+
+## Wave 7 + 8 — formats round 2, bends, timeline depth, CI, UI redesign (2026-11-07/08)
+
+Wave 7 landed as WIP (commit 121c0e3, stopped before integration),
+was integrated and fixed through the new CI loop, and Wave 8 is
+wiring the last pieces. State of the items:
+
+| Addition | State |
+|---|---|
+| FX timeline engine (`src/fx_edit.rs`) | DONE — pure ops over `Project.fx_clips`: list (FxInfo), move, resize, duplicate, delete, clips_at |
+| Clip kinds Lightning / Bubbles / Leaves (`src/vfx.rs`) | DONE — 14 clip kinds total; deterministic like the rest (bolt flicker is a pure function of frame time; bubbles pop in their last 10%; leaves flutter on individual cycles) |
+| Brush library (`src/paint.rs` + editor) | DONE — `Brush` presets from `brush_library()`, a `DrawTool { Brush, Eraser }` in the editor with a clamped `brush_index`; the default Pen path leaves prior draw behaviour unchanged |
+| Format exports round 2 | DONE with documented losses — `export_piv_v2` / `export_piv_v4` (media segments written as plain segments; v4 also drops camera keys, joins (flag 0), transparency and bends; v2's u8 counts cap it at 253 figures, v4's counts are u16), `export_nodes_figure` (thickness rounded to i32, negative lengths as magnitude + 180° flip, names/styles/media dropped, ellipses as circles), `export_nodes_animation` (.stknds writer: plain posed figures — joins written as none, clip library empty, default camera records; sounds/weather/FX/strokes/channels/easing/bends/stage size have no slots and are dropped; fps rounded to an integer, durations round up to whole ticks) |
+| Per-frame bends round-trip | DONE — model `Frame.bends` (prep d922318) + `Project::bends_at` + `model::bend_mid`; .piv v5 export writes `bend_flag` + f64 arrays from `Frame.bends` when they differ from frame 0, import reads them back into the model; the rasterizer draws bent segments as two pieces through the arc midpoint (zero-bend projects render byte-identically); editor `cycle_bend()` steps 0 → +0.35 → +0.7 → −0.35 → −0.7 → 0 rad; MCP `set_bend` tool |
+| Timeline depth (`src/editor.rs`) | DONE — `loop_range` (playback wraps inside it), `shift_frames` (block move), `reverse_range` (poses/bends/durations/easings reverse together), `nudge_path_point` + `smooth_path_roots` (motion-path editing) |
+| Movieclip editing session (`src/editor.rs`) | DONE — `ClipEditSession` (enter/exit, clip frame ops) + `create_clip_from_figure(fi)` capturing the figure's poses across the timeline |
+| 3D depth (`src/fig3d.rs` + editor) | DONE for this slice — `lerp_pose`, `bake_range`/`bake_range_staged`, a marked pose B and `fig3_bake_animation(frames)` interpolating between poses into new timeline frames; 3D figures persist in a library under `./library3d` |
+| MCP round 2 | DONE — 14 new tools (44 total): `draw_stroke`, `smooth_strokes`, `erase_strokes`, `apply_nib`, `fig3_enter`/`fig3_select`/`fig3_rotate`/`fig3_orbit`/`fig3_mark_b`/`fig3_bake`/`fig3_bake_animation`, `clip_create`/`clip_list`, `set_bend`; `export_file` gained piv2/piv4/nodes/stknds |
+| Corpus round 2 | DONE — `tests/fixtures/` gained `figure.nodes` and `project.nodemc` (generated with the original's encoders where possible, `scripts/gen_fixtures2.py`) + manifest entries + Rust corpus-test dispatch for both formats |
+| Touch on GPUI 0.2.2 — platform verdict | RESEARCHED, BLOCKED UPSTREAM — `src/touch.rs` documents the check of the vendored crate source: `PlatformInput` has no touch/pointer variant, mouse events carry no pointer identity, the X11 client announces XInput 2.1 (touch needs 2.2), and Wayland binds no `wl_touch`. A touchscreen can only arrive as a single emulated mouse pointer. The recogniser and the editor's pinch handling are already multi-pointer end to end, so real touch is a wiring change the day GPUI dispatches touch events — until then there is nothing honest to wire |
+| CI (Wave 8 infrastructure) | DONE — `.github/workflows/workflow.yml`: cached release build + full test suite + stripped binary artifact on every push. Per the repo AGENTS.md, CI is the only build environment (no local builds without the owner's approval); fixes are diagnosed from CI logs |
+| UI redesign (Wave 8) | DONE — the flat ~110-button toolbar became an app bar (brand, File/Edit, panel toggles, frame/FPS chips) + labelled tool-group panels, built on a shared kit (`src/ui_kit.rs`: `tool_group`, `section_label`, `group_row`, `top_bar`, `side_panel`, `info_chip`, `brand`); sidebar rows gained figure colour dots; the canvas is framed with a permanent hint line; timeline and graph/audio panels restyled. Every button kept its id, label and listener |
+
+**GUI visually verified (2026-11-08).** The user downloaded the
+CI artifact, ran the editor on their own Linux PC and sent a
+screenshot: the app opens, the demo project loads, the selected
+figure shows its joint handles, the timeline shows its frames.
+The long-standing "never seen on a real display" caveat is
+closed. (The same screenshot showed how dense the old toolbar
+was — the direct motivation for the UI redesign above.)
+
+**Test state:** 344 tests green in CI (run for dd2d785: "344
+passed; 0 failed"). The three failures that run shook out of
+the Wave 7 WIP are worth remembering: the corpus test dispatched
+the new Stick Nodes fixtures to the Pivot importer, the v4
+lengths test assumed a two-figure demo project (it has one),
+and the MCP clip test expected a 2-frame clip from a timeline
+its own animated bake had already grown to 4.
+
+## What remains (honest list, 2026-11-08)
+
+- **Drawing depth.** The original's raster engine is still much
+  deeper: tiles, on-canvas text, flood-fill at scale, a far
+  larger brush system. The port has a solid vector-stroke subset.
+- **VFX volume.** 14 deterministic clip kinds + weather vs the
+  original's ~6,600-line system. (The MCP kind gap is closed:
+  `add_fx_clip` accepts all 14 kinds and `fx_list`/`fx_move`/
+  `fx_resize`/`fx_duplicate`/`fx_delete` manage clips.)
+- **.piv text side tables** cannot be written from this model:
+  the format stores vector glyph outlines, and the port's text
+  is a 3×5 bitmap font with no outlines to write. (The v5 image
+  side tables and per-frame bends DO round-trip now.)
+- **Movieclip depth.** Clips are flat pose lists: no nested clip
+  timelines, and sprite/text tracks inside Stick Nodes clips are
+  not converted into ClipDefs.
+- **3D depth.** 3D exists as an editing session that bakes to
+  native 2D figures; there is no persistent 3D in the document
+  model and no 3D rendering in exports.
+- **Real multi-touch** — blocked on GPUI (see the verdict
+  above), not on this codebase.
+- **Stick Nodes leftovers** (spec §17): instance style/filter
+  data, smart-stretch, connectors and angle locks are consumed
+  or approximated, camera records and sounds are parsed but not
+  modelled, and ZIP-packaged projects are out of scope.
+- **Localisation polish.** 28 languages of machine-produced
+  strings vs the original's 27 human-maintained ones.

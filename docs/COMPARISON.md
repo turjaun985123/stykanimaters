@@ -1,6 +1,9 @@
 # StykAnimate vs StykAnimate-RS — comprehensive comparison
 
-Measured fresh from both working trees on 2026-11-07 (after Wave 6).
+Measured fresh from both working trees on 2026-11-07 (after Wave 6);
+refreshed 2026-11-08 after the Wave 7 integration, the GitHub
+Actions CI workflow, and the UI redesign. Port figures below are
+re-measured from the current tree; the original's are unchanged.
 This document supersedes the earlier comparison + addenda.
 
 ## At a glance
@@ -9,10 +12,10 @@ This document supersedes the earlier comparison + addenda.
 |---|---|---|
 | Version | 1.2.5 | 0.1.0 |
 | Runtime | Electron + WebGPU app, Python codec backend | One native binary: Rust + GPUI 0.2.2 |
-| Application code | ~103,500 lines JS in 657 files under `src/` (excluding `src/locales`) | 26,620 lines Rust in 28 modules + 2 binaries |
+| Application code | ~103,500 lines JS in 657 files under `src/` (excluding `src/locales`) | 32,004 lines Rust in 30 library modules + 2 binaries |
 | Generated code | 179,460-line compiled locale bundle (`locale-packs.mjs`) | none |
-| Backend/codecs | ~13,000 lines Python (`codecs/` + `backend/`) | included in the Rust total (`pivot.rs` 1,826; `nodes.rs` 772; `nodes_anim.rs` 2,433) |
-| Tests | 876 files in `tests/` (fixtures + suites) | 289 Rust tests + a 5-format fixture corpus with manifest |
+| Backend/codecs | ~13,000 lines Python (`codecs/` + `backend/`) | included in the Rust total (`pivot.rs` 2,896; `nodes.rs` 1,182; `nodes_anim.rs` 4,299) |
+| Tests | 876 files in `tests/` (fixtures + suites) | 344 Rust tests, green in GitHub Actions CI, + a 7-file cross-format fixture corpus with manifest |
 | UI languages | 27 | 28 (the same 27 + Bengali) |
 | Licence | GPL-3.0-or-later | GPL-3.0-or-later |
 
@@ -24,32 +27,32 @@ This document supersedes the earlier comparison + addenda.
 | Figure presets (humanoid, quadruped, mini) | Full | Full | Equal |
 | Figure builder (add/remove, length, thickness, colour, shapes) | Full | Full | Equal |
 | Segment styles (taper, caps, gradients, opacity) | Full | Rendered in raster + SVG, button editing | Near-equal |
-| Timeline (frames, durations, fps, copy/paste, inbetween) | Full | Full | Equal |
-| Easing | Full curve editor | 4 curves + per-keyframe override + a Hermite channel engine (`graph.rs`) applied live in the editor with key authoring; panel view-model built, visual panel pending | Original deeper |
+| Timeline (frames, durations, fps, copy/paste, inbetween) | Full | Full — plus loop ranges, block shift/reverse and motion-path editing (nudge/smooth roots) | Equal |
+| Easing | Full curve editor | 4 curves + per-keyframe override + a Hermite channel engine (`graph.rs`) applied live in the editor, with a visual panel (add/drag/delete keys, undoable) | Original deeper |
 | Onion skin | Full | Two-way (prev in figure colour, next in green) | Equal |
 | Camera (keys, pan, zoom, follow) | Full | Full | Equal |
 | Layers / figure list | Full layer system | Reorder (full reference remapping), hide, delete, select, **solo, lock, per-figure opacity** | Near-equal |
-| Drawing | Deep raster engine (brushes, fill, tiles, text) | Strokes with pressure widths, serpentine fill, lasso erase | Original much deeper |
+| Drawing | Deep raster engine (brushes, fill, tiles, text) | Strokes with pressure widths, a brush library + brush/eraser tools, serpentine fill, splitting eraser, smoothing and nib profiles | Original much deeper |
 | Sprite / text segments | Full | Sprites (aspect-correct) + bitmap-font text rendered **and typed in the editor**; Stick Nodes sprite/text instances imported as keyframed tracks and rendered | Near-equal |
-| Particles / VFX | ~6,600-line VFX system | Events + timed clips (8 kinds incl. confetti, shock ring) + continuous weather (rain, snow, fireflies), deterministic | Original deeper |
-| Audio | Full editor (waveform, mixing) | Playback (multi-clip aware), waveform peaks, mixdown export, normalise/trim/split/crossfade engine (editor buttons pending) | Original deeper |
-| Movieclips | Full editor | ClipDef playback + conversion from .nodemc | Original deeper |
-| 3D figures | Full 3D system | 3D mode in the editor: orbit, per-joint Euler rotation, live projected preview, **bake to a native 2D figure** | Original deeper |
-| Touch | Full touch UI | Recogniser wired into the canvas (tap select, drag pose, long-press); single-pointer via GPUI mouse events, pinch arms ready for real touch pointers | Original deeper |
+| Particles / VFX | ~6,600-line VFX system | Events + timed clips (14 kinds incl. lightning, bubbles, leaves) with an FX timeline editor (list/move/resize/duplicate/delete) + continuous weather (rain, snow, fireflies), deterministic | Original deeper |
+| Audio | Full editor (waveform, mixing) | Playback (multi-clip aware), waveform peaks + panel, mixdown export, normalise/trim/split/crossfade (engine and editor buttons) | Original deeper |
+| Movieclips | Full editor | ClipDef playback, conversion from .nodemc, and an in-editor clip session (create a clip from a figure's timeline poses, edit its frames) | Original deeper |
+| 3D figures | Full 3D system | 3D mode in the editor: orbit, per-joint Euler rotation, live projected preview, **bake to a native 2D figure** — a single pose or an animated bake interpolated between two marked poses; library persisted in `./library3d` | Original deeper |
+| Touch | Full touch UI | Recogniser wired into the canvas (tap select, drag pose, long-press; pinch logic is multi-pointer ready). Real multi-touch is blocked by the platform: GPUI 0.2.2's Linux input dispatches no touch events at all (verified in the vendored crate source, see `touch.rs`), so a touchscreen arrives as one emulated mouse pointer | Original deeper |
 | Home / library / projects | Full | Home panel, recents, recovery snapshots, figure library | Near-equal |
-| App shell (dialogs, autosave) | Native dialogs, full shell | Native open/save dialogs via zenity/kdialog with the folder flow as fallback, recovery, stage-size controls | Near-equal |
-| AI-agent control (MCP) | None | **Full MCP server: 30 tools — build, pose, decorate, render, import/export, frame inspection as base64 PNG** | Port only |
+| App shell + UI (dialogs, autosave) | Native dialogs, full shell | Native open/save dialogs via zenity/kdialog with the folder flow as fallback, recovery, stage-size controls — and redesigned chrome: an app bar + labelled tool groups (`ui_kit.rs`), colour-dot figure rows, a timeline bar. The GUI has been seen running on a real Linux desktop (user screenshot, 2026-11-08) | Near-equal |
+| AI-agent control (MCP) | None | **Full MCP server: 49 tools — build, pose, draw, decorate, manage FX clips, run 3D sessions, author movieclips, set per-frame bends, render, import/export (incl. .piv v2/v4, .nodes, .stknds), frame inspection as base64 PNG** | Port only |
 | Localisation | 27 languages, human-maintained | 28 languages (same set + Bengali), machine-produced strings | Port wider, original more polished |
 
 ## Formats — the port's strongest area
 
 | Format | Original | Port import | Port export |
 |---|---|---|---|
-| .piv v2 / v3 / v4 | native | Yes | v3 only |
-| .piv v5 | native | Yes — full grammar incl. image/text side tables | Yes — subset (no media figures); the original's own decoder consumes our files exactly (900/900 bytes in the checked case) |
+| .piv v2 / v3 / v4 | native | Yes | Yes — v2, v3 and v4 (v2/v4 with documented losses: media segments written as plain segments; v4 also drops camera keys, joins and bends) |
+| .piv v5 | native | Yes — full grammar incl. image/text side tables | Yes — incl. per-frame lengths (from graph Length channels), image side tables and per-frame bends (from `Frame.bends`); the original's own decoder consumes our files exactly, media fixture included. Text side tables are the one unwritable piece: the model carries a bitmap font, not glyph outlines |
 | .stk | native | Yes | Yes |
-| Stick Nodes .nodes | native | Yes — 57-field record grammar, verified against their decoder + real corpus fixture | No |
-| Stick Nodes .nodemc / .stknds | native | Yes — modelled subset (sprites/texts/joins parsed, not modelled) | No |
+| Stick Nodes .nodes | native | Yes — 57-field record grammar, verified against their decoder + real corpus fixture | Yes — figure export (documented losses: thickness rounded to i32; node names, styles and media dropped) |
+| Stick Nodes .nodemc / .stknds | native | Yes — modelled subset (sprites/texts as keyframed tracks, joins baked at import) | Yes — .stknds writer (plain posed figures; joins, clip library, camera detail, sounds and FX dropped — see GAP-ANALYSIS) |
 | Native project | JSON | JSON | JSON |
 | PNG sequence / GIF / MP4 / WebM / APNG / JPEG / SVG / spritesheet | Yes | — | All yes, deterministic, several verified with independent decoders (PIL checks the APNG; ffmpeg produces real MP4/WebM) |
 
@@ -80,13 +83,30 @@ By feature family, the port now has **something verified in every
 area the original has** — nothing is entirely missing any more.
 By depth, the honest estimate is that the port covers most of the
 everyday posing/animation workflow at full strength, while the
-original remains deeper in drawing volume, VFX volume, audio
-editing UI, and 3D depth. Wave 6 closed the next list: the graph
-panel is visual (add/drag/delete keys, with Undo), audio editing
-operations exist (normalise/trim/split/crossfade), Stick Nodes
-joins are modelled, camera rotation renders, and a full MCP
-server lets an AI agent drive everything end-to-end. What
-remains is depth: drawing and VFX volume, an audio waveform UI,
-nested movieclip editing, 3D beyond bake-to-2D, real multi-touch,
-more export formats (.nodes/.nodemc, .piv v2/v4), per-frame
-bends in the model, and timeline depth.
+original remains deeper in drawing volume, VFX volume, and 3D
+depth. Wave 6 closed the graph panel (visual, undoable), audio
+editing operations, Stick Nodes joins, camera rotation, and a
+full MCP server. Wave 7 then closed the rest of that list: the
+remaining export formats (.piv v2/v4, .nodes figures, .stknds
+animations), per-frame bends end-to-end (model, .piv v5
+round-trip, rendered arcs, editor + MCP access), timeline depth
+(loop ranges, block shift/reverse, motion-path editing), the
+brush library, the FX timeline editor, the movieclip editing
+session, animated 3D bakes, and 14 more MCP tools; a Wave 8 pass
+then wired the remaining Wave 7 surface (FX clip management in
+MCP + GUI panels, brush/clip/3D-library UI, timeline depth
+buttons, bend button, format export buttons) and a UI components
+wave (toasts, inspector, colour picker, dopesheet, easing picker,
+help overlay, export centre, canvas HUD), bringing the MCP
+server to 49 tools.
+Since then the suite runs green in GitHub Actions CI (344 tests —
+per the repo's AGENTS.md, CI is the only build environment), the
+editor chrome was redesigned (app bar + labelled tool groups),
+and the GUI has been visually verified running on the user's own
+Linux PC (2026-11-08) — the last "never seen on a real display"
+caveat is gone. What remains is depth, plus two hard limits:
+real multi-touch is impossible on GPUI 0.2.2's Linux platform
+(its input layer has no touch events to wire), and .piv text
+side tables cannot be written from a bitmap-font model. One
+small coverage gap: the MCP `add_fx_clip` tool exposes 8 of the
+14 clip kinds the editor offers.

@@ -497,6 +497,17 @@ impl EditorCore {
         self.status = format!("{} colour changed.", node.name);
     }
 
+    /// Set the selected segment's colour directly (the colour
+    /// picker panel). Writes the same `NodeDef.color` the cycle
+    /// op steps through, as `Some(rgb)`; like the cycle op it
+    /// does not snapshot.
+    pub fn set_node_color(&mut self, rgb: u32) {
+        let Some(ni) = self.selected_node else { return };
+        let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
+        node.color = Some(rgb);
+        self.status = format!("{} colour changed.", node.name);
+    }
+
     // ---- Camera ----
 
     pub fn camera_here(&self) -> (f32, f32, f32) {
@@ -915,6 +926,25 @@ impl EditorCore {
         match crate::layers::cycle_opacity(&mut self.project, fi) {
             Some(o) => self.status = format!("Figure {} opacity {:.0}%.", fi + 1, o * 100.0),
             None => self.status = "No such figure.".into(),
+        }
+    }
+
+    /// Step a figure's opacity by `delta` (the sidebar's −/+ steppers),
+    /// via the layers engine's clamped setter — so the bounds and NaN
+    /// handling match every other opacity write. The target is rounded
+    /// to two decimals so repeated steps land on clean percentages.
+    /// Like `cycle_figure_opacity`, this does not snapshot.
+    pub fn step_figure_opacity(&mut self, fi: usize, delta: f32) {
+        let Some(fig) = self.project.figures.get(fi) else {
+            self.status = "No such figure.".into();
+            return;
+        };
+        let next = ((fig.opacity + delta) * 100.0).round() / 100.0;
+        if crate::layers::set_opacity(&mut self.project, fi, next) {
+            let o = self.project.figures[fi].opacity;
+            self.status = format!("Figure {} opacity {:.0}%.", fi + 1, o * 100.0);
+        } else {
+            self.status = "No such figure.".into();
         }
     }
 
@@ -1430,6 +1460,22 @@ impl EditorCore {
         }
     }
 
+    /// Set the CURRENT frame's easing directly (the easing
+    /// picker's Apply / None buttons), with the same snapshot +
+    /// status behaviour as `cycle_frame_easing`.
+    pub fn set_frame_easing(&mut self, easing: Option<crate::model::Easing>) {
+        self.snapshot();
+        let cur = self.current.min(self.project.frames.len().saturating_sub(1));
+        if let Some(frame) = self.project.frames.get_mut(cur) {
+            frame.easing = easing;
+            self.status = format!(
+                "Frame {} easing: {}",
+                cur + 1,
+                frame.easing.map(|e| e.label()).unwrap_or("project default")
+            );
+        }
+    }
+
     pub fn frame_easing_label(&self) -> String {
         match self.project.frames.get(self.current).and_then(|f| f.easing) {
             Some(e) => format!("F-ease: {}", e.label()),
@@ -1606,6 +1652,55 @@ impl EditorCore {
         match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, bytes)) {
             Ok(()) => self.status = format!("Exported {}.stk", fig.name),
             Err(e) => self.status = format!("STK export failed: {e}"),
+        }
+    }
+
+    pub fn export_piv2(&mut self) {
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("export");
+        let path = dir.join("animation-v2.piv");
+        let bytes = crate::pivot::export_piv_v2(&self.project);
+        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, bytes)) {
+            Ok(()) => self.status = format!("Exported Pivot .piv (v2) to {}", path.display()),
+            Err(e) => self.status = format!("PIV v2 export failed: {e}"),
+        }
+    }
+
+    pub fn export_piv4(&mut self) {
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("export");
+        let path = dir.join("animation-v4.piv");
+        let bytes = crate::pivot::export_piv_v4(&self.project);
+        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, bytes)) {
+            Ok(()) => self.status = format!("Exported Pivot .piv (v4) to {}", path.display()),
+            Err(e) => self.status = format!("PIV v4 export failed: {e}"),
+        }
+    }
+
+    pub fn export_nodes(&mut self) {
+        let fig = &self.project.figures[self.selected_figure];
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("export");
+        let path = dir.join(format!("{}.nodes", fig.name.replace(' ', "-").to_lowercase()));
+        let bytes = crate::nodes::export_nodes_figure(&fig.def, &fig.name);
+        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, bytes)) {
+            Ok(()) => self.status = format!("Exported {}.nodes", fig.name),
+            Err(e) => self.status = format!("Nodes export failed: {e}"),
+        }
+    }
+
+    pub fn export_stknds(&mut self) {
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("export");
+        let path = dir.join("animation.stknds");
+        let bytes = crate::nodes_anim::export_nodes_animation(&self.project);
+        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, bytes)) {
+            Ok(()) => self.status = format!("Exported Stick Nodes .stknds to {}", path.display()),
+            Err(e) => self.status = format!("STKNDS export failed: {e}"),
         }
     }
 
@@ -1808,6 +1903,13 @@ impl EditorCore {
         self.brush_index = (self.brush_index + 1) % lib.len();
         let b = self.active_brush();
         self.status = format!("Brush: {} (width {:.0}).", b.name, b.width);
+    }
+
+    /// True when the eraser is the active draw tool (the app's
+    /// tool-toggle button highlights and labels itself from this,
+    /// so it never has to name `DrawTool` itself).
+    pub fn draw_tool_is_eraser(&self) -> bool {
+        self.draw_tool == DrawTool::Eraser
     }
 
     /// Switch the draw tool between brush and eraser.
@@ -2769,6 +2871,35 @@ impl EditorCore {
             None => format!("No 3D library figure named '{name}'."),
         };
         self.status = msg;
+    }
+
+    /// The display names of every figure in the 3D library,
+    /// sorted (empty when the library directory is missing or
+    /// holds no readable entries).
+    pub fn fig3_library_list(&self) -> Vec<String> {
+        crate::fig3d::scan_library(&Self::fig3_library_dir())
+    }
+
+    /// Load the next 3D library figure, cycling through
+    /// [`Self::fig3_library_list`] the way [`Self::cycle_library`]
+    /// walks the 2D library: with a session active, the entry
+    /// after the current figure's name (wrapping); otherwise the
+    /// first entry. An empty library only sets a status message.
+    pub fn fig3_cycle_library(&mut self) {
+        let names = self.fig3_library_list();
+        if names.is_empty() {
+            self.status = "3D library is empty — save a 3D figure first.".into();
+            return;
+        }
+        let current = self.fig3.as_ref().map(|st| st.figure.name.clone());
+        let next = match current {
+            Some(name) => match names.iter().position(|n| *n == name) {
+                Some(i) => names[(i + 1) % names.len()].clone(),
+                None => names[0].clone(),
+            },
+            None => names[0].clone(),
+        };
+        self.fig3_load_from_library(&next);
     }
 
     /// Bake an ANIMATION: interpolate the session's current 3D

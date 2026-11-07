@@ -207,8 +207,11 @@ pub fn composite_media(
     img: &mut RgbaImage,
     view: &dyn Fn(V2) -> [f32; 2],
 ) {
-    // Stage-units -> pixels scale along x, probed from the view.
-    // (All views in this app are uniform scale + translate.)
+    // Stage-units -> pixels scale, probed from the view: the
+    // length of the mapped x basis vector. Views may also rotate
+    // (camera angle, Wave 6) — a basis vector's length is the
+    // uniform scale with or without rotation, so this probe
+    // stays exact.
     let o = view([0.0, 0.0]);
     let ex = view([1.0, 0.0]);
     let view_scale = ((ex[0] - o[0]).powi(2) + (ex[1] - o[1]).powi(2)).sqrt();

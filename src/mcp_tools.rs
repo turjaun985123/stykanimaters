@@ -635,8 +635,14 @@ fn parse_clip_kind(name: &str) -> Result<ClipKind, String> {
         "trail" => Ok(ClipKind::Trail),
         "confetti" => Ok(ClipKind::Confetti),
         "shock_ring" | "shockring" | "shock-ring" => Ok(ClipKind::ShockRing),
+        "ember" => Ok(ClipKind::Ember),
+        "fountain" => Ok(ClipKind::Fountain),
+        "orbit" => Ok(ClipKind::Orbit),
+        "lightning" => Ok(ClipKind::Lightning),
+        "bubbles" => Ok(ClipKind::Bubbles),
+        "leaves" => Ok(ClipKind::Leaves),
         other => Err(format!(
-            "unknown fx kind '{other}' (expected burst, sparkle, smoke, beam, aura, trail, confetti or shock_ring)"
+            "unknown fx kind '{other}' (expected burst, sparkle, smoke, beam, aura, trail, confetti, shock_ring, ember, fountain, orbit, lightning, bubbles or leaves)"
         )),
     }
 }
@@ -679,6 +685,73 @@ fn tool_add_fx_clip(core: &mut EditorCore, args: &Value) -> Result<Value, String
         "node": ni,
         "start": start,
         "duration": duration,
+    }))
+}
+
+fn tool_fx_list(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let clips: Vec<Value> = crate::fx_edit::list(&core.project)
+        .iter()
+        .map(|info| {
+            json!({
+                "index": info.index,
+                "figure": info.figure,
+                "node": info.node,
+                "kind": info.kind,
+                "start": info.start,
+                "duration": info.duration,
+                "end": info.end,
+            })
+        })
+        .collect();
+    Ok(json!({ "ok": true, "count": clips.len(), "clips": clips }))
+}
+
+fn tool_fx_move(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = req_usize(args, "index")?;
+    let start = req_f32(args, "start")?;
+    if start < 0.0 {
+        return Err("argument 'start' must not be negative".into());
+    }
+    if !crate::fx_edit::move_clip(&mut core.project, idx, start) {
+        return Err(format!("no fx clip at index {idx}"));
+    }
+    Ok(json!({ "ok": true, "fx_index": idx, "start": start }))
+}
+
+fn tool_fx_resize(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = req_usize(args, "index")?;
+    let duration = req_f32(args, "duration")?;
+    if duration <= 0.0 {
+        return Err("argument 'duration' must be positive".into());
+    }
+    if !crate::fx_edit::resize_clip(&mut core.project, idx, duration) {
+        return Err(format!("no fx clip at index {idx}"));
+    }
+    Ok(json!({ "ok": true, "fx_index": idx, "duration": duration }))
+}
+
+fn tool_fx_duplicate(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = req_usize(args, "index")?;
+    let Some(new_idx) = crate::fx_edit::duplicate_clip(&mut core.project, idx) else {
+        return Err(format!("no fx clip at index {idx}"));
+    };
+    Ok(json!({
+        "ok": true,
+        "fx_index": new_idx,
+        "duplicated_from": idx,
+        "start": core.project.fx_clips[new_idx].clip.start,
+    }))
+}
+
+fn tool_fx_delete(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = req_usize(args, "index")?;
+    if !crate::fx_edit::delete_clip(&mut core.project, idx) {
+        return Err(format!("no fx clip at index {idx}"));
+    }
+    Ok(json!({
+        "ok": true,
+        "deleted": idx,
+        "count": core.project.fx_clips.len(),
     }))
 }
 
@@ -1292,7 +1365,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 json!({
                     "figure": { "type": "integer" },
                     "node": { "type": "integer" },
-                    "kind": { "type": "string", "enum": ["burst", "sparkle", "smoke", "beam", "aura", "trail", "confetti", "shock_ring"] },
+                    "kind": { "type": "string", "enum": ["burst", "sparkle", "smoke", "beam", "aura", "trail", "confetti", "shock_ring", "ember", "fountain", "orbit", "lightning", "bubbles", "leaves"] },
                     "start": { "type": "number" },
                     "duration": { "type": "number" },
                     "color": { "type": "integer", "description": "0xRRGGBB (default: figure colour)" },
@@ -1301,6 +1374,58 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["figure", "node", "kind", "start", "duration"],
             ),
             handler: tool_add_fx_clip,
+        },
+        Tool {
+            name: "fx_list",
+            description: "List all timed FX clips: index, figure, node, kind, start, duration and end frame.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_fx_list,
+        },
+        Tool {
+            name: "fx_move",
+            description: "Move an FX clip to a new start frame (clamped at 0).",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "start": { "type": "number" }
+                }),
+                &["index", "start"],
+            ),
+            handler: tool_fx_move,
+        },
+        Tool {
+            name: "fx_resize",
+            description: "Set an FX clip's duration in frames.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "duration": { "type": "number" }
+                }),
+                &["index", "duration"],
+            ),
+            handler: tool_fx_resize,
+        },
+        Tool {
+            name: "fx_duplicate",
+            description: "Duplicate an FX clip: the copy is inserted right after it and starts where the original ends.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_fx_duplicate,
+        },
+        Tool {
+            name: "fx_delete",
+            description: "Delete an FX clip by index.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_fx_delete,
         },
         Tool {
             name: "set_weather",
@@ -1776,6 +1901,62 @@ mod tests {
     }
 
     #[test]
+    fn fx_edit_tools_manage_clips() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        call(&mut core, &tools, "new_project", json!({})).unwrap();
+
+        // Every ClipKind the engine renders is addable by name —
+        // including the wave-7 kinds (lightning, bubbles, leaves)
+        // and ember/fountain/orbit, which predate the fx timeline.
+        for (name, debug) in [
+            ("ember", "Ember"),
+            ("fountain", "Fountain"),
+            ("orbit", "Orbit"),
+            ("lightning", "Lightning"),
+            ("bubbles", "Bubbles"),
+            ("leaves", "Leaves"),
+        ] {
+            let r = call(&mut core, &tools, "add_fx_clip", json!({
+                "figure": 0, "node": 0, "kind": name, "start": 0.0, "duration": 6.0
+            }))
+            .unwrap();
+            assert_eq!(r["kind"], debug, "{name}");
+        }
+        assert_eq!(core.project.fx_clips.len(), 6);
+
+        // fx_list reports the fx_edit view of the same clips.
+        let r = call(&mut core, &tools, "fx_list", json!({})).unwrap();
+        assert_eq!(r["count"], 6);
+        assert_eq!(r["clips"][3]["kind"], "lightning");
+        assert_eq!(r["clips"][3]["figure"], 0);
+        assert_eq!(r["clips"][3]["node"], 0);
+        assert_eq!(r["clips"][3]["start"], 0.0);
+        assert_eq!(r["clips"][3]["end"], 6.0);
+
+        // Move + resize go through fx_edit's ops.
+        let r = call(&mut core, &tools, "fx_move", json!({ "index": 3, "start": 10.0 })).unwrap();
+        assert_eq!(r["start"], 10.0);
+        assert_eq!(core.project.fx_clips[3].clip.start, 10.0);
+        call(&mut core, &tools, "fx_resize", json!({ "index": 3, "duration": 4.0 })).unwrap();
+        assert_eq!(core.project.fx_clips[3].clip.duration, 4.0);
+
+        // Duplicate lands right after the original, in list and time.
+        let r = call(&mut core, &tools, "fx_duplicate", json!({ "index": 3 })).unwrap();
+        assert_eq!(r["fx_index"], 4);
+        assert_eq!(r["start"], 14.0);
+        assert_eq!(core.project.fx_clips.len(), 7);
+        assert_eq!(core.project.fx_clips[4].clip.start, 14.0);
+
+        // Delete removes exactly the addressed clip.
+        let r = call(&mut core, &tools, "fx_delete", json!({ "index": 4 })).unwrap();
+        assert_eq!(r["count"], 6);
+        assert_eq!(core.project.fx_clips.len(), 6);
+        let r = call(&mut core, &tools, "fx_list", json!({})).unwrap();
+        assert_eq!(r["count"], 6);
+    }
+
+    #[test]
     fn bad_arguments_error_instead_of_panicking() {
         let tools = tools();
         let mut core = EditorCore::new();
@@ -1797,6 +1978,13 @@ mod tests {
             ("set_camera", json!({ "frame": 0, "x": 0.0, "y": 0.0, "zoom": -1.0 })),
             ("add_fx_clip", json!({ "figure": 0, "node": 0, "kind": "laser", "start": 0.0, "duration": 5.0 })),
             ("add_fx_clip", json!({ "figure": 0, "node": 0, "kind": "burst", "start": 0.0, "duration": 0.0 })),
+            ("fx_move", json!({ "index": 0, "start": 1.0 })), // no clips yet
+            ("fx_move", json!({ "index": 0, "start": -2.0 })),
+            ("fx_move", json!({ "start": 1.0 })), // missing index
+            ("fx_resize", json!({ "index": 0, "duration": 5.0 })), // no clips yet
+            ("fx_resize", json!({ "index": 0, "duration": 0.0 })),
+            ("fx_duplicate", json!({ "index": 0 })), // no clips yet
+            ("fx_delete", json!({ "index": 0 })), // no clips yet
             ("set_weather", json!({ "kind": "hail" })),
             ("add_audio_clip", json!({ "path": "", "start_frame": 0 })),
             ("graph_key", json!({ "figure": 0, "target": "spin", "frame": 0.0, "value": 1.0 })),

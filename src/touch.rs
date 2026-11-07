@@ -422,6 +422,34 @@ impl Recognizer {
     }
 }
 
+/// Feed one event from `source` into `recognizer` and return the
+/// gestures it produced — the single door every pointer source
+/// walks through, so the mouse today and any future source share
+/// exactly one path into the recogniser (the editor's
+/// `feed_pointer` calls this, never `Recognizer::on_event`
+/// directly).
+///
+/// The mouse has no per-contact identity to preserve — GPUI mouse
+/// events carry none — so a `Mouse` event's id is normalised to
+/// [`MOUSE_POINTER_ID`] whatever the caller passed. A `Touch`
+/// event's contact id passes through untouched: that branch
+/// cannot be produced from GPUI 0.2.2 today (see
+/// [`PointerSource`]), but the day a platform feed provides real
+/// contacts, this is where they enter, ids intact. The
+/// long-press clock stays separate: callers keep driving
+/// [`Recognizer::on_tick`] as before.
+pub fn feed(
+    recognizer: &mut Recognizer,
+    source: PointerSource,
+    ev: PointerEvent,
+) -> Vec<Gesture> {
+    let ev = match source {
+        PointerSource::Mouse => PointerEvent { id: MOUSE_POINTER_ID, ..ev },
+        PointerSource::Touch => ev,
+    };
+    recognizer.on_event(ev)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,6 +630,53 @@ mod tests {
         // second source and the editor's feed can grow with it.
         assert_eq!(ACTIVE_POINTER_SOURCE, PointerSource::Mouse);
         assert_eq!(MOUSE_POINTER_ID, 0);
+    }
+
+    #[test]
+    fn feed_from_mouse_forces_the_mouse_id() {
+        // Whatever id a caller hands a mouse event, the mouse is
+        // a single pointer: a second "mouse" down under a
+        // different raw id is a duplicate down for the same
+        // pointer, never a second finger, so it cannot pinch.
+        let mut r = Recognizer::new();
+        let src = PointerSource::Mouse;
+        assert!(feed(&mut r, src, down(7, 0.0, 0.0, 0)).is_empty());
+        assert!(feed(&mut r, src, down(9, 40.0, 0.0, 10)).is_empty());
+        // Motion under yet another raw id still drags the mouse,
+        // and its release ends the drag.
+        let g = feed(&mut r, src, mv(3, 12.0, 0.0, 20));
+        assert_eq!(g[0], Gesture::DragStart { pos: [0.0, 0.0] });
+        assert_eq!(feed(&mut r, src, up(5, 12.0, 0.0, 30)), vec![Gesture::DragEnd]);
+    }
+
+    #[test]
+    fn feed_from_mouse_still_taps() {
+        let mut r = Recognizer::new();
+        assert!(feed(&mut r, PointerSource::Mouse, down(0, 4.0, 4.0, 0)).is_empty());
+        assert_eq!(
+            feed(&mut r, PointerSource::Mouse, up(0, 4.0, 4.0, 100)),
+            vec![Gesture::Tap { pos: [4.0, 4.0] }]
+        );
+    }
+
+    #[test]
+    fn feed_from_touch_passes_contact_ids_through() {
+        // The touch branch cannot be produced by GPUI 0.2.2 today
+        // (see PointerSource), but the adapter must not flatten
+        // contact ids if a future source provides them: two ids
+        // pinch, with the recogniser's usual cumulative values.
+        let mut r = Recognizer::new();
+        let src = PointerSource::Touch;
+        assert!(feed(&mut r, src, down(1, 0.0, 0.0, 0)).is_empty());
+        assert_eq!(
+            feed(&mut r, src, down(2, 10.0, 0.0, 10)),
+            vec![Gesture::PinchStart { centre: [5.0, 0.0] }]
+        );
+        assert_eq!(
+            feed(&mut r, src, mv(2, 20.0, 0.0, 20)),
+            vec![Gesture::Pinch { centre: [10.0, 0.0], scale: 2.0, pan: [5.0, 0.0] }]
+        );
+        assert_eq!(feed(&mut r, src, up(1, 0.0, 0.0, 30)), vec![Gesture::PinchEnd]);
     }
 
     #[test]

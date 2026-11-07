@@ -5,6 +5,7 @@ use crate::editor::EditorCore;
 use crate::model::V2;
 #[allow(unused_imports)]
 use crate::ui_kit::*;
+use crate::ui_hud::{hud_strip, HudState};
 use crate::touch::{Gesture, PointerEvent, PointerKind, MOUSE_POINTER_ID};
 use gpui::*;
 use std::cell::RefCell;
@@ -54,6 +55,36 @@ pub struct EditorView {
     /// Wave 7: audio panel under the canvas (mutually exclusive
     /// with the graph panel — opening one closes the other).
     show_audio: bool,
+    /// Wave 8: movieclip panel under the canvas (mutually
+    /// exclusive with the graph and audio panels).
+    show_clips: bool,
+    /// Wave 8: FX timeline panel under the canvas (mutually
+    /// exclusive with the graph and audio panels — opening one
+    /// closes the others).
+    show_fx: bool,
+    /// UI components wave: toast stack fed from core.status
+    /// changes in render(); last_status detects the changes.
+    toasts: crate::ui_toast::ToastQueue,
+    last_status: String,
+    /// UI components wave: easing picker panel under the
+    /// stage (independent of the other panels, like the
+    /// colour panel).
+    show_easing: bool,
+    /// UI components wave: help & shortcuts panel under the
+    /// canvas, toggled by the app bar's "?" button.
+    show_help: bool,
+    /// UI components wave: segment colour picker panel under
+    /// the canvas (independent flag — shown alongside whichever
+    /// other panel is open).
+    show_color: bool,
+    /// Wave 8: export centre panel under the canvas — every
+    /// export op gathered by category with a guidance line each
+    /// (the tool-group export buttons all stay where they are).
+    show_export: bool,
+    /// UI components wave: right-hand inspector column for the
+    /// selected figure/node (mutually exclusive with the graph,
+    /// audio, FX and movieclip panels).
+    show_inspector: bool,
     /// Wave 7: waveform-peaks cache, keyed by (clip path, file
     /// mtime in nanoseconds since the epoch). The value is `None`
     /// for a file that failed to probe as a WAV — caching the
@@ -150,6 +181,15 @@ impl EditorView {
             graph_bounds: Rc::new(RefCell::new(Bounds::default())),
             graph_drag: None,
             show_audio: false,
+            show_clips: false,
+            show_fx: false,
+            toasts: crate::ui_toast::ToastQueue::new(),
+            last_status: String::new(),
+            show_easing: false,
+            show_help: false,
+            show_color: false,
+            show_export: false,
+            show_inspector: false,
             audio_peaks_cache: std::collections::HashMap::new(),
         }
     }
@@ -418,6 +458,379 @@ impl EditorView {
         removed
     }
 
+    /// Wave 8: FX timeline panel — one row per FX clip from
+    /// `fx_edit::list` (kind, anchor figure/node, start,
+    /// duration), with buttons wired to the `fx_edit` ops:
+    /// shift the start one frame earlier/later, duplicate,
+    /// delete. Each mutation snapshots first, so a button press
+    /// is a single undo step (the same discipline the core's
+    /// own audio ops follow before they write).
+    /// UI components wave: the easing picker — one card per
+    /// `Easing` variant with its curve drawn (see
+    /// `crate::ui_easing`), each card's Apply button setting
+    /// the CURRENT frame's easing via
+    /// `EditorCore::set_frame_easing`, and a None button in
+    /// the header clearing it back to the project default.
+    /// The header reads the frame number and its current
+    /// easing from the project data.
+    fn easing_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let core = &self.core;
+        let cur = core.current.min(core.frame_count().saturating_sub(1));
+        let current = core.project.frames.get(cur).and_then(|f| f.easing);
+        let current_label = match current {
+            Some(e) => e.label(),
+            None => "project default",
+        };
+        let variants = [
+            crate::model::Easing::Linear,
+            crate::model::Easing::Smooth,
+            crate::model::Easing::EaseIn,
+            crate::model::Easing::EaseOut,
+        ];
+        let mut cards = div().flex().flex_row().flex_wrap().gap(px(6.0));
+        for (i, e) in variants.iter().enumerate() {
+            let e = *e;
+            let card = div()
+                .flex_col()
+                .items_center()
+                .gap(px(4.0))
+                .p(px(6.0))
+                .border_1()
+                .border_color(rgb(C_BORDER))
+                .rounded(px(8.0))
+                .child(crate::ui_easing::curve_canvas(e))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(C_INK))
+                        .child(crate::ui_easing::easing_name(e)),
+                )
+                .child(btn(("ease-set", i), "Apply", current == Some(e), cx.listener(move |view, _ev, _w, cx| {
+                    view.core.set_frame_easing(Some(e));
+                    cx.notify();
+                })));
+            cards = cards.child(card);
+        }
+        div()
+            .flex_col()
+            .w_full()
+            .bg(rgb(C_PANEL))
+            .border_1()
+            .border_color(rgb(C_BORDER))
+            .rounded(px(8.0))
+            .p(px(8.0))
+            .gap(px(6.0))
+            .child(
+                top_bar()
+                    .child(section_label("Easing"))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(C_MUTED))
+                            .child(format!("Frame {} · {}", cur + 1, current_label)),
+                    )
+                    .child(div().flex_1())
+                    .child(btn("ease-clear", "None", current.is_none(), cx.listener(|view, _ev, _w, cx| {
+                        view.core.set_frame_easing(None);
+                        cx.notify();
+                    }))),
+            )
+            .child(cards)
+    }
+
+    fn fx_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let core = &self.core;
+        let infos = crate::fx_edit::list(&core.project);
+        let mut col = div()
+            .flex_col()
+            .w_full()
+            .bg(rgb(C_PANEL))
+            .border_1()
+            .border_color(rgb(C_BORDER))
+            .rounded(px(8.0))
+            .p(px(8.0))
+            .gap(px(6.0))
+            .child(
+                top_bar()
+                    .child(section_label("Effects"))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(C_MUTED))
+                            .child(format!("Effects — {} clip(s)", infos.len())),
+                    ),
+            );
+        if infos.is_empty() {
+            return col.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(0x9AA3B2))
+                    .child("No FX clips in this project."),
+            );
+        }
+        for info in infos {
+            let i = info.index;
+            let row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(8.0))
+                .py(px(3.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(12.0))
+                        .text_color(rgb(0xE8E8EC))
+                        .child(format!(
+                            "{} · fig {} node {} · f{} +{}",
+                            info.kind,
+                            info.figure + 1,
+                            info.node,
+                            info.start as i64 + 1,
+                            info.duration as i64
+                        )),
+                )
+                .child(btn(("fx-earlier", i), "<", false, cx.listener(move |view, _ev, _w, cx| {
+                    if i < view.core.project.fx_clips.len() {
+                        let start = view.core.project.fx_clips[i].clip.start;
+                        if start > 0.0 {
+                            view.core.snapshot();
+                            crate::fx_edit::move_clip(&mut view.core.project, i, start - 1.0);
+                        }
+                    }
+                    cx.notify();
+                })))
+                .child(btn(("fx-later", i), ">", false, cx.listener(move |view, _ev, _w, cx| {
+                    if i < view.core.project.fx_clips.len() {
+                        let start = view.core.project.fx_clips[i].clip.start;
+                        view.core.snapshot();
+                        crate::fx_edit::move_clip(&mut view.core.project, i, start + 1.0);
+                    }
+                    cx.notify();
+                })))
+                .child(btn(("fx-dup", i), "Dup", false, cx.listener(move |view, _ev, _w, cx| {
+                    if i < view.core.project.fx_clips.len() {
+                        view.core.snapshot();
+                        crate::fx_edit::duplicate_clip(&mut view.core.project, i);
+                    }
+                    cx.notify();
+                })))
+                .child(btn(("fx-del", i), "x", false, cx.listener(move |view, _ev, _w, cx| {
+                    if i < view.core.project.fx_clips.len() {
+                        view.core.snapshot();
+                        crate::fx_edit::delete_clip(&mut view.core.project, i);
+                    }
+                    cx.notify();
+                })));
+            col = col.child(row);
+        }
+        col
+    }
+
+    /// Wave 8: the export centre — every export op from the
+    /// Camera / Export / Formats tool groups gathered in one
+    /// panel, organised by category, each with a one-line note
+    /// saying what it writes and where it lands (paths verified
+    /// against the ops in `editor.rs`: most write under
+    /// `./export/`, but the v5, APNG and JPEG ops write under
+    /// `out/` — the notes say so). The `xc-` buttons call the
+    /// exact same `EditorCore` ops as their tool-group
+    /// counterparts; no existing button is removed or changed.
+    fn export_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // One row of the centre: an `xc-` button calling the
+        // shared core op, plus its muted guidance line.
+        let mut xc_row = |id: &'static str,
+                          label: &'static str,
+                          note: &'static str,
+                          op: fn(&mut EditorCore)| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(8.0))
+                .py(px(3.0))
+                .child(btn(id, label, false, cx.listener(move |view, _ev, _w, cx| {
+                    op(&mut view.core);
+                    cx.notify();
+                })))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(12.0))
+                        .text_color(rgb(C_MUTED))
+                        .child(note),
+                )
+        };
+        let mut col = div()
+            .flex_col()
+            .w_full()
+            .bg(rgb(C_PANEL))
+            .border_1()
+            .border_color(rgb(C_BORDER))
+            .rounded(px(8.0))
+            .p(px(8.0))
+            .gap(px(6.0))
+            .child(
+                top_bar()
+                    .child(section_label("Export"))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(C_MUTED))
+                            .child("Export centre — every format in one place"),
+                    ),
+            );
+        col = col.child(section_label("Images"));
+        col = col.child(xc_row(
+            "xc-png",
+            "PNG",
+            "PNG image sequence — one file per frame in ./export/",
+            EditorCore::export_png,
+        ));
+        col = col.child(xc_row(
+            "xc-jpeg",
+            "JPEG",
+            "JPEG image sequence in out/jpeg/ (out/, not export/)",
+            EditorCore::export_jpeg_dir,
+        ));
+        col = col.child(xc_row(
+            "xc-sheet",
+            "Spritesheet",
+            "All frames on one sheet — ./export/spritesheet.png",
+            EditorCore::export_sheet,
+        ));
+        col = col.child(section_label("Video & animation"));
+        col = col.child(xc_row(
+            "xc-gif",
+            "GIF",
+            "Animated GIF — ./export/animation.gif",
+            EditorCore::export_gif,
+        ));
+        col = col.child(xc_row(
+            "xc-mp4",
+            "MP4",
+            "MP4 video via ffmpeg, audio included — ./export/animation.mp4",
+            EditorCore::export_mp4,
+        ));
+        col = col.child(xc_row(
+            "xc-webm",
+            "WebM",
+            "WebM video (VP9) — ./export/animation.webm",
+            EditorCore::export_webm,
+        ));
+        col = col.child(xc_row(
+            "xc-apng",
+            "APNG",
+            "Animated PNG — out/animation.apng (out/, not export/)",
+            EditorCore::export_apng_file,
+        ));
+        col = col.child(xc_row(
+            "xc-svg",
+            "SVG",
+            "One SVG per frame in ./export/svg/",
+            EditorCore::export_svg,
+        ));
+        col = col.child(section_label("Project formats"));
+        col = col.child(xc_row(
+            "xc-v2",
+            ".piv v2",
+            "Pivot v2 project — ./export/animation-v2.piv",
+            EditorCore::export_piv2,
+        ));
+        col = col.child(xc_row(
+            "xc-v3",
+            ".piv v3",
+            "Pivot v3 project — ./export/animation.piv",
+            EditorCore::export_piv,
+        ));
+        col = col.child(xc_row(
+            "xc-v4",
+            ".piv v4",
+            "Pivot v4 project — ./export/animation-v4.piv",
+            EditorCore::export_piv4,
+        ));
+        col = col.child(xc_row(
+            "xc-v5",
+            ".piv v5",
+            "Pivot v5 project — out/animation-v5.piv (out/, not export/)",
+            EditorCore::export_v5_file,
+        ));
+        col = col.child(xc_row(
+            "xc-stk",
+            ".stk",
+            "Selected figure only — ./export/<figure>.stk",
+            EditorCore::export_stk,
+        ));
+        col = col.child(xc_row(
+            "xc-nodes",
+            ".nodes",
+            "Selected figure for Stick Nodes — ./export/<figure>.nodes",
+            EditorCore::export_nodes,
+        ));
+        col = col.child(xc_row(
+            "xc-stknds",
+            ".stknds",
+            "Whole project for Stick Nodes — ./export/animation.stknds",
+            EditorCore::export_stknds,
+        ));
+        col
+    }
+
+    /// UI components wave: the segment colour picker — a grid
+    /// of swatches from `crate::ui_color::PICKER_PALETTE`. Each
+    /// swatch writes through `EditorCore::set_node_color`, the
+    /// same `NodeDef.color` the "Seg colour" cycle button steps
+    /// through; the swatch matching the selected segment's
+    /// current colour is highlighted.
+    fn color_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let core = &self.core;
+        let current: Option<u32> = core
+            .selected_node
+            .and_then(|ni| core.project.figures.get(core.selected_figure))
+            .and_then(|fig| fig.def.nodes.get(ni))
+            .and_then(|node| node.color);
+        let mut grid = div().flex().flex_wrap().gap(px(4.0));
+        for (i, &color) in crate::ui_color::PICKER_PALETTE.iter().enumerate() {
+            grid = grid.child(
+                crate::ui_color::swatch(color, current == Some(color))
+                    .id(("swatch", i))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |view, _ev, _w, cx| {
+                        view.core.set_node_color(color);
+                        cx.notify();
+                    })),
+            );
+        }
+        div()
+            .flex_col()
+            .w_full()
+            .bg(rgb(C_PANEL))
+            .border_1()
+            .border_color(rgb(C_BORDER))
+            .rounded(px(8.0))
+            .p(px(8.0))
+            .gap(px(6.0))
+            .child(
+                top_bar()
+                    .child(section_label("Colour"))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(C_MUTED))
+                            .child(if core.selected_node.is_some() {
+                                "Segment colour — click a swatch"
+                            } else {
+                                "Select a segment to colour it"
+                            }),
+                    ),
+            )
+            .child(grid)
+    }
+
     /// Wave 7: the audio panel — one row per clip in the project:
     /// file name + start frame, a waveform-peaks strip (or a
     /// "not a readable WAV" note), and the wave-6 editor ops for
@@ -545,6 +958,142 @@ impl EditorView {
         col
     }
 
+    /// Wave 8: the movieclip panel — one row per clip in the
+    /// project (name, frame count, used-by figure) with an Edit
+    /// button that opens the wave-7 clip session on it. While a
+    /// session is active, a session row offers the session's own
+    /// ops: frame navigation, add/delete frame, and Exit. All
+    /// edits land on `project.clips` via `EditorCore`'s session
+    /// methods; this method only reads state and routes clicks.
+    fn clips_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let core = &self.core;
+        let clips = &core.project.clips;
+        let session = core.clip_edit;
+        let mut col = div()
+            .flex_col()
+            .w_full()
+            .bg(rgb(C_PANEL))
+            .border_1()
+            .border_color(rgb(C_BORDER))
+            .rounded(px(8.0))
+            .p(px(8.0))
+            .gap(px(6.0))
+            .child(
+                top_bar()
+                    .child(section_label("Movieclips"))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(C_MUTED))
+                            .child(format!("Movieclips — {} clip(s)", clips.len())),
+                    ),
+            );
+        if clips.is_empty() {
+            return col.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(0x9AA3B2))
+                    .child("No movieclips in this project. \"Make clip\" builds one from the selected figure."),
+            );
+        }
+        for (i, clip) in clips.iter().enumerate() {
+            let used_by: Vec<&str> = core
+                .project
+                .figures
+                .iter()
+                .filter(|f| f.clip == Some(i))
+                .map(|f| f.name.as_str())
+                .collect();
+            let usage = if used_by.is_empty() {
+                "not used by any figure".to_string()
+            } else {
+                format!("used by {}", used_by.join(", "))
+            };
+            let editing = session.map(|s| s.clip) == Some(i);
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .child(
+                        div()
+                            .w(px(180.0))
+                            .text_size(px(12.0))
+                            .text_color(rgb(0xE8E8EC))
+                            .child(clip.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.0))
+                            .text_color(rgb(0x9AA3B2))
+                            .child(format!("{} frame(s) · {}", clip.frames.len(), usage)),
+                    )
+                    .child(btn(("clip-edit", i), "Edit", editing, cx.listener(move |view, _ev, _w, cx| {
+                        view.core.enter_clip(i);
+                        cx.notify();
+                    }))),
+            );
+        }
+        if let Some(s) = session {
+            let label = match clips.get(s.clip) {
+                Some(clip) => format!(
+                    "Editing: {} — frame {} / {}",
+                    clip.name,
+                    s.frame + 1,
+                    clip.frames.len()
+                ),
+                None => "Editing session (clip missing)".to_string(),
+            };
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.0))
+                            .text_color(rgb(0xE8E8EC))
+                            .child(label),
+                    )
+                    .child(btn("clip-prev", "< Frame", false, cx.listener(|view, _ev, _w, cx| {
+                        if let Some(s) = view.core.clip_edit {
+                            view.core.clip_goto(s.frame.saturating_sub(1));
+                        }
+                        cx.notify();
+                    })))
+                    .child(btn("clip-next", "Frame >", false, cx.listener(|view, _ev, _w, cx| {
+                        if let Some(s) = view.core.clip_edit {
+                            view.core.clip_goto(s.frame + 1);
+                        }
+                        cx.notify();
+                    })))
+                    .child(btn("clip-add-frame", "+ Frame", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.clip_add_frame();
+                        cx.notify();
+                    })))
+                    .child(btn("clip-del-frame", "Delete frame", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.clip_delete_frame();
+                        cx.notify();
+                    })))
+                    .child(btn("clip-exit", "Exit", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.exit_clip();
+                        cx.notify();
+                    }))),
+            );
+        }
+        col
+    }
+
     /// Milliseconds on the view's monotonic clock — the epoch
     /// the gesture recogniser's events and ticks share.
     fn now_ms(&self) -> u64 {
@@ -626,7 +1175,9 @@ impl EditorView {
     /// handlers pass `touch::MOUSE_POINTER_ID`, and a future
     /// multi-pointer source would pass each contact's own id
     /// (see `touch::PointerSource` for why GPUI 0.2.2 provides
-    /// none today). Elapsed time is checked first, so a
+    /// none today). Events enter through `touch::feed`, the
+    /// single adapter every pointer source shares. Elapsed
+    /// time is checked first, so a
     /// long-press that matured since the previous event fires
     /// before this event is processed. Returns whether any
     /// gesture was applied, so callers can skip needless
@@ -634,9 +1185,11 @@ impl EditorView {
     fn feed_pointer(&mut self, id: u32, kind: PointerKind, pos: V2) -> bool {
         let ticked = self.tick_gestures();
         let now = self.now_ms();
-        let gestures = self
-            .recognizer
-            .on_event(PointerEvent { id, pos, kind, t_ms: now });
+        let gestures = crate::touch::feed(
+            &mut self.recognizer,
+            crate::touch::ACTIVE_POINTER_SOURCE,
+            PointerEvent { id, pos, kind, t_ms: now },
+        );
         let applied = !gestures.is_empty();
         self.apply_gestures(gestures);
         ticked || applied
@@ -959,10 +1512,42 @@ fn btn(
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.focus(&self.focus_handle);
+        // Toast feed: a changed core.status becomes a toast (kind
+        // classified from the message), then the queue ages by one
+        // tick per render (~33 ms during playback).
+        if self.core.status != self.last_status {
+            if !self.core.status.is_empty() {
+                let lower = self.core.status.to_lowercase();
+                let kind = if lower.contains("failed")
+                    || lower.contains("could not")
+                    || lower.contains("error")
+                {
+                    crate::ui_toast::ToastKind::Error
+                } else if lower.starts_with("exported")
+                    || lower.starts_with("saved")
+                    || lower.starts_with("imported")
+                {
+                    crate::ui_toast::ToastKind::Success
+                } else {
+                    crate::ui_toast::ToastKind::Info
+                };
+                self.toasts.push(kind, self.core.status.clone());
+            }
+            self.last_status = self.core.status.clone();
+        }
+        self.toasts.tick();
         let core = &self.core;
         let frame_label = format!("Frame {} / {}", core.current + 1, core.frame_count());
         let fps_label = format!("{} fps", core.project.fps as i32);
         let status = core.status.clone();
+        let status_el = if self.toasts.is_empty() {
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(C_MUTED))
+                .child(status.clone())
+        } else {
+            crate::ui_toast::toast_stack(&self.toasts)
+        };
         let playing = core.playing;
         let onion_on = core.onion;
         let cam_mode = core.camera_mode;
@@ -977,6 +1562,13 @@ impl Render for EditorView {
         let show_home = self.show_home;
         let graph_on = self.show_graph;
         let audio_on = self.show_audio;
+        let clips_on = self.show_clips;
+        let fx_on = self.show_fx;
+        let easing_on = self.show_easing;
+        let help_on = self.show_help;
+        let color_on = self.show_color;
+        let export_on = self.show_export;
+        let inspector_on = self.show_inspector;
         let tween_on = core.project.tween_playback;
         let follow_on = core.project.camera_follow.is_some();
         let paths_on = core.show_paths;
@@ -1083,6 +1675,52 @@ impl Render for EditorView {
         } else {
             None
         };
+        let clips_panel = if clips_on {
+            Some(self.clips_panel(cx))
+        } else {
+            None
+        };
+
+        // Wave 8: FX timeline panel under the stage, mutually
+        // exclusive with the graph and audio panels.
+        let fx_panel = if fx_on {
+            Some(self.fx_panel(cx))
+        } else {
+            None
+        };
+
+        // UI components wave: easing picker panel under the
+        // stage.
+        let easing_panel = if easing_on {
+            Some(self.easing_panel(cx))
+        } else {
+            None
+        };
+
+        // UI components wave: help & shortcuts panel under the
+        // stage, built from the verified data in `ui_help`.
+        let help_panel = if help_on {
+            let shortcuts = crate::ui_help::shortcut_rows();
+            let groups = crate::ui_help::group_rows();
+            Some(crate::ui_help::help_panel(&shortcuts, &groups))
+        } else {
+            None
+        };
+
+        // UI components wave: colour picker panel under the
+        // stage (independent of the other panels).
+        let color_panel = if color_on {
+            Some(self.color_panel(cx))
+        } else {
+            None
+        };
+
+        // Wave 8: export centre panel under the stage.
+        let export_panel = if export_on {
+            Some(self.export_panel(cx))
+        } else {
+            None
+        };
 
         let bounds_slot = self.canvas_bounds.clone();
         let canvas = canvas(
@@ -1138,6 +1776,12 @@ impl Render for EditorView {
                             }))
                             .child(name),
                     )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(C_MUTED))
+                            .child(format!("{:.0}%", fig.opacity * 100.0)),
+                    )
                     .child(btn(("fig-up", fi), "^", false, cx.listener(move |view, _ev, _w, cx| {
                         view.core.select_figure(fi);
                         view.core.move_figure_full(1);
@@ -1158,6 +1802,14 @@ impl Render for EditorView {
                     })))
                     .child(btn(("fig-opac", fi), "opac", false, cx.listener(move |view, _ev, _w, cx| {
                         view.core.cycle_figure_opacity(fi);
+                        cx.notify();
+                    })))
+                    .child(btn(("fig-op-dn", fi), "−", false, cx.listener(move |view, _ev, _w, cx| {
+                        view.core.step_figure_opacity(fi, -0.1);
+                        cx.notify();
+                    })))
+                    .child(btn(("fig-op-up", fi), "+", false, cx.listener(move |view, _ev, _w, cx| {
+                        view.core.step_figure_opacity(fi, 0.1);
                         cx.notify();
                     })))
                     .child(btn(("fig-eye", fi), if hidden { "off" } else { "eye" }, hidden, cx.listener(move |view, _ev, _w, cx| {
@@ -1198,6 +1850,13 @@ impl Render for EditorView {
                     .child(format!("{}", i + 1)),
             );
         }
+
+        // Dopesheet strip for the bottom bar: one row per figure
+        // with a dot on every frame where that figure's pose changes.
+        let dope_names: Vec<String> =
+            core.project.figures.iter().map(|f| f.name.clone()).collect();
+        let dope_map = crate::ui_dope::keyframe_map(&core.project);
+        let dopesheet = crate::ui_dope::dopesheet(&dope_map, core.current, &dope_names);
 
         // Home panel: saved projects (from the library scan) with
         // an Open button each, plus the recents list. Built only
@@ -1302,14 +1961,129 @@ impl Render for EditorView {
             None
         };
 
+        // Inspector: assemble a plain data snapshot here, where the
+        // editor state and evaluated pose are available. The
+        // component itself only renders that snapshot; the stepper
+        // controls are appended below because they need listeners.
+        let inspector_panel = if inspector_on {
+            let inspector_data = match core.project.figures.get(core.selected_figure) {
+                Some(figure) => {
+                    let selected = core
+                        .selected_node
+                        .and_then(|ni| figure.def.nodes.get(ni).map(|node| (ni, node)));
+                    let is_origin = selected
+                        .map(|(_, node)| node.parent.is_none())
+                        .unwrap_or(false);
+                    let angle_deg = selected.and_then(|(ni, node)| {
+                        let parent = node.parent?;
+                        let positions = core.positions(core.current, core.selected_figure);
+                        let start = *positions.get(parent)?;
+                        let end = *positions.get(ni)?;
+                        Some((end[1] - start[1]).atan2(end[0] - start[0]).to_degrees())
+                    });
+                    crate::ui_inspector::InspectorData {
+                        figure_name: figure.name.clone(),
+                        figure_color: figure.color,
+                        node_index: selected.map(|(ni, _)| ni),
+                        seg_count: figure.def.nodes.len().saturating_sub(1),
+                        length: selected.and_then(|(_, node)| {
+                            node.parent.map(|_| node.length)
+                        }),
+                        thickness: selected.and_then(|(_, node)| {
+                            node.parent.map(|_| node.thickness)
+                        }),
+                        angle_deg,
+                        is_origin,
+                    }
+                }
+                None => crate::ui_inspector::InspectorData {
+                    figure_name: "No figure".to_string(),
+                    figure_color: 0,
+                    node_index: None,
+                    seg_count: 0,
+                    length: None,
+                    thickness: None,
+                    angle_deg: None,
+                    is_origin: false,
+                },
+            };
+            let has_segment = inspector_data.node_index.is_some() && !inspector_data.is_origin;
+            let mut panel = crate::ui_inspector::inspector_panel(inspector_data);
+            if has_segment {
+                panel = panel
+                    .child(section_label("Adjust"))
+                    .child(
+                        group_row()
+                            .child(btn("insp-len-dn", "Len -", false, cx.listener(|view, _ev, _w, cx| {
+                                view.core.adjust_length(-4.0);
+                                cx.notify();
+                            })))
+                            .child(btn("insp-len-up", "Len +", false, cx.listener(|view, _ev, _w, cx| {
+                                view.core.adjust_length(4.0);
+                                cx.notify();
+                            }))),
+                    )
+                    .child(
+                        group_row()
+                            .child(btn("insp-th-dn", "Thick -", false, cx.listener(|view, _ev, _w, cx| {
+                                view.core.adjust_thickness(-1.0);
+                                cx.notify();
+                            })))
+                            .child(btn("insp-th-up", "Thick +", false, cx.listener(|view, _ev, _w, cx| {
+                                view.core.adjust_thickness(1.0);
+                                cx.notify();
+                            }))),
+                    );
+            }
+            Some(panel)
+        } else {
+            None
+        };
+
         let middle = div()
             .flex()
             .flex_row()
             .flex_1()
             .gap(px(0.0))
             .child(sidebar);
-        // The stage column: framed canvas on top, a quiet hint row
-        // under it, then the graph / audio panels.
+        // Canvas HUD state: mode follows the canvas's own claim
+        // order — an active 3D session owns the stage (its bake
+        // preview is what the canvas paints), then draw mode,
+        // then camera mode, then plain posing (the input handlers
+        // check draw before camera the same way).
+        let hud_state = HudState {
+            mode: if core.fig3.is_some() {
+                "3D".to_string()
+            } else if draw_on {
+                "Draw".to_string()
+            } else if cam_mode {
+                "Camera".to_string()
+            } else {
+                "Pose".to_string()
+            },
+            tool: if draw_on {
+                Some(if core.draw_tool_is_eraser() {
+                    "Eraser".to_string()
+                } else {
+                    format!("Brush: {}", core.active_brush().name)
+                })
+            } else {
+                None
+            },
+            camera: format!("Cam ({ccx:.0}, {ccy:.0}) x{czoom:.2}"),
+            weather: core.project.weather.as_ref().map(|w| {
+                let kind = match w.kind {
+                    crate::vfx::WeatherKind::Rain => "Rain",
+                    crate::vfx::WeatherKind::Snow => "Snow",
+                    crate::vfx::WeatherKind::Fireflies => "Fireflies",
+                };
+                format!("{kind} · {:.0}", w.amount)
+            }),
+            loop_range: core.loop_range,
+            onion: onion_on,
+        };
+        // The stage column: HUD strip over the framed canvas, a
+        // quiet hint row under it, then the graph / audio panels.
         let framed_canvas = div()
             .flex()
             .flex_1()
@@ -1336,6 +2110,7 @@ impl Render for EditorView {
             .w_full()
             .p(px(8.0))
             .gap(px(6.0))
+            .child(hud_strip(&hud_state))
             .child(framed_canvas)
             .child(hint_row);
         let stage_col = match graph_panel {
@@ -1346,9 +2121,37 @@ impl Render for EditorView {
             Some(panel) => stage_col.child(panel),
             None => stage_col,
         };
+        let stage_col = match clips_panel {
+            Some(panel) => stage_col.child(panel),
+            None => stage_col,
+        };
+        let stage_col = match fx_panel {
+            Some(panel) => stage_col.child(panel),
+            None => stage_col,
+        };
+        let stage_col = match help_panel {
+            Some(panel) => stage_col.child(panel),
+            None => stage_col,
+        };
+        let stage_col = match color_panel {
+            Some(panel) => stage_col.child(panel),
+            None => stage_col,
+        };
+        let stage_col = match export_panel {
+            Some(panel) => stage_col.child(panel),
+            None => stage_col,
+        };
+        let stage_col = match easing_panel {
+            Some(panel) => stage_col.child(panel),
+            None => stage_col,
+        };
         let middle = match home_panel {
             Some(panel) => middle.child(panel),
             None => middle.child(stage_col),
+        };
+        let middle = match inspector_panel {
+            Some(panel) => middle.child(panel),
+            None => middle,
         };
 
         div()
@@ -1550,6 +2353,7 @@ impl Render for EditorView {
                         view.show_graph = !view.show_graph;
                         if view.show_graph {
                             view.show_audio = false;
+                            view.show_fx = false;
                         }
                         if !view.show_graph {
                             view.graph_drag = None;
@@ -1561,11 +2365,56 @@ impl Render for EditorView {
                         if view.show_audio {
                             view.show_graph = false;
                             view.graph_drag = None;
+                            view.show_fx = false;
+                        }
+                        cx.notify();
+                    })))
+                    .child(btn("fx-panel", "FX", fx_on, cx.listener(|view, _ev, _w, cx| {
+                        view.show_fx = !view.show_fx;
+                        if view.show_fx {
+                            view.show_graph = false;
+                            view.graph_drag = None;
+                            view.show_audio = false;
+                        }
+                        cx.notify();
+                    })))
+                    .child(btn("inspector", "Inspector", inspector_on, cx.listener(|view, _ev, _w, cx| {
+                        view.show_inspector = !view.show_inspector;
+                        if view.show_inspector {
+                            view.show_graph = false;
+                            view.graph_drag = None;
+                            view.show_audio = false;
+                            view.show_fx = false;
+                            view.show_clips = false;
+                        }
+                        cx.notify();
+                    })))
+                    .child(btn("clips-panel", "Clips", clips_on, cx.listener(|view, _ev, _w, cx| {
+                        view.show_clips = !view.show_clips;
+                        if view.show_clips {
+                            view.show_graph = false;
+                            view.show_audio = false;
+                            view.graph_drag = None;
+                        }
+                        cx.notify();
+                    })))
+                    .child(btn("export-panel", "Export", export_on, cx.listener(|view, _ev, _w, cx| {
+                        view.show_export = !view.show_export;
+                        if view.show_export {
+                            view.show_graph = false;
+                            view.show_audio = false;
+                            view.show_fx = false;
+                            view.show_clips = false;
+                            view.graph_drag = None;
                         }
                         cx.notify();
                     })))
                     .child(info_chip(frame_label.clone(), false))
-                    .child(info_chip(fps_label.clone(), false)),
+                    .child(info_chip(fps_label.clone(), false))
+                    .child(btn("help", "?", help_on, cx.listener(|view, _ev, _w, cx| {
+                        view.show_help = !view.show_help;
+                        cx.notify();
+                    }))),
             )
             .child(
                 div()
@@ -1578,8 +2427,24 @@ impl Render for EditorView {
                     .child(
                         tool_group("Transport").child(
                             group_row()
+                                .child(btn("go-first", "|<", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.goto(0);
+                                    cx.notify();
+                                })))
+                                .child(btn("go-prev", "<", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.goto(view.core.current.saturating_sub(1));
+                                    cx.notify();
+                                })))
                                 .child(btn("play", if playing { tr("pause") } else { tr("play") }, playing, cx.listener(|view, _ev, _w, cx| {
                                     view.toggle_play(cx);
+                                })))
+                                .child(btn("go-next", ">", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.goto(view.core.current + 1);
+                                    cx.notify();
+                                })))
+                                .child(btn("go-last", ">|", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.goto(view.core.frame_count().saturating_sub(1));
+                                    cx.notify();
                                 })))
                                 .child(btn("add-frame", tr("add_frame"), false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.add_frame();
@@ -1596,8 +2461,24 @@ impl Render for EditorView {
                                 .child(btn("onion", tr("onion_skin"), onion_on, cx.listener(|view, _ev, _w, cx| {
                                     view.core.onion = !view.core.onion;
                                     cx.notify();
+                                })))
+                                .child(btn("loop-start", "Loop start", core.loop_range.is_some(), cx.listener(|view, _ev, _w, cx| {
+                                    let cur = view.core.current;
+                                    let (_, b) = view.core.loop_range.unwrap_or((cur, cur));
+                                    view.core.set_loop_range(cur, b);
+                                    cx.notify();
+                                })))
+                                .child(btn("loop-end", "Loop end", core.loop_range.is_some(), cx.listener(|view, _ev, _w, cx| {
+                                    let cur = view.core.current;
+                                    let (a, _) = view.core.loop_range.unwrap_or((cur, cur));
+                                    view.core.set_loop_range(a, cur);
+                                    cx.notify();
+                                })))
+                                .child(btn("loop-clear", "Loop clear", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.clear_loop_range();
+                                    cx.notify();
                                 }))))
-                    ),
+                    )
                     .child(
                         tool_group("Figure").child(
                             group_row()
@@ -1622,6 +2503,35 @@ impl Render for EditorView {
                             group_row()
                                 .child(btn("inbetween", tr("inbetween"), false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.insert_inbetween();
+                                    cx.notify();
+                                })))
+                                .child(btn("shift-back", "< Shift", false, cx.listener(|view, _ev, _w, cx| {
+                                    let cur = view.core.current;
+                                    if !view.core.shift_frames(cur, 1, -1) {
+                                        view.core.status = "First frame: cannot shift it earlier.".into();
+                                    }
+                                    cx.notify();
+                                })))
+                                .child(btn("shift-fwd", "Shift >", false, cx.listener(|view, _ev, _w, cx| {
+                                    let cur = view.core.current;
+                                    if !view.core.shift_frames(cur, 1, 1) {
+                                        view.core.status = "Last frame: cannot shift it later.".into();
+                                    }
+                                    cx.notify();
+                                })))
+                                .child(btn("reverse-range", "Reverse", false, cx.listener(|view, _ev, _w, cx| {
+                                    match view.core.loop_range {
+                                        Some((a, b)) => view.core.reverse_range(a, b - a + 1),
+                                        None => {
+                                            let n = view.core.frame_count();
+                                            view.core.reverse_range(0, n);
+                                        }
+                                    }
+                                    cx.notify();
+                                })))
+                                .child(btn("smooth-path", "Smooth path", false, cx.listener(|view, _ev, _w, cx| {
+                                    let fi = view.core.selected_figure;
+                                    view.core.smooth_path_roots(fi);
                                     cx.notify();
                                 })))
                         ),
@@ -1657,8 +2567,16 @@ impl Render for EditorView {
                                     view.core.cycle_node_color();
                                     cx.notify();
                                 })))
+                                .child(btn("color-panel", "Colour", color_on, cx.listener(|view, _ev, _w, cx| {
+                                    view.show_color = !view.show_color;
+                                    cx.notify();
+                                })))
                                 .child(btn("node-shape", tr("shape"), false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.cycle_shape();
+                                    cx.notify();
+                                })))
+                                .child(btn("cycle-bend", "Bend", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.cycle_bend();
                                     cx.notify();
                                 })))
                         ),
@@ -1690,6 +2608,14 @@ impl Render for EditorView {
                                 })))
                                 .child(btn("clear-drawing", tr("clear_drawing"), false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.clear_frame_drawings();
+                                    cx.notify();
+                                })))
+                                .child(btn("brush-cycle", Box::leak(format!("Brush: {}", core.active_brush().name).into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.cycle_brush();
+                                    cx.notify();
+                                })))
+                                .child(btn("draw-tool", Box::leak(format!("Tool: {}", if core.draw_tool_is_eraser() { "Eraser" } else { "Brush" }).into_boxed_str()) as &str, core.draw_tool_is_eraser(), cx.listener(|view, _ev, _w, cx| {
+                                    view.core.toggle_draw_tool();
                                     cx.notify();
                                 })))
                         ),
@@ -1964,6 +2890,22 @@ impl Render for EditorView {
                                     view.core.fig3_bake();
                                     cx.notify();
                                 })))
+                                .child(btn("mark-b-3d", "Mark B", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.fig3_mark_pose_b();
+                                    cx.notify();
+                                })))
+                                .child(btn("bake-anim-3d", "Bake anim", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.fig3_bake_animation(8);
+                                    cx.notify();
+                                })))
+                                .child(btn("save-3d", "Save 3D", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.fig3_save_to_library();
+                                    cx.notify();
+                                })))
+                                .child(btn("load-3d", "Load 3D", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.fig3_cycle_library();
+                                    cx.notify();
+                                })))
                         ),
                     )
                     .child(
@@ -2044,6 +2986,22 @@ impl Render for EditorView {
                                     view.core.export_jpeg_dir();
                                     cx.notify();
                                 })))
+                                .child(btn("export-v2", "Export .piv v2", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_piv2();
+                                    cx.notify();
+                                })))
+                                .child(btn("export-v4", "Export .piv v4", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_piv4();
+                                    cx.notify();
+                                })))
+                                .child(btn("export-nodes", "Export .nodes", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_nodes();
+                                    cx.notify();
+                                })))
+                                .child(btn("export-stknds", "Export .stknds", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.export_stknds();
+                                    cx.notify();
+                                })))
                                 .child(btn("import-nodes", "Import .nodes", false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.import_nodes_file();
                                     cx.notify();
@@ -2079,6 +3037,10 @@ impl Render for EditorView {
                                 })))
                                 .child(btn("frame-easing", Box::leak(fease_label.into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.cycle_frame_easing();
+                                    cx.notify();
+                                })))
+                                .child(btn("easing-panel", "Easing", easing_on, cx.listener(|view, _ev, _w, cx| {
+                                    view.show_easing = !view.show_easing;
                                     cx.notify();
                                 })))
                         ),
@@ -2176,17 +3138,13 @@ impl Render for EditorView {
                     .gap(px(6.0))
                     .p(px(8.0))
                     .bg(rgb(bar_bg))
+                    .child(dopesheet)
                     .child(
                         top_bar()
                             .child(section_label("Timeline"))
                             .child(timeline.flex_1()),
                     )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(C_MUTED))
-                            .child(status),
-                    ),
+                    .child(status_el),
             )
     }
 }
