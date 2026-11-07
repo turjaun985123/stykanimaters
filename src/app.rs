@@ -21,12 +21,22 @@ impl EditorView {
         }
     }
 
-    fn to_stage(&self, window_pos: Point<Pixels>) -> V2 {
+    /// (scale, cam centre) of the canvas view: fit-to-canvas times
+    /// the frame's camera zoom, centred on the camera centre.
+    fn view_transform(&self) -> (f32, V2) {
         let b = *self.canvas_bounds.borrow();
         let stage = self.core.project.stage;
-        let x = (window_pos.x - b.origin.x) / b.size.width * stage[0];
-        let y = (window_pos.y - b.origin.y) / b.size.height * stage[1];
-        [f32::from(x), f32::from(y)]
+        let (cx, cy, zoom) = self.core.camera_here();
+        let fit = (f32::from(b.size.width) / stage[0]).min(f32::from(b.size.height) / stage[1]);
+        (fit * zoom, [cx, cy])
+    }
+
+    fn to_stage(&self, window_pos: Point<Pixels>) -> V2 {
+        let b = *self.canvas_bounds.borrow();
+        let (scale, cam) = self.view_transform();
+        let dx = f32::from(window_pos.x - b.origin.x) - f32::from(b.size.width) / 2.0;
+        let dy = f32::from(window_pos.y - b.origin.y) - f32::from(b.size.height) / 2.0;
+        [cam[0] + dx / scale, cam[1] + dy / scale]
     }
 
     fn toggle_play(&mut self, cx: &mut Context<Self>) {
@@ -67,10 +77,11 @@ impl EditorView {
 struct DrawData {
     stage: [f32; 2],
     background: u32,
-    /// (segments, joints, heads, color) for the current frame
-    figures: Vec<(Vec<(V2, V2)>, Vec<V2>, Vec<V2>, u32)>,
+    /// (segments (a, b, colour, thickness), joints, heads, figure colour)
+    figures: Vec<(Vec<(V2, V2, u32, f32)>, Vec<V2>, Vec<V2>, u32)>,
     onion: Vec<(Vec<(V2, V2)>, u32)>,
     selected: Option<(usize, usize)>,
+    cam: (f32, f32, f32),
 }
 
 impl EditorView {
@@ -82,15 +93,16 @@ impl EditorView {
             let def = &core.project.figures[fi].def;
             let mut segs = Vec::new();
             let mut heads = Vec::new();
+            let fig_color = core.project.figures[fi].color;
             for (i, node) in def.nodes.iter().enumerate() {
                 if let Some(p) = node.parent {
-                    segs.push((pos[p], pos[i]));
+                    segs.push((pos[p], pos[i], node.color.unwrap_or(fig_color), node.thickness));
                 }
                 if node.head {
                     heads.push(pos[i]);
                 }
             }
-            figures.push((segs, pos, heads, core.project.figures[fi].color));
+            figures.push((segs, pos, heads, fig_color));
         }
         let mut onion = Vec::new();
         if core.onion && core.current > 0 {
@@ -112,6 +124,7 @@ impl EditorView {
             figures,
             onion,
             selected: self.core.selected_node.map(|n| (self.core.selected_figure, n)),
+            cam: core.camera_here(),
         }
     }
 }
@@ -144,6 +157,9 @@ impl Render for EditorView {
         let status = core.status.clone();
         let playing = core.playing;
         let onion_on = core.onion;
+        let cam_mode = core.camera_mode;
+        let (ccx, ccy, czoom) = core.camera_here();
+        let cam_label = format!("cam ({ccx:.0}, {ccy:.0}) x{czoom:.2} · {} key(s)", core.project.camera.len());
 
         let data = self.draw_data();
         let bounds_slot = self.canvas_bounds.clone();
@@ -187,7 +203,10 @@ impl Render for EditorView {
             .bg(rgb(0x191C21))
             .on_mouse_down(MouseButton::Left, cx.listener(|view, ev: &MouseDownEvent, _w, cx| {
                 let p = view.to_stage(ev.position);
-                if view.core.begin_drag(p) {
+                if view.core.camera_mode {
+                    view.core.begin_camera_drag(p);
+                    cx.notify();
+                } else if view.core.begin_drag(p) {
                     cx.notify();
                 }
             }))
@@ -258,6 +277,99 @@ impl Render for EditorView {
                             .child(format!("{}   ·   {}", frame_label, fps_label)),
                     ),
             )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(rgb(0x1D2129))
+                    .child(btn("inbetween", "Inbetween", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.insert_inbetween();
+                        cx.notify();
+                    })))
+                    .child(btn("add-seg", "+ Segment", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.add_segment();
+                        cx.notify();
+                    })))
+                    .child(btn("del-seg", "- Segment", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.delete_segment();
+                        cx.notify();
+                    })))
+                    .child(btn("len-up", "Len +", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.adjust_length(4.0);
+                        cx.notify();
+                    })))
+                    .child(btn("len-dn", "Len -", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.adjust_length(-4.0);
+                        cx.notify();
+                    })))
+                    .child(btn("thick-up", "Thick +", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.adjust_thickness(1.0);
+                        cx.notify();
+                    })))
+                    .child(btn("thick-dn", "Thick -", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.adjust_thickness(-1.0);
+                        cx.notify();
+                    })))
+                    .child(btn("node-color", "Seg colour", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.cycle_node_color();
+                        cx.notify();
+                    })))
+                    .child(btn("add-quad", "+ Quadruped", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.add_quadruped();
+                        cx.notify();
+                    })))
+                    .child(btn("add-mini", "+ Mini", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.add_simple();
+                        cx.notify();
+                    }))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(rgb(0x1D2129))
+                    .child(btn("cam-mode", "Camera mode", cam_mode, cx.listener(|view, _ev, _w, cx| {
+                        view.core.camera_mode = !view.core.camera_mode;
+                        view.core.status = if view.core.camera_mode {
+                            "Camera mode: drag the canvas to pan. Keys are set per frame.".into()
+                        } else {
+                            "Pose mode.".into()
+                        };
+                        cx.notify();
+                    })))
+                    .child(btn("cam-zin", "Cam zoom +", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.camera_zoom_by(1.2);
+                        cx.notify();
+                    })))
+                    .child(btn("cam-zout", "Cam zoom -", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.camera_zoom_by(1.0 / 1.2);
+                        cx.notify();
+                    })))
+                    .child(btn("cam-clear", "Clear cam key", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.camera_clear_key();
+                        cx.notify();
+                    })))
+                    .child(btn("export-gif", "Export GIF", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.export_gif();
+                        cx.notify();
+                    })))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(0x9AA3B2))
+                            .child(cam_label),
+                    ),
+            )
             .child(canvas)
             .child(
                 div()
@@ -279,13 +391,16 @@ impl Render for EditorView {
 
 fn paint_stage(window: &mut Window, bounds: Bounds<Pixels>, data: &DrawData) {
     let origin = bounds.origin;
-    let sx = f32::from(bounds.size.width) / data.stage[0];
-    let sy = f32::from(bounds.size.height) / data.stage[1];
-    let s = sx.min(sy);
+    let (cam_x, cam_y, zoom) = data.cam;
+    let fit = (f32::from(bounds.size.width) / data.stage[0])
+        .min(f32::from(bounds.size.height) / data.stage[1]);
+    let s = fit * zoom;
+    let cxw = f32::from(bounds.size.width) / 2.0;
+    let cyw = f32::from(bounds.size.height) / 2.0;
     let map = |p: V2| -> Point<Pixels> {
         point(
-            origin.x + px(p[0] * s),
-            origin.y + px(p[1] * s),
+            origin.x + px(cxw + (p[0] - cam_x) * s),
+            origin.y + px(cyw + (p[1] - cam_y) * s),
         )
     };
     let stroke = |window: &mut Window, segs: &[(V2, V2)], color: Rgba, width: f32| {
@@ -298,12 +413,22 @@ fn paint_stage(window: &mut Window, bounds: Bounds<Pixels>, data: &DrawData) {
             window.paint_path(path, color);
         }
     };
+    let stroke_seg = |window: &mut Window, a: V2, b: V2, color: u32, width: f32| {
+        let mut pb = PathBuilder::stroke(px(width));
+        pb.move_to(map(a));
+        pb.line_to(map(b));
+        if let Ok(path) = pb.build() {
+            window.paint_path(path, rgb(color));
+        }
+    };
     // Onion skin (previous frame) first, translucent.
     for (segs, color) in &data.onion {
         stroke(window, segs, rgba((color << 8) | 0x4D), 5.0 * s);
     }
     for (fi, (segs, joints, heads, color)) in data.figures.iter().enumerate() {
-        stroke(window, segs, rgb(*color), 5.0 * s);
+        for (a, b, seg_color, thickness) in segs {
+            stroke_seg(window, *a, *b, *seg_color, thickness * s);
+        }
         // Head rings.
         for h in heads {
             let mut pb = PathBuilder::stroke(px(5.0 * s));

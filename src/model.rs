@@ -61,6 +61,19 @@ pub struct NodeDef {
     pub head: bool,
     /// For end effectors (hands, feet): preferred IK bend side (+1 / -1).
     pub bend: f32,
+    /// Stroke thickness of this segment in stage units.
+    #[serde(default = "default_thickness")]
+    pub thickness: f32,
+    /// Per-segment colour override; `None` inherits the figure colour.
+    #[serde(default)]
+    pub color: Option<u32>,
+    /// True for hands/feet: dragging this node solves two-bone IK.
+    #[serde(default)]
+    pub ik_end: bool,
+}
+
+fn default_thickness() -> f32 {
+    5.0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -78,6 +91,9 @@ impl FigureDef {
             rest_angle: rest,
             head: false,
             bend: 1.0,
+            thickness: 5.0,
+            color: None,
+            ik_end: false,
         };
         let mut nodes = vec![
             n("hips", None, 0.0, 0.0),        // 0 root
@@ -97,6 +113,74 @@ impl FigureDef {
         nodes[6].bend = -1.0;
         nodes[8].bend = 1.0; // knees bend forwards
         nodes[10].bend = 1.0;
+        for i in [4, 6, 8, 10] {
+            nodes[i].ik_end = true;
+        }
+        FigureDef { nodes }
+    }
+
+    /// A two-segment-limb quadruped (dog/horse-like), root at the rear
+    /// of the spine, head at the front. Side view, facing right.
+    pub fn quadruped() -> Self {
+        let n = |name: &str, parent: Option<usize>, length: f32, rest: f32| NodeDef {
+            name: name.into(),
+            parent,
+            length,
+            rest_angle: rest,
+            head: false,
+            bend: 1.0,
+            thickness: 5.0,
+            color: None,
+            ik_end: false,
+        };
+        let mut nodes = vec![
+            n("pelvis", None, 0.0, 0.0),              // 0 root (rear)
+            n("chest", Some(0), 95.0, 90.0),          // 1 spine, points right
+            n("neck", Some(1), 34.0, 50.0),           // 2 abs 140: up-forward
+            n("head", Some(2), 26.0, 8.0),            // 3 abs 148
+            n("hind upper L", Some(0), 40.0, 16.0),   // 4
+            n("hind lower L", Some(4), 38.0, -10.0),  // 5 foot
+            n("hind upper R", Some(0), 40.0, 27.0),   // 6
+            n("hind lower R", Some(6), 38.0, -12.0),  // 7 foot
+            n("front upper L", Some(1), 40.0, -78.0), // 8 (abs ~12: down)
+            n("front lower L", Some(8), 38.0, 6.0),   // 9 foot
+            n("front upper R", Some(1), 40.0, -68.0), // 10
+            n("front lower R", Some(10), 38.0, 4.0),  // 11 foot
+            n("tail", Some(0), 44.0, -118.0),         // 12 up-back
+        ];
+        nodes[3].head = true;
+        nodes[5].bend = -1.0;
+        nodes[7].bend = -1.0;
+        for i in [5, 7, 9, 11] {
+            nodes[i].ik_end = true;
+        }
+        FigureDef { nodes }
+    }
+
+    /// A compact 7-node figure: two-segment limbs are merged, so hands
+    /// and feet aim with FK instead of IK.
+    pub fn simple() -> Self {
+        let n = |name: &str, parent: Option<usize>, length: f32, rest: f32| NodeDef {
+            name: name.into(),
+            parent,
+            length,
+            rest_angle: rest,
+            head: false,
+            bend: 1.0,
+            thickness: 6.0,
+            color: None,
+            ik_end: false,
+        };
+        let mut nodes = vec![
+            n("hips", None, 0.0, 0.0),
+            n("chest", Some(0), 52.0, 180.0),
+            n("head", Some(1), 30.0, 0.0),
+            n("arm L", Some(1), 66.0, 112.0),
+            n("arm R", Some(1), 66.0, -112.0),
+            n("leg L", Some(0), 84.0, -9.0),
+            n("leg R", Some(0), 84.0, 9.0),
+        ];
+        nodes[2].head = true;
         FigureDef { nodes }
     }
 
@@ -114,6 +198,26 @@ impl FigureDef {
 pub struct Pose {
     pub root: V2,
     pub angles: Vec<f32>,
+}
+
+impl Pose {
+    /// Interpolate two poses of the same figure: root lerps linearly,
+    /// angles take the shortest path around the circle.
+    pub fn lerp(&self, other: &Pose, t: f32) -> Pose {
+        let angles = self
+            .angles
+            .iter()
+            .zip(other.angles.iter())
+            .map(|(a, b)| norm_deg(a + norm_deg(b - a) * t))
+            .collect();
+        Pose {
+            root: [
+                self.root[0] + (other.root[0] - self.root[0]) * t,
+                self.root[1] + (other.root[1] - self.root[1]) * t,
+            ],
+            angles,
+        }
+    }
 }
 
 /// Evaluate a pose to absolute joint positions (forward kinematics).
@@ -215,6 +319,16 @@ pub struct Frame {
     pub poses: Vec<Pose>,
 }
 
+/// One camera keyframe: at `frame`, the camera centres stage point
+/// (x, y) and magnifies by `zoom`. Between keys the camera lerps.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CameraKey {
+    pub frame: usize,
+    pub x: f32,
+    pub y: f32,
+    pub zoom: f32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
@@ -224,6 +338,8 @@ pub struct Project {
     pub background: u32,
     pub figures: Vec<FigureInstance>,
     pub frames: Vec<Frame>,
+    #[serde(default)]
+    pub camera: Vec<CameraKey>,
 }
 
 impl Project {
@@ -255,11 +371,64 @@ impl Project {
             background: 0x232830,
             figures,
             frames,
+            camera: Vec::new(),
         }
     }
 
+    /// Camera (centre x, centre y, zoom) at a fractional frame time.
+    /// With no keys the camera frames the whole stage.
+    pub fn camera_at(&self, frame: f32) -> (f32, f32, f32) {
+        let default = (self.stage[0] / 2.0, self.stage[1] / 2.0, 1.0);
+        if self.camera.is_empty() {
+            return default;
+        }
+        let mut keys: Vec<&CameraKey> = self.camera.iter().collect();
+        keys.sort_by_key(|k| k.frame);
+        let first = keys[0];
+        if frame <= first.frame as f32 {
+            return (first.x, first.y, first.zoom);
+        }
+        let last = keys[keys.len() - 1];
+        if frame >= last.frame as f32 {
+            return (last.x, last.y, last.zoom);
+        }
+        for w in keys.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if frame >= a.frame as f32 && frame <= b.frame as f32 {
+                let t = (frame - a.frame as f32) / (b.frame - a.frame).max(1) as f32;
+                return (
+                    a.x + (b.x - a.x) * t,
+                    a.y + (b.y - a.y) * t,
+                    a.zoom + (b.zoom - a.zoom) * t,
+                );
+            }
+        }
+        default
+    }
+
+    /// Insert or replace the camera key at `frame`.
+    pub fn set_camera_key(&mut self, frame: usize, x: f32, y: f32, zoom: f32) {
+        if let Some(k) = self.camera.iter_mut().find(|k| k.frame == frame) {
+            k.x = x;
+            k.y = y;
+            k.zoom = zoom;
+        } else {
+            self.camera.push(CameraKey { frame, x, y, zoom });
+            self.camera.sort_by_key(|k| k.frame);
+        }
+    }
+
+    pub fn remove_camera_key(&mut self, frame: usize) -> bool {
+        let before = self.camera.len();
+        self.camera.retain(|k| k.frame != frame);
+        self.camera.len() != before
+    }
+
     pub fn add_figure(&mut self, name: &str, color: u32, root: V2) {
-        let def = FigureDef::humanoid();
+        self.add_figure_with(FigureDef::humanoid(), name, color, root);
+    }
+
+    pub fn add_figure_with(&mut self, def: FigureDef, name: &str, color: u32, root: V2) {
         let pose = def.rest_pose(root);
         self.figures.push(FigureInstance {
             name: name.into(),
@@ -300,6 +469,45 @@ mod tests {
         let pos = evaluate(&def, &pose);
         let reach = dist(pos[1], pos[6]);
         assert!((reach - 72.0).abs() < 1.5, "clamped reach {reach}");
+    }
+
+    #[test]
+    fn pose_lerp_takes_shortest_angle_path() {
+        let def = FigureDef::humanoid();
+        let mut a = def.rest_pose([0.0, 0.0]);
+        let mut b = def.rest_pose([100.0, 0.0]);
+        a.angles[1] = 170.0;
+        b.angles[1] = -170.0;
+        let mid = a.lerp(&b, 0.5);
+        assert_eq!(mid.root[0], 50.0);
+        assert!((mid.angles[1].abs() - 180.0).abs() < 0.01, "got {}", mid.angles[1]);
+    }
+
+    #[test]
+    fn camera_interpolates_between_keys() {
+        let mut project = Project::new_demo();
+        let (x, y, z) = project.camera_at(0.0);
+        assert_eq!((x, y, z), (480.0, 360.0, 1.0)); // default: whole stage
+        project.set_camera_key(0, 480.0, 360.0, 1.0);
+        project.set_camera_key(4, 680.0, 260.0, 2.0);
+        let (x, y, z) = project.camera_at(2.0);
+        assert!((x - 580.0).abs() < 0.01 && (y - 310.0).abs() < 0.01 && (z - 1.5).abs() < 0.01);
+        let (x, _, z) = project.camera_at(99.0); // clamps to last key
+        assert_eq!((x, z), (680.0, 2.0));
+        assert!(project.remove_camera_key(4));
+        assert_eq!(project.camera.len(), 1);
+    }
+
+    #[test]
+    fn quadruped_stands_and_faces_right() {
+        let def = FigureDef::quadruped();
+        let pose = def.rest_pose([200.0, 300.0]);
+        let pos = evaluate(&def, &pose);
+        assert!(pos[3][0] > pos[0][0] + 80.0, "head must be well ahead of the pelvis");
+        for foot in [5, 7, 9, 11] {
+            assert!(pos[foot][1] > pos[0][1] + 40.0, "foot {foot} must be below the body");
+            assert!(def.nodes[foot].ik_end);
+        }
     }
 
     #[test]

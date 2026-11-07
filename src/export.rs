@@ -29,7 +29,9 @@ fn seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     dist(p, c)
 }
 
-/// Render one frame index to an RGB buffer at the project stage size.
+/// Render one frame index to an RGB buffer at the project stage
+/// size. The frame's camera (centre + zoom, interpolated between
+/// keys) is applied, as are per-segment colours and thicknesses.
 pub fn render_frame(project: &Project, frame_idx: usize) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     let ss = 2u32; // supersample factor
     let (w, h) = (
@@ -39,24 +41,29 @@ pub fn render_frame(project: &Project, frame_idx: usize) -> ImageBuffer<Rgb<u8>,
     let bg = rgb(project.background);
     let mut buf = ImageBuffer::from_pixel(w, h, Rgb(bg));
     let frame = &project.frames[frame_idx];
-    let line_half = 5.0f32 * ss as f32;
-    let head_r = 17.0f32 * ss as f32;
+    let (cam_x, cam_y, zoom) = project.camera_at(frame_idx as f32);
+    let view = |p: [f32; 2]| -> [f32; 2] {
+        [
+            ((p[0] - cam_x) * zoom + project.stage[0] / 2.0) * ss as f32,
+            ((p[1] - cam_y) * zoom + project.stage[1] / 2.0) * ss as f32,
+        ]
+    };
+    let head_r = 17.0f32 * zoom * ss as f32;
 
-    // Collect drawables first: (segment a, b, color) and (head center, color).
-    let mut segments: Vec<([f32; 2], [f32; 2], [u8; 3])> = Vec::new();
-    let mut heads: Vec<([f32; 2], [u8; 3])> = Vec::new();
+    // Collect drawables: (a, b, color, half-width) and (centre, color, half-width).
+    let mut segments: Vec<([f32; 2], [f32; 2], [u8; 3], f32)> = Vec::new();
+    let mut heads: Vec<([f32; 2], [u8; 3], f32)> = Vec::new();
     for (fi, fig) in project.figures.iter().enumerate() {
         let pose = &frame.poses[fi];
         let pos = evaluate(&fig.def, pose);
-        let color = rgb(fig.color);
         for (i, node) in fig.def.nodes.iter().enumerate() {
+            let color = rgb(node.color.unwrap_or(fig.color));
+            let half = node.thickness / 2.0 * zoom * ss as f32;
             if let Some(p) = node.parent {
-                let a = [pos[p][0] * ss as f32, pos[p][1] * ss as f32];
-                let b = [pos[i][0] * ss as f32, pos[i][1] * ss as f32];
-                segments.push((a, b, color));
+                segments.push((view(pos[p]), view(pos[i]), color, half));
             }
             if node.head {
-                heads.push(([pos[i][0] * ss as f32, pos[i][1] * ss as f32], color));
+                heads.push((view(pos[i]), color, half));
             }
         }
     }
@@ -65,14 +72,14 @@ pub fn render_frame(project: &Project, frame_idx: usize) -> ImageBuffer<Rgb<u8>,
         for x in 0..w {
             let p = [x as f32, y as f32];
             let mut px = bg;
-            for (a, b, color) in &segments {
-                if seg_dist(p, *a, *b) <= line_half {
+            for (a, b, color, half) in &segments {
+                if seg_dist(p, *a, *b) <= *half {
                     px = *color;
                 }
             }
-            for (c, color) in &heads {
+            for (c, color, half) in &heads {
                 let d = dist(p, *c);
-                if (d - head_r).abs() <= line_half {
+                if (d - head_r).abs() <= *half {
                     px = *color;
                 }
             }
@@ -108,6 +115,31 @@ pub fn render_frame(project: &Project, frame_idx: usize) -> ImageBuffer<Rgb<u8>,
     out
 }
 
+/// Export the animation as a looping GIF at the project fps.
+pub fn export_gif(project: &Project, path: &Path) -> std::io::Result<usize> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::File::create(path)?;
+    let mut encoder = GifEncoder::new_with_speed(file, 10);
+    encoder
+        .set_repeat(Repeat::Infinite)
+        .map_err(std::io::Error::other)?;
+    let delay = image::Delay::from_numer_denom_ms((1000.0 / project.fps.max(1.0)) as u32, 1);
+    let mut frames = Vec::new();
+    for i in 0..project.frames.len() {
+        let img = image::DynamicImage::ImageRgb8(render_frame(project, i)).to_rgba8();
+        frames.push(
+            image::Frame::from_parts(img, 0, 0, delay),
+        );
+    }
+    encoder
+        .encode_frames(frames)
+        .map_err(std::io::Error::other)?;
+    Ok(project.frames.len())
+}
+
 /// Export every frame as `frame-0001.png`, `frame-0002.png`, ... in `dir`.
 pub fn export_png_sequence(project: &Project, dir: &Path) -> std::io::Result<usize> {
     std::fs::create_dir_all(dir)?;
@@ -129,6 +161,48 @@ mod tests {
         let project = Project::new_demo();
         let img = render_frame(&project, 2);
         img.save("/tmp/styk-export.png").unwrap();
+    }
+
+    #[test]
+    fn gif_export_writes_a_real_gif() {
+        let project = Project::new_demo();
+        let path = std::path::Path::new("/tmp/styk-test.gif");
+        let n = export_gif(&project, path).unwrap();
+        assert_eq!(n, project.frames.len());
+        let bytes = std::fs::read(path).unwrap();
+        assert!(bytes.starts_with(b"GIF8"), "not a GIF");
+        assert!(bytes.len() > 2000, "suspiciously small: {}", bytes.len());
+    }
+
+    #[test]
+    fn camera_zoom_changes_the_render() {
+        let mut project = Project::new_demo();
+        let plain = render_frame(&project, 2);
+        project.set_camera_key(2, 508.0, 400.0, 2.5);
+        let zoomed = render_frame(&project, 2);
+        let bg = rgb(project.background);
+        let count = |img: &ImageBuffer<Rgb<u8>, Vec<u8>>| {
+            img.pixels().filter(|p| p.0 != bg).count()
+        };
+        assert!(count(&zoomed) > count(&plain), "zoomed-in figure must cover more pixels");
+    }
+
+    #[test]
+    fn write_quadruped_frame_for_visual_check() {
+        let mut project = Project::new_demo();
+        project.figures.clear();
+        for frame in &mut project.frames {
+            frame.poses.clear();
+        }
+        project.add_figure_with(
+            crate::model::FigureDef::quadruped(),
+            "Dog",
+            0xFFC65D,
+            [300.0, 400.0],
+        );
+        project.set_camera_key(2, 420.0, 390.0, 1.6);
+        render_frame(&project, 2).save("/tmp/styk-quad.png").unwrap();
+        render_frame(&project, 0).save("/tmp/styk-quad-wide.png").unwrap();
     }
 
     #[test]

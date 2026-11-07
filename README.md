@@ -35,11 +35,25 @@ libx11-dev cmake clang pkg-config`.
   duplicate / delete frames, add figures (colour-cycled), undo
   snapshots, and a status line. A starter project with a 5-frame wave
   is loaded on first launch.
+- **Figure builder** — select a joint, then add or delete segments
+  (children-first, root protected), adjust segment length and
+  thickness, and cycle a per-segment colour override. Definition
+  edits stay consistent across every frame and are undoable.
+- **Figure presets** — besides the humanoid: a two-segment-limb
+  quadruped (spine, neck, head, tail, IK feet) and a compact
+  7-node mini figure with FK-aimed limbs.
+- **Inbetween** — inserts a tween frame halfway to the next frame;
+  angles interpolate along the shortest circular path.
+- **Camera** — per-frame camera keys (centre + zoom) with linear
+  interpolation between keys. Camera mode pans by dragging the
+  canvas; zoom buttons key the current frame. The editor view and
+  both exporters render through the same camera.
 - **Save / Load** — the project serializes to `project.styk.json`
   next to where you launched the app.
-- **PNG export** (`src/export.rs`) — a CPU rasterizer (2x
+- **PNG + GIF export** (`src/export.rs`) — a CPU rasterizer (2x
   supersampled) writes `export/frame-0001.png`, `...` for every
-  frame; no GPU or display needed, so it also runs in CI.
+  frame, or one looping `export/animation.gif` at the project fps;
+  no GPU or display needed, so it also runs in CI.
 
 ## Architecture notes
 
@@ -55,8 +69,10 @@ libx11-dev cmake clang pkg-config`.
 
 The original app is large; this is the working core loop, not the
 whole feature list. Still to come, roughly in the original's shape:
-`.piv` / `.stk` / Stick Nodes import, the figure builder (custom
-rigs, shapes, text, images), layers and the advanced keyframe
-timeline with easing, camera moves and follow, particles, GIF/MP4/
-WebM export, multiple colour/style tools per segment, sounds, and
-the home/project library screen.
+`.piv` / `.stk` / Stick Nodes import (needs real fixture files to
+reverse the binary layouts byte-for-byte — dropping a Pivot-made
+`.stk` into this repo is the fastest way to unblock it), shaped
+segments (circles, polygons, sprites, text), layers and the
+advanced keyframe timeline with easing curves, camera follow
+targets, particles/VFX clips, MP4/WebM export, sounds, and the
+home/project library screen.
