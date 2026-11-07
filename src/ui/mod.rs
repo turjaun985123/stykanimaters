@@ -8,7 +8,8 @@
 //! The rest of the crate refers to these modules by their
 //! historical flat names (`crate::ui_kit`, `crate::ui_toast`, …).
 //! To keep every one of those imports working unchanged, `lib.rs`
-//! declares this folder as `pub mod badge;
+//! declares this folder as a module tree.
+pub mod badge;
 pub mod banner;
 pub mod breadcrumb;
 pub mod clip_row;

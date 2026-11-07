@@ -1197,7 +1197,7 @@ impl EditorView {
         let mut kind_row = div().flex().flex_row().child(
             segs.next()
                 .unwrap()
-                .id(("wx-seg", 0))
+                .id(("wx-seg", 0usize))
                 .cursor_pointer()
                 .on_click(cx.listener(|view, _ev, _w, cx| {
                     view.core.project.weather = None;
