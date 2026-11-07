@@ -1748,8 +1748,11 @@ mod tests {
             "figure": 0, "frame": 1, "angles": { "5": -45.0 }
         }))
         .unwrap();
+        // The clip copies the figure's poses across the whole
+        // timeline — which the animated bake above already grew.
+        let timeline = core.project.frames.len();
         let r = call(&mut core, &tools, "clip_create", json!({ "figure": 0 })).unwrap();
-        assert_eq!(r["frames"], 2);
+        assert_eq!(r["frames"].as_u64().unwrap(), timeline as u64);
         assert_eq!(r["loops_on_figure"], true);
         assert_eq!(core.project.clips.len(), 1);
         assert_eq!(core.project.clips[0].frames[1].angles[5], -45.0);

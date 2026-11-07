@@ -2625,6 +2625,56 @@ mod tests {
                 assert_eq!(lens, vec![50.0, 30.0, 16.0], "{file} lengths");
                 continue;
             }
+            if file.ends_with(".nodes") {
+                // Stick Nodes figure: the .nodes importer wraps the
+                // figure in a fixed 960x720 / 24 fps project, at rest
+                // at the stage centre (the container stores neither).
+                let project = crate::nodes::import_nodes(&data)
+                    .unwrap_or_else(|e| panic!("{file}: {e}"));
+                assert_eq!(project.stage, [960.0, 720.0], "{file} canvas");
+                assert_eq!(project.figures.len(), 1, "{file} figures");
+                let fig = &project.figures[0];
+                assert_eq!(
+                    fig.name,
+                    expect["figures"][0]["name"].as_str().unwrap(),
+                    "{file} name"
+                );
+                let segs = expect["figures"][0]["segments"].as_u64().unwrap() as usize;
+                // Model convention: node 0 is the zero-length origin.
+                assert_eq!(fig.def.nodes.len(), segs + 1, "{file} nodes");
+                assert_eq!(
+                    project.frames.len(),
+                    expect["frames"].as_u64().unwrap() as usize,
+                    "{file} frames"
+                );
+                let root = project.frames[0].poses[0].root;
+                let want = &expect["frame0_roots"][0];
+                assert!(
+                    (root[0] - want[0].as_f64().unwrap() as f32).abs() < 0.6
+                        && (root[1] - want[1].as_f64().unwrap() as f32).abs() < 0.6,
+                    "{file} frame-0 root {root:?}"
+                );
+                continue;
+            }
+            if file.ends_with(".nodemc") {
+                // Stick Nodes animation: the synthetic clip's only
+                // frame holds no instances, so it imports with zero
+                // figures (the clip itself is not a ClipDef source —
+                // it has sprite-free, join-free, empty frames).
+                let project = crate::nodes_anim::import_nodes_animation(&data)
+                    .unwrap_or_else(|e| panic!("{file}: {e}"));
+                assert_eq!(
+                    project.figures.len(),
+                    expect["figures"].as_array().unwrap().len(),
+                    "{file} figures"
+                );
+                assert_eq!(
+                    project.frames.len(),
+                    expect["frames"].as_u64().unwrap() as usize,
+                    "{file} frames"
+                );
+                continue;
+            }
             let project = import_piv(&data).unwrap_or_else(|e| panic!("{file}: {e}"));
             if file.ends_with(".piv") {
                 assert_eq!(project.stage, [800.0, 600.0], "{file} canvas");
@@ -2831,11 +2881,11 @@ mod tests {
         r.u32().unwrap(); // trailer delay
         r.u8().unwrap(); // trailing loop byte
         assert_eq!(r.pos, bytes.len(), "walk consumes the export exactly");
-        // Figure 0: frame 0 sits on the def length (no array),
-        // frames 1..4 carry arrays; figure 1 never does.
-        assert_eq!(flags[0], vec![0, 0]);
+        // The demo project has a single figure: frame 0 sits on the
+        // def length (no array); frames 1..4 carry length arrays.
+        assert_eq!(flags[0], vec![0]);
         for row in &flags[1..] {
-            assert_eq!(*row, vec![1, 0]);
+            assert_eq!(*row, vec![1]);
         }
         assert!(
             (frame2_lengths[0] - 68.0).abs() < 0.5,
