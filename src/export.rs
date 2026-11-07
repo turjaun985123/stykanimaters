@@ -1721,4 +1721,3 @@ mod trail_tests {
     }
 }
 
-#[cfg(test)]
