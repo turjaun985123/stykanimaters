@@ -7,25 +7,86 @@
 //! and finally falls back to the key itself so an untranslated UI
 //! still shows something debuggable instead of a blank.
 //!
-//! Not yet wired into the view: registering this module and
-//! swapping the literals in `app.rs` for `t(...)` calls is a
-//! separate integration step.
+//! The language set mirrors the original app's locale packs
+//! (`src/locales/packs/` in StykAnimate-App: 27 packs) plus Bengali,
+//! which the port added for its user — 28 languages in total.
+//! Every table carries exactly the same 50 keys.
+//!
+//! Translation approach: established animation terms are used where
+//! a language has them (French "pelure d'oignon", Polish "skórka
+//! cebuli", Chinese 洋葱皮 for onion skin); where a concept has no
+//! established local term, it is transliterated or kept as a
+//! loanword (Bengali টুইন, Russian Твининг for tween), matching how
+//! that language's own software community writes it. File-format
+//! names (PNG, GIF, MP4, WebM, SVG, .piv, .stk) stay in Latin
+//! script everywhere, as they do in localised software generally.
 
-/// Languages the UI can be displayed in.
+/// Languages the UI can be displayed in: the original app's 27
+/// locale packs, plus Bengali (the port's own addition).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lang {
     En,
     Bn,
     Es,
+    Ar,
+    Cs,
+    Da,
+    De,
+    El,
+    Es419,
+    Fi,
+    Fr,
+    He,
+    Hr,
+    Hu,
+    Id,
+    It,
+    Kk,
+    Nb,
+    Nl,
+    Pl,
+    PtBr,
+    Ro,
+    Ru,
+    Sl,
+    Tr,
+    Uk,
+    Vi,
+    ZhHans,
 }
 
 impl Lang {
-    /// ISO 639-1 code, e.g. for a settings file or `<html lang>`.
+    /// BCP 47 code, e.g. for a settings file or `<html lang>`.
     pub fn code(&self) -> &'static str {
         match self {
             Lang::En => "en",
             Lang::Bn => "bn",
             Lang::Es => "es",
+            Lang::Ar => "ar",
+            Lang::Cs => "cs",
+            Lang::Da => "da",
+            Lang::De => "de",
+            Lang::El => "el",
+            Lang::Es419 => "es-419",
+            Lang::Fi => "fi",
+            Lang::Fr => "fr",
+            Lang::He => "he",
+            Lang::Hr => "hr",
+            Lang::Hu => "hu",
+            Lang::Id => "id",
+            Lang::It => "it",
+            Lang::Kk => "kk",
+            Lang::Nb => "nb",
+            Lang::Nl => "nl",
+            Lang::Pl => "pl",
+            Lang::PtBr => "pt-BR",
+            Lang::Ro => "ro",
+            Lang::Ru => "ru",
+            Lang::Sl => "sl",
+            Lang::Tr => "tr",
+            Lang::Uk => "uk",
+            Lang::Vi => "vi",
+            Lang::ZhHans => "zh-Hans",
         }
     }
 
@@ -35,12 +96,66 @@ impl Lang {
             Lang::En => "English",
             Lang::Bn => "বাংলা",
             Lang::Es => "Español",
+            Lang::Ar => "العربية",
+            Lang::Cs => "Čeština",
+            Lang::Da => "Dansk",
+            Lang::De => "Deutsch",
+            Lang::El => "Ελληνικά",
+            Lang::Es419 => "Español (Latinoamérica)",
+            Lang::Fi => "Suomi",
+            Lang::Fr => "Français",
+            Lang::He => "עברית",
+            Lang::Hr => "Hrvatski",
+            Lang::Hu => "Magyar",
+            Lang::Id => "Bahasa Indonesia",
+            Lang::It => "Italiano",
+            Lang::Kk => "Қазақша",
+            Lang::Nb => "Norsk bokmål",
+            Lang::Nl => "Nederlands",
+            Lang::Pl => "Polski",
+            Lang::PtBr => "Português (Brasil)",
+            Lang::Ro => "Română",
+            Lang::Ru => "Русский",
+            Lang::Sl => "Slovenščina",
+            Lang::Tr => "Türkçe",
+            Lang::Uk => "Українська",
+            Lang::Vi => "Tiếng Việt",
+            Lang::ZhHans => "简体中文",
         }
     }
 
     /// All languages, in picker order.
-    pub fn all() -> [Lang; 3] {
-        [Lang::En, Lang::Bn, Lang::Es]
+    pub fn all() -> [Lang; 28] {
+        [
+            Lang::En,
+            Lang::Bn,
+            Lang::Es,
+            Lang::Ar,
+            Lang::Cs,
+            Lang::Da,
+            Lang::De,
+            Lang::El,
+            Lang::Es419,
+            Lang::Fi,
+            Lang::Fr,
+            Lang::He,
+            Lang::Hr,
+            Lang::Hu,
+            Lang::Id,
+            Lang::It,
+            Lang::Kk,
+            Lang::Nb,
+            Lang::Nl,
+            Lang::Pl,
+            Lang::PtBr,
+            Lang::Ro,
+            Lang::Ru,
+            Lang::Sl,
+            Lang::Tr,
+            Lang::Uk,
+            Lang::Vi,
+            Lang::ZhHans,
+        ]
     }
 }
 
@@ -53,6 +168,31 @@ fn table_for(lang: Lang) -> &'static [(&'static str, &'static str)] {
         Lang::En => EN,
         Lang::Bn => BN,
         Lang::Es => ES,
+        Lang::Ar => AR,
+        Lang::Cs => CS,
+        Lang::Da => DA,
+        Lang::De => DE,
+        Lang::El => EL,
+        Lang::Es419 => ES419,
+        Lang::Fi => FI,
+        Lang::Fr => FR,
+        Lang::He => HE,
+        Lang::Hr => HR,
+        Lang::Hu => HU,
+        Lang::Id => ID,
+        Lang::It => IT,
+        Lang::Kk => KK,
+        Lang::Nb => NB,
+        Lang::Nl => NL,
+        Lang::Pl => PL,
+        Lang::PtBr => PT_BR,
+        Lang::Ro => RO,
+        Lang::Ru => RU,
+        Lang::Sl => SL,
+        Lang::Tr => TR,
+        Lang::Uk => UK,
+        Lang::Vi => VI,
+        Lang::ZhHans => ZH_HANS,
     }
 }
 
@@ -275,14 +415,1642 @@ static ES: &[(&str, &str)] = &[
     ),
 ];
 
+static AR: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "تشغيل"),
+    ("pause", "إيقاف مؤقت"),
+    ("add_frame", "+ إطار"),
+    ("duplicate_frame", "تكرار"),
+    ("delete_frame", "حذف"),
+    ("inbetween", "إطار وسيط"),
+    ("copy_frame", "نسخ الإطار"),
+    ("paste_frame", "لصق الإطار"),
+    // History
+    ("undo", "تراجع"),
+    ("redo", "إعادة"),
+    // Figure building
+    ("add_figure", "+ شكل"),
+    ("add_segment", "+ مقطع"),
+    ("delete_segment", "- مقطع"),
+    ("len_plus", "الطول +"),
+    ("len_minus", "الطول -"),
+    ("thick_plus", "السُّمك +"),
+    ("thick_minus", "السُّمك -"),
+    ("shape", "الشكل"),
+    // Canvas modes and drawing
+    ("onion_skin", "قشرة البصل"),
+    ("draw", "رسم"),
+    ("clear_drawing", "مسح الرسم"),
+    ("camera_mode", "وضع الكاميرا"),
+    ("cam_zoom_plus", "تكبير الكاميرا +"),
+    ("cam_zoom_minus", "تكبير الكاميرا -"),
+    ("follow_cam", "تتبع الكاميرا"),
+    ("tween_play", "تشغيل التوين"),
+    // Particle effects
+    ("fx_burst", "مؤثر انفجار"),
+    ("fx_sparkle", "مؤثر بريق"),
+    ("fx_smoke", "مؤثر دخان"),
+    ("clear_fx", "مسح المؤثرات"),
+    // Files and export
+    ("save", "حفظ"),
+    ("load", "فتح"),
+    ("export_png", "تصدير PNG"),
+    ("export_gif", "تصدير GIF"),
+    ("export_mp4", "تصدير MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "ورقة السبرايت"),
+    ("import_piv", "استيراد .piv"),
+    ("import_stk", "استيراد .stk"),
+    ("export_piv", "تصدير .piv"),
+    ("export_stk", "تصدير .stk"),
+    // Audio and movieclips
+    ("add_audio", "إضافة صوت"),
+    ("make_clip", "إنشاء مقطع"),
+    ("insert_clip", "إدراج مقطع"),
+    // Themes and panels
+    ("light_theme", "المظهر الفاتح"),
+    ("dark_theme", "المظهر الداكن"),
+    ("figures_layers", "الأشكال (الطبقات)"),
+    // Status line
+    ("pose_mode", "وضع الوضعية."),
+    (
+        "status_ready",
+        "اسحب مفصلًا لتحديد الوضعية. تستخدم اليدان والقدمان IK؛ اسحب الوركين للتحريك.",
+    ),
+];
+
+static CS: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Přehrát"),
+    ("pause", "Pozastavit"),
+    ("add_frame", "+ Snímek"),
+    ("duplicate_frame", "Duplikovat"),
+    ("delete_frame", "Smazat"),
+    ("inbetween", "Mezisnímek"),
+    ("copy_frame", "Kopírovat snímek"),
+    ("paste_frame", "Vložit snímek"),
+    // History
+    ("undo", "Zpět"),
+    ("redo", "Znovu"),
+    // Figure building
+    ("add_figure", "+ Figura"),
+    ("add_segment", "+ Segment"),
+    ("delete_segment", "- Segment"),
+    ("len_plus", "Délka +"),
+    ("len_minus", "Délka -"),
+    ("thick_plus", "Tloušťka +"),
+    ("thick_minus", "Tloušťka -"),
+    ("shape", "Tvar"),
+    // Canvas modes and drawing
+    ("onion_skin", "Cibulová slupka"),
+    ("draw", "Kreslit"),
+    ("clear_drawing", "Vymazat kresbu"),
+    ("camera_mode", "Režim kamery"),
+    ("cam_zoom_plus", "Zoom kamery +"),
+    ("cam_zoom_minus", "Zoom kamery -"),
+    ("follow_cam", "Sledovat kameru"),
+    ("tween_play", "Interpolace"),
+    // Particle effects
+    ("fx_burst", "FX Výbuch"),
+    ("fx_sparkle", "FX Jiskry"),
+    ("fx_smoke", "FX Kouř"),
+    ("clear_fx", "Vymazat FX"),
+    // Files and export
+    ("save", "Uložit"),
+    ("load", "Načíst"),
+    ("export_png", "Export PNG"),
+    ("export_gif", "Export GIF"),
+    ("export_mp4", "Export MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Spritesheet"),
+    ("import_piv", "Import .piv"),
+    ("import_stk", "Import .stk"),
+    ("export_piv", "Export .piv"),
+    ("export_stk", "Export .stk"),
+    // Audio and movieclips
+    ("add_audio", "Přidat zvuk"),
+    ("make_clip", "Vytvořit klip"),
+    ("insert_clip", "Vložit klip"),
+    // Themes and panels
+    ("light_theme", "Světlý motiv"),
+    ("dark_theme", "Tmavý motiv"),
+    ("figures_layers", "FIGURY (vrstvy)"),
+    // Status line
+    ("pose_mode", "Režim pózy."),
+    (
+        "status_ready",
+        "Přetažením kloubu nastavte pózu. Ruce a nohy používají IK; postavu přesunete tažením za boky.",
+    ),
+];
+
+static DA: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Afspil"),
+    ("pause", "Pause"),
+    ("add_frame", "+ Billede"),
+    ("duplicate_frame", "Dupliker"),
+    ("delete_frame", "Slet"),
+    ("inbetween", "Mellembillede"),
+    ("copy_frame", "Kopiér billede"),
+    ("paste_frame", "Indsæt billede"),
+    // History
+    ("undo", "Fortryd"),
+    ("redo", "Omgør"),
+    // Figure building
+    ("add_figure", "+ Figur"),
+    ("add_segment", "+ Segment"),
+    ("delete_segment", "- Segment"),
+    ("len_plus", "Længde +"),
+    ("len_minus", "Længde -"),
+    ("thick_plus", "Tykkelse +"),
+    ("thick_minus", "Tykkelse -"),
+    ("shape", "Form"),
+    // Canvas modes and drawing
+    ("onion_skin", "Løgskal"),
+    ("draw", "Tegn"),
+    ("clear_drawing", "Ryd tegning"),
+    ("camera_mode", "Kameratilstand"),
+    ("cam_zoom_plus", "Kamerazoom +"),
+    ("cam_zoom_minus", "Kamerazoom -"),
+    ("follow_cam", "Følg kamera"),
+    ("tween_play", "Interpolation"),
+    // Particle effects
+    ("fx_burst", "FX Udbrud"),
+    ("fx_sparkle", "FX Gnister"),
+    ("fx_smoke", "FX Røg"),
+    ("clear_fx", "Ryd FX"),
+    // Files and export
+    ("save", "Gem"),
+    ("load", "Indlæs"),
+    ("export_png", "Eksportér PNG"),
+    ("export_gif", "Eksportér GIF"),
+    ("export_mp4", "Eksportér MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Spritesheet"),
+    ("import_piv", "Importér .piv"),
+    ("import_stk", "Importér .stk"),
+    ("export_piv", "Eksportér .piv"),
+    ("export_stk", "Eksportér .stk"),
+    // Audio and movieclips
+    ("add_audio", "Tilføj lyd"),
+    ("make_clip", "Opret klip"),
+    ("insert_clip", "Indsæt klip"),
+    // Themes and panels
+    ("light_theme", "Lyst tema"),
+    ("dark_theme", "Mørkt tema"),
+    ("figures_layers", "FIGURER (lag)"),
+    // Status line
+    ("pose_mode", "Poseringstilstand."),
+    (
+        "status_ready",
+        "Træk i et led for at posere. Hænder og fødder bruger IK; træk i hofterne for at flytte.",
+    ),
+];
+
+static DE: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Abspielen"),
+    ("pause", "Pause"),
+    ("add_frame", "+ Frame"),
+    ("duplicate_frame", "Duplizieren"),
+    ("delete_frame", "Löschen"),
+    ("inbetween", "Zwischenbild"),
+    ("copy_frame", "Frame kopieren"),
+    ("paste_frame", "Frame einfügen"),
+    // History
+    ("undo", "Rückgängig"),
+    ("redo", "Wiederherstellen"),
+    // Figure building
+    ("add_figure", "+ Figur"),
+    ("add_segment", "+ Segment"),
+    ("delete_segment", "- Segment"),
+    ("len_plus", "Länge +"),
+    ("len_minus", "Länge -"),
+    ("thick_plus", "Dicke +"),
+    ("thick_minus", "Dicke -"),
+    ("shape", "Form"),
+    // Canvas modes and drawing
+    ("onion_skin", "Zwiebelhaut"),
+    ("draw", "Zeichnen"),
+    ("clear_drawing", "Zeichnung löschen"),
+    ("camera_mode", "Kameramodus"),
+    ("cam_zoom_plus", "Kamera-Zoom +"),
+    ("cam_zoom_minus", "Kamera-Zoom -"),
+    ("follow_cam", "Kamera folgen"),
+    ("tween_play", "Tween abspielen"),
+    // Particle effects
+    ("fx_burst", "FX Explosion"),
+    ("fx_sparkle", "FX Funken"),
+    ("fx_smoke", "FX Rauch"),
+    ("clear_fx", "FX löschen"),
+    // Files and export
+    ("save", "Speichern"),
+    ("load", "Laden"),
+    ("export_png", "PNG exportieren"),
+    ("export_gif", "GIF exportieren"),
+    ("export_mp4", "MP4 exportieren"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Spritesheet"),
+    ("import_piv", ".piv importieren"),
+    ("import_stk", ".stk importieren"),
+    ("export_piv", ".piv exportieren"),
+    ("export_stk", ".stk exportieren"),
+    // Audio and movieclips
+    ("add_audio", "Audio hinzufügen"),
+    ("make_clip", "Clip erstellen"),
+    ("insert_clip", "Clip einfügen"),
+    // Themes and panels
+    ("light_theme", "Helles Design"),
+    ("dark_theme", "Dunkles Design"),
+    ("figures_layers", "FIGUREN (Ebenen)"),
+    // Status line
+    ("pose_mode", "Posenmodus."),
+    (
+        "status_ready",
+        "Ziehen Sie ein Gelenk, um die Pose zu setzen. Hände und Füße nutzen IK; ziehen Sie die Hüfte zum Bewegen.",
+    ),
+];
+
+static EL: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Αναπαραγωγή"),
+    ("pause", "Παύση"),
+    ("add_frame", "+ Καρέ"),
+    ("duplicate_frame", "Διπλασιασμός"),
+    ("delete_frame", "Διαγραφή"),
+    ("inbetween", "Ενδιάμεσο καρέ"),
+    ("copy_frame", "Αντιγραφή καρέ"),
+    ("paste_frame", "Επικόλληση καρέ"),
+    // History
+    ("undo", "Αναίρεση"),
+    ("redo", "Επανάληψη"),
+    // Figure building
+    ("add_figure", "+ Φιγούρα"),
+    ("add_segment", "+ Τμήμα"),
+    ("delete_segment", "- Τμήμα"),
+    ("len_plus", "Μήκος +"),
+    ("len_minus", "Μήκος -"),
+    ("thick_plus", "Πάχος +"),
+    ("thick_minus", "Πάχος -"),
+    ("shape", "Σχήμα"),
+    // Canvas modes and drawing
+    ("onion_skin", "Φλούδα κρεμμυδιού"),
+    ("draw", "Σχεδίαση"),
+    ("clear_drawing", "Εκκαθάριση σχεδίου"),
+    ("camera_mode", "Λειτουργία κάμερας"),
+    ("cam_zoom_plus", "Ζουμ κάμερας +"),
+    ("cam_zoom_minus", "Ζουμ κάμερας -"),
+    ("follow_cam", "Ακολούθηση κάμερας"),
+    ("tween_play", "Αναπαραγωγή τουίν"),
+    // Particle effects
+    ("fx_burst", "FX Έκρηξη"),
+    ("fx_sparkle", "FX Σπινθήρες"),
+    ("fx_smoke", "FX Καπνός"),
+    ("clear_fx", "Εκκαθάριση FX"),
+    // Files and export
+    ("save", "Αποθήκευση"),
+    ("load", "Φόρτωση"),
+    ("export_png", "Εξαγωγή PNG"),
+    ("export_gif", "Εξαγωγή GIF"),
+    ("export_mp4", "Εξαγωγή MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Φύλλο σπράιτ"),
+    ("import_piv", "Εισαγωγή .piv"),
+    ("import_stk", "Εισαγωγή .stk"),
+    ("export_piv", "Εξαγωγή .piv"),
+    ("export_stk", "Εξαγωγή .stk"),
+    // Audio and movieclips
+    ("add_audio", "Προσθήκη ήχου"),
+    ("make_clip", "Δημιουργία κλιπ"),
+    ("insert_clip", "Εισαγωγή κλιπ"),
+    // Themes and panels
+    ("light_theme", "Ανοιχτό θέμα"),
+    ("dark_theme", "Σκούρο θέμα"),
+    ("figures_layers", "ΦΙΓΟΥΡΕΣ (επίπεδα)"),
+    // Status line
+    ("pose_mode", "Λειτουργία πόζας."),
+    (
+        "status_ready",
+        "Σύρετε μια άρθρωση για πόζα. Τα χέρια και τα πόδια χρησιμοποιούν IK· σύρετε τους γοφούς για μετακίνηση.",
+    ),
+];
+
+static ES419: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Reproducir"),
+    ("pause", "Pausar"),
+    ("add_frame", "+ Fotograma"),
+    ("duplicate_frame", "Duplicar"),
+    ("delete_frame", "Eliminar"),
+    ("inbetween", "Intermedio"),
+    ("copy_frame", "Copiar fotograma"),
+    ("paste_frame", "Pegar fotograma"),
+    // History
+    ("undo", "Deshacer"),
+    ("redo", "Rehacer"),
+    // Figure building
+    ("add_figure", "+ Figura"),
+    ("add_segment", "+ Segmento"),
+    ("delete_segment", "- Segmento"),
+    ("len_plus", "Long. +"),
+    ("len_minus", "Long. -"),
+    ("thick_plus", "Grosor +"),
+    ("thick_minus", "Grosor -"),
+    ("shape", "Forma"),
+    // Canvas modes and drawing
+    ("onion_skin", "Piel de cebolla"),
+    ("draw", "Dibujar"),
+    ("clear_drawing", "Borrar dibujo"),
+    ("camera_mode", "Modo de cámara"),
+    ("cam_zoom_plus", "Zoom de cámara +"),
+    ("cam_zoom_minus", "Zoom de cámara -"),
+    ("follow_cam", "Seguir cámara"),
+    ("tween_play", "Interpolación"),
+    // Particle effects
+    ("fx_burst", "FX Explosión"),
+    ("fx_sparkle", "FX Destellos"),
+    ("fx_smoke", "FX Humo"),
+    ("clear_fx", "Borrar FX"),
+    // Files and export
+    ("save", "Guardar"),
+    ("load", "Cargar"),
+    ("export_png", "Exportar PNG"),
+    ("export_gif", "Exportar GIF"),
+    ("export_mp4", "Exportar MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Hoja de sprites"),
+    ("import_piv", "Importar .piv"),
+    ("import_stk", "Importar .stk"),
+    ("export_piv", "Exportar .piv"),
+    ("export_stk", "Exportar .stk"),
+    // Audio and movieclips
+    ("add_audio", "Agregar audio"),
+    ("make_clip", "Crear clip"),
+    ("insert_clip", "Insertar clip"),
+    // Themes and panels
+    ("light_theme", "Tema claro"),
+    ("dark_theme", "Tema oscuro"),
+    ("figures_layers", "FIGURAS (capas)"),
+    // Status line
+    ("pose_mode", "Modo de pose."),
+    (
+        "status_ready",
+        "Arrastra una articulación para posar. Las manos y los pies usan IK; arrastra las caderas para moverlo.",
+    ),
+];
+
+static FI: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Toista"),
+    ("pause", "Tauko"),
+    ("add_frame", "+ Ruutu"),
+    ("duplicate_frame", "Monista"),
+    ("delete_frame", "Poista"),
+    ("inbetween", "Väliruutu"),
+    ("copy_frame", "Kopioi ruutu"),
+    ("paste_frame", "Liitä ruutu"),
+    // History
+    ("undo", "Kumoa"),
+    ("redo", "Tee uudelleen"),
+    // Figure building
+    ("add_figure", "+ Hahmo"),
+    ("add_segment", "+ Segmentti"),
+    ("delete_segment", "- Segmentti"),
+    ("len_plus", "Pituus +"),
+    ("len_minus", "Pituus -"),
+    ("thick_plus", "Paksuus +"),
+    ("thick_minus", "Paksuus -"),
+    ("shape", "Muoto"),
+    // Canvas modes and drawing
+    ("onion_skin", "Sipulinkuori"),
+    ("draw", "Piirrä"),
+    ("clear_drawing", "Tyhjennä piirros"),
+    ("camera_mode", "Kameratila"),
+    ("cam_zoom_plus", "Kameran zoomaus +"),
+    ("cam_zoom_minus", "Kameran zoomaus -"),
+    ("follow_cam", "Seuraa kameraa"),
+    ("tween_play", "Interpolointi"),
+    // Particle effects
+    ("fx_burst", "FX Räjähdys"),
+    ("fx_sparkle", "FX Kipinät"),
+    ("fx_smoke", "FX Savu"),
+    ("clear_fx", "Tyhjennä FX"),
+    // Files and export
+    ("save", "Tallenna"),
+    ("load", "Lataa"),
+    ("export_png", "Vie PNG"),
+    ("export_gif", "Vie GIF"),
+    ("export_mp4", "Vie MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Spritesheet"),
+    ("import_piv", "Tuo .piv"),
+    ("import_stk", "Tuo .stk"),
+    ("export_piv", "Vie .piv"),
+    ("export_stk", "Vie .stk"),
+    // Audio and movieclips
+    ("add_audio", "Lisää ääni"),
+    ("make_clip", "Luo leike"),
+    ("insert_clip", "Lisää leike"),
+    // Themes and panels
+    ("light_theme", "Vaalea teema"),
+    ("dark_theme", "Tumma teema"),
+    ("figures_layers", "HAHMOT (tasot)"),
+    // Status line
+    ("pose_mode", "Asentotila."),
+    (
+        "status_ready",
+        "Aseta asento vetämällä niveltä. Kädet ja jalat käyttävät IK:ta; siirrä vetämällä lantiosta.",
+    ),
+];
+
+static FR: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Lire"),
+    ("pause", "Pause"),
+    ("add_frame", "+ Image"),
+    ("duplicate_frame", "Dupliquer"),
+    ("delete_frame", "Supprimer"),
+    ("inbetween", "Intermédiaire"),
+    ("copy_frame", "Copier l'image"),
+    ("paste_frame", "Coller l'image"),
+    // History
+    ("undo", "Annuler"),
+    ("redo", "Rétablir"),
+    // Figure building
+    ("add_figure", "+ Figure"),
+    ("add_segment", "+ Segment"),
+    ("delete_segment", "- Segment"),
+    ("len_plus", "Long. +"),
+    ("len_minus", "Long. -"),
+    ("thick_plus", "Épaisseur +"),
+    ("thick_minus", "Épaisseur -"),
+    ("shape", "Forme"),
+    // Canvas modes and drawing
+    ("onion_skin", "Pelure d'oignon"),
+    ("draw", "Dessiner"),
+    ("clear_drawing", "Effacer le dessin"),
+    ("camera_mode", "Mode caméra"),
+    ("cam_zoom_plus", "Zoom caméra +"),
+    ("cam_zoom_minus", "Zoom caméra -"),
+    ("follow_cam", "Suivre la caméra"),
+    ("tween_play", "Interpolation"),
+    // Particle effects
+    ("fx_burst", "FX Explosion"),
+    ("fx_sparkle", "FX Étincelles"),
+    ("fx_smoke", "FX Fumée"),
+    ("clear_fx", "Effacer les FX"),
+    // Files and export
+    ("save", "Enregistrer"),
+    ("load", "Charger"),
+    ("export_png", "Exporter PNG"),
+    ("export_gif", "Exporter GIF"),
+    ("export_mp4", "Exporter MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Feuille de sprites"),
+    ("import_piv", "Importer .piv"),
+    ("import_stk", "Importer .stk"),
+    ("export_piv", "Exporter .piv"),
+    ("export_stk", "Exporter .stk"),
+    // Audio and movieclips
+    ("add_audio", "Ajouter l'audio"),
+    ("make_clip", "Créer un clip"),
+    ("insert_clip", "Insérer un clip"),
+    // Themes and panels
+    ("light_theme", "Thème clair"),
+    ("dark_theme", "Thème sombre"),
+    ("figures_layers", "FIGURES (calques)"),
+    // Status line
+    ("pose_mode", "Mode pose."),
+    (
+        "status_ready",
+        "Faites glisser une articulation pour poser. Les mains et les pieds utilisent l'IK ; faites glisser les hanches pour déplacer.",
+    ),
+];
+
+static HE: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "הפעלה"),
+    ("pause", "השהיה"),
+    ("add_frame", "+ פריים"),
+    ("duplicate_frame", "שכפול"),
+    ("delete_frame", "מחיקה"),
+    ("inbetween", "פריים ביניים"),
+    ("copy_frame", "העתקת פריים"),
+    ("paste_frame", "הדבקת פריים"),
+    // History
+    ("undo", "בטל"),
+    ("redo", "בצע שוב"),
+    // Figure building
+    ("add_figure", "+ דמות"),
+    ("add_segment", "+ מקטע"),
+    ("delete_segment", "- מקטע"),
+    ("len_plus", "אורך +"),
+    ("len_minus", "אורך -"),
+    ("thick_plus", "עובי +"),
+    ("thick_minus", "עובי -"),
+    ("shape", "צורה"),
+    // Canvas modes and drawing
+    ("onion_skin", "קליפת בצל"),
+    ("draw", "ציור"),
+    ("clear_drawing", "ניקוי הציור"),
+    ("camera_mode", "מצב מצלמה"),
+    ("cam_zoom_plus", "זום מצלמה +"),
+    ("cam_zoom_minus", "זום מצלמה -"),
+    ("follow_cam", "מעקב מצלמה"),
+    ("tween_play", "ניגון טווין"),
+    // Particle effects
+    ("fx_burst", "אפקט התפוצצות"),
+    ("fx_sparkle", "אפקט ניצוצות"),
+    ("fx_smoke", "אפקט עשן"),
+    ("clear_fx", "ניקוי אפקטים"),
+    // Files and export
+    ("save", "שמירה"),
+    ("load", "טעינה"),
+    ("export_png", "ייצוא PNG"),
+    ("export_gif", "ייצוא GIF"),
+    ("export_mp4", "ייצוא MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "גיליון ספרייטים"),
+    ("import_piv", "ייבוא .piv"),
+    ("import_stk", "ייבוא .stk"),
+    ("export_piv", "ייצוא .piv"),
+    ("export_stk", "ייצוא .stk"),
+    // Audio and movieclips
+    ("add_audio", "הוספת שמע"),
+    ("make_clip", "יצירת קליפ"),
+    ("insert_clip", "הוספת קליפ"),
+    // Themes and panels
+    ("light_theme", "ערכת נושא בהירה"),
+    ("dark_theme", "ערכת נושא כהה"),
+    ("figures_layers", "דמויות (שכבות)"),
+    // Status line
+    ("pose_mode", "מצב פוזה."),
+    (
+        "status_ready",
+        "גררו מפרק כדי לקבוע פוזה. הידיים והרגליים משתמשות ב-IK; גררו את הירכיים כדי להזיז.",
+    ),
+];
+
+static HR: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Reproduciraj"),
+    ("pause", "Pauza"),
+    ("add_frame", "+ Sličica"),
+    ("duplicate_frame", "Dupliciraj"),
+    ("delete_frame", "Izbriši"),
+    ("inbetween", "Međusličica"),
+    ("copy_frame", "Kopiraj sličicu"),
+    ("paste_frame", "Zalijepi sličicu"),
+    // History
+    ("undo", "Poništi"),
+    ("redo", "Ponovi"),
+    // Figure building
+    ("add_figure", "+ Figura"),
+    ("add_segment", "+ Segment"),
+    ("delete_segment", "- Segment"),
+    ("len_plus", "Duljina +"),
+    ("len_minus", "Duljina -"),
+    ("thick_plus", "Debljina +"),
+    ("thick_minus", "Debljina -"),
+    ("shape", "Oblik"),
+    // Canvas modes and drawing
+    ("onion_skin", "Ljuska luka"),
+    ("draw", "Crtanje"),
+    ("clear_drawing", "Obriši crtež"),
+    ("camera_mode", "Način kamere"),
+    ("cam_zoom_plus", "Zumiranje kamere +"),
+    ("cam_zoom_minus", "Zumiranje kamere -"),
+    ("follow_cam", "Prati kameru"),
+    ("tween_play", "Interpolacija"),
+    // Particle effects
+    ("fx_burst", "FX Eksplozija"),
+    ("fx_sparkle", "FX Iskre"),
+    ("fx_smoke", "FX Dim"),
+    ("clear_fx", "Obriši FX"),
+    // Files and export
+    ("save", "Spremi"),
+    ("load", "Učitaj"),
+    ("export_png", "Izvoz PNG"),
+    ("export_gif", "Izvoz GIF"),
+    ("export_mp4", "Izvoz MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Spritesheet"),
+    ("import_piv", "Uvoz .piv"),
+    ("import_stk", "Uvoz .stk"),
+    ("export_piv", "Izvoz .piv"),
+    ("export_stk", "Izvoz .stk"),
+    // Audio and movieclips
+    ("add_audio", "Dodaj zvuk"),
+    ("make_clip", "Stvori isječak"),
+    ("insert_clip", "Umetni isječak"),
+    // Themes and panels
+    ("light_theme", "Svijetla tema"),
+    ("dark_theme", "Tamna tema"),
+    ("figures_layers", "FIGURE (slojevi)"),
+    // Status line
+    ("pose_mode", "Način poze."),
+    (
+        "status_ready",
+        "Povucite zglob za pozu. Ruke i stopala koriste IK; povucite kukove za pomicanje.",
+    ),
+];
+
+static HU: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Lejátszás"),
+    ("pause", "Szünet"),
+    ("add_frame", "+ Képkocka"),
+    ("duplicate_frame", "Duplikálás"),
+    ("delete_frame", "Törlés"),
+    ("inbetween", "Köztes képkocka"),
+    ("copy_frame", "Képkocka másolása"),
+    ("paste_frame", "Képkocka beillesztése"),
+    // History
+    ("undo", "Visszavonás"),
+    ("redo", "Újra"),
+    // Figure building
+    ("add_figure", "+ Figura"),
+    ("add_segment", "+ Szegmens"),
+    ("delete_segment", "- Szegmens"),
+    ("len_plus", "Hossz +"),
+    ("len_minus", "Hossz -"),
+    ("thick_plus", "Vastagság +"),
+    ("thick_minus", "Vastagság -"),
+    ("shape", "Alak"),
+    // Canvas modes and drawing
+    ("onion_skin", "Hagymahéj"),
+    ("draw", "Rajzolás"),
+    ("clear_drawing", "Rajz törlése"),
+    ("camera_mode", "Kameramód"),
+    ("cam_zoom_plus", "Kamerazoom +"),
+    ("cam_zoom_minus", "Kamerazoom -"),
+    ("follow_cam", "Kamera követése"),
+    ("tween_play", "Tween lejátszás"),
+    // Particle effects
+    ("fx_burst", "FX Robbanás"),
+    ("fx_sparkle", "FX Szikrák"),
+    ("fx_smoke", "FX Füst"),
+    ("clear_fx", "FX törlése"),
+    // Files and export
+    ("save", "Mentés"),
+    ("load", "Betöltés"),
+    ("export_png", "PNG exportálása"),
+    ("export_gif", "GIF exportálása"),
+    ("export_mp4", "MP4 exportálása"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Spritesheet"),
+    ("import_piv", ".piv importálása"),
+    ("import_stk", ".stk importálása"),
+    ("export_piv", ".piv exportálása"),
+    ("export_stk", ".stk exportálása"),
+    // Audio and movieclips
+    ("add_audio", "Hang hozzáadása"),
+    ("make_clip", "Klip készítése"),
+    ("insert_clip", "Klip beszúrása"),
+    // Themes and panels
+    ("light_theme", "Világos téma"),
+    ("dark_theme", "Sötét téma"),
+    ("figures_layers", "FIGURÁK (rétegek)"),
+    // Status line
+    ("pose_mode", "Póz mód."),
+    (
+        "status_ready",
+        "Húzzon egy ízületet a pózhoz. A kezek és lábak IK-t használnak; a mozgatáshoz húzza a csípőt.",
+    ),
+];
+
+static ID: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Putar"),
+    ("pause", "Jeda"),
+    ("add_frame", "+ Bingkai"),
+    ("duplicate_frame", "Gandakan"),
+    ("delete_frame", "Hapus"),
+    ("inbetween", "Bingkai antara"),
+    ("copy_frame", "Salin bingkai"),
+    ("paste_frame", "Tempel bingkai"),
+    // History
+    ("undo", "Urungkan"),
+    ("redo", "Ulangi"),
+    // Figure building
+    ("add_figure", "+ Figur"),
+    ("add_segment", "+ Segmen"),
+    ("delete_segment", "- Segmen"),
+    ("len_plus", "Panjang +"),
+    ("len_minus", "Panjang -"),
+    ("thick_plus", "Tebal +"),
+    ("thick_minus", "Tebal -"),
+    ("shape", "Bentuk"),
+    // Canvas modes and drawing
+    ("onion_skin", "Kulit bawang"),
+    ("draw", "Gambar"),
+    ("clear_drawing", "Hapus gambar"),
+    ("camera_mode", "Mode kamera"),
+    ("cam_zoom_plus", "Zoom kamera +"),
+    ("cam_zoom_minus", "Zoom kamera -"),
+    ("follow_cam", "Ikuti kamera"),
+    ("tween_play", "Putar tween"),
+    // Particle effects
+    ("fx_burst", "FX Ledakan"),
+    ("fx_sparkle", "FX Kilau"),
+    ("fx_smoke", "FX Asap"),
+    ("clear_fx", "Hapus FX"),
+    // Files and export
+    ("save", "Simpan"),
+    ("load", "Muat"),
+    ("export_png", "Ekspor PNG"),
+    ("export_gif", "Ekspor GIF"),
+    ("export_mp4", "Ekspor MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Lembar sprite"),
+    ("import_piv", "Impor .piv"),
+    ("import_stk", "Impor .stk"),
+    ("export_piv", "Ekspor .piv"),
+    ("export_stk", "Ekspor .stk"),
+    // Audio and movieclips
+    ("add_audio", "Tambah audio"),
+    ("make_clip", "Buat klip"),
+    ("insert_clip", "Sisipkan klip"),
+    // Themes and panels
+    ("light_theme", "Tema terang"),
+    ("dark_theme", "Tema gelap"),
+    ("figures_layers", "FIGUR (lapisan)"),
+    // Status line
+    ("pose_mode", "Mode pose."),
+    (
+        "status_ready",
+        "Seret sendi untuk berpose. Tangan dan kaki menggunakan IK; seret pinggul untuk memindahkan.",
+    ),
+];
+
+static IT: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Riproduci"),
+    ("pause", "Pausa"),
+    ("add_frame", "+ Fotogramma"),
+    ("duplicate_frame", "Duplica"),
+    ("delete_frame", "Elimina"),
+    ("inbetween", "Fotogramma intermedio"),
+    ("copy_frame", "Copia fotogramma"),
+    ("paste_frame", "Incolla fotogramma"),
+    // History
+    ("undo", "Annulla"),
+    ("redo", "Ripeti"),
+    // Figure building
+    ("add_figure", "+ Figura"),
+    ("add_segment", "+ Segmento"),
+    ("delete_segment", "- Segmento"),
+    ("len_plus", "Lungh. +"),
+    ("len_minus", "Lungh. -"),
+    ("thick_plus", "Spessore +"),
+    ("thick_minus", "Spessore -"),
+    ("shape", "Forma"),
+    // Canvas modes and drawing
+    ("onion_skin", "Buccia di cipolla"),
+    ("draw", "Disegna"),
+    ("clear_drawing", "Cancella disegno"),
+    ("camera_mode", "Modalità fotocamera"),
+    ("cam_zoom_plus", "Zoom fotocamera +"),
+    ("cam_zoom_minus", "Zoom fotocamera -"),
+    ("follow_cam", "Segui fotocamera"),
+    ("tween_play", "Interpolazione"),
+    // Particle effects
+    ("fx_burst", "FX Esplosione"),
+    ("fx_sparkle", "FX Scintille"),
+    ("fx_smoke", "FX Fumo"),
+    ("clear_fx", "Cancella FX"),
+    // Files and export
+    ("save", "Salva"),
+    ("load", "Carica"),
+    ("export_png", "Esporta PNG"),
+    ("export_gif", "Esporta GIF"),
+    ("export_mp4", "Esporta MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Foglio sprite"),
+    ("import_piv", "Importa .piv"),
+    ("import_stk", "Importa .stk"),
+    ("export_piv", "Esporta .piv"),
+    ("export_stk", "Esporta .stk"),
+    // Audio and movieclips
+    ("add_audio", "Aggiungi audio"),
+    ("make_clip", "Crea clip"),
+    ("insert_clip", "Inserisci clip"),
+    // Themes and panels
+    ("light_theme", "Tema chiaro"),
+    ("dark_theme", "Tema scuro"),
+    ("figures_layers", "FIGURE (livelli)"),
+    // Status line
+    ("pose_mode", "Modalità posa."),
+    (
+        "status_ready",
+        "Trascina un'articolazione per la posa. Mani e piedi usano IK; trascina i fianchi per spostare.",
+    ),
+];
+
+static KK: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Ойнату"),
+    ("pause", "Кідірту"),
+    ("add_frame", "+ Кадр"),
+    ("duplicate_frame", "Қайталау"),
+    ("delete_frame", "Жою"),
+    ("inbetween", "Аралық кадр"),
+    ("copy_frame", "Кадрды көшіру"),
+    ("paste_frame", "Кадрды қою"),
+    // History
+    ("undo", "Болдырмау"),
+    ("redo", "Қайталау"),
+    // Figure building
+    ("add_figure", "+ Фигура"),
+    ("add_segment", "+ Сегмент"),
+    ("delete_segment", "- Сегмент"),
+    ("len_plus", "Ұзындық +"),
+    ("len_minus", "Ұзындық -"),
+    ("thick_plus", "Қалыңдық +"),
+    ("thick_minus", "Қалыңдық -"),
+    ("shape", "Пішін"),
+    // Canvas modes and drawing
+    ("onion_skin", "Пияз қабығы"),
+    ("draw", "Сурет салу"),
+    ("clear_drawing", "Суретті тазалау"),
+    ("camera_mode", "Камера режимі"),
+    ("cam_zoom_plus", "Камера масштабы +"),
+    ("cam_zoom_minus", "Камера масштабы -"),
+    ("follow_cam", "Камераны бақылау"),
+    ("tween_play", "Твин ойнату"),
+    // Particle effects
+    ("fx_burst", "FX Жарылыс"),
+    ("fx_sparkle", "FX Жарқыл"),
+    ("fx_smoke", "FX Түтін"),
+    ("clear_fx", "FX тазалау"),
+    // Files and export
+    ("save", "Сақтау"),
+    ("load", "Жүктеу"),
+    ("export_png", "PNG экспорт"),
+    ("export_gif", "GIF экспорт"),
+    ("export_mp4", "MP4 экспорт"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Спраит парағы"),
+    ("import_piv", ".piv импорт"),
+    ("import_stk", ".stk импорт"),
+    ("export_piv", ".piv экспорт"),
+    ("export_stk", ".stk экспорт"),
+    // Audio and movieclips
+    ("add_audio", "Аудио қосу"),
+    ("make_clip", "Клип жасау"),
+    ("insert_clip", "Клип кірістіру"),
+    // Themes and panels
+    ("light_theme", "Ашық тақырып"),
+    ("dark_theme", "Қараңғы тақырып"),
+    ("figures_layers", "ФИГУРАЛАР (қабаттар)"),
+    // Status line
+    ("pose_mode", "Поза режимі."),
+    (
+        "status_ready",
+        "Поза қою үшін буынды сүйреңіз. Қолдар мен аяқтар IK пайдаланады; жылжыту үшін жамбасты сүйреңіз.",
+    ),
+];
+
+static NB: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Spill av"),
+    ("pause", "Pause"),
+    ("add_frame", "+ Bilde"),
+    ("duplicate_frame", "Dupliser"),
+    ("delete_frame", "Slett"),
+    ("inbetween", "Mellombilde"),
+    ("copy_frame", "Kopier bilde"),
+    ("paste_frame", "Lim inn bilde"),
+    // History
+    ("undo", "Angre"),
+    ("redo", "Gjør om"),
+    // Figure building
+    ("add_figure", "+ Figur"),
+    ("add_segment", "+ Segment"),
+    ("delete_segment", "- Segment"),
+    ("len_plus", "Lengde +"),
+    ("len_minus", "Lengde -"),
+    ("thick_plus", "Tykkelse +"),
+    ("thick_minus", "Tykkelse -"),
+    ("shape", "Form"),
+    // Canvas modes and drawing
+    ("onion_skin", "Løkskall"),
+    ("draw", "Tegn"),
+    ("clear_drawing", "Tøm tegning"),
+    ("camera_mode", "Kameramodus"),
+    ("cam_zoom_plus", "Kamerazoom +"),
+    ("cam_zoom_minus", "Kamerazoom -"),
+    ("follow_cam", "Følg kamera"),
+    ("tween_play", "Interpolering"),
+    // Particle effects
+    ("fx_burst", "FX Eksplosjon"),
+    ("fx_sparkle", "FX Gnister"),
+    ("fx_smoke", "FX Røyk"),
+    ("clear_fx", "Tøm FX"),
+    // Files and export
+    ("save", "Lagre"),
+    ("load", "Last inn"),
+    ("export_png", "Eksporter PNG"),
+    ("export_gif", "Eksporter GIF"),
+    ("export_mp4", "Eksporter MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Spritesheet"),
+    ("import_piv", "Importer .piv"),
+    ("import_stk", "Importer .stk"),
+    ("export_piv", "Eksporter .piv"),
+    ("export_stk", "Eksporter .stk"),
+    // Audio and movieclips
+    ("add_audio", "Legg til lyd"),
+    ("make_clip", "Lag klipp"),
+    ("insert_clip", "Sett inn klipp"),
+    // Themes and panels
+    ("light_theme", "Lyst tema"),
+    ("dark_theme", "Mørkt tema"),
+    ("figures_layers", "FIGURER (lag)"),
+    // Status line
+    ("pose_mode", "Poseringsmodus."),
+    (
+        "status_ready",
+        "Dra et ledd for å posere. Hender og føtter bruker IK; dra hoftene for å flytte.",
+    ),
+];
+
+static NL: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Afspelen"),
+    ("pause", "Pauzeren"),
+    ("add_frame", "+ Frame"),
+    ("duplicate_frame", "Dupliceren"),
+    ("delete_frame", "Verwijderen"),
+    ("inbetween", "Tussenframe"),
+    ("copy_frame", "Frame kopiëren"),
+    ("paste_frame", "Frame plakken"),
+    // History
+    ("undo", "Ongedaan maken"),
+    ("redo", "Opnieuw"),
+    // Figure building
+    ("add_figure", "+ Figuur"),
+    ("add_segment", "+ Segment"),
+    ("delete_segment", "- Segment"),
+    ("len_plus", "Lengte +"),
+    ("len_minus", "Lengte -"),
+    ("thick_plus", "Dikte +"),
+    ("thick_minus", "Dikte -"),
+    ("shape", "Vorm"),
+    // Canvas modes and drawing
+    ("onion_skin", "Uienschil"),
+    ("draw", "Tekenen"),
+    ("clear_drawing", "Tekening wissen"),
+    ("camera_mode", "Cameramodus"),
+    ("cam_zoom_plus", "Camerazoom +"),
+    ("cam_zoom_minus", "Camerazoom -"),
+    ("follow_cam", "Camera volgen"),
+    ("tween_play", "Tween afspelen"),
+    // Particle effects
+    ("fx_burst", "FX Explosie"),
+    ("fx_sparkle", "FX Vonken"),
+    ("fx_smoke", "FX Rook"),
+    ("clear_fx", "FX wissen"),
+    // Files and export
+    ("save", "Opslaan"),
+    ("load", "Laden"),
+    ("export_png", "PNG exporteren"),
+    ("export_gif", "GIF exporteren"),
+    ("export_mp4", "MP4 exporteren"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Spritesheet"),
+    ("import_piv", ".piv importeren"),
+    ("import_stk", ".stk importeren"),
+    ("export_piv", ".piv exporteren"),
+    ("export_stk", ".stk exporteren"),
+    // Audio and movieclips
+    ("add_audio", "Audio toevoegen"),
+    ("make_clip", "Clip maken"),
+    ("insert_clip", "Clip invoegen"),
+    // Themes and panels
+    ("light_theme", "Licht thema"),
+    ("dark_theme", "Donker thema"),
+    ("figures_layers", "FIGUREN (lagen)"),
+    // Status line
+    ("pose_mode", "Posemodus."),
+    (
+        "status_ready",
+        "Sleep een gewricht om te poseren. Handen en voeten gebruiken IK; sleep de heupen om te verplaatsen.",
+    ),
+];
+
+static PL: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Odtwórz"),
+    ("pause", "Pauza"),
+    ("add_frame", "+ Klatka"),
+    ("duplicate_frame", "Duplikuj"),
+    ("delete_frame", "Usuń"),
+    ("inbetween", "Klatka pośrednia"),
+    ("copy_frame", "Kopiuj klatkę"),
+    ("paste_frame", "Wklej klatkę"),
+    // History
+    ("undo", "Cofnij"),
+    ("redo", "Ponów"),
+    // Figure building
+    ("add_figure", "+ Figura"),
+    ("add_segment", "+ Segment"),
+    ("delete_segment", "- Segment"),
+    ("len_plus", "Długość +"),
+    ("len_minus", "Długość -"),
+    ("thick_plus", "Grubość +"),
+    ("thick_minus", "Grubość -"),
+    ("shape", "Kształt"),
+    // Canvas modes and drawing
+    ("onion_skin", "Skórka cebuli"),
+    ("draw", "Rysuj"),
+    ("clear_drawing", "Wyczyść rysunek"),
+    ("camera_mode", "Tryb kamery"),
+    ("cam_zoom_plus", "Zoom kamery +"),
+    ("cam_zoom_minus", "Zoom kamery -"),
+    ("follow_cam", "Podążaj za kamerą"),
+    ("tween_play", "Odtwórz tween"),
+    // Particle effects
+    ("fx_burst", "FX Wybuch"),
+    ("fx_sparkle", "FX Iskry"),
+    ("fx_smoke", "FX Dym"),
+    ("clear_fx", "Wyczyść FX"),
+    // Files and export
+    ("save", "Zapisz"),
+    ("load", "Wczytaj"),
+    ("export_png", "Eksport PNG"),
+    ("export_gif", "Eksport GIF"),
+    ("export_mp4", "Eksport MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Arkusz sprite'ów"),
+    ("import_piv", "Import .piv"),
+    ("import_stk", "Import .stk"),
+    ("export_piv", "Eksport .piv"),
+    ("export_stk", "Eksport .stk"),
+    // Audio and movieclips
+    ("add_audio", "Dodaj dźwięk"),
+    ("make_clip", "Utwórz klip"),
+    ("insert_clip", "Wstaw klip"),
+    // Themes and panels
+    ("light_theme", "Jasny motyw"),
+    ("dark_theme", "Ciemny motyw"),
+    ("figures_layers", "FIGURY (warstwy)"),
+    // Status line
+    ("pose_mode", "Tryb pozy."),
+    (
+        "status_ready",
+        "Przeciągnij staw, aby ustawić pozę. Dłonie i stopy używają IK; przeciągnij biodra, aby przenieść.",
+    ),
+];
+
+static PT_BR: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Reproduzir"),
+    ("pause", "Pausar"),
+    ("add_frame", "+ Quadro"),
+    ("duplicate_frame", "Duplicar"),
+    ("delete_frame", "Excluir"),
+    ("inbetween", "Quadro intermediário"),
+    ("copy_frame", "Copiar quadro"),
+    ("paste_frame", "Colar quadro"),
+    // History
+    ("undo", "Desfazer"),
+    ("redo", "Refazer"),
+    // Figure building
+    ("add_figure", "+ Figura"),
+    ("add_segment", "+ Segmento"),
+    ("delete_segment", "- Segmento"),
+    ("len_plus", "Compr. +"),
+    ("len_minus", "Compr. -"),
+    ("thick_plus", "Espessura +"),
+    ("thick_minus", "Espessura -"),
+    ("shape", "Forma"),
+    // Canvas modes and drawing
+    ("onion_skin", "Casca de cebola"),
+    ("draw", "Desenhar"),
+    ("clear_drawing", "Limpar desenho"),
+    ("camera_mode", "Modo câmera"),
+    ("cam_zoom_plus", "Zoom da câmera +"),
+    ("cam_zoom_minus", "Zoom da câmera -"),
+    ("follow_cam", "Seguir câmera"),
+    ("tween_play", "Interpolação"),
+    // Particle effects
+    ("fx_burst", "FX Explosão"),
+    ("fx_sparkle", "FX Faíscas"),
+    ("fx_smoke", "FX Fumaça"),
+    ("clear_fx", "Limpar FX"),
+    // Files and export
+    ("save", "Salvar"),
+    ("load", "Carregar"),
+    ("export_png", "Exportar PNG"),
+    ("export_gif", "Exportar GIF"),
+    ("export_mp4", "Exportar MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Folha de sprites"),
+    ("import_piv", "Importar .piv"),
+    ("import_stk", "Importar .stk"),
+    ("export_piv", "Exportar .piv"),
+    ("export_stk", "Exportar .stk"),
+    // Audio and movieclips
+    ("add_audio", "Adicionar áudio"),
+    ("make_clip", "Criar clipe"),
+    ("insert_clip", "Inserir clipe"),
+    // Themes and panels
+    ("light_theme", "Tema claro"),
+    ("dark_theme", "Tema escuro"),
+    ("figures_layers", "FIGURAS (camadas)"),
+    // Status line
+    ("pose_mode", "Modo de pose."),
+    (
+        "status_ready",
+        "Arraste uma articulação para posar. Mãos e pés usam IK; arraste os quadris para mover.",
+    ),
+];
+
+static RO: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Redare"),
+    ("pause", "Pauză"),
+    ("add_frame", "+ Cadru"),
+    ("duplicate_frame", "Duplicare"),
+    ("delete_frame", "Ștergere"),
+    ("inbetween", "Cadru intermediar"),
+    ("copy_frame", "Copiere cadru"),
+    ("paste_frame", "Lipire cadru"),
+    // History
+    ("undo", "Anulare"),
+    ("redo", "Refacere"),
+    // Figure building
+    ("add_figure", "+ Figură"),
+    ("add_segment", "+ Segment"),
+    ("delete_segment", "- Segment"),
+    ("len_plus", "Lungime +"),
+    ("len_minus", "Lungime -"),
+    ("thick_plus", "Grosime +"),
+    ("thick_minus", "Grosime -"),
+    ("shape", "Formă"),
+    // Canvas modes and drawing
+    ("onion_skin", "Coajă de ceapă"),
+    ("draw", "Desenare"),
+    ("clear_drawing", "Șterge desenul"),
+    ("camera_mode", "Mod cameră"),
+    ("cam_zoom_plus", "Zoom cameră +"),
+    ("cam_zoom_minus", "Zoom cameră -"),
+    ("follow_cam", "Urmărește camera"),
+    ("tween_play", "Redare tween"),
+    // Particle effects
+    ("fx_burst", "FX Explozie"),
+    ("fx_sparkle", "FX Scântei"),
+    ("fx_smoke", "FX Fum"),
+    ("clear_fx", "Șterge FX"),
+    // Files and export
+    ("save", "Salvare"),
+    ("load", "Încărcare"),
+    ("export_png", "Export PNG"),
+    ("export_gif", "Export GIF"),
+    ("export_mp4", "Export MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Foaie de sprite-uri"),
+    ("import_piv", "Import .piv"),
+    ("import_stk", "Import .stk"),
+    ("export_piv", "Export .piv"),
+    ("export_stk", "Export .stk"),
+    // Audio and movieclips
+    ("add_audio", "Adaugă audio"),
+    ("make_clip", "Creează clip"),
+    ("insert_clip", "Inserează clip"),
+    // Themes and panels
+    ("light_theme", "Temă deschisă"),
+    ("dark_theme", "Temă întunecată"),
+    ("figures_layers", "FIGURI (straturi)"),
+    // Status line
+    ("pose_mode", "Mod poză."),
+    (
+        "status_ready",
+        "Trageți o articulație pentru poză. Mâinile și picioarele folosesc IK; trageți șoldurile pentru a muta.",
+    ),
+];
+
+static RU: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Воспроизвести"),
+    ("pause", "Пауза"),
+    ("add_frame", "+ Кадр"),
+    ("duplicate_frame", "Дублировать"),
+    ("delete_frame", "Удалить"),
+    ("inbetween", "Промежуточный кадр"),
+    ("copy_frame", "Копировать кадр"),
+    ("paste_frame", "Вставить кадр"),
+    // History
+    ("undo", "Отменить"),
+    ("redo", "Повторить"),
+    // Figure building
+    ("add_figure", "+ Фигура"),
+    ("add_segment", "+ Сегмент"),
+    ("delete_segment", "- Сегмент"),
+    ("len_plus", "Длина +"),
+    ("len_minus", "Длина -"),
+    ("thick_plus", "Толщина +"),
+    ("thick_minus", "Толщина -"),
+    ("shape", "Форма"),
+    // Canvas modes and drawing
+    ("onion_skin", "Луковая шелуха"),
+    ("draw", "Рисовать"),
+    ("clear_drawing", "Очистить рисунок"),
+    ("camera_mode", "Режим камеры"),
+    ("cam_zoom_plus", "Масштаб камеры +"),
+    ("cam_zoom_minus", "Масштаб камеры -"),
+    ("follow_cam", "Следовать за камерой"),
+    ("tween_play", "Твининг"),
+    // Particle effects
+    ("fx_burst", "FX Взрыв"),
+    ("fx_sparkle", "FX Искры"),
+    ("fx_smoke", "FX Дым"),
+    ("clear_fx", "Очистить FX"),
+    // Files and export
+    ("save", "Сохранить"),
+    ("load", "Загрузить"),
+    ("export_png", "Экспорт PNG"),
+    ("export_gif", "Экспорт GIF"),
+    ("export_mp4", "Экспорт MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Спрайтшит"),
+    ("import_piv", "Импорт .piv"),
+    ("import_stk", "Импорт .stk"),
+    ("export_piv", "Экспорт .piv"),
+    ("export_stk", "Экспорт .stk"),
+    // Audio and movieclips
+    ("add_audio", "Добавить аудио"),
+    ("make_clip", "Создать клип"),
+    ("insert_clip", "Вставить клип"),
+    // Themes and panels
+    ("light_theme", "Светлая тема"),
+    ("dark_theme", "Тёмная тема"),
+    ("figures_layers", "ФИГУРЫ (слои)"),
+    // Status line
+    ("pose_mode", "Режим позы."),
+    (
+        "status_ready",
+        "Перетащите сустав, чтобы задать позу. Руки и ноги используют IK; перетащите бёдра для перемещения.",
+    ),
+];
+
+static SL: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Predvajaj"),
+    ("pause", "Premor"),
+    ("add_frame", "+ Sličica"),
+    ("duplicate_frame", "Podvoji"),
+    ("delete_frame", "Izbriši"),
+    ("inbetween", "Vmesna sličica"),
+    ("copy_frame", "Kopiraj sličico"),
+    ("paste_frame", "Prilepi sličico"),
+    // History
+    ("undo", "Razveljavi"),
+    ("redo", "Uveljavi"),
+    // Figure building
+    ("add_figure", "+ Figura"),
+    ("add_segment", "+ Segment"),
+    ("delete_segment", "- Segment"),
+    ("len_plus", "Dolžina +"),
+    ("len_minus", "Dolžina -"),
+    ("thick_plus", "Debelina +"),
+    ("thick_minus", "Debelina -"),
+    ("shape", "Oblika"),
+    // Canvas modes and drawing
+    ("onion_skin", "Čebulna lupina"),
+    ("draw", "Riši"),
+    ("clear_drawing", "Počisti risbo"),
+    ("camera_mode", "Način kamere"),
+    ("cam_zoom_plus", "Povečava kamere +"),
+    ("cam_zoom_minus", "Povečava kamere -"),
+    ("follow_cam", "Sledi kameri"),
+    ("tween_play", "Interpolacija"),
+    // Particle effects
+    ("fx_burst", "FX Eksplozija"),
+    ("fx_sparkle", "FX Iskre"),
+    ("fx_smoke", "FX Dim"),
+    ("clear_fx", "Počisti FX"),
+    // Files and export
+    ("save", "Shrani"),
+    ("load", "Naloži"),
+    ("export_png", "Izvoz PNG"),
+    ("export_gif", "Izvoz GIF"),
+    ("export_mp4", "Izvoz MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Spritesheet"),
+    ("import_piv", "Uvoz .piv"),
+    ("import_stk", "Uvoz .stk"),
+    ("export_piv", "Izvoz .piv"),
+    ("export_stk", "Izvoz .stk"),
+    // Audio and movieclips
+    ("add_audio", "Dodaj zvok"),
+    ("make_clip", "Ustvari posnetek"),
+    ("insert_clip", "Vstavi posnetek"),
+    // Themes and panels
+    ("light_theme", "Svetla tema"),
+    ("dark_theme", "Temna tema"),
+    ("figures_layers", "FIGURE (plasti)"),
+    // Status line
+    ("pose_mode", "Način poze."),
+    (
+        "status_ready",
+        "Povlecite sklep za pozo. Roke in stopala uporabljajo IK; povlecite boke za premik.",
+    ),
+];
+
+static TR: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Oynat"),
+    ("pause", "Duraklat"),
+    ("add_frame", "+ Kare"),
+    ("duplicate_frame", "Çoğalt"),
+    ("delete_frame", "Sil"),
+    ("inbetween", "Ara kare"),
+    ("copy_frame", "Kareyi kopyala"),
+    ("paste_frame", "Kareyi yapıştır"),
+    // History
+    ("undo", "Geri al"),
+    ("redo", "Yinele"),
+    // Figure building
+    ("add_figure", "+ Figür"),
+    ("add_segment", "+ Parça"),
+    ("delete_segment", "- Parça"),
+    ("len_plus", "Uzunluk +"),
+    ("len_minus", "Uzunluk -"),
+    ("thick_plus", "Kalınlık +"),
+    ("thick_minus", "Kalınlık -"),
+    ("shape", "Şekil"),
+    // Canvas modes and drawing
+    ("onion_skin", "Soğan kabuğu"),
+    ("draw", "Çiz"),
+    ("clear_drawing", "Çizimi temizle"),
+    ("camera_mode", "Kamera modu"),
+    ("cam_zoom_plus", "Kamera yakınlaştırma +"),
+    ("cam_zoom_minus", "Kamera yakınlaştırma -"),
+    ("follow_cam", "Kamerayı takip et"),
+    ("tween_play", "Tween oynat"),
+    // Particle effects
+    ("fx_burst", "FX Patlama"),
+    ("fx_sparkle", "FX Kıvılcım"),
+    ("fx_smoke", "FX Duman"),
+    ("clear_fx", "FX temizle"),
+    // Files and export
+    ("save", "Kaydet"),
+    ("load", "Yükle"),
+    ("export_png", "PNG dışa aktar"),
+    ("export_gif", "GIF dışa aktar"),
+    ("export_mp4", "MP4 dışa aktar"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Sprite sayfası"),
+    ("import_piv", ".piv içe aktar"),
+    ("import_stk", ".stk içe aktar"),
+    ("export_piv", ".piv dışa aktar"),
+    ("export_stk", ".stk dışa aktar"),
+    // Audio and movieclips
+    ("add_audio", "Ses ekle"),
+    ("make_clip", "Klip oluştur"),
+    ("insert_clip", "Klip ekle"),
+    // Themes and panels
+    ("light_theme", "Açık tema"),
+    ("dark_theme", "Koyu tema"),
+    ("figures_layers", "FİGÜRLER (katmanlar)"),
+    // Status line
+    ("pose_mode", "Poz modu."),
+    (
+        "status_ready",
+        "Poz vermek için bir eklemi sürükleyin. Eller ve ayaklar IK kullanır; taşımak için kalçayı sürükleyin.",
+    ),
+];
+
+static UK: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Відтворити"),
+    ("pause", "Пауза"),
+    ("add_frame", "+ Кадр"),
+    ("duplicate_frame", "Дублювати"),
+    ("delete_frame", "Видалити"),
+    ("inbetween", "Проміжний кадр"),
+    ("copy_frame", "Копіювати кадр"),
+    ("paste_frame", "Вставити кадр"),
+    // History
+    ("undo", "Скасувати"),
+    ("redo", "Повторити"),
+    // Figure building
+    ("add_figure", "+ Фігура"),
+    ("add_segment", "+ Сегмент"),
+    ("delete_segment", "- Сегмент"),
+    ("len_plus", "Довжина +"),
+    ("len_minus", "Довжина -"),
+    ("thick_plus", "Товщина +"),
+    ("thick_minus", "Товщина -"),
+    ("shape", "Форма"),
+    // Canvas modes and drawing
+    ("onion_skin", "Цибулева шкірка"),
+    ("draw", "Малювати"),
+    ("clear_drawing", "Очистити малюнок"),
+    ("camera_mode", "Режим камери"),
+    ("cam_zoom_plus", "Масштаб камери +"),
+    ("cam_zoom_minus", "Масштаб камери -"),
+    ("follow_cam", "Стежити за камерою"),
+    ("tween_play", "Твінінг"),
+    // Particle effects
+    ("fx_burst", "FX Вибух"),
+    ("fx_sparkle", "FX Іскри"),
+    ("fx_smoke", "FX Дим"),
+    ("clear_fx", "Очистити FX"),
+    // Files and export
+    ("save", "Зберегти"),
+    ("load", "Завантажити"),
+    ("export_png", "Експорт PNG"),
+    ("export_gif", "Експорт GIF"),
+    ("export_mp4", "Експорт MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Спрайтшит"),
+    ("import_piv", "Імпорт .piv"),
+    ("import_stk", "Імпорт .stk"),
+    ("export_piv", "Експорт .piv"),
+    ("export_stk", "Експорт .stk"),
+    // Audio and movieclips
+    ("add_audio", "Додати аудіо"),
+    ("make_clip", "Створити кліп"),
+    ("insert_clip", "Вставити кліп"),
+    // Themes and panels
+    ("light_theme", "Світла тема"),
+    ("dark_theme", "Темна тема"),
+    ("figures_layers", "ФІГУРИ (шари)"),
+    // Status line
+    ("pose_mode", "Режим пози."),
+    (
+        "status_ready",
+        "Перетягніть суглоб, щоб задати позу. Руки й ноги використовують IK; перетягніть стегна для переміщення.",
+    ),
+];
+
+static VI: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "Phát"),
+    ("pause", "Tạm dừng"),
+    ("add_frame", "+ Khung hình"),
+    ("duplicate_frame", "Nhân bản"),
+    ("delete_frame", "Xóa"),
+    ("inbetween", "Khung hình trung gian"),
+    ("copy_frame", "Sao chép khung hình"),
+    ("paste_frame", "Dán khung hình"),
+    // History
+    ("undo", "Hoàn tác"),
+    ("redo", "Làm lại"),
+    // Figure building
+    ("add_figure", "+ Hình"),
+    ("add_segment", "+ Đoạn"),
+    ("delete_segment", "- Đoạn"),
+    ("len_plus", "Dài +"),
+    ("len_minus", "Dài -"),
+    ("thick_plus", "Dày +"),
+    ("thick_minus", "Dày -"),
+    ("shape", "Hình dạng"),
+    // Canvas modes and drawing
+    ("onion_skin", "Vỏ hành"),
+    ("draw", "Vẽ"),
+    ("clear_drawing", "Xóa bản vẽ"),
+    ("camera_mode", "Chế độ máy quay"),
+    ("cam_zoom_plus", "Thu phóng máy quay +"),
+    ("cam_zoom_minus", "Thu phóng máy quay -"),
+    ("follow_cam", "Theo máy quay"),
+    ("tween_play", "Phát tween"),
+    // Particle effects
+    ("fx_burst", "FX Nổ"),
+    ("fx_sparkle", "FX Tia lửa"),
+    ("fx_smoke", "FX Khói"),
+    ("clear_fx", "Xóa FX"),
+    // Files and export
+    ("save", "Lưu"),
+    ("load", "Tải"),
+    ("export_png", "Xuất PNG"),
+    ("export_gif", "Xuất GIF"),
+    ("export_mp4", "Xuất MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "Bảng sprite"),
+    ("import_piv", "Nhập .piv"),
+    ("import_stk", "Nhập .stk"),
+    ("export_piv", "Xuất .piv"),
+    ("export_stk", "Xuất .stk"),
+    // Audio and movieclips
+    ("add_audio", "Thêm âm thanh"),
+    ("make_clip", "Tạo clip"),
+    ("insert_clip", "Chèn clip"),
+    // Themes and panels
+    ("light_theme", "Giao diện sáng"),
+    ("dark_theme", "Giao diện tối"),
+    ("figures_layers", "HÌNH (lớp)"),
+    // Status line
+    ("pose_mode", "Chế độ tư thế."),
+    (
+        "status_ready",
+        "Kéo một khớp để tạo tư thế. Tay và chân dùng IK; kéo hông để di chuyển.",
+    ),
+];
+
+static ZH_HANS: &[(&str, &str)] = &[
+    // Playback and frames
+    ("play", "播放"),
+    ("pause", "暂停"),
+    ("add_frame", "+ 帧"),
+    ("duplicate_frame", "复制帧"),
+    ("delete_frame", "删除帧"),
+    ("inbetween", "中间帧"),
+    ("copy_frame", "拷贝帧"),
+    ("paste_frame", "粘贴帧"),
+    // History
+    ("undo", "撤销"),
+    ("redo", "重做"),
+    // Figure building
+    ("add_figure", "+ 人物"),
+    ("add_segment", "+ 段"),
+    ("delete_segment", "- 段"),
+    ("len_plus", "长度 +"),
+    ("len_minus", "长度 -"),
+    ("thick_plus", "粗细 +"),
+    ("thick_minus", "粗细 -"),
+    ("shape", "形状"),
+    // Canvas modes and drawing
+    ("onion_skin", "洋葱皮"),
+    ("draw", "绘制"),
+    ("clear_drawing", "清除绘制"),
+    ("camera_mode", "摄像机模式"),
+    ("cam_zoom_plus", "摄像机缩放 +"),
+    ("cam_zoom_minus", "摄像机缩放 -"),
+    ("follow_cam", "跟随摄像机"),
+    ("tween_play", "补间播放"),
+    // Particle effects
+    ("fx_burst", "特效 爆炸"),
+    ("fx_sparkle", "特效 火花"),
+    ("fx_smoke", "特效 烟雾"),
+    ("clear_fx", "清除特效"),
+    // Files and export
+    ("save", "保存"),
+    ("load", "加载"),
+    ("export_png", "导出 PNG"),
+    ("export_gif", "导出 GIF"),
+    ("export_mp4", "导出 MP4"),
+    ("export_webm", "WebM"),
+    ("export_svg", "SVG"),
+    ("spritesheet", "精灵图集"),
+    ("import_piv", "导入 .piv"),
+    ("import_stk", "导入 .stk"),
+    ("export_piv", "导出 .piv"),
+    ("export_stk", "导出 .stk"),
+    // Audio and movieclips
+    ("add_audio", "添加音频"),
+    ("make_clip", "创建片段"),
+    ("insert_clip", "插入片段"),
+    // Themes and panels
+    ("light_theme", "浅色主题"),
+    ("dark_theme", "深色主题"),
+    ("figures_layers", "人物（图层）"),
+    // Status line
+    ("pose_mode", "姿态模式。"),
+    (
+        "status_ready",
+        "拖动关节来摆姿势。手和脚使用 IK；拖动臀部来移动。",
+    ),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// For every language, every English key must have a real entry
+    /// in that language's own table (not just an English fallback):
+    /// non-empty and not the raw key.
     #[test]
-    fn every_english_key_is_translated_in_bn_and_es() {
-        for (key, _) in EN {
-            for lang in [Lang::Bn, Lang::Es] {
+    fn every_language_translates_every_key() {
+        for lang in Lang::all() {
+            for (key, _) in EN {
                 let text = lookup(table_for(lang), key)
                     .unwrap_or_else(|| panic!("{key} missing in {:?}", lang));
                 assert!(!text.is_empty(), "{key} is empty in {:?}", lang);
@@ -294,17 +2062,21 @@ mod tests {
     }
 
     #[test]
-    fn tables_have_the_same_keys_without_duplicates() {
-        assert_eq!(EN.len(), BN.len());
-        assert_eq!(EN.len(), ES.len());
-        for table in [EN, BN, ES] {
+    fn all_tables_have_the_same_keys_without_duplicates() {
+        for lang in Lang::all() {
+            let table = table_for(lang);
+            assert_eq!(table.len(), EN.len(), "size mismatch in {:?}", lang);
             let mut keys: Vec<&str> = table.iter().map(|(k, _)| *k).collect();
             let total = keys.len();
             keys.sort_unstable();
             keys.dedup();
-            assert_eq!(keys.len(), total, "duplicate keys in a table");
+            assert_eq!(keys.len(), total, "duplicate keys in {:?}", lang);
             for (key, _) in EN {
-                assert!(lookup(table, key).is_some(), "{key} missing from a table");
+                assert!(
+                    lookup(table, key).is_some(),
+                    "{key} missing from {:?}",
+                    lang
+                );
             }
         }
     }
@@ -330,13 +2102,31 @@ mod tests {
     }
 
     #[test]
-    fn codes_and_labels() {
+    fn codes_and_labels_for_all_languages() {
+        // The original's 27 packs plus the port's Bengali.
+        assert_eq!(Lang::all().len(), 28);
+        let mut codes: Vec<&str> = Lang::all().iter().map(|l| l.code()).collect();
+        let total = codes.len();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), total, "duplicate language codes");
+        for lang in Lang::all() {
+            assert!(!lang.code().is_empty(), "empty code for {:?}", lang);
+            assert!(!lang.label().is_empty(), "empty label for {:?}", lang);
+        }
+        // Exact codes, including the regional ones from the packs.
         assert_eq!(Lang::En.code(), "en");
         assert_eq!(Lang::Bn.code(), "bn");
         assert_eq!(Lang::Es.code(), "es");
+        assert_eq!(Lang::Es419.code(), "es-419");
+        assert_eq!(Lang::PtBr.code(), "pt-BR");
+        assert_eq!(Lang::Nb.code(), "nb");
+        assert_eq!(Lang::ZhHans.code(), "zh-Hans");
         assert_eq!(Lang::En.label(), "English");
         assert_eq!(Lang::Bn.label(), "বাংলা");
         assert_eq!(Lang::Es.label(), "Español");
+        assert_eq!(Lang::PtBr.label(), "Português (Brasil)");
+        assert_eq!(Lang::ZhHans.label(), "简体中文");
     }
 
     #[test]
@@ -347,5 +2137,13 @@ mod tests {
         assert_eq!(t(Lang::Bn, "figures_layers"), "ফিগারসমূহ (স্তর)");
         assert_eq!(t(Lang::Es, "figures_layers"), "FIGURAS (capas)");
         assert_eq!(t(Lang::Es, "onion_skin"), "Piel de cebolla");
+        assert_eq!(t(Lang::Fr, "onion_skin"), "Pelure d'oignon");
+        assert_eq!(t(Lang::PtBr, "onion_skin"), "Casca de cebola");
+        assert_eq!(t(Lang::ZhHans, "onion_skin"), "洋葱皮");
+        assert_eq!(t(Lang::De, "save"), "Speichern");
+        assert_eq!(t(Lang::Ru, "save"), "Сохранить");
+        assert_eq!(t(Lang::Ar, "save"), "حفظ");
+        assert_eq!(t(Lang::De, "undo"), "Rückgängig");
+        assert_eq!(t(Lang::Tr, "undo"), "Geri al");
     }
 }

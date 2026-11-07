@@ -104,3 +104,29 @@ Updated parity accounting: **~16 of 24 rows done-equivalent, 6 partial,
 absence: drawing (no brushes/text), audio (playback only), movieclips
 (no nested-timeline editor), keyframe graph editor, localisation
 (3 of 27 languages), and the Stick Nodes animation containers.
+
+## Wave 4 — the second 10-agent push (2026-11-07)
+
+Central prep added model fields first (NodeStyle, SegmentMedia,
+Project.assets, Stroke.widths/fill) so agents never fought over
+model.rs. Ten agents, strict file ownership, central integration.
+136 tests green.
+
+| Addition | State |
+|---|---|
+| Stick Nodes animation (.nodemc/.stknds) import (`src/nodes_anim.rs`, spec docs/NODES-ANIM-SPEC.md) | DONE for the modelled subset — verified against the original's decoder, its synthetic corpus, and three real corpus projects with exact values. Sprites/texts/joins/camera records are parsed and length-validated but not modelled (spec §17) |
+| Text + sprite segments (`src/media.rs`) | DONE — sprites aspect-correct on segments, text via a built-in 3x5 bitmap font (documented charset); composited in the rasterizer, attach via "Img seg" (text authoring UI still to come) |
+| Keyframe graph engine (`src/graph.rs`) | ENGINE DONE — Hermite channels (root/angle/length) with shortest-path angle wrap; no graph-editor UI or project storage yet |
+| Drawing depth (`src/paint.rs` + editor) | DONE — pressure widths recorded AND rendered per-point, serpentine fill, lasso erase |
+| Audio editor backend (`src/audio_edit.rs`) | DONE as a backend — WAV peaks, real mixdown (Mixdown button writes out/mixdown.wav), audible_at drives multi-clip-aware playback (first audible clip; simultaneous playback still single-stream) |
+| Localisation | DONE for the UI string set — 28 languages (the original's 27 + Bengali), all 50 keys, Lang button cycles all |
+| Segment styles (`src/style.rs` + rasterizer + SVG) | DONE — taper, caps, gradients, opacity rendered in raster + SVG; Seg cap / Taper / Gradient buttons edit the selected segment |
+| App shell (`src/shell.rs` + app.rs) | DONE — Home panel with project list + recents, recovery snapshot/restore, stage size buttons. Native file dialogs still not present (folder-based flow remains) |
+| 3D figures (`src/fig3d.rs`) | SLICE DONE — real 3D FK rig + perspective projection + painter order, unit-verified; not yet integrated into the editor/canvas |
+| Touch (`src/touch.rs`) | ENGINE DONE — gesture recogniser fully tested; GPUI touch wiring still to come |
+
+Updated parity accounting: every feature family in the original is
+now present in some verified form. Remaining gaps are integration
+and depth: 3D in the editor, touch wiring, graph-editor UI, text
+authoring, native file dialogs, sprite/joins modelling for Stick
+Nodes animation files, and the original's drawing/audio depth.

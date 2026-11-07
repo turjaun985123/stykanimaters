@@ -729,15 +729,163 @@ impl EditorCore {
         self.project.fx_clips.clear();
         self.status = "Particle effects cleared.".into();
     }
+
+    // ---- Wave-4 integrations: nodes animation, styles, media, mixdown ----
+
+    pub fn import_nodes_anim_file(&mut self) {
+        let Some(path) = self.first_file_with("import", &["nodemc", "stknds"]) else {
+            self.status = "Put a .nodemc or .stknds file in the import folder first.".into();
+            return;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => match crate::nodes_anim::import_nodes_animation(&bytes) {
+                Ok(project) => {
+                    self.snapshot();
+                    self.project = project;
+                    self.current = 0;
+                    self.playhead = 0.0;
+                    self.selected_figure = 0;
+                    self.selected_node = None;
+                    self.status = format!("Imported {}.", path.display());
+                }
+                Err(e) => self.status = format!("Stick Nodes animation import failed: {e}"),
+            },
+            Err(e) => self.status = format!("Could not read {}: {e}", path.display()),
+        }
+    }
+
+    fn selected_node_mut(&mut self) -> Option<&mut crate::model::NodeDef> {
+        let ni = self.selected_node?;
+        self.project.figures.get_mut(self.selected_figure)?.def.nodes.get_mut(ni)
+    }
+
+    pub fn cycle_node_cap(&mut self) {
+        self.snapshot();
+        match self.selected_node_mut() {
+            Some(node) => {
+                node.style.cap = crate::style::cycle_cap(node.style.cap);
+                self.status = format!("Segment cap: {:?}", node.style.cap);
+            }
+            None => self.status = "Select a joint first.".into(),
+        }
+    }
+
+    pub fn cycle_node_taper(&mut self) {
+        self.snapshot();
+        match self.selected_node_mut() {
+            Some(node) => {
+                node.style.taper = match node.style.taper {
+                    t if t > 0.9 => 0.6,
+                    t if t > 0.5 => 0.3,
+                    t if t > 0.1 => 0.0,
+                    _ => 1.0,
+                };
+                self.status = format!("Segment {}", crate::style::taper_label(node.style.taper));
+            }
+            None => self.status = "Select a joint first.".into(),
+        }
+    }
+
+    pub fn cycle_node_gradient(&mut self) {
+        self.snapshot();
+        match self.selected_node_mut() {
+            Some(node) => {
+                node.style.color2 = match node.style.color2 {
+                    None => Some(0xFFFFFF),
+                    Some(0xFFFFFF) => Some(0x222222),
+                    _ => None,
+                };
+                self.status = match node.style.color2 {
+                    Some(c) => format!("Gradient to #{c:06X}."),
+                    None => "Gradient off (solid colour).".into(),
+                };
+            }
+            None => self.status = "Select a joint first.".into(),
+        }
+    }
+
+    pub fn attach_image_to_node(&mut self) {
+        let Some(node_idx) = self.selected_node else {
+            self.status = "Select a joint first.".into();
+            return;
+        };
+        let Some(path) = self.first_file_with("import", &["png"]) else {
+            self.status = "Put a PNG in the import folder first.".into();
+            return;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                self.snapshot();
+                let asset = self.project.assets.len();
+                self.project.assets.push(crate::model::ImageAsset {
+                    name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                    png: bytes,
+                });
+                if let Some(node) = self
+                    .project
+                    .figures
+                    .get_mut(self.selected_figure)
+                    .and_then(|f| f.def.nodes.get_mut(node_idx))
+                {
+                    node.media = Some(crate::model::SegmentMedia::Image { asset });
+                    self.status = format!("Sprite attached (asset {}).", asset + 1);
+                }
+            }
+            Err(e) => self.status = format!("Could not read {}: {e}", path.display()),
+        }
+    }
+
+    pub fn clear_node_media(&mut self) {
+        self.snapshot();
+        match self.selected_node_mut() {
+            Some(node) => {
+                node.media = None;
+                self.status = "Segment media cleared.".into();
+            }
+            None => self.status = "Select a joint first.".into(),
+        }
+    }
+
+    pub fn mixdown_audio(&mut self) {
+        if self.project.audio.is_empty() {
+            self.status = "No audio clips to mix.".into();
+            return;
+        }
+        let fps = self.project.fps.max(1.0);
+        let clips: Vec<crate::audio_edit::MixClip> = self
+            .project
+            .audio
+            .iter()
+            .map(|c| crate::audio_edit::MixClip {
+                path: c.path.clone(),
+                start_secs: c.start_frame as f32 / fps,
+                gain: 1.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
+            })
+            .collect();
+        match crate::audio_edit::mix(&clips) {
+            Ok(wav) => {
+                let bytes = crate::audio_edit::write_wav(&wav);
+                let dir = PathBuf::from("out");
+                let _ = std::fs::create_dir_all(&dir);
+                match std::fs::write(dir.join("mixdown.wav"), bytes) {
+                    Ok(()) => self.status = "Mixed audio to out/mixdown.wav.".into(),
+                    Err(e) => self.status = format!("Mixdown write failed: {e}"),
+                }
+            }
+            Err(e) => self.status = format!("Mixdown failed: {e}"),
+        }
+    }
+
     // ---- Wave-10 integrations: formats, language, easing, VFX clips ----
 
     pub fn cycle_lang(&mut self) {
-        use crate::i18n::Lang;
-        self.lang = match self.lang {
-            Lang::En => Lang::Bn,
-            Lang::Bn => Lang::Es,
-            Lang::Es => Lang::En,
-        };
+        // Cycle through every language the i18n tables know about, so
+        // this keeps working as the language list grows.
+        let all = crate::i18n::Lang::all();
+        let idx = all.iter().position(|l| *l == self.lang).unwrap_or(0);
+        self.lang = all[(idx + 1) % all.len()];
         self.status = format!("Language: {}", self.lang.label());
     }
 
@@ -994,7 +1142,7 @@ impl EditorCore {
             points: vec![p],
             color,
             width: 4.0,
-            widths: Vec::new(),
+            widths: vec![4.0],
             fill: None,
         });
         self.drawing = true;
@@ -1006,8 +1154,24 @@ impl EditorCore {
         }
         if let Some(stroke) = self.project.strokes.last_mut() {
             let last = *stroke.points.last().unwrap();
-            if dist(last, p) > 2.0 {
+            let d = dist(last, p);
+            if d > 2.0 {
                 stroke.points.push(p);
+                // Pressure stroke: the recorded per-point width follows
+                // pointer speed — slow movement lays down up to 1.8x the
+                // base width, a fast flick tapers to 0.45x. Smoothed
+                // against the previous width so the taper doesn't
+                // jitter. `width` stays the base; `widths` stays
+                // parallel to `points`.
+                let base = stroke.width;
+                while stroke.widths.len() < stroke.points.len() - 1 {
+                    stroke.widths.push(base);
+                }
+                let prev = stroke.widths.last().copied().unwrap_or(base);
+                let t = ((d - 2.0) / 28.0).clamp(0.0, 1.0);
+                let target = base * (1.8 - t * (1.8 - 0.45));
+                let w = (prev + (target - prev) * 0.5).clamp(base * 0.45, base * 1.8);
+                stroke.widths.push(w);
             }
         }
     }
@@ -1026,6 +1190,83 @@ impl EditorCore {
         let before = self.project.strokes.len();
         self.project.strokes.retain(|s| s.frame != self.current);
         self.status = format!("Cleared {} stroke(s) on this frame.", before - self.project.strokes.len());
+    }
+
+    /// Fill the most recent stroke on this frame: the stroke's outline
+    /// is treated as a closed shape, its `fill` is set to its own
+    /// colour, and a serpentine scanline fill (see `paint`) is
+    /// appended as a separate stroke on the same frame.
+    pub fn fill_current_stroke(&mut self) {
+        let frame = self.current;
+        let Some(src) = self
+            .project
+            .strokes
+            .iter()
+            .rev()
+            .find(|s| s.frame == frame)
+        else {
+            self.status = "Nothing to fill: draw a closed shape on this frame first.".into();
+            return;
+        };
+        if src.points.len() < 3 {
+            self.status = "Nothing to fill: the last stroke needs at least 3 points to make a shape.".into();
+            return;
+        }
+        let spacing = src.width;
+        let path = crate::paint::polyline_fill_path(&src.points, spacing);
+        if path.len() < 2 {
+            self.status = "Nothing to fill: the shape is too small or flat to hold a fill.".into();
+            return;
+        }
+        let color = src.color;
+        let n_points = path.len();
+        self.snapshot();
+        if let Some(s) = self
+            .project
+            .strokes
+            .iter_mut()
+            .rev()
+            .find(|s| s.frame == frame)
+        {
+            s.fill = Some(color);
+        }
+        self.project.strokes.push(crate::model::Stroke {
+            frame,
+            points: path,
+            color,
+            width: spacing,
+            widths: Vec::new(),
+            fill: Some(color),
+        });
+        self.status = format!("Shape filled with a scanline fill ({n_points} points).");
+    }
+
+    /// Erase strokes on this frame that lie mostly (a strict majority
+    /// of their points) inside the lasso polygon `poly`.
+    pub fn lasso_erase(&mut self, poly: &[V2]) {
+        if poly.len() < 3 {
+            self.status = "Lasso needs at least 3 points; nothing erased.".into();
+            return;
+        }
+        let frame = self.current;
+        let mostly_inside = |s: &crate::model::Stroke| {
+            s.frame == frame
+                && !s.points.is_empty()
+                && s.points
+                    .iter()
+                    .filter(|p| crate::paint::point_in_polygon(**p, poly))
+                    .count()
+                    * 2
+                    > s.points.len()
+        };
+        let n = self.project.strokes.iter().filter(|s| mostly_inside(s)).count();
+        if n == 0 {
+            self.status = "Lasso erased nothing: no stroke lies mostly inside it.".into();
+            return;
+        }
+        self.snapshot();
+        self.project.strokes.retain(|s| !mostly_inside(s));
+        self.status = format!("Lasso erased {n} stroke(s).");
     }
 
     // ---- Audio ----
@@ -1286,6 +1527,97 @@ mod tests {
         assert_eq!(core.project.strokes[0].points.len(), 3);
         core.clear_frame_drawings();
         assert!(core.project.strokes.is_empty());
+    }
+
+    #[test]
+    fn pressure_widths_follow_pointer_speed() {
+        let mut core = EditorCore::new();
+        core.begin_draw([0.0, 0.0]);
+        core.draw_to([3.0, 0.0]); // slow 3px step
+        core.draw_to([120.0, 0.0]); // fast flick
+        core.end_draw();
+        let s = &core.project.strokes[0];
+        assert_eq!(s.widths.len(), s.points.len(), "widths stay parallel to points");
+        assert!((s.width - 4.0).abs() < f32::EPSILON, "base width unchanged");
+        for w in &s.widths {
+            assert!(
+                *w >= 4.0 * 0.45 - 0.01 && *w <= 4.0 * 1.8 + 0.01,
+                "width {w} within the pressure range"
+            );
+        }
+        assert!(
+            s.widths[1] > s.widths[2],
+            "slow point wider than the fast flick: {:?}",
+            s.widths
+        );
+    }
+
+    #[test]
+    fn fill_appends_scanline_stroke_and_marks_outline() {
+        let mut core = EditorCore::new();
+        core.begin_draw([100.0, 100.0]);
+        core.draw_to([200.0, 100.0]);
+        core.draw_to([200.0, 200.0]);
+        core.draw_to([100.0, 200.0]);
+        core.end_draw();
+        let color = core.project.strokes[0].color;
+        core.fill_current_stroke();
+        assert_eq!(core.project.strokes.len(), 2);
+        assert_eq!(core.project.strokes[0].fill, Some(color));
+        let fill = &core.project.strokes[1];
+        assert_eq!(fill.color, color);
+        assert_eq!(fill.frame, 0);
+        assert!(fill.points.len() > 8, "fill has many scan points: {}", fill.points.len());
+        for p in &fill.points {
+            assert!(
+                p[0] >= 99.9 && p[0] <= 200.1 && p[1] >= 99.9 && p[1] <= 200.1,
+                "fill point within the shape bounds: {p:?}"
+            );
+        }
+        core.undo();
+        assert_eq!(core.project.strokes.len(), 1);
+        assert_eq!(core.project.strokes[0].fill, None);
+    }
+
+    #[test]
+    fn fill_without_a_shape_is_a_no_op() {
+        let mut core = EditorCore::new();
+        core.fill_current_stroke();
+        assert!(core.project.strokes.is_empty());
+        core.begin_draw([10.0, 10.0]);
+        core.draw_to([60.0, 10.0]);
+        core.end_draw();
+        core.fill_current_stroke(); // only 2 points: not a shape
+        assert_eq!(core.project.strokes.len(), 1);
+        assert_eq!(core.project.strokes[0].fill, None);
+    }
+
+    #[test]
+    fn lasso_erases_only_mostly_inside_strokes() {
+        let mut core = EditorCore::new();
+        // Stroke fully inside the lasso box.
+        core.begin_draw([10.0, 10.0]);
+        core.draw_to([20.0, 20.0]);
+        core.draw_to([30.0, 10.0]);
+        core.end_draw();
+        // Stroke fully outside.
+        core.begin_draw([400.0, 400.0]);
+        core.draw_to([430.0, 420.0]);
+        core.draw_to([460.0, 400.0]);
+        core.end_draw();
+        // Straddling stroke: 1 of 3 points inside -> survives.
+        core.begin_draw([20.0, 20.0]);
+        core.draw_to([400.0, 20.0]);
+        core.draw_to([20.0, 400.0]);
+        core.end_draw();
+        let lasso = vec![[0.0, 0.0], [50.0, 0.0], [50.0, 50.0], [0.0, 50.0]];
+        core.lasso_erase(&lasso);
+        assert_eq!(core.project.strokes.len(), 2);
+        core.undo();
+        assert_eq!(core.project.strokes.len(), 3);
+        // A degenerate lasso erases nothing.
+        core.lasso_erase(&[[0.0, 0.0], [10.0, 10.0]]);
+        assert_eq!(core.project.strokes.len(), 3);
     }
 
     #[test]

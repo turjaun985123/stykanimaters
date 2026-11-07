@@ -150,3 +150,17 @@ a cross-format test corpus, and two-way onion skin. Test suite: 64.
 The original still wins on depth in drawing, audio editing, 3D, and
 its 27-language reach — but the port now touches every feature family
 the original has, except 3D figures and touch.
+
+## Addendum — Wave 4 (2026-11-07, second 10-agent push)
+
+The port now covers every feature family: Stick Nodes animation
+containers import (verified against the original's decoder and real
+corpus projects), sprite/text segments render, segment styles
+(taper/caps/gradients) render in raster + SVG, drawing gained
+pressure + fill + lasso, audio gained waveform peaks + real mixdown,
+localisation reached all 27 of the original's languages (+ Bengali),
+and both "missing" rows now have verified engines: a 3D figure
+subsystem (FK + perspective projection) and a touch gesture
+recogniser. Test suite: 136. What the original still holds: those
+two engines are not yet wired into the editor UI, there is no
+graph-editor UI yet, and its drawing/audio/3D depth remains deeper.

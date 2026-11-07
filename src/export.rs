@@ -3,7 +3,7 @@
 //! evaluated segments as round-capped thick lines and the head as a
 //! ring, with 2x supersampling for anti-aliasing.
 
-use crate::model::{dist, evaluate, ParticleKind, Project, Shape, V2};
+use crate::model::{dist, evaluate, CapKind, ParticleKind, Project, Shape, V2};
 use image::{ImageBuffer, Rgb};
 use std::path::Path;
 
@@ -27,6 +27,82 @@ fn seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     };
     let c = [a[0] + ab[0] * t, a[1] + ab[1] * t];
     dist(p, c)
+}
+
+/// A segment plus its rendering style (see `model::NodeStyle`):
+/// width and colour interpolate from the near end (`a`, the parent
+/// joint) to the far end (`b`); opacity blends over whatever is
+/// already drawn. The default style (uniform width, solid colour,
+/// opacity 1, round caps) reduces exactly to the classic test
+/// `seg_dist <= half`.
+#[derive(Clone, Copy)]
+struct StyledSeg {
+    a: [f32; 2],
+    b: [f32; 2],
+    half_near: f32,
+    half_far: f32,
+    color_near: u32,
+    color_far: u32,
+    opacity: f32,
+    cap: CapKind,
+}
+
+impl StyledSeg {
+    /// An unstyled segment (brush strokes): uniform, solid, opaque.
+    fn solid(a: [f32; 2], b: [f32; 2], color: u32, half: f32) -> StyledSeg {
+        StyledSeg {
+            a,
+            b,
+            half_near: half,
+            half_far: half,
+            color_near: color,
+            color_far: color,
+            opacity: 1.0,
+            cap: CapKind::Round,
+        }
+    }
+}
+
+/// Colour of `seg` at pixel `p` if the pixel is covered, else
+/// `None`. The pixel is projected onto the segment axis (t in
+/// 0..=1): the local half-width and colour interpolate along t, and
+/// the pixel is covered when its distance to the segment is within
+/// the local half-width. Round (and point) caps fall out of the
+/// clamped distance test; square caps first extend both endpoints
+/// by their local half-width along the segment direction.
+fn styled_seg_color(p: [f32; 2], seg: &StyledSeg) -> Option<u32> {
+    let ab = [seg.b[0] - seg.a[0], seg.b[1] - seg.a[1]];
+    let len2 = ab[0] * ab[0] + ab[1] * ab[1];
+    if len2 <= f32::EPSILON {
+        return if dist(p, seg.a) <= seg.half_near {
+            Some(seg.color_near)
+        } else {
+            None
+        };
+    }
+    let t = (((p[0] - seg.a[0]) * ab[0] + (p[1] - seg.a[1]) * ab[1]) / len2).clamp(0.0, 1.0);
+    let half = seg.half_near + (seg.half_far - seg.half_near) * t;
+    let covered = match seg.cap {
+        CapKind::Square => {
+            let len = len2.sqrt();
+            let dir = [ab[0] / len, ab[1] / len];
+            let a2 = [
+                seg.a[0] - dir[0] * seg.half_near,
+                seg.a[1] - dir[1] * seg.half_near,
+            ];
+            let b2 = [
+                seg.b[0] + dir[0] * seg.half_far,
+                seg.b[1] + dir[1] * seg.half_far,
+            ];
+            seg_dist(p, a2, b2) <= half
+        }
+        _ => seg_dist(p, seg.a, seg.b) <= half,
+    };
+    if covered {
+        Some(crate::style::lerp_color(seg.color_near, seg.color_far, t))
+    } else {
+        None
+    }
 }
 
 /// Deterministic per-particle random in [0, 1) from a seed + index.
@@ -127,7 +203,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
 
     // Collect drawables: segments (a, b, color, half-width), head
     // rings (centre, color, half-width), shape circles and polygons.
-    let mut segments: Vec<([f32; 2], [f32; 2], [u8; 3], f32)> = Vec::new();
+    let mut segments: Vec<StyledSeg> = Vec::new();
     let mut heads: Vec<([f32; 2], [u8; 3], f32)> = Vec::new();
     let mut rings: Vec<([f32; 2], f32, [u8; 3], f32)> = Vec::new();
     let mut polys: Vec<(Vec<[f32; 2]>, [u8; 3], f32)> = Vec::new();
@@ -138,10 +214,28 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
         let pose = &poses[fi];
         let pos = evaluate(&fig.def, pose);
         for (i, node) in fig.def.nodes.iter().enumerate() {
-            let color = rgb(node.color.unwrap_or(fig.color));
+            let color_hex = node.color.unwrap_or(fig.color);
+            let color = rgb(color_hex);
             let half = node.thickness / 2.0 * zoom * ss as f32;
             if let Some(p) = node.parent {
-                segments.push((view(pos[p]), view(pos[i]), color, half));
+                let style = node.style;
+                // A point cap forces the far width to zero whatever
+                // the taper says.
+                let half_far = if style.cap == CapKind::Point {
+                    0.0
+                } else {
+                    half * style.taper.max(0.0)
+                };
+                segments.push(StyledSeg {
+                    a: view(pos[p]),
+                    b: view(pos[i]),
+                    half_near: half,
+                    half_far,
+                    color_near: color_hex,
+                    color_far: style.color2.unwrap_or(color_hex),
+                    opacity: style.opacity,
+                    cap: style.cap,
+                });
             }
             if node.head {
                 heads.push((view(pos[i]), color, half));
@@ -169,12 +263,18 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     let authored = (frame_f.floor() as usize).min(project.frames.len().saturating_sub(1));
     for stroke in &project.strokes {
         if stroke.frame == authored {
-            for w in stroke.points.windows(2) {
-                segments.push((
+            let pressured = stroke.widths.len() == stroke.points.len();
+            for (i, w) in stroke.points.windows(2).enumerate() {
+                let width = if pressured {
+                    (stroke.widths[i] + stroke.widths[i + 1]) / 2.0
+                } else {
+                    stroke.width
+                };
+                segments.push(StyledSeg::solid(
                     view(w[0]),
                     view(w[1]),
-                    rgb(stroke.color),
-                    stroke.width / 2.0 * zoom * ss as f32,
+                    stroke.color,
+                    width / 2.0 * zoom * ss as f32,
                 ));
             }
         }
@@ -201,9 +301,9 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
         for x in 0..w {
             let p = [x as f32, y as f32];
             let mut px = bg;
-            for (a, b, color, half) in &segments {
-                if seg_dist(p, *a, *b) <= *half {
-                    px = *color;
+            for seg in &segments {
+                if let Some(c) = styled_seg_color(p, seg) {
+                    px = crate::style::blend_over(px, rgb(c), seg.opacity);
                 }
             }
             for (c, color, half) in &heads {
@@ -262,6 +362,20 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                 ]),
             );
         }
+    }
+    // Media segments (sprites / text) composite on the final image.
+    let has_media = project
+        .figures
+        .iter()
+        .any(|f| f.def.nodes.iter().any(|n| n.media.is_some()));
+    if has_media {
+        let mut rgba = image::DynamicImage::ImageRgb8(out).to_rgba8();
+        let ssf = ss as f32;
+        crate::media::composite_media(project, frame_f, &mut rgba, &|p| {
+            let v = view(p);
+            [v[0] / ssf, v[1] / ssf]
+        });
+        out = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
     }
     out
 }
@@ -656,6 +770,155 @@ mod tests {
         assert!(drawn > 500, "expected the figure to be drawn, got {drawn} px");
     }
 
+
+    /// One-figure test project: a single horizontal segment from
+    /// (50, 100) to (150, 100) on a 200x200 black stage, thickness
+    /// 20 (half-width 10), coloured `seg_color`, styled `style`.
+    fn styled_project(style: crate::model::NodeStyle, seg_color: u32) -> Project {
+        use crate::model::{
+            Easing, FigureDef, FigureInstance, Frame, NodeDef, Pose, Shape,
+        };
+        let node = |parent: Option<usize>, length: f32, thickness: f32| NodeDef {
+            name: "n".into(),
+            parent,
+            length,
+            rest_angle: 0.0,
+            head: false,
+            bend: 1.0,
+            thickness,
+            color: None,
+            ik_end: false,
+            shape: Shape::Line,
+            style: crate::model::NodeStyle::default(),
+            media: None,
+        };
+        let mut seg = node(Some(0), 100.0, 20.0);
+        seg.style = style;
+        seg.color = Some(seg_color);
+        Project {
+            name: "style-test".into(),
+            fps: 12.0,
+            stage: [200.0, 200.0],
+            background: 0x000000,
+            figures: vec![FigureInstance {
+                name: "F".into(),
+                color: 0xFFFFFF,
+                def: FigureDef {
+                    nodes: vec![node(None, 0.0, 20.0), seg],
+                },
+                hidden: false,
+                clip: None,
+            }],
+            frames: vec![Frame {
+                poses: vec![Pose {
+                    root: [50.0, 100.0],
+                    angles: vec![0.0, 90.0],
+                }],
+                duration: 1.0,
+                easing: None,
+            }],
+            camera: Vec::new(),
+            tween_playback: false,
+            easing: Easing::Linear,
+            camera_follow: None,
+            particles: Vec::new(),
+            strokes: Vec::new(),
+            audio: Vec::new(),
+            clips: Vec::new(),
+            fx_clips: Vec::new(),
+            assets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn point_cap_narrows_the_far_end() {
+        use crate::model::{CapKind, NodeStyle};
+        let style = NodeStyle {
+            cap: CapKind::Point,
+            ..NodeStyle::default()
+        };
+        let styled = render_frame(&styled_project(style, 0xFF0000), 0);
+        let plain = render_frame(&styled_project(NodeStyle::default(), 0xFF0000), 0);
+        // 5-6 units off the centreline near the far end (t ~ 0.96,
+        // local half ~0.4 with a point cap): covered by the default
+        // round segment, bare background with the point cap.
+        assert_eq!(plain.get_pixel(145, 105).0, [255, 0, 0]);
+        assert_eq!(styled.get_pixel(145, 105).0, [0, 0, 0]);
+        // Near the near end (t ~ 0.06, local half ~9.4) the point
+        // cap still covers the same pixel row.
+        assert_eq!(styled.get_pixel(55, 105).0, [255, 0, 0]);
+    }
+
+    #[test]
+    fn taper_narrows_the_far_end() {
+        use crate::model::NodeStyle;
+        let style = NodeStyle {
+            taper: 0.2,
+            ..NodeStyle::default()
+        };
+        let styled = render_frame(&styled_project(style, 0xFF0000), 0);
+        let plain = render_frame(&styled_project(NodeStyle::default(), 0xFF0000), 0);
+        // At t ~ 0.96 the tapered half-width is ~2.4, so 5-6 units
+        // off-axis is outside; the uniform segment covers it.
+        assert_eq!(plain.get_pixel(145, 105).0, [255, 0, 0]);
+        assert_eq!(styled.get_pixel(145, 105).0, [0, 0, 0]);
+        // The centreline is covered either way.
+        assert_eq!(styled.get_pixel(145, 100).0, [255, 0, 0]);
+    }
+
+    #[test]
+    fn square_cap_extends_past_the_endpoints() {
+        use crate::model::{CapKind, NodeStyle};
+        let style = NodeStyle {
+            cap: CapKind::Square,
+            ..NodeStyle::default()
+        };
+        let styled = render_frame(&styled_project(style, 0xFF0000), 0);
+        let plain = render_frame(&styled_project(NodeStyle::default(), 0xFF0000), 0);
+        // 8 units beyond the far joint, dead on the centreline: a
+        // square cap reaches half-width (10) past the end, a round
+        // cap only covers within the radius *around* the point, so
+        // an on-axis pixel 8 past the end is inside both reaches —
+        // use an off-axis pixel instead: 8 past the end and 8 off
+        // axis is inside the square (perp 8 <= 10) but ~11.3 from
+        // the endpoint, outside the round cap.
+        assert_eq!(plain.get_pixel(158, 108).0, [0, 0, 0]);
+        assert_eq!(styled.get_pixel(158, 108).0, [255, 0, 0]);
+    }
+
+    #[test]
+    fn gradient_reaches_the_midpoint_colour() {
+        use crate::model::NodeStyle;
+        let style = NodeStyle {
+            color2: Some(0x0000FF),
+            ..NodeStyle::default()
+        };
+        let img = render_frame(&styled_project(style, 0xFF0000), 0);
+        let mid = img.get_pixel(100, 100).0;
+        assert!(
+            (mid[0] as i32 - 128).abs() <= 6 && mid[1] == 0 && (mid[2] as i32 - 128).abs() <= 6,
+            "midpoint should be ~ (128, 0, 128), got {mid:?}"
+        );
+        // The near end stays (nearly) pure red.
+        let near = img.get_pixel(52, 100).0;
+        assert!(near[0] > 240 && near[2] < 16, "near end should stay red, got {near:?}");
+    }
+
+    #[test]
+    fn opacity_blends_over_the_background() {
+        use crate::model::NodeStyle;
+        let style = NodeStyle {
+            opacity: 0.5,
+            ..NodeStyle::default()
+        };
+        let img = render_frame(&styled_project(style, 0xFF0000), 0);
+        let px = img.get_pixel(100, 100).0;
+        assert!(
+            (120..=135).contains(&px[0]) && px[1] == 0 && px[2] == 0,
+            "50% red over black should be ~(127, 0, 0), got {px:?}"
+        );
+    }
+
     #[test]
     fn jpeg_sequence_writes_real_jpegs() {
         let project = Project::new_demo();
@@ -710,5 +973,42 @@ mod tests {
         assert_eq!(actl_frames, Some(n as u32), "acTL must declare every frame");
         assert_eq!(actl_plays, Some(0), "acTL must loop forever (num_plays = 0)");
         assert_eq!(fctl_count, n, "one fcTL chunk per animation frame");
+    }
+}
+
+
+#[cfg(test)]
+mod media_integration_tests {
+    use super::*;
+
+    #[test]
+    fn media_segments_composite_into_rendered_frames() {
+        // Integration guard for the wave-4 media path: a project with
+        // a sprite asset on one segment must render without panicking
+        // and produce a stage-sized frame whose sprite area differs
+        // from the plain render.
+        let mut project = Project::new_demo();
+        // 4x2 solid green PNG as the asset.
+        let mut png = Vec::new();
+        {
+            let img = image::RgbaImage::from_pixel(4, 2, image::Rgba([0, 200, 0, 255]));
+            let mut cur = std::io::Cursor::new(&mut png);
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut cur, image::ImageFormat::Png)
+                .unwrap();
+        }
+        project.assets.push(crate::model::ImageAsset { name: "g.png".into(), png });
+        project.figures[0].def.nodes[1].media =
+            Some(crate::model::SegmentMedia::Image { asset: 0 });
+        let with = render_frame_at(&project, 0.0);
+        assert_eq!((with.width(), with.height()), (960, 720));
+        project.figures[0].def.nodes[1].media = None;
+        let without = render_frame_at(&project, 0.0);
+        let diff = with
+            .pixels()
+            .zip(without.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(diff > 50, "sprite should change the render ({diff} px)");
     }
 }

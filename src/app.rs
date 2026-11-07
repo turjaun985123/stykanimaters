@@ -13,6 +13,9 @@ pub struct EditorView {
     canvas_bounds: Rc<RefCell<Bounds<Pixels>>>,
     focus_handle: FocusHandle,
     player: crate::audio::AudioPlayer,
+    /// When true, the home panel (saved projects + recents)
+    /// replaces the canvas area.
+    show_home: bool,
 }
 
 impl EditorView {
@@ -22,7 +25,43 @@ impl EditorView {
             canvas_bounds: Rc::new(RefCell::new(Bounds::default())),
             focus_handle: cx.focus_handle(),
             player: crate::audio::AudioPlayer::new(),
+            show_home: false,
         }
+    }
+
+    /// Open a project chosen on the home panel, routed through
+    /// the editor's existing cycle+open flow: select the matching
+    /// entry in `core.project_files` (matched by file name — the
+    /// library scan reports relative paths, the core absolute
+    /// ones), adding it first if the core has not listed it yet.
+    fn open_home_project(&mut self, path: &std::path::Path, name: &str) {
+        let fname = path.file_name();
+        if let Some(idx) = self
+            .core
+            .project_files
+            .iter()
+            .position(|p| p.file_name() == fname)
+        {
+            self.core.project_index = idx;
+        } else {
+            self.core.project_files.push(path.to_path_buf());
+            self.core.project_index = self.core.project_files.len() - 1;
+        }
+        self.core.open_project_file();
+        crate::shell::touch_recent(name);
+        self.show_home = false;
+    }
+
+    /// Resize the stage by (dw, dh), each axis clamped to
+    /// 200..=4000, reporting the new size in the status line.
+    fn adjust_stage(&mut self, dw: f32, dh: f32) {
+        let core = &mut self.core;
+        core.project.stage[0] = (core.project.stage[0] + dw).clamp(200.0, 4000.0);
+        core.project.stage[1] = (core.project.stage[1] + dh).clamp(200.0, 4000.0);
+        core.status = format!(
+            "Stage size: {} x {}.",
+            core.project.stage[0] as i32, core.project.stage[1] as i32
+        );
     }
 
     /// (scale, cam centre) of the canvas view: fit-to-canvas times
@@ -46,12 +85,24 @@ impl EditorView {
     fn toggle_play(&mut self, cx: &mut Context<Self>) {
         self.core.playing = !self.core.playing;
         if self.core.playing {
-            // Start the first audio clip in sync with the playhead.
-            if let Some(clip) = self.core.project.audio.first() {
-                if self.core.current >= clip.start_frame {
-                    let at = self.core.current as f32 / self.core.project.fps.max(1.0)
-                        - crate::audio::clip_offset_secs(clip.start_frame, self.core.project.fps);
-                    let _ = self.player.play(&clip.path, at.max(0.0));
+            // Start the audio clip that is audible at the playhead
+            // (multi-clip aware; simultaneous clips are covered by
+            // the Mixdown export - playback takes the first audible).
+            {
+                let fps = self.core.project.fps.max(1.0);
+                let playhead = self.core.current as f32 / fps;
+                let durations = |path: &str| {
+                    crate::audio_edit::read_wav(path).ok().map(|w| w.duration_secs())
+                };
+                let audible = crate::audio_edit::audible_at(
+                    &self.core.project.audio,
+                    playhead,
+                    fps,
+                    &durations,
+                );
+                if let Some(&(ci, offset)) = audible.first() {
+                    let clip = &self.core.project.audio[ci];
+                    let _ = self.player.play(&clip.path, offset);
                 }
             }
             cx.spawn(async move |this, cx| {
@@ -300,6 +351,7 @@ impl Render for EditorView {
         } else {
             (0x191C21, 0x21252D, 0x1D2129)
         };
+        let show_home = self.show_home;
         let tween_on = core.project.tween_playback;
         let follow_on = core.project.camera_follow.is_some();
         let paths_on = core.show_paths;
@@ -410,6 +462,109 @@ impl Render for EditorView {
                     .child(format!("{}", i + 1)),
             );
         }
+
+        // Home panel: saved projects (from the library scan) with
+        // an Open button each, plus the recents list. Built only
+        // while shown; it replaces the canvas in the middle row.
+        let home_panel = if show_home {
+            let mut panel = div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .gap(px(6.0))
+                .p(px(12.0))
+                .bg(rgb(row_bg))
+                .child(
+                    div()
+                        .text_size(px(15.0))
+                        .text_color(rgb(0xE8E8EC))
+                        .child("Home — saved projects in ./projects"),
+                );
+            let entries = crate::projects::scan(std::path::Path::new("projects"));
+            let mut listed = 0usize;
+            for (i, info) in entries.iter().enumerate() {
+                // The recovery snapshot parses as a project but is
+                // not a library entry; the Recover button owns it.
+                if info
+                    .path
+                    .file_name()
+                    .map(|n| n == crate::shell::RECOVERY_FILE)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                listed += 1;
+                let line = format!(
+                    "{} — {} figure(s), {} frame(s), {} fps",
+                    info.name, info.figures, info.frames, info.fps as i32
+                );
+                let path = info.path.clone();
+                let name = info.name.clone();
+                panel = panel.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(13.0))
+                                .text_color(rgb(0xE8E8EC))
+                                .child(line),
+                        )
+                        .child(btn(("home-open", i), "Open", false, cx.listener(move |view, _ev, _w, cx| {
+                            view.open_home_project(&path, &name);
+                            cx.notify();
+                        }))),
+                );
+            }
+            if listed == 0 {
+                panel = panel.child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(rgb(0x9AA3B2))
+                        .child("No saved projects yet — use \"Save project\" to add one."),
+                );
+            }
+            panel = panel.child(
+                div()
+                    .pt(px(10.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(0x9AA3B2))
+                    .child("Recent projects:"),
+            );
+            let recents = crate::shell::recents();
+            if recents.is_empty() {
+                panel = panel.child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(rgb(0x9AA3B2))
+                        .child("(none yet)"),
+                );
+            }
+            for name in recents {
+                panel = panel.child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(rgb(0xE8E8EC))
+                        .child(format!("- {name}")),
+                );
+            }
+            panel = panel.child(btn("home-close", "Close", false, cx.listener(|view, _ev, _w, cx| {
+                view.show_home = false;
+                cx.notify();
+            })));
+            Some(panel)
+        } else {
+            None
+        };
+
+        let middle = div().flex().flex_row().flex_1().child(sidebar);
+        let middle = match home_panel {
+            Some(panel) => middle.child(panel),
+            None => middle.child(canvas),
+        };
 
         div()
             .flex()
@@ -776,6 +931,10 @@ impl Render for EditorView {
                     })))
                     .child(btn("save-proj", "Save project", false, cx.listener(|view, _ev, _w, cx| {
                         view.core.save_named_project();
+                        // Keep the recovery snapshot and the recents
+                        // list in step with explicit saves.
+                        let _ = crate::shell::write_recovery(&view.core.project);
+                        crate::shell::touch_recent(&view.core.project.name);
                         cx.notify();
                     })))
                     .child(btn("cycle-proj", "Projects >", false, cx.listener(|view, _ev, _w, cx| {
@@ -831,16 +990,80 @@ impl Render for EditorView {
                     .child(btn("fxclip-trail", "FX clip Trail", false, cx.listener(|view, _ev, _w, cx| {
                         view.core.add_fx_clip(crate::vfx::ClipKind::Trail);
                         cx.notify();
+                    })))
+                    .child(btn("home", "Home", show_home, cx.listener(|view, _ev, _w, cx| {
+                        view.show_home = !view.show_home;
+                        if view.show_home {
+                            // Snapshot the current work as the
+                            // recovery file whenever Home is opened.
+                            let _ = crate::shell::write_recovery(&view.core.project);
+                        }
+                        cx.notify();
+                    })))
+                    .child(btn("recover", "Recover", false, cx.listener(|view, _ev, _w, cx| {
+                        match crate::shell::read_recovery() {
+                            Some(project) => {
+                                view.core.project = project;
+                                view.core.current = 0;
+                                view.core.playhead = 0.0;
+                                view.core.selected_figure = 0;
+                                view.core.selected_node = None;
+                                view.core.status =
+                                    "Recovered the snapshot from ./projects/.recovery.json.".into();
+                            }
+                            None => {
+                                view.core.status =
+                                    "No recovery snapshot found in ./projects/.".into();
+                            }
+                        }
+                        cx.notify();
+                    })))
+                    .child(btn("stage-w-dn", "Stage W -", false, cx.listener(|view, _ev, _w, cx| {
+                        view.adjust_stage(-40.0, 0.0);
+                        cx.notify();
+                    })))
+                    .child(btn("stage-w-up", "Stage W +", false, cx.listener(|view, _ev, _w, cx| {
+                        view.adjust_stage(40.0, 0.0);
+                        cx.notify();
+                    })))
+                    .child(btn("stage-h-dn", "Stage H -", false, cx.listener(|view, _ev, _w, cx| {
+                        view.adjust_stage(0.0, -40.0);
+                        cx.notify();
+                    })))
+                    .child(btn("stage-h-up", "Stage H +", false, cx.listener(|view, _ev, _w, cx| {
+                        view.adjust_stage(0.0, 40.0);
+                        cx.notify();
+                    })))
+                    .child(btn("import-stknds", "Import .stknds", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.import_nodes_anim_file();
+                        cx.notify();
+                    })))
+                    .child(btn("node-cap", "Seg cap", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.cycle_node_cap();
+                        cx.notify();
+                    })))
+                    .child(btn("node-taper", "Taper", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.cycle_node_taper();
+                        cx.notify();
+                    })))
+                    .child(btn("node-gradient", "Gradient", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.cycle_node_gradient();
+                        cx.notify();
+                    })))
+                    .child(btn("node-image", "Img seg", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.attach_image_to_node();
+                        cx.notify();
+                    })))
+                    .child(btn("node-media-clear", "Clear media", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.clear_node_media();
+                        cx.notify();
+                    })))
+                    .child(btn("mixdown", "Mixdown", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.mixdown_audio();
+                        cx.notify();
                     }))),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .child(sidebar)
-                    .child(canvas),
-            )
+            .child(middle)
             .child(
                 div()
                     .flex()
