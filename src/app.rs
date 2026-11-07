@@ -127,6 +127,11 @@ pub struct EditorView {
     /// export op gathered by category with a guidance line each
     /// (the tool-group export buttons all stay where they are).
     show_export: bool,
+    /// UI folder wave: the export centre's active category tab
+    /// (0 = All, 1 = Media, 2 = Formats), set by the `ui::tabs`
+    /// strip at the top of `export_panel`; rows outside the
+    /// active category are not built.
+    export_tab: usize,
     /// UI components wave: right-hand inspector column for the
     /// selected figure/node (mutually exclusive with the graph,
     /// audio, FX and movieclip panels).
@@ -244,6 +249,7 @@ impl EditorView {
             show_color: false,
             show_weather: false,
             show_export: false,
+            export_tab: 0,
             show_inspector: false,
             range_sel: None,
             audio_peaks_cache: std::collections::HashMap::new(),
@@ -796,7 +802,8 @@ impl EditorView {
                             .text_size(px(12.0))
                             .text_color(rgb(C_MUTED))
                             .child(format!("Effects — {} clip(s)", infos.len())),
-                    ),
+                    )
+                    .child(crate::ui_badge::count_badge(infos.len())),
             );
         if infos.is_empty() {
             return col.child(crate::ui_empty::empty_line(
@@ -940,99 +947,127 @@ impl EditorView {
                             .child("Export centre — every format in one place"),
                     ),
             );
-        col = col.child(section_label("Images"));
-        col = col.child(xc_row(
-            "xc-png",
-            "PNG",
-            "PNG image sequence — one file per frame in ./export/",
-            EditorCore::export_png,
-        ));
-        col = col.child(xc_row(
-            "xc-jpeg",
-            "JPEG",
-            "JPEG image sequence in out/jpeg/ (out/, not export/)",
-            EditorCore::export_jpeg_dir,
-        ));
-        col = col.child(xc_row(
-            "xc-sheet",
-            "Spritesheet",
-            "All frames on one sheet — ./export/spritesheet.png",
-            EditorCore::export_sheet,
-        ));
-        col = col.child(section_label("Video & animation"));
-        col = col.child(xc_row(
-            "xc-gif",
-            "GIF",
-            "Animated GIF — ./export/animation.gif",
-            EditorCore::export_gif,
-        ));
-        col = col.child(xc_row(
-            "xc-mp4",
-            "MP4",
-            "MP4 video via ffmpeg, audio included — ./export/animation.mp4",
-            EditorCore::export_mp4,
-        ));
-        col = col.child(xc_row(
-            "xc-webm",
-            "WebM",
-            "WebM video (VP9) — ./export/animation.webm",
-            EditorCore::export_webm,
-        ));
-        col = col.child(xc_row(
-            "xc-apng",
-            "APNG",
-            "Animated PNG — out/animation.apng (out/, not export/)",
-            EditorCore::export_apng_file,
-        ));
-        col = col.child(xc_row(
-            "xc-svg",
-            "SVG",
-            "One SVG per frame in ./export/svg/",
-            EditorCore::export_svg,
-        ));
-        col = col.child(section_label("Project formats"));
-        col = col.child(xc_row(
-            "xc-v2",
-            ".piv v2",
-            "Pivot v2 project — ./export/animation-v2.piv",
-            EditorCore::export_piv2,
-        ));
-        col = col.child(xc_row(
-            "xc-v3",
-            ".piv v3",
-            "Pivot v3 project — ./export/animation.piv",
-            EditorCore::export_piv,
-        ));
-        col = col.child(xc_row(
-            "xc-v4",
-            ".piv v4",
-            "Pivot v4 project — ./export/animation-v4.piv",
-            EditorCore::export_piv4,
-        ));
-        col = col.child(xc_row(
-            "xc-v5",
-            ".piv v5",
-            "Pivot v5 project — out/animation-v5.piv (out/, not export/)",
-            EditorCore::export_v5_file,
-        ));
-        col = col.child(xc_row(
-            "xc-stk",
-            ".stk",
-            "Selected figure only — ./export/<figure>.stk",
-            EditorCore::export_stk,
-        ));
-        col = col.child(xc_row(
-            "xc-nodes",
-            ".nodes",
-            "Selected figure for Stick Nodes — ./export/<figure>.nodes",
-            EditorCore::export_nodes,
-        ));
-        col = col.child(xc_row(
-            "xc-stknds",
-            ".stknds",
-            "Whole project for Stick Nodes — ./export/animation.stknds",
-            EditorCore::export_stknds,
-        ));
+        // UI folder wave: category tabs (`ui::tabs`) under the
+        // header. All (0) builds every row below, Media (1)
+        // builds only the Images + Video & animation sections,
+        // Formats (2) only Project formats. The strip is rebuilt
+        // from `export_tab` on every render and each tab wired
+        // like the colour picker's swatches; the `xc-` rows
+        // themselves are untouched.
+        let show_media = self.export_tab != 2;
+        let show_formats = self.export_tab != 1;
+        let mut tabs_row = div().flex().flex_row().gap(px(4.0));
+        for (i, tab) in crate::ui_tabs::tab_strip(&["All", "Media", "Formats"], self.export_tab)
+            .into_iter()
+            .enumerate()
+        {
+            tabs_row = tabs_row.child(
+                tab.id(("xc-tab", i))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |view, _ev, _w, cx| {
+                        view.export_tab = i;
+                        cx.notify();
+                    })),
+            );
+        }
+        col = col.child(tabs_row);
+        if show_media {
+            col = col.child(section_label("Images"));
+            col = col.child(xc_row(
+                "xc-png",
+                "PNG",
+                "PNG image sequence — one file per frame in ./export/",
+                EditorCore::export_png,
+            ));
+            col = col.child(xc_row(
+                "xc-jpeg",
+                "JPEG",
+                "JPEG image sequence in out/jpeg/ (out/, not export/)",
+                EditorCore::export_jpeg_dir,
+            ));
+            col = col.child(xc_row(
+                "xc-sheet",
+                "Spritesheet",
+                "All frames on one sheet — ./export/spritesheet.png",
+                EditorCore::export_sheet,
+            ));
+            col = col.child(section_label("Video & animation"));
+            col = col.child(xc_row(
+                "xc-gif",
+                "GIF",
+                "Animated GIF — ./export/animation.gif",
+                EditorCore::export_gif,
+            ));
+            col = col.child(xc_row(
+                "xc-mp4",
+                "MP4",
+                "MP4 video via ffmpeg, audio included — ./export/animation.mp4",
+                EditorCore::export_mp4,
+            ));
+            col = col.child(xc_row(
+                "xc-webm",
+                "WebM",
+                "WebM video (VP9) — ./export/animation.webm",
+                EditorCore::export_webm,
+            ));
+            col = col.child(xc_row(
+                "xc-apng",
+                "APNG",
+                "Animated PNG — out/animation.apng (out/, not export/)",
+                EditorCore::export_apng_file,
+            ));
+            col = col.child(xc_row(
+                "xc-svg",
+                "SVG",
+                "One SVG per frame in ./export/svg/",
+                EditorCore::export_svg,
+            ));
+        }
+        if show_formats {
+            col = col.child(section_label("Project formats"));
+            col = col.child(xc_row(
+                "xc-v2",
+                ".piv v2",
+                "Pivot v2 project — ./export/animation-v2.piv",
+                EditorCore::export_piv2,
+            ));
+            col = col.child(xc_row(
+                "xc-v3",
+                ".piv v3",
+                "Pivot v3 project — ./export/animation.piv",
+                EditorCore::export_piv,
+            ));
+            col = col.child(xc_row(
+                "xc-v4",
+                ".piv v4",
+                "Pivot v4 project — ./export/animation-v4.piv",
+                EditorCore::export_piv4,
+            ));
+            col = col.child(xc_row(
+                "xc-v5",
+                ".piv v5",
+                "Pivot v5 project — out/animation-v5.piv (out/, not export/)",
+                EditorCore::export_v5_file,
+            ));
+            col = col.child(xc_row(
+                "xc-stk",
+                ".stk",
+                "Selected figure only — ./export/<figure>.stk",
+                EditorCore::export_stk,
+            ));
+            col = col.child(xc_row(
+                "xc-nodes",
+                ".nodes",
+                "Selected figure for Stick Nodes — ./export/<figure>.nodes",
+                EditorCore::export_nodes,
+            ));
+            col = col.child(xc_row(
+                "xc-stknds",
+                ".stknds",
+                "Whole project for Stick Nodes — ./export/animation.stknds",
+                EditorCore::export_stknds,
+            ));
+        }
         col
     }
 
@@ -1051,6 +1086,23 @@ impl EditorView {
                 .and_then(|fig| fig.def.nodes.get(ni))
                 .and_then(|node| node.color)
         });
+        // The colour the selected segment effectively renders
+        // in: its own explicit colour when it has one, else the
+        // figure's colour — the same inherit rule `current`
+        // above exposes as None. None when the panel's selection
+        // context (selected node in the selected figure) does
+        // not resolve, in which case no readout is shown.
+        let effective: Option<u32> = core.selected_node.and_then(|ni| {
+            core.project
+                .figures
+                .get(core.selected_figure)
+                .and_then(|fig| {
+                    fig.def
+                        .nodes
+                        .get(ni)
+                        .map(|node| node.color.unwrap_or(fig.color))
+                })
+        });
         let mut grid = div().flex().flex_wrap().gap(px(4.0));
         for (i, &color) in crate::ui_color::PICKER_PALETTE.iter().enumerate() {
             grid = grid.child(
@@ -1063,7 +1115,7 @@ impl EditorView {
                     })),
             );
         }
-        div()
+        let mut panel = div()
             .flex_col()
             .w_full()
             .bg(rgb(C_PANEL))
@@ -1086,7 +1138,11 @@ impl EditorView {
                             }),
                     ),
             )
-            .child(grid)
+            .child(grid);
+        if let Some(colour) = effective {
+            panel = panel.child(crate::ui_color_field::color_readout(colour));
+        }
+        panel
     }
 
     /// Wave 9: the weather panel — kind buttons set
@@ -1121,57 +1177,73 @@ impl EditorView {
                 w.wind
             ),
         };
-        let mut kind_row = group_row().child(btn(
-            "wx-none",
-            "Off",
-            cur.is_none(),
-            cx.listener(|view, _ev, _w, cx| {
-                view.core.project.weather = None;
-                view.core.status = "Weather: off.".into();
-                cx.notify();
-            }),
-        ));
-        // (id, kind, preset used when enabling from off — the
+        // Kind picker: one segmented control (ui::segmented)
+        // instead of four separate buttons. Segment 0 is Off;
+        // segments 1-3 are the kinds, each keeping its old
+        // button's listener body unchanged.
+        let active_index = match cur {
+            None => 0,
+            Some(w) => match w.kind {
+                WeatherKind::Rain => 1,
+                WeatherKind::Snow => 2,
+                WeatherKind::Fireflies => 3,
+            },
+        };
+        let mut segs = crate::ui_segmented::segmented(
+            &["Off", "Rain", "Snow", "Fireflies"],
+            active_index,
+        )
+        .into_iter();
+        let mut kind_row = div().flex().flex_row().child(
+            segs.next()
+                .unwrap()
+                .id(("wx-seg", 0))
+                .cursor_pointer()
+                .on_click(cx.listener(|view, _ev, _w, cx| {
+                    view.core.project.weather = None;
+                    view.core.status = "Weather: off.".into();
+                    cx.notify();
+                })),
+        );
+        // (kind, preset used when enabling from off — the
         // same presets the Scene cycle button applies).
         let kinds = [
             (
-                "wx-rain",
                 WeatherKind::Rain,
                 Weather { kind: WeatherKind::Rain, amount: 90.0, wind: 25.0 },
             ),
             (
-                "wx-snow",
                 WeatherKind::Snow,
                 Weather { kind: WeatherKind::Snow, amount: 90.0, wind: 12.0 },
             ),
             (
-                "wx-fireflies",
                 WeatherKind::Fireflies,
                 Weather { kind: WeatherKind::Fireflies, amount: 60.0, wind: 4.0 },
             ),
         ];
-        for (id, kind, preset) in kinds {
-            kind_row = kind_row.child(btn(
-                id,
-                kind_name(kind),
-                cur.map(|w| w.kind) == Some(kind),
-                cx.listener(move |view, _ev, _w, cx| {
-                    view.core.project.weather = Some(match view.core.project.weather {
-                        Some(mut w) => {
-                            w.kind = kind;
-                            w
+        for (n, (kind, preset)) in kinds.into_iter().enumerate() {
+            kind_row = kind_row.child(
+                segs.next()
+                    .unwrap()
+                    .id(("wx-seg", n + 1))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |view, _ev, _w, cx| {
+                        view.core.project.weather = Some(match view.core.project.weather {
+                            Some(mut w) => {
+                                w.kind = kind;
+                                w
+                            }
+                            None => preset,
+                        });
+                        view.core.status = match kind {
+                            WeatherKind::Rain => "Weather: rain.",
+                            WeatherKind::Snow => "Weather: snow.",
+                            WeatherKind::Fireflies => "Weather: fireflies.",
                         }
-                        None => preset,
-                    });
-                    view.core.status = match kind {
-                        WeatherKind::Rain => "Weather: rain.",
-                        WeatherKind::Snow => "Weather: snow.",
-                        WeatherKind::Fireflies => "Weather: fireflies.",
-                    }
-                    .into();
-                    cx.notify();
-                }),
-            ));
+                        .into();
+                        cx.notify();
+                    })),
+            );
         }
         // One stepper row shape for both fields: label, −,
         // value, +. `step` is the field's backing helper and
@@ -1321,6 +1393,24 @@ impl EditorView {
                     .text_color(rgb(0x9AA3B2))
                     .child("No audio clips in this project."),
             );
+        }
+        // Waveform overview strip (ui::waveform): the first
+        // clip's peaks across the panel's full width, with the
+        // portion up to the current frame in accent. The WAV is
+        // read fresh while the panel is shown (the Home panel
+        // already does filesystem scans inside render); an
+        // unreadable file simply adds no strip — no error UI.
+        if let Some(first) = clips.first() {
+            if let Ok(wav) = crate::audio_edit::read_wav(&first.path) {
+                let peaks = crate::ui_waveform::downsample_peaks(&wav.samples, 96);
+                let total = core.project.frames.len();
+                let progress = if total == 0 {
+                    0.0
+                } else {
+                    (core.current as f32 / total as f32).clamp(0.0, 1.0)
+                };
+                col = col.child(crate::ui_waveform::waveform_canvas(peaks, progress));
+            }
         }
         let fps = core.project.fps;
         let current = core.current as i64;
@@ -2080,6 +2170,25 @@ impl Render for EditorView {
             )
             .flex_1()
             .w_full();
+            // Axis caption under the canvas (ui::graph_axis):
+            // the value range the canvas is showing. graph_view()
+            // is the same auto_fit computation paint_graph
+            // performs — exactly -180..=180 for angle channels,
+            // the fitted range otherwise. Before the first paint
+            // graph_view() has no bounds, so fall back to fitting
+            // the fit channel directly (the value range does not
+            // depend on the panel size).
+            let gaxis = {
+                let view = self.graph_view().unwrap_or_else(|| {
+                    crate::graph_panel::GraphView::auto_fit(
+                        &[self.graph_fit_channel()],
+                        core.frame_count(),
+                        1.0,
+                        1.0,
+                    )
+                });
+                crate::ui_graph_axis::axis_label_row(view.val_min, view.val_max, 7)
+            };
             let target_label = match target {
                 crate::graph::ChannelTarget::Angle(ni) => format!("joint {ni} angle"),
                 crate::graph::ChannelTarget::RootX => "root X".to_string(),
@@ -2126,7 +2235,8 @@ impl Render for EditorView {
                     .p(px(8.0))
                     .gap(px(6.0))
                     .child(header)
-                    .child(gcanvas),
+                    .child(gcanvas)
+                    .child(gaxis),
             )
         } else {
             None
@@ -2229,6 +2339,7 @@ impl Render for EditorView {
                 top_bar()
                     .flex_wrap()
                     .child(section_label("Figures"))
+                    .child(crate::ui_badge::count_badge(core.project.figures.len()))
                     .child(div().flex_1())
                     .child(btn("fig-vis-all", "All", false, cx.listener(|view, _ev, _w, cx| {
                         let changed = crate::layers::set_all_visible(&mut view.core.project, true);
@@ -2254,84 +2365,94 @@ impl Render for EditorView {
             let name = fig.name.clone();
             let hidden = fig.hidden;
             let solo = core.solo == Some(fi);
-            sidebar = sidebar.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .p(px(6.0))
-                    .rounded(px(6.0))
-                    .bg(if selected { rgb(0x3D5A99) } else { rgb(row_bg) })
-                    .child(
-                        div()
-                            .w(px(10.0))
-                            .h(px(10.0))
-                            .rounded(px(999.0))
-                            .bg(rgb(fig.color)),
-                    )
-                    .child(
-                        div()
-                            .id(("fig-sel", fi))
-                            .flex_1()
-                            .px(px(6.0))
-                            .py(px(4.0))
-                            .cursor_pointer()
-                            .text_size(px(13.0))
-                            .text_color(rgb(0xE8E8EC))
-                            .on_click(cx.listener(move |view, _ev, _w, cx| {
-                                view.core.select_figure(fi);
-                                cx.notify();
-                            }))
-                            .child(name),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(C_MUTED))
-                            .child(format!("{:.0}%", fig.opacity * 100.0)),
-                    )
-                    .child(btn(("fig-up", fi), "^", false, cx.listener(move |view, _ev, _w, cx| {
-                        view.core.select_figure(fi);
-                        view.core.move_figure_full(1);
-                        cx.notify();
-                    })))
-                    .child(btn(("fig-dn", fi), "v", false, cx.listener(move |view, _ev, _w, cx| {
-                        view.core.select_figure(fi);
-                        view.core.move_figure_full(-1);
-                        cx.notify();
-                    })))
-                    .child(btn(("fig-lock", fi), if fig.locked { "lock" } else { "open" }, fig.locked, cx.listener(move |view, _ev, _w, cx| {
-                        view.core.toggle_figure_lock(fi);
-                        cx.notify();
-                    })))
-                    .child(btn(("fig-solo", fi), "solo", solo, cx.listener(move |view, _ev, _w, cx| {
-                        view.core.toggle_solo(fi);
-                        cx.notify();
-                    })))
-                    .child(btn(("fig-opac", fi), "opac", false, cx.listener(move |view, _ev, _w, cx| {
-                        view.core.cycle_figure_opacity(fi);
-                        cx.notify();
-                    })))
-                    .child(btn(("fig-op-dn", fi), "−", false, cx.listener(move |view, _ev, _w, cx| {
-                        view.core.step_figure_opacity(fi, -0.1);
-                        cx.notify();
-                    })))
-                    .child(btn(("fig-op-up", fi), "+", false, cx.listener(move |view, _ev, _w, cx| {
-                        view.core.step_figure_opacity(fi, 0.1);
-                        cx.notify();
-                    })))
-                    .child(btn(("fig-eye", fi), if hidden { "off" } else { "eye" }, hidden, cx.listener(move |view, _ev, _w, cx| {
-                        view.core.select_figure(fi);
-                        view.core.toggle_figure_hidden();
-                        cx.notify();
-                    })))
-                    .child(btn(("fig-del", fi), "x", false, cx.listener(move |view, _ev, _w, cx| {
-                        view.core.select_figure(fi);
-                        view.core.delete_figure();
-                        cx.notify();
-                    }))),
-            );
+            // Row shell from ui::layer_row: it owns the rounded
+            // container, the selected/dimmed background and the
+            // left/right split; the contents stay built here so
+            // every id and listener is unchanged. btn() returns
+            // impl IntoElement, so each trailing button is wrapped
+            // in a plain div to fit the shell's Vec<Div>.
+            let leading = div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .w(px(10.0))
+                        .h(px(10.0))
+                        .rounded(px(999.0))
+                        .bg(rgb(fig.color)),
+                )
+                .child(
+                    div()
+                        .id(("fig-sel", fi))
+                        .flex_1()
+                        .px(px(6.0))
+                        .py(px(4.0))
+                        .cursor_pointer()
+                        .text_size(px(13.0))
+                        .text_color(rgb(0xE8E8EC))
+                        .on_click(cx.listener(move |view, _ev, _w, cx| {
+                            view.core.select_figure(fi);
+                            cx.notify();
+                        }))
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(C_MUTED))
+                        .child(format!("{:.0}%", fig.opacity * 100.0)),
+                );
+            let trailing: Vec<Div> = vec![
+                div().child(btn(("fig-up", fi), "^", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.select_figure(fi);
+                    view.core.move_figure_full(1);
+                    cx.notify();
+                }))),
+                div().child(btn(("fig-dn", fi), "v", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.select_figure(fi);
+                    view.core.move_figure_full(-1);
+                    cx.notify();
+                }))),
+                div().child(btn(("fig-lock", fi), if fig.locked { "lock" } else { "open" }, fig.locked, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.toggle_figure_lock(fi);
+                    cx.notify();
+                }))),
+                div().child(btn(("fig-solo", fi), "solo", solo, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.toggle_solo(fi);
+                    cx.notify();
+                }))),
+                div().child(btn(("fig-opac", fi), "opac", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.cycle_figure_opacity(fi);
+                    cx.notify();
+                }))),
+                div().child(btn(("fig-op-dn", fi), "−", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.step_figure_opacity(fi, -0.1);
+                    cx.notify();
+                }))),
+                div().child(btn(("fig-op-up", fi), "+", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.step_figure_opacity(fi, 0.1);
+                    cx.notify();
+                }))),
+                div().child(btn(("fig-eye", fi), if hidden { "off" } else { "eye" }, hidden, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.select_figure(fi);
+                    view.core.toggle_figure_hidden();
+                    cx.notify();
+                }))),
+                div().child(btn(("fig-del", fi), "x", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.select_figure(fi);
+                    view.core.delete_figure();
+                    cx.notify();
+                }))),
+            ];
+            sidebar = sidebar.child(crate::ui_layer_row::layer_row_shell(
+                selected,
+                hidden,
+                leading,
+                trailing,
+            ));
         }
 
         let range_sel = self.range_sel;
@@ -2454,6 +2575,33 @@ impl Render for EditorView {
             panel = panel.child(crate::ui_stat_grid::stat_grid(
                 &crate::stats::project_stats(&core.project),
             ));
+            // Keyframe-count sparkline (ui::sparkline): one point
+            // per figure, from the lengths of stats::figure_keyframes.
+            // Only with 2+ figures — a one-point strip is noise and
+            // the label would promise a trend that isn't there.
+            if core.project.figures.len() >= 2 {
+                let key_counts: Vec<f32> = (0..core.project.figures.len())
+                    .map(|fi| {
+                        crate::stats::figure_keyframes(&core.project, fi).len() as f32
+                    })
+                    .collect();
+                panel = panel.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(C_MUTED))
+                                .child("Keyframes per figure"),
+                        )
+                        .child(crate::ui_sparkline::sparkline_canvas(
+                            key_counts,
+                            true,
+                        )),
+                );
+            }
             let entries = crate::projects::scan(std::path::Path::new("projects"));
             let mut listed = 0usize;
             for (i, info) in entries.iter().enumerate() {
@@ -2580,6 +2728,10 @@ impl Render for EditorView {
                 },
             };
             let has_segment = inspector_data.node_index.is_some() && !inspector_data.is_origin;
+            // Captured before the snapshot moves into the panel:
+            // the read-only gauges below need the raw values.
+            let seg_length = inspector_data.length;
+            let seg_thickness = inspector_data.thickness;
             let mut panel = crate::ui_inspector::inspector_panel(inspector_data);
             if has_segment {
                 panel = panel
@@ -2606,6 +2758,28 @@ impl Render for EditorView {
                                 cx.notify();
                             }))),
                     );
+            }
+            // Read-only gauges for the selected segment's size:
+            // a text row plus a slider track per value, showing
+            // where it sits in its working range. The sliders are
+            // read-only visual gauges (display only) — the
+            // steppers above remain the editing control.
+            if let (Some(len), Some(th)) = (seg_length, seg_thickness) {
+                panel = panel
+                    .child(crate::ui_rows::value_row(
+                        "Length",
+                        format!("{:.0}", len),
+                    ))
+                    .child(crate::ui_slider::slider_track(
+                        crate::ui_slider::clamp_fraction(len, 0.0, 250.0),
+                    ))
+                    .child(crate::ui_rows::value_row(
+                        "Thickness",
+                        format!("{:.0}", th),
+                    ))
+                    .child(crate::ui_slider::slider_track(
+                        crate::ui_slider::clamp_fraction(th, 0.0, 60.0),
+                    ));
             }
             Some(panel)
         } else {
