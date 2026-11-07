@@ -1,6 +1,6 @@
 # StykAnimate vs StykAnimate-RS — comprehensive comparison
 
-Measured fresh from both working trees on 2026-11-07 (after Wave 5).
+Measured fresh from both working trees on 2026-11-07 (after Wave 6).
 This document supersedes the earlier comparison + addenda.
 
 ## At a glance
@@ -9,10 +9,10 @@ This document supersedes the earlier comparison + addenda.
 |---|---|---|
 | Version | 1.2.5 | 0.1.0 |
 | Runtime | Electron + WebGPU app, Python codec backend | One native binary: Rust + GPUI 0.2.2 |
-| Application code | ~103,500 lines JS in 657 files under `src/` (excluding `src/locales`) | 21,027 lines Rust in 24 modules |
+| Application code | ~103,500 lines JS in 657 files under `src/` (excluding `src/locales`) | 26,620 lines Rust in 28 modules + 2 binaries |
 | Generated code | 179,460-line compiled locale bundle (`locale-packs.mjs`) | none |
 | Backend/codecs | ~13,000 lines Python (`codecs/` + `backend/`) | included in the Rust total (`pivot.rs` 1,826; `nodes.rs` 772; `nodes_anim.rs` 2,433) |
-| Tests | 876 files in `tests/` (fixtures + suites) | 232 Rust tests + a 5-format fixture corpus with manifest |
+| Tests | 876 files in `tests/` (fixtures + suites) | 289 Rust tests + a 5-format fixture corpus with manifest |
 | UI languages | 27 | 28 (the same 27 + Bengali) |
 | Licence | GPL-3.0-or-later | GPL-3.0-or-later |
 
@@ -38,6 +38,7 @@ This document supersedes the earlier comparison + addenda.
 | Touch | Full touch UI | Recogniser wired into the canvas (tap select, drag pose, long-press); single-pointer via GPUI mouse events, pinch arms ready for real touch pointers | Original deeper |
 | Home / library / projects | Full | Home panel, recents, recovery snapshots, figure library | Near-equal |
 | App shell (dialogs, autosave) | Native dialogs, full shell | Native open/save dialogs via zenity/kdialog with the folder flow as fallback, recovery, stage-size controls | Near-equal |
+| AI-agent control (MCP) | None | **Full MCP server: 30 tools — build, pose, decorate, render, import/export, frame inspection as base64 PNG** | Port only |
 | Localisation | 27 languages, human-maintained | 28 languages (same set + Bengali), machine-produced strings | Port wider, original more polished |
 
 ## Formats — the port's strongest area

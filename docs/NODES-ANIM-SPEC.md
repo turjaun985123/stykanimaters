@@ -562,11 +562,58 @@ maps the result onto `crate::model::Project`:
   clip), so it stays editable.
 * `.stknds` background: the first main frame's `backgroundColor`
   becomes the project background.
+* **Joins are baked at import.** In every timeline frame (`.stknds`
+  main frames and a `.nodemc`'s own frames), a joined instance's
+  root is *superseded* by the evaluated end of its host's named
+  node: the host figure instance's pose is evaluated with the
+  model evaluator (`model::evaluate` over the host's baked def),
+  and the child's pose root — or, for a sprite instance, its key
+  position — is set to that node's end point. This matches the
+  point the original adapter computes (`instance position +
+  layoutFigure(posed).get(nodeId).end`), with two consequences of
+  the port's conventions: the figure's root node id attaches at
+  the host's root itself (the adapter's handle 0 — model node 1
+  has length 0, so the points coincide), and connector nodes are
+  evaluated as ordinary segments (their native solver is not
+  recreated, §15), so a join onto a connector lands on its
+  unsolved end. Details:
+  * *Chains* resolve parent-first: a host that is itself joined
+    is evaluated at its own join-resolved root (the parser
+    rejects cyclic joins, duplicate join children, dangling
+    parent ids and — for figure hosts — unknown node ids,
+    exactly as the original's `readJoins` does).
+  * *Non-figure hosts* (movieclip or sprite instances) have no
+    nodes: the child pins to the host's own (join-resolved)
+    position — the adapter's rule for non-figure parents, which
+    uses handle 0 for them.
+  * *Only position is inherited.* The child's angles remain its
+    own stored pose angles. The join record's `relativeRotation`
+    (build ≥ 53) is read but **not applied** — the original
+    adapter does not apply it either (it survives there only as
+    metadata on offset attachments); there is no rotation
+    inheritance in either importer.
+  * *Offset attachments*: when a child's stored root differs
+    from the attach point, the original adapter keeps the stored
+    pose and warns (`JOIN_OFFSETS`). This importer bakes the pin
+    instead — root := attach point — consistent with its
+    bake-at-import stance. In files written by Stick Nodes
+    itself the stored root already sits on the node end, so the
+    bake is a no-op there.
+  * A joined child whose host is absent from the frame keeps its
+    stored root (no join record can reference an absent host —
+    the parser rejects dangling parent ids — so this arises only
+    for a child with no model slot, e.g. an unconverted movieclip
+    instance, which is skipped as before). Frames where the
+    child instance is absent hold its previous pose, join
+    included, under the usual hold rule. Because per-frame pose
+    lengths are not representable (§15), the attach point is
+    evaluated with the host slot's baked lengths, not the
+    frame's stored lengths.
 
 **Parsed byte-exactly but not modelled** (mirroring the original
 adapter's own "stored poses preserved, dynamics not recreated" stance)
 * Sounds (external references only — there are no bytes to import),
-  joins, camera records and bindings (semantics unestablished
+  camera records and bindings (semantics unestablished
   upstream, §12.2), style/filter blocks, thumbnails, trailer editor
   state, movieclip instance playback cursors / play modes / rotation
   / flips (the model's clip playback loops from the clip start), and

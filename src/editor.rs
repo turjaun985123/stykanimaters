@@ -148,7 +148,7 @@ impl EditorCore {
         evaluate(&fig.def, &self.project.frames[frame].poses[fi])
     }
 
-    fn snapshot(&mut self) {
+    pub fn snapshot(&mut self) {
         if let Ok(s) = serde_json::to_string(&self.project) {
             self.undo.push(s);
             if self.undo.len() > 60 {
@@ -582,6 +582,20 @@ impl EditorCore {
     }
 
 
+
+    /// Rotate the camera at the current frame (wave 6): upserts a
+    /// camera key carrying the existing pan/zoom plus the new angle.
+    pub fn rotate_camera(&mut self, delta_deg: f32) {
+        self.snapshot();
+        let frame = self.current;
+        let (x, y, zoom) = self.project.camera_at(frame as f32);
+        let angle = crate::model::norm_deg(self.project.camera_angle_at(frame as f32) + delta_deg);
+        self.project.set_camera_key(frame, x, y, zoom);
+        if let Some(k) = self.project.camera.iter_mut().find(|k| k.frame == frame) {
+            k.angle = angle;
+        }
+        self.status = format!("Camera rotation {angle:.0}° at frame {}.", frame + 1);
+    }
 
     pub fn toggle_figure_lock(&mut self, fi: usize) {
         match crate::layers::toggle_lock(&mut self.project, fi) {
@@ -1441,6 +1455,293 @@ impl EditorCore {
         self.status = format!("Audio clip added at frame {}: {}", self.current + 1, path.display());
     }
 
+    // ---- Wave 6 audio editing ----
+
+    /// Path for an audio edit product: same directory as `source`,
+    /// with the source file stem plus `suffix` (for example
+    /// `.norm.wav`). The suffix always changes the file name, so an
+    /// edit product cannot accidentally be its own source.
+    fn audio_derived_path(source: &PathBuf, suffix: &str) -> PathBuf {
+        let stem = source
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "audio".into());
+        let mut out = source.clone();
+        out.set_file_name(format!("{stem}{suffix}"));
+        out
+    }
+
+    /// Normalise audio clip `clip_idx` to a peak of 0.9.
+    ///
+    /// The normalised audio is written beside the source as
+    /// `<stem>.norm.wav`; the source file is never overwritten.
+    /// Only after that file has been written does the clip point to
+    /// it. A missing index or a source that cannot be read as a WAV
+    /// sets an error status and leaves the project unchanged.
+    pub fn audio_normalize(&mut self, clip_idx: usize) {
+        let Some(clip) = self.project.audio.get(clip_idx).cloned() else {
+            self.status = format!("Audio normalise failed: no clip {}.", clip_idx + 1);
+            return;
+        };
+        let mut wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio normalise failed: {e}");
+                return;
+            }
+        };
+        let gain = crate::audio_edit::normalize(&mut wav, 0.9);
+        let source = PathBuf::from(&clip.path);
+        let out = Self::audio_derived_path(&source, ".norm.wav");
+        if out == source {
+            self.status = "Audio normalise failed: output would overwrite the source.".into();
+            return;
+        }
+        if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&wav)) {
+            self.status = format!(
+                "Audio normalise failed: could not write {}: {e}",
+                out.display()
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
+        self.status = format!(
+            "Audio clip {} normalised to peak 0.90 (gain {gain:.2}x): {}.",
+            clip_idx + 1,
+            out.display()
+        );
+    }
+
+    /// Trim audio clip `clip_idx` to `[start_secs, end_secs)` and
+    /// write the result beside the source as `<stem>.trim.wav`.
+    ///
+    /// When `start_secs` is positive, the clip's `start_frame`
+    /// advances by `round(start_secs * fps)`. The trimmed head held
+    /// the clip's earliest audible content, so the remaining content
+    /// originally sounded that much later; shifting the placement by
+    /// the same amount preserves its position on the timeline. A
+    /// non-positive start does not move the clip. An empty trim
+    /// range is an error and leaves the project unchanged.
+    pub fn audio_trim(&mut self, clip_idx: usize, start_secs: f32, end_secs: f32) {
+        let Some(clip) = self.project.audio.get(clip_idx).cloned() else {
+            self.status = format!("Audio trim failed: no clip {}.", clip_idx + 1);
+            return;
+        };
+        if !start_secs.is_finite() || !end_secs.is_finite() {
+            self.status = "Audio trim failed: trim times must be finite.".into();
+            return;
+        }
+        let wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio trim failed: {e}");
+                return;
+            }
+        };
+        let trimmed = crate::audio_edit::trim(&wav, start_secs, end_secs);
+        if trimmed.frames() == 0 {
+            self.status = "Audio trim failed: the trim range is empty.".into();
+            return;
+        }
+        let source = PathBuf::from(&clip.path);
+        let out = Self::audio_derived_path(&source, ".trim.wav");
+        if out == source {
+            self.status = "Audio trim failed: output would overwrite the source.".into();
+            return;
+        }
+        if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&trimmed)) {
+            self.status = format!("Audio trim failed: could not write {}: {e}", out.display());
+            return;
+        }
+        let fps = self.project.fps.max(1.0);
+        let shift = if start_secs > 0.0 {
+            (start_secs * fps).round().max(0.0) as usize
+        } else {
+            0
+        };
+        self.snapshot();
+        let clip = &mut self.project.audio[clip_idx];
+        clip.path = out.to_string_lossy().into_owned();
+        clip.start_frame = clip.start_frame.saturating_add(shift);
+        self.status = format!(
+            "Audio clip {} trimmed to {:.2}s; starts at frame {}.",
+            clip_idx + 1,
+            trimmed.duration_secs(),
+            clip.start_frame + 1
+        );
+    }
+
+    /// Split audio clip `clip_idx` at timeline frame `at_frame`.
+    ///
+    /// `crate::audio_edit::split_clip` splits the timeline placement
+    /// and `crate::audio_edit::split_wav` cuts the actual audio.
+    /// Both halves are materialised as real files, `<stem>.a.wav`
+    /// and `<stem>.b.wav`, and the second clip points at the `.b`
+    /// file. Materialising the tail is what makes playback of the
+    /// second clip correct: `AudioClip` has no source-offset field,
+    /// so a second clip pointing at the original file would restart
+    /// the audio from its beginning. The second clip is inserted
+    /// immediately after the first. A split point that is not
+    /// strictly inside the clip is an error and leaves the project
+    /// unchanged.
+    pub fn audio_split(&mut self, clip_idx: usize, at_frame: usize) {
+        let Some(clip) = self.project.audio.get(clip_idx).cloned() else {
+            self.status = format!("Audio split failed: no clip {}.", clip_idx + 1);
+            return;
+        };
+        let wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio split failed: {e}");
+                return;
+            }
+        };
+        let fps = self.project.fps.max(1.0);
+        let dur_frames = (wav.duration_secs() * fps).round() as usize;
+        let Some((mut first, mut second)) =
+            crate::audio_edit::split_clip(&clip, at_frame, dur_frames)
+        else {
+            self.status = format!(
+                "Audio split failed: frame {} is not inside clip {}.",
+                at_frame + 1,
+                clip_idx + 1
+            );
+            return;
+        };
+        let split_secs = (at_frame - clip.start_frame) as f32 / fps;
+        let (first_wav, second_wav) = crate::audio_edit::split_wav(&wav, split_secs);
+        if first_wav.frames() == 0 || second_wav.frames() == 0 {
+            self.status = "Audio split failed: the split point leaves an empty half.".into();
+            return;
+        }
+        let source = PathBuf::from(&clip.path);
+        let first_path = Self::audio_derived_path(&source, ".a.wav");
+        let second_path = Self::audio_derived_path(&source, ".b.wav");
+        if let Err(e) = std::fs::write(&first_path, crate::audio_edit::write_wav(&first_wav)) {
+            self.status = format!(
+                "Audio split failed: could not write {}: {e}",
+                first_path.display()
+            );
+            return;
+        }
+        if let Err(e) = std::fs::write(&second_path, crate::audio_edit::write_wav(&second_wav)) {
+            self.status = format!(
+                "Audio split failed: could not write {}: {e}",
+                second_path.display()
+            );
+            return;
+        }
+        first.path = first_path.to_string_lossy().into_owned();
+        second.path = second_path.to_string_lossy().into_owned();
+        self.snapshot();
+        self.project.audio[clip_idx] = first;
+        self.project.audio.insert(clip_idx + 1, second);
+        self.status = format!(
+            "Audio clip {} split at frame {} into {} and {}.",
+            clip_idx + 1,
+            at_frame + 1,
+            first_path.display(),
+            second_path.display()
+        );
+    }
+
+    /// Crossfade audio clip `clip_idx` into the following clip and
+    /// replace the pair with one clip at the first clip's start.
+    ///
+    /// If the clips overlap on the timeline, the fade lasts for the
+    /// overlap, preserving the second clip's timeline position in
+    /// the joined file. If they are merely adjacent, the fade is
+    /// 1.0 seconds, capped by the shorter clip's duration; creating
+    /// that overlap necessarily makes the joined file shorter than
+    /// the two clips laid end to end. Clips separated by a gap, an
+    /// overlap too long for either source, or a source that cannot
+    /// be read as a WAV are errors and leave the project unchanged.
+    /// The joined audio is written beside the first source as
+    /// `<stem>.xfade.wav`.
+    pub fn audio_crossfade(&mut self, clip_idx: usize) {
+        if clip_idx + 1 >= self.project.audio.len() {
+            self.status = format!(
+                "Audio crossfade failed: clip {} has no following clip.",
+                clip_idx + 1
+            );
+            return;
+        }
+        let first = self.project.audio[clip_idx].clone();
+        let second = self.project.audio[clip_idx + 1].clone();
+        let first_wav = match crate::audio_edit::read_wav(&first.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio crossfade failed: {e}");
+                return;
+            }
+        };
+        let second_wav = match crate::audio_edit::read_wav(&second.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio crossfade failed: {e}");
+                return;
+            }
+        };
+        if first_wav.frames() == 0 || second_wav.frames() == 0 {
+            self.status = "Audio crossfade failed: a clip is empty.".into();
+            return;
+        }
+        let fps = self.project.fps.max(1.0);
+        let first_duration = first_wav.duration_secs();
+        let second_duration = second_wav.duration_secs();
+        let first_start = first.start_frame as f32 / fps;
+        let second_start = second.start_frame as f32 / fps;
+        let overlap = first_start + first_duration - second_start;
+        // Starts and ends are frame-quantised; half a frame of
+        // slack keeps an exactly adjacent pair from looking gapped
+        // after floating-point conversion.
+        let adjacency_tolerance = 0.5 / fps;
+        let fade = if overlap > adjacency_tolerance {
+            overlap
+        } else if overlap >= -adjacency_tolerance {
+            1.0_f32.min(first_duration).min(second_duration)
+        } else {
+            self.status = format!(
+                "Audio crossfade failed: clips {} and {} are separated by a {:.2}s gap.",
+                clip_idx + 1,
+                clip_idx + 2,
+                -overlap
+            );
+            return;
+        };
+        if fade <= 0.0 || fade > first_duration || fade > second_duration {
+            self.status =
+                "Audio crossfade failed: the clips do not overlap by a usable amount.".into();
+            return;
+        }
+        let mixed = match crate::audio_edit::crossfade_mix(&first_wav, &second_wav, fade) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio crossfade failed: {e}");
+                return;
+            }
+        };
+        let source = PathBuf::from(&first.path);
+        let out = Self::audio_derived_path(&source, ".xfade.wav");
+        if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&mixed)) {
+            self.status = format!(
+                "Audio crossfade failed: could not write {}: {e}",
+                out.display()
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
+        self.project.audio.remove(clip_idx + 1);
+        self.status = format!(
+            "Audio clips {} and {} crossfaded ({fade:.2}s) into {}.",
+            clip_idx + 1,
+            clip_idx + 2,
+            out.display()
+        );
+    }
+
     // ---- Movieclips ----
 
     pub fn make_clip_from_figure(&mut self) {
@@ -2083,5 +2384,345 @@ mod tests {
         c.move_figure_full(1);
         assert_eq!(c.selected_figure, 1);
         assert_eq!(c.solo, Some(1));
+    }
+
+    fn audio_temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "styk-editor-audio-{}-{}",
+            std::process::id(),
+            name
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_editor_wav(
+        dir: &PathBuf,
+        name: &str,
+        data: &crate::audio_edit::WavData,
+    ) -> String {
+        let path = dir.join(name);
+        std::fs::write(&path, crate::audio_edit::write_wav(data)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn const_editor_wav(
+        rate: u32,
+        frames: usize,
+        value: f32,
+    ) -> crate::audio_edit::WavData {
+        crate::audio_edit::WavData {
+            sample_rate: rate,
+            channels: 1,
+            samples: vec![value; frames],
+        }
+    }
+
+    fn audio_editor_core(fps: f32) -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.fps = fps;
+        core.project.audio.clear();
+        core
+    }
+
+    fn assert_audio_clip(
+        core: &EditorCore,
+        idx: usize,
+        path: &str,
+        start_frame: usize,
+    ) {
+        assert_eq!(core.project.audio[idx].path, path);
+        assert_eq!(core.project.audio[idx].start_frame, start_frame);
+    }
+
+    #[test]
+    fn wave6_audio_normalize_writes_norm_file_and_repoints_clip() {
+        let dir = audio_temp_dir("normalize");
+        let source_data = crate::audio_edit::WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.0, 0.25, -0.125, 0.05],
+        };
+        let source = write_editor_wav(&dir, "voice.wav", &source_data);
+        let mut core = audio_editor_core(12.0);
+        core.project.audio.push(crate::model::AudioClip {
+            path: source.clone(),
+            start_frame: 3,
+        });
+
+        core.audio_normalize(0);
+
+        let expected = dir.join("voice.norm.wav");
+        assert_audio_clip(&core, 0, &expected.to_string_lossy(), 3);
+        assert!(expected.exists(), "normalised file should be written");
+        let out = crate::audio_edit::read_wav(&expected.to_string_lossy()).unwrap();
+        assert!(
+            (crate::audio_edit::peak(&out) - 0.9).abs() < 0.001,
+            "normalised peak {}",
+            crate::audio_edit::peak(&out)
+        );
+        let original = crate::audio_edit::read_wav(&source).unwrap();
+        assert!((crate::audio_edit::peak(&original) - 0.25).abs() < 0.001);
+        assert!(core.status.contains("gain 3.60x"), "status: {}", core.status);
+
+        // A bad index changes neither the clip list nor its entries.
+        core.audio_normalize(99);
+        assert_eq!(core.project.audio.len(), 1);
+        assert_audio_clip(&core, 0, &expected.to_string_lossy(), 3);
+        assert!(core.status.contains("failed"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn wave6_audio_normalize_rejects_non_wav_without_changes() {
+        let dir = audio_temp_dir("normalize-bad");
+        let bad_path = dir.join("bad.wav");
+        std::fs::write(&bad_path, b"this is not a wav").unwrap();
+        let source = bad_path.to_string_lossy().into_owned();
+        let mut core = audio_editor_core(12.0);
+        core.project.audio.push(crate::model::AudioClip {
+            path: source.clone(),
+            start_frame: 4,
+        });
+
+        core.audio_normalize(0);
+
+        assert_eq!(core.project.audio.len(), 1);
+        assert_audio_clip(&core, 0, &source, 4);
+        assert!(!dir.join("bad.norm.wav").exists());
+        assert!(core.status.contains("Audio normalise failed"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn wave6_audio_trim_writes_trim_file_and_shifts_start_frame() {
+        let dir = audio_temp_dir("trim");
+        let samples: Vec<f32> = (0..8000)
+            .map(|i| {
+                if i < 2000 {
+                    0.1
+                } else if i < 4000 {
+                    0.2
+                } else {
+                    0.3
+                }
+            })
+            .collect();
+        let source_data = crate::audio_edit::WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples,
+        };
+        let source = write_editor_wav(&dir, "clip.wav", &source_data);
+        let mut core = audio_editor_core(12.0);
+        core.project.audio.push(crate::model::AudioClip {
+            path: source,
+            start_frame: 7,
+        });
+
+        core.audio_trim(0, 0.25, 0.75);
+
+        let expected = dir.join("clip.trim.wav");
+        // At 12 fps, trimming a 0.25s head shifts frame 7 by 3 to 10.
+        assert_audio_clip(&core, 0, &expected.to_string_lossy(), 10);
+        let trimmed = crate::audio_edit::read_wav(&expected.to_string_lossy()).unwrap();
+        assert_eq!(trimmed.frames(), 4000);
+        assert!((trimmed.samples[0] - 0.2).abs() < 0.001);
+        assert!((trimmed.samples[3999] - 0.3).abs() < 0.001);
+    }
+
+    #[test]
+    fn wave6_audio_trim_rejects_empty_range_without_changes() {
+        let dir = audio_temp_dir("trim-empty");
+        let source = write_editor_wav(&dir, "range.wav", &const_editor_wav(8000, 8000, 0.25));
+        let mut core = audio_editor_core(12.0);
+        core.project.audio.push(crate::model::AudioClip {
+            path: source.clone(),
+            start_frame: 9,
+        });
+
+        core.audio_trim(0, 0.75, 0.25);
+
+        assert_eq!(core.project.audio.len(), 1);
+        assert_audio_clip(&core, 0, &source, 9);
+        assert!(!dir.join("range.trim.wav").exists());
+        assert!(core.status.contains("Audio trim failed"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn wave6_audio_split_materialises_both_halves_and_inserts_second_clip() {
+        let dir = audio_temp_dir("split");
+        let mut samples = vec![0.25; 4000];
+        samples.extend(vec![-0.5; 4000]);
+        let source_data = crate::audio_edit::WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples,
+        };
+        let source = write_editor_wav(&dir, "take.wav", &source_data);
+        let other = write_editor_wav(&dir, "other.wav", &const_editor_wav(8000, 800, 0.1));
+        let mut core = audio_editor_core(12.0);
+        core.project.audio.push(crate::model::AudioClip {
+            path: source,
+            start_frame: 12,
+        });
+        core.project.audio.push(crate::model::AudioClip {
+            path: other.clone(),
+            start_frame: 30,
+        });
+
+        // The source lasts 12 timeline frames (1s at 12 fps), so
+        // frame 18 is its midpoint: 0.5s / 4000 sample frames in.
+        core.audio_split(0, 18);
+
+        let first_path = dir.join("take.a.wav");
+        let second_path = dir.join("take.b.wav");
+        assert_eq!(core.project.audio.len(), 3);
+        assert_audio_clip(&core, 0, &first_path.to_string_lossy(), 12);
+        assert_audio_clip(&core, 1, &second_path.to_string_lossy(), 18);
+        assert_audio_clip(&core, 2, &other, 30);
+        let first = crate::audio_edit::read_wav(&first_path.to_string_lossy()).unwrap();
+        let second = crate::audio_edit::read_wav(&second_path.to_string_lossy()).unwrap();
+        assert_eq!(first.frames() + second.frames(), source_data.frames());
+        assert_eq!(first.frames(), 4000);
+        assert_eq!(second.frames(), 4000);
+        assert!(first.samples.iter().all(|s| (*s - 0.25).abs() < 0.001));
+        assert!(second.samples.iter().all(|s| (*s + 0.5).abs() < 0.001));
+    }
+
+    #[test]
+    fn wave6_audio_split_rejects_boundaries_without_changes() {
+        let dir = audio_temp_dir("split-boundary");
+        let source = write_editor_wav(&dir, "edge.wav", &const_editor_wav(8000, 8000, 0.25));
+        let mut core = audio_editor_core(12.0);
+        core.project.audio.push(crate::model::AudioClip {
+            path: source.clone(),
+            start_frame: 12,
+        });
+
+        // The clip spans timeline frames 12..24; neither endpoint is
+        // strictly inside it.
+        core.audio_split(0, 12);
+        assert_eq!(core.project.audio.len(), 1);
+        assert_audio_clip(&core, 0, &source, 12);
+        core.audio_split(0, 24);
+        assert_eq!(core.project.audio.len(), 1);
+        assert_audio_clip(&core, 0, &source, 12);
+        assert!(!dir.join("edge.a.wav").exists());
+        assert!(!dir.join("edge.b.wav").exists());
+        assert!(core.status.contains("Audio split failed"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn wave6_audio_crossfade_uses_overlap_and_replaces_pair() {
+        let dir = audio_temp_dir("crossfade-overlap");
+        let first = write_editor_wav(&dir, "a.wav", &const_editor_wav(8000, 4000, 0.4));
+        let second = write_editor_wav(&dir, "b.wav", &const_editor_wav(8000, 4000, 0.8));
+        let mut core = audio_editor_core(10.0);
+        core.project.audio.push(crate::model::AudioClip {
+            path: first,
+            start_frame: 0,
+        });
+        core.project.audio.push(crate::model::AudioClip {
+            path: second,
+            start_frame: 3,
+        });
+
+        // Each clip lasts 0.5s. The second starts at 0.3s, so the
+        // overlap (and therefore the fade) is 0.2s / 1600 frames.
+        core.audio_crossfade(0);
+
+        let expected = dir.join("a.xfade.wav");
+        assert_eq!(core.project.audio.len(), 1);
+        assert_audio_clip(&core, 0, &expected.to_string_lossy(), 0);
+        let mixed = crate::audio_edit::read_wav(&expected.to_string_lossy()).unwrap();
+        assert_eq!(mixed.frames(), 4000 + 4000 - 1600);
+        assert!((mixed.samples[0] - 0.4).abs() < 0.001);
+        assert!(
+            (mixed.samples[3200] - 0.6).abs() < 0.001,
+            "fade midpoint {}",
+            mixed.samples[3200]
+        );
+        assert!((mixed.samples[4000] - 0.8).abs() < 0.001);
+        assert!(core.status.contains("0.20s"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn wave6_audio_crossfade_adjacent_pair_uses_one_second_fade() {
+        let dir = audio_temp_dir("crossfade-adjacent");
+        let first = write_editor_wav(&dir, "a.wav", &const_editor_wav(8000, 12000, 0.4));
+        let second = write_editor_wav(&dir, "b.wav", &const_editor_wav(8000, 12000, 0.8));
+        let mut core = audio_editor_core(10.0);
+        core.project.audio.push(crate::model::AudioClip {
+            path: first,
+            start_frame: 0,
+        });
+        core.project.audio.push(crate::model::AudioClip {
+            path: second,
+            start_frame: 15,
+        });
+
+        // Two adjacent 1.5s clips: the default fade is 1.0s, so
+        // the joined file lasts 1.5 + 1.5 - 1.0 = 2.0s.
+        core.audio_crossfade(0);
+
+        let expected = dir.join("a.xfade.wav");
+        assert_eq!(core.project.audio.len(), 1);
+        assert_audio_clip(&core, 0, &expected.to_string_lossy(), 0);
+        let mixed = crate::audio_edit::read_wav(&expected.to_string_lossy()).unwrap();
+        assert_eq!(mixed.frames(), 16000);
+        assert!((mixed.samples[0] - 0.4).abs() < 0.001);
+        assert!((mixed.samples[8000] - 0.6).abs() < 0.001);
+        assert!((mixed.samples[15999] - 0.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn wave6_audio_crossfade_rejects_gap_without_changes() {
+        let dir = audio_temp_dir("crossfade-gap");
+        let first = write_editor_wav(&dir, "a.wav", &const_editor_wav(8000, 4000, 0.4));
+        let second = write_editor_wav(&dir, "b.wav", &const_editor_wav(8000, 4000, 0.8));
+        let mut core = audio_editor_core(10.0);
+        core.project.audio.push(crate::model::AudioClip {
+            path: first.clone(),
+            start_frame: 0,
+        });
+        core.project.audio.push(crate::model::AudioClip {
+            path: second.clone(),
+            start_frame: 10,
+        });
+
+        // The first 0.5s clip ends at frame 5; the second starts at
+        // frame 10, leaving a 0.5s gap.
+        core.audio_crossfade(0);
+
+        assert_eq!(core.project.audio.len(), 2);
+        assert_audio_clip(&core, 0, &first, 0);
+        assert_audio_clip(&core, 1, &second, 10);
+        assert!(!dir.join("a.xfade.wav").exists());
+        assert!(core.status.contains("Audio crossfade failed"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn wave6_audio_crossfade_rejects_unreadable_pair_without_changes() {
+        let dir = audio_temp_dir("crossfade-bad");
+        let first = write_editor_wav(&dir, "a.wav", &const_editor_wav(8000, 4000, 0.4));
+        let bad_path = dir.join("b.wav");
+        std::fs::write(&bad_path, b"not a wav").unwrap();
+        let second = bad_path.to_string_lossy().into_owned();
+        let mut core = audio_editor_core(10.0);
+        core.project.audio.push(crate::model::AudioClip {
+            path: first.clone(),
+            start_frame: 0,
+        });
+        core.project.audio.push(crate::model::AudioClip {
+            path: second.clone(),
+            start_frame: 3,
+        });
+
+        core.audio_crossfade(0);
+
+        assert_eq!(core.project.audio.len(), 2);
+        assert_audio_clip(&core, 0, &first, 0);
+        assert_audio_clip(&core, 1, &second, 3);
+        assert!(!dir.join("a.xfade.wav").exists());
+        assert!(core.status.contains("Audio crossfade failed"), "status: {}", core.status);
     }
 }

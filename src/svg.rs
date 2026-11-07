@@ -1,7 +1,17 @@
 //! SVG export: one vector file per authored frame, drawn with the
 //! same camera, shapes, strokes and particles as the rasterizer.
+//!
+//! Camera rotation (wave 6) is applied by rotating points inside
+//! the `view` closure — the same `export::camera_rotate_offset`
+//! helper the rasterizer uses — rather than wrapping the scene in
+//! a `<g transform="rotate(...)">`. Point-level rotation keeps the
+//! SVG geometry in exact agreement with the rasterizer (including
+//! the userSpaceOnUse gradient endpoints, which a group transform
+//! would also rotate, but only implicitly), and every element this
+//! exporter emits is positioned through `view`, so nothing can be
+//! left unrotated by accident.
 
-use crate::export::particles_at;
+use crate::export::{camera_rotate_offset, particles_at};
 use crate::model::{evaluate, CapKind, Project, Shape, V2};
 use std::path::Path;
 
@@ -14,10 +24,20 @@ pub fn export_svg(project: &Project, dir: &Path) -> std::io::Result<usize> {
     for frame_idx in 0..project.frames.len() {
         let poses = project.poses_at(frame_idx as f32);
         let (cam_x, cam_y, zoom) = project.camera_at(frame_idx as f32);
+        let angle = project.camera_angle_at(frame_idx as f32);
         let view = |p: V2| -> V2 {
+            let (dx, dy) = (p[0] - cam_x, p[1] - cam_y);
+            // Camera rotation (wave 6): same convention and helper
+            // as the rasterizer; angle 0 keeps the offset verbatim.
+            let (ox, oy) = if angle == 0.0 {
+                (dx, dy)
+            } else {
+                let r = camera_rotate_offset(dx, dy, angle);
+                (r[0], r[1])
+            };
             [
-                (p[0] - cam_x) * zoom + project.stage[0] / 2.0,
-                (p[1] - cam_y) * zoom + project.stage[1] / 2.0,
+                ox * zoom + project.stage[0] / 2.0,
+                oy * zoom + project.stage[1] / 2.0,
             ]
         };
         let mut svg = String::new();
@@ -207,6 +227,32 @@ mod tests {
         assert!(text.contains("stroke-opacity=\"0.50\""), "opacity missing");
         // Default segments keep the classic round-cap line form.
         assert!(text.contains("stroke-linecap=\"round\""), "default lines changed");
+    }
+
+    #[test]
+    fn svg_camera_rotation_rotates_points_like_the_rasterizer() {
+        // Demo figure, frame 0: hips at (480, 470), chest joint at
+        // (480, 424) — the hips->chest segment is a <line> with
+        // those endpoints when the camera is unrotated.
+        let mut project = Project::new_demo();
+        project.set_camera_key(0, 480.0, 360.0, 1.0);
+        let dir = std::path::Path::new("/tmp/styk-svg-rot-test");
+        export_svg(&project, dir).unwrap();
+        let plain = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert!(
+            plain.contains("x1=\"480.0\" y1=\"470.0\" x2=\"480.0\" y2=\"424.0\""),
+            "unrotated chest segment missing:\n{plain}"
+        );
+        // +90 degrees about the camera centre (480, 360): the
+        // hips' downward offset (0, 110) becomes a rightward one
+        // (110, 0) — the Pivot sign convention (scene CCW).
+        project.camera[0].angle = 90.0;
+        export_svg(&project, dir).unwrap();
+        let rotated = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert!(
+            rotated.contains("x1=\"590.0\" y1=\"360.0\" x2=\"544.0\" y2=\"360.0\""),
+            "rotated chest segment missing:\n{rotated}"
+        );
     }
 
     #[test]

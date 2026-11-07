@@ -174,15 +174,93 @@ pub fn particles_at(project: &Project, f: f32) -> Vec<(V2, f32, [u8; 3], f32)> {
     out
 }
 
+/// Rotate a stage-space offset by the camera rotation.
+///
+/// Convention (wave 6): `angle_deg` is the *camera* rotation in
+/// degrees, mirroring Pivot Animator's per-frame camera angle (the
+/// `angle_rad` f64 in the .piv v5 camera record — see pivot.rs).
+/// Pivot's renderer applies the scene transform with the negated
+/// angle (the original's `renderer-geometry.mjs` builds its camera
+/// matrix from `angle = -camera.angle_rad`), so a positive angle
+/// rotates the *scene counter-clockwise* on screen: a point to the
+/// right of the camera centre lands above it at +90°. In y-down
+/// screen coordinates that rotation is R(−θ):
+/// `(dx, dy) -> (cos·dx + sin·dy, −sin·dx + cos·dy)`.
+pub fn camera_rotate_offset(dx: f32, dy: f32, angle_deg: f32) -> [f32; 2] {
+    let rad = angle_deg.to_radians();
+    let (c, s) = (rad.cos(), rad.sin());
+    [c * dx + s * dy, -s * dx + c * dy]
+}
+
+/// Recent path of one node of one figure, as fading segments in
+/// stage coordinates: (a, b, colour, alpha). The node's position
+/// is sampled at `samples` evenly spaced times from
+/// `frame_f - span` up to `frame_f` (clamped at frame 0), and
+/// consecutive positions are joined oldest-first; alpha grows
+/// toward the present, reaching 0.5 on the newest segment. The
+/// colour is the figure's own colour. Segments shorter than 0.75
+/// stage units are dropped, so a node that did not move yields an
+/// empty trail. Pure and deterministic, like everything else in
+/// the render path. Invalid figure/node indices, `samples < 2`,
+/// `span <= 0`, or `frame_f <= 0` (no past to trail through) all
+/// yield an empty trail.
+pub fn node_trail(
+    project: &Project,
+    frame_f: f32,
+    fi: usize,
+    ni: usize,
+    samples: usize,
+    span: f32,
+) -> Vec<(V2, V2, [u8; 3], f32)> {
+    let mut out = Vec::new();
+    if samples < 2 || span <= 0.0 || frame_f <= 0.0 {
+        return out;
+    }
+    let Some(fig) = project.figures.get(fi) else {
+        return out;
+    };
+    if ni >= fig.def.nodes.len() {
+        return out;
+    }
+    let color = rgb(fig.color);
+    let mut pts: Vec<V2> = Vec::with_capacity(samples);
+    for k in 0..samples {
+        // 0 = oldest sample, 1 = the current frame.
+        let frac = k as f32 / (samples - 1) as f32;
+        let tf = (frame_f - span * (1.0 - frac)).max(0.0);
+        let poses = project.poses_at(tf);
+        let Some(pose) = poses.get(fi) else {
+            return out;
+        };
+        let pos = evaluate(&fig.def, pose);
+        let Some(&p) = pos.get(ni) else {
+            return out;
+        };
+        pts.push(p);
+    }
+    for j in 0..samples - 1 {
+        let (a, b) = (pts[j], pts[j + 1]);
+        if dist(a, b) < 0.75 {
+            continue;
+        }
+        let alpha = 0.5 * (j + 1) as f32 / (samples - 1) as f32;
+        out.push((a, b, color, alpha));
+    }
+    out
+}
+
 /// Render one frame index to an RGB buffer at the project stage size.
 pub fn render_frame(project: &Project, frame_idx: usize) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     render_frame_at(project, frame_idx as f32)
 }
 
 /// Render at a fractional frame time (tween poses, camera and
-/// particles all evaluate at `f`). The camera (centre + zoom,
-/// interpolated between keys) is applied, as are per-segment
-/// colours, thicknesses and shape segments.
+/// particles all evaluate at `f`). The camera (centre + zoom +
+/// rotation, interpolated between keys) is applied, as are
+/// per-segment colours, thicknesses and shape segments. Rotation
+/// lives inside the `view` closure, so segments, heads, shapes,
+/// strokes, particles, weather and the media composite (which
+/// receives this same view) all inherit it.
 pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     let ss = 2u32; // supersample factor
     let (w, h) = (
@@ -193,10 +271,23 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     let mut buf = ImageBuffer::from_pixel(w, h, Rgb(bg));
     let poses = project.poses_at(frame_f);
     let (cam_x, cam_y, zoom) = project.camera_at(frame_f);
+    let angle = project.camera_angle_at(frame_f);
     let view = |p: [f32; 2]| -> [f32; 2] {
+        let (dx, dy) = (p[0] - cam_x, p[1] - cam_y);
+        // Camera rotation (wave 6): rotate the offset around the
+        // camera centre before the pan/zoom mapping (see
+        // `camera_rotate_offset` for the sign convention). At
+        // angle 0 the offset is used verbatim, so the transform
+        // is exactly the pre-rotation one.
+        let (ox, oy) = if angle == 0.0 {
+            (dx, dy)
+        } else {
+            let r = camera_rotate_offset(dx, dy, angle);
+            (r[0], r[1])
+        };
         [
-            ((p[0] - cam_x) * zoom + project.stage[0] / 2.0) * ss as f32,
-            ((p[1] - cam_y) * zoom + project.stage[1] / 2.0) * ss as f32,
+            (ox * zoom + project.stage[0] / 2.0) * ss as f32,
+            (oy * zoom + project.stage[1] / 2.0) * ss as f32,
         ]
     };
     let head_r = 17.0f32 * zoom * ss as f32;
@@ -298,6 +389,33 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                 if let Some(&anchor) = pos.get(entry.node) {
                     for (p, r, c, a) in crate::vfx::clip_particles(&entry.clip, frame_f, anchor) {
                         particles.push((view(p), r * zoom * ss as f32, c, a));
+                    }
+                    // A live Trail clip also draws the node's real
+                    // recent path (not just the ghost chain opposite
+                    // `angle`): thin fading segments under the
+                    // particles, spanning half the clip's duration,
+                    // at most 12 frames back.
+                    if entry.clip.kind == crate::vfx::ClipKind::Trail
+                        && frame_f >= entry.clip.start
+                        && frame_f < entry.clip.start + entry.clip.duration
+                    {
+                        let span = (entry.clip.duration * 0.5).clamp(2.0, 12.0);
+                        for (a, b, c, alpha) in
+                            node_trail(project, frame_f, entry.figure, entry.node, 8, span)
+                        {
+                            let hex = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32;
+                            let half = 1.6 * zoom * ss as f32;
+                            segments.push(StyledSeg {
+                                a: view(a),
+                                b: view(b),
+                                half_near: half,
+                                half_far: half,
+                                color_near: hex,
+                                color_far: hex,
+                                opacity: alpha,
+                                cap: CapKind::Round,
+                            });
+                        }
                     }
                 }
             }
@@ -696,6 +814,73 @@ mod tests {
     }
 
     #[test]
+    fn camera_rotate_offset_matches_pivot_convention() {
+        // Positive angle = the scene rotates counter-clockwise on
+        // screen (mirrors Pivot's camera angle; see the helper doc).
+        let close = |a: [f32; 2], b: [f32; 2]| {
+            (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3
+        };
+        assert!(close(camera_rotate_offset(50.0, 0.0, 90.0), [0.0, -50.0]), "right -> top at +90");
+        assert!(close(camera_rotate_offset(0.0, 50.0, 90.0), [50.0, 0.0]), "bottom -> right at +90");
+        assert!(close(camera_rotate_offset(50.0, 0.0, -90.0), [0.0, 50.0]), "right -> bottom at -90");
+        assert!(close(camera_rotate_offset(10.0, 0.0, 360.0), [10.0, 0.0]), "full turn is identity");
+        // Zero angle is exact, not approximate.
+        assert_eq!(camera_rotate_offset(30.0, 40.0, 0.0), [30.0, 40.0]);
+    }
+
+    /// A white bar to the right of the stage centre on a black
+    /// 200x200 stage, one frame, no figures — a precise marker for
+    /// where the camera transform puts things.
+    fn rotation_marker_project() -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [200.0, 200.0];
+        project.background = 0x000000;
+        project.figures.clear();
+        project.frames = vec![crate::model::Frame {
+            poses: Vec::new(),
+            duration: 1.0,
+            easing: None,
+        }];
+        project.strokes = vec![crate::model::Stroke {
+            frame: 0,
+            points: vec![[150.0, 100.0], [180.0, 100.0]],
+            color: 0xFFFFFF,
+            width: 12.0,
+            widths: Vec::new(),
+            fill: None,
+        }];
+        project.camera.clear();
+        project
+    }
+
+    #[test]
+    fn camera_rotation_moves_the_marker_counter_clockwise() {
+        let mut project = rotation_marker_project();
+        project.set_camera_key(0, 100.0, 100.0, 1.0);
+        let plain = render_frame_at(&project, 0.0);
+        let white = Rgb([255u8, 255, 255]);
+        let black = Rgb([0u8, 0, 0]);
+        // Unrotated: the bar sits right of centre.
+        assert_eq!(plain.get_pixel(165, 100), &white);
+        assert_eq!(plain.get_pixel(100, 35), &black);
+        // +90 degrees: the bar must sit above centre (scene CCW).
+        project.camera[0].angle = 90.0;
+        let rotated = render_frame_at(&project, 0.0);
+        assert_eq!(rotated.get_pixel(100, 35), &white, "+90 must move the bar to the top");
+        assert_eq!(rotated.get_pixel(165, 100), &black, "+90 must vacate the right side");
+    }
+
+    #[test]
+    fn camera_angle_zero_renders_byte_identical() {
+        let project = Project::new_demo();
+        let plain = render_frame(&project, 2);
+        let mut keyed = Project::new_demo();
+        keyed.set_camera_key(2, 480.0, 360.0, 1.0); // == default view, angle 0
+        let with_key = render_frame(&keyed, 2);
+        assert_eq!(plain.as_raw(), with_key.as_raw());
+    }
+
+    #[test]
     fn write_quadruped_frame_for_visual_check() {
         let mut project = Project::new_demo();
         project.figures.clear();
@@ -1058,5 +1243,97 @@ mod weather_integration_tests {
             .filter(|(a, b)| a != b)
             .count();
         assert!(diff > 50, "rain should change the render ({diff} px)");
+    }
+}
+
+#[cfg(test)]
+mod trail_tests {
+    use super::*;
+
+    /// Demo project whose root marches 40 units/frame along y=300,
+    /// so node 0's path is a straight, exactly known line.
+    fn marching_project() -> Project {
+        let mut project = Project::new_demo();
+        for (i, frame) in project.frames.iter_mut().enumerate() {
+            frame.poses[0].root = [200.0 + 40.0 * i as f32, 300.0];
+        }
+        project
+    }
+
+    #[test]
+    fn node_trail_follows_a_moving_node() {
+        let project = marching_project();
+        // Samples land exactly on frames 0..4 (tween is off in the
+        // demo), so all four steps survive the length threshold.
+        let trail = node_trail(&project, 4.0, 0, 0, 5, 4.0);
+        assert_eq!(trail.len(), 4, "one segment per frame step");
+        assert_eq!(trail[0].0, [200.0, 300.0], "trail starts at the oldest sample");
+        assert_eq!(trail[3].1, [360.0, 300.0], "trail ends at the current position");
+        assert_eq!(trail[0].2, [232, 232, 236], "trail uses the figure colour 0xE8E8EC");
+        let alphas: Vec<f32> = trail.iter().map(|s| s.3).collect();
+        assert_eq!(alphas, vec![0.125, 0.25, 0.375, 0.5], "alpha fades with age");
+        // Deterministic: same call, same trail.
+        assert_eq!(trail, node_trail(&project, 4.0, 0, 0, 5, 4.0));
+    }
+
+    #[test]
+    fn node_trail_is_empty_for_a_static_node() {
+        let mut project = marching_project();
+        for frame in project.frames.iter_mut() {
+            frame.poses[0].root = [300.0, 300.0];
+        }
+        assert!(
+            node_trail(&project, 4.0, 0, 0, 5, 4.0).is_empty(),
+            "a node that never moved leaves no trail"
+        );
+    }
+
+    #[test]
+    fn node_trail_rejects_bad_arguments() {
+        let project = marching_project();
+        assert!(node_trail(&project, 4.0, 0, 0, 1, 4.0).is_empty(), "samples < 2");
+        assert!(node_trail(&project, 4.0, 0, 0, 5, 0.0).is_empty(), "span <= 0");
+        assert!(node_trail(&project, 0.0, 0, 0, 5, 4.0).is_empty(), "no past at frame 0");
+        assert!(node_trail(&project, 4.0, 9, 0, 5, 4.0).is_empty(), "bad figure");
+        assert!(node_trail(&project, 4.0, 0, 99, 5, 4.0).is_empty(), "bad node");
+    }
+
+    #[test]
+    fn trail_clip_draws_the_motion_path() {
+        // Integration guard for the wave-6 trail pass: with a live
+        // Trail clip on the root node, a pixel on the node's recent
+        // path (well clear of the figure and of the clip's ghost
+        // chain) is tinted toward the figure colour; without the
+        // clip it stays background.
+        let project = marching_project();
+        let plain = render_frame_at(&project, 4.0);
+        let bg = rgb(project.background);
+        assert_eq!(
+            plain.get_pixel(265, 300).0,
+            bg,
+            "path pixel should be background without the clip"
+        );
+        let mut with_clip = project.clone();
+        with_clip.fx_clips.push(crate::model::FxClipEntry {
+            clip: crate::vfx::ParticleClip {
+                start: 0.0,
+                duration: 10.0,
+                kind: crate::vfx::ClipKind::Trail,
+                color: 0xFF4040,
+                seed: 5,
+                angle: 0.0,
+                length: 80.0,
+            },
+            figure: 0,
+            node: 0,
+        });
+        let trailed = render_frame_at(&with_clip, 4.0);
+        let px = trailed.get_pixel(265, 300).0;
+        assert_ne!(px, bg, "trail segment should cover the path pixel");
+        let lift = |c: [u8; 3]| c[0] as u32 + c[1] as u32 + c[2] as u32;
+        assert!(
+            lift(px) > lift(bg),
+            "trail pixel should blend toward the pale figure colour: {px:?} vs bg {bg:?}"
+        );
     }
 }

@@ -41,6 +41,21 @@ pub enum ClipKind {
     /// An expanding ring of motes: the ring radius grows linearly
     /// to `length` while the motes fade out.
     ShockRing,
+    /// Glowing embers born together at the clip's start: they rise
+    /// with an ease-out (fast launch, decelerating climb), wobble
+    /// on a sine, and shrink and fade in warm orange shades derived
+    /// from the clip colour.
+    Ember,
+    /// Ballistic droplets launched from the anchor along `angle`
+    /// with a seeded spread and speed, pulled back down by
+    /// gravity; each droplet fades over its own arc and vanishes
+    /// when it lands back at the anchor's height.
+    Fountain,
+    /// Motes circling the anchor on three concentric rings (radii
+    /// are fractions of `length`): inner rings run faster, the
+    /// middle ring runs backwards, and each mote drags two fainter
+    /// ghosts behind it.
+    Orbit,
 }
 
 /// A timed particle effect. `start` and `duration` are in frames;
@@ -260,6 +275,99 @@ pub fn clip_particles(
                 push(&mut out, pos, 3.2 * (1.0 - 0.45 * t), (1.0 - t) * 0.9);
             }
         }
+        ClipKind::Ember => {
+            // All embers are born at the clip's start. Each one's
+            // age `s` runs 0..1 at its own pace; the rise eases out
+            // (1 - (1-s)^2), so the climb decelerates as the ember
+            // cools, shrinks and fades. Alpha stays well above the
+            // 0.01 emitter cutoff for the whole clip (envelope *
+            // 0.35 * flicker >= ~0.05), so the particle list is
+            // index-stable at every frame.
+            for i in 0..22u32 {
+                let speed = 1.0 + 0.6 * prand(seed, i, 5);
+                let s = (t * speed).clamp(0.0, 1.0);
+                let height = 55.0 + prand(seed, i, 2) * 85.0;
+                let rise = height * (1.0 - (1.0 - s) * (1.0 - s));
+                let sway = (2.5 + 4.5 * s)
+                    * (s * std::f32::consts::TAU * (1.0 + prand(seed, i, 4))
+                        + prand(seed, i, 6) * std::f32::consts::TAU)
+                        .sin();
+                let pos = [
+                    anchor[0] + (prand(seed, i, 1) - 0.5) * 14.0 + sway,
+                    anchor[1] - rise,
+                ];
+                let flicker = 0.8 + 0.2 * (local * 2.6 + i as f32 * 1.7).sin();
+                let alpha = envelope * (0.35 + 0.65 * (1.0 - s)) * flicker;
+                // Warm palette from the clip colour: the colour
+                // itself, a red-hot shift, a yellow-hot shift, and
+                // a dark coal.
+                let col = match i % 4 {
+                    0 => color,
+                    1 => [
+                        color[0],
+                        (color[1] as f32 * 0.5) as u8,
+                        (color[2] as f32 * 0.2) as u8,
+                    ],
+                    2 => [
+                        color[0],
+                        (color[1] as f32 * 1.25).min(255.0) as u8,
+                        (color[2] as f32 * 0.45) as u8,
+                    ],
+                    _ => [
+                        (color[0] as f32 * 0.75) as u8,
+                        (color[1] as f32 * 0.32) as u8,
+                        (color[2] as f32 * 0.12) as u8,
+                    ],
+                };
+                push_c(&mut out, pos, 3.4 * (1.0 - 0.65 * s), alpha, col);
+            }
+        }
+        ClipKind::Fountain => {
+            // Droplets in free flight: position is the ballistic
+            // integral of the launch velocity plus gravity, all in
+            // per-frame units. A droplet's `land` is when its arc
+            // returns to the anchor's height; it fades across its
+            // own flight and is gone once it lands.
+            let g = 1.3;
+            for i in 0..24u32 {
+                let dir = dir_from_deg(clip.angle + (prand(seed, i, 1) - 0.5) * 56.0);
+                let v = 7.5 + prand(seed, i, 2) * 3.0;
+                let land = if dir[1] < -0.05 {
+                    2.0 * v * (-dir[1]) / g
+                } else {
+                    clip.duration
+                };
+                let age = if land > 0.0 { local / land } else { 1.0 };
+                if age >= 1.0 {
+                    continue;
+                }
+                let pos = [
+                    anchor[0] + dir[0] * v * local,
+                    anchor[1] + dir[1] * v * local + 0.5 * g * local * local,
+                ];
+                push(&mut out, pos, 2.6 * (1.0 - 0.3 * age), 0.9 * (1.0 - age));
+            }
+        }
+        ClipKind::Orbit => {
+            // Ring assignment, radius, speed and phase all come
+            // from the index/seed, so a mote stays on its ring for
+            // the whole clip. Ghosts share the mote's radius and
+            // lag it by a fixed angle against its direction of
+            // travel, with trailing alpha.
+            let base = if clip.length > 0.0 { clip.length } else { 60.0 };
+            for i in 0..18u32 {
+                let ring = (i % 3) as usize;
+                let radius = base * [0.45, 0.7, 0.95][ring];
+                let speed = (0.11 - 0.03 * ring as f32) * if ring == 1 { -1.0 } else { 1.0 };
+                let theta = prand(seed, i, 1) * std::f32::consts::TAU + local * speed;
+                let bright = 0.65 + 0.35 * prand(seed, i, 2);
+                for (lag, fade) in [(0.0f32, 1.0f32), (0.16, 0.55), (0.32, 0.28)] {
+                    let a = theta - speed.signum() * lag;
+                    let pos = [anchor[0] + a.cos() * radius, anchor[1] + a.sin() * radius];
+                    push(&mut out, pos, 3.0, envelope * 0.85 * bright * fade);
+                }
+            }
+        }
     }
     out
 }
@@ -410,7 +518,7 @@ mod tests {
         }
     }
 
-    const KINDS: [ClipKind; 8] = [
+    const KINDS: [ClipKind; 11] = [
         ClipKind::Burst,
         ClipKind::Sparkle,
         ClipKind::Smoke,
@@ -419,6 +527,9 @@ mod tests {
         ClipKind::Trail,
         ClipKind::Confetti,
         ClipKind::ShockRing,
+        ClipKind::Ember,
+        ClipKind::Fountain,
+        ClipKind::Orbit,
     ];
 
     #[test]
@@ -572,6 +683,96 @@ mod tests {
         assert!((r2 - 120.0).abs() < 4.0, "ring radius at t=0.75 is {r2}, want ~120");
         assert!(r2 > r1, "ring should expand");
         assert!(a2 < a1, "ring should fade ({a1} -> {a2})");
+    }
+
+    #[test]
+    fn embers_rise_decelerate_shrink_and_fade() {
+        let c = clip(ClipKind::Ember);
+        let anchor = [300.0, 300.0];
+        let at = |t: f32| clip_particles(&c, c.start + c.duration * t, anchor);
+        // Every ember stays emitted for the whole clip, so indices
+        // are stable and means are comparable across frames.
+        let n = at(0.1).len();
+        assert!(n > 0);
+        for t in [0.3, 0.55, 0.75] {
+            assert_eq!(at(t).len(), n, "ember count changed at t={t}");
+        }
+        // Embers only ever rise above the anchor.
+        assert!(
+            at(0.3).iter().all(|p| p.0[1] < anchor[1] + 0.01),
+            "an ember fell below the anchor"
+        );
+        // Mean height above the anchor: the gain between two equal
+        // windows shrinks as the climb decelerates.
+        let height = |t: f32| {
+            let ps = at(t);
+            anchor[1] - ps.iter().map(|p| p.0[1]).sum::<f32>() / ps.len() as f32
+        };
+        let early = height(0.3) - height(0.1);
+        let late = height(0.75) - height(0.55);
+        assert!(
+            early > late && late >= 0.0,
+            "embers should decelerate: rose {early} early vs {late} late"
+        );
+        // They shrink and fade as they cool.
+        let mean = |t: f32, pick: fn(&([f32; 2], f32, [u8; 3], f32)) -> f32| {
+            let ps = at(t);
+            ps.iter().map(pick).sum::<f32>() / ps.len() as f32
+        };
+        assert!(mean(0.75, |p| p.1) < mean(0.2, |p| p.1), "embers should shrink");
+        assert!(mean(0.75, |p| p.3) < mean(0.3, |p| p.3), "embers should fade");
+    }
+
+    #[test]
+    fn fountain_peaks_then_falls_and_lands() {
+        let mut c = clip(ClipKind::Fountain);
+        c.angle = 180.0; // straight up in the model convention
+        let anchor = [300.0, 300.0];
+        let mean_y = |local: f32| {
+            let ps = clip_particles(&c, c.start + local, anchor);
+            assert!(!ps.is_empty(), "fountain dry at local {local}");
+            ps.iter().map(|p| p.0[1]).sum::<f32>() / ps.len() as f32
+        };
+        let y3 = mean_y(3.0);
+        let y7 = mean_y(7.0);
+        let y14 = mean_y(14.0);
+        assert!(y3 < anchor[1], "droplets above the anchor early: {y3}");
+        assert!(y7 < y3, "still rising toward the peak: {y7} vs {y3}");
+        assert!(y14 > y7, "falling back down late: {y14} vs {y7}");
+        // The longest flight is 2 * 10.5 / 1.3 ~= 16.2 frames, so
+        // by local 20 every droplet has landed and vanished.
+        assert!(
+            clip_particles(&c, c.start + 20.0, anchor).is_empty(),
+            "droplets should all have landed by local 20"
+        );
+    }
+
+    #[test]
+    fn orbit_motes_hold_their_rings_trail_and_move() {
+        let c = clip(ClipKind::Orbit); // length 160
+        let anchor = [300.0, 300.0];
+        let radii = [0.45 * c.length, 0.7 * c.length, 0.95 * c.length];
+        let a = clip_particles(&c, 16.0, anchor);
+        assert!(!a.is_empty());
+        assert_eq!(a.len(), 54, "18 motes with a head and two ghosts each");
+        for (p, _, _, _) in &a {
+            let d = ((p[0] - anchor[0]).powi(2) + (p[1] - anchor[1]).powi(2)).sqrt();
+            assert!(
+                radii.iter().any(|r| (d - r).abs() <= 0.75),
+                "orbit mote off its ring at radius {d}"
+            );
+        }
+        // Within each mote's triple, alpha trails off head -> ghost.
+        for triple in a.chunks_exact(3) {
+            assert!(
+                triple[0].3 > triple[1].3 && triple[1].3 > triple[2].3,
+                "trailing alpha should decrease: {:?}",
+                triple.iter().map(|p| p.3).collect::<Vec<_>>()
+            );
+        }
+        // And the whole system actually rotates.
+        let b = clip_particles(&c, 18.0, anchor);
+        assert_ne!(a, b, "orbit should move between frames");
     }
 
     // ---- Weather ----

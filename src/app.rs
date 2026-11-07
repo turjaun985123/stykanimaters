@@ -9,6 +9,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+/// Which channel the graph panel edits (wave 6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphChannelSel {
+    Angle,
+    RootX,
+    RootY,
+}
+
 pub struct EditorView {
     core: EditorCore,
     canvas_bounds: Rc<RefCell<Bounds<Pixels>>>,
@@ -25,6 +33,15 @@ pub struct EditorView {
     clock: Instant,
     /// Active text-authoring session for a segment (wave 5).
     text_edit: Option<crate::text_edit::TextEdit>,
+    /// Wave 6: graph-editor panel under the canvas.
+    show_graph: bool,
+    /// Wave 6: which channel the graph panel edits.
+    graph_channel: GraphChannelSel,
+    /// Wave 6: graph canvas bounds from the last prepaint; the
+    /// root mouse handlers route panel presses through them.
+    graph_bounds: Rc<RefCell<Bounds<Pixels>>>,
+    /// Wave 6: (frame, value) of the graph key being dragged.
+    graph_drag: Option<(f32, f32)>,
 }
 
 impl EditorView {
@@ -38,6 +55,10 @@ impl EditorView {
             recognizer: crate::touch::Recognizer::new(),
             clock: Instant::now(),
             text_edit: None,
+            show_graph: false,
+            graph_channel: GraphChannelSel::Angle,
+            graph_bounds: Rc::new(RefCell::new(Bounds::default())),
+            graph_drag: None,
         }
     }
 
@@ -92,6 +113,217 @@ impl EditorView {
         let dx = f32::from(window_pos.x - b.origin.x) - f32::from(b.size.width) / 2.0;
         let dy = f32::from(window_pos.y - b.origin.y) - f32::from(b.size.height) / 2.0;
         [cam[0] + dx / scale, cam[1] + dy / scale]
+    }
+
+    // ---- Wave 6: graph panel -------------------------------------
+
+    /// The channel the graph panel edits: the selector's choice,
+    /// where Angle with no node selected falls back to RootX
+    /// (there is no joint to key).
+    fn graph_target(&self) -> crate::graph::ChannelTarget {
+        use crate::graph::ChannelTarget;
+        match self.graph_channel {
+            GraphChannelSel::Angle => match self.core.selected_node {
+                Some(ni) => ChannelTarget::Angle(ni),
+                None => ChannelTarget::RootX,
+            },
+            GraphChannelSel::RootX => ChannelTarget::RootX,
+            GraphChannelSel::RootY => ChannelTarget::RootY,
+        }
+    }
+
+    /// The real channel for (selected figure, target), if it exists.
+    fn graph_channel_ref(&self) -> Option<&crate::graph::Channel> {
+        let target = self.graph_target();
+        let fig = self.core.selected_figure;
+        self.core
+            .project
+            .channels
+            .iter()
+            .find(|c| c.figure == fig && c.target == target)
+    }
+
+    /// The channel used to fit the panel view: the real channel
+    /// when it exists; otherwise a stand-in so `auto_fit` frames
+    /// something sensible — the full circle for angles (auto_fit
+    /// forces -180..=180 for angle channels), a window around the
+    /// current root value for root channels. The stand-in is only
+    /// ever used for fitting, never stored.
+    fn graph_fit_channel(&self) -> crate::graph::Channel {
+        use crate::graph::{Channel, ChannelTarget, Key};
+        let target = self.graph_target();
+        if let Some(ch) = self.graph_channel_ref() {
+            return ch.clone();
+        }
+        let fig = self.core.selected_figure;
+        match target {
+            ChannelTarget::Angle(_) | ChannelTarget::Length(_) => Channel {
+                figure: fig,
+                target,
+                keys: Vec::new(),
+            },
+            ChannelTarget::RootX | ChannelTarget::RootY => {
+                let axis = if target == ChannelTarget::RootX { 0 } else { 1 };
+                let cur = self
+                    .core
+                    .project
+                    .frames
+                    .get(self.core.current)
+                    .and_then(|f| f.poses.get(fig))
+                    .map(|p| p.root[axis])
+                    .unwrap_or(0.0);
+                let last = (self.core.frame_count().max(1) - 1) as f32;
+                Channel {
+                    figure: fig,
+                    target,
+                    keys: vec![Key::flat(0.0, cur - 100.0), Key::flat(last, cur + 100.0)],
+                }
+            }
+        }
+    }
+
+    /// The panel's current view — the same computation
+    /// `paint_graph` performs, with the size taken from the last
+    /// painted panel bounds.
+    fn graph_view(&self) -> Option<crate::graph_panel::GraphView> {
+        let b = *self.graph_bounds.borrow();
+        let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let fit = self.graph_fit_channel();
+        Some(crate::graph_panel::GraphView::auto_fit(
+            &[fit],
+            self.core.frame_count(),
+            w,
+            h,
+        ))
+    }
+
+    /// Window position -> panel-local pixels, when the panel is
+    /// shown and the position lands inside it. With `clamp` the
+    /// point is clamped into the panel instead of dropped (for
+    /// drags that wander outside).
+    fn graph_local(&self, pos: Point<Pixels>, clamp: bool) -> Option<V2> {
+        if !self.show_graph || self.show_home {
+            return None;
+        }
+        let b = *self.graph_bounds.borrow();
+        let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let lx = f32::from(pos.x - b.origin.x);
+        let ly = f32::from(pos.y - b.origin.y);
+        if clamp {
+            Some([lx.clamp(0.0, w), ly.clamp(0.0, h)])
+        } else if lx < 0.0 || ly < 0.0 || lx > w || ly > h {
+            None
+        } else {
+            Some([lx, ly])
+        }
+    }
+
+    /// Clamp an edited value into the range the panel shows:
+    /// angles live on the -180..=180 circle.
+    fn graph_clamp_value(&self, target: crate::graph::ChannelTarget, value: f32) -> f32 {
+        match target {
+            crate::graph::ChannelTarget::Angle(_) => value.clamp(-180.0, 180.0),
+            _ => value,
+        }
+    }
+
+    /// Left-press in the graph panel: grab a key near the press,
+    /// or add a new key at the pressed frame/value and grab it so
+    /// the same press can drag it into place. The press snapshots
+    /// once, so the whole drag is a single Undo step.
+    fn graph_press(&mut self, local: V2) {
+        let Some(view) = self.graph_view() else { return };
+        let target = self.graph_target();
+        let hit: Option<(f32, f32)> = self.graph_channel_ref().and_then(|ch| {
+            view.hit_key(ch, local, 9.0)
+                .map(|idx| (ch.keys[idx].frame, ch.keys[idx].value))
+        });
+        self.core.snapshot();
+        if let Some((frame, value)) = hit {
+            self.graph_drag = Some((frame, value));
+            self.core.status = format!(
+                "Graph: key at frame {frame:.0} = {value:.0} — drag to move, Ctrl+click deletes."
+            );
+            return;
+        }
+        let (frame, value) = view.to_data(local);
+        let frame = frame.max(0.0);
+        let value = self.graph_clamp_value(target, value);
+        let fig = self.core.selected_figure;
+        crate::graph::channel_mut(&mut self.core.project.channels, fig, target)
+            .add_key(frame, value);
+        self.graph_drag = Some((frame, value));
+        self.core.status = format!(
+            "Graph: added key at frame {frame:.0} = {value:.0}."
+        );
+    }
+
+    /// Drag the grabbed graph key to the pointer's data position.
+    fn graph_drag_to(&mut self, local: V2) {
+        let Some((from, _)) = self.graph_drag else { return };
+        let Some(view) = self.graph_view() else { return };
+        let target = self.graph_target();
+        let fig = self.core.selected_figure;
+        let (frame, value) = view.to_data(local);
+        let frame = frame.max(0.0);
+        let value = self.graph_clamp_value(target, value);
+        if let Some(ch) = self
+            .core
+            .project
+            .channels
+            .iter_mut()
+            .find(|c| c.figure == fig && c.target == target)
+        {
+            if ch.move_key(from, frame, value) {
+                self.graph_drag = Some((frame, value));
+            }
+        }
+    }
+
+    /// Finish a graph drag (mouse-up anywhere).
+    fn graph_release(&mut self) {
+        if let Some((frame, value)) = self.graph_drag.take() {
+            self.core.status = format!("Graph: key at frame {frame:.0} = {value:.0}.");
+        }
+    }
+
+    /// Delete the key near a panel position (right-click /
+    /// Ctrl+click). Returns true when a key was removed.
+    fn graph_delete_at(&mut self, local: V2) -> bool {
+        let Some(view) = self.graph_view() else { return false };
+        let target = self.graph_target();
+        let fig = self.core.selected_figure;
+        let frame = match self.graph_channel_ref() {
+            Some(ch) => match view.hit_key(ch, local, 9.0) {
+                Some(idx) => ch.keys[idx].frame,
+                None => return false,
+            },
+            None => return false,
+        };
+        self.core.snapshot();
+        let removed = self
+            .core
+            .project
+            .channels
+            .iter_mut()
+            .find(|c| c.figure == fig && c.target == target)
+            .map(|ch| ch.remove_key(frame))
+            .unwrap_or(false);
+        if removed {
+            if let Some((f, _)) = self.graph_drag {
+                if (f - frame).abs() < 0.01 {
+                    self.graph_drag = None;
+                }
+            }
+            self.core.status = "Graph: key deleted.".into();
+        }
+        removed
     }
 
     /// Milliseconds on the view's monotonic clock — the epoch
@@ -243,6 +475,21 @@ impl EditorView {
 }
 
 /// Everything the canvas paint closure needs, cloned out of the core.
+/// Everything `paint_graph` needs, cloned out of the project at
+/// render time (a channel is small; the paint closure owns it).
+struct GraphDrawData {
+    /// Channel used to fit the view (the real channel, or the
+    /// stand-in from `EditorView::graph_fit_channel`).
+    fit: crate::graph::Channel,
+    /// The real channel for the selected target, if one exists.
+    channel: Option<crate::graph::Channel>,
+    frames: usize,
+    current: f32,
+    /// Frame of the key being dragged (highlighted), if any.
+    drag_frame: Option<f32>,
+    bg: u32,
+}
+
 struct DrawData {
     stage: [f32; 2],
     background: u32,
@@ -483,6 +730,7 @@ impl Render for EditorView {
             (0x191C21, 0x21252D, 0x1D2129)
         };
         let show_home = self.show_home;
+        let graph_on = self.show_graph;
         let tween_on = core.project.tween_playback;
         let follow_on = core.project.camera_follow.is_some();
         let paths_on = core.show_paths;
@@ -497,6 +745,78 @@ impl Render for EditorView {
             .unwrap_or_else(|| "Library".into());
 
         let data = self.draw_data();
+        // Wave 6: graph panel (header + canvas) that sits under
+        // the stage while `show_graph` is on.
+        let graph_panel = if graph_on {
+            let target = self.graph_target();
+            let gdata = GraphDrawData {
+                fit: self.graph_fit_channel(),
+                channel: self.graph_channel_ref().cloned(),
+                frames: core.frame_count(),
+                current: core.current as f32,
+                drag_frame: self.graph_drag.map(|(f, _)| f),
+                bg: row_bg,
+            };
+            let gslot = self.graph_bounds.clone();
+            let gcanvas = canvas(
+                move |bounds, _window, _cx| {
+                    *gslot.borrow_mut() = bounds;
+                },
+                move |bounds, _state, window, _cx| {
+                    paint_graph(window, bounds, &gdata);
+                },
+            )
+            .flex_1()
+            .w_full();
+            let target_label = match target {
+                crate::graph::ChannelTarget::Angle(ni) => format!("joint {ni} angle"),
+                crate::graph::ChannelTarget::RootX => "root X".to_string(),
+                crate::graph::ChannelTarget::RootY => "root Y".to_string(),
+                crate::graph::ChannelTarget::Length(ni) => format!("joint {ni} length"),
+            };
+            let header = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(8.0))
+                .py(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(0x9AA3B2))
+                        .child(format!(
+                            "Graph — figure {} · {}",
+                            core.selected_figure + 1,
+                            target_label
+                        )),
+                )
+                .child(btn("graph-ch-angle", "Angle", self.graph_channel == GraphChannelSel::Angle, cx.listener(|view, _ev, _w, cx| {
+                    view.graph_channel = GraphChannelSel::Angle;
+                    cx.notify();
+                })))
+                .child(btn("graph-ch-rootx", "RootX", self.graph_channel == GraphChannelSel::RootX, cx.listener(|view, _ev, _w, cx| {
+                    view.graph_channel = GraphChannelSel::RootX;
+                    cx.notify();
+                })))
+                .child(btn("graph-ch-rooty", "RootY", self.graph_channel == GraphChannelSel::RootY, cx.listener(|view, _ev, _w, cx| {
+                    view.graph_channel = GraphChannelSel::RootY;
+                    cx.notify();
+                })));
+            Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .h(px(170.0))
+                    .w_full()
+                    .bg(rgb(row_bg))
+                    .child(header)
+                    .child(gcanvas),
+            )
+        } else {
+            None
+        };
+
         let bounds_slot = self.canvas_bounds.clone();
         let canvas = canvas(
             move |bounds, _window, _cx| {
@@ -705,9 +1025,15 @@ impl Render for EditorView {
         };
 
         let middle = div().flex().flex_row().flex_1().child(sidebar);
+        // The stage column: canvas on top, graph panel under it.
+        let stage_col = div().flex().flex_col().flex_1().w_full().child(canvas);
+        let stage_col = match graph_panel {
+            Some(panel) => stage_col.child(panel),
+            None => stage_col,
+        };
         let middle = match home_panel {
             Some(panel) => middle.child(panel),
-            None => middle.child(canvas),
+            None => middle.child(stage_col),
         };
 
         div()
@@ -788,6 +1114,17 @@ impl Render for EditorView {
             }))
             .bg(rgb(root_bg))
             .on_mouse_down(MouseButton::Left, cx.listener(|view, ev: &MouseDownEvent, _w, cx| {
+                // The graph panel gets first claim on presses
+                // inside it (Ctrl+click deletes a key there).
+                if let Some(local) = view.graph_local(ev.position, false) {
+                    if ev.modifiers.control {
+                        view.graph_delete_at(local);
+                    } else {
+                        view.graph_press(local);
+                    }
+                    cx.notify();
+                    return;
+                }
                 let p = view.to_stage(ev.position);
                 if view.core.draw_mode {
                     view.core.begin_draw(p);
@@ -802,7 +1139,22 @@ impl Render for EditorView {
                     cx.notify();
                 }
             }))
+            .on_mouse_down(MouseButton::Right, cx.listener(|view, ev: &MouseDownEvent, _w, cx| {
+                // Right-click in the graph panel deletes a key.
+                if let Some(local) = view.graph_local(ev.position, false) {
+                    view.graph_delete_at(local);
+                    cx.notify();
+                }
+            }))
             .on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, _w, cx| {
+                // An active graph-key drag owns all moves.
+                if view.graph_drag.is_some() {
+                    if let Some(local) = view.graph_local(ev.position, true) {
+                        view.graph_drag_to(local);
+                        cx.notify();
+                    }
+                    return;
+                }
                 if view.core.draw_mode {
                     let p = view.to_stage(ev.position);
                     view.core.draw_to(p);
@@ -821,6 +1173,11 @@ impl Render for EditorView {
                 }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|view, ev: &MouseUpEvent, _w, cx| {
+                if view.graph_drag.is_some() {
+                    view.graph_release();
+                    cx.notify();
+                    return;
+                }
                 if view.core.draw_mode {
                     view.core.end_draw();
                     cx.notify();
@@ -884,6 +1241,13 @@ impl Render for EditorView {
                     })))
                     .child(btn("paste-frame", tr("paste_frame"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.paste_frame();
+                        cx.notify();
+                    })))
+                    .child(btn("graph", "Graph", graph_on, cx.listener(|view, _ev, _w, cx| {
+                        view.show_graph = !view.show_graph;
+                        if !view.show_graph {
+                            view.graph_drag = None;
+                        }
                         cx.notify();
                     })))
                     .child(btn("save", tr("save"), false, cx.listener(|view, _ev, _w, cx| {
@@ -1227,6 +1591,42 @@ impl Render for EditorView {
                     .child(btn("bake-3d", "Bake 3D", false, cx.listener(|view, _ev, _w, cx| {
                         view.core.fig3_bake();
                         cx.notify();
+                    })))
+                    .child(btn("cam-rot", "Cam rot +15", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.rotate_camera(15.0);
+                        cx.notify();
+                    })))
+                    .child(btn("smooth-strokes", "Smooth", false, cx.listener(|view, _ev, _w, cx| {
+                        let n = crate::draw_ops::smooth_frame(&mut view.core.project, view.core.current, 1);
+                        view.core.status = format!("Smoothed {n} stroke(s) on this frame.");
+                        cx.notify();
+                    })))
+                    .child(btn("norm-audio", "Norm last", false, cx.listener(|view, _ev, _w, cx| {
+                        let n = view.core.project.audio.len();
+                        if n == 0 {
+                            view.core.status = "No audio clips.".into();
+                        } else {
+                            view.core.audio_normalize(n - 1);
+                        }
+                        cx.notify();
+                    })))
+                    .child(btn("split-audio", "Split@cur", false, cx.listener(|view, _ev, _w, cx| {
+                        let n = view.core.project.audio.len();
+                        if n == 0 {
+                            view.core.status = "No audio clips.".into();
+                        } else {
+                            let at = view.core.current;
+                            view.core.audio_split(n - 1, at);
+                        }
+                        cx.notify();
+                    })))
+                    .child(btn("xfade-audio", "Xfade", false, cx.listener(|view, _ev, _w, cx| {
+                        if view.core.project.audio.len() < 2 {
+                            view.core.status = "Need two audio clips to crossfade.".into();
+                        } else {
+                            view.core.audio_crossfade(0);
+                        }
+                        cx.notify();
                     }))),
             )
             .child(
@@ -1480,6 +1880,109 @@ fn paint_stage(window: &mut Window, bounds: Bounds<Pixels>, data: &DrawData) {
         if let Ok(path) = pb.build() {
             window.paint_path(path, rgba((color << 8) | a));
         }
+    }
+}
+
+/// Paint the graph panel: background, zero line, playhead, the
+/// channel curve as connected segments and its key handles as
+/// small squares, with the axis box on top. All data<->pixel
+/// mapping goes through `GraphView` (auto_fit + curve_points).
+fn paint_graph(window: &mut Window, bounds: Bounds<Pixels>, data: &GraphDrawData) {
+    let origin = bounds.origin;
+    let w = f32::from(bounds.size.width);
+    let h = f32::from(bounds.size.height);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let view = crate::graph_panel::GraphView::auto_fit(
+        std::slice::from_ref(&data.fit),
+        data.frames,
+        w,
+        h,
+    );
+    let at = |p: V2| point(origin.x + px(p[0]), origin.y + px(p[1]));
+    // Background.
+    fill_rect(window, origin, w, h, rgb(data.bg));
+    // Zero line, when zero is inside the value range.
+    if view.val_min < 0.0 && view.val_max > 0.0 {
+        let y = view.to_px(view.frame_min, 0.0)[1];
+        stroke_line(window, at([0.0, y]), at([w, y]), rgba(0x9AA3B2 << 8 | 0x55), 1.0);
+    }
+    // Playhead at the editor's current frame.
+    let play_x = view.to_px(data.current, view.val_min)[0];
+    if (0.0..=w).contains(&play_x) {
+        stroke_line(
+            window,
+            at([play_x, 0.0]),
+            at([play_x, h]),
+            rgba(0xFF5D5D << 8 | 0x99),
+            1.0,
+        );
+    }
+    // Curve + key handles.
+    if let Some(ch) = &data.channel {
+        if !ch.keys.is_empty() {
+            let pts = view.curve_points(ch, 120);
+            let mut pb = PathBuilder::stroke(px(2.0));
+            for (i, p) in pts.iter().enumerate() {
+                if i == 0 {
+                    pb.move_to(at(*p));
+                } else {
+                    pb.line_to(at(*p));
+                }
+            }
+            if let Ok(path) = pb.build() {
+                window.paint_path(path, rgb(0x35C4D8));
+            }
+            for (i, hp) in view.key_handles(ch).iter().enumerate() {
+                let dragged = data
+                    .drag_frame
+                    .map(|f| (ch.keys[i].frame - f).abs() < 0.01)
+                    .unwrap_or(false);
+                let c = at(*hp);
+                let half = 4.0;
+                fill_rect(
+                    window,
+                    point(c.x - px(half), c.y - px(half)),
+                    half * 2.0,
+                    half * 2.0,
+                    rgb(if dragged { 0xFFC65D } else { 0xE8E8EC }),
+                );
+            }
+        }
+    }
+    // Axis box on top.
+    let mut pb = PathBuilder::stroke(px(1.0));
+    pb.move_to(origin);
+    pb.line_to(point(origin.x + px(w), origin.y));
+    pb.line_to(point(origin.x + px(w), origin.y + px(h)));
+    pb.line_to(point(origin.x, origin.y + px(h)));
+    pb.close();
+    if let Ok(path) = pb.build() {
+        window.paint_path(path, rgb(0x3A4150));
+    }
+}
+
+/// One straight stroked segment between two window points.
+fn stroke_line(window: &mut Window, a: Point<Pixels>, b: Point<Pixels>, color: Rgba, width: f32) {
+    let mut pb = PathBuilder::stroke(px(width));
+    pb.move_to(a);
+    pb.line_to(b);
+    if let Ok(path) = pb.build() {
+        window.paint_path(path, color);
+    }
+}
+
+/// A filled rectangle from `origin` spanning `w` x `h` pixels.
+fn fill_rect(window: &mut Window, origin: Point<Pixels>, w: f32, h: f32, color: Rgba) {
+    let mut pb = PathBuilder::fill();
+    pb.move_to(origin);
+    pb.line_to(point(origin.x + px(w), origin.y));
+    pb.line_to(point(origin.x + px(w), origin.y + px(h)));
+    pb.line_to(point(origin.x, origin.y + px(h)));
+    pb.close();
+    if let Ok(path) = pb.build() {
+        window.paint_path(path, color);
     }
 }
 

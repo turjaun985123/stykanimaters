@@ -150,3 +150,28 @@ lock/solo/opacity buttons, weather and 3D controls, graph key
 authoring with live application in positions_f, locked figures
 refusing drags, solo-aware canvas, per-figure opacity in canvas
 and rasterizer. 232 tests green.
+
+## Wave 6 — MCP + depth (2026-11-07)
+
+Prep: the crate became a library (src/lib.rs) so the GUI binary
+and the new MCP server binary share one engine; CameraKey gained
+an angle field + camera_angle_at. Ten agents: MCP transport/core
+(mcp.rs, JSON-RPC stdio, handle() pure and tested), 20 MCP content
+tools, 7 MCP render/format tools (incl. render_frame_base64);
+the visual graph panel (add/drag/delete keys, undo via a press
+snapshot); audio editor ops (normalise/trim/split-with-real-tail/
+crossfade); Stick Nodes joins baked at import per the original
+decoder's semantics (no rotation inheritance exists upstream);
+draw_ops (smoothing/nib/erase over projects); .piv v5 export
+deepening (per-frame lengths from graph Length channels + image
+side tables landed and cross-verified 40/40 against the original's
+decoder; bends and text side tables proven impossible from the
+model's data and documented); VFX depth (Ember/Fountain/Orbit +
+real motion trails for Trail clips); camera rotation rendered in
+rasterizer + SVG with Pivot's sign convention, byte-identical at
+0 degrees, and .piv camera angles now round-trip. Integration
+also wired Cam rot / Smooth / audio buttons. End-to-end proof: a
+scripted MCP session over the real binary built a project, posed
+it, added rain + confetti + a graph key + a rotating camera,
+rendered PNG/GIF, read a frame back as base64, saved JSON and
+exported a .piv the original's decoder accepts. 289 tests green.

@@ -32,7 +32,10 @@
 //! the format this model can express. Stick Nodes `.nodes` is a
 //! different, much larger format and is not handled here.
 
-use crate::model::{CameraKey, FigureDef, FigureInstance, Frame, NodeDef, Pose, Project, Shape};
+use crate::model::{
+    CameraKey, FigureDef, FigureInstance, Frame, ImageAsset, NodeDef, Pose, Project, SegmentMedia,
+    Shape,
+};
 use std::io::Read as _;
 use std::io::Write as _;
 
@@ -1174,9 +1177,15 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
         if is_default == 0 {
             let x = r.f32()?;
             let y = r.f32()?;
-            r.f64()?; // camera angle: not modelled
+            let cam_angle = r.f64()?; // stored radians; CameraKey.angle is degrees (wave 6)
             let zoom = r.f32()?;
-            camera.push(CameraKey { frame: fi, x, y, zoom, angle: 0.0 });
+            camera.push(CameraKey {
+                frame: fi,
+                x,
+                y,
+                zoom,
+                angle: cam_angle.to_degrees() as f32,
+            });
         }
         raw_frames.push((duration.max(1) as f32, bg_id, objects));
     }
@@ -1367,6 +1376,63 @@ pub fn export_piv_v3(project: &Project) -> Vec<u8> {
     out
 }
 
+/// Per-frame segment lengths for one exported object, or `None`
+/// when the frame's lengths are exactly the figure def's.
+///
+/// The only source of per-frame lengths in this model is the graph
+/// editor's Length channels: `Pose` carries no lengths at all, and
+/// the importers discard the format's own per-frame length arrays
+/// as unrepresentable (see `import_v5`). Channels are sampled at
+/// the frame's integer index and clamped to >= 1.0, mirroring
+/// `graph::apply_channels`. When any sampled length differs from
+/// the def, the full segment-length vector is returned (the format
+/// stores all-or-nothing per object).
+fn export_frame_lengths(project: &Project, frame: usize, fi: usize) -> Option<Vec<f32>> {
+    let fig = &project.figures[fi];
+    let seg_count = fig.def.nodes.len().saturating_sub(1);
+    if seg_count == 0 {
+        return None;
+    }
+    let mut lengths: Vec<f32> = fig.def.nodes[1..].iter().map(|n| n.length).collect();
+    let mut any_channel = false;
+    for ch in &project.channels {
+        if ch.figure != fi {
+            continue;
+        }
+        let crate::graph::ChannelTarget::Length(n) = ch.target else {
+            continue;
+        };
+        // Node 0 is the origin (no segment) and out-of-range
+        // indices are stale editor state; both are ignored, as in
+        // apply_channels.
+        if n == 0 || n > seg_count {
+            continue;
+        }
+        any_channel = true;
+        lengths[n - 1] = ch.value_at(frame as f32).max(1.0);
+    }
+    if !any_channel {
+        return None;
+    }
+    let differs = lengths
+        .iter()
+        .zip(fig.def.nodes[1..].iter())
+        .any(|(a, b)| (a - b.length).abs() > 1e-4);
+    differs.then_some(lengths)
+}
+
+/// Width/height of a PNG asset from its IHDR chunk (the asset
+/// table stores PNG bytes — see `model::ImageAsset`). `None` for
+/// non-PNG or truncated data.
+fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
+    if png.len() < 24 || &png[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    let w = u32::from_be_bytes(png[16..20].try_into().ok()?);
+    let h = u32::from_be_bytes(png[20..24].try_into().ok()?);
+    Some((w, h))
+}
+
 /// Export the project as a version 5 `.piv` file, zlib-compressed
 /// (the form StykAnimate itself writes). Writer grammar:
 /// `codecs/piv_full_writer.py` (tables) and `codecs/piv_document.py`
@@ -1375,11 +1441,46 @@ pub fn export_piv_v3(project: &Project) -> Vec<u8> {
 /// every frame references; figure flags 144 (bit 16 = z-order is
 /// the identity permutation, so the arrays are omitted; bit 128 =
 /// no segment has a secondary colour, which the model does not
-/// have); no bends or polyfills; objects keyed by stable unique
-/// ids; a camera record only for frames whose key differs from
-/// the default (stage centre, zoom 1); and the Auto-Easing trailer
-/// byte 0. Media segments are never produced, so the image/text
-/// side tables are empty.
+/// have); no polyfills; objects keyed by stable unique ids; a
+/// camera record only for frames whose key differs from the
+/// default (stage centre, zoom 1); and the Auto-Easing trailer
+/// byte 0.
+///
+/// Beyond the wave-3 subset, this writer now emits:
+///
+/// * **Per-frame lengths** (`len_flag` + f32 array) for objects
+///   whose graph Length channels move a segment length away from
+///   the figure def at that frame — see [`export_frame_lengths`].
+/// * **Image side tables** for figures containing image segments
+///   (`SegmentMedia::Image`): one table entry per distinct
+///   referenced asset, holding the asset's PNG bytes verbatim
+///   behind an absolute end offset. The anchor segment is the
+///   image's horizontal centreline in pixel space, which is
+///   exactly how `media.rs` renders image segments (the image's
+///   width spans the segment, centred on it). Figures with image
+///   segments also get the per-object image/text flags byte the
+///   grammar requires.
+///
+/// Two format features remain unwritten, because the model holds
+/// nothing faithful to write:
+///
+/// * **Bends.** The format stores per-segment `bend_rad` values
+///   (figure record, non-zero entries only) plus per-frame bend
+///   arrays behind `bend_flag`. This model's `Pose` is root +
+///   angles only, and `NodeDef::bend` is the ±1 IK bend-*side*
+///   sign — a different quantity, not an arc angle. The importers
+///   read both bend blocks and discard them (see
+///   `parse_figure_v5` / `import_v5`), so an imported bend is gone
+///   before export could see it. Bend count and `bend_flag` are
+///   therefore always 0 here; writing the IK sign as a radian
+///   bend would corrupt the file's meaning.
+/// * **Text side tables.** A text entry stores vector glyph
+///   outlines (M/L/C/Z/V/H path commands) and per-character
+///   placements derived from a real font. `SegmentMedia::Text`
+///   holds only a string and a size, and the port renders text
+///   with a 3×5 raster bitmap font (`media.rs`) — there are no
+///   outlines to encode, and fabricating them would invent a
+///   font. Text segments export as plain segments, as before.
 pub fn export_piv_v5(project: &Project) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(5u8); // version
@@ -1393,8 +1494,9 @@ pub fn export_piv_v5(project: &Project) -> Vec<u8> {
     out.extend_from_slice(b"Background");
     // Figure table (slot 1 is the implicit built-in figure).
     out.extend_from_slice(&((project.figures.len() + 2) as u16).to_le_bytes());
+    let mut fig_has_media: Vec<bool> = Vec::with_capacity(project.figures.len());
     for fig in &project.figures {
-        write_figure_v5(&mut out, &fig.def, &fig.name);
+        fig_has_media.push(write_figure_v5(&mut out, fig, &project.assets));
     }
     // Keyframes.
     out.extend_from_slice(&(project.frames.len() as u32).to_le_bytes());
@@ -1410,14 +1512,28 @@ pub fn export_piv_v5(project: &Project) -> Vec<u8> {
             out.extend_from_slice(&1.0f32.to_le_bytes()); // scale
             out.extend_from_slice(&rgb_to_colorref(fig.color).to_le_bytes());
             out.push(0u8); // field28 (transparency)
+            if fig_has_media[i] {
+                // Image/text flags byte: present iff the figure
+                // record carries media segments. 0 = no endpoint
+                // reversal / reflection for any segment this frame.
+                out.push(0u8);
+            }
             let abs = pose_absolutes(&fig.def, &frame.poses[i]);
             for k in 1..fig.def.nodes.len() {
                 out.extend_from_slice(&deg_to_rad(abs[k]).to_le_bytes());
             }
             out.extend_from_slice(&frame.poses[i].root[0].to_le_bytes());
             out.extend_from_slice(&frame.poses[i].root[1].to_le_bytes());
-            out.extend_from_slice(&0u16.to_le_bytes()); // len flag
-            out.extend_from_slice(&0u16.to_le_bytes()); // bend flag
+            match export_frame_lengths(project, fi, i) {
+                Some(lengths) => {
+                    out.extend_from_slice(&1u16.to_le_bytes()); // len flag
+                    for l in lengths {
+                        out.extend_from_slice(&l.to_le_bytes());
+                    }
+                }
+                None => out.extend_from_slice(&0u16.to_le_bytes()), // len flag
+            }
+            out.extend_from_slice(&0u16.to_le_bytes()); // bend flag: the model holds no bends
             out.push(0u8); // join flag
         }
         for i in 0..project.figures.len() {
@@ -1430,12 +1546,13 @@ pub fn export_piv_v5(project: &Project) -> Vec<u8> {
             Some(key)
                 if (key.zoom - 1.0).abs() > 0.0001
                     || (key.x - centre[0]).abs() > 0.01
-                    || (key.y - centre[1]).abs() > 0.01 =>
+                    || (key.y - centre[1]).abs() > 0.01
+                    || key.angle.abs() > 0.01 =>
             {
                 out.push(0u8); // not the default camera
                 out.extend_from_slice(&key.x.to_le_bytes());
                 out.extend_from_slice(&key.y.to_le_bytes());
-                out.extend_from_slice(&0.0f64.to_le_bytes()); // angle: not modelled
+                out.extend_from_slice(&(key.angle.to_radians() as f64).to_le_bytes());
                 out.extend_from_slice(&key.zoom.to_le_bytes());
             }
             _ => out.push(1u8), // default camera
@@ -1454,8 +1571,40 @@ pub fn export_piv_v5(project: &Project) -> Vec<u8> {
 /// Write one v5 figure record: flags 144 (implicit z-order, no
 /// secondary colours), then segments in node order — a segment's
 /// id is its node index, so the parent id is the parent node index
-/// (the origin node is 0). Bends and polyfills are empty.
-fn write_figure_v5(out: &mut Vec<u8>, def: &FigureDef, name: &str) {
+/// (the origin node is 0). Bends and polyfills are empty (see
+/// [`export_piv_v5`] for why bends cannot be written).
+///
+/// Image segments (`SegmentMedia::Image` with a valid asset
+/// index) are written as primitive 2 with the extra triple
+/// (image-table index, 0, 0), and the figure's image side table
+/// follows the bend count, per the grammar: a u16 entry count,
+/// then per entry four i32 anchors, a u64 **absolute** end offset
+/// (into the whole payload), and the asset's PNG bytes verbatim.
+/// Returns whether the record contains any media segment (the
+/// caller then owes each keyframe object an image/text flags
+/// byte).
+fn write_figure_v5(out: &mut Vec<u8>, fig: &FigureInstance, assets: &[ImageAsset]) -> bool {
+    let def = &fig.def;
+    let name = &fig.name;
+    // The figure's image table: distinct referenced assets in
+    // first-reference order, plus each segment's index into it.
+    // Segments whose asset index dangles fall back to plain
+    // segments (there is no blob to write for them).
+    let mut table: Vec<usize> = Vec::new();
+    let mut seg_table_idx: Vec<Option<usize>> = vec![None; def.nodes.len()];
+    for (i, node) in def.nodes.iter().enumerate().skip(1) {
+        if let Some(SegmentMedia::Image { asset }) = node.media {
+            if asset < assets.len() {
+                seg_table_idx[i] = Some(match table.iter().position(|&a| a == asset) {
+                    Some(p) => p,
+                    None => {
+                        table.push(asset);
+                        table.len() - 1
+                    }
+                });
+            }
+        }
+    }
     let rest_abs = rest_absolutes(def);
     out.push(128 | 16); // flags
     out.extend_from_slice(&((def.nodes.len() - 1) as u16).to_le_bytes());
@@ -1465,10 +1614,14 @@ fn write_figure_v5(out: &mut Vec<u8>, def: &FigureDef, name: &str) {
         out.extend_from_slice(&node.length.to_le_bytes());
         out.extend_from_slice(&deg_to_rad(rest_abs[i]).to_le_bytes());
         out.extend_from_slice(&node.thickness.to_le_bytes());
-        out.push(match node.shape {
-            Shape::Circle => 1,
-            Shape::Polygon(4) => 6,
-            _ => 0,
+        out.push(if seg_table_idx[i].is_some() {
+            2 // image primitive; the media replaces the shape
+        } else {
+            match node.shape {
+                Shape::Circle => 1,
+                Shape::Polygon(4) => 6,
+                _ => 0,
+            }
         });
         out.push(0); // aux
         let rgb = node.color.unwrap_or(0);
@@ -1476,13 +1629,42 @@ fn write_figure_v5(out: &mut Vec<u8>, def: &FigureDef, name: &str) {
         out.push((rgb >> 8) as u8);
         out.push(rgb as u8);
         out.push(0); // transparency
+        if let Some(ti) = seg_table_idx[i] {
+            out.extend_from_slice(&(ti as u16).to_le_bytes()); // extra: table index
+            out.push(0); // extra: endpoint reversal
+            out.push(0); // extra: baseline reflection
+        }
     }
-    out.extend_from_slice(&0u16.to_le_bytes()); // bend count
+    out.extend_from_slice(&0u16.to_le_bytes()); // bend count: the model holds no bends
+    if !table.is_empty() {
+        out.extend_from_slice(&(table.len() as u16).to_le_bytes());
+        for &asset in &table {
+            let blob = &assets[asset].png;
+            // Anchors: the image's horizontal centreline in pixel
+            // space (media.rs maps the image's width onto the
+            // segment, centred). Non-PNG assets have no known
+            // pixel size; a unit anchor keeps the scale finite.
+            let (ax, ay, bx, by) = match png_dimensions(blob) {
+                Some((w, h)) if w > 0 && h > 0 => (0i32, (h / 2) as i32, w as i32, (h / 2) as i32),
+                _ => (0i32, 0, 1, 0),
+            };
+            // The end offset is absolute (whole payload) and
+            // points just past the blob: anchors (16) + this u64
+            // field (8) + the blob itself.
+            let end = (out.len() + 16 + 8 + blob.len()) as u64;
+            for v in [ax, ay, bx, by] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out.extend_from_slice(&end.to_le_bytes());
+            out.extend_from_slice(blob);
+        }
+    }
     out.extend_from_slice(&0u16.to_le_bytes()); // polyfill count
     // No z-order arrays (flag 16) and no global style (flag 64 clear).
     let name_bytes = name.as_bytes();
     out.push(name_bytes.len().min(255) as u8);
     out.extend_from_slice(&name_bytes[..name_bytes.len().min(255)]);
+    !table.is_empty()
 }
 
 #[cfg(test)]
@@ -1755,6 +1937,330 @@ mod tests {
     }
 
 
+
+    // ---- Wave 6: deepened v5 export (lengths, image tables) ----
+
+    fn test_png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([0, 200, 0, 255]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    /// Demo project + a 4x2 PNG asset on node 3 (image), a text
+    /// label on node 5, and a Length channel driving node 1 from
+    /// its def length 46 to 90 across frames 0..4 (flat tangents,
+    /// so frame values are the smoothstep blends 46 / 52.875 / 68 /
+    /// 83.125 / 90).
+    fn media_project() -> Project {
+        let mut project = Project::new_demo();
+        project.assets.push(ImageAsset {
+            name: "dot".into(),
+            png: test_png(4, 2),
+        });
+        project.figures[0].def.nodes[3].media =
+            Some(SegmentMedia::Image { asset: 0 });
+        project.figures[0].def.nodes[5].media = Some(SegmentMedia::Text {
+            content: "HI".into(),
+            size: 25.0,
+        });
+        project.channels.push(crate::graph::Channel {
+            figure: 0,
+            target: crate::graph::ChannelTarget::Length(1),
+            keys: vec![
+                crate::graph::Key::flat(0.0, 46.0),
+                crate::graph::Key::flat(4.0, 90.0),
+            ],
+        });
+        project
+    }
+
+    fn inflate_export(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Read as _;
+        let mut out = Vec::new();
+        flate2::read::ZlibDecoder::new(bytes)
+            .read_to_end(&mut out)
+            .unwrap();
+        out
+    }
+
+    struct WalkedObject {
+        len_flag: u16,
+        lengths: Vec<f32>,
+        bend_flag: u16,
+    }
+
+    /// Walk an exported v5 payload with the module's own reader,
+    /// collecting the per-object len/bend data. Asserts the walk
+    /// lands exactly at the end of the payload (fps + 1 trailer
+    /// byte), which proves every variable-length field — angles,
+    /// media flags byte, lengths arrays, side tables (skipped by
+    /// `parse_figure_v5`) — is sized exactly as written.
+    fn walk_v5_export(payload: &[u8]) -> Vec<Vec<WalkedObject>> {
+        let mut r = Reader::new(payload);
+        assert_eq!(r.u8().unwrap(), 5);
+        r.u32().unwrap();
+        r.u32().unwrap();
+        let bg_slots = r.u16().unwrap();
+        for _ in 1..bg_slots {
+            assert_eq!(r.u8().unwrap(), 2, "solid background slot");
+            r.u32().unwrap();
+            r.str8().unwrap();
+        }
+        let figure_slots = r.u16().unwrap();
+        // (segment count, has media) per type id, 1-based slot - 1.
+        let (bdef, _) = builtin_man();
+        let mut types: Vec<(usize, bool)> = vec![(bdef.nodes.len() - 1, false)];
+        for _ in 2..figure_slots {
+            let t = parse_figure_v5(&mut r).unwrap();
+            types.push((t.def.nodes.len() - 1, t.has_images));
+        }
+        let frame_count = r.u32().unwrap() as usize;
+        let mut frames = Vec::new();
+        for _ in 0..frame_count {
+            r.u16().unwrap(); // duration
+            r.u8().unwrap(); // background mix
+            r.u16().unwrap(); // background id
+            let object_count = r.u16().unwrap() as usize;
+            let mut objects = Vec::new();
+            for _ in 0..object_count {
+                r.u32().unwrap(); // unique id
+                let tid = r.u16().unwrap() as usize;
+                let (seg_count, has_media) = types[tid - 1];
+                r.f32().unwrap(); // scale
+                r.u32().unwrap(); // colour
+                r.u8().unwrap(); // field28
+                if has_media {
+                    r.u8().unwrap(); // image/text flags byte
+                }
+                for _ in 0..seg_count {
+                    r.f64().unwrap(); // angles
+                }
+                r.f32().unwrap();
+                r.f32().unwrap(); // root
+                let len_flag = r.u16().unwrap();
+                let lengths = if len_flag != 0 {
+                    (0..seg_count).map(|_| r.f32().unwrap()).collect()
+                } else {
+                    Vec::new()
+                };
+                let bend_flag = r.u16().unwrap();
+                if bend_flag != 0 {
+                    for _ in 0..seg_count {
+                        r.f64().unwrap();
+                    }
+                }
+                let join = r.u8().unwrap();
+                if join != 0 {
+                    r.u16().unwrap();
+                    r.u16().unwrap();
+                }
+                objects.push(WalkedObject {
+                    len_flag,
+                    lengths,
+                    bend_flag,
+                });
+            }
+            for _ in 0..object_count {
+                r.u16().unwrap(); // draw order
+            }
+            let is_default = r.u8().unwrap();
+            if is_default == 0 {
+                r.f32().unwrap();
+                r.f32().unwrap();
+                r.f64().unwrap();
+                r.f32().unwrap();
+            }
+            frames.push(objects);
+        }
+        r.u32().unwrap(); // fps
+        r.u8().unwrap(); // trailer
+        assert!(r.done(), "walk must consume the payload exactly");
+        frames
+    }
+
+    #[test]
+    fn v5_export_per_frame_lengths_from_graph_channels() {
+        let project = media_project();
+        let payload = inflate_export(&export_piv_v5(&project));
+        let frames = walk_v5_export(&payload);
+        assert_eq!(frames.len(), 5);
+        // Frame 0: the channel value equals the def length (46),
+        // so no lengths array is stored.
+        assert_eq!(frames[0][0].len_flag, 0, "frame 0 keeps def lengths");
+        // Frames 1..4: smoothstep blends of 46 -> 90.
+        let want = [52.875f32, 68.0, 83.125, 90.0];
+        let def = &project.figures[0].def;
+        for (k, w) in want.iter().enumerate() {
+            let obj = &frames[k + 1][0];
+            assert_eq!(obj.len_flag, 1, "frame {} stores lengths", k + 1);
+            assert_eq!(obj.lengths.len(), def.nodes.len() - 1);
+            assert!(
+                (obj.lengths[0] - w).abs() < 0.001,
+                "frame {} node 1 length {} vs {w}",
+                k + 1,
+                obj.lengths[0]
+            );
+            // Untouched segments carry their def lengths.
+            for (j, node) in def.nodes.iter().enumerate().skip(2) {
+                assert!(
+                    (obj.lengths[j - 1] - node.length).abs() < 0.001,
+                    "frame {} node {j} length",
+                    k + 1
+                );
+            }
+        }
+        // No bends anywhere (the model holds none).
+        assert!(frames.iter().flatten().all(|o| o.bend_flag == 0));
+    }
+
+    #[test]
+    fn v5_export_image_side_table_and_media_roundtrip() {
+        let project = media_project();
+        let bytes = export_piv_v5(&project);
+        let payload = inflate_export(&bytes);
+        // The asset's PNG bytes are embedded verbatim.
+        let png = &project.assets[0].png;
+        assert!(
+            payload.windows(png.len()).any(|w| w == png.as_slice()),
+            "image blob must appear verbatim in the payload"
+        );
+        // Round-trip through the port's own importer: structure
+        // and poses survive (media itself is not modelled on
+        // import — the side table is walked and skipped, exactly
+        // like a file from the original).
+        let back = import_piv(&bytes).unwrap();
+        assert_eq!(back.figures.len(), 1);
+        assert_eq!(back.figures[0].name, "Styk");
+        assert_eq!(back.figures[0].def.nodes.len(), project.figures[0].def.nodes.len());
+        assert_eq!(back.frames.len(), project.frames.len());
+        for (a, b) in project.frames.iter().zip(back.frames.iter()) {
+            let (pa, pb) = (&a.poses[0], &b.poses[0]);
+            assert!((pa.root[0] - pb.root[0]).abs() < 0.5);
+            assert!((pa.root[1] - pb.root[1]).abs() < 0.5);
+            for (x, y) in pa.angles.iter().zip(pb.angles.iter()) {
+                assert!((crate::model::norm_deg(x - y)).abs() < 0.1, "angle {x} vs {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn v5_export_without_channels_or_media_is_unchanged() {
+        // Guard: a plain project still writes len_flag 0 / no
+        // media byte on every object (the wave-3 subset).
+        let project = Project::new_demo();
+        let payload = inflate_export(&export_piv_v5(&project));
+        let frames = walk_v5_export(&payload);
+        assert!(frames
+            .iter()
+            .flatten()
+            .all(|o| o.len_flag == 0 && o.bend_flag == 0));
+    }
+
+    #[test]
+    fn v5_bends_are_dropped_on_import_and_never_written() {
+        // Hand-built v5 file whose figure record carries a bend
+        // (segment 0 -> 0.7 rad) and whose frame carries a bend
+        // array ([0.7, -0.3]). The original's Python decoder reads
+        // the same bytes with those values (cross-check fixture),
+        // so this also pins the importer's bend skipping.
+        let mut b: Vec<u8> = Vec::new();
+        b.push(5); // version
+        b.extend_from_slice(&800u32.to_le_bytes());
+        b.extend_from_slice(&600u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes()); // background slots: default only
+        b.extend_from_slice(&3u16.to_le_bytes()); // figure slots: builtin + 1
+        b.push(0); // figure flags: all optional fields present
+        b.extend_from_slice(&2u16.to_le_bytes()); // segment count
+        // Segment 1: parent 0, id 1, len 50, up, thick 6, line, red.
+        b.extend_from_slice(&0u16.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&50.0f32.to_le_bytes());
+        b.extend_from_slice(&(-std::f64::consts::FRAC_PI_2).to_le_bytes());
+        b.extend_from_slice(&6.0f32.to_le_bytes());
+        b.push(0); // primitive
+        b.push(0); // aux
+        b.extend_from_slice(&[255, 0, 0]);
+        b.push(0); // transparency
+        b.push(0); // no secondary colour
+        // Segment 2: parent 1, id 2, len 30, right, thick 4, circle, blue.
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&30.0f32.to_le_bytes());
+        b.extend_from_slice(&0.0f64.to_le_bytes());
+        b.extend_from_slice(&4.0f32.to_le_bytes());
+        b.push(1); // primitive: circle
+        b.push(0); // aux
+        b.extend_from_slice(&[0, 0, 255]);
+        b.push(0); // transparency
+        b.push(0); // no secondary colour
+        // Bend block: one record, segment index 0, 0.7 rad.
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&0u16.to_le_bytes());
+        b.extend_from_slice(&0.7f64.to_le_bytes());
+        b.extend_from_slice(&0u16.to_le_bytes()); // polyfill count
+        b.extend_from_slice(&0u16.to_le_bytes()); // z-order seg 1
+        b.extend_from_slice(&1u16.to_le_bytes()); // z-order seg 2
+        b.push(4);
+        b.extend_from_slice(b"Bent");
+        // One keyframe with a per-frame bend array.
+        b.extend_from_slice(&1u32.to_le_bytes()); // frame count
+        b.extend_from_slice(&2u16.to_le_bytes()); // duration
+        b.push(0); // background mix
+        b.extend_from_slice(&0u16.to_le_bytes()); // background id
+        b.extend_from_slice(&1u16.to_le_bytes()); // object count
+        b.extend_from_slice(&7u32.to_le_bytes()); // unique id
+        b.extend_from_slice(&2u16.to_le_bytes()); // figure type
+        b.extend_from_slice(&1.0f32.to_le_bytes()); // scale
+        b.extend_from_slice(&0x0000_FF00u32.to_le_bytes()); // COLORREF green
+        b.push(0); // field28
+        b.extend_from_slice(&(-std::f64::consts::FRAC_PI_2).to_le_bytes());
+        b.extend_from_slice(&0.0f64.to_le_bytes());
+        b.extend_from_slice(&10.0f32.to_le_bytes()); // root x
+        b.extend_from_slice(&20.0f32.to_le_bytes()); // root y
+        b.extend_from_slice(&0u16.to_le_bytes()); // len flag
+        b.extend_from_slice(&1u16.to_le_bytes()); // bend flag: array follows
+        b.extend_from_slice(&0.7f64.to_le_bytes());
+        b.extend_from_slice(&(-0.3f64).to_le_bytes());
+        b.push(0); // join flag
+        b.extend_from_slice(&0u16.to_le_bytes()); // draw order
+        b.push(1); // camera default
+        b.extend_from_slice(&24u32.to_le_bytes()); // fps
+        std::fs::write("/tmp/v5-bent-input.piv", &b).unwrap();
+
+        // Import discards the bends but keeps geometry and pose.
+        let project = import_piv(&b).unwrap();
+        assert_eq!(project.figures.len(), 1);
+        assert_eq!(project.figures[0].name, "Bent");
+        assert_eq!(project.figures[0].def.nodes.len(), 3);
+        let pose = &project.frames[0].poses[0];
+        assert!((pose.root[0] - 10.0).abs() < 0.01 && (pose.root[1] - 20.0).abs() < 0.01);
+        assert!((pose.angles[1] - 180.0).abs() < 0.05);
+        assert!((pose.angles[2] + 90.0).abs() < 0.05);
+
+        // Export writes no bends (the model retained none), and
+        // the export re-imports to the same pose.
+        let bytes = export_piv_v5(&project);
+        std::fs::write("/tmp/styk-export-v5-bent.piv", &bytes).unwrap();
+        let frames = walk_v5_export(&inflate_export(&bytes));
+        assert!(frames.iter().flatten().all(|o| o.bend_flag == 0 && o.len_flag == 0));
+        let back = import_piv(&bytes).unwrap();
+        let pose2 = &back.frames[0].poses[0];
+        assert!((pose2.root[0] - pose.root[0]).abs() < 0.01);
+        assert!((pose2.angles[1] - pose.angles[1]).abs() < 0.05);
+    }
+
+    #[test]
+    fn write_v5_media_fixture_for_cross_check() {
+        // Consumed by the original app's Python decoder
+        // (decode_piv_bytes): image asset bytes/anchors, per-frame
+        // length arrays, and bend absence are asserted there.
+        let project = media_project();
+        std::fs::write("/tmp/styk-export-v5-media.piv", export_piv_v5(&project)).unwrap();
+        std::fs::write("/tmp/styk-asset.png", &project.assets[0].png).unwrap();
+    }
 
     #[test]
     fn corpus_fixtures_import_with_manifest_values() {

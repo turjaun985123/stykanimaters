@@ -16,14 +16,17 @@
 //! single-figure movieclips become `ClipDef`s. Sprite library
 //! images are extracted to PNG assets and sprite instances (main /
 //! `.nodemc` timelines) become `SpriteInstance` key tracks;
-//! main-frame texts become `TextInstance` key tracks. Sounds, joins,
+//! main-frame texts become `TextInstance` key tracks. Sounds,
 //! camera records and filter blocks are consumed precisely but not
 //! modelled — the same "stored poses preserved, dynamics not
-//! recreated" stance the original adapter takes.
+//! recreated" stance the original adapter takes. Joins are the
+//! exception: they are baked at import — a joined instance's
+//! root is superseded by the evaluated end of its host's named
+//! node (see `resolve_join_roots` and §17 of the spec).
 
 use crate::model::{
-    norm_deg, ClipDef, Easing, FigureDef, FigureInstance, Frame, ImageAsset, InstanceKey,
-    NodeDef, Pose, Project, Shape, SpriteInstance, TextInstance,
+    evaluate, norm_deg, ClipDef, Easing, FigureDef, FigureInstance, Frame, ImageAsset,
+    InstanceKey, NodeDef, Pose, Project, Shape, SpriteInstance, TextInstance,
 };
 use std::collections::HashMap;
 use std::io::Read as _;
@@ -808,9 +811,27 @@ struct MainSettings {
     sound_index: i32,
 }
 
+/// One join record (`readJoins`): instance `child` (an index
+/// into its frame's instance list) is pinned to node `node_id`
+/// of the instance `parent` (also a frame instance index — the
+/// file stores the parent's instance *id*; the parser resolves
+/// it, mirroring the original decoder).
+struct RawJoin {
+    child: usize,
+    parent: usize,
+    node_id: i32,
+    /// Stored rotation of the child relative to the parent node
+    /// (build >= 53). Read for parity with the decoded document
+    /// but never applied: the original adapter ignores it too —
+    /// a child's orientation comes from its own stored pose
+    /// records (see §17 of the spec).
+    #[allow(dead_code)]
+    relative_rotation: Option<f32>,
+}
+
 struct RawFrame {
     instances: Vec<RawInstance>,
-    joins: usize,
+    joins: Vec<RawJoin>,
     settings: Option<MainSettings>,
     /// Main-frame texts; always empty for clip frames (the format
     /// stores texts only in `.stknds` main frames).
@@ -1059,20 +1080,84 @@ fn read_instance(
     })
 }
 
-fn read_joins(r: &mut Reader, b: i32, present: bool) -> Result<usize, String> {
-    if !present {
-        return Ok(0);
-    }
-    let n = r.count(MAX_INSTANCES)?;
-    for _ in 0..n {
-        r.i32()?; // child (frame instance index)
-        r.i32()?; // parentId (instance id)
-        r.i32()?; // nodeId
-        if b >= 53 {
-            r.f32()?; // relativeRotation
+/// Join records (`readJoins`), with the original decoder's
+/// cross-record validation: instance ids in the frame must be
+/// non-negative and unique (checked whether or not any join is
+/// present — the original runs this inside `readJoins` too), a
+/// join's child index and parent id must resolve, an instance
+/// may have at most one join parent, a figure parent must own
+/// the named node, and join parent chains must be acyclic.
+fn read_joins(
+    r: &mut Reader,
+    b: i32,
+    present: bool,
+    instances: &[RawInstance],
+    figures: &[LibFigure],
+) -> Result<Vec<RawJoin>, String> {
+    let mut by_id: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+    for (k, inst) in instances.iter().enumerate() {
+        if inst.id < 0 {
+            return Err(format!("negative instance id {}", inst.id));
+        }
+        if by_id.insert(inst.id, k).is_some() {
+            return Err(format!("instance id {} appears twice in one frame", inst.id));
         }
     }
-    Ok(n)
+    if !present {
+        return Ok(Vec::new());
+    }
+    let n = r.count(MAX_INSTANCES)?;
+    let mut joins = Vec::with_capacity(n);
+    let mut children = std::collections::HashSet::new();
+    for _ in 0..n {
+        let child_i = r.i32()?;
+        let parent_id = r.i32()?;
+        let node_id = r.i32()?;
+        let relative_rotation = if b >= 53 { Some(r.f32()?) } else { None };
+        if child_i < 0 || child_i as usize >= instances.len() {
+            return Err(format!("join child index {child_i} is absent"));
+        }
+        let child = child_i as usize;
+        let Some(&parent) = by_id.get(&parent_id) else {
+            return Err(format!("join parent id {parent_id} is absent"));
+        };
+        if !children.insert(child) {
+            return Err("an instance cannot have multiple join parents".into());
+        }
+        let pi = &instances[parent];
+        if pi.ty == 0
+            && !figures[pi.asset]
+                .scan
+                .nodes
+                .iter()
+                .any(|nd| nd.id == node_id)
+        {
+            return Err(format!("join target node {node_id} is absent"));
+        }
+        joins.push(RawJoin {
+            child,
+            parent,
+            node_id,
+            relative_rotation,
+        });
+    }
+    // A cyclic parent chain is not a valid rig (the original
+    // rejects it rather than letting it hang rendering).
+    let parents: std::collections::HashMap<usize, usize> =
+        joins.iter().map(|j| (j.child, j.parent)).collect();
+    let mut finished = std::collections::HashSet::new();
+    for &k in parents.keys() {
+        let mut visited = std::collections::HashSet::new();
+        let mut x = k;
+        while parents.contains_key(&x) && !finished.contains(&x) {
+            if !visited.insert(x) {
+                return Err("cycle in instance joins".into());
+            }
+            x = parents[&x];
+        }
+        finished.extend(visited);
+    }
+    Ok(joins)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1100,7 +1185,7 @@ fn read_clip_frame(
     for _ in 0..n {
         instances.push(read_instance(r, v, b, true, figures, sprites, expected_clips, layouts)?);
     }
-    let joins = read_joins(r, b, true)?;
+    let joins = read_joins(r, b, true, &instances, figures)?;
     Ok(RawFrame {
         instances,
         joins,
@@ -1276,7 +1361,7 @@ fn read_main_frame(
     for _ in 0..n {
         instances.push(read_instance(r, v, b, false, figures, sprites, clips_len, layouts)?);
     }
-    let joins = read_joins(r, b, v >= 174)?;
+    let joins = read_joins(r, b, v >= 174, &instances, figures)?;
     let mut texts = Vec::new();
     if v >= 150 {
         let nt = r.count(10_000)?;
@@ -1642,6 +1727,124 @@ fn frame_duration(
     (hold + tween).clamp(1.0, 65535.0)
 }
 
+/// World position of the end of scan node `scan_idx` of a
+/// figure instance whose root sits at `root`, evaluated with
+/// the model evaluator — the same point the original adapter
+/// computes as `instance position + layoutFigure(posed).get(id)
+/// .end` (its handle 0 — the figure's root node — lands on the
+/// root itself, since model node 1 has length 0). The instance's
+/// def is baked from its own scale, which equals the timeline
+/// slot def whenever the instance's scale is constant across
+/// frames (the modelled case; §17 of the spec).
+fn node_end(
+    lib: &LibFigure,
+    inst: &RawInstance,
+    container_build: i32,
+    root: [f32; 2],
+    scan_idx: usize,
+) -> [f32; 2] {
+    let def = bake_instance_def(&lib.def, lib.scan.scale, inst.scale);
+    let mut pose = convert_pose(inst, &lib.scan, container_build);
+    pose.root = root;
+    evaluate(&def, &pose)[scan_idx + 1]
+}
+
+/// Resolve one raw frame's joins: for every joined instance
+/// index, the root that supersedes its stored (x, y) this frame.
+///
+/// A join pins its child instance's root to the end of the
+/// named node of its parent instance, evaluated with the
+/// parent's *final* root — join chains resolve parent-first
+/// (the parser has already rejected cycles and duplicate
+/// parents). A parent that is not a figure instance has no
+/// nodes: it pins to its own final root, which is the original
+/// adapter's handle-0 rule (`pi.type === 0 ? handles.get(nodeId)
+/// : 0`, attaching at the parent instance's position). Only
+/// position is inherited: the child's angles are its own stored
+/// pose angles, exactly as the original adapter treats them —
+/// the join record's `relativeRotation` is read but not
+/// applied, by either importer.
+///
+/// Joins that cannot resolve (a parent index or node the
+/// parser's validation should have caught) are skipped, so the
+/// child keeps its stored root — the documented fallback.
+fn resolve_join_roots(
+    frame: &RawFrame,
+    figures: &[LibFigure],
+    container_build: i32,
+) -> HashMap<usize, [f32; 2]> {
+    let mut resolved = HashMap::new();
+    // Parser-validated frames always satisfy these bounds; the
+    // filter keeps hand-built frames (and any future caller)
+    // from panicking here — an unresolvable join simply leaves
+    // the child's stored root in place.
+    let joins: Vec<&RawJoin> = frame
+        .joins
+        .iter()
+        .filter(|j| j.child < frame.instances.len() && j.parent < frame.instances.len())
+        .collect();
+    if joins.is_empty() {
+        return resolved;
+    }
+    let join_of: HashMap<usize, &RawJoin> = joins.iter().map(|j| (j.child, *j)).collect();
+    // Depth of each joined child = its ancestor count in the
+    // join forest; processing in ascending depth order means a
+    // parent's root is final before any child reads it.
+    let mut depth: HashMap<usize, usize> = HashMap::new();
+    for j in &joins {
+        if depth.contains_key(&j.child) {
+            continue;
+        }
+        let mut chain: Vec<usize> = Vec::new();
+        let mut cur = j.child;
+        let base = loop {
+            if let Some(&d) = depth.get(&cur) {
+                break d;
+            }
+            // The parser rejects cycles; this visited set keeps
+            // a hand-built cyclic frame from looping forever.
+            if chain.contains(&cur) {
+                break 0;
+            }
+            match join_of.get(&cur) {
+                Some(pj) => {
+                    chain.push(cur);
+                    cur = pj.parent;
+                }
+                None => {
+                    depth.insert(cur, 0);
+                    break 0;
+                }
+            }
+        };
+        let mut d = base;
+        for node in chain.iter().rev() {
+            d += 1;
+            depth.insert(*node, d);
+        }
+    }
+    let mut order: Vec<&RawJoin> = joins.clone();
+    order.sort_by_key(|j| depth.get(&j.child).copied().unwrap_or(0));
+    let mut roots: Vec<[f32; 2]> = frame.instances.iter().map(|i| [i.x, i.y]).collect();
+    for j in order {
+        let pi = &frame.instances[j.parent];
+        let attach = if pi.ty == 0 {
+            let lib = &figures[pi.asset];
+            match lib.scan.nodes.iter().position(|nd| nd.id == j.node_id) {
+                Some(s) => node_end(lib, pi, container_build, roots[j.parent], s),
+                None => roots[j.parent],
+            }
+        } else {
+            roots[j.parent]
+        };
+        roots[j.child] = attach;
+    }
+    for j in &joins {
+        resolved.insert(j.child, roots[j.child]);
+    }
+    resolved
+}
+
 /// Encode a sprite library image as a PNG asset. The stored
 /// pixels are RGB(A), row-major, top-down — the layout the
 /// original passes straight to its PNG encoder — so this is a
@@ -1770,18 +1973,23 @@ fn text_centre(text: &RawText) -> [f32; 2] {
 /// Sprite content/colour are fixed at first appearance: a sprite
 /// whose resolved image changes later keeps its first image (the
 /// figure slots' hold rule), and a text whose content changes
-/// keeps its first content.
+/// keeps its first content. A sprite instance joined to another
+/// instance this frame keys at its join-resolved root instead
+/// of its stored position (see `resolve_join_roots`).
 fn build_instance_tracks(
     frames_raw: &[RawFrame],
     sprites: &[SpriteLib],
     sprite_asset: &[Option<usize>],
+    figures: &[LibFigure],
+    container_build: i32,
 ) -> (Vec<SpriteInstance>, Vec<TextInstance>) {
     let mut out_sprites: Vec<SpriteInstance> = Vec::new();
     let mut sprite_tracks: HashMap<(i32, i32), usize> = HashMap::new();
     let mut out_texts: Vec<TextInstance> = Vec::new();
     let mut text_tracks: HashMap<i32, usize> = HashMap::new();
     for (fi, frame) in frames_raw.iter().enumerate() {
-        for inst in &frame.instances {
+        let join_roots = resolve_join_roots(frame, figures, container_build);
+        for (ii, inst) in frame.instances.iter().enumerate() {
             if inst.ty != 2 && inst.ty != 3 {
                 continue;
             }
@@ -1791,10 +1999,14 @@ fn build_instance_tracks(
             let Some(asset) = sprite_asset.get(lib_idx).copied().flatten() else {
                 continue;
             };
+            let (kx, ky) = match join_roots.get(&ii) {
+                Some(&[x, y]) => (x, y),
+                None => (inst.x, inst.y),
+            };
             let key = InstanceKey {
                 frame: fi as f32,
-                x: inst.x,
-                y: inst.y,
+                x: kx,
+                y: ky,
                 scale: inst.scale_x.abs(),
                 angle: inst.rotation,
             };
@@ -1878,14 +2090,14 @@ fn convert_clip(
     container_build: i32,
 ) -> Option<(ClipDef, usize, u32)> {
     let first = clip.frames.first()?;
-    if first.joins != 0 {
+    if !first.joins.is_empty() {
         return None;
     }
     let inst0 = clip_figure_instance(first)?;
     let asset = inst0.asset;
     let mut poses = Vec::with_capacity(clip.frames.len());
     for frame in &clip.frames {
-        if frame.joins != 0 {
+        if !frame.joins.is_empty() {
             return None;
         }
         let inst = clip_figure_instance(frame)?;
@@ -1994,22 +2206,36 @@ fn build_timeline(
         .collect();
     for (fi, frame) in frames_raw.iter().enumerate() {
         let mut by_key: HashMap<(i32, i32), &RawInstance> = HashMap::new();
-        for inst in &frame.instances {
+        let mut index_of_key: HashMap<(i32, i32), usize> = HashMap::new();
+        for (ii, inst) in frame.instances.iter().enumerate() {
             by_key.insert((inst.ty, inst.id), inst);
+            index_of_key.insert((inst.ty, inst.id), ii);
         }
+        // Joins bake at assembly: a joined instance's pose root
+        // is superseded by its host's evaluated node end. Held
+        // poses (instance absent this frame) are untouched —
+        // there is no join record for an absent instance.
+        let join_roots = resolve_join_roots(frame, figures, container_build);
         let mut poses: Vec<Pose> = Vec::with_capacity(slots.len());
         for (si, slot) in slots.iter().enumerate() {
-            let pose = match by_key.get(&slot.key) {
+            let (mut pose, present) = match by_key.get(&slot.key) {
                 Some(inst) if slot.clip.is_none() && inst.asset == slot.asset => {
-                    convert_pose(inst, &figures[slot.asset].scan, container_build)
+                    (convert_pose(inst, &figures[slot.asset].scan, container_build), true)
                 }
                 Some(inst) if slot.clip.is_some() => {
                     // Playback replaces this with the clip's pose;
                     // the rest pose at the placement is the fallback.
-                    slot.def.rest_pose([inst.x, inst.y])
+                    (slot.def.rest_pose([inst.x, inst.y]), true)
                 }
-                _ => last_poses[si].clone(),
+                _ => (last_poses[si].clone(), false),
             };
+            if present {
+                if let Some(&ii) = index_of_key.get(&slot.key) {
+                    if let Some(&root) = join_roots.get(&ii) {
+                        pose.root = root;
+                    }
+                }
+            }
             poses.push(pose);
         }
         last_poses = poses.clone();
@@ -2216,7 +2442,8 @@ fn parse_stknds(payload: &[u8]) -> Result<Project, String> {
         build,
     );
     let (assets, sprite_asset) = sprite_assets(&sprites);
-    let (sprites_out, texts_out) = build_instance_tracks(&frames_raw, &sprites, &sprite_asset);
+    let (sprites_out, texts_out) =
+        build_instance_tracks(&frames_raw, &sprites, &sprite_asset, &figures, build);
     let mut project = empty_project(name, fps as f32, auto_tween);
     project.background = background;
     project.figures = figures_out;
@@ -2328,7 +2555,8 @@ fn parse_nodemc(payload: &[u8]) -> Result<Project, String> {
     let (assets, sprite_asset) = sprite_assets(&sprites);
     // A .nodemc's frames are its own timeline, so its sprite
     // instances model directly (clip frames carry no texts).
-    let (sprites_out, texts_out) = build_instance_tracks(&frames_raw, &sprites, &sprite_asset);
+    let (sprites_out, texts_out) =
+        build_instance_tracks(&frames_raw, &sprites, &sprite_asset, &figures, build);
     let mut project = empty_project(name, fps as f32, auto_tween);
     project.figures = figures_out;
     project.frames = frames;
@@ -2798,7 +3026,23 @@ mod tests {
             let pose0 = &project.frames[0].poses[0];
             let pose1 = &project.frames[0].poses[1];
             assert_eq!(pose0.root, [100.0, 100.0], "{key}");
-            assert_eq!(pose1.root, [100.0, 140.0], "{key}");
+            // Instance 1 is JOINED to instance 0 at node 7 — the
+            // original's own decoder reports the join record
+            // {child: 1, parentId: 100, nodeId: 7} in all three
+            // variants (relativeRotation 0 in the 431/117 one) —
+            // so the bake supersedes its stored root (100, 140)
+            // with the host's segment end, the same point as
+            // slot 0's endpoint below. (The original *adapter*
+            // would keep the stored root here: at ~106 units it
+            // counts as an offset attachment. This importer bakes
+            // the pin; see §17 of the spec.)
+            assert!(
+                (pose1.root[0] - want_end[0]).abs() < 0.05
+                    && (pose1.root[1] - want_end[1]).abs() < 0.05,
+                "{key}: joined child root {:?}, want host node end {:?}",
+                pose1.root,
+                want_end
+            );
             let pos = evaluate(&project.figures[0].def, pose0);
             assert!(
                 (pos[2][0] - want_end[0]).abs() < 0.05 && (pos[2][1] - want_end[1]).abs() < 0.05,
@@ -3240,7 +3484,7 @@ mod tests {
         };
         let frame = |instances: Vec<RawInstance>| RawFrame {
             instances,
-            joins: 0,
+            joins: Vec::new(),
             settings: None,
             texts: Vec::new(),
         };
@@ -3265,6 +3509,354 @@ mod tests {
             ..clip
         };
         assert!(convert_clip(&clip2, &figures, 117).is_none());
+    }
+
+    /// One type-0 instance record at 431/117 for the Synthetic
+    /// rig (root pose + segment pose), field order per
+    /// `read_instance`.
+    fn figure_instance_431_117(b: &mut B, id: i32, x: f32, y: f32, seg_angle: f32) {
+        b.i32(0); // type (read when v >= 400 in clip context)
+        b.i32(0); // assetIndex
+        b.i32(id); // header id
+        b.f32(1.0); // header scale (type 0)
+        style_431_117(b);
+        b.f32(x);
+        b.f32(y);
+        b.color(255, 255, 255, 255); // white
+        b.flag(false); // isLocked
+        b.flag(false); // persistent
+        b.flag(true); // visibleInOnionSkin
+        b.flag(false); // tweenColors
+        b.i8(0); // tweenMode (build >= 78)
+        b.flag(false); // scaleJoinedFigures
+        b.flag(false); // pushJoinedFigures
+        b.flag(false); // setStateOfJoins
+        b.i32(0); // joinsState
+        b.flag(false); // useParentFilters
+        b.i32(-1); // lockedNodeId
+        b.f32(0.0); // lockedNodeX
+        b.f32(0.0); // lockedNodeY
+        pose_431_117(b, 0.0, 0.0, 4); // root pose
+        pose_431_117(b, seg_angle, 80.0, 4); // segment pose
+    }
+
+    /// A `.nodemc` whose single frame holds two figure instances
+    /// — a host (id 5) at (300, 200) with its segment at 45
+    /// degrees, and a child (id 6) stored far away at (50, 50) —
+    /// plus one join record pinning the child to the host's
+    /// segment node.
+    fn hand_packed_clip_with_join() -> Vec<u8> {
+        let scan = scan_figure(&modern_nodes(), 0).unwrap();
+        let seg_id = scan.nodes[1].id;
+        assert_eq!(seg_id, 7, "corpus rig segment id");
+        let mut b = B::default();
+        b.i32(431); // version
+        b.i32(117); // build
+        b.string("Clip J");
+        b.i32(1); // frameCount
+        b.i32(1); // figureCount
+        b.i32(0); // spriteCount
+        b.i32(0); // soundCount
+        b.i32(0); // thumbnailCount
+        b.i32(0); // thumbnailWidth
+        b.i32(0); // thumbnailHeight
+        b.i32(24); // fps
+        b.i32(2); // tweenCount
+        b.flag(false); // autoTween
+        b.flag(false); // clipFlag
+        b.i32(7); // nextInstanceId
+        b.string("Synthetic rig");
+        b.raw(&modern_nodes());
+        // One clip frame (readClipFrame).
+        b.f32(1.0); // volume
+        b.f32(0.0); // pan
+        b.f32(1.0); // pitch
+        b.i32(-1); // soundIndex
+        b.i32(2); // instance count
+        figure_instance_431_117(&mut b, 5, 300.0, 200.0, 45.0);
+        figure_instance_431_117(&mut b, 6, 50.0, 50.0, 0.0);
+        b.i32(1); // joins count
+        b.i32(1); // child: frame instance index 1
+        b.i32(5); // parentId: the host's instance id
+        b.i32(seg_id); // nodeId
+        b.f32(0.0); // relativeRotation (build >= 53)
+        b.v
+    }
+
+    #[test]
+    fn nodemc_join_bakes_child_root_to_host_node_end() {
+        let project = import_nodes_animation(&hand_packed_clip_with_join()).unwrap();
+        assert_eq!(project.figures.len(), 2);
+        let host_pose = &project.frames[0].poses[0];
+        let child_pose = &project.frames[0].poses[1];
+        assert_eq!(host_pose.root, [300.0, 200.0]);
+        // The child's stored root (50, 50) is superseded by the
+        // host's segment end: (300, 200) + 80*(cos45, -sin45).
+        assert!(
+            (child_pose.root[0] - 356.5685).abs() < 0.01,
+            "x {}",
+            child_pose.root[0]
+        );
+        assert!(
+            (child_pose.root[1] - 143.4315).abs() < 0.01,
+            "y {}",
+            child_pose.root[1]
+        );
+        // Only the root moved: the child's own segment (stored
+        // angle 0) still extends along +x from the baked root.
+        let pos = evaluate(&project.figures[1].def, child_pose);
+        assert!((pos[2][0] - 436.5685).abs() < 0.01, "x {}", pos[2][0]);
+        assert!((pos[2][1] - 143.4315).abs() < 0.01, "y {}", pos[2][1]);
+    }
+
+    fn raw_fig_inst(id: i32, x: f32, y: f32, seg_angle: f32) -> RawInstance {
+        RawInstance {
+            ty: 0,
+            asset: 0,
+            id,
+            scale: 1.0,
+            x,
+            y,
+            color: 0xFFFFFF,
+            poses: vec![
+                PoseRec {
+                    local_angle: 0.0,
+                    length: 0.0,
+                    scale: 1.0,
+                    use_segment_scale: false,
+                },
+                PoseRec {
+                    local_angle: seg_angle,
+                    length: 80.0,
+                    scale: 1.0,
+                    use_segment_scale: false,
+                },
+            ],
+            scale_x: 1.0,
+            rotation: 0.0,
+            group_frame: 0,
+        }
+    }
+
+    fn raw_rig() -> Vec<LibFigure> {
+        let bytes = modern_nodes();
+        let scan = scan_figure(&bytes, 0).unwrap();
+        let (def, color) = figure_def(&bytes, &scan);
+        vec![LibFigure {
+            name: "Rig".into(),
+            scan,
+            def,
+            color,
+        }]
+    }
+
+    fn join(child: usize, parent: usize, node_id: i32) -> RawJoin {
+        RawJoin {
+            child,
+            parent,
+            node_id,
+            relative_rotation: None,
+        }
+    }
+
+    #[test]
+    fn join_chains_root_joins_and_fallbacks() {
+        let figures = raw_rig();
+        let root_id = figures[0].scan.nodes[0].id;
+        let seg_id = figures[0].scan.nodes[1].id;
+        // A at the origin aiming up (segment end (0, -80)); B
+        // joined to A's segment, aiming +x (its segment end is
+        // B's root + (80, 0)); C joined to B's segment; D joined
+        // to A's root node.
+        let frame = RawFrame {
+            instances: vec![
+                raw_fig_inst(1, 0.0, 0.0, 90.0),
+                raw_fig_inst(2, 500.0, 500.0, 0.0),
+                raw_fig_inst(3, 900.0, 900.0, 0.0),
+                raw_fig_inst(4, 700.0, 700.0, 0.0),
+            ],
+            joins: vec![join(1, 0, seg_id), join(2, 1, seg_id), join(3, 0, root_id)],
+            settings: None,
+            texts: Vec::new(),
+        };
+        let (figs, frames) = build_timeline(
+            &[frame],
+            &[1.0],
+            &figures,
+            &[],
+            &HashMap::new(),
+            &mut Vec::new(),
+            &HashMap::new(),
+            117,
+        );
+        assert_eq!(figs.len(), 4);
+        let roots: Vec<[f32; 2]> = frames[0].poses.iter().map(|p| p.root).collect();
+        assert_eq!(roots[0], [0.0, 0.0]);
+        assert!(
+            roots[1][0].abs() < 0.01 && (roots[1][1] + 80.0).abs() < 0.01,
+            "B root {:?}",
+            roots[1]
+        );
+        assert!(
+            (roots[2][0] - 80.0).abs() < 0.01 && (roots[2][1] + 80.0).abs() < 0.01,
+            "C root {:?}",
+            roots[2]
+        );
+        assert_eq!(roots[3], [0.0, 0.0], "root-node join pins to the host root");
+
+        // Unresolvable join (parent index out of range in a
+        // hand-built frame): the child keeps its stored root.
+        let frame = RawFrame {
+            instances: vec![
+                raw_fig_inst(1, 10.0, 10.0, 0.0),
+                raw_fig_inst(2, 500.0, 500.0, 0.0),
+            ],
+            joins: vec![join(1, 99, seg_id)],
+            settings: None,
+            texts: Vec::new(),
+        };
+        let (_, frames) = build_timeline(
+            &[frame],
+            &[1.0],
+            &figures,
+            &[],
+            &HashMap::new(),
+            &mut Vec::new(),
+            &HashMap::new(),
+            117,
+        );
+        assert_eq!(frames[0].poses[1].root, [500.0, 500.0]);
+    }
+
+    #[test]
+    fn join_to_sprite_parent_and_sprite_child() {
+        let figures = raw_rig();
+        let seg_id = figures[0].scan.nodes[1].id;
+        let sprite_inst = |id: i32, x: f32, y: f32| RawInstance {
+            ty: 2,
+            asset: 0,
+            id,
+            scale: 1.0,
+            x,
+            y,
+            color: 0xFFFFFF,
+            poses: Vec::new(),
+            scale_x: 1.0,
+            rotation: 0.0,
+            group_frame: 0,
+        };
+        // Figure child pinned to a sprite parent: the handle-0
+        // rule (non-figure parents pin to their own position).
+        let frame = RawFrame {
+            instances: vec![sprite_inst(9, 33.0, 44.0), raw_fig_inst(2, 500.0, 500.0, 0.0)],
+            joins: vec![join(1, 0, seg_id)],
+            settings: None,
+            texts: Vec::new(),
+        };
+        let (_, frames) = build_timeline(
+            &[frame],
+            &[1.0],
+            &figures,
+            &[],
+            &HashMap::new(),
+            &mut Vec::new(),
+            &HashMap::new(),
+            117,
+        );
+        assert_eq!(frames[0].poses[0].root, [33.0, 44.0]);
+
+        // Sprite child pinned to a figure host's segment end:
+        // the sprite's key position is the baked root.
+        let sprites = vec![SpriteLib::Image(SpriteImage {
+            name: "Dot".into(),
+            width: 1,
+            height: 1,
+            alpha: false,
+            pixels: vec![255, 0, 0],
+        })];
+        let frame = RawFrame {
+            instances: vec![raw_fig_inst(1, 0.0, 0.0, 90.0), sprite_inst(9, 7.0, 7.0)],
+            joins: vec![join(1, 0, seg_id)],
+            settings: None,
+            texts: Vec::new(),
+        };
+        let (tracks, _) = build_instance_tracks(&[frame], &sprites, &[Some(0)], &figures, 117);
+        assert_eq!(tracks.len(), 1);
+        let k = tracks[0].keys[0];
+        assert!(
+            k.x.abs() < 0.01 && (k.y + 80.0).abs() < 0.01,
+            "sprite key ({}, {})",
+            k.x,
+            k.y
+        );
+    }
+
+    #[test]
+    fn joined_clip_still_does_not_convert() {
+        let figures = raw_rig();
+        let seg_id = figures[0].scan.nodes[1].id;
+        let clip = RawClip {
+            name: "J".into(),
+            fps: 24,
+            tween_count: 2,
+            auto_tween: false,
+            frames: vec![RawFrame {
+                instances: vec![raw_fig_inst(5, 300.0, 200.0, 45.0)],
+                joins: vec![join(0, 0, seg_id)],
+                settings: None,
+                texts: Vec::new(),
+            }],
+        };
+        assert!(convert_clip(&clip, &figures, 117).is_none());
+    }
+
+    #[test]
+    fn read_joins_validates_like_the_original() {
+        let figures = raw_rig();
+        let seg_id = figures[0].scan.nodes[1].id;
+        let insts = vec![
+            raw_fig_inst(5, 0.0, 0.0, 0.0),
+            raw_fig_inst(6, 9.0, 9.0, 0.0),
+        ];
+        let pack = |child: i32, parent: i32, node: i32| {
+            let mut b = B::default();
+            b.i32(1); // joins count
+            b.i32(child);
+            b.i32(parent);
+            b.i32(node);
+            b.f32(0.0); // relativeRotation at build 117
+            b.v
+        };
+        // Happy path: the parent id resolves to an index.
+        let bytes = pack(1, 5, seg_id);
+        let mut r = Reader::new(&bytes);
+        let joins = read_joins(&mut r, 117, true, &insts, &figures).unwrap();
+        assert_eq!(joins.len(), 1);
+        assert_eq!(
+            (joins[0].child, joins[0].parent, joins[0].node_id),
+            (1, 0, seg_id)
+        );
+        // Dangling parent id.
+        let bytes = pack(1, 999, seg_id);
+        let mut r = Reader::new(&bytes);
+        assert!(read_joins(&mut r, 117, true, &insts, &figures).is_err());
+        // Unknown node on a figure parent.
+        let bytes = pack(1, 5, 4242);
+        let mut r = Reader::new(&bytes);
+        assert!(read_joins(&mut r, 117, true, &insts, &figures).is_err());
+        // A cycle: instance 5 joins to 6 and 6 joins to 5.
+        let mut b = B::default();
+        b.i32(2); // joins count
+        b.i32(0);
+        b.i32(6);
+        b.i32(seg_id);
+        b.f32(0.0);
+        b.i32(1);
+        b.i32(5);
+        b.i32(seg_id);
+        b.f32(0.0);
+        let mut r = Reader::new(&b.v);
+        assert!(read_joins(&mut r, 117, true, &insts, &figures).is_err());
     }
 
     #[test]
