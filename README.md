@@ -97,12 +97,15 @@ libx11-dev cmake clang pkg-config`.
 
 ## Not yet ported (the road from here)
 
-The original app is large; this is the working core loop, not the
-whole feature list. Still to come, roughly in the original's shape:
-`.piv` v5 export and Stick Nodes `.nodes` import,
-sprite and text segments, a keyframe graph editor with layer
-folders and property channels, particle clips with beams/auras,
-APNG/JPEG export, an audio editor with playback, raster drawing
-depth (pressure, fill, tiles), 3D figures, localisation, touch,
-and the home screen. See `docs/GAP-ANALYSIS.md` for the full
-measured comparison.
+The original app is large; this port now touches every feature
+family it has except two. Still missing or shallow, honestly:
+true 3D figures, touch UI, sprite and text segment rendering,
+a keyframe graph editor with property channels, audio editing
+depth (playback exists), raster drawing depth (pressure, fill),
+Stick Nodes animation containers (`.nodemc`/`.stknds` — figures
+import today), and localisation beyond EN/BN/ES (the original
+ships 27 languages).
+
+## Licence
+
+GPL-3.0-or-later, matching the original project.
