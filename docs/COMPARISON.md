@@ -80,10 +80,13 @@ By feature family, the port now has **something verified in every
 area the original has** — nothing is entirely missing any more.
 By depth, the honest estimate is that the port covers most of the
 everyday posing/animation workflow at full strength, while the
-original remains deeper in drawing, VFX volume, audio editing
-UI, 3D depth, and the graph editor's visual panel. Wave 5 closed
-the integration list Wave 4 left: 3D and touch are in the editor,
-graph channels apply live with key authoring, text is typeable,
-native dialogs exist, and Stick Nodes sprites/texts are modelled
-and rendered. What remains is depth: the graph panel's visuals,
-audio-edit buttons, Stick Nodes joins, and drawing/VFX volume.
+original remains deeper in drawing volume, VFX volume, audio
+editing UI, and 3D depth. Wave 6 closed the next list: the graph
+panel is visual (add/drag/delete keys, with Undo), audio editing
+operations exist (normalise/trim/split/crossfade), Stick Nodes
+joins are modelled, camera rotation renders, and a full MCP
+server lets an AI agent drive everything end-to-end. What
+remains is depth: drawing and VFX volume, an audio waveform UI,
+nested movieclip editing, 3D beyond bake-to-2D, real multi-touch,
+more export formats (.nodes/.nodemc, .piv v2/v4), per-frame
+bends in the model, and timeline depth.
