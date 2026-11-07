@@ -869,7 +869,7 @@ impl EditorView {
                 .map(|e| e.clip.color)
                 .unwrap_or(0xFFC6_5D);
             col = col.child(crate::ui_clip_row::clip_row(
-                crate::ui_clip_row::ClipRowData {
+                &crate::ui_clip_row::ClipRowData {
                     name: format!(
                         "{} · fig {} node {}",
                         info.kind,
@@ -1245,7 +1245,7 @@ impl EditorView {
             cx,
         );
         crate::ui_panel::panel_shell(
-            crate::ui_panel::PanelSpec::new("Weather").with_subtitle(summary),
+            &crate::ui_panel::PanelSpec::new("Weather").with_subtitle(summary),
             div()
                 .flex_col()
                 .gap(px(6.0))

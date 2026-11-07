@@ -75,8 +75,8 @@ fn channel_row(label: &str, value: u8) -> Div {
 /// bordered so white and near-black stay visible against the
 /// dark panel) beside a column with the hex string in ink and
 /// the three channel rows under it.
-pub fn color_readout(rgb: u32) -> Div {
-    let (r, g, b) = rgb_parts(rgb);
+pub fn color_readout(colour: u32) -> Div {
+    let (r, g, b) = rgb_parts(colour);
     div()
         .flex()
         .items_center()
@@ -86,7 +86,7 @@ pub fn color_readout(rgb: u32) -> Div {
                 .w(px(40.0))
                 .h(px(40.0))
                 .rounded(px(6.0))
-                .bg(rgb(rgb))
+                .bg(rgb(colour))
                 .border_1()
                 .border_color(rgb(C_BORDER)),
         )
@@ -98,7 +98,7 @@ pub fn color_readout(rgb: u32) -> Div {
                     div()
                         .text_size(px(12.0))
                         .text_color(rgb(C_INK))
-                        .child(hex_string(rgb)),
+                        .child(hex_string(colour)),
                 )
                 .child(channel_row("R", r))
                 .child(channel_row("G", g))

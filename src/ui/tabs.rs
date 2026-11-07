@@ -51,7 +51,7 @@ pub fn tab_strip(labels: &[&str], active: usize) -> Vec<Div> {
                 .bg(rgb(tab_bg(is_active)))
                 .text_size(px(12.0))
                 .text_color(rgb(tab_fg(is_active)))
-                .child(*label)
+                .child(label.to_string())
         })
         .collect()
 }
