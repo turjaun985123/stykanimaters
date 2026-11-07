@@ -1,0 +1,87 @@
+name: Build, Test & Binary
+
+# Builds the project, runs the full test suite and publishes ready-to-run
+# Linux binaries as a downloadable artifact. Optimised for speed: the Cargo
+# cache is reused across runs, and the tests run in the release profile so
+# they reuse the build step's artifacts instead of recompiling the world a
+# second time in the debug profile.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch/PR cancels the stale run — no wasted minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental compilation makes CI caches big and mostly unreusable.
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  build-test-package:
+    name: Build, test, package (Linux x86-64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install system libraries (GPUI windowing/audio + ffmpeg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libvulkan-dev \
+            libasound2-dev \
+            libudev-dev \
+            cmake \
+            clang \
+            ffmpeg
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # The main speed-up: caches the Cargo registry, git dependencies and
+      # the target directory, keyed by Cargo.lock. Unchanged crates are
+      # never recompiled on later runs.
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-release
+          cache-on-failure: true
+
+      - name: Build (release, all binaries)
+        run: cargo build --release --locked --bins
+
+      # Release profile on purpose: the test run reuses the exact artifacts
+      # compiled above. (A debug-profile test run would recompile every
+      # dependency from scratch.)
+      - name: Test (release profile — reuses build artifacts)
+        run: cargo test --release --locked
+
+      - name: Prepare the binary package
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p dist
+          cp target/release/stykanimate-rs dist/
+          cp target/release/mcp_server dist/
+          strip dist/stykanimate-rs dist/mcp_server
+          (cd dist && sha256sum stykanimate-rs mcp_server > SHA256SUMS.txt)
+          ls -lh dist
+
+      - name: Upload the binaries as an artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stykanimaters-linux-x86_64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90
