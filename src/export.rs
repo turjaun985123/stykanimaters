@@ -332,7 +332,7 @@ pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
     if !has_audio {
         return ffmpeg_encode(project, path, &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
     }
-    let silent = std::env::temp_dir().join(format!("styk-silent-{}.mp4", std::process::id()));
+    let silent = unique_temp("silent").with_extension("mp4");
     let n = ffmpeg_encode(project, &silent, &["-c:v", "libx264", "-pix_fmt", "yuv420p"])?;
     let muxed = mux_audio(project, &silent, path)?;
     let _ = std::fs::remove_file(&silent);
@@ -344,6 +344,13 @@ pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
 }
 
 /// Encode rendered frames with ffmpeg using the given video args.
+static ENCODE_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn unique_temp(tag: &str) -> std::path::PathBuf {
+    let seq = ENCODE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("styk-{tag}-{}-{seq}", std::process::id()))
+}
+
 fn ffmpeg_encode(
     project: &Project,
     path: &Path,
@@ -352,7 +359,7 @@ fn ffmpeg_encode(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = std::env::temp_dir().join(format!("styk-enc-{}", std::process::id()));
+    let tmp = unique_temp("enc");
     std::fs::create_dir_all(&tmp)?;
     let times = sample_times(project);
     for (k, t) in times.iter().enumerate() {
