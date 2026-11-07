@@ -15,7 +15,7 @@
 
 use gpui::*;
 
-use crate::ui_kit::{C_ACCENT, C_INK, C_MUTED};
+use crate::ui_kit::{C_ACCENT, C_BORDER, C_INK};
 
 /// Loop/selection-range chip background: the dimmed accent the
 /// frame chips use for in-range cells.
@@ -47,13 +47,15 @@ pub enum ChipState {
 /// brightest cell on the bar. In-range frames keep ink text on the
 /// dimmed accent. A keyframe keeps the neutral background but its
 /// number turns accent, so keys stand out without shouting; a
-/// plain frame is neutral with muted text.
+/// plain frame is neutral with ink text (matching the timeline
+/// chips this component replaced in Wave 10 — an earlier draft
+/// used muted text, which dimmed every plain frame).
 pub fn chip_colors(state: ChipState) -> (u32, u32) {
     match state {
         ChipState::Current | ChipState::CurrentKeyframe => (C_ACCENT, C_INK),
         ChipState::InRange => (C_RANGE, C_INK),
         ChipState::Keyframe => (C_CELL, C_ACCENT),
-        ChipState::Normal => (C_CELL, C_MUTED),
+        ChipState::Normal => (C_CELL, C_INK),
     }
 }
 
@@ -90,6 +92,7 @@ pub fn frame_chip(number: usize, state: ChipState) -> Div {
         .py(px(2.0))
         .rounded(px(6.0))
         .bg(rgb(bg))
+        .hover(|s| s.bg(rgb(C_BORDER)))
         .child(
             div()
                 .flex()
@@ -108,8 +111,8 @@ mod tests {
     use super::{chip_colors, ChipState};
 
     #[test]
-    fn normal_chip_is_neutral_with_muted_text() {
-        assert_eq!(chip_colors(ChipState::Normal), (0x2C313A, 0x9AA3B2));
+    fn normal_chip_is_neutral_with_ink_text() {
+        assert_eq!(chip_colors(ChipState::Normal), (0x2C313A, 0xE8E8EC));
     }
 
     #[test]

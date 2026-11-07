@@ -225,6 +225,7 @@ fn tool_get_state() -> Tool {
                 crate::vfx::WeatherKind::Rain => "rain",
                 crate::vfx::WeatherKind::Snow => "snow",
                 crate::vfx::WeatherKind::Fireflies => "fireflies",
+                crate::vfx::WeatherKind::Fog => "fog",
             });
             Ok(json!({
                 "project": project.name,

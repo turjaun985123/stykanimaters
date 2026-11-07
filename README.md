@@ -65,7 +65,8 @@ present and fall back to a folder-based flow when neither exists.
 - **Posing** — forward kinematics for the whole rig; dragging a
   hand or foot runs two-bone IK (unreachable-target clamping,
   per-limb bend direction); dragging any other joint rotates its
-  segment (FK aim); dragging the hips moves the figure.
+  segment (FK aim); dragging the hips moves the figure; a mirror
+  op flips the current pose (the 3D session mirrors poses too).
 - **Editor UI** (`src/app.rs`, `src/ui_kit.rs`, `src/ui_*.rs`) —
   redesigned chrome: a slim **app bar** (brand, File/Edit, panel
   toggles, frame/FPS chips) over labelled **tool-group panels**
@@ -81,7 +82,8 @@ present and fall back to a folder-based flow when neither exists.
   block shift, range reverse, loop ranges, motion-path display
   with path smoothing, onion skin 1–3 in both directions, and a
   **graph engine** (Hermite channels for root X/Y, joint angles
-  and segment lengths, with shortest-path angle wrap) applied live
+  and segment lengths, with shortest-path angle wrap and
+  Catmull-Rom auto-tangents) applied live
   and editable in a visual graph panel.
 - **Camera** — per-frame keys (centre, zoom **and rotation**) with
   interpolation; camera mode pans by dragging; a follow target can
@@ -94,24 +96,27 @@ present and fall back to a folder-based flow when neither exists.
   and text segments (built-in 3×5 bitmap font for text), figure
   presets (humanoid, quadruped, mini), and a local figure library
   (`./library/*.json` plus built-ins).
-- **Drawing** — Draw mode with a brush library (preset brushes,
-  brush/eraser tools), per-point pressure widths, smoothing, nib
+- **Drawing** — Draw mode with an expanded brush library (preset
+  brushes, brush/eraser tools), per-point pressure widths, smoothing, nib
   shapes, serpentine fill and erasers; strokes render in the
   editor and all exports.
-- **VFX** (`src/vfx.rs`, `src/fx_edit.rs`) — 14 deterministic,
+- **VFX** (`src/vfx.rs`, `src/fx_edit.rs`) — 21 deterministic,
   seeded clip kinds (Burst, Sparkle, Smoke, Beam, Aura, Trail,
   Confetti, ShockRing, Ember, Fountain, Orbit, Lightning,
-  Bubbles, Leaves) anchored to joints, with an FX timeline engine
+  Bubbles, Leaves, Meteor, Petals, Splash, Spiral, Fireworks,
+  Aurora, Comet) anchored to joints, with an FX timeline engine
   (list/move/resize/duplicate/delete) in the GUI and over MCP;
-  plus continuous **weather** (rain, snow, fireflies) rendered in
-  the canvas and the rasterizer.
-- **Audio** — clips placed at frames, muxed into MP4 at the right
-  offset, played back synced to the playhead (via `ffplay`); a
-  waveform panel with per-clip normalise / split / crossfade and
-  a real mixdown export.
+  plus continuous **weather** (rain, snow, fireflies, fog)
+  rendered in the canvas and the rasterizer.
+- **Audio** — clips placed at frames; playback mixes **all**
+  clips audible at the playhead, synced via `ffplay`, and
+  MP4/WebM exports mix every clip into the soundtrack at its
+  frame offset; a waveform panel with per-clip normalise /
+  split / crossfade and a real mixdown export.
 - **Movieclips** — capture a figure's timeline as a clip, edit it
-  in a dedicated clip session panel; clip figures loop their own
-  animation inside any project.
+  in a dedicated clip session panel; clip figures play their own
+  animation inside any project with a selectable loop mode —
+  **Loop**, **PingPong** or **Once**.
 - **3D mode** (`src/fig3d.rs`) — a real 3D FK rig with Euler
   per-joint rotation, orbit camera and perspective projection,
   living in an editing session: pose A/B, animated bakes into
@@ -138,12 +143,13 @@ present and fall back to a folder-based flow when neither exists.
 ## Drive it from an AI agent (MCP)
 
 The `mcp_server` binary speaks MCP (JSON-RPC 2.0 over stdio,
-protocol `2024-11-05`) and exposes **51 tools**: project/figure/
+protocol `2024-11-05`) and exposes **54 tools**: project/figure/
 pose editing, camera (with rotation), graph keys, FX clip
 management, weather, audio, drawing, 3D sessions, movieclips,
-per-frame bends, import/export in every supported format, and
+per-frame bends, pose mirroring, graph tangent smoothing,
+import/export in every supported format, and
 rendering — including `render_frame_base64`, so an agent can see
-the frame it just made. Full tool catalogue and the client
+the frame it just made, and `render_contact_sheet`. Full tool catalogue and the client
 configuration snippet live in [docs/MCP.md](docs/MCP.md).
 
 ## Architecture notes

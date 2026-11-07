@@ -174,6 +174,7 @@ pub fn particles_at(project: &Project, f: f32) -> Vec<(V2, f32, [u8; 3], f32)> {
     out
 }
 
+
 /// Rotate a stage-space offset by the camera rotation.
 ///
 /// Convention (wave 6): `angle_deg` is the *camera* rotation in
@@ -416,6 +417,10 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
         .into_iter()
         .map(|(p, r, c, a)| (view(p), r * zoom * ss as f32, c, a))
         .collect();
+    // Fog bands (wave 10): (centre, rx, ry, peak alpha) in screen
+    // space, filled by the weather block below when the weather
+    // kind is Fog. Blended in the pixel pass at the same layer as
+    // the weather particles — over the figures, like rain and snow.
     for entry in &project.fx_clips {
         if entry.figure < project.figures.len() {
             let fig = &project.figures[entry.figure];
@@ -683,9 +688,8 @@ pub fn export_gif(project: &Project, path: &Path) -> std::io::Result<usize> {
 pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
     let has_audio = project
         .audio
-        .first()
-        .map(|c| std::path::Path::new(&c.path).exists())
-        .unwrap_or(false);
+        .iter()
+        .any(|c| std::path::Path::new(&c.path).exists());
     if !has_audio {
         return ffmpeg_encode(project, path, &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
     }
@@ -752,40 +756,245 @@ pub fn export_webm(project: &Project, path: &Path) -> std::io::Result<usize> {
     ffmpeg_encode(project, path, &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"])
 }
 
-/// Mux the project's first audio clip (if its file exists) into an
-/// already-encoded silent MP4, offset by its start frame.
-pub fn mux_audio(project: &Project, video: &Path, out: &Path) -> std::io::Result<bool> {
-    let Some(clip) = project.audio.first() else {
-        return Ok(false);
-    };
-    if !std::path::Path::new(&clip.path).exists() {
-        return Ok(false);
+/// What an export should do with the project's audio, decided
+/// purely from the clip list, file existence and the project fps.
+#[derive(Clone, Debug, PartialEq)]
+enum MuxPlan {
+    /// No clip has an existing file: export stays silent.
+    None,
+    /// Exactly one audible clip: mux its file directly, offset by
+    /// ffmpeg like the original single-clip path.
+    Single { path: String, start_secs: f32 },
+    /// Two or more audible clips: mix them into one WAV first.
+    /// `(path, start_secs)` pairs sorted by start offset.
+    Mixed(Vec<(String, f32)>),
+}
+
+/// Decide the mux plan for a project: clips whose files are missing
+/// are skipped, start offsets are `start_frame / fps` seconds, and
+/// the surviving clips are sorted by start offset.
+fn mux_plan(project: &Project) -> MuxPlan {
+    let fps = project.fps.max(1.0);
+    let mut audible: Vec<(String, f32)> = project
+        .audio
+        .iter()
+        .filter(|clip| std::path::Path::new(&clip.path).exists())
+        .map(|clip| (clip.path.clone(), clip.start_frame as f32 / fps))
+        .collect();
+    audible.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    match audible.len() {
+        0 => MuxPlan::None,
+        1 => {
+            let (path, start_secs) = audible.into_iter().next().unwrap();
+            MuxPlan::Single { path, start_secs }
+        }
+        _ => MuxPlan::Mixed(audible),
     }
-    let offset = clip.start_frame as f32 / project.fps.max(1.0);
-    let status = std::process::Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-i",
-            video.to_str().unwrap_or(""),
-            "-itsoffset",
-            &format!("{offset:.3}"),
-            "-i",
-            &clip.path,
-            "-map",
-            "0:v",
-            "-map",
-            "1:a",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-shortest",
-            out.to_str().unwrap_or(""),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    Ok(status.success())
+}
+
+/// Mux the project's audio into an already-encoded silent MP4.
+/// With exactly one audible clip its file is passed to ffmpeg
+/// directly, offset by its start frame (`-itsoffset`). With two or
+/// more, every clip is first mixed into one WAV with
+/// `audio_edit::mix` (each clip placed at its start-frame offset)
+/// and the mix is muxed instead; the mixed WAV starts at t=0
+/// because the offsets are baked into it, so that ffmpeg call has
+/// no `-itsoffset`. Clips whose files are missing are skipped; with
+/// no audible clip at all this returns `Ok(false)`.
+pub fn mux_audio(project: &Project, video: &Path, out: &Path) -> std::io::Result<bool> {
+    match mux_plan(project) {
+        MuxPlan::None => Ok(false),
+        MuxPlan::Single { path, start_secs } => {
+            let status = std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-i",
+                    video.to_str().unwrap_or(""),
+                    "-itsoffset",
+                    &format!("{start_secs:.3}"),
+                    "-i",
+                    &path,
+                    "-map",
+                    "0:v",
+                    "-map",
+                    "1:a",
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    "-shortest",
+                    out.to_str().unwrap_or(""),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()?;
+            Ok(status.success())
+        }
+        MuxPlan::Mixed(clips) => {
+            let mix_clips: Vec<crate::audio_edit::MixClip> = clips
+                .iter()
+                .map(|(path, start_secs)| crate::audio_edit::MixClip {
+                    path: path.clone(),
+                    start_secs: *start_secs,
+                    gain: 1.0,
+                    fade_in: 0.0,
+                    fade_out: 0.0,
+                })
+                .collect();
+            let mixed = match crate::audio_edit::mix(&mix_clips) {
+                Ok(m) => m,
+                Err(_) => {
+                    // The mix engine reads WAV only: with a non-WAV
+                    // clip among the audible ones, fall back to the
+                    // earliest audible clip alone (the pre-Wave-10
+                    // behaviour) instead of failing the export.
+                    let (path, start_secs) = &clips[0];
+                    let status = std::process::Command::new("ffmpeg")
+                        .args([
+                            "-y",
+                            "-i",
+                            video.to_str().unwrap_or(""),
+                            "-itsoffset",
+                            &format!("{start_secs:.3}"),
+                            "-i",
+                            path,
+                            "-map",
+                            "0:v",
+                            "-map",
+                            "1:a",
+                            "-c:v",
+                            "copy",
+                            "-c:a",
+                            "aac",
+                            "-shortest",
+                            out.to_str().unwrap_or(""),
+                        ])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()?;
+                    return Ok(status.success());
+                }
+            };
+            let tmp = unique_temp("mixdown").with_extension("wav");
+            std::fs::write(&tmp, crate::audio_edit::write_wav(&mixed))?;
+            // No `-itsoffset` on this call: the mix starts at t=0
+            // because each clip's start offset is already baked
+            // into the mixed WAV.
+            let status = std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-i",
+                    video.to_str().unwrap_or(""),
+                    "-i",
+                    tmp.to_str().unwrap_or(""),
+                    "-map",
+                    "0:v",
+                    "-map",
+                    "1:a",
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    "-shortest",
+                    out.to_str().unwrap_or(""),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            let _ = std::fs::remove_file(&tmp);
+            Ok(status?.success())
+        }
+    }
+}
+
+#[cfg(test)]
+mod mux_tests {
+    use super::{mux_plan, MuxPlan};
+    use crate::model::{AudioClip, Project};
+
+    /// Create an empty uniquely-named temp file (the plan decision
+    /// only checks existence) and return its path as a String.
+    fn temp_audio(tag: &str) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "styk-mux-{tag}-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"").unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// A demo project at 10 fps carrying exactly the given
+    /// `(path, start_frame)` audio clips.
+    fn project_with(clips: Vec<(&str, usize)>) -> Project {
+        let mut project = Project::new_demo();
+        project.fps = 10.0;
+        project.audio = clips
+            .into_iter()
+            .map(|(path, start_frame)| AudioClip {
+                path: path.to_string(),
+                start_frame,
+            })
+            .collect();
+        project
+    }
+
+    #[test]
+    fn no_clips_is_none_plan() {
+        let project = project_with(vec![]);
+        assert_eq!(mux_plan(&project), MuxPlan::None);
+    }
+
+    #[test]
+    fn all_files_missing_is_none_plan() {
+        let project = project_with(vec![
+            ("/nonexistent/styk-mux-a.wav", 0),
+            ("/nonexistent/styk-mux-b.wav", 25),
+        ]);
+        assert_eq!(mux_plan(&project), MuxPlan::None);
+    }
+
+    #[test]
+    fn single_audible_clip_is_flagged_single() {
+        let real = temp_audio("single");
+        // A missing first clip is skipped, not a silent export.
+        let project = project_with(vec![
+            ("/nonexistent/styk-mux-gone.wav", 0),
+            (real.as_str(), 25),
+        ]);
+        assert_eq!(
+            mux_plan(&project),
+            MuxPlan::Single {
+                path: real.clone(),
+                start_secs: 2.5,
+            }
+        );
+        let _ = std::fs::remove_file(&real);
+    }
+
+    #[test]
+    fn multiple_clips_are_mixed_sorted_by_start() {
+        let a = temp_audio("multi-a");
+        let b = temp_audio("multi-b");
+        let c = temp_audio("multi-c");
+        // Given out of order, with one missing file in between.
+        let project = project_with(vec![
+            (a.as_str(), 25),
+            ("/nonexistent/styk-mux-gone.wav", 10),
+            (b.as_str(), 0),
+            (c.as_str(), 5),
+        ]);
+        assert_eq!(
+            mux_plan(&project),
+            MuxPlan::Mixed(vec![
+                (b.clone(), 0.0),
+                (c.clone(), 0.5),
+                (a.clone(), 2.5),
+            ])
+        );
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+        let _ = std::fs::remove_file(&c);
+    }
 }
 
 /// Export all authored frames as one spritesheet PNG (grid layout).
@@ -1511,3 +1720,5 @@ mod trail_tests {
         );
     }
 }
+
+#[cfg(test)]

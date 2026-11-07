@@ -525,6 +525,112 @@ pub fn lerp_pose(a: &Pose3, b: &Pose3, t: f32) -> Pose3 {
     }
 }
 
+/// How close two offsets must be to count as mirror images when
+/// [`mirror_pose`] pairs up nodes (see [`mirror_partners`]).
+const MIRROR_OFFSET_EPS: f32 = 1e-4;
+
+fn v_approx(a: [f32; 3], b: [f32; 3], eps: f32) -> bool {
+    (a[0] - b[0]).abs() < eps && (a[1] - b[1]).abs() < eps && (a[2] - b[2]).abs() < eps
+}
+
+/// The mirror partner of every node across the YZ plane: node `j`
+/// partners node `i` when `j`'s offset is `i`'s offset with X
+/// negated **and** `j`'s parent is the partner of `i`'s parent, so
+/// whole subtrees swap sides consistently. In [`humanoid3`] the
+/// `.L` chains trade places with the `.R` chains while the spine —
+/// whose offsets all have X = 0 under self-partnered parents —
+/// partners itself. Nodes are matched greedily in node order
+/// (parents precede children, per the module rules); a node with no
+/// geometric partner partners itself.
+fn mirror_partners(fig: &Figure3) -> Vec<usize> {
+    let n = fig.nodes.len();
+    let mut partner: Vec<Option<usize>> = vec![None; n];
+    for i in 0..n {
+        if partner[i].is_some() {
+            continue;
+        }
+        let want = [
+            -fig.nodes[i].offset[0],
+            fig.nodes[i].offset[1],
+            fig.nodes[i].offset[2],
+        ];
+        let mut found = None;
+        for j in i..n {
+            if partner[j].is_some() {
+                continue;
+            }
+            let parents_match = match (fig.nodes[i].parent, fig.nodes[j].parent) {
+                (None, None) => true,
+                (Some(pi), Some(pj)) => partner[pi] == Some(pj),
+                _ => false,
+            };
+            if parents_match && v_approx(fig.nodes[j].offset, want, MIRROR_OFFSET_EPS) {
+                found = Some(j);
+                break;
+            }
+        }
+        let j = found.unwrap_or(i);
+        partner[i] = Some(j);
+        partner[j] = Some(i);
+    }
+    partner
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| p.unwrap_or(i))
+        .collect()
+}
+
+/// Mirror a pose across the YZ plane — the figure's left and right
+/// swap sides. The root's X is negated, and every joint rotation is
+/// replaced by its mirror image, with left/right partner joints
+/// exchanging rotations (see [`mirror_partners`]).
+///
+/// **Why both steps are needed.** Write the mirror as the matrix
+/// `M = diag(−1, 1, 1)`. A rotation's mirror image is the
+/// conjugation `M·R·M`; for this module's Euler order
+/// (`R = Rz·Ry·Rx`) that works out to negating the Y and Z angles
+/// only — `M` commutes with `Rx` (the YZ plane is `Rx`'s own
+/// plane) and flips the sense of `Ry` and `Rz` — so each joint
+/// maps `(x, y, z) → (x, −y, −z)`. But conjugating the rotations
+/// alone does **not** mirror the evaluated figure: a node's world
+/// position is built from its ancestors' rotations applied to its
+/// **offset**, and offsets carry X too (the humanoid's left forearm
+/// hangs at X = −24 in rest, the right at +24). With rotations
+/// also swapped between partner nodes, induction over the tree
+/// gives the exact result, for every node `i`:
+/// `evaluate3(fig, &mirror_pose(fig, pose))[partner(i)]` is
+/// `evaluate3(fig, pose)[i]` with X negated — because
+/// `W'·offset' = (M·W·M)·(M·offset) = M·(W·offset)` along the
+/// whole chain. Under [`default_camera`] (yaw/pitch 0) the
+/// projected points are therefore the originals flipped about the
+/// stage's vertical centre line; the tests below pin both facts
+/// against [`evaluate3`] and [`project`].
+///
+/// Nodes with no geometric mirror partner keep their own
+/// (conjugated) rotation, so below such a node an asymmetric
+/// figure's mirror is best-effort rather than exact. Angles are
+/// negated, never normalised, so mirroring is an exact involution:
+/// `mirror_pose(fig, &mirror_pose(fig, pose)) == pose`.
+pub fn mirror_pose(figure: &Figure3, pose: &Pose3) -> Pose3 {
+    let partners = mirror_partners(figure);
+    let n = pose.rotations.len().max(figure.nodes.len());
+    let mut rotations = vec![[0.0; 3]; n];
+    for (i, &j) in partners.iter().enumerate() {
+        let r = pose.rotations.get(i).copied().unwrap_or([0.0; 3]);
+        rotations[j] = [r[0], -r[1], -r[2]];
+    }
+    // Entries beyond the node list carry no partner meaning;
+    // conjugate them in place so a second mirror still restores
+    // them exactly.
+    for (i, r) in pose.rotations.iter().enumerate().skip(figure.nodes.len()) {
+        rotations[i] = [r[0], -r[1], -r[2]];
+    }
+    Pose3 {
+        root: [-pose.root[0], pose.root[1], pose.root[2]],
+        rotations,
+    }
+}
+
 /// Bake an animated range: `frames` steps interpolating `from` →
 /// `to` (see [`lerp_pose`]), each baked with [`bake_nodes`] on the
 /// given stage. Step `i` uses `t = i / (frames − 1)`, so the first
@@ -1055,5 +1161,191 @@ mod tests {
         assert_eq!(loaded_fig, fig);
         assert_eq!(loaded_pose, pose);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::{
+        default_camera, evaluate3, humanoid3, mirror_partners, mirror_pose, project, Figure3,
+        Node3, Pose3,
+    };
+
+    #[test]
+    fn mirror_partners_humanoid_swaps_left_right_chains() {
+        // Spine (0, 1, 2) partners itself; the .L chains (3-5, 9-11)
+        // trade places with the .R chains (6-8, 12-14), subtree by
+        // subtree: shin.L (10) partners shin.R (13), not itself,
+        // because its parent thigh.L partners thigh.R.
+        let fig = humanoid3();
+        assert_eq!(
+            mirror_partners(&fig),
+            vec![0, 1, 2, 6, 7, 8, 3, 4, 5, 12, 13, 14, 9, 10, 11]
+        );
+    }
+
+    #[test]
+    fn mirror_partners_asymmetric_node_falls_back_to_itself() {
+        // The child hangs at +X with no -X counterpart anywhere:
+        // it partners itself (documented best-effort fallback).
+        let fig = Figure3 {
+            name: "lopsided".into(),
+            color: 0,
+            nodes: vec![
+                Node3 { name: "root".into(), parent: None, offset: [0.0; 3], head: false },
+                Node3 { name: "only".into(), parent: Some(0), offset: [10.0, 5.0, 0.0], head: false },
+            ],
+        };
+        assert_eq!(mirror_partners(&fig), vec![0, 1]);
+        // Its rotation is still conjugated in place, and the root
+        // X still mirrors.
+        let mut pose = Pose3::rest(&fig, [7.0, 0.0, 0.0]);
+        pose.rotations[1] = [10.0, 20.0, 30.0];
+        let m = mirror_pose(&fig, &pose);
+        assert_eq!(m.root, [-7.0, 0.0, 0.0]);
+        assert_eq!(m.rotations[1], [10.0, -20.0, -30.0]);
+    }
+
+    #[test]
+    fn mirror_pose_swaps_and_conjugates_rotations() {
+        let fig = humanoid3();
+        let mut pose = Pose3::rest(&fig, [12.0, 0.0, 0.0]);
+        pose.rotations[1] = [5.0, -15.0, 25.0]; // chest: self-partnered
+        pose.rotations[3] = [10.0, 20.0, 30.0]; // upperArm.L
+        let m = mirror_pose(&fig, &pose);
+        assert_eq!(m.root, [-12.0, 0.0, 0.0]);
+        // The chest keeps its slot but its Y/Z angles negate.
+        assert_eq!(m.rotations[1], [5.0, 15.0, -25.0]);
+        // upperArm.L's rotation lands, conjugated, on upperArm.R;
+        // upperArm.L receives upperArm.R's rest rotation (identity).
+        assert_eq!(m.rotations[6], [10.0, -20.0, -30.0]);
+        assert_eq!(m.rotations[3], [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn mirror_pose_twice_restores_the_pose_exactly() {
+        let fig = humanoid3();
+        let mut pose = Pose3::rest(&fig, [30.0, 10.0, -20.0]);
+        pose.rotations[1] = [15.0, -40.0, 120.0];
+        pose.rotations[3] = [0.0, 25.0, -60.0];
+        pose.rotations[6] = [-80.0, 10.0, 5.0];
+        pose.rotations[13] = [45.0, 0.0, 0.0];
+        let twice = mirror_pose(&fig, &mirror_pose(&fig, &pose));
+        assert_eq!(twice, pose);
+    }
+
+    #[test]
+    fn mirrored_pose_projects_to_x_flipped_original() {
+        // The brief's verification: under the default camera, the
+        // mirrored pose's projection is the original projection
+        // flipped about the stage's vertical centre line — with
+        // each node compared against its mirror partner's point.
+        let fig = humanoid3();
+        let mut pose = Pose3::rest(&fig, [25.0, 5.0, -10.0]);
+        pose.rotations[1] = [10.0, 20.0, 5.0]; // chest twists
+        pose.rotations[2] = [0.0, -15.0, 0.0]; // head turns
+        pose.rotations[3] = [0.0, 0.0, -60.0]; // upperArm.L raises
+        pose.rotations[7] = [25.0, 0.0, 0.0]; // foreArm.R bends
+        pose.rotations[10] = [30.0, 0.0, 0.0]; // shin.L bends
+        let stage = [960.0, 720.0];
+        let cam = default_camera();
+        let orig = project(&evaluate3(&fig, &pose), &cam, stage);
+        let mir = project(&evaluate3(&fig, &mirror_pose(&fig, &pose)), &cam, stage);
+        let partners = mirror_partners(&fig);
+        for i in 0..fig.nodes.len() {
+            let o = orig[partners[i]];
+            let m = mir[i];
+            assert!(
+                (m.xy[0] - (stage[0] - o.xy[0])).abs() < 0.01,
+                "node {i} screen x: {} vs flipped {}",
+                m.xy[0],
+                stage[0] - o.xy[0]
+            );
+            assert!(
+                (m.xy[1] - o.xy[1]).abs() < 0.01,
+                "node {i} screen y: {} vs {}",
+                m.xy[1],
+                o.xy[1]
+            );
+            assert!(
+                (m.depth - o.depth).abs() < 0.01,
+                "node {i} depth: {} vs {}",
+                m.depth,
+                o.depth
+            );
+            assert!(
+                (m.scale - o.scale).abs() < 0.001,
+                "node {i} scale: {} vs {}",
+                m.scale,
+                o.scale
+            );
+        }
+    }
+
+    #[test]
+    fn mirrored_world_positions_are_x_negated_partners() {
+        // The 3D fact underneath the projection test: evaluated
+        // node i of the mirrored pose sits at the X-negation of
+        // node partner(i) of the original pose.
+        let fig = humanoid3();
+        let mut pose = Pose3::rest(&fig, [-15.0, 0.0, 30.0]);
+        pose.rotations[1] = [-20.0, 35.0, 10.0];
+        pose.rotations[4] = [0.0, 0.0, -45.0]; // foreArm.L
+        pose.rotations[12] = [15.0, -10.0, 0.0]; // thigh.R
+        let before = evaluate3(&fig, &pose);
+        let after = evaluate3(&fig, &mirror_pose(&fig, &pose));
+        let partners = mirror_partners(&fig);
+        for i in 0..fig.nodes.len() {
+            let b = before[partners[i]];
+            let a = after[i];
+            assert!(
+                (a[0] + b[0]).abs() < 0.01
+                    && (a[1] - b[1]).abs() < 0.01
+                    && (a[2] - b[2]).abs() < 0.01,
+                "node {i}: mirrored {a:?} vs partner original {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn raised_left_arm_mirrors_to_raised_right_arm() {
+        let fig = humanoid3();
+        let rest = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        let rest_pos = evaluate3(&fig, &rest);
+        let mut pose = rest.clone();
+        // Rz(-60) on upperArm.L swings the sideways-pointing arm
+        // upward: the left hand ends ~40 units above rest height.
+        pose.rotations[3] = [0.0, 0.0, -60.0];
+        let before = evaluate3(&fig, &pose);
+        assert!(
+            before[5][1] - rest_pos[5][1] > 30.0,
+            "left hand raised: {:?} vs rest {:?}",
+            before[5],
+            rest_pos[5]
+        );
+        let after = evaluate3(&fig, &mirror_pose(&fig, &pose));
+        // Now the RIGHT hand (node 8) is the raised one, at the
+        // exact mirror image of the left hand's raised position...
+        assert!(
+            after[8][1] - rest_pos[8][1] > 30.0,
+            "right hand raised: {:?} vs rest {:?}",
+            after[8],
+            rest_pos[8]
+        );
+        assert!(
+            (after[8][0] + before[5][0]).abs() < 0.01
+                && (after[8][1] - before[5][1]).abs() < 0.01
+                && (after[8][2] - before[5][2]).abs() < 0.01,
+            "right hand {a:?} vs mirrored left hand {b:?}",
+            a = after[8],
+            b = before[5]
+        );
+        // ...and the left hand is back at rest.
+        assert!(
+            (after[5][1] - rest_pos[5][1]).abs() < 0.01,
+            "left hand back at rest: {:?} vs {:?}",
+            after[5],
+            rest_pos[5]
+        );
     }
 }

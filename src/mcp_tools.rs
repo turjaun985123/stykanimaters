@@ -364,6 +364,7 @@ fn tool_get_project_stats(core: &mut EditorCore, _args: &Value) -> Result<Value,
         WeatherKind::Rain => "rain",
         WeatherKind::Snow => "snow",
         WeatherKind::Fireflies => "fireflies",
+        WeatherKind::Fog => "fog",
     });
     Ok(json!({
         "ok": true,
@@ -703,8 +704,11 @@ fn parse_clip_kind(name: &str) -> Result<ClipKind, String> {
         "petals" => Ok(ClipKind::Petals),
         "splash" => Ok(ClipKind::Splash),
         "spiral" => Ok(ClipKind::Spiral),
+        "fireworks" => Ok(ClipKind::Fireworks),
+        "aurora" => Ok(ClipKind::Aurora),
+        "comet" => Ok(ClipKind::Comet),
         other => Err(format!(
-            "unknown fx kind '{other}' (expected burst, sparkle, smoke, beam, aura, trail, confetti, shock_ring, ember, fountain, orbit, lightning, bubbles, leaves, meteor, petals, splash or spiral)"
+            "unknown fx kind '{other}' (expected burst, sparkle, smoke, beam, aura, trail, confetti, shock_ring, ember, fountain, orbit, lightning, bubbles, leaves, meteor, petals, splash, spiral, fireworks, aurora or comet)"
         )),
     }
 }
@@ -827,9 +831,10 @@ fn tool_set_weather(core: &mut EditorCore, args: &Value) -> Result<Value, String
         "rain" => WeatherKind::Rain,
         "snow" => WeatherKind::Snow,
         "fireflies" => WeatherKind::Fireflies,
+        "fog" => WeatherKind::Fog,
         other => {
             return Err(format!(
-                "unknown weather kind '{other}' (expected \"rain\", \"snow\", \"fireflies\" or \"off\")"
+                "unknown weather kind '{other}' (expected \"rain\", \"snow\", \"fireflies\", \"fog\" or \"off\")"
             ))
         }
     };
@@ -940,6 +945,16 @@ fn tool_undo(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
 
 fn tool_redo(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
     core.redo();
+    Ok(json!({ "ok": true, "status": core.status, "project": project_summary(core) }))
+}
+
+fn tool_mirror_pose(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    core.mirror_selected_pose();
+    Ok(json!({ "ok": true, "status": core.status, "project": project_summary(core) }))
+}
+
+fn tool_smooth_graph_tangents(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    core.smooth_graph_tangents();
     Ok(json!({ "ok": true, "status": core.status, "project": project_summary(core) }))
 }
 
@@ -1381,6 +1396,12 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_set_pose,
         },
         Tool {
+            name: "mirror_pose",
+            description: "Mirror the selected figure's pose in the current frame (left-right flip around its root). One undo step.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_mirror_pose,
+        },
+        Tool {
             name: "set_node",
             description: "Edit a figure definition's segment: length, thickness, colour override, or shape (\"line\" | \"circle\" | \"polygon\" | side count 3-12).",
             schema: obj_schema(
@@ -1444,7 +1465,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 json!({
                     "figure": { "type": "integer" },
                     "node": { "type": "integer" },
-                    "kind": { "type": "string", "enum": ["burst", "sparkle", "smoke", "beam", "aura", "trail", "confetti", "shock_ring", "ember", "fountain", "orbit", "lightning", "bubbles", "leaves", "meteor", "petals", "splash", "spiral"] },
+                    "kind": { "type": "string", "enum": ["burst", "sparkle", "smoke", "beam", "aura", "trail", "confetti", "shock_ring", "ember", "fountain", "orbit", "lightning", "bubbles", "leaves", "meteor", "petals", "splash", "spiral", "fireworks", "aurora", "comet"] },
                     "start": { "type": "number" },
                     "duration": { "type": "number" },
                     "color": { "type": "integer", "description": "0xRRGGBB (default: figure colour)" },
@@ -1511,7 +1532,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             description: "Set continuous weather over the whole timeline, or turn it off.",
             schema: obj_schema(
                 json!({
-                    "kind": { "type": "string", "enum": ["rain", "snow", "fireflies", "off"] },
+                    "kind": { "type": "string", "enum": ["rain", "snow", "fireflies", "fog", "off"] },
                     "amount": { "type": "number", "description": "Particles per frame, 0-200" },
                     "wind": { "type": "number", "description": "Horizontal drift per second" }
                 }),
@@ -1544,6 +1565,12 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["figure", "target", "frame", "value"],
             ),
             handler: tool_graph_key,
+        },
+        Tool {
+            name: "smooth_graph_tangents",
+            description: "Smooth the tangents of every graph channel key (auto-tangent pass over all channels). One undo step.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_smooth_graph_tangents,
         },
         Tool {
             name: "layers",
@@ -1738,11 +1765,11 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 41);
+        assert_eq!(tools.len(), 43);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 41, "tool names must be unique");
+        assert_eq!(names.len(), 43, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
@@ -1817,6 +1844,11 @@ mod tests {
         assert!(matches!(
             core.project.weather.as_ref().map(|w| w.kind),
             Some(WeatherKind::Rain)
+        ));
+        call(&mut core, &tools, "set_weather", json!({ "kind": "fog" })).unwrap();
+        assert!(matches!(
+            core.project.weather.as_ref().map(|w| w.kind),
+            Some(WeatherKind::Fog)
         ));
         call(&mut core, &tools, "set_weather", json!({ "kind": "off" })).unwrap();
         assert!(core.project.weather.is_none());
@@ -2052,8 +2084,9 @@ mod tests {
         call(&mut core, &tools, "new_project", json!({})).unwrap();
 
         // Every ClipKind the engine renders is addable by name —
-        // including the wave-7 kinds (lightning, bubbles, leaves)
-        // and ember/fountain/orbit, which predate the fx timeline.
+        // including the wave-7 kinds (lightning, bubbles, leaves),
+        // ember/fountain/orbit, which predate the fx timeline, and
+        // the wave-10 kinds (fireworks, aurora, comet).
         for (name, debug) in [
             ("ember", "Ember"),
             ("fountain", "Fountain"),
@@ -2061,6 +2094,9 @@ mod tests {
             ("lightning", "Lightning"),
             ("bubbles", "Bubbles"),
             ("leaves", "Leaves"),
+            ("fireworks", "Fireworks"),
+            ("aurora", "Aurora"),
+            ("comet", "Comet"),
         ] {
             let r = call(&mut core, &tools, "add_fx_clip", json!({
                 "figure": 0, "node": 0, "kind": name, "start": 0.0, "duration": 6.0
@@ -2068,11 +2104,11 @@ mod tests {
             .unwrap();
             assert_eq!(r["kind"], debug, "{name}");
         }
-        assert_eq!(core.project.fx_clips.len(), 6);
+        assert_eq!(core.project.fx_clips.len(), 9);
 
         // fx_list reports the fx_edit view of the same clips.
         let r = call(&mut core, &tools, "fx_list", json!({})).unwrap();
-        assert_eq!(r["count"], 6);
+        assert_eq!(r["count"], 9);
         assert_eq!(r["clips"][3]["kind"], "lightning");
         assert_eq!(r["clips"][3]["figure"], 0);
         assert_eq!(r["clips"][3]["node"], 0);
@@ -2090,15 +2126,38 @@ mod tests {
         let r = call(&mut core, &tools, "fx_duplicate", json!({ "index": 3 })).unwrap();
         assert_eq!(r["fx_index"], 4);
         assert_eq!(r["start"], 14.0);
-        assert_eq!(core.project.fx_clips.len(), 7);
+        assert_eq!(core.project.fx_clips.len(), 10);
         assert_eq!(core.project.fx_clips[4].clip.start, 14.0);
 
         // Delete removes exactly the addressed clip.
         let r = call(&mut core, &tools, "fx_delete", json!({ "index": 4 })).unwrap();
-        assert_eq!(r["count"], 6);
-        assert_eq!(core.project.fx_clips.len(), 6);
+        assert_eq!(r["count"], 9);
+        assert_eq!(core.project.fx_clips.len(), 9);
         let r = call(&mut core, &tools, "fx_list", json!({})).unwrap();
-        assert_eq!(r["count"], 6);
+        assert_eq!(r["count"], 9);
+    }
+
+    #[test]
+    fn wave10_kinds_parse_and_new_tools_registered() {
+        // The wave-10 FX kinds parse by name; near-misses and
+        // garbage are rejected with an error, never a panic.
+        assert!(matches!(parse_clip_kind("fireworks"), Ok(ClipKind::Fireworks)));
+        assert!(matches!(parse_clip_kind("aurora"), Ok(ClipKind::Aurora)));
+        assert!(matches!(parse_clip_kind("comet"), Ok(ClipKind::Comet)));
+        assert!(parse_clip_kind("firework").is_err());
+        assert!(parse_clip_kind("nova").is_err());
+        assert!(parse_clip_kind("").is_err());
+
+        // The wave-10 pose/graph tools are in the table and run.
+        let tools = tools();
+        let mut core = EditorCore::new();
+        call(&mut core, &tools, "new_project", json!({})).unwrap();
+        let r = call(&mut core, &tools, "mirror_pose", json!({})).unwrap();
+        assert_eq!(r["ok"], true);
+        assert!(r["status"].is_string());
+        let r = call(&mut core, &tools, "smooth_graph_tangents", json!({})).unwrap();
+        assert_eq!(r["ok"], true);
+        assert!(r["status"].is_string());
     }
 
     #[test]

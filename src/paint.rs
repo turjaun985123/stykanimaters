@@ -360,6 +360,47 @@ pub fn brush_library() -> Vec<Brush> {
             nib_angle: 45.0,
             smoothing: 2,
         },
+        // Wave 10 additions — appended only: the indices above
+        // must never move, because a saved `brush_index` refers
+        // into this list. Everything a preset can promise has to
+        // be expressible through width / nib / nib_angle /
+        // smoothing alone: the model has no opacity, spacing or
+        // scatter, so there is deliberately no "spray" or
+        // low-opacity entry here — such a name would describe a
+        // mark the stroke pipeline cannot draw.
+        Brush {
+            // The left-hand mirror of Calligraphy: a broader
+            // broad-edge nib whose edge sits at 315° instead of
+            // 30°, so the thick/thin directions swap diagonals —
+            // thin travelling ↘/↖, thick travelling ↗/↙.
+            name: "Calligraphy L",
+            width: 10.0,
+            nib: Nib::Calligraphy,
+            nib_angle: 315.0,
+            smoothing: 1,
+        },
+        Brush {
+            // A chisel-tip marker: the square nib at 45° marks
+            // full width horizontally and vertically and slims
+            // to base/√2 on the diagonals (the opposite of the
+            // 0° Brush), and no smoothing keeps the recorded
+            // path — and its corners — exactly as drawn.
+            name: "Chisel Marker",
+            width: 5.0,
+            nib: Nib::Square,
+            nib_angle: 45.0,
+            smoothing: 0,
+        },
+        Brush {
+            // The widest mark in the library: a flat square nib
+            // twice the Paint Brush's width, with the maximum
+            // smoothing so broad washes follow a very even path.
+            name: "Broad Brush",
+            width: 20.0,
+            nib: Nib::Square,
+            nib_angle: 0.0,
+            smoothing: 3,
+        },
     ]
 }
 
@@ -894,5 +935,108 @@ mod tests {
         let out = erase_at(&[s], [50.0, 0.0], 15.0);
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|p| p.widths.is_empty()));
+    }
+}
+
+// ---- Wave 10 brush additions ----
+//
+// Separate module on purpose: the tests below import exact names
+// only (never a glob), and they pin the append-only contract of
+// `brush_library` — the six original presets keep their indices
+// and the three Wave 10 presets sit after them, so a saved
+// `brush_index` can never silently change brushes.
+#[cfg(test)]
+mod brush_wave10_tests {
+    use crate::paint::{brush_library, nib_widths, Nib};
+
+    fn assert_close(actual: f32, expected: f32, what: &str) {
+        assert!(
+            (actual - expected).abs() < 1e-3,
+            "{what}: expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn library_grew_by_exactly_three_and_originals_did_not_move() {
+        let lib = brush_library();
+        assert_eq!(lib.len(), 9, "six originals + three Wave 10 presets");
+        // The pre-existing order, pinned by name: a saved index
+        // into this list must keep meaning the same brush.
+        let originals = [
+            "Pen",
+            "Pencil",
+            "Marker",
+            "Calligraphy",
+            "Brush",
+            "Paint Brush",
+        ];
+        for (i, name) in originals.iter().enumerate() {
+            assert_eq!(lib[i].name, *name, "index {i} moved");
+        }
+        // Two originals pinned by their defining fields as well,
+        // not just by name.
+        assert_eq!(lib[3].width, 7.0);
+        assert_eq!(lib[3].nib, Nib::Calligraphy);
+        assert_eq!(lib[3].nib_angle, 30.0);
+        assert_eq!(lib[5].width, 12.0);
+        assert_eq!(lib[5].nib, Nib::Square);
+        assert_eq!(lib[5].smoothing, 2);
+    }
+
+    #[test]
+    fn calligraphy_l_is_the_wide_mirrored_broad_edge() {
+        let lib = brush_library();
+        let b = lib[6];
+        assert_eq!(b.name, "Calligraphy L");
+        assert_eq!(b.width, 10.0);
+        assert_eq!(b.nib, Nib::Calligraphy);
+        assert_eq!(b.nib_angle, 315.0);
+        assert_eq!(b.smoothing, 1);
+        // Behaviour, not just data: on a horizontal stroke the
+        // 315° edge gives base * |sin(45°)| ≈ 7.07, while the
+        // original 30° Calligraphy gives base * |sin(30°)| = 5.0
+        // (at the same base width) — the mirror really does swap
+        // which strokes come out thick.
+        let horiz = vec![[0.0, 0.0], [10.0, 0.0]];
+        let mirrored = nib_widths(&horiz, b.width, b.nib, b.nib_angle);
+        assert_close(mirrored[0], 10.0 * std::f32::consts::FRAC_1_SQRT_2, "L on horizontal");
+        let original = nib_widths(&horiz, b.width, Nib::Calligraphy, 30.0);
+        assert_close(original[0], 5.0, "original angle on horizontal");
+    }
+
+    #[test]
+    fn chisel_marker_is_thin_square_at_45_and_unsmoothed() {
+        let lib = brush_library();
+        let b = lib[7];
+        assert_eq!(b.name, "Chisel Marker");
+        assert_eq!(b.width, 5.0);
+        assert_eq!(b.nib, Nib::Square);
+        assert_eq!(b.nib_angle, 45.0);
+        assert_eq!(b.smoothing, 0);
+        // Full width travelling horizontally (psi = -45° puts the
+        // square's silhouette at its widest) ...
+        let horiz = vec![[0.0, 0.0], [10.0, 0.0]];
+        let w = nib_widths(&horiz, b.width, b.nib, b.nib_angle);
+        assert_close(w[0], 5.0, "chisel on horizontal");
+        // ... and base/√2 travelling along the nib's own diagonal.
+        let diag = vec![[0.0, 0.0], [10.0, 10.0]];
+        let w = nib_widths(&diag, b.width, b.nib, b.nib_angle);
+        assert_close(w[0], 5.0 / std::f32::consts::SQRT_2, "chisel on its diagonal");
+    }
+
+    #[test]
+    fn broad_brush_is_the_widest_and_most_smoothed() {
+        let lib = brush_library();
+        let b = lib[8];
+        assert_eq!(b.name, "Broad Brush");
+        assert_eq!(b.width, 20.0);
+        assert_eq!(b.nib, Nib::Square);
+        assert_eq!(b.nib_angle, 0.0);
+        assert_eq!(b.smoothing, 3);
+        // It really is the widest entry in the library.
+        assert!(
+            lib.iter().all(|other| other.width <= b.width),
+            "Broad Brush must be the widest preset"
+        );
     }
 }

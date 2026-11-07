@@ -96,6 +96,22 @@ pub enum ClipKind {
     /// by an extra twist across the cycle, bending the three
     /// spokes into arms.
     Spiral,
+    /// A single shell bursting at the anchor: seeded stars
+    /// radiate in every direction, decelerate under drag, sag
+    /// under gravity and twinkle out by the clip's end, in a
+    /// small palette derived from the clip colour (the colour
+    /// itself, a white-hot pull, and its channel rotation).
+    Fireworks,
+    /// Slow curtains of light above the anchor: motes in three
+    /// horizontal sine-wave bands whose crests travel sideways,
+    /// so the ribbons ripple and drift, in three lightnesses of
+    /// the clip colour (palest on the highest band).
+    Aurora,
+    /// A large bright head gliding along `angle` at a steady
+    /// pace out to `length` (200 when unset), dragging a smooth,
+    /// wide taper of softer tail motes at fixed lags behind it —
+    /// Meteor's bigger, statelier cousin.
+    Comet,
 }
 
 /// A timed particle effect. `start` and `duration` are in frames;
@@ -655,6 +671,111 @@ pub fn clip_particles(
                 push(&mut out, pos, 3.1 * (1.0 - 0.35 * s), alpha);
             }
         }
+        ClipKind::Fireworks => {
+            // One shell bursts at the anchor at the clip's start:
+            // every star leaves at t = 0 with a seeded direction
+            // and reach, decelerates under drag (the ease-out
+            // reach Burst uses), sags under gravity, and twinkles
+            // as the whole shell fades. The palette mixes the
+            // clip colour with a white-hot pull and its channel
+            // rotation, so one burst carries several shades.
+            let white = [
+                color[0] + ((255 - color[0] as u16) * 55 / 100) as u8,
+                color[1] + ((255 - color[1] as u16) * 55 / 100) as u8,
+                color[2] + ((255 - color[2] as u16) * 55 / 100) as u8,
+            ];
+            let spun = rotate_channels(color, 1);
+            for i in 0..36u32 {
+                let a = prand(seed, i, 1) * std::f32::consts::TAU;
+                let reach = 45.0 + prand(seed, i, 2) * 95.0;
+                let d = reach * (1.0 - (1.0 - t) * (1.0 - t));
+                let pos = [
+                    anchor[0] + a.cos() * d,
+                    anchor[1] + a.sin() * d + 30.0 * t * t,
+                ];
+                let twinkle = 0.7 + 0.3 * (local * 3.1 + i as f32 * 2.9).sin();
+                let col = match i % 3 {
+                    0 => color,
+                    1 => white,
+                    _ => spun,
+                };
+                push_c(&mut out, pos, 3.0 * (1.0 - 0.55 * t), (1.0 - t) * twinkle, col);
+            }
+        }
+        ClipKind::Aurora => {
+            // Three horizontal bands above the anchor, 13 motes
+            // each. A mote's height is a sine of its place along
+            // the band whose phase runs with `local`, so the
+            // crests travel sideways and the curtains ripple;
+            // each band also sways slowly as a whole, at its own
+            // rate. Bands differ in wavelength, height and
+            // lightness (factors 1.05 / 0.8 / 0.55 of the clip
+            // colour, top band palest).
+            for b in 0..3u32 {
+                let f = [1.05, 0.8, 0.55][b as usize];
+                let col = [
+                    (color[0] as f32 * f).min(255.0) as u8,
+                    (color[1] as f32 * f).min(255.0) as u8,
+                    (color[2] as f32 * f).min(255.0) as u8,
+                ];
+                let base_y = anchor[1] - 26.0 - b as f32 * 16.0;
+                let wave_len = 46.0 + b as f32 * 14.0;
+                let phase = prand(seed, b, 11) * std::f32::consts::TAU;
+                for i in 0..13u32 {
+                    let x0 = -78.0 + i as f32 * 13.0;
+                    let wave = (x0 / wave_len * std::f32::consts::TAU
+                        - local * (0.25 + 0.12 * b as f32)
+                        + phase)
+                        .sin();
+                    let pos = [
+                        anchor[0] + x0 + 6.0 * (local * 0.18 + phase).sin(),
+                        base_y + 7.0 * wave,
+                    ];
+                    let shimmer = 0.65 + 0.35 * (local * 0.9 + i as f32 * 1.3 + b as f32).sin();
+                    push_c(&mut out, pos, 4.2, envelope * 0.5 * shimmer, col);
+                }
+            }
+        }
+        ClipKind::Comet => {
+            // The head glides at a steady pace (head_d = travel
+            // * t — Meteor accelerates; the comet does not) and
+            // its tail motes sit at fixed lags behind it, like
+            // Meteor's sparks but larger and softer, in a smooth
+            // taper. The whole comet fades in fast and out across
+            // the last 15% of the clip, rather than burning to
+            // the very end.
+            let dir = dir_from_deg(clip.angle);
+            let perp = [-dir[1], dir[0]];
+            let travel = if clip.length > 0.0 { clip.length } else { 200.0 };
+            let head_d = travel * t;
+            // White-hot head: the clip colour pulled 70% to white
+            // (the same core blend Meteor uses).
+            let core = [
+                color[0] + ((255 - color[0] as u16) * 70 / 100) as u8,
+                color[1] + ((255 - color[1] as u16) * 70 / 100) as u8,
+                color[2] + ((255 - color[2] as u16) * 70 / 100) as u8,
+            ];
+            let fade_in = (t / 0.04).min(1.0);
+            let fade_out = ((1.0 - t) / 0.15).min(1.0);
+            let glow = fade_in * fade_out;
+            for i in 0..24u32 {
+                let lag = 6.0 + i as f32 * 4.5 + prand(seed, i, 1) * 3.0;
+                let d = head_d - lag;
+                if d < 0.0 {
+                    continue;
+                }
+                let spread = (prand(seed, i, 2) - 0.5) * (1.5 + lag * 0.05);
+                let pos = [
+                    anchor[0] + dir[0] * d + perp[0] * spread,
+                    anchor[1] + dir[1] * d + perp[1] * spread,
+                ];
+                let tail = 1.0 - i as f32 / 24.0;
+                push(&mut out, pos, 5.2 * (0.35 + 0.65 * tail), glow * 0.6 * tail);
+            }
+            // The head itself, on top of its own tail.
+            let head = [anchor[0] + dir[0] * head_d, anchor[1] + dir[1] * head_d];
+            push_c(&mut out, head, 6.4, glow, core);
+        }
     }
     out
 }
@@ -676,6 +797,7 @@ pub enum WeatherKind {
     Rain,
     Snow,
     Fireflies,
+    Fog,
 }
 
 /// Wrap a coordinate into `[0, m)`. The weather field lives on a
@@ -707,6 +829,9 @@ fn wrap(v: f32, m: f32) -> f32 {
 /// - Snow adds a per-flake sinusoidal sway on top of the drift.
 /// - Fireflies wander around their home on slow Lissajous paths
 ///   (sums of sines), drift at half the wind speed, and pulse.
+/// - Fog banks are huge, faint discs that drift slower than the
+///   wind with a slow vertical bob; it is their overlap that
+///   makes the field read as fog rather than as particles.
 ///
 /// `t` is `frame_f / fps` seconds (30 fps assumed if `fps` is not
 /// positive), so speeds are in stage units per second and look the
@@ -783,6 +908,22 @@ pub fn weather_particles(
                 ];
                 ([x, y], size, col, alpha)
             }
+            WeatherKind::Fog => {
+                let seed = 0x9A17_0004;
+                let hx = prand(seed, i, 1) * sw;
+                let hy = prand(seed, i, 2) * sh;
+                // Banks drift slower than the wind itself, plus a
+                // slow per-bank wander, and bob gently. Centres
+                // wrap on the torus like every other kind.
+                let drift = wind * 0.5 + 6.0 * prand(seed, i, 3);
+                let x = wrap(hx + drift * secs, sw);
+                let bob = 14.0
+                    * (0.11 * secs + prand(seed, i, 4) * std::f32::consts::TAU).sin();
+                let y = wrap(hy + bob, sh);
+                let size = 46.0 + prand(seed, i, 5) * 54.0;
+                let alpha = 0.05 + 0.05 * prand(seed, i, 6);
+                ([x, y], size, [216, 222, 232], alpha)
+            }
         };
         out.push(p);
     }
@@ -805,7 +946,7 @@ mod tests {
         }
     }
 
-    const KINDS: [ClipKind; 18] = [
+    const KINDS: [ClipKind; 21] = [
         ClipKind::Burst,
         ClipKind::Sparkle,
         ClipKind::Smoke,
@@ -824,6 +965,9 @@ mod tests {
         ClipKind::Petals,
         ClipKind::Splash,
         ClipKind::Spiral,
+        ClipKind::Fireworks,
+        ClipKind::Aurora,
+        ClipKind::Comet,
     ];
 
     #[test]
@@ -1357,6 +1501,125 @@ mod tests {
         assert_ne!(mid, later, "spiral should rotate between frames");
     }
 
+    #[test]
+    fn fireworks_burst_outward_and_fade() {
+        let c = clip(ClipKind::Fireworks);
+        let anchor = [300.0, 300.0];
+        let stats = |t: f32| {
+            let ps = clip_particles(&c, c.start + c.duration * t, anchor);
+            assert!(!ps.is_empty());
+            let reach = ps
+                .iter()
+                .map(|p| ((p.0[0] - anchor[0]).powi(2) + (p.0[1] - anchor[1]).powi(2)).sqrt())
+                .sum::<f32>()
+                / ps.len() as f32;
+            let alpha = ps.iter().map(|p| p.3).sum::<f32>() / ps.len() as f32;
+            (ps.len(), reach, alpha)
+        };
+        let (n, r_early, a_early) = stats(0.2);
+        let (_, r_mid, _) = stats(0.5);
+        let (_, _, a_late) = stats(0.85);
+        assert_eq!(n, 36, "the whole shell should be out early");
+        // Stars fly outward: mean distance from the anchor grows
+        // as the burst expands.
+        assert!(
+            r_mid > r_early + 10.0,
+            "firework stars should spread: {r_early} -> {r_mid}"
+        );
+        // And the shell fades over the clip.
+        assert!(a_late < a_early, "fireworks should fade: {a_early} -> {a_late}");
+        // The burst mixes shades from its derived palette.
+        let mid = clip_particles(&c, c.start + c.duration * 0.5, anchor);
+        let mut colours: Vec<[u8; 3]> = mid.iter().map(|p| p.2).collect();
+        colours.sort();
+        colours.dedup();
+        assert!(
+            colours.len() >= 2,
+            "fireworks should mix colours, got {colours:?}"
+        );
+    }
+
+    #[test]
+    fn aurora_bands_hang_above_the_anchor_and_ripple() {
+        let c = clip(ClipKind::Aurora);
+        let anchor = [300.0, 300.0];
+        let mid = clip_particles(&c, c.start + c.duration * 0.5, anchor);
+        assert_eq!(mid.len(), 39, "three bands of thirteen motes");
+        // The curtains hang above the anchor: band bases are
+        // 26/42/58 above it and the wave adds at most 7 either
+        // way, so every mote sits between 19 and 65 above.
+        assert!(
+            mid.iter().all(|p| p.0[1] < anchor[1] - 15.0),
+            "a mote drifted down to the anchor"
+        );
+        assert!(
+            mid.iter().all(|p| p.0[1] > anchor[1] - 70.0),
+            "a band floated too high"
+        );
+        // Three bands: the y values span more than one band gap.
+        let lo = mid.iter().map(|p| p.0[1]).fold(f32::MAX, f32::min);
+        let hi = mid.iter().map(|p| p.0[1]).fold(f32::MIN, f32::max);
+        assert!(hi - lo > 24.0, "bands collapsed: y span only {}", hi - lo);
+        // The ribbons flow between frames.
+        let later = clip_particles(&c, c.start + c.duration * 0.5 + 3.0, anchor);
+        assert_ne!(mid, later, "aurora should ripple between frames");
+    }
+
+    #[test]
+    fn comet_head_glides_steadily_and_drags_a_tapered_tail() {
+        let c = clip(ClipKind::Comet); // angle 90 -> dir (1, 0), length 160
+        let anchor = [300.0, 300.0];
+        let dir = dir_from_deg(c.angle);
+        let along = |p: &[f32; 2]| {
+            (p[0] - anchor[0]) * dir[0] + (p[1] - anchor[1]) * dir[1]
+        };
+        let stats = |t: f32| {
+            let ps = clip_particles(&c, c.start + c.duration * t, anchor);
+            assert!(!ps.is_empty());
+            let hi = ps.iter().map(|p| along(&p.0)).fold(f32::MIN, f32::max);
+            let lo = ps.iter().map(|p| along(&p.0)).fold(f32::MAX, f32::min);
+            let big = ps.iter().map(|p| p.1).fold(0.0f32, f32::max);
+            (lo, hi, big)
+        };
+        let (_, hi_early, _) = stats(0.25);
+        let (lo_mid, hi_mid, big_mid) = stats(0.5);
+        // Steady glide: the head's leading edge sits at t * length
+        // (Meteor's accelerating head would be behind this pace
+        // early and is a different design point).
+        assert!(
+            (hi_early - 0.25 * c.length).abs() < 1.0,
+            "comet head at {hi_early} at t=0.25, want ~{}",
+            0.25 * c.length
+        );
+        assert!(
+            (hi_mid - 0.5 * c.length).abs() < 1.0,
+            "comet head at {hi_mid} at t=0.5, want ~{}",
+            0.5 * c.length
+        );
+        // Only the head is drawn at full head size.
+        assert!(big_mid >= 6.0, "comet head missing (max size {big_mid})");
+        // The tail stretches a long way behind the head.
+        assert!(
+            hi_mid - lo_mid > 50.0,
+            "comet tail should stretch: {lo_mid}..{hi_mid}"
+        );
+    }
+
+    #[test]
+    fn wave10_kinds_differ_from_each_other() {
+        let anchor = [300.0, 300.0];
+        let at = |kind: ClipKind| clip_particles(&clip(kind), 22.0, anchor);
+        let fireworks = at(ClipKind::Fireworks);
+        let aurora = at(ClipKind::Aurora);
+        let comet = at(ClipKind::Comet);
+        assert!(!fireworks.is_empty() && !aurora.is_empty() && !comet.is_empty());
+        assert_ne!(fireworks, aurora);
+        assert_ne!(fireworks, comet);
+        assert_ne!(aurora, comet);
+        // Comet is Meteor's cousin, not its clone.
+        assert_ne!(comet, at(ClipKind::Meteor), "comet renders like meteor");
+    }
+
     // ---- Weather ----
 
     fn weather(kind: WeatherKind, amount: f32, wind: f32) -> Weather {
@@ -1364,8 +1627,12 @@ mod tests {
     }
 
     const STAGE: [f32; 2] = [960.0, 720.0];
-    const WEATHER_KINDS: [WeatherKind; 3] =
-        [WeatherKind::Rain, WeatherKind::Snow, WeatherKind::Fireflies];
+    const WEATHER_KINDS: [WeatherKind; 4] = [
+        WeatherKind::Rain,
+        WeatherKind::Snow,
+        WeatherKind::Fireflies,
+        WeatherKind::Fog,
+    ];
 
     #[test]
     fn weather_is_deterministic() {
@@ -1388,6 +1655,20 @@ mod tests {
         assert_eq!(at(WeatherKind::Snow, 0.0), 0);
         assert_eq!(at(WeatherKind::Snow, -5.0), 0, "negative clamps to 0");
         assert_eq!(at(WeatherKind::Fireflies, 999.0), 200, "clamped to 200");
+    }
+
+    #[test]
+    fn fog_weather_round_trips_through_serde() {
+        let w = weather(WeatherKind::Fog, 120.0, -8.0);
+        let text = serde_json::to_string(&w).unwrap();
+        assert!(text.contains("\"Fog\""), "kind wire name changed: {text}");
+        let back: Weather = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, w);
+        // Project JSON written before Fog existed still loads.
+        let old: Weather =
+            serde_json::from_str("{\"kind\":\"Rain\",\"amount\":90.0,\"wind\":25.0}")
+                .unwrap();
+        assert_eq!(old.kind, WeatherKind::Rain);
     }
 
     #[test]

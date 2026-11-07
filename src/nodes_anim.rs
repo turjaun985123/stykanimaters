@@ -28,7 +28,7 @@
 //! node (see `resolve_join_roots` and §17 of the spec).
 
 use crate::model::{
-    evaluate, norm_deg, ClipDef, Easing, FigureDef, FigureInstance, Frame, ImageAsset,
+    evaluate, norm_deg, ClipDef, ClipLoop, Easing, FigureDef, FigureInstance, Frame, ImageAsset,
     InstanceKey, NodeDef, Pose, Project, Shape, SpriteInstance, TextInstance,
 };
 use std::collections::HashMap;
@@ -2115,6 +2115,7 @@ fn convert_clip(
             name: clip.name.clone(),
             def,
             frames: poses,
+            loop_mode: ClipLoop::Loop,
         },
         asset,
         inst0.color,

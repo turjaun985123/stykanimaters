@@ -396,6 +396,87 @@ fn tool_render_frame_base64(core: &mut EditorCore, args: &Value) -> Result<Value
     }))
 }
 
+fn tool_render_contact_sheet(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let path = arg_path(args)?;
+    let project = &core.project;
+    if project.frames.is_empty() {
+        return Err("project has no frames to render".to_string());
+    }
+    let total = project.frames.len();
+    let cols = match args.get("cols") {
+        None | Some(Value::Null) => 4usize,
+        Some(v) => v
+            .as_u64()
+            .map(|n| n as usize)
+            .ok_or_else(|| "argument 'cols' must be a positive integer".to_string())?,
+    };
+    if cols < 1 {
+        return Err("argument 'cols' must be at least 1".to_string());
+    }
+    let thumb_width = match args.get("thumb_width") {
+        None | Some(Value::Null) => 240u32,
+        Some(v) => v
+            .as_u64()
+            .map(|n| n as u32)
+            .ok_or_else(|| "argument 'thumb_width' must be an integer in 16..=1024".to_string())?,
+    };
+    if !(16..=1024).contains(&thumb_width) {
+        return Err("argument 'thumb_width' must be in 16..=1024".to_string());
+    }
+    // Frame selection: an explicit list (out-of-range indices are
+    // clamped to the last frame and reported in a note) or, by
+    // default, up to 12 evenly spaced frames across the timeline.
+    let mut clamped = 0usize;
+    let frames: Vec<usize> = match args.get("frames") {
+        None | Some(Value::Null) => {
+            let n = total.min(12);
+            (0..n)
+                .map(|i| if n == 1 { 0 } else { i * (total - 1) / (n - 1) })
+                .collect()
+        }
+        Some(v) => {
+            let arr = v
+                .as_array()
+                .ok_or_else(|| "argument 'frames' must be an array of frame indices".to_string())?;
+            if arr.is_empty() {
+                return Err("argument 'frames' must not be empty".to_string());
+            }
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                let idx = item.as_u64().ok_or_else(|| {
+                    "argument 'frames' entries must be non-negative integers".to_string()
+                })? as usize;
+                if idx >= total {
+                    clamped += 1;
+                }
+                out.push(idx.min(total - 1));
+            }
+            out
+        }
+    };
+    let sheet = crate::export::render_contact_sheet(project, &frames, cols, thumb_width);
+    let (width, height) = (sheet.width(), sheet.height());
+    let path_ref = Path::new(&path);
+    ensure_parent(path_ref)?;
+    sheet
+        .save(path_ref)
+        .map_err(|e| format!("could not write {path}: {e}"))?;
+    let mut out = json!({
+        "path": path,
+        "width": width,
+        "height": height,
+        "frames": frames,
+        "cols": cols,
+        "thumb_width": thumb_width,
+    });
+    if clamped > 0 {
+        out["note"] = json!(format!(
+            "{clamped} frame index(es) out of range, clamped to the last frame"
+        ));
+    }
+    Ok(out)
+}
+
 fn tool_project_summary(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
     Ok(summary(core))
 }
@@ -481,6 +562,21 @@ pub fn tools() -> Vec<Tool> {
                 }
             }),
             handler: tool_render_frame_base64,
+        },
+        Tool {
+            name: "render_contact_sheet",
+            description: "Render a contact sheet (grid of frame thumbnails) as a PNG file at 'path'. 'frames' is an optional array of frame indices (default: up to 12 evenly spaced frames; out-of-range indices are clamped and reported in a note). 'cols' is the grid column count (default 4, at least 1); 'thumb_width' is each thumbnail's width in pixels (default 240, 16..=1024). Returns {path, width, height, frames, cols, thumb_width}. Parent directories are created.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Destination PNG file path" },
+                    "frames": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "description": "Frame indices to include (default: up to 12 evenly spaced)" },
+                    "cols": { "type": "integer", "minimum": 1, "description": "Grid columns (default 4)" },
+                    "thumb_width": { "type": "integer", "minimum": 16, "maximum": 1024, "description": "Thumbnail width in pixels (default 240)" }
+                },
+                "required": ["path"]
+            }),
+            handler: tool_render_contact_sheet,
         },
         Tool {
             name: "project_summary",
@@ -609,6 +705,72 @@ mod tests {
         assert_eq!(img.height(), core.project.stage[1] as u32);
         assert_eq!(out["width"], core.project.stage[0] as u32);
         assert_eq!(out["height"], core.project.stage[1] as u32);
+    }
+
+    #[test]
+    fn render_contact_sheet_writes_a_png_grid() {
+        let dir = temp_dir("contact-sheet");
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        let total = core.project.frames.len();
+        assert!(total >= 2, "demo project needs at least 2 frames");
+
+        // Explicit frames, one out of range: it clamps with a note.
+        let path = dir.join("sheet.png");
+        let out = call(
+            "render_contact_sheet",
+            &mut core,
+            json!({
+                "path": path.to_string_lossy(),
+                "frames": [0, total - 1, 9999],
+                "cols": 2,
+                "thumb_width": 48,
+            }),
+        )
+        .expect("render_contact_sheet failed");
+        assert_eq!(out["path"], path.to_string_lossy().as_ref());
+        assert_eq!(out["frames"], json!([0, total - 1, total - 1]));
+        assert!(out["note"].as_str().is_some_and(|n| n.contains("clamped")));
+        assert!(path.exists(), "contact sheet PNG missing");
+        let img = image::open(&path).expect("contact sheet does not decode");
+        assert_eq!(img.width(), out["width"].as_u64().unwrap() as u32);
+        assert_eq!(img.height(), out["height"].as_u64().unwrap() as u32);
+        // Grid geometry from export::render_contact_sheet: 2 cols,
+        // 2 rows, 8px gaps around 48px-wide thumbnails.
+        assert_eq!(img.width(), 2 * 48 + 3 * 8);
+
+        // Defaults: every frame (demo has <= 12), no note.
+        let path2 = dir.join("sheet-default.png");
+        let out = call(
+            "render_contact_sheet",
+            &mut core,
+            json!({ "path": path2.to_string_lossy() }),
+        )
+        .expect("render_contact_sheet with defaults failed");
+        assert_eq!(out["frames"].as_array().unwrap().len(), total);
+        assert!(out.get("note").is_none());
+        assert!(path2.exists());
+
+        // Bad arguments error instead of panicking.
+        assert!(call(
+            "render_contact_sheet",
+            &mut core,
+            json!({ "path": path.to_string_lossy(), "cols": 0 }),
+        )
+        .is_err());
+        assert!(call(
+            "render_contact_sheet",
+            &mut core,
+            json!({ "path": path.to_string_lossy(), "thumb_width": 8 }),
+        )
+        .is_err());
+        assert!(call(
+            "render_contact_sheet",
+            &mut core,
+            json!({ "path": path.to_string_lossy(), "frames": [] }),
+        )
+        .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

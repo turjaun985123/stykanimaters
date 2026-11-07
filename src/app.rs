@@ -120,6 +120,11 @@ pub struct EditorView {
     /// the canvas (independent flag — shown alongside whichever
     /// other panel is open).
     show_color: bool,
+    /// Wave 10: viewport guides overlay (safe frame + centre
+    /// cross) layered over the stage canvas, toggled from the
+    /// View tool group. The overlay paints the default camera
+    /// only — see `crate::ui_overlay`.
+    show_guides: bool,
     /// Wave 9: weather panel under the canvas (independent
     /// flag, like the colour panel).
     show_weather: bool,
@@ -247,6 +252,7 @@ impl EditorView {
             show_easing: false,
             show_help: false,
             show_color: false,
+            show_guides: false,
             show_weather: false,
             show_export: false,
             export_tab: 0,
@@ -1167,6 +1173,7 @@ impl EditorView {
             WeatherKind::Rain => "Rain",
             WeatherKind::Snow => "Snow",
             WeatherKind::Fireflies => "Fireflies",
+            WeatherKind::Fog => "Fog",
         };
         let summary = match cur {
             None => "Off — pick a kind".to_string(),
@@ -1178,8 +1185,8 @@ impl EditorView {
             ),
         };
         // Kind picker: one segmented control (ui::segmented)
-        // instead of four separate buttons. Segment 0 is Off;
-        // segments 1-3 are the kinds, each keeping its old
+        // instead of five separate buttons. Segment 0 is Off;
+        // segments 1-4 are the kinds, each keeping its old
         // button's listener body unchanged.
         let active_index = match cur {
             None => 0,
@@ -1187,10 +1194,11 @@ impl EditorView {
                 WeatherKind::Rain => 1,
                 WeatherKind::Snow => 2,
                 WeatherKind::Fireflies => 3,
+                WeatherKind::Fog => 4,
             },
         };
         let mut segs = crate::ui_segmented::segmented(
-            &["Off", "Rain", "Snow", "Fireflies"],
+            &["Off", "Rain", "Snow", "Fireflies", "Fog"],
             active_index,
         )
         .into_iter();
@@ -1220,6 +1228,10 @@ impl EditorView {
                 WeatherKind::Fireflies,
                 Weather { kind: WeatherKind::Fireflies, amount: 60.0, wind: 4.0 },
             ),
+            (
+                WeatherKind::Fog,
+                Weather { kind: WeatherKind::Fog, amount: 60.0, wind: 0.0 },
+            ),
         ];
         for (n, (kind, preset)) in kinds.into_iter().enumerate() {
             kind_row = kind_row.child(
@@ -1239,6 +1251,7 @@ impl EditorView {
                             WeatherKind::Rain => "Weather: rain.",
                             WeatherKind::Snow => "Weather: snow.",
                             WeatherKind::Fireflies => "Weather: fireflies.",
+                            WeatherKind::Fog => "Weather: fog.",
                         }
                         .into();
                         cx.notify();
@@ -1741,25 +1754,13 @@ impl EditorView {
     fn toggle_play(&mut self, cx: &mut Context<Self>) {
         self.core.playing = !self.core.playing;
         if self.core.playing {
-            // Start the audio clip that is audible at the playhead
-            // (multi-clip aware; simultaneous clips are covered by
-            // the Mixdown export - playback takes the first audible).
+            // Start audio at the playhead: every clip audible
+            // there is mixed and played together (Wave 10); a
+            // single audible clip keeps the player's direct path.
             {
                 let fps = self.core.project.fps.max(1.0);
                 let playhead = self.core.current as f32 / fps;
-                let durations = |path: &str| {
-                    crate::audio_edit::read_wav(path).ok().map(|w| w.duration_secs())
-                };
-                let audible = crate::audio_edit::audible_at(
-                    &self.core.project.audio,
-                    playhead,
-                    fps,
-                    &durations,
-                );
-                if let Some(&(ci, offset)) = audible.first() {
-                    let clip = &self.core.project.audio[ci];
-                    let _ = self.player.play(&clip.path, offset);
-                }
+                let _ = self.player.play_project(&self.core.project.audio, fps, playhead);
             }
             cx.spawn(async move |this, cx| {
                 loop {
@@ -2456,6 +2457,16 @@ impl Render for EditorView {
         }
 
         let range_sel = self.range_sel;
+        // Keyframe flags for the chips (ui_frame_chip states):
+        // a frame is a key frame when ANY figure's pose changes
+        // there — the same union the ruler below computes from
+        // its own keyframe_map call.
+        let chip_keys: Vec<bool> = {
+            let map = crate::ui_dope::keyframe_map(&core.project);
+            (0..core.frame_count())
+                .map(|f| map.iter().any(|row| row.get(f).copied().unwrap_or(false)))
+                .collect()
+        };
         let mut timeline = div().flex().flex_row().gap(px(4.0));
         for i in 0..core.frame_count() {
             let is_current = i == core.current;
@@ -2469,27 +2480,21 @@ impl Render for EditorView {
                 }
                 None => false,
             };
+            let chip_state = if is_current && chip_keys[i] {
+                crate::ui_frame_chip::ChipState::CurrentKeyframe
+            } else if is_current {
+                crate::ui_frame_chip::ChipState::Current
+            } else if in_range {
+                crate::ui_frame_chip::ChipState::InRange
+            } else if chip_keys[i] {
+                crate::ui_frame_chip::ChipState::Keyframe
+            } else {
+                crate::ui_frame_chip::ChipState::Normal
+            };
             timeline = timeline.child(
                 div()
                     .id(("frame", i))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .min_w(px(26.0))
-                    .px(px(6.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
                     .cursor_pointer()
-                    .bg(if is_current {
-                        rgb(C_ACCENT)
-                    } else if in_range {
-                        rgb(0x2E4470)
-                    } else {
-                        rgb(0x2C313A)
-                    })
-                    .hover(|s| s.bg(rgb(C_BORDER)))
-                    .text_size(px(12.0))
-                    .text_color(rgb(C_INK))
                     .on_click(cx.listener(move |view, ev: &ClickEvent, _w, cx| {
                         if ev.modifiers().shift {
                             // Shift-click builds the range: the
@@ -2505,7 +2510,7 @@ impl Render for EditorView {
                         }
                         cx.notify();
                     }))
-                    .child(format!("{}", i + 1)),
+                    .child(crate::ui_frame_chip::frame_chip(i + 1, chip_state)),
             );
         }
 
@@ -2616,38 +2621,27 @@ impl Render for EditorView {
                     continue;
                 }
                 listed += 1;
-                let line = format!(
-                    "{} figure(s), {} frame(s), {} fps",
-                    info.figures, info.frames, info.fps as i32
-                );
                 let path = info.path.clone();
                 let name = info.name.clone();
-                panel = panel.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .p(px(8.0))
-                        .rounded(px(8.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(13.0))
-                                .text_color(rgb(C_INK))
-                                .child(name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(C_MUTED))
-                                .child(line),
-                        )
-                        .child(btn(("home-open", i), "Open", false, cx.listener(move |view, _ev, _w, cx| {
+                panel = panel.child(crate::ui_file_row::file_row(
+                    &crate::ui_file_row::FileRowData {
+                        name: crate::ui_file_row::display_name(&name),
+                        meta: crate::ui_file_row::meta_line(
+                            info.figures,
+                            info.frames,
+                            info.fps as i32,
+                        ),
+                    },
+                    vec![div().child(btn(
+                        ("home-open", i),
+                        "Open",
+                        false,
+                        cx.listener(move |view, _ev, _w, cx| {
                             view.open_home_project(&path, &name);
                             cx.notify();
-                        }))),
-                );
+                        }),
+                    ))],
+                ));
             }
             if listed == 0 {
                 panel = panel.child(
@@ -2734,30 +2728,42 @@ impl Render for EditorView {
             let seg_thickness = inspector_data.thickness;
             let mut panel = crate::ui_inspector::inspector_panel(inspector_data);
             if has_segment {
+                // The stepper rows display the same rounded
+                // values the gauges below show. has_segment means
+                // a non-origin node is selected, so both captured
+                // values are Some here.
+                let len_value = seg_length
+                    .map(|v| format!("{:.0}", v))
+                    .unwrap_or_default();
+                let th_value = seg_thickness
+                    .map(|v| format!("{:.0}", v))
+                    .unwrap_or_default();
                 panel = panel
                     .child(section_label("Adjust"))
-                    .child(
-                        group_row()
-                            .child(btn("insp-len-dn", "Len -", false, cx.listener(|view, _ev, _w, cx| {
-                                view.core.adjust_length(-4.0);
-                                cx.notify();
-                            })))
-                            .child(btn("insp-len-up", "Len +", false, cx.listener(|view, _ev, _w, cx| {
-                                view.core.adjust_length(4.0);
-                                cx.notify();
-                            }))),
-                    )
-                    .child(
-                        group_row()
-                            .child(btn("insp-th-dn", "Thick -", false, cx.listener(|view, _ev, _w, cx| {
-                                view.core.adjust_thickness(-1.0);
-                                cx.notify();
-                            })))
-                            .child(btn("insp-th-up", "Thick +", false, cx.listener(|view, _ev, _w, cx| {
-                                view.core.adjust_thickness(1.0);
-                                cx.notify();
-                            }))),
-                    );
+                    .child(crate::ui_stepper::stepper_row(
+                        "Length",
+                        len_value,
+                        div().child(btn("insp-len-dn", "Len -", false, cx.listener(|view, _ev, _w, cx| {
+                            view.core.adjust_length(-4.0);
+                            cx.notify();
+                        }))),
+                        div().child(btn("insp-len-up", "Len +", false, cx.listener(|view, _ev, _w, cx| {
+                            view.core.adjust_length(4.0);
+                            cx.notify();
+                        }))),
+                    ))
+                    .child(crate::ui_stepper::stepper_row(
+                        "Thickness",
+                        th_value,
+                        div().child(btn("insp-th-dn", "Thick -", false, cx.listener(|view, _ev, _w, cx| {
+                            view.core.adjust_thickness(-1.0);
+                            cx.notify();
+                        }))),
+                        div().child(btn("insp-th-up", "Thick +", false, cx.listener(|view, _ev, _w, cx| {
+                            view.core.adjust_thickness(1.0);
+                            cx.notify();
+                        }))),
+                    ));
             }
             // Read-only gauges for the selected segment's size:
             // a text row plus a slider track per value, showing
@@ -2822,6 +2828,7 @@ impl Render for EditorView {
                     crate::vfx::WeatherKind::Rain => "Rain",
                     crate::vfx::WeatherKind::Snow => "Snow",
                     crate::vfx::WeatherKind::Fireflies => "Fireflies",
+                    crate::vfx::WeatherKind::Fog => "Fog",
                 };
                 format!("{kind} · {:.0}", w.amount)
             }),
@@ -2833,11 +2840,37 @@ impl Render for EditorView {
         let framed_canvas = div()
             .flex()
             .flex_1()
+            .relative()
             .border_1()
             .border_color(rgb(C_BORDER))
             .rounded(px(8.0))
             .overflow_hidden()
             .child(canvas);
+        // Wave 10: guides overlay (safe frame + centre cross)
+        // layered over the stage when the View group's Guides
+        // toggle is on. The overlay is a plain canvas element
+        // with no handlers of its own, and every pointer handler
+        // for the stage lives on the render root (which routes
+        // by position), so it can never eat a posing click. It
+        // paints the default camera (see `crate::ui_overlay`).
+        let framed_canvas = if self.show_guides {
+            framed_canvas.child(
+                div()
+                    .absolute()
+                    .left(px(0.0))
+                    .top(px(0.0))
+                    .w_full()
+                    .h_full()
+                    .child(crate::ui_overlay::overlay_canvas(
+                        core.project.stage[0],
+                        core.project.stage[1],
+                        true,
+                        true,
+                    )),
+            )
+        } else {
+            framed_canvas
+        };
         let hint_row = div()
             .flex()
             .flex_row()
@@ -3668,6 +3701,10 @@ impl Render for EditorView {
                                     view.core.cycle_onion_frames();
                                     cx.notify();
                                 })))
+                                .child(btn("guides", "Guides", self.show_guides, cx.listener(|view, _ev, _w, cx| {
+                                    view.show_guides = !view.show_guides;
+                                    cx.notify();
+                                })))
                         ),
                     )
                     .child(
@@ -3759,6 +3796,7 @@ impl Render for EditorView {
                                         Some(w) => match w.kind {
                                             WeatherKind::Rain => (Some(Weather { kind: WeatherKind::Snow, amount: 90.0, wind: 12.0 }), "Weather: snow."),
                                             WeatherKind::Snow => (Some(Weather { kind: WeatherKind::Fireflies, amount: 60.0, wind: 4.0 }), "Weather: fireflies."),
+                                            WeatherKind::Fog => (None, "Weather: off."),
                                             WeatherKind::Fireflies => (None, "Weather: off."),
                                         },
                                     };
@@ -3919,6 +3957,18 @@ impl Render for EditorView {
                                 })))
                                 .child(btn("fxclip-spiral", "FX clip Spiral", false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.add_fx_clip(crate::vfx::ClipKind::Spiral);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-fireworks", "FX clip Fireworks", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Fireworks);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-aurora", "FX clip Aurora", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Aurora);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-comet", "FX clip Comet", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Comet);
                                     cx.notify();
                                 })))
                         ),

@@ -269,6 +269,88 @@ impl Channel {
     }
 }
 
+/// Recompute every key's tangents as the Catmull-Rom slope through
+/// its neighbours — the "auto" / "smooth tangents" operation of a
+/// graph editor, for when hand-dragged handles have left a curve
+/// lumpy and the user wants the natural spline back.
+///
+/// For each interior key `i` the slope is the secant through its
+/// two neighbours, `(v[i+1] − v[i−1]) / (f[i+1] − f[i−1])`, stored
+/// in both `in_tan` and `out_tan`, so the curve passes through the
+/// key smoothly (no corner). Endpoints have only one neighbour
+/// pair, so they take that pair's one-sided slope; in a two-key
+/// slice both keys therefore get the segment's slope. Fewer than
+/// two keys have no slope to derive and are left untouched. A
+/// degenerate span (neighbour frames not strictly increasing —
+/// impossible in channels built through [`Channel::add_key`], but
+/// possible in a hand-built slice) yields a flat 0.0 tangent for
+/// that key rather than a NaN.
+///
+/// With `angular` set, value deltas take the shortest circular
+/// path ([`norm_deg`]), matching how [`Channel::value_at`] unwraps
+/// angle segments: keys at 350° and 30° differ by +40°, not −320°.
+/// The caller decides — this function cannot tell an angle channel
+/// from a plain one by its values alone.
+///
+/// Tangents are set on **every** key, whatever its [`Interp`]
+/// mode. Evaluation ignores tangents for the segments a Step or
+/// Linear key starts, but a key's `in_tan` belongs to the segment
+/// *ending* at it (governed by the previous key's mode), and if an
+/// editor later flips a key back to Hermite its smoothed tangents
+/// are already in place instead of stale hand-set ones.
+///
+/// Keys must be in ascending frame order (see
+/// [`Channel::sort_keys`]); [`smooth_channel`] handles that for
+/// you.
+pub fn auto_tangents(keys: &mut [Key], angular: bool) {
+    let n = keys.len();
+    if n < 2 {
+        return;
+    }
+    let delta = |a: f32, b: f32| -> f32 {
+        if angular {
+            norm_deg(b - a)
+        } else {
+            b - a
+        }
+    };
+    let pair_slope = |keys: &[Key], i0: usize, i1: usize| -> f32 {
+        let dt = keys[i1].frame - keys[i0].frame;
+        if dt <= 0.0 {
+            0.0
+        } else {
+            delta(keys[i0].value, keys[i1].value) / dt
+        }
+    };
+    // Compute every slope from the untouched slice first, then
+    // apply: writing tangents as we go would feed already-smoothed
+    // values into the neighbouring keys' secants.
+    let mut slopes = Vec::with_capacity(n);
+    for i in 0..n {
+        slopes.push(if i == 0 {
+            pair_slope(keys, 0, 1)
+        } else if i == n - 1 {
+            pair_slope(keys, n - 2, n - 1)
+        } else {
+            pair_slope(keys, i - 1, i + 1)
+        });
+    }
+    for (key, s) in keys.iter_mut().zip(slopes) {
+        key.in_tan = s;
+        key.out_tan = s;
+    }
+}
+
+/// Channel-level convenience wrapper around [`auto_tangents`]:
+/// sorts the keys (the order evaluation relies on), then smooths
+/// them, deriving `angular` from the channel's target so angle
+/// channels wrap and every other target stays plain.
+pub fn smooth_channel(channel: &mut Channel) {
+    channel.sort_keys();
+    let angular = channel.is_angle();
+    auto_tangents(&mut channel.keys, angular);
+}
+
 /// The result of [`apply_channels`]: channel-overridden poses plus
 /// the figure defs to evaluate them with (clones of the project's
 /// defs, with any length channels applied).
@@ -735,5 +817,185 @@ mod tests {
         assert!(json.contains("Linear"), "mode is stored: {json}");
         let back: Key = serde_json::from_str(&json).expect("key parses back");
         assert_eq!(back, lin);
+    }
+}
+
+#[cfg(test)]
+mod auto_tangent_tests {
+    use super::{auto_tangents, smooth_channel, Channel, ChannelTarget, Interp, Key};
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    /// Both tangents of a key, for one-line assertions.
+    fn tangents(k: &Key) -> (f32, f32) {
+        (k.in_tan, k.out_tan)
+    }
+
+    #[test]
+    fn middle_key_gets_exact_catmull_rom_slope() {
+        // Keys (0, 0), (10, 50), (30, 90): the middle key's
+        // Catmull-Rom slope is the neighbour secant
+        // (90 - 0) / (30 - 0) = 3.0, stored in both tangents.
+        let mut keys = vec![
+            Key::flat(0.0, 0.0),
+            Key::flat(10.0, 50.0),
+            Key::flat(30.0, 90.0),
+        ];
+        auto_tangents(&mut keys, false);
+        let (i, o) = tangents(&keys[1]);
+        assert!(approx(i, 3.0) && approx(o, 3.0), "middle tangents {i}, {o}");
+    }
+
+    #[test]
+    fn endpoints_take_one_sided_slopes() {
+        // Same keys: the first key only has the (0,0)->(10,50)
+        // pair, slope 5.0; the last only (10,50)->(30,90), slope
+        // 40 / 20 = 2.0.
+        let mut keys = vec![
+            Key::flat(0.0, 0.0),
+            Key::flat(10.0, 50.0),
+            Key::flat(30.0, 90.0),
+        ];
+        auto_tangents(&mut keys, false);
+        let (fi, fo) = tangents(&keys[0]);
+        assert!(approx(fi, 5.0) && approx(fo, 5.0), "first tangents {fi}, {fo}");
+        let (li, lo) = tangents(&keys[2]);
+        assert!(approx(li, 2.0) && approx(lo, 2.0), "last tangents {li}, {lo}");
+        // A two-key slice: both keys are endpoints of the same
+        // single pair, so both get the pair's slope.
+        let mut pair = vec![Key::flat(0.0, 0.0), Key::flat(4.0, 20.0)];
+        auto_tangents(&mut pair, false);
+        for k in &pair {
+            let (i, o) = tangents(k);
+            assert!(approx(i, 5.0) && approx(o, 5.0), "pair tangents {i}, {o}");
+        }
+    }
+
+    #[test]
+    fn degenerate_inputs_are_left_alone() {
+        // A single key has no neighbour pair: its tangents (here
+        // deliberately non-flat) must survive untouched.
+        let mut one = vec![Key {
+            frame: 3.0,
+            value: 7.0,
+            in_tan: 3.0,
+            out_tan: -2.0,
+            interp: Interp::Hermite,
+        }];
+        auto_tangents(&mut one, false);
+        let (i, o) = tangents(&one[0]);
+        assert!(approx(i, 3.0) && approx(o, -2.0), "single key untouched");
+        // And an empty slice is simply a no-op (no panic).
+        let mut none: Vec<Key> = Vec::new();
+        auto_tangents(&mut none, true);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn angular_slopes_wrap_through_zero() {
+        // 350° -> 10° -> 30° is steady +20°-per-10-frames motion
+        // through 0°: with angular deltas every key's slope is
+        // exactly 2.0 (interior: norm_deg(30 - 350) / 20 = 40 / 20).
+        let mut keys = vec![
+            Key::flat(0.0, 350.0),
+            Key::flat(10.0, 10.0),
+            Key::flat(20.0, 30.0),
+        ];
+        auto_tangents(&mut keys, true);
+        for k in &keys {
+            let (i, o) = tangents(k);
+            assert!(approx(i, 2.0) && approx(o, 2.0), "wrapped tangents {i}, {o}");
+        }
+        // Without the flag the same values are read literally:
+        // the middle secant is (30 - 350) / 20 = -16.0, the long
+        // way around — the flag is what makes the difference.
+        let mut keys = vec![
+            Key::flat(0.0, 350.0),
+            Key::flat(10.0, 10.0),
+            Key::flat(20.0, 30.0),
+        ];
+        auto_tangents(&mut keys, false);
+        let (i, _) = tangents(&keys[1]);
+        assert!(approx(i, -16.0), "unwrapped middle slope {i}");
+    }
+
+    #[test]
+    fn straight_line_channel_keeps_its_slope() {
+        // Keys exactly on the line v = 10 * f: every secant is
+        // 10.0, so smoothing leaves the (already linear) curve's
+        // slopes unchanged instead of flattening or bending them.
+        let mut keys = vec![
+            Key::flat(0.0, 0.0),
+            Key::flat(10.0, 100.0),
+            Key::flat(25.0, 250.0),
+        ];
+        auto_tangents(&mut keys, false);
+        for k in &keys {
+            let (i, o) = tangents(k);
+            assert!(approx(i, 10.0) && approx(o, 10.0), "line tangents {i}, {o}");
+        }
+    }
+
+    #[test]
+    fn step_and_linear_keys_still_get_tangents() {
+        // The documented decision: interp mode governs the segment
+        // a key STARTS, but its in_tan serves the previous segment
+        // — so Step/Linear keys are smoothed too, and their modes
+        // are not modified.
+        let mut keys = vec![
+            Key::flat(0.0, 0.0).with_interp(Interp::Linear),
+            Key::flat(10.0, 50.0).with_interp(Interp::Step),
+            Key::flat(30.0, 90.0),
+        ];
+        auto_tangents(&mut keys, false);
+        let (i, o) = tangents(&keys[1]);
+        assert!(approx(i, 3.0) && approx(o, 3.0), "Step key smoothed: {i}, {o}");
+        let (i, o) = tangents(&keys[0]);
+        assert!(approx(i, 5.0) && approx(o, 5.0), "Linear key smoothed: {i}, {o}");
+        assert_eq!(keys[0].interp, Interp::Linear, "mode untouched");
+        assert_eq!(keys[1].interp, Interp::Step, "mode untouched");
+    }
+
+    #[test]
+    fn smooth_channel_sorts_and_picks_angular_from_target() {
+        // Angle channel with keys deliberately out of order:
+        // the wrapper sorts them, then applies wrapped slopes.
+        let mut ch = Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![
+                Key::flat(20.0, 30.0),
+                Key::flat(0.0, 350.0),
+                Key::flat(10.0, 10.0),
+            ],
+        };
+        smooth_channel(&mut ch);
+        assert!(
+            approx(ch.keys[0].frame, 0.0)
+                && approx(ch.keys[1].frame, 10.0)
+                && approx(ch.keys[2].frame, 20.0),
+            "wrapper sorts keys: {:?}",
+            ch.keys
+        );
+        for k in &ch.keys {
+            let (i, o) = tangents(k);
+            assert!(approx(i, 2.0) && approx(o, 2.0), "angle tangents {i}, {o}");
+        }
+        // A RootX channel through the same wrapper stays plain:
+        // middle secant is (90 - 0) / 30 = 3.0, not a wrapped one.
+        let mut ch = Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(10.0, 50.0),
+                Key::flat(30.0, 90.0),
+            ],
+        };
+        smooth_channel(&mut ch);
+        let (i, o) = tangents(&ch.keys[1]);
+        assert!(approx(i, 3.0) && approx(o, 3.0), "plain tangents {i}, {o}");
     }
 }

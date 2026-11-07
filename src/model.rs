@@ -422,12 +422,46 @@ fn default_opacity() -> f32 {
     1.0
 }
 
+/// How a movieclip's frames are sequenced when played back.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub enum ClipLoop {
+    /// Wrap around to the first frame (the original behaviour).
+    #[default]
+    Loop,
+    /// Play forward, then backward, then forward again.
+    PingPong,
+    /// Play to the last frame and hold it.
+    Once,
+}
+
+/// The clip frame shown at timeline position `frame` for a clip of
+/// `len` frames under `mode`. `len <= 1` always yields 0; callers
+/// guard against empty clips as before.
+pub fn clip_frame_index(mode: ClipLoop, frame: usize, len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    match mode {
+        ClipLoop::Loop => frame % len,
+        ClipLoop::PingPong => {
+            let period = 2 * len - 2;
+            let p = frame % period;
+            if p < len { p } else { period - p }
+        }
+        ClipLoop::Once => frame.min(len - 1),
+    }
+}
+
 /// A movieclip: a self-contained looping animation of one figure.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClipDef {
     pub name: String,
     pub def: FigureDef,
     pub frames: Vec<Pose>,
+    /// Frame sequencing when the clip plays; older projects without
+    /// the field deserialize as `ClipLoop::Loop`.
+    #[serde(default)]
+    pub loop_mode: ClipLoop,
 }
 
 /// A freehand brush stroke drawn on one frame.
@@ -778,10 +812,12 @@ impl Project {
                 continue;
             }
             let n = clip.frames.len();
-            let idx = (f.floor() as usize) % n;
+            let base = f.floor() as usize;
+            let idx = clip_frame_index(clip.loop_mode, base, n);
             poses[fi] = if self.tween_playback && n > 1 {
                 let t = self.easing.apply(f - f.floor());
-                clip.frames[idx].lerp(&clip.frames[(idx + 1) % n], t)
+                let next = clip_frame_index(clip.loop_mode, base + 1, n);
+                clip.frames[idx].lerp(&clip.frames[next], t)
             } else {
                 clip.frames[idx].clone()
             };
@@ -1039,5 +1075,75 @@ mod tests {
         let pos = evaluate(&def, &pose);
         assert!((dist(pos[7], pos[8]) - 42.0).abs() < 0.05);
         assert!((dist(pos[0], pos[7]) - 44.0).abs() < 0.05);
+    }
+}
+
+#[cfg(test)]
+mod clip_loop_tests {
+    use super::{clip_frame_index, ClipDef, ClipLoop, Project};
+
+    #[test]
+    fn clip_index_loop_wraps() {
+        let got: Vec<usize> = (0..7).map(|f| clip_frame_index(ClipLoop::Loop, f, 3)).collect();
+        assert_eq!(got, vec![0, 1, 2, 0, 1, 2, 0]);
+    }
+
+    #[test]
+    fn clip_index_pingpong_bounces() {
+        let got: Vec<usize> = (0..6).map(|f| clip_frame_index(ClipLoop::PingPong, f, 3)).collect();
+        assert_eq!(got, vec![0, 1, 2, 1, 0, 1]);
+        let got4: Vec<usize> = (0..7).map(|f| clip_frame_index(ClipLoop::PingPong, f, 4)).collect();
+        assert_eq!(got4, vec![0, 1, 2, 3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn clip_index_once_clamps_on_last_frame() {
+        let got: Vec<usize> = (0..6).map(|f| clip_frame_index(ClipLoop::Once, f, 3)).collect();
+        assert_eq!(got, vec![0, 1, 2, 2, 2, 2]);
+    }
+
+    #[test]
+    fn clip_index_single_frame_is_always_zero() {
+        for mode in [ClipLoop::Loop, ClipLoop::PingPong, ClipLoop::Once] {
+            for f in [0, 1, 7, 100] {
+                assert_eq!(clip_frame_index(mode, f, 1), 0);
+                assert_eq!(clip_frame_index(mode, f, 0), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn clip_loop_default_is_loop() {
+        assert_eq!(ClipLoop::default(), ClipLoop::Loop);
+    }
+
+    #[test]
+    fn clip_instance_honours_loop_mode_at_poses_at() {
+        let mut project = Project::new_demo();
+        let def = project.figures[0].def.clone();
+        let frames = vec![
+            def.rest_pose([10.0, 0.0]),
+            def.rest_pose([20.0, 0.0]),
+            def.rest_pose([30.0, 0.0]),
+        ];
+        project.clips.push(ClipDef {
+            name: "wave".to_string(),
+            def,
+            frames,
+            loop_mode: ClipLoop::PingPong,
+        });
+        project.figures[0].clip = Some(0);
+        // The demo timeline has 5 frames (0..=4); poses_at clamps to it.
+        // PingPong visits clip frames 0, 1, 2, 1, 0.
+        let roots: Vec<f32> = (0..5).map(|f| project.poses_at(f as f32)[0].root[0]).collect();
+        assert_eq!(roots, vec![10.0, 20.0, 30.0, 20.0, 10.0]);
+        // Loop wraps: 0, 1, 2, 0, 1 — the pre-existing behaviour.
+        project.clips[0].loop_mode = ClipLoop::Loop;
+        let roots: Vec<f32> = (0..5).map(|f| project.poses_at(f as f32)[0].root[0]).collect();
+        assert_eq!(roots, vec![10.0, 20.0, 30.0, 10.0, 20.0]);
+        // Once holds the last frame: 0, 1, 2, 2, 2.
+        project.clips[0].loop_mode = ClipLoop::Once;
+        let roots: Vec<f32> = (0..5).map(|f| project.poses_at(f as f32)[0].root[0]).collect();
+        assert_eq!(roots, vec![10.0, 20.0, 30.0, 30.0, 30.0]);
     }
 }

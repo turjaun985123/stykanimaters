@@ -110,6 +110,8 @@ struct RawNode {
     use_segment_scale: bool,
     use_segment_color: bool,
     color: u32,
+    use_gradient: bool,
+    gradient_color: u32,
     num_polygon_vertices: i16,
     child_count: usize,
     child_connector_flags: Vec<i32>,
@@ -204,8 +206,9 @@ fn read_node(
     if modern(version, build, 21) {
         r.flag()?; // circle_is_hollow
     }
+    let mut use_gradient = false;
     if version >= 176 {
-        r.flag()?; // use_gradient
+        use_gradient = r.flag()?;
         r.flag()?; // reverse_gradient
     }
     if modern(version, build, 20) {
@@ -270,8 +273,9 @@ fn read_node(
         r.f32()?; // default_angle
     }
     let color = r.color()?;
+    let mut gradient_color = 0;
     if version >= 176 {
-        r.color()?; // gradient_color
+        gradient_color = r.color()?;
     }
     if version >= 256 {
         r.color()?; // circle_outline_color
@@ -338,6 +342,8 @@ fn read_node(
         use_segment_scale,
         use_segment_color,
         color,
+        use_gradient,
+        gradient_color,
         num_polygon_vertices,
         child_count,
         child_connector_flags,
@@ -546,7 +552,18 @@ fn convert(fig: &RawFigure) -> (FigureDef, u32) {
             _ => Shape::Line,
         };
         nodes.push(NodeDef {
-        style: crate::model::NodeStyle::default(),
+        style: crate::model::NodeStyle {
+            // The gradient end colour is a real grammar field
+            // (use_gradient + gradient_color, version >= 176)
+            // and round-trips through export. The raw root's is
+            // dropped with its colour, by the same design.
+            color2: if node.use_gradient && i > 0 {
+                Some(node.gradient_color)
+            } else {
+                None
+            },
+            ..Default::default()
+        },
         media: None,
             name: format!("{} {}", kind_name(node.kind), node.id),
             parent: Some(node.parent.map(|p| p + 1).unwrap_or(0)),
@@ -624,7 +641,8 @@ impl BeWriter {
 /// One node record at version 431 / build 117, in exactly the
 /// field order `read_node` consumes at that profile. Every field
 /// the model cannot express is written at its neutral default
-/// (no gradient, no curve, no locks, no smart stretch).
+/// (no curve, no locks, no smart stretch). The gradient end
+/// colour is not a default: it is written from the model.
 #[allow(clippy::too_many_arguments)]
 fn write_node_record(
     w: &mut BeWriter,
@@ -634,6 +652,7 @@ fn write_node_record(
     length: f32,
     thickness: i32,
     color: Option<u32>,
+    gradient: Option<u32>,
     polygon_vertices: i16,
     child_count: usize,
 ) {
@@ -648,7 +667,7 @@ fn write_node_record(
     w.flag(color.is_some()); // use_segment_color
     w.flag(false); // use_circle_outline
     w.flag(false); // circle_is_hollow
-    w.flag(false); // use_gradient
+    w.flag(gradient.is_some()); // use_gradient
     w.flag(false); // reverse_gradient
     w.i16(0); // gradient_mode
     w.flag(false); // use_segment_scale
@@ -675,7 +694,7 @@ fn write_node_record(
     w.f32(local_angle);
     w.f32(0.0); // default_angle (absolute; readers recompute it)
     w.color(color.unwrap_or(0));
-    w.color(0); // gradient_color
+    w.color(gradient.unwrap_or(0)); // gradient_color
     w.color(0); // circle_outline_color
     w.flag(false); // is_angle_locked
     w.flag(false); // angle_lock_is_main_node
@@ -768,18 +787,40 @@ pub(crate) fn nodes_preorder(def: &FigureDef) -> Vec<usize> {
 ///   instances): the header colour is node 1's colour when set,
 ///   else black, and returns as the instance colour from
 ///   `import_nodes_figure`. Every other node's colour survives
-///   via `use_segment_color`.
+///   via `use_segment_color`, and its gradient end colour
+///   (`NodeStyle.color2`) via `use_gradient` +
+///   `gradient_color`; node 1's gradient end colour is
+///   dropped with its colour.
 /// * **Fractional thickness** (the format stores i32;
 ///   values are rounded) and **negative lengths** (written as
 ///   magnitude plus the format's own 180° local-angle flip, so
 ///   the evaluated geometry is identical but the length reads
 ///   back positive).
-/// * Node names, head/IK flags, bend direction, styles and
-///   media have no fields in the grammar and are dropped.
-///   Ellipses read back as circles (there is no ellipse in the
-///   model; kind 5 writes as kind 2), and a 4-sided polygon
-///   writes as kind 7 with 4 vertices (kind 6, trapezoid,
-///   would read back as a plain segment).
+/// * **Node names**: the figure grammar contains no string
+///   fields at all (strings exist only in project
+///   containers), so names are dropped.
+/// * **Segment taper** (`NodeStyle.taper`): the only
+///   start/end thickness fields in the record are the
+///   trapezoid node's own, and the original renderer
+///   applies them only to kind 6; a segment's drawn width
+///   comes from the i32 thickness alone. Kind 6 is never
+///   written (it would read back as a plain segment and
+///   render as a different shape in Stick Nodes), so taper
+///   is dropped.
+/// * **Segment cap** (`NodeStyle.cap`): the record has no
+///   cap field, so the cap kind is dropped.
+/// * **Segment opacity** (`NodeStyle.opacity`): the record
+///   has no opacity field; the colour alpha byte is dropped
+///   on read by design and defines no opacity, so opacity
+///   is dropped.
+/// * **Media** (sprites/text on segments): `.nodes` node
+///   kinds are purely geometric — there are no image/text
+///   kinds and no side tables — so media is dropped.
+/// * Head/IK flags and bend direction have no fields in
+///   the grammar and are dropped. Ellipses read back as
+///   circles (there is no ellipse in the model; kind 5
+///   writes as kind 2), and a 4-sided polygon writes as
+///   kind 7 with 4 vertices.
 pub fn export_nodes_figure(def: &FigureDef, _name: &str) -> Vec<u8> {
     let mut w = BeWriter { v: Vec::new() };
     w.i32(431); // version
@@ -791,7 +832,7 @@ pub fn export_nodes_figure(def: &FigureDef, _name: &str) -> Vec<u8> {
     if n < 2 {
         // Degenerate def (origin only): a lone raw root still
         // parses as a figure.
-        write_node_record(&mut w, -1, 0, 0.0, 0.0, 0, None, 5, 0);
+        write_node_record(&mut w, -1, 0, 0.0, 0.0, 0, None, None, 5, 0);
         w.i32(0); // polyfills
         w.i32(0); // connections
         return w.v;
@@ -830,8 +871,10 @@ pub fn export_nodes_figure(def: &FigureDef, _name: &str) -> Vec<u8> {
         }
         // The raw root's colour never surfaces in the model
         // (convert drops it), so it is written without the
-        // per-segment colour flag.
+        // per-segment colour flag. The same holds for its
+        // gradient end colour.
         let color = if k == 1 { None } else { node.color };
+        let gradient = if k == 1 { None } else { node.style.color2 };
         write_node_record(
             w,
             kind,
@@ -840,6 +883,7 @@ pub fn export_nodes_figure(def: &FigureDef, _name: &str) -> Vec<u8> {
             length,
             node.thickness.round() as i32,
             color,
+            gradient,
             polygon_vertices,
             children[k].len(),
         );
@@ -1129,6 +1173,10 @@ mod tests {
             } else {
                 assert!((a.length - b.length).abs() < 0.01, "node {k} length");
                 assert_eq!(a.color, b.color, "node {k} colour");
+                assert_eq!(
+                    a.style.color2, b.style.color2,
+                    "node {k} gradient end colour"
+                );
                 // The new parent is the raw parent's new index.
                 let rp = if a.parent == Some(0) { 1 } else { a.parent.unwrap() };
                 let expect = order.iter().position(|&x| x == rp).unwrap() + 1;
@@ -1194,7 +1242,11 @@ mod tests {
     /// and its colour None (the colour returns as the header /
     /// instance colour instead), origin-parented nodes re-parent
     /// to the root, and head / IK-end flags and bend direction
-    /// are dropped (no grammar fields). `check_geometry` also
+    /// are dropped (no grammar fields). The gradient end colour
+    /// is not a loss: it is compared for every non-root node
+    /// (the root's is dropped with its colour), and taper, cap
+    /// and opacity are asserted back at their defaults (no
+    /// grammar fields for them). `check_geometry` also
     /// compares evaluated rest positions — only valid for defs
     /// in the importer's own image (zero-length root anchor):
     /// for Pivot-style defs the root's lost length shifts every
@@ -1222,10 +1274,18 @@ mod tests {
             assert!(!b.head, "node {k}: head flag has no grammar field");
             assert!(!b.ik_end, "node {k}: ik_end flag has no grammar field");
             assert_eq!(b.bend, 1.0, "node {k}: bend direction has no grammar field");
+            assert_eq!(b.style.taper, 1.0, "node {k}: taper has no grammar field");
+            assert_eq!(
+                b.style.cap,
+                crate::model::CapKind::Round,
+                "node {k}: cap has no grammar field"
+            );
+            assert_eq!(b.style.opacity, 1.0, "node {k}: opacity has no grammar field");
             if k == 1 {
                 // Documented raw-root losses.
                 assert_eq!(b.length, 0.0, "raw root length reads back 0");
                 assert_eq!(b.color, None, "raw root colour is dropped");
+                assert_eq!(b.style.color2, None, "raw root gradient is dropped");
                 assert_eq!(b.parent, Some(0));
             } else {
                 assert!(
@@ -1235,6 +1295,10 @@ mod tests {
                     b.length
                 );
                 assert_eq!(a.color, b.color, "node {k} colour");
+                assert_eq!(
+                    a.style.color2, b.style.color2,
+                    "node {k} gradient end colour"
+                );
                 // Origin-parented nodes re-parent to the root;
                 // any other parent maps to its preorder slot.
                 let rp = match a.parent {
@@ -1443,5 +1507,74 @@ mod tests {
         assert_eq!(back.nodes[2].name, "segment 1");
         assert_eq!(back.nodes[3].name, "circle 2");
         assert_eq!(back.nodes[4].name, "triangle 3");
+    }
+
+    #[test]
+    fn nodes_roundtrip_gradient_end_colour_survives() {
+        // The grammar carries a per-node gradient (use_gradient
+        // flag + gradient_color, version >= 176) and the model
+        // holds it as NodeStyle.color2, so it must round-trip:
+        // over a node's own colour, over the figure colour
+        // (colour None), and on a shape kind. The raw root's
+        // gradient is the one exception — dropped with the
+        // root's colour, by convert's design.
+        let mut def = FigureDef {
+            nodes: vec![
+                nd(None, 0.0, 0.0, 5.0, None, Shape::Line),
+                nd(Some(0), 0.0, 100.0, 6.0, None, Shape::Line),
+                nd(Some(1), 40.0, 10.0, 4.0, Some(0x102030), Shape::Line),
+                nd(Some(1), 36.0, -25.0, 4.0, None, Shape::Line),
+                nd(Some(1), 30.0, 80.0, 4.0, None, Shape::Circle),
+                nd(Some(1), 26.0, 140.0, 4.0, Some(0xA0B0C0), Shape::Line),
+            ],
+        };
+        def.nodes[1].style.color2 = Some(0xFF0000); // root: dropped
+        def.nodes[2].style.color2 = Some(0x00FF00); // over own colour
+        def.nodes[3].style.color2 = Some(0x0000FF); // over figure colour
+        def.nodes[4].style.color2 = Some(0x123123); // on a circle
+        // nodes[5] keeps color2 None: no gradient is written.
+        let bytes = export_nodes_figure(&def, "T");
+        let (back, _) = import_nodes_figure(&bytes).unwrap();
+        assert_eq!(back.nodes[1].style.color2, None, "root gradient dropped");
+        assert_eq!(back.nodes[2].style.color2, Some(0x00FF00));
+        assert_eq!(back.nodes[3].style.color2, Some(0x0000FF));
+        assert_eq!(back.nodes[4].style.color2, Some(0x123123));
+        assert_eq!(back.nodes[5].style.color2, None);
+        // Base colours are unaffected by the gradient channel.
+        assert_eq!(back.nodes[2].color, Some(0x102030));
+        assert_eq!(back.nodes[5].color, Some(0xA0B0C0));
+        check_roundtrip_fields(&def, &back, true);
+    }
+
+    #[test]
+    fn nodes_roundtrip_taper_cap_opacity_dropped_documented() {
+        // Documented losses: taper, cap and opacity have no
+        // fields in the .nodes record (see export_nodes_figure),
+        // so they read back at their NodeStyle defaults even
+        // when set — while the gradient end colour on the same
+        // node survives, proving the style was written.
+        let mut def = FigureDef {
+            nodes: vec![
+                nd(None, 0.0, 0.0, 5.0, None, Shape::Line),
+                nd(Some(0), 0.0, 100.0, 6.0, None, Shape::Line),
+                nd(Some(1), 40.0, 10.0, 4.0, None, Shape::Line),
+            ],
+        };
+        def.nodes[2].style = crate::model::NodeStyle {
+            taper: 0.25,
+            cap: crate::model::CapKind::Point,
+            color2: Some(0x445566),
+            opacity: 0.4,
+        };
+        let bytes = export_nodes_figure(&def, "T");
+        let (back, _) = import_nodes_figure(&bytes).unwrap();
+        assert_eq!(back.nodes[2].style.color2, Some(0x445566), "gradient survives");
+        assert_eq!(back.nodes[2].style.taper, 1.0, "taper has no grammar field");
+        assert_eq!(
+            back.nodes[2].style.cap,
+            crate::model::CapKind::Round,
+            "cap has no grammar field"
+        );
+        assert_eq!(back.nodes[2].style.opacity, 1.0, "opacity has no grammar field");
     }
 }

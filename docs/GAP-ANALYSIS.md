@@ -274,3 +274,64 @@ of this gets). Themes:
 
 Nothing in this section is CI-verified yet; statuses move to
 the per-wave tables above once the run is green.
+
+## Wave 10 (in progress, 2026-11-08)
+
+Twenty code agents, aimed at the top remaining gaps listed in
+docs/COMPARISON.md. Everything below is implemented in Wave 10;
+CI verification happens at integration (per the repo rule, CI
+is the first build/test any of this gets), so no item here is
+claimed verified yet. (Wave 9, described above as pending, has
+since passed CI: 421 tests green, run 42403754079.)
+
+- **Live audio mixing** — playback now mixes ALL clips audible
+  at the playhead; the first-audible-clip-only, single-stream
+  playback noted in the Wave 4 section is gone.
+- **Export audio mixing** — MP4/WebM exports mix every audio
+  clip into the soundtrack at its frame offset, instead of
+  muxing only the first clip.
+- **Fog weather** — a fourth weather kind (Fog) beside rain,
+  snow and fireflies: model variant, rasterizer and editor
+  canvas rendering, and a Fog segment in the weather panel's
+  segmented control.
+- **Brush library round 3** — three new preset brushes in
+  `brush_library()` (`src/paint.rs`).
+- **3 new VFX kinds** — Fireworks, Aurora, Comet: 21
+  deterministic clip kinds total (was 18). MCP's
+  `parse_clip_kind` covers all 21.
+- **Graph auto-tangents** — Catmull-Rom auto-tangents for
+  graph channels: engine support plus an editor op that
+  smooths a channel's tangents in one action.
+- **Pose mirroring** — an editor op that mirrors the current
+  pose, plus the matching 3D pose mirror in `src/fig3d.rs`.
+- **Movieclip loop modes** — clips gain a loop mode in the
+  model (Loop / PingPong / Once) with an editor op to cycle
+  it; clips are still flat pose lists (no nested timelines).
+- **.nodes export fidelity** — writer improvements scoped to
+  what the format grammar can express; the exact wins are the
+  implementing agent's to report, and the documented losses
+  in the Wave 7+8 table stand until integration confirms
+  otherwise.
+- **MCP round 4** — three new tools (`mirror_pose`,
+  `smooth_graph_tangents`, `render_contact_sheet`): 54 tools
+  total.
+- **Localisation** — the 12 newest UI keys (added in Wave 9)
+  are now genuinely translated into German, French, Italian,
+  Portuguese (pt-BR), Russian and Chinese (zh-Hans); they were
+  English-filled placeholders in those languages. (Japanese,
+  Korean, Hindi and Urdu have no tables in this project — or
+  in the original — so there was nothing to translate into;
+  adding them would be a structural change.) The remaining
+  languages still carry the English strings for those 12 keys.
+- **UI wiring** — the Guides overlay gains a toggle; timeline
+  chips render through `ui::frame_chip`, inspector steppers
+  through `ui::stepper_row`, and the Home project list
+  through `ui::file_row`; the HUD gains a pure `chip_specs`
+  seam so its chip layout is testable without GPUI.
+- **Export determinism tests** — integration tests asserting
+  byte-identical exports for identical projects, guarding
+  the determinism claim the architecture notes make.
+
+Nothing in this section is CI-verified yet; statuses move to
+the per-wave tables above once the run is green, and
+docs/COMPARISON.md is refreshed after that run.

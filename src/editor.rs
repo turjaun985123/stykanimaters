@@ -1134,6 +1134,69 @@ impl EditorCore {
         self.status = "Graph channels cleared.".into();
     }
 
+    /// Wave 10: smooth every graph channel's key tangents in one
+    /// undo step. `graph::smooth_channel` fits automatic
+    /// Catmull-Rom-style tangents through each channel's keys so
+    /// Hermite segments flow instead of cornering at flat tangents;
+    /// it derives from the channel's own target whether the values
+    /// are angles (smoothed the short way around the circle) or
+    /// plain scalars.
+    pub fn smooth_graph_tangents(&mut self) {
+        if self.project.channels.is_empty() {
+            self.status = "No graph channels to smooth.".into();
+            return;
+        }
+        let n = self.project.channels.len();
+        self.snapshot();
+        for ch in &mut self.project.channels {
+            crate::graph::smooth_channel(ch);
+        }
+        self.status = format!("Smoothed tangents on {n} graph channel(s).");
+    }
+
+    /// Wave 10: mirror the selected figure's pose on the current
+    /// frame, in place, as one undo step.
+    ///
+    /// Pose angles are RELATIVE joint angles in degrees, so
+    /// negating every angle reflects the pose about the vertical
+    /// axis through the root: each segment leaves its parent at
+    /// the mirrored heading, and the root position is unchanged.
+    /// Approximation, stated honestly: this is exact for the angle
+    /// data itself and for bilaterally symmetric rigs (the
+    /// built-in presets) — mirroring twice returns the original
+    /// pose exactly. It does not touch anything outside `Pose`:
+    /// per-node bends, segment lengths and graph channels keep
+    /// their values, so a mirrored pose driven by a graph channel
+    /// or carrying bends can differ slightly from a true
+    /// geometric mirror of the rendered figure.
+    pub fn mirror_selected_pose(&mut self) {
+        let fi = self.selected_figure;
+        if fi >= self.project.figures.len() {
+            self.status = "No such figure.".into();
+            return;
+        }
+        let has_pose = self
+            .project
+            .frames
+            .get(self.current)
+            .and_then(|f| f.poses.get(fi))
+            .is_some();
+        if !has_pose {
+            self.status = format!(
+                "Figure {} has no pose on frame {}.",
+                fi + 1,
+                self.current + 1
+            );
+            return;
+        }
+        self.snapshot();
+        let pose = &mut self.project.frames[self.current].poses[fi];
+        for a in &mut pose.angles {
+            *a = -*a;
+        }
+        self.status = format!("Mirrored figure {} on frame {}.", fi + 1, self.current + 1);
+    }
+
     pub fn open_via_dialog(&mut self) {
         if crate::dialogs::available_tool().is_none() {
             self.status =
@@ -2425,6 +2488,7 @@ impl EditorCore {
             name: name.clone(),
             def: fig.def.clone(),
             frames,
+            loop_mode: crate::model::ClipLoop::Loop,
         });
         let ci = self.project.clips.len() - 1;
         self.project.figures[fi].clip = Some(ci);
@@ -2661,7 +2725,12 @@ impl EditorCore {
             fallback = pose.clone();
             frames.push(pose);
         }
-        self.project.clips.push(crate::model::ClipDef { name: name.clone(), def, frames });
+        self.project.clips.push(crate::model::ClipDef {
+            name: name.clone(),
+            def,
+            frames,
+            loop_mode: crate::model::ClipLoop::Loop,
+        });
         let ci = self.project.clips.len() - 1;
         for f in 0..self.project.clips[ci].frames.len() {
             self.clip_fit_frame(ci, f);
@@ -2669,6 +2738,31 @@ impl EditorCore {
         self.project.figures[fi].clip = Some(ci);
         self.status = format!("{name} created; figure {} now loops it.", fi + 1);
         Some(ci)
+    }
+
+    /// Wave 10: cycle a clip's loop mode — Loop → PingPong →
+    /// Once → Loop — as one undo step. `model::poses_at` honours
+    /// the mode when a figure plays the clip back.
+    pub fn cycle_clip_loop(&mut self, index: usize) {
+        if index >= self.project.clips.len() {
+            self.status = "No such clip.".into();
+            return;
+        }
+        self.snapshot();
+        let clip = &mut self.project.clips[index];
+        clip.loop_mode = match clip.loop_mode {
+            crate::model::ClipLoop::Loop => crate::model::ClipLoop::PingPong,
+            crate::model::ClipLoop::PingPong => crate::model::ClipLoop::Once,
+            crate::model::ClipLoop::Once => crate::model::ClipLoop::Loop,
+        };
+        self.status = format!(
+            "Clip loop: {}.",
+            match clip.loop_mode {
+                crate::model::ClipLoop::Loop => "loop",
+                crate::model::ClipLoop::PingPong => "ping-pong",
+                crate::model::ClipLoop::Once => "once",
+            }
+        );
     }
 
     // ---- Named projects ----
@@ -4516,5 +4610,101 @@ mod tests {
         core.exit_clip();
         core.exit_clip(); // a second exit is a harmless no-op
         assert!(core.clip_edit.is_none());
+    }
+}
+
+#[cfg(test)]
+mod wave10_tests {
+    use crate::editor::EditorCore;
+    use crate::graph::{Channel, ChannelTarget, Key};
+    use crate::model::{ClipDef, ClipLoop, FigureDef};
+
+    #[test]
+    fn smooth_graph_tangents_rewrites_flat_tangents() {
+        let mut core = EditorCore::new();
+        // The demo project has no channels: a clear no-op status,
+        // and no undo step is recorded for it.
+        core.smooth_graph_tangents();
+        assert!(
+            core.status.contains("No graph channels"),
+            "status: {}",
+            core.status
+        );
+
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(10.0, 50.0),
+                Key::flat(20.0, 10.0),
+            ],
+        });
+        core.smooth_graph_tangents();
+        assert!(core.status.contains("Smoothed"), "status: {}", core.status);
+        let ch = &core.project.channels[0];
+        // Frames and values are untouched; only tangents move.
+        assert_eq!(ch.keys.len(), 3);
+        assert_eq!(ch.keys[1].frame, 10.0);
+        assert_eq!(ch.keys[1].value, 50.0);
+        assert!(
+            ch.keys.iter().any(|k| k.in_tan != 0.0 || k.out_tan != 0.0),
+            "smoothing should give at least one key a non-flat tangent: {:?}",
+            ch.keys
+        );
+    }
+
+    #[test]
+    fn mirror_pose_negates_angles_and_is_its_own_inverse() {
+        let mut core = EditorCore::new();
+        let before = core.project.frames[0].poses[0].clone();
+        assert!(!before.angles.is_empty());
+        core.mirror_selected_pose();
+        assert!(core.status.contains("Mirrored"), "status: {}", core.status);
+        let mirrored = &core.project.frames[0].poses[0];
+        assert_eq!(mirrored.root, before.root, "the root must not move");
+        for (m, b) in mirrored.angles.iter().zip(&before.angles) {
+            assert_eq!(*m, -*b);
+        }
+        // Mirroring a second time returns the exact original pose.
+        core.mirror_selected_pose();
+        assert_eq!(core.project.frames[0].poses[0].angles, before.angles);
+        assert_eq!(core.project.frames[0].poses[0].root, before.root);
+    }
+
+    #[test]
+    fn mirror_pose_without_pose_reports_and_changes_nothing() {
+        let mut core = EditorCore::new();
+        core.project.frames[0].poses.clear();
+        core.mirror_selected_pose();
+        assert!(core.status.contains("no pose"), "status: {}", core.status);
+        assert!(core.project.frames[0].poses.is_empty());
+    }
+
+    #[test]
+    fn cycle_clip_loop_rotates_through_all_modes() {
+        let mut core = EditorCore::new();
+        core.project.clips.push(ClipDef {
+            name: "T".into(),
+            def: FigureDef::simple(),
+            frames: Vec::new(),
+            loop_mode: ClipLoop::Loop,
+        });
+        core.cycle_clip_loop(0);
+        assert!(matches!(
+            core.project.clips[0].loop_mode,
+            ClipLoop::PingPong
+        ));
+        assert!(core.status.contains("ping-pong"), "status: {}", core.status);
+        core.cycle_clip_loop(0);
+        assert!(matches!(core.project.clips[0].loop_mode, ClipLoop::Once));
+        assert!(core.status.contains("once"), "status: {}", core.status);
+        core.cycle_clip_loop(0);
+        assert!(matches!(core.project.clips[0].loop_mode, ClipLoop::Loop));
+        assert!(core.status.contains("loop"), "status: {}", core.status);
+        // Out of range: quiet no-op with a status, mode unchanged.
+        core.cycle_clip_loop(9);
+        assert!(core.status.contains("No such clip"), "status: {}", core.status);
+        assert!(matches!(core.project.clips[0].loop_mode, ClipLoop::Loop));
     }
 }
