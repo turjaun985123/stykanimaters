@@ -337,14 +337,15 @@ Nothing in this section is CI-verified yet; statuses move to
 the per-wave tables above once the run is green, and
 docs/COMPARISON.md is refreshed after that run.
 
-## Wave 11 (in progress, 2026-11-08)
+## Wave 11 (delivered 2026-11-08, CI run 42427232939 green on 78f1665, 689 tests)
 
 Twenty code agents, aimed at the top remaining gaps listed in
-docs/COMPARISON.md. Everything below is implemented in Wave 11;
-CI verification happens at integration (per the repo rule, CI
-is the first build/test any of this gets), so no item here is
-claimed verified yet. Two items are investigations whose
-outcome is still pending — they are marked as such.
+docs/COMPARISON.md. Two CI fix commits followed the wave commit
+(a GifDecoder BufRead bound in the range-export test, and a
+rect-shape test that expected counter-clockwise winding where
+the implementation's clockwise rotation is correct). Both
+investigations resolved: .stknds camera implemented both ways,
+segment gradients audited as already implemented.
 
 - **Drawing shape tools** — line, rectangle and ellipse stroke
   generators in `src/paint.rs`, so exact shapes can be drawn
