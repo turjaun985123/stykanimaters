@@ -128,6 +128,123 @@ pub fn default_camera() -> Camera3 {
     }
 }
 
+/// A named camera view, built from [`default_camera`] with only
+/// yaw/pitch adjusted (distance, FOV and target stay the defaults):
+///
+/// - `"front"` — the default orientation (yaw 0, pitch 0): camera
+///   on +Z, looking at the figure face-on.
+/// - `"side"` — yaw +90°: the camera sits on +X (positive yaw
+///   orbits toward +X), so the figure is seen in profile.
+/// - `"three-quarter"` — yaw +35°, pitch +12°: front-side and
+///   slightly from above. This module's convention is that
+///   positive pitch *raises* the camera above the target (see
+///   [`Camera3`]), so +12° is the elevated three-quarter view.
+/// - `"top"` — pitch 89.9°, the most top-down this representation
+///   allows: [`project`]'s view frame (and the editor's orbit)
+///   clamp pitch to ±89.9° so the camera basis never degenerates
+///   at the pole.
+///
+/// Any other name returns `None`. Matching is exact and
+/// case-sensitive.
+pub fn camera_preset(name: &str) -> Option<Camera3> {
+    let base = default_camera();
+    match name {
+        "front" => Some(base),
+        "side" => Some(Camera3 { yaw: 90.0, ..base }),
+        "three-quarter" => Some(Camera3 {
+            yaw: 35.0,
+            pitch: 12.0,
+            ..base
+        }),
+        "top" => Some(Camera3 {
+            pitch: 89.9,
+            ..base
+        }),
+        _ => None,
+    }
+}
+
+/// Frame `fig` in `pose` on `stage`: a front camera (the
+/// [`default_camera`] orientation and FOV) targeted on the posed
+/// figure's centroid, with its distance chosen so the figure's
+/// projected bounding box lies inside the central 80% of the stage
+/// in both dimensions — i.e. within `[0.1·w, 0.9·w] × [0.1·h,
+/// 0.9·h]`. Testing the box against that region (rather than only
+/// its size) is what guarantees every joint lands on stage with a
+/// margin: the box is centred on the projected centroid only when
+/// the pose is symmetric about it, and an off-centre box of the
+/// right size could still spill past an edge.
+///
+/// The distance search is deterministic and bounded: starting from
+/// the default 400 units, the distance doubles (at most 40 times)
+/// until the box fits, then 48 bisection steps narrow to nearly
+/// the smallest fitting distance. Projected size shrinks
+/// monotonically as distance grows, so once a distance fits, every
+/// larger one does too and the bisection is sound; points behind
+/// the camera (clamped projections) never count as fitting. An
+/// empty figure has nothing to frame and yields
+/// [`default_camera`].
+pub fn frame_camera(fig: &Figure3, pose: &Pose3, stage: [f32; 2]) -> Camera3 {
+    let world = evaluate3(fig, pose);
+    if world.is_empty() {
+        return default_camera();
+    }
+    let n = world.len() as f32;
+    let mut centroid = [0.0; 3];
+    for p in &world {
+        centroid[0] += p[0];
+        centroid[1] += p[1];
+        centroid[2] += p[2];
+    }
+    let centroid = [centroid[0] / n, centroid[1] / n, centroid[2] / n];
+    let mut cam = Camera3 {
+        target: centroid,
+        ..default_camera()
+    };
+    let (x0, x1) = (stage[0] * 0.1, stage[0] * 0.9);
+    let (y0, y1) = (stage[1] * 0.1, stage[1] * 0.9);
+    let fits = |cam: &Camera3| -> bool {
+        let proj = project(&world, cam, stage);
+        let mut min = [f32::INFINITY; 2];
+        let mut max = [f32::NEG_INFINITY; 2];
+        for p in &proj {
+            if p.depth >= BEHIND_DEPTH {
+                return false;
+            }
+            min[0] = min[0].min(p.xy[0]);
+            min[1] = min[1].min(p.xy[1]);
+            max[0] = max[0].max(p.xy[0]);
+            max[1] = max[1].max(p.xy[1]);
+        }
+        min[0] >= x0 && max[0] <= x1 && min[1] >= y0 && max[1] <= y1
+    };
+    // Bracket a fitting distance, growing from the default.
+    let mut lo = 1.0f32;
+    let mut hi = cam.distance;
+    cam.distance = hi;
+    let mut grows = 0;
+    while !fits(&cam) && grows < 40 {
+        hi *= 2.0;
+        cam.distance = hi;
+        grows += 1;
+    }
+    if fits(&cam) {
+        // Bisect down to (very nearly) the smallest fitting
+        // distance; `hi` only ever moves to distances that fit.
+        for _ in 0..48 {
+            let mid = (lo + hi) / 2.0;
+            cam.distance = mid;
+            if fits(&cam) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        cam.distance = hi;
+    }
+    cam
+}
+
 // ---------------------------------------------------------------------
 // Small vector / matrix helpers (row-major 3x3, column vectors).
 // ---------------------------------------------------------------------
@@ -1347,5 +1464,127 @@ mod mirror_tests {
             after[5],
             rest_pos[5]
         );
+    }
+}
+
+#[cfg(test)]
+mod camera_framing_tests {
+    use super::{
+        camera_preset, default_camera, evaluate3, frame_camera, humanoid3, project, Figure3,
+        Pose3,
+    };
+
+    #[test]
+    fn all_four_presets_exist_and_unknown_names_are_none() {
+        for name in ["front", "side", "three-quarter", "top"] {
+            assert!(camera_preset(name).is_some(), "preset {name} missing");
+        }
+        assert!(camera_preset("back").is_none());
+        assert!(camera_preset("").is_none());
+        assert!(camera_preset("FRONT").is_none(), "names are case-sensitive");
+    }
+
+    #[test]
+    fn presets_adjust_only_yaw_and_pitch() {
+        let base = default_camera();
+        let front = camera_preset("front").unwrap();
+        assert_eq!(front, base, "front is the default orientation");
+        let side = camera_preset("side").unwrap();
+        assert_eq!(side.yaw, 90.0);
+        assert_eq!(side.pitch, base.pitch);
+        let tq = camera_preset("three-quarter").unwrap();
+        assert_eq!(tq.yaw, 35.0);
+        // Positive pitch raises the camera in this module's
+        // convention, so the elevated three-quarter view is +12.
+        assert_eq!(tq.pitch, 12.0);
+        let top = camera_preset("top").unwrap();
+        assert!(
+            top.pitch >= 89.0,
+            "top is as top-down as the pitch clamp allows: {}",
+            top.pitch
+        );
+        // Every preset keeps the default distance, FOV and target.
+        for name in ["front", "side", "three-quarter", "top"] {
+            let c = camera_preset(name).unwrap();
+            assert_eq!(c.distance, base.distance, "{name} distance");
+            assert_eq!(c.fov_deg, base.fov_deg, "{name} fov");
+            assert_eq!(c.target, base.target, "{name} target");
+        }
+    }
+
+    #[test]
+    fn side_preset_differs_from_front() {
+        let front = camera_preset("front").unwrap();
+        let side = camera_preset("side").unwrap();
+        assert_ne!(side, front);
+        assert_ne!(side.yaw, front.yaw);
+    }
+
+    #[test]
+    fn frame_camera_frames_the_rest_humanoid() {
+        let fig = humanoid3();
+        let pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        let stage = [960.0, 720.0];
+        let cam = frame_camera(&fig, &pose, stage);
+        // A front camera: default orientation and FOV, targeted on
+        // the figure's centroid.
+        assert_eq!((cam.yaw, cam.pitch), (0.0, 0.0));
+        assert_eq!(cam.fov_deg, default_camera().fov_deg);
+        assert!(cam.distance > 0.0);
+        let world = evaluate3(&fig, &pose);
+        let proj = project(&world, &cam, stage);
+        // Every joint lands inside the stage with a margin — the
+        // central-80% region the distance search targets.
+        let (x0, x1) = (stage[0] * 0.1, stage[0] * 0.9);
+        let (y0, y1) = (stage[1] * 0.1, stage[1] * 0.9);
+        for (i, p) in proj.iter().enumerate() {
+            assert!(
+                p.xy[0] >= x0 && p.xy[0] <= x1 && p.xy[1] >= y0 && p.xy[1] <= y1,
+                "joint {i} at {:?} outside the central region",
+                p.xy
+            );
+        }
+        // The fit is not absurdly loose: the bounding box covers
+        // at least 40% of the stage in width or height.
+        let mut min = [f32::INFINITY; 2];
+        let mut max = [f32::NEG_INFINITY; 2];
+        for p in &proj {
+            min[0] = min[0].min(p.xy[0]);
+            min[1] = min[1].min(p.xy[1]);
+            max[0] = max[0].max(p.xy[0]);
+            max[1] = max[1].max(p.xy[1]);
+        }
+        assert!(
+            max[0] - min[0] >= 0.4 * stage[0] || max[1] - min[1] >= 0.4 * stage[1],
+            "bbox {} x {} on a {} x {} stage is too loose",
+            max[0] - min[0],
+            max[1] - min[1],
+            stage[0],
+            stage[1]
+        );
+    }
+
+    #[test]
+    fn frame_camera_is_deterministic() {
+        let fig = humanoid3();
+        let mut pose = Pose3::rest(&fig, [15.0, -5.0, 10.0]);
+        pose.rotations[3] = [0.0, 0.0, -50.0]; // upperArm.L raised
+        pose.rotations[10] = [30.0, 0.0, 0.0]; // shin.L bent
+        let stage = [960.0, 720.0];
+        assert_eq!(
+            frame_camera(&fig, &pose, stage),
+            frame_camera(&fig, &pose, stage)
+        );
+    }
+
+    #[test]
+    fn frame_camera_empty_figure_is_the_default_camera() {
+        let fig = Figure3 {
+            name: "empty".into(),
+            color: 0,
+            nodes: vec![],
+        };
+        let pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        assert_eq!(frame_camera(&fig, &pose, [960.0, 720.0]), default_camera());
     }
 }

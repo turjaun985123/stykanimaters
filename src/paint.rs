@@ -459,6 +459,72 @@ pub fn erase_at(strokes: &[Stroke], centre: V2, radius: f32) -> Vec<Stroke> {
     out
 }
 
+/// The shapes the shape tool can draw from a drag. The outline is
+/// generated as a plain polyline (see [`shape_points`]), so a
+/// shape becomes an ordinary stroke once it is committed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ShapeKind {
+    Line,
+    Rect,
+    Ellipse,
+}
+
+/// Outline points for the shape `kind` dragged from corner `a` to
+/// corner `b` (stage coordinates, y down). Rects and ellipses are
+/// normalised to the axis-aligned box spanned by the two corners,
+/// so the drag direction never changes the figure — only, for a
+/// rect, which corner comes first:
+///
+/// - `Line`: exactly `[a, b]`.
+/// - `Rect`: the box's four corners, closed (5 points, last ==
+///   first), starting at `a`'s own corner and running clockwise
+///   as seen on screen (y down).
+/// - `Ellipse`: the ellipse inscribed in the box, 24 segments,
+///   closed (25 points, last == first), starting at the rightmost
+///   point and running clockwise as seen on screen.
+///
+/// Degenerate drags (`a == b`, zero width or zero height) never
+/// panic and return finite points: lines and rects collapse onto
+/// the shared corner(s), ellipses onto the centre line/point.
+pub fn shape_points(kind: ShapeKind, a: [f32; 2], b: [f32; 2]) -> Vec<[f32; 2]> {
+    match kind {
+        ShapeKind::Line => vec![a, b],
+        ShapeKind::Rect => {
+            let (minx, maxx) = (a[0].min(b[0]), a[0].max(b[0]));
+            let (miny, maxy) = (a[1].min(b[1]), a[1].max(b[1]));
+            // Clockwise on screen (y down): top-left, top-right,
+            // bottom-right, bottom-left.
+            let cycle = [[minx, miny], [maxx, miny], [maxx, maxy], [minx, maxy]];
+            // (a[0], a[1]) always appears verbatim among the four
+            // corners (min/max pick the input values themselves),
+            // so the drag's own corner can start the run.
+            let start = cycle.iter().position(|&c| c == a).unwrap_or(0);
+            let mut out: Vec<[f32; 2]> = (0..4).map(|i| cycle[(start + i) % 4]).collect();
+            out.push(out[0]);
+            out
+        }
+        ShapeKind::Ellipse => {
+            const SEGMENTS: usize = 24;
+            let cx = (a[0] + b[0]) * 0.5;
+            let cy = (a[1] + b[1]) * 0.5;
+            let rx = (a[0] - b[0]).abs() * 0.5;
+            let ry = (a[1] - b[1]).abs() * 0.5;
+            let mut out: Vec<[f32; 2]> = Vec::with_capacity(SEGMENTS + 1);
+            for i in 0..SEGMENTS {
+                // Angle 0 is the rightmost point; with y down an
+                // increasing angle runs clockwise on screen.
+                let t = (i as f32) * std::f32::consts::TAU / (SEGMENTS as f32);
+                out.push([cx + rx * t.cos(), cy + ry * t.sin()]);
+            }
+            // Close with the first point verbatim, so the last
+            // point equals it exactly (sin/cos of 2π would drift
+            // by a rounding error instead).
+            out.push(out[0]);
+            out
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1037,6 +1103,183 @@ mod brush_wave10_tests {
         assert!(
             lib.iter().all(|other| other.width <= b.width),
             "Broad Brush must be the widest preset"
+        );
+    }
+}
+
+// Wave 11: shape-tool geometry. Exact-name imports only — this
+// file has no gpui import, but the rule is kept anyway so the
+// pattern stays safe to copy (see the Wave 9 #[test] trap).
+#[cfg(test)]
+mod shape_wave11_tests {
+    use crate::paint::{shape_points, ShapeKind};
+
+    fn assert_all_finite(pts: &[[f32; 2]], what: &str) {
+        for p in pts {
+            assert!(
+                p[0].is_finite() && p[1].is_finite(),
+                "{what}: non-finite point {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn line_is_exactly_the_two_endpoints() {
+        let pts = shape_points(ShapeKind::Line, [1.0, 2.0], [3.0, 4.0]);
+        assert_eq!(pts, vec![[1.0, 2.0], [3.0, 4.0]]);
+        // Drag direction is preserved: a line is [a, b], not a
+        // normalised pair.
+        let back = shape_points(ShapeKind::Line, [3.0, 4.0], [1.0, 2.0]);
+        assert_eq!(back, vec![[3.0, 4.0], [1.0, 2.0]]);
+    }
+
+    #[test]
+    fn rect_is_closed_and_starts_at_a() {
+        let pts = shape_points(ShapeKind::Rect, [10.0, 20.0], [30.0, 50.0]);
+        assert_eq!(pts.len(), 5, "4 corners + closing repeat");
+        assert_eq!(pts[0], [10.0, 20.0], "starts at a's corner");
+        assert_eq!(pts[4], pts[0], "closed: last == first");
+    }
+
+    #[test]
+    fn rect_corners_clockwise_for_down_right_drag() {
+        // a is the top-left corner: clockwise on screen (y down)
+        // runs right along the top edge first.
+        let pts = shape_points(ShapeKind::Rect, [10.0, 20.0], [30.0, 50.0]);
+        assert_eq!(
+            pts,
+            vec![
+                [10.0, 20.0],
+                [30.0, 20.0],
+                [30.0, 50.0],
+                [10.0, 50.0],
+                [10.0, 20.0],
+            ]
+        );
+    }
+
+    #[test]
+    fn rect_corners_clockwise_when_a_is_below_right_of_b() {
+        // Same box dragged the opposite way: a is the bottom-right
+        // corner. The run still starts at a and stays clockwise —
+        // from bottom-right, clockwise heads up the right edge.
+        let pts = shape_points(ShapeKind::Rect, [30.0, 50.0], [10.0, 20.0]);
+        assert_eq!(
+            pts,
+            vec![
+                [30.0, 50.0],
+                [30.0, 20.0],
+                [10.0, 20.0],
+                [10.0, 50.0],
+                [30.0, 50.0],
+            ]
+        );
+        // Normalisation: both drag directions trace the same four
+        // corners (only the starting corner differs).
+        let fwd = shape_points(ShapeKind::Rect, [10.0, 20.0], [30.0, 50.0]);
+        let mut a: Vec<[f32; 2]> = pts[..4].to_vec();
+        let mut b: Vec<[f32; 2]> = fwd[..4].to_vec();
+        a.sort_by(|p, q| p.partial_cmp(q).unwrap());
+        b.sort_by(|p, q| p.partial_cmp(q).unwrap());
+        assert_eq!(a, b, "same corner set regardless of drag direction");
+    }
+
+    #[test]
+    fn rect_corners_clockwise_for_mixed_drag() {
+        // a is top-right, b is bottom-left: clockwise from
+        // top-right heads down the right edge.
+        let pts = shape_points(ShapeKind::Rect, [30.0, 20.0], [10.0, 50.0]);
+        assert_eq!(
+            pts,
+            vec![
+                [30.0, 20.0],
+                [30.0, 50.0],
+                [10.0, 50.0],
+                [10.0, 20.0],
+                [30.0, 20.0],
+            ]
+        );
+        // And from bottom-left, clockwise heads up the left edge.
+        let pts = shape_points(ShapeKind::Rect, [10.0, 50.0], [30.0, 20.0]);
+        assert_eq!(
+            pts,
+            vec![
+                [10.0, 50.0],
+                [10.0, 20.0],
+                [30.0, 20.0],
+                [30.0, 50.0],
+                [10.0, 50.0],
+            ]
+        );
+    }
+
+    #[test]
+    fn ellipse_is_closed_25_points_starting_at_rightmost() {
+        let pts = shape_points(ShapeKind::Ellipse, [0.0, 0.0], [100.0, 60.0]);
+        assert_eq!(pts.len(), 25, "24 segments + closing repeat");
+        // Centre (50, 30), rx 50: the rightmost point is exact
+        // (angle 0 → cos 1, sin 0 with no rounding).
+        assert_eq!(pts[0], [100.0, 30.0], "starts at the rightmost point");
+        assert_eq!(pts[24], pts[0], "closed: last == first");
+        // Clockwise on screen (y down): the next point after the
+        // rightmost dips DOWN toward the bottom of the ellipse.
+        assert!(pts[1][1] > pts[0][1], "clockwise: y grows after the rightmost point");
+        // Quarter turn (segment 6 of 24) is the bottom point.
+        assert!((pts[6][0] - 50.0).abs() < 1e-3, "bottom point x is the centre x");
+        assert!((pts[6][1] - 60.0).abs() < 1e-3, "bottom point y is the box bottom");
+    }
+
+    #[test]
+    fn ellipse_points_satisfy_the_ellipse_equation() {
+        let pts = shape_points(ShapeKind::Ellipse, [0.0, 0.0], [100.0, 60.0]);
+        let (cx, cy, rx, ry) = (50.0f32, 30.0f32, 50.0f32, 30.0f32);
+        for p in &pts {
+            let v = ((p[0] - cx) / rx).powi(2) + ((p[1] - cy) / ry).powi(2);
+            assert!((v - 1.0).abs() < 1e-3, "point {p:?} off the ellipse: {v}");
+        }
+    }
+
+    #[test]
+    fn ellipse_ignores_drag_direction() {
+        // The start is defined as the rightmost point, not a's
+        // corner, so both drags produce the identical outline.
+        let fwd = shape_points(ShapeKind::Ellipse, [0.0, 0.0], [100.0, 60.0]);
+        let back = shape_points(ShapeKind::Ellipse, [100.0, 60.0], [0.0, 0.0]);
+        assert_eq!(fwd, back);
+    }
+
+    #[test]
+    fn degenerate_drags_stay_finite() {
+        // a == b for every kind.
+        let p = [7.0, 9.0];
+        assert_eq!(shape_points(ShapeKind::Line, p, p), vec![p, p]);
+        let r = shape_points(ShapeKind::Rect, p, p);
+        assert_eq!(r.len(), 5);
+        assert!(r.iter().all(|&q| q == p), "zero-size rect is the point itself");
+        let e = shape_points(ShapeKind::Ellipse, p, p);
+        assert_eq!(e.len(), 25);
+        assert!(e.iter().all(|&q| q == p), "zero-size ellipse is the point itself");
+
+        // Zero width: a vertical drag.
+        let r = shape_points(ShapeKind::Rect, [5.0, 0.0], [5.0, 40.0]);
+        assert_eq!(r.len(), 5);
+        assert_all_finite(&r, "zero-width rect");
+        let e = shape_points(ShapeKind::Ellipse, [5.0, 0.0], [5.0, 40.0]);
+        assert_eq!(e.len(), 25);
+        assert_all_finite(&e, "zero-width ellipse");
+        assert!(
+            e.iter().all(|q| q[0] == 5.0),
+            "zero-width ellipse stays on the centre line"
+        );
+
+        // Zero height: a horizontal drag.
+        let r = shape_points(ShapeKind::Rect, [0.0, 8.0], [40.0, 8.0]);
+        assert_all_finite(&r, "zero-height rect");
+        let e = shape_points(ShapeKind::Ellipse, [0.0, 8.0], [40.0, 8.0]);
+        assert_all_finite(&e, "zero-height ellipse");
+        assert!(
+            e.iter().all(|q| q[1] == 8.0),
+            "zero-height ellipse stays on the centre line"
         );
     }
 }

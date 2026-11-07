@@ -112,6 +112,24 @@ pub enum ClipKind {
     /// wide taper of softer tail motes at fixed lags behind it —
     /// Meteor's bigger, statelier cousin.
     Comet,
+    /// A rotating three-arm spiral galaxy: every star keeps its
+    /// seeded place along its arm while the whole pattern turns
+    /// and its radius grows across the clip, so the galaxy
+    /// blooms outward as it spins — Spiral's motes stream and
+    /// cycle; Galaxy's hold formation. Each arm carries its own
+    /// channel rotation of the clip colour.
+    Galaxy,
+    /// A rainbow fan above the anchor: motes pinned along an
+    /// arc of radius `length` (70 when unset) that sweeps
+    /// gently, coloured by a channel rotation of the clip
+    /// colour that steps along the arc and cycles with time,
+    /// so bands of hue drift around the fan.
+    Prism,
+    /// A one-shot inward spiral: every mote starts near the
+    /// rim at the clip's start and winds into the anchor,
+    /// turning faster as it falls, shrinking and fading as it
+    /// arrives, until the whole vortex has been swallowed.
+    Vortex,
 }
 
 /// A timed particle effect. `start` and `duration` are in frames;
@@ -776,6 +794,79 @@ pub fn clip_particles(
             let head = [anchor[0] + dir[0] * head_d, anchor[1] + dir[1] * head_d];
             push_c(&mut out, head, 6.4, glow, core);
         }
+        ClipKind::Galaxy => {
+            // Three arms of fourteen stars. A star's place is
+            // fixed by its seeds — arm (i % 3) and fractional
+            // radius u along the arm — and the extra `u * 2.6`
+            // wind bends each spoke into a spiral arm, exactly
+            // like Spiral's. What differs is the motion: nothing
+            // cycles. The whole pattern rotates at 0.45 rad per
+            // frame and the pattern radius grows from a quarter
+            // of `length` (110 when unset) to all of it, so the
+            // galaxy blooms as it turns. Each arm is drawn in
+            // its own channel rotation of the clip colour, and
+            // stars dim toward the rim.
+            let max_r = if clip.length > 0.0 { clip.length } else { 110.0 };
+            let radius = max_r * (0.25 + 0.75 * t);
+            for i in 0..42u32 {
+                let arm = i % 3;
+                let u = 0.15 + 0.85 * prand(seed, i, 4);
+                let theta = arm as f32 * (std::f32::consts::TAU / 3.0)
+                    + u * 2.6
+                    + local * 0.45;
+                let r = u * radius;
+                let pos = [anchor[0] + theta.cos() * r, anchor[1] + theta.sin() * r];
+                let col = rotate_channels(color, arm);
+                push_c(&mut out, pos, 3.2 * (1.0 - 0.4 * u), envelope * (1.0 - 0.5 * u), col);
+            }
+        }
+        ClipKind::Prism => {
+            // Thirty-six motes pinned along an arc above the
+            // anchor: mote i sits at a fixed fraction of the
+            // fan's ±66° spread on a circle of radius `length`
+            // (70 when unset), and the whole fan sweeps slowly
+            // from side to side. The colour is a channel
+            // rotation of the clip colour whose step advances
+            // along the arc and cycles with `local`, so the hue
+            // bands travel around the fan while the motes
+            // themselves hold their places on the arc.
+            let radius = if clip.length > 0.0 { clip.length } else { 70.0 };
+            let sweep = 0.12 * (local * 0.6).sin();
+            let shift = (local * 1.5) as u32;
+            for i in 0..36u32 {
+                let a = -1.15 + 2.3 * (i as f32 / 35.0) + sweep;
+                let pos = [
+                    anchor[0] + a.sin() * radius,
+                    anchor[1] - a.cos() * radius,
+                ];
+                let col = rotate_channels(color, i / 4 + shift);
+                let shimmer = 0.7 + 0.3 * (local * 1.1 + i as f32 * 0.7).sin();
+                push_c(&mut out, pos, 3.4, envelope * 0.85 * shimmer, col);
+            }
+        }
+        ClipKind::Vortex => {
+            // A one-shot inward spiral, the mirror of the
+            // fireworks shell: every mote starts at its seeded
+            // share of the rim radius (0.55..1 of `length`, 110
+            // when unset) and its radius shrinks with (1 - t*t),
+            // so the fall accelerates as the centre nears. The
+            // wind angle grows with the distance fallen, winding
+            // each mote around the anchor as it drops in, and
+            // the alpha rides the same (1 - t) fall, so motes
+            // fade and shrink as they arrive and the vortex is
+            // fully swallowed by the clip's end.
+            let max_r = if clip.length > 0.0 { clip.length } else { 110.0 };
+            for i in 0..36u32 {
+                let u = 0.55 + 0.45 * prand(seed, i, 6);
+                let theta0 = prand(seed, i, 5) * std::f32::consts::TAU;
+                let r = max_r * u * (1.0 - t * t);
+                let theta = theta0 + t * (3.0 + 2.0 * u);
+                let pos = [anchor[0] + theta.cos() * r, anchor[1] + theta.sin() * r];
+                let fade_in = (t / 0.06).min(1.0);
+                let alpha = envelope * fade_in * (1.0 - t);
+                push(&mut out, pos, 3.4 * (0.35 + 0.65 * (1.0 - t)), alpha);
+            }
+        }
     }
     out
 }
@@ -946,7 +1037,7 @@ mod tests {
         }
     }
 
-    const KINDS: [ClipKind; 21] = [
+    const KINDS: [ClipKind; 24] = [
         ClipKind::Burst,
         ClipKind::Sparkle,
         ClipKind::Smoke,
@@ -968,6 +1059,9 @@ mod tests {
         ClipKind::Fireworks,
         ClipKind::Aurora,
         ClipKind::Comet,
+        ClipKind::Galaxy,
+        ClipKind::Prism,
+        ClipKind::Vortex,
     ];
 
     #[test]
@@ -1618,6 +1712,132 @@ mod tests {
         assert_ne!(aurora, comet);
         // Comet is Meteor's cousin, not its clone.
         assert_ne!(comet, at(ClipKind::Meteor), "comet renders like meteor");
+    }
+
+    #[test]
+    fn galaxy_expands_and_rotates_in_formation() {
+        let c = clip(ClipKind::Galaxy); // length 160
+        let anchor = [300.0, 300.0];
+        let mean_r = |t: f32| {
+            let ps = clip_particles(&c, c.start + c.duration * t, anchor);
+            assert!(!ps.is_empty());
+            ps.iter()
+                .map(|p| ((p.0[0] - anchor[0]).powi(2) + (p.0[1] - anchor[1]).powi(2)).sqrt())
+                .sum::<f32>()
+                / ps.len() as f32
+        };
+        // The whole formation is out mid-clip: 42 stars, three
+        // arms of fourteen.
+        let mid = clip_particles(&c, c.start + c.duration * 0.5, anchor);
+        assert_eq!(mid.len(), 42, "three arms of fourteen stars");
+        // The pattern radius grows across the clip, so the mean
+        // star distance grows with it.
+        let r_early = mean_r(0.15);
+        let r_late = mean_r(0.85);
+        assert!(
+            r_late > r_early + 20.0,
+            "galaxy should bloom outward: {r_early} -> {r_late}"
+        );
+        // Star 0 holds its arm and its fractional radius, so
+        // between two frames one second apart in clip time its
+        // offset must turn by the pattern's rotation (0.45 rad
+        // per frame) and lengthen with the growing radius.
+        let p1 = clip_particles(&c, c.start + 7.0, anchor)[0].0;
+        let p2 = clip_particles(&c, c.start + 8.0, anchor)[0].0;
+        let v1 = [p1[0] - anchor[0], p1[1] - anchor[1]];
+        let v2 = [p2[0] - anchor[0], p2[1] - anchor[1]];
+        let cross = v1[0] * v2[1] - v1[1] * v2[0];
+        let r1 = (v1[0].powi(2) + v1[1].powi(2)).sqrt();
+        let r2 = (v2[0].powi(2) + v2[1].powi(2)).sqrt();
+        assert!(
+            cross > 0.3 * r1 * r2,
+            "galaxy should rotate: cross {cross} for radii {r1}, {r2}"
+        );
+        assert!(r2 > r1 * 1.03, "star 0 should ride the expansion: {r1} -> {r2}");
+        // One colour per arm: three channel rotations in play.
+        let mut colours: Vec<[u8; 3]> = mid.iter().map(|p| p.2).collect();
+        colours.sort();
+        colours.dedup();
+        assert_eq!(colours.len(), 3, "one channel rotation per arm: {colours:?}");
+    }
+
+    #[test]
+    fn prism_motes_hold_their_arc_above_the_anchor() {
+        let c = clip(ClipKind::Prism); // length 160 -> arc radius 160
+        let anchor = [300.0, 300.0];
+        let mid = clip_particles(&c, c.start + c.duration * 0.5, anchor);
+        assert_eq!(mid.len(), 36, "the full fan should be out mid-clip");
+        for (p, _, _, _) in &mid {
+            let d = ((p[0] - anchor[0]).powi(2) + (p[1] - anchor[1]).powi(2)).sqrt();
+            assert!(
+                (d - c.length).abs() <= 2.0,
+                "prism mote off its arc: radius {d}, want {}",
+                c.length
+            );
+            // The fan's spread plus the sweep keeps every mote
+            // well above the anchor.
+            assert!(p[1] < anchor[1] - 10.0, "prism mote at/below the anchor: {p:?}");
+        }
+        // The sweep moves the fan between frames.
+        let later = clip_particles(&c, c.start + c.duration * 0.5 + 3.0, anchor);
+        assert_ne!(mid, later, "prism fan should sweep between frames");
+        // The hue rotation cycles along the arc: at least the
+        // three channel rotations of the clip colour appear.
+        let mut colours: Vec<[u8; 3]> = mid.iter().map(|p| p.2).collect();
+        colours.sort();
+        colours.dedup();
+        assert!(
+            colours.len() >= 3,
+            "prism should cycle colours along the arc, got {colours:?}"
+        );
+    }
+
+    #[test]
+    fn vortex_spirals_inward_and_is_swallowed() {
+        let c = clip(ClipKind::Vortex); // length 160
+        let anchor = [300.0, 300.0];
+        let mean_r = |t: f32| {
+            let ps = clip_particles(&c, c.start + c.duration * t, anchor);
+            assert!(!ps.is_empty());
+            ps.iter()
+                .map(|p| ((p.0[0] - anchor[0]).powi(2) + (p.0[1] - anchor[1]).powi(2)).sqrt())
+                .sum::<f32>()
+                / ps.len() as f32
+        };
+        // Every mote is out early: the vortex is a single
+        // inward fall, not a stream.
+        let early = clip_particles(&c, c.start + c.duration * 0.2, anchor);
+        assert_eq!(early.len(), 36, "the whole vortex should start at the rim");
+        // Inward: the mean radius shrinks hard across the clip
+        // (the exact opposite of the fireworks shell).
+        let r_early = mean_r(0.2);
+        let r_late = mean_r(0.7);
+        assert!(
+            r_late < r_early - 25.0,
+            "vortex should spiral inward: {r_early} -> {r_late}"
+        );
+        // And it fades as it arrives.
+        let a_early = early.iter().map(|p| p.3).sum::<f32>() / early.len() as f32;
+        let late = clip_particles(&c, c.start + c.duration * 0.7, anchor);
+        let a_late = late.iter().map(|p| p.3).sum::<f32>() / late.len() as f32;
+        assert!(a_late < a_early, "vortex should fade as it arrives: {a_early} -> {a_late}");
+    }
+
+    #[test]
+    fn wave11_kinds_differ_from_each_other() {
+        let anchor = [300.0, 300.0];
+        let at = |kind: ClipKind| clip_particles(&clip(kind), 22.0, anchor);
+        let galaxy = at(ClipKind::Galaxy);
+        let prism = at(ClipKind::Prism);
+        let vortex = at(ClipKind::Vortex);
+        assert!(!galaxy.is_empty() && !prism.is_empty() && !vortex.is_empty());
+        assert_ne!(galaxy, prism);
+        assert_ne!(galaxy, vortex);
+        assert_ne!(prism, vortex);
+        // Galaxy holds formation; Spiral cycles its motes.
+        assert_ne!(galaxy, at(ClipKind::Spiral), "galaxy renders like spiral");
+        // Vortex falls inward; Fireworks bursts outward.
+        assert_ne!(vortex, at(ClipKind::Fireworks), "vortex renders like fireworks");
     }
 
     // ---- Weather ----

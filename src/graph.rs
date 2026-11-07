@@ -351,6 +351,79 @@ pub fn smooth_channel(channel: &mut Channel) {
     auto_tangents(&mut channel.keys, angular);
 }
 
+/// Remove interior keys that contribute at most `tolerance`
+/// (in value units) to the channel's curve — the "reduce keys" /
+/// "simplify" operation of a graph editor, for channels that were
+/// baked or imported with far more keys than their shape needs.
+///
+/// The algorithm is a greedy single left-to-right pass with a
+/// purely **local** test — it is not Douglas-Peucker and makes no
+/// global max-error guarantee. Each interior key is considered
+/// once, in frame order: the channel is re-evaluated at the key's
+/// own frame with the key removed, and the key is dropped when
+/// that value differs from the key's stored value by at most
+/// `tolerance`. The "removed" curve at that moment runs from the
+/// previous **kept** key to the next key, so once a key is dropped
+/// it stays dropped: later candidates are tested against the
+/// longer segment their removal would actually leave behind, not
+/// against their original neighbours.
+///
+/// Two honest approximations follow from that design. First, the
+/// error is measured only at the removed key's own frame — the
+/// curve between keys can deviate by more than `tolerance` even
+/// when every single removal passed its local test. Second, the
+/// test segment is evaluated with the neighbours' stored tangents
+/// exactly as they are ([`Channel::value_at`] on the two-key
+/// segment): tangents are not refitted to the longer span, so on
+/// Hermite channels a key whose neighbours carry strong tangents
+/// may be kept even where the values alone look redundant. The
+/// segment's interpolation mode is the previous kept key's, as
+/// usual. Angle channels compare by shortest-path difference
+/// ([`norm_deg`]), so keys straddling the ±180° wrap are judged by
+/// their circular distance.
+///
+/// The first and last keys are endpoints and are never removed.
+/// A channel with fewer than three keys has no interior key to
+/// test and is returned completely untouched (not even sorted).
+/// Otherwise the keys are sorted first and remain sorted. Returns
+/// the number of keys removed.
+pub fn reduce_keys(channel: &mut Channel, tolerance: f32) -> usize {
+    let n = channel.keys.len();
+    if n < 3 {
+        return 0;
+    }
+    channel.sort_keys();
+    let angular = channel.is_angle();
+    let mut kept: Vec<Key> = Vec::with_capacity(n);
+    kept.push(channel.keys[0]);
+    for i in 1..n - 1 {
+        let candidate = channel.keys[i];
+        let prev = *kept.last().expect("the first key is always kept");
+        let next = channel.keys[i + 1];
+        // The curve without the candidate, at the candidate's
+        // frame: the two-key segment from the previous kept key
+        // to the next key, evaluated by the engine's own rules.
+        let probe = Channel {
+            figure: channel.figure,
+            target: channel.target,
+            keys: vec![prev, next],
+        };
+        let without = probe.value_at(candidate.frame);
+        let err = if angular {
+            norm_deg(without - candidate.value).abs()
+        } else {
+            (without - candidate.value).abs()
+        };
+        if err > tolerance {
+            kept.push(candidate);
+        }
+    }
+    kept.push(channel.keys[n - 1]);
+    let removed = n - kept.len();
+    channel.keys = kept;
+    removed
+}
+
 /// The result of [`apply_channels`]: channel-overridden poses plus
 /// the figure defs to evaluate them with (clones of the project's
 /// defs, with any length channels applied).
@@ -997,5 +1070,182 @@ mod auto_tangent_tests {
         smooth_channel(&mut ch);
         let (i, o) = tangents(&ch.keys[1]);
         assert!(approx(i, 3.0) && approx(o, 3.0), "plain tangents {i}, {o}");
+    }
+}
+
+#[cfg(test)]
+mod reduce_tests {
+    use super::{reduce_keys, Channel, ChannelTarget, Interp, Key};
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    fn channel(target: ChannelTarget, keys: Vec<Key>) -> Channel {
+        Channel {
+            figure: 0,
+            target,
+            keys,
+        }
+    }
+
+    /// A Linear-interp key, so segment evaluation is an exact lerp
+    /// and hand-computed expectations hold to float precision.
+    fn lin(frame: f32, value: f32) -> Key {
+        Key::flat(frame, value).with_interp(Interp::Linear)
+    }
+
+    #[test]
+    fn straight_line_channel_reduces_to_its_endpoints() {
+        // Keys exactly on the line v = 10 * f. Under Linear
+        // evaluation every interior key is reproduced exactly by
+        // the segment skipping it, so all three are removed —
+        // each later one tested against the lengthening segment
+        // from frame 0, per the greedy pass.
+        let mut ch = channel(
+            ChannelTarget::RootX,
+            vec![
+                lin(0.0, 0.0),
+                lin(4.0, 40.0),
+                lin(9.0, 90.0),
+                lin(15.0, 150.0),
+                lin(20.0, 200.0),
+            ],
+        );
+        let removed = reduce_keys(&mut ch, 0.01);
+        assert_eq!(removed, 3, "all interior keys removed");
+        assert_eq!(ch.keys.len(), 2, "only the endpoints remain");
+        assert!(approx(ch.keys[0].frame, 0.0) && approx(ch.keys[0].value, 0.0));
+        assert!(approx(ch.keys[1].frame, 20.0) && approx(ch.keys[1].value, 200.0));
+    }
+
+    #[test]
+    fn spike_key_survives_a_tight_tolerance() {
+        // A one-frame-wide spike to 100 on a flat baseline. The
+        // spike's own removal test evaluates the flat segment
+        // under it (error 100), so it is kept — and so are its
+        // immediate neighbours, whose skipping segments run into
+        // the spike. Nothing is removed at tolerance 1.0.
+        let mut ch = channel(
+            ChannelTarget::RootX,
+            vec![
+                lin(0.0, 0.0),
+                lin(10.0, 0.0),
+                lin(11.0, 100.0),
+                lin(12.0, 0.0),
+                lin(20.0, 0.0),
+            ],
+        );
+        let removed = reduce_keys(&mut ch, 1.0);
+        assert_eq!(removed, 0, "the spike protects itself and its neighbours");
+        assert_eq!(ch.keys.len(), 5);
+        assert!(
+            approx(ch.keys[2].frame, 11.0) && approx(ch.keys[2].value, 100.0),
+            "the spike key itself survives: {:?}",
+            ch.keys[2]
+        );
+        // The same channel under a tolerance above the spike's
+        // height removes every interior key, spike included —
+        // tolerance is the only thing protecting it.
+        let removed = reduce_keys(&mut ch, 1000.0);
+        assert_eq!(removed, 3);
+        assert_eq!(ch.keys.len(), 2);
+    }
+
+    #[test]
+    fn endpoints_survive_any_tolerance() {
+        // Extreme endpoint values, negligible interior ones: even
+        // a huge tolerance may only ever drop the interior.
+        let mut ch = channel(
+            ChannelTarget::RootY,
+            vec![
+                Key::flat(0.0, -500.0),
+                Key::flat(3.0, 0.0),
+                Key::flat(7.0, 0.0),
+                Key::flat(10.0, 500.0),
+            ],
+        );
+        let removed = reduce_keys(&mut ch, 10000.0);
+        assert_eq!(removed, 2, "both interior keys go");
+        assert_eq!(ch.keys.len(), 2);
+        assert!(
+            approx(ch.keys[0].frame, 0.0) && approx(ch.keys[0].value, -500.0),
+            "first endpoint verbatim"
+        );
+        assert!(
+            approx(ch.keys[1].frame, 10.0) && approx(ch.keys[1].value, 500.0),
+            "last endpoint verbatim"
+        );
+    }
+
+    #[test]
+    fn fewer_than_three_keys_are_untouched() {
+        // Empty and single-key channels: nothing to test.
+        let mut empty = channel(ChannelTarget::RootX, vec![]);
+        assert_eq!(reduce_keys(&mut empty, 0.0), 0);
+        assert!(empty.keys.is_empty());
+        let mut one = channel(ChannelTarget::RootX, vec![Key::flat(4.0, 42.0)]);
+        assert_eq!(reduce_keys(&mut one, 1000.0), 0);
+        assert_eq!(one.keys.len(), 1);
+        assert!(approx(one.keys[0].value, 42.0));
+        // Two keys have no interior — and "untouched" is literal:
+        // even an unsorted pair is not reordered (the pass sorts
+        // only once it actually runs).
+        let mut two = channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(10.0, 5.0), Key::flat(0.0, 1.0)],
+        );
+        assert_eq!(reduce_keys(&mut two, 1000.0), 0);
+        assert_eq!(two.keys.len(), 2);
+        assert!(
+            approx(two.keys[0].frame, 10.0) && approx(two.keys[1].frame, 0.0),
+            "unsorted pair left exactly as it was"
+        );
+    }
+
+    #[test]
+    fn angle_channel_reduces_across_the_wrap() {
+        // Steady rotation through the wrap: 170°, 180°, 190°,
+        // 200° stored wrapped as 170, 180, -170, -160 — exactly
+        // on the wrapped line v = 170 + f. On an angle channel
+        // the shortest-path comparison sees them as collinear, so
+        // both interior keys reduce away.
+        let keys = vec![
+            lin(0.0, 170.0),
+            lin(10.0, 180.0),
+            lin(20.0, -170.0),
+            lin(30.0, -160.0),
+        ];
+        let mut ch = channel(ChannelTarget::Angle(0), keys.clone());
+        let removed = reduce_keys(&mut ch, 0.01);
+        assert_eq!(removed, 2, "wrapped interior keys are redundant");
+        assert_eq!(ch.keys.len(), 2);
+        assert!(approx(ch.keys[0].value, 170.0));
+        assert!(approx(ch.keys[1].value, -160.0));
+        // The identical numbers on a plain channel must NOT
+        // reduce: read literally, 180 -> -170 is a 350° cliff,
+        // and every interior key is load-bearing.
+        let mut plain = channel(ChannelTarget::RootX, keys);
+        let removed = reduce_keys(&mut plain, 0.01);
+        assert_eq!(removed, 0, "no wrap awareness, no reduction");
+        assert_eq!(plain.keys.len(), 4);
+    }
+
+    #[test]
+    fn unsorted_input_comes_out_sorted() {
+        // Keys on a line but stored out of order: the pass sorts
+        // first, reduces, and leaves ascending endpoints.
+        let mut ch = channel(
+            ChannelTarget::RootX,
+            vec![lin(20.0, 200.0), lin(0.0, 0.0), lin(10.0, 100.0)],
+        );
+        let removed = reduce_keys(&mut ch, 0.01);
+        assert_eq!(removed, 1);
+        assert_eq!(ch.keys.len(), 2);
+        assert!(
+            approx(ch.keys[0].frame, 0.0) && approx(ch.keys[1].frame, 20.0),
+            "endpoints in ascending order: {:?}",
+            ch.keys
+        );
     }
 }

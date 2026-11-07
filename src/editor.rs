@@ -1154,6 +1154,51 @@ impl EditorCore {
         self.status = format!("Smoothed tangents on {n} graph channel(s).");
     }
 
+    /// Wave 11: bake every graph channel into real frame poses
+    /// for frames `from..=to` (the end clamped to the timeline),
+    /// as one undo step.
+    ///
+    /// Each frame's poses are computed with
+    /// `crate::graph::apply_channels` — the same evaluation the
+    /// renderer uses — so the baked frames hold exactly what the
+    /// channels produced, and the channels can then be edited or
+    /// cleared without changing those frames. Every frame is
+    /// evaluated BEFORE the snapshot and the writes, so a bake
+    /// never leaves a half-baked range behind. Stated plainly:
+    /// length channels are not baked — `apply_channels` reports
+    /// them through the returned figure defs, and frame poses
+    /// carry no lengths, so only root and angle channels land in
+    /// the frames. The status counts every channel either way.
+    pub fn bake_graph_channels(&mut self, from: usize, to: usize) {
+        if self.project.channels.is_empty() {
+            self.status = "No graph channels to bake.".into();
+            return;
+        }
+        if self.project.frames.is_empty() || from > to || from >= self.project.frames.len() {
+            self.status = "Graph bake failed: invalid frame range.".into();
+            return;
+        }
+        let lo = from;
+        let hi = to.min(self.project.frames.len() - 1);
+        let n_channels = self.project.channels.len();
+        let baked: Vec<Vec<crate::model::Pose>> = (lo..=hi)
+            .map(|f| {
+                crate::graph::apply_channels(&self.project, &self.project.channels, f as f32)
+                    .poses
+            })
+            .collect();
+        self.snapshot();
+        for (poses, f) in baked.into_iter().zip(lo..=hi) {
+            self.project.frames[f].poses = poses;
+        }
+        self.status = format!(
+            "Baked {n_channels} graph channel(s) into frames {}–{} ({} frame(s)).",
+            lo + 1,
+            hi + 1,
+            hi - lo + 1
+        );
+    }
+
     /// Wave 10: mirror the selected figure's pose on the current
     /// frame, in place, as one undo step.
     ///
@@ -1195,6 +1240,45 @@ impl EditorCore {
             *a = -*a;
         }
         self.status = format!("Mirrored figure {} on frame {}.", fi + 1, self.current + 1);
+    }
+
+    /// Wave 11: copy the current frame's pose of figure
+    /// `from_fig` onto figure `to_fig` (same frame), as one undo
+    /// step. The pose is copied exactly — root and every angle —
+    /// so the target figure adopts the source's posture while
+    /// keeping its own definition, bends and lengths.
+    pub fn copy_pose_between(&mut self, from_fig: usize, to_fig: usize) {
+        if from_fig >= self.project.figures.len() || to_fig >= self.project.figures.len() {
+            self.status = "Copy pose failed: figure index out of range.".into();
+            return;
+        }
+        if from_fig == to_fig {
+            self.status = "Copy pose failed: source and target are the same figure.".into();
+            return;
+        }
+        let cur = self.current;
+        let Some(pose) = self
+            .project
+            .frames
+            .get(cur)
+            .and_then(|f| f.poses.get(from_fig))
+            .cloned()
+        else {
+            self.status = format!("Figure {} has no pose on frame {}.", from_fig + 1, cur + 1);
+            return;
+        };
+        if self.project.frames[cur].poses.get(to_fig).is_none() {
+            self.status = format!("Figure {} has no pose on frame {}.", to_fig + 1, cur + 1);
+            return;
+        }
+        self.snapshot();
+        self.project.frames[cur].poses[to_fig] = pose;
+        self.status = format!(
+            "Copied figure {}'s pose to figure {} on frame {}.",
+            from_fig + 1,
+            to_fig + 1,
+            cur + 1
+        );
     }
 
     pub fn open_via_dialog(&mut self) {
@@ -2467,6 +2551,135 @@ impl EditorCore {
             "Audio clips {} and {} crossfaded ({fade:.2}s) into {}.",
             clip_idx + 1,
             clip_idx + 2,
+            out.display()
+        );
+    }
+
+    // ---- Wave 11 audio effects (last clip) ----
+
+    /// Wave 11: apply a feedback echo (0.18 s delay, 0.35
+    /// feedback) to the LAST audio clip. Follows the
+    /// `audio_normalize` pattern: the processed audio is written
+    /// beside the source as `<stem>.echo.wav`, the source file is
+    /// never overwritten, and only after the write does the clip
+    /// point to the new file (behind one undo snapshot).
+    pub fn audio_echo_last(&mut self) {
+        let Some(clip_idx) = self.project.audio.len().checked_sub(1) else {
+            self.status = "Audio echo failed: there are no audio clips.".into();
+            return;
+        };
+        let clip = self.project.audio[clip_idx].clone();
+        let mut wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio echo failed: {e}");
+                return;
+            }
+        };
+        crate::audio_edit::echo(&mut wav, 0.18, 0.35);
+        let source = PathBuf::from(&clip.path);
+        let out = Self::audio_derived_path(&source, ".echo.wav");
+        if out == source {
+            self.status = "Audio echo failed: output would overwrite the source.".into();
+            return;
+        }
+        if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&wav)) {
+            self.status = format!("Audio echo failed: could not write {}: {e}", out.display());
+            return;
+        }
+        self.snapshot();
+        self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
+        self.status = format!(
+            "Echo applied to audio clip {} (0.18s delay, 35% feedback): {}.",
+            clip_idx + 1,
+            out.display()
+        );
+    }
+
+    /// Wave 11: apply a 1200 Hz low-pass filter to the LAST
+    /// audio clip. Same materialise-and-repoint pattern as
+    /// `audio_echo_last`; the product is `<stem>.lowpass.wav`.
+    pub fn audio_lowpass_last(&mut self) {
+        let Some(clip_idx) = self.project.audio.len().checked_sub(1) else {
+            self.status = "Audio low-pass failed: there are no audio clips.".into();
+            return;
+        };
+        let clip = self.project.audio[clip_idx].clone();
+        let mut wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio low-pass failed: {e}");
+                return;
+            }
+        };
+        crate::audio_edit::lowpass(&mut wav, 1200.0);
+        let source = PathBuf::from(&clip.path);
+        let out = Self::audio_derived_path(&source, ".lowpass.wav");
+        if out == source {
+            self.status = "Audio low-pass failed: output would overwrite the source.".into();
+            return;
+        }
+        if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&wav)) {
+            self.status = format!(
+                "Audio low-pass failed: could not write {}: {e}",
+                out.display()
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
+        self.status = format!(
+            "Low-pass filter (1200 Hz) applied to audio clip {}: {}.",
+            clip_idx + 1,
+            out.display()
+        );
+    }
+
+    /// Wave 11: trim leading and trailing silence (samples below
+    /// 0.02) from the LAST audio clip. Same materialise-and-
+    /// repoint pattern as `audio_echo_last`; the product is
+    /// `<stem>.silence.wav`. When the clip has no silence at
+    /// either edge there is nothing to write: no file is created,
+    /// no snapshot is taken, and the status says so.
+    pub fn audio_trim_silence_last(&mut self) {
+        let Some(clip_idx) = self.project.audio.len().checked_sub(1) else {
+            self.status = "Audio trim silence failed: there are no audio clips.".into();
+            return;
+        };
+        let clip = self.project.audio[clip_idx].clone();
+        let mut wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio trim silence failed: {e}");
+                return;
+            }
+        };
+        let (lead, trail) = crate::audio_edit::trim_silence(&mut wav, 0.02);
+        if lead + trail == 0 {
+            self.status = format!("No silence to trim from audio clip {}.", clip_idx + 1);
+            return;
+        }
+        let source = PathBuf::from(&clip.path);
+        let out = Self::audio_derived_path(&source, ".silence.wav");
+        if out == source {
+            self.status = "Audio trim silence failed: output would overwrite the source.".into();
+            return;
+        }
+        if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&wav)) {
+            self.status = format!(
+                "Audio trim silence failed: could not write {}: {e}",
+                out.display()
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
+        self.status = format!(
+            "Trimmed {} silent frame(s) ({} at the start, {} at the end) from audio clip {}: {}.",
+            lead + trail,
+            lead,
+            trail,
+            clip_idx + 1,
             out.display()
         );
     }
@@ -4706,5 +4919,243 @@ mod wave10_tests {
         core.cycle_clip_loop(9);
         assert!(core.status.contains("No such clip"), "status: {}", core.status);
         assert!(matches!(core.project.clips[0].loop_mode, ClipLoop::Loop));
+    }
+}
+
+#[cfg(test)]
+mod wave11_tests {
+    use crate::audio_edit::WavData;
+    use crate::editor::EditorCore;
+    use crate::graph::{Channel, ChannelTarget, Key};
+    use crate::model::AudioClip;
+
+    /// A one-key RootX channel: `value_at` returns the key value
+    /// verbatim at every frame, so baked roots are exact.
+    fn rootx_channel(value: f32) -> Channel {
+        Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(0.0, value)],
+        }
+    }
+
+    #[test]
+    fn bake_graph_channels_writes_channel_poses() {
+        let mut core = EditorCore::new();
+        let n_frames = core.project.frames.len();
+        assert!(n_frames >= 4, "demo project should have several frames");
+        let pre_root = core.project.frames[1].poses[0].root;
+        core.project.channels.push(rootx_channel(123.5));
+        // The expected bake, computed on the pre-bake project.
+        let expected: Vec<(f32, Vec<f32>)> = (0..=2)
+            .map(|f| {
+                let p = crate::graph::apply_channels(&core.project, &core.project.channels, f as f32)
+                    .poses[0]
+                    .clone();
+                (p.root[0], p.angles)
+            })
+            .collect();
+        core.bake_graph_channels(0, 2);
+        assert!(core.status.contains("Baked"), "status: {}", core.status);
+        for (f, (root_x, angles)) in expected.iter().enumerate() {
+            let pose = &core.project.frames[f].poses[0];
+            assert_eq!(pose.root[0], *root_x, "frame {f} root x should be baked");
+            assert_eq!(pose.root[0], 123.5, "frame {f} root x is the channel value");
+            assert_eq!(&pose.angles, angles, "frame {f} angles should be baked");
+        }
+        assert_ne!(pre_root[0], 123.5, "the channel value must differ from the stored root");
+        // Frames outside the range keep their stored poses.
+        assert_ne!(core.project.frames[3].poses[0].root[0], 123.5);
+    }
+
+    #[test]
+    fn bake_graph_channels_clamps_the_range_end() {
+        let mut core = EditorCore::new();
+        let last = core.project.frames.len() - 1;
+        core.project.channels.push(rootx_channel(123.5));
+        core.bake_graph_channels(0, usize::MAX);
+        assert!(core.status.contains("Baked"), "status: {}", core.status);
+        assert_eq!(core.project.frames[last].poses[0].root[0], 123.5);
+    }
+
+    #[test]
+    fn bake_graph_channels_noops_without_channels_or_range() {
+        let mut core = EditorCore::new();
+        let edits = core.edits_since_autosave();
+        let before = core.project.frames[0].poses[0].clone();
+        core.bake_graph_channels(0, 2);
+        assert!(
+            core.status.contains("No graph channels"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot on a no-op");
+        assert_eq!(core.project.frames[0].poses[0].root, before.root);
+        assert_eq!(core.project.frames[0].poses[0].angles, before.angles);
+
+        // With a channel but an invalid range: still no snapshot.
+        core.project.channels.push(rootx_channel(123.5));
+        core.bake_graph_channels(3, 1);
+        assert!(core.status.contains("invalid"), "status: {}", core.status);
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot on a bad range");
+        assert_ne!(core.project.frames[0].poses[0].root[0], 123.5);
+    }
+
+    /// Give the demo project a second figure whose frame poses
+    /// start as copies of figure 0's.
+    fn add_second_figure(core: &mut EditorCore) {
+        let fig = core.project.figures[0].clone();
+        core.project.figures.push(fig);
+        for frame in &mut core.project.frames {
+            let pose = frame.poses[0].clone();
+            frame.poses.push(pose);
+        }
+    }
+
+    #[test]
+    fn copy_pose_between_copies_root_and_angles_exactly() {
+        let mut core = EditorCore::new();
+        add_second_figure(&mut core);
+        // Make the target pose unmistakably different.
+        core.project.frames[0].poses[1].root = [1.0, 2.0];
+        for a in &mut core.project.frames[0].poses[1].angles {
+            *a = 7.0;
+        }
+        let source = core.project.frames[0].poses[0].clone();
+        core.copy_pose_between(0, 1);
+        assert!(core.status.contains("Copied"), "status: {}", core.status);
+        let copied = &core.project.frames[0].poses[1];
+        assert_eq!(copied.root, source.root);
+        assert_eq!(copied.angles, source.angles);
+    }
+
+    #[test]
+    fn copy_pose_between_rejects_bad_indices() {
+        let mut core = EditorCore::new();
+        add_second_figure(&mut core);
+        let edits = core.edits_since_autosave();
+        let before = core.project.frames[0].poses[1].clone();
+
+        core.copy_pose_between(0, 0);
+        assert!(core.status.contains("same figure"), "status: {}", core.status);
+        core.copy_pose_between(0, 9);
+        assert!(core.status.contains("out of range"), "status: {}", core.status);
+        core.copy_pose_between(9, 1);
+        assert!(core.status.contains("out of range"), "status: {}", core.status);
+
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot on rejected copies");
+        assert_eq!(core.project.frames[0].poses[1].root, before.root);
+        assert_eq!(core.project.frames[0].poses[1].angles, before.angles);
+    }
+
+    /// Write a tiny mono WAV into a pid-unique temp path and
+    /// return the path as a String.
+    fn temp_wav(tag: &str, samples: Vec<f32>) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "styk-wave11-{tag}-{}.wav",
+            std::process::id()
+        ));
+        let wav = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples,
+        };
+        std::fs::write(&path, crate::audio_edit::write_wav(&wav)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// A fresh core whose only audio clip points at `path`.
+    fn core_with_clip(path: String) -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(AudioClip {
+            path,
+            start_frame: 0,
+        });
+        core
+    }
+
+    #[test]
+    fn audio_echo_last_repoints_clip_to_a_new_file() {
+        let src = temp_wav("echo", vec![0.5; 800]);
+        let mut core = core_with_clip(src.clone());
+        core.audio_echo_last();
+        assert!(core.status.contains("Echo applied"), "status: {}", core.status);
+        let new_path = core.project.audio[0].path.clone();
+        assert_ne!(new_path, src, "the clip must point at the echo product");
+        let back = crate::audio_edit::read_wav(&new_path).expect("echo product reads back");
+        assert!(back.frames() > 0);
+        // The original file is untouched and still reads back.
+        assert!(crate::audio_edit::read_wav(&src).is_ok());
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&new_path);
+    }
+
+    #[test]
+    fn audio_lowpass_last_repoints_clip_to_a_new_file() {
+        let src = temp_wav("lowpass", vec![0.5; 800]);
+        let mut core = core_with_clip(src.clone());
+        core.audio_lowpass_last();
+        assert!(
+            core.status.contains("Low-pass filter"),
+            "status: {}",
+            core.status
+        );
+        let new_path = core.project.audio[0].path.clone();
+        assert_ne!(new_path, src, "the clip must point at the low-pass product");
+        let back = crate::audio_edit::read_wav(&new_path).expect("low-pass product reads back");
+        assert!(back.frames() > 0);
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&new_path);
+    }
+
+    #[test]
+    fn audio_trim_silence_last_trims_and_reports() {
+        let mut samples = vec![0.0; 400];
+        samples.extend(vec![0.5; 800]);
+        samples.extend(vec![0.0; 400]);
+        let src = temp_wav("silence", samples);
+        let mut core = core_with_clip(src.clone());
+        core.audio_trim_silence_last();
+        assert!(core.status.contains("Trimmed"), "status: {}", core.status);
+        assert!(
+            core.status.contains("800 silent frame(s)"),
+            "status: {}",
+            core.status
+        );
+        let new_path = core.project.audio[0].path.clone();
+        assert_ne!(new_path, src, "the clip must point at the trimmed product");
+        let back = crate::audio_edit::read_wav(&new_path).expect("trimmed product reads back");
+        assert_eq!(back.frames(), 800, "only the audible middle remains");
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&new_path);
+    }
+
+    #[test]
+    fn audio_trim_silence_last_noops_when_nothing_to_trim() {
+        let src = temp_wav("nosilence", vec![0.5; 800]);
+        let mut core = core_with_clip(src.clone());
+        let edits = core.edits_since_autosave();
+        core.audio_trim_silence_last();
+        assert!(
+            core.status.contains("No silence to trim"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.project.audio[0].path, src, "the clip keeps its file");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot when nothing changed");
+        let _ = std::fs::remove_file(&src);
+    }
+
+    #[test]
+    fn audio_effects_report_when_there_are_no_clips() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.audio_echo_last();
+        assert!(core.status.contains("no audio clips"), "status: {}", core.status);
+        core.audio_lowpass_last();
+        assert!(core.status.contains("no audio clips"), "status: {}", core.status);
+        core.audio_trim_silence_last();
+        assert!(core.status.contains("no audio clips"), "status: {}", core.status);
     }
 }

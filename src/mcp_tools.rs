@@ -707,8 +707,11 @@ fn parse_clip_kind(name: &str) -> Result<ClipKind, String> {
         "fireworks" => Ok(ClipKind::Fireworks),
         "aurora" => Ok(ClipKind::Aurora),
         "comet" => Ok(ClipKind::Comet),
+        "galaxy" => Ok(ClipKind::Galaxy),
+        "prism" => Ok(ClipKind::Prism),
+        "vortex" => Ok(ClipKind::Vortex),
         other => Err(format!(
-            "unknown fx kind '{other}' (expected burst, sparkle, smoke, beam, aura, trail, confetti, shock_ring, ember, fountain, orbit, lightning, bubbles, leaves, meteor, petals, splash, spiral, fireworks, aurora or comet)"
+            "unknown fx kind '{other}' (expected burst, sparkle, smoke, beam, aura, trail, confetti, shock_ring, ember, fountain, orbit, lightning, bubbles, leaves, meteor, petals, splash, spiral, fireworks, aurora, comet, galaxy, prism or vortex)"
         )),
     }
 }
@@ -958,6 +961,19 @@ fn tool_smooth_graph_tangents(core: &mut EditorCore, _args: &Value) -> Result<Va
     Ok(json!({ "ok": true, "status": core.status, "project": project_summary(core) }))
 }
 
+fn tool_set_clip_loop(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = req_usize(args, "index")?;
+    core.cycle_clip_loop(index);
+    Ok(json!({ "ok": true, "status": core.status, "project": project_summary(core) }))
+}
+
+fn tool_bake_graph(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let from = req_usize(args, "from")?;
+    let to = req_usize(args, "to")?;
+    core.bake_graph_channels(from, to);
+    Ok(json!({ "ok": true, "status": core.status, "project": project_summary(core) }))
+}
+
 // ---------------------------------------------------------------------
 // The tool table
 // ---------------------------------------------------------------------
@@ -1007,6 +1023,50 @@ fn tool_draw_stroke(core: &mut EditorCore, args: &Value) -> Result<Value, String
         return Err("argument 'width' must be positive".into());
     }
     let n_points = points.len();
+    core.project.strokes.push(Stroke {
+        frame,
+        points,
+        color,
+        width,
+        widths: Vec::new(),
+        fill: None,
+    });
+    Ok(json!({
+        "ok": true,
+        "frame": frame,
+        "points": n_points,
+        "strokes_on_frame": crate::draw_ops::stroke_count(&core.project, frame),
+    }))
+}
+
+fn tool_draw_shape(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    // Geometry comes from paint::shape_points so MCP shapes match
+    // the editor's own shape tool point-for-point. The stroke goes
+    // on the CURRENT frame, like a stroke drawn by hand.
+    let kind = match req_str(args, "kind")? {
+        "line" => crate::paint::ShapeKind::Line,
+        "rect" => crate::paint::ShapeKind::Rect,
+        "ellipse" => crate::paint::ShapeKind::Ellipse,
+        other => {
+            return Err(format!(
+                "unknown shape kind '{other}' (expected \"line\", \"rect\" or \"ellipse\")"
+            ))
+        }
+    };
+    let x1 = req_f32(args, "x1")?;
+    let y1 = req_f32(args, "y1")?;
+    let x2 = req_f32(args, "x2")?;
+    let y2 = req_f32(args, "y2")?;
+    // Same pen defaults as draw_stroke (light grey; the active
+    // brush's width), with the same optional overrides.
+    let color = opt_color(args, "color")?.unwrap_or(0xE8E8EC);
+    let width = opt_f32(args, "width")?.unwrap_or_else(|| core.active_brush().width);
+    if width <= 0.0 {
+        return Err("argument 'width' must be positive".into());
+    }
+    let points = crate::paint::shape_points(kind, [x1, y1], [x2, y2]);
+    let n_points = points.len();
+    let frame = core.current;
     core.project.strokes.push(Stroke {
         frame,
         points,
@@ -1465,7 +1525,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 json!({
                     "figure": { "type": "integer" },
                     "node": { "type": "integer" },
-                    "kind": { "type": "string", "enum": ["burst", "sparkle", "smoke", "beam", "aura", "trail", "confetti", "shock_ring", "ember", "fountain", "orbit", "lightning", "bubbles", "leaves", "meteor", "petals", "splash", "spiral", "fireworks", "aurora", "comet"] },
+                    "kind": { "type": "string", "enum": ["burst", "sparkle", "smoke", "beam", "aura", "trail", "confetti", "shock_ring", "ember", "fountain", "orbit", "lightning", "bubbles", "leaves", "meteor", "petals", "splash", "spiral", "fireworks", "aurora", "comet", "galaxy", "prism", "vortex"] },
                     "start": { "type": "number" },
                     "duration": { "type": "number" },
                     "color": { "type": "integer", "description": "0xRRGGBB (default: figure colour)" },
@@ -1573,6 +1633,18 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_smooth_graph_tangents,
         },
         Tool {
+            name: "bake_graph",
+            description: "Bake the graph channels into per-frame keys between frames 'from' and 'to' (inclusive), sampling every channel at each frame in the range. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "from": { "type": "integer" },
+                    "to": { "type": "integer" }
+                }),
+                &["from", "to"],
+            ),
+            handler: tool_bake_graph,
+        },
+        Tool {
             name: "layers",
             description: "Apply layer state to a figure: locked, hidden, opacity (0.05-1.0), and solo (true solos this figure in the editor, false clears its solo).",
             schema: obj_schema(
@@ -1612,6 +1684,23 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["frame", "points"],
             ),
             handler: tool_draw_stroke,
+        },
+        Tool {
+            name: "draw_shape",
+            description: "Append a geometric shape as a stroke on the CURRENT frame: kind is \"line\" (2 points), \"rect\" (closed rectangle, 5 points) or \"ellipse\" (25 points), from corner (x1, y1) to corner (x2, y2) in stage coordinates. color is 0xRRGGBB (default light grey), width defaults to the active brush width.",
+            schema: obj_schema(
+                json!({
+                    "kind": { "type": "string", "enum": ["line", "rect", "ellipse"] },
+                    "x1": { "type": "number" },
+                    "y1": { "type": "number" },
+                    "x2": { "type": "number" },
+                    "y2": { "type": "number" },
+                    "color": { "type": "integer", "description": "0xRRGGBB" },
+                    "width": { "type": "number" }
+                }),
+                &["kind", "x1", "y1", "x2", "y2"],
+            ),
+            handler: tool_draw_shape,
         },
         Tool {
             name: "smooth_strokes",
@@ -1725,6 +1814,15 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_clip_list,
         },
         Tool {
+            name: "set_clip_loop",
+            description: "Cycle a movieclip's loop mode one step: Loop -> PingPong -> Once -> Loop. The returned status names the new mode; an out-of-range index is a no-op reported in the status.",
+            schema: obj_schema(
+                json!({ "index": { "type": "integer" } }),
+                &["index"],
+            ),
+            handler: tool_set_clip_loop,
+        },
+        Tool {
             name: "set_bend",
             description: "Set one segment's bend (radians) for a figure on a frame. Positive/negative bend arcs the segment to opposite sides; 0 is straight. Frame.bends rows/cols are extended with zeros as needed.",
             schema: obj_schema(
@@ -1765,11 +1863,11 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 43);
+        assert_eq!(tools.len(), 46);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 43, "tool names must be unique");
+        assert_eq!(names.len(), 46, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
@@ -2086,7 +2184,8 @@ mod tests {
         // Every ClipKind the engine renders is addable by name —
         // including the wave-7 kinds (lightning, bubbles, leaves),
         // ember/fountain/orbit, which predate the fx timeline, and
-        // the wave-10 kinds (fireworks, aurora, comet).
+        // the wave-10 kinds (fireworks, aurora, comet) and the
+        // wave-11 kinds (galaxy, prism, vortex).
         for (name, debug) in [
             ("ember", "Ember"),
             ("fountain", "Fountain"),
@@ -2097,6 +2196,9 @@ mod tests {
             ("fireworks", "Fireworks"),
             ("aurora", "Aurora"),
             ("comet", "Comet"),
+            ("galaxy", "Galaxy"),
+            ("prism", "Prism"),
+            ("vortex", "Vortex"),
         ] {
             let r = call(&mut core, &tools, "add_fx_clip", json!({
                 "figure": 0, "node": 0, "kind": name, "start": 0.0, "duration": 6.0
@@ -2104,11 +2206,11 @@ mod tests {
             .unwrap();
             assert_eq!(r["kind"], debug, "{name}");
         }
-        assert_eq!(core.project.fx_clips.len(), 9);
+        assert_eq!(core.project.fx_clips.len(), 12);
 
         // fx_list reports the fx_edit view of the same clips.
         let r = call(&mut core, &tools, "fx_list", json!({})).unwrap();
-        assert_eq!(r["count"], 9);
+        assert_eq!(r["count"], 12);
         assert_eq!(r["clips"][3]["kind"], "lightning");
         assert_eq!(r["clips"][3]["figure"], 0);
         assert_eq!(r["clips"][3]["node"], 0);
@@ -2126,15 +2228,15 @@ mod tests {
         let r = call(&mut core, &tools, "fx_duplicate", json!({ "index": 3 })).unwrap();
         assert_eq!(r["fx_index"], 4);
         assert_eq!(r["start"], 14.0);
-        assert_eq!(core.project.fx_clips.len(), 10);
+        assert_eq!(core.project.fx_clips.len(), 13);
         assert_eq!(core.project.fx_clips[4].clip.start, 14.0);
 
         // Delete removes exactly the addressed clip.
         let r = call(&mut core, &tools, "fx_delete", json!({ "index": 4 })).unwrap();
-        assert_eq!(r["count"], 9);
-        assert_eq!(core.project.fx_clips.len(), 9);
+        assert_eq!(r["count"], 12);
+        assert_eq!(core.project.fx_clips.len(), 12);
         let r = call(&mut core, &tools, "fx_list", json!({})).unwrap();
-        assert_eq!(r["count"], 9);
+        assert_eq!(r["count"], 12);
     }
 
     #[test]
@@ -2156,6 +2258,79 @@ mod tests {
         assert_eq!(r["ok"], true);
         assert!(r["status"].is_string());
         let r = call(&mut core, &tools, "smooth_graph_tangents", json!({})).unwrap();
+        assert_eq!(r["ok"], true);
+        assert!(r["status"].is_string());
+    }
+
+    #[test]
+    fn wave11_kinds_and_tools() {
+        // The wave-11 FX kinds parse by name; near-misses are
+        // rejected with an error, never a panic.
+        assert!(matches!(parse_clip_kind("galaxy"), Ok(ClipKind::Galaxy)));
+        assert!(matches!(parse_clip_kind("prism"), Ok(ClipKind::Prism)));
+        assert!(matches!(parse_clip_kind("vortex"), Ok(ClipKind::Vortex)));
+        assert!(parse_clip_kind("galax").is_err());
+        assert!(parse_clip_kind("prisma").is_err());
+
+        let tools = tools();
+        let mut core = EditorCore::new();
+        call(&mut core, &tools, "new_project", json!({})).unwrap();
+
+        // draw_shape appends one stroke per call on the current
+        // frame, with the point count paint::shape_points defines
+        // per kind: line 2, rect 5 (closed), ellipse 25.
+        let r = call(&mut core, &tools, "draw_shape", json!({
+            "kind": "line", "x1": 10.0, "y1": 20.0, "x2": 110.0, "y2": 80.0
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["points"], 2);
+        assert_eq!(core.project.strokes.len(), 1);
+        assert_eq!(core.project.strokes[0].points.len(), 2);
+        assert_eq!(core.project.strokes[0].frame, core.current);
+        assert!(core.project.strokes[0].width > 0.0);
+        let r = call(&mut core, &tools, "draw_shape", json!({
+            "kind": "rect", "x1": 10.0, "y1": 20.0, "x2": 110.0, "y2": 80.0
+        }))
+        .unwrap();
+        assert_eq!(r["points"], 5);
+        assert_eq!(core.project.strokes.len(), 2);
+        assert_eq!(core.project.strokes[1].points.len(), 5);
+        let r = call(&mut core, &tools, "draw_shape", json!({
+            "kind": "ellipse", "x1": 10.0, "y1": 20.0, "x2": 110.0, "y2": 80.0
+        }))
+        .unwrap();
+        assert_eq!(r["points"], 25);
+        assert_eq!(core.project.strokes.len(), 3);
+        assert_eq!(core.project.strokes[2].points.len(), 25);
+        // An unknown shape kind errors and adds nothing.
+        let r = call(&mut core, &tools, "draw_shape", json!({
+            "kind": "circle", "x1": 0.0, "y1": 0.0, "x2": 5.0, "y2": 5.0
+        }));
+        assert!(r.is_err());
+        assert_eq!(core.project.strokes.len(), 3);
+
+        // set_clip_loop cycles the clip's mode Loop -> PingPong ->
+        // Once -> Loop (clip_create is how the other tests make a
+        // clip).
+        call(&mut core, &tools, "clip_create", json!({ "figure": 0 })).unwrap();
+        assert_eq!(core.project.clips.len(), 1);
+        assert_eq!(core.project.clips[0].loop_mode, crate::model::ClipLoop::Loop);
+        let r = call(&mut core, &tools, "set_clip_loop", json!({ "index": 0 })).unwrap();
+        assert_eq!(r["ok"], true);
+        assert!(r["status"].is_string());
+        assert_eq!(core.project.clips[0].loop_mode, crate::model::ClipLoop::PingPong);
+        call(&mut core, &tools, "set_clip_loop", json!({ "index": 0 })).unwrap();
+        assert_eq!(core.project.clips[0].loop_mode, crate::model::ClipLoop::Once);
+        call(&mut core, &tools, "set_clip_loop", json!({ "index": 0 })).unwrap();
+        assert_eq!(core.project.clips[0].loop_mode, crate::model::ClipLoop::Loop);
+        // Out-of-range is the op's own no-op status, not an error.
+        let r = call(&mut core, &tools, "set_clip_loop", json!({ "index": 9 })).unwrap();
+        assert_eq!(r["ok"], true);
+
+        // bake_graph on a project with no graph channels is a
+        // successful no-op (a status string), not an error.
+        let r = call(&mut core, &tools, "bake_graph", json!({ "from": 0, "to": 4 })).unwrap();
         assert_eq!(r["ok"], true);
         assert!(r["status"].is_string());
     }

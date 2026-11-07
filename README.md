@@ -100,11 +100,12 @@ present and fall back to a folder-based flow when neither exists.
   brushes, brush/eraser tools), per-point pressure widths, smoothing, nib
   shapes, serpentine fill and erasers; strokes render in the
   editor and all exports.
-- **VFX** (`src/vfx.rs`, `src/fx_edit.rs`) — 21 deterministic,
+- **VFX** (`src/vfx.rs`, `src/fx_edit.rs`) — 24 deterministic,
   seeded clip kinds (Burst, Sparkle, Smoke, Beam, Aura, Trail,
   Confetti, ShockRing, Ember, Fountain, Orbit, Lightning,
   Bubbles, Leaves, Meteor, Petals, Splash, Spiral, Fireworks,
-  Aurora, Comet) anchored to joints, with an FX timeline engine
+  Aurora, Comet, Galaxy, Prism, Vortex) anchored to joints,
+  with an FX timeline engine
   (list/move/resize/duplicate/delete) in the GUI and over MCP;
   plus continuous **weather** (rain, snow, fireflies, fog)
   rendered in the canvas and the rasterizer.
@@ -143,7 +144,7 @@ present and fall back to a folder-based flow when neither exists.
 ## Drive it from an AI agent (MCP)
 
 The `mcp_server` binary speaks MCP (JSON-RPC 2.0 over stdio,
-protocol `2024-11-05`) and exposes **54 tools**: project/figure/
+protocol `2024-11-05`) and exposes **57 tools**: project/figure/
 pose editing, camera (with rotation), graph keys, FX clip
 management, weather, audio, drawing, 3D sessions, movieclips,
 per-frame bends, pose mirroring, graph tangent smoothing,

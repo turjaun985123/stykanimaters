@@ -19,17 +19,21 @@
 //! single-figure movieclips become `ClipDef`s. Sprite library
 //! images are extracted to PNG assets and sprite instances (main /
 //! `.nodemc` timelines) become `SpriteInstance` key tracks;
-//! main-frame texts become `TextInstance` key tracks. Sounds,
-//! camera records and filter blocks are consumed precisely but not
-//! modelled — the same "stored poses preserved, dynamics not
-//! recreated" stance the original adapter takes. Joins are the
+//! main-frame texts become `TextInstance` key tracks. Main-frame
+//! camera records are modelled as camera keys (zoom, position
+//! and rotation — the fields the original adapter itself
+//! imports; the records' wobble and binding blocks are consumed
+//! but not modelled, mirroring the adapter, which retains them
+//! as metadata). Sounds and filter blocks are consumed precisely
+//! but not modelled — the same "stored poses preserved, dynamics
+//! not recreated" stance the original adapter takes. Joins are the
 //! exception: they are baked at import — a joined instance's
 //! root is superseded by the evaluated end of its host's named
 //! node (see `resolve_join_roots` and §17 of the spec).
 
 use crate::model::{
-    evaluate, norm_deg, ClipDef, ClipLoop, Easing, FigureDef, FigureInstance, Frame, ImageAsset,
-    InstanceKey, NodeDef, Pose, Project, Shape, SpriteInstance, TextInstance,
+    evaluate, norm_deg, CameraKey, ClipDef, ClipLoop, Easing, FigureDef, FigureInstance, Frame,
+    ImageAsset, InstanceKey, NodeDef, Pose, Project, Shape, SpriteInstance, TextInstance,
 };
 use std::collections::HashMap;
 use std::io::Read as _;
@@ -839,6 +843,10 @@ struct RawFrame {
     /// Main-frame texts; always empty for clip frames (the format
     /// stores texts only in `.stknds` main frames).
     texts: Vec<RawText>,
+    /// Main-frame camera record; `None` for clip frames (the
+    /// format stores camera records only in `.stknds` main
+    /// frames).
+    camera: Option<RawCamera>,
 }
 
 /// A parsed library movieclip. Only name/frames feed the model
@@ -1194,6 +1202,7 @@ fn read_clip_frame(
         joins,
         settings: None,
         texts: Vec::new(),
+        camera: None,
     })
 }
 
@@ -1288,17 +1297,50 @@ fn read_text(r: &mut Reader, v: i32, index: i32) -> Result<RawText, String> {
     })
 }
 
-/// Frame camera record (`readCamera`): consumed, not modelled —
-/// the original decoder itself leaves camera-binding semantics
-/// unestablished.
-fn read_camera(r: &mut Reader, v: i32) -> Result<(), String> {
+/// One frame's camera record (`readCamera`), values only. The
+/// wobble and binding blocks are consumed by the reader but not
+/// modelled — the original adapter takes the same stance (it
+/// imports camera position, zoom and rotation, and retains
+/// wobble and bindings as metadata, their parameter meanings
+/// unestablished).
+#[derive(Clone, Copy)]
+struct RawCamera {
+    zoom: f32,
+    x: f32,
+    y: f32,
+    rotation: f32,
+}
+
+impl RawCamera {
+    /// The decoder's own fallback record: zoom 1, no offset, no
+    /// rotation (what an untouched camera reads as at any
+    /// version, and what older versions carry no fields for).
+    fn fallback() -> RawCamera {
+        RawCamera {
+            zoom: 1.0,
+            x: 0.0,
+            y: 0.0,
+            rotation: 0.0,
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        self.zoom == 1.0 && self.x == 0.0 && self.y == 0.0 && self.rotation == 0.0
+    }
+}
+
+/// Frame camera record (`readCamera`): returns the record's
+/// zoom / position / rotation; wobble and bindings are consumed
+/// and dropped (see [`RawCamera`]).
+fn read_camera(r: &mut Reader, v: i32) -> Result<RawCamera, String> {
+    let mut cam = RawCamera::fallback();
     if v >= 170 {
-        r.f32()?; // zoom
-        r.f32()?; // x
-        r.f32()?; // y
+        cam.zoom = r.f32()?;
+        cam.x = r.f32()?;
+        cam.y = r.f32()?;
     }
     if v >= 230 {
-        r.f32()?; // rotation
+        cam.rotation = r.f32()?;
     }
     if v >= 310 {
         r.flag()?; // wobbleXY
@@ -1341,7 +1383,7 @@ fn read_camera(r: &mut Reader, v: i32) -> Result<(), String> {
             }
         }
     }
-    Ok(())
+    Ok(cam)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1372,12 +1414,13 @@ fn read_main_frame(
             texts.push(read_text(r, v, i as i32)?);
         }
     }
-    read_camera(r, v)?;
+    let camera = read_camera(r, v)?;
     Ok(RawFrame {
         instances,
         joins,
         settings: Some(settings),
         texts,
+        camera: Some(camera),
     })
 }
 
@@ -2301,6 +2344,56 @@ fn empty_project(name: String, fps: f32, auto_tween: bool) -> Project {
     }
 }
 
+/// Convert the main frames' camera records to model camera
+/// keys. The mapping is the original adapter's own conversion
+/// (`src/sticknodes/adapter.mjs`: native camera
+/// `x = c.x + 960/z − 960`, `y = 540 − c.y − 540/z`,
+/// `scale = 1/z`, `angle_rad = −c.rotation°`), composed with
+/// the native render transform (`cameraMatrix` in
+/// `renderer-geometry.mjs`, whose effective magnification is
+/// `1/scale` per `inverseCameraScale` in
+/// `pivot/background.mjs`): in the format's own coordinates
+/// the record's (x, y) anchors the view's corner, the view
+/// centre sits at `(x + 960/z, y + 540/z)`, the magnification
+/// is `z`, and `rotation` is in degrees. This importer keeps
+/// file positions verbatim (figure roots, text and sprite
+/// positions alike) and — like the text and sprite rotation
+/// fields, which become `InstanceKey` angles verbatim — keeps
+/// the rotation verbatim in degrees, so a record becomes the
+/// key `(x + 960/z, y + 540/z, z, rotation)`.
+///
+/// A project whose every record is the default (zoom 1, no
+/// offset, no rotation) gets NO keys: the model's own default
+/// camera then applies, exactly as imports behaved before
+/// camera records were modelled. If any record differs, keys
+/// are dense (one per frame) — the format stores a record per
+/// frame, and dense keys reproduce every frame's values
+/// exactly under the model's interpolation.
+fn camera_keys(frames_raw: &[RawFrame]) -> Vec<CameraKey> {
+    if !frames_raw
+        .iter()
+        .any(|f| f.camera.map_or(false, |c| !c.is_default()))
+    {
+        return Vec::new();
+    }
+    frames_raw
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let c = f.camera.unwrap_or_else(RawCamera::fallback);
+            // The adapter's guard: a non-positive zoom reads as 1.
+            let z = if c.zoom > 0.0 { c.zoom } else { 1.0 };
+            CameraKey {
+                frame: i,
+                x: c.x + 960.0 / z,
+                y: c.y + 540.0 / z,
+                zoom: z,
+                angle: c.rotation,
+            }
+        })
+        .collect()
+}
+
 // ---------- .stknds ----------
 
 fn parse_stknds(payload: &[u8]) -> Result<Project, String> {
@@ -2458,6 +2551,7 @@ fn parse_stknds(payload: &[u8]) -> Result<Project, String> {
     project.assets = assets;
     project.sprites = sprites_out;
     project.texts = texts_out;
+    project.camera = camera_keys(&frames_raw);
     Ok(project)
 }
 
@@ -2827,15 +2921,29 @@ fn write_pose_record(
     }
 }
 
-/// Frame camera at 431/117 (field order per `read_camera`):
-/// the default camera (zoom 1, no offset, no wobble, no
-/// bindings). Camera keys are not exported — see
-/// [`export_nodes_animation`].
-fn write_camera(w: &mut BeWriter) {
-    w.f32(1.0); // zoom
-    w.f32(0.0); // x
-    w.f32(0.0); // y
-    w.f32(0.0); // rotation
+/// Frame camera at 431/117 (field order per `read_camera`).
+/// With no camera data (`cam` is `None`) the record is the
+/// default — zoom 1, no offset, no wobble, no bindings —
+/// byte-identical to what the writer emitted before camera
+/// export existed. With camera data, `cam` is the frame's
+/// evaluated model camera `(x, y, zoom, angle)` and the
+/// record is written via the inverse of the import mapping
+/// (see `camera_keys`): zoom verbatim, the record's anchor is
+/// the view centre minus `(960/z, 540/z)`, and the rotation
+/// is the angle in degrees verbatim. Wobble and bindings are
+/// written absent: the model has no source for them.
+fn write_camera(w: &mut BeWriter, cam: Option<(f32, f32, f32, f32)>) {
+    let (zoom, x, y, rotation) = match cam {
+        Some((cx, cy, cz, angle)) => {
+            let z = if cz > 0.0 { cz } else { 1.0 };
+            (z, cx - 960.0 / z, cy - 540.0 / z, angle)
+        }
+        None => (1.0, 0.0, 0.0, 0.0),
+    };
+    w.f32(zoom); // zoom
+    w.f32(x); // x
+    w.f32(y); // y
+    w.f32(rotation); // rotation
     w.flag(false); // wobbleXY
     w.flag(false); // wobbleRotation
     w.flag(false); // wobbleScale
@@ -2903,7 +3011,12 @@ fn write_trailer(w: &mut BeWriter) {
 /// * **Movieclips** — the clip library is empty; a figure with
 ///   clip linkage exports as a plain posed figure and the
 ///   `ClipDef` content is dropped.
-/// * **Camera keys** — a default camera record per frame.
+/// * **Camera** — each frame's record carries the frame's
+///   evaluated camera (sparse keys and any follow target are
+///   baked to per-frame values; see `write_camera`). A project
+///   with no camera data keeps the default record per frame,
+///   byte-identical to before. Camera wobble and tracking
+///   bindings have no model source and are written absent.
 /// * Sounds, weather, particles, FX clips, audio clips,
 ///   strokes, graph channels, per-frame easing and bends, the
 ///   stage size (the grammar has no stage field; the importer
@@ -2950,7 +3063,7 @@ pub fn export_nodes_animation(project: &Project) -> Vec<u8> {
         .collect();
     // Main timeline.
     w.i32(project.frames.len() as i32);
-    for frame in &project.frames {
+    for (fi, frame) in project.frames.iter().enumerate() {
         write_main_settings(&mut w, project.background, frame.duration, fps);
         w.i32(project.figures.len() as i32); // instance count
         for (fi, fig) in project.figures.iter().enumerate() {
@@ -3002,7 +3115,17 @@ pub fn export_nodes_animation(project: &Project) -> Vec<u8> {
         }
         w.i32(0); // joins: none
         w.i32(0); // texts: none
-        write_camera(&mut w);
+        // The frame's evaluated camera, baked per frame (the
+        // format stores a record per frame); a project with no
+        // camera keys and no follow target writes the default
+        // record, byte-identical to earlier exports.
+        let cam = if project.camera.is_empty() && project.camera_follow.is_none() {
+            None
+        } else {
+            let (x, y, zoom) = project.camera_at(fi as f32);
+            Some((x, y, zoom, project.camera_angle_at(fi as f32)))
+        };
+        write_camera(&mut w, cam);
     }
     write_trailer(&mut w);
     w.v
@@ -3633,6 +3756,24 @@ mod tests {
         b.i32(0); // secondary bindings count
     }
 
+    /// Frame camera at 431/117 with explicit values (field
+    /// order per `read_camera`).
+    fn camera_431_117_with(b: &mut B, zoom: f32, x: f32, y: f32, rotation: f32) {
+        b.f32(zoom); // zoom
+        b.f32(x); // x
+        b.f32(y); // y
+        b.f32(rotation); // rotation
+        b.flag(false); // wobbleXY
+        b.flag(false); // wobbleRotation
+        b.flag(false); // wobbleScale
+        b.i32(0); // wobbleXYIntensity
+        b.f32(0.0); // wobbleRotationIntensity
+        b.f32(0.0); // wobbleSpeed
+        b.flag(false); // widescreen
+        b.i32(0); // bindings count
+        b.i32(0); // secondary bindings count
+    }
+
     /// Main-frame text at 431/117 (field order per `read_text`),
     /// red, unrotated, no shadow.
     fn text_431_117(b: &mut B, id: i32, x: f32, y: f32, scale: f32, text: &str, align: i32) {
@@ -3720,6 +3861,37 @@ mod tests {
         b.i32(0); // joins count
         b.i32(1); // text count
         text_431_117(&mut b, 3, 260.0, 500.0, 2.0, "HI", 0);
+        camera_431_117(&mut b);
+        trailer_431_117(&mut b);
+        b.v
+    }
+
+    /// A `.stknds` project packed byte-by-byte at 431/117: no
+    /// figures, no sprites, two main frames — frame 0 carries a
+    /// moved camera (zoom 2, anchor (100, 50), rotation 30),
+    /// frame 1 the default camera record.
+    fn hand_packed_project_with_camera() -> Vec<u8> {
+        let mut b = B::default();
+        b.i32(431); // version
+        b.i32(117); // build (v >= 401)
+        b.string("Proj C");
+        project_header_431_117(&mut b);
+        b.i32(0); // figure count
+        b.i32(0); // sound count (v >= 160)
+        b.i32(0); // sprite library count (v >= 400)
+        b.i32(0); // clip count (v >= 300)
+        b.i32(2); // frame count
+        // Frame 0.
+        main_settings_431_117(&mut b);
+        b.i32(0); // instance count
+        b.i32(0); // joins count
+        b.i32(0); // text count
+        camera_431_117_with(&mut b, 2.0, 100.0, 50.0, 30.0);
+        // Frame 1.
+        main_settings_431_117(&mut b);
+        b.i32(0); // instance count
+        b.i32(0); // joins count
+        b.i32(0); // text count
         camera_431_117(&mut b);
         trailer_431_117(&mut b);
         b.v
@@ -3834,6 +4006,7 @@ mod tests {
             joins: Vec::new(),
             settings: None,
             texts: Vec::new(),
+            camera: None,
         };
         // One figure + one sprite per frame: converts (the sprite
         // is not carried into the ClipDef).
@@ -4025,6 +4198,7 @@ mod tests {
             joins: vec![join(1, 0, seg_id), join(2, 1, seg_id), join(3, 0, root_id)],
             settings: None,
             texts: Vec::new(),
+            camera: None,
         };
         let (figs, frames) = build_timeline(
             &[frame],
@@ -4061,6 +4235,7 @@ mod tests {
             joins: vec![join(1, 99, seg_id)],
             settings: None,
             texts: Vec::new(),
+            camera: None,
         };
         let (_, frames) = build_timeline(
             &[frame],
@@ -4099,6 +4274,7 @@ mod tests {
             joins: vec![join(1, 0, seg_id)],
             settings: None,
             texts: Vec::new(),
+            camera: None,
         };
         let (_, frames) = build_timeline(
             &[frame],
@@ -4126,6 +4302,7 @@ mod tests {
             joins: vec![join(1, 0, seg_id)],
             settings: None,
             texts: Vec::new(),
+            camera: None,
         };
         let (tracks, _) = build_instance_tracks(&[frame], &sprites, &[Some(0)], &figures, 117);
         assert_eq!(tracks.len(), 1);
@@ -4152,6 +4329,7 @@ mod tests {
                 joins: vec![join(0, 0, seg_id)],
                 settings: None,
                 texts: Vec::new(),
+                camera: None,
             }],
         };
         assert!(convert_clip(&clip, &figures, 117).is_none());
@@ -4296,5 +4474,81 @@ mod tests {
         let back = import_nodes_animation(&export_nodes_animation(&project)).unwrap();
         assert!(back.figures.is_empty());
         assert_eq!(back.frames.len(), project.frames.len());
+    }
+
+    #[test]
+    fn stknds_camera_records_import_as_dense_keys() {
+        let project = import_nodes_animation(&hand_packed_project_with_camera())
+            .expect("hand-packed camera project imports");
+        // Frame 0's record is non-default, so keys are dense:
+        // frame 0 is (100 + 960/2, 50 + 540/2, 2, 30) and the
+        // default record on frame 1 is (0 + 960, 0 + 540, 1, 0).
+        assert_eq!(project.camera.len(), 2);
+        let k0 = &project.camera[0];
+        assert_eq!(k0.frame, 0);
+        assert!((k0.x - 580.0).abs() < 0.01, "key0 x {}", k0.x);
+        assert!((k0.y - 320.0).abs() < 0.01, "key0 y {}", k0.y);
+        assert!((k0.zoom - 2.0).abs() < 0.001, "key0 zoom {}", k0.zoom);
+        assert!((k0.angle - 30.0).abs() < 0.001, "key0 angle {}", k0.angle);
+        let k1 = &project.camera[1];
+        assert_eq!(k1.frame, 1);
+        assert!((k1.x - 960.0).abs() < 0.01, "key1 x {}", k1.x);
+        assert!((k1.y - 540.0).abs() < 0.01, "key1 y {}", k1.y);
+        assert!((k1.zoom - 1.0).abs() < 0.001, "key1 zoom {}", k1.zoom);
+        assert!((k1.angle - 0.0).abs() < 0.001, "key1 angle {}", k1.angle);
+    }
+
+    #[test]
+    fn stknds_default_camera_records_import_without_keys() {
+        // Both frames of the sprites/texts project carry the
+        // default camera record: no keys are created, exactly
+        // as imports behaved before camera was modelled.
+        let project = import_nodes_animation(&hand_packed_project_with_sprites_and_text())
+            .expect("hand-packed project imports");
+        assert!(project.camera.is_empty());
+    }
+
+    #[test]
+    fn stknds_export_import_camera_round_trip() {
+        let mut project = Project::new_demo();
+        project.camera = vec![
+            CameraKey {
+                frame: 0,
+                x: 480.0,
+                y: 360.0,
+                zoom: 1.0,
+                angle: 0.0,
+            },
+            CameraKey {
+                frame: 4,
+                x: 672.0,
+                y: 396.0,
+                zoom: 2.0,
+                angle: 30.0,
+            },
+        ];
+        let back = import_nodes_animation(&export_nodes_animation(&project)).unwrap();
+        // Keys come back dense (the format stores a record per
+        // frame) and reproduce the evaluated camera at every
+        // frame, including the interpolated middle frames.
+        assert_eq!(back.camera.len(), project.frames.len());
+        for f in 0..project.frames.len() {
+            let (ax, ay, az) = project.camera_at(f as f32);
+            let (bx, by, bz) = back.camera_at(f as f32);
+            assert!((ax - bx).abs() < 0.05, "frame {f} x {ax} vs {bx}");
+            assert!((ay - by).abs() < 0.05, "frame {f} y {ay} vs {by}");
+            assert!((az - bz).abs() < 0.001, "frame {f} zoom {az} vs {bz}");
+            let aa = project.camera_angle_at(f as f32);
+            let ba = back.camera_angle_at(f as f32);
+            assert!((aa - ba).abs() < 0.05, "frame {f} angle {aa} vs {ba}");
+        }
+    }
+
+    #[test]
+    fn stknds_export_without_camera_imports_without_keys() {
+        let project = Project::new_demo();
+        assert!(project.camera.is_empty());
+        let back = import_nodes_animation(&export_nodes_animation(&project)).unwrap();
+        assert!(back.camera.is_empty());
     }
 }

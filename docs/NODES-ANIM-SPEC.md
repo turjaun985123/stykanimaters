@@ -350,6 +350,11 @@ flag widescreen (v ≥ 220), flag legacyFlag (220 ≤ v < 244)
 The original decoder itself notes that camera-binding parameter
 *meanings* are not established ("typed and preserved, but their
 behavioral meanings are not established"); §16 reflects that.
+The camera record's core values (zoom, x, y, rotation) ARE
+established — via the original adapter's transform (§12.2 values
+map to the port's CameraKey as (x + 960/z, y + 540/z, z,
+rotation)) — and are modelled on import and export since
+Wave 11; only bindings and wobble remain metadata-only.
 
 ### 13. Trailer (`readProjectTrailer`)
 
@@ -613,8 +618,12 @@ maps the result onto `crate::model::Project`:
 **Parsed byte-exactly but not modelled** (mirroring the original
 adapter's own "stored poses preserved, dynamics not recreated" stance)
 * Sounds (external references only — there are no bytes to import),
-  camera records and bindings (semantics unestablished
-  upstream, §12.2), style/filter blocks, thumbnails, trailer editor
+  camera bindings and procedural wobble (semantics unestablished
+  upstream, §12.2 — the camera's zoom/x/y/rotation themselves ARE
+  modelled both ways since Wave 11: import maps each record to a
+  CameraKey via the original adapter's own transform, export bakes
+  the evaluated camera back to per-frame records), style/filter
+  blocks, thumbnails, trailer editor
   state, movieclip instance playback cursors / play modes / rotation
   / flips (the model's clip playback loops from the clip start), and
   figure-instance scale changes after an instance's first frame.

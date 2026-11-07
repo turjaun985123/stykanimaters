@@ -1,7 +1,8 @@
 //! Audio editor backend: minimal PCM16 WAV I/O, waveform peaks,
 //! a real multi-clip mixdown, playback scheduling, and editing
 //! operations: peak/RMS metering, normalisation, trim, split,
-//! crossfade joins, and timeline clip splitting.
+//! crossfade joins, timeline clip splitting, and effects (fade,
+//! gain, reverse, echo, lowpass, silence trim).
 //!
 //! Std-only, no decoding crates: WAV files are parsed and written
 //! by hand (RIFF/WAVE, PCM format 1, 16-bit, mono or stereo).
@@ -233,6 +234,105 @@ pub fn reverse(data: &mut WavData) {
             data.samples.swap(a + c, b + c);
         }
     }
+}
+
+/// Feedback-delay echo in place: every frame is repeated
+/// `delay_secs` later at `decay` of its level, and the repeats
+/// themselves feed back, so an impulse rings as a decaying train
+/// (1, decay, decay², …) until it runs off the end of the buffer —
+/// the buffer never grows.
+///
+/// `delay_secs` is rounded to whole frames and clamps to a minimum
+/// of 0.01 s; `decay` clamps to 0.0..=0.9 (even 0.9 still decays,
+/// so the train always dies out). The delay is per channel: a
+/// frame's echo is sourced only from the same channel
+/// `delay_frames` earlier, never from a neighbouring channel.
+///
+/// The sum is NOT clamped: a loud source with a high decay can
+/// push samples past ±1.0. Like `fade` and `normalize`, this op
+/// leaves headroom to the caller — `write_wav` clamps on the way
+/// out. Empty audio is a no-op.
+pub fn echo(w: &mut WavData, delay_secs: f32, decay: f32) {
+    let ch = w.channels as usize;
+    if w.frames() == 0 || ch == 0 {
+        return;
+    }
+    let decay = decay.clamp(0.0, 0.9);
+    if decay == 0.0 {
+        return;
+    }
+    let delay_frames = ((delay_secs.max(0.01) * w.sample_rate as f32).round() as usize).max(1);
+    let stride = delay_frames * ch;
+    for i in stride..w.samples.len() {
+        let src = w.samples[i - stride];
+        w.samples[i] += decay * src;
+    }
+}
+
+/// One-pole lowpass filter in place: `y += alpha * (x - y)` per
+/// channel, with `alpha = 1 - exp(-2π * cutoff / rate)` — the
+/// classic RC smoothing filter. Content above `cutoff_hz` is
+/// rolled off; `cutoff_hz` clamps to 20 Hz..=rate/2.
+///
+/// State is kept per channel (channels never bleed) and seeded
+/// with each channel's first sample, so a constant (DC) signal
+/// passes unchanged from the very first frame instead of ramping
+/// up from zero. Empty audio and a zero sample rate are no-ops.
+pub fn lowpass(w: &mut WavData, cutoff_hz: f32) {
+    let ch = w.channels as usize;
+    let frames = w.frames();
+    if frames == 0 || ch == 0 || w.sample_rate == 0 {
+        return;
+    }
+    let rate = w.sample_rate as f32;
+    let cutoff = cutoff_hz.clamp(20.0, rate / 2.0);
+    let alpha = 1.0 - (-2.0 * std::f32::consts::PI * cutoff / rate).exp();
+    let mut y: Vec<f32> = (0..ch).map(|c| w.samples[c]).collect();
+    for j in 0..frames {
+        for c in 0..ch {
+            let i = j * ch + c;
+            y[c] += alpha * (w.samples[i] - y[c]);
+            w.samples[i] = y[c];
+        }
+    }
+}
+
+/// Trim silent frames from both ends in place and report how many
+/// frames were removed: `(front, back)`.
+///
+/// A frame counts as silent when its loudest channel is below
+/// `threshold` (max |sample| < threshold), so a frame survives if
+/// ANY channel reaches the threshold. Interior silence is kept —
+/// only the leading and trailing runs are removed.
+///
+/// Guard: if every frame is silent the buffer is left completely
+/// unchanged and `(0, 0)` is returned — this op never empties a
+/// clip. (A threshold of 0 or less therefore trims nothing, since
+/// no frame's peak is below it.) Empty audio returns `(0, 0)`.
+pub fn trim_silence(w: &mut WavData, threshold: f32) -> (usize, usize) {
+    let ch = w.channels as usize;
+    let frames = w.frames();
+    if frames == 0 || ch == 0 {
+        return (0, 0);
+    }
+    let frame_peak = |j: usize| -> f32 {
+        (0..ch).fold(0.0f32, |m, c| m.max(w.samples[j * ch + c].abs()))
+    };
+    let Some(first) = (0..frames).find(|&j| frame_peak(j) >= threshold) else {
+        return (0, 0); // All frames silent: leave the buffer as is.
+    };
+    let last = (0..frames)
+        .rev()
+        .find(|&j| frame_peak(j) >= threshold)
+        .unwrap();
+    let front = first;
+    let back = frames - 1 - last;
+    if front == 0 && back == 0 {
+        return (0, 0);
+    }
+    w.samples.drain((frames - back) * ch..);
+    w.samples.drain(..front * ch);
+    (front, back)
 }
 
 /// Seconds to a frame index in `data`, rounded and clamped to the
@@ -1058,5 +1158,157 @@ mod tests {
         assert!(split_clip(&clip, 10, 48).is_none());
         // Zero duration has no inside.
         assert!(split_clip(&clip, 48, 0).is_none());
+    }
+
+    #[test]
+    fn echo_repeats_an_impulse_with_decay_and_no_channel_bleed() {
+        // Stereo at 8000 Hz; the minimum delay (0.01 s) is 80
+        // frames. A left-only impulse rings in the left channel
+        // only: 1.0, then 0.5, then 0.25 — the second repeat
+        // exists only because the first repeat feeds back.
+        let frames = 240;
+        let mut samples = vec![0.0f32; frames * 2];
+        samples[0] = 1.0; // frame 0, left
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 2,
+            samples,
+        };
+        echo(&mut data, 0.01, 0.5);
+        let left = |f: usize| data.samples[f * 2];
+        assert_eq!(left(0), 1.0);
+        assert_eq!(left(80), 0.5);
+        assert_eq!(left(160), 0.25);
+        // Nothing rings between the repeats.
+        assert_eq!(left(79), 0.0);
+        assert_eq!(left(81), 0.0);
+        // Right channel indices are the odd ones: all still zero.
+        assert!(
+            data.samples.iter().skip(1).step_by(2).all(|s| *s == 0.0),
+            "right channel must stay silent — no cross-channel bleed"
+        );
+    }
+
+    #[test]
+    fn echo_clamps_delay_and_decay() {
+        // delay_secs 0 clamps up to the 0.01 s minimum (80 frames
+        // at 8000 Hz) and decay 2.0 clamps down to 0.9.
+        let mut samples = vec![0.0f32; 200];
+        samples[0] = 1.0;
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples,
+        };
+        echo(&mut data, 0.0, 2.0);
+        assert!(
+            (data.samples[80] - 0.9).abs() < 1e-6,
+            "clamped echo at frame 80: {}",
+            data.samples[80]
+        );
+        assert_eq!(data.samples[79], 0.0);
+    }
+
+    #[test]
+    fn lowpass_passes_a_constant_signal_unchanged() {
+        // State is seeded with the first sample, so DC passes from
+        // frame 0 even at a low cutoff.
+        let mut data = const_wav(44100, 0.1, 0.7);
+        lowpass(&mut data, 100.0);
+        assert!(
+            data.samples.iter().all(|s| (s - 0.7).abs() < 1e-6),
+            "constant signal must pass ~unchanged"
+        );
+    }
+
+    #[test]
+    fn lowpass_strongly_attenuates_a_nyquist_alternation() {
+        // +1/-1 every sample is the fastest possible alternation
+        // (Nyquist). Through a 100 Hz one-pole at 44100 Hz the
+        // steady-state amplitude is alpha/(2-alpha) ≈ 0.007.
+        let rate = 44100u32;
+        let samples: Vec<f32> = (0..rate as usize)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let mut data = WavData {
+            sample_rate: rate,
+            channels: 1,
+            samples,
+        };
+        lowpass(&mut data, 100.0);
+        let tail_peak = data.samples[rate as usize - 1000..]
+            .iter()
+            .fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(
+            tail_peak < 0.02,
+            "alternation should be ~gone after settling, tail peak {tail_peak}"
+        );
+    }
+
+    #[test]
+    fn trim_silence_removes_exact_counts() {
+        // Mono: 3 silent frames, 2 loud, 2 silent.
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.0, 0.0, 0.0, 0.5, 0.25, 0.0, 0.0],
+        };
+        assert_eq!(trim_silence(&mut data, 0.01), (3, 2));
+        assert_eq!(data.samples, vec![0.5, 0.25]);
+
+        // Stereo: a frame survives if ANY channel reaches the
+        // threshold. Frame 1 peaks at 0.005 < 0.01, so it is
+        // trimmed despite being non-zero.
+        let mut stereo = WavData {
+            sample_rate: 8000,
+            channels: 2,
+            samples: vec![
+                0.0, 0.0, // silent
+                0.0, 0.005, // below threshold -> silent
+                0.3, 0.0, // loud (left channel only)
+                0.0, 0.0, // silent
+            ],
+        };
+        assert_eq!(trim_silence(&mut stereo, 0.01), (2, 1));
+        assert_eq!(stereo.samples, vec![0.3, 0.0]);
+        assert_eq!(stereo.frames(), 1);
+    }
+
+    #[test]
+    fn trim_silence_never_empties_a_clip() {
+        // All-silent input is left completely unchanged.
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.0, 0.001, 0.0, 0.0],
+        };
+        let before = data.samples.clone();
+        assert_eq!(trim_silence(&mut data, 0.01), (0, 0));
+        assert_eq!(data.samples, before);
+
+        // No silence at the edges -> nothing removed, and the
+        // interior silent frame is kept.
+        let mut loud = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.5, 0.0, 0.5],
+        };
+        assert_eq!(trim_silence(&mut loud, 0.01), (0, 0));
+        assert_eq!(loud.samples, vec![0.5, 0.0, 0.5]);
+    }
+
+    #[test]
+    fn echo_lowpass_trim_silence_on_empty_audio_are_safe() {
+        for channels in [1u16, 2] {
+            let mut data = WavData {
+                sample_rate: 8000,
+                channels,
+                samples: Vec::new(),
+            };
+            echo(&mut data, 0.3, 0.5);
+            lowpass(&mut data, 1000.0);
+            assert_eq!(trim_silence(&mut data, 0.01), (0, 0));
+            assert!(data.samples.is_empty());
+        }
     }
 }

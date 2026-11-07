@@ -659,8 +659,57 @@ fn sample_times(project: &Project) -> Vec<f32> {
     }
 }
 
-/// Export the animation as a looping GIF at the project fps.
-pub fn export_gif(project: &Project, path: &Path) -> std::io::Result<usize> {
+/// Clamp an inclusive authored-frame range `from..=to` to the
+/// timeline. Both ends clamp into `0..frames.len()`; a range that
+/// is empty after clamping (including an inverted range or an
+/// empty project) is an `InvalidInput` error.
+fn clamp_frame_range(project: &Project, from: usize, to: usize) -> std::io::Result<(usize, usize)> {
+    let n = project.frames.len();
+    if n == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cannot export a frame range from an empty project",
+        ));
+    }
+    let from = from.min(n - 1);
+    let to = to.min(n - 1);
+    if from > to {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("empty frame range: frame {from} comes after frame {to}"),
+        ));
+    }
+    Ok((from, to))
+}
+
+/// Frame times for the authored range `from..=to` only, following
+/// the same sampling rules as [`sample_times`]: with tween
+/// playback the range's span is sampled at the project fps
+/// starting at the range's offset in the timeline; without it, the
+/// range's authored frames are expanded by their own durations.
+/// For the full range this returns exactly what `sample_times`
+/// returns.
+fn sample_times_range(project: &Project, from: usize, to: usize) -> Vec<f32> {
+    if project.tween_playback {
+        let fps = project.fps.max(1.0);
+        let start: f32 = project.frames[..from].iter().map(|f| f.duration).sum();
+        let span: f32 = project.frames[from..=to].iter().map(|f| f.duration).sum();
+        let count = ((span / fps) * fps).ceil().max(1.0) as usize;
+        (0..count)
+            .map(|k| authored_at(project, (start + k as f32) / fps))
+            .collect()
+    } else {
+        expanded_frames(project)
+            .into_iter()
+            .filter(|&i| (from..=to).contains(&i))
+            .map(|i| i as f32)
+            .collect()
+    }
+}
+
+/// Encode the given frame times as a looping GIF at the project
+/// fps (the shared encoder behind the GIF exports).
+fn encode_gif(project: &Project, times: &[f32], path: &Path) -> std::io::Result<usize> {
     use image::codecs::gif::{GifEncoder, Repeat};
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -671,15 +720,38 @@ pub fn export_gif(project: &Project, path: &Path) -> std::io::Result<usize> {
         .set_repeat(Repeat::Infinite)
         .map_err(std::io::Error::other)?;
     let delay = image::Delay::from_numer_denom_ms((1000.0 / project.fps.max(1.0)) as u32, 1);
-    let times = sample_times(project);
     let mut frames = Vec::new();
-    for t in &times {
+    for t in times {
         let img = image::DynamicImage::ImageRgb8(render_frame_at(project, *t)).to_rgba8();
         frames.push(image::Frame::from_parts(img, 0, 0, delay));
     }
     let n = frames.len();
     encoder.encode_frames(frames).map_err(std::io::Error::other)?;
     Ok(n)
+}
+
+/// Export the animation as a looping GIF at the project fps.
+pub fn export_gif(project: &Project, path: &Path) -> std::io::Result<usize> {
+    if project.frames.is_empty() {
+        return encode_gif(project, &[], path);
+    }
+    export_gif_range(project, 0, project.frames.len() - 1, path)
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped to
+/// the timeline) as a looping GIF at the project fps. Frames keep
+/// their own durations (duration-expanded or tween-sampled,
+/// exactly as in a full export). Returns the number of GIF frames
+/// written; an empty or inverted range is an error.
+pub fn export_gif_range(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+) -> std::io::Result<usize> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let times = sample_times_range(project, from, to);
+    encode_gif(project, &times, path)
 }
 
 /// Export an MP4 (H.264, yuv420p) via the system `ffmpeg`. When
@@ -1018,13 +1090,33 @@ pub fn export_spritesheet(project: &Project, path: &Path) -> std::io::Result<usi
 
 /// Export every frame as `frame-0001.png`, `frame-0002.png`, ... in `dir`.
 pub fn export_png_sequence(project: &Project, dir: &Path) -> std::io::Result<usize> {
+    if project.frames.is_empty() {
+        std::fs::create_dir_all(dir)?;
+        return Ok(0);
+    }
+    export_png_sequence_range(project, 0, project.frames.len() - 1, dir)
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped to
+/// the timeline) as `frame-XXXX.png` files in `dir`, keeping each
+/// frame's authored index in its file name (frame 2 exports as
+/// `frame-0003.png`, as in a full sequence export). Returns the
+/// number of files written; an empty or inverted range is an
+/// error.
+pub fn export_png_sequence_range(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+) -> std::io::Result<usize> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
     std::fs::create_dir_all(dir)?;
-    for i in 0..project.frames.len() {
+    for i in from..=to {
         let img = render_frame(project, i);
         img.save(dir.join(format!("frame-{:04}.png", i + 1)))
             .map_err(std::io::Error::other)?;
     }
-    Ok(project.frames.len())
+    Ok(to - from + 1)
 }
 
 /// Export every authored frame as `frame-0001.jpg`, `frame-0002.jpg`,
@@ -1490,6 +1582,46 @@ mod tests {
         // The near end stays (nearly) pure red.
         let near = img.get_pixel(52, 100).0;
         assert!(near[0] > 240 && near[2] < 16, "near end should stay red, got {near:?}");
+        // And the far end reaches (nearly) pure blue (wave 11):
+        // the gradient runs the whole segment axis, not just to
+        // the midpoint.
+        let far = img.get_pixel(148, 100).0;
+        assert!(far[2] > 240 && far[0] < 16, "far end should reach blue, got {far:?}");
+    }
+
+    #[test]
+    fn no_gradient_render_is_byte_identical() {
+        use crate::model::NodeStyle;
+        // The determinism contract: engaging the gradient path
+        // with both endpoints equal to the segment colour must
+        // change zero bytes versus the color2 = None twin —
+        // lerp_color(a, a, t) is exactly `a` for every t.
+        let plain = render_frame(&styled_project(NodeStyle::default(), 0xFF0000), 0);
+        let flat_gradient = render_frame(
+            &styled_project(
+                NodeStyle {
+                    color2: Some(0xFF0000),
+                    ..NodeStyle::default()
+                },
+                0xFF0000,
+            ),
+            0,
+        );
+        assert_eq!(plain.as_raw(), flat_gradient.as_raw());
+        // Non-vacuity: a real gradient to a different colour does
+        // change the buffer (otherwise the equality above would
+        // prove nothing).
+        let gradient = render_frame(
+            &styled_project(
+                NodeStyle {
+                    color2: Some(0x0000FF),
+                    ..NodeStyle::default()
+                },
+                0xFF0000,
+            ),
+            0,
+        );
+        assert_ne!(plain.as_raw(), gradient.as_raw());
     }
 
     #[test]
@@ -1721,3 +1853,141 @@ mod trail_tests {
     }
 }
 
+#[cfg(test)]
+mod range_export_tests {
+    use super::{export_gif, export_gif_range, export_png_sequence, export_png_sequence_range};
+    use crate::model::Project;
+    use image::AnimationDecoder as _;
+    use std::path::{Path, PathBuf};
+
+    /// The 5-frame demo project (all durations 1.0, tween
+    /// playback off) on a small stage so renders stay fast.
+    fn tiny_project() -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [96.0, 72.0];
+        project
+    }
+
+    fn temp_file(tag: &str, ext: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "styk-range-{tag}-{}.{ext}",
+            std::process::id()
+        ))
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("styk-range-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Number of frames in a written GIF, decoded with the image
+    /// crate's GIF decoder.
+    fn gif_frame_count(path: &Path) -> usize {
+        let file = std::fs::File::open(path).unwrap();
+        let decoder = image::codecs::gif::GifDecoder::new(file).unwrap();
+        decoder.into_frames().count()
+    }
+
+    #[test]
+    fn gif_range_writes_exactly_the_sub_range_frames() {
+        let project = tiny_project();
+        assert_eq!(project.frames.len(), 5);
+        let path = temp_file("gif-sub", "gif");
+        let n = export_gif_range(&project, 1, 3, &path).unwrap();
+        assert_eq!(n, 3, "frames 1..=3 of 5 must write 3 GIF frames");
+        assert_eq!(gif_frame_count(&path), 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn gif_range_clamps_to_the_timeline() {
+        let project = tiny_project();
+        let path = temp_file("gif-clamp", "gif");
+        let n = export_gif_range(&project, 3, 999, &path).unwrap();
+        assert_eq!(n, 2, "3..=999 on 5 frames clamps to frames 3..=4");
+        assert_eq!(gif_frame_count(&path), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn gif_range_keeps_each_frames_own_duration() {
+        let mut project = tiny_project();
+        project.frames[2].duration = 2.0; // frame 2 is held twice as long
+        let path = temp_file("gif-dur", "gif");
+        let n = export_gif_range(&project, 1, 3, &path).unwrap();
+        assert_eq!(n, 4, "frames 1, 2 (held x2), 3 expand to 4 GIF frames");
+        assert_eq!(gif_frame_count(&path), 4);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn gif_range_rejects_empty_and_inverted_ranges() {
+        let project = tiny_project();
+        let path = temp_file("gif-err", "gif");
+        assert!(export_gif_range(&project, 3, 1, &path).is_err(), "inverted range");
+        assert!(
+            export_gif_range(&project, 99, 2, &path).is_err(),
+            "99..=2 clamps to 4..=2, still empty"
+        );
+    }
+
+    #[test]
+    fn gif_full_export_matches_the_full_range() {
+        let project = tiny_project();
+        let full_path = temp_file("gif-full", "gif");
+        let range_path = temp_file("gif-fullrange", "gif");
+        let n_full = export_gif(&project, &full_path).unwrap();
+        let n_range =
+            export_gif_range(&project, 0, project.frames.len() - 1, &range_path).unwrap();
+        assert_eq!(n_full, n_range);
+        assert_eq!(gif_frame_count(&full_path), gif_frame_count(&range_path));
+        let _ = std::fs::remove_file(&full_path);
+        let _ = std::fs::remove_file(&range_path);
+    }
+
+    #[test]
+    fn png_range_writes_exactly_the_clamped_file_count() {
+        let project = tiny_project();
+        let dir = temp_dir("png-range");
+        let n = export_png_sequence_range(&project, 2, 99, &dir).unwrap();
+        assert_eq!(n, 3, "2..=99 on 5 frames clamps to frames 2..=4");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        // File names keep the authored indices, as in a full export.
+        let expected: Vec<String> = ["frame-0003.png", "frame-0004.png", "frame-0005.png"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(names, expected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn png_full_export_matches_the_full_range() {
+        let project = tiny_project();
+        let full_dir = temp_dir("png-full");
+        let range_dir = temp_dir("png-fullrange");
+        let n_full = export_png_sequence(&project, &full_dir).unwrap();
+        let n_range =
+            export_png_sequence_range(&project, 0, project.frames.len() - 1, &range_dir)
+                .unwrap();
+        assert_eq!(n_full, 5);
+        assert_eq!(n_full, n_range);
+        assert_eq!(std::fs::read_dir(&full_dir).unwrap().count(), 5);
+        assert_eq!(std::fs::read_dir(&range_dir).unwrap().count(), 5);
+        let _ = std::fs::remove_dir_all(&full_dir);
+        let _ = std::fs::remove_dir_all(&range_dir);
+    }
+
+    #[test]
+    fn png_range_rejects_inverted_ranges() {
+        let project = tiny_project();
+        let dir = temp_dir("png-err");
+        assert!(export_png_sequence_range(&project, 4, 1, &dir).is_err());
+    }
+}

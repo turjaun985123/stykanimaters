@@ -69,6 +69,7 @@ pub use ui::stat_grid as ui_stat_grid;
 pub use ui::stepper as ui_stepper;
 pub use ui::swatch_grid as ui_swatch_grid;
 pub use ui::tabs as ui_tabs;
+pub use ui::timecode as ui_timecode;
 pub use ui::timeline_ruler as ui_timeline_ruler;
 pub use ui::toast as ui_toast;
 pub use ui::toolbar as ui_toolbar;

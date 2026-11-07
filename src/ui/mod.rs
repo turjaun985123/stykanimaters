@@ -43,6 +43,7 @@ pub mod stat_grid;
 pub mod stepper;
 pub mod swatch_grid;
 pub mod tabs;
+pub mod timecode;
 pub mod timeline_ruler;
 pub mod toast;
 pub mod toolbar;

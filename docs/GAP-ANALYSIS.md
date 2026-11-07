@@ -336,3 +336,64 @@ with 622 tests green.
 Nothing in this section is CI-verified yet; statuses move to
 the per-wave tables above once the run is green, and
 docs/COMPARISON.md is refreshed after that run.
+
+## Wave 11 (in progress, 2026-11-08)
+
+Twenty code agents, aimed at the top remaining gaps listed in
+docs/COMPARISON.md. Everything below is implemented in Wave 11;
+CI verification happens at integration (per the repo rule, CI
+is the first build/test any of this gets), so no item here is
+claimed verified yet. Two items are investigations whose
+outcome is still pending — they are marked as such.
+
+- **Drawing shape tools** — line, rectangle and ellipse stroke
+  generators in `src/paint.rs`, so exact shapes can be drawn
+  instead of only freehand strokes, plus an MCP `draw_shape`
+  tool exposing them to agents.
+- **3 new VFX kinds + full GUI coverage** — Galaxy, Prism,
+  Vortex: 24 deterministic clip kinds total (was 21). The GUI
+  also gains creation buttons for ALL 24 kinds; previously
+  only 10 kinds had buttons and the rest were MCP-only.
+- **Audio FX** — echo, lowpass and silence-trim join the audio
+  engine's processing set, with editor ops and buttons in the
+  audio panel beside normalise/split/crossfade.
+- **Editor depth** — graph channels can be baked to frames
+  (channels become real keyframed poses), and a pose can be
+  copied from one figure to another.
+- **Movieclip loop-mode button** — the clips panel gains a
+  loop-mode control; the Wave 10 `cycle_clip_loop` op finally
+  has a button.
+- **3D camera presets + auto-framing** — preset camera views
+  for the 3D session, plus `frame_camera` auto-framing of the
+  current figure.
+- **Graph key reduction** — `reduce_keys` drops graph keys
+  that do not change the channel's curve beyond a tolerance,
+  simplifying over-keyed channels.
+- **Frame-range exports** — GIF and PNG-sequence exports can
+  be limited to a frame range instead of the whole timeline.
+- **.stknds camera round-trip (investigation — outcome:
+  implemented)** — the camera grammar proved out from the
+  original's decoder, adapter and renderer sources, so
+  `.stknds` camera records are now imported (mapped to
+  CameraKeys via the adapter's own transform) and exported
+  (evaluated camera baked to per-frame records). Only
+  bindings and procedural wobble remain unmodelled, as
+  upstream.
+- **Segment gradient audit (investigation — outcome:
+  already implemented)** — segment gradients (`color2`)
+  already render along the segment axis in the rasterizer
+  and as real linearGradient defs in SVG; no production
+  change was needed. Test coverage was extended (far-end
+  sampling + a byte-identity twin test).
+- **Localisation, round 2** — the 12 newest UI keys (added in
+  Wave 9, translated into 6 languages in Wave 10) are now
+  translated into the remaining 19 languages, so all 28
+  languages carry real translations for these keys.
+- **MCP round 5** — three new tools: 57 tools total.
+- **Determinism + timecode** — the byte-determinism proof
+  (Wave 10) extends to PNG sequences and contact sheets; the
+  timeline bar gains a timecode chip.
+
+Nothing in this section is CI-verified yet; statuses move to
+the per-wave tables above once the run is green, and
+docs/COMPARISON.md is refreshed after that run.

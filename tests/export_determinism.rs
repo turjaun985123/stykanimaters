@@ -7,7 +7,11 @@
 //! - raw frame pixels (`export::render_frame_at`),
 //! - SVG documents (`svg::export_svg`),
 //! - GIF (`export::export_gif`, encoded in-crate via `image`),
-//! - spritesheet PNG (`export::export_spritesheet`, in-crate).
+//! - spritesheet PNG (`export::export_spritesheet`, in-crate),
+//! - PNG sequence (`export::export_png_sequence`, in-crate via
+//!   `image`),
+//! - contact sheet (`export::render_contact_sheet`, in-memory
+//!   pixels).
 //!
 //! MP4 and WebM are deliberately NOT asserted here: they are
 //! encoded by the system `ffmpeg` binary, so their bytes depend
@@ -148,4 +152,71 @@ fn spritesheet_export_is_byte_identical_across_runs() {
     assert_eq!(bytes_a, bytes_b, "two spritesheet exports differ");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn png_sequence_export_is_byte_identical_across_runs() {
+    let project = tiny_project();
+    let dir_a = temp_dir("png-a");
+    let dir_b = temp_dir("png-b");
+
+    let n_a = export::export_png_sequence(&project, &dir_a).expect("png sequence A");
+    let n_b = export::export_png_sequence(&project, &dir_b).expect("png sequence B");
+    assert_eq!(n_a, 3, "png sequence should write one file per frame");
+    assert_eq!(n_a, n_b);
+
+    // The file SETS must match: the same names in both directories.
+    let mut names_a: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&dir_a).expect("list png dir A") {
+        let entry = entry.expect("png dir A entry");
+        names_a.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    let mut names_b: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&dir_b).expect("list png dir B") {
+        let entry = entry.expect("png dir B entry");
+        names_b.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    names_a.sort();
+    names_b.sort();
+    assert_eq!(names_a.len(), 3, "png sequence should hold 3 files");
+    assert_eq!(names_a, names_b, "png sequence file sets differ");
+
+    // And every file's bytes must match, with the PNG magic as a
+    // non-vacuity check that these are real PNG documents.
+    for name in &names_a {
+        let bytes_a = std::fs::read(dir_a.join(name)).expect("read png A");
+        let bytes_b = std::fs::read(dir_b.join(name)).expect("read png B");
+        assert!(bytes_a.len() > 8, "{name}: png suspiciously small");
+        assert!(bytes_a.starts_with(b"\x89PNG"), "{name}: missing PNG magic");
+        assert_eq!(bytes_a, bytes_b, "{name}: two png sequence exports differ");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+}
+
+#[test]
+fn contact_sheet_is_byte_identical_across_renders() {
+    let project = tiny_project();
+
+    let a = export::render_contact_sheet(&project, &[0, 1, 2], 2, 120);
+    let b = export::render_contact_sheet(&project, &[0, 1, 2], 2, 120);
+    assert_eq!(a.dimensions(), b.dimensions());
+    assert_eq!(
+        a.as_raw(),
+        b.as_raw(),
+        "two contact sheets of the same frames differ"
+    );
+
+    // Non-vacuity: frames 0 and 2 of the wave animation are
+    // different poses, so single-frame sheets of each (same grid
+    // shape) must differ in pixels, not just in size.
+    let first = export::render_contact_sheet(&project, &[0], 1, 120);
+    let third = export::render_contact_sheet(&project, &[2], 1, 120);
+    assert_eq!(first.dimensions(), third.dimensions());
+    assert_ne!(
+        first.as_raw(),
+        third.as_raw(),
+        "contact sheets of frames 0 and 2 are identical — the demo animation is not reaching the contact sheet"
+    );
 }

@@ -1511,6 +1511,31 @@ impl EditorView {
             }
             col = col.child(row);
         }
+        // Wave 11: last-clip audio FX — these EditorCore ops act
+        // on the project's last audio clip (no per-clip index),
+        // so they get their own panel row under the clip rows,
+        // built in the same row style.
+        col = col.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(8.0))
+                .py(px(3.0))
+                .child(btn("audio-echo", "Echo", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.audio_echo_last();
+                    cx.notify();
+                })))
+                .child(btn("audio-lowpass", "Lowpass", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.audio_lowpass_last();
+                    cx.notify();
+                })))
+                .child(btn("audio-trimsil", "Trim silence", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.audio_trim_silence_last();
+                    cx.notify();
+                }))),
+        );
         col
     }
 
@@ -1568,6 +1593,11 @@ impl EditorView {
                 format!("used by {}", used_by.join(", "))
             };
             let editing = session.map(|s| s.clip) == Some(i);
+            let loop_label = match clip.loop_mode {
+                crate::model::ClipLoop::Loop => "Loop: loop",
+                crate::model::ClipLoop::PingPong => "Loop: ping-pong",
+                crate::model::ClipLoop::Once => "Loop: once",
+            };
             col = col.child(
                 div()
                     .flex()
@@ -1592,6 +1622,10 @@ impl EditorView {
                     )
                     .child(btn(("clip-edit", i), "Edit", editing, cx.listener(move |view, _ev, _w, cx| {
                         view.core.enter_clip(i);
+                        cx.notify();
+                    })))
+                    .child(btn(("clip-loop", i), loop_label, false, cx.listener(move |view, _ev, _w, cx| {
+                        view.core.cycle_clip_loop(i);
                         cx.notify();
                     }))),
             );
@@ -3931,6 +3965,18 @@ impl Render for EditorView {
                     .child(
                         tool_group("Effects 2").child(
                             group_row()
+                                .child(btn("fxclip-burst", "FX clip Burst", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Burst);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-sparkle", "FX clip Sparkle", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Sparkle);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-smoke", "FX clip Smoke", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Smoke);
+                                    cx.notify();
+                                })))
                                 .child(btn("fxclip-beam", "FX clip Beam", false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.add_fx_clip(crate::vfx::ClipKind::Beam);
                                     cx.notify();
@@ -3941,6 +3987,38 @@ impl Render for EditorView {
                                 })))
                                 .child(btn("fxclip-trail", "FX clip Trail", false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.add_fx_clip(crate::vfx::ClipKind::Trail);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-confetti", "FX clip Confetti", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Confetti);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-shockring", "FX clip ShockRing", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::ShockRing);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-ember", "FX clip Ember", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Ember);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-fountain", "FX clip Fountain", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Fountain);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-orbit", "FX clip Orbit", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Orbit);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-lightning", "FX clip Lightning", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Lightning);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-bubbles", "FX clip Bubbles", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Bubbles);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-leaves", "FX clip Leaves", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Leaves);
                                     cx.notify();
                                 })))
                                 .child(btn("fxclip-meteor", "FX clip Meteor", false, cx.listener(|view, _ev, _w, cx| {
@@ -3969,6 +4047,18 @@ impl Render for EditorView {
                                 })))
                                 .child(btn("fxclip-comet", "FX clip Comet", false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.add_fx_clip(crate::vfx::ClipKind::Comet);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-galaxy", "FX clip Galaxy", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Galaxy);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-prism", "FX clip Prism", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Prism);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-vortex", "FX clip Vortex", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Vortex);
                                     cx.notify();
                                 })))
                         ),
@@ -4055,7 +4145,12 @@ impl Render for EditorView {
                     .child(
                         top_bar()
                             .child(section_label("Timeline"))
-                            .child(timeline.flex_1()),
+                            .child(timeline.flex_1())
+                            .child(crate::ui_timecode::timecode_chip(
+                                core.current,
+                                core.frame_count(),
+                                core.project.fps,
+                            )),
                     )
                     .child(status_el),
             )
