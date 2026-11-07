@@ -10,7 +10,10 @@
 //!
 //! Both containers are parsed byte-exactly (same strictness as the
 //! original: canonical flags, finite floats, validated references,
-//! exact EOF) and mapped onto the model: figure instances become
+//! exact EOF). `.stknds` export is also provided
+//! (`export_nodes_animation`, 431/117 — figures, frames, poses and
+//! durations; sprites/texts/joins/clips written as absent). Parsed
+//! projects are mapped onto the model: figure instances become
 //! project figure slots keyed by instance id, pose records become
 //! model poses with the `layoutFigure` accumulation rules, and
 //! single-figure movieclips become `ClipDef`s. Sprite library
@@ -2663,6 +2666,347 @@ pub fn import_nodes_animation(data: &[u8]) -> Result<Project, String> {
     }
 }
 
+// ---------- .stknds export ----------
+
+/// Big-endian byte writer for the export profile below.
+struct BeWriter {
+    v: Vec<u8>,
+}
+
+impl BeWriter {
+    fn i8(&mut self, x: i8) {
+        self.v.push(x as u8);
+    }
+    fn i16(&mut self, x: i16) {
+        self.v.extend_from_slice(&x.to_be_bytes());
+    }
+    fn i32(&mut self, x: i32) {
+        self.v.extend_from_slice(&x.to_be_bytes());
+    }
+    fn f32(&mut self, x: f32) {
+        self.v.extend_from_slice(&x.to_be_bytes());
+    }
+    fn flag(&mut self, b: bool) {
+        self.v.push(b as u8);
+    }
+    /// [alpha, blue, green, red] — the wire order `Reader::color`
+    /// reads back as 0xRRGGBB.
+    fn color(&mut self, rgb: u32) {
+        self.v.push(255);
+        self.v.push((rgb & 0xFF) as u8);
+        self.v.push(((rgb >> 8) & 0xFF) as u8);
+        self.v.push(((rgb >> 16) & 0xFF) as u8);
+    }
+    /// A fully transparent colour (unused editor colours).
+    fn color0(&mut self) {
+        self.v.extend_from_slice(&[0, 0, 0, 0]);
+    }
+    fn string(&mut self, s: &str) {
+        self.i32(s.len() as i32);
+        self.v.extend_from_slice(s.as_bytes());
+    }
+}
+
+/// Project header at 431/117 (field order per
+/// `read_project_header`), editor metadata at defaults. The
+/// header's auto-tween flag is written false: with it set, the
+/// importer adds tween ticks to every non-final tweened frame,
+/// which would corrupt the stored durations.
+fn write_project_header(w: &mut BeWriter, fps: i32, figure_count: usize) {
+    w.flag(false); // editorFlagD (build >= 16)
+    w.flag(false); // editorFlagE (v >= 244)
+    w.string(""); // projectCredit
+    w.color0(); // editorColor
+    w.i32(fps);
+    w.i32(2); // tweenCount (unused: autoTween is false)
+    w.flag(false); // editorFlagB
+    w.flag(false); // editorFlagZ
+    w.flag(false); // editorFlagA
+    w.flag(false); // editorFlagC
+    w.flag(false); // autoTween
+    w.flag(false); // timelineFlagC
+    w.i32(0); // selectedFrame
+    w.i32(1); // nextTextId
+    w.i32(figure_count as i32 + 1); // nextInstanceId
+    w.i32(figure_count as i32); // nextLibraryId
+    w.i32(0); // fontUsage count (v >= 400)
+    w.i32(0); // editor list 1
+    w.i32(0); // editor list 2
+    w.i32(0); // editor list 3
+    w.i32(0); // outer map count
+}
+
+/// Main-frame settings at 431/117 (field order per
+/// `read_main_settings`). The frame's duration is encoded as a
+/// delay: with auto-tween off, the importer's tick rule reduces
+/// to `ceil(delay_seconds * fps - 1e-5)`, so an integer duration
+/// `d` is stored exactly as `delay_seconds = d / fps`.
+fn write_main_settings(w: &mut BeWriter, bg: u32, duration: f32, fps: f32) {
+    let delayed = duration != 1.0;
+    w.flag(false); // isTweened
+    w.flag(false); // useImageBackground
+    w.flag(false); // useGradient
+    w.flag(false); // expandedGradient
+    w.flag(false); // stopSounds
+    w.flag(delayed); // isDelayed
+    w.f32(if delayed { duration / fps } else { 0.0 }); // delaySeconds
+    w.flag(false); // slowMotion
+    w.i32(0); // slowMotionTweenFrames
+    w.flag(false); // repeating
+    w.i32(0); // repeatBackFrames
+    w.i32(0); // repeatLoops
+    w.flag(false); // tweenWhenRepeating
+    w.flag(false); // cameraDuringDelay
+    w.flag(false); // easeIn
+    w.flag(false); // easeOut
+    w.i16(0); // interpolation
+    w.color(bg); // background colour
+    w.color0(); // backgroundGradientColor
+    w.i32(-1); // soundIndex: none
+    w.f32(1.0); // soundVolume
+    w.f32(0.0); // soundPan
+    w.f32(1.0); // soundPitch
+}
+
+/// Instance style block at 431/117 (field order per
+/// `read_style`), all filters at their neutral defaults.
+fn write_style(w: &mut BeWriter) {
+    w.f32(1.0); // opacity
+    w.f32(0.0); // blur
+    w.flag(false); // motionBlur
+    w.flag(false); // omnidirectionalBlur
+    w.i32(0); // motionBlurAngle
+    w.f32(1.0); // saturation
+    w.i32(0); // pixelation
+    w.color0(); // tintColor
+    w.f32(0.0); // tintAmount
+    w.f32(0.0); // hueShift
+    w.flag(false); // invert
+    w.f32(0.0); // glow
+    w.color0(); // glowColor
+    w.f32(0.0); // glowIntensity
+    w.color0(); // outlineColor
+    w.f32(1.0); // outlineAlpha
+    w.f32(1.0); // outlineThickness
+    w.color0(); // dropShadowColor
+    w.f32(0.0); // dropShadowAlpha
+    w.i32(0); // dropShadowDistance
+    w.i32(0); // dropShadowAngle
+    w.f32(0.0); // dropShadowBlur
+}
+
+/// One pose record, driven by the reader's own compiled layout
+/// table at 431/117 so writer and reader can never drift apart:
+/// every field is written at its neutral default except the
+/// angle, the segment length, and the thickness. The record's
+/// `use_segment_scale` flag is false, so the effective length
+/// the importer computes is exactly `length` (times the instance
+/// scale, written as 1.0).
+fn write_pose_record(
+    w: &mut BeWriter,
+    layout: &PoseLayout,
+    local_angle: f32,
+    length: f32,
+    thickness: i32,
+) {
+    for (kind, name) in &layout.fields {
+        match kind {
+            PKind::Flag => w.flag(false),
+            PKind::I8 => w.i8(0),
+            PKind::I16 => w.i16(0),
+            PKind::I32 => w.i32(if *name == "thickness" { thickness } else { 0 }),
+            PKind::F32 => w.f32(match *name {
+                "local_angle" | "default_local_angle" => local_angle,
+                "length" => length,
+                "scale" => 1.0,
+                _ => 0.0,
+            }),
+            PKind::Color => w.color0(),
+        }
+    }
+}
+
+/// Frame camera at 431/117 (field order per `read_camera`):
+/// the default camera (zoom 1, no offset, no wobble, no
+/// bindings). Camera keys are not exported — see
+/// [`export_nodes_animation`].
+fn write_camera(w: &mut BeWriter) {
+    w.f32(1.0); // zoom
+    w.f32(0.0); // x
+    w.f32(0.0); // y
+    w.f32(0.0); // rotation
+    w.flag(false); // wobbleXY
+    w.flag(false); // wobbleRotation
+    w.flag(false); // wobbleScale
+    w.i32(0); // wobbleXYIntensity
+    w.f32(0.0); // wobbleRotationIntensity
+    w.f32(0.0); // wobbleSpeed
+    w.flag(false); // widescreen
+    w.i32(0); // bindings count
+    w.i32(0); // secondary bindings count
+}
+
+/// Project trailer at 431/117 (field order per `read_trailer`),
+/// all editor state at defaults.
+fn write_trailer(w: &mut BeWriter) {
+    w.i32(0); // tweenLinks count
+    w.i32(0); // selectionMode
+    for _ in 0..5 {
+        w.f32(0.0); // parameter[i]
+    }
+    w.i32(0); // selectedAsset
+    w.flag(false); // flag_i
+    w.flag(false); // flag_j
+    w.flag(false); // flag_k
+    w.flag(false); // flag_l
+    w.flag(false); // flag_m
+    w.flag(false); // flag_n
+    w.flag(false); // flag_o
+    w.flag(false); // flag_p
+    w.flag(false); // flag_r (build >= 84)
+    w.flag(false); // flag_s
+    w.flag(false); // flag_t
+    w.flag(false); // flag_u
+    w.i8(0); // mode (build >= 79)
+    for _ in 0..7 {
+        w.color0(); // palette
+    }
+    w.i32(0); // editorPairs count
+}
+
+/// Export the project as a Stick Nodes `.stknds` file: version
+/// 431 / build 117 (the newest layout the original's decoder
+/// knows — `KNOWN_PROJECT_LAYOUT` tops out at exactly this
+/// profile), raw (uncompressed) payload.
+///
+/// The figure library embeds each project figure via
+/// `crate::nodes::export_nodes_figure`; every frame then holds
+/// one type-0 instance per figure — stable instance id
+/// (figure index + 1, which is what the importer keys timeline
+/// slots by), scale 1.0, the figure's colour, and one pose
+/// record per segment, inverting `convert_pose` (the root
+/// record's local angle is the pose's first angle minus 90;
+/// other records carry the pose angles verbatim, with the
+/// definition's lengths and thicknesses). Frame durations are
+/// encoded exactly for integer values via the settings delay
+/// (see `write_main_settings`).
+///
+/// Written as absent, because the model-to-format mapping for
+/// them is either unmodelled by the importer or has no faithful
+/// source in a `Project` (each is a real loss on reimport):
+///
+/// * **Sprites and texts** — the libraries and per-frame counts
+///   are written empty, so sprite/text tracks are dropped.
+/// * **Joins** — written as none. (Poses that were join-baked
+///   at import are ordinary poses by now and survive as such.)
+/// * **Movieclips** — the clip library is empty; a figure with
+///   clip linkage exports as a plain posed figure and the
+///   `ClipDef` content is dropped.
+/// * **Camera keys** — a default camera record per frame.
+/// * Sounds, weather, particles, FX clips, audio clips,
+///   strokes, graph channels, per-frame easing and bends, the
+///   stage size (the grammar has no stage field; the importer
+///   always uses 960×720), and figure hidden/locked/opacity
+///   state have no slots and are dropped.
+///
+/// Further rounding: the fps is stored as an integer (rounded),
+/// fractional frame durations round UP to whole ticks (the
+/// format counts frames), and figure definitions inherit the
+/// documented losses of `export_nodes_figure` (node-1 length,
+/// origin-parented nodes, fractional thickness).
+pub fn export_nodes_animation(project: &Project) -> Vec<u8> {
+    let fps = project.fps.round().clamp(1.0, 1000.0);
+    let layout = compile_pose_layout(431, 117, false);
+    let mut w = BeWriter { v: Vec::new() };
+    w.i32(431); // version
+    w.i32(117); // build
+    w.string(&project.name);
+    write_project_header(&mut w, fps as i32, project.figures.len());
+    // Figure library.
+    w.i32(project.figures.len() as i32);
+    for fig in &project.figures {
+        w.string(&fig.name);
+        // The embedded figure's own header colour is the
+        // instance colour (that is where convert() sources it).
+        let mut def = fig.def.clone();
+        if let Some(node) = def.nodes.get_mut(1) {
+            if node.color.is_none() {
+                node.color = Some(fig.color);
+            }
+        }
+        w.v.extend_from_slice(&crate::nodes::export_nodes_figure(&def, &fig.name));
+    }
+    w.i32(0); // sound library (v >= 160): none
+    w.i32(0); // sprite library (v >= 400): none
+    w.i32(0); // movieclip library (v >= 300): none
+    // Pose records are stored per node in the embedded figure's
+    // scan order (tree preorder), which the per-figure traversal
+    // shared with the `.nodes` writer provides.
+    let preorders: Vec<Vec<usize>> = project
+        .figures
+        .iter()
+        .map(|f| crate::nodes::nodes_preorder(&f.def))
+        .collect();
+    // Main timeline.
+    w.i32(project.frames.len() as i32);
+    for frame in &project.frames {
+        write_main_settings(&mut w, project.background, frame.duration, fps);
+        w.i32(project.figures.len() as i32); // instance count
+        for (fi, fig) in project.figures.iter().enumerate() {
+            let pose = frame
+                .poses
+                .get(fi)
+                .cloned()
+                .unwrap_or_else(|| fig.def.rest_pose([0.0, 0.0]));
+            w.i32(0); // instance type: figure
+            w.i32(fi as i32); // asset index
+            w.i32(fi as i32 + 1); // stable instance id (slot key)
+            w.f32(1.0); // instance scale
+            write_style(&mut w);
+            w.f32(pose.root[0]);
+            w.f32(pose.root[1]);
+            w.color(fig.color);
+            w.flag(false); // isLocked
+            w.flag(false); // persistent
+            w.flag(true); // visibleInOnionSkin
+            w.flag(false); // tweenColors
+            w.i8(0); // tweenMode (build >= 78)
+            w.flag(false); // scaleJoinedFigures
+            w.flag(false); // pushJoinedFigures
+            w.flag(false); // setStateOfJoins
+            w.i32(0); // joinsState
+            w.flag(false); // useParentFilters
+            w.i32(-1); // lockedNodeId
+            w.f32(0.0); // lockedNodeX
+            w.f32(0.0); // lockedNodeY
+            // One pose record per library segment, in scan
+            // order, inverting convert_pose: the raw root's
+            // local angle is the pose's first angle minus 90,
+            // every other node's is its pose angle verbatim.
+            for &k in &preorders[fi] {
+                let node = &fig.def.nodes[k];
+                let local = if k == 1 {
+                    pose.angles.get(1).copied().unwrap_or(0.0) - 90.0
+                } else {
+                    pose.angles.get(k).copied().unwrap_or(0.0)
+                };
+                write_pose_record(
+                    &mut w,
+                    &layout,
+                    local,
+                    node.length,
+                    node.thickness.round() as i32,
+                );
+            }
+        }
+        w.i32(0); // joins: none
+        w.i32(0); // texts: none
+        write_camera(&mut w);
+    }
+    write_trailer(&mut w);
+    w.v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3871,5 +4215,85 @@ mod tests {
         let mut trailed = bytes.clone();
         trailed.push(7); // exact-EOF: one extra byte must fail
         assert!(import_nodes_animation(&trailed).is_err());
+    }
+
+    // ---- Wave 7: .stknds export ----
+
+    fn assert_projects_match(a: &Project, b: &Project) {
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.background, b.background);
+        assert!((a.fps - b.fps).abs() < 0.01, "fps {} vs {}", a.fps, b.fps);
+        assert_eq!(a.figures.len(), b.figures.len());
+        for (fa, fb) in a.figures.iter().zip(b.figures.iter()) {
+            assert_eq!(fa.name, fb.name);
+            assert_eq!(fa.color, fb.color);
+            assert_eq!(fa.def.nodes.len(), fb.def.nodes.len());
+        }
+        assert_eq!(a.frames.len(), b.frames.len());
+        for (fa, fb) in a.frames.iter().zip(b.frames.iter()) {
+            assert_eq!(fa.duration, fb.duration, "frame duration");
+            assert_eq!(fa.poses.len(), fb.poses.len());
+            for (pa, pb) in fa.poses.iter().zip(fb.poses.iter()) {
+                assert!(
+                    (pa.root[0] - pb.root[0]).abs() < 0.5,
+                    "root x {} vs {}",
+                    pa.root[0],
+                    pb.root[0]
+                );
+                assert!(
+                    (pa.root[1] - pb.root[1]).abs() < 0.5,
+                    "root y {} vs {}",
+                    pa.root[1],
+                    pb.root[1]
+                );
+                assert_eq!(pa.angles.len(), pb.angles.len());
+                for (x, y) in pa.angles.iter().zip(pb.angles.iter()) {
+                    assert!(
+                        (norm_deg(x - y)).abs() < 0.1,
+                        "angle {x} vs {y}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stknds_export_roundtrips_poses_and_durations() {
+        let mut project = Project::new_demo();
+        project.name = "Wave 7".into();
+        project.background = 0x334455;
+        project.add_figure_with(FigureDef::quadruped(), "Quad", 0x5DB2FF, [300.0, 400.0]);
+        project.frames[1].duration = 3.0;
+        project.frames[3].duration = 2.0;
+        let bytes = export_nodes_animation(&project);
+        // Raw 431/117 payload.
+        assert_eq!(&bytes[0..4], &431i32.to_be_bytes());
+        assert_eq!(&bytes[4..8], &117i32.to_be_bytes());
+        // Kept on disk for cross-verification with the original
+        // app's JS project decoder (openProject).
+        std::fs::write("/tmp/styk-export.stknds", &bytes).unwrap();
+        let back = import_nodes_animation(&bytes).unwrap();
+        assert_projects_match(&project, &back);
+        // The delay-based duration encoding is exact for
+        // integers, not approximate.
+        let durations: Vec<f32> = back.frames.iter().map(|f| f.duration).collect();
+        assert_eq!(durations, vec![1.0, 3.0, 1.0, 2.0, 1.0]);
+        // A second round trip is a fixed point: the reimported
+        // project's defs are in scan order already, so poses map
+        // identically again.
+        let back2 = import_nodes_animation(&export_nodes_animation(&back)).unwrap();
+        assert_projects_match(&back, &back2);
+    }
+
+    #[test]
+    fn stknds_export_empty_project_roundtrips() {
+        let mut project = Project::new_demo();
+        project.figures.clear();
+        for frame in &mut project.frames {
+            frame.poses.clear();
+        }
+        let back = import_nodes_animation(&export_nodes_animation(&project)).unwrap();
+        assert!(back.figures.is_empty());
+        assert_eq!(back.frames.len(), project.frames.len());
     }
 }

@@ -3,7 +3,7 @@
 
 use crate::editor::EditorCore;
 use crate::model::V2;
-use crate::touch::{Gesture, PointerEvent, PointerKind};
+use crate::touch::{Gesture, PointerEvent, PointerKind, MOUSE_POINTER_ID};
 use gpui::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -26,11 +26,18 @@ pub struct EditorView {
     /// replaces the canvas area.
     show_home: bool,
     /// Gesture recogniser for canvas pointer input (wave 5).
-    /// GPUI mouse events feed it as pointer id 0; where GPUI
-    /// delivers real touch pointers, the same path serves them.
+    /// GPUI 0.2.2 exposes no multi-pointer events on Linux (see
+    /// `touch::PointerSource`), so today only the mouse feeds it,
+    /// under `touch::MOUSE_POINTER_ID` — fed by pointer id, so a
+    /// future touch source needs no redesign.
     recognizer: crate::touch::Recognizer,
     /// Monotonic clock the recogniser's timestamps come from.
     clock: Instant,
+    /// Wave 7: pinch→camera driver (see `PinchCamera` below).
+    /// Inert in the running app until a second pointer source
+    /// exists; its recogniser input contract is test-pinned in
+    /// `touch.rs`.
+    pinch_cam: PinchCamera,
     /// Active text-authoring session for a segment (wave 5).
     text_edit: Option<crate::text_edit::TextEdit>,
     /// Wave 6: graph-editor panel under the canvas.
@@ -42,6 +49,86 @@ pub struct EditorView {
     graph_bounds: Rc<RefCell<Bounds<Pixels>>>,
     /// Wave 6: (frame, value) of the graph key being dragged.
     graph_drag: Option<(f32, f32)>,
+    /// Wave 7: audio panel under the canvas (mutually exclusive
+    /// with the graph panel — opening one closes the other).
+    show_audio: bool,
+    /// Wave 7: waveform-peaks cache, keyed by (clip path, file
+    /// mtime in nanoseconds since the epoch). The value is `None`
+    /// for a file that failed to probe as a WAV — caching the
+    /// failure too keeps repaints from re-reading broken clips.
+    audio_peaks_cache: std::collections::HashMap<(String, u64), Option<AudioPeaksEntry>>,
+}
+
+/// Pinch → camera driver (Wave 7).
+///
+/// A pinch is a camera gesture (see `touch.rs`): the recogniser's
+/// cumulative `scale` zooms and its cumulative `pan` pans. This
+/// driver captures the camera at `PinchStart` and on every
+/// `Pinch` writes `baseline ∘ gesture` back as the camera key at
+/// the current frame, in the same terms the mouse camera drag
+/// uses: `Project::set_camera_key`, centre moved opposite the
+/// fingers' travel so the scene follows them, zoom clamped to
+/// the 0.3..=4.0 range `EditorCore::camera_zoom_by` uses. The
+/// whole pinch is a single undo step: `begin_camera_drag`
+/// snapshots once at the start, and this driver writes keys
+/// directly instead of calling `camera_zoom_by` per event (that
+/// op snapshots on every call).
+///
+/// GPUI 0.2.2 cannot deliver a pinch on Linux today (see
+/// `touch::PointerSource`), so in the running app this driver
+/// only ever sees what a future second pointer source would
+/// emit. Its input contract — the recogniser's cumulative
+/// scale/pan for a scripted two-pointer stream — is pinned by
+/// a test in `touch.rs`; app.rs hosts no tests because any
+/// `#[test]` in this file currently blows the test profile's
+/// recursion limit (the accumulated GPUI builder nesting sits
+/// at the edge; raising the limit segfaults rustc in
+/// gpui_macros instead — Wave 7 finding, integrator-flagged).
+struct PinchCamera {
+    /// Camera (x, y, zoom) captured at `PinchStart`; `None`
+    /// between pinches.
+    baseline: Option<(f32, f32, f32)>,
+}
+
+impl PinchCamera {
+    fn new() -> Self {
+        PinchCamera { baseline: None }
+    }
+
+    /// Handle one gesture; returns true when it was a pinch
+    /// gesture (consumed), false for anything else.
+    fn apply(&mut self, core: &mut EditorCore, gesture: Gesture) -> bool {
+        match gesture {
+            Gesture::PinchStart { centre } => {
+                self.baseline = Some(core.camera_here());
+                // Snapshots once and arms DragKind::Camera, so
+                // the core's bookkeeping (and the mouse handlers'
+                // mid-drag safety nets) treat the pinch exactly
+                // like a camera drag.
+                core.begin_camera_drag(centre);
+                true
+            }
+            Gesture::Pinch { scale, pan, .. } => {
+                if let Some((bx, by, bz)) = self.baseline {
+                    let zoom = (bz * scale).clamp(0.3, 4.0);
+                    core.project
+                        .set_camera_key(core.current, bx - pan[0], by - pan[1], zoom);
+                }
+                true
+            }
+            Gesture::PinchEnd => {
+                if self.baseline.take().is_some() {
+                    let (_, _, zoom) = core.camera_here();
+                    if core.dragging.is_some() {
+                        core.end_drag();
+                    }
+                    core.status = format!("Camera zoom {zoom:.2} (pinch).");
+                }
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 impl EditorView {
@@ -54,11 +141,14 @@ impl EditorView {
             show_home: false,
             recognizer: crate::touch::Recognizer::new(),
             clock: Instant::now(),
+            pinch_cam: PinchCamera::new(),
             text_edit: None,
             show_graph: false,
             graph_channel: GraphChannelSel::Angle,
             graph_bounds: Rc::new(RefCell::new(Bounds::default())),
             graph_drag: None,
+            show_audio: false,
+            audio_peaks_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -326,6 +416,127 @@ impl EditorView {
         removed
     }
 
+    /// Wave 7: the audio panel — one row per clip in the project:
+    /// file name + start frame, a waveform-peaks strip (or a
+    /// "not a readable WAV" note), and the wave-6 editor ops for
+    /// that clip as buttons. Peaks come from `audio_peaks_cache`,
+    /// which `render` fills for any clip whose (path, mtime) key
+    /// isn't cached yet, so this method only reads.
+    fn audio_panel(&self, cx: &mut Context<Self>, row_bg: u32) -> impl IntoElement {
+        let core = &self.core;
+        let clips = &core.project.audio;
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .bg(rgb(row_bg))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(0x9AA3B2))
+                    .child(format!("Audio — {} clip(s)", clips.len())),
+            );
+        if clips.is_empty() {
+            return col.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(0x9AA3B2))
+                    .child("No audio clips in this project."),
+            );
+        }
+        let fps = core.project.fps;
+        let current = core.current as i64;
+        for (i, clip) in clips.iter().enumerate() {
+            let name = std::path::Path::new(&clip.path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&clip.path)
+                .to_string();
+            let entry = self
+                .audio_peaks_cache
+                .get(&(clip.path.clone(), audio_file_stamp(&clip.path)))
+                .and_then(|e| e.as_ref());
+            let mut row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(8.0))
+                .py(px(3.0))
+                .child(
+                    div()
+                        .w(px(180.0))
+                        .text_size(px(12.0))
+                        .text_color(rgb(0xE8E8EC))
+                        .child(format!("{} · f{}", name, clip.start_frame + 1)),
+                );
+            match entry {
+                Some(entry) => {
+                    // Playhead on the first clip's strip: the
+                    // current frame mapped into the clip's span
+                    // (start .. start + duration in frames).
+                    let playhead = if i == 0 {
+                        let dur_frames = (entry.duration_secs * fps).round() as i64;
+                        let start = clip.start_frame as i64;
+                        if dur_frames > 0 && current >= start && current < start + dur_frames {
+                            Some((current - start) as f32 / dur_frames as f32)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    let strip = AudioStripData {
+                        peaks: entry.peaks.clone(),
+                        playhead,
+                        bg: row_bg,
+                    };
+                    row = row.child(
+                        canvas(
+                            move |_bounds, _window, _cx| {},
+                            move |bounds, _state, window, _cx| {
+                                paint_audio_peaks(window, bounds, &strip);
+                            },
+                        )
+                        .h(px(26.0))
+                        .flex_1(),
+                    );
+                }
+                None => {
+                    row = row.child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.0))
+                            .text_color(rgb(0x9AA3B2))
+                            .child("(not a readable WAV)"),
+                    );
+                }
+            }
+            row = row
+                .child(btn(("audio-norm", i), "Norm", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.audio_normalize(i);
+                    cx.notify();
+                })))
+                .child(btn(("audio-split", i), "Split@cur", false, cx.listener(move |view, _ev, _w, cx| {
+                    let at = view.core.current;
+                    view.core.audio_split(i, at);
+                    cx.notify();
+                })));
+            if i + 1 < clips.len() {
+                row = row.child(btn(("audio-xfade", i), "Xfade", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.audio_crossfade(i);
+                    cx.notify();
+                })));
+            }
+            col = col.child(row);
+        }
+        col
+    }
+
     /// Milliseconds on the view's monotonic clock — the epoch
     /// the gesture recogniser's events and ticks share.
     fn now_ms(&self) -> u64 {
@@ -338,6 +549,13 @@ impl EditorView {
     /// itself refuses to start while playing, and the tap /
     /// long-press selection below mirrors that refusal.
     fn apply_gesture(&mut self, gesture: Gesture) {
+        // Pinch gestures drive the camera (PinchCamera). They
+        // cannot arise from GPUI mouse events today — the mouse
+        // is a single pointer — but the recogniser is fed by
+        // pointer id, so this arm is live for any future source.
+        if self.pinch_cam.apply(&mut self.core, gesture) {
+            return;
+        }
         match gesture {
             Gesture::DragStart { pos } => {
                 self.core.begin_drag(pos);
@@ -371,11 +589,8 @@ impl EditorView {
                     }
                 }
             }
-            // A mouse is a single pointer, so pinch gestures
-            // cannot arise from the events fed here; where GPUI
-            // delivers real multi-touch pointers they will land
-            // in these arms, and camera handling for them is a
-            // later step.
+            // Pinch gestures are consumed by PinchCamera above;
+            // this arm only exists for exhaustiveness.
             Gesture::PinchStart { .. } | Gesture::Pinch { .. } | Gesture::PinchEnd => {}
         }
     }
@@ -397,19 +612,23 @@ impl EditorView {
         applied
     }
 
-    /// Feed one canvas pointer event (stage coordinates; the
-    /// mouse is pointer id 0) into the recogniser and apply the
-    /// resulting gestures. Elapsed time is checked first, so a
+    /// Feed one canvas pointer event (stage coordinates) into
+    /// the recogniser and apply the resulting gestures. `id`
+    /// distinguishes simultaneous pointers: the GPUI mouse
+    /// handlers pass `touch::MOUSE_POINTER_ID`, and a future
+    /// multi-pointer source would pass each contact's own id
+    /// (see `touch::PointerSource` for why GPUI 0.2.2 provides
+    /// none today). Elapsed time is checked first, so a
     /// long-press that matured since the previous event fires
     /// before this event is processed. Returns whether any
     /// gesture was applied, so callers can skip needless
     /// repaints.
-    fn feed_pointer(&mut self, kind: PointerKind, pos: V2) -> bool {
+    fn feed_pointer(&mut self, id: u32, kind: PointerKind, pos: V2) -> bool {
         let ticked = self.tick_gestures();
         let now = self.now_ms();
         let gestures = self
             .recognizer
-            .on_event(PointerEvent { id: 0, pos, kind, t_ms: now });
+            .on_event(PointerEvent { id, pos, kind, t_ms: now });
         let applied = !gestures.is_empty();
         self.apply_gestures(gestures);
         ticked || applied
@@ -487,6 +706,24 @@ struct GraphDrawData {
     current: f32,
     /// Frame of the key being dragged (highlighted), if any.
     drag_frame: Option<f32>,
+    bg: u32,
+}
+
+/// One probed WAV for the audio panel: 96 peak buckets from
+/// `audio_edit::peaks`, plus the clip's duration in seconds (the
+/// panel turns it into a frame span with the project's fps).
+struct AudioPeaksEntry {
+    peaks: Vec<f32>,
+    duration_secs: f32,
+}
+
+/// Everything `paint_audio_peaks` needs for one clip row, cloned
+/// out of the cache at render time (the paint closure owns it).
+struct AudioStripData {
+    peaks: Vec<f32>,
+    /// Playhead position as a fraction of the strip width, when
+    /// the editor's current frame falls inside the clip's span.
+    playhead: Option<f32>,
     bg: u32,
 }
 
@@ -731,6 +968,7 @@ impl Render for EditorView {
         };
         let show_home = self.show_home;
         let graph_on = self.show_graph;
+        let audio_on = self.show_audio;
         let tween_on = core.project.tween_playback;
         let follow_on = core.project.camera_follow.is_some();
         let paths_on = core.show_paths;
@@ -813,6 +1051,24 @@ impl Render for EditorView {
                     .child(header)
                     .child(gcanvas),
             )
+        } else {
+            None
+        };
+
+        // Wave 7: audio panel under the stage, mutually exclusive
+        // with the graph panel (the toggles enforce that). Fill
+        // the peaks cache first: any clip whose (path, mtime) key
+        // is missing gets probed once — failures cache as `None`,
+        // so a broken clip is not re-read on every repaint.
+        let audio_panel = if audio_on {
+            for clip in &core.project.audio {
+                let key = (clip.path.clone(), audio_file_stamp(&clip.path));
+                if !self.audio_peaks_cache.contains_key(&key) {
+                    let entry = probe_audio_peaks(&clip.path);
+                    self.audio_peaks_cache.insert(key, entry);
+                }
+            }
+            Some(self.audio_panel(cx, row_bg))
         } else {
             None
         };
@@ -1031,6 +1287,10 @@ impl Render for EditorView {
             Some(panel) => stage_col.child(panel),
             None => stage_col,
         };
+        let stage_col = match audio_panel {
+            Some(panel) => stage_col.child(panel),
+            None => stage_col,
+        };
         let middle = match home_panel {
             Some(panel) => middle.child(panel),
             None => middle.child(stage_col),
@@ -1134,8 +1394,8 @@ impl Render for EditorView {
                     cx.notify();
                 } else {
                     // Pose mode goes through the gesture
-                    // recogniser (mouse = pointer id 0).
-                    view.feed_pointer(PointerKind::Down, p);
+                    // recogniser (mouse = MOUSE_POINTER_ID).
+                    view.feed_pointer(MOUSE_POINTER_ID, PointerKind::Down, p);
                     cx.notify();
                 }
             }))
@@ -1167,7 +1427,7 @@ impl Render for EditorView {
                     cx.notify();
                 } else if !view.core.camera_mode {
                     let p = view.to_stage(ev.position);
-                    if view.feed_pointer(PointerKind::Move, p) {
+                    if view.feed_pointer(MOUSE_POINTER_ID, PointerKind::Move, p) {
                         cx.notify();
                     }
                 }
@@ -1186,7 +1446,7 @@ impl Render for EditorView {
                     cx.notify();
                 } else {
                     let p = view.to_stage(ev.position);
-                    view.feed_pointer(PointerKind::Up, p);
+                    view.feed_pointer(MOUSE_POINTER_ID, PointerKind::Up, p);
                     if view.core.dragging.is_some() {
                         // A drag the recogniser does not own
                         // (input mode was toggled mid-drag):
@@ -1245,7 +1505,18 @@ impl Render for EditorView {
                     })))
                     .child(btn("graph", "Graph", graph_on, cx.listener(|view, _ev, _w, cx| {
                         view.show_graph = !view.show_graph;
+                        if view.show_graph {
+                            view.show_audio = false;
+                        }
                         if !view.show_graph {
+                            view.graph_drag = None;
+                        }
+                        cx.notify();
+                    })))
+                    .child(btn("audio-panel", "Audio", audio_on, cx.listener(|view, _ev, _w, cx| {
+                        view.show_audio = !view.show_audio;
+                        if view.show_audio {
+                            view.show_graph = false;
                             view.graph_drag = None;
                         }
                         cx.notify();
@@ -1963,6 +2234,79 @@ fn paint_graph(window: &mut Window, bounds: Bounds<Pixels>, data: &GraphDrawData
     }
 }
 
+/// Cache-key stamp for an audio file: its mtime in nanoseconds
+/// since the epoch, or 0 when the metadata can't be read (a
+/// missing file then keys as (path, 0) and probes as unreadable).
+fn audio_file_stamp(path: &str) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() * 1_000_000_000 + d.subsec_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// Probe one WAV for the audio panel: 96 peak buckets + duration.
+/// `None` when the file is missing or not a readable WAV.
+fn probe_audio_peaks(path: &str) -> Option<AudioPeaksEntry> {
+    let data = crate::audio_edit::read_wav(path).ok()?;
+    Some(AudioPeaksEntry {
+        peaks: crate::audio_edit::peaks(&data, 96),
+        duration_secs: data.duration_secs(),
+    })
+}
+
+/// Paint one clip's waveform strip: background, a centre line,
+/// one vertical bar per peak bucket (amplitude mirrored around
+/// the centre), and the playhead line when the editor's current
+/// frame falls inside the clip's span.
+fn paint_audio_peaks(window: &mut Window, bounds: Bounds<Pixels>, data: &AudioStripData) {
+    let origin = bounds.origin;
+    let w = f32::from(bounds.size.width);
+    let h = f32::from(bounds.size.height);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    fill_rect(window, origin, w, h, rgb(data.bg));
+    let mid = h / 2.0;
+    stroke_line(
+        window,
+        point(origin.x, origin.y + px(mid)),
+        point(origin.x + px(w), origin.y + px(mid)),
+        rgba(0x9AA3B2 << 8 | 0x44),
+        1.0,
+    );
+    let n = data.peaks.len();
+    if n > 0 {
+        let step = w / n as f32;
+        let bar_w = step.max(1.0);
+        let mut pb = PathBuilder::fill();
+        for (i, &pk) in data.peaks.iter().enumerate() {
+            let amp = pk.clamp(0.0, 1.0) * (mid - 1.0).max(0.0);
+            let x = i as f32 * step;
+            let tl = point(origin.x + px(x), origin.y + px(mid - amp));
+            pb.move_to(tl);
+            pb.line_to(point(origin.x + px(x + bar_w), origin.y + px(mid - amp)));
+            pb.line_to(point(origin.x + px(x + bar_w), origin.y + px(mid + amp)));
+            pb.line_to(point(origin.x + px(x), origin.y + px(mid + amp)));
+            pb.close();
+        }
+        if let Ok(path) = pb.build() {
+            window.paint_path(path, rgb(0x35C4D8));
+        }
+    }
+    if let Some(frac) = data.playhead {
+        let x = frac.clamp(0.0, 1.0) * w;
+        stroke_line(
+            window,
+            point(origin.x + px(x), origin.y),
+            point(origin.x + px(x), origin.y + px(h)),
+            rgba(0xFF5D5D << 8 | 0xCC),
+            1.0,
+        );
+    }
+}
+
 /// One straight stroked segment between two window points.
 fn stroke_line(window: &mut Window, a: Point<Pixels>, b: Point<Pixels>, color: Rgba, width: f32) {
     let mut pb = PathBuilder::stroke(px(width));
@@ -2000,3 +2344,4 @@ fn trace_circle(pb: &mut PathBuilder, center: Point<Pixels>, radius: f32) {
         }
     }
 }
+

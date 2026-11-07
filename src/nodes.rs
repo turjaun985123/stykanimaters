@@ -1,4 +1,4 @@
-//! Stick Nodes `.nodes` figure import.
+//! Stick Nodes `.nodes` figure import and export.
 //!
 //! The byte grammar is ported from the original app's decoder
 //! (`src/sticknodes/decoder/decoder.mjs`, itself based on
@@ -12,7 +12,10 @@
 //! figure's rest pose. Polyfills and connections are parsed
 //! byte-exactly but not modelled; connector nodes and angle-lock
 //! solver fields are consumed and the stored rest pose is kept,
-//! mirroring the original importer's stance.
+//! mirroring the original importer's stance. Export writes the
+//! 431/117 profile as the direct inverse of the import conversion
+//! (see `export_nodes_figure` for exactly what the grammar cannot
+//! carry back).
 
 use crate::model::{
     Easing, FigureDef, FigureInstance, Frame, NodeDef, Project, Shape,
@@ -585,6 +588,271 @@ pub fn import_nodes_figure(data: &[u8]) -> Result<(FigureDef, u32), String> {
     Ok(convert(&parse_any(data)?))
 }
 
+// ---------- export ----------
+
+/// Big-endian byte writer for the export profile below.
+struct BeWriter {
+    v: Vec<u8>,
+}
+
+impl BeWriter {
+    fn i8(&mut self, x: i8) {
+        self.v.push(x as u8);
+    }
+    fn i16(&mut self, x: i16) {
+        self.v.extend_from_slice(&x.to_be_bytes());
+    }
+    fn i32(&mut self, x: i32) {
+        self.v.extend_from_slice(&x.to_be_bytes());
+    }
+    fn f32(&mut self, x: f32) {
+        self.v.extend_from_slice(&x.to_be_bytes());
+    }
+    fn flag(&mut self, b: bool) {
+        self.v.push(b as u8);
+    }
+    /// [alpha, blue, green, red] — the wire order `Reader::color`
+    /// reads back as 0xRRGGBB.
+    fn color(&mut self, rgb: u32) {
+        self.v.push(255);
+        self.v.push((rgb & 0xFF) as u8);
+        self.v.push(((rgb >> 8) & 0xFF) as u8);
+        self.v.push(((rgb >> 16) & 0xFF) as u8);
+    }
+}
+
+/// One node record at version 431 / build 117, in exactly the
+/// field order `read_node` consumes at that profile. Every field
+/// the model cannot express is written at its neutral default
+/// (no gradient, no curve, no locks, no smart stretch).
+#[allow(clippy::too_many_arguments)]
+fn write_node_record(
+    w: &mut BeWriter,
+    kind: i8,
+    id: i32,
+    local_angle: f32,
+    length: f32,
+    thickness: i32,
+    color: Option<u32>,
+    polygon_vertices: i16,
+    child_count: usize,
+) {
+    w.i8(kind);
+    w.i32(id);
+    w.flag(false); // is_static
+    w.flag(false); // is_stretchy
+    w.flag(false); // is_floaty
+    w.flag(false); // is_smart_stretch
+    w.flag(false); // do_not_apply_smart_stretch
+    w.flag(false); // smart_stretch_reset_impulse
+    w.flag(color.is_some()); // use_segment_color
+    w.flag(false); // use_circle_outline
+    w.flag(false); // circle_is_hollow
+    w.flag(false); // use_gradient
+    w.flag(false); // reverse_gradient
+    w.i16(0); // gradient_mode
+    w.flag(false); // use_segment_scale
+    w.f32(0.0); // local_x
+    w.f32(0.0); // local_y
+    w.f32(1.0); // scale
+    w.f32(length); // default_length
+    w.f32(length); // length
+    w.i32(thickness); // default_thickness
+    w.i32(thickness); // thickness
+    w.i32(0); // segment_curve_radius
+    w.flag(false); // curve_circulization
+    w.i16(0); // segment_curve_polyfill_precision
+    w.flag(false); // half_arc
+    w.i16(0); // right_triangle_direction
+    w.flag(false); // triangle_upside_down
+    w.f32(0.0); // trapezoid_thickness_start
+    w.f32(0.0); // trapezoid_thickness_end
+    w.f32(0.5); // trapezoid_top_thickness_ratio
+    w.flag(false); // trapezoid_is_rounded_start
+    w.flag(false); // trapezoid_is_rounded_end
+    w.i16(polygon_vertices);
+    w.f32(local_angle); // default_local_angle
+    w.f32(local_angle);
+    w.f32(0.0); // default_angle (absolute; readers recompute it)
+    w.color(color.unwrap_or(0));
+    w.color(0); // gradient_color
+    w.color(0); // circle_outline_color
+    w.flag(false); // is_angle_locked
+    w.flag(false); // angle_lock_is_main_node
+    w.f32(0.0); // angle_lock_offset
+    w.f32(0.0); // angle_lock_relative_start
+    w.f32(0.0); // angle_lock_stickfigure_start
+    w.i8(0); // angle_lock_relative_multiplier
+    w.flag(false); // is_drag_locked
+    w.f32(0.0); // drag_lock_angle
+    w.f32(1.0); // smart_stretch_multiplier
+    w.i32(child_count as i32);
+    for _ in 0..child_count {
+        w.i32(0); // child connector flag: plain child
+    }
+}
+
+/// The children map `export_nodes_figure` writes: children of
+/// each model node in node order, with a parent of 0 (the
+/// origin) — or a stale out-of-range parent — collapsed onto
+/// node 1, the raw root.
+fn nodes_children(def: &FigureDef) -> Vec<Vec<usize>> {
+    let n = def.nodes.len();
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for k in 2..n {
+        let p = def.nodes[k].parent.unwrap_or(0);
+        let rp = if p == 0 || p >= n { 1 } else { p };
+        children[rp].push(k);
+    }
+    children
+}
+
+/// Model node indices in the order `export_nodes_figure` writes
+/// them (and the order `import_nodes_figure` reads them back):
+/// node 1 first, then a preorder walk of the children map. A
+/// def whose storage order is not already this preorder reads
+/// back with its nodes reordered — same tree, same per-node
+/// values, same evaluated geometry. Shared with the `.stknds`
+/// writer, whose pose records are stored per node in this
+/// order.
+pub(crate) fn nodes_preorder(def: &FigureDef) -> Vec<usize> {
+    let children = nodes_children(def);
+    let mut order = Vec::with_capacity(def.nodes.len().saturating_sub(1));
+    fn walk(children: &[Vec<usize>], k: usize, order: &mut Vec<usize>) {
+        order.push(k);
+        for &c in &children[k] {
+            walk(children, c, order);
+        }
+    }
+    if def.nodes.len() >= 2 {
+        walk(&children, 1, &mut order);
+    }
+    order
+}
+
+/// Export a figure definition as a `.nodes` file: version 431 /
+/// build 117 (the newest layout the original's native loader
+/// reads, and the profile this module's importer is verified
+/// against), big-endian, raw (uncompressed).
+///
+/// This is the direct inverse of [`convert`]: model node 1
+/// becomes the raw root (kind −1), model node k becomes raw node
+/// k−1 with its id, and raw parents are the model parents
+/// shifted by one. `name` exists only for symmetry with the
+/// other exporters — the `.nodes` grammar stores no figure
+/// name. The def must be a tree over its parent links, as every
+/// constructor and importer in this project produces.
+///
+/// What the format cannot carry, and therefore does not survive
+/// a round trip (each loss is forced by the grammar or by
+/// `convert`'s documented semantics, not by this writer):
+///
+/// * **Node 1's length.** The raw root is a pure anchor in
+///   Stick Nodes (the original's `layoutFigure` always places
+///   the root's end at the origin), so `convert` forces it to
+///   0 on import. The value is written but reads back as 0.
+///   Figures in the importer's own image — node 1 a zero-length
+///   anchor, segments hanging off it — round-trip exactly.
+/// * **Origin-parented nodes beyond node 1.** A model node
+///   whose parent is the origin (e.g. Pivot-style legs) has no
+///   distinct raw parent; it is written as a child of the raw
+///   root and reads back with parent 1. Its rest angle is
+///   written verbatim and survives as a value.
+/// * **Node order.** Nodes are stored in tree preorder (see
+///   `nodes_preorder`); a def whose storage order differs reads
+///   back reordered — same tree, same per-node values, same
+///   evaluated geometry, different indices.
+/// * **Node 1's per-node colour, and the figure colour.**
+///   `convert` drops the raw root's colour by design, and
+///   `FigureDef` carries no figure colour (it lives on
+///   instances): the header colour is node 1's colour when set,
+///   else black, and returns as the instance colour from
+///   `import_nodes_figure`. Every other node's colour survives
+///   via `use_segment_color`.
+/// * **Fractional thickness** (the format stores i32;
+///   values are rounded) and **negative lengths** (written as
+///   magnitude plus the format's own 180° local-angle flip, so
+///   the evaluated geometry is identical but the length reads
+///   back positive).
+/// * Node names, head/IK flags, bend direction, styles and
+///   media have no fields in the grammar and are dropped.
+///   Ellipses read back as circles (there is no ellipse in the
+///   model; kind 5 writes as kind 2), and a 4-sided polygon
+///   writes as kind 7 with 4 vertices (kind 6, trapezoid,
+///   would read back as a plain segment).
+pub fn export_nodes_figure(def: &FigureDef, _name: &str) -> Vec<u8> {
+    let mut w = BeWriter { v: Vec::new() };
+    w.i32(431); // version
+    w.i32(117); // build
+    w.f32(1.0); // figure scale
+    let header_color = def.nodes.get(1).and_then(|n| n.color).unwrap_or(0);
+    w.color(header_color);
+    let n = def.nodes.len();
+    if n < 2 {
+        // Degenerate def (origin only): a lone raw root still
+        // parses as a figure.
+        write_node_record(&mut w, -1, 0, 0.0, 0.0, 0, None, 5, 0);
+        w.i32(0); // polyfills
+        w.i32(0); // connections
+        return w.v;
+    }
+    let children = nodes_children(def);
+    fn emit(w: &mut BeWriter, def: &FigureDef, children: &[Vec<usize>], k: usize) {
+        let node = &def.nodes[k];
+        let kind: i8 = if k == 1 {
+            -1 // raw root
+        } else {
+            match node.shape {
+                Shape::Circle => 2,
+                Shape::Polygon(3) => 3,
+                Shape::Polygon(_) => 7,
+                Shape::Line => 1,
+            }
+        };
+        let polygon_vertices = match node.shape {
+            Shape::Polygon(s) => s as i16,
+            _ => 5, // the reader's own default
+        };
+        // convert() accumulates raw local angles parent-first and
+        // offsets only the root by 90 degrees, so node 1's local
+        // angle is its rest angle minus 90 and every other node's
+        // is its rest angle. A negative length folds into the
+        // format's 180-degree flip convention.
+        let mut local = if k == 1 {
+            node.rest_angle - 90.0
+        } else {
+            node.rest_angle
+        };
+        let mut length = node.length;
+        if length < 0.0 {
+            length = -length;
+            local += 180.0;
+        }
+        // The raw root's colour never surfaces in the model
+        // (convert drops it), so it is written without the
+        // per-segment colour flag.
+        let color = if k == 1 { None } else { node.color };
+        write_node_record(
+            w,
+            kind,
+            (k - 1) as i32,
+            local,
+            length,
+            node.thickness.round() as i32,
+            color,
+            polygon_vertices,
+            children[k].len(),
+        );
+        for &c in &children[k] {
+            emit(w, def, children, c);
+        }
+    }
+    emit(&mut w, def, &children, 1);
+    w.i32(0); // polyfills: none
+    w.i32(0); // connections: none
+    w.v
+}
+
 /// Import a `.nodes` file as a one-figure, one-frame project
 /// holding the figure's rest pose at the stage centre.
 pub fn import_nodes(data: &[u8]) -> Result<Project, String> {
@@ -775,5 +1043,140 @@ mod tests {
         assert!(import_nodes(&[]).is_err());
         assert!(import_nodes(&[1, 2, 3]).is_err());
         assert!(import_nodes(&[0, 0, 0, 200, 1, 2, 3, 4]).is_err());
+    }
+
+    // ---- Wave 7: .nodes export ----
+
+    fn nd(
+        parent: Option<usize>,
+        length: f32,
+        rest: f32,
+        thickness: f32,
+        color: Option<u32>,
+        shape: Shape,
+    ) -> NodeDef {
+        NodeDef {
+            name: "n".into(),
+            parent,
+            length,
+            rest_angle: rest,
+            head: false,
+            bend: 1.0,
+            thickness,
+            color,
+            ik_end: false,
+            shape,
+            style: crate::model::NodeStyle::default(),
+            media: None,
+        }
+    }
+
+    /// A branched, coloured, multi-shape def in the importer's
+    /// own image: node 1 is a zero-length anchor (rest 100, so
+    /// the root's −90 local-angle offset is exercised), segments
+    /// hang off it and off each other.
+    fn branched_def() -> FigureDef {
+        FigureDef {
+            nodes: vec![
+                nd(None, 0.0, 0.0, 5.0, None, Shape::Line),
+                nd(Some(0), 0.0, 100.0, 6.0, Some(0x112233), Shape::Line),
+                nd(Some(1), 80.0, 0.0, 4.0, Some(0xFF0000), Shape::Line),
+                nd(Some(1), 50.0, -90.0, 3.0, None, Shape::Circle),
+                nd(Some(2), 30.0, 45.0, 2.0, Some(0x00FF00), Shape::Polygon(3)),
+                nd(Some(2), 25.0, -30.0, 2.0, None, Shape::Polygon(5)),
+                nd(Some(1), 40.0, 170.0, 7.0, Some(0x0000FF), Shape::Polygon(4)),
+            ],
+        }
+    }
+
+    #[test]
+    fn nodes_export_roundtrips_branched_def() {
+        let def = branched_def();
+        let bytes = export_nodes_figure(&def, "Branch");
+        // Raw 431/117: version + build up front, root kind −1 at
+        // offset 16 (the raw-detection byte).
+        assert_eq!(&bytes[0..4], &431i32.to_be_bytes());
+        assert_eq!(&bytes[4..8], &117i32.to_be_bytes());
+        assert_eq!(bytes[16], 0xFF);
+        // Kept on disk for cross-verification with the original
+        // app's JS parser (parseNodes).
+        std::fs::write("/tmp/styk-export.nodes", &bytes).unwrap();
+        let (back, color) = import_nodes_figure(&bytes).unwrap();
+        assert_eq!(color, 0x112233, "header colour from node 1");
+        assert_eq!(back.nodes.len(), def.nodes.len());
+        // The stream is tree preorder, which for this def is NOT
+        // storage order ([1, 2, 4, 5, 3, 6]): compare per
+        // corresponding node, not per index.
+        let order = nodes_preorder(&def);
+        assert_eq!(order, vec![1, 2, 4, 5, 3, 6]);
+        let pa = evaluate(&def, &def.rest_pose([100.0, 100.0]));
+        let pb = evaluate(&back, &back.rest_pose([100.0, 100.0]));
+        for (j, &k) in order.iter().enumerate() {
+            let (a, b) = (&def.nodes[k], &back.nodes[j + 1]);
+            assert!((a.thickness - b.thickness).abs() < 0.01, "node {k} thickness");
+            assert!(
+                (crate::model::norm_deg(a.rest_angle - b.rest_angle)).abs() < 0.05,
+                "node {k} rest {} vs {}",
+                a.rest_angle,
+                b.rest_angle
+            );
+            assert_eq!(a.shape, b.shape, "node {k} shape");
+            if k == 1 {
+                // Documented losses on the raw root only.
+                assert_eq!(b.length, 0.0);
+                assert_eq!(b.color, None);
+                assert_eq!(b.parent, Some(0));
+            } else {
+                assert!((a.length - b.length).abs() < 0.01, "node {k} length");
+                assert_eq!(a.color, b.color, "node {k} colour");
+                // The new parent is the raw parent's new index.
+                let rp = if a.parent == Some(0) { 1 } else { a.parent.unwrap() };
+                let expect = order.iter().position(|&x| x == rp).unwrap() + 1;
+                assert_eq!(b.parent, Some(expect), "node {k} parent");
+            }
+            // Evaluated rest geometry is identical per node.
+            assert!(
+                (pa[k][0] - pb[j + 1][0]).abs() < 0.05 && (pa[k][1] - pb[j + 1][1]).abs() < 0.05,
+                "node {k} pos {:?} vs {:?}",
+                pa[k],
+                pb[j + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn nodes_export_of_imported_fixture_roundtrips() {
+        let (def, _) = import_nodes_figure(&fixture_bytes()).unwrap();
+        let bytes = export_nodes_figure(&def, "Fixture");
+        let (back, _) = import_nodes_figure(&bytes).unwrap();
+        assert_eq!(back.nodes.len(), def.nodes.len());
+        assert!((back.nodes[2].length - 80.0).abs() < 0.01);
+        assert!((back.nodes[2].thickness - 4.0).abs() < 0.01);
+        assert!((back.nodes[2].rest_angle - 0.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn nodes_export_humanoid_documents_its_losses() {
+        // A Pivot-style def: node 1 is a real 46-long segment and
+        // the thighs parent the origin. The .nodes tree cannot
+        // express either; the writer's documented behaviour is
+        // asserted here so it cannot drift silently.
+        let def = FigureDef::humanoid();
+        let bytes = export_nodes_figure(&def, "Humanoid");
+        let (back, _) = import_nodes_figure(&bytes).unwrap();
+        assert_eq!(back.nodes.len(), def.nodes.len(), "node count survives");
+        assert_eq!(back.nodes[1].length, 0.0, "raw root length is not representable");
+        assert_eq!(back.nodes[7].parent, Some(1), "origin-parented thigh re-parents to the root");
+        assert_eq!(back.nodes[9].parent, Some(1));
+        for k in 2..def.nodes.len() {
+            assert!(
+                (def.nodes[k].length - back.nodes[k].length).abs() < 0.01,
+                "node {k} length"
+            );
+            assert!(
+                (crate::model::norm_deg(def.nodes[k].rest_angle - back.nodes[k].rest_angle)).abs() < 0.1,
+                "node {k} rest"
+            );
+        }
     }
 }

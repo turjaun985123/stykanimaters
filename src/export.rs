@@ -304,6 +304,9 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
         }
         let pose = &poses[fi];
         let pos = evaluate(&fig.def, pose);
+        // Per-node bends at this time (wave 7); empty when the
+        // project carries no bend data.
+        let bends = project.bends_at(frame_f, fi);
         for (i, node) in fig.def.nodes.iter().enumerate() {
             let color_hex = node.color.unwrap_or(fig.color);
             // Figure opacity: heads/rings/polys have no alpha
@@ -324,7 +327,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                 } else {
                     half * style.taper.max(0.0)
                 };
-                segments.push(StyledSeg {
+                let seg = StyledSeg {
                     a: view(pos[p]),
                     b: view(pos[i]),
                     half_near: half,
@@ -333,7 +336,39 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                     color_far: style.color2.unwrap_or(color_hex),
                     opacity: style.opacity * fig.opacity.clamp(0.0, 1.0),
                     cap: style.cap,
-                });
+                };
+                // Wave 7: a bent segment draws as two pieces
+                // through the arc midpoint (`model::bend_mid`);
+                // the joint positions themselves don't move. The
+                // mid width/colour are the t = 0.5 interpolations
+                // of the segment's taper/gradient, and the first
+                // piece's far cap is Round so the arc joint stays
+                // smooth whatever the segment's own cap is. Zero
+                // bend — and bend-less projects, whose `bends_at`
+                // is empty — take the single-segment path above
+                // unchanged.
+                let bend = bends.get(i).copied().unwrap_or(0.0);
+                if bend == 0.0 {
+                    segments.push(seg);
+                } else {
+                    let mid = view(crate::model::bend_mid(pos[p], pos[i], bend));
+                    let half_mid = (seg.half_near + seg.half_far) / 2.0;
+                    let color_mid =
+                        crate::style::lerp_color(seg.color_near, seg.color_far, 0.5);
+                    segments.push(StyledSeg {
+                        b: mid,
+                        half_far: half_mid,
+                        color_far: color_mid,
+                        cap: CapKind::Round,
+                        ..seg
+                    });
+                    segments.push(StyledSeg {
+                        a: mid,
+                        half_near: half_mid,
+                        color_near: color_mid,
+                        ..seg
+                    });
+                }
             }
             if node.head {
                 heads.push((view(pos[i]), color, half));
@@ -869,6 +904,55 @@ mod tests {
         let rotated = render_frame_at(&project, 0.0);
         assert_eq!(rotated.get_pixel(100, 35), &white, "+90 must move the bar to the top");
         assert_eq!(rotated.get_pixel(165, 100), &black, "+90 must vacate the right side");
+    }
+
+    /// A single horizontal white bar (length 200, thickness 10)
+    /// on black: root (100, 150) -> joint (300, 150).
+    fn bend_bar_project() -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [400.0, 300.0];
+        project.background = 0x000000;
+        project.figures.clear();
+        for frame in &mut project.frames {
+            frame.poses.clear();
+        }
+        project.camera.clear();
+        let src = crate::model::FigureDef::humanoid();
+        let mut bar = src.nodes[1].clone();
+        bar.parent = Some(0);
+        bar.length = 200.0;
+        bar.rest_angle = 90.0; // dir(90 deg) = +x
+        bar.thickness = 10.0;
+        bar.color = Some(0xFFFFFF);
+        bar.head = false;
+        bar.shape = crate::model::Shape::Line;
+        let def = crate::model::FigureDef {
+            nodes: vec![src.nodes[0].clone(), bar],
+        };
+        project.add_figure_with(def, "Bar", 0xFFFFFF, [100.0, 150.0]);
+        project
+    }
+
+    #[test]
+    fn bent_segment_arcs_through_the_bend_midpoint() {
+        let mut project = bend_bar_project();
+        let white = Rgb([255u8, 255, 255]);
+        let black = Rgb([0u8, 0, 0]);
+        // Straight: the chord midpoint is covered; 18px below the
+        // chord is background (the half-width is only 5).
+        let straight = render_frame_at(&project, 0.0);
+        assert_eq!(straight.get_pixel(200, 150), &white);
+        assert_eq!(straight.get_pixel(200, 168), &black);
+        // Bend node 1 by +0.7 rad (wave 7): the joints stay put
+        // but the drawn path bulges through bend_mid.
+        project.frames[0].bends = vec![vec![0.0, 0.7]];
+        let bent = render_frame_at(&project, 0.0);
+        assert_ne!(straight.as_raw(), bent.as_raw(), "a bend must change the frame");
+        let mid = crate::model::bend_mid([100.0, 150.0], [300.0, 150.0], 0.7);
+        let (mx, my) = (mid[0].round() as u32, mid[1].round() as u32);
+        assert_eq!(bent.get_pixel(mx, my), &white, "arc joint at {mid:?} must be covered");
+        assert_eq!(bent.get_pixel(200, 168), &white, "the bulge passes below the chord");
+        assert_eq!(bent.get_pixel(200, 150), &black, "the chord midpoint is vacated");
     }
 
     #[test]

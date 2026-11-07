@@ -10,6 +10,7 @@ pub mod draw_ops;
 pub mod editor;
 pub mod export;
 pub mod fig3d;
+pub mod fx_edit;
 pub mod graph;
 pub mod graph_panel;
 pub mod i18n;

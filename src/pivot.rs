@@ -884,7 +884,10 @@ fn skip_side_tables(r: &mut Reader, segs: &[V5Seg], flags: u8) -> Result<(), Str
     Ok(())
 }
 
-fn parse_figure_v5(r: &mut Reader) -> Result<FigType, String> {
+/// Parse one v5 figure record. Also returns the figure's REST
+/// bends (radians, one per segment in record order): the bend a
+/// frame uses when its object carries no bend array (wave 7).
+fn parse_figure_v5(r: &mut Reader) -> Result<(FigType, Vec<f32>), String> {
     let flags = r.u8()?;
     let count = r.u16()? as usize;
     if count == 0 {
@@ -941,12 +944,22 @@ fn parse_figure_v5(r: &mut Reader) -> Result<FigType, String> {
         });
     }
     let _ = has_media;
-    // Bends: per-segment arc values. The model has no bend channel,
-    // so the values are read and discarded.
+    // Bends: sparse per-segment arc values (radians), keyed by
+    // 0-based segment ordinal (record order, NOT segment id) —
+    // the original's decoder validates both the count and the
+    // indices, and the last entry for an index wins.
     let bend_count = r.u16()? as usize;
+    if bend_count > count {
+        return Err(format!("invalid bend count {bend_count}"));
+    }
+    let mut rest_bends = vec![0.0f32; count];
     for _ in 0..bend_count {
-        r.u16()?; // segment index
-        r.f64()?; // bend value (not modelled)
+        let index = r.u16()? as usize;
+        let value = r.f64()?;
+        if index >= count {
+            return Err(format!("invalid bend index {index}"));
+        }
+        rest_bends[index] = value as f32;
     }
     // Image/text side tables sit between the bends and the
     // polyfills; skip them precisely (assets are not modelled).
@@ -1040,12 +1053,15 @@ fn parse_figure_v5(r: &mut Reader) -> Result<FigType, String> {
         });
         rest_abs.push(abs);
     }
-    Ok(FigType {
-        def: FigureDef { nodes },
-        rest_abs,
-        name,
-        has_images: segs.iter().any(|s| s.primitive == 2 || s.primitive == 5),
-    })
+    Ok((
+        FigType {
+            def: FigureDef { nodes },
+            rest_abs,
+            name,
+            has_images: segs.iter().any(|s| s.primitive == 2 || s.primitive == 5),
+        },
+        rest_bends,
+    ))
 }
 
 /// One raw v5 object record from a keyframe.
@@ -1056,6 +1072,51 @@ struct V5Obj {
     color: u32,
     angles: Vec<f64>,
     root: [f32; 2],
+    /// Per-segment bends (radians) when the object's bend_flag
+    /// was set; empty means "use the figure record's rest bends".
+    bends: Vec<f64>,
+}
+
+/// Per-node bend vec (origin = 0) for one v5 object (wave 7):
+/// a present per-frame array replaces the figure record's rest
+/// bends wholesale; without one the record bends apply — the
+/// original's rule everywhere it evaluates a pose
+/// (`bend_flag ? bends[i] : segment.bend_rad`). Segment k in the
+/// file (0-based, record order) is node k+1 in the model.
+fn v5_bends_per_node(rest: &[f32], frame: &[f64], node_count: usize) -> Vec<f32> {
+    let mut v = vec![0.0f32; node_count];
+    if frame.is_empty() {
+        for (k, b) in rest.iter().enumerate() {
+            if k + 1 < node_count {
+                v[k + 1] = *b;
+            }
+        }
+    } else {
+        for (k, b) in frame.iter().enumerate() {
+            if k + 1 < node_count {
+                v[k + 1] = *b as f32;
+            }
+        }
+    }
+    v
+}
+
+/// Storage shape for `Frame.bends`: empty outer vec when no
+/// figure bends in the frame; straight figures get empty inners.
+fn compact_bends(per_figure: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    if per_figure.iter().all(|b| b.iter().all(|v| *v == 0.0)) {
+        return Vec::new();
+    }
+    per_figure
+        .iter()
+        .map(|b| {
+            if b.iter().all(|v| *v == 0.0) {
+                Vec::new()
+            } else {
+                b.clone()
+            }
+        })
+        .collect()
 }
 
 fn import_v5(r: &mut Reader) -> Result<Project, String> {
@@ -1107,8 +1168,11 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
         name: "Default".into(),
         has_images: false,
     }];
+    let mut type_bends: Vec<Vec<f32>> = vec![Vec::new()];
     for _ in 2..figure_slots {
-        types.push(parse_figure_v5(r)?);
+        let (t, b) = parse_figure_v5(r)?;
+        types.push(t);
+        type_bends.push(b);
     }
     // Keyframes.
     let frame_count = r.u32()? as usize;
@@ -1152,9 +1216,10 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
                 }
             }
             let bend_flag = r.u16()?;
+            let mut bends: Vec<f64> = Vec::new();
             if bend_flag != 0 {
                 for _ in 0..seg_count {
-                    r.f64()?; // per-frame bends: not modelled, skipped
+                    bends.push(r.f64()?);
                 }
             }
             let join_flag = r.u8()?;
@@ -1169,6 +1234,7 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
                 color: colorref_to_rgb(colour_raw & 0x00FF_FFFF),
                 angles,
                 root,
+                bends,
             });
         }
         for _ in 0..object_count {
@@ -1237,9 +1303,19 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
         .iter()
         .map(|f| f.def.rest_pose([width / 2.0, height / 2.0]))
         .collect();
+    // Bends start at each type's record (rest) bends and hold
+    // across frames where the instance is absent, like poses.
+    let mut last_bends: Vec<Vec<f32>> = figures
+        .iter()
+        .enumerate()
+        .map(|(ii, f)| {
+            v5_bends_per_node(&type_bends[first_objects[ii].type_idx], &[], f.def.nodes.len())
+        })
+        .collect();
     let mut frames: Vec<Frame> = Vec::new();
     for (duration, _, objects) in &raw_frames {
         let mut poses = last_poses.clone();
+        let mut bends_now = last_bends.clone();
         for o in objects {
             let ii = index_of_uid[&o.uid];
             if first_objects[ii].type_idx != o.type_idx {
@@ -1247,16 +1323,27 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
             }
             let ty = &types[o.type_idx];
             poses[ii] = pose_from_abs(&figures[ii].def, &ty.rest_abs, &o.angles, o.root);
+            bends_now[ii] = v5_bends_per_node(
+                &type_bends[o.type_idx],
+                &o.bends,
+                figures[ii].def.nodes.len(),
+            );
         }
         last_poses = poses.clone();
-        frames.push(Frame { poses, duration: *duration, easing: None, bends: Vec::new() });
+        last_bends = bends_now.clone();
+        frames.push(Frame {
+            poses,
+            duration: *duration,
+            easing: None,
+            bends: compact_bends(&bends_now),
+        });
     }
     if frames.is_empty() {
         frames.push(Frame {
             poses: last_poses,
             duration: 1.0,
             easing: None,
-            bends: Vec::new(),
+            bends: compact_bends(&last_bends),
         });
     }
     let background = raw_frames
@@ -1378,6 +1465,132 @@ pub fn export_piv_v3(project: &Project) -> Vec<u8> {
     out
 }
 
+/// Export the project as a legacy `.piv` version 2 file (raw,
+/// uncompressed). Writer grammar: `codecs/piv_legacy_v2.py` —
+/// version byte, a has-background byte, canvas, a u8 figure-slot
+/// count, the figure streams, then frames with NO per-frame
+/// header bytes and NO trailer.
+///
+/// V2 is the smallest legacy grammar, and these model features
+/// have nowhere to go (all confirmed against the decoder):
+///
+/// * **Timing.** The format stores no frame interval at all; a
+///   v2 file always plays at the fixed 13 fps and every frame is
+///   a unit hold. The project's fps and per-frame durations are
+///   dropped.
+/// * **Background.** Written as "no background"; the project's
+///   background colour is dropped (no legacy version round-trips
+///   it through this port's importers).
+/// * **Camera.** No legacy version stores one; camera keys are
+///   dropped.
+/// * **Per-frame lengths, joins, transparency, bends.** Not in
+///   the grammar (lengths exist only in v4/v5).
+/// * **Per-node colours, styles and media.** The shared figure
+///   stream (`write_figure`) stores geometry and shape only, so
+///   image/text segments export as plain segments (the same
+///   limitation as v3).
+///
+/// Object scale is written as 1.0 (this model bakes instance
+/// scale into figure defs at import, and poses carry no scale).
+/// Figure and object counts are u8 fields, so at most 253
+/// figures survive — the same ceiling `export_piv_v3` has.
+pub fn export_piv_v2(project: &Project) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(2u8); // version
+    out.push(0u8); // has background: none
+    out.extend_from_slice(&(project.stage[0] as u32).to_le_bytes());
+    out.extend_from_slice(&(project.stage[1] as u32).to_le_bytes());
+    out.push((project.figures.len() + 2) as u8); // figure slots (builtin + these, per decoder range)
+    for fig in &project.figures {
+        write_figure(&mut out, &fig.def, &fig.name, &rest_absolutes(&fig.def));
+    }
+    out.extend_from_slice(&(project.frames.len() as u32).to_le_bytes());
+    for frame in &project.frames {
+        out.push(project.figures.len() as u8); // object count
+        for (fi, fig) in project.figures.iter().enumerate() {
+            out.push((fi + 2) as u8); // figure type id
+            out.extend_from_slice(&1.0f32.to_le_bytes()); // scale
+            out.extend_from_slice(&rgb_to_colorref(fig.color).to_le_bytes());
+            let abs = pose_absolutes(&fig.def, &frame.poses[fi]);
+            for i in 1..fig.def.nodes.len() {
+                out.extend_from_slice(&deg_to_rad(abs[i]).to_le_bytes());
+            }
+            out.extend_from_slice(&frame.poses[fi].root[0].to_le_bytes());
+            out.extend_from_slice(&frame.poses[fi].root[1].to_le_bytes());
+        }
+    }
+    out
+}
+
+/// Export the project as a legacy `.piv` version 4 file (raw,
+/// uncompressed). Writer grammar: `codecs/piv_legacy_v4.py` —
+/// like v3 but with u16 figure-slot and object counts, a u32
+/// per-object unique id, a per-object transparency byte, an
+/// optional per-frame length array (`len_flag`), a join flag,
+/// and a u16 draw-order permutation per frame.
+///
+/// What survives that v2 drops: per-frame durations (stored
+/// verbatim) and per-frame segment lengths — the length array is
+/// emitted exactly when the graph Length channels move a segment
+/// away from the figure def at that frame (see
+/// [`export_frame_lengths`], shared with the v5 writer). The
+/// project fps survives millisecond-quantised in the trailer
+/// delay, as in v3.
+///
+/// Still dropped, because the grammar or the shared figure
+/// stream has no slot for them: the project background (only
+/// the default background slot is written), camera keys, joins
+/// (flag always 0), transparency (written 0), bends, and
+/// per-node colours/styles/media (image/text segments export as
+/// plain segments, as in v3).
+pub fn export_piv_v4(project: &Project) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(4u8); // version
+    out.extend_from_slice(&(project.stage[0] as u32).to_le_bytes());
+    out.extend_from_slice(&(project.stage[1] as u32).to_le_bytes());
+    out.push(1u8); // background slots: default only
+    out.extend_from_slice(&((project.figures.len() + 2) as u16).to_le_bytes()); // figure slots
+    for fig in &project.figures {
+        write_figure(&mut out, &fig.def, &fig.name, &rest_absolutes(&fig.def));
+    }
+    out.extend_from_slice(&(project.frames.len() as u32).to_le_bytes());
+    for (frame_idx, frame) in project.frames.iter().enumerate() {
+        out.extend_from_slice(&(frame.duration.round().max(1.0) as u16).to_le_bytes());
+        out.push(0u8); // background id
+        out.extend_from_slice(&(project.figures.len() as u16).to_le_bytes()); // object count
+        for (fi, fig) in project.figures.iter().enumerate() {
+            out.extend_from_slice(&((fi + 1) as u32).to_le_bytes()); // unique id
+            out.extend_from_slice(&((fi + 2) as u16).to_le_bytes()); // figure type id
+            out.extend_from_slice(&1.0f32.to_le_bytes()); // scale
+            out.extend_from_slice(&rgb_to_colorref(fig.color).to_le_bytes());
+            out.push(0u8); // transparency
+            let abs = pose_absolutes(&fig.def, &frame.poses[fi]);
+            for i in 1..fig.def.nodes.len() {
+                out.extend_from_slice(&deg_to_rad(abs[i]).to_le_bytes());
+            }
+            out.extend_from_slice(&frame.poses[fi].root[0].to_le_bytes());
+            out.extend_from_slice(&frame.poses[fi].root[1].to_le_bytes());
+            match export_frame_lengths(project, frame_idx, fi) {
+                Some(lengths) => {
+                    out.push(1u8); // len flag: per-frame lengths follow
+                    for len in lengths {
+                        out.extend_from_slice(&len.to_le_bytes());
+                    }
+                }
+                None => out.push(0u8),
+            }
+            out.push(0u8); // join flag: none
+        }
+        for fi in 0..project.figures.len() {
+            out.extend_from_slice(&(fi as u16).to_le_bytes()); // draw order: identity
+        }
+    }
+    let interval = (1000.0 / project.fps.max(1.0)).round() as u32;
+    out.extend_from_slice(&interval.max(1).to_le_bytes());
+    out.push(1u8); // optional trailing byte (loop), as in v3
+    out
+}
+
 /// Per-frame segment lengths for one exported object, or `None`
 /// when the frame's lengths are exactly the figure def's.
 ///
@@ -1389,6 +1602,36 @@ pub fn export_piv_v3(project: &Project) -> Vec<u8> {
 /// `graph::apply_channels`. When any sampled length differs from
 /// the def, the full segment-length vector is returned (the format
 /// stores all-or-nothing per object).
+/// The per-frame bend array (f64 per segment) for one object,
+/// or `None` when the frame's bends equal the figure-record
+/// (frame-0) bends — the frame then stores `bend_flag` clear and
+/// inherits the record values on read, exactly like the original
+/// writer's omitted-array case. Values come from `Frame.bends`
+/// (per node; segment k is node k+1).
+fn export_frame_bends(
+    project: &Project,
+    frame: usize,
+    fi: usize,
+    record: &[f32],
+) -> Option<Vec<f64>> {
+    let fig = &project.figures[fi];
+    let seg_count = fig.def.nodes.len().saturating_sub(1);
+    if seg_count == 0 {
+        return None;
+    }
+    let fb = project.frames.get(frame).and_then(|f| f.bends.get(fi));
+    let mut any = false;
+    let mut arr = Vec::with_capacity(seg_count);
+    for k in 0..seg_count {
+        let v = fb.and_then(|b| b.get(k + 1)).copied().unwrap_or(0.0);
+        if v != record.get(k + 1).copied().unwrap_or(0.0) {
+            any = true;
+        }
+        arr.push(v as f64);
+    }
+    if any { Some(arr) } else { None }
+}
+
 fn export_frame_lengths(project: &Project, frame: usize, fi: usize) -> Option<Vec<f32>> {
     let fig = &project.figures[fi];
     let seg_count = fig.def.nodes.len().saturating_sub(1);
@@ -1453,6 +1696,15 @@ fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
 /// * **Per-frame lengths** (`len_flag` + f32 array) for objects
 ///   whose graph Length channels move a segment length away from
 ///   the figure def at that frame — see [`export_frame_lengths`].
+/// * **Bends** (wave 7): the figure-record bend block carries
+///   frame 0's per-segment bends — in the format the record bend
+///   is the rest value a frame falls back to when it has no bend
+///   array, and frame 0 is this port's rest frame. A frame whose
+///   bends differ from frame 0's gets `bend_flag` + the full f64
+///   array; other frames store the flag clear and inherit the
+///   record values, so the round trip is exact under the
+///   original's evaluation rule (`bend_flag ? bends[i] :
+///   segment.bend_rad`). See [`export_frame_bends`].
 /// * **Image side tables** for figures containing image segments
 ///   (`SegmentMedia::Image`): one table entry per distinct
 ///   referenced asset, holding the asset's PNG bytes verbatim
@@ -1463,19 +1715,9 @@ fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
 ///   segments also get the per-object image/text flags byte the
 ///   grammar requires.
 ///
-/// Two format features remain unwritten, because the model holds
+/// One format feature remains unwritten, because the model holds
 /// nothing faithful to write:
 ///
-/// * **Bends.** The format stores per-segment `bend_rad` values
-///   (figure record, non-zero entries only) plus per-frame bend
-///   arrays behind `bend_flag`. This model's `Pose` is root +
-///   angles only, and `NodeDef::bend` is the ±1 IK bend-*side*
-///   sign — a different quantity, not an arc angle. The importers
-///   read both bend blocks and discard them (see
-///   `parse_figure_v5` / `import_v5`), so an imported bend is gone
-///   before export could see it. Bend count and `bend_flag` are
-///   therefore always 0 here; writing the IK sign as a radian
-///   bend would corrupt the file's meaning.
 /// * **Text side tables.** A text entry stores vector glyph
 ///   outlines (M/L/C/Z/V/H path commands) and per-character
 ///   placements derived from a real font. `SegmentMedia::Text`
@@ -1496,9 +1738,24 @@ pub fn export_piv_v5(project: &Project) -> Vec<u8> {
     out.extend_from_slice(b"Background");
     // Figure table (slot 1 is the implicit built-in figure).
     out.extend_from_slice(&((project.figures.len() + 2) as u16).to_le_bytes());
+    // Figure-record bend blocks carry frame 0's bends (wave 7).
+    let record_bends: Vec<Vec<f32>> = project
+        .figures
+        .iter()
+        .enumerate()
+        .map(|(i, fig)| {
+            let mut v = vec![0.0f32; fig.def.nodes.len()];
+            if let Some(b) = project.frames.first().and_then(|f| f.bends.get(i)) {
+                for (k, val) in b.iter().enumerate().take(v.len()) {
+                    v[k] = *val;
+                }
+            }
+            v
+        })
+        .collect();
     let mut fig_has_media: Vec<bool> = Vec::with_capacity(project.figures.len());
-    for fig in &project.figures {
-        fig_has_media.push(write_figure_v5(&mut out, fig, &project.assets));
+    for (i, fig) in project.figures.iter().enumerate() {
+        fig_has_media.push(write_figure_v5(&mut out, fig, &project.assets, &record_bends[i]));
     }
     // Keyframes.
     out.extend_from_slice(&(project.frames.len() as u32).to_le_bytes());
@@ -1535,7 +1792,15 @@ pub fn export_piv_v5(project: &Project) -> Vec<u8> {
                 }
                 None => out.extend_from_slice(&0u16.to_le_bytes()), // len flag
             }
-            out.extend_from_slice(&0u16.to_le_bytes()); // bend flag: the model holds no bends
+            match export_frame_bends(project, fi, i, &record_bends[i]) {
+                Some(arr) => {
+                    out.extend_from_slice(&1u16.to_le_bytes()); // bend flag
+                    for v in arr {
+                        out.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+                None => out.extend_from_slice(&0u16.to_le_bytes()), // bend flag
+            }
             out.push(0u8); // join flag
         }
         for i in 0..project.figures.len() {
@@ -1573,8 +1838,10 @@ pub fn export_piv_v5(project: &Project) -> Vec<u8> {
 /// Write one v5 figure record: flags 144 (implicit z-order, no
 /// secondary colours), then segments in node order — a segment's
 /// id is its node index, so the parent id is the parent node index
-/// (the origin node is 0). Bends and polyfills are empty (see
-/// [`export_piv_v5`] for why bends cannot be written).
+/// (the origin node is 0). The bend block carries `rest_bends`
+/// (per node; frame 0's bends, chosen by the caller) as sparse
+/// non-zero entries keyed by 0-based segment ordinal. Polyfills
+/// are empty (not modelled).
 ///
 /// Image segments (`SegmentMedia::Image` with a valid asset
 /// index) are written as primitive 2 with the extra triple
@@ -1585,7 +1852,12 @@ pub fn export_piv_v5(project: &Project) -> Vec<u8> {
 /// Returns whether the record contains any media segment (the
 /// caller then owes each keyframe object an image/text flags
 /// byte).
-fn write_figure_v5(out: &mut Vec<u8>, fig: &FigureInstance, assets: &[ImageAsset]) -> bool {
+fn write_figure_v5(
+    out: &mut Vec<u8>,
+    fig: &FigureInstance,
+    assets: &[ImageAsset],
+    rest_bends: &[f32],
+) -> bool {
     let def = &fig.def;
     let name = &fig.name;
     // The figure's image table: distinct referenced assets in
@@ -1637,7 +1909,24 @@ fn write_figure_v5(out: &mut Vec<u8>, fig: &FigureInstance, assets: &[ImageAsset
             out.push(0); // extra: baseline reflection
         }
     }
-    out.extend_from_slice(&0u16.to_le_bytes()); // bend count: the model holds no bends
+    // Bend block: non-zero rest bends as (segment ordinal,
+    // radians) — the ordinal is the segment's record position,
+    // not its id (the original's decoder indexes `segments[i]`).
+    let bend_entries: Vec<(u16, f64)> = (1..def.nodes.len())
+        .filter_map(|node| {
+            let b = rest_bends.get(node).copied().unwrap_or(0.0);
+            if b != 0.0 {
+                Some(((node - 1) as u16, b as f64))
+            } else {
+                None
+            }
+        })
+        .collect();
+    out.extend_from_slice(&(bend_entries.len() as u16).to_le_bytes());
+    for (idx, v) in bend_entries {
+        out.extend_from_slice(&idx.to_le_bytes());
+        out.extend_from_slice(&v.to_le_bytes());
+    }
     if !table.is_empty() {
         out.extend_from_slice(&(table.len() as u16).to_le_bytes());
         for &asset in &table {
@@ -1992,6 +2281,7 @@ mod tests {
         len_flag: u16,
         lengths: Vec<f32>,
         bend_flag: u16,
+        bends: Vec<f64>,
     }
 
     /// Walk an exported v5 payload with the module's own reader,
@@ -2016,7 +2306,7 @@ mod tests {
         let (bdef, _) = builtin_man();
         let mut types: Vec<(usize, bool)> = vec![(bdef.nodes.len() - 1, false)];
         for _ in 2..figure_slots {
-            let t = parse_figure_v5(&mut r).unwrap();
+            let (t, _) = parse_figure_v5(&mut r).unwrap();
             types.push((t.def.nodes.len() - 1, t.has_images));
         }
         let frame_count = r.u32().unwrap() as usize;
@@ -2049,11 +2339,11 @@ mod tests {
                     Vec::new()
                 };
                 let bend_flag = r.u16().unwrap();
-                if bend_flag != 0 {
-                    for _ in 0..seg_count {
-                        r.f64().unwrap();
-                    }
-                }
+                let bends = if bend_flag != 0 {
+                    (0..seg_count).map(|_| r.f64().unwrap()).collect()
+                } else {
+                    Vec::new()
+                };
                 let join = r.u8().unwrap();
                 if join != 0 {
                     r.u16().unwrap();
@@ -2063,6 +2353,7 @@ mod tests {
                     len_flag,
                     lengths,
                     bend_flag,
+                    bends,
                 });
             }
             for _ in 0..object_count {
@@ -2081,6 +2372,28 @@ mod tests {
         r.u8().unwrap(); // trailer
         assert!(r.done(), "walk must consume the payload exactly");
         frames
+    }
+
+    /// Walk an exported payload's figure table and return each
+    /// stored figure's record (rest) bends, per segment.
+    fn walk_v5_record_bends(payload: &[u8]) -> Vec<Vec<f32>> {
+        let mut r = Reader::new(payload);
+        assert_eq!(r.u8().unwrap(), 5);
+        r.u32().unwrap();
+        r.u32().unwrap();
+        let bg_slots = r.u16().unwrap();
+        for _ in 1..bg_slots {
+            assert_eq!(r.u8().unwrap(), 2, "solid background slot");
+            r.u32().unwrap();
+            r.str8().unwrap();
+        }
+        let figure_slots = r.u16().unwrap();
+        let mut out = Vec::new();
+        for _ in 2..figure_slots {
+            let (_, bends) = parse_figure_v5(&mut r).unwrap();
+            out.push(bends);
+        }
+        out
     }
 
     #[test]
@@ -2162,12 +2475,14 @@ mod tests {
     }
 
     #[test]
-    fn v5_bends_are_dropped_on_import_and_never_written() {
+    fn v5_bends_roundtrip_through_import_and_export() {
+        // Wave 7 supersedes the wave-6 expectation (this test used
+        // to assert bends are dropped on import and never
+        // written): `Frame.bends` now carries them end to end.
         // Hand-built v5 file whose figure record carries a bend
         // (segment 0 -> 0.7 rad) and whose frame carries a bend
         // array ([0.7, -0.3]). The original's Python decoder reads
-        // the same bytes with those values (cross-check fixture),
-        // so this also pins the importer's bend skipping.
+        // the same bytes with those values (cross-check fixture).
         let mut b: Vec<u8> = Vec::new();
         b.push(5); // version
         b.extend_from_slice(&800u32.to_le_bytes());
@@ -2232,8 +2547,10 @@ mod tests {
         b.extend_from_slice(&24u32.to_le_bytes()); // fps
         std::fs::write("/tmp/v5-bent-input.piv", &b).unwrap();
 
-        // Import discards the bends but keeps geometry and pose.
-        let project = import_piv(&b).unwrap();
+        // Import keeps geometry and pose AND the bends: the
+        // frame's bend array replaces the record bend wholesale
+        // (the original's rule), stored per node (origin = 0).
+        let mut project = import_piv(&b).unwrap();
         assert_eq!(project.figures.len(), 1);
         assert_eq!(project.figures[0].name, "Bent");
         assert_eq!(project.figures[0].def.nodes.len(), 3);
@@ -2241,17 +2558,43 @@ mod tests {
         assert!((pose.root[0] - 10.0).abs() < 0.01 && (pose.root[1] - 20.0).abs() < 0.01);
         assert!((pose.angles[1] - 180.0).abs() < 0.05);
         assert!((pose.angles[2] + 90.0).abs() < 0.05);
+        let (root0, ang1) = (pose.root, pose.angles[1]);
+        let bends0 = project.bends_at(0.0, 0);
+        assert_eq!(bends0.len(), 3);
+        assert!((bends0[1] - 0.7).abs() < 1e-6, "segment 0 bend: {}", bends0[1]);
+        assert!((bends0[2] + 0.3).abs() < 1e-6, "segment 1 bend: {}", bends0[2]);
 
-        // Export writes no bends (the model retained none), and
-        // the export re-imports to the same pose.
+        // A second frame with different bends (vs frame 0's,
+        // which become the export's record bends).
+        let mut frame2 = project.frames[0].clone();
+        frame2.bends = vec![vec![0.0, -0.7, 0.7]];
+        project.frames.push(frame2);
+
+        // Export: record block = frame 0's bends; frame 0 stores
+        // no array (it equals the record), frame 1 stores its own.
         let bytes = export_piv_v5(&project);
         std::fs::write("/tmp/styk-export-v5-bent.piv", &bytes).unwrap();
-        let frames = walk_v5_export(&inflate_export(&bytes));
-        assert!(frames.iter().flatten().all(|o| o.bend_flag == 0 && o.len_flag == 0));
+        let payload = inflate_export(&bytes);
+        let record = walk_v5_record_bends(&payload);
+        assert_eq!(record.len(), 1);
+        assert!((record[0][0] - 0.7).abs() < 1e-6, "record seg 0: {}", record[0][0]);
+        assert!((record[0][1] + 0.3).abs() < 1e-6, "record seg 1: {}", record[0][1]);
+        let frames = walk_v5_export(&payload);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0][0].bend_flag, 0, "frame 0 inherits the record bends");
+        assert_eq!(frames[1][0].bend_flag, 1, "frame 1 stores its own array");
+        assert!((frames[1][0].bends[0] + 0.7).abs() < 1e-6);
+        assert!((frames[1][0].bends[1] - 0.7).abs() < 1e-6);
+
+        // Re-import reproduces both frames' bends and the pose.
         let back = import_piv(&bytes).unwrap();
+        let b0 = back.bends_at(0.0, 0);
+        assert!((b0[1] - 0.7).abs() < 1e-6 && (b0[2] + 0.3).abs() < 1e-6);
+        let b1 = back.bends_at(1.0, 0);
+        assert!((b1[1] + 0.7).abs() < 1e-6 && (b1[2] - 0.7).abs() < 1e-6, "frame 1 bends: {b1:?}");
         let pose2 = &back.frames[0].poses[0];
-        assert!((pose2.root[0] - pose.root[0]).abs() < 0.01);
-        assert!((pose2.angles[1] - pose.angles[1]).abs() < 0.05);
+        assert!((pose2.root[0] - root0[0]).abs() < 0.01);
+        assert!((pose2.angles[1] - ang1).abs() < 0.05);
     }
 
     #[test]
@@ -2343,5 +2686,161 @@ mod tests {
         let (def, _) = import_stk(&with_name).unwrap();
         assert_eq!(def.nodes.len(), 11); // origin + 10 segments
         assert!((def.nodes[1].length - 60.0).abs() < 0.5, "first segment is 60 long");
+    }
+
+    // ---- Wave 7: legacy v2 / v4 export ----
+
+    /// Shared figure/pose assertions for a legacy round trip.
+    fn assert_legacy_roundtrip(project: &Project, back: &Project) {
+        assert_eq!(back.stage, project.stage);
+        assert_eq!(back.figures.len(), project.figures.len());
+        for (a, b) in project.figures.iter().zip(back.figures.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.color, b.color);
+            assert_eq!(a.def.nodes.len(), b.def.nodes.len());
+            for (na, nb) in a.def.nodes.iter().zip(b.def.nodes.iter()) {
+                assert!(
+                    (na.length - nb.length).abs() < 0.01,
+                    "length {} vs {}",
+                    na.length,
+                    nb.length
+                );
+                assert!(
+                    (na.thickness - nb.thickness).abs() < 0.01,
+                    "thickness {} vs {}",
+                    na.thickness,
+                    nb.thickness
+                );
+                assert!(
+                    (crate::model::norm_deg(na.rest_angle - nb.rest_angle)).abs() < 0.1,
+                    "rest {} vs {}",
+                    na.rest_angle,
+                    nb.rest_angle
+                );
+            }
+        }
+        assert_eq!(back.frames.len(), project.frames.len());
+        for (a, b) in project.frames.iter().zip(back.frames.iter()) {
+            for (pa, pb) in a.poses.iter().zip(b.poses.iter()) {
+                assert!((pa.root[0] - pb.root[0]).abs() < 0.5, "root x {} vs {}", pa.root[0], pb.root[0]);
+                assert!((pa.root[1] - pb.root[1]).abs() < 0.5, "root y {} vs {}", pa.root[1], pb.root[1]);
+                assert_eq!(pa.angles.len(), pb.angles.len());
+                for (x, y) in pa.angles.iter().zip(pb.angles.iter()) {
+                    assert!(
+                        (crate::model::norm_deg(x - y)).abs() < 0.1,
+                        "angle {x} vs {y}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn piv_v2_roundtrip_preserves_frames_and_poses() {
+        let mut project = Project::new_demo();
+        project.add_figure_with(FigureDef::quadruped(), "Quad", 0x5DB2FF, [300.0, 400.0]);
+        project.frames[1].duration = 3.0; // v2 cannot store this
+        let bytes = export_piv_v2(&project);
+        assert_eq!(bytes[0], 2, "raw v2 payload starts with the version byte");
+        // Kept on disk for cross-verification with the original
+        // app's Python decoder (scripts/verify_fixtures.py style).
+        std::fs::write("/tmp/styk-export-v2.piv", &bytes).unwrap();
+        let back = import_piv(&bytes).unwrap();
+        assert_legacy_roundtrip(&project, &back);
+        // The documented v2 losses, asserted so they stay honest:
+        // no timing is stored (fixed 13 fps, unit holds).
+        assert_eq!(back.fps, 13.0);
+        assert!(back.frames.iter().all(|f| f.duration == 1.0));
+    }
+
+    #[test]
+    fn piv_v4_roundtrip_preserves_frames_poses_durations() {
+        let mut project = Project::new_demo();
+        project.add_figure_with(FigureDef::quadruped(), "Quad", 0x5DB2FF, [300.0, 400.0]);
+        project.frames[1].duration = 3.0;
+        let bytes = export_piv_v4(&project);
+        assert_eq!(bytes[0], 4, "raw v4 payload starts with the version byte");
+        std::fs::write("/tmp/styk-export-v4.piv", &bytes).unwrap();
+        let back = import_piv(&bytes).unwrap();
+        assert_legacy_roundtrip(&project, &back);
+        assert!(
+            (back.fps - project.fps).abs() < 1.0,
+            "fps {} vs {}",
+            back.fps,
+            project.fps
+        );
+        assert_eq!(back.frames[1].duration, 3.0, "v4 keeps per-frame durations");
+    }
+
+    #[test]
+    fn piv_v4_writes_length_arrays_only_when_channels_move_lengths() {
+        // media_project carries a Length channel driving figure
+        // 0's node 1 from 46 (frame 0, == def) to 90 (frame 4).
+        let project = media_project();
+        let bytes = export_piv_v4(&project);
+        // Walk the export with the module's own reader, collecting
+        // per-object len flags; the walk must land exactly on the
+        // end of the payload (delay u32 + 1 trailing byte).
+        let mut r = Reader::new(&bytes);
+        assert_eq!(r.u8().unwrap(), 4);
+        r.u32().unwrap();
+        r.u32().unwrap(); // canvas
+        assert_eq!(r.u8().unwrap(), 1); // background slots
+        let figure_slots = r.u16().unwrap() as usize;
+        let mut seg_counts = Vec::new();
+        for _ in 2..figure_slots {
+            let def = parse_figure(&mut r, true).unwrap();
+            seg_counts.push(def.nodes.len() - 1);
+        }
+        let frame_count = r.u32().unwrap() as usize;
+        assert_eq!(frame_count, project.frames.len());
+        let mut flags: Vec<Vec<u8>> = Vec::new();
+        let mut frame2_lengths: Vec<f32> = Vec::new();
+        for fi in 0..frame_count {
+            r.u16().unwrap(); // duration
+            r.u8().unwrap(); // background id
+            let object_count = r.u16().unwrap() as usize;
+            let mut row = Vec::new();
+            for oi in 0..object_count {
+                r.u32().unwrap(); // unique id
+                let tid = r.u16().unwrap() as usize;
+                r.f32().unwrap(); // scale
+                r.u32().unwrap(); // colour
+                r.u8().unwrap(); // transparency
+                let segs = seg_counts[tid - 2];
+                for _ in 0..segs {
+                    r.f64().unwrap(); // angles
+                }
+                r.f32().unwrap();
+                r.f32().unwrap(); // root
+                let len_flag = r.u8().unwrap();
+                row.push(len_flag);
+                if len_flag != 0 {
+                    let lengths: Vec<f32> = (0..segs).map(|_| r.f32().unwrap()).collect();
+                    if fi == 2 && oi == 0 {
+                        frame2_lengths = lengths;
+                    }
+                }
+                assert_eq!(r.u8().unwrap(), 0, "join flag");
+            }
+            for _ in 0..object_count {
+                r.u16().unwrap(); // draw order
+            }
+            flags.push(row);
+        }
+        r.u32().unwrap(); // trailer delay
+        r.u8().unwrap(); // trailing loop byte
+        assert_eq!(r.pos, bytes.len(), "walk consumes the export exactly");
+        // Figure 0: frame 0 sits on the def length (no array),
+        // frames 1..4 carry arrays; figure 1 never does.
+        assert_eq!(flags[0], vec![0, 0]);
+        for row in &flags[1..] {
+            assert_eq!(*row, vec![1, 0]);
+        }
+        assert!(
+            (frame2_lengths[0] - 68.0).abs() < 0.5,
+            "frame 2 node-1 length {}",
+            frame2_lengths[0]
+        );
     }
 }

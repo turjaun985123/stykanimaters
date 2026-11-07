@@ -1,14 +1,16 @@
 //! Touch gesture recognition: a deterministic, platform-neutral
 //! state machine that turns raw pointer events into editor gestures.
 //!
-//! The original StykAnimate is touch-capable; this port is mouse-only
-//! today. GPUI delivers touch input as ordinary pointer events, so
-//! the missing core is not platform code but this recogniser: feed it
-//! [`PointerEvent`]s (from mouse or touch, it cannot tell the
-//! difference) plus periodic [`Recognizer::on_tick`] calls, and it
-//! emits a stream of [`Gesture`]s.
+//! The original StykAnimate is touch-capable. In this port the
+//! recogniser is not the missing piece — the platform feed is:
+//! GPUI 0.2.2 exposes no multi-pointer events on Linux at all (the
+//! full research is written up on [`PointerSource`]), so today a
+//! touchscreen reaches the app only as one emulated mouse pointer.
+//! Feed the recogniser [`PointerEvent`]s — pointer id distinguishes
+//! simultaneous contacts — plus periodic [`Recognizer::on_tick`]
+//! calls, and it emits a stream of [`Gesture`]s.
 //!
-//! # Mapping to editor actions (wiring is a later step)
+//! # Mapping to editor actions (wired in app.rs; pinch since Wave 7)
 //!
 //! - `DragStart` / `Drag` / `DragEnd` — **pose**: drag the grabbed
 //!   joint (hands/feet solve IK, hips move the figure), exactly like
@@ -64,6 +66,69 @@ pub const LONG_PRESS_MS: u64 = 500;
 /// A press that has moved this far (stage units) can no longer
 /// become a long-press.
 pub const LONG_PRESS_MAX_DISTANCE: f32 = 6.0;
+
+/// The pointer id under which the editor feeds GPUI mouse events
+/// (see [`PointerSource`]). Id 0 is arbitrary — what matters is
+/// that the mouse always uses one id and a future multi-pointer
+/// source would give each contact its own.
+pub const MOUSE_POINTER_ID: u32 = 0;
+
+/// Where the pointer events fed to the [`Recognizer`] come from.
+///
+/// # Wave 7 research: GPUI 0.2.2 has NO multi-pointer events on Linux
+///
+/// Checked directly in the vendored crate source
+/// (`gpui-0.2.2`, cargo registry):
+///
+/// - `src/interactive.rs` — `PlatformInput`, the enum a window
+///   dispatches to elements, has exactly nine variants: `KeyDown`,
+///   `KeyUp`, `ModifiersChanged`, `MouseDown`, `MouseUp`,
+///   `MouseMove`, `MouseExited`, `ScrollWheel`, `FileDrop`. There
+///   is no touch or pointer variant.
+/// - `src/interactive.rs` — `MouseDownEvent`, `MouseUpEvent` and
+///   `MouseMoveEvent` carry `button`, `position`, `modifiers`,
+///   `click_count` / `pressed_button` — and no pointer identity,
+///   so two simultaneous contacts could not be told apart even in
+///   principle.
+/// - `src/interactive.rs` — the one touch-sounding type,
+///   `TouchPhase`, is used only as `ScrollWheelEvent::touch_phase`:
+///   trackpad scroll phases (the enum is noted as based on
+///   winit's), not contacts.
+/// - `src/platform/linux/x11/client.rs` — the XInput extension
+///   is announced at version 2.1 next to the comment "To increase
+///   this to 2.2 and beyond, support for touch events would need
+///   to be added." Touch is an XInput 2.2 feature, so the X
+///   server is never even asked for touch events.
+/// - `src/platform/linux/wayland/client.rs` — no `wl_touch`
+///   object is bound anywhere in the crate; the only "touch" in
+///   the file is `TouchPhase::Moved` stamped onto scroll-wheel
+///   events.
+/// - There is no `on_touch`-style handler registration anywhere
+///   in the crate.
+///
+/// Consequence: on Linux, a touchscreen reaches a GPUI app only
+/// as a single emulated mouse pointer (X11 / Wayland pointer
+/// emulation), indistinguishable from a real mouse. The `Touch`
+/// variant below therefore names a source that **cannot be
+/// constructed from anything GPUI 0.2.2 dispatches today**; it
+/// exists so call sites can name the distinction, and so that if
+/// a future GPUI grows touch events, feeding them is a wiring
+/// change (assign each contact an id, call the same feed
+/// function the mouse uses) — the recogniser and the editor's
+/// pinch handling are already multi-pointer end to end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerSource {
+    /// GPUI mouse events (`on_mouse_down` / `on_mouse_move` /
+    /// `on_mouse_up`), fed under [`MOUSE_POINTER_ID`]. The only
+    /// source GPUI 0.2.2 can produce on Linux.
+    Mouse,
+    /// A genuine multi-pointer touch source. Not obtainable from
+    /// GPUI 0.2.2 on Linux — see the research note above.
+    Touch,
+}
+
+/// The pointer source the editor's canvas handlers feed today.
+pub const ACTIVE_POINTER_SOURCE: PointerSource = PointerSource::Mouse;
 
 /// One raw pointer event, from mouse or touch indifferently.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -466,6 +531,36 @@ mod tests {
     }
 
     #[test]
+    fn pinch_values_are_the_cumulative_ones_the_camera_driver_applies() {
+        // The editor's pinch→camera driver (app.rs `PinchCamera`)
+        // writes `baseline ∘ gesture` per Pinch event, so the
+        // recogniser's cumulative scale/pan ARE the camera math.
+        // This is the exact finger geometry the app-level
+        // scenario uses; app.rs itself cannot host the test
+        // (any `#[test]` in that file currently blows the
+        // test-profile recursion limit — see the Wave 7 notes),
+        // so the contract is pinned here instead.
+        let mut r = Recognizer::new();
+        r.on_event(down(1, 430.0, 360.0, 0));
+        assert_eq!(
+            r.on_event(down(2, 530.0, 360.0, 10)),
+            vec![Gesture::PinchStart { centre: [480.0, 360.0] }]
+        );
+        // B: 530 → 630. Distance 100 → 200, centre → (530, 360).
+        assert_eq!(
+            r.on_event(mv(2, 630.0, 360.0, 20)),
+            vec![Gesture::Pinch { centre: [530.0, 360.0], scale: 2.0, pan: [50.0, 0.0] }]
+        );
+        // A: 430 → 380. Distance 200 → 250, centre → (505, 360).
+        // Scale/pan are cumulative from PinchStart, not steps.
+        assert_eq!(
+            r.on_event(mv(1, 380.0, 360.0, 30)),
+            vec![Gesture::Pinch { centre: [505.0, 360.0], scale: 2.5, pan: [25.0, 0.0] }]
+        );
+        assert_eq!(r.on_event(up(2, 630.0, 360.0, 40)), vec![Gesture::PinchEnd]);
+    }
+
+    #[test]
     fn second_finger_cancels_drag_into_pinch() {
         let mut r = Recognizer::new();
         r.on_event(down(1, 0.0, 0.0, 0));
@@ -496,6 +591,17 @@ mod tests {
         let g = r.on_event(mv(1, 10.0, 0.0, 116));
         assert_eq!(g[0], Gesture::DragStart { pos: [0.0, 0.0] });
         assert_eq!(r.on_event(up(1, 10.0, 0.0, 132)), vec![Gesture::DragEnd]);
+    }
+
+    #[test]
+    fn pointer_source_today_is_the_gpui_mouse() {
+        // Pins the Wave 7 finding documented on `PointerSource`:
+        // until GPUI grows touch events, the mouse under
+        // MOUSE_POINTER_ID is the only feed the recogniser gets.
+        // If this test ever needs to change, the platform grew a
+        // second source and the editor's feed can grow with it.
+        assert_eq!(ACTIVE_POINTER_SOURCE, PointerSource::Mouse);
+        assert_eq!(MOUSE_POINTER_ID, 0);
     }
 
     #[test]

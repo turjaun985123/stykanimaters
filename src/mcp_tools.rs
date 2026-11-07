@@ -18,7 +18,7 @@
 //! keys, FX clips, channels, layer fields).
 
 use crate::editor::EditorCore;
-use crate::model::{AudioClip, CameraKey, FigureDef, Frame, Pose, Project, Shape};
+use crate::model::{AudioClip, CameraKey, FigureDef, Frame, Pose, Project, Shape, Stroke};
 use crate::vfx::{ClipKind, ParticleClip, Weather, WeatherKind};
 use serde_json::{json, Value};
 
@@ -813,6 +813,329 @@ fn tool_redo(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
 // ---------------------------------------------------------------------
 
 /// All content-building tools, in the order agents usually need them.
+
+// ---------------------------------------------------------------------
+// Drawing tools (wave 7): strokes are project data
+// (Project.strokes), manipulated through draw_ops so MCP, the
+// editor and the rasterizer all agree on the width conventions
+// (empty `widths` = uniform width, else one width per point).
+// ---------------------------------------------------------------------
+
+fn req_points(args: &Value, key: &str) -> Result<Vec<crate::model::V2>, String> {
+    let v = get(args, key).ok_or_else(|| format!("missing required argument '{key}'"))?;
+    let arr = v
+        .as_array()
+        .ok_or_else(|| format!("argument '{key}' must be an array of [x, y] points"))?;
+    let mut points = Vec::with_capacity(arr.len());
+    for (i, p) in arr.iter().enumerate() {
+        let pair = p
+            .as_array()
+            .filter(|a| a.len() == 2)
+            .ok_or_else(|| format!("argument '{key}[{i}]' must be an [x, y] pair"))?;
+        let x = pair[0]
+            .as_f64()
+            .ok_or_else(|| format!("argument '{key}[{i}][0]' must be a number"))? as f32;
+        let y = pair[1]
+            .as_f64()
+            .ok_or_else(|| format!("argument '{key}[{i}][1]' must be a number"))? as f32;
+        points.push([x, y]);
+    }
+    Ok(points)
+}
+
+fn tool_draw_stroke(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let frame = req_usize(args, "frame")?;
+    check_frame(core, frame)?;
+    let points = req_points(args, "points")?;
+    if points.is_empty() {
+        return Err("argument 'points' must contain at least one point".into());
+    }
+    // Defaults mirror the editor's own pen: light grey, width 4.
+    let color = opt_color(args, "color")?.unwrap_or(0xE8E8EC);
+    let width = opt_f32(args, "width")?.unwrap_or(4.0);
+    if width <= 0.0 {
+        return Err("argument 'width' must be positive".into());
+    }
+    let n_points = points.len();
+    core.project.strokes.push(Stroke {
+        frame,
+        points,
+        color,
+        width,
+        widths: Vec::new(),
+        fill: None,
+    });
+    Ok(json!({
+        "ok": true,
+        "frame": frame,
+        "points": n_points,
+        "strokes_on_frame": crate::draw_ops::stroke_count(&core.project, frame),
+    }))
+}
+
+fn tool_smooth_strokes(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let frame = req_usize(args, "frame")?;
+    check_frame(core, frame)?;
+    let smoothed = crate::draw_ops::smooth_frame(&mut core.project, frame, 1);
+    Ok(json!({
+        "ok": true,
+        "frame": frame,
+        "smoothed": smoothed,
+        "strokes_on_frame": crate::draw_ops::stroke_count(&core.project, frame),
+    }))
+}
+
+fn tool_erase_strokes(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let frame = req_usize(args, "frame")?;
+    check_frame(core, frame)?;
+    let x = req_f32(args, "x")?;
+    let y = req_f32(args, "y")?;
+    let radius = req_f32(args, "radius")?;
+    if radius <= 0.0 {
+        return Err("argument 'radius' must be positive".into());
+    }
+    let changed = crate::draw_ops::erase(&mut core.project, frame, [x, y], radius);
+    Ok(json!({
+        "ok": true,
+        "frame": frame,
+        "changed": changed,
+        "strokes_on_frame": crate::draw_ops::stroke_count(&core.project, frame),
+    }))
+}
+
+fn tool_apply_nib(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let frame = req_usize(args, "frame")?;
+    check_frame(core, frame)?;
+    let nib = match req_str(args, "nib")? {
+        "round" => crate::paint::Nib::Round,
+        "square" => crate::paint::Nib::Square,
+        "calligraphy" => crate::paint::Nib::Calligraphy,
+        other => {
+            return Err(format!(
+                "unknown nib '{other}' (expected \"round\", \"square\" or \"calligraphy\")"
+            ))
+        }
+    };
+    let angle = opt_f32(args, "angle")?.unwrap_or(45.0);
+    let mut count = 0usize;
+    for stroke in core.project.strokes.iter_mut().filter(|s| s.frame == frame) {
+        crate::draw_ops::apply_nib(stroke, nib, angle);
+        count += 1;
+    }
+    Ok(json!({ "ok": true, "frame": frame, "strokes": count }))
+}
+
+// ---------------------------------------------------------------------
+// 3D session tools (wave 7): thin wrappers over the EditorCore
+// fig3 ops. The session state lives in EditorCore.fig3; handlers
+// check for it themselves so a missing session is a clean Err,
+// not just a status line. Summaries carry the core status text.
+// ---------------------------------------------------------------------
+
+fn tool_fig3_enter(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    core.enter_3d();
+    let st = core.fig3.as_ref().expect("enter_3d always starts a session");
+    Ok(json!({
+        "ok": true,
+        "active": true,
+        "figure": st.figure.name,
+        "joints": st.figure.nodes.len(),
+        "status": core.status,
+    }))
+}
+
+fn fig3_summary(core: &EditorCore) -> Value {
+    match &core.fig3 {
+        Some(st) => {
+            let sel = st.selected.min(st.figure.nodes.len().saturating_sub(1));
+            json!({
+                "active": true,
+                "selected": sel,
+                "selected_name": st.figure.nodes.get(sel).map(|n| n.name.clone()),
+                "joints": st.figure.nodes.len(),
+                "camera": { "yaw": st.camera.yaw, "pitch": st.camera.pitch },
+                "status": core.status,
+            })
+        }
+        None => json!({ "active": false, "status": core.status }),
+    }
+}
+
+fn tool_fig3_select(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let joint = req_usize(args, "joint")?;
+    let n = match &core.fig3 {
+        Some(st) => st.figure.nodes.len(),
+        None => return Err("no active 3D session; call fig3_enter first".into()),
+    };
+    if joint >= n {
+        return Err(format!("joint index {joint} out of range (3D figure has {n} joint(s))"));
+    }
+    let st = core.fig3.as_mut().expect("session checked above");
+    st.selected = joint;
+    core.status = format!("3D joint: {}.", st.figure.nodes[joint].name);
+    Ok(fig3_summary(core))
+}
+
+fn tool_fig3_rotate(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    if core.fig3.is_none() {
+        return Err("no active 3D session; call fig3_enter first".into());
+    }
+    let axis = req_usize(args, "axis")?;
+    if axis > 2 {
+        return Err("argument 'axis' must be 0 (X), 1 (Y) or 2 (Z)".into());
+    }
+    let degrees = req_f32(args, "degrees")?;
+    core.fig3_rotate(axis, degrees);
+    let mut out = fig3_summary(core);
+    out["axis"] = json!(axis);
+    out["degrees"] = json!(degrees);
+    Ok(out)
+}
+
+fn tool_fig3_orbit(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    if core.fig3.is_none() {
+        return Err("no active 3D session; call fig3_enter first".into());
+    }
+    let yaw = req_f32(args, "yaw")?;
+    let pitch = req_f32(args, "pitch")?;
+    core.fig3_orbit(yaw, pitch);
+    Ok(fig3_summary(core))
+}
+
+fn tool_fig3_bake(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    if core.fig3.is_none() {
+        return Err("no active 3D session; call fig3_enter first".into());
+    }
+    let before = core.project.figures.len();
+    core.fig3_bake();
+    if core.project.figures.len() != before + 1 {
+        return Err(core.status.clone());
+    }
+    let idx = core.project.figures.len() - 1;
+    Ok(json!({
+        "ok": true,
+        "figure": idx,
+        "name": core.project.figures[idx].name,
+        "figures": core.project.figures.len(),
+        "status": core.status,
+    }))
+}
+
+fn tool_fig3_mark_b(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    if core.fig3.is_none() {
+        return Err("no active 3D session; call fig3_enter first".into());
+    }
+    core.fig3_mark_pose_b();
+    Ok(fig3_summary(core))
+}
+
+fn tool_fig3_bake_animation(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    if core.fig3.is_none() {
+        return Err("no active 3D session; call fig3_enter first".into());
+    }
+    let frames = req_usize(args, "frames")?;
+    if frames < 2 {
+        return Err("argument 'frames' must be at least 2".into());
+    }
+    let before = core.project.figures.len();
+    core.fig3_bake_animation(frames);
+    if core.project.figures.len() != before + 1 {
+        // Refused (no marked pose B): the core explains via status.
+        return Err(core.status.clone());
+    }
+    let idx = core.project.figures.len() - 1;
+    Ok(json!({
+        "ok": true,
+        "figure": idx,
+        "name": core.project.figures[idx].name,
+        "frames_baked": frames,
+        "project_frames": core.project.frames.len(),
+        "status": core.status,
+    }))
+}
+
+// ---------------------------------------------------------------------
+// Movieclip tools (wave 7)
+// ---------------------------------------------------------------------
+
+fn tool_clip_create(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    // The wave-7 session op: parameterised, snapshot-covering, and
+    // tolerant of short pose vecs (it falls back along the frame
+    // chain). None means it refused and explained via the status.
+    let Some(ci) = core.create_clip_from_figure(fi) else {
+        return Err(core.status.clone());
+    };
+    let clip = &core.project.clips[ci];
+    Ok(json!({
+        "ok": true,
+        "clip": ci,
+        "name": clip.name,
+        "frames": clip.frames.len(),
+        "figure": fi,
+        "loops_on_figure": core.project.figures[fi].clip == Some(ci),
+        "status": core.status,
+    }))
+}
+
+fn tool_clip_list(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let clips: Vec<Value> = core
+        .project
+        .clips
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            json!({
+                "index": i,
+                "name": c.name,
+                "frames": c.frames.len(),
+                "nodes": c.def.nodes.len(),
+                "used_by": core
+                    .project
+                    .figures
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| f.clip == Some(i))
+                    .map(|(fi, _)| fi)
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let count = clips.len();
+    Ok(json!({ "clips": clips, "count": count }))
+}
+
+// ---------------------------------------------------------------------
+// Bend tool (wave 7): Frame.bends is per-figure, per-node segment
+// bend in radians (empty/short vecs mean straight segments).
+// ---------------------------------------------------------------------
+
+fn tool_set_bend(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    let frame = req_usize(args, "frame")?;
+    let ni = req_usize(args, "node")?;
+    check_frame(core, frame)?;
+    check_node(core, fi, ni)?;
+    let radians = req_f32(args, "radians")?;
+    let fr = &mut core.project.frames[frame];
+    while fr.bends.len() <= fi {
+        fr.bends.push(Vec::new());
+    }
+    let row = &mut fr.bends[fi];
+    while row.len() <= ni {
+        row.push(0.0);
+    }
+    row[ni] = radians;
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "frame": frame,
+        "node": ni,
+        "radians": radians,
+    }))
+}
+
 pub fn tools() -> Vec<crate::mcp::Tool> {
     use crate::mcp::Tool;
     vec![
@@ -1045,6 +1368,145 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             schema: obj_schema(json!({}), &[]),
             handler: tool_redo,
         },
+        Tool {
+            name: "draw_stroke",
+            description: "Append a freehand stroke (polyline) to a frame's drawing layer. points is an array of [x, y] stage coordinates; color is 0xRRGGBB (default light grey), width in stage units (default 4, the editor's pen).",
+            schema: obj_schema(
+                json!({
+                    "frame": { "type": "integer" },
+                    "points": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 } },
+                    "color": { "type": "integer", "description": "0xRRGGBB" },
+                    "width": { "type": "number" }
+                }),
+                &["frame", "points"],
+            ),
+            handler: tool_draw_stroke,
+        },
+        Tool {
+            name: "smooth_strokes",
+            description: "Chaikin-smooth every stroke on a frame (one subdivision pass). Returns how many strokes changed.",
+            schema: obj_schema(
+                json!({ "frame": { "type": "integer" } }),
+                &["frame"],
+            ),
+            handler: tool_smooth_strokes,
+        },
+        Tool {
+            name: "erase_strokes",
+            description: "Erase stroke points within radius of (x, y) on a frame, splitting strokes at the cut (draw_ops::erase semantics). Returns how many of the frame's strokes changed.",
+            schema: obj_schema(
+                json!({
+                    "frame": { "type": "integer" },
+                    "x": { "type": "number" },
+                    "y": { "type": "number" },
+                    "radius": { "type": "number" }
+                }),
+                &["frame", "x", "y", "radius"],
+            ),
+            handler: tool_erase_strokes,
+        },
+        Tool {
+            name: "apply_nib",
+            description: "Give every stroke on a frame a nib width profile: \"round\" (uniform), \"square\" or \"calligraphy\" (angle-dependent, angle in degrees, default 45). Returns the stroke count.",
+            schema: obj_schema(
+                json!({
+                    "frame": { "type": "integer" },
+                    "nib": { "type": "string", "enum": ["round", "square", "calligraphy"] },
+                    "angle": { "type": "number", "description": "Nib angle in degrees (default 45)" }
+                }),
+                &["frame", "nib"],
+            ),
+            handler: tool_apply_nib,
+        },
+        Tool {
+            name: "fig3_enter",
+            description: "Enter 3D mode: start a session posing the 3D humanoid with an orbit camera. Keeping an existing session as-is. Pose with fig3_select/fig3_rotate/fig3_orbit, then fig3_bake turns the pose into a normal 2D figure.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_fig3_enter,
+        },
+        Tool {
+            name: "fig3_select",
+            description: "Select the 3D joint (node index) that fig3_rotate acts on.",
+            schema: obj_schema(
+                json!({ "joint": { "type": "integer" } }),
+                &["joint"],
+            ),
+            handler: tool_fig3_select,
+        },
+        Tool {
+            name: "fig3_rotate",
+            description: "Rotate the selected 3D joint by degrees around an Euler axis: 0 = X, 1 = Y, 2 = Z.",
+            schema: obj_schema(
+                json!({
+                    "axis": { "type": "integer", "enum": [0, 1, 2] },
+                    "degrees": { "type": "number" }
+                }),
+                &["axis", "degrees"],
+            ),
+            handler: tool_fig3_rotate,
+        },
+        Tool {
+            name: "fig3_orbit",
+            description: "Orbit the 3D camera by yaw/pitch deltas in degrees (pitch clamps to +-89.9).",
+            schema: obj_schema(
+                json!({
+                    "yaw": { "type": "number" },
+                    "pitch": { "type": "number" }
+                }),
+                &["yaw", "pitch"],
+            ),
+            handler: tool_fig3_orbit,
+        },
+        Tool {
+            name: "fig3_bake",
+            description: "Bake the current 3D pose into a new 2D figure in the project (held on all frames, like the editor's Bake 3D). Returns the new figure index.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_fig3_bake,
+        },
+        Tool {
+            name: "fig3_mark_b",
+            description: "Mark the current 3D pose as pose B, the target fig3_bake_animation interpolates to (pose the figure, mark B, repose to A, then bake the animation).",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_fig3_mark_b,
+        },
+        Tool {
+            name: "fig3_bake_animation",
+            description: "Bake an animated 2D figure: interpolate the 3D session's current pose to the marked pose B over 'frames' frames (at least 2), extending the timeline if needed. Requires fig3_mark_b first.",
+            schema: obj_schema(
+                json!({ "frames": { "type": "integer", "minimum": 2 } }),
+                &["frames"],
+            ),
+            handler: tool_fig3_bake_animation,
+        },
+        Tool {
+            name: "clip_create",
+            description: "Create a movieclip from a figure's poses across all frames and set the figure to loop it (the editor's Make clip). Returns the clip index and frame count.",
+            schema: obj_schema(
+                json!({ "figure": { "type": "integer" } }),
+                &["figure"],
+            ),
+            handler: tool_clip_create,
+        },
+        Tool {
+            name: "clip_list",
+            description: "List the project's movieclip definitions: index, name, frame count, node count, and which figures loop each clip.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_clip_list,
+        },
+        Tool {
+            name: "set_bend",
+            description: "Set one segment's bend (radians) for a figure on a frame. Positive/negative bend arcs the segment to opposite sides; 0 is straight. Frame.bends rows/cols are extended with zeros as needed.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "frame": { "type": "integer" },
+                    "node": { "type": "integer" },
+                    "radians": { "type": "number" }
+                }),
+                &["figure", "frame", "node", "radians"],
+            ),
+            handler: tool_set_bend,
+        },
     ]
 }
 
@@ -1072,11 +1534,11 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 34);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 20, "tool names must be unique");
+        assert_eq!(names.len(), 34, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
@@ -1203,6 +1665,114 @@ mod tests {
     }
 
     #[test]
+    fn wave7_drawing_fig3_clip_and_bend_tools() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        call(&mut core, &tools, "new_project", json!({})).unwrap();
+        call(&mut core, &tools, "add_frame", json!({})).unwrap();
+
+        // --- drawing: stroke, nib, smooth, erase ---
+        let r = call(&mut core, &tools, "draw_stroke", json!({
+            "frame": 0,
+            "points": [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0]],
+            "color": 0xFF0000,
+            "width": 6.0
+        }))
+        .unwrap();
+        assert_eq!(r["strokes_on_frame"], 1);
+        assert_eq!(core.project.strokes.len(), 1);
+        assert_eq!(core.project.strokes[0].color, 0xFF0000);
+        // A second stroke far away, to prove erase is local.
+        call(&mut core, &tools, "draw_stroke", json!({
+            "frame": 0, "points": [[700.0, 600.0], [760.0, 600.0]]
+        }))
+        .unwrap();
+
+        let r = call(&mut core, &tools, "apply_nib", json!({
+            "frame": 0, "nib": "calligraphy", "angle": 45.0
+        }))
+        .unwrap();
+        assert_eq!(r["strokes"], 2);
+        let s0 = &core.project.strokes[0];
+        assert_eq!(s0.widths.len(), s0.points.len(), "nib widths stay parallel");
+        let (mn, mx) = (
+            s0.widths.iter().fold(f32::MAX, |a, &b| a.min(b)),
+            s0.widths.iter().fold(f32::MIN, |a, &b| a.max(b)),
+        );
+        assert!(mx > mn, "calligraphy profile must vary along a bent stroke");
+
+        let before = core.project.strokes[0].points.len();
+        let r = call(&mut core, &tools, "smooth_strokes", json!({ "frame": 0 })).unwrap();
+        assert_eq!(r["smoothed"], 2);
+        assert!(core.project.strokes[0].points.len() > before, "smoothing adds points");
+        // Erasing at the first stroke's start removes/changes only it.
+        let p0 = core.project.strokes[0].points[0];
+        let r = call(&mut core, &tools, "erase_strokes", json!({
+            "frame": 0, "x": p0[0], "y": p0[1], "radius": 3.0
+        }))
+        .unwrap();
+        assert_eq!(r["changed"], 1);
+        assert_eq!(r["strokes_on_frame"], 2, "the far stroke survives");
+        assert_eq!(core.project.strokes[1].points.len(), 4, "far stroke untouched (post-smooth)");
+
+        // --- 3D session: enter, select, rotate, orbit, bake ---
+        let r = call(&mut core, &tools, "fig3_enter", json!({})).unwrap();
+        assert_eq!(r["active"], true);
+        let joints = r["joints"].as_u64().unwrap() as usize;
+        assert!(joints > 5);
+        let r = call(&mut core, &tools, "fig3_select", json!({ "joint": 2 })).unwrap();
+        assert_eq!(r["selected"], 2);
+        let r = call(&mut core, &tools, "fig3_rotate", json!({ "axis": 2, "degrees": 30.0 })).unwrap();
+        assert_eq!(r["selected"], 2);
+        let r = call(&mut core, &tools, "fig3_orbit", json!({ "yaw": 45.0, "pitch": 10.0 })).unwrap();
+        assert_eq!(r["camera"]["yaw"], 45.0);
+        let figures_before = core.project.figures.len();
+        let r = call(&mut core, &tools, "fig3_bake", json!({})).unwrap();
+        assert_eq!(core.project.figures.len(), figures_before + 1);
+        let baked = r["figure"].as_u64().unwrap() as usize;
+        assert!(core.project.figures[baked].name.contains("(3D)"));
+
+        // Animated bake: mark the current pose as B, repose, and
+        // interpolate back over 4 frames (timeline grows to fit).
+        call(&mut core, &tools, "fig3_mark_b", json!({})).unwrap();
+        call(&mut core, &tools, "fig3_rotate", json!({ "axis": 1, "degrees": -60.0 })).unwrap();
+        let figures_before = core.project.figures.len();
+        let r = call(&mut core, &tools, "fig3_bake_animation", json!({ "frames": 4 })).unwrap();
+        assert_eq!(r["frames_baked"], 4);
+        assert_eq!(core.project.figures.len(), figures_before + 1);
+        assert!(core.project.frames.len() >= 4, "timeline extended for the bake");
+        assert!(r["name"].as_str().unwrap().contains("(3D anim)"));
+
+        // --- movieclip: create from figure 0, then list ---
+        call(&mut core, &tools, "set_pose", json!({
+            "figure": 0, "frame": 1, "angles": { "5": -45.0 }
+        }))
+        .unwrap();
+        let r = call(&mut core, &tools, "clip_create", json!({ "figure": 0 })).unwrap();
+        assert_eq!(r["frames"], 2);
+        assert_eq!(r["loops_on_figure"], true);
+        assert_eq!(core.project.clips.len(), 1);
+        assert_eq!(core.project.clips[0].frames[1].angles[5], -45.0);
+        let r = call(&mut core, &tools, "clip_list", json!({})).unwrap();
+        assert_eq!(r["count"], 1);
+        assert_eq!(r["clips"][0]["used_by"], json!([0]));
+
+        // --- bends ---
+        let r = call(&mut core, &tools, "set_bend", json!({
+            "figure": 0, "frame": 1, "node": 3, "radians": 0.5
+        }))
+        .unwrap();
+        assert_eq!(r["radians"], 0.5);
+        assert_eq!(core.project.frames[1].bends[0][3], 0.5);
+        assert_eq!(core.project.frames[1].bends[0][2], 0.0, "extended with zeros");
+        call(&mut core, &tools, "set_bend", json!({
+            "figure": 0, "frame": 1, "node": 3, "radians": 0.0
+        }))
+        .unwrap();
+        assert_eq!(core.project.frames[1].bends[0][3], 0.0);
+    }
+
+    #[test]
     fn bad_arguments_error_instead_of_panicking() {
         let tools = tools();
         let mut core = EditorCore::new();
@@ -1235,6 +1805,22 @@ mod tests {
             ("delete_node", json!({ "figure": 0, "node": 0 })), // root refused
             ("new_project", json!({ "fps": -3.0 })),
             ("insert_inbetween", json!({})), // no following frame
+            ("draw_stroke", json!({ "frame": 0, "points": [] })),
+            ("draw_stroke", json!({ "frame": 0, "points": [[1.0]] })),
+            ("draw_stroke", json!({ "frame": 9, "points": [[0.0, 0.0], [1.0, 1.0]] })),
+            ("draw_stroke", json!({ "frame": 0, "points": [[0.0, 0.0]], "width": 0.0 })),
+            ("smooth_strokes", json!({ "frame": 4 })),
+            ("erase_strokes", json!({ "frame": 0, "x": 0.0, "y": 0.0, "radius": -1.0 })),
+            ("apply_nib", json!({ "frame": 0, "nib": "airbrush" })),
+            ("fig3_select", json!({ "joint": 0 })), // no session yet
+            ("fig3_rotate", json!({ "axis": 0, "degrees": 10.0 })), // no session yet
+            ("fig3_orbit", json!({ "yaw": 1.0, "pitch": 1.0 })), // no session yet
+            ("fig3_bake", json!({})), // no session yet
+            ("fig3_mark_b", json!({})), // no session yet
+            ("fig3_bake_animation", json!({ "frames": 4 })), // no session yet
+            ("clip_create", json!({ "figure": 12 })),
+            ("set_bend", json!({ "figure": 0, "frame": 0, "node": 99, "radians": 0.5 })),
+            ("set_bend", json!({ "figure": 0, "frame": 0, "node": 1 })),
         ];
         for (name, args) in cases {
             let r = call(&mut core, &tools, name, args.clone());

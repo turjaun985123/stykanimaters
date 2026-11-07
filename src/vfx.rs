@@ -56,6 +56,23 @@ pub enum ClipKind {
     /// middle ring runs backwards, and each mote drags two fainter
     /// ghosts behind it.
     Orbit,
+    /// A jagged lightning bolt from the anchor along `angle`,
+    /// reaching `length` (140 when unset): dots along a seeded
+    /// zigzag polyline whose sideways jitter is re-seeded every
+    /// frame, so the bolt re-strikes constantly while staying a
+    /// pure function of the frame time. Brightest at the strike's
+    /// start and near the anchor, with a seeded per-frame flicker.
+    Lightning,
+    /// Bubbles that rise from the anchor on individual life
+    /// cycles: each wobbles as it climbs, grows slightly, and
+    /// pops — its alpha collapses across the last 10% of its
+    /// life.
+    Bubbles,
+    /// Leaves shed from the anchor: they fall on individual
+    /// cycles, fluttering with a slow sideways sway and a slow
+    /// apparent-width oscillation, in green shades derived from
+    /// the clip colour.
+    Leaves,
 }
 
 /// A timed particle effect. `start` and `duration` are in frames;
@@ -368,6 +385,122 @@ pub fn clip_particles(
                 }
             }
         }
+        ClipKind::Lightning => {
+            // The bolt is a polyline of SEG segments from the
+            // anchor along `angle`. Vertex jitter is seeded by
+            // (seed, vertex, frame index), so each frame strikes a
+            // fresh bolt while remaining a pure function of
+            // `frame_f`. The first vertex is pinned to the anchor.
+            let dir = dir_from_deg(clip.angle);
+            let perp = [-dir[1], dir[0]];
+            let reach = if clip.length > 0.0 { clip.length } else { 140.0 };
+            const SEG: u32 = 7;
+            let strike = local.floor().max(0.0) as u32;
+            let salt = 100u32.wrapping_add(strike.wrapping_mul(31));
+            // White-hot core: the clip colour pulled toward white.
+            let core = [
+                color[0] + ((255 - color[0] as u16) * 65 / 100) as u8,
+                color[1] + ((255 - color[1] as u16) * 65 / 100) as u8,
+                color[2] + ((255 - color[2] as u16) * 65 / 100) as u8,
+            ];
+            let mut verts: Vec<V2> = Vec::with_capacity((SEG + 1) as usize);
+            for k in 0..=SEG {
+                let s = k as f32 / SEG as f32;
+                let off = if k == 0 {
+                    0.0
+                } else {
+                    (prand(seed, k, salt) - 0.5) * 26.0 * (0.35 + 0.65 * s)
+                };
+                verts.push([
+                    anchor[0] + dir[0] * reach * s + perp[0] * off,
+                    anchor[1] + dir[1] * reach * s + perp[1] * off,
+                ]);
+            }
+            // Brightest just after the strike begins; the seeded
+            // flicker varies the whole bolt's intensity per frame.
+            let flicker = 0.6 + 0.4 * prand(seed, strike, 77);
+            let fade = (1.0 - 0.55 * t) * flicker;
+            for k in 0..SEG {
+                let (a, b) = (verts[k as usize], verts[k as usize + 1]);
+                for j in 0..4 {
+                    let f = j as f32 / 4.0;
+                    let pos = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+                    let s = (k as f32 + f) / SEG as f32;
+                    // The tail of the bolt is dimmer than its head.
+                    push_c(&mut out, pos, 2.8 * (1.0 - 0.4 * s), fade * (1.0 - 0.45 * s), core);
+                }
+            }
+            push_c(&mut out, verts[SEG as usize], 3.4, fade * 0.55, core);
+        }
+        ClipKind::Bubbles => {
+            // Each bubble runs its own life cycle `s` at its own
+            // pace: it fades in over the first 10% of its life,
+            // grows slightly as it climbs, and pops — alpha
+            // collapses across the last 10%, with a final swell.
+            let pale = [
+                color[0] + ((255 - color[0] as u16) * 45 / 100) as u8,
+                color[1] + ((255 - color[1] as u16) * 45 / 100) as u8,
+                color[2] + ((255 - color[2] as u16) * 45 / 100) as u8,
+            ];
+            for i in 0..16u32 {
+                let speed = 0.85 + prand(seed, i, 5) * 0.4;
+                let s = (t * speed).clamp(0.0, 1.0);
+                let height = 70.0 + prand(seed, i, 2) * 90.0;
+                let wobble =
+                    (2.0 + 3.0 * s) * (local * 1.1 + prand(seed, i, 4) * std::f32::consts::TAU).sin();
+                let pos = [
+                    anchor[0] + (prand(seed, i, 1) - 0.5) * 20.0 + wobble,
+                    anchor[1] - height * s,
+                ];
+                let fade_in = (s / 0.1).min(1.0);
+                let pop = if s > 0.9 { (1.0 - s) / 0.1 } else { 1.0 };
+                let bright = 0.7 + 0.3 * prand(seed, i, 6);
+                let swell = if s > 0.9 { 1.0 + 0.3 * ((s - 0.9) / 0.1) } else { 1.0 };
+                push_c(
+                    &mut out,
+                    pos,
+                    (2.2 + 1.9 * s) * swell,
+                    0.8 * fade_in * pop * bright,
+                    pale,
+                );
+            }
+        }
+        ClipKind::Leaves => {
+            // Three leafy shades from the clip colour: the green
+            // channel dominates in all of them.
+            let g = color[1].max(120);
+            let palette: [[u8; 3]; 3] = [
+                [(color[0] as f32 * 0.35) as u8, g, (color[2] as f32 * 0.3) as u8],
+                [
+                    (color[0] as f32 * 0.5) as u8 + 30,
+                    (g as u16 + 40).min(255) as u8,
+                    (color[2] as f32 * 0.4) as u8 + 10,
+                ],
+                [
+                    (color[0] as f32 * 0.28) as u8,
+                    (g as f32 * 0.62) as u8,
+                    (color[2] as f32 * 0.22) as u8,
+                ],
+            ];
+            for i in 0..16u32 {
+                let speed = 0.8 + prand(seed, i, 5) * 0.45;
+                let s = (t * speed).clamp(0.0, 1.0);
+                let fall = 80.0 + prand(seed, i, 2) * 80.0;
+                let phase = prand(seed, i, 4) * std::f32::consts::TAU;
+                // Slow flutter: sideways sway that widens as the
+                // leaf falls, plus a gentle vertical bob.
+                let sway = (6.0 + 10.0 * s) * (local * 0.5 + phase).sin();
+                let pos = [
+                    anchor[0] + (prand(seed, i, 1) - 0.5) * 30.0 + sway,
+                    anchor[1] + fall * s + 6.0 * (local * 0.8 + phase).sin(),
+                ];
+                // Tumbling like confetti but slower (0.6 vs 1.3).
+                let spin =
+                    0.5 + 0.5 * (local * 0.6 + prand(seed, i, 6) * std::f32::consts::TAU).sin().abs();
+                let alpha = envelope * 0.85 * (0.7 + 0.3 * prand(seed, i, 3));
+                push_c(&mut out, pos, 3.6 * spin + 0.8, alpha, palette[(i % 3) as usize]);
+            }
+        }
     }
     out
 }
@@ -518,7 +651,7 @@ mod tests {
         }
     }
 
-    const KINDS: [ClipKind; 11] = [
+    const KINDS: [ClipKind; 14] = [
         ClipKind::Burst,
         ClipKind::Sparkle,
         ClipKind::Smoke,
@@ -530,6 +663,9 @@ mod tests {
         ClipKind::Ember,
         ClipKind::Fountain,
         ClipKind::Orbit,
+        ClipKind::Lightning,
+        ClipKind::Bubbles,
+        ClipKind::Leaves,
     ];
 
     #[test]
@@ -773,6 +909,140 @@ mod tests {
         // And the whole system actually rotates.
         let b = clip_particles(&c, 18.0, anchor);
         assert_ne!(a, b, "orbit should move between frames");
+    }
+
+    #[test]
+    fn lightning_bolt_runs_along_the_angle_and_is_jagged() {
+        let c = clip(ClipKind::Lightning); // angle 90 -> dir (1, 0), length 160
+        let anchor = [300.0, 300.0];
+        let dir = dir_from_deg(c.angle);
+        let ps = clip_particles(&c, 14.0, anchor);
+        assert!(!ps.is_empty());
+        // The bolt starts at the anchor and reaches ~length along
+        // the ray; sideways offsets stay within the jitter bound.
+        let mut max_along: f32 = 0.0;
+        for (p, _, _, _) in &ps {
+            let rel = [p[0] - anchor[0], p[1] - anchor[1]];
+            let along = rel[0] * dir[0] + rel[1] * dir[1];
+            let perp = (rel[0] * dir[1] - rel[1] * dir[0]).abs();
+            assert!(along >= -0.01, "bolt dot behind the anchor: {along}");
+            assert!(perp <= 13.5, "bolt dot {perp} off the zigzag bound");
+            max_along = max_along.max(along);
+        }
+        assert!(
+            (max_along - c.length).abs() < 1.0,
+            "bolt tip at {max_along} along the ray, want ~{}",
+            c.length
+        );
+        // Jagged: across a few frames, at least one dot sits well
+        // off the straight ray.
+        let mut worst = 0.0f32;
+        for frame in [11.0, 13.0, 15.0, 17.0, 19.0] {
+            for (p, _, _, _) in clip_particles(&c, frame, anchor) {
+                let rel = [p[0] - anchor[0], p[1] - anchor[1]];
+                worst = worst.max((rel[0] * dir[1] - rel[1] * dir[0]).abs());
+            }
+        }
+        assert!(worst > 3.0, "bolt never zigzags: max sideways offset {worst}");
+    }
+
+    #[test]
+    fn lightning_restricks_each_frame_but_stays_deterministic() {
+        let c = clip(ClipKind::Lightning);
+        let anchor = [300.0, 300.0];
+        // Same fractional frame, identical bolt (covered globally
+        // too, but pin it here against the frame-salted design).
+        assert_eq!(
+            clip_particles(&c, 17.3, anchor),
+            clip_particles(&c, 17.3, anchor)
+        );
+        // The next integer frame re-seeds the jitter: new bolt.
+        assert_ne!(
+            clip_particles(&c, 17.0, anchor),
+            clip_particles(&c, 18.0, anchor),
+            "bolt shape should change between frames"
+        );
+    }
+
+    #[test]
+    fn bubbles_rise_grow_and_pop() {
+        let c = clip(ClipKind::Bubbles);
+        let anchor = [300.0, 300.0];
+        let at = |t: f32| clip_particles(&c, c.start + c.duration * t, anchor);
+        // Mid-life: the full set is up, and every bubble is above
+        // the anchor.
+        let mid = at(0.45);
+        assert_eq!(mid.len(), 16, "all bubbles should be alive mid-clip");
+        assert!(
+            mid.iter().all(|p| p.0[1] < anchor[1]),
+            "a bubble sank below the anchor"
+        );
+        // Rising: the mean height above the anchor grows with t.
+        let height = |t: f32| {
+            let ps = at(t);
+            anchor[1] - ps.iter().map(|p| p.0[1]).sum::<f32>() / ps.len() as f32
+        };
+        assert!(
+            height(0.45) > height(0.15),
+            "bubbles should climb: {} vs {}",
+            height(0.45),
+            height(0.15)
+        );
+        // Growing: mean radius is larger later in the life cycle.
+        let size = |t: f32| {
+            let ps = at(t);
+            ps.iter().map(|p| p.1).sum::<f32>() / ps.len() as f32
+        };
+        assert!(size(0.45) > size(0.15), "bubbles should grow as they rise");
+        // Popping: by the very end of the clip most bubbles have
+        // burst (their life cycles ran out / alpha collapsed).
+        let late = at(0.99);
+        assert!(
+            late.len() < mid.len(),
+            "bubbles should pop late: {} alive at t=0.99 vs {} mid-clip",
+            late.len(),
+            mid.len()
+        );
+    }
+
+    #[test]
+    fn leaves_fall_flutter_and_stay_green() {
+        let c = clip(ClipKind::Leaves); // clip colour 0xFFC65D (amber)
+        let anchor = [300.0, 300.0];
+        let mean_y = |t: f32| {
+            let ps = clip_particles(&c, c.start + c.duration * t, anchor);
+            assert!(!ps.is_empty());
+            ps.iter().map(|p| p.0[1]).sum::<f32>() / ps.len() as f32
+        };
+        // Falling: mean y grows (down-screen) through the clip and
+        // ends below the anchor.
+        assert!(
+            mean_y(0.65) > mean_y(0.25),
+            "leaves should descend: {} vs {}",
+            mean_y(0.65),
+            mean_y(0.25)
+        );
+        assert!(mean_y(0.65) > anchor[1], "leaves should end below the anchor");
+        // Flutter: the sway pushes leaves to both sides of the
+        // anchor over the clip.
+        let mut xs: Vec<f32> = Vec::new();
+        for t in [0.3, 0.45, 0.6] {
+            xs.extend(
+                clip_particles(&c, c.start + c.duration * t, anchor)
+                    .iter()
+                    .map(|p| p.0[0]),
+            );
+        }
+        assert!(xs.iter().any(|x| *x < anchor[0] - 4.0), "no leaf swayed left");
+        assert!(xs.iter().any(|x| *x > anchor[0] + 4.0), "no leaf swayed right");
+        // Palette: green dominates every leaf colour even though
+        // the clip colour is amber.
+        for (_, _, col, _) in clip_particles(&c, c.start + c.duration * 0.5, anchor) {
+            assert!(
+                col[1] >= col[0] && col[1] >= col[2],
+                "leaf colour {col:?} is not green-dominant"
+            );
+        }
     }
 
     // ---- Weather ----

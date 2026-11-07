@@ -247,6 +247,77 @@ pub fn nib_widths(points: &[V2], base: f32, nib: Nib, nib_angle_deg: f32) -> Vec
         .collect()
 }
 
+/// A named brush preset: the base width a stroke is recorded
+/// with, the nib that profiles its per-point widths when the
+/// stroke is finished, and how many Chaikin smoothing iterations
+/// are applied to the recorded path at that same moment. Pure
+/// data — the editor owns the behaviour (see `editor.rs`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Brush {
+    pub name: &'static str,
+    /// Base stroke width (the nib size for profiled brushes).
+    pub width: f32,
+    pub nib: Nib,
+    /// Nib edge orientation in degrees (see [`nib_widths`]).
+    pub nib_angle: f32,
+    /// Chaikin iterations applied to the finished stroke;
+    /// 0 = keep the path exactly as recorded.
+    pub smoothing: usize,
+}
+
+/// The built-in brush library, in the order the editor's
+/// brush cycle walks it. Index 0 is **Pen**, and it is the
+/// editor's default for a reason: width 4.0, a round nib and no
+/// smoothing reproduce exactly how strokes were recorded before
+/// the library existed, so picking up any other brush is a
+/// deliberate change, never a silent one.
+pub fn brush_library() -> Vec<Brush> {
+    vec![
+        Brush {
+            name: "Pen",
+            width: 4.0,
+            nib: Nib::Round,
+            nib_angle: 0.0,
+            smoothing: 0,
+        },
+        Brush {
+            name: "Pencil",
+            width: 2.0,
+            nib: Nib::Round,
+            nib_angle: 0.0,
+            smoothing: 0,
+        },
+        Brush {
+            name: "Marker",
+            width: 8.0,
+            nib: Nib::Round,
+            nib_angle: 0.0,
+            smoothing: 1,
+        },
+        Brush {
+            name: "Calligraphy",
+            width: 7.0,
+            nib: Nib::Calligraphy,
+            nib_angle: 30.0,
+            smoothing: 1,
+        },
+        Brush {
+            name: "Brush",
+            width: 9.0,
+            nib: Nib::Square,
+            nib_angle: 0.0,
+            smoothing: 1,
+        },
+        Brush {
+            name: "Paint Brush",
+            width: 12.0,
+            nib: Nib::Square,
+            nib_angle: 45.0,
+            smoothing: 2,
+        },
+    ]
+}
+
 /// The eraser: remove every point within `radius` of `centre`
 /// (distance `<= radius`) from every stroke, splitting a stroke
 /// into several where the erasure cuts its middle. Each surviving
@@ -536,6 +607,42 @@ mod tests {
         assert_widths(&nib_widths(&horiz, base, Nib::Square, 0.0), base / s2);
         assert_widths(&nib_widths(&vert, base, Nib::Square, 0.0), base / s2);
         assert_widths(&nib_widths(&diag, base, Nib::Square, 0.0), base);
+    }
+
+    // ---- brush_library ----
+
+    #[test]
+    fn brush_library_is_sane_and_pen_is_the_legacy_default() {
+        let lib = brush_library();
+        assert!(lib.len() >= 5, "a handful of presets: {}", lib.len());
+        // Names are unique (the editor reports them in its status).
+        for (i, a) in lib.iter().enumerate() {
+            for b in &lib[i + 1..] {
+                assert_ne!(a.name, b.name, "duplicate brush name");
+            }
+            assert!(a.width > 0.0, "{} has a usable width", a.name);
+            assert!(
+                (0.0..360.0).contains(&a.nib_angle),
+                "{} nib angle in range",
+                a.name
+            );
+            assert!(a.smoothing <= 3, "{} smoothing is bounded", a.name);
+        }
+        // Index 0 is the default, and it must reproduce the
+        // pre-library recording exactly: width 4.0, round nib
+        // (no profiling), no smoothing.
+        let pen = lib[0];
+        assert_eq!(pen.name, "Pen");
+        assert_eq!(pen.width, 4.0);
+        assert_eq!(pen.nib, Nib::Round);
+        assert_eq!(pen.smoothing, 0);
+        // The library exercises every nib shape.
+        for nib in [Nib::Round, Nib::Square, Nib::Calligraphy] {
+            assert!(
+                lib.iter().any(|b| b.nib == nib),
+                "some brush uses {nib:?}"
+            );
+        }
     }
 
     #[test]

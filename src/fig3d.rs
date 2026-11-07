@@ -36,6 +36,7 @@
 
 use crate::model::V2;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// One joint of a 3D figure: `offset` is the rest-pose vector from the
 /// parent joint to this joint, in world-axis directions (Y up).
@@ -108,6 +109,10 @@ pub struct Fig3State {
     pub pose: Pose3,
     pub camera: Camera3,
     pub selected: usize,
+    /// A second pose marked by the user (`EditorCore::fig3_mark_pose_b`):
+    /// the target `EditorCore::fig3_bake_animation` interpolates to
+    /// from the current pose. `None` until marked.
+    pub pose_b: Option<Pose3>,
 }
 
 /// The orbit camera a fresh 3D editing session starts with: on +Z,
@@ -423,6 +428,176 @@ pub fn bake_nodes(fig: &Figure3, pose: &Pose3, cam: &Camera3, stage: [f32; 2]) -
         .collect()
 }
 
+// ---------------------------------------------------------------------
+// Pose interpolation, animated baking, and the 3D figure library.
+// ---------------------------------------------------------------------
+
+/// The stage size [`bake_range`] projects onto: the port's standard
+/// project stage (see `Project::demo` in model.rs). Callers working
+/// on a different stage use [`bake_range_staged`].
+pub const DEFAULT_STAGE: [f32; 2] = [960.0, 720.0];
+
+/// Interpolate two poses of the same figure. The root lerps
+/// component-wise; each Euler component takes the **shortest path**
+/// around the circle (per [`crate::model::norm_deg`]): interpolating
+/// 350° → 10° passes through 0°, not backwards through 180°. A
+/// rotation list shorter than the other is padded with identity
+/// rotations, matching how [`evaluate3`] reads poses. Components of
+/// the result are normalised into (−180°, 180°], so lerping between
+/// two stored-but-noncanonical angles (e.g. 350°) yields the
+/// equivalent canonical angle — the evaluated figure is identical.
+pub fn lerp_pose(a: &Pose3, b: &Pose3, t: f32) -> Pose3 {
+    let n = a.rotations.len().max(b.rotations.len());
+    let rotations = (0..n)
+        .map(|i| {
+            let ra = a.rotations.get(i).copied().unwrap_or([0.0; 3]);
+            let rb = b.rotations.get(i).copied().unwrap_or([0.0; 3]);
+            let mut out = [0.0; 3];
+            for c in 0..3 {
+                let d = crate::model::norm_deg(rb[c] - ra[c]);
+                out[c] = crate::model::norm_deg(ra[c] + d * t);
+            }
+            out
+        })
+        .collect();
+    Pose3 {
+        root: [
+            a.root[0] + (b.root[0] - a.root[0]) * t,
+            a.root[1] + (b.root[1] - a.root[1]) * t,
+            a.root[2] + (b.root[2] - a.root[2]) * t,
+        ],
+        rotations,
+    }
+}
+
+/// Bake an animated range: `frames` steps interpolating `from` →
+/// `to` (see [`lerp_pose`]), each baked with [`bake_nodes`] on the
+/// given stage. Step `i` uses `t = i / (frames − 1)`, so the first
+/// step is exactly `from` and the last exactly `to`. `frames == 0`
+/// yields no steps; `frames == 1` yields the single `from` bake.
+pub fn bake_range_staged(
+    fig: &Figure3,
+    from: &Pose3,
+    to: &Pose3,
+    cam: &Camera3,
+    stage: [f32; 2],
+    frames: usize,
+) -> Vec<Vec<BakeNode>> {
+    (0..frames)
+        .map(|i| {
+            let t = if frames <= 1 {
+                0.0
+            } else {
+                i as f32 / (frames - 1) as f32
+            };
+            bake_nodes(fig, &lerp_pose(from, to, t), cam, stage)
+        })
+        .collect()
+}
+
+/// [`bake_range_staged`] on [`DEFAULT_STAGE`].
+pub fn bake_range(
+    fig: &Figure3,
+    from: &Pose3,
+    to: &Pose3,
+    cam: &Camera3,
+    frames: usize,
+) -> Vec<Vec<BakeNode>> {
+    bake_range_staged(fig, from, to, cam, DEFAULT_STAGE, frames)
+}
+
+/// File name a library figure called `name` is stored under:
+/// `fig3d-<slug>.json`, where the slug is the lowercased name with
+/// every run of non-alphanumeric characters collapsed to one `-`
+/// (and no leading/trailing `-`); an empty slug becomes `figure`.
+pub fn library_file_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut dash = false;
+    for ch in name.chars() {
+        if ch.is_alphanumeric() {
+            if dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            dash = false;
+            slug.extend(ch.to_lowercase());
+        } else {
+            dash = true;
+        }
+    }
+    if slug.is_empty() {
+        slug.push_str("figure");
+    }
+    format!("fig3d-{slug}.json")
+}
+
+/// One library file's contents: a figure plus the pose it was saved
+/// in, under the name the user saved it by.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LibraryEntry {
+    name: String,
+    figure: Figure3,
+    pose: Pose3,
+}
+
+/// Save `fig` in `pose` into the 3D library directory `dir` (created
+/// if missing) under `name`, returning the file's path. The file is
+/// `<dir>/fig3d-<slug>.json` (see [`library_file_name`]) holding
+/// `{name, figure, pose}` as JSON.
+pub fn save_library_figure(
+    dir: &Path,
+    name: &str,
+    fig: &Figure3,
+    pose: &Pose3,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(library_file_name(name));
+    let entry = LibraryEntry {
+        name: name.to_string(),
+        figure: fig.clone(),
+        pose: pose.clone(),
+    };
+    let text = serde_json::to_string_pretty(&entry).map_err(std::io::Error::other)?;
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
+/// Load a library file written by [`save_library_figure`], returning
+/// the figure and its saved pose. `None` on any failure (missing
+/// file, invalid JSON, wrong shape) — a corrupt library entry is
+/// simply unusable, never an error worth aborting over.
+pub fn load_library_figure(path: &Path) -> Option<(Figure3, Pose3)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let entry: LibraryEntry = serde_json::from_str(&text).ok()?;
+    Some((entry.figure, entry.pose))
+}
+
+/// The display names of every figure saved in library directory
+/// `dir`, sorted. Files that are not readable library entries are
+/// skipped; a missing directory yields an empty list.
+pub fn scan_library(dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_library_file = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("fig3d-") && n.ends_with(".json"))
+                .unwrap_or(false);
+            if is_library_file {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(parsed) = serde_json::from_str::<LibraryEntry>(&text) {
+                        names.push(parsed.name);
+                    }
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,5 +801,124 @@ mod tests {
         let pose = Pose3 { root: [1.0, 2.0, 3.0], rotations: vec![] };
         let pos = evaluate3(&fig, &pose);
         assert_eq!(pos[2], [1.0, 60.0, 3.0]);
+    }
+
+    #[test]
+    fn lerp_pose_takes_the_shortest_path_around_the_circle() {
+        let fig = humanoid3();
+        let mut a = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        let mut b = Pose3::rest(&fig, [100.0, -40.0, 20.0]);
+        a.rotations[3] = [350.0, 0.0, 0.0];
+        b.rotations[3] = [10.0, 0.0, 0.0];
+        // The midpoint of 350 -> 10 is 0 (through 360), never 180.
+        let mid = lerp_pose(&a, &b, 0.5);
+        assert!(mid.rotations[3][0].abs() < 0.01, "mid {:?}", mid.rotations[3]);
+        // A quarter of the way is 355, i.e. -5 normalised.
+        let quarter = lerp_pose(&a, &b, 0.25);
+        assert!(
+            (quarter.rotations[3][0] - (-5.0)).abs() < 0.01,
+            "quarter {:?}",
+            quarter.rotations[3]
+        );
+        // Endpoints: values equivalent to a and b (350 normalises to
+        // -10, which evaluates identically).
+        let start = lerp_pose(&a, &b, 0.0);
+        assert!((start.rotations[3][0] - (-10.0)).abs() < 0.01);
+        assert_eq!(start.root, [0.0, 0.0, 0.0]);
+        let end = lerp_pose(&a, &b, 1.0);
+        assert!((end.rotations[3][0] - 10.0).abs() < 0.01);
+        assert_eq!(end.root, [100.0, -40.0, 20.0]);
+        // The root lerps linearly.
+        assert_eq!(mid.root, [50.0, -20.0, 10.0]);
+    }
+
+    #[test]
+    fn lerp_pose_pads_short_rotation_lists() {
+        let fig = humanoid3();
+        let a = Pose3 { root: [0.0; 3], rotations: vec![] };
+        let mut b = Pose3::rest(&fig, [0.0; 3]);
+        b.rotations[1] = [0.0, 0.0, 40.0];
+        let mid = lerp_pose(&a, &b, 0.5);
+        assert_eq!(mid.rotations.len(), fig.nodes.len());
+        assert!((mid.rotations[1][2] - 20.0).abs() < 0.01);
+    }
+
+    fn bake_nodes_close(a: &[BakeNode], b: &[BakeNode], eps: f32) -> bool {
+        a.len() == b.len()
+            && a.iter().zip(b).all(|(x, y)| {
+                (x.xy[0] - y.xy[0]).abs() < eps
+                    && (x.xy[1] - y.xy[1]).abs() < eps
+                    && (x.length - y.length).abs() < eps
+                    && (x.abs_angle - y.abs_angle).abs() < 0.1
+            })
+    }
+
+    #[test]
+    fn bake_range_endpoints_equal_single_bakes() {
+        let fig = humanoid3();
+        let cam = default_camera();
+        let from = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        let mut to = Pose3::rest(&fig, [30.0, 0.0, 0.0]);
+        to.rotations[3] = [0.0, 0.0, 60.0]; // upperArm.L swings
+        to.rotations[1] = [20.0, 0.0, 0.0]; // chest tips forward
+        let range = bake_range(&fig, &from, &to, &cam, 5);
+        assert_eq!(range.len(), 5);
+        let first = bake_nodes(&fig, &from, &cam, DEFAULT_STAGE);
+        let last = bake_nodes(&fig, &to, &cam, DEFAULT_STAGE);
+        assert!(bake_nodes_close(&range[0], &first, 0.01), "first step = from");
+        assert!(bake_nodes_close(&range[4], &last, 0.01), "last step = to");
+        // A middle step is genuinely between: the left hand is near
+        // neither endpoint's position.
+        let hand = 5;
+        let mid = range[2][hand].xy;
+        assert!(dist2(mid, first[hand].xy) > 1.0, "mid {mid:?} vs from {:?}", first[hand].xy);
+        assert!(dist2(mid, last[hand].xy) > 1.0, "mid {mid:?} vs to {:?}", last[hand].xy);
+        // Degenerate counts stay safe.
+        assert!(bake_range(&fig, &from, &to, &cam, 0).is_empty());
+        assert_eq!(bake_range(&fig, &from, &to, &cam, 1).len(), 1);
+        assert!(bake_nodes_close(
+            &bake_range(&fig, &from, &to, &cam, 1)[0],
+            &first,
+            0.01
+        ));
+    }
+
+    fn dist2(a: V2, b: V2) -> f32 {
+        let d = [a[0] - b[0], a[1] - b[1]];
+        (d[0] * d[0] + d[1] * d[1]).sqrt()
+    }
+
+    #[test]
+    fn library_save_load_scan_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "stykr-fig3d-library-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Scanning a directory that does not exist yet is empty.
+        assert!(scan_library(&dir).is_empty());
+        assert!(load_library_figure(&dir.join("fig3d-nope.json")).is_none());
+
+        let fig = humanoid3();
+        let mut pose = Pose3::rest(&fig, [5.0, 6.0, 7.0]);
+        pose.rotations[2] = [0.0, 30.0, 0.0];
+        let path = save_library_figure(&dir, "Humanoid3", &fig, &pose).unwrap();
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            "fig3d-humanoid3.json"
+        );
+        // A second, messier name exercises the slug rules.
+        let path2 = save_library_figure(&dir, "My Bot!!", &fig, &pose).unwrap();
+        assert_eq!(
+            path2.file_name().unwrap().to_str().unwrap(),
+            "fig3d-my-bot.json"
+        );
+        assert_eq!(library_file_name("  --  "), "fig3d-figure.json");
+
+        assert_eq!(scan_library(&dir), vec!["Humanoid3", "My Bot!!"]);
+        let (loaded_fig, loaded_pose) = load_library_figure(&path).unwrap();
+        assert_eq!(loaded_fig, fig);
+        assert_eq!(loaded_pose, pose);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

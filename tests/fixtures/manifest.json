@@ -98,6 +98,40 @@
       "frames": null,
       "frame0_roots": [],
       "notes": "The legacy STK container stores no name, canvas, fps or frames. The original's decoder reports the figure name as the file stem ('figure'); the geometry is the same Tripod (lengths 50/30/16, segment 3 a circle)."
+    },
+    "figure.nodes": {
+      "format": "sticknodes_nodes",
+      "canvas": [
+        960,
+        720
+      ],
+      "fps": 24,
+      "figures": [
+        {
+          "name": "Stick Nodes figure",
+          "segments": 2
+        }
+      ],
+      "frames": 1,
+      "frame0_roots": [
+        [
+          480.0,
+          360.0
+        ]
+      ],
+      "notes": "The original suite's modernNodesBase64 corpus figure (431/117). The container stores no canvas or fps; the values above are the importing project's: a fixed 960x720 stage, 24 fps, the figure at rest at the stage centre. Two segments (root + one child, id 7, length 80, thickness 4); the imported definition has one extra origin node."
+    },
+    "project.nodemc": {
+      "format": "sticknodes_nodemc",
+      "canvas": [
+        960,
+        720
+      ],
+      "fps": 24,
+      "figures": [],
+      "frames": 1,
+      "frame0_roots": [],
+      "notes": "Built by the original test suite's syntheticClip helper (431/117) around the figure.nodes rig, 389 bytes. The clip is named 'Synthetic clip'; its only frame holds no instances, so it imports with zero figures and no poses."
     }
   }
 }

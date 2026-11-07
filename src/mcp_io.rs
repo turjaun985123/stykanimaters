@@ -172,6 +172,25 @@ fn tool_import_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
     Ok(out)
 }
 
+/// The figure index for single-figure exports: the `figure`
+/// argument, defaulting to the editor's selected figure.
+fn arg_figure(core: &EditorCore, args: &Value) -> Result<usize, String> {
+    let idx = match args.get("figure") {
+        None | Some(Value::Null) => core.selected_figure,
+        Some(v) => v.as_u64().map(|n| n as usize).ok_or_else(|| {
+            "argument 'figure' must be a non-negative integer".to_string()
+        })?,
+    };
+    if idx < core.project.figures.len() {
+        Ok(idx)
+    } else {
+        Err(format!(
+            "figure index {idx} out of range (project has {} figures)",
+            core.project.figures.len()
+        ))
+    }
+}
+
 fn tool_export_file(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let path = arg_path(args)?;
     let format = args
@@ -179,26 +198,22 @@ fn tool_export_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
         .and_then(Value::as_str)
         .ok_or_else(|| "missing required string argument: format".to_string())?;
     let bytes: Vec<u8> = match format {
+        "piv2" => crate::pivot::export_piv_v2(&core.project),
         "piv3" => crate::pivot::export_piv_v3(&core.project),
+        "piv4" => crate::pivot::export_piv_v4(&core.project),
         "piv5" => crate::pivot::export_piv_v5(&core.project),
         "stk" => {
-            let idx = match args.get("figure") {
-                None | Some(Value::Null) => core.selected_figure,
-                Some(v) => v.as_u64().map(|n| n as usize).ok_or_else(|| {
-                    "argument 'figure' must be a non-negative integer".to_string()
-                })?,
-            };
-            let fig = core.project.figures.get(idx).ok_or_else(|| {
-                format!(
-                    "figure index {idx} out of range (project has {} figures)",
-                    core.project.figures.len()
-                )
-            })?;
+            let fig = &core.project.figures[arg_figure(core, args)?];
             crate::pivot::export_stk(&fig.def, &fig.name)
         }
+        "nodes" => {
+            let fig = &core.project.figures[arg_figure(core, args)?];
+            crate::nodes::export_nodes_figure(&fig.def, &fig.name)
+        }
+        "stknds" => crate::nodes_anim::export_nodes_animation(&core.project),
         _ => {
             return Err(format!(
-                "unknown export format '{format}' (supported: piv3, piv5, stk)"
+                "unknown export format '{format}' (supported: piv2, piv3, piv4, piv5, stk, nodes, stknds)"
             ));
         }
     };
@@ -429,13 +444,13 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "export_file",
-            description: "Export the project in a Pivot format: 'piv3' or 'piv5' write the whole animation as .piv bytes; 'stk' writes a single figure as .stk bytes (the 'figure' index, defaulting to the selected figure). Parent directories are created.",
+            description: "Export the project: 'piv2', 'piv3', 'piv4' or 'piv5' write the whole animation as .piv bytes; 'stk' writes a single figure as Pivot .stk bytes and 'nodes' writes it as a Stick Nodes .nodes figure (both take the 'figure' index, defaulting to the selected figure); 'stknds' writes the whole animation as a Stick Nodes project. Parent directories are created.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Destination file path" },
-                    "format": { "type": "string", "enum": ["piv3", "piv5", "stk"] },
-                    "figure": { "type": "integer", "minimum": 0, "description": "Figure index for format 'stk' (default: selected figure)" }
+                    "format": { "type": "string", "enum": ["piv2", "piv3", "piv4", "piv5", "stk", "nodes", "stknds"] },
+                    "figure": { "type": "integer", "minimum": 0, "description": "Figure index for formats 'stk' and 'nodes' (default: selected figure)" }
                 },
                 "required": ["path", "format"]
             }),
@@ -616,6 +631,67 @@ mod tests {
     }
 
     #[test]
+    fn export_piv2_piv4_roundtrip_through_importer() {
+        let dir = temp_dir("piv24");
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        for format in ["piv2", "piv4"] {
+            let path = dir.join(format!("out.{format}"));
+            call(
+                "export_file",
+                &mut core,
+                json!({ "path": path.to_string_lossy(), "format": format }),
+            )
+            .unwrap_or_else(|e| panic!("{format} export failed: {e}"));
+            let bytes = std::fs::read(&path).expect("piv missing");
+            let reimported = crate::pivot::import_piv(&bytes)
+                .unwrap_or_else(|e| panic!("exported {format} does not re-import: {e}"));
+            assert!(!reimported.frames.is_empty(), "{format} lost its frames");
+            assert_eq!(reimported.figures.len(), core.project.figures.len(), "{format}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_nodes_roundtrips_through_importer() {
+        let dir = temp_dir("nodes");
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        let path = dir.join("fig.nodes");
+        call(
+            "export_file",
+            &mut core,
+            json!({ "path": path.to_string_lossy(), "format": "nodes", "figure": 0 }),
+        )
+        .expect("nodes export failed");
+        let bytes = std::fs::read(&path).expect("nodes file missing");
+        let (def, _color) = crate::nodes::import_nodes_figure(&bytes)
+            .expect("exported .nodes does not re-import");
+        assert_eq!(def.nodes.len(), core.project.figures[0].def.nodes.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_stknds_roundtrips_through_importer() {
+        let dir = temp_dir("stknds");
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        let path = dir.join("out.stknds");
+        call(
+            "export_file",
+            &mut core,
+            json!({ "path": path.to_string_lossy(), "format": "stknds" }),
+        )
+        .expect("stknds export failed");
+        let bytes = std::fs::read(&path).expect("stknds file missing");
+        let reimported = crate::nodes_anim::import_nodes_animation(&bytes)
+            .expect("exported .stknds does not re-import");
+        assert_eq!(reimported.frames.len(), core.project.frames.len());
+        assert!(!reimported.figures.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn import_fixture_through_tool() {
         let mut core = EditorCore::new();
         let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-v3.piv");
@@ -631,6 +707,66 @@ mod tests {
         let out = call("import_file", &mut core, json!({ "path": stk })).expect("stk import failed");
         assert_eq!(out["imported_format"], "stk");
         assert_eq!(core.project.figures.len(), before + 1);
+    }
+
+    fn manifest_fixture(name: &str) -> Value {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/manifest.json"
+        ))
+        .expect("manifest missing");
+        let manifest: Value = serde_json::from_str(&text).expect("manifest is not JSON");
+        manifest["fixtures"][name].clone()
+    }
+
+    /// Wave-7 corpus: the Stick Nodes figure fixture must import to
+    /// exactly the values tests/fixtures/manifest.json states.
+    #[test]
+    fn nodes_fixture_matches_manifest() {
+        let entry = manifest_fixture("figure.nodes");
+        let mut core = EditorCore::new();
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/figure.nodes");
+        let out = call("import_file", &mut core, json!({ "path": fixture }))
+            .expect("nodes fixture import failed");
+        assert_eq!(out["imported_format"], "nodes");
+        let p = &core.project;
+        assert_eq!(p.frames.len(), entry["frames"].as_u64().unwrap() as usize);
+        assert_eq!(p.fps, entry["fps"].as_f64().unwrap() as f32);
+        let stated = entry["figures"].as_array().unwrap();
+        assert_eq!(p.figures.len(), stated.len());
+        let fig = &p.figures[0];
+        assert_eq!(fig.name, stated[0]["name"].as_str().unwrap());
+        // Definition nodes = stated segments plus the origin node.
+        assert_eq!(
+            fig.def.nodes.len(),
+            stated[0]["segments"].as_u64().unwrap() as usize + 1
+        );
+        let root = entry["frame0_roots"][0].as_array().unwrap();
+        assert_eq!(
+            p.frames[0].poses[0].root,
+            [root[0].as_f64().unwrap() as f32, root[1].as_f64().unwrap() as f32]
+        );
+        // The corpus segment itself: length 80 (see manifest notes).
+        assert!((fig.def.nodes[2].length - 80.0).abs() < 0.01);
+    }
+
+    /// Wave-7 corpus: the Stick Nodes movieclip fixture (built by
+    /// the original suite's syntheticClip helper) imports with the
+    /// manifest's name/fps/frame/figure values.
+    #[test]
+    fn nodemc_fixture_matches_manifest() {
+        let entry = manifest_fixture("project.nodemc");
+        let mut core = EditorCore::new();
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/project.nodemc");
+        let out = call("import_file", &mut core, json!({ "path": fixture }))
+            .expect("nodemc fixture import failed");
+        assert_eq!(out["imported_format"], "nodemc");
+        let p = &core.project;
+        assert_eq!(p.name, "Synthetic clip");
+        assert_eq!(p.frames.len(), entry["frames"].as_u64().unwrap() as usize);
+        assert_eq!(p.fps, entry["fps"].as_f64().unwrap() as f32);
+        assert_eq!(p.figures.len(), entry["figures"].as_array().unwrap().len());
+        assert!(p.frames[0].poses.is_empty(), "the clip frame holds no instances");
     }
 
     #[test]
