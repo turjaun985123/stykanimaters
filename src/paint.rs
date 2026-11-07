@@ -1162,15 +1162,16 @@ mod shape_wave11_tests {
     fn rect_corners_clockwise_when_a_is_below_right_of_b() {
         // Same box dragged the opposite way: a is the bottom-right
         // corner. The run still starts at a and stays clockwise —
-        // from bottom-right, clockwise heads up the right edge.
+        // from bottom-right, clockwise heads left along the bottom
+        // edge (the same rotational sense as the forward drag).
         let pts = shape_points(ShapeKind::Rect, [30.0, 50.0], [10.0, 20.0]);
         assert_eq!(
             pts,
             vec![
                 [30.0, 50.0],
-                [30.0, 20.0],
-                [10.0, 20.0],
                 [10.0, 50.0],
+                [10.0, 20.0],
+                [30.0, 20.0],
                 [30.0, 50.0],
             ]
         );
