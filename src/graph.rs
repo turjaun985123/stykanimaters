@@ -42,26 +42,56 @@ pub enum ChannelTarget {
     Length(usize),
 }
 
+/// How a channel segment is interpolated. The mode lives on the
+/// key that STARTS the segment: it governs the curve from that key
+/// to the next one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Interp {
+    /// Cubic Hermite spline through the segment's keys, using
+    /// their tangents (the engine's original behaviour).
+    #[default]
+    Hermite,
+    /// Straight-line interpolation between the segment's keys
+    /// (angle channels still take the shortest circular path).
+    Linear,
+    /// Hold this key's value for the whole segment, jumping to the
+    /// next key's value exactly at the next key's frame.
+    Step,
+}
+
 /// One keyframe on a channel. Tangents are slopes in value-units
 /// per frame: `out_tan` is the curve's slope as it leaves this key,
-/// `in_tan` its slope as it arrives at this key.
+/// `in_tan` its slope as it arrives at this key. `interp` selects
+/// how the segment STARTING at this key is interpolated; it
+/// defaults to [`Interp::Hermite`], so projects saved before the
+/// field existed load unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Key {
     pub frame: f32,
     pub value: f32,
     pub in_tan: f32,
     pub out_tan: f32,
+    #[serde(default)]
+    pub interp: Interp,
 }
 
 impl Key {
-    /// A key with flat (zero) tangents.
+    /// A key with flat (zero) tangents and Hermite interpolation.
     pub fn flat(frame: f32, value: f32) -> Self {
         Key {
             frame,
             value,
             in_tan: 0.0,
             out_tan: 0.0,
+            interp: Interp::Hermite,
         }
+    }
+
+    /// This key with a different interpolation mode for the
+    /// segment starting at it (builder-style, for editors/tests).
+    pub fn with_interp(mut self, interp: Interp) -> Self {
+        self.interp = interp;
+        self
     }
 }
 
@@ -164,12 +194,15 @@ impl Channel {
 
     /// The channel's value at fractional frame `frame_f`.
     ///
-    /// Between two keys the value is the cubic Hermite spline
-    /// through them, using the left key's `out_tan` and the right
-    /// key's `in_tan` (converted from per-frame slopes to the
-    /// segment's normalised parameter). Outside the key range the
-    /// value clamps to the nearest key; at a key frame the stored
-    /// value is returned exactly. A channel with no keys yields 0.0.
+    /// Between two keys the segment is interpolated by the mode on
+    /// the key that STARTS it (`Key::interp`): Hermite is the cubic
+    /// spline through them, using the left key's `out_tan` and the
+    /// right key's `in_tan` (converted from per-frame slopes to the
+    /// segment's normalised parameter); Linear is a straight lerp;
+    /// Step holds the left key's value until the right key's frame.
+    /// Outside the key range the value clamps to the nearest key;
+    /// at a key frame the stored value is returned exactly. A
+    /// channel with no keys yields 0.0.
     ///
     /// Angle channels interpolate on the shortest circular path:
     /// each segment's end value is unwrapped relative to its start
@@ -177,6 +210,7 @@ impl Channel {
     /// 180°), and the interpolated result is normalised to
     /// (-180, 180], matching `Pose::lerp`'s convention. Tangents on
     /// an angle channel are interpreted on that unwrapped path.
+    /// (Step needs no unwrapping: it holds the start value.)
     pub fn value_at(&self, frame_f: f32) -> f32 {
         let keys = &self.keys;
         if keys.is_empty() {
@@ -201,10 +235,6 @@ impl Channel {
             return k1.value;
         }
         let t = (frame_f - k0.frame) / dt;
-        // Hermite derivatives are with respect to t, so scale the
-        // per-frame slopes by the segment's frame span.
-        let m0 = k0.out_tan * dt;
-        let m1 = k1.in_tan * dt;
         let v0 = k0.value;
         let v1 = if self.is_angle() {
             // Unwrap the end value onto the short path from v0.
@@ -212,13 +242,25 @@ impl Channel {
         } else {
             k1.value
         };
-        let t2 = t * t;
-        let t3 = t2 * t;
-        let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
-        let h10 = t3 - 2.0 * t2 + t;
-        let h01 = -2.0 * t3 + 3.0 * t2;
-        let h11 = t3 - t2;
-        let v = h00 * v0 + h10 * m0 + h01 * v1 + h11 * m1;
+        // The segment's interpolation mode comes from the key that
+        // starts the segment.
+        let v = match k0.interp {
+            Interp::Step => v0,
+            Interp::Linear => v0 + (v1 - v0) * t,
+            Interp::Hermite => {
+                // Hermite derivatives are with respect to t, so
+                // scale the per-frame slopes by the segment's span.
+                let m0 = k0.out_tan * dt;
+                let m1 = k1.in_tan * dt;
+                let t2 = t * t;
+                let t3 = t2 * t;
+                let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+                let h10 = t3 - 2.0 * t2 + t;
+                let h01 = -2.0 * t3 + 3.0 * t2;
+                let h11 = t3 - t2;
+                h00 * v0 + h10 * m0 + h01 * v1 + h11 * m1
+            }
+        };
         if self.is_angle() {
             norm_deg(v)
         } else {
@@ -349,6 +391,7 @@ mod tests {
                     value: 0.0,
                     in_tan: 0.0,
                     out_tan: 2.0,
+                    interp: Interp::Hermite,
                 },
                 Key::flat(10.0, 100.0),
             ],
@@ -370,6 +413,7 @@ mod tests {
                     value: 0.0,
                     in_tan: 0.0,
                     out_tan: 2.0,
+                    interp: Interp::Hermite,
                 },
                 Key::flat(10.0, 100.0),
             ],
@@ -494,6 +538,7 @@ mod tests {
                 value: 1.0,
                 in_tan: 3.0,
                 out_tan: -2.0,
+                interp: Interp::Hermite,
             }],
         );
         ch.add_key(5.0, 9.0);
@@ -535,6 +580,7 @@ mod tests {
                     value: 50.0,
                     in_tan: 1.0,
                     out_tan: 1.0,
+                    interp: Interp::Hermite,
                 },
                 Key::flat(10.0, 100.0),
             ],
@@ -592,5 +638,102 @@ mod tests {
         channel_mut(&mut channels, 2, ChannelTarget::RootX).add_key(1.0, 5.0);
         channel_mut(&mut channels, 0, ChannelTarget::Angle(3)).add_key(1.0, 5.0);
         assert_eq!(channels.len(), 3, "figure and target both distinguish");
+    }
+
+    #[test]
+    fn linear_midpoint_is_exact() {
+        let ch = channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 0.0).with_interp(Interp::Linear),
+                Key::flat(10.0, 100.0),
+            ],
+        );
+        assert!(approx(ch.value_at(0.0), 0.0));
+        assert!(approx(ch.value_at(2.5), 25.0), "quarter point lerps");
+        assert!(approx(ch.value_at(5.0), 50.0), "midpoint is the exact mean");
+        assert!(approx(ch.value_at(7.5), 75.0));
+        assert!(approx(ch.value_at(10.0), 100.0));
+    }
+
+    #[test]
+    fn step_holds_value_then_jumps_at_next_key() {
+        let ch = channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 7.0).with_interp(Interp::Step),
+                Key::flat(10.0, 42.0).with_interp(Interp::Step),
+                Key::flat(20.0, 5.0),
+            ],
+        );
+        assert!(approx(ch.value_at(0.0), 7.0));
+        assert!(approx(ch.value_at(5.0), 7.0), "held mid-segment");
+        assert!(approx(ch.value_at(9.99), 7.0), "held until the next key");
+        assert!(approx(ch.value_at(10.0), 42.0), "jumps exactly at the key");
+        assert!(approx(ch.value_at(19.99), 42.0), "second segment holds too");
+        assert!(approx(ch.value_at(20.0), 5.0), "last key verbatim");
+    }
+
+    #[test]
+    fn linear_angle_wraps_through_zero() {
+        // 350° -> 10° under Linear: the wrapped delta is +20°, so
+        // the path passes through 0°, exactly like Hermite mode.
+        let ch = channel(
+            ChannelTarget::Angle(0),
+            vec![
+                Key::flat(0.0, 350.0).with_interp(Interp::Linear),
+                Key::flat(10.0, 10.0),
+            ],
+        );
+        assert!(
+            approx(ch.value_at(2.5), -5.0),
+            "quarter point is 355° ≡ -5°, got {}",
+            ch.value_at(2.5)
+        );
+        let mid = ch.value_at(5.0);
+        assert!(mid.abs() < 1e-3, "midpoint should be ~0, got {mid}");
+        assert!(approx(ch.value_at(7.5), 5.0), "three-quarter point is 5°");
+    }
+
+    #[test]
+    fn segment_mode_comes_from_the_starting_key() {
+        // Start key Linear, end key Step: the segment is linear —
+        // the end key's mode governs the NEXT segment, not this one.
+        let lin = channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 0.0).with_interp(Interp::Linear),
+                Key::flat(10.0, 100.0).with_interp(Interp::Step),
+            ],
+        );
+        assert!(approx(lin.value_at(5.0), 50.0), "start key's Linear wins");
+        // And the mirror image: start Step, end Linear -> held.
+        let step = channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 0.0).with_interp(Interp::Step),
+                Key::flat(10.0, 100.0).with_interp(Interp::Linear),
+            ],
+        );
+        assert!(approx(step.value_at(5.0), 0.0), "start key's Step wins");
+        assert!(approx(step.value_at(10.0), 100.0));
+    }
+
+    #[test]
+    fn key_json_without_interp_defaults_to_hermite() {
+        // Projects saved before the interp field existed must load
+        // with the original Hermite behaviour.
+        let old: Key = serde_json::from_str(
+            r#"{"frame": 1.0, "value": 2.0, "in_tan": 0.5, "out_tan": -0.5}"#,
+        )
+        .expect("pre-interp key JSON must parse");
+        assert_eq!(old.interp, Interp::Hermite);
+        assert!(approx(old.value, 2.0) && approx(old.out_tan, -0.5));
+        // And a non-default mode round-trips through JSON.
+        let lin = Key::flat(3.0, 9.0).with_interp(Interp::Linear);
+        let json = serde_json::to_string(&lin).expect("key serialises");
+        assert!(json.contains("Linear"), "mode is stored: {json}");
+        let back: Key = serde_json::from_str(&json).expect("key parses back");
+        assert_eq!(back, lin);
     }
 }

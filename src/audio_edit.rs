@@ -158,6 +158,83 @@ pub fn normalize(data: &mut WavData, target_peak: f32) -> f32 {
     gain
 }
 
+/// Apply linear fade-in and fade-out ramps in place.
+///
+/// Lengths are converted with `secs_to_frame` — rounded to frames
+/// and clamped to the clip — so an over-long fade simply spans the
+/// whole clip, negative lengths clamp to zero, and a call with both
+/// lengths zero is a no-op. The ramp follows `mix`'s fade
+/// convention: a fade-in of `F` frames scales frame `j` (`j < F`)
+/// by `j / F`, so the first frame is silent and full level resumes
+/// at frame `F`; a fade-out scales the last `F` frames by their
+/// remaining length, so the final frame lands at `1 / F` of its
+/// level (≈ silence). Where the two ramps overlap they multiply.
+/// The ramp is per frame: every channel of a frame is scaled by
+/// the same factor.
+pub fn fade(data: &mut WavData, fade_in_secs: f32, fade_out_secs: f32) {
+    let frames = data.frames();
+    let ch = data.channels as usize;
+    if frames == 0 || ch == 0 {
+        return;
+    }
+    let fade_in = secs_to_frame(data, fade_in_secs);
+    let fade_out = secs_to_frame(data, fade_out_secs);
+    if fade_in == 0 && fade_out == 0 {
+        return;
+    }
+    for j in 0..frames {
+        let mut amp = 1.0f32;
+        if fade_in > 0 && j < fade_in {
+            amp *= j as f32 / fade_in as f32;
+        }
+        if fade_out > 0 {
+            let remaining = frames - j;
+            if remaining <= fade_out {
+                amp *= remaining as f32 / fade_out as f32;
+            }
+        }
+        if amp == 1.0 {
+            continue;
+        }
+        for c in 0..ch {
+            data.samples[j * ch + c] *= amp;
+        }
+    }
+}
+
+/// Apply a constant gain in decibels in place: every sample is
+/// multiplied by `10^(db / 20)` (+6 dB ≈ ×2, −6 dB ≈ ×0.5,
+/// 0 dB = unity) and hard-clamped to -1..=1 — the same clamp
+/// `mix` puts on its sum. Returns the linear multiplier that was
+/// applied, like `normalize` returns its gain. Empty audio is a
+/// no-op apart from the return value.
+pub fn gain(data: &mut WavData, db: f32) -> f32 {
+    let factor = 10f32.powf(db / 20.0);
+    for s in data.samples.iter_mut() {
+        *s = (*s * factor).clamp(-1.0, 1.0);
+    }
+    factor
+}
+
+/// Reverse the clip in place — the classic backwards-playback
+/// effect. Frames trade places; the channels inside each frame
+/// keep their order, so a stereo clip's left/right are not
+/// swapped. Empty and single-frame clips are unchanged.
+pub fn reverse(data: &mut WavData) {
+    let ch = data.channels as usize;
+    if ch == 0 {
+        return;
+    }
+    let frames = data.frames();
+    for j in 0..frames / 2 {
+        let a = j * ch;
+        let b = (frames - 1 - j) * ch;
+        for c in 0..ch {
+            data.samples.swap(a + c, b + c);
+        }
+    }
+}
+
 /// Seconds to a frame index in `data`, rounded and clamped to the
 /// data range — the same rounding `mix` uses for clip offsets.
 fn secs_to_frame(data: &WavData, secs: f32) -> usize {
@@ -751,6 +828,133 @@ mod tests {
         };
         assert_eq!(normalize(&mut data, 0.9), 1.0);
         assert_eq!(data.samples, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn fade_ramps_edges_to_zero_and_keeps_middle_at_full_scale() {
+        // 1 s of constant 1.0 at 8000 Hz; 0.25 s fades = 2000 frames.
+        let mut data = const_wav(8000, 1.0, 1.0);
+        fade(&mut data, 0.25, 0.25);
+        let at = |f: usize| data.samples[f];
+        assert_eq!(at(0), 0.0, "fade-in edge is silent");
+        assert!((at(1000) - 0.5).abs() < 1e-6, "halfway up: {}", at(1000));
+        assert_eq!(at(2000), 1.0, "fade-in complete");
+        assert_eq!(at(4000), 1.0, "middle is untouched full scale");
+        assert_eq!(at(6000), 1.0, "fade-out begins at full scale");
+        assert!(
+            at(7999).abs() < 0.001,
+            "fade-out edge is ~silent: {}",
+            at(7999)
+        );
+    }
+
+    #[test]
+    fn fade_zero_lengths_leave_samples_untouched() {
+        let mut data = const_wav(8000, 0.1, 0.5);
+        let before = data.samples.clone();
+        fade(&mut data, 0.0, 0.0);
+        fade(&mut data, -1.0, -1.0); // negative lengths clamp to zero
+        assert_eq!(data.samples, before);
+    }
+
+    #[test]
+    fn fade_longer_than_the_clip_clamps_to_the_buffer() {
+        // A 5 s fade-in requested on a 1 s clip becomes a ramp over
+        // the whole clip instead of running past the end.
+        let mut data = const_wav(8000, 1.0, 1.0);
+        fade(&mut data, 5.0, 0.0);
+        assert_eq!(data.samples[0], 0.0);
+        assert!((data.samples[4000] - 0.5).abs() < 1e-6);
+        assert!(
+            (data.samples[7999] - 7999.0 / 8000.0).abs() < 1e-5,
+            "ramp stops at the buffer end: {}",
+            data.samples[7999]
+        );
+    }
+
+    #[test]
+    fn gain_plus_6db_roughly_doubles_and_clips() {
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.25, -0.25, 0.6, -0.6],
+        };
+        let factor = gain(&mut data, 6.0);
+        assert!((factor - 1.995_262_3).abs() < 0.001, "factor {factor}");
+        assert!(
+            (data.samples[0] - 0.5).abs() < 0.002,
+            "0.25 at +6 dB should land near 0.5: {}",
+            data.samples[0]
+        );
+        assert!((data.samples[1] + 0.5).abs() < 0.002);
+        // 0.6 * ~2 = ~1.2 hard-clips to full scale, both signs.
+        assert_eq!(data.samples[2], 1.0);
+        assert_eq!(data.samples[3], -1.0);
+    }
+
+    #[test]
+    fn gain_minus_6db_roughly_halves_and_zero_db_is_unity() {
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.5, -0.5],
+        };
+        let factor = gain(&mut data, -6.0);
+        assert!((factor - 0.501_187_2).abs() < 0.001, "factor {factor}");
+        assert!((data.samples[0] - 0.25).abs() < 0.002);
+        assert!((data.samples[1] + 0.25).abs() < 0.002);
+
+        let mut data2 = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.5, -0.5],
+        };
+        assert_eq!(gain(&mut data2, 0.0), 1.0);
+        assert_eq!(data2.samples, vec![0.5, -0.5]);
+    }
+
+    #[test]
+    fn reverse_flips_frame_order() {
+        // ramp_wav values are distinct per frame (i * 0.0001).
+        let mut data = ramp_wav(8000, 100);
+        let original = data.samples.clone();
+        reverse(&mut data);
+        let expected: Vec<f32> = original.iter().rev().copied().collect();
+        assert_eq!(data.samples, expected);
+        assert_eq!(data.samples[0], original[99]);
+        assert_eq!(data.samples[99], 0.0);
+        // Reversing twice restores the original exactly.
+        reverse(&mut data);
+        assert_eq!(data.samples, original);
+    }
+
+    #[test]
+    fn reverse_keeps_stereo_channels_within_their_frame() {
+        // Frames (0.1, 0.2), (0.3, 0.4), (0.5, 0.6): time reverses
+        // but left/right inside each frame must not swap.
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 2,
+            samples: vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+        };
+        reverse(&mut data);
+        assert_eq!(data.samples, vec![0.5, 0.6, 0.3, 0.4, 0.1, 0.2]);
+    }
+
+    #[test]
+    fn fade_gain_reverse_on_empty_audio_are_safe() {
+        for channels in [1u16, 2] {
+            let mut data = WavData {
+                sample_rate: 8000,
+                channels,
+                samples: Vec::new(),
+            };
+            fade(&mut data, 0.5, 0.5);
+            assert_eq!(gain(&mut data, 12.0), 10f32.powf(12.0 / 20.0));
+            reverse(&mut data);
+            assert!(data.samples.is_empty());
+            assert_eq!(data.frames(), 0);
+        }
     }
 
     #[test]

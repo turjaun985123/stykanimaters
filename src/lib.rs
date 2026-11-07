@@ -26,6 +26,7 @@ pub mod paint;
 pub mod pivot;
 pub mod projects;
 pub mod shell;
+pub mod stats;
 pub mod style;
 pub mod svg;
 pub mod text_edit;

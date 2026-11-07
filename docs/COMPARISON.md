@@ -41,7 +41,7 @@ This document supersedes the earlier comparison + addenda.
 | Touch | Full touch UI | Recogniser wired into the canvas (tap select, drag pose, long-press; pinch logic is multi-pointer ready). Real multi-touch is blocked by the platform: GPUI 0.2.2's Linux input dispatches no touch events at all (verified in the vendored crate source, see `touch.rs`), so a touchscreen arrives as one emulated mouse pointer | Original deeper |
 | Home / library / projects | Full | Home panel, recents, recovery snapshots, figure library | Near-equal |
 | App shell + UI (dialogs, autosave) | Native dialogs, full shell | Native open/save dialogs via zenity/kdialog with the folder flow as fallback, recovery, stage-size controls — and redesigned chrome: an app bar + labelled tool groups (`ui_kit.rs`), colour-dot figure rows, a timeline bar. The GUI has been seen running on a real Linux desktop (user screenshot, 2026-11-08) | Near-equal |
-| AI-agent control (MCP) | None | **Full MCP server: 49 tools — build, pose, draw, decorate, manage FX clips, run 3D sessions, author movieclips, set per-frame bends, render, import/export (incl. .piv v2/v4, .nodes, .stknds), frame inspection as base64 PNG** | Port only |
+| AI-agent control (MCP) | None | **Full MCP server: 51 tools — build, pose, draw, decorate, manage FX clips, run 3D sessions, author movieclips, set per-frame bends, render, import/export (incl. .piv v2/v4, .nodes, .stknds), frame inspection as base64 PNG** | Port only |
 | Localisation | 27 languages, human-maintained | 28 languages (same set + Bengali), machine-produced strings | Port wider, original more polished |
 
 ## Formats — the port's strongest area
@@ -98,7 +98,7 @@ MCP + GUI panels, brush/clip/3D-library UI, timeline depth
 buttons, bend button, format export buttons) and a UI components
 wave (toasts, inspector, colour picker, dopesheet, easing picker,
 help overlay, export centre, canvas HUD), bringing the MCP
-server to 49 tools.
+server to 51 tools (Wave 9).
 Since then the suite runs green in GitHub Actions CI (344 tests —
 per the repo's AGENTS.md, CI is the only build environment), the
 editor chrome was redesigned (app bar + labelled tool groups),

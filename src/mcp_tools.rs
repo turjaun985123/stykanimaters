@@ -351,6 +351,36 @@ fn tool_list_figures(core: &mut EditorCore, _args: &Value) -> Result<Value, Stri
     Ok(json!({ "figures": figures }))
 }
 
+fn tool_get_project_stats(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    use crate::vfx::WeatherKind;
+    let p = &core.project;
+    let frames = p.frames.len();
+    let duration_secs = if p.fps > 0.0 {
+        frames as f32 / p.fps
+    } else {
+        0.0
+    };
+    let weather = p.weather.map(|w| match w.kind {
+        WeatherKind::Rain => "rain",
+        WeatherKind::Snow => "snow",
+        WeatherKind::Fireflies => "fireflies",
+    });
+    Ok(json!({
+        "ok": true,
+        "figures": p.figures.len(),
+        "frames": frames,
+        "fps": p.fps,
+        "duration_secs": duration_secs,
+        "fx_clips": p.fx_clips.len(),
+        "audio_clips": p.audio.len(),
+        "sprites": p.sprites.len(),
+        "texts": p.texts.len(),
+        "weather": weather,
+        "clips": p.clips.len(),
+        "channels": p.channels.len(),
+    }))
+}
+
 fn tool_add_frame(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
     if core.project.frames.is_empty() {
         return Err("project has no frames to copy".into());
@@ -402,6 +432,34 @@ fn tool_set_frame_duration(core: &mut EditorCore, args: &Value) -> Result<Value,
     }
     core.project.frames[frame].duration = duration;
     Ok(json!({ "ok": true, "frame": frame, "duration": duration }))
+}
+
+fn tool_set_frame_durations(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let raw = match get(args, "durations") {
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| "argument 'durations' must be an array of numbers".to_string())?,
+        None => return Err("missing required argument 'durations'".into()),
+    };
+    // Validate everything before mutating, mirroring
+    // set_frame_duration's rule (each duration must be positive),
+    // so a bad entry never leaves a half-updated timeline.
+    let mut durations: Vec<f32> = Vec::with_capacity(raw.len());
+    for (i, v) in raw.iter().enumerate() {
+        let d = v
+            .as_f64()
+            .map(|f| f as f32)
+            .ok_or_else(|| format!("argument 'durations[{i}]' must be a number"))?;
+        if d <= 0.0 {
+            return Err(format!("argument 'durations[{i}]' must be positive"));
+        }
+        durations.push(d);
+    }
+    let updated = durations.len().min(core.project.frames.len());
+    for (i, d) in durations.into_iter().take(updated).enumerate() {
+        core.project.frames[i].duration = d;
+    }
+    Ok(json!({ "ok": true, "updated": updated }))
 }
 
 fn tool_get_pose(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
@@ -641,8 +699,12 @@ fn parse_clip_kind(name: &str) -> Result<ClipKind, String> {
         "lightning" => Ok(ClipKind::Lightning),
         "bubbles" => Ok(ClipKind::Bubbles),
         "leaves" => Ok(ClipKind::Leaves),
+        "meteor" => Ok(ClipKind::Meteor),
+        "petals" => Ok(ClipKind::Petals),
+        "splash" => Ok(ClipKind::Splash),
+        "spiral" => Ok(ClipKind::Spiral),
         other => Err(format!(
-            "unknown fx kind '{other}' (expected burst, sparkle, smoke, beam, aura, trail, confetti, shock_ring, ember, fountain, orbit, lightning, bubbles or leaves)"
+            "unknown fx kind '{other}' (expected burst, sparkle, smoke, beam, aura, trail, confetti, shock_ring, ember, fountain, orbit, lightning, bubbles, leaves, meteor, petals, splash or spiral)"
         )),
     }
 }
@@ -1246,6 +1308,12 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_list_figures,
         },
         Tool {
+            name: "get_project_stats",
+            description: "Project summary counts: figures, frames, fps, duration in seconds, FX/audio clips, sprites, texts, weather kind (or null), movieclips and graph channels.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_get_project_stats,
+        },
+        Tool {
             name: "add_frame",
             description: "Append a copy of the current frame after it and move to it.",
             schema: obj_schema(json!({}), &[]),
@@ -1274,6 +1342,17 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["frame", "duration"],
             ),
             handler: tool_set_frame_duration,
+        },
+        Tool {
+            name: "set_frame_durations",
+            description: "Set hold-time multipliers for frames 0..n in one call (same positive-value rule as set_frame_duration; extra entries beyond the frame count are ignored).",
+            schema: obj_schema(
+                json!({
+                    "durations": { "type": "array", "items": { "type": "number" } }
+                }),
+                &["durations"],
+            ),
+            handler: tool_set_frame_durations,
         },
         Tool {
             name: "get_pose",
@@ -1365,7 +1444,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 json!({
                     "figure": { "type": "integer" },
                     "node": { "type": "integer" },
-                    "kind": { "type": "string", "enum": ["burst", "sparkle", "smoke", "beam", "aura", "trail", "confetti", "shock_ring", "ember", "fountain", "orbit", "lightning", "bubbles", "leaves"] },
+                    "kind": { "type": "string", "enum": ["burst", "sparkle", "smoke", "beam", "aura", "trail", "confetti", "shock_ring", "ember", "fountain", "orbit", "lightning", "bubbles", "leaves", "meteor", "petals", "splash", "spiral"] },
                     "start": { "type": "number" },
                     "duration": { "type": "number" },
                     "color": { "type": "integer", "description": "0xRRGGBB (default: figure colour)" },
@@ -1898,6 +1977,70 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(core.project.frames[1].bends[0][3], 0.0);
+    }
+
+    #[test]
+    #[test]
+    fn wave9_stats_and_bulk_durations() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        call(&mut core, &tools, "new_project", json!({})).unwrap();
+
+        // Stats over the fresh demo project.
+        let s = call(&mut core, &tools, "get_project_stats", json!({})).unwrap();
+        assert_eq!(s["ok"], json!(true));
+        assert!(s["figures"].as_u64().unwrap() >= 1);
+        assert!(s["frames"].as_u64().unwrap() >= 1);
+        assert!(s["duration_secs"].as_f64().unwrap() > 0.0);
+        assert_eq!(s["weather"], Value::Null);
+        assert_eq!(s["fx_clips"].as_u64().unwrap(), 0);
+        assert_eq!(s["channels"].as_u64().unwrap(), 0);
+
+        // Bulk durations: happy path writes frames 0..n in order.
+        let r = call(
+            &mut core,
+            &tools,
+            "set_frame_durations",
+            json!({ "durations": [2.0, 0.5] }),
+        )
+        .unwrap();
+        assert_eq!(r["updated"], json!(2));
+        assert_eq!(core.project.frames[0].duration, 2.0);
+        assert_eq!(core.project.frames[1].duration, 0.5);
+
+        // More entries than frames: only the frame count is applied.
+        let n = core.project.frames.len();
+        let many: Vec<f64> = vec![1.0; n + 3];
+        let r = call(
+            &mut core,
+            &tools,
+            "set_frame_durations",
+            json!({ "durations": many }),
+        )
+        .unwrap();
+        assert_eq!(r["updated"], json!(n));
+
+        // A non-positive entry is rejected (mirroring
+        // set_frame_duration) and nothing is applied at all.
+        core.project.frames[0].duration = 1.0;
+        assert!(call(
+            &mut core,
+            &tools,
+            "set_frame_durations",
+            json!({ "durations": [3.0, 0.0] })
+        )
+        .is_err());
+        assert_eq!(core.project.frames[0].duration, 1.0);
+
+        // Empty array is a no-op.
+        let r = call(
+            &mut core,
+            &tools,
+            "set_frame_durations",
+            json!({ "durations": [] }),
+        )
+        .unwrap();
+        assert_eq!(r["updated"], json!(0));
     }
 
     #[test]

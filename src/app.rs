@@ -20,6 +20,37 @@ enum GraphChannelSel {
     RootY,
 }
 
+/// Which of a graph key's two Hermite tangents a handle drag
+/// edits (wave 9).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TanSide {
+    In,
+    Out,
+}
+
+impl TanSide {
+    fn label(&self) -> &'static str {
+        match self {
+            TanSide::In => "incoming",
+            TanSide::Out => "outgoing",
+        }
+    }
+}
+
+/// Wave 9: an in-progress motion-path point drag — the grabbed
+/// frame root of the selected figure. `start` is the stage-space
+/// press point; `delta` is the total stage-space drag offset
+/// accumulated from it (kept current by the mouse-move handler,
+/// previewed by `draw_data`, and applied once — through
+/// `EditorCore::nudge_path_point` — when the drag ends).
+#[derive(Clone, Copy)]
+struct PathDrag {
+    frame: usize,
+    fi: usize,
+    start: V2,
+    delta: V2,
+}
+
 pub struct EditorView {
     core: EditorCore,
     canvas_bounds: Rc<RefCell<Bounds<Pixels>>>,
@@ -52,6 +83,18 @@ pub struct EditorView {
     graph_bounds: Rc<RefCell<Bounds<Pixels>>>,
     /// Wave 6: (frame, value) of the graph key being dragged.
     graph_drag: Option<(f32, f32)>,
+    /// Wave 9: motion-path point drag in progress, if any (see
+    /// `PathDrag`). Started by a press on a path vertex of the
+    /// selected figure; owns mouse moves until release.
+    path_drag: Option<PathDrag>,
+    /// Wave 9: frame of the selected graph key — set whenever a
+    /// key is grabbed or added, and follows the key while it is
+    /// dragged. Unlike `graph_drag` it survives mouse-up, so the
+    /// key's tangent handles stay painted (and pressable) after
+    /// the key drag ends.
+    graph_sel: Option<f32>,
+    /// Wave 9: tangent drag in progress — (key frame, side).
+    graph_tan_drag: Option<(f32, TanSide)>,
     /// Wave 7: audio panel under the canvas (mutually exclusive
     /// with the graph panel — opening one closes the other).
     show_audio: bool,
@@ -77,6 +120,9 @@ pub struct EditorView {
     /// the canvas (independent flag — shown alongside whichever
     /// other panel is open).
     show_color: bool,
+    /// Wave 9: weather panel under the canvas (independent
+    /// flag, like the colour panel).
+    show_weather: bool,
     /// Wave 8: export centre panel under the canvas — every
     /// export op gathered by category with a guidance line each
     /// (the tool-group export buttons all stay where they are).
@@ -85,6 +131,11 @@ pub struct EditorView {
     /// selected figure/node (mutually exclusive with the graph,
     /// audio, FX and movieclip panels).
     show_inspector: bool,
+    /// Wave 9: timeline range selection as (anchor, focus),
+    /// set by shift-clicking frame chips (the first shift-click
+    /// anchors at the current frame); drives the Frames group's
+    /// Copy/Paste/Delete range buttons. Plain chip clicks clear it.
+    range_sel: Option<(usize, usize)>,
     /// Wave 7: waveform-peaks cache, keyed by (clip path, file
     /// mtime in nanoseconds since the epoch). The value is `None`
     /// for a file that failed to probe as a WAV — caching the
@@ -180,6 +231,9 @@ impl EditorView {
             graph_channel: GraphChannelSel::Angle,
             graph_bounds: Rc::new(RefCell::new(Bounds::default())),
             graph_drag: None,
+            path_drag: None,
+            graph_sel: None,
+            graph_tan_drag: None,
             show_audio: false,
             show_clips: false,
             show_fx: false,
@@ -188,8 +242,10 @@ impl EditorView {
             show_easing: false,
             show_help: false,
             show_color: false,
+            show_weather: false,
             show_export: false,
             show_inspector: false,
+            range_sel: None,
             audio_peaks_cache: std::collections::HashMap::new(),
         }
     }
@@ -245,6 +301,65 @@ impl EditorView {
         let dx = f32::from(window_pos.x - b.origin.x) - f32::from(b.size.width) / 2.0;
         let dy = f32::from(window_pos.y - b.origin.y) - f32::from(b.size.height) / 2.0;
         [cam[0] + dx / scale, cam[1] + dy / scale]
+    }
+
+    // ---- Wave 9: motion-path point dragging --------------------
+
+    /// Hit-test the motion-path vertices of the SELECTED figure
+    /// at stage point `p`: the same points `draw_data` paints —
+    /// `positions(f, fi)[0]`, the figure's root at every frame.
+    /// A vertex counts as hit when it lies within 8 SCREEN px of
+    /// the press: the view transform is a uniform scale, so the
+    /// stage-space tolerance is `8 / scale`. Returns the drag to
+    /// start (nearest hit; ties go to the earliest frame), or
+    /// `None` when the press should fall through to the normal
+    /// pose handling — paths hidden, playback running (pose
+    /// drags refuse then too), or the selected figure hidden or
+    /// locked (a locked press falls through so `begin_drag` can
+    /// post its "figure is locked" status as usual).
+    fn path_point_hit(&self, p: V2) -> Option<PathDrag> {
+        let core = &self.core;
+        if core.playing || !core.show_paths {
+            return None;
+        }
+        let fi = core.selected_figure;
+        let fig = core.project.figures.get(fi)?;
+        if fig.hidden || fig.locked {
+            return None;
+        }
+        let (scale, _cam) = self.view_transform();
+        if scale <= 0.0 {
+            return None;
+        }
+        let tol = 8.0 / scale;
+        let mut best: Option<(usize, f32)> = None;
+        for f in 0..core.frame_count() {
+            let pt = core.positions(f, fi)[0];
+            let dx = p[0] - pt[0];
+            let dy = p[1] - pt[1];
+            let d = (dx * dx + dy * dy).sqrt();
+            if d <= tol && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                best = Some((f, d));
+            }
+        }
+        best.map(|(frame, _)| PathDrag { frame, fi, start: p, delta: [0.0, 0.0] })
+    }
+
+    /// Finish a motion-path point drag: apply the accumulated
+    /// delta through `EditorCore::nudge_path_point` — ONCE, so
+    /// the whole drag is a single undo step (the nudge's internal
+    /// snapshot captures the pre-drag project, which is still
+    /// untouched: while dragging, the movement existed only as
+    /// the `draw_data` vertex preview). A press released without
+    /// moving applies nothing and leaves no undo entry. This
+    /// mirrors the pose drags, whose `begin_drag` snapshots once
+    /// and whose `drag_to` then mutates snapshot-free.
+    fn end_path_drag(&mut self) {
+        if let Some(pd) = self.path_drag.take() {
+            if pd.delta != [0.0, 0.0] {
+                self.core.nudge_path_point(pd.frame, pd.fi, pd.delta);
+            }
+        }
     }
 
     // ---- Wave 6: graph panel -------------------------------------
@@ -372,6 +487,35 @@ impl EditorView {
     fn graph_press(&mut self, local: V2) {
         let Some(view) = self.graph_view() else { return };
         let target = self.graph_target();
+        // The selected key's tangent handles get first claim on
+        // the press: grabbing one starts a tangent drag (one
+        // snapshot, like a key drag) instead of a key drag.
+        let tan_hit: Option<(f32, TanSide)> = self.graph_sel.and_then(|sel| {
+            let ch = self.graph_channel_ref()?;
+            let key = ch.keys.iter().find(|k| (k.frame - sel).abs() < 0.01)?;
+            let (hin, hout) = graph_tan_handles(&view, key);
+            let near = |p: V2| {
+                let dx = p[0] - local[0];
+                let dy = p[1] - local[1];
+                dx * dx + dy * dy <= 8.0 * 8.0
+            };
+            if near(hin) {
+                Some((key.frame, TanSide::In))
+            } else if near(hout) {
+                Some((key.frame, TanSide::Out))
+            } else {
+                None
+            }
+        });
+        if let Some((frame, side)) = tan_hit {
+            self.core.snapshot();
+            self.graph_tan_drag = Some((frame, side));
+            self.core.status = format!(
+                "Graph: drag to shape the {} tangent of the key at frame {frame:.0}.",
+                side.label()
+            );
+            return;
+        }
         let hit: Option<(f32, f32)> = self.graph_channel_ref().and_then(|ch| {
             view.hit_key(ch, local, 9.0)
                 .map(|idx| (ch.keys[idx].frame, ch.keys[idx].value))
@@ -379,8 +523,9 @@ impl EditorView {
         self.core.snapshot();
         if let Some((frame, value)) = hit {
             self.graph_drag = Some((frame, value));
+            self.graph_sel = Some(frame);
             self.core.status = format!(
-                "Graph: key at frame {frame:.0} = {value:.0} — drag to move, Ctrl+click deletes."
+                "Graph: key at frame {frame:.0} = {value:.0} — drag to move, Ctrl+click deletes. Its round handles bend the tangents."
             );
             return;
         }
@@ -391,6 +536,7 @@ impl EditorView {
         crate::graph::channel_mut(&mut self.core.project.channels, fig, target)
             .add_key(frame, value);
         self.graph_drag = Some((frame, value));
+        self.graph_sel = Some(frame);
         self.core.status = format!(
             "Graph: added key at frame {frame:.0} = {value:.0}."
         );
@@ -414,6 +560,7 @@ impl EditorView {
         {
             if ch.move_key(from, frame, value) {
                 self.graph_drag = Some((frame, value));
+                self.graph_sel = Some(frame);
             }
         }
     }
@@ -422,6 +569,87 @@ impl EditorView {
     fn graph_release(&mut self) {
         if let Some((frame, value)) = self.graph_drag.take() {
             self.core.status = format!("Graph: key at frame {frame:.0} = {value:.0}.");
+        }
+    }
+
+    /// Drag a grabbed tangent handle to the pointer's data
+    /// position. The pointer defines a point on the key's tangent
+    /// line, so the new slope is (value delta) / (frame delta)
+    /// against the key — value-units per frame, the exact unit
+    /// `Channel::value_at` consumes (it scales by the segment's
+    /// frame span: `m = tan * dt`). The pointer must stay on the
+    /// handle's own side of the key and at least 0.25 frames away
+    /// from it, so the slope stays finite and the handle can't
+    /// flip through the key; the slope is clamped to the panel's
+    /// full visible value span per frame. On angle channels the
+    /// value delta is measured on the unwrapped (shortest-path)
+    /// circle, matching `value_at`'s tangent interpretation.
+    fn graph_tan_drag_to(&mut self, local: V2) {
+        let Some((kframe, side)) = self.graph_tan_drag else { return };
+        let Some(view) = self.graph_view() else { return };
+        let target = self.graph_target();
+        let fig = self.core.selected_figure;
+        let (pf, pv) = view.to_data(local);
+        let span = (view.val_max - view.val_min).abs().max(1.0);
+        let mut applied: Option<f32> = None;
+        if let Some(ch) = self
+            .core
+            .project
+            .channels
+            .iter_mut()
+            .find(|c| c.figure == fig && c.target == target)
+        {
+            if let Some(key) = ch
+                .keys
+                .iter_mut()
+                .find(|k| (k.frame - kframe).abs() < 0.01)
+            {
+                let df = pf - key.frame;
+                let on_side = match side {
+                    TanSide::In => df <= -0.25,
+                    TanSide::Out => df >= 0.25,
+                };
+                if on_side {
+                    let mut dv = pv - key.value;
+                    if matches!(target, crate::graph::ChannelTarget::Angle(_)) {
+                        dv = crate::model::norm_deg(dv);
+                    }
+                    let slope = (dv / df).clamp(-span, span);
+                    match side {
+                        TanSide::In => key.in_tan = slope,
+                        TanSide::Out => key.out_tan = slope,
+                    }
+                    applied = Some(slope);
+                }
+            }
+        }
+        if let Some(slope) = applied {
+            self.core.status = format!(
+                "Graph: key frame {kframe:.0} {} tangent {slope:.2}/frame.",
+                side.label()
+            );
+        }
+    }
+
+    /// Finish a tangent drag (mouse-up anywhere).
+    fn graph_tan_release(&mut self) {
+        if let Some((frame, side)) = self.graph_tan_drag.take() {
+            let tan = self.graph_channel_ref().and_then(|ch| {
+                ch.keys
+                    .iter()
+                    .find(|k| (k.frame - frame).abs() < 0.01)
+                    .map(|k| match side {
+                        TanSide::In => k.in_tan,
+                        TanSide::Out => k.out_tan,
+                    })
+            });
+            self.core.status = match tan {
+                Some(t) => format!(
+                    "Graph: key frame {frame:.0} {} tangent {t:.2}/frame.",
+                    side.label()
+                ),
+                None => "Graph: tangent drag ended.".into(),
+            };
         }
     }
 
@@ -451,6 +679,16 @@ impl EditorView {
             if let Some((f, _)) = self.graph_drag {
                 if (f - frame).abs() < 0.01 {
                     self.graph_drag = None;
+                }
+            }
+            if let Some(sel) = self.graph_sel {
+                if (sel - frame).abs() < 0.01 {
+                    self.graph_sel = None;
+                }
+            }
+            if let Some((f, _)) = self.graph_tan_drag {
+                if (f - frame).abs() < 0.01 {
+                    self.graph_tan_drag = None;
                 }
             }
             self.core.status = "Graph: key deleted.".into();
@@ -788,11 +1026,13 @@ impl EditorView {
     /// current colour is highlighted.
     fn color_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let core = &self.core;
-        let current: Option<u32> = core
-            .selected_node
-            .and_then(|ni| core.project.figures.get(core.selected_figure))
-            .and_then(|fig| fig.def.nodes.get(ni))
-            .and_then(|node| node.color);
+        let current: Option<u32> = core.selected_node.and_then(|ni| {
+            core.project
+                .figures
+                .get(core.selected_figure)
+                .and_then(|fig| fig.def.nodes.get(ni))
+                .and_then(|node| node.color)
+        });
         let mut grid = div().flex().flex_wrap().gap(px(4.0));
         for (i, &color) in crate::ui_color::PICKER_PALETTE.iter().enumerate() {
             grid = grid.child(
@@ -829,6 +1069,214 @@ impl EditorView {
                     ),
             )
             .child(grid)
+    }
+
+    /// Wave 9: the weather panel — kind buttons set
+    /// `Project.weather`'s kind directly (keeping the tuned
+    /// amount/wind when switching kinds; enabling from off uses
+    /// the cycle button's per-kind presets), and steppers adjust
+    /// amount (±20) and wind (±0.5). Like the Scene group's
+    /// cycle button — the only other weather control; there is
+    /// no weather op in editor.rs — the listeners write
+    /// `core.project.weather` directly and report through
+    /// `core.status`, so nothing sits between the panel and the
+    /// field. Amount clamps to the Weather doc's 0..=200 (the
+    /// range emission itself clamps to); wind is stage units
+    /// per second and clamps to -200..=200 (at 200 a particle
+    /// crosses the 960-wide stage in under five seconds, and
+    /// rain's slant is already a third of its maximum).
+    fn weather_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::vfx::{Weather, WeatherKind};
+        let core = &self.core;
+        let cur = core.project.weather;
+        let kind_name = |k: WeatherKind| match k {
+            WeatherKind::Rain => "Rain",
+            WeatherKind::Snow => "Snow",
+            WeatherKind::Fireflies => "Fireflies",
+        };
+        let summary = match cur {
+            None => "Off — pick a kind".to_string(),
+            Some(w) => format!(
+                "{} · amount {:.0} · wind {}",
+                kind_name(w.kind),
+                w.amount,
+                w.wind
+            ),
+        };
+        let mut kind_row = group_row().child(btn(
+            "wx-none",
+            "Off",
+            cur.is_none(),
+            cx.listener(|view, _ev, _w, cx| {
+                view.core.project.weather = None;
+                view.core.status = "Weather: off.".into();
+                cx.notify();
+            }),
+        ));
+        // (id, kind, preset used when enabling from off — the
+        // same presets the Scene cycle button applies).
+        let kinds = [
+            (
+                "wx-rain",
+                WeatherKind::Rain,
+                Weather { kind: WeatherKind::Rain, amount: 90.0, wind: 25.0 },
+            ),
+            (
+                "wx-snow",
+                WeatherKind::Snow,
+                Weather { kind: WeatherKind::Snow, amount: 90.0, wind: 12.0 },
+            ),
+            (
+                "wx-fireflies",
+                WeatherKind::Fireflies,
+                Weather { kind: WeatherKind::Fireflies, amount: 60.0, wind: 4.0 },
+            ),
+        ];
+        for (id, kind, preset) in kinds {
+            kind_row = kind_row.child(btn(
+                id,
+                kind_name(kind),
+                cur.map(|w| w.kind) == Some(kind),
+                cx.listener(move |view, _ev, _w, cx| {
+                    view.core.project.weather = Some(match view.core.project.weather {
+                        Some(mut w) => {
+                            w.kind = kind;
+                            w
+                        }
+                        None => preset,
+                    });
+                    view.core.status = match kind {
+                        WeatherKind::Rain => "Weather: rain.",
+                        WeatherKind::Snow => "Weather: snow.",
+                        WeatherKind::Fireflies => "Weather: fireflies.",
+                    }
+                    .into();
+                    cx.notify();
+                }),
+            ));
+        }
+        // One stepper row shape for both fields: label, −,
+        // value, +. `step` is the field's backing helper and
+        // `dn_delta` its (negative) down step; up applies the
+        // negation.
+        let stepper_row = |label: &'static str,
+                           value: String,
+                           dn: &'static str,
+                           up: &'static str,
+                           dn_delta: f32,
+                           step: fn(&mut EditorView, f32),
+                           cx: &mut Context<Self>| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(C_MUTED))
+                        .child(label),
+                )
+                .child(btn(
+                    dn,
+                    "−",
+                    false,
+                    cx.listener(move |view, _ev, _w, cx| {
+                        step(view, dn_delta);
+                        cx.notify();
+                    }),
+                ))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(C_INK))
+                        .child(value),
+                )
+                .child(btn(
+                    up,
+                    "+",
+                    false,
+                    cx.listener(move |view, _ev, _w, cx| {
+                        step(view, -dn_delta);
+                        cx.notify();
+                    }),
+                ))
+        };
+        let amount_row = stepper_row(
+            "Amount",
+            match cur {
+                Some(w) => format!("{:.0}", w.amount),
+                None => "—".to_string(),
+            },
+            "wx-amt-dn",
+            "wx-amt-up",
+            -20.0,
+            Self::weather_amount_step,
+            cx,
+        );
+        let wind_row = stepper_row(
+            "Wind",
+            match cur {
+                Some(w) => format!("{}", w.wind),
+                None => "—".to_string(),
+            },
+            "wx-wind-dn",
+            "wx-wind-up",
+            -0.5,
+            Self::weather_wind_step,
+            cx,
+        );
+        div()
+            .flex_col()
+            .w_full()
+            .bg(rgb(C_PANEL))
+            .border_1()
+            .border_color(rgb(C_BORDER))
+            .rounded(px(8.0))
+            .p(px(8.0))
+            .gap(px(6.0))
+            .child(
+                top_bar()
+                    .child(section_label("Weather"))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(C_MUTED))
+                            .child(summary),
+                    ),
+            )
+            .child(kind_row)
+            .child(amount_row)
+            .child(wind_row)
+    }
+
+    /// Weather panel stepper backing: adjust the live
+    /// weather's amount by `delta`, clamped to the Weather
+    /// doc's 0..=200 — the same direct-write + status pattern
+    /// as the Scene cycle button. Off weather just reports.
+    fn weather_amount_step(view: &mut EditorView, delta: f32) {
+        match view.core.project.weather {
+            Some(mut w) => {
+                w.amount = (w.amount + delta).clamp(0.0, 200.0);
+                view.core.project.weather = Some(w);
+                view.core.status = format!("Weather amount: {:.0}.", w.amount);
+            }
+            None => view.core.status = "Weather is off — pick a kind first.".into(),
+        }
+    }
+
+    /// Weather panel stepper backing: adjust wind (stage
+    /// units per second) by `delta`, clamped to -200..=200
+    /// (see `weather_panel` for the range's reasoning).
+    fn weather_wind_step(view: &mut EditorView, delta: f32) {
+        match view.core.project.weather {
+            Some(mut w) => {
+                w.wind = (w.wind + delta).clamp(-200.0, 200.0);
+                view.core.project.weather = Some(w);
+                view.core.status = format!("Weather wind: {}.", w.wind);
+            }
+            None => view.core.status = "Weather is off — pick a kind first.".into(),
+        }
     }
 
     /// Wave 7: the audio panel — one row per clip in the project:
@@ -1267,6 +1715,9 @@ struct GraphDrawData {
     current: f32,
     /// Frame of the key being dragged (highlighted), if any.
     drag_frame: Option<f32>,
+    /// Frame of the selected key, whose tangent handles are
+    /// drawn, if any.
+    sel_frame: Option<f32>,
     bg: u32,
 }
 
@@ -1417,11 +1868,23 @@ impl EditorView {
                 if core.project.figures[fi].hidden {
                     continue;
                 }
-                paths.push(
-                    (0..core.frame_count())
-                        .map(|f| core.positions(f, fi)[0])
-                        .collect::<Vec<V2>>(),
-                );
+                let mut poly: Vec<V2> = (0..core.frame_count())
+                    .map(|f| core.positions(f, fi)[0])
+                    .collect();
+                // Wave 9: while a path point is being dragged,
+                // preview its vertex at the dragged position.
+                // The project itself is only mutated once — by
+                // `nudge_path_point` when the drag ends — so the
+                // polyline is the drag's live feedback.
+                if let Some(pd) = &self.path_drag {
+                    if pd.fi == fi {
+                        if let Some(pt) = poly.get_mut(pd.frame) {
+                            pt[0] += pd.delta[0];
+                            pt[1] += pd.delta[1];
+                        }
+                    }
+                }
+                paths.push(poly);
             }
             if let Some(ni) = core.selected_node {
                 let fi = core.selected_figure;
@@ -1536,6 +1999,9 @@ impl Render for EditorView {
             self.last_status = self.core.status.clone();
         }
         self.toasts.tick();
+        // Autosave: writes the recovery file every 25 undoable
+        // edits; silent unless the write fails.
+        self.core.maybe_autosave();
         let core = &self.core;
         let frame_label = format!("Frame {} / {}", core.current + 1, core.frame_count());
         let fps_label = format!("{} fps", core.project.fps as i32);
@@ -1567,6 +2033,7 @@ impl Render for EditorView {
         let easing_on = self.show_easing;
         let help_on = self.show_help;
         let color_on = self.show_color;
+        let weather_on = self.show_weather;
         let export_on = self.show_export;
         let inspector_on = self.show_inspector;
         let tween_on = core.project.tween_playback;
@@ -1575,6 +2042,7 @@ impl Render for EditorView {
         let easing_label = format!("Easing: {}", core.project.easing.label());
         let tr = |k: &str| crate::i18n::t(core.lang, k);
         let lang_label = format!("Lang: {}", core.lang.label());
+        let fps_preset_label = format!("FPS: {}", core.project.fps as i32);
         let fease_label = core.frame_easing_label();
         let lib_name = core
             .library
@@ -1593,6 +2061,7 @@ impl Render for EditorView {
                 frames: core.frame_count(),
                 current: core.current as f32,
                 drag_frame: self.graph_drag.map(|(f, _)| f),
+                sel_frame: self.graph_sel,
                 bg: row_bg,
             };
             let gslot = self.graph_bounds.clone();
@@ -1715,6 +2184,14 @@ impl Render for EditorView {
             None
         };
 
+        // Wave 9: weather panel under the stage (independent
+        // of the other panels, like the colour panel).
+        let weather_panel = if weather_on {
+            Some(self.weather_panel(cx))
+        } else {
+            None
+        };
+
         // Wave 8: export centre panel under the stage.
         let export_panel = if export_on {
             Some(self.export_panel(cx))
@@ -1739,7 +2216,34 @@ impl Render for EditorView {
             .flex_col()
             .gap(px(4.0))
             .w(px(168.0))
-            .child(section_label("Figures"));
+            .child(
+                // Sidebar header: caption + bulk visibility controls.
+                // The layers ops own the `hidden` flags; solo is the
+                // caller's runtime state, so each listener clears it
+                // to make the bulk result the effective visibility.
+                top_bar()
+                    .flex_wrap()
+                    .child(section_label("Figures"))
+                    .child(div().flex_1())
+                    .child(btn("fig-vis-all", "All", false, cx.listener(|view, _ev, _w, cx| {
+                        let changed = crate::layers::set_all_visible(&mut view.core.project, true);
+                        view.core.solo = None;
+                        view.core.status = format!("All figures shown ({changed} changed).");
+                        cx.notify();
+                    })))
+                    .child(btn("fig-vis-none", "None", false, cx.listener(|view, _ev, _w, cx| {
+                        let changed = crate::layers::set_all_visible(&mut view.core.project, false);
+                        view.core.solo = None;
+                        view.core.status = format!("All figures hidden ({changed} changed).");
+                        cx.notify();
+                    })))
+                    .child(btn("fig-vis-inv", "Invert", false, cx.listener(|view, _ev, _w, cx| {
+                        let flipped = crate::layers::invert_visibility(&mut view.core.project);
+                        view.core.solo = None;
+                        view.core.status = format!("Figure visibility inverted ({flipped} flipped).");
+                        cx.notify();
+                    }))),
+            );
         for (fi, fig) in core.project.figures.iter().enumerate() {
             let selected = fi == core.selected_figure;
             let name = fig.name.clone();
@@ -1825,9 +2329,20 @@ impl Render for EditorView {
             );
         }
 
+        let range_sel = self.range_sel;
         let mut timeline = div().flex().flex_row().gap(px(4.0));
         for i in 0..core.frame_count() {
             let is_current = i == core.current;
+            // In-range chips (anchor..=focus, either direction)
+            // get a dimmed accent so the selection reads as a
+            // block under the brighter current-frame chip.
+            let in_range = match range_sel {
+                Some((a, f)) => {
+                    let (lo, hi) = if a <= f { (a, f) } else { (f, a) };
+                    i >= lo && i <= hi
+                }
+                None => false,
+            };
             timeline = timeline.child(
                 div()
                     .id(("frame", i))
@@ -1839,12 +2354,29 @@ impl Render for EditorView {
                     .py(px(6.0))
                     .rounded(px(6.0))
                     .cursor_pointer()
-                    .bg(if is_current { rgb(C_ACCENT) } else { rgb(0x2C313A) })
+                    .bg(if is_current {
+                        rgb(C_ACCENT)
+                    } else if in_range {
+                        rgb(0x2E4470)
+                    } else {
+                        rgb(0x2C313A)
+                    })
                     .hover(|s| s.bg(rgb(C_BORDER)))
                     .text_size(px(12.0))
                     .text_color(rgb(C_INK))
-                    .on_click(cx.listener(move |view, _ev, _w, cx| {
-                        view.core.goto(i);
+                    .on_click(cx.listener(move |view, ev: &ClickEvent, _w, cx| {
+                        if ev.modifiers().shift {
+                            // Shift-click builds the range: the
+                            // first one anchors at the current
+                            // frame, later ones just move focus.
+                            view.range_sel = Some(match view.range_sel {
+                                Some((anchor, _)) => (anchor, i),
+                                None => (view.core.current, i),
+                            });
+                        } else {
+                            view.range_sel = None;
+                            view.core.goto(i);
+                        }
                         cx.notify();
                     }))
                     .child(format!("{}", i + 1)),
@@ -2137,6 +2669,10 @@ impl Render for EditorView {
             Some(panel) => stage_col.child(panel),
             None => stage_col,
         };
+        let stage_col = match weather_panel {
+            Some(panel) => stage_col.child(panel),
+            None => stage_col,
+        };
         let stage_col = match export_panel {
             Some(panel) => stage_col.child(panel),
             None => stage_col,
@@ -2250,6 +2786,14 @@ impl Render for EditorView {
                 } else if view.core.camera_mode {
                     view.core.begin_camera_drag(p);
                     cx.notify();
+                } else if let Some(pd) = view.path_point_hit(p) {
+                    // A press landing on a motion-path vertex of
+                    // the selected figure starts a path drag,
+                    // which takes precedence over pose dragging.
+                    // The recogniser is not fed, so no pose drag
+                    // or tap-select starts underneath it.
+                    view.path_drag = Some(pd);
+                    cx.notify();
                 } else {
                     // Pose mode goes through the gesture
                     // recogniser (mouse = MOUSE_POINTER_ID).
@@ -2265,12 +2809,34 @@ impl Render for EditorView {
                 }
             }))
             .on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, _w, cx| {
+                // An active graph tangent drag owns all moves.
+                if view.graph_tan_drag.is_some() {
+                    if let Some(local) = view.graph_local(ev.position, true) {
+                        view.graph_tan_drag_to(local);
+                        cx.notify();
+                    }
+                    return;
+                }
                 // An active graph-key drag owns all moves.
                 if view.graph_drag.is_some() {
                     if let Some(local) = view.graph_local(ev.position, true) {
                         view.graph_drag_to(local);
                         cx.notify();
                     }
+                    return;
+                }
+                // An active path-point drag owns all moves too,
+                // even if a mode is toggled mid-drag (mirrors the
+                // camera drag's ownership below). The delta is
+                // recomputed from the press point each move, so
+                // it accumulates without drift; draw_data
+                // previews it, end_path_drag applies it.
+                if view.path_drag.is_some() {
+                    let p = view.to_stage(ev.position);
+                    if let Some(pd) = &mut view.path_drag {
+                        pd.delta = [p[0] - pd.start[0], p[1] - pd.start[1]];
+                    }
+                    cx.notify();
                     return;
                 }
                 if view.core.draw_mode {
@@ -2291,8 +2857,18 @@ impl Render for EditorView {
                 }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|view, ev: &MouseUpEvent, _w, cx| {
+                if view.graph_tan_drag.is_some() {
+                    view.graph_tan_release();
+                    cx.notify();
+                    return;
+                }
                 if view.graph_drag.is_some() {
                     view.graph_release();
+                    cx.notify();
+                    return;
+                }
+                if view.path_drag.is_some() {
+                    view.end_path_drag();
                     cx.notify();
                     return;
                 }
@@ -2534,6 +3110,39 @@ impl Render for EditorView {
                                     view.core.smooth_path_roots(fi);
                                     cx.notify();
                                 })))
+                                .child(btn("range-copy", "Copy range", false, cx.listener(|view, _ev, _w, cx| {
+                                    // No selection falls back to the
+                                    // current frame on its own.
+                                    match view.range_sel {
+                                        Some((a, f)) => {
+                                            let (lo, hi) = if a <= f { (a, f) } else { (f, a) };
+                                            view.core.copy_range(lo, hi - lo + 1);
+                                        }
+                                        None => {
+                                            let cur = view.core.current;
+                                            view.core.copy_range(cur, 1);
+                                        }
+                                    }
+                                    cx.notify();
+                                })))
+                                .child(btn("range-paste", "Paste range", false, cx.listener(|view, _ev, _w, cx| {
+                                    let at = view.core.current;
+                                    view.core.paste_range(at);
+                                    cx.notify();
+                                })))
+                                .child(btn("range-del", "Delete range", false, cx.listener(|view, _ev, _w, cx| {
+                                    // No selection: a no-op (the kit
+                                    // has no disabled state); the
+                                    // selection clears after a delete
+                                    // because its indices are stale.
+                                    if let Some((a, f)) = view.range_sel {
+                                        let (lo, hi) = if a <= f { (a, f) } else { (f, a) };
+                                        if view.core.delete_range(lo, hi - lo + 1) {
+                                            view.range_sel = None;
+                                        }
+                                    }
+                                    cx.notify();
+                                })))
                         ),
                     )
                     .child(
@@ -2671,6 +3280,24 @@ impl Render for EditorView {
                                 })))
                                 .child(btn("fps-up", "FPS +", false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.adjust_fps(1.0);
+                                    cx.notify();
+                                })))
+                                .child(btn("fps-preset", Box::leak(fps_preset_label.into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
+                                    // Cycle through the preset frame rates:
+                                    // jump to the next preset strictly above
+                                    // the current fps, wrapping back to 6
+                                    // past 60. Applied through adjust_fps
+                                    // (as a delta) so playback timing and
+                                    // the status line stay consistent with
+                                    // the FPS +/- buttons.
+                                    const PRESETS: [f32; 5] = [6.0, 12.0, 24.0, 30.0, 60.0];
+                                    let cur = view.core.project.fps;
+                                    let next = PRESETS
+                                        .iter()
+                                        .copied()
+                                        .find(|p| *p > cur)
+                                        .unwrap_or(PRESETS[0]);
+                                    view.core.adjust_fps(next - cur);
                                     cx.notify();
                                 })))
                                 .child(btn("dur-dn", "Dur -", false, cx.listener(|view, _ev, _w, cx| {
@@ -2925,6 +3552,10 @@ impl Render for EditorView {
                                     view.core.status = label.into();
                                     cx.notify();
                                 })))
+                                .child(btn("weather-panel", "Weather", weather_on, cx.listener(|view, _ev, _w, cx| {
+                                    view.show_weather = !view.show_weather;
+                                    cx.notify();
+                                })))
                                 .child(btn("cam-rot", "Cam rot +15", false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.rotate_camera(15.0);
                                     cx.notify();
@@ -3058,6 +3689,22 @@ impl Render for EditorView {
                                 })))
                                 .child(btn("fxclip-trail", "FX clip Trail", false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.add_fx_clip(crate::vfx::ClipKind::Trail);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-meteor", "FX clip Meteor", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Meteor);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-petals", "FX clip Petals", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Petals);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-splash", "FX clip Splash", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Splash);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-spiral", "FX clip Spiral", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Spiral);
                                     cx.notify();
                                 })))
                         ),
@@ -3271,6 +3918,55 @@ fn paint_stage(window: &mut Window, bounds: Bounds<Pixels>, data: &DrawData) {
 /// channel curve as connected segments and its key handles as
 /// small squares, with the axis box on top. All data<->pixel
 /// mapping goes through `GraphView` (auto_fit + curve_points).
+/// Pixel length of a graph tangent handle's arm.
+const GRAPH_TAN_HANDLE_PX: f32 = 34.0;
+
+/// Unit pixel direction of a Hermite tangent slope under the
+/// panel view's mapping: one frame maps to `width / frame span`
+/// px horizontally, one value unit to `height / value span` px
+/// vertically (pixel y grows down, so the value component is
+/// negated). A zero slope points straight right; a degenerate
+/// view falls back to that instead of NaN.
+fn graph_tan_dir(view: &crate::graph_panel::GraphView, tan: f32) -> V2 {
+    let sx = if view.frame_max > view.frame_min {
+        view.width / (view.frame_max - view.frame_min)
+    } else {
+        0.0
+    };
+    let sy = if view.val_max > view.val_min {
+        view.height / (view.val_max - view.val_min)
+    } else {
+        0.0
+    };
+    let v = [sx, -tan * sy];
+    let len = (v[0] * v[0] + v[1] * v[1]).sqrt();
+    if len > 1e-6 {
+        [v[0] / len, v[1] / len]
+    } else {
+        [1.0, 0.0]
+    }
+}
+
+/// The (incoming, outgoing) tangent-handle pixel positions for
+/// key `k`: one arm length from the key point — backwards along
+/// the incoming tangent line, forwards along the outgoing one.
+/// `graph_press` hit-tests exactly these positions.
+fn graph_tan_handles(view: &crate::graph_panel::GraphView, k: &crate::graph::Key) -> (V2, V2) {
+    let c = view.to_px(k.frame, k.value);
+    let di = graph_tan_dir(view, k.in_tan);
+    let dout = graph_tan_dir(view, k.out_tan);
+    (
+        [
+            c[0] - di[0] * GRAPH_TAN_HANDLE_PX,
+            c[1] - di[1] * GRAPH_TAN_HANDLE_PX,
+        ],
+        [
+            c[0] + dout[0] * GRAPH_TAN_HANDLE_PX,
+            c[1] + dout[1] * GRAPH_TAN_HANDLE_PX,
+        ],
+    )
+}
+
 fn paint_graph(window: &mut Window, bounds: Bounds<Pixels>, data: &GraphDrawData) {
     let origin = bounds.origin;
     let w = f32::from(bounds.size.width);
@@ -3332,6 +4028,21 @@ fn paint_graph(window: &mut Window, bounds: Bounds<Pixels>, data: &GraphDrawData
                     half * 2.0,
                     rgb(if dragged { 0xFFC65D } else { 0xE8E8EC }),
                 );
+            }
+            // Tangent arms + round handles on the selected key.
+            if let Some(sel) = data.sel_frame {
+                if let Some(key) = ch.keys.iter().find(|k| (k.frame - sel).abs() < 0.01) {
+                    let (hin, hout) = graph_tan_handles(&view, key);
+                    let kc = view.to_px(key.frame, key.value);
+                    for hp in [hin, hout] {
+                        stroke_line(window, at(kc), at(hp), rgba(0xFFC65D << 8 | 0x88), 1.0);
+                        let mut pb = PathBuilder::fill();
+                        trace_circle(&mut pb, at(hp), 3.5);
+                        if let Ok(path) = pb.build() {
+                            window.paint_path(path, rgb(0xFFC65D));
+                        }
+                    }
+                }
             }
         }
     }

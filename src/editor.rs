@@ -42,7 +42,18 @@ pub struct EditorCore {
     pub status: String,
     undo: Vec<String>,
     redo: Vec<String>,
+    /// Wave 9: edits counted at `snapshot()` (the undo choke
+    /// point) over this core's lifetime. A few appearance
+    /// cyclers (segment colour/shape, figure opacity) mutate
+    /// without snapshotting by design and are NOT counted —
+    /// autosave is driven by undoable edits.
+    edit_count: u64,
+    /// Wave 9: `edit_count` at the last successful autosave.
+    last_autosave_count: u64,
     clipboard: Option<crate::model::Frame>,
+    /// Wave 9: deep-copied frames held by `copy_range` for
+    /// `paste_range`. Distinct from the single-frame `clipboard`.
+    frame_clipboard: Vec<crate::model::Frame>,
     pub playhead: f32,
     /// Wave 7: inclusive frame range the playhead loops inside,
     /// when set. Runtime only, like `solo`: undo snapshots cover
@@ -105,7 +116,10 @@ impl EditorCore {
             status: "Drag a joint to pose. Hands and feet use IK; drag the hips to move.".into(),
             undo: Vec::new(),
             redo: Vec::new(),
+            edit_count: 0,
+            last_autosave_count: 0,
             clipboard: None,
+            frame_clipboard: Vec::new(),
             playhead: 0.0,
             loop_range: None,
             show_paths: false,
@@ -192,6 +206,9 @@ impl EditorCore {
                 self.undo.remove(0);
             }
             self.redo.clear();
+            // Wave 9: every recorded undo step is one counted
+            // edit for the autosave cadence.
+            self.edit_count += 1;
         }
     }
 
@@ -735,6 +752,133 @@ impl EditorCore {
         self.status = format!("Reversed frames {}–{}.", from + 1, from + count);
     }
 
+    /// After frames [from, from+count) are deleted, keep `current`
+    /// and the loop range attached to surviving frames where they
+    /// can. A current frame inside the deleted block lands on the
+    /// next survivor (or the last survivor when the tail was cut);
+    /// a loop range that only overlapped the block shrinks to its
+    /// surviving part, and one wholly inside it is cleared.
+    fn remap_after_frame_delete(&mut self, from: usize, count: usize) {
+        let end = from + count;
+        let new_len = self.project.frames.len();
+        if self.current >= from {
+            self.current = if self.current < end {
+                from.min(new_len - 1)
+            } else {
+                self.current - count
+            };
+        }
+        self.playhead = self.current as f32;
+        if let Some((a, b)) = self.loop_range {
+            let has_prefix = a < from;
+            let has_suffix = b >= end;
+            self.loop_range = match (has_prefix, has_suffix) {
+                (false, false) => None,
+                (true, true) => Some((a, b - count)),
+                (true, false) => Some((a, b.min(from - 1))),
+                (false, true) => {
+                    let a = if a >= end { a - count } else { from };
+                    Some((a, b - count))
+                }
+            };
+        }
+    }
+
+    /// Delete the block of `count` frames starting at `from`.
+    /// Poses, bends, durations and easings all live in `Frame`, so
+    /// removal is structural. The count is clamped to the timeline
+    /// end, like `reverse_range`; an empty or out-of-range block is
+    /// refused, as is deleting every frame — a project always keeps
+    /// at least one frame. Frame-indexed project data outside
+    /// `Frame` (camera keys and FX clip start frames) is NOT
+    /// remapped, matching `shift_frames`/`reverse_range`.
+    pub fn delete_range(&mut self, from: usize, count: usize) -> bool {
+        let n = self.project.frames.len();
+        if count == 0 || from >= n {
+            return false;
+        }
+        let count = count.min(n - from);
+        if count == n {
+            return false;
+        }
+        self.snapshot();
+        self.project.frames.drain(from..from + count);
+        self.remap_after_frame_delete(from, count);
+        self.status = format!(
+            "Deleted {count} frame(s) (frames {}–{}).",
+            from + 1,
+            from + count
+        );
+        true
+    }
+
+    /// Copy the block of `count` frames starting at `from` into the
+    /// range clipboard as deep clones, ready for `paste_range`. The
+    /// count is clamped to the timeline end; an empty or
+    /// out-of-range block is refused and leaves any previous range
+    /// clipboard untouched. This does not use the single-frame
+    /// clipboard and, like `copy_frame`, is not an undoable edit.
+    pub fn copy_range(&mut self, from: usize, count: usize) -> bool {
+        let n = self.project.frames.len();
+        if count == 0 || from >= n {
+            return false;
+        }
+        let count = count.min(n - from);
+        self.frame_clipboard = self.project.frames[from..from + count].to_vec();
+        self.status = format!(
+            "Copied {count} frame(s) (frames {}–{}).",
+            from + 1,
+            from + count
+        );
+        true
+    }
+
+    /// After frames are inserted at `at`, keep `current` and the
+    /// loop range pointing at the same frames they pointed at
+    /// before: indices at or after the insertion point shift later.
+    fn remap_after_frame_insert(&mut self, at: usize, count: usize) {
+        if self.current >= at {
+            self.current += count;
+        }
+        self.playhead = self.current as f32;
+        if let Some((a, b)) = self.loop_range {
+            let a = if a >= at { a + count } else { a };
+            let b = if b >= at { b + count } else { b };
+            self.loop_range = Some((a, b));
+        }
+    }
+
+    /// Insert the range clipboard's frames at index `at` (clamped
+    /// to the timeline, so a large `at` appends), shifting later
+    /// frames. Refused when the range clipboard is empty, or when a
+    /// copied frame's figure count no longer matches the project
+    /// (the same guard as `paste_frame`). Frame-indexed project
+    /// data outside `Frame` (camera keys and FX clip start frames)
+    /// is NOT remapped, matching `shift_frames`/`reverse_range`.
+    pub fn paste_range(&mut self, at: usize) -> bool {
+        if self.frame_clipboard.is_empty() {
+            return false;
+        }
+        if self
+            .frame_clipboard
+            .iter()
+            .any(|frame| frame.poses.len() != self.project.figures.len())
+        {
+            self.status = "Copied frames have a different figure count.".into();
+            return false;
+        }
+        let at = at.min(self.project.frames.len());
+        let block = self.frame_clipboard.clone();
+        let count = block.len();
+        self.snapshot();
+        for (i, frame) in block.into_iter().enumerate() {
+            self.project.frames.insert(at + i, frame);
+        }
+        self.remap_after_frame_insert(at, count);
+        self.status = format!("Pasted {count} frame(s) at position {}.", at + 1);
+        true
+    }
+
     /// Motion-path editing primitive: move the ROOT of figure `fi`'s
     /// pose at frame `frame` by `delta`. The roots across frames
     /// are what the motion path draws, so this bends the path at
@@ -1078,6 +1222,44 @@ impl EditorCore {
                 self.status = format!("Loaded {}", path.display());
             }
             Err(e) => self.status = format!("Load failed: {e}"),
+        }
+    }
+
+    /// Wave 9: autosave the recovery snapshot after this many
+    /// snapshot-counted edits (see `maybe_autosave`).
+    pub const AUTOSAVE_EVERY: u64 = 25;
+
+    /// Wave 9: the pure autosave decision, factored out of
+    /// `maybe_autosave` so the threshold logic is unit tested
+    /// without touching the filesystem.
+    fn autosave_due(edit_count: u64, last_autosave_count: u64) -> bool {
+        edit_count.saturating_sub(last_autosave_count) >= Self::AUTOSAVE_EVERY
+    }
+
+    /// Wave 9: snapshot-counted edits not yet covered by an
+    /// autosave (0 right after a successful one).
+    pub fn edits_since_autosave(&self) -> u64 {
+        self.edit_count.saturating_sub(self.last_autosave_count)
+    }
+
+    /// Wave 9: if at least `AUTOSAVE_EVERY` edits have
+    /// accumulated since the last autosave, write the recovery
+    /// snapshot (`./projects/.recovery.json`, via shell.rs — the
+    /// same file the Home panel writes and the Recover button
+    /// reads). Silent on success: autosave must never spam the
+    /// status line. On failure the status reports it and the
+    /// last-autosave counter is left alone, so the next call
+    /// retries instead of waiting for another AUTOSAVE_EVERY
+    /// edits. Nothing calls this yet — the app layer decides
+    /// when to check (e.g. after ops); this is only the
+    /// mechanism.
+    pub fn maybe_autosave(&mut self) {
+        if !Self::autosave_due(self.edit_count, self.last_autosave_count) {
+            return;
+        }
+        match crate::shell::write_recovery(&self.project) {
+            Ok(_) => self.last_autosave_count = self.edit_count,
+            Err(e) => self.status = format!("Autosave failed: {e}"),
         }
     }
 
@@ -2998,6 +3180,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn autosave_counter_counts_snapshots_only() {
+        let mut core = EditorCore::new();
+        assert_eq!(core.edits_since_autosave(), 0);
+        core.snapshot();
+        assert_eq!(core.edits_since_autosave(), 1);
+        core.snapshot();
+        core.snapshot();
+        assert_eq!(core.edits_since_autosave(), 3);
+        // Ops that deliberately mutate without snapshotting
+        // (non-undoable appearance cyclers) do not move the
+        // counter: autosave counts snapshot-driven edits only.
+        core.cycle_node_color();
+        core.cycle_figure_opacity(0);
+        assert_eq!(core.edits_since_autosave(), 3);
+    }
+
+    #[test]
+    fn autosave_due_respects_the_threshold() {
+        let every = EditorCore::AUTOSAVE_EVERY;
+        assert_eq!(every, 25);
+        assert!(!EditorCore::autosave_due(0, 0));
+        assert!(!EditorCore::autosave_due(every - 1, 0));
+        assert!(EditorCore::autosave_due(every, 0));
+        assert!(EditorCore::autosave_due(every * 2, every));
+        assert!(!EditorCore::autosave_due(every * 2 - 1, every));
+        // A last-autosave count ahead of the edit count (cannot
+        // happen in practice) saturates instead of underflowing.
+        assert!(!EditorCore::autosave_due(0, every));
+    }
+
+    #[test]
+    fn maybe_autosave_noops_before_the_threshold() {
+        let mut core = EditorCore::new();
+        core.snapshot();
+        let status_before = core.status.clone();
+        core.maybe_autosave();
+        // Below the threshold: no write, no status change (the
+        // success path is silent by design), counter untouched.
+        assert_eq!(core.edits_since_autosave(), 1);
+        assert_eq!(core.status, status_before);
+    }
+
+    #[test]
     fn fig3_enter_exit_and_noop_bake() {
         let mut core = EditorCore::new();
         assert!(core.fig3.is_none());
@@ -4036,6 +4261,94 @@ mod tests {
         assert_eq!(core.current, 3, "current flips inside the reversed block");
         core.undo();
         assert_eq!(root_xs(&core), vec![0.0, 10.0, 20.0, 30.0, 40.0]);
+    }
+
+    #[test]
+    fn wave9_delete_range_removes_middle_and_remaps_state() {
+        let mut core = EditorCore::new();
+        tag_frames(&mut core);
+        core.set_loop_range(0, 4);
+        core.goto(2); // inside the block being deleted
+        assert!(core.delete_range(1, 2));
+        assert_eq!(root_xs(&core), vec![0.0, 30.0, 40.0]);
+        let durations: Vec<f32> = core.project.frames.iter().map(|f| f.duration).collect();
+        assert_eq!(durations, vec![1.0, 4.0, 5.0], "surviving durations keep their frames");
+        let bends: Vec<f32> = core.project.frames.iter().map(|f| f.bends[0][0]).collect();
+        assert_eq!(bends, vec![0.0, 3.0, 4.0], "surviving bends keep their frames");
+        assert_eq!(core.current, 1, "current lands on the next surviving frame");
+        assert_eq!(core.project.frames[core.current].poses[0].root[0], 30.0);
+        assert_eq!(
+            core.loop_range,
+            Some((0, 2)),
+            "loop range follows its surviving first and last frames"
+        );
+        core.undo();
+        assert_eq!(root_xs(&core), vec![0.0, 10.0, 20.0, 30.0, 40.0]);
+    }
+
+    #[test]
+    fn wave9_delete_range_refuses_every_frame_and_clamps_tail() {
+        let mut core = EditorCore::new();
+        tag_frames(&mut core);
+        let before = root_xs(&core);
+        assert!(!core.delete_range(0, 99), "deleting every frame is refused");
+        assert!(!core.delete_range(5, 1), "start past the end is refused");
+        assert!(!core.delete_range(0, 0), "an empty range is refused");
+        assert_eq!(root_xs(&core), before, "refused deletions are no-ops");
+
+        core.set_loop_range(3, 4);
+        core.goto(4);
+        assert!(core.delete_range(3, 99), "count clamps to the timeline end");
+        assert_eq!(root_xs(&core), vec![0.0, 10.0, 20.0]);
+        assert_eq!(core.current, 2, "current lands on the last surviving frame");
+        assert_eq!(core.loop_range, None, "a loop range inside the deleted tail is cleared");
+    }
+
+    #[test]
+    fn wave9_copy_paste_range_round_trip_preserves_poses() {
+        let mut core = EditorCore::new();
+        tag_frames(&mut core);
+        assert!(core.copy_range(1, 2));
+        assert_eq!(core.frame_clipboard.len(), 2);
+        assert!(core.clipboard.is_none(), "the single-frame clipboard is separate");
+        core.project.frames[1].poses[0].root[0] = 999.0;
+        assert_eq!(
+            core.frame_clipboard[0].poses[0].root[0], 10.0,
+            "the range clipboard holds deep clones"
+        );
+        assert!(!core.copy_range(5, 1), "copy start past the end is refused");
+        assert!(!core.copy_range(0, 0), "an empty copy is refused");
+        assert_eq!(core.frame_clipboard.len(), 2, "refused copies keep the clipboard");
+
+        core.set_loop_range(3, 4);
+        core.goto(4);
+        assert!(core.paste_range(4));
+        assert_eq!(root_xs(&core), vec![0.0, 999.0, 20.0, 30.0, 10.0, 20.0, 40.0]);
+        let durations: Vec<f32> = core.project.frames.iter().map(|f| f.duration).collect();
+        assert_eq!(durations, vec![1.0, 2.0, 3.0, 4.0, 2.0, 3.0, 5.0]);
+        let bends: Vec<f32> = core.project.frames.iter().map(|f| f.bends[0][0]).collect();
+        assert_eq!(bends, vec![0.0, 1.0, 2.0, 3.0, 1.0, 2.0, 4.0]);
+        assert_eq!(
+            core.project.frames[5].easing,
+            Some(crate::model::Easing::EaseIn),
+            "the copied frame's easing is preserved"
+        );
+        assert_eq!(core.current, 6, "current follows its original frame past the insertion");
+        assert_eq!(core.loop_range, Some((3, 6)), "loop endpoints follow their frames");
+        assert_eq!(core.frame_clipboard.len(), 2, "paste does not consume the clipboard");
+    }
+
+    #[test]
+    fn wave9_paste_range_at_end_appends_and_empty_clipboard_refuses() {
+        let mut core = EditorCore::new();
+        assert!(!core.paste_range(0), "an empty range clipboard is refused");
+        assert_eq!(core.project.frames.len(), 5);
+        tag_frames(&mut core);
+        assert!(core.copy_range(3, 2));
+        core.goto(0);
+        assert!(core.paste_range(999), "the paste index clamps to the end");
+        assert_eq!(root_xs(&core), vec![0.0, 10.0, 20.0, 30.0, 40.0, 30.0, 40.0]);
+        assert_eq!(core.current, 0, "appending does not move an earlier current frame");
     }
 
     #[test]

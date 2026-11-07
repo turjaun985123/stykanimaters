@@ -372,6 +372,61 @@ pub fn segments2d(fig: &Figure3, pts: &[Proj]) -> Vec<(V2, V2, f32)> {
     out
 }
 
+/// Per-segment depth shade for faking depth in a 2D renderer: one
+/// value per segment, in exactly the order [`segments2d`] produces
+/// (node order, one per parent→node pair). The figure is evaluated
+/// and projected internally — view depth does not depend on the
+/// stage size, so the projection uses [`DEFAULT_STAGE`].
+///
+/// **Normalisation rule:** each segment's depth is the mean of its
+/// two projected endpoints' `Proj.depth` (so a segment behind the
+/// camera carries the clamped [`BEHIND_DEPTH`] into its mean). The
+/// means are then normalised against the figure's *own* minimum and
+/// maximum mean depth: the nearest segment (smallest mean) shades
+/// exactly 1.0 and the farthest shades exactly 0.35, with a linear
+/// ramp between them — `shade = 1.0 − 0.65 · (d − min) / (max − min)`,
+/// clamped to `0.35..=1.0`. Because the ramp is relative to the
+/// figure itself, a figure whose segments all sit at (nearly) the
+/// same depth — e.g. a planar figure facing the camera — has a
+/// zero (or near-zero) depth range; that case is guarded and every
+/// segment shades 1.0 rather than dividing by ~0. A figure with no
+/// segments yields an empty vector. Pure data for renderers: this
+/// function changes no rendering itself.
+pub fn segment_shades(figure: &Figure3, pose: &Pose3, cam: &Camera3) -> Vec<f32> {
+    /// Depth ranges at or below this count as "all segments at one
+    /// depth" (the planar/uniform case).
+    const ZERO_RANGE_EPS: f32 = 1e-4;
+    /// The farthest segment's shade; nothing shades darker.
+    const MIN_SHADE: f32 = 0.35;
+
+    let world = evaluate3(figure, pose);
+    let proj = project(&world, cam, DEFAULT_STAGE);
+    let mut means: Vec<f32> = Vec::new();
+    for (i, node) in figure.nodes.iter().enumerate() {
+        if let Some(p) = node.parent {
+            if let (Some(&a), Some(&b)) = (proj.get(p), proj.get(i)) {
+                means.push((a.depth + b.depth) / 2.0);
+            }
+        }
+    }
+    if means.is_empty() {
+        return means;
+    }
+    let min = means.iter().copied().fold(f32::INFINITY, f32::min);
+    let max = means.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let range = max - min;
+    if range <= ZERO_RANGE_EPS {
+        return vec![1.0; means.len()];
+    }
+    means
+        .iter()
+        .map(|&d| {
+            let t = (d - min) / range; // 0 = nearest, 1 = farthest
+            (1.0 - t * (1.0 - MIN_SHADE)).clamp(MIN_SHADE, 1.0)
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------
 // Baking a posed 3D figure into 2D figure-definition data.
 // ---------------------------------------------------------------------
@@ -754,6 +809,86 @@ mod tests {
         let far = project(&world, &Camera3 { distance: 800.0, ..cam() }, stage);
         let segs_far = segments2d(&fig, &far);
         assert!(segs_far[0].2 < segs[0].2, "{} vs {}", segs_far[0].2, segs[0].2);
+    }
+
+    #[test]
+    fn segment_shades_far_segment_in_minus_z_scores_lower() {
+        // One segment in the view plane, one pushed far in -Z (away
+        // from the camera at +Z): the far segment's mean depth is
+        // (400 + 600) / 2, the near one's is 400.
+        let fig = Figure3 {
+            name: "depth".into(),
+            color: 0,
+            nodes: vec![
+                Node3 { name: "root".into(), parent: None, offset: [0.0; 3], head: false },
+                Node3 { name: "near".into(), parent: Some(0), offset: [30.0, 0.0, 0.0], head: false },
+                Node3 { name: "far".into(), parent: Some(0), offset: [0.0, 0.0, -200.0], head: false },
+            ],
+        };
+        let pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        let shades = segment_shades(&fig, &pose, &cam());
+        assert_eq!(shades.len(), 2, "one shade per segment, segments2d order");
+        // Nearest segment is exactly 1.0; the farthest hits the floor.
+        assert_eq!(shades[0], 1.0);
+        assert!(shades[1] < shades[0], "far {} vs near {}", shades[1], shades[0]);
+        assert!((shades[1] - 0.35).abs() < 1e-4, "far shade {}", shades[1]);
+    }
+
+    #[test]
+    fn segment_shades_planar_figure_is_uniform() {
+        // The rest humanoid is planar (every Z offset 0) facing the
+        // camera: all endpoints share one depth, the range is zero,
+        // and every segment must shade ~1.0 (no divide-by-zero ramp).
+        let fig = humanoid3();
+        let shades = segment_shades(&fig, &Pose3::rest(&fig, [0.0, 0.0, 0.0]), &cam());
+        assert_eq!(shades.len(), fig.nodes.len() - 1);
+        assert!(
+            shades.iter().all(|&s| (s - 1.0).abs() < 1e-4),
+            "planar shades {shades:?}"
+        );
+    }
+
+    #[test]
+    fn segment_shades_empty_figure_is_empty() {
+        let fig = Figure3 { name: "empty".into(), color: 0, nodes: vec![] };
+        let pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        assert!(segment_shades(&fig, &pose, &cam()).is_empty());
+        // A lone root has no segments either.
+        let solo = Figure3 {
+            name: "solo".into(),
+            color: 0,
+            nodes: vec![Node3 {
+                name: "root".into(),
+                parent: None,
+                offset: [0.0; 3],
+                head: false,
+            }],
+        };
+        assert!(segment_shades(&solo, &Pose3::rest(&solo, [0.0; 3]), &cam()).is_empty());
+    }
+
+    #[test]
+    fn segment_shades_stay_within_clamp_bounds() {
+        // A depth-rich pose (chest pitched, one arm swung toward the
+        // camera, root off-axis under an orbited camera): every
+        // shade lands in 0.35..=1.0, the count matches segments2d,
+        // and at least one segment is shaded below 1.0.
+        let fig = humanoid3();
+        let mut pose = Pose3::rest(&fig, [20.0, 0.0, -30.0]);
+        pose.rotations[1] = [35.0, 0.0, 0.0]; // chest tips forward
+        pose.rotations[3] = [0.0, 80.0, 0.0]; // upperArm.L swings in Z
+        pose.rotations[9] = [0.0, 0.0, -25.0]; // thigh.L
+        let cam = Camera3 { yaw: 30.0, pitch: 15.0, ..cam() };
+        let shades = segment_shades(&fig, &pose, &cam);
+        let world = evaluate3(&fig, &pose);
+        let proj = project(&world, &cam, DEFAULT_STAGE);
+        assert_eq!(shades.len(), segments2d(&fig, &proj).len());
+        assert!(
+            shades.iter().all(|&s| (0.35..=1.0).contains(&s)),
+            "shades out of bounds {shades:?}"
+        );
+        assert!(shades.iter().any(|&s| s < 1.0), "expected some depth shading {shades:?}");
+        assert!(shades.iter().any(|&s| s == 1.0), "nearest segment shades 1.0 {shades:?}");
     }
 
     #[test]

@@ -400,6 +400,351 @@ pub fn import_piv(data: &[u8]) -> Result<Project, String> {
     }
 }
 
+// ---------- Probe (import diagnostics) ----------
+
+/// A cheap header summary of a `.piv` file: what
+/// [`probe_piv`] can report without importing the animation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PivProbe {
+    /// Container version byte (2, 3, 4 or 5).
+    pub version: u8,
+    /// Stage size in pixels, as stored in the header.
+    pub canvas: (u32, u32),
+    /// Playback rate. v2 stores no rate (Pivot's fixed 13 fps);
+    /// v3/v4 derive it from the trailer's frame interval exactly
+    /// as [`import_piv`] does; v5 stores it directly in its
+    /// trailer.
+    pub fps: f32,
+    /// The figure-slot count stored in the header, in the
+    /// importers' own convention: slot 1 is the implicit
+    /// built-in man, so a file with one stored figure reports 3.
+    pub figure_slots: usize,
+    /// The frame/keyframe count stored after the figure table.
+    pub frames: usize,
+    /// The file carries background entries beyond the implicit
+    /// default slot (v2: its has-background byte is set; v3/v4/v5:
+    /// the background table holds more than the default slot).
+    pub has_backgrounds: bool,
+}
+
+/// Inspect a `.piv` file's header and counts without importing
+/// it. The probe never builds a [`Project`] and never assembles
+/// poses; every version's fields are reachable from the header
+/// plus size-only structural walks, so no version needs a
+/// full-import fallback:
+///
+/// * v2 — canvas, slot count and frame count all sit in the
+///   header/figure-table preamble, and fps is the fixed 13; the
+///   frame records are still walked (skipped by size) so a
+///   truncated file errors here just as it would on import.
+/// * v3/v4 — the same walk reaches the trailer's frame
+///   interval/delay, from which fps derives with the importers'
+///   own formula.
+/// * v5 — the keyframe count is a plain header field after the
+///   figure table (parsed with `parse_figure_v5`, side tables
+///   included); the keyframes are then walked by size —
+///   honouring the per-object length/bend arrays and the
+///   optional camera record — to reach the trailer's stored
+///   fps.
+///
+/// Figure records are parsed with the importers' own
+/// `parse_figure`/`parse_figure_v5` because the frame walks
+/// need each type's segment count (and whether its objects
+/// carry the image/text flags byte); nothing else is retained.
+pub fn probe_piv(data: &[u8]) -> Result<PivProbe, String> {
+    if data.is_empty() {
+        return Err("empty file".into());
+    }
+    let payload;
+    let bytes: &[u8] = if (1..=5).contains(&data[0]) {
+        data
+    } else {
+        payload = inflate(data)?;
+        &payload
+    };
+    let mut r = Reader::new(bytes);
+    let version = r.u8()?;
+    match version {
+        2 | 3 => probe_v23(&mut r, version),
+        4 => probe_v4(&mut r),
+        5 => probe_v5(&mut r),
+        v => Err(format!("unsupported .piv version {v} (this probe covers 2, 3, 4 and 5)")),
+    }
+}
+
+/// Skip one v2/v3 frame object record (type, scale, colour,
+/// optional image/text flags byte, absolute angles, root) using
+/// the owning type's segment count. Mirrors the record layout
+/// [`import_v23`] reads.
+fn skip_object_v23(r: &mut Reader, seg_counts: &[usize], img_flags: &[bool]) -> Result<(), String> {
+    let type_id = r.u8()? as usize;
+    if type_id == 0 || type_id > seg_counts.len() {
+        return Err(format!("unknown figure type {type_id}"));
+    }
+    r.take(8)?; // scale f32 + colour COLORREF
+    if img_flags[type_id - 1] {
+        r.u8()?; // image/text flags byte
+    }
+    r.take(seg_counts[type_id - 1] * 8)?; // absolute angles, f64 each
+    r.take(8)?; // root, 2 x f32
+    Ok(())
+}
+
+fn probe_v23(r: &mut Reader, version: u8) -> Result<PivProbe, String> {
+    let has_background = if version == 2 { r.u8()? } else { 0 };
+    let width = r.u32()?;
+    let height = r.u32()?;
+    if width == 0 || height == 0 {
+        return Err("invalid canvas size".into());
+    }
+    if version == 2 && has_background == 1 {
+        let marker = r.u8()?;
+        if marker != 0 {
+            return Err("unsupported v2 background marker".into());
+        }
+        skip_bmp(r)?;
+    }
+    let mut bg_slots = 1usize;
+    if version == 3 {
+        let slots = r.u8()?;
+        if slots == 0 {
+            return Err("background table missing default slot".into());
+        }
+        bg_slots = slots as usize;
+        for _ in 1..slots {
+            match r.u8()? {
+                0 => skip_bmp(r)?,
+                1 => skip_jpeg(r)?,
+                k => return Err(format!("unsupported v3 background kind {k}")),
+            }
+            r.str8()?;
+        }
+    }
+    let figure_slots = r.u8()? as usize;
+    if figure_slots < 2 {
+        return Err("invalid figure slot count".into());
+    }
+    let (bdef, _babs) = builtin_man();
+    let mut seg_counts: Vec<usize> = vec![bdef.nodes.len() - 1];
+    let mut img_flags: Vec<bool> = vec![false];
+    for _ in 2..figure_slots {
+        let (def, _name, _abs, has_images) = parse_figure(r, false)?;
+        seg_counts.push(def.nodes.len() - 1);
+        img_flags.push(has_images);
+    }
+    let frame_count = r.u32()? as usize;
+    // Walk the frame records by size: v2 needs nothing past the
+    // count, but the walk keeps truncation an error, as on
+    // import; v3's fps lives in the trailer beyond the frames.
+    let fps = if version == 2 {
+        for _ in 0..frame_count {
+            let object_count = r.u8()? as usize;
+            for _ in 0..object_count {
+                skip_object_v23(r, &seg_counts, &img_flags)?;
+            }
+        }
+        13.0
+    } else {
+        for _ in 0..frame_count {
+            r.u16()?; // duration
+            r.u8()?; // background id
+            let object_count = r.u8()? as usize;
+            for _ in 0..object_count {
+                skip_object_v23(r, &seg_counts, &img_flags)?;
+            }
+        }
+        let interval = r.u32()?;
+        if interval == 0 {
+            return Err("zero frame interval".into());
+        }
+        (1000.0 / interval as f32).round().max(1.0)
+    };
+    if !r.done() && version == 3 && r.data.len() - r.pos == 1 {
+        r.u8()?; // optional loop flag
+    }
+    if !r.done() {
+        return Err("trailing bytes after .piv payload".into());
+    }
+    Ok(PivProbe {
+        version,
+        canvas: (width, height),
+        fps,
+        figure_slots,
+        frames: frame_count,
+        has_backgrounds: if version == 2 { has_background == 1 } else { bg_slots > 1 },
+    })
+}
+
+fn probe_v4(r: &mut Reader) -> Result<PivProbe, String> {
+    let width = r.u32()?;
+    let height = r.u32()?;
+    if width == 0 || height == 0 {
+        return Err("invalid canvas size".into());
+    }
+    let bg_slots = r.u8()?;
+    if bg_slots == 0 {
+        return Err("background table missing default slot".into());
+    }
+    for _ in 1..bg_slots {
+        match r.u8()? {
+            0 => skip_bmp(r)?,
+            1 => skip_jpeg(r)?,
+            k => return Err(format!("unsupported v4 background kind {k}")),
+        }
+        r.str8()?;
+    }
+    let figure_slots = r.u16()? as usize;
+    if figure_slots < 2 {
+        return Err("invalid figure slot count".into());
+    }
+    let (bdef, _babs) = builtin_man();
+    let mut seg_counts: Vec<usize> = vec![bdef.nodes.len() - 1];
+    let mut img_flags: Vec<bool> = vec![false];
+    for _ in 2..figure_slots {
+        let (def, _name, _abs, has_images) = parse_figure(r, true)?;
+        seg_counts.push(def.nodes.len() - 1);
+        img_flags.push(has_images);
+    }
+    let frame_count = r.u32()? as usize;
+    // Walk the frame records by size to reach the trailer's
+    // frame delay, from which fps derives as on import.
+    for _ in 0..frame_count {
+        r.u16()?; // duration
+        r.u8()?; // background id
+        let object_count = r.u16()? as usize;
+        for _ in 0..object_count {
+            r.u32()?; // unique id
+            let type_id = r.u16()? as usize;
+            if type_id == 0 || type_id > seg_counts.len() {
+                return Err(format!("unknown figure type {type_id}"));
+            }
+            r.take(9)?; // scale f32 + colour COLORREF + transparency
+            if img_flags[type_id - 1] {
+                r.u8()?; // image/text flags byte
+            }
+            let seg = seg_counts[type_id - 1];
+            r.take(seg * 8)?; // absolute angles, f64 each
+            r.take(8)?; // root, 2 x f32
+            if r.u8()? != 0 {
+                r.take(seg * 4)?; // per-frame lengths, f32 each
+            }
+            if r.u8()? != 0 {
+                r.take(3)?; // join record: slot u16 + flag u8
+            }
+        }
+        r.take(object_count * 2)?; // draw order, u16 each
+    }
+    let delay = r.u32()?;
+    if delay == 0 {
+        return Err("zero frame delay".into());
+    }
+    if !r.done() && r.data.len() - r.pos == 1 {
+        r.u8()?; // optional loop flag
+    }
+    if !r.done() {
+        return Err("trailing bytes after .piv payload".into());
+    }
+    Ok(PivProbe {
+        version: 4,
+        canvas: (width, height),
+        fps: (1000.0 / delay as f32).round().max(1.0),
+        figure_slots,
+        frames: frame_count,
+        has_backgrounds: bg_slots > 1,
+    })
+}
+
+fn probe_v5(r: &mut Reader) -> Result<PivProbe, String> {
+    let width = r.u32()?;
+    let height = r.u32()?;
+    if width == 0 || height == 0 {
+        return Err("invalid canvas size".into());
+    }
+    let bg_slots = r.u16()? as usize;
+    if bg_slots < 1 {
+        return Err("background table missing default slot".into());
+    }
+    for _ in 1..bg_slots {
+        match r.u8()? {
+            0 | 1 => {
+                let end = r.u64()? as usize;
+                if end < r.pos || end > r.data.len() {
+                    return Err("invalid background end pointer".into());
+                }
+                r.take(end - r.pos)?;
+            }
+            2 => {
+                r.u32()?; // colour
+            }
+            3 | 4 => {
+                r.take(24)?; // two colours + 4 x f32 gradient geometry
+            }
+            k => return Err(format!("unsupported v5 background kind {k}")),
+        }
+        r.str8()?; // background name
+    }
+    let figure_slots = r.u16()? as usize;
+    if figure_slots < 2 {
+        return Err("invalid figure slot count".into());
+    }
+    let (bdef, _babs) = builtin_man();
+    let mut seg_counts: Vec<usize> = vec![bdef.nodes.len() - 1];
+    let mut img_flags: Vec<bool> = vec![false];
+    for _ in 2..figure_slots {
+        let (t, _bends) = parse_figure_v5(r)?;
+        seg_counts.push(t.def.nodes.len() - 1);
+        img_flags.push(t.has_images);
+    }
+    let frame_count = r.u32()? as usize;
+    // Walk the keyframes by size to reach the trailer's stored
+    // fps (past it sit only ignored trailer bytes, as on import).
+    for _ in 0..frame_count {
+        r.u16()?; // duration
+        let bg_mix = r.u8()?;
+        r.u16()?; // background id
+        if bg_mix != 0 {
+            r.u16()?; // secondary background id
+        }
+        let object_count = r.u16()? as usize;
+        for _ in 0..object_count {
+            r.u32()?; // unique id
+            let type_id = r.u16()? as usize;
+            if type_id == 0 || type_id > seg_counts.len() {
+                return Err(format!("unknown figure type {type_id}"));
+            }
+            r.take(9)?; // scale f32 + colour COLORREF + field28
+            if img_flags[type_id - 1] {
+                r.u8()?; // image/text flags byte
+            }
+            let seg = seg_counts[type_id - 1];
+            r.take(seg * 8)?; // absolute angles, f64 each
+            r.take(8)?; // root, 2 x f32
+            if r.u16()? != 0 {
+                r.take(seg * 4)?; // per-frame lengths, f32 each
+            }
+            if r.u16()? != 0 {
+                r.take(seg * 8)?; // per-frame bends, f64 each
+            }
+            if r.u8()? != 0 {
+                r.take(4)?; // join record: slot u16 + handle u16
+            }
+        }
+        r.take(object_count * 2)?; // draw order, u16 each
+        if r.u8()? == 0 {
+            r.take(20)?; // camera record: x/y f32, angle f64, zoom f32
+        }
+    }
+    let fps = r.u32()? as f32;
+    Ok(PivProbe {
+        version: 5,
+        canvas: (width, height),
+        fps,
+        figure_slots,
+        frames: frame_count,
+        has_backgrounds: bg_slots > 1,
+    })
+}
+
 struct FigType {
     def: FigureDef,
     rest_abs: Vec<f32>,
@@ -2703,6 +3048,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn probe_corpus_fixtures_match_manifest_values() {
+        let dir = std::path::Path::new("tests/fixtures");
+        if !dir.exists() {
+            return; // corpus is generated by scripts/gen_fixtures.py
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
+                .unwrap();
+        for (file, version) in [
+            ("legacy-v2.piv", 2u8),
+            ("legacy-v3.piv", 3),
+            ("legacy-v4.piv", 4),
+            ("modern-v5.piv", 5),
+        ] {
+            let data = std::fs::read(dir.join(file)).unwrap();
+            let probe = probe_piv(&data).unwrap_or_else(|e| panic!("{file}: {e}"));
+            assert_eq!(probe.version, version, "{file} version");
+            assert_eq!(probe.canvas, (800, 600), "{file} canvas");
+            // Header slot count: builtin + the one stored figure.
+            assert_eq!(probe.figure_slots, 3, "{file} figure slots");
+            let expect = &manifest["fixtures"][file];
+            assert_eq!(
+                probe.frames,
+                expect["frames"].as_u64().unwrap() as usize,
+                "{file} frames"
+            );
+            let want_fps = expect["fps"].as_f64().unwrap() as f32;
+            assert!((probe.fps - want_fps).abs() < 1.5, "{file} fps {}", probe.fps);
+            assert!(!probe.has_backgrounds, "{file} backgrounds");
+        }
+    }
+
+    #[test]
+    fn probe_agrees_with_demo_project_exports() {
+        // Every exporter in this module probes back to the
+        // project it was written from (v2's fps is the format
+        // constant 13 by definition — the format stores no rate).
+        let project = Project::new_demo();
+        for (bytes, version) in [
+            (export_piv_v2(&project), 2u8),
+            (export_piv_v3(&project), 3),
+            (export_piv_v4(&project), 4),
+            (export_piv_v5(&project), 5),
+        ] {
+            let probe = probe_piv(&bytes).unwrap_or_else(|e| panic!("v{version}: {e}"));
+            assert_eq!(probe.version, version, "v{version} version");
+            assert_eq!(
+                probe.canvas,
+                (project.stage[0] as u32, project.stage[1] as u32),
+                "v{version} canvas"
+            );
+            assert_eq!(probe.figure_slots, project.figures.len() + 2, "v{version} slots");
+            assert_eq!(probe.frames, project.frames.len(), "v{version} frames");
+            if version == 2 {
+                assert_eq!(probe.fps, 13.0, "v2 fps");
+            } else {
+                assert!(
+                    (probe.fps - project.fps).abs() < 1.5,
+                    "v{version} fps {}",
+                    probe.fps
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn probe_rejects_garbage_and_truncation() {
+        assert!(probe_piv(&[]).is_err());
+        assert!(probe_piv(b"not a pivot file at all").is_err());
+        // A raw version byte this probe does not cover.
+        assert!(probe_piv(&[1, 0, 0, 0, 0]).is_err());
+        // A real file cut short inside its frame records.
+        let bytes = export_piv_v3(&Project::new_demo());
+        assert!(probe_piv(&bytes[..bytes.len() - 3]).is_err());
     }
 
     #[test]

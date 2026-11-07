@@ -1179,4 +1179,269 @@ mod tests {
             );
         }
     }
+
+    // ---- Wave 9: .nodes round-trip properties ----
+
+    /// Field-by-field comparison of a def against its
+    /// export → import round trip, node by corresponding node
+    /// via `nodes_preorder` (the stream is tree preorder, so
+    /// indices generally move). Tolerances follow the spirit of
+    /// pivot.rs's round-trips (< 0.5 there): 0.51 here, because
+    /// thickness is stored as i32 and rounding alone can cost
+    /// 0.5. The only exemptions are the losses documented on
+    /// `export_nodes_figure`, and each is asserted explicitly
+    /// rather than skipped: the raw root's length reads back 0
+    /// and its colour None (the colour returns as the header /
+    /// instance colour instead), origin-parented nodes re-parent
+    /// to the root, and head / IK-end flags and bend direction
+    /// are dropped (no grammar fields). `check_geometry` also
+    /// compares evaluated rest positions — only valid for defs
+    /// in the importer's own image (zero-length root anchor):
+    /// for Pivot-style defs the root's lost length shifts every
+    /// descendant's evaluated position by design.
+    fn check_roundtrip_fields(def: &FigureDef, back: &FigureDef, check_geometry: bool) {
+        assert_eq!(back.nodes.len(), def.nodes.len(), "node count");
+        let order = nodes_preorder(def);
+        let pa = evaluate(def, &def.rest_pose([100.0, 100.0]));
+        let pb = evaluate(back, &back.rest_pose([100.0, 100.0]));
+        for (j, &k) in order.iter().enumerate() {
+            let (a, b) = (&def.nodes[k], &back.nodes[j + 1]);
+            assert!(
+                (a.thickness - b.thickness).abs() < 0.51,
+                "node {k} thickness {} vs {}",
+                a.thickness,
+                b.thickness
+            );
+            assert!(
+                (crate::model::norm_deg(a.rest_angle - b.rest_angle)).abs() < 0.51,
+                "node {k} rest {} vs {}",
+                a.rest_angle,
+                b.rest_angle
+            );
+            assert_eq!(a.shape, b.shape, "node {k} shape");
+            assert!(!b.head, "node {k}: head flag has no grammar field");
+            assert!(!b.ik_end, "node {k}: ik_end flag has no grammar field");
+            assert_eq!(b.bend, 1.0, "node {k}: bend direction has no grammar field");
+            if k == 1 {
+                // Documented raw-root losses.
+                assert_eq!(b.length, 0.0, "raw root length reads back 0");
+                assert_eq!(b.color, None, "raw root colour is dropped");
+                assert_eq!(b.parent, Some(0));
+            } else {
+                assert!(
+                    (a.length - b.length).abs() < 0.51,
+                    "node {k} length {} vs {}",
+                    a.length,
+                    b.length
+                );
+                assert_eq!(a.color, b.color, "node {k} colour");
+                // Origin-parented nodes re-parent to the root;
+                // any other parent maps to its preorder slot.
+                let rp = match a.parent {
+                    Some(p) if p >= 1 => p,
+                    _ => 1,
+                };
+                let expect = order.iter().position(|&x| x == rp).unwrap() + 1;
+                assert_eq!(b.parent, Some(expect), "node {k} parent");
+            }
+            if check_geometry {
+                assert!(
+                    (pa[k][0] - pb[j + 1][0]).abs() < 0.51
+                        && (pa[k][1] - pb[j + 1][1]).abs() < 0.51,
+                    "node {k} pos {:?} vs {:?}",
+                    pa[k],
+                    pb[j + 1]
+                );
+            }
+        }
+    }
+
+    /// Round trip for defs in the importer's own image
+    /// (zero-length root anchor): geometry included.
+    fn assert_nodes_roundtrip(def: &FigureDef) -> FigureDef {
+        let bytes = export_nodes_figure(def, "T");
+        let (back, _) = import_nodes_figure(&bytes).unwrap();
+        check_roundtrip_fields(def, &back, true);
+        back
+    }
+
+    /// Round trip for Pivot-style defs: every field except
+    /// evaluated geometry (shifted by the root's lost length).
+    fn assert_nodes_roundtrip_structure(def: &FigureDef) -> FigureDef {
+        let bytes = export_nodes_figure(def, "T");
+        let (back, _) = import_nodes_figure(&bytes).unwrap();
+        check_roundtrip_fields(def, &back, false);
+        back
+    }
+
+    #[test]
+    fn nodes_roundtrip_wide_star_and_deep_chain() {
+        // Importer-image def (node 1 a zero-length anchor, rest
+        // 100): five leaves fanned off the root — one a circle,
+        // one a hexagon — plus a four-deep chain. Storage order
+        // below is already tree preorder.
+        let def = FigureDef {
+            nodes: vec![
+                nd(None, 0.0, 0.0, 5.0, None, Shape::Line),
+                nd(Some(0), 0.0, 100.0, 6.0, None, Shape::Line),
+                nd(Some(1), 34.0, -12.0, 3.0, None, Shape::Line), // chain a
+                nd(Some(2), 28.0, 24.0, 3.0, Some(0x224466), Shape::Line), // chain b
+                nd(Some(3), 22.0, -36.0, 2.0, None, Shape::Line), // chain c
+                nd(Some(4), 16.0, 48.0, 2.0, None, Shape::Circle), // chain d
+                nd(Some(1), 44.0, -150.0, 8.0, Some(0xFF0000), Shape::Line),
+                nd(Some(1), 40.0, -75.0, 12.0, None, Shape::Circle),
+                nd(Some(1), 52.0, 0.0, 4.0, Some(0x00FF00), Shape::Polygon(6)),
+                nd(Some(1), 38.0, 75.0, 6.0, None, Shape::Line),
+                nd(Some(1), 46.0, 160.0, 9.0, Some(0x0000FF), Shape::Line),
+            ],
+        };
+        assert_nodes_roundtrip(&def);
+    }
+
+    #[test]
+    fn nodes_roundtrip_quadruped_preset_structure() {
+        // The quadruped preset is Pivot-style: node 1 is a real
+        // 95-long spine and four nodes parent the origin, so the
+        // documented losses apply — but count, lengths,
+        // thicknesses, rest angles, shapes and the re-parenting
+        // must all survive. (Its storage order is preorder under
+        // the collapsed parent map, so indices line up.)
+        let def = FigureDef::quadruped();
+        let back = assert_nodes_roundtrip_structure(&def);
+        assert_eq!(back.nodes[1].length, 0.0, "the spine's 95 does not survive");
+        for k in [4, 6, 12] {
+            assert_eq!(
+                back.nodes[k].parent,
+                Some(1),
+                "origin-parented node {k} re-parents to the root"
+            );
+        }
+        assert!(!back.nodes[3].head, "the head flag is dropped");
+        for k in [5, 7, 9, 11] {
+            assert!(!back.nodes[k].ik_end, "ik_end on node {k} is dropped");
+        }
+    }
+
+    #[test]
+    fn nodes_roundtrip_simple_preset_with_colour_override_and_circle() {
+        // Preset + the brief's edge cases on top: per-node
+        // colour overrides, a circle-primitive head, and a
+        // non-default thickness on one leg.
+        let mut def = FigureDef::simple();
+        def.nodes[1].color = Some(0x0A0B0C); // root colour → header
+        def.nodes[2].shape = Shape::Circle; // head as a circle
+        def.nodes[3].color = Some(0xFF8800);
+        def.nodes[4].color = Some(0x123456);
+        def.nodes[5].thickness = 9.0;
+        let bytes = export_nodes_figure(&def, "T");
+        let (back, color) = import_nodes_figure(&bytes).unwrap();
+        // Node 1's colour is not a per-node field on the way
+        // back: it returns as the figure (instance) colour.
+        assert_eq!(color, 0x0A0B0C, "root colour returns via the header");
+        assert_eq!(back.nodes[1].color, None);
+        check_roundtrip_fields(&def, &back, false);
+        assert_eq!(back.nodes[2].shape, Shape::Circle);
+        assert_eq!(back.nodes[3].color, Some(0xFF8800));
+        assert_eq!(back.nodes[4].color, Some(0x123456));
+        assert_eq!(back.nodes[5].thickness, 9.0);
+        // The origin-parented legs re-parent to the root.
+        assert_eq!(back.nodes[5].parent, Some(1));
+        assert_eq!(back.nodes[6].parent, Some(1));
+    }
+
+    #[test]
+    fn nodes_roundtrip_fractional_thickness_rounds_to_i32_documented() {
+        // Documented loss: the format stores thickness as i32,
+        // so fractional values round (half away from zero).
+        let def = FigureDef {
+            nodes: vec![
+                nd(None, 0.0, 0.0, 5.0, None, Shape::Line),
+                nd(Some(0), 0.0, 100.0, 6.0, None, Shape::Line),
+                nd(Some(1), 40.0, 10.0, 4.4, None, Shape::Line),
+                nd(Some(1), 40.0, -10.0, 4.6, None, Shape::Line),
+                nd(Some(1), 40.0, 90.0, 7.5, None, Shape::Line),
+            ],
+        };
+        let bytes = export_nodes_figure(&def, "T");
+        let (back, _) = import_nodes_figure(&bytes).unwrap();
+        assert_eq!(back.nodes[2].thickness, 4.0, "4.4 rounds down");
+        assert_eq!(back.nodes[3].thickness, 5.0, "4.6 rounds up");
+        assert_eq!(back.nodes[4].thickness, 8.0, "7.5 rounds up");
+        // Lengths and angles are f32 in the grammar: exact.
+        for k in 2..=4 {
+            assert!((back.nodes[k].length - 40.0).abs() < 0.01, "node {k} length");
+        }
+    }
+
+    #[test]
+    fn nodes_roundtrip_negative_length_flips_180_documented() {
+        // Documented loss: a negative length is written as its
+        // magnitude plus the format's 180° local-angle flip, so
+        // the value changes but the evaluated geometry is
+        // identical.
+        let def = FigureDef {
+            nodes: vec![
+                nd(None, 0.0, 0.0, 5.0, None, Shape::Line),
+                nd(Some(0), 0.0, 100.0, 6.0, None, Shape::Line),
+                nd(Some(1), 40.0, 20.0, 4.0, None, Shape::Line),
+                nd(Some(2), -30.0, 10.0, 4.0, None, Shape::Line),
+            ],
+        };
+        let bytes = export_nodes_figure(&def, "T");
+        let (back, _) = import_nodes_figure(&bytes).unwrap();
+        assert_eq!(back.nodes.len(), def.nodes.len());
+        assert!((back.nodes[3].length - 30.0).abs() < 0.01, "magnitude survives");
+        assert!(
+            (crate::model::norm_deg(back.nodes[3].rest_angle - (def.nodes[3].rest_angle + 180.0)))
+                .abs()
+                < 0.05,
+            "rest angle gains the 180 flip: {} vs {}",
+            back.nodes[3].rest_angle,
+            def.nodes[3].rest_angle
+        );
+        let pa = evaluate(&def, &def.rest_pose([100.0, 100.0]));
+        let pb = evaluate(&back, &back.rest_pose([100.0, 100.0]));
+        for k in 0..def.nodes.len() {
+            assert!(
+                (pa[k][0] - pb[k][0]).abs() < 0.05 && (pa[k][1] - pb[k][1]).abs() < 0.05,
+                "node {k} pos {:?} vs {:?}",
+                pa[k],
+                pb[k]
+            );
+        }
+    }
+
+    #[test]
+    fn nodes_roundtrip_names_are_regenerated_documented() {
+        // Documented loss: the grammar stores no names at all —
+        // neither node names nor a figure name. Imported nodes
+        // are named from their kind and raw id, and the export's
+        // `name` argument is ignored entirely (byte-identical
+        // output for any name).
+        let mut def = FigureDef {
+            nodes: vec![
+                nd(None, 0.0, 0.0, 5.0, None, Shape::Line),
+                nd(Some(0), 0.0, 100.0, 6.0, None, Shape::Line),
+                nd(Some(1), 40.0, 15.0, 4.0, None, Shape::Line),
+                nd(Some(2), 24.0, -20.0, 4.0, None, Shape::Circle),
+                nd(Some(2), 18.0, 30.0, 4.0, None, Shape::Polygon(3)),
+            ],
+        };
+        def.nodes[1].name = "Alpha".into();
+        def.nodes[2].name = "Beta".into();
+        def.nodes[3].name = "Gamma".into();
+        def.nodes[4].name = "Delta".into();
+        let bytes = export_nodes_figure(&def, "T");
+        assert_eq!(
+            bytes,
+            export_nodes_figure(&def, "A Completely Different Name"),
+            "the figure name is not stored in the grammar"
+        );
+        let (back, _) = import_nodes_figure(&bytes).unwrap();
+        assert_eq!(back.nodes[0].name, "origin");
+        assert_eq!(back.nodes[1].name, "root 0");
+        assert_eq!(back.nodes[2].name, "segment 1");
+        assert_eq!(back.nodes[3].name, "circle 2");
+        assert_eq!(back.nodes[4].name, "triangle 3");
+    }
 }

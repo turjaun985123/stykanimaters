@@ -85,3 +85,33 @@ fn paint_curve(window: &mut Window, bounds: Bounds<Pixels>, easing: Easing) {
         window.paint_path(path, rgb(C_ACCENT));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn easing_name_covers_every_variant() {
+        assert_eq!(easing_name(Easing::Linear), "Linear");
+        assert_eq!(easing_name(Easing::Smooth), "Smooth");
+        assert_eq!(easing_name(Easing::EaseIn), "Ease In");
+        assert_eq!(easing_name(Easing::EaseOut), "Ease Out");
+    }
+
+    #[test]
+    fn easing_names_are_distinct_and_non_empty() {
+        let names = [
+            easing_name(Easing::Linear),
+            easing_name(Easing::Smooth),
+            easing_name(Easing::EaseIn),
+            easing_name(Easing::EaseOut),
+        ];
+        for (i, name) in names.iter().enumerate() {
+            assert!(!name.trim().is_empty(), "name {i} is empty");
+            assert!(
+                !names[..i].contains(name),
+                "duplicate easing name: {name}"
+            );
+        }
+    }
+}

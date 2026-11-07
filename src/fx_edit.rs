@@ -53,6 +53,10 @@ pub fn kind_name(kind: ClipKind) -> &'static str {
         ClipKind::Lightning => "lightning",
         ClipKind::Bubbles => "bubbles",
         ClipKind::Leaves => "leaves",
+        ClipKind::Meteor => "meteor",
+        ClipKind::Petals => "petals",
+        ClipKind::Splash => "splash",
+        ClipKind::Spiral => "spiral",
     }
 }
 
@@ -219,6 +223,10 @@ mod tests {
             ClipKind::Lightning,
             ClipKind::Bubbles,
             ClipKind::Leaves,
+            ClipKind::Meteor,
+            ClipKind::Petals,
+            ClipKind::Splash,
+            ClipKind::Spiral,
         ];
         let mut names: Vec<&str> = kinds.iter().map(|k| kind_name(*k)).collect();
         names.sort();

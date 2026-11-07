@@ -32,17 +32,19 @@ Protocol: JSON-RPC 2.0, one message per line — `initialize`,
 `notifications/initialized`, `ping`, `tools/list`, `tools/call`.
 Protocol version `2024-11-05`.
 
-## Tools (49)
+## Tools (51)
 
 Session: `server_info`, `get_state`, `set_frame`, `project_summary`.
 
 Build: `new_project`, `add_figure` (humanoid/quadruped/mini),
 `list_figures`, `add_frame`, `insert_inbetween`, `delete_frame`,
-`set_frame_duration`, `get_pose`, `set_pose` (root + per-joint
+`set_frame_duration`, `set_frame_durations` (bulk),
+`get_project_stats`, `get_pose`, `set_pose` (root + per-joint
 angles), `set_node`, `add_node`, `delete_node`, `set_camera`
-(x/y/zoom/**angle**), `add_fx_clip` (all 14 kinds: burst, sparkle,
+(x/y/zoom/**angle**), `add_fx_clip` (all 18 kinds: burst, sparkle,
 smoke, beam, aura, trail, confetti, shock_ring, ember, fountain,
-orbit, lightning, bubbles, leaves), `fx_list`, `fx_move`,
+orbit, lightning, bubbles, leaves, meteor, petals, splash,
+spiral), `fx_list`, `fx_move`,
 `fx_resize`, `fx_duplicate`, `fx_delete`, `set_weather`
 (rain/snow/fireflies/off), `add_audio_clip`, `graph_key`,
 `layers` (lock/hide/opacity/solo), `undo`, `redo`.

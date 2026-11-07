@@ -169,3 +169,80 @@ pub fn help_panel(shortcuts: &[(&str, &str)], groups: &[(&str, &str)]) -> Div {
                 .child(groups_col),
         )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shortcut_rows_has_exactly_19_rows() {
+        assert_eq!(shortcut_rows().len(), 19);
+    }
+
+    #[test]
+    fn shortcut_rows_spot_checks() {
+        let rows = shortcut_rows();
+        // First global binding and the undo binding, exactly as
+        // the key handler implements them.
+        assert_eq!(rows[0], ("Space", "Play / pause"));
+        assert!(rows.contains(&("Ctrl+Z", "Undo")));
+        assert!(rows.contains(&("Ctrl+Shift+Z", "Redo")));
+        // Left/Right appear twice: once global, once in the
+        // text-authoring capture.
+        assert_eq!(rows.iter().filter(|(k, _)| *k == "Left").count(), 2);
+        assert_eq!(rows.iter().filter(|(k, _)| *k == "Right").count(), 2);
+    }
+
+    #[test]
+    fn shortcut_rows_globals_come_before_text_editing_rows() {
+        let rows = shortcut_rows();
+        // The 10 global bindings come first; every row after
+        // them is a text-authoring row whose action says so.
+        for (key, action) in &rows[..10] {
+            assert!(
+                !action.starts_with("Text editing:"),
+                "global row {key} is marked as text editing"
+            );
+        }
+        for (key, action) in &rows[10..] {
+            assert!(
+                action.starts_with("Text editing:"),
+                "text-editing row {key} is not marked as such"
+            );
+        }
+    }
+
+    #[test]
+    fn group_rows_covers_all_tool_groups() {
+        let rows = group_rows();
+        assert_eq!(rows.len(), 24);
+        assert_eq!(rows.first().map(|(name, _)| *name), Some("Transport"));
+        assert_eq!(rows.last().map(|(name, _)| *name), Some("Strokes"));
+    }
+
+    #[test]
+    fn group_names_are_unique() {
+        let rows = group_rows();
+        for (i, (name, _)) in rows.iter().enumerate() {
+            assert!(
+                !rows[..i].iter().any(|(n, _)| n == name),
+                "duplicate tool-group name: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_empty_strings_anywhere() {
+        for (key, action) in shortcut_rows() {
+            assert!(!key.trim().is_empty(), "empty shortcut key");
+            assert!(!action.trim().is_empty(), "empty action for {key}");
+        }
+        for (name, description) in group_rows() {
+            assert!(!name.trim().is_empty(), "empty group name");
+            assert!(
+                !description.trim().is_empty(),
+                "empty description for {name}"
+            );
+        }
+    }
+}

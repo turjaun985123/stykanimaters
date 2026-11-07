@@ -183,6 +183,51 @@ pub fn resample(points: &[V2], spacing: f32) -> Vec<V2> {
     out
 }
 
+/// Stabilise a freehand stroke with one left-to-right pass:
+/// hand jitter is dropped first, then each interior point is
+/// pulled toward the midpoint of its neighbours. A point closer
+/// than 0.5 units to the previous *kept* point counts as jitter
+/// and is dropped — except the first and last points, which are
+/// always kept exactly. Each remaining interior point `p` moves
+/// to `p + (mid - p) * strength`, where `mid` is the midpoint of
+/// the previous (already stabilised) point and the next kept
+/// point, so the correction propagates along the stroke instead
+/// of snapping every point independently. `strength` is clamped
+/// to `0..=1`: 0.0 returns the input completely unchanged
+/// (no dropping either), 1.0 puts every interior point exactly
+/// on its neighbours' midpoint. Empty and single-point inputs
+/// are returned as-is; NaN `strength` behaves as 0.0.
+pub fn stabilise(points: &[V2], strength: f32) -> Vec<V2> {
+    let s = strength.clamp(0.0, 1.0);
+    if !(s > 0.0) || points.len() < 2 {
+        return points.to_vec();
+    }
+    // De-jitter: keep a point only when it is at least 0.5 units
+    // from the previously kept one; the endpoints are exempt.
+    let mut kept: Vec<V2> = Vec::with_capacity(points.len());
+    kept.push(points[0]);
+    for &p in &points[1..points.len() - 1] {
+        if distance(p, *kept.last().unwrap()) >= 0.5 {
+            kept.push(p);
+        }
+    }
+    kept.push(*points.last().unwrap());
+    if kept.len() < 3 {
+        return kept;
+    }
+    let mut out: Vec<V2> = Vec::with_capacity(kept.len());
+    out.push(kept[0]);
+    for i in 1..kept.len() - 1 {
+        let prev = out[i - 1];
+        let next = kept[i + 1];
+        let mid = [(prev[0] + next[0]) * 0.5, (prev[1] + next[1]) * 0.5];
+        let p = kept[i];
+        out.push([p[0] + (mid[0] - p[0]) * s, p[1] + (mid[1] - p[1]) * s]);
+    }
+    out.push(*kept.last().unwrap());
+    out
+}
+
 /// Pen nib shape for width profiling in [`nib_widths`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Nib {
@@ -570,6 +615,98 @@ mod tests {
         assert_eq!(resample(&pts, -1.0), pts, "negative spacing is identity");
         // Spacing larger than the whole path: just the endpoints.
         assert_eq!(resample(&pts, 50.0), pts);
+    }
+
+    // ---- stabilise ----
+
+    #[test]
+    fn stabilise_zero_strength_is_identity() {
+        // Even points packed closer than the 0.5 de-jitter radius
+        // survive: strength 0.0 drops nothing.
+        let pts = vec![[0.0, 0.0], [0.1, 0.1], [0.2, 0.0], [5.0, 5.0]];
+        assert_eq!(stabilise(&pts, 0.0), pts);
+        // Out-of-range strengths clamp: negative behaves as 0.0.
+        assert_eq!(stabilise(&pts, -2.0), pts);
+    }
+
+    #[test]
+    fn stabilise_preserves_endpoints() {
+        let pts = vec![
+            [0.0, 0.0],
+            [1.0, 2.0],
+            [2.0, 0.0],
+            [3.0, 2.0],
+            [4.0, 0.0],
+        ];
+        for s in [0.25, 0.5, 1.0] {
+            let out = stabilise(&pts, s);
+            assert_eq!(out.first(), Some(&pts[0]), "start pinned at strength {s}");
+            assert_eq!(out.last(), Some(&pts[4]), "end pinned at strength {s}");
+        }
+        // Over-range strength clamps to the 1.0 result.
+        assert_eq!(stabilise(&pts, 7.0), stabilise(&pts, 1.0));
+    }
+
+    #[test]
+    fn stabilise_reduces_jitter_on_a_zigzag() {
+        let pts = vec![
+            [0.0, 0.0],
+            [1.0, 2.0],
+            [2.0, 0.0],
+            [3.0, 2.0],
+            [4.0, 0.0],
+        ];
+        let out = stabilise(&pts, 1.0);
+        // Full strength: each interior point lands on the midpoint
+        // of the previous stabilised point and the next kept point.
+        assert_eq!(
+            out,
+            vec![
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [2.0, 1.0],
+                [3.0, 0.5],
+                [4.0, 0.0],
+            ]
+        );
+        // Local roughness (deviation from the neighbours' mean)
+        // strictly drops.
+        let roughness = |path: &[V2]| -> f32 {
+            (1..path.len() - 1)
+                .map(|i| (path[i][1] - (path[i - 1][1] + path[i + 1][1]) * 0.5).abs())
+                .sum()
+        };
+        assert!(
+            roughness(&out) < roughness(&pts),
+            "roughness {} !< {}",
+            roughness(&out),
+            roughness(&pts)
+        );
+    }
+
+    #[test]
+    fn stabilise_drops_close_jitter_but_keeps_endpoints() {
+        // An interior point within 0.5 of the previous kept point
+        // is dropped, whatever the strength.
+        let pts = vec![[0.0, 0.0], [0.25, 0.0], [10.0, 0.0]];
+        assert_eq!(stabilise(&pts, 0.8), vec![[0.0, 0.0], [10.0, 0.0]]);
+        // The last point is an endpoint: kept even when it sits
+        // within 0.5 of its predecessor.
+        let pts = vec![[0.0, 0.0], [10.0, 0.0], [10.25, 0.0]];
+        assert_eq!(
+            stabilise(&pts, 1.0),
+            vec![[0.0, 0.0], [5.125, 0.0], [10.25, 0.0]]
+        );
+    }
+
+    #[test]
+    fn stabilise_degenerate_inputs() {
+        assert!(stabilise(&[], 0.5).is_empty());
+        assert!(stabilise(&[], 1.0).is_empty());
+        assert_eq!(stabilise(&[[3.0, 4.0]], 1.0), vec![[3.0, 4.0]]);
+        // Two points have no interior: returned unchanged.
+        let pts = vec![[0.0, 0.0], [10.0, 0.0]];
+        assert_eq!(stabilise(&pts, 1.0), pts);
     }
 
     // ---- nib_widths ----

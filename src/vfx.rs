@@ -73,6 +73,29 @@ pub enum ClipKind {
     /// apparent-width oscillation, in green shades derived from
     /// the clip colour.
     Leaves,
+    /// A white-hot head streaking along `angle` for `length`
+    /// (240 when unset), accelerating slightly, dragging a trail
+    /// of sparks at fixed lags behind it: each spark appears when
+    /// the head passes its lag and fades as the lag grows, so the
+    /// trail stretches exactly like a real meteor's.
+    Meteor,
+    /// Petals shed continuously: each petal runs its own falling
+    /// cycle (fract, like Beam's stream), drifting down across a
+    /// wide spread on a gentle sine sway, tumbling slowly, in
+    /// pink shades derived from the clip colour.
+    Petals,
+    /// A single upward burst: droplets leave together in an even
+    /// fan across a ±50° cone around `angle` (seeded speeds, not
+    /// seeded angles — the even fan reads as a crown splash),
+    /// arc under strong gravity, and vanish when they fall back
+    /// to the anchor's height.
+    Splash,
+    /// Motes streaming outward on three spiral arms: each mote
+    /// cycles from the anchor to `length` (90 when unset) at its
+    /// own pace while the pattern rotates, and its angle winds
+    /// by an extra twist across the cycle, bending the three
+    /// spokes into arms.
+    Spiral,
 }
 
 /// A timed particle effect. `start` and `duration` are in frames;
@@ -501,6 +524,137 @@ pub fn clip_particles(
                 push_c(&mut out, pos, 3.6 * spin + 0.8, alpha, palette[(i % 3) as usize]);
             }
         }
+        ClipKind::Meteor => {
+            // The head travels head_d(t) along `angle`, with a
+            // slight acceleration (0.75t + 0.25t^2 reaches exactly
+            // `travel` at t = 1). Trail sparks sit at fixed lags
+            // behind the head: a spark only exists once the head
+            // has passed its lag (d >= 0), spreads a little wider
+            // the further back it sits, and fades with its lag.
+            let dir = dir_from_deg(clip.angle);
+            let perp = [-dir[1], dir[0]];
+            let travel = if clip.length > 0.0 { clip.length } else { 240.0 };
+            let head_d = travel * (0.75 * t + 0.25 * t * t);
+            // White-hot head: the clip colour pulled 70% to white.
+            let core = [
+                color[0] + ((255 - color[0] as u16) * 70 / 100) as u8,
+                color[1] + ((255 - color[1] as u16) * 70 / 100) as u8,
+                color[2] + ((255 - color[2] as u16) * 70 / 100) as u8,
+            ];
+            let fade_in = (t / 0.05).min(1.0);
+            for i in 0..22u32 {
+                let lag = 7.0 + i as f32 * 5.5 + prand(seed, i, 1) * 4.0;
+                let d = head_d - lag;
+                if d < 0.0 {
+                    continue;
+                }
+                let spread = (prand(seed, i, 2) - 0.5) * (2.0 + lag * 0.07);
+                let pos = [
+                    anchor[0] + dir[0] * d + perp[0] * spread,
+                    anchor[1] + dir[1] * d + perp[1] * spread,
+                ];
+                let tail = 1.0 - i as f32 / 22.0;
+                push(
+                    &mut out,
+                    pos,
+                    3.2 * (0.45 + 0.55 * tail),
+                    fade_in * (1.0 - 0.4 * t) * 0.75 * tail,
+                );
+            }
+            // The head itself, on top of its own trail.
+            let head = [anchor[0] + dir[0] * head_d, anchor[1] + dir[1] * head_d];
+            push_c(&mut out, head, 4.6, fade_in * (1.0 - 0.3 * t), core);
+        }
+        ClipKind::Petals => {
+            // Each petal owns a falling cycle `s` (fract, like
+            // Beam's stream) at its own pace, so the air stays
+            // full for the whole clip. Alpha is floored
+            // (0.25 + 0.75 sin(pi s)) so a petal never blinks out
+            // at the wrap — it only softens there. Two pink shades
+            // from the clip colour: a saturated petal pink and a
+            // paler one pulled toward white.
+            let pink = [
+                color[0].max(215),
+                (color[1] as f32 * 0.55) as u8 + 70,
+                (color[2] as f32 * 0.5) as u8 + 85,
+            ];
+            let pale = [
+                pink[0] + ((255 - pink[0] as u16) * 30 / 100) as u8,
+                pink[1] + ((255 - pink[1] as u16) * 45 / 100) as u8,
+                pink[2] + ((255 - pink[2] as u16) * 35 / 100) as u8,
+            ];
+            for i in 0..18u32 {
+                let speed = 0.7 + prand(seed, i, 5) * 0.5;
+                let s = (t * speed + prand(seed, i, 7)).fract();
+                let fall = 90.0 + prand(seed, i, 2) * 60.0;
+                let phase = prand(seed, i, 4) * std::f32::consts::TAU;
+                // Gentle sway that widens as the petal falls.
+                let sway = (5.0 + 11.0 * s) * (local * 0.55 + phase).sin();
+                let pos = [
+                    anchor[0] + (prand(seed, i, 1) - 0.5) * 140.0 + sway,
+                    anchor[1] - 14.0 + fall * s,
+                ];
+                // Tumbling like leaves, at the same slow rate.
+                let spin = 0.5
+                    + 0.5 * (local * 0.7 + prand(seed, i, 6) * std::f32::consts::TAU)
+                        .sin()
+                        .abs();
+                let alpha = (0.25 + 0.75 * (std::f32::consts::PI * s).sin()) * 0.85;
+                let col = if i % 3 == 2 { pale } else { pink };
+                push_c(&mut out, pos, 3.8 * spin + 0.7, alpha, col);
+            }
+        }
+        ClipKind::Splash => {
+            // Ballistic droplets in per-frame units, exactly
+            // Fountain's convention (age = local / land, gone at
+            // age 1) but one even fan and stronger gravity, so
+            // the arcs are compact and crown-like. `land` is when
+            // a droplet's arc returns to the anchor's height;
+            // droplets launched with no upward component live out
+            // the clip instead (Fountain's rule).
+            let g = 1.6;
+            for i in 0..24u32 {
+                let fan = (i as f32 / 23.0 - 0.5) * 100.0; // -50..=+50 deg
+                let dir = dir_from_deg(clip.angle + fan);
+                let v = 5.5 + prand(seed, i, 2) * 3.5;
+                let land = if dir[1] < -0.05 {
+                    2.0 * v * (-dir[1]) / g
+                } else {
+                    clip.duration
+                };
+                let age = if land > 0.0 { local / land } else { 1.0 };
+                if age >= 1.0 {
+                    continue;
+                }
+                let pos = [
+                    anchor[0] + dir[0] * v * local,
+                    anchor[1] + dir[1] * v * local + 0.5 * g * local * local,
+                ];
+                push(&mut out, pos, 2.8 * (1.0 - 0.35 * age), 0.92 * (1.0 - age));
+            }
+        }
+        ClipKind::Spiral => {
+            // Mote i belongs to arm (i % 3); arms are offset by a
+            // third of a turn. The extra `s * 2.4` wind across a
+            // mote's own cycle bends each spoke into an arm, and
+            // the whole pattern rotates at 0.16 rad/frame. Motes
+            // fade in at the hub and dim toward the rim.
+            let max_r = if clip.length > 0.0 { clip.length } else { 90.0 };
+            for i in 0..30u32 {
+                let arm = (i % 3) as f32;
+                let speed = 0.8 + prand(seed, i, 5) * 0.5;
+                let s = (t * speed + prand(seed, i, 7)).fract();
+                let theta = arm * (std::f32::consts::TAU / 3.0)
+                    + prand(seed, i, 1) * 0.35
+                    + local * 0.16
+                    + s * 2.4;
+                let r = max_r * s;
+                let pos = [anchor[0] + theta.cos() * r, anchor[1] + theta.sin() * r];
+                let fade_in = (s / 0.12).min(1.0);
+                let alpha = envelope * 0.9 * fade_in * (1.0 - s * 0.75);
+                push(&mut out, pos, 3.1 * (1.0 - 0.35 * s), alpha);
+            }
+        }
     }
     out
 }
@@ -651,7 +805,7 @@ mod tests {
         }
     }
 
-    const KINDS: [ClipKind; 14] = [
+    const KINDS: [ClipKind; 18] = [
         ClipKind::Burst,
         ClipKind::Sparkle,
         ClipKind::Smoke,
@@ -666,6 +820,10 @@ mod tests {
         ClipKind::Lightning,
         ClipKind::Bubbles,
         ClipKind::Leaves,
+        ClipKind::Meteor,
+        ClipKind::Petals,
+        ClipKind::Splash,
+        ClipKind::Spiral,
     ];
 
     #[test]
@@ -1043,6 +1201,160 @@ mod tests {
                 "leaf colour {col:?} is not green-dominant"
             );
         }
+    }
+
+    #[test]
+    fn meteor_head_streaks_and_drags_a_trail_behind_it() {
+        let c = clip(ClipKind::Meteor); // angle 90 -> dir (1, 0), length 160
+        let anchor = [300.0, 300.0];
+        let dir = dir_from_deg(c.angle);
+        let along = |p: &[f32; 2]| {
+            (p[0] - anchor[0]) * dir[0] + (p[1] - anchor[1]) * dir[1]
+        };
+        let stats = |t: f32| {
+            let ps = clip_particles(&c, c.start + c.duration * t, anchor);
+            assert!(!ps.is_empty());
+            let hi = ps.iter().map(|p| along(&p.0)).fold(f32::MIN, f32::max);
+            let lo = ps.iter().map(|p| along(&p.0)).fold(f32::MAX, f32::min);
+            let big = ps.iter().map(|p| p.1).fold(0.0f32, f32::max);
+            (lo, hi, big)
+        };
+        let (_, hi_early, _) = stats(0.25);
+        let (lo_mid, hi_mid, big_mid) = stats(0.5);
+        // The head travels: its leading edge is much further along
+        // the ray later in the clip, and never past `length`.
+        assert!(
+            hi_mid > hi_early + 20.0,
+            "meteor head should streak forward: {hi_early} -> {hi_mid}"
+        );
+        assert!(hi_mid <= c.length + 0.01, "head overshot its travel: {hi_mid}");
+        // The trail stretches from near the anchor to the head.
+        assert!(
+            hi_mid - lo_mid > 40.0,
+            "trail should span a long stretch: {lo_mid}..{hi_mid}"
+        );
+        // Only the head is drawn at full head size.
+        assert!(big_mid >= 4.0, "meteor head missing (max size {big_mid})");
+    }
+
+    #[test]
+    fn petals_fill_the_air_drift_down_and_sway() {
+        let c = clip(ClipKind::Petals);
+        let anchor = [300.0, 300.0];
+        // Continuous cycles with a floored alpha: the full set is
+        // airborne at every sampled moment of the clip.
+        for t in [0.2, 0.5, 0.8] {
+            let ps = clip_particles(&c, c.start + c.duration * t, anchor);
+            assert_eq!(ps.len(), 18, "petal count changed at t={t}");
+        }
+        let mid = clip_particles(&c, c.start + c.duration * 0.5, anchor);
+        // Wide spread: petals span a broad band across the anchor.
+        let xs: Vec<f32> = mid.iter().map(|p| p.0[0]).collect();
+        let span = xs.iter().fold(f32::MIN, |a, &x| a.max(x))
+            - xs.iter().fold(f32::MAX, |a, &x| a.min(x));
+        assert!(span > 70.0, "petals bunched up: x span only {span}");
+        // Over the clip, petals traverse a tall falling band: some
+        // are caught near the top of a cycle, some near the bottom.
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        for step in 0..20 {
+            let t = step as f32 / 20.0;
+            for p in clip_particles(&c, c.start + c.duration * t, anchor) {
+                lo = lo.min(p.0[1]);
+                hi = hi.max(p.0[1]);
+            }
+        }
+        assert!(lo < anchor[1] + 30.0, "no petal near its cycle top: min y {lo}");
+        assert!(hi > anchor[1] + 80.0, "no petal fell far: max y {hi}");
+        // Sway: between two frames ~3 apart, at least one petal's
+        // x (a pure sway term — the spread is fixed per petal) has
+        // clearly moved sideways.
+        let a = clip_particles(&c, c.start + 6.0, anchor);
+        let b = clip_particles(&c, c.start + 9.0, anchor);
+        let sway = a
+            .iter()
+            .zip(&b)
+            .map(|(pa, pb)| (pb.0[0] - pa.0[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(sway > 3.0, "petals never sway: max sideways move {sway}");
+        // Petals stay pink: red dominates every petal colour even
+        // though the clip colour is amber.
+        for (_, _, col, _) in &mid {
+            assert!(
+                col[0] >= col[1] && col[0] >= col[2],
+                "petal colour {col:?} is not pink-dominant"
+            );
+        }
+    }
+
+    #[test]
+    fn splash_fans_up_arcs_and_lands() {
+        let mut c = clip(ClipKind::Splash);
+        c.angle = 180.0; // straight up in the model convention
+        let anchor = [300.0, 300.0];
+        // Just after launch the whole fan is airborne.
+        let early = clip_particles(&c, c.start + 2.0, anchor);
+        assert_eq!(early.len(), 24, "splash fan incomplete at local 2");
+        let mean_y = |local: f32| {
+            let ps = clip_particles(&c, c.start + local, anchor);
+            assert!(!ps.is_empty(), "splash dry at local {local}");
+            ps.iter().map(|p| p.0[1]).sum::<f32>() / ps.len() as f32
+        };
+        // The highest droplet (min y). The fastest droplet also
+        // flies longest (land = 2u/g grows with u), so the same
+        // droplet tops the arc at every sampled time: its height
+        // -u*local + 0.8*local^2 peaks at local = u/1.6 and the
+        // comparisons below hold for any launch strength u.
+        let top = |local: f32| {
+            let ps = clip_particles(&c, c.start + local, anchor);
+            assert!(!ps.is_empty(), "splash dry at local {local}");
+            ps.iter().map(|p| p.0[1]).fold(f32::MAX, f32::min)
+        };
+        assert!(
+            mean_y(2.0) < anchor[1],
+            "droplets should burst upward: mean y {}",
+            mean_y(2.0)
+        );
+        assert!(
+            top(5.0) < top(2.0),
+            "still climbing toward the crown: {} vs {}",
+            top(5.0),
+            top(2.0)
+        );
+        assert!(
+            top(9.0) > top(5.0),
+            "arcing back down late: {} vs {}",
+            top(9.0),
+            top(5.0)
+        );
+        // The longest flight is 2 * 9.0 / 1.6 = 11.25 frames, so
+        // by local 14 every droplet has landed and vanished.
+        assert!(
+            clip_particles(&c, c.start + 14.0, anchor).is_empty(),
+            "splash droplets should all have landed by local 14"
+        );
+    }
+
+    #[test]
+    fn spiral_motes_stream_outward_and_rotate() {
+        let c = clip(ClipKind::Spiral); // length 160
+        let anchor = [300.0, 300.0];
+        let mid = clip_particles(&c, c.start + c.duration * 0.5, anchor);
+        assert!(!mid.is_empty());
+        // Radii span the whole stream: some motes are still near
+        // the hub while others have nearly reached the rim.
+        let radii: Vec<f32> = mid
+            .iter()
+            .map(|p| ((p.0[0] - anchor[0]).powi(2) + (p.0[1] - anchor[1]).powi(2)).sqrt())
+            .collect();
+        let lo = radii.iter().fold(f32::MAX, |a, &r| a.min(r));
+        let hi = radii.iter().fold(f32::MIN, |a, &r| a.max(r));
+        assert!(lo < 0.3 * c.length, "no mote near the hub: min radius {lo}");
+        assert!(hi > 0.55 * c.length, "no mote near the rim: max radius {hi}");
+        assert!(hi <= c.length + 0.01, "mote escaped its rim: {hi}");
+        // The pattern rotates between frames.
+        let later = clip_particles(&c, c.start + c.duration * 0.5 + 3.0, anchor);
+        assert_ne!(mid, later, "spiral should rotate between frames");
     }
 
     // ---- Weather ----

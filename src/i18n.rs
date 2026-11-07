@@ -10,7 +10,7 @@
 //! The language set mirrors the original app's locale packs
 //! (`src/locales/packs/` in StykAnimate-App: 27 packs) plus Bengali,
 //! which the port added for its user — 28 languages in total.
-//! Every table carries exactly the same 50 keys.
+//! Every table carries exactly the same 62 keys.
 //!
 //! Translation approach: established animation terms are used where
 //! a language has them (French "pelure d'oignon", Polish "skórka
@@ -20,6 +20,14 @@
 //! that language's own software community writes it. File-format
 //! names (PNG, GIF, MP4, WebM, SVG, .piv, .stk) stay in Latin
 //! script everywhere, as they do in localised software generally.
+//!
+//! The Wave 9 panel keys (`help`, `inspector`, `easing`,
+//! `colour_picker`, `export_centre`, `dopesheet`, `hud_loop`,
+//! `transport_first`, `transport_last`, `fx_panel`, `clips_panel`,
+//! `weather_panel`) are fully translated in English, Bengali and
+//! Spanish; the other 25 tables carry the English text as their
+//! value for these keys until native translations land, which
+//! keeps the same-keys-in-every-table invariant intact.
 
 /// Languages the UI can be displayed in: the original app's 27
 /// locale packs, plus Bengali (the port's own addition).
@@ -277,6 +285,19 @@ static EN: &[(&str, &str)] = &[
     ("light_theme", "Light theme"),
     ("dark_theme", "Dark theme"),
     ("figures_layers", "FIGURES (layers)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Pose mode."),
     (
@@ -342,6 +363,19 @@ static BN: &[(&str, &str)] = &[
     ("light_theme", "হালকা থিম"),
     ("dark_theme", "গাঢ় থিম"),
     ("figures_layers", "ফিগারসমূহ (স্তর)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "সাহায্য"),
+    ("inspector", "পরিদর্শক"),
+    ("easing", "ইজিং"),
+    ("colour_picker", "রঙ নির্বাচক"),
+    ("export_centre", "রপ্তানি কেন্দ্র"),
+    ("dopesheet", "ডোপশিট"),
+    ("hud_loop", "লুপ"),
+    ("transport_first", "প্রথম ফ্রেম"),
+    ("transport_last", "শেষ ফ্রেম"),
+    ("fx_panel", "এফএক্স প্যানেল"),
+    ("clips_panel", "ক্লিপ প্যানেল"),
+    ("weather_panel", "আবহাওয়া প্যানেল"),
     // Status line
     ("pose_mode", "পোজ মোড।"),
     (
@@ -407,6 +441,19 @@ static ES: &[(&str, &str)] = &[
     ("light_theme", "Tema claro"),
     ("dark_theme", "Tema oscuro"),
     ("figures_layers", "FIGURAS (capas)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Ayuda"),
+    ("inspector", "Inspector"),
+    ("easing", "Suavizado"),
+    ("colour_picker", "Selector de color"),
+    ("export_centre", "Centro de exportación"),
+    ("dopesheet", "Hoja de tiempos"),
+    ("hud_loop", "Bucle"),
+    ("transport_first", "Primer fotograma"),
+    ("transport_last", "Último fotograma"),
+    ("fx_panel", "Panel de FX"),
+    ("clips_panel", "Panel de clips"),
+    ("weather_panel", "Panel de clima"),
     // Status line
     ("pose_mode", "Modo pose."),
     (
@@ -472,6 +519,19 @@ static AR: &[(&str, &str)] = &[
     ("light_theme", "المظهر الفاتح"),
     ("dark_theme", "المظهر الداكن"),
     ("figures_layers", "الأشكال (الطبقات)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "وضع الوضعية."),
     (
@@ -537,6 +597,19 @@ static CS: &[(&str, &str)] = &[
     ("light_theme", "Světlý motiv"),
     ("dark_theme", "Tmavý motiv"),
     ("figures_layers", "FIGURY (vrstvy)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Režim pózy."),
     (
@@ -602,6 +675,19 @@ static DA: &[(&str, &str)] = &[
     ("light_theme", "Lyst tema"),
     ("dark_theme", "Mørkt tema"),
     ("figures_layers", "FIGURER (lag)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Poseringstilstand."),
     (
@@ -667,6 +753,19 @@ static DE: &[(&str, &str)] = &[
     ("light_theme", "Helles Design"),
     ("dark_theme", "Dunkles Design"),
     ("figures_layers", "FIGUREN (Ebenen)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Posenmodus."),
     (
@@ -732,6 +831,19 @@ static EL: &[(&str, &str)] = &[
     ("light_theme", "Ανοιχτό θέμα"),
     ("dark_theme", "Σκούρο θέμα"),
     ("figures_layers", "ΦΙΓΟΥΡΕΣ (επίπεδα)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Λειτουργία πόζας."),
     (
@@ -797,6 +909,19 @@ static ES419: &[(&str, &str)] = &[
     ("light_theme", "Tema claro"),
     ("dark_theme", "Tema oscuro"),
     ("figures_layers", "FIGURAS (capas)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Modo de pose."),
     (
@@ -862,6 +987,19 @@ static FI: &[(&str, &str)] = &[
     ("light_theme", "Vaalea teema"),
     ("dark_theme", "Tumma teema"),
     ("figures_layers", "HAHMOT (tasot)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Asentotila."),
     (
@@ -927,6 +1065,19 @@ static FR: &[(&str, &str)] = &[
     ("light_theme", "Thème clair"),
     ("dark_theme", "Thème sombre"),
     ("figures_layers", "FIGURES (calques)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Mode pose."),
     (
@@ -992,6 +1143,19 @@ static HE: &[(&str, &str)] = &[
     ("light_theme", "ערכת נושא בהירה"),
     ("dark_theme", "ערכת נושא כהה"),
     ("figures_layers", "דמויות (שכבות)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "מצב פוזה."),
     (
@@ -1057,6 +1221,19 @@ static HR: &[(&str, &str)] = &[
     ("light_theme", "Svijetla tema"),
     ("dark_theme", "Tamna tema"),
     ("figures_layers", "FIGURE (slojevi)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Način poze."),
     (
@@ -1122,6 +1299,19 @@ static HU: &[(&str, &str)] = &[
     ("light_theme", "Világos téma"),
     ("dark_theme", "Sötét téma"),
     ("figures_layers", "FIGURÁK (rétegek)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Póz mód."),
     (
@@ -1187,6 +1377,19 @@ static ID: &[(&str, &str)] = &[
     ("light_theme", "Tema terang"),
     ("dark_theme", "Tema gelap"),
     ("figures_layers", "FIGUR (lapisan)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Mode pose."),
     (
@@ -1252,6 +1455,19 @@ static IT: &[(&str, &str)] = &[
     ("light_theme", "Tema chiaro"),
     ("dark_theme", "Tema scuro"),
     ("figures_layers", "FIGURE (livelli)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Modalità posa."),
     (
@@ -1317,6 +1533,19 @@ static KK: &[(&str, &str)] = &[
     ("light_theme", "Ашық тақырып"),
     ("dark_theme", "Қараңғы тақырып"),
     ("figures_layers", "ФИГУРАЛАР (қабаттар)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Поза режимі."),
     (
@@ -1382,6 +1611,19 @@ static NB: &[(&str, &str)] = &[
     ("light_theme", "Lyst tema"),
     ("dark_theme", "Mørkt tema"),
     ("figures_layers", "FIGURER (lag)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Poseringsmodus."),
     (
@@ -1447,6 +1689,19 @@ static NL: &[(&str, &str)] = &[
     ("light_theme", "Licht thema"),
     ("dark_theme", "Donker thema"),
     ("figures_layers", "FIGUREN (lagen)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Posemodus."),
     (
@@ -1512,6 +1767,19 @@ static PL: &[(&str, &str)] = &[
     ("light_theme", "Jasny motyw"),
     ("dark_theme", "Ciemny motyw"),
     ("figures_layers", "FIGURY (warstwy)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Tryb pozy."),
     (
@@ -1577,6 +1845,19 @@ static PT_BR: &[(&str, &str)] = &[
     ("light_theme", "Tema claro"),
     ("dark_theme", "Tema escuro"),
     ("figures_layers", "FIGURAS (camadas)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Modo de pose."),
     (
@@ -1642,6 +1923,19 @@ static RO: &[(&str, &str)] = &[
     ("light_theme", "Temă deschisă"),
     ("dark_theme", "Temă întunecată"),
     ("figures_layers", "FIGURI (straturi)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Mod poză."),
     (
@@ -1707,6 +2001,19 @@ static RU: &[(&str, &str)] = &[
     ("light_theme", "Светлая тема"),
     ("dark_theme", "Тёмная тема"),
     ("figures_layers", "ФИГУРЫ (слои)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Режим позы."),
     (
@@ -1772,6 +2079,19 @@ static SL: &[(&str, &str)] = &[
     ("light_theme", "Svetla tema"),
     ("dark_theme", "Temna tema"),
     ("figures_layers", "FIGURE (plasti)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Način poze."),
     (
@@ -1837,6 +2157,19 @@ static TR: &[(&str, &str)] = &[
     ("light_theme", "Açık tema"),
     ("dark_theme", "Koyu tema"),
     ("figures_layers", "FİGÜRLER (katmanlar)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Poz modu."),
     (
@@ -1902,6 +2235,19 @@ static UK: &[(&str, &str)] = &[
     ("light_theme", "Світла тема"),
     ("dark_theme", "Темна тема"),
     ("figures_layers", "ФІГУРИ (шари)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Режим пози."),
     (
@@ -1967,6 +2313,19 @@ static VI: &[(&str, &str)] = &[
     ("light_theme", "Giao diện sáng"),
     ("dark_theme", "Giao diện tối"),
     ("figures_layers", "HÌNH (lớp)"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "Chế độ tư thế."),
     (
@@ -2032,6 +2391,19 @@ static ZH_HANS: &[(&str, &str)] = &[
     ("light_theme", "浅色主题"),
     ("dark_theme", "深色主题"),
     ("figures_layers", "人物（图层）"),
+    // Panels and help (Wave 9 UI)
+    ("help", "Help"),
+    ("inspector", "Inspector"),
+    ("easing", "Easing"),
+    ("colour_picker", "Colour picker"),
+    ("export_centre", "Export centre"),
+    ("dopesheet", "Dopesheet"),
+    ("hud_loop", "Loop"),
+    ("transport_first", "First frame"),
+    ("transport_last", "Last frame"),
+    ("fx_panel", "FX panel"),
+    ("clips_panel", "Clips panel"),
+    ("weather_panel", "Weather panel"),
     // Status line
     ("pose_mode", "姿态模式。"),
     (
@@ -2059,6 +2431,52 @@ mod tests {
                 assert_eq!(t(lang, key), text);
             }
         }
+    }
+
+    /// The Wave 9 panel keys must resolve in every language to a
+    /// non-empty string that is not the raw key. English, Bengali
+    /// and Spanish carry real translations; the other 25 languages
+    /// currently carry the English text as their value.
+    #[test]
+    fn new_ui_keys_resolve_in_every_language() {
+        const NEW_KEYS: [&str; 12] = [
+            "help",
+            "inspector",
+            "easing",
+            "colour_picker",
+            "export_centre",
+            "dopesheet",
+            "hud_loop",
+            "transport_first",
+            "transport_last",
+            "fx_panel",
+            "clips_panel",
+            "weather_panel",
+        ];
+        for lang in Lang::all() {
+            for key in NEW_KEYS {
+                let text = t(lang, key);
+                assert!(!text.is_empty(), "{key} is empty in {:?}", lang);
+                assert_ne!(text, key, "{key} in {:?} is just the key", lang);
+                // Present in the language's own table, not only via
+                // the English fallback in resolve().
+                assert!(
+                    lookup(table_for(lang), key).is_some(),
+                    "{key} missing from {:?}'s own table",
+                    lang
+                );
+            }
+        }
+        // Authored translations.
+        assert_eq!(t(Lang::En, "help"), "Help");
+        assert_eq!(t(Lang::Bn, "help"), "সাহায্য");
+        assert_eq!(t(Lang::Es, "help"), "Ayuda");
+        assert_eq!(t(Lang::Bn, "transport_last"), "শেষ ফ্রেম");
+        assert_eq!(t(Lang::Es, "transport_first"), "Primer fotograma");
+        assert_eq!(t(Lang::Es, "dopesheet"), "Hoja de tiempos");
+        // Not-yet-authored languages carry the English value.
+        assert_eq!(t(Lang::Fr, "export_centre"), t(Lang::En, "export_centre"));
+        assert_eq!(t(Lang::ZhHans, "weather_panel"), t(Lang::En, "weather_panel"));
     }
 
     #[test]

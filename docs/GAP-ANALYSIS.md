@@ -244,3 +244,33 @@ its own animated bake had already grown to 4.
   modelled, and ZIP-packaged projects are out of scope.
 - **Localisation polish.** 28 languages of machine-produced
   strings vs the original's 27 human-maintained ones.
+
+## Wave 9 (in progress, 2026-11-08)
+
+The current wave, landed in the working tree and pending CI
+verification (per the repo rule, CI is the first build/test any
+of this gets). Themes:
+
+- **Stabiliser** — stroke stabilisation for drawing (smoothing
+  live input before it becomes a stroke).
+- **4 new VFX kinds** — four more deterministic clip kinds on
+  top of the existing 14 in `src/vfx.rs`.
+- **Audio DSP** — deeper audio processing on top of the
+  peak/RMS/normalise/trim/split/crossfade set.
+- **Graph interpolation modes** — more interpolation options
+  for graph channels beyond the Hermite default.
+- **3D shading** — shaded rendering for the 3D posing session's
+  preview (3D remains a session that bakes to 2D).
+- **Stats** — project/session statistics surfaced in the UI.
+- **Contact-sheet render** — a contact-sheet export (frames as
+  a single tiled image) alongside the spritesheet.
+- **Pivot probe** — a diagnostic read of `.piv` files (header/
+  structure inspection without a full import).
+- **Range ops + UI** — more timeline range operations, wired
+  into the redesigned tool groups.
+- **Weather panel** — a dedicated panel for the weather
+  controls (rain/snow/fireflies) instead of toolbar buttons.
+- **MCP round 3** — more MCP tools on top of the current 49.
+
+Nothing in this section is CI-verified yet; statuses move to
+the per-wave tables above once the run is green.

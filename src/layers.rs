@@ -72,6 +72,47 @@ pub fn visible_figures(project: &Project, solo: Option<usize>) -> Vec<bool> {
         .collect()
 }
 
+/// Show or hide every figure at once (the sidebar's All / None
+/// bulk controls): sets each figure's `hidden` flag to `!visible`.
+/// Returns how many figures actually changed state, so a repeated
+/// call with the same argument returns 0.
+///
+/// Solo interaction: none, deliberately. Solo is not part of the
+/// document — it is a runtime argument supplied by the caller (see
+/// [`visible_figures`] and the module docs: state held outside the
+/// project is the caller's responsibility) — so a `Project`-level
+/// op cannot and does not clear it. The module invariant that
+/// `hidden` always wins over solo keeps the extremes safe:
+/// hiding all hides everything, solo or not. But showing all
+/// while a solo is still active brings back only the solo figure
+/// on stage; a caller that wants the bulk result to be the whole
+/// story (the sidebar buttons do) clears its solo itself.
+pub fn set_all_visible(project: &mut Project, visible: bool) -> usize {
+    let mut changed = 0;
+    for fig in &mut project.figures {
+        if fig.hidden == visible {
+            fig.hidden = !visible;
+            changed += 1;
+        }
+    }
+    changed
+}
+
+/// Flip every figure's `hidden` flag (the sidebar's Invert bulk
+/// control). Returns the number of figures flipped — always the
+/// figure count, since every flag changes state.
+///
+/// Solo interaction: as with [`set_all_visible`], solo lives
+/// outside the document and is left to the caller; while a solo is
+/// active the *effective* visibility stays solo-driven (and the
+/// hidden flag still wins for the solo figure itself).
+pub fn invert_visibility(project: &mut Project) -> usize {
+    for fig in &mut project.figures {
+        fig.hidden = !fig.hidden;
+    }
+    project.figures.len()
+}
+
 /// Flip a figure's `locked` flag. Returns the new state, or `None`
 /// when `fi` is not a figure index.
 pub fn toggle_lock(project: &mut Project, fi: usize) -> Option<bool> {
@@ -362,6 +403,35 @@ mod tests {
         assert_eq!(first_editable(&p), Some(2));
         p.figures[2].locked = true;
         assert_eq!(first_editable(&p), None);
+    }
+
+    #[test]
+    fn set_all_visible_counts_only_real_changes() {
+        let mut p = three_figures();
+        p.figures[1].hidden = true;
+        // Show all: only B was hidden, so exactly one change.
+        assert_eq!(set_all_visible(&mut p, true), 1);
+        assert_eq!(visible_figures(&p, None), [true, true, true]);
+        // Idempotent: a second show-all changes nothing.
+        assert_eq!(set_all_visible(&mut p, true), 0);
+        // Hide all: three changes, and hidden wins over solo.
+        assert_eq!(set_all_visible(&mut p, false), 3);
+        assert_eq!(visible_figures(&p, Some(0)), [false, false, false]);
+        // Showing all does not clear a caller's solo (solo is not
+        // document state): only the solo figure comes back.
+        assert_eq!(set_all_visible(&mut p, true), 3);
+        assert_eq!(visible_figures(&p, Some(2)), [false, false, true]);
+    }
+
+    #[test]
+    fn invert_visibility_flips_every_flag() {
+        let mut p = three_figures();
+        p.figures[0].hidden = true;
+        assert_eq!(invert_visibility(&mut p), 3);
+        assert_eq!(visible_figures(&p, None), [true, false, false]);
+        // Inverting again restores the original pattern exactly.
+        assert_eq!(invert_visibility(&mut p), 3);
+        assert_eq!(visible_figures(&p, None), [false, true, true]);
     }
 
     #[test]

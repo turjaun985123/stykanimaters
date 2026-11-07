@@ -547,6 +547,69 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     out
 }
 
+/// Render a contact sheet: the listed frames as thumbnails in a
+/// grid, for a quick visual overview of an animation without
+/// opening every frame. Each index is rendered with
+/// `render_frame_at` (at `idx as f32`, so no rasterisation is
+/// duplicated) and shrunk to `thumb_w` pixels wide, keeping the
+/// stage aspect (`thumb_h = round(thumb_w * stage_h / stage_w)`,
+/// at least 1). Layout: tiles run left-to-right, top-to-bottom
+/// with an 8 px gap between tiles and the same 8 px as outer
+/// padding, so for `cols` columns and `rows = ceil(n / cols)`:
+///
+///   sheet_w = cols * thumb_w + (cols + 1) * 8
+///   sheet_h = rows * thumb_h + (rows + 1) * 8
+///
+/// The sheet background is the fixed dark rgb(26, 29, 36) — it
+/// reads as a neutral matte whatever the project's own background
+/// is. `cols == 0` is treated as 1 and `thumb_w == 0` as 1, so
+/// the function never divides by zero. An empty frame list
+/// yields a 1x1 image of the sheet background.
+pub fn render_contact_sheet(
+    project: &Project,
+    frame_indices: &[usize],
+    cols: usize,
+    thumb_w: u32,
+) -> image::RgbaImage {
+    const GAP: u32 = 8;
+    const BG: [u8; 4] = [26, 29, 36, 255];
+    if frame_indices.is_empty() {
+        return ImageBuffer::from_pixel(1, 1, image::Rgba(BG));
+    }
+    let cols = cols.max(1);
+    let thumb_w = thumb_w.max(1);
+    // Render and shrink every frame first: the grid's row height
+    // comes from the (uniform) thumbnail height of the first one.
+    let mut thumbs = Vec::with_capacity(frame_indices.len());
+    let mut thumb_h = 0u32;
+    for &idx in frame_indices {
+        let frame = render_frame_at(project, idx as f32);
+        if thumb_h == 0 {
+            thumb_h = ((thumb_w as f32 * frame.height() as f32
+                / frame.width().max(1) as f32)
+                .round() as u32)
+                .max(1);
+        }
+        let rgba = image::DynamicImage::ImageRgb8(frame).to_rgba8();
+        thumbs.push(image::imageops::resize(
+            &rgba,
+            thumb_w,
+            thumb_h,
+            image::imageops::FilterType::Triangle,
+        ));
+    }
+    let rows = (frame_indices.len() + cols - 1) / cols;
+    let sheet_w = cols as u32 * thumb_w + (cols as u32 + 1) * GAP;
+    let sheet_h = rows as u32 * thumb_h + (rows as u32 + 1) * GAP;
+    let mut sheet = ImageBuffer::from_pixel(sheet_w, sheet_h, image::Rgba(BG));
+    for (i, thumb) in thumbs.iter().enumerate() {
+        let x = GAP + (i % cols) as u32 * (thumb_w + GAP);
+        let y = GAP + (i / cols) as u32 * (thumb_h + GAP);
+        image::imageops::overlay(&mut sheet, thumb, x as i64, y as i64);
+    }
+    sheet
+}
+
 /// Authored frame indices expanded by per-frame durations
 /// (a frame with duration 2 appears twice, rounded, min once).
 pub fn expanded_frames(project: &Project) -> Vec<usize> {
@@ -1052,6 +1115,31 @@ mod tests {
         let bg = rgb(project.background);
         let drawn = img.pixels().filter(|p| p.0 != bg).count();
         assert!(drawn > 500, "expected the figure to be drawn, got {drawn} px");
+    }
+
+    #[test]
+    fn contact_sheet_tiles_frames_on_a_grid() {
+        let project = Project::new_demo(); // 960x720 stage
+        let sheet = render_contact_sheet(&project, &[0, 1, 2, 3], 2, 48);
+        // Thumbs keep the 4:3 stage aspect: 48 wide, 36 tall.
+        // Sheet = 2 thumbs + 3 gaps of 8 wide, 2 rows + 3 gaps tall.
+        assert_eq!(sheet.width(), 2 * 48 + 3 * 8, "sheet width");
+        assert_eq!(sheet.height(), 2 * 36 + 3 * 8, "sheet height");
+        // The outer padding is the sheet background...
+        assert_eq!(sheet.get_pixel(0, 0).0, [26, 29, 36, 255]);
+        // ...and every tile area was actually drawn into (a tile's
+        // centre pixel comes from a rendered frame, whose stage
+        // background differs from the sheet matte).
+        let centre = sheet.get_pixel(8 + 24, 8 + 18).0;
+        assert_ne!(centre, [26, 29, 36, 255], "first tile should hold a rendered frame");
+    }
+
+    #[test]
+    fn contact_sheet_empty_list_is_1x1_background() {
+        let project = Project::new_demo();
+        let sheet = render_contact_sheet(&project, &[], 3, 64);
+        assert_eq!((sheet.width(), sheet.height()), (1, 1));
+        assert_eq!(sheet.get_pixel(0, 0).0, [26, 29, 36, 255]);
     }
 
 

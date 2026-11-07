@@ -5,106 +5,189 @@ An end-to-end Rust port of [StykAnimate](https://github.com/filippocalippo/StykA
 [Rust](https://www.rust-lang.org) and [GPUI](https://www.gpui.rs)
 (`gpui = "=0.2.2"` from crates.io). GPL-3.0-or-later, like the original.
 
-## Run it
+It is a single native binary: a full stick-figure animation editor
+(posing with FK + two-bone IK, timeline, camera, drawing, VFX,
+audio, 3D posing sessions, movieclips), a CPU rasterizer that
+exports PNG/GIF/MP4/WebM/APNG/JPEG/SVG/spritesheets with no GPU or
+display needed, first-class Pivot and Stick Nodes format support,
+and an MCP server that lets an AI agent drive the whole engine.
+
+## Get it — the CI binary
+
+Every push to `master` runs the **Build, Test & Binary** GitHub
+Actions workflow: a cached release build, the full test suite in
+the release profile, and a stripped binary package uploaded as
+the `stykanimaters-linux-x86_64` artifact (both binaries —
+`stykanimate-rs`, the editor, and `mcp_server` — plus
+SHA256SUMS). Download it from the repo's Actions tab and run
+`./stykanimate-rs`. The editor has been run and screenshot-verified
+this way on a real Linux desktop.
+
+## Build from source
+
+> **Repo rule (see `AGENTS.md`): no local cargo builds without the
+> owner's explicit approval for that run.** Local builds are heavy
+> and the owner does not want them; GitHub Actions CI is the
+> project's only sanctioned build/test environment, and fixes are
+> diagnosed from CI logs. If you have approval, the commands are
+> the usual ones:
+>
+> ```sh
+> cargo build --release --locked --bins   # what CI builds
+> cargo test --release --locked           # what CI tests
+> cargo run --release                     # the editor
+> ```
+
+System libraries (Ubuntu/Debian) — this is the exact install line
+from `.github/workflows/workflow.yml`, plus `ffmpeg` (used for
+MP4/WebM export and audio playback):
 
 ```sh
-cargo run            # debug build
-cargo run --release  # what you actually want day to day
-cargo test           # model + export tests (FK, IK, rasterizer)
+sudo apt-get install -y --no-install-recommends \
+  libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+  libwayland-dev libvulkan-dev libasound2-dev libudev-dev \
+  cmake clang ffmpeg
 ```
 
-Linux build dependencies (Ubuntu/Debian): `libfontconfig1-dev
-libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev
-libasound2-dev libudev-dev libdrm-dev libgbm-dev libxcb1-dev
-libx11-dev cmake clang pkg-config`.
+Native file dialogs shell out to `zenity` or `kdialog` when
+present and fall back to a folder-based flow when neither exists.
 
 ## What works today
 
-- **Document model** (`src/model.rs`) — plain serializable data, kept
-  separate from editor and UI state like the original: figures are
-  node/segment rigs (parent, fixed length, relative rest angle, head
-  flag, IK bend side); a pose is a root position plus one relative
-  angle per node; a project is figures + frames + fps + stage size.
-- **Posing** — forward kinematics for the whole rig; dragging a hand
-  or foot runs two-bone IK (with unreachable-target clamping and
+- **Document model** (`src/model.rs`) — plain serializable data,
+  separate from editor and UI state: figures are node/segment rigs
+  (parent, fixed length, relative rest angle, head flag, IK bend
+  side, per-node styles and media); a pose is a root position plus
+  one relative angle per node, plus optional per-node **bends**
+  (curved segments, rendered through an arc midpoint); a project
+  is figures + frames + fps + stage size + camera keys, graph
+  channels, FX clips, audio clips, sprites/texts and weather.
+- **Posing** — forward kinematics for the whole rig; dragging a
+  hand or foot runs two-bone IK (unreachable-target clamping,
   per-limb bend direction); dragging any other joint rotates its
   segment (FK aim); dragging the hips moves the figure.
-- **GPUI editor** (`src/app.rs`, `src/editor.rs`) — canvas with joint
-  handles and head rings, onion skin of the previous frame, frame
-  timeline (click to jump), Play/Pause at the project fps, add /
-  duplicate / delete frames, add figures (colour-cycled), undo
-  snapshots, and a status line. A starter project with a 5-frame wave
-  is loaded on first launch.
-- **Figure builder** — select a joint, then add or delete segments
-  (children-first, root protected), adjust segment length and
-  thickness, and cycle a per-segment colour override. Definition
-  edits stay consistent across every frame and are undoable.
-- **Figure presets** — besides the humanoid: a two-segment-limb
-  quadruped (spine, neck, head, tail, IK feet) and a compact
-  7-node mini figure with FK-aimed limbs.
-- **Inbetween** — inserts a tween frame halfway to the next frame;
-  angles interpolate along the shortest circular path.
-- **Camera** — per-frame camera keys (centre + zoom) with linear
-  interpolation between keys. Camera mode pans by dragging the
-  canvas; zoom buttons key the current frame. The editor view and
-  both exporters render through the same camera.
-- **Layers sidebar** — figures listed as layers: select, reorder
-  (draw order), hide/show, delete. Plus redo, frame copy/paste,
-  per-frame durations, editable fps, and keyboard shortcuts
-  (arrows, space, N, I, O, C, Ctrl+Z / Ctrl+Shift+Z).
-- **Tween playback** — optional interpolation between authored
-  frames with linear / smooth / ease-in / ease-out easing, in the
-  editor, GIF and MP4 exports.
-- **Shapes** — segments can be lines, circles, or regular polygons
-  (3-6 sides): shields, wheels, signs.
-- **Particles** — deterministic burst / sparkle / smoke effects
-  anchored to a joint on a chosen frame, rendered identically in
-  the editor and every export.
-- **Local figure library** — save figure definitions to
-  `./library/*.json` and insert them into any project; three
-  built-ins included.
-- **More exports** — MP4 (H.264, via the system `ffmpeg`) and a
-  spritesheet PNG join the PNG sequence and GIF.
-- **Themes** — dark and light editor palettes.
-- **Pivot formats** — import `.piv` (legacy versions 2, 3, 4 and
-  the modern v5 container, including image/text side tables) and
-  `.stk` from the `import/` folder; export `.piv` v3 and `.stk`
-  to `export/`. The grammar is ported from the original app's own
-  codec and cross-verified against it in both directions.
-- **Drawing** — a Draw mode paints freehand brush strokes on the
-  current frame; strokes render in the editor and all exports.
-- **Audio** — clips from the `audio/` folder are placed at a frame
-  and muxed into MP4 exports at the right offset.
-- **Movieclips** — capture a figure's timeline as a clip; clip
-  figures loop their own animation inside any project.
-- **Named projects** — save/open projects under `projects/`.
-- **Save / Load** — the project serializes to `project.styk.json`
-  next to where you launched the app.
-- **PNG + GIF export** (`src/export.rs`) — a CPU rasterizer (2x
-  supersampled) writes `export/frame-0001.png`, `...` for every
-  frame, or one looping `export/animation.gif` at the project fps;
-  no GPU or display needed, so it also runs in CI.
+- **Editor UI** (`src/app.rs`, `src/ui_kit.rs`, `src/ui_*.rs`) —
+  redesigned chrome: a slim **app bar** (brand, File/Edit, panel
+  toggles, frame/FPS chips) over labelled **tool-group panels**
+  instead of a flat button wall. Panels for the keyframe graph,
+  audio, FX clips, movieclips, colour picker, easing picker,
+  inspector, export centre and help; a per-figure **dopesheet**
+  above the timeline; a state HUD above the framed canvas; status
+  messages arrive as a **toast stack**; the figures sidebar has
+  colour dots, lock/solo/opacity controls and opacity steppers.
+  Transport includes |< < > >| stepping and a loop range.
+- **Timeline depth** — per-frame durations and easing (per-frame
+  override of the project easing), frame copy/paste, inbetween,
+  block shift, range reverse, loop ranges, motion-path display
+  with path smoothing, onion skin 1–3 in both directions, and a
+  **graph engine** (Hermite channels for root X/Y, joint angles
+  and segment lengths, with shortest-path angle wrap) applied live
+  and editable in a visual graph panel.
+- **Camera** — per-frame keys (centre, zoom **and rotation**) with
+  interpolation; camera mode pans by dragging; a follow target can
+  track a figure. The editor and every exporter render through
+  the same camera, rotation included.
+- **Figure building** — add/delete segments (children-first, root
+  protected), length/thickness editing, per-segment colour
+  override and styles (taper, caps, gradients, opacity), shape
+  segments (lines, circles, regular polygons 3–6 sides), sprite
+  and text segments (built-in 3×5 bitmap font for text), figure
+  presets (humanoid, quadruped, mini), and a local figure library
+  (`./library/*.json` plus built-ins).
+- **Drawing** — Draw mode with a brush library (preset brushes,
+  brush/eraser tools), per-point pressure widths, smoothing, nib
+  shapes, serpentine fill and erasers; strokes render in the
+  editor and all exports.
+- **VFX** (`src/vfx.rs`, `src/fx_edit.rs`) — 14 deterministic,
+  seeded clip kinds (Burst, Sparkle, Smoke, Beam, Aura, Trail,
+  Confetti, ShockRing, Ember, Fountain, Orbit, Lightning,
+  Bubbles, Leaves) anchored to joints, with an FX timeline engine
+  (list/move/resize/duplicate/delete) in the GUI and over MCP;
+  plus continuous **weather** (rain, snow, fireflies) rendered in
+  the canvas and the rasterizer.
+- **Audio** — clips placed at frames, muxed into MP4 at the right
+  offset, played back synced to the playhead (via `ffplay`); a
+  waveform panel with per-clip normalise / split / crossfade and
+  a real mixdown export.
+- **Movieclips** — capture a figure's timeline as a clip, edit it
+  in a dedicated clip session panel; clip figures loop their own
+  animation inside any project.
+- **3D mode** (`src/fig3d.rs`) — a real 3D FK rig with Euler
+  per-joint rotation, orbit camera and perspective projection,
+  living in an editing session: pose A/B, animated bakes into
+  timeline frames, one-click bake to a native 2D figure, and a
+  persistent 3D figure library (`./library3d`).
+- **Formats** — the grammar is ported from the original app's own
+  codecs and cross-verified against them in both directions:
+  - *Import:* `.piv` v2/v3/v4/v5 (v5 incl. image side tables,
+    per-frame lengths and bends), `.stk`, Stick Nodes `.nodes`
+    figures, and Stick Nodes animation containers
+    `.nodemc`/`.stknds` (sprites/texts modelled as keyframed
+    tracks with real pixel extraction; joins baked at import).
+  - *Export:* `.piv` v2/v3/v4/v5, `.stk`, `.nodes`, `.stknds`,
+    plus PNG sequence, GIF, MP4, WebM, APNG, JPEG sequence, SVG
+    and spritesheets.
+  - A cross-format fixture corpus (`tests/fixtures/`) generated
+    with the original's encoders guards the importers.
+- **Projects & shell** — named projects under `./projects/`, a
+  Home panel with recents, a recovery snapshot, native open/save
+  dialogs, save/load as JSON (`project.styk.json`), light/dark
+  themes, and **28 languages** (the original's 27 + Bengali)
+  cycled from the toolbar.
+
+## Drive it from an AI agent (MCP)
+
+The `mcp_server` binary speaks MCP (JSON-RPC 2.0 over stdio,
+protocol `2024-11-05`) and exposes **51 tools**: project/figure/
+pose editing, camera (with rotation), graph keys, FX clip
+management, weather, audio, drawing, 3D sessions, movieclips,
+per-frame bends, import/export in every supported format, and
+rendering — including `render_frame_base64`, so an agent can see
+the frame it just made. Full tool catalogue and the client
+configuration snippet live in [docs/MCP.md](docs/MCP.md).
 
 ## Architecture notes
 
-- `model.rs` has no UI dependencies and is fully unit-tested.
-- `editor.rs` holds editor state and every document operation; the
-  GPUI layer only translates mouse events and buttons into calls.
-- `vendor/xattr` is a byte-identical copy of crates.io `xattr 0.2.3`
-  with one patched constant: it referenced `libc::ENOATTR`, which
-  current `libc` removed on Linux; the vendored copy maps it to
-  `ENODATA` there. Wired through `[patch.crates-io]` in `Cargo.toml`.
+- The crate is a library (`src/lib.rs`); the GPUI editor
+  (`src/main.rs`) and the MCP server (`src/bin/mcp_server.rs`)
+  are two thin binaries over the same engine.
+- `model.rs` has no UI dependencies; `editor.rs` holds editor
+  state and every document operation; the GPUI layer translates
+  mouse events and buttons into calls.
+- Exports are deterministic: same project → same bytes, in CI
+  as on a desktop.
+- `vendor/xattr` is a byte-identical copy of crates.io
+  `xattr 0.2.3` with one patched constant: it referenced
+  `libc::ENOATTR`, which current `libc` removed on Linux; the
+  vendored copy maps it to `ENODATA` there. Wired through
+  `[patch.crates-io]` in `Cargo.toml`.
 
-## Not yet ported (the road from here)
+## Honest limits
 
-The original app is large; this port now touches every feature
-family it has except two. Still missing or shallow, honestly:
-true 3D figures, touch UI, sprite and text segment rendering,
-a keyframe graph editor with property channels, audio editing
-depth (playback exists), raster drawing depth (pressure, fill),
-Stick Nodes animation containers (`.nodemc`/`.stknds` — figures
-import today), and localisation beyond EN/BN/ES (the original
-ships 27 languages).
+- **No touch input.** GPUI 0.2.2 has no touch API at all —
+  proven from the crate source in [docs/TOUCH.md](docs/TOUCH.md).
+  The gesture recogniser and pinch-to-camera code are written
+  and tested but unreachable from hardware until GPUI ships
+  touch events; a touchscreen arrives as one emulated mouse.
+- **`.piv` text side tables cannot be written.** The format
+  stores vector glyph outlines; this port's text is a 3×5 bitmap
+  font with no outlines to write. (Image side tables, per-frame
+  lengths and bends *do* round-trip.)
+- **3D is a session, not a document feature.** 3D figures are
+  posed in the 3D mode and baked to native 2D figures; exports
+  render the 2D result.
+- **Depth gaps vs the original** (see
+  [docs/GAP-ANALYSIS.md](docs/GAP-ANALYSIS.md)): the original's
+  drawing and VFX systems are still larger, movieclips are flat
+  pose lists (no nested clip timelines), some Stick Nodes
+  instance data (styles/filters, smart-stretch, sounds) is
+  consumed but not modelled, and the 28 localisations are
+  machine-produced where the original's are human-maintained.
+- **Visual checks happen on the user's machine.** This project's
+  dev VM uses a virtual display with software Vulkan where the
+  GUI renders black screenshots; the editor is verified visually
+  from CI artifacts run on a real desktop (first verified
+  2026-11-08).
 
 ## Licence
 
