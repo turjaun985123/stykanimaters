@@ -1,9 +1,14 @@
 mod app;
+mod audio;
 mod editor;
 mod export;
+mod i18n;
 mod model;
+mod nodes;
 mod pivot;
+mod projects;
 mod svg;
+mod vfx;
 
 use gpui::{App, AppContext, Application, WindowOptions};
 

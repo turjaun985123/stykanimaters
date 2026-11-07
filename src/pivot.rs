@@ -1,6 +1,6 @@
 //! Pivot formats: `.piv` versions 2, 3 and 4 (import and export),
-//! the version 5 native container (import), and `.stk` figure
-//! files (import and export).
+//! the version 5 native container (import and export), and `.stk`
+//! figure files (import and export).
 //!
 //! The byte grammar is ported from the original app's own codec
 //! (`codecs/piv_legacy_v2.py`, `codecs/piv_legacy_v4.py`,
@@ -24,11 +24,13 @@
 //!   `deg = 90 - rad * 180/pi`, relative to the parent segment.
 //! * Object colours are COLORREF (0x00BBGGRR).
 //!
-//! The v5 grammar is ported from `codecs/piv_codec.py`; v5 import
-//! covers figures built from line/circle/square segments. Figures
-//! with image/text segments are rejected until the side-table
-//! grammar is ported. Stick Nodes `.nodes` is a different, much
-//! larger format and is not handled here.
+//! The v5 grammar is ported from `codecs/piv_codec.py` (reader)
+//! and `codecs/piv_full_writer.py` / `codecs/piv_document.py`
+//! (writer). V5 import covers the full sequential grammar — image
+//! and text side tables are walked and skipped precisely (see
+//! `docs/V5-SIDETABLES-SPEC.md`); v5 export writes the subset of
+//! the format this model can express. Stick Nodes `.nodes` is a
+//! different, much larger format and is not handled here.
 
 use crate::model::{CameraKey, FigureDef, FigureInstance, Frame, NodeDef, Pose, Project, Shape};
 use std::io::Read as _;
@@ -584,12 +586,13 @@ fn assemble(
             }
         }
         last_poses = poses.clone();
-        frames.push(Frame { poses, duration: *duration });
+        frames.push(Frame { poses, duration: *duration, easing: None });
     }
     if frames.is_empty() {
         frames.push(Frame {
             poses: last_poses,
             duration: 1.0,
+            easing: None,
         });
     }
     Project {
@@ -607,6 +610,7 @@ fn assemble(
         strokes: Vec::new(),
         audio: Vec::new(),
         clips: Vec::new(),
+        fx_clips: Vec::new(),
     }
 }
 
@@ -1218,12 +1222,13 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
             poses[ii] = pose_from_abs(&figures[ii].def, &ty.rest_abs, &o.angles, o.root);
         }
         last_poses = poses.clone();
-        frames.push(Frame { poses, duration: *duration });
+        frames.push(Frame { poses, duration: *duration, easing: None });
     }
     if frames.is_empty() {
         frames.push(Frame {
             poses: last_poses,
             duration: 1.0,
+            easing: None,
         });
     }
     let background = raw_frames
@@ -1245,6 +1250,7 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
         strokes: Vec::new(),
         audio: Vec::new(),
         clips: Vec::new(),
+        fx_clips: Vec::new(),
     })
 }
 
@@ -1337,6 +1343,124 @@ pub fn export_piv_v3(project: &Project) -> Vec<u8> {
     out.extend_from_slice(&interval.max(1).to_le_bytes());
     out.push(1u8); // loop flag
     out
+}
+
+/// Export the project as a version 5 `.piv` file, zlib-compressed
+/// (the form StykAnimate itself writes). Writer grammar:
+/// `codecs/piv_full_writer.py` (tables) and `codecs/piv_document.py`
+/// (keyframes). The choices are the simplest legal ones the model
+/// can express: one solid-colour background slot (kind 2) that
+/// every frame references; figure flags 144 (bit 16 = z-order is
+/// the identity permutation, so the arrays are omitted; bit 128 =
+/// no segment has a secondary colour, which the model does not
+/// have); no bends or polyfills; objects keyed by stable unique
+/// ids; a camera record only for frames whose key differs from
+/// the default (stage centre, zoom 1); and the Auto-Easing trailer
+/// byte 0. Media segments are never produced, so the image/text
+/// side tables are empty.
+pub fn export_piv_v5(project: &Project) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(5u8); // version
+    out.extend_from_slice(&(project.stage[0] as u32).to_le_bytes());
+    out.extend_from_slice(&(project.stage[1] as u32).to_le_bytes());
+    // Backgrounds: slot 0 is implicit; slot 1 is a solid colour.
+    out.extend_from_slice(&2u16.to_le_bytes()); // background slots
+    out.push(2u8); // kind 2: solid colour
+    out.extend_from_slice(&rgb_to_colorref(project.background).to_le_bytes());
+    out.push(10u8); // name length
+    out.extend_from_slice(b"Background");
+    // Figure table (slot 1 is the implicit built-in figure).
+    out.extend_from_slice(&((project.figures.len() + 2) as u16).to_le_bytes());
+    for fig in &project.figures {
+        write_figure_v5(&mut out, &fig.def, &fig.name);
+    }
+    // Keyframes.
+    out.extend_from_slice(&(project.frames.len() as u32).to_le_bytes());
+    let centre = [project.stage[0] / 2.0, project.stage[1] / 2.0];
+    for (fi, frame) in project.frames.iter().enumerate() {
+        out.extend_from_slice(&(frame.duration.round().max(1.0) as u16).to_le_bytes());
+        out.push(0u8); // background mix
+        out.extend_from_slice(&1u16.to_le_bytes()); // background id
+        out.extend_from_slice(&(project.figures.len() as u16).to_le_bytes());
+        for (i, fig) in project.figures.iter().enumerate() {
+            out.extend_from_slice(&((i + 1) as u32).to_le_bytes()); // unique id
+            out.extend_from_slice(&((i + 2) as u16).to_le_bytes()); // figure type
+            out.extend_from_slice(&1.0f32.to_le_bytes()); // scale
+            out.extend_from_slice(&rgb_to_colorref(fig.color).to_le_bytes());
+            out.push(0u8); // field28 (transparency)
+            let abs = pose_absolutes(&fig.def, &frame.poses[i]);
+            for k in 1..fig.def.nodes.len() {
+                out.extend_from_slice(&deg_to_rad(abs[k]).to_le_bytes());
+            }
+            out.extend_from_slice(&frame.poses[i].root[0].to_le_bytes());
+            out.extend_from_slice(&frame.poses[i].root[1].to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // len flag
+            out.extend_from_slice(&0u16.to_le_bytes()); // bend flag
+            out.push(0u8); // join flag
+        }
+        for i in 0..project.figures.len() {
+            out.extend_from_slice(&(i as u16).to_le_bytes()); // draw order: identity
+        }
+        // Camera: written in full only when a key on this frame
+        // differs from the default — the writer's `is_default` rule.
+        let key = project.camera.iter().find(|k| k.frame == fi);
+        match key {
+            Some(key)
+                if (key.zoom - 1.0).abs() > 0.0001
+                    || (key.x - centre[0]).abs() > 0.01
+                    || (key.y - centre[1]).abs() > 0.01 =>
+            {
+                out.push(0u8); // not the default camera
+                out.extend_from_slice(&key.x.to_le_bytes());
+                out.extend_from_slice(&key.y.to_le_bytes());
+                out.extend_from_slice(&0.0f64.to_le_bytes()); // angle: not modelled
+                out.extend_from_slice(&key.zoom.to_le_bytes());
+            }
+            _ => out.push(1u8), // default camera
+        }
+    }
+    out.extend_from_slice(&(project.fps.round().max(1.0) as u32).to_le_bytes());
+    out.push(0u8); // trailer: Auto-Easing option byte (0 = enabled)
+    let mut encoder =
+        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(&out)
+        .expect("zlib encode into memory cannot fail");
+    encoder.finish().expect("zlib finish into memory cannot fail")
+}
+
+/// Write one v5 figure record: flags 144 (implicit z-order, no
+/// secondary colours), then segments in node order — a segment's
+/// id is its node index, so the parent id is the parent node index
+/// (the origin node is 0). Bends and polyfills are empty.
+fn write_figure_v5(out: &mut Vec<u8>, def: &FigureDef, name: &str) {
+    let rest_abs = rest_absolutes(def);
+    out.push(128 | 16); // flags
+    out.extend_from_slice(&((def.nodes.len() - 1) as u16).to_le_bytes());
+    for (i, node) in def.nodes.iter().enumerate().skip(1) {
+        out.extend_from_slice(&(node.parent.unwrap_or(0) as u16).to_le_bytes());
+        out.extend_from_slice(&(i as u16).to_le_bytes()); // segment id
+        out.extend_from_slice(&node.length.to_le_bytes());
+        out.extend_from_slice(&deg_to_rad(rest_abs[i]).to_le_bytes());
+        out.extend_from_slice(&node.thickness.to_le_bytes());
+        out.push(match node.shape {
+            Shape::Circle => 1,
+            Shape::Polygon(4) => 6,
+            _ => 0,
+        });
+        out.push(0); // aux
+        let rgb = node.color.unwrap_or(0);
+        out.push((rgb >> 16) as u8);
+        out.push((rgb >> 8) as u8);
+        out.push(rgb as u8);
+        out.push(0); // transparency
+    }
+    out.extend_from_slice(&0u16.to_le_bytes()); // bend count
+    out.extend_from_slice(&0u16.to_le_bytes()); // polyfill count
+    // No z-order arrays (flag 16) and no global style (flag 64 clear).
+    let name_bytes = name.as_bytes();
+    out.push(name_bytes.len().min(255) as u8);
+    out.extend_from_slice(&name_bytes[..name_bytes.len().min(255)]);
 }
 
 #[cfg(test)]
@@ -1553,6 +1677,114 @@ mod tests {
         assert_eq!(project.figures[0].name, "Txt");
         let pose = &project.frames[0].poses[0];
         assert!((pose.root[0] - 33.0).abs() < 0.01 && (pose.root[1] - 44.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn piv_v5_roundtrip_preserves_frames_and_poses() {
+        // Two figures (the second added at a different root) and a
+        // non-default camera key, so the v5 writer's object and
+        // camera paths are both exercised.
+        let mut project = Project::new_demo();
+        project.add_figure_with(FigureDef::quadruped(), "Quad", 0x5DB2FF, [300.0, 400.0]);
+        project.camera.push(CameraKey {
+            frame: 1,
+            x: 500.0,
+            y: 300.0,
+            zoom: 1.5,
+        });
+        let bytes = export_piv_v5(&project);
+        // The export is zlib-wrapped, like the files StykAnimate
+        // writes: the first payload byte (version 5) must not be
+        // visible in the raw stream.
+        assert_ne!(bytes[0], 5, "v5 export should be zlib-compressed");
+        let back = import_piv(&bytes).unwrap();
+        assert_eq!(back.stage, project.stage);
+        assert_eq!(back.background, project.background);
+        assert!((back.fps - project.fps).abs() < 1.0, "fps {} vs {}", back.fps, project.fps);
+        assert_eq!(back.figures.len(), 2);
+        assert_eq!(back.figures[0].name, "Styk");
+        assert_eq!(back.figures[1].name, "Quad");
+        for (a, b) in project.figures.iter().zip(back.figures.iter()) {
+            assert_eq!(a.def.nodes.len(), b.def.nodes.len());
+            assert_eq!(a.color, b.color);
+        }
+        assert_eq!(back.frames.len(), project.frames.len());
+        for (a, b) in project.frames.iter().zip(back.frames.iter()) {
+            assert!((a.duration - b.duration).abs() < 0.01);
+            for (pa, pb) in a.poses.iter().zip(b.poses.iter()) {
+                assert!((pa.root[0] - pb.root[0]).abs() < 0.5, "root x {} vs {}", pa.root[0], pb.root[0]);
+                assert!((pa.root[1] - pb.root[1]).abs() < 0.5, "root y {} vs {}", pa.root[1], pb.root[1]);
+                assert_eq!(pa.angles.len(), pb.angles.len());
+                for (x, y) in pa.angles.iter().zip(pb.angles.iter()) {
+                    assert!(
+                        (crate::model::norm_deg(x - y)).abs() < 0.1,
+                        "angle {x} vs {y}"
+                    );
+                }
+            }
+        }
+        // The camera key survives; frames without a key stay default.
+        assert_eq!(back.camera.len(), 1);
+        let key = &back.camera[0];
+        assert_eq!(key.frame, 1);
+        assert!((key.x - 500.0).abs() < 0.01 && (key.y - 300.0).abs() < 0.01);
+        assert!((key.zoom - 1.5).abs() < 0.001);
+    }
+
+
+
+    #[test]
+    fn corpus_fixtures_import_with_manifest_values() {
+        let dir = std::path::Path::new("tests/fixtures");
+        if !dir.exists() {
+            return; // corpus is generated by scripts/gen_fixtures.py
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
+                .unwrap();
+        for (file, expect) in manifest["fixtures"].as_object().unwrap() {
+            let data = std::fs::read(dir.join(file)).unwrap();
+            if file.ends_with(".stk") {
+                let (def, _name) = import_stk(&data).unwrap_or_else(|e| panic!("{file}: {e}"));
+                assert_eq!(def.nodes.len(), 4, "{file} nodes"); // origin + 3 segments
+                let lens: Vec<f32> = def.nodes[1..].iter().map(|n| n.length).collect();
+                assert_eq!(lens, vec![50.0, 30.0, 16.0], "{file} lengths");
+                continue;
+            }
+            let project = import_piv(&data).unwrap_or_else(|e| panic!("{file}: {e}"));
+            if file.ends_with(".piv") {
+                assert_eq!(project.stage, [800.0, 600.0], "{file} canvas");
+                let want_fps = expect["fps"].as_f64().unwrap() as f32;
+                assert!((project.fps - want_fps).abs() < 1.5, "{file} fps {}", project.fps);
+                assert_eq!(
+                    project.frames.len(),
+                    expect["frames"].as_u64().unwrap() as usize,
+                    "{file} frames"
+                );
+                let fi = project
+                    .figures
+                    .iter()
+                    .position(|f| f.name == "Tripod")
+                    .unwrap_or_else(|| panic!("{file}: Tripod figure missing"));
+                // Model convention: node 0 is the zero-length origin,
+                // so a 3-segment figure has 4 nodes.
+                assert_eq!(project.figures[fi].def.nodes.len(), 4, "{file} nodes");
+                let lens: Vec<f32> =
+                    project.figures[fi].def.nodes[1..].iter().map(|n| n.length).collect();
+                assert_eq!(lens, vec![50.0, 30.0, 16.0], "{file} lengths");
+                let root = project.frames[0].poses[fi].root;
+                assert!(
+                    (root[0] - 111.0).abs() < 0.6 && (root[1] - 222.0).abs() < 0.6,
+                    "{file} frame-0 root {root:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn write_v5_fixture_for_cross_check() {
+        let project = Project::new_demo();
+        std::fs::write("/tmp/styk-export-v5.piv", export_piv_v5(&project)).unwrap();
     }
 
     #[test]

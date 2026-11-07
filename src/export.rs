@@ -179,10 +179,23 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
             }
         }
     }
-    let particles: Vec<([f32; 2], f32, [u8; 3], f32)> = particles_at(project, frame_f)
+    let mut particles: Vec<([f32; 2], f32, [u8; 3], f32)> = particles_at(project, frame_f)
         .into_iter()
         .map(|(p, r, c, a)| (view(p), r * zoom * ss as f32, c, a))
         .collect();
+    for entry in &project.fx_clips {
+        if entry.figure < project.figures.len() {
+            let fig = &project.figures[entry.figure];
+            if !fig.hidden {
+                let pos = evaluate(&fig.def, &poses[entry.figure]);
+                if let Some(&anchor) = pos.get(entry.node) {
+                    for (p, r, c, a) in crate::vfx::clip_particles(&entry.clip, frame_f, anchor) {
+                        particles.push((view(p), r * zoom * ss as f32, c, a));
+                    }
+                }
+            }
+        }
+    }
 
     for y in 0..h {
         for x in 0..w {
@@ -461,6 +474,63 @@ pub fn export_png_sequence(project: &Project, dir: &Path) -> std::io::Result<usi
     Ok(project.frames.len())
 }
 
+/// Export every authored frame as `frame-0001.jpg`, `frame-0002.jpg`,
+/// ... in `dir` (JPEG, quality 90).
+pub fn export_jpeg_sequence(project: &Project, dir: &Path) -> std::io::Result<usize> {
+    std::fs::create_dir_all(dir)?;
+    for i in 0..project.frames.len() {
+        let img = render_frame(project, i);
+        let path = dir.join(format!("frame-{:04}.jpg", i + 1));
+        let mut file = std::fs::File::create(&path)?;
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 90);
+        encoder.encode_image(&img).map_err(std::io::Error::other)?;
+    }
+    Ok(project.frames.len())
+}
+
+/// Export the animation as an APNG (animated PNG) at the project
+/// fps, looping forever. Uses the `png` crate's native APNG writer
+/// (`set_animated`): the first frame is stored as IDAT and the rest
+/// as fdAT. Frames are the same full-canvas samples the GIF/MP4
+/// exports use, converted to RGBA.
+pub fn export_apng(project: &Project, path: &Path) -> std::io::Result<usize> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let times = sample_times(project);
+    if times.is_empty() {
+        return Ok(0);
+    }
+    let first = image::DynamicImage::ImageRgb8(render_frame_at(project, times[0])).to_rgba8();
+    let (w, h) = (first.width(), first.height());
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(file, w, h);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .set_animated(times.len() as u32, 0) // 0 plays = loop forever
+        .map_err(std::io::Error::other)?;
+    // Frame delay 1/fps, expressed exactly as 100 / (fps * 100).
+    let den = (project.fps.max(1.0) * 100.0).round().clamp(1.0, u16::MAX as f32) as u16;
+    encoder
+        .set_frame_delay(100, den)
+        .map_err(std::io::Error::other)?;
+    let mut writer = encoder.write_header().map_err(std::io::Error::other)?;
+    writer
+        .write_image_data(first.as_raw())
+        .map_err(std::io::Error::other)?;
+    for t in &times[1..] {
+        let img = image::DynamicImage::ImageRgb8(render_frame_at(project, *t)).to_rgba8();
+        writer
+            .write_image_data(img.as_raw())
+            .map_err(std::io::Error::other)?;
+    }
+    writer.finish().map_err(std::io::Error::other)?;
+    Ok(times.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,5 +654,61 @@ mod tests {
         let bg = rgb(project.background);
         let drawn = img.pixels().filter(|p| p.0 != bg).count();
         assert!(drawn > 500, "expected the figure to be drawn, got {drawn} px");
+    }
+
+    #[test]
+    fn jpeg_sequence_writes_real_jpegs() {
+        let project = Project::new_demo();
+        let dir = std::path::Path::new("/tmp/styk-jpeg-test");
+        let n = export_jpeg_sequence(&project, dir).unwrap();
+        assert_eq!(n, project.frames.len());
+        for i in [1, n] {
+            let bytes = std::fs::read(dir.join(format!("frame-{i:04}.jpg"))).unwrap();
+            assert_eq!(&bytes[0..2], &[0xFF, 0xD8], "frame {i}: missing JPEG SOI marker");
+            assert_eq!(
+                &bytes[bytes.len() - 2..],
+                &[0xFF, 0xD9],
+                "frame {i}: missing JPEG EOI marker"
+            );
+            assert!(bytes.len() > 1000, "frame {i}: jpeg suspiciously small: {}", bytes.len());
+        }
+    }
+
+    #[test]
+    fn apng_export_has_actl_and_all_frames() {
+        let project = Project::new_demo();
+        let path = std::path::Path::new("/tmp/styk-test.apng");
+        let n = export_apng(&project, path).unwrap();
+        assert_eq!(n, project.frames.len());
+        let bytes = std::fs::read(path).unwrap();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG file");
+        // Walk the chunk list properly (type strings can also occur
+        // inside compressed data, so don't just substring-search).
+        let mut fctl_count = 0usize;
+        let mut actl_frames: Option<u32> = None;
+        let mut actl_plays: Option<u32> = None;
+        let mut off = 8usize;
+        loop {
+            assert!(off + 8 <= bytes.len(), "truncated chunk header at {off}");
+            let len = u32::from_be_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+            let ty = &bytes[off + 4..off + 8];
+            match ty {
+                b"acTL" => {
+                    actl_frames = Some(u32::from_be_bytes(
+                        bytes[off + 8..off + 12].try_into().unwrap(),
+                    ));
+                    actl_plays = Some(u32::from_be_bytes(
+                        bytes[off + 12..off + 16].try_into().unwrap(),
+                    ));
+                }
+                b"fcTL" => fctl_count += 1,
+                b"IEND" => break,
+                _ => {}
+            }
+            off += 12 + len;
+        }
+        assert_eq!(actl_frames, Some(n as u32), "acTL must declare every frame");
+        assert_eq!(actl_plays, Some(0), "acTL must loop forever (num_plays = 0)");
+        assert_eq!(fctl_count, n, "one fcTL chunk per animation frame");
     }
 }

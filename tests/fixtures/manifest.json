@@ -1,0 +1,103 @@
+{
+  "scene": "One shared scene in every container: canvas 800x600, the 3-segment 'Tripod' figure (lengths 50/30/16, segment 3 a circle), red colour override, frame 0 root (111, 222), frame 1 root (121, 222). 'figures' lists the custom figures only; every .piv also implies the format's built-in slot-1 figure.",
+  "fixtures": {
+    "legacy-v2.piv": {
+      "format": "piv_v2_legacy_exact",
+      "canvas": [
+        800,
+        600
+      ],
+      "fps": 13,
+      "figures": [
+        {
+          "name": "Tripod",
+          "segments": 3
+        }
+      ],
+      "frames": 2,
+      "frame0_roots": [
+        [
+          111.0,
+          222.0
+        ]
+      ]
+    },
+    "legacy-v3.piv": {
+      "format": "piv_v3_legacy_exact",
+      "canvas": [
+        800,
+        600
+      ],
+      "fps": 25,
+      "figures": [
+        {
+          "name": "Tripod",
+          "segments": 3
+        }
+      ],
+      "frames": 2,
+      "frame0_roots": [
+        [
+          111.0,
+          222.0
+        ]
+      ]
+    },
+    "legacy-v4.piv": {
+      "format": "piv_v4_exact",
+      "canvas": [
+        800,
+        600
+      ],
+      "fps": 25,
+      "figures": [
+        {
+          "name": "Tripod",
+          "segments": 3
+        }
+      ],
+      "frames": 2,
+      "frame0_roots": [
+        [
+          111.0,
+          222.0
+        ]
+      ]
+    },
+    "modern-v5.piv": {
+      "format": "piv_v5_standalone",
+      "canvas": [
+        800,
+        600
+      ],
+      "fps": 24,
+      "figures": [
+        {
+          "name": "Tripod",
+          "segments": 3
+        }
+      ],
+      "frames": 2,
+      "frame0_roots": [
+        [
+          111.0,
+          222.0
+        ]
+      ]
+    },
+    "figure.stk": {
+      "format": "legacy_stk",
+      "canvas": null,
+      "fps": null,
+      "figures": [
+        {
+          "name": "figure",
+          "segments": 3
+        }
+      ],
+      "frames": null,
+      "frame0_roots": [],
+      "notes": "The legacy STK container stores no name, canvas, fps or frames. The original's decoder reports the figure name as the file stem ('figure'); the geometry is the same Tripod (lengths 50/30/16, segment 3 a circle)."
+    }
+  }
+}

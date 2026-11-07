@@ -371,6 +371,10 @@ pub struct Frame {
     /// Hold time multiplier: 2.0 shows this frame twice as long.
     #[serde(default = "default_duration")]
     pub duration: f32,
+    /// Tween easing for the segment FROM this frame to the next.
+    /// `None` inherits the project-wide easing.
+    #[serde(default)]
+    pub easing: Option<Easing>,
 }
 
 fn default_duration() -> f32 {
@@ -449,6 +453,14 @@ pub struct ParticleEvent {
     pub seed: u32,
 }
 
+/// A timed VFX clip (see `vfx.rs`) anchored to one figure's node.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FxClipEntry {
+    pub clip: crate::vfx::ParticleClip,
+    pub figure: usize,
+    pub node: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
@@ -477,6 +489,8 @@ pub struct Project {
     pub audio: Vec<AudioClip>,
     #[serde(default)]
     pub clips: Vec<ClipDef>,
+    #[serde(default)]
+    pub fx_clips: Vec<FxClipEntry>,
 }
 
 impl Project {
@@ -500,7 +514,7 @@ impl Project {
             pose.angles[5] = -118.0 - wave * 2.2; // raise right arm (wave < 0 lifts)
             pose.angles[6] = -4.0 - wave * 0.8;
             let _ = i;
-            frames.push(Frame { poses: vec![pose], duration: 1.0 });
+            frames.push(Frame { poses: vec![pose], duration: 1.0, easing: None });
         }
 
         Project {
@@ -518,6 +532,7 @@ impl Project {
             strokes: Vec::new(),
             audio: Vec::new(),
             clips: Vec::new(),
+            fx_clips: Vec::new(),
         }
     }
 
@@ -536,7 +551,8 @@ impl Project {
             self.apply_clips(&mut poses, f);
             return poses;
         }
-        let t = self.easing.apply(f - i as f32);
+        let easing = self.frames[i].easing.unwrap_or(self.easing);
+        let t = easing.apply(f - i as f32);
         let mut poses: Vec<Pose> = self.frames[i]
             .poses
             .iter()
@@ -741,6 +757,20 @@ mod tests {
         let mid = project.poses_at(0.5);
         assert!((mid[0].root[0] - 487.0).abs() < 0.01, "root {}", mid[0].root[0]);
         project.easing = Easing::EaseIn; // t^2 = 0.25 at halfway
+        let eased = project.poses_at(0.5);
+        assert!((eased[0].root[0] - 483.5).abs() < 0.01, "root {}", eased[0].root[0]);
+    }
+
+    #[test]
+    fn per_frame_easing_overrides_project_easing() {
+        let mut project = Project::new_demo();
+        project.tween_playback = true;
+        project.easing = Easing::Linear;
+        // None inherits the project easing (linear): t = 0.5.
+        let linear = project.poses_at(0.5);
+        assert!((linear[0].root[0] - 487.0).abs() < 0.01, "root {}", linear[0].root[0]);
+        // Some(EaseIn) on frame 0 wins for the 0 -> 1 segment: t = 0.25.
+        project.frames[0].easing = Some(Easing::EaseIn);
         let eased = project.poses_at(0.5);
         assert!((eased[0].root[0] - 483.5).abs() < 0.01, "root {}", eased[0].root[0]);
     }

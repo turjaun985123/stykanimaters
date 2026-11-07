@@ -47,6 +47,8 @@ pub struct EditorCore {
     pub onion_frames: u8,
     pub project_files: Vec<PathBuf>,
     pub project_index: usize,
+    /// UI language for toolbar labels (see i18n.rs).
+    pub lang: crate::i18n::Lang,
 }
 
 const FIGURE_COLORS: [u32; 6] = [0xE8E8EC, 0xFF5D5D, 0x5DB2FF, 0x7BE495, 0xFFC65D, 0xC792FF];
@@ -77,6 +79,7 @@ impl EditorCore {
             onion_frames: 1,
             project_files: Self::list_project_files(),
             project_index: 0,
+            lang: crate::i18n::Lang::En,
         }
     }
 
@@ -272,7 +275,7 @@ impl EditorCore {
         let duration = self.project.frames[self.current].duration;
         self.project
             .frames
-            .insert(self.current + 1, crate::model::Frame { poses, duration });
+            .insert(self.current + 1, crate::model::Frame { poses, duration, easing: None });
         self.current += 1;
         self.status = format!("Frame {} added.", self.current + 1);
     }
@@ -322,7 +325,7 @@ impl EditorCore {
             .collect();
         self.project.frames.insert(
             self.current + 1,
-            crate::model::Frame { poses, duration: 1.0 },
+            crate::model::Frame { poses, duration: 1.0, easing: None },
         );
         self.current += 1;
         self.status = format!("Inbetween inserted at frame {}.", self.current + 1);
@@ -721,8 +724,125 @@ impl EditorCore {
     pub fn clear_particles(&mut self) {
         self.snapshot();
         self.project.particles.clear();
+        self.project.fx_clips.clear();
         self.status = "Particle effects cleared.".into();
     }
+    // ---- Wave-10 integrations: formats, language, easing, VFX clips ----
+
+    pub fn cycle_lang(&mut self) {
+        use crate::i18n::Lang;
+        self.lang = match self.lang {
+            Lang::En => Lang::Bn,
+            Lang::Bn => Lang::Es,
+            Lang::Es => Lang::En,
+        };
+        self.status = format!("Language: {}", self.lang.label());
+    }
+
+    pub fn export_v5_file(&mut self) {
+        let bytes = crate::pivot::export_piv_v5(&self.project);
+        let dir = PathBuf::from("out");
+        let _ = std::fs::create_dir_all(&dir);
+        match std::fs::write(dir.join("animation-v5.piv"), &bytes) {
+            Ok(()) => self.status = "Exported out/animation-v5.piv (Pivot v5).".into(),
+            Err(e) => self.status = format!("v5 export failed: {e}"),
+        }
+    }
+
+    pub fn export_apng_file(&mut self) {
+        match crate::export::export_apng(&self.project, std::path::Path::new("out/animation.apng")) {
+            Ok(_) => self.status = "Exported out/animation.apng.".into(),
+            Err(e) => self.status = format!("APNG export failed: {e}"),
+        }
+    }
+
+    pub fn export_jpeg_dir(&mut self) {
+        match crate::export::export_jpeg_sequence(&self.project, std::path::Path::new("out/jpeg")) {
+            Ok(_) => self.status = "Exported JPEG frames to out/jpeg/.".into(),
+            Err(e) => self.status = format!("JPEG export failed: {e}"),
+        }
+    }
+
+    pub fn import_nodes_file(&mut self) {
+        let Some(path) = self.first_file_with("import", &["nodes"]) else {
+            self.status = "Put a .nodes file in the import folder first.".into();
+            return;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => match crate::nodes::import_nodes(&bytes) {
+                Ok(project) => {
+                    self.snapshot();
+                    self.project = project;
+                    self.current = 0;
+                    self.selected_figure = 0;
+                    self.selected_node = None;
+                    self.status = format!("Imported {} as a figure.", path.display());
+                }
+                Err(e) => self.status = format!("Stick Nodes import failed: {e}"),
+            },
+            Err(e) => self.status = format!("Could not read {}: {e}", path.display()),
+        }
+    }
+
+    pub fn cycle_frame_easing(&mut self) {
+        use crate::model::Easing;
+        self.snapshot();
+        let cur = self.current.min(self.project.frames.len().saturating_sub(1));
+        if let Some(frame) = self.project.frames.get_mut(cur) {
+            frame.easing = match frame.easing {
+                None => Some(Easing::Linear),
+                Some(Easing::Linear) => Some(Easing::Smooth),
+                Some(Easing::Smooth) => Some(Easing::EaseIn),
+                Some(Easing::EaseIn) => Some(Easing::EaseOut),
+                Some(Easing::EaseOut) => None,
+            };
+            self.status = format!(
+                "Frame {} easing: {}",
+                cur + 1,
+                frame.easing.map(|e| e.label()).unwrap_or("project default")
+            );
+        }
+    }
+
+    pub fn frame_easing_label(&self) -> String {
+        match self.project.frames.get(self.current).and_then(|f| f.easing) {
+            Some(e) => format!("F-ease: {}", e.label()),
+            None => "F-ease: project".into(),
+        }
+    }
+
+    /// Add a timed VFX clip of `kind` anchored at the selected node,
+    /// starting at the current frame.
+    pub fn add_fx_clip(&mut self, kind: crate::vfx::ClipKind) {
+        use crate::vfx::{ClipKind, ParticleClip};
+        let Some(node) = self.selected_node else {
+            self.status = "Select a joint first, then add the FX clip.".into();
+            return;
+        };
+        self.snapshot();
+        let color = self
+            .project
+            .figures
+            .get(self.selected_figure)
+            .map(|f| f.color)
+            .unwrap_or(0xFFFFFF);
+        self.project.fx_clips.push(crate::model::FxClipEntry {
+            clip: ParticleClip {
+                start: self.current as f32,
+                duration: 16.0,
+                kind,
+                color,
+                seed: 11 + self.project.fx_clips.len() as u32 * 7,
+                angle: 0.0,
+                length: 130.0,
+            },
+            figure: self.selected_figure,
+            node,
+        });
+        let _ = ClipKind::Burst;
+        self.status = format!("FX clip ({kind:?}) added at frame {}.", self.current + 1);
+    }
+
 
     // ---- Library ----
 
@@ -1084,6 +1204,7 @@ impl Default for EditorCore {
         Self::new()
     }
 }
+
 
 #[cfg(test)]
 mod tests {

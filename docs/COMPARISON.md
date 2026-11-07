@@ -138,3 +138,15 @@ embedded `default_pivot2.stk` bytes parse in the port.
 6. APNG/JPEG export (small).
 7. Localisation framework (English + user languages first).
 8. 3D figures, touch, home screen polish.
+
+## Addendum — Wave 3 (2026-11-07, 10-agent push)
+
+Since the comparison above: the port gained .piv v5 **export**
+(cross-verified against the original's decoder), Stick Nodes `.nodes`
+figure import (the last missing format family), APNG + JPEG exports,
+per-keyframe easing, EN/BN/ES localisation on the main toolbar,
+playhead-synced audio playback, timed VFX clips with beam/aura/trail,
+a cross-format test corpus, and two-way onion skin. Test suite: 64.
+The original still wins on depth in drawing, audio editing, 3D, and
+its 27-language reach — but the port now touches every feature family
+the original has, except 3D figures and touch.

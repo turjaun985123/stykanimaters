@@ -12,6 +12,7 @@ pub struct EditorView {
     core: EditorCore,
     canvas_bounds: Rc<RefCell<Bounds<Pixels>>>,
     focus_handle: FocusHandle,
+    player: crate::audio::AudioPlayer,
 }
 
 impl EditorView {
@@ -20,6 +21,7 @@ impl EditorView {
             core: EditorCore::new(),
             canvas_bounds: Rc::new(RefCell::new(Bounds::default())),
             focus_handle: cx.focus_handle(),
+            player: crate::audio::AudioPlayer::new(),
         }
     }
 
@@ -44,6 +46,14 @@ impl EditorView {
     fn toggle_play(&mut self, cx: &mut Context<Self>) {
         self.core.playing = !self.core.playing;
         if self.core.playing {
+            // Start the first audio clip in sync with the playhead.
+            if let Some(clip) = self.core.project.audio.first() {
+                if self.core.current >= clip.start_frame {
+                    let at = self.core.current as f32 / self.core.project.fps.max(1.0)
+                        - crate::audio::clip_offset_secs(clip.start_frame, self.core.project.fps);
+                    let _ = self.player.play(&clip.path, at.max(0.0));
+                }
+            }
             cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor()
@@ -53,6 +63,9 @@ impl EditorView {
                         .update(cx, |view, cx| {
                             if view.core.playing {
                                 view.core.advance_play(0.033);
+                                if !view.core.playing {
+                                    view.player.stop();
+                                }
                                 cx.notify();
                                 true
                             } else {
@@ -66,6 +79,8 @@ impl EditorView {
                 }
             })
             .detach();
+        } else {
+            self.player.stop();
         }
         cx.notify();
     }
@@ -79,6 +94,11 @@ struct DrawData {
     figures: Vec<(Vec<(V2, V2, u32, f32)>, Vec<V2>, Vec<V2>, u32)>,
     /// (centre, shape, length, colour, thickness) shape segments
     shapes: Vec<(V2, crate::model::Shape, f32, u32, f32)>,
+    /// Onion skin entries (segments, colour, alpha) covering BOTH
+    /// directions around the current frame: previous frames keep
+    /// each figure's own colour, while next frames all use one
+    /// shared green tint (0x7BE495) so the animator can tell at a
+    /// glance where a pose came from versus where it is heading.
     onion: Vec<(Vec<(V2, V2)>, u32, u8)>,
     selected: Option<(usize, usize)>,
     cam: (f32, f32, f32),
@@ -157,6 +177,32 @@ impl EditorView {
                 }
             }
         }
+        // Next frames (where the pose is heading), colour-coded with
+        // one green tint for every figure, mirroring the previous
+        // frames' alpha falloff.
+        if core.onion {
+            for ahead in 1..=(core.onion_frames as usize) {
+                let frame = core.current + ahead;
+                if frame >= core.frame_count() {
+                    break;
+                }
+                let alpha = if ahead == 1 { 0x4D } else { 0x26 };
+                for fi in 0..core.project.figures.len() {
+                    if core.project.figures[fi].hidden {
+                        continue;
+                    }
+                    let pos = core.positions(frame, fi);
+                    let def = &core.project.figures[fi].def;
+                    let mut segs = Vec::new();
+                    for (i, node) in def.nodes.iter().enumerate() {
+                        if let Some(p) = node.parent {
+                            segs.push((pos[p], pos[i]));
+                        }
+                    }
+                    onion.push((segs, 0x7BE495, alpha));
+                }
+            }
+        }
         let mut paths = Vec::new();
         if core.show_paths {
             for fi in 0..core.project.figures.len() {
@@ -180,10 +226,20 @@ impl EditorView {
                 }
             }
         }
-        let particles = crate::export::particles_at(&core.project, display)
+        let mut particles: Vec<(V2, f32, u32, f32)> = crate::export::particles_at(&core.project, display)
             .into_iter()
             .map(|(p, r, c, a)| (p, r, ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32, a))
             .collect();
+        for entry in &core.project.fx_clips {
+            if entry.figure < core.project.figures.len() && !core.project.figures[entry.figure].hidden {
+                let joints = core.positions_f(display, entry.figure);
+                if let Some(&anchor) = joints.get(entry.node) {
+                    for (p, r, c, a) in crate::vfx::clip_particles(&entry.clip, display, anchor) {
+                        particles.push((p, r, ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32, a));
+                    }
+                }
+            }
+        }
         let strokes = core
             .project
             .strokes
@@ -248,6 +304,9 @@ impl Render for EditorView {
         let follow_on = core.project.camera_follow.is_some();
         let paths_on = core.show_paths;
         let easing_label = format!("Easing: {}", core.project.easing.label());
+        let tr = |k: &str| crate::i18n::t(core.lang, k);
+        let lang_label = format!("Lang: {}", core.lang.label());
+        let fease_label = core.frame_easing_label();
         let lib_name = core
             .library
             .get(core.library_index)
@@ -278,7 +337,7 @@ impl Render for EditorView {
                 div()
                     .text_size(px(12.0))
                     .text_color(rgb(0x9AA3B2))
-                    .child("FIGURES (layers)"),
+                    .child(tr("figures_layers")),
             );
         for (fi, fig) in core.project.figures.iter().enumerate() {
             let selected = fi == core.selected_figure;
@@ -425,54 +484,54 @@ impl Render for EditorView {
                     .gap(px(6.0))
                     .p(px(8.0))
                     .bg(rgb(bar_bg))
-                    .child(btn("play", if playing { "Pause" } else { "Play" }, playing, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("play", if playing { tr("pause") } else { tr("play") }, playing, cx.listener(|view, _ev, _w, cx| {
                         view.toggle_play(cx);
                     })))
-                    .child(btn("add-frame", "+ Frame", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("add-frame", tr("add_frame"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.add_frame();
                         cx.notify();
                     })))
-                    .child(btn("dup-frame", "Duplicate", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("dup-frame", tr("duplicate_frame"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.duplicate_frame();
                         cx.notify();
                     })))
-                    .child(btn("del-frame", "Delete", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("del-frame", tr("delete_frame"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.delete_frame();
                         cx.notify();
                     })))
-                    .child(btn("onion", "Onion skin", onion_on, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("onion", tr("onion_skin"), onion_on, cx.listener(|view, _ev, _w, cx| {
                         view.core.onion = !view.core.onion;
                         cx.notify();
                     })))
-                    .child(btn("add-figure", "+ Figure", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("add-figure", tr("add_figure"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.add_figure();
                         cx.notify();
                     })))
-                    .child(btn("undo", "Undo", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("undo", tr("undo"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.undo();
                         cx.notify();
                     })))
-                    .child(btn("redo", "Redo", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("redo", tr("redo"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.redo();
                         cx.notify();
                     })))
-                    .child(btn("copy-frame", "Copy frame", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("copy-frame", tr("copy_frame"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.copy_frame();
                         cx.notify();
                     })))
-                    .child(btn("paste-frame", "Paste frame", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("paste-frame", tr("paste_frame"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.paste_frame();
                         cx.notify();
                     })))
-                    .child(btn("save", "Save", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("save", tr("save"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.save();
                         cx.notify();
                     })))
-                    .child(btn("load", "Load", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("load", tr("load"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.load();
                         cx.notify();
                     })))
-                    .child(btn("export", "Export PNG", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("export", tr("export_png"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.export_png();
                         cx.notify();
                     })))
@@ -493,31 +552,31 @@ impl Render for EditorView {
                     .px(px(8.0))
                     .py(px(4.0))
                     .bg(rgb(row_bg))
-                    .child(btn("inbetween", "Inbetween", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("inbetween", tr("inbetween"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.insert_inbetween();
                         cx.notify();
                     })))
-                    .child(btn("add-seg", "+ Segment", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("add-seg", tr("add_segment"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.add_segment();
                         cx.notify();
                     })))
-                    .child(btn("del-seg", "- Segment", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("del-seg", tr("delete_segment"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.delete_segment();
                         cx.notify();
                     })))
-                    .child(btn("len-up", "Len +", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("len-up", tr("len_plus"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.adjust_length(4.0);
                         cx.notify();
                     })))
-                    .child(btn("len-dn", "Len -", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("len-dn", tr("len_minus"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.adjust_length(-4.0);
                         cx.notify();
                     })))
-                    .child(btn("thick-up", "Thick +", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("thick-up", tr("thick_plus"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.adjust_thickness(1.0);
                         cx.notify();
                     })))
-                    .child(btn("thick-dn", "Thick -", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("thick-dn", tr("thick_minus"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.adjust_thickness(-1.0);
                         cx.notify();
                     })))
@@ -525,11 +584,11 @@ impl Render for EditorView {
                         view.core.cycle_node_color();
                         cx.notify();
                     })))
-                    .child(btn("node-shape", "Shape", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("node-shape", tr("shape"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.cycle_shape();
                         cx.notify();
                     })))
-                    .child(btn("draw-mode", "Draw", draw_on, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("draw-mode", tr("draw"), draw_on, cx.listener(|view, _ev, _w, cx| {
                         view.core.draw_mode = !view.core.draw_mode;
                         view.core.status = if view.core.draw_mode {
                             "Draw mode: drag on the canvas to paint a stroke on this frame.".into()
@@ -538,7 +597,7 @@ impl Render for EditorView {
                         };
                         cx.notify();
                     })))
-                    .child(btn("clear-drawing", "Clear drawing", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("clear-drawing", tr("clear_drawing"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.clear_frame_drawings();
                         cx.notify();
                     })))
@@ -561,7 +620,7 @@ impl Render for EditorView {
                     .px(px(8.0))
                     .py(px(4.0))
                     .bg(rgb(row_bg))
-                    .child(btn("cam-mode", "Camera mode", cam_mode, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("cam-mode", tr("camera_mode"), cam_mode, cx.listener(|view, _ev, _w, cx| {
                         view.core.camera_mode = !view.core.camera_mode;
                         view.core.status = if view.core.camera_mode {
                             "Camera mode: drag the canvas to pan. Keys are set per frame.".into()
@@ -570,11 +629,11 @@ impl Render for EditorView {
                         };
                         cx.notify();
                     })))
-                    .child(btn("cam-zin", "Cam zoom +", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("cam-zin", tr("cam_zoom_plus"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.camera_zoom_by(1.2);
                         cx.notify();
                     })))
-                    .child(btn("cam-zout", "Cam zoom -", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("cam-zout", tr("cam_zoom_minus"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.camera_zoom_by(1.0 / 1.2);
                         cx.notify();
                     })))
@@ -582,7 +641,7 @@ impl Render for EditorView {
                         view.core.camera_clear_key();
                         cx.notify();
                     })))
-                    .child(btn("export-gif", "Export GIF", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("export-gif", tr("export_gif"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.export_gif();
                         cx.notify();
                     })))
@@ -619,7 +678,7 @@ impl Render for EditorView {
                         view.core.adjust_frame_duration(2.0);
                         cx.notify();
                     })))
-                    .child(btn("tween", "Tween play", tween_on, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("tween", tr("tween_play"), tween_on, cx.listener(|view, _ev, _w, cx| {
                         view.core.toggle_tween_playback();
                         cx.notify();
                     })))
@@ -627,7 +686,7 @@ impl Render for EditorView {
                         view.core.cycle_easing();
                         cx.notify();
                     })))
-                    .child(btn("follow", "Follow cam", follow_on, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("follow", tr("follow_cam"), follow_on, cx.listener(|view, _ev, _w, cx| {
                         view.core.toggle_camera_follow();
                         cx.notify();
                     })))
@@ -635,19 +694,19 @@ impl Render for EditorView {
                         view.core.show_paths = !view.core.show_paths;
                         cx.notify();
                     })))
-                    .child(btn("fx-burst", "FX Burst", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("fx-burst", tr("fx_burst"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.add_particle(0);
                         cx.notify();
                     })))
-                    .child(btn("fx-sparkle", "FX Sparkle", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("fx-sparkle", tr("fx_sparkle"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.add_particle(1);
                         cx.notify();
                     })))
-                    .child(btn("fx-smoke", "FX Smoke", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("fx-smoke", tr("fx_smoke"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.add_particle(2);
                         cx.notify();
                     })))
-                    .child(btn("fx-clear", "Clear FX", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("fx-clear", tr("clear_fx"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.clear_particles();
                         cx.notify();
                     })))
@@ -667,11 +726,11 @@ impl Render for EditorView {
                         view.core.export_mp4();
                         cx.notify();
                     })))
-                    .child(btn("export-sheet", "Spritesheet", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("export-sheet", tr("spritesheet"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.export_sheet();
                         cx.notify();
                     })))
-                    .child(btn("theme", if core.light_theme { "Dark theme" } else { "Light theme" }, false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("theme", if core.light_theme { tr("dark_theme") } else { tr("light_theme") }, false, cx.listener(|view, _ev, _w, cx| {
                         view.core.light_theme = !view.core.light_theme;
                         cx.notify();
                     })))
@@ -679,39 +738,39 @@ impl Render for EditorView {
                         view.core.cycle_onion_frames();
                         cx.notify();
                     })))
-                    .child(btn("import-piv", "Import .piv", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("import-piv", tr("import_piv"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.import_piv();
                         cx.notify();
                     })))
-                    .child(btn("import-stk", "Import .stk", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("import-stk", tr("import_stk"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.import_stk();
                         cx.notify();
                     })))
-                    .child(btn("export-piv", "Export .piv", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("export-piv", tr("export_piv"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.export_piv();
                         cx.notify();
                     })))
-                    .child(btn("export-stk", "Export .stk", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("export-stk", tr("export_stk"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.export_stk();
                         cx.notify();
                     })))
-                    .child(btn("add-audio", "Add audio", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("add-audio", tr("add_audio"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.add_audio_clip();
                         cx.notify();
                     })))
-                    .child(btn("make-clip", "Make clip", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("make-clip", tr("make_clip"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.make_clip_from_figure();
                         cx.notify();
                     })))
-                    .child(btn("insert-clip", "Insert clip", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("insert-clip", tr("insert_clip"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.insert_clip_figure();
                         cx.notify();
                     })))
-                    .child(btn("export-webm", "WebM", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("export-webm", tr("export_webm"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.export_webm();
                         cx.notify();
                     })))
-                    .child(btn("export-svg", "SVG", false, cx.listener(|view, _ev, _w, cx| {
+                    .child(btn("export-svg", tr("export_svg"), false, cx.listener(|view, _ev, _w, cx| {
                         view.core.export_svg();
                         cx.notify();
                     })))
@@ -725,6 +784,52 @@ impl Render for EditorView {
                     })))
                     .child(btn("open-proj", "Open project", false, cx.listener(|view, _ev, _w, cx| {
                         view.core.open_project_file();
+                        cx.notify();
+                    }))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.0))
+                    .p(px(8.0))
+                    .bg(rgb(bar_bg))
+                    .child(btn("export-v5", "Export .piv v5", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.export_v5_file();
+                        cx.notify();
+                    })))
+                    .child(btn("export-apng", "Export APNG", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.export_apng_file();
+                        cx.notify();
+                    })))
+                    .child(btn("export-jpeg", "Export JPEG", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.export_jpeg_dir();
+                        cx.notify();
+                    })))
+                    .child(btn("import-nodes", "Import .nodes", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.import_nodes_file();
+                        cx.notify();
+                    })))
+                    .child(btn("lang", Box::leak(lang_label.into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.cycle_lang();
+                        cx.notify();
+                    })))
+                    .child(btn("frame-easing", Box::leak(fease_label.into_boxed_str()) as &str, false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.cycle_frame_easing();
+                        cx.notify();
+                    })))
+                    .child(btn("fxclip-beam", "FX clip Beam", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.add_fx_clip(crate::vfx::ClipKind::Beam);
+                        cx.notify();
+                    })))
+                    .child(btn("fxclip-aura", "FX clip Aura", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.add_fx_clip(crate::vfx::ClipKind::Aura);
+                        cx.notify();
+                    })))
+                    .child(btn("fxclip-trail", "FX clip Trail", false, cx.listener(|view, _ev, _w, cx| {
+                        view.core.add_fx_clip(crate::vfx::ClipKind::Trail);
                         cx.notify();
                     }))),
             )

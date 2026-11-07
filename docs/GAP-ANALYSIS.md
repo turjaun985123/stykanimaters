@@ -78,3 +78,28 @@ Python codec, including .piv v5 files produced by its encoder. Status key: DONE 
    harness sibling proves the pattern), then clip keyframing.
 7. Drawing brushes, audio, movieclips/library, themes, i18n, touch —
    in that order, as separate projects each.
+
+## Wave 3 — the 10-agent push (2026-11-07)
+
+Built by ten parallel agents with strict file ownership, then integrated
+(module registration, UI wiring, corpus tests) centrally. 64 tests green.
+
+| Addition | State |
+|---|---|
+| .piv v5 EXPORT (`pivot::export_piv_v5`) | DONE — original's Python decoder reads our file with exact byte consumption (900/900) |
+| Stick Nodes `.nodes` import (`src/nodes.rs`, spec in docs/NODES-SPEC.md) | DONE for figures — full 57-field record grammar with all version gates; verified against a real corpus fixture from the original repo AND their own JS decoder. Connectors import as plain segments; polyfills parsed, not rendered; `.nodemc`/`.stknds` containers not covered |
+| APNG export (png crate native APNG) | DONE — PIL opens the output as a real animated PNG |
+| JPEG sequence export | DONE — SOI/EOI-verified |
+| Per-keyframe easing (`Frame.easing`) | DONE — frame overrides project easing for its outgoing segment |
+| Localisation (`src/i18n.rs`) | PARTIAL — EN/BN/ES, 50 keys, wired into ~45 toolbar labels + a Lang toggle; the original ships 27 languages |
+| Audio playback (`src/audio.rs`) | PARTIAL — ffplay subprocess synced to the playhead on Play; no waveform/editor depth, first clip only |
+| VFX clips (`src/vfx.rs`) | DONE as a system — timed clips (Burst/Sparkle/Smoke/Beam/Aura/Trail) anchored to joints, rendered in canvas + all raster exports; add via FX clip buttons |
+| Cross-format test corpus (`tests/fixtures/`, `scripts/`) | DONE — one scene in v2/v3/v4/v5/.stk, generated + verified with the original's codecs, asserted by a Rust corpus test |
+| Project library backend (`src/projects.rs`) | DONE as a backend — scan/load/save/thumbnails; the editor's existing named-project flow still drives the UI |
+| Onion skin, both directions | DONE — next frames tinted green 0x7BE495 |
+
+Updated parity accounting: **~16 of 24 rows done-equivalent, 6 partial,
+2 missing** (true 3D figures; touch UI). The partials are depth, not
+absence: drawing (no brushes/text), audio (playback only), movieclips
+(no nested-timeline editor), keyframe graph editor, localisation
+(3 of 27 languages), and the Stick Nodes animation containers.
