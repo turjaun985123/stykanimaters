@@ -49,9 +49,10 @@ fn temp_dir(tag: &str) -> PathBuf {
 #[test]
 fn frame_pixels_are_byte_identical_across_renders() {
     let project = tiny_project();
-    // render_frame_at supersamples 2x, so the RGB buffer is
-    // (stage * 2)^2 * 3 bytes.
-    let expected_len = (project.stage[0] as usize * 2) * (project.stage[1] as usize * 2) * 3;
+    // render_frame_at supersamples 2x internally but returns the
+    // downsampled stage-size frame, so the RGB buffer is
+    // stage_w * stage_h * 3 bytes.
+    let expected_len = project.stage[0] as usize * project.stage[1] as usize * 3;
 
     for frame_f in [0.0f32, 1.0, 2.0] {
         let a = export::render_frame_at(&project, frame_f);
