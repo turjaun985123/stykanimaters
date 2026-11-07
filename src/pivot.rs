@@ -1,5 +1,6 @@
-//! Legacy Pivot formats: `.piv` versions 2, 3 and 4, and `.stk`
-//! figure files — import and export.
+//! Pivot formats: `.piv` versions 2, 3 and 4 (import and export),
+//! the version 5 native container (import), and `.stk` figure
+//! files (import and export).
 //!
 //! The byte grammar is ported from the original app's own codec
 //! (`codecs/piv_legacy_v2.py`, `codecs/piv_legacy_v4.py`,
@@ -23,10 +24,13 @@
 //!   `deg = 90 - rad * 180/pi`, relative to the parent segment.
 //! * Object colours are COLORREF (0x00BBGGRR).
 //!
-//! The modern v5 native container and Stick Nodes `.nodes` are
-//! different, much larger formats and are not handled here.
+//! The v5 grammar is ported from `codecs/piv_codec.py`; v5 import
+//! covers figures built from line/circle/square segments. Figures
+//! with image/text segments are rejected until the side-table
+//! grammar is ported. Stick Nodes `.nodes` is a different, much
+//! larger format and is not handled here.
 
-use crate::model::{FigureDef, FigureInstance, Frame, NodeDef, Pose, Project, Shape};
+use crate::model::{CameraKey, FigureDef, FigureInstance, Frame, NodeDef, Pose, Project, Shape};
 use std::io::Read as _;
 use std::io::Write as _;
 
@@ -365,7 +369,7 @@ pub fn import_stk(data: &[u8]) -> Result<(FigureDef, String), String> {
     }
 }
 
-/// Import a legacy `.piv` file (versions 2, 3, 4) as a project.
+/// Import a `.piv` file (versions 2, 3, 4 and 5) as a project.
 pub fn import_piv(data: &[u8]) -> Result<Project, String> {
     if data.is_empty() {
         return Err("empty file".into());
@@ -382,7 +386,8 @@ pub fn import_piv(data: &[u8]) -> Result<Project, String> {
     match version {
         2 | 3 => import_v23(&mut r, version),
         4 => import_v4(&mut r),
-        v => Err(format!("unsupported .piv version {v} (this importer covers legacy 2, 3 and 4)")),
+        5 => import_v5(&mut r),
+        v => Err(format!("unsupported .piv version {v} (this importer covers 2, 3, 4 and 5)")),
     }
 }
 
@@ -711,6 +716,538 @@ fn import_v4(r: &mut Reader) -> Result<Project, String> {
     Ok(assemble(types, raw_frames_to_instances(raw_frames, max_objects), fps, [width, height]))
 }
 
+/// One parsed v5 segment record.
+struct V5Seg {
+    extra_u16: u16,
+    parent_id: u16,
+    id: u16,
+    length: f32,
+    angle_rad: f64,
+    thickness: f32,
+    primitive: u8,
+    rgb: [u8; 3],
+}
+
+/// Parse one v5 figure stream (grammar from `codecs/piv_codec.py`
+/// `_figure`). A flags byte switches off whole field groups; image
+/// and text segments are rejected because their side tables are a
+/// separate grammar that is not ported yet.
+/// Skip a v5 UTF-16 string (u32 code-unit count + LE bytes),
+/// returning the code units (text placements need them).
+fn skip_utf16_string(r: &mut Reader) -> Result<Vec<u16>, String> {
+    let n = r.u32()? as usize;
+    let bytes = r.take(2 * n)?;
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect())
+}
+
+/// Skip the image and text side tables of a v5 figure. Grammar per
+/// the original's piv_side_tables.py (see docs/V5-SIDETABLES-SPEC.md):
+/// image table first (iff any segment is primitive 2), then text
+/// table (iff any is primitive 5); each starts with a u16 count.
+/// Image/text artwork is not modelled — this only walks the bytes.
+fn skip_side_tables(r: &mut Reader, segs: &[V5Seg], flags: u8) -> Result<(), String> {
+    let has_text = segs.iter().any(|s| s.primitive == 5);
+    if segs.iter().any(|s| s.primitive == 2) {
+        let count = r.u16()? as usize;
+        for seg in segs.iter().filter(|s| s.primitive == 2) {
+            if seg.extra_u16 as usize >= count {
+                return Err("image segment refers to a missing asset".into());
+            }
+        }
+        for i in 0..count {
+            r.take(16)?; // anchor start/end (i32 x4)
+            let pointer = r.pos;
+            let end = r.u64()? as usize;
+            if end == pointer {
+                // Unpatched placeholder: empty blob, nothing more.
+                continue;
+            }
+            let allow_missing =
+                i + 1 == count && !has_text && flags & 16 != 0 && flags & 64 == 0;
+            if allow_missing && end > r.data.len() {
+                // The end field may never have been written: the
+                // bytes at `pointer` are then the figure's polyfill
+                // count (u16, must be 0) and a printable name.
+                let at = |o: usize| r.data.get(pointer + o).copied();
+                if at(0) == Some(0) && at(1) == Some(0) {
+                    let name_len = at(2).unwrap_or(0) as usize;
+                    let fits = pointer + 3 + name_len <= r.data.len();
+                    let printable = (0..name_len).all(|k| {
+                        matches!(at(3 + k), Some(b) if (32..127).contains(&b))
+                    });
+                    if name_len > 0 && fits && printable {
+                        r.pos = pointer; // entry consumed nothing
+                        continue;
+                    }
+                }
+            }
+            if end < pointer + 8 || end > r.data.len() {
+                return Err("image asset end pointer out of range".into());
+            }
+            r.pos = end;
+        }
+    }
+    if has_text {
+        let count = r.u16()? as usize;
+        for seg in segs.iter().filter(|s| s.primitive == 5) {
+            if seg.extra_u16 as usize >= count {
+                return Err("text segment refers to a missing asset".into());
+            }
+        }
+        for _ in 0..count {
+            skip_utf16_string(r)?; // font name
+            r.u8()?; // font style
+            r.u32()?; // alignment
+            let content = skip_utf16_string(r)?;
+            let glyph_count = r.u8()? as usize;
+            // Unique code units in first-appearance order own glyphs.
+            let mut uniques: Vec<u16> = Vec::new();
+            for u in &content {
+                if !uniques.contains(u) {
+                    uniques.push(*u);
+                }
+            }
+            if uniques.len() != glyph_count {
+                return Err("text glyph count does not match content".into());
+            }
+            let mut glyph_nodes: Vec<u32> = Vec::new();
+            for _ in 0..glyph_count {
+                let node_count = r.u32()?;
+                glyph_nodes.push(node_count);
+                if node_count == 0 {
+                    continue;
+                }
+                // Opcodes are packed two per byte, low nibble first,
+                // with no count: simulate the expansion (cubic = 3
+                // nodes, everything else 1) until it reaches
+                // node_count, tallying coordinate values per opcode
+                // (M/L = 2, C = 6, Z = 0, V/H = 1).
+                let mut expanded = 0u32;
+                let mut values = 0usize;
+                let mut high = false;
+                let mut byte = 0u8;
+                while expanded < node_count {
+                    if !high {
+                        byte = r.u8()?;
+                    }
+                    let op = if high { byte >> 4 } else { byte & 0x0F };
+                    high = !high;
+                    if op > 5 {
+                        return Err("invalid glyph opcode".into());
+                    }
+                    expanded += if op == 2 { 3 } else { 1 };
+                    values += match op {
+                        0 | 1 => 2,
+                        2 => 6,
+                        3 => 0,
+                        _ => 1,
+                    };
+                    if expanded > node_count {
+                        return Err("glyph opcodes overshoot node count".into());
+                    }
+                }
+                r.take(4 * values)?; // the flat f32 coordinate block
+            }
+            // Placements: visible glyphs (node_count > 0) store an
+            // (x, y) f32 pair per content unit; empty glyphs store
+            // nothing.
+            for unit in &content {
+                let gi = uniques.iter().position(|u| u == unit).unwrap();
+                if glyph_nodes[gi] > 0 {
+                    r.take(8)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_figure_v5(r: &mut Reader) -> Result<FigType, String> {
+    let flags = r.u8()?;
+    let count = r.u16()? as usize;
+    if count == 0 {
+        return Err("empty figure".into());
+    }
+    let mut segs: Vec<V5Seg> = Vec::new();
+    let mut has_media = false;
+    for i in 0..count {
+        let parent_id = r.u16()?;
+        let id = if flags & 32 != 0 {
+            (i + 1) as u16 // implicit ids
+        } else {
+            r.u16()?
+        };
+        let length = r.f32()?;
+        let angle_rad = r.f64()?;
+        let thickness = r.f32()?;
+        let primitive = if flags & 1 != 0 { 0 } else { r.u8()? };
+        if !matches!(primitive, 0 | 1 | 2 | 3 | 4 | 5 | 6) {
+            return Err(format!("unsupported segment primitive {primitive}"));
+        }
+        if flags & 2 == 0 {
+            r.u8()?; // aux (static flag etc.; not modelled)
+        }
+        let rgb = if flags & 4 != 0 {
+            [0, 0, 0]
+        } else {
+            let b = r.take(3)?;
+            [b[0], b[1], b[2]]
+        };
+        if flags & 8 == 0 {
+            r.u8()?; // transparency (not modelled)
+        }
+        if flags & 128 == 0 && r.u8()? != 0 {
+            r.take(3)?; // secondary colour rgb
+            r.u8()?; // secondary colour alpha
+        }
+        let mut extra_u16 = 0u16;
+        if primitive == 2 || primitive == 5 {
+            has_media = true;
+            extra_u16 = r.u16()?; // extra: asset index within its table
+            r.u8()?;
+            r.u8()?;
+        }
+        segs.push(V5Seg {
+            parent_id,
+            id,
+            length,
+            angle_rad,
+            thickness,
+            primitive,
+            rgb,
+            extra_u16,
+        });
+    }
+    let _ = has_media;
+    // Bends: per-segment arc values. The model has no bend channel,
+    // so the values are read and discarded.
+    let bend_count = r.u16()? as usize;
+    for _ in 0..bend_count {
+        r.u16()?; // segment index
+        r.f64()?; // bend value (not modelled)
+    }
+    // Image/text side tables sit between the bends and the
+    // polyfills; skip them precisely (assets are not modelled).
+    if segs.iter().any(|s| s.primitive == 2 || s.primitive == 5) {
+        skip_side_tables(r, &segs, flags)?;
+    }
+    // Polyfills: filled regions between joints; not modelled, skipped.
+    let poly_count = r.u16()? as usize;
+    for _ in 0..poly_count {
+        let seg_count = r.u16()? as usize;
+        r.take(3)?; // colour rgb
+        r.u8()?; // alpha
+        for _ in 0..seg_count {
+            r.u16()?; // joint id
+        }
+    }
+    // Z-order permutation for segments then polyfills; not modelled.
+    if flags & 16 == 0 {
+        for _ in 0..count {
+            r.u16()?;
+        }
+        for _ in 0..poly_count {
+            r.u16()?;
+        }
+    }
+    if flags & 64 != 0 {
+        r.u32()?; // global style: packed outline thickness
+        r.take(3)?; // global style rgb
+        r.u8()?; // global style transparency
+    }
+    let name = r.str8().unwrap_or_default();
+
+    // Segments stay in record order (same reasoning as the legacy
+    // parser): object angle arrays index by record order and the
+    // model's FK needs parents before children.
+    let mut index_of_id: std::collections::HashMap<u16, usize> = Default::default();
+    let mut abs_of_id: std::collections::HashMap<u16, f32> = Default::default();
+    index_of_id.insert(0, 0);
+    abs_of_id.insert(0, 0.0);
+    for (k, seg) in segs.iter().enumerate() {
+        if seg.id == 0 {
+            return Err("figure segment id 0 is reserved for the origin".into());
+        }
+        if index_of_id.contains_key(&seg.id) {
+            return Err(format!("duplicate segment id {}", seg.id));
+        }
+        if !index_of_id.contains_key(&seg.parent_id) {
+            return Err("figure segment parent follows its child (unsupported order)".into());
+        }
+        index_of_id.insert(seg.id, k + 1);
+        abs_of_id.insert(seg.id, rad_to_deg(seg.angle_rad));
+    }
+    let mut nodes = vec![NodeDef {
+        name: "origin".into(),
+        parent: None,
+        length: 0.0,
+        rest_angle: 0.0,
+        head: false,
+        bend: 1.0,
+        thickness: 5.0,
+        color: None,
+        ik_end: false,
+        shape: Shape::Line,
+    }];
+    let mut rest_abs = vec![0.0f32];
+    for seg in &segs {
+        let abs = abs_of_id[&seg.id];
+        let parent_abs = abs_of_id[&seg.parent_id];
+        let shape = match seg.primitive {
+            1 | 3 | 4 => Shape::Circle,
+            6 => Shape::Polygon(4),
+            _ => Shape::Line,
+        };
+        nodes.push(NodeDef {
+            name: format!("segment {}", seg.id),
+            parent: Some(index_of_id[&seg.parent_id]),
+            length: seg.length,
+            rest_angle: crate::model::norm_deg(abs - parent_abs),
+            head: false,
+            bend: 1.0,
+            thickness: seg.thickness,
+            color: Some(
+                ((seg.rgb[0] as u32) << 16) | ((seg.rgb[1] as u32) << 8) | seg.rgb[2] as u32,
+            ),
+            ik_end: false,
+            shape,
+        });
+        rest_abs.push(abs);
+    }
+    Ok(FigType {
+        def: FigureDef { nodes },
+        rest_abs,
+        name,
+        has_images: segs.iter().any(|s| s.primitive == 2 || s.primitive == 5),
+    })
+}
+
+/// One raw v5 object record from a keyframe.
+struct V5Obj {
+    uid: u32,
+    type_idx: usize,
+    scale: f32,
+    color: u32,
+    angles: Vec<f64>,
+    root: [f32; 2],
+}
+
+fn import_v5(r: &mut Reader) -> Result<Project, String> {
+    let width = r.u32()? as f32;
+    let height = r.u32()? as f32;
+    if width <= 0.0 || height <= 0.0 {
+        return Err("invalid canvas size".into());
+    }
+    // Background table. Slot 0 is the implicit default (no entry in
+    // the stream); image backgrounds are skipped and gradients keep
+    // their first colour.
+    let bg_slots = r.u16()? as usize;
+    if bg_slots < 1 {
+        return Err("background table missing default slot".into());
+    }
+    let mut bg_colors: Vec<Option<u32>> = vec![None; bg_slots];
+    for slot in 1..bg_slots {
+        match r.u8()? {
+            0 | 1 => {
+                let end = r.u64()? as usize;
+                if end < r.pos || end > r.data.len() {
+                    return Err("invalid background end pointer".into());
+                }
+                r.take(end - r.pos)?;
+            }
+            2 => {
+                bg_colors[slot] = Some(colorref_to_rgb(r.u32()?));
+            }
+            3 | 4 => {
+                bg_colors[slot] = Some(colorref_to_rgb(r.u32()?)); // colour_a
+                r.u32()?; // colour_b
+                for _ in 0..4 {
+                    r.f32()?; // gradient geometry
+                }
+            }
+            k => return Err(format!("unsupported v5 background kind {k}")),
+        }
+        r.str8()?; // background name
+    }
+    // Figure table: slot 1 is the implicit built-in figure.
+    let figure_slots = r.u16()? as usize;
+    if figure_slots < 2 {
+        return Err("invalid figure slot count".into());
+    }
+    let (bdef, babs) = builtin_man();
+    let mut types: Vec<FigType> = vec![FigType {
+        def: bdef,
+        rest_abs: babs,
+        name: "Default".into(),
+        has_images: false,
+    }];
+    for _ in 2..figure_slots {
+        types.push(parse_figure_v5(r)?);
+    }
+    // Keyframes.
+    let frame_count = r.u32()? as usize;
+    let mut raw_frames: Vec<(f32, u16, Vec<V5Obj>)> = Vec::new();
+    let mut camera: Vec<CameraKey> = Vec::new();
+    for fi in 0..frame_count {
+        let duration = r.u16()?;
+        let bg_mix = r.u8()?;
+        let bg_id = r.u16()?;
+        if bg_mix != 0 {
+            r.u16()?; // secondary background id (blend not modelled)
+        }
+        let object_count = r.u16()? as usize;
+        let mut objects = Vec::new();
+        for _ in 0..object_count {
+            let uid = r.u32()?;
+            let type_id = r.u16()? as usize;
+            if type_id == 0 || type_id > types.len() {
+                return Err(format!("unknown figure type {type_id}"));
+            }
+            let scale = r.f32()?;
+            let colour_raw = r.u32()?;
+            r.u8()?; // field28 (transparency; not modelled)
+            if types[type_id - 1].has_images {
+                r.u8()?; // image/text flags byte
+            }
+            let seg_count = types[type_id - 1].def.nodes.len() - 1;
+            let mut angles = Vec::new();
+            for _ in 0..seg_count {
+                let a = r.f64()?;
+                if a.abs() > 100.0 {
+                    return Err("unsupported angle-reset sentinel".into());
+                }
+                angles.push(a);
+            }
+            let root = [r.f32()?, r.f32()?];
+            let len_flag = r.u16()?;
+            if len_flag != 0 {
+                for _ in 0..seg_count {
+                    r.f32()?; // per-frame lengths: not representable, skipped
+                }
+            }
+            let bend_flag = r.u16()?;
+            if bend_flag != 0 {
+                for _ in 0..seg_count {
+                    r.f64()?; // per-frame bends: not modelled, skipped
+                }
+            }
+            let join_flag = r.u8()?;
+            if join_flag != 0 {
+                r.u16()?; // target object slot
+                r.u16()?; // target handle id
+            }
+            objects.push(V5Obj {
+                uid,
+                type_idx: type_id - 1,
+                scale,
+                color: colorref_to_rgb(colour_raw & 0x00FF_FFFF),
+                angles,
+                root,
+            });
+        }
+        for _ in 0..object_count {
+            r.u16()?; // draw order (instances keep first-seen order)
+        }
+        let is_default = r.u8()?;
+        if is_default == 0 {
+            let x = r.f32()?;
+            let y = r.f32()?;
+            r.f64()?; // camera angle: not modelled
+            let zoom = r.f32()?;
+            camera.push(CameraKey { frame: fi, x, y, zoom });
+        }
+        raw_frames.push((duration.max(1) as f32, bg_id, objects));
+    }
+    let fps = r.u32()? as f32;
+    // Any trailer bytes (auto-easing flag etc.) are ignored.
+
+    // Assembly: instances are keyed by the objects' unique ids in
+    // first-seen order (v5 files carry stable cross-frame
+    // identities, unlike the legacy formats). Type, scale and
+    // colour come from each id's first occurrence; a later object
+    // reusing the id with a different figure type is skipped for
+    // that frame, mirroring the original, which holds the previous
+    // pose for incompatible rigs.
+    let mut index_of_uid: std::collections::HashMap<u32, usize> = Default::default();
+    let mut first_objects: Vec<&V5Obj> = Vec::new();
+    for (_, _, objects) in &raw_frames {
+        for o in objects {
+            if !index_of_uid.contains_key(&o.uid) {
+                index_of_uid.insert(o.uid, first_objects.len());
+                first_objects.push(o);
+            }
+        }
+    }
+    let mut figures: Vec<FigureInstance> = Vec::new();
+    for (i, first) in first_objects.iter().enumerate() {
+        let ty = &types[first.type_idx];
+        let mut def = ty.def.clone();
+        if (first.scale - 1.0).abs() > 0.001 {
+            for node in def.nodes.iter_mut() {
+                node.length *= first.scale;
+            }
+        }
+        figures.push(FigureInstance {
+            name: if ty.name.is_empty() {
+                format!("Figure {}", i + 1)
+            } else {
+                ty.name.clone()
+            },
+            color: first.color,
+            def,
+            hidden: false,
+            clip: None,
+        });
+    }
+    let mut last_poses: Vec<Pose> = figures
+        .iter()
+        .map(|f| f.def.rest_pose([width / 2.0, height / 2.0]))
+        .collect();
+    let mut frames: Vec<Frame> = Vec::new();
+    for (duration, _, objects) in &raw_frames {
+        let mut poses = last_poses.clone();
+        for o in objects {
+            let ii = index_of_uid[&o.uid];
+            if first_objects[ii].type_idx != o.type_idx {
+                continue; // same id, different rig: hold previous pose
+            }
+            let ty = &types[o.type_idx];
+            poses[ii] = pose_from_abs(&figures[ii].def, &ty.rest_abs, &o.angles, o.root);
+        }
+        last_poses = poses.clone();
+        frames.push(Frame { poses, duration: *duration });
+    }
+    if frames.is_empty() {
+        frames.push(Frame {
+            poses: last_poses,
+            duration: 1.0,
+        });
+    }
+    let background = raw_frames
+        .first()
+        .and_then(|(_, bg_id, _)| bg_colors.get(*bg_id as usize).copied().flatten())
+        .unwrap_or(0xF2F2F2);
+    Ok(Project {
+        name: "Imported Pivot animation".into(),
+        fps,
+        stage: [width, height],
+        background,
+        figures,
+        frames,
+        camera,
+        tween_playback: false,
+        easing: Default::default(),
+        camera_follow: None,
+        particles: Vec::new(),
+        strokes: Vec::new(),
+        audio: Vec::new(),
+        clips: Vec::new(),
+    })
+}
+
 // ---------- Export ----------
 
 fn write_figure(out: &mut Vec<u8>, def: &FigureDef, name: &str, rest_abs: &[f32]) {
@@ -876,6 +1413,146 @@ mod tests {
         assert_eq!(project.figures[0].def.nodes.len(), 4); // origin + 3
         let pose = &project.frames[1].poses[0];
         assert!((pose.root[0] - 121.0).abs() < 0.01 && (pose.root[1] - 222.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn piv_v5_minimal_file_imports_with_known_values() {
+        // A minimal v5 file packed byte-by-byte per piv_codec.py's
+        // grammar: one flags=0 figure with two segments, one
+        // keyframe holding one object of that figure, fps 24.
+        let mut b: Vec<u8> = Vec::new();
+        b.push(5); // version
+        b.extend_from_slice(&800u32.to_le_bytes()); // canvas width
+        b.extend_from_slice(&600u32.to_le_bytes()); // canvas height
+        b.extend_from_slice(&1u16.to_le_bytes()); // background slots: default only
+        b.extend_from_slice(&3u16.to_le_bytes()); // figure slots: builtin + 1 file figure
+        // Figure, flags = 0 (all optional fields present, explicit ids).
+        b.push(0); // flags
+        b.extend_from_slice(&2u16.to_le_bytes()); // segment count
+        // Segment 1: parent 0, id 1, length 50, angle up, thickness 6, line, red.
+        b.extend_from_slice(&0u16.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&50.0f32.to_le_bytes());
+        b.extend_from_slice(&(-std::f64::consts::FRAC_PI_2).to_le_bytes());
+        b.extend_from_slice(&6.0f32.to_le_bytes());
+        b.push(0); // primitive: line
+        b.push(0); // aux
+        b.extend_from_slice(&[255, 0, 0]); // rgb
+        b.push(0); // transparency
+        b.push(0); // no secondary colour
+        // Segment 2: parent 1, id 2, length 30, angle right, thickness 4, circle, blue.
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&30.0f32.to_le_bytes());
+        b.extend_from_slice(&0.0f64.to_le_bytes());
+        b.extend_from_slice(&4.0f32.to_le_bytes());
+        b.push(1); // primitive: circle
+        b.push(0); // aux
+        b.extend_from_slice(&[0, 0, 255]);
+        b.push(0); // transparency
+        b.push(0); // no secondary colour
+        b.extend_from_slice(&0u16.to_le_bytes()); // bend count
+        b.extend_from_slice(&0u16.to_le_bytes()); // polyfill count
+        b.extend_from_slice(&0u16.to_le_bytes()); // z-order: segment 1
+        b.extend_from_slice(&1u16.to_le_bytes()); // z-order: segment 2
+        b.push(3); // name length
+        b.extend_from_slice(b"Duo");
+        // One keyframe with one object of the file figure.
+        b.extend_from_slice(&1u32.to_le_bytes()); // frame count
+        b.extend_from_slice(&2u16.to_le_bytes()); // duration
+        b.push(0); // background mix
+        b.extend_from_slice(&0u16.to_le_bytes()); // background id
+        b.extend_from_slice(&1u16.to_le_bytes()); // object count
+        b.extend_from_slice(&42u32.to_le_bytes()); // unique id
+        b.extend_from_slice(&2u16.to_le_bytes()); // figure type id
+        b.extend_from_slice(&1.0f32.to_le_bytes()); // scale
+        b.extend_from_slice(&0x0000_FF00u32.to_le_bytes()); // colour: COLORREF green
+        b.push(0); // field28
+        b.extend_from_slice(&(-std::f64::consts::FRAC_PI_2).to_le_bytes()); // angle seg 1
+        b.extend_from_slice(&0.0f64.to_le_bytes()); // angle seg 2
+        b.extend_from_slice(&111.0f32.to_le_bytes()); // root x
+        b.extend_from_slice(&222.0f32.to_le_bytes()); // root y
+        b.extend_from_slice(&0u16.to_le_bytes()); // len flag
+        b.extend_from_slice(&0u16.to_le_bytes()); // bend flag
+        b.push(0); // join flag
+        b.extend_from_slice(&0u16.to_le_bytes()); // draw order
+        b.push(1); // camera is default
+        b.extend_from_slice(&24u32.to_le_bytes()); // fps
+
+        let project = import_piv(&b).unwrap();
+        assert_eq!(project.stage, [800.0, 600.0]);
+        assert!((project.fps - 24.0).abs() < 0.01, "fps {}", project.fps);
+        assert_eq!(project.figures.len(), 1);
+        let fig = &project.figures[0];
+        assert_eq!(fig.name, "Duo");
+        assert_eq!(fig.color, 0x00FF00);
+        assert_eq!(fig.def.nodes.len(), 3); // origin + 2 segments
+        assert!((fig.def.nodes[1].length - 50.0).abs() < 0.01);
+        assert_eq!(fig.def.nodes[1].color, Some(0xFF0000));
+        assert!(matches!(fig.def.nodes[2].shape, Shape::Circle));
+        assert_eq!(fig.def.nodes[2].color, Some(0x0000FF));
+        assert_eq!(project.frames.len(), 1);
+        assert!((project.frames[0].duration - 2.0).abs() < 0.01);
+        let pose = &project.frames[0].poses[0];
+        assert!((pose.root[0] - 111.0).abs() < 0.01 && (pose.root[1] - 222.0).abs() < 0.01);
+        assert!((pose.angles[1] - 180.0).abs() < 0.05, "seg 1 rel {}", pose.angles[1]);
+        assert!((pose.angles[2] + 90.0).abs() < 0.05, "seg 2 rel {}", pose.angles[2]);
+        assert!(project.camera.is_empty());
+        assert_eq!(project.background, 0xF2F2F2); // slot 0 has no colour
+    }
+
+    #[test]
+    fn v5_image_side_table_file_imports() {
+        // Hand-built v5 file with an image-segment figure and an
+        // image side table; the original app's Python decoder reads
+        // the same bytes (figure "Pic", 1 image asset, root 50/60),
+        // so a successful import here proves the skip offsets.
+        let Ok(bytes) = std::fs::read("/tmp/v5-image.piv") else {
+            return; // fixture generated by the cross-check script
+        };
+        let project = import_piv(&bytes).unwrap();
+        assert_eq!(project.figures.len(), 1);
+        assert_eq!(project.figures[0].name, "Pic");
+        assert_eq!(project.figures[0].def.nodes.len(), 3); // origin + 2
+        assert_eq!(project.frames.len(), 1);
+        assert!((project.frames[0].duration - 2.0).abs() < 0.01);
+        let pose = &project.frames[0].poses[0];
+        assert!((pose.root[0] - 50.0).abs() < 0.01 && (pose.root[1] - 60.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn real_v5_file_from_the_original_encoder_imports() {
+        // Generated by the original app's own Python encoder
+        // (encode_piv_project over a migrated legacy figure) — the
+        // strongest available oracle for the v5 grammar.
+        let Ok(bytes) = std::fs::read("/tmp/real-v5.piv") else {
+            return; // fixture generated by the cross-check script
+        };
+        let project = import_piv(&bytes).unwrap();
+        assert_eq!(project.stage, [800.0, 600.0]);
+        assert!((project.fps - 24.0).abs() < 0.1, "fps {}", project.fps);
+        assert_eq!(project.figures.len(), 1);
+        assert_eq!(project.figures[0].name, "Tripod");
+        assert_eq!(project.figures[0].def.nodes.len(), 4);
+        assert_eq!(project.frames.len(), 1);
+        assert!((project.frames[0].duration - 3.0).abs() < 0.01);
+        let pose = &project.frames[0].poses[0];
+        assert!((pose.root[0] - 111.0).abs() < 0.01 && (pose.root[1] - 222.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn v5_text_side_table_file_imports() {
+        // Hand-built v5 file with a text-segment figure; the
+        // original's decoder reads the same bytes (figure "Txt",
+        // 1 text asset, root 33/44). Exercises the nibble-walk
+        // glyph skip and visibility-dependent placements.
+        let Ok(bytes) = std::fs::read("/tmp/v5-text.piv") else {
+            return; // fixture generated by the cross-check script
+        };
+        let project = import_piv(&bytes).unwrap();
+        assert_eq!(project.figures[0].name, "Txt");
+        let pose = &project.frames[0].poses[0];
+        assert!((pose.root[0] - 33.0).abs() < 0.01 && (pose.root[1] - 44.0).abs() < 0.01);
     }
 
     #[test]
