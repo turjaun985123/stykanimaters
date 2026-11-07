@@ -66,7 +66,8 @@ libx11-dev cmake clang pkg-config`.
 - **More exports** — MP4 (H.264, via the system `ffmpeg`) and a
   spritesheet PNG join the PNG sequence and GIF.
 - **Themes** — dark and light editor palettes.
-- **Pivot formats** — import `.piv` (legacy versions 2, 3, 4) and
+- **Pivot formats** — import `.piv` (legacy versions 2, 3, 4 and
+  the modern v5 container, including image/text side tables) and
   `.stk` from the `import/` folder; export `.piv` v3 and `.stk`
   to `export/`. The grammar is ported from the original app's own
   codec and cross-verified against it in both directions.
@@ -98,7 +99,7 @@ libx11-dev cmake clang pkg-config`.
 
 The original app is large; this is the working core loop, not the
 whole feature list. Still to come, roughly in the original's shape:
-The modern v5 native container and Stick Nodes `.nodes` import,
+`.piv` v5 export and Stick Nodes `.nodes` import,
 sprite and text segments, a keyframe graph editor with layer
 folders and property channels, particle clips with beams/auras,
 APNG/JPEG export, an audio editor with playback, raster drawing

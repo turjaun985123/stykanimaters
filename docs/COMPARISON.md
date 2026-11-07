@@ -71,7 +71,7 @@ Verdicts: ● full · ◐ partial · ○ missing.
 | --- | --- | --- | --- | --- |
 | `.piv` v2 / v3 (legacy) | ● | ● | ● | ● (v3) |
 | `.piv` v4 (legacy) | ● | ● | ● | ○ |
-| `.piv` v5 (native container) | ● | ● | ○ | ○ |
+| `.piv` v5 (native container) | ● | ● | ● (incl. image/text side tables) | ○ |
 | `.stk` legacy figure | ● | ● | ● | ● |
 | `.stk` modern (zlib figure stream) | ● | ● | ◐ reads the figure grammar incl. zlib wrap | ○ writes legacy form |
 | Stick Nodes `.nodes` | ● | ● (export) | ○ | ○ |
@@ -129,8 +129,8 @@ embedded `default_pivot2.stk` bytes parse in the port.
 
 ## 8. What remains, ranked by value
 
-1. `.piv` v5 read/write (the current native format — unlocks the
-   original's own saved projects).
+1. ~~`.piv` v5 read~~ DONE 2026-11-07 (verified against the
+   original's encoder). `.piv` v5 write remains.
 2. Stick Nodes `.nodes` import.
 3. Sprite/image segments (finishes legacy Pivot fidelity).
 4. Keyframe graph + property channels (advanced timeline depth).

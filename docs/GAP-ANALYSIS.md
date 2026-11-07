@@ -5,12 +5,12 @@ Original: ~85,800 lines of JS in `src/` alone (655 modules), plus a
 Python codec backend and native helpers. This port: ~2,900 lines of
 Rust, 31 tests. By headline feature rows below the port now stands
 at roughly four-fifths: 14 rows DONE or DONE-equivalent, 6 PARTIAL,
-4 MISSING. The missing rows are the deepest subsystems: the modern
-v5 native container, the Stick Nodes `.nodes` corpus decoder, true
+4 MISSING. The missing rows are the deepest subsystems: the Stick Nodes `.nodes` corpus decoder, true
 3D figures, the raster drawing engine's depth (tiles, pressure,
-wet ink), an audio editor, and 27-language localisation + touch.
+wet ink), an audio editor, .piv v5 export, and 27-language
+localisation + touch.
 Interop is verified both directions against the original's own
-Python codec. Status key: DONE / PARTIAL / MISSING.
+Python codec, including .piv v5 files produced by its encoder. Status key: DONE / PARTIAL / MISSING.
 
 ## Feature-by-feature (original README order)
 
@@ -35,7 +35,8 @@ Python codec. Status key: DONE / PARTIAL / MISSING.
 | Export APNG / JPEG / SVG / spritesheet | PARTIAL | Spritesheet PNG and per-frame SVG added; APNG/JPEG still missing |
 | Export editable .piv / .stk | DONE | Writes legacy .piv v3 and .stk; the original app's decoder reads our .piv exactly (figures, frames, fps, canvas) |
 | Import .piv / .stk | DONE (legacy) | Grammar ported from the original's own codec: .piv v2/v3/v4 and .stk (raw + zlib), verified against the original's embedded .stk bytes, a hand-packed v3 file, and their Python decoder reading our exports. Modern v5 container still missing (separate row) |
-| Import Stick Nodes (.nodes) + .piv v5 | MISSING | The v5 native container and the corpus-backed Stick Nodes decoder are the largest remaining format tasks |
+| Import .piv v5 (native container) | DONE (read) | Full sequential grammar: flagged figure records, bends/polyfills/z-order skips, image+text side tables (absolute end pointers with both recovery branches, nibble-walk glyph skipping), uid-keyed instances, per-frame camera. Verified against files written by the original's own encoder and hand-built media fixtures its decoder also reads. Export still missing |
+| Import Stick Nodes (.nodes) | MISSING | The corpus-backed Stick Nodes decoder is the largest remaining format task |
 | 27 languages | MISSING | No localisation layer at all |
 | Light/dark themes | DONE | Toggleable light/dark editor palettes |
 | Touch interface | MISSING | Mouse only |

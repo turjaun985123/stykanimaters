@@ -173,4 +173,29 @@ the whole figure** — they change how every following field is read:
   the z-order arrays (if any), before the figure name:
   `u28: u32` (its bit pattern reinterpreted as f32 = outline thickness),
   `rgb: u8×3`, `u30: u8`
-...[truncated 3391 chars]
+- **bit 7 (value 128) — secondary colours omitted:** no per-segment
+  secondary-colour presence byte; every segment's secondary is None.
+  When the bit is clear, EACH segment carries `presence: u8`, and
+  when 1, `rgb: u8x3` + `a: u8`. (Verified against
+  `piv_full_writer.py` lines 164-178, which sets this bit iff all
+  segments' secondaries are None and otherwise writes the presence
+  bytes per segment, and `piv_codec.py` lines 176-179, which reads
+  exactly that.)
+
+## 5. Trailer (after the keyframes and `fps: u32`)
+
+- `fps: u32` — must be in 1..=1000.
+- `auto_easing_disabled: u8` (optional) — the first trailer byte is
+  the complement of the native Auto-Easing option (1 = easing off).
+  Older saves may omit it entirely; any further bytes are preserved
+  verbatim by the original and ignored by readers.
+
+## 6. Note on this document
+
+Sections 1-4 (through bit 6) were extracted by a research pass over
+`piv_side_tables.py` / `piv_codec.py`; the bit-7 entry and section 5
+were completed and verified against `piv_full_writer.py` and
+`piv_codec.py`'s `_decode` during implementation. The Rust importer
+in `src/pivot.rs` (`parse_figure_v5`, `skip_side_tables`,
+`import_v5`) implements this grammar and is cross-tested against
+files produced by the original's own encoder.
