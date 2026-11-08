@@ -252,7 +252,29 @@ State fields). Source-pinned counts: palette
 **108** commands, MCP registry **91** (total
 **102** tools), curated icons **111**, headless
 scenes **11**, help **54** rows. CI verdict:
-_integrator — filled at close-out_.
+**GREEN — run 42478556459 on 6a9efd8: 2,451
+tests passed (996 lib + 1,445 bin + 10
+integration), 0 failed.** The road there took
+five fix commits, each diagnosed from the
+failed run's own log: two shorthand-literal
+sweeps the gate's colon-field census could
+not see (mcp_tools' `add_fx` literal, an
+editor test helper, then the integration
+tests in tests/export_determinism.rs), the
+flag tests' missing `Stroke`/`FxClipEntry`
+imports in model.rs's `audio_gain_tests`
+module, a closure-lifetime error in
+text_tool's z-order test, a brush-step test
+premise §40's Pencil conversion invalidated,
+and the clips-lane Runtime test learning
+that a direct state write needs
+`Runtime::invalidate()` before the view
+re-runs. Fix 4 also carries a production
+fix the swap test exposed: the Frames
+section's main row never wrapped, so its
+tail buttons (Swap included) sat clipped
+past the side column's edge, unpressable —
+the row now wraps (`flex_wrap`).
 
 ## 7. Honest remainders after Phase M
 

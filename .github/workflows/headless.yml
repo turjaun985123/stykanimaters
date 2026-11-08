@@ -157,7 +157,7 @@ jobs:
           BIN=./target/release/stykanimate-rs
           mkdir -p headless-out
           missing=0
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage; do
             timeout 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
               > "headless-out/tree-$scene.log" 2>&1
             echo $? > "headless-out/tree-$scene.exit"
@@ -175,7 +175,7 @@ jobs:
         run: |
           set +e
           BIN=./target/release/stykanimate-rs
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage; do
             if [ ! -f "headless-out/tree-$scene.json" ]; then
               timeout 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
                 > "headless-out/tree-$scene-xvfb.log" 2>&1
@@ -206,6 +206,9 @@ jobs:
           timeout 120 "$BIN" --snap headless-out/snap-three-d.png --scene three-d --at 0 \
             > headless-out/snap-three-d.log 2>&1
           echo $? > headless-out/snap-three-d.exit
+          timeout 120 "$BIN" --snap headless-out/snap-three-d-stage.png --scene three-d-stage --at 0 \
+            > headless-out/snap-three-d-stage.log 2>&1
+          echo $? > headless-out/snap-three-d-stage.exit
           if [ ! -f headless-out/snap-default.png ]; then
             timeout 120 xvfb-run -a "$BIN" --snap headless-out/snap-default.png --scene default --at 0 \
               > headless-out/snap-default-xvfb.log 2>&1
