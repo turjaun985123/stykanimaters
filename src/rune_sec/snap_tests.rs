@@ -545,6 +545,16 @@ fn workspace_gating_hides_and_shows_panels() {
     tap(&mut rt, "ws-animate");
     rt.frame(DT);
     assert_eq!(rt.state.workspace, Workspace::Animate);
+    // If `init` restored a sibling test's Draw workspace,
+    // the Draw-only panel is still presence-fading out of
+    // the tree; settle (bounded) before asserting absence —
+    // the same fade the menu tests settle through.
+    for _ in 0..30 {
+        if !presented_keys(&rt).contains("draw-tools") {
+            break;
+        }
+        rt.frame(DT);
+    }
 
     // The gating table (workspaces.rs): Animate mounts
     // Figures and FrameOps but not DrawTools. Panel root
@@ -569,6 +579,13 @@ fn workspace_gating_hides_and_shows_panels() {
     tap(&mut rt, "ws-draw");
     rt.frame(DT);
     assert_eq!(rt.state.workspace, Workspace::Draw);
+    // Same presence fade on the way out for FrameOps.
+    for _ in 0..30 {
+        if !presented_keys(&rt).contains("frames") {
+            break;
+        }
+        rt.frame(DT);
+    }
     let keys = presented_keys(&rt);
     assert!(keys.contains("draw-tools"), "Draw mounts DrawTools");
     assert!(!keys.contains("frames"), "Draw gates FrameOps out");
