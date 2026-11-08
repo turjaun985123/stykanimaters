@@ -3217,7 +3217,7 @@ fn workspace_card_roots_sweep() {
         for _ in 0..30 {
             if present
                 .iter()
-                .all(|k| presented_keys(&rt).contains(k))
+                .all(|k| presented_keys(&rt).contains(*k))
             {
                 break;
             }
@@ -3232,7 +3232,7 @@ fn workspace_card_roots_sweep() {
         let keys = presented_keys(&rt);
         for want in present {
             assert!(
-                keys.contains(want),
+                keys.contains(*want),
                 "{chip}: card root {want:?} is presented"
             );
         }
