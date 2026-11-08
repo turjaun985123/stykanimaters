@@ -624,3 +624,84 @@ any of this gets), so no item here is claimed verified yet.
 Nothing in this section is CI-verified yet; statuses move
 to the per-wave tables above once the run is green, and
 docs/COMPARISON.md is refreshed after that run.
+
+## Wave 15 — STYKANIMATE 2.0: the wall comes down (in progress, 2026-11-08)
+
+Wave 14 reorganised the button wall into labelled tool
+groups under eight workspace presets — and the user
+rejected the result. Grouping is not gating: every group
+still rendered in every workspace, so the wall still
+stood, the app bar still carried every toggle, and the
+stage still fought 24 panels for space. Wave 15 is the
+corrective. It changes what renders, not how what renders
+is arranged: tool groups and panels are gated by the
+active workspace, the app bar is cut down to menus, and
+the space the hidden controls free up goes to the stage.
+As with Wave 14, everything below is implemented in this
+wave and CI verification happens at integration, so no
+item here is claimed verified yet.
+
+- **Render gating (the headline change)** — the tool
+  groups and toggleable panels now render only in the
+  workspace they belong to. The tool band carries 4–12
+  of the 24 groups per workspace instead of all 24 at
+  once, and switching workspaces changes what exists on
+  screen, not just which chip is highlighted. The stage
+  takes the freed space.
+- **App bar slimmed** — File, Edit, View and Help are now
+  dropdown menu rows built from the existing command
+  buttons, with every button id preserved; the
+  panel-toggle buttons render only in the workspace
+  their panel belongs to, so the bar stops acting as a
+  second, always-on wall.
+- **New shell components** — a menus component and a
+  status component join `src/ui/`. The slim status strip
+  shows the project name, current frame, fps, camera
+  zoom, selection and playback state — every field is
+  real editor state, nothing is decorative. The timeline
+  gains a collapse toggle whose state persists between
+  launches alongside the other layout preferences.
+- **Contextual inspector** — when nothing is selected,
+  the inspector shows a project summary instead of a
+  stack of unrelated controls; selection-specific
+  properties take over when a figure or segment is
+  picked.
+- **Panels organised by category** — the FX kinds are
+  grouped into five categories in the effects panel; the
+  audio panel is sectioned and opens with a real summary
+  line drawn from the project (clip count and total
+  duration); the export centre's rows are categorised
+  (Images / Animation / Video / Project formats); the
+  graph panel gains per-key interpolation buttons
+  (Hermite / Linear / Step) over the existing `Interp`
+  modes.
+- **Performance** — the Home panel's project scan and
+  the FX panel's preset listing no longer hit the disk
+  on every render; both are now mtime-keyed caches. This
+  closes the per-render filesystem scans flagged in the
+  `docs/GUI_AUDIT.md` scorecard.
+- **Palette refined to the 2.0 directive** — the primary
+  accent moves to `#6D8CFF` and error to `#F16F78`, and
+  hover-surface, success, warning and tertiary-text
+  tokens join the kit, so state colours stop being
+  invented per component. Values changed in the kit;
+  component code is untouched by the retune.
+- **Preservation** — the wave is still presentation
+  only: all 235 button ids audited in Wave 14 remain
+  present (verified by `docs/QA_WAVE15.md` at
+  integration), and the engines, file formats, exports
+  and all 65 MCP tools are untouched.
+- **Still open** — the decisive check remains
+  real-desktop screenshots: CI can prove the wall is
+  down in code, not how the result looks or feels, and
+  no screenshot verdict exists yet. Light-theme adoption
+  is still token-level for most components; drag-resize
+  panels and native menus remain beyond GPUI 0.2.2 (the
+  new dropdowns are custom divs, as every overlay in
+  this app is); and interactive slider and text-input
+  components still do not exist, so numeric editing
+  remains steppers and cyclers.
+
+Nothing in this section is CI-verified yet; statuses move
+to the per-wave tables above once the run is green, and
+docs/COMPARISON.md is refreshed after that run.

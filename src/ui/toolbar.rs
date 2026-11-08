@@ -39,7 +39,7 @@
 
 use gpui::*;
 
-use crate::ui_kit::{C_ACCENT, C_BORDER, C_ELEVATED, C_INK, C_MUTED, C_PANEL};
+use crate::ui_kit::{C_ACCENT, C_BORDER, C_ELEVATED, C_ERROR, C_INK, C_MUTED, C_PANEL};
 
 /// Resting background of an idle button: the literal `btn()` and
 /// the kit's `info_chip` both use.
@@ -53,7 +53,7 @@ pub const BG_DANGER: u32 = 0x5A2C2C;
 /// Background of an *active* danger button (the Danger variant in
 /// its on state): the full toast error red, so an armed
 /// destructive action reads hotter than a merely resting one.
-pub const BG_DANGER_ACTIVE: u32 = 0xB23A3A;
+pub const BG_DANGER_ACTIVE: u32 = C_ERROR;
 
 /// The visual family a button belongs to.
 ///
@@ -266,7 +266,7 @@ mod tests {
         button_face, effective_variant, face_colors, spec_colors, toolbar_faces, variant_colors,
         BtnVariant, ButtonSpec, BG_DANGER, BG_DANGER_ACTIVE, BG_IDLE,
     };
-    use crate::ui_kit::{C_ACCENT, C_ELEVATED, C_INK, C_MUTED, C_PANEL};
+    use crate::ui_kit::{C_ACCENT, C_ELEVATED, C_ERROR, C_INK, C_MUTED, C_PANEL};
 
     #[test]
     fn face_colors_idle_matches_btn_palette() {
@@ -319,7 +319,7 @@ mod tests {
     fn variant_colors_danger_heats_up_when_active() {
         assert_eq!(variant_colors(BtnVariant::Danger, false), (0x5A2C2C, C_INK));
         assert_eq!(variant_colors(BtnVariant::Danger, false), (BG_DANGER, C_INK));
-        assert_eq!(variant_colors(BtnVariant::Danger, true), (0xB23A3A, C_INK));
+        assert_eq!(variant_colors(BtnVariant::Danger, true), (C_ERROR, C_INK));
         assert_eq!(
             variant_colors(BtnVariant::Danger, true),
             (BG_DANGER_ACTIVE, C_INK)

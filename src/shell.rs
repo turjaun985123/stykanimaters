@@ -16,8 +16,10 @@
 //! named save.
 //!
 //! A third, smaller store holds the window layout
-//! preferences at `.layout.json` (last workspace, theme) so
-//! the app shell can restore them on startup.
+//! preferences at `.layout.json` (last workspace, theme,
+//! timeline collapse, sidebar visibility) so the app shell
+//! can restore them on startup. New fields are added with
+//! serde defaults so older `.layout.json` files keep loading.
 
 use crate::model::Project;
 use serde::{Deserialize, Serialize};
@@ -198,23 +200,43 @@ pub fn recovery_is_newer_than_last_project_in(dir: &Path) -> bool {
 
 // ---- Layout preferences ----
 
+/// Serde default for boolean layout fields that default to
+/// `true` (e.g. [`LayoutPrefs::sidebar_visible`]): files
+/// written before the field existed load with it enabled.
+fn default_true() -> bool {
+    true
+}
+
 /// Window layout preferences persisted across runs: which
-/// workspace was active and whether the dark theme was on.
-/// Stored as JSON at `.layout.json` in the projects dir.
+/// workspace was active, whether the dark theme was on, and
+/// the timeline / sidebar arrangement of the context-first
+/// shell. Stored as JSON at `.layout.json` in the projects
+/// dir. The newer fields carry serde defaults so a
+/// `.layout.json` written by an older build still loads.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LayoutPrefs {
     /// Name of the active workspace (e.g. `"Animate"`).
     pub workspace: String,
     /// Whether the dark theme is enabled.
     pub dark: bool,
+    /// Whether the bottom timeline strip is collapsed.
+    #[serde(default)]
+    pub timeline_collapsed: bool,
+    /// Whether the left sidebar (figures / library column)
+    /// is visible.
+    #[serde(default = "default_true")]
+    pub sidebar_visible: bool,
 }
 
 impl Default for LayoutPrefs {
-    /// The first-run layout: the Animate workspace, dark theme.
+    /// The first-run layout: the Animate workspace, dark
+    /// theme, timeline expanded, sidebar visible.
     fn default() -> Self {
         LayoutPrefs {
             workspace: "Animate".to_string(),
             dark: true,
+            timeline_collapsed: false,
+            sidebar_visible: true,
         }
     }
 }
@@ -436,6 +458,7 @@ mod tests {
         let prefs = LayoutPrefs {
             workspace: "Draw".to_string(),
             dark: false,
+            ..Default::default()
         };
         save_layout_in(&dir, &prefs);
         let path = dir.join(LAYOUT_FILE);
@@ -460,6 +483,7 @@ mod tests {
         let prefs = LayoutPrefs {
             workspace: "Audio".to_string(),
             dark: true,
+            ..Default::default()
         };
         save_layout_in(&dir, &prefs);
         assert_eq!(load_layout_in(&dir), prefs);
@@ -474,14 +498,63 @@ mod tests {
             &LayoutPrefs {
                 workspace: "Animate".to_string(),
                 dark: true,
+                ..Default::default()
             },
         );
         let second = LayoutPrefs {
             workspace: "3D".to_string(),
             dark: false,
+            ..Default::default()
         };
         save_layout_in(&dir, &second);
         assert_eq!(load_layout_in(&dir), second);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_old_format_file_loads_with_new_field_defaults() {
+        let dir = temp_dir("layout-old-format");
+        // A `.layout.json` written before the timeline /
+        // sidebar fields existed: only the original two keys.
+        std::fs::write(
+            dir.join(LAYOUT_FILE),
+            "{\"workspace\":\"Draw\",\"dark\":false}",
+        )
+        .unwrap();
+        let prefs = load_layout_in(&dir);
+        assert_eq!(prefs.workspace, "Draw");
+        assert!(!prefs.dark);
+        // The new fields take their defaults, they do not
+        // make the whole file read as corrupt.
+        assert!(!prefs.timeline_collapsed);
+        assert!(prefs.sidebar_visible);
+        assert_eq!(
+            prefs,
+            LayoutPrefs {
+                workspace: "Draw".to_string(),
+                dark: false,
+                ..Default::default()
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_round_trips_timeline_and_sidebar_fields() {
+        let dir = temp_dir("layout-roundtrip-panels");
+        let prefs = LayoutPrefs {
+            workspace: "Graph".to_string(),
+            dark: true,
+            timeline_collapsed: true,
+            sidebar_visible: false,
+        };
+        save_layout_in(&dir, &prefs);
+        // The non-default values are really on disk, not
+        // just reconstructed from defaults on load.
+        let text = std::fs::read_to_string(dir.join(LAYOUT_FILE)).unwrap();
+        assert!(text.contains("\"timeline_collapsed\": true"), "{text}");
+        assert!(text.contains("\"sidebar_visible\": false"), "{text}");
+        assert_eq!(load_layout_in(&dir), prefs);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

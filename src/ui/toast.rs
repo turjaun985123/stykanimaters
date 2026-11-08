@@ -275,7 +275,9 @@ mod tests {
         assert_eq!(ToastKind::Info.accent(), C_MUTED);
         assert_eq!(ToastKind::Success.accent(), C_ACCENT);
         assert_eq!(ToastKind::Error.accent(), C_ERROR);
-        assert_eq!(C_ERROR, 0xB23A3A);
+        // Value pin for the shared kit token (2.0 palette:
+        // the error red changed from 0xB23A3A to 0xF16F78).
+        assert_eq!(C_ERROR, 0xF16F78);
     }
 
     #[test]

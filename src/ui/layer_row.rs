@@ -87,8 +87,8 @@ mod tests {
     #[test]
     fn selected_row_is_the_opaque_accent() {
         assert_eq!(row_bg(true, false), (C_ACCENT << 8) | 0xFF);
-        // The accent itself, pinned: 0x6C8CFF with full alpha.
-        assert_eq!(row_bg(true, false), 0x6C8C_FFFF);
+        // The accent itself, pinned: 0x6D8CFF with full alpha.
+        assert_eq!(row_bg(true, false), 0x6D8C_FFFF);
     }
 
     #[test]

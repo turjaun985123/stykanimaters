@@ -71,10 +71,13 @@ present and fall back to a folder-based flow when neither exists.
   redesigned chrome on a shared token-based design system: a
   slim **app bar** (brand, File/Edit, panel toggles, frame/FPS
   chips) over labelled **tool-group panels** instead of a flat
-  button wall. Eight **workspace presets** (Animate, Draw,
+  button wall. Eight **workspaces** (Animate, Draw,
   Build, Graph, Effects, Audio, 3D, Export) under the app bar
-  (Alt+1…8) arrange the panels and modes around one task; the
-  chosen workspace and theme persist between launches. Panels for the keyframe graph,
+  (Alt+1…8) **gate which tool groups and panels render** —
+  each workspace shows only its own tools (4–12 of the 24
+  tool groups), and the stage takes the space the hidden
+  groups free up; the chosen workspace and theme persist
+  between launches. Panels for the keyframe graph,
   audio, FX clips, movieclips, colour picker, easing picker,
   inspector, export centre and help; a per-figure **dopesheet**
   above the timeline; a state HUD above the framed canvas; status

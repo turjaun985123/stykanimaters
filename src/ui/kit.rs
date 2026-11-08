@@ -24,28 +24,37 @@
 use gpui::*;
 
 /// Application background (the darkest surface).
-pub const C_BG: u32 = 0x101216;
+pub const C_BG: u32 = 0x111318;
 /// Secondary background, one step above [`C_BG`].
 pub const C_SURFACE: u32 = 0x171A21;
 /// Panel background.
 pub const C_PANEL: u32 = 0x1D222B;
 /// Elevated surface, above panels (menus, popovers, chips).
-pub const C_ELEVATED: u32 = 0x252B36;
+pub const C_ELEVATED: u32 = 0x252B35;
+/// Hover surface, one step above [`C_ELEVATED`].
+pub const C_HOVER: u32 = 0x303846;
 /// Primary text colour.
 pub const C_INK: u32 = 0xF1F3F7;
 /// Secondary / caption text colour.
-pub const C_MUTED: u32 = 0xA1A9B7;
+pub const C_MUTED: u32 = 0xA2AAB8;
+/// Tertiary text colour (hints, disabled labels).
+pub const C_TEXT_MUTED: u32 = 0x707B8C;
 /// Panel and divider border colour.
-pub const C_BORDER: u32 = 0x303745;
+pub const C_BORDER: u32 = 0x303744;
 /// Active / accent background.
-pub const C_ACCENT: u32 = 0x6C8CFF;
+pub const C_ACCENT: u32 = 0x6D8CFF;
 /// Secondary accent (used sparingly, beside [`C_ACCENT`]).
-pub const C_ACCENT2: u32 = 0x9B7CFF;
+pub const C_ACCENT2: u32 = 0xA184FF;
 /// Idle background for chips and other small neutral controls.
-pub const C_CELL: u32 = 0x252B36;
-/// Error / destructive accent. Matches the value the toast system
-/// has always used (`ui::toast::C_ERROR`), now shared from here.
-pub const C_ERROR: u32 = 0xB23A3A;
+pub const C_CELL: u32 = 0x252B35;
+/// Error / destructive accent: the 2.0 directive's error red,
+/// shared with the toast system (`ui::toast::C_ERROR` re-exports
+/// this constant).
+pub const C_ERROR: u32 = 0xF16F78;
+/// Success accent (confirmations, positive status).
+pub const C_SUCCESS: u32 = 0x55C99A;
+/// Warning accent (caution states).
+pub const C_WARN: u32 = 0xE8B65D;
 
 /// Spacing scale (reference values for new code; existing layout
 /// code keeps the literals it already has).
@@ -92,10 +101,14 @@ pub struct Palette {
     pub panel: u32,
     /// Elevated surface background.
     pub elevated: u32,
+    /// Hover surface background.
+    pub hover: u32,
     /// Primary text.
     pub ink: u32,
     /// Secondary text.
     pub muted: u32,
+    /// Tertiary text.
+    pub text_muted: u32,
     /// Borders and dividers.
     pub border: u32,
     /// Primary accent.
@@ -106,6 +119,10 @@ pub struct Palette {
     pub cell: u32,
     /// Error / destructive accent.
     pub error: u32,
+    /// Success accent.
+    pub success: u32,
+    /// Warning accent.
+    pub warn: u32,
 }
 
 impl Palette {
@@ -116,30 +133,42 @@ impl Palette {
         surface: C_SURFACE,
         panel: C_PANEL,
         elevated: C_ELEVATED,
+        hover: C_HOVER,
         ink: C_INK,
         muted: C_MUTED,
+        text_muted: C_TEXT_MUTED,
         border: C_BORDER,
         accent: C_ACCENT,
         accent2: C_ACCENT2,
         cell: C_CELL,
         error: C_ERROR,
+        success: C_SUCCESS,
+        warn: C_WARN,
     };
 
     /// A professional light theme at the same standard as the dark
     /// one: near-white panels, the dark theme's surface colour as
     /// ink, and accents darkened enough to keep contrast on white.
+    /// The status colours follow the same rule: `error` is a
+    /// darkened variant of the dark theme's bright red (which is
+    /// too light to read on white), and `success`/`warn` reuse the
+    /// deeper tones the badge/gauge components already use.
     pub const LIGHT: Palette = Palette {
         bg: 0xF2F3F6,
         surface: 0xE8EAEF,
         panel: 0xFFFFFF,
         elevated: 0xFFFFFF,
+        hover: 0xDDE1E8,
         ink: 0x171A21,
         muted: 0x5A6474,
+        text_muted: 0x8A94A3,
         border: 0xD3D8E1,
         accent: 0x4A6FE0,
         accent2: 0x7C5CD6,
         cell: 0xE8EAEF,
-        error: 0xB23A3A,
+        error: 0xC93A44,
+        success: 0x2E7D4F,
+        warn: 0x8A6D1F,
     };
 }
 
@@ -257,8 +286,9 @@ pub fn brand() -> Div {
 mod tests {
     use super::{
         palette, Palette, C_ACCENT, C_ACCENT2, C_BG, C_BORDER, C_CELL, C_ELEVATED, C_ERROR,
-        C_INK, C_MUTED, C_PANEL, C_SURFACE, RAD_LG, RAD_MD, RAD_SM, SP_LG, SP_MD, SP_SM,
-        SP_XL, SP_XS, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XL, TEXT_XS,
+        C_HOVER, C_INK, C_MUTED, C_PANEL, C_SUCCESS, C_SURFACE, C_TEXT_MUTED, C_WARN, RAD_LG,
+        RAD_MD, RAD_SM, SP_LG, SP_MD, SP_SM, SP_XL, SP_XS, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XL,
+        TEXT_XS,
     };
 
     /// sRGB relative luminance of a 0xRRGGBB colour, in 0.0..=1.0.
@@ -279,17 +309,21 @@ mod tests {
 
     #[test]
     fn colour_tokens_match_the_directive_palette() {
-        assert_eq!(C_BG, 0x101216);
+        assert_eq!(C_BG, 0x111318);
         assert_eq!(C_SURFACE, 0x171A21);
         assert_eq!(C_PANEL, 0x1D222B);
-        assert_eq!(C_ELEVATED, 0x252B36);
+        assert_eq!(C_ELEVATED, 0x252B35);
+        assert_eq!(C_HOVER, 0x303846);
         assert_eq!(C_INK, 0xF1F3F7);
-        assert_eq!(C_MUTED, 0xA1A9B7);
-        assert_eq!(C_BORDER, 0x303745);
-        assert_eq!(C_ACCENT, 0x6C8CFF);
-        assert_eq!(C_ACCENT2, 0x9B7CFF);
-        assert_eq!(C_CELL, 0x252B36);
-        assert_eq!(C_ERROR, 0xB23A3A);
+        assert_eq!(C_MUTED, 0xA2AAB8);
+        assert_eq!(C_TEXT_MUTED, 0x707B8C);
+        assert_eq!(C_BORDER, 0x303744);
+        assert_eq!(C_ACCENT, 0x6D8CFF);
+        assert_eq!(C_ACCENT2, 0xA184FF);
+        assert_eq!(C_CELL, 0x252B35);
+        assert_eq!(C_ERROR, 0xF16F78);
+        assert_eq!(C_SUCCESS, 0x55C99A);
+        assert_eq!(C_WARN, 0xE8B65D);
     }
 
     #[test]
@@ -316,13 +350,17 @@ mod tests {
         assert_eq!(dark.surface, C_SURFACE);
         assert_eq!(dark.panel, C_PANEL);
         assert_eq!(dark.elevated, C_ELEVATED);
+        assert_eq!(dark.hover, C_HOVER);
         assert_eq!(dark.ink, C_INK);
         assert_eq!(dark.muted, C_MUTED);
+        assert_eq!(dark.text_muted, C_TEXT_MUTED);
         assert_eq!(dark.border, C_BORDER);
         assert_eq!(dark.accent, C_ACCENT);
         assert_eq!(dark.accent2, C_ACCENT2);
         assert_eq!(dark.cell, C_CELL);
         assert_eq!(dark.error, C_ERROR);
+        assert_eq!(dark.success, C_SUCCESS);
+        assert_eq!(dark.warn, C_WARN);
     }
 
     #[test]
@@ -338,13 +376,17 @@ mod tests {
         assert_eq!(light.surface, 0xE8EAEF);
         assert_eq!(light.panel, 0xFFFFFF);
         assert_eq!(light.elevated, 0xFFFFFF);
+        assert_eq!(light.hover, 0xDDE1E8);
         assert_eq!(light.ink, 0x171A21);
         assert_eq!(light.muted, 0x5A6474);
+        assert_eq!(light.text_muted, 0x8A94A3);
         assert_eq!(light.border, 0xD3D8E1);
         assert_eq!(light.accent, 0x4A6FE0);
         assert_eq!(light.accent2, 0x7C5CD6);
         assert_eq!(light.cell, 0xE8EAEF);
-        assert_eq!(light.error, 0xB23A3A);
+        assert_eq!(light.error, 0xC93A44);
+        assert_eq!(light.success, 0x2E7D4F);
+        assert_eq!(light.warn, 0x8A6D1F);
     }
 
     #[test]

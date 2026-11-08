@@ -18,7 +18,7 @@
 
 use gpui::*;
 
-use crate::ui_kit::{C_CELL, C_INK, C_MUTED};
+use crate::ui_kit::{C_CELL, C_INK, C_MUTED, TEXT_XS};
 
 /// Smallest span width, as a fraction of the timeline, that a
 /// clip row will draw — a zero-length (or nearly zero-length)
@@ -89,7 +89,7 @@ pub fn clip_row(data: &ClipRowData) -> Div {
                 )
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(px(TEXT_XS))
                         .text_color(rgb(C_MUTED))
                         .child(data.kind_label.clone()),
                 ),

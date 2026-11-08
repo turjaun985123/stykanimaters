@@ -1287,6 +1287,61 @@ impl EditorCore {
         );
     }
 
+    /// Wave 15: set the interpolation mode (`crate::graph::Interp`)
+    /// of one graph key, as one undo step.
+    ///
+    /// Which key: `EditorCore` has no graph key selection of its
+    /// own — the graph panel's channel selector and its key
+    /// selection (`graph_sel`) live in the view, and the core-side
+    /// graph ops scope by figure and joint instead (the tangent
+    /// presets apply to every channel of the selected figure).
+    /// So this op targets the same channel `key_graph_angle`
+    /// authors — the selected figure's `Angle(selected_node)`
+    /// channel — and within it the key nearest the current frame
+    /// (an exact hit wins; ties go to the earlier key). The mode
+    /// governs the segment STARTING at that key (see
+    /// `graph::Interp`). No selected joint, or a channel with no
+    /// keys, is a no-op (no snapshot).
+    pub fn set_graph_key_interp(&mut self, mode: crate::graph::Interp) {
+        let Some(ni) = self.selected_node else {
+            self.status = "Select a joint first, then set graph interp.".into();
+            return;
+        };
+        let fi = self.selected_figure;
+        let target = crate::graph::ChannelTarget::Angle(ni);
+        let Some(ci) = self
+            .project
+            .channels
+            .iter()
+            .position(|ch| ch.figure == fi && ch.target == target)
+        else {
+            self.status = format!("No graph keys for figure {} joint {}.", fi + 1, ni);
+            return;
+        };
+        let now = self.current as f32;
+        let mut best: Option<usize> = None;
+        let mut best_dist = f32::INFINITY;
+        for (ki, key) in self.project.channels[ci].keys.iter().enumerate() {
+            let dist = (key.frame - now).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best = Some(ki);
+            }
+        }
+        let Some(ki) = best else {
+            self.status = format!("No graph keys for figure {} joint {}.", fi + 1, ni);
+            return;
+        };
+        self.snapshot();
+        let key = &mut self.project.channels[ci].keys[ki];
+        key.interp = mode;
+        let frame = key.frame;
+        self.status = format!(
+            "Interp {mode:?} set on key at frame {}.",
+            frame.round() as i64 + 1
+        );
+    }
+
     /// Wave 11: bake every graph channel into real frame poses
     /// for frames `from..=to` (the end clamped to the timeline),
     /// as one undo step.
@@ -6402,5 +6457,103 @@ mod wave14_camera_tests {
         assert_eq!(core.status, "No figures to centre on.");
         assert!(core.project.camera.is_empty());
         assert_eq!(core.edits_since_autosave(), edits, "no snapshot");
+    }
+}
+
+#[cfg(test)]
+mod wave15_graph_interp_tests {
+    use super::EditorCore;
+    use crate::graph::{Channel, ChannelTarget, Interp, Key};
+
+    /// A core whose selected figure has one angle channel for
+    /// joint 0 with Hermite keys at frames 0, 10 and 20, and
+    /// joint 0 selected.
+    fn core_with_angle_keys() -> EditorCore {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        core.selected_node = Some(0);
+        core.project.channels.clear();
+        core.project.channels.push(Channel {
+            figure: fi,
+            target: ChannelTarget::Angle(0),
+            keys: vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(10.0, 50.0),
+                Key::flat(20.0, 0.0),
+            ],
+        });
+        core
+    }
+
+    #[test]
+    fn set_graph_key_interp_changes_only_the_key_at_the_current_frame() {
+        let mut core = core_with_angle_keys();
+        core.current = 10;
+        let edits = core.edits_since_autosave();
+        core.set_graph_key_interp(Interp::Linear);
+        assert!(core.status.contains("Linear"), "status: {}", core.status);
+        assert!(core.status.contains("frame 11"), "status: {}", core.status);
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        let keys = &core.project.channels[0].keys;
+        assert_eq!(keys[0].interp, Interp::Hermite, "earlier key untouched");
+        assert_eq!(keys[1].interp, Interp::Linear, "the key at the current frame changed");
+        assert_eq!(keys[2].interp, Interp::Hermite, "later key untouched");
+    }
+
+    #[test]
+    fn set_graph_key_interp_picks_the_nearest_key_to_the_current_frame() {
+        let mut core = core_with_angle_keys();
+        // 17 is 3 frames from the key at 20 and 7 from the key at 10.
+        core.current = 17;
+        core.set_graph_key_interp(Interp::Step);
+        assert!(core.status.contains("frame 21"), "status: {}", core.status);
+        let keys = &core.project.channels[0].keys;
+        assert_eq!(keys[2].interp, Interp::Step, "nearest key changed");
+        assert_eq!(keys[1].interp, Interp::Hermite, "farther key untouched");
+        assert_eq!(keys[0].interp, Interp::Hermite, "farthest key untouched");
+        // A tie goes to the earlier key: 15 is equidistant from
+        // the keys at 10 and 20.
+        core.current = 15;
+        core.set_graph_key_interp(Interp::Linear);
+        let keys = &core.project.channels[0].keys;
+        assert_eq!(keys[1].interp, Interp::Linear, "earlier key wins the tie");
+        assert_eq!(keys[2].interp, Interp::Step, "later key keeps its mode");
+    }
+
+    #[test]
+    fn set_graph_key_interp_noops_without_a_joint_or_keys() {
+        let mut core = EditorCore::new();
+        core.project.channels.clear();
+        core.selected_node = None;
+        let edits = core.edits_since_autosave();
+        core.set_graph_key_interp(Interp::Linear);
+        assert!(
+            core.status.contains("Select a joint"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot on a no-op");
+        // Joint selected but no channel for it.
+        core.selected_node = Some(0);
+        core.set_graph_key_interp(Interp::Linear);
+        assert!(
+            core.status.contains("No graph keys"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits, "still no snapshot");
+        // A channel for another target does not count.
+        core.project.channels.push(Channel {
+            figure: core.selected_figure,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(0.0, 0.0)],
+        });
+        core.set_graph_key_interp(Interp::Linear);
+        assert!(
+            core.status.contains("No graph keys"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits, "still no snapshot");
     }
 }
