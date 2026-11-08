@@ -2,8 +2,8 @@
 //! a real multi-clip mixdown, playback scheduling, and editing
 //! operations: peak/RMS metering, normalisation, trim, split,
 //! crossfade joins, timeline clip splitting, and effects (fade,
-//! gain, reverse, echo, lowpass, silence trim, pitch shift,
-//! compression).
+//! gain, reverse, echo, lowpass, silence trim, silence
+//! segmentation, pitch shift, compression).
 //!
 //! Std-only, no decoding crates: WAV files are parsed and written
 //! by hand (RIFF/WAVE, PCM format 1, 16-bit, mono or stereo).
@@ -298,6 +298,15 @@ pub fn lowpass(w: &mut WavData, cutoff_hz: f32) {
     }
 }
 
+/// Peak absolute sample across the channels of frame `j` of
+/// `w` — the per-frame loudness measure behind the silence
+/// definition `trim_silence` and `split_at_silences` share: a
+/// frame is silent exactly when this peak is below the caller's
+/// threshold.
+fn frame_peak(w: &WavData, ch: usize, j: usize) -> f32 {
+    (0..ch).fold(0.0f32, |m, c| m.max(w.samples[j * ch + c].abs()))
+}
+
 /// Trim silent frames from both ends in place and report how many
 /// frames were removed: `(front, back)`.
 ///
@@ -316,15 +325,12 @@ pub fn trim_silence(w: &mut WavData, threshold: f32) -> (usize, usize) {
     if frames == 0 || ch == 0 {
         return (0, 0);
     }
-    let frame_peak = |j: usize| -> f32 {
-        (0..ch).fold(0.0f32, |m, c| m.max(w.samples[j * ch + c].abs()))
-    };
-    let Some(first) = (0..frames).find(|&j| frame_peak(j) >= threshold) else {
+    let Some(first) = (0..frames).find(|&j| frame_peak(w, ch, j) >= threshold) else {
         return (0, 0); // All frames silent: leave the buffer as is.
     };
     let last = (0..frames)
         .rev()
-        .find(|&j| frame_peak(j) >= threshold)
+        .find(|&j| frame_peak(w, ch, j) >= threshold)
         .unwrap();
     let front = first;
     let back = frames - 1 - last;
@@ -334,6 +340,63 @@ pub fn trim_silence(w: &mut WavData, threshold: f32) -> (usize, usize) {
     w.samples.drain((frames - back) * ch..);
     w.samples.drain(..front * ch);
     (front, back)
+}
+
+/// Find the sounding segments of a clip: the `(start, end)`
+/// frame ranges (end exclusive) that contain non-silent audio,
+/// splitting wherever a run of silent frames lasts at least
+/// `min_silence_frames`.
+///
+/// A frame is silent when its loudest channel is below
+/// `threshold` — the definition `trim_silence` uses (see
+/// `frame_peak`), so a frame exactly at the threshold counts as
+/// sounding. Leading and trailing silence belong to no range,
+/// and a silent gap shorter than `min_silence_frames` does not
+/// split: the surrounding sound merges into one range that spans
+/// the gap, gap frames included. A `min_silence_frames` of 0
+/// behaves as 1.
+///
+/// Pure analysis — the data is not modified; an editor op
+/// materialises the segments (e.g. with `trim`). All-silent or
+/// empty input yields an empty vec; audio with no qualifying
+/// silence yields the single range `(0, frames)`.
+pub fn split_at_silences(
+    w: &WavData,
+    threshold: f32,
+    min_silence_frames: usize,
+) -> Vec<(usize, usize)> {
+    let ch = w.channels as usize;
+    let frames = w.frames();
+    if frames == 0 || ch == 0 {
+        return Vec::new();
+    }
+    let min_gap = min_silence_frames.max(1);
+    let mut ranges = Vec::new();
+    // Start of the sounding segment being accumulated, the end
+    // (exclusive) of its most recent sounding frame, and the
+    // silent run length since that frame.
+    let mut seg_start: Option<usize> = None;
+    let mut seg_end = 0usize;
+    let mut gap = 0usize;
+    for j in 0..frames {
+        if frame_peak(w, ch, j) >= threshold {
+            if seg_start.is_none() {
+                seg_start = Some(j);
+            }
+            seg_end = j + 1;
+            gap = 0;
+        } else if seg_start.is_some() {
+            gap += 1;
+            if gap >= min_gap {
+                ranges.push((seg_start.take().unwrap(), seg_end));
+                gap = 0;
+            }
+        }
+    }
+    if let Some(start) = seg_start {
+        ranges.push((start, seg_end));
+    }
+    ranges
 }
 
 /// Resampling pitch shift in place: the buffer is replayed at
@@ -731,10 +794,12 @@ pub fn split_clip(
         crate::model::AudioClip {
             path: clip.path.clone(),
             start_frame: clip.start_frame,
+            gain: clip.gain,
         },
         crate::model::AudioClip {
             path: clip.path.clone(),
             start_frame: at_frame,
+            gain: clip.gain,
         },
     ))
 }
@@ -902,14 +967,17 @@ mod tests {
             AudioClip {
                 path: "a.wav".into(),
                 start_frame: 0,
+                gain: 1.0,
             },
             AudioClip {
                 path: "b.wav".into(),
                 start_frame: 24,
+                gain: 1.0,
             },
             AudioClip {
                 path: "c.wav".into(),
                 start_frame: 48,
+                gain: 1.0,
             },
         ];
         // All clips last 1.5 s; fps 24 -> starts at 0s, 1s, 2s.
@@ -1230,6 +1298,7 @@ mod tests {
         let clip = AudioClip {
             path: "x.wav".into(),
             start_frame: 24,
+            gain: 1.0,
         };
         let (first, second) = split_clip(&clip, 48, 48).unwrap();
         assert_eq!(first.start_frame, 24);
@@ -1556,5 +1625,98 @@ mod tests {
             compress(&mut data, 0.4, 4.0);
             assert!(data.samples.is_empty());
         }
+    }
+
+    fn mono_frames(values: &[f32]) -> WavData {
+        WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: values.to_vec(),
+        }
+    }
+
+    #[test]
+    fn split_at_silences_finds_bursts_separated_by_a_long_gap() {
+        // Threshold 0.1, minimum silence 3. Layout by frame:
+        //   0..2   silence (leading)
+        //   2..5   burst A
+        //   5..9   silence, 4 frames >= 3 -> split
+        //   9..11  burst B
+        //   11..13 silence (trailing)
+        let data = mono_frames(&[
+            0.0, 0.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.6, 0.6, 0.0, 0.0,
+        ]);
+        let before = data.samples.clone();
+        assert_eq!(split_at_silences(&data, 0.1, 3), vec![(2, 5), (9, 11)]);
+        // Pure analysis: the buffer is untouched.
+        assert_eq!(data.samples, before);
+    }
+
+    #[test]
+    fn split_at_silences_merges_across_a_gap_below_the_minimum() {
+        // A 2-frame silent gap with a minimum of 3 does not
+        // split: one range spans the gap frames too.
+        let data = mono_frames(&[0.5, 0.5, 0.0, 0.0, 0.5, 0.5]);
+        assert_eq!(split_at_silences(&data, 0.1, 3), vec![(0, 6)]);
+        // A gap of exactly the minimum does split.
+        let data = mono_frames(&[0.5, 0.0, 0.0, 0.0, 0.5]);
+        assert_eq!(split_at_silences(&data, 0.1, 3), vec![(0, 1), (4, 5)]);
+    }
+
+    #[test]
+    fn split_at_silences_excludes_leading_and_trailing_silence() {
+        // Even with a minimum no gap could ever reach, the
+        // ranges cover only the sounding frames.
+        let data = mono_frames(&[0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0]);
+        assert_eq!(split_at_silences(&data, 0.1, 100), vec![(3, 5)]);
+    }
+
+    #[test]
+    fn split_at_silences_all_silent_and_empty_inputs_are_empty() {
+        // Below-threshold noise still counts as silence.
+        let data = mono_frames(&[0.0, 0.05, 0.0, 0.09]);
+        assert!(split_at_silences(&data, 0.1, 1).is_empty());
+        let empty = mono_frames(&[]);
+        assert!(split_at_silences(&empty, 0.1, 1).is_empty());
+    }
+
+    #[test]
+    fn split_at_silences_never_silent_audio_is_one_full_range() {
+        let data = mono_frames(&[0.5, 0.5, 0.5, 0.5, 0.5]);
+        assert_eq!(split_at_silences(&data, 0.1, 2), vec![(0, 5)]);
+    }
+
+    #[test]
+    fn split_at_silences_treats_a_frame_at_the_threshold_as_sounding() {
+        // Peaks of exactly 0.5 with threshold 0.5 are NOT silent
+        // (silence is peak < threshold, as in trim_silence), so
+        // the 2-frame gap between them reaches the minimum of 2
+        // and splits.
+        let data = mono_frames(&[0.5, 0.0, 0.0, 0.5]);
+        assert_eq!(split_at_silences(&data, 0.5, 2), vec![(0, 1), (3, 4)]);
+        // A minimum of 0 behaves as 1: a lone silent frame
+        // splits.
+        let data = mono_frames(&[0.5, 0.0, 0.5]);
+        assert_eq!(split_at_silences(&data, 0.1, 0), vec![(0, 1), (2, 3)]);
+    }
+
+    #[test]
+    fn split_at_silences_stereo_uses_the_loudest_channel() {
+        // A frame is silent only when BOTH channels are below
+        // the threshold. Frames: silent, right-only loud,
+        // silent, silent, left-only loud; the 2-frame gap
+        // reaches the minimum of 2 and splits.
+        let data = WavData {
+            sample_rate: 8000,
+            channels: 2,
+            samples: vec![
+                0.0, 0.0, // silent
+                0.0, 0.8, // loud (right only)
+                0.0, 0.0, // silent
+                0.0, 0.0, // silent
+                0.7, 0.0, // loud (left only)
+            ],
+        };
+        assert_eq!(split_at_silences(&data, 0.1, 2), vec![(1, 2), (4, 5)]);
     }
 }

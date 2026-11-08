@@ -1731,7 +1731,7 @@ impl EditorCore {
             .map(|c| crate::audio_edit::MixClip {
                 path: c.path.clone(),
                 start_secs: c.start_frame as f32 / fps,
-                gain: 1.0,
+                gain: c.gain,
                 fade_in: 0.0,
                 fade_out: 0.0,
             })
@@ -1873,12 +1873,67 @@ impl EditorCore {
                 seed: 11 + self.project.fx_clips.len() as u32 * 7,
                 angle: 0.0,
                 length: 130.0,
+                color2: None,
             },
             figure: self.selected_figure,
             node,
         });
         let _ = ClipKind::Burst;
         self.status = format!("FX clip ({kind:?}) added at frame {}.", self.current + 1);
+    }
+
+    // ---- FX presets (wave 13) ----
+
+    /// Wave 13: save FX clip `index` as a preset in
+    /// `./fx-presets/`, auto-named `<kind>-<index+1>` (for
+    /// example `sparkle-2`). Saving a preset does not change
+    /// the project, so no snapshot is taken. A missing index or
+    /// a failed write sets an error status.
+    pub fn fx_save_preset(&mut self, index: usize) {
+        let Some(entry) = self.project.fx_clips.get(index) else {
+            self.status = format!("FX preset save failed: no FX clip {}.", index + 1);
+            return;
+        };
+        let name = format!(
+            "{}-{}",
+            crate::fx_edit::kind_name(entry.clip.kind),
+            index + 1
+        );
+        match crate::fx_edit::save_clip_preset(&entry.clip, &name) {
+            Ok(path) => {
+                self.status = format!("FX preset '{name}' saved to {}.", path.display());
+            }
+            Err(e) => self.status = format!("FX preset save failed: {e}"),
+        }
+    }
+
+    /// Wave 13: add the preset `name` from `./fx-presets/` as a
+    /// new FX clip on the selected figure (node 0), starting at
+    /// the current frame — the placement shape of `add_fx_clip`,
+    /// as one undo step. A preset that cannot be loaded sets an
+    /// error status and changes nothing.
+    pub fn fx_apply_preset(&mut self, name: &str) {
+        let mut clip = match crate::fx_edit::load_clip_preset(name) {
+            Ok(clip) => clip,
+            Err(e) => {
+                self.status = format!("FX preset apply failed: {e}");
+                return;
+            }
+        };
+        clip.start = self.current as f32;
+        self.snapshot();
+        self.project.fx_clips.push(crate::model::FxClipEntry {
+            clip,
+            figure: self.selected_figure,
+            node: 0,
+        });
+        self.status = format!("FX preset '{name}' added at frame {}.", self.current + 1);
+    }
+
+    /// Wave 13: the slugs of the FX presets available in
+    /// `./fx-presets/` (see `fx_edit::list_clip_presets`).
+    pub fn fx_preset_names(&self) -> Vec<String> {
+        crate::fx_edit::list_clip_presets()
     }
 
 
@@ -2087,6 +2142,24 @@ impl EditorCore {
         }
         let brush = self.active_brush();
         let color = self.project.figures[self.selected_figure].color;
+        // Wave 13: a scatter brush (scatter > 0) records a spray
+        // mark on the stroke. The seed is derived from the frame
+        // and the stroke's own index in `project.strokes`, so the
+        // scatter a renderer expands from the mark
+        // (`paint::spray_dots`) is deterministic per stroke. The
+        // recorded points stay the path the user drew; plain
+        // brushes (scatter 0) record no mark.
+        let spray = if brush.scatter > 0.0 {
+            Some(crate::model::SprayMark {
+                seed: 0x5EED_0000u64
+                    + (self.current as u64) * 131
+                    + self.project.strokes.len() as u64,
+                radius: brush.scatter,
+                opacity: brush.opacity,
+            })
+        } else {
+            None
+        };
         self.project.strokes.push(crate::model::Stroke {
             frame: self.current,
             points: vec![p],
@@ -2094,6 +2167,7 @@ impl EditorCore {
             width: brush.width,
             widths: vec![brush.width],
             fill: None,
+            spray,
         });
         self.drawing = true;
     }
@@ -2214,6 +2288,7 @@ impl EditorCore {
             width: spacing,
             widths: Vec::new(),
             fill: Some(color),
+            spray: None,
         });
         self.status = format!("Shape filled with a scanline fill ({n_points} points).");
     }
@@ -2296,6 +2371,7 @@ impl EditorCore {
             width: brush.width,
             widths: vec![brush.width; n],
             fill: None,
+            spray: None,
         });
         self.status = format!("Stamped {what} on frame {} ({n} points).", self.current + 1);
     }
@@ -2383,6 +2459,7 @@ impl EditorCore {
         self.project.audio.push(crate::model::AudioClip {
             path: path.to_string_lossy().into_owned(),
             start_frame: self.current,
+            gain: 1.0,
         });
         self.status = format!("Audio clip added at frame {}: {}", self.current + 1, path.display());
     }
@@ -2883,6 +2960,90 @@ impl EditorCore {
             "Compressor (threshold 0.5, ratio 4.0) applied to audio clip {}: {}.",
             clip_idx + 1,
             out.display()
+        );
+    }
+
+    /// Wave 13: split the LAST audio clip wherever silence
+    /// (below 0.02) lasts at least a quarter second, using
+    /// `audio_edit::split_at_silences` to find the sounding
+    /// ranges. Each range is materialised beside the source as
+    /// `<stem>.seg1.wav`, `<stem>.seg2.wav`, ... — a segment
+    /// clip pointing at the original file would restart the
+    /// audio from its beginning, because `AudioClip` has no
+    /// source-offset field (the same reason `audio_split`
+    /// materialises its tail). The first segment replaces the
+    /// last clip and the remaining segments are inserted
+    /// immediately after it, each starting at the original
+    /// start plus `round(range_start_secs * fps)` — the shift
+    /// convention `audio_trim` uses for a trimmed head — and
+    /// keeping the original clip's gain. One snapshot, taken
+    /// only after every segment file is written. Fewer than
+    /// two ranges (no qualifying silence) is a no-op: no files
+    /// are written and no snapshot is taken.
+    pub fn audio_split_at_silences_last(&mut self) {
+        let Some(clip_idx) = self.project.audio.len().checked_sub(1) else {
+            self.status = "Audio split at silences failed: there are no audio clips.".into();
+            return;
+        };
+        let clip = self.project.audio[clip_idx].clone();
+        let wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio split at silences failed: {e}");
+                return;
+            }
+        };
+        let rate = wav.sample_rate;
+        let min_silence = (rate as f32 * 0.25) as usize;
+        let ranges = crate::audio_edit::split_at_silences(&wav, 0.02, min_silence);
+        if ranges.len() < 2 {
+            self.status = format!(
+                "Audio clip {} has no silence of 0.25s or more to split at.",
+                clip_idx + 1
+            );
+            return;
+        }
+        let source = PathBuf::from(&clip.path);
+        let ch = wav.channels as usize;
+        let fps = self.project.fps.max(1.0);
+        let mut segments: Vec<crate::model::AudioClip> =
+            Vec::with_capacity(ranges.len());
+        for (i, &(start, end)) in ranges.iter().enumerate() {
+            let seg = crate::audio_edit::WavData {
+                sample_rate: wav.sample_rate,
+                channels: wav.channels,
+                samples: wav.samples[start * ch..end * ch].to_vec(),
+            };
+            let out = Self::audio_derived_path(&source, &format!(".seg{}.wav", i + 1));
+            if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&seg)) {
+                self.status = format!(
+                    "Audio split at silences failed: could not write {}: {e}",
+                    out.display()
+                );
+                return;
+            }
+            let start_secs = start as f32 / rate.max(1) as f32;
+            let shift = (start_secs * fps).round().max(0.0) as usize;
+            segments.push(crate::model::AudioClip {
+                path: out.to_string_lossy().into_owned(),
+                start_frame: clip.start_frame.saturating_add(shift),
+                gain: clip.gain,
+            });
+        }
+        let n = segments.len();
+        self.snapshot();
+        // The first segment replaces the split clip; the rest
+        // are inserted immediately after it, in order (the
+        // placement `audio_split` uses for its second half).
+        let mut segments = segments.into_iter();
+        self.project.audio[clip_idx] =
+            segments.next().expect("at least two ranges were checked");
+        for (j, seg) in segments.enumerate() {
+            self.project.audio.insert(clip_idx + 1 + j, seg);
+        }
+        self.status = format!(
+            "Audio clip {} split at silences into {n} clips.",
+            clip_idx + 1
         );
     }
 
@@ -4103,6 +4264,7 @@ mod tests {
             width: 4.0,
             widths: Vec::new(),
             fill: None,
+            spray: None,
         });
         core.toggle_draw_tool();
         assert_eq!(core.draw_tool, DrawTool::Eraser);
@@ -4375,6 +4537,7 @@ mod tests {
         core.project.audio.push(crate::model::AudioClip {
             path: source.clone(),
             start_frame: 3,
+            gain: 1.0,
         });
 
         core.audio_normalize(0);
@@ -4409,6 +4572,7 @@ mod tests {
         core.project.audio.push(crate::model::AudioClip {
             path: source.clone(),
             start_frame: 4,
+            gain: 1.0,
         });
 
         core.audio_normalize(0);
@@ -4443,6 +4607,7 @@ mod tests {
         core.project.audio.push(crate::model::AudioClip {
             path: source,
             start_frame: 7,
+            gain: 1.0,
         });
 
         core.audio_trim(0, 0.25, 0.75);
@@ -4464,6 +4629,7 @@ mod tests {
         core.project.audio.push(crate::model::AudioClip {
             path: source.clone(),
             start_frame: 9,
+            gain: 1.0,
         });
 
         core.audio_trim(0, 0.75, 0.25);
@@ -4490,10 +4656,12 @@ mod tests {
         core.project.audio.push(crate::model::AudioClip {
             path: source,
             start_frame: 12,
+            gain: 1.0,
         });
         core.project.audio.push(crate::model::AudioClip {
             path: other.clone(),
             start_frame: 30,
+            gain: 1.0,
         });
 
         // The source lasts 12 timeline frames (1s at 12 fps), so
@@ -4523,6 +4691,7 @@ mod tests {
         core.project.audio.push(crate::model::AudioClip {
             path: source.clone(),
             start_frame: 12,
+            gain: 1.0,
         });
 
         // The clip spans timeline frames 12..24; neither endpoint is
@@ -4547,10 +4716,12 @@ mod tests {
         core.project.audio.push(crate::model::AudioClip {
             path: first,
             start_frame: 0,
+            gain: 1.0,
         });
         core.project.audio.push(crate::model::AudioClip {
             path: second,
             start_frame: 3,
+            gain: 1.0,
         });
 
         // Each clip lasts 0.5s. The second starts at 0.3s, so the
@@ -4581,10 +4752,12 @@ mod tests {
         core.project.audio.push(crate::model::AudioClip {
             path: first,
             start_frame: 0,
+            gain: 1.0,
         });
         core.project.audio.push(crate::model::AudioClip {
             path: second,
             start_frame: 15,
+            gain: 1.0,
         });
 
         // Two adjacent 1.5s clips: the default fade is 1.0s, so
@@ -4610,10 +4783,12 @@ mod tests {
         core.project.audio.push(crate::model::AudioClip {
             path: first.clone(),
             start_frame: 0,
+            gain: 1.0,
         });
         core.project.audio.push(crate::model::AudioClip {
             path: second.clone(),
             start_frame: 10,
+            gain: 1.0,
         });
 
         // The first 0.5s clip ends at frame 5; the second starts at
@@ -4917,10 +5092,12 @@ mod tests {
         core.project.audio.push(crate::model::AudioClip {
             path: first.clone(),
             start_frame: 0,
+            gain: 1.0,
         });
         core.project.audio.push(crate::model::AudioClip {
             path: second.clone(),
             start_frame: 3,
+            gain: 1.0,
         });
 
         core.audio_crossfade(0);
@@ -5273,6 +5450,7 @@ mod wave11_tests {
         core.project.audio.push(AudioClip {
             path,
             start_frame: 0,
+            gain: 1.0,
         });
         core
     }
@@ -5393,6 +5571,7 @@ mod wave12_tests {
         core.project.audio.push(AudioClip {
             path,
             start_frame: 0,
+            gain: 1.0,
         });
         core
     }
@@ -5461,6 +5640,7 @@ mod wave12_tests {
             width: 3.0,
             widths: Vec::new(),
             fill: None,
+            spray: None,
         }
     }
 
@@ -5660,5 +5840,267 @@ mod wave12_tests {
         assert_eq!(s.points[0], [cx - 70.0, cy]);
         assert_eq!(s.points[1], [cx + 70.0, cy]);
         assert_eq!(s.points[3], s.points[1], "the polyline revisits the tip");
+    }
+}
+#[cfg(test)]
+mod wave13_tests {
+    use crate::audio_edit::WavData;
+    use crate::editor::EditorCore;
+    use crate::model::AudioClip;
+
+    /// Select a brush preset by name (the draw tests in
+    /// `mod tests` pick brushes the same way).
+    fn set_brush(core: &mut EditorCore, name: &str) {
+        core.brush_index = crate::paint::brush_library()
+            .iter()
+            .position(|b| b.name == name)
+            .unwrap_or_else(|| panic!("no brush named {name}"));
+    }
+
+    #[test]
+    fn spray_brush_records_a_deterministic_spray_mark() {
+        let mut core = EditorCore::new();
+        core.project.strokes.clear();
+        set_brush(&mut core, "Spray");
+        let brush = core.active_brush();
+        assert!(brush.scatter > 0.0, "the Spray preset must scatter");
+        core.begin_draw([0.0, 0.0]);
+        core.draw_to([30.0, 0.0]);
+        core.end_draw();
+        assert_eq!(core.project.strokes.len(), 1);
+        let s = &core.project.strokes[0];
+        // The recorded points stay the drawn path — the Spray
+        // preset has no smoothing and a round nib, so neither
+        // end-of-stroke step rewrites them; the mark is what
+        // tells renderers to scatter dots along it.
+        assert_eq!(s.points, vec![[0.0, 0.0], [30.0, 0.0]]);
+        let mark = s.spray.expect("a scatter brush records a spray mark");
+        assert_eq!(mark.seed, 0x5EED_0000u64, "frame 0, stroke index 0");
+        assert_eq!(mark.radius, brush.scatter);
+        assert_eq!(mark.opacity, brush.opacity);
+
+        // A second spray stroke on a later frame: the seed
+        // moves with both the frame (x131) and the stroke's
+        // own index (+1).
+        core.current = 3;
+        core.begin_draw([10.0, 10.0]);
+        core.end_draw();
+        assert_eq!(core.project.strokes.len(), 2);
+        let mark = core.project.strokes[1]
+            .spray
+            .expect("the second spray stroke is marked too");
+        assert_eq!(mark.seed, 0x5EED_0000u64 + 3 * 131 + 1);
+    }
+
+    #[test]
+    fn plain_brush_records_no_spray_mark() {
+        let mut core = EditorCore::new();
+        core.project.strokes.clear();
+        assert_eq!(core.active_brush().name, "Pen");
+        assert_eq!(core.active_brush().scatter, 0.0);
+        core.begin_draw([0.0, 0.0]);
+        core.draw_to([30.0, 0.0]);
+        core.end_draw();
+        assert_eq!(core.project.strokes.len(), 1);
+        assert!(core.project.strokes[0].spray.is_none());
+    }
+
+    fn fx_entry(kind: crate::vfx::ClipKind, seed: u32) -> crate::model::FxClipEntry {
+        crate::model::FxClipEntry {
+            clip: crate::vfx::ParticleClip {
+                start: 0.0,
+                duration: 16.0,
+                kind,
+                color: 0xFFCC00,
+                seed,
+                angle: 0.0,
+                length: 130.0,
+                color2: None,
+            },
+            figure: 0,
+            node: 0,
+        }
+    }
+
+    #[test]
+    fn fx_preset_save_then_apply_round_trips_the_clip() {
+        let mut core = EditorCore::new();
+        core.project.fx_clips.clear();
+        core.project
+            .fx_clips
+            .push(fx_entry(crate::vfx::ClipKind::Sparkle, 42));
+        let edits = core.edits_since_autosave();
+
+        // Saving writes the preset file but is not an undoable
+        // project change: no snapshot.
+        core.fx_save_preset(0);
+        assert!(
+            core.status.contains("FX preset 'sparkle-1' saved"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits, "save takes no snapshot");
+        assert!(
+            core.fx_preset_names().iter().any(|n| n == "sparkle-1"),
+            "the saved preset is listed"
+        );
+
+        // Applying adds a fresh entry at the current frame on
+        // the selected figure (node 0), as one undo step.
+        core.current = 4;
+        core.fx_apply_preset("sparkle-1");
+        assert!(
+            core.status.contains("added at frame 5"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        assert_eq!(core.project.fx_clips.len(), 2);
+        let added = &core.project.fx_clips[1];
+        assert!(matches!(added.clip.kind, crate::vfx::ClipKind::Sparkle));
+        assert_eq!(added.clip.seed, 42, "the preset's clip data round-trips");
+        assert_eq!(added.clip.start, 4.0);
+        assert_eq!(added.figure, core.selected_figure);
+        assert_eq!(added.node, 0);
+
+        let _ = std::fs::remove_file(
+            std::path::PathBuf::from("fx-presets").join("sparkle-1.json"),
+        );
+    }
+
+    #[test]
+    fn fx_preset_failures_change_nothing() {
+        let mut core = EditorCore::new();
+        core.project.fx_clips.clear();
+        let edits = core.edits_since_autosave();
+        core.fx_save_preset(0);
+        assert!(
+            core.status.contains("no FX clip 1"),
+            "status: {}",
+            core.status
+        );
+        core.fx_apply_preset("wave13-no-such-preset");
+        assert!(
+            core.status.contains("FX preset apply failed"),
+            "status: {}",
+            core.status
+        );
+        assert!(core.project.fx_clips.is_empty());
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot on failures");
+    }
+
+    /// Write a tiny mono WAV into a pid-unique temp path and
+    /// return the path as a String. The `wave13` tag keeps these
+    /// files distinct from the wave11/12 tests' (same pid — one
+    /// test binary).
+    fn temp_wav(tag: &str, samples: Vec<f32>) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "styk-wave13-{tag}-{}.wav",
+            std::process::id()
+        ));
+        let wav = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples,
+        };
+        std::fs::write(&path, crate::audio_edit::write_wav(&wav)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// A fresh core whose only audio clip points at `path`,
+    /// starting at `start_frame`, with the project at `fps`.
+    fn core_with_clip(path: String, start_frame: usize, fps: f32) -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.fps = fps;
+        core.project.audio.clear();
+        core.project.audio.push(AudioClip {
+            path,
+            start_frame,
+            gain: 1.0,
+        });
+        core
+    }
+
+    #[test]
+    fn audio_split_at_silences_last_splits_two_bursts() {
+        // 0.5s burst, 0.5s silence, 0.5s burst at 8 kHz: the
+        // gap (4000 frames) clears the 0.25s minimum (2000
+        // frames), so the sounding ranges are exactly the two
+        // bursts.
+        let mut samples = vec![0.5; 4000];
+        samples.extend(vec![0.0; 4000]);
+        samples.extend(vec![0.5; 4000]);
+        let src = temp_wav("bursts", samples);
+        let mut core = core_with_clip(src.clone(), 10, 30.0);
+        let edits = core.edits_since_autosave();
+        core.audio_split_at_silences_last();
+        assert!(
+            core.status.contains("split at silences into 2 clips"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        assert_eq!(core.project.audio.len(), 2);
+        let (first, second) = (&core.project.audio[0], &core.project.audio[1]);
+        assert!(first.path.ends_with(".seg1.wav"), "path: {}", first.path);
+        assert!(second.path.ends_with(".seg2.wav"), "path: {}", second.path);
+        // Segment 1 starts where the clip started; segment 2 is
+        // offset by its range start (8000 frames = 1.0s = 30
+        // frames at 30 fps).
+        assert_eq!(first.start_frame, 10);
+        assert_eq!(second.start_frame, 40);
+        assert!(first.start_frame < second.start_frame, "starts are ordered");
+        for clip in [first, second] {
+            let back =
+                crate::audio_edit::read_wav(&clip.path).expect("segment file reads back");
+            assert_eq!(back.frames(), 4000, "each burst is one segment");
+        }
+        // The original file is untouched.
+        assert_eq!(crate::audio_edit::read_wav(&src).unwrap().frames(), 12000);
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&first.path);
+        let _ = std::fs::remove_file(&second.path);
+    }
+
+    #[test]
+    fn audio_split_at_silences_last_noops_without_a_long_gap() {
+        // Continuous sound is a single range: nothing to split,
+        // no files written, no snapshot.
+        let src = temp_wav("steady", vec![0.5; 8000]);
+        let mut core = core_with_clip(src.clone(), 7, 30.0);
+        let edits = core.edits_since_autosave();
+        core.audio_split_at_silences_last();
+        assert!(
+            core.status.contains("no silence of 0.25s or more"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot on a no-op");
+        assert_eq!(core.project.audio.len(), 1);
+        assert_eq!(core.project.audio[0].path, src);
+        assert_eq!(core.project.audio[0].start_frame, 7);
+        let source_path = std::path::PathBuf::from(&src);
+        let stem = source_path
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let seg1 = source_path.with_file_name(format!("{stem}.seg1.wav"));
+        assert!(!seg1.exists(), "no segment file is written on a no-op");
+        let _ = std::fs::remove_file(&src);
+    }
+
+    #[test]
+    fn audio_split_at_silences_last_reports_when_there_are_no_clips() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        let edits = core.edits_since_autosave();
+        core.audio_split_at_silences_last();
+        assert!(
+            core.status.contains("no audio clips"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot without clips");
     }
 }

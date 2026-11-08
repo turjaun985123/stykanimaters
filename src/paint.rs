@@ -5,7 +5,7 @@
 //! adapts these helpers to strokes. Everything is deterministic
 //! and unit-tested below.
 
-use crate::model::{Stroke, V2};
+use crate::model::{SprayMark, Stroke, V2};
 
 fn distance(a: V2, b: V2) -> f32 {
     ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt()
@@ -492,6 +492,42 @@ pub fn spray_offsets(seed: u64, count: usize, radius: f32) -> Vec<[f32; 2]> {
         .collect()
 }
 
+/// Expand a spray stroke's points into renderable dots: the
+/// single source of spray geometry for the rasterizer, the SVG
+/// exporter and the canvas, so all three draw the same dots.
+///
+/// Each point `i` grows 6 dots. Their offsets come from
+/// [`spray_offsets`] seeded with
+/// `mark.seed + i * 0x9E3779B97F4A7C15` (wrapping), so every
+/// point sprays from its own stream and the whole stroke's dots
+/// depend only on the points and the mark — never on render
+/// order, frame, or machine. A dot's alpha is
+/// `mark.opacity * (0.45 + 0.55 * frac)`, where `frac` is that
+/// dot's normalised radius (its offset length divided by
+/// `mark.radius`, in `[0, 1)`): dots near the point's centre are
+/// the faintest and dots at the disc's rim the strongest, all
+/// within `[0, mark.opacity]`. A zero `radius` puts every dot
+/// exactly on its point with `frac` 0. Empty `points` yields no
+/// dots.
+pub fn spray_dots(points: &[[f32; 2]], mark: &SprayMark) -> Vec<([f32; 2], f32)> {
+    let mut out: Vec<([f32; 2], f32)> = Vec::with_capacity(points.len() * 6);
+    for (i, &p) in points.iter().enumerate() {
+        let seed = mark
+            .seed
+            .wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        for offset in spray_offsets(seed, 6, mark.radius) {
+            let frac = if mark.radius > 0.0 {
+                (distance(offset, [0.0, 0.0]) / mark.radius).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let alpha = mark.opacity * (0.45 + 0.55 * frac);
+            out.push(([p[0] + offset[0], p[1] + offset[1]], alpha));
+        }
+    }
+    out
+}
+
 /// The eraser: remove every point within `radius` of `centre`
 /// (distance `<= radius`) from every stroke, splitting a stroke
 /// into several where the erasure cuts its middle. Each surviving
@@ -531,6 +567,7 @@ pub fn erase_at(strokes: &[Stroke], centre: V2, radius: f32) -> Vec<Stroke> {
                         Vec::new()
                     },
                     fill: None,
+                    spray: stroke.spray,
                 });
             }
         };
@@ -719,6 +756,82 @@ pub fn arrow_points(a: [f32; 2], b: [f32; 2], head_len: f32) -> Vec<[f32; 2]> {
 /// original points.
 pub fn mirror_points_x(points: &[[f32; 2]], cx: f32) -> Vec<[f32; 2]> {
     points.iter().map(|p| [2.0 * cx - p[0], p[1]]).collect()
+}
+
+/// Distance from `p` to the segment `a`–`b`: the perpendicular
+/// distance to the segment's line when the projection of `p`
+/// falls between the endpoints, the distance to the nearer
+/// endpoint otherwise. A zero-length segment (`a == b`) degrades
+/// to the plain distance to `a`.
+fn point_segment_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let len_sq = ab[0] * ab[0] + ab[1] * ab[1];
+    let t = if len_sq > 0.0 {
+        let ap = [p[0] - a[0], p[1] - a[1]];
+        ((ap[0] * ab[0] + ap[1] * ab[1]) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let closest = [a[0] + t * ab[0], a[1] + t * ab[1]];
+    let d = [p[0] - closest[0], p[1] - closest[1]];
+    (d[0] * d[0] + d[1] * d[1]).sqrt()
+}
+
+/// Simplify a polyline with the Douglas-Peucker algorithm: the
+/// endpoints are always kept, and an interior point survives
+/// only when removing it would move the path by more than
+/// `epsilon` somewhere — recursively, each span between two kept
+/// points drops all its interior points when the farthest of
+/// them sits within `epsilon` of the span's chord (see
+/// [`point_segment_distance`]), and subdivides at that farthest
+/// point otherwise.
+///
+/// The output is a subsequence of the input: points are copied
+/// verbatim, never averaged or repositioned, so a simplified
+/// stroke renders through the same kept points and simplification
+/// never shifts the drawing. Point order is preserved.
+///
+/// Passthrough cases return the input cloned: fewer than 3
+/// points (nothing removable) and `epsilon <= 0.0` (no tolerance,
+/// nothing may move). The subdivision runs on an explicit stack
+/// rather than recursion, so a long stroke cannot overflow the
+/// call stack; the kept set is the same either way, since each
+/// span's verdict depends only on its own endpoints and interior.
+pub fn simplify_points(points: &[[f32; 2]], epsilon: f32) -> Vec<[f32; 2]> {
+    if points.len() < 3 || epsilon <= 0.0 {
+        return points.to_vec();
+    }
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[points.len() - 1] = true;
+    // Spans between two kept endpoints still to examine.
+    let mut stack = vec![(0, points.len() - 1)];
+    while let Some((first, last)) = stack.pop() {
+        if last <= first + 1 {
+            continue;
+        }
+        let (a, b) = (points[first], points[last]);
+        let mut farthest = first + 1;
+        let mut max_dist = 0.0f32;
+        for i in first + 1..last {
+            let d = point_segment_distance(points[i], a, b);
+            if d > max_dist {
+                max_dist = d;
+                farthest = i;
+            }
+        }
+        if max_dist > epsilon {
+            keep[farthest] = true;
+            stack.push((first, farthest));
+            stack.push((farthest, last));
+        }
+    }
+    points
+        .iter()
+        .zip(&keep)
+        .filter(|(_, &k)| k)
+        .map(|(&p, _)| p)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1106,6 +1219,7 @@ mod tests {
             width: 4.0,
             widths: (0..=10).map(|i| 4.0 + i as f32).collect(),
             fill: Some(0x00FF00),
+            spray: None,
         }
     }
 
@@ -1154,6 +1268,7 @@ mod tests {
                 width: 2.0,
                 widths: Vec::new(),
                 fill: Some(0xABCDEF),
+                spray: None,
             },
         ];
         let out = erase_at(&strokes, [1000.0, 1000.0], 10.0);
@@ -1182,6 +1297,7 @@ mod tests {
             width: 3.0,
             widths: Vec::new(),
             fill: None,
+            spray: None,
         };
         assert!(erase_at(&[short], [10.0, 0.0], 5.0).is_empty());
         // No strokes in, no strokes out.
@@ -1722,5 +1838,228 @@ mod brush_wave12_tests {
             seeded_zero.iter().any(|&p| p != seeded_zero[0]),
             "seed 0 must not emit a single repeated offset"
         );
+    }
+}
+
+#[cfg(test)]
+mod simplify_tests {
+    use crate::paint::simplify_points;
+
+    /// Assert `output` is a subsequence of `input`: same order,
+    /// every output point found verbatim in the input.
+    fn assert_subsequence(input: &[[f32; 2]], output: &[[f32; 2]]) {
+        let mut rest = input;
+        for p in output {
+            let pos = rest
+                .iter()
+                .position(|q| q == p)
+                .expect("output point must appear verbatim in the input");
+            rest = &rest[pos + 1..];
+        }
+    }
+
+    #[test]
+    fn jittered_line_collapses_to_its_endpoints() {
+        // Interior points jitter at most 0.4 off the chord — well
+        // under epsilon 1.0 — so all of them drop.
+        let pts = vec![
+            [0.0, 0.0],
+            [10.0, 0.4],
+            [20.0, -0.3],
+            [30.0, 0.2],
+            [40.0, 0.0],
+        ];
+        assert_eq!(
+            simplify_points(&pts, 1.0),
+            vec![[0.0, 0.0], [40.0, 0.0]]
+        );
+    }
+
+    #[test]
+    fn sharp_corner_survives_small_epsilon_but_not_huge() {
+        // An L: along the x axis, then up. The corner (20, 0)
+        // sits ~14.14 from the (0, 0)-(20, 20) chord.
+        let pts = vec![
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [20.0, 0.0],
+            [20.0, 10.0],
+            [20.0, 20.0],
+        ];
+        assert_eq!(
+            simplify_points(&pts, 1.0),
+            vec![[0.0, 0.0], [20.0, 0.0], [20.0, 20.0]],
+            "corner kept, collinear midpoints dropped"
+        );
+        assert_eq!(
+            simplify_points(&pts, 100.0),
+            vec![[0.0, 0.0], [20.0, 20.0]],
+            "huge epsilon swallows the corner too"
+        );
+    }
+
+    #[test]
+    fn output_is_a_subsequence_with_verbatim_endpoints() {
+        let pts = vec![
+            [0.0, 0.0],
+            [5.0, 3.0],
+            [10.0, 0.0],
+            [15.0, -3.0],
+            [20.0, 0.0],
+            [25.0, 3.0],
+            [30.0, 0.0],
+        ];
+        let out = simplify_points(&pts, 1.0);
+        assert!(
+            out.len() < pts.len(),
+            "the wave has removable points: {out:?}"
+        );
+        assert_eq!(out.first(), pts.first(), "first endpoint verbatim");
+        assert_eq!(out.last(), pts.last(), "last endpoint verbatim");
+        assert_subsequence(&pts, &out);
+    }
+
+    #[test]
+    fn point_at_exactly_epsilon_is_dropped() {
+        let pts = vec![[0.0, 0.0], [10.0, 1.0], [20.0, 0.0]];
+        // The middle point is exactly 1.0 from the chord, and
+        // "stays <= epsilon" drops it.
+        assert_eq!(
+            simplify_points(&pts, 1.0),
+            vec![[0.0, 0.0], [20.0, 0.0]]
+        );
+        // Just under its distance, it survives.
+        assert_eq!(simplify_points(&pts, 0.99), pts);
+    }
+
+    #[test]
+    fn passthrough_for_short_inputs_and_nonpositive_epsilon() {
+        let empty: Vec<[f32; 2]> = Vec::new();
+        assert_eq!(simplify_points(&empty, 1.0), empty);
+        let one = vec![[3.0, 4.0]];
+        assert_eq!(simplify_points(&one, 1.0), one);
+        let two = vec![[0.0, 0.0], [9.0, 9.0]];
+        assert_eq!(simplify_points(&two, 1.0), two);
+        // epsilon <= 0 keeps everything, even a collapsible line.
+        let line = vec![[0.0, 0.0], [10.0, 0.1], [20.0, 0.0]];
+        assert_eq!(simplify_points(&line, 0.0), line);
+        assert_eq!(simplify_points(&line, -2.5), line);
+    }
+
+    #[test]
+    fn closed_stroke_with_coincident_endpoints_still_simplifies() {
+        // First == last makes the top-level chord zero-length;
+        // the far point measures its distance from that endpoint.
+        let pts = vec![[0.0, 0.0], [10.0, 10.0], [0.0, 0.0]];
+        assert_eq!(simplify_points(&pts, 1.0), pts);
+        assert_eq!(
+            simplify_points(&pts, 100.0),
+            vec![[0.0, 0.0], [0.0, 0.0]],
+            "both endpoints kept verbatim, interior dropped"
+        );
+    }
+}
+
+// ---- Wave 13 spray dots ----
+//
+// Separate module on purpose (same pattern as the Wave 10–12
+// modules): exact-name imports only, never a glob. Pins the
+// `spray_dots` contract the rasterizer, the SVG exporter and the
+// canvas all share: 6 dots per point, deterministic, every dot
+// centre inside the mark's disc around its source point, and
+// every alpha within the mark's opacity.
+#[cfg(test)]
+mod spray_dots_wave13_tests {
+    use crate::model::SprayMark;
+    use crate::paint::spray_dots;
+
+    fn mark() -> SprayMark {
+        SprayMark {
+            seed: 99,
+            radius: 12.0,
+            opacity: 0.5,
+        }
+    }
+
+    fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn spray_dots_count_is_six_per_point() {
+        let pts = vec![[0.0, 0.0], [100.0, 50.0], [-30.0, 80.0]];
+        assert_eq!(spray_dots(&pts, &mark()).len(), 18, "3 points x 6 dots");
+        assert_eq!(spray_dots(&pts[..1], &mark()).len(), 6, "1 point x 6 dots");
+    }
+
+    #[test]
+    fn spray_dots_are_deterministic() {
+        let pts = vec![[10.0, 10.0], [40.0, 90.0]];
+        let a = spray_dots(&pts, &mark());
+        let b = spray_dots(&pts, &mark());
+        assert_eq!(a, b, "same points + mark -> same dots, bit for bit");
+        // A different seed sprays a different pattern.
+        let other = SprayMark {
+            seed: 100,
+            ..mark()
+        };
+        assert_ne!(a, spray_dots(&pts, &other), "the seed drives the pattern");
+    }
+
+    #[test]
+    fn spray_dot_centres_stay_within_radius_of_their_point() {
+        let pts = vec![[0.0, 0.0], [250.0, 120.0]];
+        let m = mark();
+        let dots = spray_dots(&pts, &m);
+        assert_eq!(dots.len(), 12);
+        for (j, (centre, _)) in dots.iter().enumerate() {
+            let src = pts[j / 6];
+            let d = dist(*centre, src);
+            assert!(
+                d <= m.radius + 1e-3,
+                "dot {j} at {centre:?} is {d} from its source point {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn spray_dot_alphas_stay_within_the_marks_opacity() {
+        let pts = vec![[0.0, 0.0], [10.0, 10.0], [20.0, 20.0], [30.0, 30.0]];
+        let m = mark();
+        let dots = spray_dots(&pts, &m);
+        assert_eq!(dots.len(), 24);
+        for (_, alpha) in &dots {
+            assert!(
+                *alpha >= 0.0 && *alpha <= m.opacity,
+                "alpha {alpha} outside [0, {}]",
+                m.opacity
+            );
+            // Stronger pin from the documented falloff: the floor
+            // is 0.45 * opacity (frac = 0 at the disc's centre).
+            assert!(
+                *alpha >= 0.45 * m.opacity - 1e-6,
+                "alpha {alpha} below the 0.45 * opacity floor"
+            );
+        }
+    }
+
+    #[test]
+    fn spray_dots_of_no_points_is_empty() {
+        assert!(spray_dots(&[], &mark()).is_empty());
+    }
+
+    #[test]
+    fn spray_dots_with_zero_radius_sit_on_their_points() {
+        let m = SprayMark {
+            seed: 5,
+            radius: 0.0,
+            opacity: 0.8,
+        };
+        let dots = spray_dots(&[[7.0, 9.0]], &m);
+        assert_eq!(dots.len(), 6);
+        for (centre, alpha) in &dots {
+            assert_eq!(*centre, [7.0, 9.0], "zero radius: the dot is on the point");
+            assert_eq!(*alpha, 0.8 * 0.45, "frac 0 -> the floor alpha");
+        }
     }
 }

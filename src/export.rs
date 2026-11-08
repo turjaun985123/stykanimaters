@@ -394,9 +394,24 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
         }
     }
     // Brush strokes belonging to the authored frame under `frame_f`.
+    // A spray stroke (wave 13) skips the polyline entirely — a
+    // sprayed path must read as spray, not as a line with dots on
+    // it — and is collected as dots instead. Below, the dots join
+    // `particles` and are drawn by the same disc/alpha code as the
+    // weather and FX particles: one disc blender, and spray
+    // geometry comes only from `paint::spray_dots`.
     let authored = (frame_f.floor() as usize).min(project.frames.len().saturating_sub(1));
+    let mut spray: Vec<([f32; 2], f32, [u8; 3], f32)> = Vec::new();
     for stroke in &project.strokes {
         if stroke.frame == authored {
+            if let Some(mark) = &stroke.spray {
+                let radius = (stroke.width * 0.5).max(1.0);
+                let color = rgb(stroke.color);
+                for (centre, alpha) in crate::paint::spray_dots(&stroke.points, mark) {
+                    spray.push((centre, radius, color, alpha));
+                }
+                continue;
+            }
             let pressured = stroke.widths.len() == stroke.points.len();
             for (i, w) in stroke.points.windows(2).enumerate() {
                 let width = if pressured {
@@ -417,6 +432,14 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
         .into_iter()
         .map(|(p, r, c, a)| (view(p), r * zoom * ss as f32, c, a))
         .collect();
+    // Spray dots (wave 13) ride the particle path from here: same
+    // view transform, same radius scaling, same disc blending in
+    // the pixel pass below.
+    particles.extend(
+        spray
+            .into_iter()
+            .map(|(p, r, c, a)| (view(p), r * zoom * ss as f32, c, a)),
+    );
     // Fog bands (wave 10): (centre, rx, ry, peak alpha) in screen
     // space, filled by the weather block below when the weather
     // kind is Fog. Blended in the pixel pass at the same layer as
@@ -907,11 +930,17 @@ enum MuxPlan {
     /// No clip has an existing file: export stays silent.
     None,
     /// Exactly one audible clip: mux its file directly, offset by
-    /// ffmpeg like the original single-clip path.
-    Single { path: String, start_secs: f32 },
+    /// ffmpeg like the original single-clip path. The clip's
+    /// `gain` travels with the plan: `mux_audio` can only honour
+    /// a non-unity gain by routing the clip through the mix.
+    Single {
+        path: String,
+        start_secs: f32,
+        gain: f32,
+    },
     /// Two or more audible clips: mix them into one WAV first.
-    /// `(path, start_secs)` pairs sorted by start offset.
-    Mixed(Vec<(String, f32)>),
+    /// `(path, start_secs, gain)` triples sorted by start offset.
+    Mixed(Vec<(String, f32, f32)>),
 }
 
 /// Decide the mux plan for a project: clips whose files are missing
@@ -919,36 +948,107 @@ enum MuxPlan {
 /// the surviving clips are sorted by start offset.
 fn mux_plan(project: &Project) -> MuxPlan {
     let fps = project.fps.max(1.0);
-    let mut audible: Vec<(String, f32)> = project
+    let mut audible: Vec<(String, f32, f32)> = project
         .audio
         .iter()
         .filter(|clip| std::path::Path::new(&clip.path).exists())
-        .map(|clip| (clip.path.clone(), clip.start_frame as f32 / fps))
+        .map(|clip| {
+            (
+                clip.path.clone(),
+                clip.start_frame as f32 / fps,
+                clip.gain,
+            )
+        })
         .collect();
     audible.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     match audible.len() {
         0 => MuxPlan::None,
         1 => {
-            let (path, start_secs) = audible.into_iter().next().unwrap();
-            MuxPlan::Single { path, start_secs }
+            let (path, start_secs, gain) = audible.into_iter().next().unwrap();
+            MuxPlan::Single {
+                path,
+                start_secs,
+                gain,
+            }
         }
         _ => MuxPlan::Mixed(audible),
     }
 }
 
+/// Write `mixed` to a temporary WAV and mux it onto the silent
+/// `video`. The mix starts at t=0 because each clip's start
+/// offset is already baked into it, so the ffmpeg call has no
+/// `-itsoffset`. The temp file is removed either way.
+fn mux_mixed_wav(
+    video: &Path,
+    mixed: &crate::audio_edit::WavData,
+    out: &Path,
+) -> std::io::Result<bool> {
+    let tmp = unique_temp("mixdown").with_extension("wav");
+    std::fs::write(&tmp, crate::audio_edit::write_wav(mixed))?;
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-i",
+            video.to_str().unwrap_or(""),
+            "-i",
+            tmp.to_str().unwrap_or(""),
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-shortest",
+            out.to_str().unwrap_or(""),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = std::fs::remove_file(&tmp);
+    Ok(status?.success())
+}
+
 /// Mux the project's audio into an already-encoded silent MP4.
-/// With exactly one audible clip its file is passed to ffmpeg
-/// directly, offset by its start frame (`-itsoffset`). With two or
-/// more, every clip is first mixed into one WAV with
-/// `audio_edit::mix` (each clip placed at its start-frame offset)
-/// and the mix is muxed instead; the mixed WAV starts at t=0
+/// With exactly one audible clip at unity gain its file is passed
+/// to ffmpeg directly, offset by its start frame (`-itsoffset`).
+/// With two or more clips — or a single clip whose gain is not
+/// 1.0, which the direct path cannot scale — every clip is first
+/// mixed into one WAV with `audio_edit::mix` (each clip placed at
+/// its start-frame offset and scaled by its gain) and the mix is
+/// muxed instead; the mixed WAV starts at t=0
 /// because the offsets are baked into it, so that ffmpeg call has
 /// no `-itsoffset`. Clips whose files are missing are skipped; with
 /// no audible clip at all this returns `Ok(false)`.
 pub fn mux_audio(project: &Project, video: &Path, out: &Path) -> std::io::Result<bool> {
     match mux_plan(project) {
         MuxPlan::None => Ok(false),
-        MuxPlan::Single { path, start_secs } => {
+        MuxPlan::Single {
+            path,
+            start_secs,
+            gain,
+        } => {
+            if gain != 1.0 {
+                // The direct ffmpeg path cannot scale a file's
+                // volume, so a gained lone clip renders a one-clip
+                // mix with the gain applied and muxes that. The
+                // mix engine reads WAV only: if the clip is not
+                // WAV the mix fails and we fall through to the
+                // direct path below (gain unapplied), mirroring
+                // the multi-clip fallback.
+                let mix_clips = vec![crate::audio_edit::MixClip {
+                    path: path.clone(),
+                    start_secs,
+                    gain,
+                    fade_in: 0.0,
+                    fade_out: 0.0,
+                }];
+                if let Ok(mixed) = crate::audio_edit::mix(&mix_clips) {
+                    return mux_mixed_wav(video, &mixed, out);
+                }
+            }
             let status = std::process::Command::new("ffmpeg")
                 .args([
                     "-y",
@@ -977,10 +1077,10 @@ pub fn mux_audio(project: &Project, video: &Path, out: &Path) -> std::io::Result
         MuxPlan::Mixed(clips) => {
             let mix_clips: Vec<crate::audio_edit::MixClip> = clips
                 .iter()
-                .map(|(path, start_secs)| crate::audio_edit::MixClip {
+                .map(|(path, start_secs, gain)| crate::audio_edit::MixClip {
                     path: path.clone(),
                     start_secs: *start_secs,
-                    gain: 1.0,
+                    gain: *gain,
                     fade_in: 0.0,
                     fade_out: 0.0,
                 })
@@ -992,7 +1092,7 @@ pub fn mux_audio(project: &Project, video: &Path, out: &Path) -> std::io::Result
                     // clip among the audible ones, fall back to the
                     // earliest audible clip alone (the pre-Wave-10
                     // behaviour) instead of failing the export.
-                    let (path, start_secs) = &clips[0];
+                    let (path, start_secs, _gain) = &clips[0];
                     let status = std::process::Command::new("ffmpeg")
                         .args([
                             "-y",
@@ -1019,34 +1119,7 @@ pub fn mux_audio(project: &Project, video: &Path, out: &Path) -> std::io::Result
                     return Ok(status.success());
                 }
             };
-            let tmp = unique_temp("mixdown").with_extension("wav");
-            std::fs::write(&tmp, crate::audio_edit::write_wav(&mixed))?;
-            // No `-itsoffset` on this call: the mix starts at t=0
-            // because each clip's start offset is already baked
-            // into the mixed WAV.
-            let status = std::process::Command::new("ffmpeg")
-                .args([
-                    "-y",
-                    "-i",
-                    video.to_str().unwrap_or(""),
-                    "-i",
-                    tmp.to_str().unwrap_or(""),
-                    "-map",
-                    "0:v",
-                    "-map",
-                    "1:a",
-                    "-c:v",
-                    "copy",
-                    "-c:a",
-                    "aac",
-                    "-shortest",
-                    out.to_str().unwrap_or(""),
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            let _ = std::fs::remove_file(&tmp);
-            Ok(status?.success())
+            mux_mixed_wav(video, &mixed, out)
         }
     }
 }
@@ -1077,6 +1150,7 @@ mod mux_tests {
             .map(|(path, start_frame)| AudioClip {
                 path: path.to_string(),
                 start_frame,
+                gain: 1.0,
             })
             .collect();
         project
@@ -1110,6 +1184,7 @@ mod mux_tests {
             MuxPlan::Single {
                 path: real.clone(),
                 start_secs: 2.5,
+                gain: 1.0,
             }
         );
         let _ = std::fs::remove_file(&real);
@@ -1130,14 +1205,60 @@ mod mux_tests {
         assert_eq!(
             mux_plan(&project),
             MuxPlan::Mixed(vec![
-                (b.clone(), 0.0),
-                (c.clone(), 0.5),
-                (a.clone(), 2.5),
+                (b.clone(), 0.0, 1.0),
+                (c.clone(), 0.5, 1.0),
+                (a.clone(), 2.5, 1.0),
             ])
         );
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
         let _ = std::fs::remove_file(&c);
+    }
+
+    /// A demo project at 10 fps carrying exactly the given
+    /// `(path, start_frame, gain)` audio clips.
+    fn project_with_gains(clips: Vec<(&str, usize, f32)>) -> Project {
+        let mut project = Project::new_demo();
+        project.fps = 10.0;
+        project.audio = clips
+            .into_iter()
+            .map(|(path, start_frame, gain)| AudioClip {
+                path: path.to_string(),
+                start_frame,
+                gain,
+            })
+            .collect();
+        project
+    }
+
+    #[test]
+    fn single_gained_clip_plans_single_with_its_gain() {
+        let real = temp_audio("single-gain");
+        let project = project_with_gains(vec![(real.as_str(), 25, 0.5)]);
+        // The plan stays Single — mux_audio sees the non-unity
+        // gain and routes the clip through the mix itself.
+        assert_eq!(
+            mux_plan(&project),
+            MuxPlan::Single {
+                path: real.clone(),
+                start_secs: 2.5,
+                gain: 0.5,
+            }
+        );
+        let _ = std::fs::remove_file(&real);
+    }
+
+    #[test]
+    fn mixed_plan_carries_per_clip_gains() {
+        let a = temp_audio("gains-a");
+        let b = temp_audio("gains-b");
+        let project = project_with_gains(vec![(a.as_str(), 25, 2.0), (b.as_str(), 0, 0.5)]);
+        assert_eq!(
+            mux_plan(&project),
+            MuxPlan::Mixed(vec![(b.clone(), 0.0, 0.5), (a.clone(), 2.5, 2.0),])
+        );
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
     }
 }
 
@@ -1194,29 +1315,49 @@ pub fn export_png_sequence_range(
 /// Export every authored frame as `frame-0001.jpg`, `frame-0002.jpg`,
 /// ... in `dir` (JPEG, quality 90).
 pub fn export_jpeg_sequence(project: &Project, dir: &Path) -> std::io::Result<usize> {
+    if project.frames.is_empty() {
+        std::fs::create_dir_all(dir)?;
+        return Ok(0);
+    }
+    export_jpeg_sequence_range(project, 0, project.frames.len() - 1, dir)
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped to
+/// the timeline) as `frame-XXXX.jpg` files in `dir`, keeping each
+/// frame's authored index in its file name (frame 2 exports as
+/// `frame-0003.jpg`, as in a full sequence export). Returns the
+/// number of files written; an empty or inverted range is an
+/// error.
+pub fn export_jpeg_sequence_range(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+) -> std::io::Result<usize> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
     std::fs::create_dir_all(dir)?;
-    for i in 0..project.frames.len() {
+    for i in from..=to {
         let img = render_frame(project, i);
         let path = dir.join(format!("frame-{:04}.jpg", i + 1));
         let mut file = std::fs::File::create(&path)?;
         let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 90);
         encoder.encode_image(&img).map_err(std::io::Error::other)?;
     }
-    Ok(project.frames.len())
+    Ok(to - from + 1)
 }
 
-/// Export the animation as an APNG (animated PNG) at the project
-/// fps, looping forever. Uses the `png` crate's native APNG writer
+/// Encode the given frame times as an APNG (animated PNG) at the
+/// project fps, looping forever (the shared encoder behind the
+/// APNG exports). Uses the `png` crate's native APNG writer
 /// (`set_animated`): the first frame is stored as IDAT and the rest
-/// as fdAT. Frames are the same full-canvas samples the GIF/MP4
-/// exports use, converted to RGBA.
-pub fn export_apng(project: &Project, path: &Path) -> std::io::Result<usize> {
+/// as fdAT. An empty `times` creates the parent directory but
+/// writes no file, returning `Ok(0)`.
+fn encode_apng(project: &Project, times: &[f32], path: &Path) -> std::io::Result<usize> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let times = sample_times(project);
     if times.is_empty() {
         return Ok(0);
     }
@@ -1246,6 +1387,31 @@ pub fn export_apng(project: &Project, path: &Path) -> std::io::Result<usize> {
     }
     writer.finish().map_err(std::io::Error::other)?;
     Ok(times.len())
+}
+
+/// Export the animation as an APNG (animated PNG) at the project
+/// fps, looping forever. Frames are the same full-canvas samples
+/// the GIF/MP4 exports use, converted to RGBA.
+pub fn export_apng(project: &Project, path: &Path) -> std::io::Result<usize> {
+    let times = sample_times(project);
+    encode_apng(project, &times, path)
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped to
+/// the timeline) as an APNG (animated PNG) at the project fps,
+/// looping forever. Frames keep their own durations
+/// (duration-expanded or tween-sampled, exactly as in a full
+/// export). Returns the number of APNG frames written; an empty
+/// or inverted range is an error.
+pub fn export_apng_range(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+) -> std::io::Result<usize> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let times = sample_times_range(project, from, to);
+    encode_apng(project, &times, path)
 }
 
 #[cfg(test)]
@@ -1320,6 +1486,7 @@ mod tests {
             width: 12.0,
             widths: Vec::new(),
             fill: None,
+            spray: None,
         }];
         project.camera.clear();
         project
@@ -1910,6 +2077,7 @@ mod trail_tests {
                 seed: 5,
                 angle: 0.0,
                 length: 80.0,
+                color2: None,
             },
             figure: 0,
             node: 0,
@@ -1928,8 +2096,9 @@ mod trail_tests {
 #[cfg(test)]
 mod range_export_tests {
     use super::{
-        export_gif, export_gif_range, export_mp4_range, export_png_sequence,
-        export_png_sequence_range, export_webm_range,
+        export_apng, export_apng_range, export_gif, export_gif_range,
+        export_jpeg_sequence, export_jpeg_sequence_range, export_mp4_range,
+        export_png_sequence, export_png_sequence_range, export_webm_range,
     };
     use crate::model::Project;
     use image::AnimationDecoder as _;
@@ -1964,6 +2133,36 @@ mod range_export_tests {
         let decoder =
             image::codecs::gif::GifDecoder::new(std::io::BufReader::new(file)).unwrap();
         decoder.into_frames().count()
+    }
+
+    /// The frame counts inside a written APNG: the `acTL` chunk's
+    /// declared frame count and the number of `fcTL` chunks,
+    /// walked chunk by chunk like the `mod tests` APNG check
+    /// (type strings can also occur inside compressed data, so
+    /// don't just substring-search).
+    fn apng_frame_counts(path: &Path) -> (u32, usize) {
+        let bytes = std::fs::read(path).unwrap();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG file");
+        let mut actl_frames: Option<u32> = None;
+        let mut fctl_count = 0usize;
+        let mut off = 8usize;
+        loop {
+            assert!(off + 8 <= bytes.len(), "truncated chunk header at {off}");
+            let len = u32::from_be_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+            let ty = &bytes[off + 4..off + 8];
+            match ty {
+                b"acTL" => {
+                    actl_frames = Some(u32::from_be_bytes(
+                        bytes[off + 8..off + 12].try_into().unwrap(),
+                    ));
+                }
+                b"fcTL" => fctl_count += 1,
+                b"IEND" => break,
+                _ => {}
+            }
+            off += 12 + len;
+        }
+        (actl_frames.expect("APNG has no acTL chunk"), fctl_count)
     }
 
     #[test]
@@ -2122,5 +2321,262 @@ mod range_export_tests {
         assert!(std::fs::metadata(&webm_path).unwrap().len() > 0);
         let _ = std::fs::remove_file(&mp4_path);
         let _ = std::fs::remove_file(&webm_path);
+    }
+
+    #[test]
+    fn apng_range_writes_exactly_the_sub_range_frames() {
+        let project = tiny_project();
+        let path = temp_file("apng-sub", "png");
+        let n = export_apng_range(&project, 1, 3, &path).unwrap();
+        assert_eq!(n, 3, "frames 1..=3 of 5 must write 3 APNG frames");
+        let (actl, fctl) = apng_frame_counts(&path);
+        assert_eq!(actl, 3, "acTL must declare the sub-range's frames");
+        assert_eq!(fctl, 3, "one fcTL chunk per animation frame");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apng_range_clamps_to_the_timeline() {
+        let project = tiny_project();
+        let path = temp_file("apng-clamp", "png");
+        let n = export_apng_range(&project, 3, 999, &path).unwrap();
+        assert_eq!(n, 2, "3..=999 on 5 frames clamps to frames 3..=4");
+        assert_eq!(apng_frame_counts(&path), (2, 2));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apng_range_keeps_each_frames_own_duration() {
+        let mut project = tiny_project();
+        project.frames[2].duration = 2.0; // frame 2 is held twice as long
+        let path = temp_file("apng-dur", "png");
+        let n = export_apng_range(&project, 1, 3, &path).unwrap();
+        assert_eq!(n, 4, "frames 1, 2 (held x2), 3 expand to 4 APNG frames");
+        assert_eq!(apng_frame_counts(&path), (4, 4));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apng_range_rejects_empty_and_inverted_ranges() {
+        let project = tiny_project();
+        let path = temp_file("apng-err", "png");
+        assert!(export_apng_range(&project, 3, 1, &path).is_err(), "inverted range");
+        assert!(
+            export_apng_range(&project, 99, 2, &path).is_err(),
+            "99..=2 clamps to 4..=2, still empty"
+        );
+    }
+
+    #[test]
+    fn apng_full_export_matches_the_full_range() {
+        let project = tiny_project();
+        let full_path = temp_file("apng-full", "png");
+        let range_path = temp_file("apng-fullrange", "png");
+        let n_full = export_apng(&project, &full_path).unwrap();
+        let n_range =
+            export_apng_range(&project, 0, project.frames.len() - 1, &range_path).unwrap();
+        assert_eq!(n_full, n_range);
+        assert_eq!(apng_frame_counts(&full_path), apng_frame_counts(&range_path));
+        // The encoder is deterministic (the determinism suite
+        // pins it), so the full range through the range path is
+        // byte-identical to the wrapper's output.
+        assert_eq!(
+            std::fs::read(&full_path).unwrap(),
+            std::fs::read(&range_path).unwrap()
+        );
+        let _ = std::fs::remove_file(&full_path);
+        let _ = std::fs::remove_file(&range_path);
+    }
+
+    #[test]
+    fn jpeg_range_writes_exactly_the_clamped_file_count() {
+        let project = tiny_project();
+        let dir = temp_dir("jpeg-range");
+        let n = export_jpeg_sequence_range(&project, 2, 99, &dir).unwrap();
+        assert_eq!(n, 3, "2..=99 on 5 frames clamps to frames 2..=4");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        // File names keep the authored indices, as in a full export.
+        let expected: Vec<String> = ["frame-0003.jpg", "frame-0004.jpg", "frame-0005.jpg"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(names, expected);
+        for name in &names {
+            let bytes = std::fs::read(dir.join(name)).unwrap();
+            assert_eq!(&bytes[0..2], &[0xFF, 0xD8], "{name}: missing JPEG SOI marker");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn jpeg_range_rejects_inverted_ranges() {
+        let project = tiny_project();
+        let dir = temp_dir("jpeg-err");
+        assert!(export_jpeg_sequence_range(&project, 4, 1, &dir).is_err());
+    }
+
+    #[test]
+    fn jpeg_full_export_matches_the_full_range() {
+        let project = tiny_project();
+        let full_dir = temp_dir("jpeg-full");
+        let range_dir = temp_dir("jpeg-fullrange");
+        let n_full = export_jpeg_sequence(&project, &full_dir).unwrap();
+        let n_range =
+            export_jpeg_sequence_range(&project, 0, project.frames.len() - 1, &range_dir)
+                .unwrap();
+        assert_eq!(n_full, 5);
+        assert_eq!(n_full, n_range);
+        // Same file set, byte for byte (the JPEG encoder is
+        // deterministic, as the determinism suite pins).
+        let sorted_names = |dir: &Path| -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let full_names = sorted_names(&full_dir);
+        assert_eq!(full_names, sorted_names(&range_dir));
+        for name in &full_names {
+            assert_eq!(
+                std::fs::read(full_dir.join(name)).unwrap(),
+                std::fs::read(range_dir.join(name)).unwrap(),
+                "{name}: full and full-range exports differ"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&full_dir);
+        let _ = std::fs::remove_dir_all(&range_dir);
+    }
+}
+
+#[cfg(test)]
+mod spray_render_tests {
+    use crate::export::render_frame_at;
+    use crate::model::{Frame, Project, SprayMark, Stroke};
+    use crate::paint::spray_dots;
+    use image::Rgb;
+
+    /// One frame, no figures, black 200x200 stage, a single white
+    /// horizontal stroke from (50, 100) to (150, 100) at width 8 —
+    /// plain or sprayed depending on `spray`. With the camera
+    /// cleared the default view maps stage units 1:1 onto output
+    /// pixels, so pixel coordinates below are stage coordinates.
+    fn spray_project(spray: Option<SprayMark>) -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [200.0, 200.0];
+        project.background = 0x000000;
+        project.figures.clear();
+        project.frames = vec![Frame {
+            poses: Vec::new(),
+            duration: 1.0,
+            easing: None,
+            bends: Vec::new(),
+        }];
+        project.camera.clear();
+        project.strokes = vec![Stroke {
+            frame: 0,
+            points: vec![[50.0, 100.0], [150.0, 100.0]],
+            color: 0xFFFFFF,
+            width: 8.0,
+            widths: Vec::new(),
+            fill: None,
+            spray,
+        }];
+        project
+    }
+
+    fn mark() -> SprayMark {
+        SprayMark {
+            seed: 42,
+            radius: 6.0,
+            opacity: 0.85,
+        }
+    }
+
+    #[test]
+    fn spray_stroke_renders_as_dots_not_a_polyline() {
+        let mark = mark();
+        let sprayed = render_frame_at(&spray_project(Some(mark)), 0.0);
+        let plain = render_frame_at(&spray_project(None), 0.0);
+        assert_ne!(
+            sprayed.as_raw(),
+            plain.as_raw(),
+            "a spray stroke must not render like its polyline"
+        );
+
+        // The dots actually land: the strongest dot's centre pixel
+        // is lit. Expected geometry comes from `spray_dots` itself
+        // — the single spray geometry source — not from a second
+        // computation here.
+        let points = [[50.0, 100.0], [150.0, 100.0]];
+        let dots = spray_dots(&points, &mark);
+        assert!(!dots.is_empty(), "the mark must produce dots");
+        let (centre, _) = dots
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+        let (cx, cy) = (centre[0].round() as u32, centre[1].round() as u32);
+        assert_ne!(
+            sprayed.get_pixel(cx, cy),
+            &Rgb([0u8, 0, 0]),
+            "strongest dot centre {centre:?} must be painted"
+        );
+
+        // No polyline: along the stroke's own line, every pixel
+        // that no dot can reach (centre farther than the dot
+        // radius 4 plus the pixel footprint) stays background in
+        // the spray render, while the plain render paints it
+        // solid — the path itself is gone, only dots remain.
+        let black = Rgb([0u8, 0, 0]);
+        let white = Rgb([255u8, 255, 255]);
+        let mut checked = 0;
+        for x in (62..=138).step_by(2) {
+            let p = [x as f32 + 0.5, 100.5];
+            let nearest = dots
+                .iter()
+                .map(|(c, _)| {
+                    let (dx, dy) = (p[0] - c[0], p[1] - c[1]);
+                    (dx * dx + dy * dy).sqrt()
+                })
+                .fold(f32::INFINITY, f32::min);
+            if nearest > 6.0 {
+                checked += 1;
+                assert_eq!(
+                    sprayed.get_pixel(x, 100),
+                    &black,
+                    "pixel ({x}, 100) is beyond every dot but on the path"
+                );
+                assert_eq!(
+                    plain.get_pixel(x, 100),
+                    &white,
+                    "plain polyline must cover ({x}, 100)"
+                );
+            }
+        }
+        assert!(checked > 0, "the scan must find dot-free path pixels");
+    }
+
+    #[test]
+    fn spray_render_is_deterministic() {
+        let project = spray_project(Some(mark()));
+        let a = render_frame_at(&project, 0.0);
+        let b = render_frame_at(&project, 0.0);
+        assert_eq!(a.as_raw(), b.as_raw(), "same frame, same pixels");
+    }
+
+    #[test]
+    fn plain_stroke_keeps_its_polyline_render() {
+        // The None path is the classic solid polyline: covered on
+        // the path (including the round cap at the endpoint),
+        // background well off it.
+        let plain = render_frame_at(&spray_project(None), 0.0);
+        assert_eq!(plain.get_pixel(100, 100), &Rgb([255u8, 255, 255]));
+        assert_eq!(plain.get_pixel(50, 100), &Rgb([255u8, 255, 255]));
+        assert_eq!(plain.get_pixel(100, 80), &Rgb([0u8, 0, 0]));
     }
 }

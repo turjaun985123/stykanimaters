@@ -560,6 +560,116 @@ pub fn reduce_keys(channel: &mut Channel, tolerance: f32) -> usize {
     removed
 }
 
+/// Time-reverse a slice of keys around `centre`: afterwards the
+/// channel plays backwards, so the curve it evaluates is
+/// `w(t) = v(2·centre − t)` where `v` was the curve before —
+/// the "mirror / reverse this channel" operation of a graph
+/// editor, e.g. turning a wind-up into its own release.
+///
+/// Each key keeps its value and moves to frame
+/// `2·centre − frame`; the slice ends up back in ascending
+/// order (reflection reverses it, so the keys are reversed
+/// after transforming). Tangents transform as differentiation
+/// of `w` demands — `w'(t) = −v'(2·centre − t)` — so a key's
+/// new `in_tan` is the negation of its old `out_tan` and its
+/// new `out_tan` the negation of its old `in_tan`: slopes swap
+/// sides and flip sign.
+///
+/// [`Interp`] modes belong to segments, not keys, and segments
+/// reverse order. The mode therefore cannot simply travel with
+/// its key: the key that starts a segment after mirroring is
+/// the mirror of the key that *ended* that segment before, so
+/// each key (except the new last) takes the mode of the key
+/// that preceded its source key — in slice terms, new key `m`
+/// gets old key `n − 2 − m`'s mode. The new last key starts no
+/// segment; it keeps the mode it carried in (the old first
+/// key's), which evaluation never reads.
+///
+/// The invariant this guarantees: for Hermite and Linear
+/// segments, `value_at(centre + d)` after mirroring equals
+/// `value_at(centre − d)` before it, for every `d` — a
+/// reversed Hermite segment is the same polynomial traversed
+/// backwards, and a reversed straight line is itself. **Step
+/// segments are the exception**: a reversed step would have to
+/// hold the segment's *end* value and jump at its start,
+/// which this engine cannot express (Step always holds the
+/// starting key's value), so a mirrored step segment holds
+/// the original segment's end value instead. The mode itself
+/// is still remapped like the others — the information is not
+/// lost, only the hold direction — and at the key frames the
+/// values agree in every mode.
+///
+/// Mirroring twice restores frames, values and tangents
+/// exactly, restores every segment's mode exactly, and so
+/// restores the evaluated curve exactly for all modes. The
+/// one field that may differ afterwards is the *last* key's
+/// stored [`Interp`]: it governs no segment in either list,
+/// so no evaluation ever records it, and the remap above
+/// leaves the original second-to-last key's mode in that
+/// slot instead.
+///
+/// An empty slice is left alone. A single key still has its
+/// frame reflected and its tangents swapped/negated (its
+/// constant curve is of course unchanged). Keys must be in
+/// ascending frame order (see [`Channel::sort_keys`]).
+pub fn mirror_keys_time(keys: &mut [Key], centre: f32) {
+    let n = keys.len();
+    if n == 0 {
+        return;
+    }
+    // Snapshot the segment modes before mutating: the remap
+    // below reads modes from positions the reversal moves.
+    let modes: Vec<Interp> = keys.iter().map(|k| k.interp).collect();
+    for k in keys.iter_mut() {
+        *k = Key {
+            frame: 2.0 * centre - k.frame,
+            value: k.value,
+            in_tan: -k.out_tan,
+            out_tan: -k.in_tan,
+            interp: k.interp,
+        };
+    }
+    // Reflection reversed the frame order; reverse the slice
+    // to restore the ascending order evaluation relies on.
+    keys.reverse();
+    // Segment modes: keys[m] now starts the segment that was
+    // old segment (n - 2 - m) run backwards, so it takes that
+    // segment's mode. The loop stops before the new last key,
+    // which starts no segment and keeps the mode it has.
+    for m in 0..n.saturating_sub(1) {
+        keys[m].interp = modes[n - 2 - m];
+    }
+}
+
+/// Scale every key's value around `pivot`:
+/// `value' = pivot + (value − pivot) · factor` — the "stretch
+/// these values" operation of a graph editor, e.g. doubling
+/// how far a root channel travels without moving the point it
+/// travels *from*. Frames and [`Interp`] modes are untouched.
+///
+/// Tangents are slopes in value-units per frame, so they scale
+/// by the same factor (a negative factor reflects the values
+/// and correctly flips every slope's sign with them). A
+/// factor of 1 is the identity; a factor of 0 flattens every
+/// value onto `pivot` with zero tangents — a constant channel.
+///
+/// Angle-channel warning: values are **not** re-wrapped.
+/// Scaling degrees can push them outside (−180, 180] or
+/// across the ±180° wrap, and [`Channel::value_at`] reads
+/// angle segments by their shortest circular path, so a
+/// scaled channel whose values straddle the wrap differently
+/// than before will evaluate differently than a naive
+/// scaling of the old curve. The caller is responsible for
+/// wrap sanity — keep factors modest and the pivot near the
+/// values when scaling angles.
+pub fn scale_key_values(keys: &mut [Key], factor: f32, pivot: f32) {
+    for k in keys.iter_mut() {
+        k.value = pivot + (k.value - pivot) * factor;
+        k.in_tan *= factor;
+        k.out_tan *= factor;
+    }
+}
+
 /// The result of [`apply_channels`]: channel-overridden poses plus
 /// the figure defs to evaluate them with (clones of the project's
 /// defs, with any length channels applied).
@@ -1599,5 +1709,302 @@ mod preset_tests {
             apply_tangent_preset(&mut none, preset, true);
             assert!(none.is_empty(), "{preset:?} on an empty slice is a no-op");
         }
+    }
+}
+
+#[cfg(test)]
+mod transform_tests {
+    use super::{mirror_keys_time, scale_key_values, Channel, ChannelTarget, Interp, Key};
+
+    // Cross-parameterisation comparisons (the same polynomial
+    // evaluated forwards and backwards) accumulate a little
+    // more float error than this file's direct comparisons, so
+    // the tolerance here is 1e-3 rather than the usual 1e-4.
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    fn channel(keys: Vec<Key>) -> Channel {
+        Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys,
+        }
+    }
+
+    /// A 3-key Hermite channel with distinct tangents on every
+    /// side of every key, spanning frames 0..10 (centre 5).
+    fn hermite_channel() -> Channel {
+        channel(vec![
+            Key {
+                frame: 0.0,
+                value: 0.0,
+                in_tan: 0.0,
+                out_tan: 2.0,
+                interp: Interp::Hermite,
+            },
+            Key {
+                frame: 4.0,
+                value: 40.0,
+                in_tan: 1.0,
+                out_tan: -1.0,
+                interp: Interp::Hermite,
+            },
+            Key {
+                frame: 10.0,
+                value: 20.0,
+                in_tan: 3.0,
+                out_tan: 0.0,
+                interp: Interp::Hermite,
+            },
+        ])
+    }
+
+    #[test]
+    fn mirror_reverses_a_hermite_channel_in_time() {
+        let before = hermite_channel();
+        let mut after = hermite_channel();
+        mirror_keys_time(&mut after.keys, 5.0);
+        // The defining invariant: sampling the mirrored channel
+        // at centre + d reproduces the original at centre - d.
+        // The d values land mid-segment on both sides, exactly
+        // on keys (1 and 5), and in the clamped region (6).
+        for d in [0.0, 1.0, 2.5, 3.7, 5.0, 6.0] {
+            let mirrored = after.value_at(5.0 + d);
+            let original = before.value_at(5.0 - d);
+            assert!(
+                approx(mirrored, original),
+                "d {d}: mirrored {mirrored} vs original {original}"
+            );
+        }
+        // Keys come back in ascending frame order, frames
+        // reflected, tangents swapped and negated.
+        let frames: Vec<f32> = after.keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, [0.0, 6.0, 10.0], "reflected, ascending");
+        let last = after.keys[2];
+        assert!(
+            approx(last.in_tan, -2.0) && approx(last.out_tan, 0.0),
+            "old first key's tangents swap sides negated: {last:?}"
+        );
+    }
+
+    /// A channel whose two segments use different modes, so a
+    /// wrong interp remap changes evaluation grossly: segment 0
+    /// is Linear, segment 1 a strongly curved Hermite (a
+    /// mistaken Step there would pin the whole mirrored segment
+    /// to one value). The last key's Step governs no segment —
+    /// it is the dangling slot the mirror docs describe.
+    fn mixed_channel() -> Channel {
+        channel(vec![
+            Key {
+                frame: 0.0,
+                value: 0.0,
+                in_tan: 0.0,
+                out_tan: 0.0,
+                interp: Interp::Linear,
+            },
+            Key {
+                frame: 4.0,
+                value: 40.0,
+                in_tan: 0.0,
+                out_tan: 6.0,
+                interp: Interp::Hermite,
+            },
+            Key {
+                frame: 10.0,
+                value: 20.0,
+                in_tan: -6.0,
+                out_tan: 0.0,
+                interp: Interp::Step,
+            },
+        ])
+    }
+
+    #[test]
+    fn mirror_shifts_interp_modes_with_their_segments() {
+        let before = mixed_channel();
+        let mut after = mixed_channel();
+        mirror_keys_time(&mut after.keys, 5.0);
+        // Whole keys, exactly: frames reflected about 5, values
+        // carried, tangents swapped/negated — and the modes
+        // shifted by one slot. Old segment 1 (Hermite) now
+        // starts at the mirrored old last key; old segment 0
+        // (Linear) starts at the mirrored old middle key; the
+        // new last key keeps the old first key's mode (Linear),
+        // NOT the old last key's Step, which belonged to no
+        // segment and so had nowhere to land.
+        assert_eq!(
+            after.keys,
+            [
+                Key {
+                    frame: 0.0,
+                    value: 20.0,
+                    in_tan: 0.0,
+                    out_tan: 6.0,
+                    interp: Interp::Hermite,
+                },
+                Key {
+                    frame: 6.0,
+                    value: 40.0,
+                    in_tan: -6.0,
+                    out_tan: 0.0,
+                    interp: Interp::Linear,
+                },
+                Key {
+                    frame: 10.0,
+                    value: 0.0,
+                    in_tan: 0.0,
+                    out_tan: 0.0,
+                    interp: Interp::Linear,
+                },
+            ]
+        );
+        // The invariant holds through both segments (Linear and
+        // Hermite alike): d lands in segment 1, segment 0, and
+        // across the shared key.
+        for d in [0.8, 2.0, 4.0, 5.0] {
+            let mirrored = after.value_at(5.0 + d);
+            let original = before.value_at(5.0 - d);
+            assert!(
+                approx(mirrored, original),
+                "d {d}: mirrored {mirrored} vs original {original}"
+            );
+        }
+    }
+
+    #[test]
+    fn mirroring_twice_restores_keys_except_the_dangling_interp() {
+        let original = mixed_channel();
+        let mut keys = original.keys.clone();
+        mirror_keys_time(&mut keys, 5.0);
+        mirror_keys_time(&mut keys, 5.0);
+        // Frames, values and tangents restore exactly, and so
+        // do the modes of both keys that start segments.
+        assert_eq!(keys[0], original.keys[0], "first key exact");
+        assert_eq!(keys[1], original.keys[1], "middle key exact");
+        // The last key restores exactly EXCEPT its interp: that
+        // slot governs no segment in either list, so nothing in
+        // evaluation records the original Step, and the remap
+        // leaves the original middle key's mode (Hermite) there
+        // instead. This is the weaker truth the mirror docs pin
+        // down.
+        assert_eq!(
+            keys[2],
+            Key {
+                interp: Interp::Hermite,
+                ..original.keys[2]
+            },
+            "last key exact but for the dangling interp slot"
+        );
+        // The evaluated curve still round-trips exactly, since
+        // only evaluation-irrelevant data differed.
+        let restored = channel(keys);
+        for f in [0.0, 2.0, 4.0, 7.0, 10.0] {
+            assert!(
+                approx(restored.value_at(f), original.value_at(f)),
+                "curve differs at frame {f}"
+            );
+        }
+    }
+
+    #[test]
+    fn mirror_handles_empty_and_single_key_slices() {
+        let mut none: Vec<Key> = Vec::new();
+        mirror_keys_time(&mut none, 5.0);
+        assert!(none.is_empty(), "empty slice untouched");
+        // A single key: frame reflects, tangents swap/negate,
+        // and the constant curve is unchanged.
+        let mut one = vec![Key {
+            frame: 3.0,
+            value: 42.0,
+            in_tan: 2.0,
+            out_tan: -1.0,
+            interp: Interp::Hermite,
+        }];
+        mirror_keys_time(&mut one, 5.0);
+        assert_eq!(
+            one[0],
+            Key {
+                frame: 7.0,
+                value: 42.0,
+                in_tan: 1.0,
+                out_tan: -2.0,
+                interp: Interp::Hermite,
+            }
+        );
+        let ch = channel(one);
+        assert!(approx(ch.value_at(0.0), 42.0));
+        assert!(approx(ch.value_at(10.0), 42.0));
+    }
+
+    #[test]
+    fn scale_about_a_pivot_stretches_values_and_tangents() {
+        // The brief's canonical case: factor 2 about pivot 10
+        // maps 20 -> 30 and doubles every tangent. Frames and
+        // interps are not the transform's business.
+        let mut keys = vec![
+            Key {
+                frame: 3.0,
+                value: 20.0,
+                in_tan: 1.5,
+                out_tan: -2.0,
+                interp: Interp::Linear,
+            },
+            Key {
+                frame: 9.0,
+                value: -10.0,
+                in_tan: 0.5,
+                out_tan: 0.25,
+                interp: Interp::Step,
+            },
+        ];
+        scale_key_values(&mut keys, 2.0, 10.0);
+        assert!(approx(keys[0].value, 30.0), "20 -> 30: {}", keys[0].value);
+        assert!(approx(keys[1].value, -30.0), "-10 -> -30: {}", keys[1].value);
+        assert!(approx(keys[0].in_tan, 3.0) && approx(keys[0].out_tan, -4.0));
+        assert!(approx(keys[1].in_tan, 1.0) && approx(keys[1].out_tan, 0.5));
+        assert_eq!(keys[0].frame, 3.0, "frames untouched");
+        assert_eq!(keys[1].frame, 9.0, "frames untouched");
+        assert_eq!(keys[0].interp, Interp::Linear, "modes untouched");
+        assert_eq!(keys[1].interp, Interp::Step, "modes untouched");
+    }
+
+    #[test]
+    fn scale_by_one_is_the_identity() {
+        let mut keys = hermite_channel().keys;
+        let original = keys.clone();
+        // A non-zero pivot proves the identity comes from the
+        // formula, not from skipping the arithmetic.
+        scale_key_values(&mut keys, 1.0, 7.0);
+        assert_eq!(keys, original, "factor 1 changes nothing");
+    }
+
+    #[test]
+    fn scale_by_zero_flattens_onto_the_pivot() {
+        let mut keys = hermite_channel().keys;
+        scale_key_values(&mut keys, 0.0, 4.0);
+        for k in &keys {
+            assert!(approx(k.value, 4.0), "value flattened: {}", k.value);
+            assert!(k.in_tan == 0.0 && k.out_tan == 0.0, "tangents zeroed: {k:?}");
+        }
+        // And the flattened keys evaluate as a constant channel.
+        let ch = channel(keys);
+        assert!(approx(ch.value_at(2.0), 4.0));
+        assert!(approx(ch.value_at(7.5), 4.0));
+    }
+
+    #[test]
+    fn scale_by_a_negative_factor_reflects() {
+        let mut keys = vec![Key {
+            frame: 0.0,
+            value: 20.0,
+            in_tan: 1.5,
+            out_tan: -2.0,
+            interp: Interp::Hermite,
+        }];
+        scale_key_values(&mut keys, -1.0, 0.0);
+        assert!(approx(keys[0].value, -20.0), "20 reflected to -20");
+        assert!(approx(keys[0].in_tan, -1.5), "slope signs flip too");
+        assert!(approx(keys[0].out_tan, 2.0), "slope signs flip too");
     }
 }

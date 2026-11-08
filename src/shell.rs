@@ -9,10 +9,16 @@
 //!
 //! The `*_in` variants take the directory explicitly so tests
 //! (and any future settings screen) never touch the real folder.
+//!
+//! On top of the two stores sit two session-continuity queries
+//! for a future startup prompt: which project was open last,
+//! and whether the recovery snapshot is newer than its last
+//! named save.
 
 use crate::model::Project;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// File name of the recovery snapshot inside the projects dir.
 pub const RECOVERY_FILE: &str = ".recovery.json";
@@ -102,6 +108,87 @@ pub fn recents_in(dir: &Path) -> Vec<String> {
     serde_json::from_str(&text).unwrap_or_default()
 }
 
+// ---- Session continuity ----
+
+/// The display name of the most recently opened project: the
+/// front of the recents list. `None` when nothing has been
+/// recorded yet (a missing or corrupt recents file already
+/// reads as an empty list via [`recents`]). Recents store
+/// display names, not paths, so the name is returned as-is.
+pub fn last_opened_project() -> Option<String> {
+    last_opened_project_in(&default_dir())
+}
+
+/// [`last_opened_project`] with an explicit base directory.
+pub fn last_opened_project_in(dir: &Path) -> Option<String> {
+    recents_in(dir).into_iter().next()
+}
+
+/// The file-name slug for a project name: the crate-wide
+/// naming convention (`editor.rs::save_named_project`,
+/// `projects::save`) — the name lowercased with every
+/// non-alphanumeric character replaced by `-`, giving the
+/// project's file as `<slug>.json` in the projects directory.
+/// Duplicated here because both owners keep their copy
+/// private; keep the rule in sync with them.
+fn project_file_slug(name: &str) -> String {
+    name.to_lowercase()
+        .replace(|c: char| !c.is_alphanumeric(), "-")
+}
+
+/// A file's modification time, swallowing every error into
+/// `None` (the caller treats an unreadable clock as "no
+/// timestamp", never as a failure worth surfacing).
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// The pure decision behind
+/// [`recovery_is_newer_than_last_project_in`]: no recovery
+/// snapshot → `false`; a snapshot with no last-saved project
+/// to compare against → `true`; otherwise the snapshot must
+/// be *strictly* newer than the last save.
+fn recovery_newer(recovery: Option<SystemTime>, last_project: Option<SystemTime>) -> bool {
+    match (recovery, last_project) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(snapshot), Some(saved)) => snapshot > saved,
+    }
+}
+
+/// Whether the recovery snapshot holds work newer than the
+/// last named save: `true` when a recovery file exists and
+/// either no project has been opened yet or the snapshot's
+/// mtime beats the most recent project's file mtime. This
+/// powers a future "you have unsaved work newer than your
+/// last save" startup prompt. Every filesystem error folds
+/// into `false` — a recent whose file cannot be stat'ed
+/// cannot be compared, so it never claims newer work — and
+/// the check must never block startup.
+pub fn recovery_is_newer_than_last_project() -> bool {
+    recovery_is_newer_than_last_project_in(&default_dir())
+}
+
+/// [`recovery_is_newer_than_last_project`] with an explicit
+/// base directory.
+pub fn recovery_is_newer_than_last_project_in(dir: &Path) -> bool {
+    let snapshot = file_mtime(&dir.join(RECOVERY_FILE));
+    let saved = match recents_in(dir).into_iter().next() {
+        // No recents: nothing saved to compare against.
+        None => None,
+        Some(name) => {
+            let path = dir.join(format!("{}.json", project_file_slug(&name)));
+            match file_mtime(&path) {
+                Some(mtime) => Some(mtime),
+                // A recorded project whose file is gone or
+                // unreadable is an error, not "no save".
+                None => return false,
+            }
+        }
+    };
+    recovery_newer(snapshot, saved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +275,78 @@ mod tests {
         // And a touch repairs it.
         touch_recent_in(&dir, "Fixed");
         assert_eq!(recents_in(&dir), vec!["Fixed".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn last_opened_project_is_the_recents_front() {
+        let dir = temp_dir("last-opened");
+        assert!(last_opened_project_in(&dir).is_none(), "no recents yet");
+        touch_recent_in(&dir, "Alpha");
+        touch_recent_in(&dir, "Beta");
+        assert_eq!(last_opened_project_in(&dir).as_deref(), Some("Beta"));
+        // Re-touching moves a project back to the front.
+        touch_recent_in(&dir, "Alpha");
+        assert_eq!(last_opened_project_in(&dir).as_deref(), Some("Alpha"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_newer_decision_table() {
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let t1 = t0 + std::time::Duration::from_secs(60);
+        assert!(!recovery_newer(None, None), "no snapshot, no save");
+        assert!(!recovery_newer(None, Some(t0)), "no snapshot");
+        assert!(recovery_newer(Some(t0), None), "snapshot, nothing saved");
+        assert!(recovery_newer(Some(t1), Some(t0)), "snapshot strictly newer");
+        assert!(!recovery_newer(Some(t0), Some(t1)), "save is newer");
+        assert!(!recovery_newer(Some(t0), Some(t0)), "equal is not newer");
+    }
+
+    /// Pin a file's modification time (the std handle API, so
+    /// the tests need no extra crates).
+    fn set_mtime(path: &Path, t: SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    #[test]
+    fn recovery_is_newer_compares_snapshot_against_last_save() {
+        let dir = temp_dir("recovery-newer");
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let t1 = t0 + std::time::Duration::from_secs(60);
+        let t2 = t1 + std::time::Duration::from_secs(60);
+
+        // No recovery snapshot at all.
+        assert!(!recovery_is_newer_than_last_project_in(&dir));
+
+        // Snapshot exists, no project ever opened → newer.
+        let snapshot = write_recovery_in(&dir, &Project::new_demo()).unwrap();
+        assert!(recovery_is_newer_than_last_project_in(&dir));
+
+        // Last save older than the snapshot → still newer.
+        touch_recent_in(&dir, "Old Save");
+        let saved = dir.join("old-save.json");
+        std::fs::write(&saved, "{}").unwrap();
+        set_mtime(&snapshot, t1);
+        set_mtime(&saved, t0);
+        assert!(recovery_is_newer_than_last_project_in(&dir));
+
+        // Save catches up to the snapshot's mtime → not newer,
+        // and overtaking it is not newer either.
+        set_mtime(&saved, t1);
+        assert!(!recovery_is_newer_than_last_project_in(&dir));
+        set_mtime(&saved, t2);
+        assert!(!recovery_is_newer_than_last_project_in(&dir));
+
+        // A recorded project whose file has vanished cannot be
+        // compared → false, never a startup-blocking claim.
+        std::fs::remove_file(&saved).unwrap();
+        assert!(!recovery_is_newer_than_last_project_in(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

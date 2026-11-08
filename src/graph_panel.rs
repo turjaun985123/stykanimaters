@@ -17,9 +17,11 @@
 //! -180..=180, the full circle of the normalised angle convention
 //! (see `Channel::value_at`). For multi-channel overlay displays,
 //! [`overlay_curves`] provides per-channel curves normalised to a
-//! shared 0.0..=1.0 band.
+//! shared 0.0..=1.0 band. For tangent-preset pickers,
+//! [`preset_preview`] provides the normalised curve each
+//! [`TangentPreset`] produces on a canonical ramp.
 
-use crate::graph::{Channel, ChannelTarget};
+use crate::graph::{apply_tangent_preset, Channel, ChannelTarget, Key, TangentPreset};
 use crate::model::{Project, V2};
 
 /// A rectangular window onto channel data: frames
@@ -202,6 +204,36 @@ pub fn overlay_curves(
                 vec![0.5; samples]
             };
             (target_label(&ch.target), values)
+        })
+        .collect()
+}
+
+/// The normalised preview curve for one tangent preset, for a
+/// preset-picker UI: the canonical ramp channel (RootX, keys at
+/// frame 0 value 0 and frame 10 value 100, flat tangents) with
+/// `preset` applied via [`apply_tangent_preset`], sampled through
+/// [`Channel::value_at`] at `samples` evenly spaced points across
+/// frames 0..=10 and divided by 100, so every preset's curve lives
+/// in the same 0.0..=1.0 band and starts/ends exactly at 0.0/1.0.
+/// `samples < 2` is treated as 2.
+///
+/// On this two-key ramp, `Smooth` coincides with the straight
+/// diagonal: Catmull-Rom gives both keys the segment's own secant
+/// slope, and a Hermite segment whose endpoint derivatives equal
+/// its secant is exactly the straight line. The eases separate
+/// only because their tangents scale the secant asymmetrically.
+pub fn preset_preview(preset: TangentPreset, samples: usize) -> Vec<f32> {
+    let samples = samples.max(2);
+    let mut ch = Channel {
+        figure: 0,
+        target: ChannelTarget::RootX,
+        keys: vec![Key::flat(0.0, 0.0), Key::flat(10.0, 100.0)],
+    };
+    apply_tangent_preset(&mut ch.keys, preset, false);
+    (0..samples)
+        .map(|i| {
+            let f = 10.0 * (i as f32 / (samples - 1) as f32);
+            ch.value_at(f) / 100.0
         })
         .collect()
 }
@@ -445,5 +477,111 @@ mod overlay_tests {
         let mut p = Project::new_demo();
         p.channels = Vec::new();
         assert!(overlay_curves(&p, 0, 8).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod preset_preview_tests {
+    use crate::graph::TangentPreset;
+
+    use super::preset_preview;
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    /// All five presets, for the endpoint/clamp sweeps.
+    const ALL: [TangentPreset; 5] = [
+        TangentPreset::Smooth,
+        TangentPreset::EaseIn,
+        TangentPreset::EaseOut,
+        TangentPreset::EaseInOut,
+        TangentPreset::Linear,
+    ];
+
+    #[test]
+    fn linear_preview_is_the_exact_diagonal() {
+        // 5 samples land on frames 0, 2.5, 5, 7.5, 10 — the
+        // quarter points of the ramp.
+        let vs = preset_preview(TangentPreset::Linear, 5);
+        assert_eq!(vs.len(), 5);
+        for (got, want) in vs.iter().zip([0.0, 0.25, 0.5, 0.75, 1.0]) {
+            assert!(approx(*got, want), "linear preview {vs:?}");
+        }
+    }
+
+    #[test]
+    fn smooth_preview_is_also_the_diagonal_on_a_two_key_ramp() {
+        // Catmull-Rom on two keys gives both keys the segment's
+        // secant slope, and a Hermite segment whose endpoint
+        // derivatives equal its secant IS the straight line — so
+        // Smooth and Linear coincide on this canonical ramp. They
+        // only separate on channels with interior keys.
+        let vs = preset_preview(TangentPreset::Smooth, 5);
+        for (got, want) in vs.iter().zip([0.0, 0.25, 0.5, 0.75, 1.0]) {
+            assert!(approx(*got, want), "smooth preview {vs:?}");
+        }
+    }
+
+    #[test]
+    fn ease_in_preview_starts_slow() {
+        let vs = preset_preview(TangentPreset::EaseIn, 5);
+        assert!(vs[1] < 0.25, "below the diagonal at 25%: {vs:?}");
+        // The engine's exact curve: out-tangent 0.1x secant,
+        // in-tangent full secant gives 12.34375 at 25% and
+        // 38.75 at the midpoint, in ramp units.
+        assert!(approx(vs[1], 0.1234375), "ease-in quarter: {vs:?}");
+        assert!(approx(vs[2], 0.3875), "ease-in midpoint: {vs:?}");
+        assert!(approx(vs[4], 1.0), "still lands on the end: {vs:?}");
+    }
+
+    #[test]
+    fn ease_out_preview_starts_fast() {
+        let vs = preset_preview(TangentPreset::EaseOut, 5);
+        assert!(vs[1] > 0.25, "above the diagonal at 25%: {vs:?}");
+        // Mirror of EaseIn: 29.21875 at 25% in ramp units.
+        assert!(approx(vs[1], 0.2921875), "ease-out quarter: {vs:?}");
+        assert!(approx(vs[4], 1.0), "still lands on the end: {vs:?}");
+    }
+
+    #[test]
+    fn ease_in_out_preview_is_an_s_curve() {
+        let vs = preset_preview(TangentPreset::EaseInOut, 5);
+        assert!(vs[1] < 0.25, "below the diagonal at 25%: {vs:?}");
+        assert!(vs[3] > 0.75, "above the diagonal at 75%: {vs:?}");
+        // Both tangents at 0.35x secant: 18.90625 / 81.09375 in
+        // ramp units, and the curve passes exactly through the
+        // midpoint.
+        assert!(approx(vs[1], 0.1890625), "ease-in-out quarter: {vs:?}");
+        assert!(approx(vs[2], 0.5), "ease-in-out midpoint: {vs:?}");
+        assert!(approx(vs[3], 0.8109375), "ease-in-out 75%: {vs:?}");
+    }
+
+    #[test]
+    fn endpoints_are_exact_for_every_preset() {
+        // value_at returns the key values verbatim outside/at the
+        // ends of the key range, so 0/100 and 100/100 are exact.
+        for preset in ALL {
+            let vs = preset_preview(preset, 9);
+            assert_eq!(vs.len(), 9);
+            assert_eq!(vs[0], 0.0, "{preset:?} starts at 0.0: {vs:?}");
+            assert_eq!(vs[8], 1.0, "{preset:?} ends at 1.0: {vs:?}");
+            assert!(
+                vs.iter().all(|v| (0.0..=1.0).contains(v)),
+                "{preset:?} stays inside the band: {vs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sample_count_below_two_is_treated_as_two() {
+        for preset in ALL {
+            for samples in [0, 1] {
+                let vs = preset_preview(preset, samples);
+                assert_eq!(vs.len(), 2, "{preset:?} with {samples} samples");
+                assert_eq!(vs[0], 0.0);
+                assert_eq!(vs[1], 1.0);
+            }
+        }
     }
 }

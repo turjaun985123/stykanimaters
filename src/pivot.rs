@@ -27,10 +27,13 @@
 //! The v5 grammar is ported from `codecs/piv_codec.py` (reader)
 //! and `codecs/piv_full_writer.py` / `codecs/piv_document.py`
 //! (writer). V5 import covers the full sequential grammar — image
-//! and text side tables are walked and skipped precisely (see
+//! side tables are walked precisely and text side tables are
+//! walked with their contents recovered onto prim-5 segments (see
 //! `docs/V5-SIDETABLES-SPEC.md`); v5 export writes the subset of
-//! the format this model can express. Stick Nodes `.nodes` is a
-//! different, much larger format and is not handled here.
+//! the format this model can express, including text side tables
+//! whose glyph outlines are the port's 3x5 bitmap font drawn as
+//! tiny square paths. Stick Nodes `.nodes` is a different, much
+//! larger format and is not handled here.
 
 use crate::model::{
     CameraKey, FigureDef, FigureInstance, Frame, ImageAsset, NodeDef, Pose, Project, SegmentMedia,
@@ -1092,10 +1095,10 @@ struct V5Seg {
     rgb: [u8; 3],
 }
 
-/// Parse one v5 figure stream (grammar from `codecs/piv_codec.py`
-/// `_figure`). A flags byte switches off whole field groups; image
-/// and text segments are rejected because their side tables are a
-/// separate grammar that is not ported yet.
+/// V5 figure streams are parsed by `parse_figure_v5` below
+/// (grammar from `codecs/piv_codec.py` `_figure`): a flags byte
+/// switches off whole field groups, and image/text segments carry
+/// side tables (see `skip_side_tables`).
 /// Skip a v5 UTF-16 string (u32 code-unit count + LE bytes),
 /// returning the code units (text placements need them).
 fn skip_utf16_string(r: &mut Reader) -> Result<Vec<u16>, String> {
@@ -1107,12 +1110,14 @@ fn skip_utf16_string(r: &mut Reader) -> Result<Vec<u16>, String> {
         .collect())
 }
 
-/// Skip the image and text side tables of a v5 figure. Grammar per
+/// Walk the image and text side tables of a v5 figure. Grammar per
 /// the original's piv_side_tables.py (see docs/V5-SIDETABLES-SPEC.md):
 /// image table first (iff any segment is primitive 2), then text
 /// table (iff any is primitive 5); each starts with a u16 count.
-/// Image/text artwork is not modelled — this only walks the bytes.
-fn skip_side_tables(r: &mut Reader, segs: &[V5Seg], flags: u8) -> Result<(), String> {
+/// Image artwork is not modelled — this only walks its bytes — but
+/// text contents ARE recovered: returns the text entries' strings
+/// in table order so prim-5 segments can get their text back.
+fn skip_side_tables(r: &mut Reader, segs: &[V5Seg], flags: u8) -> Result<Vec<String>, String> {
     let has_text = segs.iter().any(|s| s.primitive == 5);
     if segs.iter().any(|s| s.primitive == 2) {
         let count = r.u16()? as usize;
@@ -1154,6 +1159,7 @@ fn skip_side_tables(r: &mut Reader, segs: &[V5Seg], flags: u8) -> Result<(), Str
             r.pos = end;
         }
     }
+    let mut text_entries: Vec<String> = Vec::new();
     if has_text {
         let count = r.u16()? as usize;
         for seg in segs.iter().filter(|s| s.primitive == 5) {
@@ -1166,6 +1172,7 @@ fn skip_side_tables(r: &mut Reader, segs: &[V5Seg], flags: u8) -> Result<(), Str
             r.u8()?; // font style
             r.u32()?; // alignment
             let content = skip_utf16_string(r)?;
+            text_entries.push(String::from_utf16_lossy(&content));
             let glyph_count = r.u8()? as usize;
             // Unique code units in first-appearance order own glyphs.
             let mut uniques: Vec<u16> = Vec::new();
@@ -1226,7 +1233,7 @@ fn skip_side_tables(r: &mut Reader, segs: &[V5Seg], flags: u8) -> Result<(), Str
             }
         }
     }
-    Ok(())
+    Ok(text_entries)
 }
 
 /// Parse one v5 figure record. Also returns the figure's REST
@@ -1307,10 +1314,13 @@ fn parse_figure_v5(r: &mut Reader) -> Result<(FigType, Vec<f32>), String> {
         rest_bends[index] = value as f32;
     }
     // Image/text side tables sit between the bends and the
-    // polyfills; skip them precisely (assets are not modelled).
-    if segs.iter().any(|s| s.primitive == 2 || s.primitive == 5) {
-        skip_side_tables(r, &segs, flags)?;
-    }
+    // polyfills; walk them precisely. Image assets stay
+    // unmodelled, but text contents are recovered below.
+    let text_entries = if segs.iter().any(|s| s.primitive == 2 || s.primitive == 5) {
+        skip_side_tables(r, &segs, flags)?
+    } else {
+        Vec::new()
+    };
     // Polyfills: filled regions between joints; not modelled, skipped.
     let poly_count = r.u16()? as usize;
     for _ in 0..poly_count {
@@ -1380,9 +1390,34 @@ fn parse_figure_v5(r: &mut Reader) -> Result<(FigType, Vec<f32>), String> {
             6 => Shape::Polygon(4),
             _ => Shape::Line,
         };
+        // Text recovery: a prim-5 segment gets its side-table
+        // content back as the node's media. The format stores no
+        // text size; Pivot's own rendering spans the text's width
+        // across the segment with height = object scale x the
+        // placement bounds, so the size that reproduces "text
+        // spans the segment" in the port's model (width units
+        // 4n - 1 at size/5 per unit, `media.rs`) is
+        // size = 5 * length / (4n - 1). Empty content renders
+        // nothing; its size is nominal.
+        let media = if seg.primitive == 5 {
+            text_entries.get(seg.extra_u16 as usize).map(|content| {
+                let n = content.chars().count() as f32;
+                let size = if n > 0.0 {
+                    5.0 * seg.length / (4.0 * n - 1.0)
+                } else {
+                    seg.length
+                };
+                SegmentMedia::Text {
+                    content: content.clone(),
+                    size,
+                }
+            })
+        } else {
+            None
+        };
         nodes.push(NodeDef {
         style: crate::model::NodeStyle::default(),
-        media: None,
+        media,
             name: format!("segment {}", seg.id),
             parent: Some(index_of_id[&seg.parent_id]),
             length: seg.length,
@@ -2060,16 +2095,28 @@ fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
 ///   segments also get the per-object image/text flags byte the
 ///   grammar requires.
 ///
-/// One format feature remains unwritten, because the model holds
-/// nothing faithful to write:
-///
-/// * **Text side tables.** A text entry stores vector glyph
-///   outlines (M/L/C/Z/V/H path commands) and per-character
-///   placements derived from a real font. `SegmentMedia::Text`
-///   holds only a string and a size, and the port renders text
-///   with a 3×5 raster bitmap font (`media.rs`) — there are no
-///   outlines to encode, and fabricating them would invent a
-///   font. Text segments export as plain segments, as before.
+/// * **Text side tables** for figures containing text segments
+///   (`SegmentMedia::Text`): one table entry per distinct content
+///   string. A text entry stores vector glyph outlines and
+///   per-character placements; the port has no font outlines —
+///   it renders text with a 3x5 raster bitmap font (`media.rs`) —
+///   so each glyph is encoded as the bitmap's own outline: one
+///   closed square path (M/L/L/L/Z) per lit pixel, in a glyph
+///   space where one unit is one bitmap pixel, the glyph cell is
+///   3 wide x 5 tall with its top-left at the origin (y down),
+///   and character `i` is placed at x = 4i (the renderer's 3 + 1
+///   advance). That is real data in the format's own encoding —
+///   the original's decoder reads it and derives exactly these
+///   bounds — and it matches the port's blocky bitmap look.
+///   Characters the bitmap font lacks export as its '?' glyph,
+///   exactly as they render. Documented limits: the format has
+///   no size field (Pivot derives text geometry from the segment
+///   and placements), so segments sharing a content string share
+///   one entry even if their model sizes differ; a content with
+///   more than 255 distinct UTF-16 code units (the format's u8
+///   glyph count) exports as a plain segment instead; glyphs are
+///   keyed by UTF-16 code unit, so an astral character gets a
+///   '?' glyph per surrogate half where the renderer draws one.
 pub fn export_piv_v5(project: &Project) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(5u8); // version
@@ -2180,6 +2227,199 @@ pub fn export_piv_v5(project: &Project) -> Vec<u8> {
     encoder.finish().expect("zlib finish into memory cannot fail")
 }
 
+/// Font name written into exported text entries. The format
+/// treats the name as an opaque label (rendering derives geometry
+/// from the outlines and placements, `piv_side_tables.py`), and
+/// this label says honestly what the outlines are: the port's
+/// 3x5 bitmap font, drawn as squares.
+const TEXT_FONT_NAME: &str = "Bitmap 3x5";
+
+/// The 3x5 bitmap font, mirrored from `media.rs`'s `glyph_rows`
+/// (private to that module): five rows top to bottom, 3 bits per
+/// row, bit 2 the leftmost pixel. KEEP IN SYNC with `media.rs` —
+/// the exporter's glyph outlines must match what the renderer
+/// draws. Same fallback rules: ASCII case folds up, control
+/// characters are blank, anything else unknown is '?'.
+fn bitmap_glyph_rows(ch: char) -> [u8; 5] {
+    let up = ch.to_ascii_uppercase();
+    match up {
+        'A' => [0b010, 0b101, 0b111, 0b101, 0b101],
+        'B' => [0b110, 0b101, 0b110, 0b101, 0b110],
+        'C' => [0b011, 0b100, 0b100, 0b100, 0b011],
+        'D' => [0b110, 0b101, 0b101, 0b101, 0b110],
+        'E' => [0b111, 0b100, 0b110, 0b100, 0b111],
+        'F' => [0b111, 0b100, 0b110, 0b100, 0b100],
+        'G' => [0b011, 0b100, 0b101, 0b101, 0b011],
+        'H' => [0b101, 0b101, 0b111, 0b101, 0b101],
+        'I' => [0b111, 0b010, 0b010, 0b010, 0b111],
+        'J' => [0b001, 0b001, 0b001, 0b101, 0b010],
+        'K' => [0b101, 0b101, 0b110, 0b101, 0b101],
+        'L' => [0b100, 0b100, 0b100, 0b100, 0b111],
+        'M' => [0b101, 0b111, 0b111, 0b101, 0b101],
+        'N' => [0b101, 0b111, 0b101, 0b101, 0b101],
+        'O' => [0b010, 0b101, 0b101, 0b101, 0b010],
+        'P' => [0b110, 0b101, 0b110, 0b100, 0b100],
+        'Q' => [0b010, 0b101, 0b101, 0b010, 0b001],
+        'R' => [0b110, 0b101, 0b110, 0b101, 0b101],
+        'S' => [0b011, 0b100, 0b010, 0b001, 0b110],
+        'T' => [0b111, 0b010, 0b010, 0b010, 0b010],
+        'U' => [0b101, 0b101, 0b101, 0b101, 0b111],
+        'V' => [0b101, 0b101, 0b101, 0b101, 0b010],
+        'W' => [0b101, 0b101, 0b101, 0b111, 0b101],
+        'X' => [0b101, 0b101, 0b010, 0b101, 0b101],
+        'Y' => [0b101, 0b101, 0b010, 0b010, 0b010],
+        'Z' => [0b111, 0b001, 0b010, 0b100, 0b111],
+        '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+        '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+        '2' => [0b110, 0b001, 0b010, 0b100, 0b111],
+        '3' => [0b110, 0b001, 0b010, 0b001, 0b110],
+        '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+        '5' => [0b111, 0b100, 0b110, 0b001, 0b110],
+        '6' => [0b011, 0b100, 0b110, 0b101, 0b010],
+        '7' => [0b111, 0b001, 0b001, 0b010, 0b010],
+        '8' => [0b010, 0b101, 0b010, 0b101, 0b010],
+        '9' => [0b010, 0b101, 0b011, 0b001, 0b110],
+        ' ' => [0, 0, 0, 0, 0],
+        '.' => [0, 0, 0, 0, 0b010],
+        ',' => [0, 0, 0, 0b010, 0b100],
+        '!' => [0b010, 0b010, 0b010, 0, 0b010],
+        '?' => [0b110, 0b001, 0b010, 0, 0b010],
+        '\'' => [0b010, 0b010, 0, 0, 0],
+        '"' => [0b101, 0b101, 0, 0, 0],
+        '-' => [0, 0, 0b111, 0, 0],
+        ':' => [0, 0b010, 0, 0b010, 0],
+        ';' => [0, 0b010, 0, 0b010, 0b100],
+        '(' => [0b001, 0b010, 0b010, 0b010, 0b001],
+        ')' => [0b100, 0b010, 0b010, 0b010, 0b100],
+        '+' => [0, 0b010, 0b111, 0b010, 0],
+        '/' => [0b001, 0b001, 0b010, 0b100, 0b100],
+        '&' => [0b010, 0b101, 0b010, 0b101, 0b011],
+        '%' => [0b101, 0b001, 0b010, 0b100, 0b101],
+        '*' => [0, 0b101, 0b010, 0b101, 0],
+        '=' => [0, 0b111, 0, 0b111, 0],
+        '<' => [0b001, 0b010, 0b100, 0b010, 0b001],
+        '>' => [0b100, 0b010, 0b001, 0b010, 0b100],
+        '_' => [0, 0, 0, 0, 0b111],
+        '#' => [0b101, 0b111, 0b101, 0b111, 0b101],
+        '$' => [0b011, 0b110, 0b010, 0b011, 0b110],
+        '@' => [0b010, 0b101, 0b111, 0b100, 0b011],
+        _ => {
+            if ch.is_control() {
+                [0, 0, 0, 0, 0]
+            } else {
+                bitmap_glyph_rows('?')
+            }
+        }
+    }
+}
+
+/// Rows for one UTF-16 code unit of stored content. A unit that
+/// is not a Unicode scalar value (a surrogate half) has no
+/// renderer glyph; it exports as '?' like any unknown character.
+fn bitmap_glyph_rows_for_unit(unit: u16) -> [u8; 5] {
+    match char::from_u32(unit as u32) {
+        Some(c) => bitmap_glyph_rows(c),
+        None => bitmap_glyph_rows('?'),
+    }
+}
+
+/// Distinct UTF-16 code units of `content`, first-appearance
+/// order — the order that owns the glyph table.
+fn text_unique_units(content: &str) -> Vec<u16> {
+    let mut uniques: Vec<u16> = Vec::new();
+    for u in content.encode_utf16() {
+        if !uniques.contains(&u) {
+            uniques.push(u);
+        }
+    }
+    uniques
+}
+
+/// Write a string in the side-table UTF-16 form: u32 code-unit
+/// count + little-endian bytes.
+fn write_utf16_string(out: &mut Vec<u8>, s: &str) {
+    let units: Vec<u16> = s.encode_utf16().collect();
+    out.extend_from_slice(&(units.len() as u32).to_le_bytes());
+    for u in units {
+        out.extend_from_slice(&u.to_le_bytes());
+    }
+}
+
+/// Write one v5 text side-table entry. Grammar per the original's
+/// `piv_side_tables.py`: font name (UTF-16), font style u8,
+/// alignment u32, content (UTF-16), glyph count u8, then per
+/// glyph a u32 node count, the opcode stream packed two 4-bit
+/// codes per byte (low nibble first) and ALL f32 coordinates as
+/// one flat block; finally one (x, y) f32 placement per content
+/// unit whose glyph is visible (node count > 0).
+///
+/// Glyph space (see `export_piv_v5`'s docs): one unit = one
+/// bitmap pixel; pixel (col, row) is the square
+/// [col, col+1] x [row, row+1] of the 3x5 cell with its top-left
+/// at the origin, y down — exactly `media.rs`'s cell layout —
+/// emitted as M/L/L/L/Z, so a glyph's node count is 5 x its lit
+/// pixels and a blank glyph (space, control characters) has node
+/// count 0. Placements put unit `i` at (4i, 0), the renderer's
+/// advance. Callers guarantee at most 255 distinct units.
+fn write_text_entry(out: &mut Vec<u8>, content: &str) {
+    write_utf16_string(out, TEXT_FONT_NAME);
+    out.push(0); // font style: regular
+    out.extend_from_slice(&0u32.to_le_bytes()); // alignment
+    write_utf16_string(out, content);
+    let units: Vec<u16> = content.encode_utf16().collect();
+    let uniques = text_unique_units(content);
+    debug_assert!(uniques.len() <= 255);
+    out.push(uniques.len() as u8); // glyph count
+    let mut node_counts: Vec<u32> = Vec::with_capacity(uniques.len());
+    for &unit in &uniques {
+        let rows = bitmap_glyph_rows_for_unit(unit);
+        let mut codes: Vec<u8> = Vec::new();
+        let mut values: Vec<f32> = Vec::new();
+        for (row, &bits) in rows.iter().enumerate() {
+            for col in 0..3usize {
+                if (bits >> (2 - col)) & 1 == 1 {
+                    let (x, y) = (col as f32, row as f32);
+                    codes.extend_from_slice(&[0, 1, 1, 1, 3]); // M L L L Z
+                    values.extend_from_slice(&[
+                        x,
+                        y,
+                        x + 1.0,
+                        y,
+                        x + 1.0,
+                        y + 1.0,
+                        x,
+                        y + 1.0,
+                    ]);
+                }
+            }
+        }
+        let node_count = codes.len() as u32;
+        node_counts.push(node_count);
+        out.extend_from_slice(&node_count.to_le_bytes());
+        if node_count > 0 {
+            // Opcodes packed two per byte, low nibble first; an
+            // odd tail pads the high nibble with 0 — an M code
+            // the reader's expansion never reaches, because it
+            // stops exactly at node_count.
+            for pair in codes.chunks(2) {
+                let hi = if pair.len() > 1 { pair[1] } else { 0 };
+                out.push(pair[0] | (hi << 4));
+            }
+            for v in values {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+    // Placements: visible glyphs only, per content unit in order.
+    for (i, unit) in units.iter().enumerate() {
+        let gi = uniques.iter().position(|u| u == unit).unwrap();
+        if node_counts[gi] > 0 {
+            out.extend_from_slice(&(4.0 * i as f32).to_le_bytes());
+            out.extend_from_slice(&0.0f32.to_le_bytes());
+        }
+    }
+}
+
 /// Write one v5 figure record: flags 144 (implicit z-order, no
 /// secondary colours), then segments in node order — a segment's
 /// id is its node index, so the parent id is the parent node index
@@ -2194,9 +2434,12 @@ pub fn export_piv_v5(project: &Project) -> Vec<u8> {
 /// follows the bend count, per the grammar: a u16 entry count,
 /// then per entry four i32 anchors, a u64 **absolute** end offset
 /// (into the whole payload), and the asset's PNG bytes verbatim.
-/// Returns whether the record contains any media segment (the
-/// caller then owes each keyframe object an image/text flags
-/// byte).
+/// Text segments are written as primitive 5 with the extra triple
+/// (text-table index, 0, 0), and the figure's text side table
+/// follows the image table: a u16 entry count, then one entry per
+/// distinct content string (see [`write_text_entry`]). Returns
+/// whether the record contains any media segment (the caller
+/// then owes each keyframe object an image/text flags byte).
 fn write_figure_v5(
     out: &mut Vec<u8>,
     fig: &FigureInstance,
@@ -2224,6 +2467,27 @@ fn write_figure_v5(
             }
         }
     }
+    // The figure's text table: distinct content strings in
+    // first-reference order (the format stores no size, so
+    // segments sharing a string share an entry). A content with
+    // more than 255 distinct UTF-16 code units cannot be an
+    // entry (u8 glyph count); such a segment falls back to a
+    // plain segment, like a dangling image reference.
+    let mut text_table: Vec<String> = Vec::new();
+    let mut seg_text_idx: Vec<Option<usize>> = vec![None; def.nodes.len()];
+    for (i, node) in def.nodes.iter().enumerate().skip(1) {
+        if let Some(SegmentMedia::Text { content, .. }) = &node.media {
+            if text_unique_units(content).len() <= 255 {
+                seg_text_idx[i] = Some(match text_table.iter().position(|c| c == content) {
+                    Some(p) => p,
+                    None => {
+                        text_table.push(content.clone());
+                        text_table.len() - 1
+                    }
+                });
+            }
+        }
+    }
     let rest_abs = rest_absolutes(def);
     out.push(128 | 16); // flags
     out.extend_from_slice(&((def.nodes.len() - 1) as u16).to_le_bytes());
@@ -2235,6 +2499,8 @@ fn write_figure_v5(
         out.extend_from_slice(&node.thickness.to_le_bytes());
         out.push(if seg_table_idx[i].is_some() {
             2 // image primitive; the media replaces the shape
+        } else if seg_text_idx[i].is_some() {
+            5 // text primitive; the media replaces the shape
         } else {
             match node.shape {
                 Shape::Circle => 1,
@@ -2248,7 +2514,9 @@ fn write_figure_v5(
         out.push((rgb >> 8) as u8);
         out.push(rgb as u8);
         out.push(0); // transparency
-        if let Some(ti) = seg_table_idx[i] {
+        // A node carries at most one media, so at most one of the
+        // two table indices is set.
+        if let Some(ti) = seg_table_idx[i].or(seg_text_idx[i]) {
             out.extend_from_slice(&(ti as u16).to_le_bytes()); // extra: table index
             out.push(0); // extra: endpoint reversal
             out.push(0); // extra: baseline reflection
@@ -2295,12 +2563,18 @@ fn write_figure_v5(
             out.extend_from_slice(blob);
         }
     }
+    if !text_table.is_empty() {
+        out.extend_from_slice(&(text_table.len() as u16).to_le_bytes());
+        for content in &text_table {
+            write_text_entry(out, content);
+        }
+    }
     out.extend_from_slice(&0u16.to_le_bytes()); // polyfill count
     // No z-order arrays (flag 16) and no global style (flag 64 clear).
     let name_bytes = name.as_bytes();
     out.push(name_bytes.len().min(255) as u8);
     out.extend_from_slice(&name_bytes[..name_bytes.len().min(255)]);
-    !table.is_empty()
+    !table.is_empty() || !text_table.is_empty()
 }
 
 #[cfg(test)]
@@ -2788,9 +3062,10 @@ mod tests {
             "image blob must appear verbatim in the payload"
         );
         // Round-trip through the port's own importer: structure
-        // and poses survive (media itself is not modelled on
-        // import — the side table is walked and skipped, exactly
-        // like a file from the original).
+        // and poses survive. Image media is not modelled on
+        // import (its side table is walked and skipped), but the
+        // text label IS recovered from its side table, with the
+        // size derived from the segment (see parse_figure_v5).
         let back = import_piv(&bytes).unwrap();
         assert_eq!(back.figures.len(), 1);
         assert_eq!(back.figures[0].name, "Styk");
@@ -2804,6 +3079,193 @@ mod tests {
                 assert!((crate::model::norm_deg(x - y)).abs() < 0.1, "angle {x} vs {y}");
             }
         }
+        assert_eq!(
+            back.figures[0].def.nodes[3].media, None,
+            "image media stays unmodelled on import"
+        );
+        // "HI" spans 4*2-1 = 7 width units: size = 5 * length / 7.
+        let want_size = 5.0 * project.figures[0].def.nodes[5].length / 7.0;
+        match &back.figures[0].def.nodes[5].media {
+            Some(SegmentMedia::Text { content, size }) => {
+                assert_eq!(content, "HI");
+                assert!((size - want_size).abs() < 0.01, "size {size} vs {want_size}");
+            }
+            other => panic!("text label must be recovered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v5_export_text_side_table_structure() {
+        // Byte-level structural assertions on an exported text
+        // table, per the documented layout (piv_side_tables.py):
+        // entry counts, glyph counts, per-glyph node counts and
+        // placement pairs are read straight off the payload.
+        let mut project = Project::new_demo();
+        project.figures[0].def.nodes[5].media = Some(SegmentMedia::Text {
+            content: "A B~".into(),
+            size: 25.0,
+        });
+        let bytes = export_piv_v5(&project);
+        let payload = inflate_export(&bytes);
+        // The generic walker still lands exactly at payload end.
+        walk_v5_export(&payload);
+        // Walk to the figure record's text table by hand.
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.u8().unwrap(), 5);
+        r.u32().unwrap();
+        r.u32().unwrap();
+        let bg_slots = r.u16().unwrap();
+        for _ in 1..bg_slots {
+            r.u8().unwrap(); // kind: solid colour
+            r.u32().unwrap(); // colour
+            r.str8().unwrap(); // name
+        }
+        r.u16().unwrap(); // figure slots
+        let flags = r.u8().unwrap();
+        assert_eq!(flags, 144);
+        let count = r.u16().unwrap() as usize;
+        let mut prims = Vec::new();
+        for _ in 0..count {
+            r.u16().unwrap(); // parent
+            r.u16().unwrap(); // id
+            r.f32().unwrap(); // length
+            r.f64().unwrap(); // angle
+            r.f32().unwrap(); // thickness
+            let prim = r.u8().unwrap();
+            prims.push(prim);
+            r.u8().unwrap(); // aux
+            r.take(3).unwrap(); // rgb
+            r.u8().unwrap(); // transparency
+            if prim == 2 || prim == 5 {
+                r.take(4).unwrap(); // extra triple
+            }
+        }
+        // Node 5 is the 5th segment record; it alone is text.
+        assert_eq!(prims[4], 5);
+        assert_eq!(prims.iter().filter(|&&p| p == 5).count(), 1);
+        let bends = r.u16().unwrap();
+        for _ in 0..bends {
+            r.u16().unwrap();
+            r.f64().unwrap();
+        }
+        // No image table (no prim-2 segments): the text table
+        // follows the bends directly.
+        assert_eq!(r.u16().unwrap(), 1, "one text entry");
+        let font = skip_utf16_string(&mut r).unwrap();
+        assert_eq!(String::from_utf16_lossy(&font), "Bitmap 3x5");
+        assert_eq!(r.u8().unwrap(), 0, "font style");
+        assert_eq!(r.u32().unwrap(), 0, "alignment");
+        let content = skip_utf16_string(&mut r).unwrap();
+        assert_eq!(String::from_utf16_lossy(&content), "A B~");
+        assert_eq!(r.u8().unwrap(), 4, "glyph count = distinct units");
+        // 'A' = 10 lit pixels, ' ' = 0, 'B' = 10, '~' -> '?' = 5;
+        // the node count is 5 per lit pixel (M/L/L/L/Z per square).
+        let want_nodes = [50u32, 0, 50, 25];
+        let mut glyph0_values: Vec<f32> = Vec::new();
+        for (gi, &want) in want_nodes.iter().enumerate() {
+            let node_count = r.u32().unwrap();
+            assert_eq!(node_count, want, "glyph {gi} node count");
+            if node_count == 0 {
+                continue;
+            }
+            // Simulate the opcode expansion to size the f32 block
+            // (cubic = 3 nodes, everything else 1; M/L = 2 values,
+            // C = 6, Z = 0, V/H = 1) — the reader's own rule.
+            let mut expanded = 0u32;
+            let mut values = 0usize;
+            let mut high = false;
+            let mut byte = 0u8;
+            while expanded < node_count {
+                if !high {
+                    byte = r.u8().unwrap();
+                }
+                let op = if high { byte >> 4 } else { byte & 0x0F };
+                high = !high;
+                assert!(op <= 5, "opcode {op}");
+                expanded += if op == 2 { 3 } else { 1 };
+                values += match op {
+                    0 | 1 => 2,
+                    2 => 6,
+                    3 => 0,
+                    _ => 1,
+                };
+            }
+            assert_eq!(expanded, node_count);
+            let mut vals = Vec::new();
+            for _ in 0..values {
+                vals.push(r.f32().unwrap());
+            }
+            if gi == 0 {
+                glyph0_values = vals;
+            }
+        }
+        // 'A' row 0 is 0b010: its first lit pixel is (col 1,
+        // row 0), drawn as the square (1,0) -> (2,1).
+        assert_eq!(
+            &glyph0_values[..8],
+            &[1.0, 0.0, 2.0, 0.0, 2.0, 1.0, 1.0, 1.0]
+        );
+        // Placements: visible units only — A at x 0, B at x 8,
+        // '~' at x 12; the space stores nothing.
+        for want_x in [0.0f32, 8.0, 12.0] {
+            assert_eq!(r.f32().unwrap(), want_x);
+            assert_eq!(r.f32().unwrap(), 0.0);
+        }
+        assert_eq!(r.u16().unwrap(), 0, "polyfill count follows the table");
+        // And the label round-trips through the importer.
+        let back = import_piv(&bytes).unwrap();
+        match &back.figures[0].def.nodes[5].media {
+            Some(SegmentMedia::Text { content, .. }) => assert_eq!(content, "A B~"),
+            other => panic!("expected recovered text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v5_text_over_255_unique_units_exports_as_plain_segment() {
+        // The glyph count is a u8: a content with more than 255
+        // distinct UTF-16 units cannot be a table entry, so the
+        // segment falls back to a plain segment (documented) and
+        // the file still round-trips structurally.
+        let wide: String = (0..300u32)
+            .map(|i| char::from_u32(0x100 + i).unwrap())
+            .collect();
+        let mut project = Project::new_demo();
+        project.figures[0].def.nodes[5].media = Some(SegmentMedia::Text {
+            content: wide,
+            size: 25.0,
+        });
+        let bytes = export_piv_v5(&project);
+        let payload = inflate_export(&bytes);
+        walk_v5_export(&payload); // exact-EOF walk still holds
+        let back = import_piv(&bytes).unwrap();
+        assert_eq!(back.figures[0].def.nodes[5].media, None);
+    }
+
+    #[test]
+    fn v5_text_corpus_fixture_recovers_text() {
+        // tests/fixtures/text-v5.piv is produced by the ORIGINAL's
+        // Python writer (scripts/verify_text_tables.py): the
+        // shared Tripod scene with segment 2 as a text segment
+        // carrying "HI" in box-outline glyphs.
+        let dir = std::path::Path::new("tests/fixtures");
+        let Ok(bytes) = std::fs::read(dir.join("text-v5.piv")) else {
+            return; // corpus is generated by scripts/
+        };
+        let project = import_piv(&bytes).unwrap();
+        let fig = project
+            .figures
+            .iter()
+            .find(|f| f.name == "Tripod")
+            .expect("Tripod figure");
+        // Segment 2 is nodes[2] (node 0 is the origin); its
+        // length is 30, so the recovered size is 5*30/(4*2-1).
+        assert_eq!(
+            fig.def.nodes[2].media,
+            Some(SegmentMedia::Text {
+                content: "HI".into(),
+                size: 150.0 / 7.0,
+            })
+        );
     }
 
     #[test]

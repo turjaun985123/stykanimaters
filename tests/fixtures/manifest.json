@@ -132,6 +132,28 @@
       "frames": 1,
       "frame0_roots": [],
       "notes": "Built by the original test suite's syntheticClip helper (431/117) around the figure.nodes rig, 389 bytes. The clip is named 'Synthetic clip'; its only frame holds no instances, so it imports with zero figures and no poses."
+    },
+    "text-v5.piv": {
+      "format": "piv_v5_standalone",
+      "canvas": [
+        800,
+        600
+      ],
+      "fps": 24,
+      "figures": [
+        {
+          "name": "Tripod",
+          "segments": 3
+        }
+      ],
+      "frames": 2,
+      "frame0_roots": [
+        [
+          111,
+          222
+        ]
+      ],
+      "notes": "Shared Tripod scene; segment 2 is a TEXT segment (primitive 5, extra 0) whose side table carries 'HI' in box-outline glyphs, font 'Arial'. Written by the original's encoder via scripts/verify_text_tables.py. The port's importer recovers the text onto segment 2 (size 5*30/7)."
     }
   }
 }

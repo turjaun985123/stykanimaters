@@ -84,8 +84,9 @@ present and fall back to a folder-based flow when neither exists.
   **graph engine** (Hermite channels for root X/Y, joint angles
   and segment lengths, with shortest-path angle wrap,
   Catmull-Rom auto-tangents, tangent presets — Smooth, EaseIn,
-  EaseOut, EaseInOut, Linear — and a multi-channel overlay
-  view-model) applied live
+  EaseOut, EaseInOut, Linear — with preview curves, time-mirror
+  and value-scale channel transforms, and a multi-channel
+  overlay painted in the panel) applied live
   and editable in a visual graph panel. Motion statistics are
   computed alongside the project statistics.
 - **Camera** — per-frame keys (centre, zoom **and rotation**) with
@@ -101,10 +102,12 @@ present and fall back to a folder-based flow when neither exists.
   (`./library/*.json` plus built-ins).
 - **Drawing** — Draw mode with an expanded brush library (preset
   brushes, brush/eraser tools, brush opacity and scatter, and a
-  Spray brush with deterministic spray offsets — model data
-  for now, the stroke renderer does not apply scatter yet), per-point
-  pressure widths, smoothing, nib
-  shapes, serpentine fill and erasers; shape generators cover
+  Spray brush whose strokes record a spray mark and render
+  as deterministic dots — dots only, no polyline — in the
+  editor and every exporter, all from one shared spray-dot
+  source), per-point pressure widths, smoothing,
+  Douglas-Peucker stroke simplification, nib shapes,
+  serpentine fill and erasers; shape generators cover
   line, rectangle, ellipse, polygon, star and arrow, with
   stroke mirroring and editor stamp ops for shapes; strokes
   render in the editor and all exports.
@@ -116,16 +119,19 @@ present and fall back to a folder-based flow when neither exists.
   anchored to joints, with creation buttons in the GUI for
   every kind, an FX timeline engine
   (list/move/resize/duplicate/delete) in the GUI and over MCP,
-  and FX clip presets saved on disk;
+  per-clip colour gradients (a start colour and an end
+  colour), and FX clip presets saved on disk with save/apply
+  buttons in the FX panel;
   plus continuous **weather** (rain, snow, fireflies, fog, storm)
   rendered in the canvas and the rasterizer.
-- **Audio** — clips placed at frames; playback mixes **all**
-  clips audible at the playhead, synced via `ffplay`, and
-  MP4/WebM exports mix every clip into the soundtrack at its
-  frame offset; a waveform panel with per-clip normalise /
-  split / crossfade plus pitch shift and compressor (audio
-  engine, editor ops and panel buttons), and a real mixdown
-  export.
+- **Audio** — clips placed at frames, each with a per-clip
+  gain; playback mixes **all** clips audible at the playhead
+  at their gains, synced via `ffplay`, and MP4/WebM exports
+  mix every clip into the soundtrack at its frame offset and
+  gain; a waveform panel with per-clip normalise / split
+  (including split at silences) / crossfade plus pitch shift
+  and compressor (audio engine, editor ops and panel
+  buttons), and a real mixdown export.
 - **Movieclips** — capture a figure's timeline as a clip, edit it
   in a dedicated clip session panel; clip figures play their own
   animation inside any project with a selectable loop mode —
@@ -134,8 +140,9 @@ present and fall back to a folder-based flow when neither exists.
   per-joint rotation, orbit camera and perspective projection,
   living in an editing session: pose A/B, animated bakes into
   timeline frames, one-click bake to a native 2D figure, a
-  persistent 3D figure library (`./library3d`), and a 3D pose
-  library.
+  persistent 3D figure library (`./library3d`), a 3D pose
+  library, and a two-bone IK solver with one-call arm/leg
+  chain helpers.
 - **Formats** — the grammar is ported from the original app's own
   codecs and cross-verified against them in both directions:
   - *Import:* `.piv` v2/v3/v4/v5 (v5 incl. image side tables,
@@ -146,12 +153,15 @@ present and fall back to a folder-based flow when neither exists.
   - *Export:* `.piv` v2/v3/v4/v5, `.stk`, `.nodes`, `.stknds`,
     plus PNG sequence, GIF, MP4, WebM, APNG, JPEG sequence, SVG
     and spritesheets. MP4/WebM can also be exported for a frame
-    range (video-only).
+    range (video-only), and APNG/JPEG sequence exports take a
+    frame range too.
   - A cross-format fixture corpus (`tests/fixtures/`) generated
     with the original's encoders guards the importers.
 - **Projects & shell** — named projects under `./projects/`
   with rename, duplicate and filter in the project library, a
-  Home panel with recents, a recovery snapshot, native open/save
+  Home panel with recents, a per-project duplicate button and
+  a most-active-figure line, a recovery snapshot and
+  session-continuity helpers, native open/save
   dialogs, save/load as JSON (`project.styk.json`), light/dark
   themes, and **28 languages** (the original's 27 + Bengali)
   cycled from the toolbar.
@@ -159,10 +169,11 @@ present and fall back to a folder-based flow when neither exists.
 ## Drive it from an AI agent (MCP)
 
 The `mcp_server` binary speaks MCP (JSON-RPC 2.0 over stdio,
-protocol `2024-11-05`) and exposes **62 tools**: project/figure/
+protocol `2024-11-05`) and exposes **65 tools**: project/figure/
 pose editing, camera (with rotation), graph keys and tangent
 presets, FX clip management and FX presets, weather (including
-storm), audio, drawing (including polygon and star shapes),
+storm), audio, drawing (including polygon and star shapes
+and stroke simplification),
 3D sessions, movieclips,
 per-frame bends, pose mirroring, graph tangent smoothing,
 import/export in every supported format (including MP4/WebM
@@ -180,8 +191,10 @@ configuration snippet live in [docs/MCP.md](docs/MCP.md).
   state and every document operation; the GPUI layer translates
   mouse events and buttons into calls.
 - Exports are deterministic: same project → same bytes, in CI
-  as on a desktop; the byte-determinism integration proof now
-  covers APNG and JPEG sequence exports as well.
+  as on a desktop; the byte-determinism integration proof
+  covers APNG and JPEG sequence exports and now also runs a
+  rich project (storm weather, FX clips, spray strokes), not
+  just the demo project.
 - `vendor/xattr` is a byte-identical copy of crates.io
   `xattr 0.2.3` with one patched constant: it referenced
   `libc::ENOATTR`, which current `libc` removed on Linux; the
@@ -195,10 +208,12 @@ configuration snippet live in [docs/MCP.md](docs/MCP.md).
   The gesture recogniser and pinch-to-camera code are written
   and tested but unreachable from hardware until GPUI ships
   touch events; a touchscreen arrives as one emulated mouse.
-- **`.piv` text side tables cannot be written.** The format
-  stores vector glyph outlines; this port's text is a 3×5 bitmap
-  font with no outlines to write. (Image side tables, per-frame
-  lengths and bends *do* round-trip.)
+- **`.piv` text side tables carry bitmap glyphs.** Text is
+  written into v5 files with each bitmap pixel as a tiny square
+  glyph outline (cross-verified with the original's codecs) and
+  recovered on import — readable, but blocky by construction:
+  the port has no vector font outlines to write. (Image side
+  tables, per-frame lengths and bends round-trip too.)
 - **3D is a session, not a document feature.** 3D figures are
   posed in the 3D mode and baked to native 2D figures; exports
   render the 2D result.

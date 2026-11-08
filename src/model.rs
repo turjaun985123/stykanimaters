@@ -464,6 +464,18 @@ pub struct ClipDef {
     pub loop_mode: ClipLoop,
 }
 
+/// Spray-paint parameters for a stroke: the stroke's points are
+/// rendered as deterministic dots scattered within `radius` of
+/// each point (see `paint::spray_dots`), each dot drawn at up to
+/// `opacity`. `seed` drives the scatter stream, so a spray stroke
+/// renders identically on every machine and in every export.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SprayMark {
+    pub seed: u64,
+    pub radius: f32,
+    pub opacity: f32,
+}
+
 /// A freehand brush stroke drawn on one frame.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Stroke {
@@ -477,6 +489,15 @@ pub struct Stroke {
     /// Closed-shape fill colour for this stroke, when filled.
     #[serde(default)]
     pub fill: Option<u32>,
+    /// Spray-paint mark for this stroke, when sprayed; older
+    /// projects without the field deserialize as `None` (a plain
+    /// solid stroke).
+    #[serde(default)]
+    pub spray: Option<SprayMark>,
+}
+
+fn default_audio_gain() -> f32 {
+    1.0
 }
 
 /// An audio file placed on the timeline (used by MP4 export).
@@ -484,6 +505,13 @@ pub struct Stroke {
 pub struct AudioClip {
     pub path: String,
     pub start_frame: usize,
+    /// Per-clip volume multiplier (1.0 = unity). Applied wherever
+    /// clips are mixed — playback and the MP4/WebM mux — and a
+    /// lone clip with a non-unity gain is routed through the mix
+    /// so the gain is honoured there too. Projects saved before
+    /// this field existed deserialize as 1.0.
+    #[serde(default = "default_audio_gain")]
+    pub gain: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1145,5 +1173,116 @@ mod clip_loop_tests {
         project.clips[0].loop_mode = ClipLoop::Once;
         let roots: Vec<f32> = (0..5).map(|f| project.poses_at(f as f32)[0].root[0]).collect();
         assert_eq!(roots, vec![10.0, 20.0, 30.0, 30.0, 30.0]);
+    }
+}
+
+// ---- Wave 13 spray data model ----
+//
+// Separate module on purpose: exact-name imports only, never a
+// glob. Pins the serde contract of `Stroke::spray`: projects
+// saved before the field existed must load with `spray: None`.
+#[cfg(test)]
+mod spray_wave13_tests {
+    use crate::model::{SprayMark, Stroke};
+
+    #[test]
+    fn stroke_json_without_a_spray_field_loads_with_spray_none() {
+        // Every field a pre-spray project file carries — and no
+        // `spray` key at all.
+        let json = r#"{
+            "frame": 2,
+            "points": [[10.0, 20.0], [30.0, 40.0]],
+            "color": 16711680,
+            "width": 4.0,
+            "widths": [],
+            "fill": null
+        }"#;
+        let stroke: Stroke =
+            serde_json::from_str(json).expect("pre-spray stroke JSON must still parse");
+        assert_eq!(stroke.spray, None, "missing spray field defaults to None");
+        assert_eq!(stroke.frame, 2);
+        assert_eq!(stroke.points.len(), 2);
+    }
+
+    #[test]
+    fn spray_mark_round_trips_through_json() {
+        let mark = SprayMark {
+            seed: 42,
+            radius: 12.0,
+            opacity: 0.5,
+        };
+        let json = serde_json::to_string(&mark).expect("SprayMark serialises");
+        let back: SprayMark = serde_json::from_str(&json).expect("SprayMark parses back");
+        assert_eq!(back, mark);
+    }
+
+    #[test]
+    fn stroke_with_a_spray_mark_round_trips_through_json() {
+        let mut stroke: Stroke = serde_json::from_str(
+            r#"{"frame":0,"points":[[0.0,0.0]],"color":0,"width":14.0,"widths":[],"fill":null}"#,
+        )
+        .expect("plain stroke parses");
+        stroke.spray = Some(SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        });
+        let json = serde_json::to_string(&stroke).expect("spray stroke serialises");
+        assert!(json.contains("\"spray\""), "spray field is stored: {json}");
+        let back: Stroke = serde_json::from_str(&json).expect("spray stroke parses back");
+        assert_eq!(
+            back.spray,
+            Some(SprayMark {
+                seed: 7,
+                radius: 12.0,
+                opacity: 0.5
+            })
+        );
+    }
+}
+
+#[cfg(test)]
+mod audio_gain_tests {
+    use crate::model::{AudioClip, Project};
+
+    #[test]
+    fn audio_clip_json_without_gain_defaults_to_unity() {
+        // Projects saved before the gain field existed carry no
+        // "gain" key in their clips; they must load at unity.
+        let clip: AudioClip =
+            serde_json::from_str(r#"{"path":"a.wav","start_frame":7}"#).unwrap();
+        assert_eq!(clip.path, "a.wav");
+        assert_eq!(clip.start_frame, 7);
+        assert_eq!(clip.gain, 1.0);
+    }
+
+    #[test]
+    fn audio_clip_json_with_gain_round_trips() {
+        let clip: AudioClip =
+            serde_json::from_str(r#"{"path":"a.wav","start_frame":7,"gain":0.25}"#).unwrap();
+        assert_eq!(clip.gain, 0.25);
+        let json = serde_json::to_string(&clip).unwrap();
+        let back: AudioClip = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.gain, 0.25);
+    }
+
+    #[test]
+    fn project_json_without_clip_gain_loads_clips_at_unity() {
+        // Serialize a current project, strip the gain key to get
+        // the pre-gain on-disk shape, and reload: the clip must
+        // come back at unity gain, not fail or default to 0.
+        let mut project = Project::new_demo();
+        project.audio.push(AudioClip {
+            path: "song.wav".to_string(),
+            start_frame: 12,
+            gain: 0.5,
+        });
+        let json = serde_json::to_string(&project).unwrap();
+        assert!(json.contains("\"gain\":0.5"), "gain is serialized: {json}");
+        let old_json = json.replace(",\"gain\":0.5", "");
+        assert!(!old_json.contains("\"gain\""));
+        let back: Project = serde_json::from_str(&old_json).unwrap();
+        assert_eq!(back.audio.len(), 1);
+        assert_eq!(back.audio[0].gain, 1.0);
     }
 }

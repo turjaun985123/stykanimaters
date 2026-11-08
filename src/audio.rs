@@ -55,11 +55,16 @@ pub enum PlaybackPlan {
     /// Nothing is audible at the playhead — or every clip that
     /// would be audible is missing or unreadable.
     Silent,
-    /// Exactly one audible clip: play its file directly, starting
-    /// `offset_secs` into the file.
+    /// Exactly one audible clip, at unity gain: play its file
+    /// directly, starting `offset_secs` into the file. A lone clip
+    /// whose gain is not 1.0 takes the `Mixed` path instead —
+    /// ffplay cannot scale a directly played file's volume, so
+    /// the gain is applied by rendering a one-clip mix.
     Direct { path: String, offset_secs: f32 },
-    /// Two or more audible clips: render `mix_clips` into one WAV
-    /// and play it starting `offset_secs` in. The mix starts at
+    /// Two or more audible clips — or a single clip with a
+    /// non-unity gain: render `mix_clips` into one WAV (each
+    /// clip scaled by its `gain`) and play it starting
+    /// `offset_secs` in. The mix starts at
     /// timeline zero (each clip sits at its absolute timeline
     /// offset), so the playhead position *is* the offset into the
     /// mix; the offset into any one file is
@@ -91,26 +96,34 @@ pub fn playback_plan(
     // Match audible_at's frame-rate convention exactly.
     let fps = if fps > 0.0 { fps } else { 1.0 };
     let audible = crate::audio_edit::audible_at(clips, playhead_secs, fps, durations);
+    let to_mix_clip = |index: usize| crate::audio_edit::MixClip {
+        path: clips[index].path.clone(),
+        start_secs: clips[index].start_frame as f32 / fps,
+        gain: clips[index].gain,
+        fade_in: 0.0,
+        fade_out: 0.0,
+    };
     match audible.len() {
         0 => PlaybackPlan::Silent,
         1 => {
             let (index, offset_secs) = audible[0];
-            PlaybackPlan::Direct {
-                path: clips[index].path.clone(),
-                offset_secs,
+            if clips[index].gain != 1.0 {
+                // ffplay has no per-file volume flag in the direct
+                // invocation, so a gained lone clip routes through
+                // the mix path (a one-clip mix) to honour its gain.
+                PlaybackPlan::Mixed {
+                    mix_clips: vec![to_mix_clip(index)],
+                    offset_secs: playhead_secs.max(0.0),
+                }
+            } else {
+                PlaybackPlan::Direct {
+                    path: clips[index].path.clone(),
+                    offset_secs,
+                }
             }
         }
         _ => PlaybackPlan::Mixed {
-            mix_clips: audible
-                .iter()
-                .map(|&(index, _)| crate::audio_edit::MixClip {
-                    path: clips[index].path.clone(),
-                    start_secs: clips[index].start_frame as f32 / fps,
-                    gain: 1.0,
-                    fade_in: 0.0,
-                    fade_out: 0.0,
-                })
-                .collect(),
+            mix_clips: audible.iter().map(|&(index, _)| to_mix_clip(index)).collect(),
             offset_secs: playhead_secs.max(0.0),
         },
     }
@@ -182,8 +195,9 @@ impl AudioPlayer {
     /// `fps` converts each clip's `start_frame` to a timeline
     /// offset. The decision logic is [`playback_plan`]: with no
     /// audible clip this stops the player and succeeds silently;
-    /// with exactly one, the clip's file is played directly (the
-    /// same path as [`AudioPlayer::play`]); with two or more, a
+    /// with exactly one at unity gain, the clip's file is played
+    /// directly (the same path as [`AudioPlayer::play`]); with
+    /// two or more — or a single clip whose gain is not 1.0 — a
     /// mix is rendered with [`crate::audio_edit::mix`] to a
     /// temporary WAV and that is played instead. Clip files that
     /// cannot be decoded are skipped. If the mix itself fails,
@@ -315,6 +329,7 @@ mod tests {
         crate::model::AudioClip {
             path: path.to_string(),
             start_frame,
+            gain: 1.0,
         }
     }
 
@@ -468,5 +483,108 @@ mod tests {
         wav.resize(44 + data_size as usize, 0);
 
         fs::File::create(path)?.write_all(&wav)
+    }
+}
+
+#[cfg(test)]
+mod gain_tests {
+    use super::{playback_plan, PlaybackPlan};
+    use crate::audio_edit::{mix, write_wav, WavData};
+    use crate::model::AudioClip;
+
+    fn clip(path: &str, start_frame: usize, gain: f32) -> AudioClip {
+        AudioClip {
+            path: path.to_string(),
+            start_frame,
+            gain,
+        }
+    }
+
+    /// Write a one-second mono WAV of constant `amplitude` to a
+    /// unique temp path and return the path as a String.
+    fn const_wav_path(tag: &str, amplitude: f32) -> String {
+        let wav = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![amplitude; 8000],
+        };
+        let path = std::env::temp_dir().join(format!(
+            "styk-gain-{tag}-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, write_wav(&wav)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn mixed_plan_scales_each_clip_by_its_gain() {
+        // Two real clips, both constant 0.5: at unity they would
+        // sum to 1.0; with the second at gain 0.5 the mix must
+        // sit at 0.5 + 0.25 = 0.75 — the gained clip contributes
+        // at half amplitude.
+        let a = const_wav_path("mix-a", 0.5);
+        let b = const_wav_path("mix-b", 0.5);
+        let clips = vec![clip(&a, 0, 1.0), clip(&b, 0, 0.5)];
+        let durations = |_: &str| Some(1.0);
+        match playback_plan(&clips, 0.5, 24.0, &durations) {
+            PlaybackPlan::Mixed { mix_clips, .. } => {
+                assert_eq!(mix_clips.len(), 2);
+                assert_eq!(mix_clips[0].gain, 1.0);
+                assert_eq!(mix_clips[1].gain, 0.5);
+                let mixed = mix(&mix_clips).unwrap();
+                assert!(!mixed.samples.is_empty());
+                for s in &mixed.samples {
+                    assert!((s - 0.75).abs() < 1e-3, "expected ~0.75, got {s}");
+                }
+                // The gained clip alone at 0.5 vs at unity: half.
+                let half = mix(&mix_clips[1..]).unwrap();
+                for s in &half.samples {
+                    assert!((s - 0.25).abs() < 1e-3, "expected ~0.25, got {s}");
+                }
+            }
+            other => panic!("expected a Mixed plan, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn single_gained_clip_routes_to_mixed_not_direct() {
+        // ffplay cannot scale a directly played file, so a lone
+        // clip with gain 0.5 must take the one-clip Mixed path.
+        let clips = vec![clip("a.wav", 24, 0.5)];
+        let durations = |_: &str| Some(4.0);
+        match playback_plan(&clips, 2.0, 24.0, &durations) {
+            PlaybackPlan::Mixed {
+                mix_clips,
+                offset_secs,
+            } => {
+                assert_eq!(mix_clips.len(), 1);
+                assert_eq!(mix_clips[0].path, "a.wav");
+                assert_eq!(mix_clips[0].gain, 0.5);
+                assert_eq!(mix_clips[0].start_secs, 1.0);
+                assert_eq!(offset_secs, 2.0);
+            }
+            other => panic!("expected a one-clip Mixed plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unity_gain_plans_keep_their_existing_shapes() {
+        let durations = |_: &str| Some(4.0);
+        // A lone unity-gain clip still plays directly.
+        let clips = vec![clip("a.wav", 24, 1.0)];
+        assert!(matches!(
+            playback_plan(&clips, 2.0, 24.0, &durations),
+            PlaybackPlan::Direct { .. }
+        ));
+        // Two unity-gain clips mix with both gains at 1.0.
+        let clips = vec![clip("a.wav", 0, 1.0), clip("b.wav", 0, 1.0)];
+        match playback_plan(&clips, 1.0, 24.0, &durations) {
+            PlaybackPlan::Mixed { mix_clips, .. } => {
+                assert!(mix_clips.iter().all(|c| c.gain == 1.0));
+            }
+            other => panic!("expected a Mixed plan, got {other:?}"),
+        }
     }
 }

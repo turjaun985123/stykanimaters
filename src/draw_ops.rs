@@ -16,7 +16,7 @@
 //! where they rewrite a stroke, matching `erase_at`'s behaviour.
 
 use crate::model::{Project, Stroke, V2};
-use crate::paint::{erase_at, mirror_points_x, nib_widths, smooth_path, Nib};
+use crate::paint::{erase_at, mirror_points_x, nib_widths, simplify_points, smooth_path, Nib};
 
 fn distance(a: V2, b: V2) -> f32 {
     ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt()
@@ -213,6 +213,47 @@ pub fn mirror_strokes_all(project: &mut Project, cx: f32) -> usize {
     mirrored
 }
 
+/// Simplify every stroke on `frame` with Douglas-Peucker (see
+/// [`simplify_points`]): interior points that stay within
+/// `epsilon` of the simplified path are dropped. Returns how
+/// many strokes actually lost points — a stroke whose point
+/// count is unchanged (already simple, degenerate, or
+/// `epsilon <= 0.0`) does not count, and strokes on other
+/// frames are not touched.
+///
+/// Per-point widths are resampled onto the surviving points by
+/// normalised arc position (see [`sample_widths`], the same
+/// treatment [`smooth_stroke`] gives its rewritten points), so
+/// the result stays parallel and the profile's endpoint widths
+/// are preserved; a uniform stroke (empty `widths`) stays
+/// uniform, and a broken non-parallel vector is normalised to
+/// the uniform form. Like smoothing, simplification never cuts
+/// the outline — kept points are a subset of the original — so
+/// a `fill` stays valid and is kept.
+pub fn simplify_strokes(project: &mut Project, frame: usize, epsilon: f32) -> usize {
+    let mut reduced = 0;
+    for stroke in &mut project.strokes {
+        if stroke.frame != frame {
+            continue;
+        }
+        let new_points = simplify_points(&stroke.points, epsilon);
+        if new_points.len() == stroke.points.len() {
+            continue;
+        }
+        let new_widths = if stroke.widths.len() == stroke.points.len() {
+            sample_widths(&stroke.points, &stroke.widths, &new_points)
+        } else {
+            // Empty stays empty (uniform); a broken non-parallel
+            // vector is normalised to empty, as in smooth_stroke.
+            Vec::new()
+        };
+        stroke.points = new_points;
+        stroke.widths = new_widths;
+        reduced += 1;
+    }
+    reduced
+}
+
 #[cfg(test)]
 mod mirror_tests {
     use crate::draw_ops::mirror_strokes_all;
@@ -226,6 +267,7 @@ mod mirror_tests {
             width: 4.0,
             widths: Vec::new(),
             fill: None,
+            spray: None,
         }
     }
 
@@ -290,6 +332,7 @@ mod tests {
             width: 4.0,
             widths: Vec::new(),
             fill: None,
+            spray: None,
         }
     }
 
@@ -460,5 +503,109 @@ mod tests {
         assert_eq!(erase(&mut p, 0, [3.0, 4.0], 5.0), 1);
         assert_eq!(stroke_count(&p, 0), 1, "only the empty stroke remains");
         assert_eq!(smooth_frame(&mut p, 0, 2), 0);
+    }
+}
+
+#[cfg(test)]
+mod simplify_tests {
+    use crate::draw_ops::simplify_strokes;
+    use crate::model::{Project, Stroke, V2};
+
+    fn stroke(frame: usize, points: Vec<V2>) -> Stroke {
+        Stroke {
+            frame,
+            points,
+            color: 0xFF0000,
+            width: 4.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+        }
+    }
+
+    fn project_with(strokes: Vec<Stroke>) -> Project {
+        let mut p = Project::new_demo();
+        p.strokes = strokes;
+        p
+    }
+
+    /// Five points jittering within 0.4 of their chord: at
+    /// epsilon 1.0 the stroke collapses to its two endpoints.
+    fn jittered(frame: usize) -> Stroke {
+        stroke(
+            frame,
+            vec![
+                [0.0, 0.0],
+                [10.0, 0.4],
+                [20.0, -0.3],
+                [30.0, 0.2],
+                [40.0, 0.0],
+            ],
+        )
+    }
+
+    #[test]
+    fn simplify_strokes_counts_only_reduced_strokes_on_the_frame() {
+        let collapsible = jittered(0);
+        // A sharp corner (20, 0) sits ~14.14 from its chord, so
+        // it survives epsilon 1.0 with its point count unchanged.
+        let corner = stroke(0, vec![[0.0, 0.0], [20.0, 0.0], [20.0, 20.0]]);
+        let other_frame = jittered(1);
+        let other_before = other_frame.points.clone();
+        let mut p = project_with(vec![collapsible, corner, other_frame]);
+
+        let reduced = simplify_strokes(&mut p, 0, 1.0);
+
+        assert_eq!(reduced, 1, "only the jittered frame-0 stroke lost points");
+        assert_eq!(p.strokes[0].points, vec![[0.0, 0.0], [40.0, 0.0]]);
+        assert_eq!(
+            p.strokes[1].points,
+            vec![[0.0, 0.0], [20.0, 0.0], [20.0, 20.0]],
+            "corner stroke unchanged, so it did not count"
+        );
+        assert_eq!(p.strokes[2].points, other_before, "other frame untouched");
+        // Metadata untouched.
+        assert_eq!(p.strokes[0].color, 0xFF0000);
+        assert_eq!(p.strokes[0].width, 4.0);
+    }
+
+    #[test]
+    fn simplify_strokes_keeps_widths_parallel_and_endpoints() {
+        let mut s = jittered(0);
+        s.widths = vec![2.0, 4.0, 6.0, 8.0, 10.0];
+        let mut p = project_with(vec![s]);
+
+        assert_eq!(simplify_strokes(&mut p, 0, 1.0), 1);
+        let s = &p.strokes[0];
+        assert_eq!(s.points.len(), 2);
+        assert_eq!(s.widths.len(), s.points.len(), "widths stay parallel");
+        // Arc-position resampling preserves the profile's ends.
+        assert!((s.widths[0] - 2.0).abs() < 1e-4);
+        assert!((s.widths[1] - 10.0).abs() < 1e-4);
+
+        // A uniform stroke stays uniform.
+        let mut p = project_with(vec![jittered(0)]);
+        assert_eq!(simplify_strokes(&mut p, 0, 1.0), 1);
+        assert!(p.strokes[0].widths.is_empty());
+    }
+
+    #[test]
+    fn simplify_strokes_with_zero_epsilon_and_empty_frames_change_nothing() {
+        let mut p = project_with(vec![jittered(0), jittered(1)]);
+        let before: Vec<Vec<V2>> =
+            p.strokes.iter().map(|s| s.points.clone()).collect();
+        assert_eq!(
+            simplify_strokes(&mut p, 0, 0.0),
+            0,
+            "epsilon 0 reduces nothing"
+        );
+        assert_eq!(
+            simplify_strokes(&mut p, 9, 1.0),
+            0,
+            "no strokes on frame 9"
+        );
+        let after: Vec<Vec<V2>> =
+            p.strokes.iter().map(|s| s.points.clone()).collect();
+        assert_eq!(before, after);
     }
 }

@@ -302,6 +302,7 @@ mod tests {
                 duration,
                 kind,
                 color: 0xFFC65D,
+                color2: None,
                 seed,
                 angle: 90.0,
                 length: 160.0,
@@ -508,6 +509,7 @@ mod preset_tests {
             duration: 30.0,
             kind: ClipKind::Galaxy,
             color: 0xFFC65D,
+            color2: None,
             seed: 424_242,
             angle: -45.0,
             length: 220.0,
@@ -519,6 +521,7 @@ mod preset_tests {
         assert_eq!(a.start, b.start, "start");
         assert_eq!(a.duration, b.duration, "duration");
         assert_eq!(a.color, b.color, "colour");
+        assert_eq!(a.color2, b.color2, "gradient end colour");
         assert_eq!(a.seed, b.seed, "seed");
         assert_eq!(a.angle, b.angle, "angle");
         assert_eq!(a.length, b.length, "length");

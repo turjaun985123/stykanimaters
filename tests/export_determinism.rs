@@ -14,7 +14,12 @@
 //!   pixels),
 //! - APNG (`export::export_apng`, in-crate via the `png` crate),
 //! - JPEG sequence (`export::export_jpeg_sequence`, in-crate via
-//!   `image`).
+//!   `image`),
+//! - rich-project frame renders: the same `render_frame_at`
+//!   determinism, but on a project exercising the newer
+//!   closed-form systems (Storm weather, an FX clip, a spray
+//!   stroke), with non-vacuity checks that those systems
+//!   actually reach the rasterizer.
 //!
 //! MP4 and WebM are deliberately NOT asserted here: they are
 //! encoded by the system `ffmpeg` binary, so their bytes depend
@@ -28,8 +33,9 @@
 use std::path::PathBuf;
 
 use stykanimate_rs::export;
-use stykanimate_rs::model::Project;
+use stykanimate_rs::model::{FxClipEntry, Project, SprayMark, Stroke};
 use stykanimate_rs::svg;
+use stykanimate_rs::vfx::{ClipKind, ParticleClip, Weather, WeatherKind};
 
 /// The demo project cut down to 3 authored frames so CI stays
 /// fast. Stage size is left at the demo's 960x720.
@@ -287,4 +293,119 @@ fn jpeg_sequence_export_is_byte_identical_across_runs() {
 
     let _ = std::fs::remove_dir_all(&dir_a);
     let _ = std::fs::remove_dir_all(&dir_b);
+}
+
+/// The tiny project dressed with two of the newer closed-form
+/// systems: Storm weather and a Shard FX clip anchored to the
+/// demo figure's origin node. The clip window is frames
+/// [0.0, 2.0), so frame 1.0 sits at its midpoint (t = 0.5).
+fn rich_project() -> Project {
+    let mut project = tiny_project();
+    project.weather = Some(Weather {
+        kind: WeatherKind::Storm,
+        amount: 120.0,
+        wind: 25.0,
+    });
+    project.fx_clips.push(FxClipEntry {
+        clip: ParticleClip {
+            start: 0.0,
+            duration: 2.0,
+            kind: ClipKind::Shard,
+            color: 0xFFCC33,
+            seed: 7,
+            angle: 0.0,
+            length: 120.0,
+            color2: None,
+        },
+        figure: 0,
+        node: 0,
+    });
+    project
+}
+
+#[test]
+fn rich_project_frames_are_byte_identical_across_renders() {
+    let project = rich_project();
+    let expected_len = project.stage[0] as usize * project.stage[1] as usize * 3;
+
+    // Frame 1.0 is inside the FX clip window; frame 2.0 is past
+    // it but still under Storm weather. Both must render
+    // byte-identically across calls.
+    for frame_f in [1.0f32, 2.0] {
+        let a = export::render_frame_at(&project, frame_f);
+        let b = export::render_frame_at(&project, frame_f);
+        assert_eq!(
+            a.as_raw().len(),
+            expected_len,
+            "frame {frame_f}: unexpected buffer size"
+        );
+        assert_eq!(
+            a.as_raw(),
+            b.as_raw(),
+            "frame {frame_f}: two renders of the storm + FX project differ"
+        );
+    }
+
+    // Non-vacuity: the same project with weather and FX removed
+    // must NOT produce the frame-1.0 pixels — the storm drops and
+    // the shard burst have to reach the rasterizer, not just the
+    // determinism check.
+    let mut stripped = project.clone();
+    stripped.weather = None;
+    stripped.fx_clips.clear();
+    let rich = export::render_frame_at(&project, 1.0);
+    let plain = export::render_frame_at(&stripped, 1.0);
+    assert_ne!(
+        rich.as_raw(),
+        plain.as_raw(),
+        "frame 1.0 is unchanged by removing Storm weather and the Shard clip — weather/FX are not reaching the rasterizer"
+    );
+}
+
+#[test]
+fn spray_stroke_renders_deterministically_and_differs_from_plain() {
+    // One horizontal stroke across the middle of the stage on
+    // authored frame 0; the spray twin carries a SprayMark, so
+    // its marks spread around the recorded path (seeded, hence
+    // deterministic) instead of only tracing it.
+    let plain_stroke = Stroke {
+        frame: 0,
+        points: vec![[200.0, 360.0], [760.0, 360.0]],
+        color: 0x3366CC,
+        width: 6.0,
+        widths: Vec::new(),
+        fill: None,
+        spray: None,
+    };
+    let spray_stroke = Stroke {
+        spray: Some(SprayMark {
+            seed: 42,
+            radius: 18.0,
+            opacity: 0.6,
+        }),
+        ..plain_stroke.clone()
+    };
+
+    let mut plain_project = tiny_project();
+    plain_project.strokes.push(plain_stroke);
+    let mut spray_project = tiny_project();
+    spray_project.strokes.push(spray_stroke);
+
+    let a = export::render_frame_at(&spray_project, 0.0);
+    let b = export::render_frame_at(&spray_project, 0.0);
+    assert_eq!(
+        a.as_raw(),
+        b.as_raw(),
+        "two renders of the spray stroke differ — spray placement is not deterministic"
+    );
+
+    // Non-vacuity: the spray render must differ from the plain
+    // stroke's render — the SprayMark has to change pixels, not
+    // just be stored.
+    let plain = export::render_frame_at(&plain_project, 0.0);
+    assert_ne!(
+        a.as_raw(),
+        plain.as_raw(),
+        "spray stroke renders identically to its spray: None twin — the SprayMark is not reaching the rasterizer"
+    );
 }

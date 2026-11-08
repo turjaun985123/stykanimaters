@@ -623,11 +623,62 @@ pub fn solve_two_bone_ik(
     out
 }
 
+/// Solve two-bone IK for one of [`humanoid3`]'s arms — the
+/// convenience form of [`solve_two_bone_ik`] that resolves the
+/// chain indices from the side: left arm upperArm.L = 3,
+/// foreArm.L = 4, hand.L = 5; right arm upperArm.R = 6,
+/// foreArm.R = 7, hand.R = 8.
+///
+/// The indices are **humanoid-layout constants**: the figure is
+/// expected to use `humanoid3`'s node layout. On any other
+/// figure the same fixed indices are used, naming whatever body
+/// part happens to sit there; when an index is out of range (or
+/// the three nodes do not form a parent chain) the pose is
+/// returned unchanged, exactly as [`solve_two_bone_ik`] does.
+pub fn solve_arm_ik(
+    fig: &Figure3,
+    pose: &Pose3,
+    side_is_left: bool,
+    target: [f32; 3],
+) -> Pose3 {
+    let (upper, fore, end) = if side_is_left {
+        (3, 4, 5)
+    } else {
+        (6, 7, 8)
+    };
+    solve_two_bone_ik(fig, pose, upper, fore, end, target)
+}
+
+/// Solve two-bone IK for one of [`humanoid3`]'s legs — the
+/// convenience form of [`solve_two_bone_ik`] that resolves the
+/// chain indices from the side: left leg thigh.L = 9,
+/// shin.L = 10, foot.L = 11; right leg thigh.R = 12,
+/// shin.R = 13, foot.R = 14.
+///
+/// The indices are **humanoid-layout constants**, with the same
+/// contract as [`solve_arm_ik`]: on a figure with a different
+/// layout the fixed indices are used as-is, and out-of-range
+/// indices (or a non-chain) return the pose unchanged.
+pub fn solve_leg_ik(
+    fig: &Figure3,
+    pose: &Pose3,
+    side_is_left: bool,
+    target: [f32; 3],
+) -> Pose3 {
+    let (upper, fore, end) = if side_is_left {
+        (9, 10, 11)
+    } else {
+        (12, 13, 14)
+    };
+    solve_two_bone_ik(fig, pose, upper, fore, end, target)
+}
+
 #[cfg(test)]
 mod ik_tests {
     use super::{
         evaluate3, humanoid3, mat3_from_euler, mat3_identity, mat3_to_euler,
-        solve_two_bone_ik, Mat3, Pose3,
+        solve_arm_ik, solve_leg_ik, solve_two_bone_ik, Figure3, Mat3, Node3,
+        Pose3,
     };
 
     fn assert_mat_approx(a: &Mat3, b: &Mat3, tol: f32) {
@@ -797,6 +848,114 @@ mod ik_tests {
         // is not a chain: the pose comes back unchanged.
         let solved = solve_two_bone_ik(&fig, &pose, 3, 5, 4, [0.0, 0.0, 0.0]);
         assert_eq!(solved, pose);
+    }
+
+    #[test]
+    fn arm_ik_left_reaches_a_reachable_target() {
+        let fig = humanoid3();
+        let mut pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        pose.rotations[1] = [0.0, 0.0, 20.0]; // chest twist
+        pose.rotations[3] = [10.0, -20.0, 30.0]; // upperArm.L posed
+        let before = evaluate3(&fig, &pose);
+        let shoulder = before[3];
+        // |offset| = sqrt(950) ~ 30.8, inside the 24 + 22 reach.
+        let target = [
+            shoulder[0] - 10.0,
+            shoulder[1] - 25.0,
+            shoulder[2] + 15.0,
+        ];
+        let solved = solve_arm_ik(&fig, &pose, true, target);
+        let after = evaluate3(&fig, &solved);
+        assert!(
+            dist(after[5], target) < 2.0,
+            "hand.L at {:?}, target {:?}",
+            after[5],
+            target
+        );
+    }
+
+    #[test]
+    fn arm_ik_right_reaches_and_leaves_the_left_arm_untouched() {
+        let fig = humanoid3();
+        let mut pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        pose.rotations[3] = [10.0, -20.0, 30.0]; // upperArm.L posed
+        pose.rotations[4] = [0.0, 0.0, -45.0]; // foreArm.L bent
+        pose.rotations[6] = [-10.0, 20.0, -30.0]; // upperArm.R posed
+        let before = evaluate3(&fig, &pose);
+        let shoulder = before[6];
+        let target = [
+            shoulder[0] + 10.0,
+            shoulder[1] - 25.0,
+            shoulder[2] + 15.0,
+        ];
+        let solved = solve_arm_ik(&fig, &pose, false, target);
+        let after = evaluate3(&fig, &solved);
+        assert!(
+            dist(after[8], target) < 2.0,
+            "hand.R at {:?}, target {:?}",
+            after[8],
+            target
+        );
+        // The solver writes only the right chain's slots (6, 7):
+        // the left arm's rotations and evaluated hand position
+        // are exactly as they were.
+        assert_eq!(solved.rotations[3], pose.rotations[3]);
+        assert_eq!(solved.rotations[4], pose.rotations[4]);
+        assert!(
+            dist(after[5], before[5]) < 1.0e-4,
+            "hand.L moved: {:?} -> {:?}",
+            before[5],
+            after[5]
+        );
+    }
+
+    #[test]
+    fn leg_ik_left_moves_the_foot_below_the_hip() {
+        let fig = humanoid3();
+        let pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        let before = evaluate3(&fig, &pose);
+        let hip = before[9]; // thigh.L
+        // Below the hip and stepped forward/out:
+        // |offset| = sqrt(3114) ~ 55.8, inside the 34 + 32 reach.
+        let target = [hip[0] + 5.0, hip[1] - 55.0, hip[2] + 8.0];
+        assert!(target[1] < hip[1], "target is below the hip");
+        let solved = solve_leg_ik(&fig, &pose, true, target);
+        let after = evaluate3(&fig, &solved);
+        assert!(
+            dist(after[11], target) < 2.0,
+            "foot.L at {:?}, target {:?}",
+            after[11],
+            target
+        );
+        // The right leg was not part of the solve.
+        assert!(
+            dist(after[14], before[14]) < 1.0e-4,
+            "foot.R moved: {:?} -> {:?}",
+            before[14],
+            after[14]
+        );
+    }
+
+    #[test]
+    fn arm_and_leg_ik_on_a_small_figure_return_the_pose_unchanged() {
+        // A 3-node figure: every humanoid arm/leg index is out of
+        // range, so all four conveniences are no-ops.
+        let fig = Figure3 {
+            name: "tiny".into(),
+            color: 0,
+            nodes: vec![
+                Node3 { name: "root".into(), parent: None, offset: [0.0; 3], head: false },
+                Node3 { name: "mid".into(), parent: Some(0), offset: [10.0, 0.0, 0.0], head: false },
+                Node3 { name: "tip".into(), parent: Some(1), offset: [10.0, 0.0, 0.0], head: false },
+            ],
+        };
+        let mut pose = Pose3::rest(&fig, [1.0, 2.0, 3.0]);
+        pose.rotations[1] = [0.0, 0.0, 45.0];
+        let target = [5.0, 5.0, 5.0];
+        assert_eq!(solve_arm_ik(&fig, &pose, true, target), pose);
+        assert_eq!(solve_arm_ik(&fig, &pose, false, target), pose);
+        assert_eq!(solve_leg_ik(&fig, &pose, true, target), pose);
+        assert_eq!(solve_leg_ik(&fig, &pose, false, target), pose);
     }
 }
 

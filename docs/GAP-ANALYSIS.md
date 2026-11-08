@@ -226,10 +226,13 @@ its own animated bake had already grown to 4.
   original's ~6,600-line system. (The MCP kind gap is closed:
   `add_fx_clip` accepts all 14 kinds and `fx_list`/`fx_move`/
   `fx_resize`/`fx_duplicate`/`fx_delete` manage clips.)
-- **.piv text side tables** cannot be written from this model:
-  the format stores vector glyph outlines, and the port's text
-  is a 3×5 bitmap font with no outlines to write. (The v5 image
-  side tables and per-frame bends DO round-trip now.)
+- **.piv text side tables** — closed in Wave 13: the bitmap
+  font's lit pixels are written as tiny square glyph outlines
+  in the format's own encoding (machine cross-verified with
+  the original's Python codecs), and text is recovered on
+  import. Limit: glyphs are the port's blocky bitmap shapes,
+  not real font outlines. (The v5 image side tables and
+  per-frame bends round-trip too.)
 - **Movieclip depth.** Clips are flat pose lists: no nested clip
   timelines, and sprite/text tracks inside Stick Nodes clips are
   not converted into ClipDefs.
@@ -464,4 +467,79 @@ is green with 779 tests.
 
 Nothing in this section is CI-verified yet; statuses move to
 the per-wave tables above once the run is green, and
+docs/COMPARISON.md is refreshed after that run.
+
+## Wave 13 (in progress, 2026-11-08)
+
+Twenty code agents, aimed at the loose ends earlier waves
+left documented — the spray render wiring, backend features
+that never reached the GUI, and the unfinished range-export
+family — plus one long-standing investigation. Everything
+below is implemented in Wave 13; CI verification happens at
+integration (per the repo rule, CI is the first build/test
+any of this gets), so no item here is claimed verified yet.
+
+- **Spray wiring, end to end** — the Wave 12 brush model
+  gains its missing half: `Stroke` records a spray mark
+  (`SprayMark`) when a scatter brush draws, and the
+  rasterizer, the SVG exporter and the editor canvas all
+  render spray strokes as deterministic dots computed from
+  one shared `spray_dots` source. Spray strokes render
+  dots only — no polyline is drawn through them. The
+  Wave 12 "model data only" limit is closed.
+- **Stroke simplification** — Douglas-Peucker
+  simplification for freehand strokes in `src/paint.rs`,
+  exposed over project strokes in `src/draw_ops.rs` and
+  over MCP.
+- **FX clip colour gradients** — FX clips gain an end
+  colour (`color2`) alongside the existing colour, so a
+  clip's particles render as a colour gradient.
+- **Per-clip audio gain, end to end** — audio clips carry
+  a gain in the model; the live playback plan and the
+  MP4/WebM export mux both honour it, so the gain set in
+  the panel is the gain that plays and exports.
+- **Audio split at silences** — the audio engine computes
+  a clip's non-silent ranges, and an editor op splits a
+  clip at its silences into separate clips.
+- **Graph transforms** — graph channels gain time-mirror
+  and value-scale transforms.
+- **FX preset GUI buttons** — the Wave 12 on-disk FX clip
+  presets gain save/apply buttons in the FX panel;
+  presets are no longer reachable only over MCP.
+- **Graph overlay wired in** — the Wave 12 multi-channel
+  overlay view-model is painted in the graph panel.
+- **Graph preset preview curves** — the tangent preset
+  buttons gain preview curves, so a preset's shape is
+  visible before it is applied.
+- **3D IK conveniences** — one-call arm and leg chain
+  helpers over the Wave 12 two-bone IK solver in
+  `src/fig3d.rs`, so posing code names a limb instead of
+  raw node indices.
+- **.piv v5 text side tables — INVESTIGATION SUCCEEDED**:
+  the grammar proved fully determined by the original's
+  source; text tables are written with bitmap-pixel glyph
+  outlines and recovered on import. The encoding algorithm
+  round-trips through the original's Python codecs and a
+  fixture produced by the original's own writer decodes
+  exactly (scripts/verify_text_tables.py). Rust-side tests
+  are CI-pending like the rest of this section.
+- **APNG/JPEG frame-range exports** — APNG and JPEG
+  sequence exports can be limited to a frame range,
+  completing the range family (GIF/PNG in Wave 11,
+  MP4/WebM in Wave 12).
+- **MCP round 7** — three new tools, including stroke
+  simplification: 65 tools total.
+- **Shell session continuity** — session-continuity
+  helpers in the shell layer, restoring session state
+  across editor relaunches.
+- **Determinism, round 4** — the byte-determinism proof
+  extends from the demo project to a rich project (storm
+  weather, FX clips and spray strokes).
+- **Home panel** — the Home panel gains a duplicate
+  button per saved project (the Wave 12 project-library
+  backend, wired in) and a most-active-figure line from
+  the motion statistics.
+
+Nothing in this section is CI-verified yet; statuses move
+to the per-wave tables above once the run is green, and
 docs/COMPARISON.md is refreshed after that run.

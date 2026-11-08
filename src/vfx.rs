@@ -155,12 +155,24 @@ pub enum ClipKind {
 /// the clip is live for `start <= frame < start + duration`.
 /// `angle` (degrees, model convention) aims Beam and Trail;
 /// `length` is the beam's reach and the trail's total span.
+/// `color2`, when set, turns `color` into the start of a colour
+/// gradient that runs across the clip's life (see
+/// [`clip_particles`]).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ParticleClip {
     pub start: f32,
     pub duration: f32,
     pub kind: ClipKind,
     pub color: u32,
+    /// Optional gradient end colour: when set, every mote's
+    /// base colour lerps from `color` to this colour by the
+    /// clip-local progress `t` (0 at the clip's first frame,
+    /// approaching 1 at its last), before the kind's own colour
+    /// derivations are applied. `None` — the default, and what
+    /// clips saved before this field existed load as — keeps
+    /// the solid `color` for the whole clip.
+    #[serde(default)]
+    pub color2: Option<u32>,
     pub seed: u32,
     pub angle: f32,
     pub length: f32,
@@ -206,6 +218,16 @@ fn dir_from_deg(deg: f32) -> V2 {
 /// emitted around `anchor`: (centre, radius, colour, alpha).
 /// Empty when `frame_f` is outside the clip's window
 /// `[start, start + duration)` or the duration is not positive.
+///
+/// Every kind derives its mote colours from one base colour.
+/// When the clip sets `color2`, that base is the gradient
+/// [`crate::style::lerp_color`] of `color` → `color2` at the
+/// clip-local progress `t`, computed before any per-kind
+/// derivation (channel rotations, pulls toward white, channel
+/// rescalings), so the gradient flows through every kind's
+/// palette. No kind overrides the base with a colour of its
+/// own — Leaves and Petals clamp channels of their derived
+/// palettes, but still start from this base.
 pub fn clip_particles(
     clip: &ParticleClip,
     frame_f: f32,
@@ -220,7 +242,14 @@ pub fn clip_particles(
         return out;
     }
     let t = local / clip.duration; // 0..1 through the clip
-    let color = rgb(clip.color);
+    // The base colour every kind derives from: the solid colour,
+    // or the gradient colour at this point of the clip's life.
+    // With `color2: None` this is exactly `rgb(clip.color)`,
+    // the pre-gradient behaviour.
+    let color = match clip.color2 {
+        Some(end) => rgb(crate::style::lerp_color(clip.color, end, t)),
+        None => rgb(clip.color),
+    };
     let seed = clip.seed;
     // Ramp shared by the sustained effects: 0 at both ends, 1 mid-clip.
     let envelope = (std::f32::consts::PI * t).sin();
@@ -1180,6 +1209,7 @@ mod tests {
             duration: 24.0,
             kind,
             color: 0xFFC65D,
+            color2: None,
             seed: 777,
             angle: 90.0, // dir = (1, 0): pointing right
             length: 160.0,
@@ -2362,5 +2392,157 @@ mod tests {
                 assert!(n <= 64, "{kind:?} emitted {n} particles at frame {frame}");
             }
         }
+    }
+
+    // ---- Wave 13: clip colour gradients ----
+
+    /// A clip with explicit colours (the `clip(kind)` helper
+    /// pins its own), for the gradient tests below.
+    fn gradient_clip(kind: ClipKind, color: u32, color2: Option<u32>) -> ParticleClip {
+        ParticleClip {
+            start: 0.0,
+            duration: 10.0,
+            kind,
+            color,
+            color2,
+            seed: 42,
+            angle: 0.0,
+            length: 160.0,
+        }
+    }
+
+    #[test]
+    fn gradient_clip_opens_on_the_start_colour() {
+        // Burst draws every mote in the shared base colour, so
+        // at t = 0 all 26 motes are exactly `color` — the
+        // gradient has not moved yet (lerp at t = 0 is exact).
+        let c = gradient_clip(ClipKind::Burst, 0x102040, Some(0xE08010));
+        let out = clip_particles(&c, 0.0, [100.0, 100.0]);
+        assert_eq!(out.len(), 26);
+        for (_, _, col, _) in &out {
+            assert_eq!(*col, [0x10, 0x20, 0x40]);
+        }
+    }
+
+    #[test]
+    fn gradient_clip_near_its_end_is_near_the_end_colour() {
+        // At t = 0.95 the lerp (16, 32, 64) -> (224, 128, 16)
+        // evaluates to (213.6, 123.2, 18.4), rounding to
+        // (214, 123, 18) — close to the end colour on every
+        // channel, and exactly what lerp_color produces.
+        let c = gradient_clip(ClipKind::Burst, 0x102040, Some(0xE08010));
+        let out = clip_particles(&c, 9.5, [100.0, 100.0]);
+        assert_eq!(out.len(), 26);
+        for (_, _, col, _) in &out {
+            assert_eq!(*col, [214, 123, 18]);
+            for ch in 0..3 {
+                let end = [0xE0u8, 0x80, 0x10][ch] as i32;
+                assert!((col[ch] as i32 - end).abs() <= 16, "channel {ch} near the end");
+            }
+        }
+    }
+
+    #[test]
+    fn gradient_midpoint_motes_sit_between_the_endpoints() {
+        // t = 0.5: (16, 32, 64) -> (224, 128, 16) halves to
+        // (120, 80, 40) — between the endpoints on every
+        // channel (blue falls while red and green rise).
+        let c = gradient_clip(ClipKind::Burst, 0x102040, Some(0xE08010));
+        let out = clip_particles(&c, 5.0, [100.0, 100.0]);
+        assert_eq!(out.len(), 26);
+        for (_, _, col, _) in &out {
+            assert_eq!(*col, [120, 80, 40]);
+            for ch in 0..3 {
+                let (a, b) = ([0x10u8, 0x20, 0x40][ch], [0xE0u8, 0x80, 0x10][ch]);
+                assert!(
+                    col[ch] >= a.min(b) && col[ch] <= a.max(b),
+                    "channel {ch} between the endpoints"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gradient_flows_under_the_channel_rotations() {
+        // Galaxy colours each arm by a channel rotation of the
+        // base. Red -> blue at t = 0.5 gives the base
+        // (128, 0, 128) (each moving channel halves 255 -> 0,
+        // 127.5 rounding to 128), so the arms are that base's
+        // three rotations — proof the gradient is applied to
+        // the base BEFORE the kind's rotations, not after.
+        let mut c = gradient_clip(ClipKind::Galaxy, 0xFF0000, Some(0x0000FF));
+        c.duration = 24.0;
+        let out = clip_particles(&c, 12.0, [100.0, 100.0]);
+        assert_eq!(out.len(), 42);
+        let arms = [[128, 0, 128], [0, 128, 128], [128, 128, 0]];
+        for (i, (_, _, col, _)) in out.iter().enumerate() {
+            assert_eq!(*col, arms[i % 3], "mote {i}");
+        }
+    }
+
+    #[test]
+    fn solid_clip_colours_match_the_pre_gradient_formulas() {
+        // `color2: None` must reproduce the old single-colour
+        // behaviour bit for bit. Every colour below is computed
+        // from the kinds' formulas for color 0xC86432 =
+        // (200, 100, 50) at t = 0.5, seed 42: Burst motes all
+        // carry the base colour itself; Galaxy arms rotate it
+        // by (i % 3); Confetti's palette is the three rotations
+        // at full brightness, then at 65% (50 * 0.65 = 32.5
+        // truncates to 32 through the `as u8` cast).
+        let burst = gradient_clip(ClipKind::Burst, 0xC86432, None);
+        let out = clip_particles(&burst, 5.0, [100.0, 100.0]);
+        assert_eq!(out.len(), 26);
+        for (_, _, col, _) in &out {
+            assert_eq!(*col, [200, 100, 50]);
+        }
+
+        let galaxy = gradient_clip(ClipKind::Galaxy, 0xC86432, None);
+        let out = clip_particles(&galaxy, 5.0, [100.0, 100.0]);
+        assert_eq!(out.len(), 42);
+        let arms = [[200, 100, 50], [100, 50, 200], [50, 200, 100]];
+        for (i, (_, _, col, _)) in out.iter().enumerate() {
+            assert_eq!(*col, arms[i % 3], "mote {i}");
+        }
+
+        let confetti = gradient_clip(ClipKind::Confetti, 0xC86432, None);
+        let out = clip_particles(&confetti, 5.0, [100.0, 100.0]);
+        assert_eq!(out.len(), 28);
+        let palette = [
+            [200, 100, 50],
+            [100, 50, 200],
+            [50, 200, 100],
+            [130, 65, 32],
+            [65, 32, 130],
+            [32, 130, 65],
+        ];
+        for (i, (_, _, col, _)) in out.iter().enumerate() {
+            assert_eq!(*col, palette[i % 6], "mote {i}");
+        }
+    }
+
+    #[test]
+    fn clip_json_without_color2_loads_as_solid() {
+        // A clip saved before the gradient field existed has
+        // no `color2` key at all; it must load as `None`.
+        let old = "{\"start\":0.0,\"duration\":10.0,\"kind\":\"Burst\",\"color\":16711680,\"seed\":7,\"angle\":0.0,\"length\":0.0}";
+        let c: ParticleClip = serde_json::from_str(old).unwrap();
+        assert_eq!(c.color2, None);
+        assert_eq!(c.color, 0xFF0000);
+        assert_eq!(c.kind, ClipKind::Burst);
+    }
+
+    #[test]
+    fn clip_json_round_trips_gradient_and_solid() {
+        let grad = gradient_clip(ClipKind::Burst, 0x102040, Some(0xE08010));
+        let text = serde_json::to_string(&grad).unwrap();
+        let back: ParticleClip = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.color2, Some(0xE08010));
+        assert_eq!(back.color, 0x102040);
+
+        let solid = gradient_clip(ClipKind::Burst, 0x102040, None);
+        let text = serde_json::to_string(&solid).unwrap();
+        let back: ParticleClip = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.color2, None);
     }
 }

@@ -812,7 +812,7 @@ impl EditorView {
                     .child(crate::ui_badge::count_badge(infos.len())),
             );
         if infos.is_empty() {
-            return col.child(crate::ui_empty::empty_line(
+            col = col.child(crate::ui_empty::empty_line(
                 "No FX clips in this project.",
             ));
         }
@@ -870,6 +870,10 @@ impl EditorView {
                         crate::fx_edit::delete_clip(&mut view.core.project, i);
                     }
                     cx.notify();
+                })))
+                .child(btn(("fx-preset-save", i), "Save preset", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.fx_save_preset(i);
+                    cx.notify();
                 })));
             col = col.child(row);
             // Span bar (ui::clip_row): where this clip sits on
@@ -895,6 +899,29 @@ impl EditorView {
                     end_frac: info.end / total,
                 },
             ));
+        }
+        // Wave 13: saved FX presets (fx-presets/*.json on disk).
+        // Shown even when the project has no clips yet — applying
+        // a preset is how a clip gets created from one.
+        let preset_names = core.fx_preset_names();
+        col = col.child(section_label("Presets"));
+        if preset_names.is_empty() {
+            col = col.child(crate::ui_empty::empty_line("No presets saved yet"));
+        } else {
+            for (pi, pname) in preset_names.iter().enumerate() {
+                let label: &'static str =
+                    Box::leak(pname.clone().into_boxed_str()) as &str;
+                let apply_name = pname.clone();
+                col = col.child(btn(
+                    ("fx-preset-apply", pi),
+                    label,
+                    false,
+                    cx.listener(move |view, _ev, _w, cx| {
+                        view.core.fx_apply_preset(&apply_name);
+                        cx.notify();
+                    }),
+                ));
+            }
         }
         col
     }
@@ -1856,6 +1883,12 @@ struct GraphDrawData {
     fit: crate::graph::Channel,
     /// The real channel for the selected target, if one exists.
     channel: Option<crate::graph::Channel>,
+    /// Normalized curves of the figure's OTHER channels
+    /// (`graph_panel::overlay_curves` with the displayed channel
+    /// removed at render time), drawn faintly behind the main
+    /// curve. Each inner vec is normalized 0.0..=1.0 samples
+    /// spanning the project frame range evenly.
+    overlay: Vec<Vec<f32>>,
     frames: usize,
     current: f32,
     /// Frame of the key being dragged (highlighted), if any.
@@ -1903,7 +1936,11 @@ struct DrawData {
     /// selected joint's path appended last when enabled.
     paths: Vec<Vec<V2>>,
     particles: Vec<(V2, f32, u32, f32)>,
-    strokes: Vec<(Vec<V2>, u32, f32)>,
+    /// (points, colour, width, spray dots) — the dots are
+    /// `Some((centre, alpha) list)` only for spray strokes, which
+    /// paint dots instead of a polyline, matching the rasterizer
+    /// and the SVG exporter.
+    strokes: Vec<(Vec<V2>, u32, f32, Option<Vec<(V2, f32)>>)>,
 }
 
 impl EditorView {
@@ -2080,7 +2117,16 @@ impl EditorView {
             .strokes
             .iter()
             .filter(|s| s.frame == core.current)
-            .map(|s| (s.points.clone(), s.color, s.width))
+            .map(|s| {
+                // Spray strokes carry their dots — computed by the
+                // single spray geometry source (paint::spray_dots) —
+                // instead of being painted as a polyline.
+                let dots = s
+                    .spray
+                    .as_ref()
+                    .map(|mark| crate::paint::spray_dots(&s.points, mark));
+                (s.points.clone(), s.color, s.width, dots)
+            })
             .collect();
         DrawData {
             stage: core.project.stage,
@@ -2200,9 +2246,40 @@ impl Render for EditorView {
         // the stage while `show_graph` is on.
         let graph_panel = if graph_on {
             let target = self.graph_target();
+            // Faint overlay data: normalized curves of the
+            // selected figure's channels (Wave 12's
+            // graph_panel::overlay_curves), with the channel the
+            // panel displays removed. overlay_curves walks the
+            // figure's channels in project order, and
+            // graph_channel_ref finds the displayed channel by
+            // the same (figure, target) match — so the entry to
+            // drop is the first filtered position of `target`.
+            // When no real channel exists for the target, the
+            // panel displays no main curve, and every channel
+            // stays in the overlay.
+            let overlay: Vec<Vec<f32>> = {
+                let mut curves = crate::graph_panel::overlay_curves(
+                    &core.project,
+                    core.selected_figure,
+                    96,
+                );
+                if let Some(pos) = core
+                    .project
+                    .channels
+                    .iter()
+                    .filter(|c| c.figure == core.selected_figure)
+                    .position(|c| c.target == target)
+                {
+                    if pos < curves.len() {
+                        curves.remove(pos);
+                    }
+                }
+                curves.into_iter().map(|(_, values)| values).collect()
+            };
             let gdata = GraphDrawData {
                 fit: self.graph_fit_channel(),
                 channel: self.graph_channel_ref().cloned(),
+                overlay,
                 frames: core.frame_count(),
                 current: core.current as f32,
                 drag_frame: self.graph_drag.map(|(f, _)| f),
@@ -2648,6 +2725,23 @@ impl Render for EditorView {
             panel = panel.child(crate::ui_stat_grid::stat_grid(
                 &crate::stats::project_stats(&core.project),
             ));
+            // Most-active figure (stats::busiest_figure, Wave 12):
+            // the figure whose root travels the most, with its
+            // travel. No figures -> no line at all.
+            if let Some(fi) = crate::stats::busiest_figure(&core.project) {
+                if let Some(fig) = core.project.figures.get(fi) {
+                    let travel = crate::stats::root_travel(&core.project, fi);
+                    panel = panel.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(C_MUTED))
+                            .child(format!(
+                                "Most active: {} ({:.1} units)",
+                                fig.name, travel
+                            )),
+                    );
+                }
+            }
             // Keyframe-count sparkline (ui::sparkline): one point
             // per figure, from the lengths of stats::figure_keyframes.
             // Only with 2+ figures — a one-point strip is noise and
@@ -2690,6 +2784,7 @@ impl Render for EditorView {
                 }
                 listed += 1;
                 let path = info.path.clone();
+                let dup_path = info.path.clone();
                 let name = info.name.clone();
                 panel = panel.child(crate::ui_file_row::file_row(
                     &crate::ui_file_row::FileRowData {
@@ -2700,15 +2795,36 @@ impl Render for EditorView {
                             info.fps as i32,
                         ),
                     },
-                    vec![div().child(btn(
-                        ("home-open", i),
-                        "Open",
-                        false,
-                        cx.listener(move |view, _ev, _w, cx| {
-                            view.open_home_project(&path, &name);
-                            cx.notify();
-                        }),
-                    ))],
+                    vec![
+                        div().child(btn(
+                            ("home-open", i),
+                            "Open",
+                            false,
+                            cx.listener(move |view, _ev, _w, cx| {
+                                view.open_home_project(&path, &name);
+                                cx.notify();
+                            }),
+                        )),
+                        div().child(btn(
+                            ("home-dup", i),
+                            "Copy",
+                            false,
+                            cx.listener(move |view, _ev, _w, cx| {
+                                view.core.status =
+                                    match crate::projects::duplicate_project(&dup_path) {
+                                        Ok(new_path) => format!(
+                                            "Duplicated project: {}.",
+                                            new_path
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().into_owned())
+                                                .unwrap_or_default()
+                                        ),
+                                        Err(e) => format!("Duplicate failed: {e}"),
+                                    };
+                                cx.notify();
+                            }),
+                        )),
+                    ],
                 ));
             }
             if listed == 0 {
@@ -4258,8 +4374,22 @@ fn paint_stage(window: &mut Window, bounds: Bounds<Pixels>, data: &DrawData) {
         stroke(window, segs, rgba((color << 8) | *alpha as u32), 5.0 * s);
     }
     // Brush strokes for this frame, under the figures.
-    for (points, color, width) in &data.strokes {
-        if points.len() > 1 {
+    for (points, color, width, spray) in &data.strokes {
+        if let Some(dots) = spray {
+            // Spray stroke: filled dot circles only, no polyline —
+            // the same decision as the rasterizer and SVG export,
+            // painted like the particles below (fill + trace_circle
+            // + rgba packing).
+            let r = ((width * 0.5).max(1.0) * s).max(0.8);
+            for (centre, alpha) in dots {
+                let a = (*alpha * 255.0) as u32;
+                let mut pb = PathBuilder::fill();
+                trace_circle(&mut pb, map(*centre), r);
+                if let Ok(path) = pb.build() {
+                    window.paint_path(path, rgba((color << 8) | a));
+                }
+            }
+        } else if points.len() > 1 {
             let segs: Vec<(V2, V2)> = points.windows(2).map(|w| (w[0], w[1])).collect();
             stroke(window, &segs, rgb(*color), width * s);
         }
@@ -4423,6 +4553,33 @@ fn paint_graph(window: &mut Window, bounds: Bounds<Pixels>, data: &GraphDrawData
             rgba(0xFF5D5D << 8 | 0x99),
             1.0,
         );
+    }
+    // Faint overlay: the figure's other channels, each
+    // normalized into the view's value band (0.0 at val_min,
+    // 1.0 at val_max) and sampled evenly across the project
+    // frame range, mapped through the same `to_px` the main
+    // curve uses — 1px strokes in muted ink behind everything
+    // else the panel draws.
+    let val_span = view.val_max - view.val_min;
+    let last_frame = (data.frames.saturating_sub(1)) as f32;
+    for curve in &data.overlay {
+        let n = curve.len();
+        if n < 2 {
+            continue;
+        }
+        let mut pb = PathBuilder::stroke(px(1.0));
+        for (i, nv) in curve.iter().enumerate() {
+            let frame = last_frame * (i as f32 / (n - 1) as f32);
+            let p = view.to_px(frame, view.val_min + nv * val_span);
+            if i == 0 {
+                pb.move_to(at(p));
+            } else {
+                pb.line_to(at(p));
+            }
+        }
+        if let Ok(path) = pb.build() {
+            window.paint_path(path, rgba(C_MUTED << 8 | 0x40));
+        }
     }
     // Curve + key handles.
     if let Some(ch) = &data.channel {

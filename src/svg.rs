@@ -55,7 +55,29 @@ pub fn export_svg(project: &Project, dir: &Path) -> std::io::Result<usize> {
         let mut defs = String::new();
         let mut grad_n = 0usize;
         for stroke in &project.strokes {
-            if stroke.frame == frame_idx && stroke.points.len() > 1 {
+            if stroke.frame != frame_idx {
+                continue;
+            }
+            if let Some(mark) = &stroke.spray {
+                // Spray stroke: dots only, no polyline — the same
+                // decision the rasterizer makes, with the dot
+                // geometry from the single spray source
+                // (paint::spray_dots), so every renderer agrees on
+                // where the dots land. Centres go through `view`
+                // exactly like polyline points do.
+                let r = (stroke.width * 0.5).max(1.0);
+                for (centre, alpha) in crate::paint::spray_dots(&stroke.points, mark) {
+                    let q = view(centre);
+                    svg += &format!(
+                        "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"{}\" fill-opacity=\"{:.2}\"/>\n",
+                        q[0],
+                        q[1],
+                        r,
+                        hex(stroke.color),
+                        alpha
+                    );
+                }
+            } else if stroke.points.len() > 1 {
                 let pts: Vec<String> = stroke
                     .points
                     .iter()
@@ -264,5 +286,61 @@ mod tests {
         let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
         assert!(text.starts_with("<svg"), "not an svg: {}", &text[..40.min(text.len())]);
         assert!(text.contains("<line"), "figure segments missing");
+    }
+
+    #[test]
+    fn svg_spray_stroke_exports_dots_not_a_polyline() {
+        let mut project = Project::new_demo();
+        let mark = crate::model::SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        };
+        let spray_points = vec![[100.0, 100.0], [200.0, 120.0], [300.0, 100.0]];
+        // A spray stroke: must come out as <circle> dots only.
+        project.strokes.push(crate::model::Stroke {
+            frame: 0,
+            points: spray_points.clone(),
+            color: 0xC0FFEE,
+            width: 14.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: Some(mark),
+        });
+        // A plain stroke on the same frame: unchanged polyline.
+        project.strokes.push(crate::model::Stroke {
+            frame: 0,
+            points: vec![[100.0, 600.0], [300.0, 600.0]],
+            color: 0x123456,
+            width: 4.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+        });
+        let dir = std::path::Path::new("/tmp/styk-svg-spray-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        // The dot geometry comes from the single spray source;
+        // the export must emit exactly one circle per dot.
+        let dots = crate::paint::spray_dots(&spray_points, &mark);
+        assert_eq!(dots.len(), spray_points.len() * 6, "spray_dots contract");
+        assert_eq!(
+            text.matches("fill=\"#C0FFEE\"").count(),
+            dots.len(),
+            "one <circle> per spray dot:\n{text}"
+        );
+        assert!(text.contains("fill-opacity="), "dots must carry their alpha");
+        assert!(
+            text.contains("r=\"7.0\""),
+            "dot radius is (width * 0.5).max(1.0):\n{text}"
+        );
+        // The only polyline in the file is the plain stroke's —
+        // the spray stroke did not draw one.
+        assert_eq!(
+            text.matches("<polyline").count(),
+            1,
+            "spray stroke drew a polyline:\n{text}"
+        );
+        assert!(text.contains("stroke=\"#123456\""), "plain stroke changed");
     }
 }

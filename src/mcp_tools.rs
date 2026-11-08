@@ -734,6 +734,7 @@ fn tool_add_fx_clip(core: &mut EditorCore, args: &Value) -> Result<Value, String
         return Err("argument 'duration' must be positive".into());
     }
     let color = opt_color(args, "color")?.unwrap_or(core.project.figures[fi].color);
+    let color2 = opt_color(args, "color2")?;
     let length = opt_f32(args, "length")?.unwrap_or(130.0);
     // Same construction as the editor's own add_fx_clip op.
     let seed = 11 + core.project.fx_clips.len() as u32 * 7;
@@ -743,6 +744,7 @@ fn tool_add_fx_clip(core: &mut EditorCore, args: &Value) -> Result<Value, String
             duration,
             kind,
             color,
+            color2,
             seed,
             angle: 0.0,
             length,
@@ -758,6 +760,7 @@ fn tool_add_fx_clip(core: &mut EditorCore, args: &Value) -> Result<Value, String
         "node": ni,
         "start": start,
         "duration": duration,
+        "color2": color2,
     }))
 }
 
@@ -918,7 +921,7 @@ fn tool_add_audio_clip(core: &mut EditorCore, args: &Value) -> Result<Value, Str
         return Err("argument 'path' must not be empty".into());
     }
     let start_frame = req_usize(args, "start_frame")?;
-    core.project.audio.push(AudioClip { path: path.to_string(), start_frame });
+    core.project.audio.push(AudioClip { path: path.to_string(), start_frame, gain: 1.0 });
     Ok(json!({
         "ok": true,
         "audio_index": core.project.audio.len() - 1,
@@ -927,34 +930,78 @@ fn tool_add_audio_clip(core: &mut EditorCore, args: &Value) -> Result<Value, Str
     }))
 }
 
+/// Parse the graph `target` argument shared by graph_key and the
+/// channel transform tools: "root_x"/"root_y" (or "rootx"/"rooty"),
+/// "angle:N" / "length:N" strings, or an object {"angle": node} /
+/// {"length": node}. Node indices are range-checked against the
+/// figure.
+fn parse_graph_target(
+    core: &EditorCore,
+    fi: usize,
+    args: &Value,
+) -> Result<crate::graph::ChannelTarget, String> {
+    use crate::graph::ChannelTarget;
+    let target_v = get(args, "target").ok_or("missing required argument 'target'")?;
+    if let Some(s) = target_v.as_str() {
+        match s {
+            "root_x" | "rootx" => return Ok(ChannelTarget::RootX),
+            "root_y" | "rooty" => return Ok(ChannelTarget::RootY),
+            _ => {}
+        }
+        for (prefix, is_angle) in [("angle:", true), ("length:", false)] {
+            if let Some(rest) = s.strip_prefix(prefix) {
+                let ni: usize = rest.parse().map_err(|_| {
+                    format!("unknown graph target '{s}' (the {prefix} index must be an integer)")
+                })?;
+                check_node(core, fi, ni)?;
+                return Ok(if is_angle {
+                    ChannelTarget::Angle(ni)
+                } else {
+                    ChannelTarget::Length(ni)
+                });
+            }
+        }
+        return Err(format!(
+            "unknown graph target '{s}' (expected \"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {{"angle": node}})"
+        ));
+    }
+    if let Some(map) = target_v.as_object() {
+        if let Some(v) = map.get("angle") {
+            let ni = as_usize(v, "target.angle")?;
+            check_node(core, fi, ni)?;
+            return Ok(ChannelTarget::Angle(ni));
+        }
+        if let Some(v) = map.get("length") {
+            let ni = as_usize(v, "target.length")?;
+            check_node(core, fi, ni)?;
+            return Ok(ChannelTarget::Length(ni));
+        }
+        return Err("argument 'target' object must contain an 'angle' or 'length' node index".into());
+    }
+    Err("argument 'target' must be \"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": node}".into())
+}
+
+/// Index of the (figure, target) channel for the channel
+/// transform tools; a missing channel is a clean error (these
+/// tools never create channels implicitly, unlike graph_key).
+fn channel_index(
+    core: &EditorCore,
+    fi: usize,
+    target: crate::graph::ChannelTarget,
+) -> Result<usize, String> {
+    core.project
+        .channels
+        .iter()
+        .position(|c| c.figure == fi && c.target == target)
+        .ok_or_else(|| {
+            format!("no graph channel for figure {fi} target {target:?}; add keys with graph_key first")
+        })
+}
+
 fn tool_graph_key(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let fi = req_usize(args, "figure")?;
     check_figure(core, fi)?;
-    let target_v = get(args, "target").ok_or("missing required argument 'target'")?;
-    let target = if let Some(s) = target_v.as_str() {
-        match s {
-            "root_x" => crate::graph::ChannelTarget::RootX,
-            "root_y" => crate::graph::ChannelTarget::RootY,
-            other => {
-                return Err(format!(
-                    "unknown graph target '{other}' (expected \"root_x\", \"root_y\" or {{\"angle\": node}})"
-                ))
-            }
-        }
-    } else if let Some(map) = target_v.as_object() {
-        match map.get("angle") {
-            Some(v) => {
-                let ni = as_usize(v, "target.angle")?;
-                check_node(core, fi, ni)?;
-                crate::graph::ChannelTarget::Angle(ni)
-            }
-            None => {
-                return Err("argument 'target' object must contain an 'angle' node index".into())
-            }
-        }
-    } else {
-        return Err("argument 'target' must be \"root_x\", \"root_y\" or {\"angle\": node}".into());
-    };
+    let target = parse_graph_target(core, fi, args)?;
     let frame = req_f32(args, "frame")?;
     if frame < 0.0 {
         return Err("argument 'frame' must not be negative".into());
@@ -1053,6 +1100,61 @@ fn tool_graph_tangent_preset(core: &mut EditorCore, args: &Value) -> Result<Valu
     Ok(json!({ "ok": true, "status": core.status, "project": project_summary(core) }))
 }
 
+fn tool_mirror_channel_time(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    let target = parse_graph_target(core, fi, args)?;
+    // 'centre' (the brief's spelling; "center" accepted too)
+    // defaults to the timeline's middle frame.
+    let centre = match opt_f32(args, "centre")? {
+        Some(c) => Some(c),
+        None => opt_f32(args, "center")?,
+    }
+    .unwrap_or_else(|| (core.project.frames.len().saturating_sub(1)) as f32 / 2.0);
+    let idx = channel_index(core, fi, target)?;
+    core.snapshot();
+    let ch = &mut core.project.channels[idx];
+    crate::graph::mirror_keys_time(&mut ch.keys, centre);
+    // Mirroring reverses the key order; restore ascending order
+    // (a no-op if the graph function already sorted).
+    ch.sort_keys();
+    let keys = ch.keys.len();
+    core.status = format!("Mirrored graph channel time around frame {centre}.");
+    Ok(json!({
+        "ok": true,
+        "status": core.status,
+        "project": project_summary(core),
+        "figure": fi,
+        "target": format!("{target:?}"),
+        "centre": centre,
+        "keys": keys,
+    }))
+}
+
+fn tool_scale_channel_values(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    let target = parse_graph_target(core, fi, args)?;
+    let factor = req_f32(args, "factor")?;
+    let pivot = opt_f32(args, "pivot")?.unwrap_or(0.0);
+    let idx = channel_index(core, fi, target)?;
+    core.snapshot();
+    let ch = &mut core.project.channels[idx];
+    crate::graph::scale_key_values(&mut ch.keys, factor, pivot);
+    let keys = ch.keys.len();
+    core.status = format!("Scaled graph channel values by {factor} around {pivot}.");
+    Ok(json!({
+        "ok": true,
+        "status": core.status,
+        "project": project_summary(core),
+        "figure": fi,
+        "target": format!("{target:?}"),
+        "factor": factor,
+        "pivot": pivot,
+        "keys": keys,
+    }))
+}
+
 // ---------------------------------------------------------------------
 // The tool table
 // ---------------------------------------------------------------------
@@ -1109,6 +1211,7 @@ fn tool_draw_stroke(core: &mut EditorCore, args: &Value) -> Result<Value, String
         width,
         widths: Vec::new(),
         fill: None,
+        spray: None,
     });
     Ok(json!({
         "ok": true,
@@ -1153,6 +1256,7 @@ fn tool_draw_shape(core: &mut EditorCore, args: &Value) -> Result<Value, String>
         width,
         widths: Vec::new(),
         fill: None,
+        spray: None,
     });
     Ok(json!({
         "ok": true,
@@ -1201,6 +1305,7 @@ fn tool_draw_polygon(core: &mut EditorCore, args: &Value) -> Result<Value, Strin
         width,
         widths: Vec::new(),
         fill: None,
+        spray: None,
     });
     Ok(json!({
         "ok": true,
@@ -1244,6 +1349,7 @@ fn tool_draw_star(core: &mut EditorCore, args: &Value) -> Result<Value, String> 
         width,
         widths: Vec::new(),
         fill: None,
+        spray: None,
     });
     Ok(json!({
         "ok": true,
@@ -1279,6 +1385,32 @@ fn tool_erase_strokes(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
         "ok": true,
         "frame": frame,
         "changed": changed,
+        "strokes_on_frame": crate::draw_ops::stroke_count(&core.project, frame),
+    }))
+}
+
+fn tool_simplify_strokes(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    // 'frame' defaults to the current frame (wave-13 tools follow
+    // the draw_shape convention for optional frame arguments).
+    let frame = match get(args, "frame") {
+        Some(v) => as_usize(v, "frame")?,
+        None => core.current,
+    };
+    check_frame(core, frame)?;
+    let epsilon = req_f32(args, "epsilon")?;
+    if epsilon <= 0.0 {
+        return Err("argument 'epsilon' must be positive".into());
+    }
+    core.snapshot();
+    let reduced = crate::draw_ops::simplify_strokes(&mut core.project, frame, epsilon);
+    core.status = format!("Simplified strokes on frame {} ({reduced} reduced).", frame + 1);
+    Ok(json!({
+        "ok": true,
+        "status": core.status,
+        "project": project_summary(core),
+        "frame": frame,
+        "epsilon": epsilon,
+        "reduced": reduced,
         "strokes_on_frame": crate::draw_ops::stroke_count(&core.project, frame),
     }))
 }
@@ -1690,7 +1822,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "add_fx_clip",
-            description: "Add a timed particle FX clip anchored to a figure's node. start/duration are in frames.",
+            description: "Add a timed particle FX clip anchored to a figure's node. start/duration are in frames. 'color2' optionally sets a gradient end colour (particles blend colour -> color2).",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
@@ -1699,6 +1831,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                     "start": { "type": "number" },
                     "duration": { "type": "number" },
                     "color": { "type": "integer", "description": "0xRRGGBB (default: figure colour)" },
+                    "color2": { "type": "integer", "description": "0xRRGGBB gradient end colour (default: none = solid colour)" },
                     "length": { "type": "number", "description": "Beam reach / trail span (default 130)" }
                 }),
                 &["figure", "node", "kind", "start", "duration"],
@@ -1808,11 +1941,11 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "graph_key",
-            description: "Add a graph-editor channel key: target is \"root_x\", \"root_y\" or {\"angle\": node}; frame and value are numbers (degrees for angles).",
+            description: "Add a graph-editor channel key: target is \"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": node}; frame and value are numbers (degrees for angles).",
             schema: obj_schema(
                 json!({
                     "figure": { "type": "integer" },
-                    "target": { "description": "\"root_x\", \"root_y\" or {\"angle\": nodeIndex}" },
+                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": nodeIndex}" },
                     "frame": { "type": "number" },
                     "value": { "type": "number" }
                 }),
@@ -1848,6 +1981,33 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["preset"],
             ),
             handler: tool_graph_tangent_preset,
+        },
+        Tool {
+            name: "mirror_channel_time",
+            description: "Mirror one graph channel's keys in time around 'centre' (a frame coordinate; default: the timeline's middle frame), so that channel's animation plays backwards. Target addressing matches graph_key (\"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": node}). Errors when the channel does not exist. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": nodeIndex}" },
+                    "centre": { "type": "number", "description": "Mirror centre frame (default: middle frame)" }
+                }),
+                &["figure", "target"],
+            ),
+            handler: tool_mirror_channel_time,
+        },
+        Tool {
+            name: "scale_channel_values",
+            description: "Scale one graph channel's key values by 'factor' around 'pivot' (default 0): value' = pivot + (value - pivot) * factor. Target addressing matches graph_key. Errors when the channel does not exist. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": nodeIndex}" },
+                    "factor": { "type": "number" },
+                    "pivot": { "type": "number", "description": "Value the scaling is centred on (default 0)" }
+                }),
+                &["figure", "target", "factor"],
+            ),
+            handler: tool_scale_channel_values,
         },
         Tool {
             name: "layers",
@@ -1962,6 +2122,18 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["frame", "x", "y", "radius"],
             ),
             handler: tool_erase_strokes,
+        },
+        Tool {
+            name: "simplify_strokes",
+            description: "Simplify every stroke on a frame with Douglas-Peucker: interior points within 'epsilon' stage units of the path are dropped, endpoints kept. 'frame' defaults to the current frame. Returns how many strokes lost points. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "frame": { "type": "integer", "description": "Target frame (default: current frame)" },
+                    "epsilon": { "type": "number", "description": "Tolerance in stage units" }
+                }),
+                &["epsilon"],
+            ),
+            handler: tool_simplify_strokes,
         },
         Tool {
             name: "apply_nib",
@@ -2101,11 +2273,11 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 51);
+        assert_eq!(tools.len(), 54);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 51, "tool names must be unique");
+        assert_eq!(names.len(), 54, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
@@ -2697,6 +2869,120 @@ mod tests {
     }
 
     #[test]
+    fn wave13_tools() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        call(&mut core, &tools, "new_project", json!({})).unwrap();
+        // Grow the timeline to 5 frames for the channel work.
+        for _ in 0..4 {
+            call(&mut core, &tools, "add_frame", json!({})).unwrap();
+        }
+        assert_eq!(core.project.frames.len(), 5);
+
+        // --- add_fx_clip color2 stores the gradient end colour ---
+        let r = call(&mut core, &tools, "add_fx_clip", json!({
+            "figure": 0, "node": 0, "kind": "beam", "start": 0.0, "duration": 6.0,
+            "color": 0xFF0000, "color2": 0x0000FF
+        }))
+        .unwrap();
+        assert_eq!(r["color2"], 0x0000FF);
+        assert_eq!(core.project.fx_clips[0].clip.color, 0xFF0000);
+        assert_eq!(core.project.fx_clips[0].clip.color2, Some(0x0000FF));
+        // Without color2 the clip stays a solid colour.
+        call(&mut core, &tools, "add_fx_clip", json!({
+            "figure": 0, "node": 0, "kind": "burst", "start": 0.0, "duration": 6.0
+        }))
+        .unwrap();
+        assert_eq!(core.project.fx_clips[1].clip.color2, None);
+
+        // --- simplify_strokes reduces a jittery stroke ---
+        call(&mut core, &tools, "draw_stroke", json!({
+            "frame": 0,
+            "points": [[0.0, 0.0], [10.0, 0.4], [20.0, 0.0], [30.0, 0.4], [40.0, 0.0]]
+        }))
+        .unwrap();
+        assert_eq!(core.project.strokes[0].points.len(), 5);
+        let r = call(&mut core, &tools, "simplify_strokes", json!({
+            "frame": 0, "epsilon": 1.0
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["reduced"], 1);
+        let pts = &core.project.strokes[0].points;
+        assert!(pts.len() < 5, "jitter within epsilon is dropped: {pts:?}");
+        assert_eq!(pts.first(), Some(&[0.0, 0.0]), "start point kept");
+        assert_eq!(pts.last(), Some(&[40.0, 0.0]), "end point kept");
+        // A missing epsilon is an error.
+        assert!(call(&mut core, &tools, "simplify_strokes", json!({ "frame": 0 })).is_err());
+
+        // --- channel transforms ---
+        // A root_x channel with keys at frames 0 and 4.
+        call(&mut core, &tools, "graph_key", json!({
+            "figure": 0, "target": "root_x", "frame": 0.0, "value": 0.0
+        }))
+        .unwrap();
+        call(&mut core, &tools, "graph_key", json!({
+            "figure": 0, "target": "root_x", "frame": 4.0, "value": 100.0
+        }))
+        .unwrap();
+        // Scale values x2 around the default pivot 0.
+        let r = call(&mut core, &tools, "scale_channel_values", json!({
+            "figure": 0, "target": "root_x", "factor": 2.0
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(core.project.channels[0].keys[0].value, 0.0);
+        assert_eq!(core.project.channels[0].keys[1].value, 200.0);
+        // Scale around a pivot: v' = 100 + (v - 100) * 0.5.
+        call(&mut core, &tools, "scale_channel_values", json!({
+            "figure": 0, "target": "root_x", "factor": 0.5, "pivot": 100.0
+        }))
+        .unwrap();
+        assert_eq!(core.project.channels[0].keys[0].value, 50.0);
+        assert_eq!(core.project.channels[0].keys[1].value, 150.0);
+        // Mirror in time around the default centre (frame 2 of 5):
+        // key frames swap 0 <-> 4 and the values travel with them.
+        let r = call(&mut core, &tools, "mirror_channel_time", json!({
+            "figure": 0, "target": "root_x"
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["centre"], 2.0);
+        let ch = &core.project.channels[0];
+        assert_eq!(ch.keys.len(), 2);
+        assert_eq!(ch.keys[0].frame, 0.0);
+        assert_eq!(ch.keys[0].value, 150.0, "the frame-4 key moved to frame 0");
+        assert_eq!(ch.keys[1].frame, 4.0);
+        assert_eq!(ch.keys[1].value, 50.0);
+        // The "angle:N" string addressing works too.
+        call(&mut core, &tools, "graph_key", json!({
+            "figure": 0, "target": "angle:2", "frame": 1.0, "value": 30.0
+        }))
+        .unwrap();
+        let r = call(&mut core, &tools, "mirror_channel_time", json!({
+            "figure": 0, "target": "angle:2", "centre": 2.0
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        let ang = core
+            .project
+            .channels
+            .iter()
+            .find(|c| matches!(c.target, crate::graph::ChannelTarget::Angle(2)))
+            .unwrap();
+        assert_eq!(ang.keys[0].frame, 3.0, "frame 1 mirrors to frame 3 around 2");
+        // Missing channels error for both transforms.
+        assert!(call(&mut core, &tools, "mirror_channel_time", json!({
+            "figure": 0, "target": "root_y"
+        }))
+        .is_err());
+        assert!(call(&mut core, &tools, "scale_channel_values", json!({
+            "figure": 0, "target": { "angle": 3 }, "factor": 2.0
+        }))
+        .is_err());
+    }
+
+    #[test]
     fn bad_arguments_error_instead_of_panicking() {
         let tools = tools();
         let mut core = EditorCore::new();
@@ -2741,6 +3027,10 @@ mod tests {
             ("draw_stroke", json!({ "frame": 9, "points": [[0.0, 0.0], [1.0, 1.0]] })),
             ("draw_stroke", json!({ "frame": 0, "points": [[0.0, 0.0]], "width": 0.0 })),
             ("smooth_strokes", json!({ "frame": 4 })),
+            ("simplify_strokes", json!({ "frame": 99, "epsilon": 1.0 })),
+            ("simplify_strokes", json!({ "epsilon": 0.0 })),
+            ("mirror_channel_time", json!({ "figure": 0, "target": "root_x" })), // no channel yet
+            ("scale_channel_values", json!({ "figure": 0, "target": "root_x", "factor": 2.0 })), // no channel yet
             ("erase_strokes", json!({ "frame": 0, "x": 0.0, "y": 0.0, "radius": -1.0 })),
             ("apply_nib", json!({ "frame": 0, "nib": "airbrush" })),
             ("fig3_select", json!({ "joint": 0 })), // no session yet

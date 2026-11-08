@@ -298,6 +298,7 @@ mod tests {
                 seed: 1,
                 angle: 0.0,
                 length: 100.0,
+                color2: None,
             },
             figure: 0, // on Styk
             node: 2,

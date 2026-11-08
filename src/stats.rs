@@ -286,6 +286,7 @@ mod tests {
                 seed: 1,
                 angle: 0.0,
                 length: 10.0,
+                color2: None,
             },
             figure: 0,
             node: 0,
@@ -293,6 +294,7 @@ mod tests {
         p.audio.push(AudioClip {
             path: "clip.wav".into(),
             start_frame: 0,
+            gain: 1.0,
         });
         p.strokes.push(Stroke {
             frame: 0,
