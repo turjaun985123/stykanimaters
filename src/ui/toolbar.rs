@@ -278,8 +278,8 @@ mod tests {
     #[test]
     fn face_colors_active_uses_accent() {
         assert_eq!(face_colors(true, false), (C_ACCENT, C_INK));
-        // The Wave 14 kit retune moved the accent token.
-        assert_eq!(C_ACCENT, 0x6C8CFF);
+        // The Wave 15 (2.0) kit retune moved the accent token.
+        assert_eq!(C_ACCENT, 0x6D8CFF);
     }
 
     #[test]
