@@ -565,10 +565,10 @@ mod tests {
         let mut core = EditorCore::new();
         core.enter_3d();
         assert!(apply_camera_preset(&mut core, "side"));
-        let cam = core.fig3.as_ref().unwrap().camera;
-        assert_eq!(cam, fig3d::camera_preset("side").unwrap());
+        let cam = &core.fig3.as_ref().unwrap().camera;
+        assert_eq!(*cam, fig3d::camera_preset("side").unwrap());
         assert!(apply_frame_camera(&mut core));
-        let framed = core.fig3.as_ref().unwrap().camera;
+        let framed = &core.fig3.as_ref().unwrap().camera;
         assert!(framed.distance > 0.0);
         // Framing targets the figure, not the world origin
         // default — the rest humanoid's centroid sits above
