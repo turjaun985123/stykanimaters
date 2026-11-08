@@ -1567,6 +1567,6 @@ mod tests {
         let _ = build_strip(&core, None, None, speed_segment(1.0), None);
         let _ = build_strip(&core, None, None, speed_segment(2.0), None);
         assert_eq!(est_text_width("2×"), 2.0 * LABEL_CHAR_W);
-        assert_eq!(est_text_width("0.25×"), 4.0 * LABEL_CHAR_W);
+        assert_eq!(est_text_width("0.25×"), 5.0 * LABEL_CHAR_W);
     }
 }

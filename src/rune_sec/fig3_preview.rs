@@ -381,12 +381,17 @@ mod tests {
         let prims = preview_prims(None, true, VP);
         assert!(prims.iter().all(|p| p.color == GRID_COLOR));
         // With a session the grid comes first, then figure work.
+        // The session's grid sits at the figure's feet rather
+        // than at y = 0, so its surviving segment count can
+        // differ from the no-session grid's — what is pinned
+        // here is the order: a solid leading run of grid
+        // prims, then exactly the figure-only prims.
         let state = rest_state(0);
         let both = preview_prims(Some(&state), true, VP);
-        assert_eq!(both.len(), prims.len() + preview_prims(Some(&state), false, VP).len());
-        assert!(both[..prims.len()]
-            .iter()
-            .all(|p| p.color == GRID_COLOR));
+        let fig_only = preview_prims(Some(&state), false, VP);
+        let grid_run = both.iter().take_while(|p| p.color == GRID_COLOR).count();
+        assert!(grid_run > 0, "the grid leads the prim list");
+        assert_eq!(both.len(), grid_run + fig_only.len());
     }
 
     #[test]

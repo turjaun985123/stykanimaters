@@ -1547,13 +1547,17 @@ playback_speed: 1.0,
         // At head-ring scale 2.0 the drawn radius is
         // 2 × 17 = 34, and the box grows by that — the
         // growth follows the project's scale, not the
-        // base constant.
+        // base constant. The head at (100, 200) grows on
+        // every side, so its right edge (100 + 34 = 134)
+        // now passes the chain's bare max_x of 130;
+        // max_y stays the chain's bare 240 (the head's
+        // grown 234 does not reach it).
         let mut core = chain_core(true);
         core.set_head_ring_scale(2.0);
         assert_eq!(core.project.head_ring_radius(), 34.0);
         assert_eq!(
             figure_bbox(&core),
-            Some([100.0 - 34.0, 200.0 - 34.0, 130.0, 240.0])
+            Some([100.0 - 34.0, 200.0 - 34.0, 100.0 + 34.0, 240.0])
         );
     }
 
