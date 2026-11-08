@@ -328,9 +328,9 @@ mod tests {
             info("ALPHA Bet"),
             info("Gamma"),
         ];
-        let names = |list: &[ProjectInfo]| -> Vec<&str> {
+        fn names<'a>(list: &'a [ProjectInfo]) -> Vec<&'a str> {
             list.iter().map(|p| p.name.as_str()).collect()
-        };
+        }
 
         // Empty query returns everything, in order.
         assert_eq!(
