@@ -631,11 +631,8 @@ impl EditorCore {
             self.status = "No figures to centre on.".into();
             return;
         }
-        let Some(pose) = self
-            .project
-            .poses_at(self.current as f32)
-            .get(self.selected_figure)
-        else {
+        let poses_here = self.project.poses_at(self.current as f32);
+        let Some(pose) = poses_here.get(self.selected_figure) else {
             self.status = "No figures to centre on.".into();
             return;
         };
