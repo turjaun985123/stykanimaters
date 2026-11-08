@@ -3,10 +3,11 @@
 //! The Rune shell does NOT adopt `rune-i18n` (audit
 //! `docs/RUNE_API_AUDIT.md` Q12: it would replace a solved problem
 //! with a build.rs + ICU4X stack). It reuses the project's own
-//! table in `stykanimate_rs::i18n` — 28 languages × 96 keys
-//! (78 through Phase E; +18 mission-era label keys in Wave 9,
-//! carried as English placeholders in the untranslated tables
-//! per the table's own convention), with
+//! table in `stykanimate_rs::i18n` — 28 languages × 99 keys
+//! (78 through Phase E; +18 mission-era label keys in Wave 9
+//! and +3 dopesheet keys in Wave 10, carried as English
+//! placeholders in the untranslated tables per the table's
+//! own convention), with
 //! fallback current language → English → the key itself
 //! (`i18n::t`, src/i18n.rs:235; fallback chain in `resolve`,
 //! src/i18n.rs:223).
@@ -92,10 +93,12 @@ pub fn key_in_table(key: &str) -> bool {
 ///
 /// Every entry names a label the shell actually shows (see
 /// `src/chrome_view.rs`, whose app-bar and transport labels
-/// resolve through [`tr`] since Phase E). All 30 keys exist in
+/// resolve through [`tr`] since Phase E). All 31 keys exist in
 /// the table — the last 8 arrived with the Phase E translation
-/// pass in `i18n.rs` — so [`missing_shell_keys`] is empty; the
-/// coverage split stays as the regression guard.
+/// pass in `i18n.rs`, and `dopesheet` (registered with the
+/// Wave 10 panel rebuild) was already in every table — so
+/// [`missing_shell_keys`] is empty; the coverage split stays
+/// as the regression guard.
 pub const SHELL_KEYS: &[&str] = &[
     // App bar
     "save",
@@ -128,6 +131,7 @@ pub const SHELL_KEYS: &[&str] = &[
     // Panels / workspaces the shell links to
     "help",
     "inspector",
+    "dopesheet",
     "export_png",
     "export_mp4",
     "ws_animate",
@@ -270,6 +274,29 @@ mod tests {
         }
         assert!(missing.is_empty(), "missing should be empty, got {missing:?}");
         assert_eq!(missing_shell_keys(), missing);
+    }
+
+    #[test]
+    fn dopesheet_keys_resolve_through_tr() {
+        let mut core = core();
+        // The Wave 10 dopesheet panel's strings. The title key
+        // `dopesheet` predates the rebuild and is genuinely
+        // translated in all 28 languages; the navigation and
+        // empty-state keys carry the English text as a
+        // placeholder outside English for now (the table's
+        // convention), so they resolve to the English string.
+        assert_eq!(tr(&core, "dopesheet"), "Dopesheet");
+        assert_eq!(tr(&core, "next_keyframe"), "Next keyframe");
+        assert_eq!(tr(&core, "previous_keyframe"), "Previous keyframe");
+        assert_eq!(tr(&core, "no_keyframes_yet"), "No keyframes yet");
+        core.lang = Lang::Es;
+        assert_eq!(tr(&core, "dopesheet"), "Hoja de tiempos");
+        core.lang = Lang::Bn;
+        assert_eq!(tr(&core, "dopesheet"), "ডোপশিট");
+        assert!(key_in_table("dopesheet"));
+        assert!(key_in_table("next_keyframe"));
+        assert!(key_in_table("previous_keyframe"));
+        assert!(key_in_table("no_keyframes_yet"));
     }
 
     #[test]

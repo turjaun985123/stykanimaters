@@ -8,7 +8,8 @@
 use crate::model::{norm_deg, Pose, Project};
 
 /// A root move larger than this (stage units) counts as a pose
-/// change. Same threshold as the dopesheet in `ui_dope.rs`.
+/// change. Same threshold as the dopesheet in
+/// `rune_sec/dopesheet.rs`.
 const ROOT_EPS: f32 = 0.5;
 /// A single-node angle change larger than this (degrees,
 /// shortest path around the circle) counts as a pose change.
@@ -102,7 +103,8 @@ fn pose_changed(prev: &Pose, cur: &Pose) -> bool {
 /// can be *missing* from a frame: a missing frame is never a
 /// key, and the frame the figure reappears on is (nothing →
 /// something is a change). An out-of-range `fi` yields an empty
-/// vec. Consistent with the dopesheet's rule in `ui_dope.rs`,
+/// vec. Consistent with the dopesheet's rule in
+/// `rune_sec/dopesheet.rs`,
 /// but returns indices instead of a per-frame boolean map.
 pub fn figure_keyframes(p: &Project, fi: usize) -> Vec<usize> {
     if fi >= p.figures.len() {
@@ -307,6 +309,7 @@ mod tests {
             fill: None,
             spray: None,
             opacity: 1.0,
+            scatter: 0.0,
         });
         let s = project_stats(&p);
         assert_eq!(s.figures, 2);

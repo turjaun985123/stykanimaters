@@ -10,7 +10,7 @@
 //! The language set mirrors the original app's locale packs
 //! (`src/locales/packs/` in StykAnimate-App: 27 packs) plus Bengali,
 //! which the port added for its user — 28 languages in total.
-//! Every table carries exactly the same 96 keys.
+//! Every table carries exactly the same 99 keys.
 //!
 //! Translation approach: established animation terms are used where
 //! a language has them (French "pelure d'oignon", Polish "skórka
@@ -61,6 +61,18 @@
 //! workspace keys they are infrastructure for now: the call
 //! sites still render the English literals until a wiring
 //! pass routes them through `tr`.
+//!
+//! The dopesheet keys (`next_keyframe`, `previous_keyframe`,
+//! `no_keyframes_yet`) were added in Wave 10 for the rebuilt
+//! dopesheet panel: the first two label its keyframe
+//! navigation, the third is its empty state when a figure has
+//! no keyframes. Their English values are the exact strings
+//! the panel shows; every other language carries the English
+//! text as a placeholder, the same convention as the
+//! UI-mission keys above, for a later translation pass. The
+//! panel's title needs no new key: it resolves the existing
+//! `dopesheet` key — genuinely translated in all 28
+//! languages — through the same `tr` accessor.
 //!
 //! The Rune shell keys (`settings`, `frame`, `frames`,
 //! `figures`, `prev_frame`, `next_frame`, `fps`, `zoom`) were
@@ -389,6 +401,10 @@ static EN: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static BN: &[(&str, &str)] = &[
@@ -504,6 +520,10 @@ static BN: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static ES: &[(&str, &str)] = &[
@@ -619,6 +639,10 @@ static ES: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static AR: &[(&str, &str)] = &[
@@ -734,6 +758,10 @@ static AR: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static CS: &[(&str, &str)] = &[
@@ -849,6 +877,10 @@ static CS: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static DA: &[(&str, &str)] = &[
@@ -964,6 +996,10 @@ static DA: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static DE: &[(&str, &str)] = &[
@@ -1079,6 +1115,10 @@ static DE: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static EL: &[(&str, &str)] = &[
@@ -1194,6 +1234,10 @@ static EL: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static ES419: &[(&str, &str)] = &[
@@ -1309,6 +1353,10 @@ static ES419: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static FI: &[(&str, &str)] = &[
@@ -1424,6 +1472,10 @@ static FI: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static FR: &[(&str, &str)] = &[
@@ -1539,6 +1591,10 @@ static FR: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static HE: &[(&str, &str)] = &[
@@ -1654,6 +1710,10 @@ static HE: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static HR: &[(&str, &str)] = &[
@@ -1769,6 +1829,10 @@ static HR: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static HU: &[(&str, &str)] = &[
@@ -1884,6 +1948,10 @@ static HU: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static ID: &[(&str, &str)] = &[
@@ -1999,6 +2067,10 @@ static ID: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static IT: &[(&str, &str)] = &[
@@ -2114,6 +2186,10 @@ static IT: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static KK: &[(&str, &str)] = &[
@@ -2229,6 +2305,10 @@ static KK: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static NB: &[(&str, &str)] = &[
@@ -2344,6 +2424,10 @@ static NB: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static NL: &[(&str, &str)] = &[
@@ -2459,6 +2543,10 @@ static NL: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static PL: &[(&str, &str)] = &[
@@ -2574,6 +2662,10 @@ static PL: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static PT_BR: &[(&str, &str)] = &[
@@ -2689,6 +2781,10 @@ static PT_BR: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static RO: &[(&str, &str)] = &[
@@ -2804,6 +2900,10 @@ static RO: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static RU: &[(&str, &str)] = &[
@@ -2919,6 +3019,10 @@ static RU: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static SL: &[(&str, &str)] = &[
@@ -3034,6 +3138,10 @@ static SL: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static TR: &[(&str, &str)] = &[
@@ -3149,6 +3257,10 @@ static TR: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static UK: &[(&str, &str)] = &[
@@ -3264,6 +3376,10 @@ static UK: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static VI: &[(&str, &str)] = &[
@@ -3379,6 +3495,10 @@ static VI: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 static ZH_HANS: &[(&str, &str)] = &[
@@ -3494,6 +3614,10 @@ static ZH_HANS: &[(&str, &str)] = &[
     ("preset_scatter", "Preset scatter"),
     ("preset_nib", "Preset nib"),
     ("preset_smoothing", "Preset smoothing"),
+    // Dopesheet keyframe navigation (Wave 10)
+    ("next_keyframe", "Next keyframe"),
+    ("previous_keyframe", "Previous keyframe"),
+    ("no_keyframes_yet", "No keyframes yet"),
 ];
 
 #[cfg(test)]
@@ -3611,6 +3735,48 @@ mod tests {
                 assert_eq!(text, english, "{key} in {lang:?}");
             }
         }
+    }
+
+    /// The Wave 10 dopesheet keys must resolve in every
+    /// language to a non-empty string that is not the raw
+    /// key, present in each language's own table. Only
+    /// English carries authored values so far; the other 27
+    /// languages carry the English text as a placeholder
+    /// (the UI-mission convention), so every language
+    /// currently resolves to the English string. The
+    /// panel's title key, `dopesheet`, predates the rebuild
+    /// and is genuinely translated in all 28 languages.
+    #[test]
+    fn dopesheet_keys_resolve_in_every_language() {
+        const DOPESHEET_KEYS: [(&str, &str); 3] = [
+            ("next_keyframe", "Next keyframe"),
+            ("previous_keyframe", "Previous keyframe"),
+            ("no_keyframes_yet", "No keyframes yet"),
+        ];
+        for lang in Lang::all() {
+            for (key, english) in DOPESHEET_KEYS {
+                let text = t(lang, key);
+                assert!(!text.is_empty(), "{key} is empty in {lang:?}");
+                assert_ne!(text, key, "{key} in {lang:?} is just the key");
+                assert!(
+                    lookup(table_for(lang), key).is_some(),
+                    "{key} missing from {lang:?}'s own table"
+                );
+                // Placeholder convention: untranslated languages
+                // resolve to the English source string.
+                assert_eq!(text, english, "{key} in {lang:?}");
+            }
+            // The title key is present in the language's own
+            // table and never resolves to the raw key.
+            let title = t(lang, "dopesheet");
+            assert!(!title.is_empty(), "dopesheet is empty in {lang:?}");
+            assert_ne!(title, "dopesheet", "dopesheet in {lang:?} is just the key");
+            assert!(
+                lookup(table_for(lang), "dopesheet").is_some(),
+                "dopesheet missing from {lang:?}'s own table"
+            );
+        }
+        assert_eq!(t(Lang::En, "dopesheet"), "Dopesheet");
     }
 
     #[test]

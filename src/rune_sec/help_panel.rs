@@ -262,6 +262,26 @@
 //! (Alt+1 … Alt+8) was checked and needed no row: it
 //! has been listed in the Workspaces section since
 //! Phase E. The panel now holds 56 rows.
+//!
+//! Wave 10 refresh, 2026-11-09: one more Features
+//! row, for the rebuilt dopesheet lane in the Animate
+//! timeline — one row per figure, a ◆ in each cell
+//! whose frame is a keyframe for that figure (the
+//! engine's `stats::figure_keyframes`), click a cell
+//! to go to that frame and select the figure. The
+//! lane lands in this same wave; at this row's census
+//! its module was not yet in the tree, so the wording
+//! is held to the wave's spec and to the timeline's
+//! existing, verified marker behaviour —
+//! `timeline_marks` already draws ◆ for keyframes in
+//! its marker row and seeks on a marker press — and
+//! claims nothing beyond that. The palette's next /
+//! previous keyframe commands were checked for in
+//! `command_palette.rs` (112 commands censused) and
+//! are not there, so no palette row was added: the
+//! transport's Prev key / Next key buttons remain
+//! the keyframe-jump route, as the Keyframe jump row
+//! already says. The panel now holds 57 rows.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -339,6 +359,10 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             (
                 "Timeline ruler",
                 "Second labels above the frame chips",
+            ),
+            (
+                "Dopesheet",
+                "Timeline — one row per figure; ◆ marks that figure's keyframes; click a cell to go to that frame and select the figure",
             ),
             (
                 "Clear keys in loop range",
@@ -609,9 +633,9 @@ mod tests {
     use super::{group_rows, section_note, section_rows, shortcut_rows};
 
     #[test]
-    fn shortcut_rows_has_exactly_56_rows() {
+    fn shortcut_rows_has_exactly_57_rows() {
         // 10 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
-        // + 31 Features; Drawing contributes none (see the
+        // + 32 Features; Drawing contributes none (see the
         // module docs for which GPUI-era rows were dropped
         // and why). Phase G added the four palette/menu rows
         // to Shortcuts; Phase I added the Features section;
@@ -623,8 +647,9 @@ mod tests {
         // moved Quick save from Features to Shortcuts as
         // a Ctrl+S row — one row each way, total stands.
         // The UI mission Wave 9 refresh added two Features
-        // rows (View zoom, Live MCP control).
-        assert_eq!(shortcut_rows().len(), 56);
+        // rows (View zoom, Live MCP control). The Wave 10
+        // refresh added one more (Dopesheet).
+        assert_eq!(shortcut_rows().len(), 57);
     }
 
     #[test]
@@ -677,7 +702,7 @@ mod tests {
         // this order, and nowhere else. (The count covers
         // the Phase J, Phase K, Phase L and Phase M rows
         // too — see those tests.)
-        assert_eq!(section_rows("Features").len(), 31);
+        assert_eq!(section_rows("Features").len(), 32);
     }
 
     #[test]
@@ -717,9 +742,11 @@ mod tests {
         // V-wave pass moved Quick save into Shortcuts, so
         // twenty-nine remained after that move; the UI
         // mission Wave 9 refresh added View zoom and Live
-        // MCP control, so thirty-one stand now.
+        // MCP control, so thirty-one stood then; the
+        // Wave 10 refresh added the Dopesheet row, so
+        // thirty-two stand now.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 31);
+        assert_eq!(features.len(), 32);
         let jump = features
             .iter()
             .position(|(label, _)| *label == "Keyframe jump")
@@ -790,7 +817,7 @@ mod tests {
         // Placement: Playback speed sits with the
         // transport rows directly after Loop playback.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 31);
+        assert_eq!(features.len(), 32);
         let loop_row = features
             .iter()
             .position(|(label, _)| *label == "Loop playback")
@@ -862,7 +889,7 @@ mod tests {
         // Palette recents sits with the project rows,
         // directly after Reload from disk.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 31);
+        assert_eq!(features.len(), 32);
         let channel_row = features
             .iter()
             .position(|(label, _)| *label == "Delete graph channel")
@@ -962,7 +989,7 @@ mod tests {
         // after Split FX clip. No earlier phase's pinned
         // adjacency is disturbed by any of these.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 31);
+        assert_eq!(features.len(), 32);
         let clear_row = features
             .iter()
             .position(|(label, _)| *label == "Clear keys in loop range")
@@ -1033,13 +1060,46 @@ mod tests {
         // Range export. No earlier phase's pinned
         // adjacency is disturbed by either.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 31);
+        assert_eq!(features.len(), 32);
         let swap_row = features
             .iter()
             .position(|(label, _)| *label == "Swap frames")
             .expect("Swap frames row");
         assert_eq!(features[swap_row + 1].0, "View zoom");
         assert_eq!(features.last().map(|(label, _)| *label), Some("Live MCP control"));
+    }
+
+    #[test]
+    fn wave_10_feature_rows_are_listed() {
+        // The Wave 10 refresh (see the module docs): the
+        // rebuilt dopesheet lane in the Animate timeline.
+        // The row is phrased to the wave's spec and to
+        // the timeline's existing marker behaviour —
+        // `timeline_marks` draws ◆ for keyframes in its
+        // marker row and seeks on a marker press — and
+        // the per-figure keyframe sets behind the lane
+        // are the engine's `stats::figure_keyframes`.
+        // The palette's next / previous keyframe
+        // commands were censused in `command_palette.rs`
+        // and are not there, so — unlike the rows above
+        // that name a palette home where one exists —
+        // this row names none.
+        let rows = shortcut_rows();
+        assert!(rows.contains(&(
+            "Dopesheet",
+            "Timeline — one row per figure; ◆ marks that figure's keyframes; click a cell to go to that frame and select the figure"
+        )));
+        // Placement: the dopesheet sits with the
+        // timeline rows, directly after the Timeline
+        // ruler. No earlier phase's pinned adjacency is
+        // disturbed by the insertion.
+        let features = section_rows("Features");
+        assert_eq!(features.len(), 32);
+        let ruler_row = features
+            .iter()
+            .position(|(label, _)| *label == "Timeline ruler")
+            .expect("Timeline ruler row");
+        assert_eq!(features[ruler_row + 1].0, "Dopesheet");
     }
 
     #[test]

@@ -2103,6 +2103,12 @@ fn timeline_ruler_shows_the_zero_label() {
     use crate::rune_sec::workspaces::Workspace;
 
     let mut rt = editor();
+    // Wave 10 (F2): the marker row mounts only when a
+    // frame carries a camera or graph marker — the demo
+    // has none, so plant one camera key to keep this
+    // test's stacking assertions about a mounted row.
+    rt.state.core.project.set_camera_key(2, 0.0, 0.0, 1.0);
+    rt.invalidate();
     tap(&mut rt, "ws-animate");
     rt.frame(DT);
     assert_eq!(rt.state.workspace, Workspace::Animate);
@@ -3471,6 +3477,195 @@ fn workspace_scenes_mount_their_signature_panels() {
     }
 }
 
+// ----------------------------------------------------------------
+// Round 13 (Wave 10): the dopesheet lane. The lane
+// (`dopesheet.rs`) mounts inside Animate's timeline
+// card only: a root keyed `dopesheet-lane`, one row
+// header per figure (`dope-row-{fi}`), and one cell
+// per frame (`dope-cell-{fi}-{frame}`, carrying the
+// 0-based frame index — the same index
+// `stats::figure_keyframes` returns and `core.current`
+// holds). A cell press goes to the cell's frame and
+// selects the cell's figure. The navigation test reads
+// its targets back from state via `figure_keyframes`
+// instead of hardcoding the `dopesheet-keys` scene's
+// frame choices, so the scene may re-scatter its keys
+// without breaking it.
+// ----------------------------------------------------------------
+
+#[test]
+fn dopesheet_lane_mounts_in_animate_and_gates_out_in_draw() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // Seed Animate through its chip (the shared-prefs
+    // discipline), like every other workspace test.
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+    // The lane mounts with the timeline card — settle
+    // (bounded) through the presence fade before
+    // reading the tree, the sweep's discipline.
+    for _ in 0..30 {
+        if presented_keys(&rt).contains("dopesheet-lane") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    let keys = presented_keys(&rt);
+    assert!(
+        keys.contains("dopesheet-lane"),
+        "Animate presents the dopesheet lane"
+    );
+    // One row header per figure in the project — the
+    // count comes from state, not a hardcoded figure
+    // count.
+    let figures = rt.state.core.project.figures.len();
+    assert!(figures >= 1, "the demo project has a figure");
+    for fi in 0..figures {
+        let header = format!("dope-row-{fi}");
+        assert!(
+            keys.contains(header.as_str()),
+            "Animate presents row header {header:?}"
+        );
+    }
+
+    // The lane is Animate's timeline card only: Draw
+    // gates it out. Settle (bounded) through the
+    // fade-out before the absence assert.
+    tap(&mut rt, "ws-draw");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Draw);
+    for _ in 0..30 {
+        if !presented_keys(&rt).contains("dopesheet-lane") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    assert!(
+        !presented_keys(&rt).contains("dopesheet-lane"),
+        "Draw gates the dopesheet lane out"
+    );
+
+    // Restore Animate for the shared prefs, as rounds
+    // 2–12 do.
+    tap(&mut rt, "ws-animate");
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+}
+
+#[test]
+fn dopesheet_cell_press_goes_to_frame_and_selects_its_figure() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    // Resolve the scene by name in the `scenes()`
+    // table, the workspace-scene test's way — a rename
+    // on either side fails loudly here instead of
+    // silently losing the pixel proof's in-process
+    // counterpart.
+    let table = crate::rune_sec::scenes::scenes();
+    let scene = table
+        .iter()
+        .find(|(n, _)| *n == "dopesheet-keys")
+        .map(|(_, f)| *f)
+        .unwrap_or_else(|| panic!("scene \"dopesheet-keys\" is registered in scenes()"));
+
+    let mut rt = editor();
+    scene(&mut rt.state);
+    // The scene fn is a direct state write, outside
+    // the runtime's dispatch — mark the tree changed
+    // so the next frame re-runs the view (the suite's
+    // own discipline after direct writes; see the
+    // workspace-scene test).
+    rt.invalidate();
+    assert_eq!(
+        rt.state.workspace,
+        Workspace::Animate,
+        "the dopesheet-keys scene lands on Animate"
+    );
+    rt.frame(DT);
+    for _ in 0..30 {
+        if presented_keys(&rt).contains("dopesheet-lane") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    assert!(
+        presented_keys(&rt).contains("dopesheet-lane"),
+        "the scene presents the dopesheet lane"
+    );
+
+    // The scene's guarantees, read back from state
+    // rather than assumed: at least two figures,
+    // figure 1 keyed somewhere, and the playhead
+    // starting on a keyed frame (either figure's).
+    let keys0 =
+        stykanimate_rs::stats::figure_keyframes(&rt.state.core.project, 0);
+    let keys1 =
+        stykanimate_rs::stats::figure_keyframes(&rt.state.core.project, 1);
+    assert!(
+        rt.state.core.project.figures.len() >= 2,
+        "the scene keys two figures"
+    );
+    assert!(
+        !keys1.is_empty(),
+        "the scene keys figure 1 at at least one frame"
+    );
+    assert!(
+        keys0.contains(&rt.state.core.current)
+            || keys1.contains(&rt.state.core.current),
+        "the scene starts the playhead on a keyed frame"
+    );
+
+    // Press figure 1's keyed cell. `figure_keyframes`
+    // returns frames in ascending order, so the first
+    // key away from the playhead is the nearest one —
+    // the goto is observable and the cell sits as far
+    // left in the timeline as a differing key can. If
+    // figure 1's only key IS the playhead's frame, the
+    // press lands there and the selection half of the
+    // contract still carries the test.
+    let start = rt.state.core.current;
+    let target = keys1
+        .iter()
+        .copied()
+        .find(|f| *f != start)
+        .unwrap_or(keys1[0]);
+    let cell = format!("dope-cell-1-{target}");
+    // Settle (bounded) until the cell itself is fully
+    // presented through the lane's presence fade —
+    // `scroll_into_view`'s second half, without its
+    // right-column wheel (the timeline card is fixed
+    // chrome, always in view).
+    for _ in 0..90 {
+        rt.frame(DT);
+        if let Some((_, opacity)) = rt.presented(&cell) {
+            if opacity > 0.99 {
+                break;
+            }
+        }
+    }
+    assert!(
+        presented_keys(&rt).contains(cell.as_str()),
+        "figure 1's keyed cell {cell:?} is presented"
+    );
+    tap(&mut rt, &cell);
+    assert_eq!(
+        rt.state.core.current, target,
+        "the cell press goes to its frame"
+    );
+    assert_eq!(
+        rt.state.core.selected_figure, 1,
+        "the cell press selects its figure"
+    );
+
+    // The scene's switch persisted Animate through
+    // `select_workspace`, so the shared prefs already
+    // hold the restore state — assert it, so a scene
+    // change that moves workspaces fails here rather
+    // than in a sibling test.
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+}
+
 #[test]
 fn edit_menu_dropdown_renders_after_restyle() {
     let mut rt = editor();
@@ -3630,6 +3825,12 @@ fn timeline_card_keeps_chips_marks_and_rows() {
     use crate::rune_sec::workspaces::Workspace;
 
     let mut rt = editor();
+    // Wave 10 (F2): the marker row mounts only when a
+    // frame carries a camera or graph marker — the demo
+    // has none, so plant one camera key to keep this
+    // test's assertions about a mounted row.
+    rt.state.core.project.set_camera_key(2, 0.0, 0.0, 1.0);
+    rt.invalidate();
     tap(&mut rt, "ws-animate");
     rt.frame(DT);
     assert_eq!(rt.state.workspace, Workspace::Animate);

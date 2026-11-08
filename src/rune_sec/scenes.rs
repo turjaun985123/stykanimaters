@@ -152,6 +152,28 @@
 //! populated states). `home` gives the Home workspace —
 //! the project library every launch can land on — its
 //! first scene at all.
+//!
+//! The Wave 10 scene gives the timeline's new dopesheet
+//! lane a populated state: `dopesheet-keys` authors real
+//! keyframes on two figures, mostly through the core's
+//! own keyframe ops — `EditorCore::delete_keyframe`
+//! (the keyframe tools' hold-previous op) flattens the
+//! demo wave's extra keys, `EditorCore::add_figure`
+//! adds the second figure, and
+//! `EditorCore::nudge_path_point` (the motion-path
+//! primitive) authors its one change. It carries the
+//! module's named-exception pattern twice, each time
+//! because the op set has a real gap: no op removes one
+//! figure's pose from one frame (the scene truncates
+//! the trailing slot — the absence state
+//! `stats::figure_keyframes` documents), and no op
+//! makes a NON-key frame repeat a chosen earlier pose
+//! (`delete_keyframe` only holds the immediately
+//! previous pose over an existing key), so the scene's
+//! last repeat is a direct `poses` assignment. The
+//! scene's unit test pins the resulting census through
+//! `stats::figure_keyframes` itself — the lane's own
+//! input.
 
 use crate::State;
 
@@ -636,6 +658,102 @@ fn scene_clips_populated(s: &mut State) {
     }
 }
 
+/// `"dopesheet-keys"` — the Animate workspace with real
+/// keyframes authored on TWO figures, so the snap/tree
+/// renders the timeline's dopesheet lane (Wave 10) with
+/// keyed cells for both figures instead of an empty or
+/// single-figure lane. The census the lane reads is
+/// `stats::figure_keyframes`: a frame keys when the
+/// figure has a pose there that differs from the
+/// previous frame's (root moved beyond 0.5 units or any
+/// angle beyond 0.01°); frame 0 keys whenever a pose is
+/// present; a figure MISSING from a frame (poses are
+/// positional — a shorter `poses` vec) never keys, and
+/// its reappearance does. The scene authors exactly
+/// this census: figure 0 keyed at frames 0, 2, 4;
+/// figure 1 keyed at frames 1, 3; the playhead parked
+/// on frame 2 (a figure-0 key, with both figures posed
+/// there).
+///
+/// The starting point fights back: the demo has ONE
+/// figure, and its built-in wave changes the pose on
+/// EVERY frame, so the raw demo keys figure 0 at all
+/// five frames. The recipe, real ops first:
+/// 1. Figure 0's unwanted keys at frames 1 and 3 are
+///    deleted through the real op
+///    `EditorCore::delete_keyframe` — the keyframe
+///    tools' hold-previous op, which replaces the
+///    frame's pose with the previous frame's (bends
+///    held too). Both frames are genuine keys in the
+///    raw demo, so neither refusal branch (frame 0,
+///    non-key, appearance) can fire. The demo's own
+///    wave then supplies the surviving changes at
+///    frames 2 and 4 — root 28 units and ≈57° off the
+///    new predecessors, far beyond the epsilons.
+/// 2. Figure 1 is added through the real op
+///    `EditorCore::add_figure`, which plants the same
+///    rest pose on every frame (its census would read
+///    {0} as-is).
+/// 3. Figure 1 is made MISSING from frame 0 by
+///    truncating that frame's `poses` vec to the first
+///    figure — a direct write, and the recipe's first
+///    named exception: no core op removes one figure's
+///    pose from one frame, and for a TRAILING figure
+///    the shorter vec IS the absence state
+///    `figure_keyframes` documents. Frame 1 keeps the
+///    rest pose and keys as the reappearance; frame 2
+///    repeats it and does not key.
+/// 4. Figure 1's frame-3 key is authored through the
+///    real op `EditorCore::nudge_path_point` — the
+///    motion-path primitive (move one figure's root at
+///    one frame, nothing else touched) — +36 units on
+///    x, far beyond the 0.5-unit epsilon. Frame 4 must
+///    then repeat frame 3's pose: the second named
+///    exception, a direct assignment, because
+///    `delete_keyframe` only holds the immediately
+///    previous pose over an EXISTING key and frame 4
+///    holds no key to delete.
+/// The playhead parks through `EditorCore::goto`, the
+/// timeline chips' op.
+fn scene_dopesheet_keys(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Animate,
+    );
+    let demo_shaped = {
+        let p = &s.core.project;
+        !p.figures.is_empty()
+            && p.frames.len() >= 5
+            && p.frames.iter().all(|f| !f.poses.is_empty())
+    };
+    if !demo_shaped {
+        return;
+    }
+    // Step 1: figure 0's repeats, through the real
+    // hold-previous op (see the doc comment).
+    s.core.delete_keyframe(0, 1);
+    s.core.delete_keyframe(0, 3);
+    // Step 2: the second figure, through the real op.
+    s.core.add_figure();
+    if s.core.project.figures.len() < 2 {
+        return;
+    }
+    // Step 3: figure 1 missing from frame 0 — the
+    // trailing slot's absence is the shorter vec.
+    if s.core.project.frames[0].poses.len() > 1 {
+        s.core.project.frames[0].poses.truncate(1);
+    }
+    // Step 4: the frame-3 key through the real op,
+    // then frame 4 repeats it (direct assignment —
+    // the doc comment's second exception).
+    s.core.nudge_path_point(3, 1, [36.0, 0.0]);
+    if s.core.project.frames[3].poses.len() > 1 && s.core.project.frames[4].poses.len() > 1 {
+        let keyed = s.core.project.frames[3].poses[1].clone();
+        s.core.project.frames[4].poses[1] = keyed;
+    }
+    s.core.goto(2);
+}
+
 /// The scene table for `AppSpec::scenes`, in `--list-scenes`
 /// display order. Element type is Rune's own, verbatim:
 /// `(&'static str, fn(&mut State))` (tooling.rs:25).
@@ -664,6 +782,7 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("effects-open", scene_effects_open),
         ("audio-open", scene_audio_open),
         ("clips-populated", scene_clips_populated),
+        ("dopesheet-keys", scene_dopesheet_keys),
     ]
 }
 
@@ -853,6 +972,19 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    clips panel, the surface no earlier scene
 ///    populated — and the open edit session mounts
 ///    its section under the list.
+/// 27. Under `--scene dopesheet-keys` (Wave 10): the
+///    timeline's dopesheet lane — root element keyed
+///    `dopesheet-lane`, figure header cells keyed
+///    `dope-row-{fi}`, frame cells keyed
+///    `dope-cell-{fi}-{frame}` (0-based) — carries TWO
+///    figure rows with keyed cells at exactly the
+///    scene's authored census — figure 0 keyed at
+///    frames 0, 2 and 4 (3 keys), figure 1 keyed at
+///    frames 1 and 3 (2 keys), no other cell keyed —
+///    counted from `stats::figure_keyframes`, the
+///    census the lane renders from. (The playhead's
+///    park on frame 2 is chip styling — drawn, not
+///    keyed — so it is a `--snap` fact, as in fact 11.)
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -881,13 +1013,15 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene effects-open: an element keyed \"fx-browser\" exists and an element is keyed \"figures-panel\" (the FX browser with nothing added — see fact 24)",
         "under --scene audio-open: an element keyed \"audio-panel\" exists and an element is keyed \"figures-panel\" (the audio panel — see fact 25)",
         "under --scene clips-populated: elements keyed \"clip-dup-0\" and \"clip-dup-1\" exist (two real clip rows — see fact 26)",
+        "under --scene dopesheet-keys: the dopesheet lane shows two figure rows, figure 0 keyed at frames 0, 2, 4 (3 keys) and figure 1 keyed at frames 1, 3 (2 keys), no other cell keyed (the stats::figure_keyframes census — see fact 27)",
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        scene_audio_open, scene_build_open, scene_clips_populated, scene_default_light, scene_draw_open,
+        scene_audio_open, scene_build_open, scene_clips_populated, scene_default_light,
+        scene_dopesheet_keys, scene_draw_open,
         scene_effects_open, scene_export_open, scene_fx_selected, scene_fx_split_mid,
         scene_graph_duplicates, scene_graph_open, scene_home, scene_loop_range,
         scene_menu_open, scene_palette_open, scene_settings_open,
@@ -897,7 +1031,7 @@ mod tests {
     use crate::rune_sec::workspaces::Workspace;
 
     /// The scene table is the headless contract:
-    /// twenty-three scenes, each name unique (a duplicate
+    /// twenty-four scenes, each name unique (a duplicate
     /// would shadow the later entry in `with_scene`'s
     /// lookup), with the Phase J scenes in their display
     /// positions, the two Phase K scenes appended after
@@ -906,12 +1040,13 @@ mod tests {
     /// Phase N scenes appended after those, the two
     /// UI-mission Wave 7 light scenes appended after
     /// those, the five UI-mission Wave 9 workspace
-    /// scenes appended after those, and the Wave 9
-    /// integration clips-populated scene last.
+    /// scenes appended after those, the Wave 9
+    /// integration clips-populated scene appended after
+    /// those, and the Wave 10 dopesheet-keys scene last.
     #[test]
-    fn scene_table_has_twentythree_uniquely_named_scenes() {
+    fn scene_table_has_twentyfour_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 23, "twenty-three scenes are registered");
+        assert_eq!(table.len(), 24, "twenty-four scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -935,6 +1070,8 @@ mod tests {
         assert_eq!(table[19].0, "graph-open");
         assert_eq!(table[20].0, "effects-open");
         assert_eq!(table[21].0, "audio-open");
+        assert_eq!(table[22].0, "clips-populated");
+        assert_eq!(table[23].0, "dopesheet-keys");
     }
 
     /// The export scene reaches the Export workspace through
@@ -1308,10 +1445,43 @@ mod tests {
         assert_eq!(s.core.project.clips.len(), 2, "two clips are built");
         assert_eq!(s.core.project.clips[1].name, "Second clip");
         assert_eq!(
-            s.core.clip_edit.map(|session| session.clip),
+            s.core.clip_edit.as_ref().map(|session| session.clip),
             Some(0),
             "the edit session is open on the first clip"
         );
+    }
+
+    /// The dopesheet-keys scene (Wave 10) authors the
+    /// exact keyframe census the dopesheet lane renders,
+    /// proven through the lane's own input —
+    /// `stats::figure_keyframes`: figure 0 keyed at
+    /// frames 0, 2, 4 (the demo wave's changes at 2 and
+    /// 4 survive; frames 1 and 3 were held to their
+    /// predecessors by `delete_keyframe`), figure 1
+    /// keyed at frames 1 and 3 (missing from frame 0,
+    /// appearing at 1, repeated at 2 and 4, changed at
+    /// 3 by the path nudge), the frame count untouched,
+    /// and the playhead parked on frame 2 — a figure-0
+    /// key with both figures posed. This is the state
+    /// behind layout fact 27.
+    #[test]
+    fn dopesheet_keys_scene_authors_the_two_figure_census() {
+        let mut s = init();
+        scene_dopesheet_keys(&mut s);
+        assert_eq!(s.workspace, Workspace::Animate);
+        assert_eq!(s.core.project.figures.len(), 2, "two figures are present");
+        assert_eq!(s.core.project.frames.len(), 5, "the frame count is untouched");
+        assert_eq!(
+            crate::stats::figure_keyframes(&s.core.project, 0),
+            vec![0, 2, 4],
+            "figure 0 keys at frames 0, 2, 4"
+        );
+        assert_eq!(
+            crate::stats::figure_keyframes(&s.core.project, 1),
+            vec![1, 3],
+            "figure 1 keys at frames 1, 3"
+        );
+        assert_eq!(s.core.current, 2, "the playhead parks on a keyed frame");
     }
 
     /// The default-light scene flips ONLY the theme,

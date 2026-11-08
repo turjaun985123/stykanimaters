@@ -27,7 +27,9 @@
 //! headless tests find the chips by those keys. Two keys are
 //! added: `timeline-chips` on the inner content row that
 //! carries the drag handler (see below), and
-//! `timeline-markers` on the marker row under the chips.
+//! `timeline-markers` on the marker row under the chips
+//! (mounted only when a frame carries a marker — Wave 10,
+//! see the Marker row section).
 //! Phase I adds one key per marker glyph:
 //! `marker-cam-{frame}` and `marker-graph-{frame}`, where
 //! `{frame}` is the 0-based timeline index the key belongs
@@ -113,6 +115,28 @@
 //! and one over every channel's keys — never per-cell
 //! searches ([`frame_markers`] exists for single-frame
 //! callers and tests).
+//!
+//! Wave 10 (audit F1/F2) changes two things about the
+//! row. **Current column (F1):** the current frame's
+//! cell takes the current chip's own treatment — the
+//! accent fill at the chips' radius, both glyphs white
+//! ([`marker_glyph_color`]) — so the row reads against
+//! the playhead even where the current cell itself
+//! carries no glyph; every other cell is drawn exactly
+//! as before, and the marker press targets and handlers
+//! are unchanged. **Collapse (F2):** the row is mounted
+//! only when at least one frame carries a marker
+//! ([`any_markers`]) — a marker-free project's timeline
+//! is ruler + chips (+ clips) and the row's 14 points
+//! are not spent on a strip of blanks, the clips lane's
+//! rule. The predicate is the row's own content,
+//! deliberately not `stats::figure_keyframes`: that
+//! helper measures figure *pose* changes, which this
+//! row never renders, and it disagrees with the row's
+//! content in both directions — non-empty on the
+//! marker-free demo project (a frame-0 pose is a pose
+//! key), empty on a camera-keyed project whose figures
+//! are never posed (see [`any_markers`]).
 //!
 //! ## Press / drag semantics (exact)
 //!
@@ -427,6 +451,16 @@ pub const CHIP_W: f32 = 30.0;
 pub const CHIP_H: f32 = 24.0;
 /// Horizontal gap between chips (chrome_view parity).
 pub const CHIP_GAP: f32 = 4.0;
+
+/// The frame-chip pitch in points: one chip plus the gap
+/// after it — the x distance between successive frames'
+/// left edges in every row laid out on the chips'
+/// geometry (the ruler, the marker row, [`span_rect`]'s
+/// clip spans). Spelled as one constant (Wave 10) so the
+/// dopesheet lane lays its rows out on the same pitch by
+/// importing this instead of duplicating the 34-point
+/// stride.
+pub const CHIP_PITCH: f32 = CHIP_W + CHIP_GAP;
 
 /// Which frame a content x falls on: chips of `chip_w`
 /// points separated by `gap`, laid out from x = 0. A point in
@@ -772,7 +806,7 @@ pub fn ruler_frame_at_x(x: f32, frame_count: usize) -> usize {
     if frame_count == 0 || !x.is_finite() || x <= 0.0 {
         return 0;
     }
-    let idx = (x / (CHIP_W + CHIP_GAP)).floor() as usize;
+    let idx = (x / CHIP_PITCH).floor() as usize;
     idx.min(frame_count - 1)
 }
 
@@ -857,6 +891,130 @@ pub fn graph_marker_key(frame: usize) -> String {
 /// inside the timeline, so no clamping is needed here.
 fn goto_marker(s: &mut State, frame: usize) {
     s.core.goto(frame);
+}
+
+/// Whether the marker row has anything to show: at
+/// least one frame carrying a camera or a graph marker.
+/// This is the row's mount predicate (Wave 10, audit
+/// F2): the row renders only camera and graph markers,
+/// so "no markers anywhere" is the one state in which
+/// it would paint a full row of blank cells — the state
+/// it now collapses out of, the clips lane's rule
+/// ([`clips_lane`] is `None` on a clip-free project for
+/// the same reason).
+///
+/// The predicate is the row's own content, deliberately
+/// not `stats::figure_keyframes`: that helper measures
+/// figure *pose* changes, which this row never renders,
+/// and it disagrees with the row's content in both
+/// directions — it is non-empty on the marker-free demo
+/// project (a frame-0 pose is a pose key), where the
+/// row is blank, and empty on a camera-keyed project
+/// whose figures are never posed, whose markers must
+/// still show.
+pub fn any_markers(markers: &[(bool, bool)]) -> bool {
+    markers.iter().any(|&(camera, graph)| camera || graph)
+}
+
+/// The colour one marker glyph paints. Off the current
+/// frame the camera diamond takes the accent and the
+/// graph dot the secondary text tone, as the row has
+/// always drawn them; on the current frame both go
+/// white — the current chip's own treatment (accent
+/// fill, white content) carried into its marker cell
+/// (Wave 10, audit F1), so the glyph stays legible on
+/// the cell's accent ground.
+pub fn marker_glyph_color(
+    current: bool,
+    camera: bool,
+    accent: Color,
+    secondary: Color,
+) -> Color {
+    if current {
+        Color::WHITE
+    } else if camera {
+        accent
+    } else {
+        secondary
+    }
+}
+
+/// The marker row under the chips (see the module
+/// docs): one cell per chip, same geometry as the
+/// display-only row it replaces — each glyph wrapped
+/// in a transparent pressable element keyed by its
+/// frame, pressing it seeks there. Phase N: the wrapper
+/// fills its share of the cell (the whole `CHIP_W ×
+/// MARKER_H` cell for a lone marker, an equal split
+/// when both glyphs share one) so the press target is
+/// the cell, not the glyph — the glyph is drawn
+/// unchanged, centred in the wrapper. Wave 10 (audit
+/// F1): the current frame's cell takes the current
+/// chip's treatment — accent fill at the chips' own
+/// radius, both glyphs white ([`marker_glyph_color`])
+/// — so the row reads against the playhead even where
+/// the current cell itself carries no glyph; every
+/// other cell is drawn exactly as before. `None` when
+/// no frame carries a marker ([`any_markers`], audit
+/// F2): the row is not mounted at all then, and a
+/// marker-free timeline is ruler + chips (+ clips),
+/// exactly as it was before the row existed.
+fn marker_row(core: &EditorCore, t: &Theme) -> Option<El> {
+    let markers = markers_for_project(core);
+    if !any_markers(&markers) {
+        return None;
+    }
+    let accent = tok::accent(0, true);
+    let mut marker_row = row().key("timeline-markers").gap(CHIP_GAP);
+    for (i, &(camera, graph)) in markers.iter().enumerate() {
+        let current = i == core.current;
+        let mut cell = row().size(CHIP_W, MARKER_H).center().gap(2.0);
+        if current {
+            cell = cell.fill(accent).radius(6.0);
+        }
+        if camera {
+            cell = cell.child(
+                el()
+                    .key(camera_marker_key(i))
+                    .grow(1.0)
+                    .h(MARKER_H)
+                    .center()
+                    .on_press(move |s: &mut State| goto_marker(s, i))
+                    .child(
+                        text("◆")
+                            .font(type_::LABEL)
+                            .color(marker_glyph_color(
+                                current,
+                                true,
+                                accent,
+                                t.text_secondary,
+                            )),
+                    ),
+            );
+        }
+        if graph {
+            cell = cell.child(
+                el()
+                    .key(graph_marker_key(i))
+                    .grow(1.0)
+                    .h(MARKER_H)
+                    .center()
+                    .on_press(move |s: &mut State| goto_marker(s, i))
+                    .child(
+                        text("●")
+                            .font(type_::LABEL)
+                            .color(marker_glyph_color(
+                                current,
+                                false,
+                                accent,
+                                t.text_secondary,
+                            )),
+                    ),
+            );
+        }
+        marker_row = marker_row.child(cell);
+    }
+    Some(marker_row)
 }
 
 /// The ruler's drag gesture (Phase K, see the module
@@ -1011,7 +1169,7 @@ fn timeline_drag(s: &mut State, d: &mut Drag) {
 /// horizontally scrolling row, with the time ruler (see the
 /// module docs) directly above the chips and the marker row
 /// (camera `◆` / graph `●`, see the module docs) directly
-/// under them. Current frame accent-filled; loop-range frames
+/// under them whenever a frame carries a marker. Current frame accent-filled; loop-range frames
 /// tinted toward the accent; selected frames outlined (white
 /// on the current frame, accent elsewhere, so the outline
 /// survives the accent fill).
@@ -1019,7 +1177,6 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let accent = tok::accent(0, true);
     let loop_fill = t.card.mix(accent, 0.35);
-    let markers = markers_for_project(core);
     // The time ruler: one fixed-width slot per frame in
     // the chips' own geometry — a muted time label at
     // whole seconds, a short tick elsewhere — carrying
@@ -1097,49 +1254,20 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
         }
         chips = chips.child(chip);
     }
-    // The marker row: one cell per chip, same geometry as
-    // the display-only row it replaces — each glyph now
-    // wrapped in a transparent pressable element keyed by
-    // its frame, pressing it seeks there (see the module
-    // docs). Phase N: the wrapper grows to fill its share
-    // of the cell (the whole `CHIP_W × MARKER_H` cell for
-    // a lone marker, an equal split when both glyphs
-    // share one) so the press target is the cell, not the
-    // glyph — the glyph is drawn unchanged, centred in
-    // the wrapper. The camera diamond takes the accent so
-    // it reads apart from the graph dot at a glance.
-    let mut marker_row = row().key("timeline-markers").gap(CHIP_GAP);
-    for (i, &(camera, graph)) in markers.iter().enumerate() {
-        let mut cell = row().size(CHIP_W, MARKER_H).center().gap(2.0);
-        if camera {
-            cell = cell.child(
-                el()
-                    .key(camera_marker_key(i))
-                    .grow(1.0)
-                    .h(MARKER_H)
-                    .center()
-                    .on_press(move |s: &mut State| goto_marker(s, i))
-                    .child(text("◆").font(type_::LABEL).color(accent)),
-            );
-        }
-        if graph {
-            cell = cell.child(
-                el()
-                    .key(graph_marker_key(i))
-                    .grow(1.0)
-                    .h(MARKER_H)
-                    .center()
-                    .on_press(move |s: &mut State| goto_marker(s, i))
-                    .child(text("●").font(type_::LABEL).color(t.text_secondary)),
-            );
-        }
-        marker_row = marker_row.child(cell);
-    }
-    // All three rows live in one column inside the scroll
+    // The marker row (see [`marker_row`]): Wave 10
+    // (audit F2) mounts it only when a frame carries a
+    // marker — `marker_row` is None on a marker-free
+    // project, whose column is then ruler + chips (+
+    // clips), so the row's height is never spent on a
+    // strip of blank cells.
+    // All rows live in one column inside the scroll
     // viewport, so they translate together: the ruler stays
     // above its chips and the markers stay under theirs at
     // any scroll offset.
-    let mut content = col().gap(2.0).child(ruler).child(chips).child(marker_row);
+    let mut content = col().gap(2.0).child(ruler).child(chips);
+    if let Some(markers_row) = marker_row(core, t) {
+        content = content.child(markers_row);
+    }
     // UI mission Wave 5 (audit D1/T1): the clips lane is
     // the scrolled column's last row, so it shares the
     // chips' one scroll offset — a clip bar always sits
@@ -1156,6 +1284,21 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // drag handlers read.
     if let Some(clips) = clips_lane(core) {
         content = content.child(clips);
+    }
+    // Wave 10 (dopesheet rebuild): the dopesheet lane is
+    // the scrolled column's last row in the Animate
+    // workspace — one row per figure, a diamond on each
+    // of the figure's keyframes (stats::figure_keyframes),
+    // cells pressing to that frame with that figure
+    // selected. It lives in the same column for the same
+    // reason the clips lane does: one shared scroll
+    // offset, so a cell always sits under its frame chip.
+    // The timeline card itself mounts in every workspace
+    // (it is centre-column chrome), so the Animate gate
+    // sits here at the call site; the lane builder is
+    // workspace-agnostic. See docs/DOPESHEET.md.
+    if s.workspace == crate::rune_sec::workspaces::Workspace::Animate {
+        content = content.child(crate::rune_sec::dopesheet::dopesheet_lane(s, t));
     }
     let timeline = row().key("timeline").child(content).scroll_x().w_full();
     // Phase N (charter §13, see the module docs' Timeline
@@ -1324,7 +1467,7 @@ pub fn timeline_width(frame_count: usize) -> f32 {
     if frame_count == 0 {
         return 0.0;
     }
-    frame_count as f32 * (CHIP_W + CHIP_GAP) - CHIP_GAP
+    frame_count as f32 * CHIP_PITCH - CHIP_GAP
 }
 
 /// Every clip in the project as a [`ClipSpan`]: audio
@@ -1378,7 +1521,7 @@ pub fn span_rect(span: &ClipSpan, frame_count: usize) -> [f32; 2] {
         return [0.0, 0.0];
     }
     let total = timeline_width(frame_count);
-    let stride = CHIP_W + CHIP_GAP;
+    let stride = CHIP_PITCH;
     let x = (span.from_frame * stride).clamp(0.0, total);
     let right = (span.to_frame * stride - CHIP_GAP).clamp(x, total);
     [x, right - x]
@@ -2098,6 +2241,129 @@ mod tests {
         assert_eq!(state.core.current, 2);
         goto_marker(&mut state, 4);
         assert_eq!(state.core.current, 4);
+    }
+
+    // ---- Wave 10 (audit F1/F2): the marker row's
+    // current-column state, its collapse when it has
+    // nothing to show, and the shared chip pitch ----
+
+    #[test]
+    fn any_markers_needs_one_marked_frame() {
+        assert!(!any_markers(&[]));
+        assert!(!any_markers(&[(false, false); 5]));
+        assert!(any_markers(&[(false, false), (true, false)]));
+        assert!(any_markers(&[(false, true), (false, false)]));
+        // The computed vectors agree: the marked fixture
+        // qualifies, the demo's all-blank one does not.
+        assert!(any_markers(&markers_for_project(&marked_core())));
+        assert!(!any_markers(&markers_for_project(&EditorCore::new())));
+    }
+
+    #[test]
+    fn marker_row_collapses_on_the_marker_free_demo() {
+        // The demo project HAS pose keyframes (a frame-0
+        // pose is one, by `figure_keyframes`' own rule)
+        // but no camera or graph markers — the row is
+        // blank there, so it is not mounted. The mount
+        // predicate is the row's own content, not pose
+        // keyframes.
+        let t = rune::tok::theme(true);
+        let core = EditorCore::new();
+        assert!(
+            !stykanimate_rs::stats::figure_keyframes(&core.project, 0).is_empty(),
+            "the demo figure is posed, so it has pose keyframes"
+        );
+        assert!(marker_row(&core, &t).is_none());
+    }
+
+    #[test]
+    fn marker_row_survives_a_camera_key_with_no_pose_keyframes() {
+        // The other direction, and the counterexample
+        // that rules `figure_keyframes` out as the
+        // predicate: strip every pose (no figure has a
+        // pose keyframe anywhere), plant one camera key,
+        // and the row must still mount — its content is
+        // the camera marker, not poses.
+        let t = rune::tok::theme(true);
+        let mut core = EditorCore::new();
+        for frame in &mut core.project.frames {
+            frame.poses.clear();
+        }
+        assert!(stykanimate_rs::stats::figure_keyframes(&core.project, 0).is_empty());
+        core.project.set_camera_key(2, 480.0, 360.0, 1.0);
+        assert!(marker_row(&core, &t).is_some());
+    }
+
+    #[test]
+    fn marker_glyph_color_matches_the_chips_current_treatment() {
+        let accent = Color {
+            r: 0.43,
+            g: 0.55,
+            b: 1.0,
+            a: 1.0,
+        };
+        let secondary = Color {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        // Off the current frame: the standing colours —
+        // the camera diamond in the accent, the graph
+        // dot in the secondary tone.
+        assert_eq!(marker_glyph_color(false, true, accent, secondary), accent);
+        assert_eq!(
+            marker_glyph_color(false, false, accent, secondary),
+            secondary
+        );
+        // On the current frame both go white — the
+        // current chip's content colour on its accent
+        // fill, so the glyph survives the cell's new
+        // accent ground.
+        assert_eq!(
+            marker_glyph_color(true, true, accent, secondary),
+            Color::WHITE
+        );
+        assert_eq!(
+            marker_glyph_color(true, false, accent, secondary),
+            Color::WHITE
+        );
+    }
+
+    #[test]
+    fn timeline_builds_with_the_current_cell_highlighted() {
+        // Builder smoke over the F1 branch (the fill
+        // itself is proven by `marker_glyph_color`'s
+        // test and the mount by `marker_row`'s — `El`
+        // has no public tree-walk): the row is mounted
+        // for the marked fixture, and the timeline
+        // builds with the playhead on a marked frame
+        // (frame 2, both glyphs in the current cell)
+        // and on an unmarked one (frame 1 — its current
+        // cell is blank but still accent-filled, the
+        // column state F1 asks for).
+        let t = rune::tok::theme(true);
+        let mut state = demo_state();
+        state.core = marked_core();
+        assert!(marker_row(&state.core, &t).is_some());
+        state.core.goto(2);
+        assert_eq!(state.core.current, 2);
+        let _ = timeline_marks(&state, &t);
+        state.core.goto(1);
+        let _ = timeline_marks(&state, &t);
+    }
+
+    #[test]
+    fn chip_pitch_is_one_chip_plus_one_gap() {
+        // The stride the dopesheet lane imports: one
+        // chip plus the gap after it, 34 points at the
+        // shell's geometry — and the helpers that read
+        // on the pitch agree with it.
+        assert_eq!(CHIP_PITCH, CHIP_W + CHIP_GAP);
+        assert_eq!(CHIP_PITCH, 34.0);
+        assert_eq!(timeline_width(5), 5.0 * CHIP_PITCH - CHIP_GAP);
+        assert_eq!(ruler_frame_at_x(CHIP_PITCH, 5), 1);
+        assert_eq!(ruler_frame_at_x(CHIP_PITCH - 0.1, 5), 0);
     }
 
     // ---- builder smoke test (the drag handler itself is
