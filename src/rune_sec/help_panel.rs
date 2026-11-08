@@ -109,17 +109,16 @@
 //! branch runs the app-bar Save button's own op. Delete
 //! project file is the Home rows' two-step
 //! `home-proj-del-{i}` → confirm, over
-//! `shell::delete_project_file`. Two candidates were
-//! DROPPED under the rule: **Right-press selects** —
-//! `stage_view`' `secondary_select` helper exists and
-//! is tested, but no element anywhere attaches a
-//! secondary-press handler (the stage canvas in
-//! `main.rs` carries only `on_drag`), so a user cannot
-//! reach it and the row would have been false; and
-//! **Reload from disk** — no `proj-reload` control or
-//! reload op exists anywhere in the tree (section 27
-//! did not land), so there is no place to name.
-//! The panel now holds 40 rows.
+//! `shell::delete_project_file`. Two further
+//! candidates were dropped at §39's census and restored
+//! at the Phase K close-out, each verified
+//! user-reachable by then: **Right-press selects** —
+//! `stage_view`' `secondary_select` was registered on
+//! the stage canvas (`on_secondary_press_local` in
+//! `main.rs`) by the integrator after §39's census; and
+//! **Reload from disk** — §27's `proj-reload` button
+//! landed in `project_tools` after §39's census ran.
+//! The panel now holds 42 rows.
 
 use rune::tok::{type_, Family, Theme};
 use rune::{col, el, row, text, El};
@@ -210,6 +209,10 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
                 "Click a stroke on the stage to select it",
             ),
             (
+                "Right-press selects",
+                "Stage — right-press a figure to select it and its joint",
+            ),
+            (
                 "Particles panel",
                 "Effects workspace — add, select and delete particle events",
             ),
@@ -240,6 +243,10 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             (
                 "Delete project file",
                 "Home workspace — Delete on a project row, then confirm",
+            ),
+            (
+                "Reload from disk",
+                "Project tools — Reload from disk button re-reads the saved file",
             ),
             (
                 "Range export",
@@ -401,14 +408,17 @@ mod tests {
     use super::{group_rows, section_note, section_rows, shortcut_rows};
 
     #[test]
-    fn shortcut_rows_has_exactly_40_rows() {
+    fn shortcut_rows_has_exactly_42_rows() {
         // 9 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
-        // + 16 Features; Drawing contributes none (see the
+        // + 18 Features; Drawing contributes none (see the
         // module docs for which GPUI-era rows were dropped
         // and why). Phase G added the four palette/menu rows
         // to Shortcuts; Phase I added the Features section;
-        // Phase J added four rows to it; Phase K six more.
-        assert_eq!(shortcut_rows().len(), 40);
+        // Phase J added four rows to it; Phase K six more,
+        // and the Phase K close-out two more (Right-press
+        // selects and Reload from disk — both verified
+        // user-reachable at integration time).
+        assert_eq!(shortcut_rows().len(), 42);
     }
 
     #[test]
@@ -461,7 +471,7 @@ mod tests {
         // this order, and nowhere else. (The count covers
         // the Phase J and Phase K rows too — see those
         // tests.)
-        assert_eq!(section_rows("Features").len(), 16);
+        assert_eq!(section_rows("Features").len(), 18);
     }
 
     #[test]
@@ -495,10 +505,11 @@ mod tests {
         )));
         // The ruler sits with the timeline rows, directly
         // after Keyframe jump; the section holds all
-        // sixteen feature rows (ten at Phase J, six more
-        // in Phase K) and no seventeenth has crept in.
+        // eighteen feature rows (ten at Phase J, six more
+        // in Phase K, two at the Phase K close-out) and no
+        // nineteenth has crept in.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 16);
+        assert_eq!(features.len(), 18);
         let jump = features
             .iter()
             .position(|(label, _)| *label == "Keyframe jump")
@@ -525,11 +536,13 @@ mod tests {
         // the app-bar Save op; Delete project file — the
         // two-step `home-proj-del-{i}` → confirm rows in
         // `home_panel` over `shell::delete_project_file`.
-        // Two candidates are deliberately NOT here:
-        // Right-press selects (the `secondary_select`
-        // helper in `stage_view` is wired to no element —
-        // not user-reachable) and Reload from disk (no
-        // `proj-reload` exists anywhere in the tree).
+        // Right-press selects and Reload from disk were
+        // added at the Phase K close-out: §39's census ran
+        // before §27's `proj-reload` landed and before the
+        // integrator registered the stage's
+        // `on_secondary_press_local` handler, so both were
+        // dropped mid-phase as not user-reachable; both
+        // verifiably are now (see the module docs).
         let rows = shortcut_rows();
         assert!(rows.contains(&(
             "Playback speed",
@@ -555,18 +568,23 @@ mod tests {
             "Delete project file",
             "Home workspace — Delete on a project row, then confirm"
         )));
+        assert!(rows.contains(&(
+            "Right-press selects",
+            "Stage — right-press a figure to select it and its joint"
+        )));
+        assert!(rows.contains(&(
+            "Reload from disk",
+            "Project tools — Reload from disk button re-reads the saved file"
+        )));
         // Placement: Playback speed sits with the
-        // transport rows directly after Loop playback;
-        // the two dropped candidates appear nowhere.
+        // transport rows directly after Loop playback.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 16);
+        assert_eq!(features.len(), 18);
         let loop_row = features
             .iter()
             .position(|(label, _)| *label == "Loop playback")
             .expect("Loop playback row");
         assert_eq!(features[loop_row + 1].0, "Playback speed");
-        assert!(!rows.iter().any(|(label, _)| *label == "Right-press selects"));
-        assert!(!rows.iter().any(|(label, _)| *label == "Reload from disk"));
     }
 
     #[test]

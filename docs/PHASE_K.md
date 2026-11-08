@@ -22,8 +22,10 @@ project delete, and a second pass of panel depth.
 > tree at writing time are marked **planned — not
 > landed** rather than described as done. The
 > integrator re-verifies at integration time, as
-> before. Two rows carry that mark in this census
-> (§33, §37).
+> before. One row carried that mark in this census
+> (§33); §37 also carried it at first writing and was
+> corrected by the integrator after verifying the
+> round in the tree.
 
 ## 1. What Phase K set out to close
 
@@ -121,9 +123,9 @@ one** (gate run at this document's census).
 | 34 | src/stage_view.rs | Stage completion of three contracts: the head ring reads `model::HEAD_RING_RADIUS` (:669, §6's family); the FX gizmo prims from §9 are drawn in the last overlay slot (:715, call :723) for `overlays.fx_selected`; right-press selection (:730) — a secondary press selects what it lands on through the same hit paths as a primary press, without starting a drag |
 | 35 | src/audio_ops.rs | `audio_duplicate_clip_at(&mut self, index) -> Option<usize>` (:464) — the Phase H indexed family's missing duplicate: clone inserted right after the chosen clip, one snapshot, sibling statuses ("Audio clip {n} duplicated as clip {n+1}."); an audio clip carries no seed, so the clone is exact. **No caller yet — see §5** |
 | 36 | src/rune_sec/scenes.rs | Two new headless scenes (table :271/:272): `graph-duplicates` (`scene_graph_duplicates`, :177) — two RootX channels planted for figure 0 so a `--tree` dump proves both rows list; `fx-split-mid` (`scene_fx_split_mid`, :223) — an FX clip added through `add_fx_clip` and selected, the state §9's gizmo draws for. Scene count 6 → 8 (`scene_table_has_eight_uniquely_named_scenes`, :370). One named discipline exception, documented in-file: the duplicates scene writes the pub `project.channels` field directly, because no core op creates a channel with chosen keys |
-| 37 | — | **Planned — not landed at this document's census** (Runtime test round). `snap_tests.rs` carries no Phase K change — no new Runtime tests were added this phase; the phase's behavioural proof rests on the sections' unit tests and the §38 gate until a round lands |
+| 37 | src/rune_sec/snap_tests.rs | Runtime round 8 (landed after this document's first census; the integrator verified it in the tree): four tests (27 → 31) — the Phase J column split pinned by the stage's presented width (744 ± 1), fig-centre moving the figure's bbox centre onto the stage centre, pose-mirror-all negating every angle with roots byte-identical, and the FX split driven through the real panel (browser add → lane select → Split at playhead) |
 | 38 | scripts/phase_j_checks.py | The gate, widened in place (it is now the "Phase J+K" gate): the caller census gains `PHASE_K_OPS` — §3's pair, §12's setters, §15's delete, §35's duplicate, §9's gizmo geometry, §1/§2's `note_playback_speed`, and one Phase J op the Phase J list never watched, `duplicate_channel_to_figure`. Count claims stay read-from-source: palette 103, MCP registry 84, icons 110, scenes 8. The State census covers `playback_speed` automatically (the field list is parsed live from main.rs). Census run for this document: checks 1/2/3/5 PASS, check 4 fails on exactly one op — §35's, the §5 item below |
-| 39 | src/rune_sec/help_panel.rs | 34 → 40 rows (the file's count test pins 40): six new Features rows for the phase's landed features, each verified against the tree as §29 of Phase J verified its own |
+| 39 | src/rune_sec/help_panel.rs | 34 → 42 rows (the file's count test pins 42): six new Features rows for the phase's landed features, each verified against the tree as §29 of Phase J verified its own; two more (Right-press selects, Reload from disk) were restored at the close-out — §39's census ran before §27's button and the integrator's right-press registration landed, so both were dropped mid-phase as not user-reachable; both verifiably are |
 | 40 | docs/ | This document + QA_RUNE §13 |
 
 ## 4. Cross-section contracts
@@ -268,7 +270,8 @@ integrator's `audio-duplicate` button.)
   default label shortens, the icon shrinks, or the
   strip widens, because the arithmetic is pinned
   by a test.
-- §33 (3D ground grid) and §37 (Runtime round) had
-  not landed at this document's census — named
-  here so they are carry-overs on the record, not
-  silent gaps.
+- §33 (3D ground grid) had not landed at this
+  document's census — named here so it is a
+  carry-over on the record, not a silent gap.
+  (§37's Runtime round landed after the census and
+  is recorded in its row above.)
