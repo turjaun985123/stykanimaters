@@ -203,6 +203,9 @@ jobs:
           timeout 120 "$BIN" --snap headless-out/snap-stage.png --scene default --at 0 --crop stage \
             > headless-out/snap-stage.log 2>&1
           echo $? > headless-out/snap-stage.exit
+          timeout 120 "$BIN" --snap headless-out/snap-three-d.png --scene three-d --at 0 \
+            > headless-out/snap-three-d.log 2>&1
+          echo $? > headless-out/snap-three-d.exit
           if [ ! -f headless-out/snap-default.png ]; then
             timeout 120 xvfb-run -a "$BIN" --snap headless-out/snap-default.png --scene default --at 0 \
               > headless-out/snap-default-xvfb.log 2>&1
