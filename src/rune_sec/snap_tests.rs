@@ -3495,6 +3495,13 @@ fn timeline_card_keeps_chips_marks_and_rows() {
     tap(&mut rt, "loop-clear");
     assert_eq!(rt.state.core.loop_range, None, "Clear removes the range");
 
+    // Baseline for the stacking proof below: the loop
+    // row's position while the card holds no clips lane.
+    rt.frame(DT);
+    let (loop_before, _) = rt
+        .presented("timeline-loop-row")
+        .expect("loop row is presented before the plant");
+
     // The clips lane joins the stack between the
     // scroll row and the loop row once a clip exists —
     // planted by direct project write exactly as round
@@ -3528,38 +3535,53 @@ fn timeline_card_keeps_chips_marks_and_rows() {
         }
     }
     assert!(appeared, "the clips lane joins the card once a clip exists");
-    // The lane's mount pushes the loop row down by the
-    // lane's height + the card gap, and Rune springs
-    // that layout change: a rect read in the appearance
-    // frame still shows the loop row at its pre-lane
-    // position, overlapping the lane. Settle (bounded)
-    // until the loop row's top clears the lane's bottom
-    // before asserting the stacking relations.
-    for _ in 0..30 {
-        let (lane_now, _) = rt
-            .presented("timeline-clips")
-            .expect("clips lane is presented");
+    // Settle until the loop row's y is stable: the
+    // lane's mount springs the rows below it down.
+    let mut last_y = f32::MAX;
+    for _ in 0..60 {
+        rt.frame(DT);
         let (loop_now, _) = rt
             .presented("timeline-loop-row")
             .expect("loop row is still presented");
-        if lane_now[1] + lane_now[3] <= loop_now[1] + 0.5 {
+        if (loop_now[1] - last_y).abs() < 0.01 {
             break;
         }
-        rt.frame(DT);
+        last_y = loop_now[1];
     }
     let (lane, _) = rt
         .presented("timeline-clips")
         .expect("clips lane is presented");
-    let (loop_row, _) = rt
+    let (loop_after, _) = rt
         .presented("timeline-loop-row")
         .expect("loop row is still presented");
+    // Stacking is proven by displacement + centre
+    // order, NOT by edge abutment: a canvas element's
+    // presented rect tracks its drawn shape and can sit
+    // up to its own height above its layout box (the
+    // lane reads ~790 while its layout slot starts at
+    // ~800), so lane-vs-scroll edge arithmetic is not a
+    // sound relation. What the card's column order
+    // guarantees observably: the loop row drops by the
+    // lane's height + the card gap (10 + 2 = 12) when
+    // the lane joins, and the three rows' centres stay
+    // in stack order.
+    let moved = loop_after[1] - loop_before[1];
     assert!(
-        lane[1] >= scroll[1] + scroll[3] - 0.5,
-        "clips lane stacks below the scroll row: lane {lane:?}, scroll {scroll:?}"
+        (8.0..=16.0).contains(&moved),
+        "loop row drops by the lane's height + gap (~12) when the lane joins: \
+         before {loop_before:?}, after {loop_after:?}"
+    );
+    let scroll_c = scroll[1] + scroll[3] / 2.0;
+    let lane_c = lane[1] + lane[3] / 2.0;
+    let loop_c = loop_after[1] + loop_after[3] / 2.0;
+    assert!(
+        scroll_c < lane_c && lane_c < loop_c,
+        "centre order is scroll < lane < loop: scroll {scroll:?}, lane {lane:?}, loop {loop_after:?}"
     );
     assert!(
-        lane[1] + lane[3] <= loop_row[1] + 0.5,
-        "clips lane stacks above the loop row: lane {lane:?}, loop {loop_row:?}"
+        (lane[0] - scroll[0]).abs() < 0.5,
+        "lane shares the scroll row's left edge (the card's inset): \
+         lane {lane:?}, scroll {scroll:?}"
     );
 }
 
