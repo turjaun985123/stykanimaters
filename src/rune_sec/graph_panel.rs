@@ -175,6 +175,27 @@
 //! consumes channels, and file imports may also carry
 //! channels in.)
 //!
+//! ## Icons (Phase H)
+//!
+//! Two decorative glyphs, both the catalogue's
+//! `chart-line`, drawn via [`icon_el`]: one leads the
+//! panel header (14 pt), one leads every channel-list
+//! row (12 pt), each in the muted palette hex
+//! [`GLYPH_MUTED`]. They are pure decoration — no key,
+//! no press, no state — so row keys (`graph-chan-{i}`),
+//! labels and handlers are byte-identical to before.
+//!
+//! Everything else deliberately stays text. The interp
+//! segmented control (Hermite / Linear / Step) and the
+//! tangent-preset chips (Smooth, Ease in, …) name
+//! CONCEPTS, not glyph-clear actions; the preset chips
+//! already carry the most honest glyph possible — a
+//! drawn preview of the preset's own curve. The actions
+//! row (Key angle, Auto tangents, Mirror time, …) is
+//! likewise labelled operations whose names are the
+//! meaning; a wand on "Auto tangents" or "Smooth" would
+//! claim magic the ops do not perform.
+//!
 //! ## State the shell must provide
 //!
 //! `State` needs one field (integrator wires it):
@@ -189,6 +210,7 @@ use stykanimate_rs::graph_panel::{preset_preview, GraphView};
 use stykanimate_rs::model::V2;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icons::icon_el_rgb;
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -198,6 +220,11 @@ pub const GRAPH_H: f32 = 170.0;
 /// exists (the `Cx::layout_size` read settles after one frame,
 /// exactly as the stage's does).
 const FALLBACK_SIZE: [f32; 2] = [720.0, GRAPH_H];
+/// Muted hex for the decorative `chart-line` glyphs
+/// (panel header, channel-list rows) — the shell
+/// palette's muted-text token (#707B8C) in the
+/// `0xRRGGBB` form [`icon_el`] takes.
+const GLYPH_MUTED: u32 = 0x707B8C;
 /// Key-reduction tolerance, in channel value units (degrees
 /// for angle channels, stage units for root/length): interior
 /// keys whose removal moves the curve by at most this much are
@@ -1153,6 +1180,7 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                 .on_press(move |s: &mut State| {
                     select_channel(&mut s.core, &mut s.graph_panel, i);
                 })
+                .child(icon_el_rgb("chart-line", 12.0, GLYPH_MUTED))
                 .child(text(label).font(type_::LABEL).color(t.text).grow(1.0))
                 .child(
                     text(if count == 1 {
@@ -1248,6 +1276,7 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
+                .child(icon_el_rgb("chart-line", 14.0, GLYPH_MUTED))
                 .child(
                     text(format!("Graph — figure {}", core.selected_figure + 1))
                         .font(type_::TITLE)

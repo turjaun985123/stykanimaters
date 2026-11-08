@@ -4,12 +4,13 @@
 //! current frame. Bin-crate code — not part of the engine
 //! library. The original builders here were deliberately free
 //! of `crate::` references so they could be mounted wherever
-//! the shell declared them; Phase G (section 10) adds the
+//! the shell declared them; Phase G (section 10) added the
 //! first `crate::State`-taking builder
 //! ([`waveform_el_state`], click-to-seek), following the same
-//! pattern as every other section file. The core-only
-//! builders ([`waveform_el`], [`waveform_shape`]) are
-//! unchanged.
+//! pattern as every other section file, and Phase H
+//! (section 27) removed the core-only builders it superseded
+//! (see "One x mapping" below) — [`waveform_el_state`] is
+//! now the only builder in this module.
 //!
 //! ## Data source (no decoding is invented here)
 //!
@@ -46,35 +47,41 @@
 //! (accent, opaque) — so both envelope extremes stay visible
 //! after reduction. Amplitudes are scaled by the clip's `gain`
 //! (`src/model.rs:505`, `AudioClip::gain`) and clamped to the
-//! strip's half-height. The playhead fraction mirrors the GPUI
-//! strip's `AudioStripData::playhead` computation: the current
-//! frame mapped into the clip's span
-//! `start_frame .. start_frame + duration_secs * fps`.
+//! strip's half-height. The playhead is the project-mapped
+//! marker described in the next section.
 //!
-//! ## Two x mappings (Phase G, section 10)
+//! ## One x mapping (Phase G, section 10; resolved Phase H, section 27)
 //!
-//! The strip's waveform itself is drawn on the **clip
-//! mapping**: the last clip's peaks fill the whole strip
-//! width whatever the clip's start frame or length, so x is
-//! the clip's own time. [`waveform_shape`]'s playhead follows
-//! that mapping ([`playhead_fraction`]) and is drawn only
-//! while the current frame is inside the clip's span.
+//! Phase G left this module with two builders using two
+//! different x mappings: the original core-only `waveform_el`
+//! drew a **clip-mapped** playhead (the current frame mapped
+//! into the last clip's own span, via `playhead_fraction`),
+//! while the interactive [`waveform_el_state`] treated the
+//! strip as a miniature **project timeline**. Phase G's
+//! integrator switched the shell's mount to
+//! `waveform_el_state`, and a repo-wide grep at Phase H
+//! (section 27) found no remaining caller of `waveform_el`
+//! anywhere in `src/` — so the old builder, its
+//! `waveform_shape`, and `playhead_fraction` were removed.
+//! The two-mapping situation Phase G documented is resolved:
+//! one builder, one mapping.
 //!
-//! The interactive builder ([`waveform_el_state`]) instead
-//! treats the strip as a miniature **project timeline**:
+//! The surviving builder ([`waveform_el_state`]) treats the
+//! strip as a project timeline for interaction:
 //! [`playhead_x`] maps a project frame to x with frame 0 at
 //! the left edge and the last frame at the right edge, and
-//! [`frame_at_x`] is its round-to-nearest inverse. The new
+//! [`frame_at_x`] is its round-to-nearest inverse. The
 //! builder draws its playhead with `playhead_x` and seeks
 //! with `frame_at_x`, so marker and press always agree: a
 //! press lands on the frame whose marker would stand there.
-//! The price of that agreement is that the new builder's
-//! playhead generally does NOT line up with a feature in the
-//! waveform unless the clip spans the whole project — the
-//! waveform is clip-time, the interaction is project-time.
-//! That divergence is deliberate (it is what makes the strip
-//! seekable) and is confined to the new builder; the old
-//! builder's rendering is untouched.
+//! The waveform bars themselves are still the last clip's
+//! peaks stretched across the whole strip width whatever the
+//! clip's start frame or length, so the playhead generally
+//! does NOT line up with a feature in the waveform unless
+//! the clip spans the whole project — the waveform is
+//! clip-time, the interaction is project-time. That
+//! divergence is deliberate (it is what makes the strip
+//! seekable).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -148,28 +155,6 @@ pub fn reduce_columns(peaks: &[f32], columns: usize) -> Vec<(f32, f32)> {
 pub fn bar_span(amp: f32, gain: f32, mid: f32, half: f32) -> (f32, f32) {
     let a = (amp * gain).clamp(0.0, 1.0) * half;
     (mid - a, mid + a)
-}
-
-/// Playhead position as a fraction of the strip width, when
-/// the editor's current frame falls inside the clip's span
-/// (`start_frame .. start_frame + duration_secs * fps`,
-/// duration rounded to whole frames) — the GPUI strip's
-/// computation, verbatim in structure. `None` when the clip
-/// has no positive frame span or the frame is outside it.
-pub fn playhead_fraction(
-    clip: &AudioClip,
-    duration_secs: f32,
-    fps: f32,
-    current: usize,
-) -> Option<f32> {
-    let dur_frames = (duration_secs * fps).round() as i64;
-    let start = clip.start_frame as i64;
-    let current = current as i64;
-    if dur_frames > 0 && current >= start && current < start + dur_frames {
-        Some((current - start) as f32 / dur_frames as f32)
-    } else {
-        None
-    }
 }
 
 /// The x position, in element points, of project frame
@@ -328,26 +313,18 @@ pub fn clip_peaks(clip: &AudioClip, buckets: usize) -> Option<(Vec<f32>, f32)> {
     Some(probed)
 }
 
-/// The waveform strip as one `Shape` in canvas-element points,
-/// for the last audio clip in the project. Layout: one column
-/// per ~3 points of width; bars are drawn with
-/// [`LineCap::Butt`] so a bar's ends land exactly on its
-/// amplitude (round caps would overshoot by half the bar
-/// width). With no clips — or an unreadable clip file — the
-/// shape is just the centre line, so the strip reads as an
-/// empty audio lane rather than a hole in the layout. The
-/// playhead follows the clip mapping ([`playhead_fraction`]).
-pub fn waveform_shape(core: &EditorCore, el_size: [f32; 2]) -> Shape {
-    waveform_bars(core, el_size, true)
-}
-
-/// The strip without a project-mapped playhead: centre line
-/// plus the last clip's bars, and — only when `clip_playhead`
-/// — the original clip-mapped playhead. [`waveform_shape`]
-/// passes `true`; [`waveform_shape_project`] passes `false`
-/// and appends its own marker, so the two playhead mappings
-/// never draw on the same strip.
-fn waveform_bars(core: &EditorCore, el_size: [f32; 2], clip_playhead: bool) -> Shape {
+/// The waveform strip's bars as one `Shape` in
+/// canvas-element points, for the last audio clip in the
+/// project: centre line plus one column of mirrored bars per
+/// ~3 points of width. Bars are drawn with [`LineCap::Butt`]
+/// so a bar's ends land exactly on its amplitude (round caps
+/// would overshoot by half the bar width). With no clips —
+/// or an unreadable clip file — the shape is just the centre
+/// line, so the strip reads as an empty audio lane rather
+/// than a hole in the layout. No playhead here:
+/// [`waveform_shape_project`] appends the one
+/// project-mapped marker.
+fn waveform_bars(core: &EditorCore, el_size: [f32; 2]) -> Shape {
     let (w, h) = (el_size[0], el_size[1]);
     let mut shape = Shape::new();
     if w <= 0.0 || h <= 0.0 {
@@ -365,7 +342,7 @@ fn waveform_bars(core: &EditorCore, el_size: [f32; 2], clip_playhead: bool) -> S
     // column count so the reduction still sees local extremes.
     let columns = ((w / 3.0).floor() as usize).clamp(1, 512);
     let buckets = (columns * 4).clamp(96, 2048);
-    let Some((peaks, duration_secs)) = clip_peaks(clip, buckets) else {
+    let Some((peaks, _)) = clip_peaks(clip, buckets) else {
         return shape;
     };
     let cols = reduce_columns(&peaks, columns);
@@ -380,25 +357,18 @@ fn waveform_bars(core: &EditorCore, el_size: [f32; 2], clip_playhead: bool) -> S
         let (top, bottom) = bar_span(min, clip.gain, mid, mid);
         shape = shape.line([x, top], [x, bottom], bar_w, LineCap::Butt, accent);
     }
-    if clip_playhead {
-        if let Some(frac) = playhead_fraction(clip, duration_secs, core.project.fps, core.current) {
-            let x = frac * w;
-            let playhead = hex_color(PLAYHEAD_HEX).unwrap_or(Color::WHITE);
-            shape = shape.line([x, 0.0], [x, h], 2.0, LineCap::Butt, playhead);
-        }
-    }
     shape
 }
 
-/// The strip for [`waveform_el_state`]: the same centre line
-/// and bars as [`waveform_shape`], but the playhead is the
-/// project-mapped marker ([`playhead_x`] of the current
-/// frame), drawn whenever the project has frames — including
-/// over the empty lane of a project with no (readable) clip,
-/// since the strip still seeks there. Drawn last, over the
-/// bars, in the same amber as the clip-mapped marker.
+/// The strip for [`waveform_el_state`]: the centre line and
+/// bars of [`waveform_bars`], plus the project-mapped
+/// playhead ([`playhead_x`] of the current frame), drawn
+/// whenever the project has frames — including over the
+/// empty lane of a project with no (readable) clip, since
+/// the strip still seeks there. Drawn last, over the bars,
+/// in the stage's selected-joint amber.
 fn waveform_shape_project(core: &EditorCore, el_size: [f32; 2]) -> Shape {
-    let mut shape = waveform_bars(core, el_size, false);
+    let mut shape = waveform_bars(core, el_size);
     let (w, h) = (el_size[0], el_size[1]);
     if w > 0.0 && h > 0.0 && core.frame_count() > 0 {
         let x = playhead_x(core.current, core.frame_count(), w);
@@ -406,13 +376,6 @@ fn waveform_shape_project(core: &EditorCore, el_size: [f32; 2]) -> Shape {
         shape = shape.line([x, 0.0], [x, h], 2.0, LineCap::Butt, playhead);
     }
     shape
-}
-
-/// The waveform strip as a canvas element (key `waveform`, so
-/// headless `--tree` checks and the shell's layout reads can
-/// find it), sized by the caller like the stage canvas.
-pub fn waveform_el(core: &EditorCore, el_size: [f32; 2]) -> El {
-    canvas(waveform_shape(core, el_size)).key("waveform")
 }
 
 /// The seek gesture for [`waveform_el_state`]: pressing —
@@ -441,17 +404,19 @@ fn waveform_seek(s: &mut State, d: &Drag) {
     }
 }
 
-/// The interactive waveform strip: the same canvas and the
-/// same `waveform` key as [`waveform_el`], but drawn by
+/// The interactive waveform strip — the only builder in
+/// this module since Phase H (section 27) removed the
+/// core-only `waveform_el` (see the module docs). The canvas
+/// carries the `waveform` key (so headless `--tree` checks
+/// and the shell's layout reads can find it), is drawn by
 /// [`waveform_shape_project`] (project-mapped playhead) and
-/// carrying the seek gesture ([`waveform_seek`]). This is
-/// the builder the shell mounts; `waveform_el` remains for
-/// core-only callers. Element-local drag points are in the
-/// element's drawn points (Rune's `Drag` contract), matching
-/// the points the shape was built in as long as the caller
-/// lays the canvas out at the `el_size` it passes — the
-/// current mount passes `[308.0, 56.0]` and the right column
-/// gives the canvas that width.
+/// carries the seek gesture ([`waveform_seek`]).
+/// Element-local drag points are in the element's drawn
+/// points (Rune's `Drag` contract), matching the points the
+/// shape was built in as long as the caller lays the canvas
+/// out at the `el_size` it passes — the current mount passes
+/// `[308.0, 56.0]` and the right column gives the canvas
+/// that width.
 pub fn waveform_el_state(s: &State, el_size: [f32; 2]) -> El {
     canvas(waveform_shape_project(&s.core, el_size))
         .key("waveform")
@@ -462,14 +427,6 @@ pub fn waveform_el_state(s: &State, el_size: [f32; 2]) -> El {
 mod tests {
     use super::*;
     use stykanimate_rs::audio_edit::{peaks, write_wav, WavData};
-
-    fn clip(start_frame: usize, gain: f32) -> AudioClip {
-        AudioClip {
-            path: "unused.wav".to_string(),
-            start_frame,
-            gain,
-        }
-    }
 
     #[test]
     fn reduce_columns_hand_computed() {
@@ -555,18 +512,6 @@ mod tests {
         // Zero gain / zero amplitude collapse to the centre.
         assert_eq!(bar_span(0.9, 0.0, 24.0, 24.0), (24.0, 24.0));
         assert_eq!(bar_span(0.0, 3.0, 24.0, 24.0), (24.0, 24.0));
-    }
-
-    #[test]
-    fn playhead_fraction_inside_and_outside_the_span() {
-        let c = clip(10, 1.0);
-        // 2 s at 30 fps = 60 frames: span is 10..70.
-        assert_eq!(playhead_fraction(&c, 2.0, 30.0, 10), Some(0.0));
-        assert_eq!(playhead_fraction(&c, 2.0, 30.0, 40), Some(0.5));
-        assert_eq!(playhead_fraction(&c, 2.0, 30.0, 9), None);
-        assert_eq!(playhead_fraction(&c, 2.0, 30.0, 70), None);
-        // Zero-length clips have no span.
-        assert_eq!(playhead_fraction(&c, 0.0, 30.0, 10), None);
     }
 
     // ---- Peaks cache (Phase E, section 27) ----

@@ -27,16 +27,18 @@
 //!   cycle control on purpose: the engine has NO
 //!   `set_node_taper`, and adding one is an engine change,
 //!   not a panel change.
-//! * Copy / Paste buttons (Phase G) → the panel-local style
-//!   clipboard ([`capture_style`] / [`apply_style`], held in
-//!   a `thread_local` like `camera_panel`'s key clipboard).
-//!   The clipboard holds exactly the fields this panel can
-//!   write through a direct core setter — cap
-//!   (`set_node_cap`), gradient end (`set_node_color2`),
-//!   colour (`set_node_color`) and opacity
-//!   (`set_node_opacity`) — and paste applies them through
-//!   those same setters in panel order (cap, gradient,
-//!   colour, opacity).
+//! * Copy / Paste buttons (Phase G; atomic paste Phase H)
+//!   → the panel-local style clipboard ([`capture_style`] /
+//!   [`apply_style`], held in a `thread_local` like
+//!   `camera_panel`'s key clipboard). The clipboard holds
+//!   exactly the fields this panel can write through a
+//!   direct core setter — cap (`set_node_cap`), gradient
+//!   end (`set_node_color2`), colour (`set_node_color`) and
+//!   opacity (`set_node_opacity`) — and paste applies all
+//!   four at once through
+//!   `EditorCore::set_node_style_atomic` (Phase H, engine
+//!   section 38), which writes them through those same
+//!   setters' write paths under a single snapshot.
 //!
 //!   The captured colour is the node's *effective* colour
 //!   ([`selected_color`]): `set_node_color` always writes
@@ -54,17 +56,15 @@
 //!   `adjust_thickness`, which cannot set an exact value
 //!   either.
 //!
-//!   Undo: paste takes NO snapshot of its own and adds
-//!   none; it inherits the setters' mixed semantics —
-//!   `set_node_color` does not snapshot, while
-//!   `set_node_cap`, `set_node_color2` and
-//!   `set_node_opacity` each snapshot once — so one paste
-//!   lands as THREE undo steps, not one, and undoing once
-//!   after a paste reverts only the last setter's field
-//!   (opacity). That is the honest consequence of reusing
-//!   the panel's own ops unchanged; making paste a single
-//!   atomic undo step would need an engine change, not a
-//!   panel change.
+//!   Undo: paste is atomic (Phase H). Phase G applied the
+//!   four fields through the panel's separate setters and
+//!   inherited their mixed snapshot semantics — one paste
+//!   landed as three undo steps, and a single undo reverted
+//!   only the last setter's field. `set_node_style_atomic`
+//!   snapshots exactly once before writing all four fields,
+//!   so one paste is exactly ONE undo step and one undo
+//!   after a paste reverts cap, gradient, colour and
+//!   opacity together.
 //!
 //! History: Phase D shipped cap and gradient as single
 //! press targets advancing `cycle_node_cap` /
@@ -85,6 +85,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{CapKind, NodeStyle};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_btn;
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -260,9 +261,11 @@ pub fn step_color_channel(core: &mut EditorCore, channel: usize, dir: i32) {
 /// module docs for what is excluded and why — taper and
 /// thickness). `color` is the source node's *effective*
 /// colour; paste writes it back as an explicit `Some`.
-/// `opacity` replays through `set_node_opacity`, so the
-/// setter's 0.05..=1.0 clamp applies on paste just as it
-/// does to the panel's own stepper.
+/// `opacity` replays through the atomic paste op
+/// (`set_node_style_atomic`), whose opacity write path is
+/// `set_node_opacity`'s, so the setter's 0.05..=1.0 clamp
+/// applies on paste just as it does to the panel's own
+/// stepper.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StyleClipboard {
     pub color: u32,
@@ -308,22 +311,19 @@ pub fn capture_style(core: &EditorCore) -> Option<StyleClipboard> {
     })
 }
 
-/// Apply `clip` to the selected node through the panel's
-/// own setters, in panel order (cap, gradient, colour,
-/// opacity). Returns `false` — changing nothing, not even
-/// a setter's status line — when no node is selected, so
-/// the caller owns the refusal wording. Takes no snapshot
-/// of its own: the setters' snapshot semantics (three of
-/// the four snapshot, `set_node_color` does not) are the
-/// paste's undo semantics — see the module docs.
+/// Apply `clip` to the selected node through the engine's
+/// atomic style op (`set_node_style_atomic`, Phase H):
+/// one snapshot, then all four fields written through the
+/// same write paths the panel's own setters use — so a
+/// paste is exactly one undo step (Phase G's setter-by-
+/// setter paste cost three). Returns `false` — changing
+/// nothing, not even a status line — when no node is
+/// selected, so the caller owns the refusal wording.
 pub fn apply_style(core: &mut EditorCore, clip: &StyleClipboard) -> bool {
     if selected_style(core).is_none() {
         return false;
     }
-    core.set_node_cap(clip.cap);
-    core.set_node_color2(clip.color2);
-    core.set_node_color(clip.color);
-    core.set_node_opacity(clip.opacity);
+    core.set_node_style_atomic(clip.color, clip.color2, clip.cap, clip.opacity);
     true
 }
 
@@ -345,8 +345,8 @@ pub fn copy_style(core: &mut EditorCore) {
 /// selected node via [`apply_style`]. Refusals (empty
 /// clipboard, no selection) are status-only and change no
 /// project state. On success the status is exactly
-/// "Style pasted." — written after the setters, whose own
-/// status lines the paste supersedes.
+/// "Style pasted." — written after the atomic op, whose
+/// own status line the paste supersedes.
 pub fn paste_style(core: &mut EditorCore) -> bool {
     let Some(clip) = clipboard_style() else {
         core.status = "Copy a style first.".into();
@@ -360,17 +360,30 @@ pub fn paste_style(core: &mut EditorCore) -> bool {
     true
 }
 
-/// One RGB channel stepper row: channel letter, the
-/// channel's current value, and − / + buttons stepping it
-/// by [`RGB_STEP`] via [`step_color_channel`]. Keys are
-/// `style-<letter>-dn` / `style-<letter>-up`.
+/// One RGB channel stepper row: channel letter, a small
+/// square in the channel's own colour (the R row shows red
+/// at the channel's value, and so on — the Colour header
+/// row's preview idiom), the channel's current value, and
+/// − / + buttons stepping it by [`RGB_STEP`] via
+/// [`step_color_channel`]. Keys are `style-<letter>-dn` /
+/// `style-<letter>-up`.
 fn channel_row(channel: usize, label: &str, value: u8, t: &Theme) -> El {
     let lower = label.to_lowercase();
+    let swatch_rgb = match channel {
+        0 => rgb_join(value, 0, 0),
+        1 => rgb_join(0, value, 0),
+        _ => rgb_join(0, 0, value),
+    };
+    let swatch = el()
+        .size(12.0, 12.0)
+        .radius(3.0)
+        .fill(hex_color(swatch_rgb).unwrap_or(Color::WHITE));
     row()
         .key(format!("style-{lower}-row"))
         .gap(8.0)
         .center_y()
         .child(text(label).font(type_::LABEL).color(t.text))
+        .child(swatch)
         .child(
             text(value.to_string())
                 .font(type_::LABEL)
@@ -569,17 +582,19 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
 
     // Copy / Paste: the panel-local style clipboard (see
     // the module docs for what is — and is not — captured,
-    // and for the undo consequence of a paste).
+    // and for the undo consequence of a paste). Icon
+    // buttons (Phase H): Font Awesome `copy` / `clipboard`
+    // glyphs beside the labels, keys unchanged.
     panel = panel.child(
         row()
             .key("style-copy-paste-row")
             .gap(8.0)
             .center_y()
             .child(text("Style").font(type_::LABEL).color(t.text))
-            .child(btn("style-copy", "Copy", false, t, |s| {
+            .child(icon_btn("style-copy", "copy", "Copy", false, t, |s| {
                 copy_style(&mut s.core)
             }))
-            .child(btn("style-paste", "Paste", false, t, |s| {
+            .child(icon_btn("style-paste", "clipboard", "Paste", false, t, |s| {
                 paste_style(&mut s.core);
             })),
     );
@@ -886,6 +901,58 @@ mod tests {
         assert_eq!(source.color, Some(0x12_3456));
         assert_eq!(source.style.cap, CapKind::Point);
         assert_eq!(source.style.opacity, 0.55);
+    }
+
+    #[test]
+    fn paste_is_one_atomic_undo_step() {
+        // Phase H: paste goes through
+        // `set_node_style_atomic` (one snapshot), replacing
+        // Phase G's setter-by-setter paste, which cost
+        // THREE undo steps and reverted field-by-field.
+        // This test pins the new count — exactly one — and
+        // that a single undo reverts all four fields
+        // together. (No older test pinned the 3-step count;
+        // the round-trip test above is count-agnostic.)
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+
+        // Source node 1: a distinctive writable style.
+        core.selected_node = Some(1);
+        core.set_node_color(0x12_3456);
+        core.set_node_color2(Some(0x34_5678));
+        core.set_node_cap(CapKind::Point);
+        core.set_node_opacity(0.55);
+        copy_style(&mut core);
+        assert_eq!(core.status, "Style copied.");
+
+        // Target node 2: a different value in every field.
+        core.selected_node = Some(2);
+        core.set_node_color(0xFF_0000);
+        core.set_node_color2(None);
+        core.set_node_cap(CapKind::Square);
+        core.set_node_opacity(0.9);
+
+        let depth_before = core.undo_depth();
+        assert!(paste_style(&mut core));
+        assert_eq!(core.status, "Style pasted.");
+        // Exactly ONE new undo step for the whole paste.
+        assert_eq!(core.undo_depth(), depth_before + 1);
+
+        // All four fields landed.
+        let target = &core.project.figures[0].def.nodes[2];
+        assert_eq!(target.color, Some(0x12_3456));
+        assert_eq!(target.style.color2, Some(0x34_5678));
+        assert_eq!(target.style.cap, CapKind::Point);
+        assert_eq!(target.style.opacity, 0.55);
+
+        // One undo reverts all four together — the
+        // atomicity the old three-step paste lacked.
+        core.undo();
+        let target = &core.project.figures[0].def.nodes[2];
+        assert_eq!(target.color, Some(0xFF_0000));
+        assert_eq!(target.style.color2, None);
+        assert_eq!(target.style.cap, CapKind::Square);
+        assert_eq!(target.style.opacity, 0.9);
     }
 
     #[test]

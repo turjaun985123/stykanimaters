@@ -4,7 +4,10 @@
 //! right-aligned shortcut hints on the items that have
 //! real shell key bindings, and View ▸ Stage guides;
 //! Phase G: View ▸ Camera frame / Safe frames, the two
-//! child toggles under Stage guides).
+//! child toggles under Stage guides; Phase H: leading
+//! Font Awesome glyphs on the high-value items — see
+//! [`menu_icon`] — with keys, labels, active behaviour
+//! and handlers unchanged).
 //! Declared from `main.rs` by the integrator; bin-crate
 //! code, not part of the engine library.
 //!
@@ -214,11 +217,105 @@ fn hinted_item(
         )
 }
 
+/// The Font Awesome glyph an item leads with (Phase H),
+/// keyed by the item's element key — or `None` when the
+/// item stays plain text. Only the high-value items are
+/// mapped: the File actions, Edit's undo/redo and frame
+/// clipboard, View's visibility toggles and sidebar
+/// switches, and Help's two entries. Fit view / Centre on
+/// selection stay unmapped (no glyph reads as clearly,
+/// and an unclear icon is worse than none).
+///
+/// Every name was verified against the icon set
+/// (`icon_data::ICON_NAMES`); even so, [`item`] checks
+/// `icons::has_icon` before rendering the glyph and
+/// falls back to the plain/hinted row when the lookup
+/// fails, so a renamed or dropped glyph degrades the
+/// item instead of breaking the menu. Pinned by the
+/// `menu_icons_name_real_glyphs_for_the_high_value_items`
+/// test.
+fn menu_icon(key: &str) -> Option<&'static str> {
+    match key {
+        // File: open / save / export out.
+        "load" => Some("folder-open"),
+        "save" => Some("floppy-disk"),
+        "export" => Some("download"),
+        // Edit: undo / redo, copy / paste frame.
+        "undo" => Some("arrow-rotate-left"),
+        "redo" => Some("arrow-rotate-right"),
+        "copy-frame" => Some("copy"),
+        "paste-frame" => Some("clipboard"),
+        // View: visibility (eye), the guides sub-toggles
+        // (crosshairs), the sidebar switches (list).
+        "onion" => Some("eye"),
+        "view-guides" => Some("eye"),
+        "view-guides-frustum" => Some("crosshairs"),
+        "view-guides-safe" => Some("crosshairs"),
+        "view-toggle-left" => Some("list"),
+        "view-toggle-right" => Some("list"),
+        // Help: palette search, shortcuts question.
+        "menu-palette" => Some("magnifying-glass"),
+        "help" => Some("circle-question"),
+        _ => None,
+    }
+}
+
+/// A menu item leading with a Font Awesome glyph: the
+/// same row chrome as [`hinted_item`] (10/5 padding,
+/// radius 6, the same fill/hover/press states), with
+/// the glyph at 12 pt in the label's own colour
+/// (white while active, theme text otherwise) ahead
+/// of the label, and the shortcut hint — for the items
+/// that have one — at the right edge exactly as
+/// `hinted_item` renders it. Key, press handler and
+/// hit area cover the whole row, icon included.
+fn item_icon(
+    key: &str,
+    icon: &str,
+    label: &str,
+    active: bool,
+    hint: Option<&'static str>,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    let accent = tok::accent(0, true);
+    let label_color = if active { Color::WHITE } else { t.text };
+    let mut r = row()
+        .key(key)
+        .px(10.0)
+        .py(5.0)
+        .radius(6.0)
+        .fill(if active { accent } else { t.card })
+        .hover(if active { accent } else { t.control_track })
+        .press(if active { accent } else { t.control_off })
+        .on_press(f)
+        .center_y()
+        .gap(12.0)
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(crate::rune_sec::icons::icon_el(icon, 12.0, label_color))
+                .child(text(label).font(type_::LABEL).color(label_color)),
+        )
+        .child(row().grow(1.0));
+    if let Some(hint) = hint {
+        r = r.child(text(hint).font(type_::LABEL).color(if active {
+            Color::WHITE.alpha(0.75)
+        } else {
+            t.text_secondary
+        }));
+    }
+    r
+}
+
 /// One menu item: a chrome button that runs `f` and then
-/// closes the menu (see [`closing`]). Items whose action
-/// has a real shell key binding (see [`shortcut_hint`])
-/// render it as a muted hint at the row's right edge;
-/// the rest are plain `btn`s, exactly as before.
+/// closes the menu (see [`closing`]). Items in the
+/// [`menu_icon`] map lead with their glyph (see
+/// [`item_icon`]); items whose action has a real shell
+/// key binding (see [`shortcut_hint`]) render it as a
+/// muted hint at the row's right edge; the rest are
+/// plain `btn`s, exactly as before.
 fn item(
     key: &str,
     label: &str,
@@ -226,9 +323,14 @@ fn item(
     t: &Theme,
     f: impl Fn(&mut State) + 'static,
 ) -> El {
-    match shortcut_hint(key) {
-        Some(hint) => hinted_item(key, label, hint, active, t, closing(f)),
-        None => btn(key, label, active, t, closing(f)),
+    match menu_icon(key) {
+        Some(icon) if crate::rune_sec::icons::has_icon(icon) => {
+            item_icon(key, icon, label, active, shortcut_hint(key), t, closing(f))
+        }
+        _ => match shortcut_hint(key) {
+            Some(hint) => hinted_item(key, label, hint, active, t, closing(f)),
+            None => btn(key, label, active, t, closing(f)),
+        },
     }
 }
 
@@ -495,6 +597,48 @@ mod tests {
             "help",
         ] {
             assert_eq!(shortcut_hint(key), None, "{key} has no shell binding");
+        }
+    }
+
+    #[test]
+    fn menu_icons_name_real_glyphs_for_the_high_value_items() {
+        // Phase H: the icon map covers exactly the
+        // high-value items, and every name it returns
+        // must be a glyph the icon set actually carries
+        // (checked through the icons section's own
+        // lookup — the same one `item` falls back on),
+        // or the item would silently render plain.
+        for (key, icon) in [
+            ("load", "folder-open"),
+            ("save", "floppy-disk"),
+            ("export", "download"),
+            ("undo", "arrow-rotate-left"),
+            ("redo", "arrow-rotate-right"),
+            ("copy-frame", "copy"),
+            ("paste-frame", "clipboard"),
+            ("onion", "eye"),
+            ("view-guides", "eye"),
+            ("view-guides-frustum", "crosshairs"),
+            ("view-guides-safe", "crosshairs"),
+            ("view-toggle-left", "list"),
+            ("view-toggle-right", "list"),
+            ("menu-palette", "magnifying-glass"),
+            ("help", "circle-question"),
+        ] {
+            assert_eq!(menu_icon(key), Some(icon), "{key}");
+            assert!(
+                crate::rune_sec::icons::has_icon(icon),
+                "{icon} must exist in the icon set"
+            );
+            assert!(
+                crate::rune_sec::icon_data::ICON_NAMES.contains(&icon),
+                "{icon} must be listed in ICON_NAMES"
+            );
+        }
+        // Items outside the high-value set — and the
+        // menu triggers themselves — stay icon-less.
+        for key in ["view-fit", "view-centre", "menu-file", "bogus"] {
+            assert_eq!(menu_icon(key), None, "{key} stays plain");
         }
     }
 

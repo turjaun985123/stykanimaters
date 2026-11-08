@@ -106,6 +106,21 @@
 //! The keyed-frame indicator is a read-only graph query over
 //! `core.project.channels` — the same channel
 //! `key_graph_angle` authors.
+//!
+//! Phase H (section 18/40) puts Font Awesome glyphs on four
+//! of this section's controls through `icon_btn`: "Key all
+//! here" (`key`), "Copy key +10" (`copy`) and "Clear
+//! channel keys" (`xmark`) render as icon+label buttons,
+//! and the nudge pair renders as icon-only chevrons
+//! (`chevron-left` / `chevron-right`). Keys, labels and
+//! handlers are unchanged. One honest difference from the
+//! old `kbtn` rendering of the stamp row: those two
+//! buttons used to go inert (no handler) when there was
+//! nothing to act on; `icon_btn` has no inert mode, so
+//! they now stay wired and the press lands on the ops'
+//! own status-only refusals ("No graph channels to
+//! key." / the copy refusals) — still snapshot-free,
+//! exactly as the ops were already written.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El};
@@ -114,6 +129,7 @@ use stykanimate_rs::graph::{Channel, ChannelTarget, Key, TangentPreset};
 use stykanimate_rs::graph_keys;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::State;
 
 /// The graph channel this section acts on: the selected
@@ -645,9 +661,11 @@ fn kbtn(
 /// state: Delete is accent-filled exactly when a key sits
 /// at this frame; Copy is muted until a channel exists to
 /// copy from, and Paste is muted while the key clipboard
-/// is empty. The stamp row mutes the same way: Key all
-/// needs at least one channel in the project, Copy key
-/// +10 needs the selected joint's channel.
+/// is empty. The stamp row's two buttons are icon
+/// buttons (Phase H) and stay wired in every state: with
+/// no channels (Key all) or no channel on the selected
+/// joint (Copy key +10) the press lands on the op's own
+/// status-only, snapshot-free refusal.
 pub fn keyframe_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let keyed = selected_angle_channel(core).is_some_and(|ch| keyed_here(&ch.keys, core.current));
@@ -708,18 +726,23 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                     t,
                     |s| paste_keys_here(s),
                 ))
-                .child(btn("key-clear-channel", "Clear channel keys", false, t, |s| {
-                    clear_channel_keys_here(s)
-                })),
+                .child(icon_btn(
+                    "key-clear-channel",
+                    "xmark",
+                    "Clear channel keys",
+                    false,
+                    t,
+                    |s| clear_channel_keys_here(s),
+                )),
         )
         .child(
             row()
                 .key("keyframe-nudge")
                 .gap(6.0)
-                .child(btn("key-nudge-l", "Nudge left", false, t, |s| {
+                .child(icon_only_btn("key-nudge-l", "chevron-left", 26.0, false, t, |s| {
                     nudge_key_here(s, -1)
                 }))
-                .child(btn("key-nudge-r", "Nudge right", false, t, |s| {
+                .child(icon_only_btn("key-nudge-r", "chevron-right", 26.0, false, t, |s| {
                     nudge_key_here(s, 1)
                 })),
         )
@@ -727,17 +750,19 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
             row()
                 .key("keyframe-stamp")
                 .gap(6.0)
-                .child(kbtn(
+                .child(icon_btn(
                     "key-all-here",
+                    "key",
                     "Key all here",
-                    !core.project.channels.is_empty(),
+                    false,
                     t,
                     |s| key_all_here(s),
                 ))
-                .child(kbtn(
+                .child(icon_btn(
                     "key-copy-to-frame",
+                    "copy",
                     "Copy key +10",
-                    selected_angle_channel_index(core).is_some(),
+                    false,
                     t,
                     |s| copy_key_to_frame(s),
                 )),

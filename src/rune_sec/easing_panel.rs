@@ -49,6 +49,7 @@ use stykanimate_rs::graph::TangentPreset;
 use stykanimate_rs::model::Easing;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 /// Width / height (points) of each preset's curve preview box.
@@ -288,7 +289,22 @@ pub fn easing_panel(s: &State, t: &Theme) -> El {
         .padding(10.0)
         .fill(t.card)
         .radius(8.0)
-        .child(text("Easing").font(type_::TITLE).color(t.text));
+        .child(
+            // Panel header (Phase H): the chart-line glyph
+            // — axes with a rising curve, the shape an
+            // easing curve is — before the title, following
+            // the shell's icon-row idiom (`icons::icon_el`
+            // at the title's own 13pt). The preset buttons
+            // below deliberately stay text: each already
+            // sits beside its sampled curve preview, and no
+            // glyph honestly distinguishes ease-in from
+            // ease-out — the drawn curve does that.
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(icon_el("chart-line", 13.0, t.text))
+                .child(text("Easing").font(type_::TITLE).color(t.text)),
+        );
 
     // ---- Frame tween: set_frame_easing on the current frame.
     panel = panel.child(section(

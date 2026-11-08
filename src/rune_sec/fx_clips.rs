@@ -80,6 +80,19 @@
 //! element by `Shape::view_box`, and converts presses
 //! from the drag's own reported size — fractions on both
 //! sides, so the two always agree.
+//!
+//! Phase H switches the unambiguous micro-buttons to
+//! Font Awesome glyphs through the shell's icon buttons:
+//! the lane header gains a `wand-magic-sparkles` glyph,
+//! the inspector's duplicate/delete become icon-only
+//! (`copy` / `trash-can`), and the nudge row's
+//! single-step pair become icon-only chevrons
+//! (`chevron-left` / `chevron-right`). Keys and handlers
+//! are unchanged. The ±10 nudge pair and the duration
+//! steppers keep their text — `-10` / `+10` / `±0.1s`
+//! are magnitudes a glyph cannot carry — and the strip
+//! canvas is drawing code, not element code, so it is
+//! untouched.
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, ScrollSpec, Shape, Tx};
@@ -87,6 +100,8 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::fx_edit;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_only_btn;
+use crate::rune_sec::icons::icon_el;
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -799,6 +814,7 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
+                .child(icon_el("wand-magic-sparkles", 14.0, t.text))
                 .child(text("FX clips").font(type_::TITLE).color(t.text))
                 .child(
                     text(format!("{} clip(s)", s.core.project.fx_clips.len()))
@@ -841,10 +857,10 @@ pub fn nudge_row(s: &State, t: &Theme) -> El {
         .child(btn("fx-nudge-l10", "-10", false, t, |s| {
             nudge_start(s, -10)
         }))
-        .child(btn("fx-nudge-l", "-1", false, t, |s| {
+        .child(icon_only_btn("fx-nudge-l", "chevron-left", 26.0, false, t, |s| {
             nudge_start(s, -1)
         }))
-        .child(btn("fx-nudge-r", "+1", false, t, |s| {
+        .child(icon_only_btn("fx-nudge-r", "chevron-right", 26.0, false, t, |s| {
             nudge_start(s, 1)
         }))
         .child(btn("fx-nudge-r10", "+10", false, t, |s| {
@@ -957,10 +973,10 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                     nudge_start(s, 1)
                 }))
                 .child(el().grow(1.0))
-                .child(btn(&format!("fx-dup-{i}"), "Duplicate", false, t, |s| {
+                .child(icon_only_btn(&format!("fx-dup-{i}"), "copy", 26.0, false, t, |s| {
                     duplicate_selected(s)
                 }))
-                .child(btn(&format!("fx-del-{i}"), "Delete", false, t, |s| {
+                .child(icon_only_btn(&format!("fx-del-{i}"), "trash-can", 26.0, false, t, |s| {
                     delete_selected(s)
                 })),
         )

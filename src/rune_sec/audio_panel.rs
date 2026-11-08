@@ -19,10 +19,24 @@
 //! selection the toolbar falls back to the LAST clip, the
 //! pre-Phase-G behaviour, and the line under "Operations"
 //! says which clip is targeted. (The row Delete and the
-//! other per-row ops were always index-based; the remaining
-//! toolbar effects — Echo, Lowpass, Trim silence, Split
-//! silences, Pitch, Compress — still act on the last clip:
-//! no indexed variants of those `editor.rs` ops exist.)
+//! other per-row ops were always index-based.)
+//!
+//! Phase H completes the retarget: the remaining toolbar
+//! effects — Echo, Lowpass, Trim silence, Split silences,
+//! Pitch, Compress — now aim at the effective target too,
+//! through §37's indexed `audio_ops` variants
+//! (`audio_echo_at`, `audio_lowpass_at`,
+//! `audio_trim_silence_at`, `audio_split_silences_at`,
+//! `audio_pitch_at`, `audio_compress_at`), falling back to
+//! the `editor.rs` `_last` ops when nothing is selected.
+//! No panel op is last-clip-only any more; Mixdown stays
+//! whole-project by nature. Phase H also puts Font Awesome
+//! glyphs on the controls whose meaning a glyph states
+//! honestly — Add clip (`music`), the per-row Split@cur
+//! (`scissors`) and Delete (`trash-can`, icon-only), and
+//! Fade (`chart-line`: the fade is an amplitude ramp, in
+//! and out — a rising line, not a loudness mark) — via
+//! `icon_btn` / `icon_only_btn`; every key is unchanged.
 //!
 //! Every control calls a real `EditorCore` op (evidence in
 //! the handler comments). Phase E closed the gaps Phase D
@@ -44,6 +58,7 @@ use stykanimate_rs::audio_edit;
 use stykanimate_rs::model::AudioClip;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::State;
 
 /// Panel-owned state: the add-clip file-name entry (Rune
@@ -373,6 +388,79 @@ fn move_target(s: &mut State, delta_frames: i32) {
     }
 }
 
+/// Echo the target clip; same dispatch as `fade_target`.
+/// DEPENDENCY (Phase H): calls `EditorCore::audio_echo_at`
+/// from the parallel `audio_ops` section (§37) — until
+/// that lands this file does not compile, by design. The
+/// no-selection fallback keeps the `editor.rs` `_last` op,
+/// whose no-clips status is unchanged.
+fn echo_target(s: &mut State) {
+    match live_target(s) {
+        Some(i) => s.core.audio_echo_at(i),
+        None => s.core.audio_echo_last(),
+    }
+}
+
+/// Low-pass the target clip; same dispatch as
+/// `echo_target`. Calls `EditorCore::audio_lowpass_at`
+/// (Phase H `audio_ops` dependency, as above).
+fn lowpass_target(s: &mut State) {
+    match live_target(s) {
+        Some(i) => s.core.audio_lowpass_at(i),
+        None => s.core.audio_lowpass_last(),
+    }
+}
+
+/// Trim the target clip's leading/trailing silence; same
+/// dispatch as `echo_target`. Calls
+/// `EditorCore::audio_trim_silence_at` (Phase H
+/// `audio_ops` dependency, as above).
+fn trim_silence_target(s: &mut State) {
+    match live_target(s) {
+        Some(i) => s.core.audio_trim_silence_at(i),
+        None => s.core.audio_trim_silence_last(),
+    }
+}
+
+/// Split the target clip at its silences; same dispatch
+/// as `echo_target`. Calls
+/// `EditorCore::audio_split_silences_at` (Phase H
+/// `audio_ops` dependency, as above). The fallback keeps
+/// the `editor.rs` op's own name,
+/// `audio_split_at_silences_last`.
+fn split_silences_target(s: &mut State) {
+    match live_target(s) {
+        Some(i) => s.core.audio_split_silences_at(i),
+        None => s.core.audio_split_at_silences_last(),
+    }
+}
+
+/// Pitch-shift the target clip; same dispatch as
+/// `echo_target`. Calls `EditorCore::audio_pitch_at`
+/// (Phase H `audio_ops` dependency, as above) with the
+/// index ONLY: verified against the `editor.rs` original
+/// — `audio_pitch_last` takes no amount argument; the
+/// +2 semitones is fixed inside the op
+/// (`audio_edit::pitch_shift(&mut wav, 2.0)`), so the
+/// indexed twin's signature is the `_last` signature plus
+/// the leading index, with no semitones parameter.
+fn pitch_target(s: &mut State) {
+    match live_target(s) {
+        Some(i) => s.core.audio_pitch_at(i),
+        None => s.core.audio_pitch_last(),
+    }
+}
+
+/// Compress the target clip; same dispatch as
+/// `echo_target`. Calls `EditorCore::audio_compress_at`
+/// (Phase H `audio_ops` dependency, as above).
+fn compress_target(s: &mut State) {
+    match live_target(s) {
+        Some(i) => s.core.audio_compress_at(i),
+        None => s.core.audio_compress_last(),
+    }
+}
+
 /// A clip row's Delete: the (already index-based)
 /// `EditorCore::delete_audio_clip`, then the selection is
 /// repaired so it keeps naming the same clip where it can
@@ -390,12 +478,15 @@ fn delete_row_clip(s: &mut State, i: usize) {
 /// Split at the current frame, Crossfade into the next
 /// clip, Delete), the operations toolbar (Phase G: aimed
 /// at the selected clip row, falling back to the last
-/// clip), and the add-clip row. Element keys reuse the
+/// clip; Phase H: every effect aimed, none last-clip-only),
+/// and the add-clip row. Element keys reuse the
 /// GPUI control ids where they existed; the Phase E keys
 /// (`audio-fade`, `audio-reverse`, `audio-gain-*`,
 /// `audio-move-*`, `audio-del-{i}`) are new; Phase G adds
 /// no keys — row selection rides the existing
-/// `audio-clip-{i}` row keys.
+/// `audio-clip-{i}` row keys. Phase H adds no keys either:
+/// Split@cur, Fade and Add clip gain glyphs and Delete
+/// goes icon-only under their existing keys.
 pub fn audio_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let clips = &core.project.audio;
@@ -469,8 +560,9 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 .child(btn(&format!("audio-norm-{i}"), "Norm", false, t, move |s| {
                     s.core.audio_normalize(i)
                 }))
-                .child(btn(
+                .child(icon_btn(
                     &format!("audio-split-{i}"),
+                    "scissors",
                     "Split@cur",
                     false,
                     t,
@@ -488,10 +580,10 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                     move |s| s.core.audio_crossfade(i),
                 ));
             }
-            clip_row = clip_row.child(btn(
+            clip_row = clip_row.child(icon_only_btn(
                 &format!("audio-del-{i}"),
-                "Delete",
-                false,
+                "trash-can",
+                26.0, false,
                 t,
                 move |s| delete_row_clip(s, i),
             ));
@@ -504,11 +596,11 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
     // the SELECTED clip (the indexed `audio_ops` variants,
     // dispatched by the `*_target` handlers), falling back
     // to the last clip when nothing is selected — the
-    // target line under the header says which. The
-    // remaining effects (Echo, Lowpass, Trim silence,
-    // Split silences, Pitch, Compress) are still the
-    // engine's `_last` ops: no indexed variants exist.
-    // Mixdown is whole-project.
+    // target line under the header says which. Phase H
+    // aims the remaining effects (Echo, Lowpass, Trim
+    // silence, Split silences, Pitch, Compress) the same
+    // way, through §37's indexed variants; no toolbar op
+    // is last-clip-only. Mixdown is whole-project.
     panel = panel.child(text("Operations").font(type_::LABEL).color(t.text_secondary));
     panel = panel.child(
         text(target_line(clips, selected))
@@ -521,25 +613,16 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             .gap(6.0)
             .center_y()
             .child(btn("audio-norm-last", "Normalise", false, t, normalize_target))
-            .child(btn("audio-echo", "Echo", false, t, |s| {
-                s.core.audio_echo_last()
-            }))
-            .child(btn("audio-lowpass", "Lowpass", false, t, |s| {
-                s.core.audio_lowpass_last()
-            }))
-            .child(btn("audio-trimsil", "Trim silence", false, t, |s| {
-                s.core.audio_trim_silence_last()
-            }))
-            .child(btn("audio-split-sil", "Split silences", false, t, |s| {
-                s.core.audio_split_at_silences_last()
-            }))
-            .child(btn("audio-pitch", "Pitch +2", false, t, |s| {
-                s.core.audio_pitch_last()
-            }))
-            .child(btn("audio-comp", "Compress", false, t, |s| {
-                s.core.audio_compress_last()
-            }))
-            .child(btn("audio-fade", "Fade", false, t, fade_target))
+            .child(btn("audio-echo", "Echo", false, t, echo_target))
+            .child(btn("audio-lowpass", "Lowpass", false, t, lowpass_target))
+            .child(btn("audio-trimsil", "Trim silence", false, t, trim_silence_target))
+            .child(btn("audio-split-sil", "Split silences", false, t, split_silences_target))
+            .child(btn("audio-pitch", "Pitch +2", false, t, pitch_target))
+            .child(btn("audio-comp", "Compress", false, t, compress_target))
+            // Fade is an amplitude ramp (in and out), so
+            // its glyph is the rising `chart-line`, not a
+            // loudness mark (Phase H).
+            .child(icon_btn("audio-fade", "chart-line", "Fade", false, t, fade_target))
             .child(btn("audio-reverse", "Reverse", false, t, reverse_target))
             .child(btn("audio-gain-dn", "Gain -", false, t, |s| {
                 gain_step_target(s, -0.1);
@@ -586,7 +669,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                     .on_edit(|s: &mut State| &mut s.audio_panel.name)
                     .on_submit(submit_audio_name),
             )
-            .child(btn("add-audio", "Add clip", false, t, |s| add_clip(s))),
+            .child(icon_btn("add-audio", "music", "Add clip", false, t, |s| add_clip(s))),
     );
 
     panel
@@ -937,5 +1020,57 @@ loop_playback: true,
         let _ = audio_panel(&s, &t);
         s.audio_panel.selected = Some(9);
         let _ = audio_panel(&s, &t);
+    }
+
+    #[test]
+    fn echo_target_hits_the_selected_clip_not_the_last() {
+        // Phase H: Echo used to be a `_last` op — with the
+        // FIRST of two clips selected it would have echoed
+        // clip 2. The retargeted handler must echo clip 1.
+        // The op's observable effect (the `editor.rs`
+        // materialise-and-repoint pattern): the clip's path
+        // moves to the derived `.echo.wav` product and the
+        // status names the clip by its 1-based index.
+        let wav = audio_edit::WavData {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: vec![0.5; 800],
+        };
+        let pid = std::process::id();
+        let first = std::env::temp_dir()
+            .join(format!("stykanimate-rune-audio-panel-echo-a-{pid}.wav"));
+        let second = std::env::temp_dir()
+            .join(format!("stykanimate-rune-audio-panel-echo-b-{pid}.wav"));
+        std::fs::write(&first, audio_edit::write_wav(&wav)).unwrap();
+        std::fs::write(&second, audio_edit::write_wav(&wav)).unwrap();
+        let first_path = first.to_string_lossy().into_owned();
+        let second_path = second.to_string_lossy().into_owned();
+
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip(&first_path, 0, 1.0));
+        core.project.audio.push(clip(&second_path, 30, 1.0));
+        let mut s = state_with(core);
+        s.audio_panel.selected = Some(0);
+        echo_target(&mut s);
+
+        assert!(
+            s.core.status.contains("Echo applied to audio clip 1"),
+            "status: {}",
+            s.core.status
+        );
+        let new_first = s.core.project.audio[0].path.clone();
+        assert_ne!(new_first, first_path, "the selected clip is repointed");
+        assert!(
+            new_first.contains(".echo.wav"),
+            "selected clip path: {new_first}"
+        );
+        assert_eq!(
+            s.core.project.audio[1].path, second_path,
+            "the unselected last clip is untouched"
+        );
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+        let _ = std::fs::remove_file(&new_first);
     }
 }

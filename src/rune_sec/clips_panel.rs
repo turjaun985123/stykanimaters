@@ -115,6 +115,8 @@ use stykanimate_rs::editor::{ClipEditSession, EditorCore};
 use stykanimate_rs::model::{ClipDef, ClipLoop, FigureInstance};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
+use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 /// Panel-local state for the movieclips panel (see the module
@@ -628,8 +630,9 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         )
-        .child(btn(
+        .child(icon_btn(
             &format!("clip-dup-{index}"),
+            "copy",
             "Dup",
             false,
             t,
@@ -639,8 +642,9 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
                 }
             },
         ))
-        .child(btn(
+        .child(icon_btn(
             &format!("clip-rename-{index}"),
+            "pencil",
             "Rename",
             false,
             t,
@@ -649,26 +653,29 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
                 begin_rename(s, index);
             },
         ))
-        .child(btn(
+        .child(icon_only_btn(
             &format!("clip-up-{index}"),
-            "Up",
+            "chevron-up",
+            26.0,
             false,
             t,
             move |s: &mut State| {
                 move_clip_at(s, index, true);
             },
         ))
-        .child(btn(
+        .child(icon_only_btn(
             &format!("clip-dn-{index}"),
-            "Dn",
+            "chevron-down",
+            26.0,
             false,
             t,
             move |s: &mut State| {
                 move_clip_at(s, index, false);
             },
         ))
-        .child(btn(
+        .child(icon_btn(
             &format!("clip-del-{index}"),
+            "trash-can",
             "Del",
             false,
             t,
@@ -681,7 +688,8 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
 /// The rename editor row, mounted under the clip list
 /// while a rename is in progress (`ClipRenameState::target`
 /// set and still naming an existing clip): the loaded name
-/// field plus "Apply"; Enter in the field applies too.
+/// field plus "Apply" / "Cancel"; Enter in the field
+/// applies too, Cancel closes the row without writing.
 /// Closed — or a target gone stale — it renders an empty
 /// keyed row, so the panel never shows a dead field.
 fn rename_row(s: &State, t: &Theme) -> El {
@@ -707,9 +715,24 @@ fn rename_row(s: &State, t: &Theme) -> El {
                 .on_edit(|s: &mut State| &mut s.clips_rename.field)
                 .on_submit(|s: &mut State, _tx: &mut Tx| apply_rename(s)),
         )
-        .child(btn("clip-rename-apply", "Apply", false, t, |s: &mut State| {
-            apply_rename(s)
-        }))
+        .child(icon_btn(
+            "clip-rename-apply",
+            "check",
+            "Apply",
+            false,
+            t,
+            |s: &mut State| apply_rename(s),
+        ))
+        .child(icon_btn(
+            "clip-rename-cancel",
+            "xmark",
+            "Cancel",
+            false,
+            t,
+            |s: &mut State| {
+                s.clips_rename.target = None;
+            },
+        ))
 }
 
 /// The loop-mode segmented control for the selected clip:
@@ -878,6 +901,7 @@ pub fn clips_panel(s: &State, t: &Theme) -> El {
                 .w_full()
                 .gap(8.0)
                 .center_y()
+                .child(icon_el("film", 14.0, t.text_secondary))
                 .child(
                     text("Movieclips")
                         .font(type_::SECTION)

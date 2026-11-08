@@ -62,7 +62,9 @@
 //!   the focus-guarded sync the integrator calls from
 //!   `poll()` — `project_tools::sync_name_edit`'s pattern,
 //!   plus a selection-change trigger. Keys `fig-name` /
-//!   `fig-rename`.
+//!   `fig-rename`. The Rename button carries the Font
+//!   Awesome `pencil` glyph via `icon_btn` (Phase H); its
+//!   key, label and handler are unchanged.
 //! * Scale 90% / 110% → [`scale_selected_figure`] — the
 //!   whole-figure resize this panel adds in Phase G. There
 //!   is no scale op in the core, so it composes the
@@ -79,7 +81,11 @@
 //!   opacity); and the head ring — its radius is stored
 //!   nowhere: both renderers draw a constant 17 units for
 //!   nodes flagged `head` (stage_view.rs, export.rs), so
-//!   a scaled figure keeps the same head size.
+//!   a scaled figure keeps the same head size. The 110%
+//!   button carries the `expand` glyph via `icon_btn`
+//!   (Phase H); the 90% button stays text-only — the
+//!   curated icon set has no `compress` glyph to pair
+//!   with it.
 //!
 //! When the project has no figures — or the selection is
 //! stale — the panel is one muted line.
@@ -109,6 +115,7 @@ use rune::{col, el, row, text, text_input, Color, El, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_btn;
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -352,7 +359,14 @@ fn name_field_row(s: &State, t: &Theme) -> El {
                 .on_edit(|s: &mut State| &mut s.inspector_figure.name)
                 .on_submit(|s: &mut State, _tx: &mut Tx| apply_figure_name(s)),
         )
-        .child(btn("fig-rename", "Rename", false, t, apply_figure_name))
+        .child(icon_btn(
+            "fig-rename",
+            "pencil",
+            "Rename",
+            false,
+            t,
+            apply_figure_name,
+        ))
 }
 
 /// One read-only label/value row.
@@ -416,9 +430,16 @@ fn scale_stepper_row(t: &Theme) -> El {
         .child(btn("fig-scale-dn", "90%", false, t, |s: &mut State| {
             scale_selected_figure(&mut s.core, 0.9);
         }))
-        .child(btn("fig-scale-up", "110%", false, t, |s: &mut State| {
-            scale_selected_figure(&mut s.core, 1.1);
-        }))
+        .child(icon_btn(
+            "fig-scale-up",
+            "expand",
+            "110%",
+            false,
+            t,
+            |s: &mut State| {
+                scale_selected_figure(&mut s.core, 1.1);
+            },
+        ))
 }
 
 /// The Delete figure button: chrome-button shape in the

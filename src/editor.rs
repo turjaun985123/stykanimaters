@@ -542,6 +542,14 @@ impl EditorCore {
     /// op steps through, as `Some(rgb)`; like the cycle op it
     /// does not snapshot.
     pub fn set_node_color(&mut self, rgb: u32) {
+        self.write_node_color(rgb);
+    }
+
+    /// The colour write itself, without `set_node_color`'s
+    /// (absent) snapshot: shared with `set_node_style_atomic`,
+    /// which snapshots once for the whole style. Silent when
+    /// nothing is selected, exactly like `set_node_color`.
+    fn write_node_color(&mut self, rgb: u32) {
         let Some(ni) = self.selected_node else { return };
         let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
         node.color = Some(rgb);
@@ -1886,6 +1894,12 @@ impl EditorCore {
     /// Snapshots and reports exactly like `cycle_node_cap`.
     pub fn set_node_cap(&mut self, cap: crate::model::CapKind) {
         self.snapshot();
+        self.write_node_cap(cap);
+    }
+
+    /// The cap write itself, without `set_node_cap`'s
+    /// snapshot: shared with `set_node_style_atomic`.
+    fn write_node_cap(&mut self, cap: crate::model::CapKind) {
         match self.selected_node_mut() {
             Some(node) => {
                 node.style.cap = cap;
@@ -1901,6 +1915,14 @@ impl EditorCore {
     /// `cycle_node_gradient`.
     pub fn set_node_color2(&mut self, color2: Option<u32>) {
         self.snapshot();
+        self.write_node_color2(color2);
+    }
+
+    /// The gradient-colour write itself, without
+    /// `set_node_color2`'s snapshot: shared with
+    /// `set_node_style_atomic`. `None` clears the gradient,
+    /// exactly like the public setter.
+    fn write_node_color2(&mut self, color2: Option<u32>) {
         match self.selected_node_mut() {
             Some(node) => {
                 node.style.color2 = color2;
@@ -1919,6 +1941,13 @@ impl EditorCore {
     /// Snapshots and reports like the other style setters.
     pub fn set_node_opacity(&mut self, opacity: f32) {
         self.snapshot();
+        self.write_node_opacity(opacity);
+    }
+
+    /// The opacity write itself, without `set_node_opacity`'s
+    /// snapshot: shared with `set_node_style_atomic`. Keeps
+    /// the public setter's 0.05..=1.0 clamp.
+    fn write_node_opacity(&mut self, opacity: f32) {
         match self.selected_node_mut() {
             Some(node) => {
                 node.style.opacity = opacity.clamp(0.05, 1.0);
@@ -1926,6 +1955,35 @@ impl EditorCore {
             }
             None => self.status = "Select a joint first.".into(),
         }
+    }
+
+    /// Apply a complete style to the selected segment in
+    /// exactly ONE undo step: the four writes of
+    /// `set_node_color` / `set_node_color2` / `set_node_cap` /
+    /// `set_node_opacity` (same fields, same clamps, same
+    /// per-write status wording — the last write's status is
+    /// the one left standing), but with a single snapshot
+    /// taken here instead of the three the snapshotting
+    /// setters would take between them. This is the write
+    /// the style panel's paste path uses, so pasting a style
+    /// is one undo, not three. With no segment selected it
+    /// refuses in the setters' voice and snapshots nothing.
+    pub fn set_node_style_atomic(
+        &mut self,
+        color: u32,
+        color2: Option<u32>,
+        cap: crate::model::CapKind,
+        opacity: f32,
+    ) {
+        if self.selected_node_mut().is_none() {
+            self.status = "Select a joint first.".into();
+            return;
+        }
+        self.snapshot();
+        self.write_node_color(color);
+        self.write_node_color2(color2);
+        self.write_node_cap(cap);
+        self.write_node_opacity(opacity);
     }
 
     pub fn attach_image_to_node(&mut self) {
@@ -3609,25 +3667,43 @@ impl EditorCore {
 
     // ---- Named projects ----
 
-    pub fn save_named_project(&mut self) {
+    /// Save the project under its (slugified) name in
+    /// `./projects/`. Returns true iff the file was actually
+    /// written — callers that sync side state (recovery
+    /// snapshot, recents) gate on it, so a failed save no
+    /// longer plants a phantom recent. The status line
+    /// reports the outcome either way, as it always has.
+    pub fn save_named_project(&mut self) -> bool {
+        let dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("projects");
+        self.save_named_project_to(&dir)
+    }
+
+    /// `save_named_project` against an explicit projects
+    /// directory (the codebase's `_in`-style split, so tests
+    /// can aim the write at a temp dir). Same slug, same
+    /// status strings, same `project_files` refresh.
+    fn save_named_project_to(&mut self, dir: &std::path::Path) -> bool {
         let slug = self
             .project
             .name
             .to_lowercase()
             .replace(|c: char| !c.is_alphanumeric(), "-");
-        let dir = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("projects");
         let path = dir.join(format!("{slug}.json"));
-        let result = std::fs::create_dir_all(&dir)
+        let result = std::fs::create_dir_all(dir)
             .and_then(|_| serde_json::to_string_pretty(&self.project).map_err(std::io::Error::other))
             .and_then(|text| std::fs::write(&path, text));
         match result {
             Ok(()) => {
                 self.project_files = Self::list_project_files();
                 self.status = format!("Project saved to {}", path.display());
+                true
             }
-            Err(e) => self.status = format!("Project save failed: {e}"),
+            Err(e) => {
+                self.status = format!("Project save failed: {e}");
+                false
+            }
         }
     }
 
@@ -4198,6 +4274,110 @@ mod tests {
         core.set_node_opacity(0.25);
         assert_eq!(core.status, "Select a joint first.");
         assert_eq!(core.project.figures[0].def.nodes[1].style, before);
+    }
+
+    #[test]
+    fn node_style_atomic_applies_all_four_in_one_undo_step() {
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        let before_color = core.project.figures[0].def.nodes[1].color;
+        let before_style = core.project.figures[0].def.nodes[1].style;
+        let depth = core.undo_depth();
+        core.set_node_style_atomic(
+            0x334455,
+            Some(0x112233),
+            crate::model::CapKind::Square,
+            0.5,
+        );
+        // Exactly one snapshot for the whole style.
+        assert_eq!(core.undo_depth(), depth + 1);
+        let node = &core.project.figures[0].def.nodes[1];
+        assert_eq!(node.color, Some(0x334455));
+        assert_eq!(node.style.color2, Some(0x112233));
+        assert_eq!(node.style.cap, crate::model::CapKind::Square);
+        assert_eq!(node.style.opacity, 0.5);
+        // The last write's status is the one left standing,
+        // in the opacity setter's own wording.
+        assert_eq!(core.status, "Segment opacity 50%.");
+        // And that one step undoes the whole style.
+        core.undo();
+        let node = &core.project.figures[0].def.nodes[1];
+        assert_eq!(node.color, before_color);
+        assert_eq!(node.style, before_style);
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn node_style_atomic_honours_the_setter_clamps_and_none() {
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        // Opacity clamps to 1.0, exactly like set_node_opacity.
+        core.set_node_style_atomic(0x000000, Some(0xABCDEF), crate::model::CapKind::Round, 2.0);
+        assert_eq!(core.project.figures[0].def.nodes[1].style.opacity, 1.0);
+        // …and to 0.05; a None gradient clears, like
+        // set_node_color2(None).
+        core.set_node_style_atomic(0x000000, None, crate::model::CapKind::Round, 0.0);
+        let node = &core.project.figures[0].def.nodes[1];
+        assert_eq!(node.style.opacity, 0.05);
+        assert_eq!(node.style.color2, None);
+    }
+
+    #[test]
+    fn node_style_atomic_refuses_without_a_selection() {
+        let mut core = EditorCore::new();
+        assert_eq!(core.selected_node, None);
+        let before = core.project.figures[0].def.nodes[1].style;
+        let depth = core.undo_depth();
+        core.set_node_style_atomic(
+            0x334455,
+            Some(0x112233),
+            crate::model::CapKind::Square,
+            0.5,
+        );
+        assert_eq!(core.status, "Select a joint first.");
+        // The refusal snapshots nothing.
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.project.figures[0].def.nodes[1].style, before);
+    }
+
+    fn save_temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "styk-editor-save-{}-{}",
+            std::process::id(),
+            name
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn save_named_project_to_reports_true_and_writes_the_file() {
+        let mut core = EditorCore::new();
+        core.project.name = "Bool Save Test".into();
+        // A projects dir that does not exist yet — the op
+        // creates it, as it does for ./projects.
+        let dir = save_temp_dir("ok").join("projects");
+        assert!(core.save_named_project_to(&dir));
+        assert!(core.status.starts_with("Project saved to "));
+        let written = std::fs::read_to_string(dir.join("bool-save-test.json"))
+            .expect("the slugified project file exists");
+        let parsed: crate::model::Project =
+            serde_json::from_str(&written).expect("the written file parses back");
+        assert_eq!(parsed.name, "Bool Save Test");
+    }
+
+    #[test]
+    fn save_named_project_to_reports_false_when_the_write_cannot_succeed() {
+        let mut core = EditorCore::new();
+        core.project.name = "Bool Save Test".into();
+        // A regular file where the projects dir would have
+        // to be created: create_dir_all cannot succeed.
+        let base = save_temp_dir("blocked");
+        let blocker = base.join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let dir = blocker.join("projects");
+        assert!(!core.save_named_project_to(&dir));
+        assert!(core.status.starts_with("Project save failed: "));
     }
 
     #[test]

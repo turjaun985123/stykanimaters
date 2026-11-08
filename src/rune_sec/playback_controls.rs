@@ -51,6 +51,15 @@
 //!   and pauses instead of letting the playhead wrap. The
 //!   button itself touches no core state and takes no undo
 //!   snapshot.
+//! * **Transport icons** (Phase H) — the three transport
+//!   buttons render through `icon_btn` with Font Awesome
+//!   glyphs: `pb-restart` = `backward-step`, `pb-play-range`
+//!   = `play`, `pb-loop` = `repeat`. Keys, labels (the loop
+//!   label still carries the on/off state), active states
+//!   and handlers are byte-identical to the text-button
+//!   versions. The basic transport (Prev / Play-Pause /
+//!   Next) is not in this file — it lives in
+//!   `chrome_view::transport_row` and is converted there.
 //! * **Frame duration** — the `dur-dn` / `dur-up` steppers
 //!   call `EditorCore::adjust_frame_duration`
 //!   (`editor.rs:1675`) with the GPUI factors 0.5 / 2.0
@@ -73,6 +82,7 @@ use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_btn;
 use crate::State;
 use stykanimate_rs::editor::EditorCore;
 
@@ -294,11 +304,19 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
         row()
             .gap(6.0)
             .center_y()
-            .child(btn("pb-restart", "Restart", false, t, |s| {
-                start_playback_at(&mut s.core, 0);
-            }))
-            .child(btn(
+            .child(icon_btn(
+                "pb-restart",
+                "backward-step",
+                "Restart",
+                false,
+                t,
+                |s| {
+                    start_playback_at(&mut s.core, 0);
+                },
+            ))
+            .child(icon_btn(
                 "pb-play-range",
+                "play",
                 "Play range",
                 loop_range.is_some(),
                 t,
@@ -318,8 +336,9 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
         row()
             .gap(6.0)
             .center_y()
-            .child(btn(
+            .child(icon_btn(
                 "pb-loop",
+                "repeat",
                 loop_toggle_label(loop_playback),
                 loop_playback,
                 t,

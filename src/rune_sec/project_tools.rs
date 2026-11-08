@@ -36,12 +36,12 @@
 //! | *(title row, unkeyed)* | "Project" title + autosave text | renders `autosave_line(core.edits_since_autosave())` (editor.rs:1599) | ok — counter is the core's; see the autosave note on [`autosave_line`] |
 //! | `proj-name-field` | name-field wrapper (el) | — container, no handler | ok |
 //! | `proj-name` | text input | `on_edit` → `&mut State::name_edit`; `on_submit` → [`apply_name`] | ok — Enter and "Set name" share one path |
-//! | `proj-set-name` | "Set name" button | [`apply_name`] → [`apply_project_name`]: trims, writes `Project::name` directly (no core rename op or setter exists — editor.rs has no `rename*` fn; the file-level rename is Home's `projects::rename_project`) | ok |
-//! | `new-proj` | "New" button | [`new_pressed`] → [`new_project`] + [`sync_name_edit`]: installs [`blank_project`]`("Untitled")` — field-for-field the MCP `new_project` tool's defaults and reset set (mcp_tools.rs `tool_new_project`) — clears solo, stops playback, no snapshot/confirm | ok |
-//! | `save-proj` | "Save project" button | [`save_named_pressed`] → `EditorCore::save_named_project` (editor.rs:3599: slugifies the name, writes `./projects/<slug>.json`, refreshes `project_files`, sets status), then `shell::write_recovery` + `shell::touch_recent` to keep snapshot/recents in step | ok — caveat: on a failed save the recovery/recents sync still runs (the op returns `()`, so this file cannot tell); integrator item |
-//! | `recover` | "Recover" button | [`recover_pressed`] → [`recover_snapshot`] (`shell::read_recovery` = `./projects/.recovery.json`, shell.rs) → [`apply_recovered_project`] + [`sync_name_edit`] | fixed in Phase G — the reset now also clears solo and stops playback (see the fn) |
+//! | `proj-set-name` | "Set name" button (`icon_btn`, "check" icon) | [`apply_name`] → [`apply_project_name`]: trims, writes `Project::name` directly (no core rename op or setter exists — editor.rs has no `rename*` fn; the file-level rename is Home's `projects::rename_project`) | ok |
+//! | `new-proj` | "New" button (`icon_btn`, "file" icon) | [`new_pressed`] → [`new_project`] + [`sync_name_edit`]: installs [`blank_project`]`("Untitled")` — field-for-field the MCP `new_project` tool's defaults and reset set (mcp_tools.rs `tool_new_project`) — clears solo, stops playback, no snapshot/confirm | ok |
+//! | `save-proj` | "Save project" button (`icon_btn`, "floppy-disk" icon) | [`save_named_pressed`] → `EditorCore::save_named_project` (slugifies the name, writes `./projects/<slug>.json`, refreshes `project_files`, sets status), then — only on success — `shell::write_recovery` + `shell::touch_recent` to keep snapshot/recents in step | fixed in Phase H — the Phase G caveat is closed: the op returns `bool` and [`after_save`] gates the recovery/recents sync on it, so a failed save no longer plants a phantom recent |
+//! | `recover` | "Recover" button (`icon_btn`, "arrow-rotate-left" icon) | [`recover_pressed`] → [`recover_snapshot`] (`shell::read_recovery` = `./projects/.recovery.json`, shell.rs) → [`apply_recovered_project`] + [`sync_name_edit`] | fixed in Phase G — the reset now also clears solo and stops playback (see the fn) |
 //! | `proj-list` | selector list (col) | — container, no handler | ok |
-//! | `open-proj-{i}` | "Open" button per row, accent-styled when `i == core.project_index` | [`open_row_pressed`] → sets `project_index`, `EditorCore::open_project_file` (editor.rs:3636: reads the file; resets current/playhead/figure/node; sets status), [`clear_stale_solo`], [`sync_name_edit`] | fixed in Phase G — stale-solo guard added; the highlight tracks the core's cycle cursor (the palette's `cycle-project` moves it without opening), exactly as [`ProjectRow`] documents |
+//! | `open-proj-{i}` | "Open" button per row (plain text `btn` — list rows stay text; no icon), accent-styled when `i == core.project_index` | [`open_row_pressed`] → sets `project_index`, `EditorCore::open_project_file` (editor.rs:3636: reads the file; resets current/playhead/figure/node; sets status), [`clear_stale_solo`], [`sync_name_edit`] | fixed in Phase G — stale-solo guard added; the highlight tracks the core's cycle cursor (the palette's `cycle-project` moves it without opening), exactly as [`ProjectRow`] documents |
 //! | *(empty-list text, unkeyed)* | "No saved projects in ./projects/ yet." | — display only; wording is `cycle_project_file`'s own status string (editor.rs), verbatim | ok |
 //!
 //! Name-field sync is not duplicated work: the handlers above
@@ -59,6 +59,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{Easing, FigureDef, FigureInstance, Frame, Project};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_btn;
 use crate::State;
 
 // ---------------------------------------------------------------------
@@ -184,10 +185,10 @@ pub fn blank_project(name: &str) -> Project {
 ///
 /// Phase G audit note, so the line is not over-read: the
 /// counter is the core's and this section renders it
-/// faithfully, but (a) nothing in the shell currently calls
-/// `maybe_autosave` — the integrator wiring its doc comment
-/// promises ("the app layer decides when to check") is still
-/// owed, so in practice the count grows until restart; and
+/// faithfully, but (a) the cadence behind it is the shell's:
+/// `poll()` in main.rs calls `maybe_autosave` every tick
+/// (wired in the Phase G integration), so the snapshot
+/// refreshes every 25 counted edits; and
 /// (b) a recovery write that bypasses `maybe_autosave` —
 /// "Save project" writes one via `shell::write_recovery` —
 /// does not reset the counter (the core keeps it private and
@@ -339,14 +340,47 @@ fn new_pressed(s: &mut State) {
     sync_name_edit(s);
 }
 
-/// "Save project": the GPUI `save-proj` listener verbatim —
-/// save under the project's name in `./projects/`, then keep
-/// the recovery snapshot and recents list in step with the
-/// explicit save.
+/// The follow-up work a named save earns, decided by
+/// [`after_save`] from the save op's success report. Pure
+/// and factored out of the press handler so the gating is
+/// testable without touching the disk.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AfterSave {
+    /// The file was written: refresh the recovery snapshot
+    /// and add the project to the recents list.
+    SyncRecoveryAndRecents,
+    /// The save failed: do neither. A failed save must not
+    /// plant a phantom name in recents (no file backs it),
+    /// and the op's own failure status stays on screen —
+    /// nothing here overwrites it.
+    Nothing,
+}
+
+/// Decide the follow-up work for a named save. The op
+/// reports success as `bool` (Phase H); before that it
+/// returned `()` and the sync ran unconditionally — the
+/// Phase G audit's phantom-recent caveat.
+pub fn after_save(saved: bool) -> AfterSave {
+    if saved {
+        AfterSave::SyncRecoveryAndRecents
+    } else {
+        AfterSave::Nothing
+    }
+}
+
+/// "Save project": the GPUI `save-proj` listener — save
+/// under the project's name in `./projects/`, then keep the
+/// recovery snapshot and recents list in step with the
+/// explicit save. Phase H gates those follow-ups on the
+/// op's success report ([`after_save`]): on failure the
+/// op's status ("Project save failed: …") is the last word
+/// and recents stays untouched.
 fn save_named_pressed(s: &mut State) {
-    s.core.save_named_project();
-    let _ = stykanimate_rs::shell::write_recovery(&s.core.project);
-    stykanimate_rs::shell::touch_recent(&s.core.project.name);
+    let saved = s.core.save_named_project();
+    if after_save(saved) == AfterSave::SyncRecoveryAndRecents {
+        let _ = stykanimate_rs::shell::write_recovery(&s.core.project);
+        stykanimate_rs::shell::touch_recent(&s.core.project.name);
+    }
 }
 
 /// Drop a solo index the current project does not have
@@ -438,16 +472,16 @@ pub fn project_section(s: &State, t: &Theme) -> El {
                                 .on_submit(|s: &mut State, _tx: &mut Tx| apply_name(s)),
                         ),
                 )
-                .child(btn("proj-set-name", "Set name", false, t, apply_name)),
+                .child(icon_btn("proj-set-name", "check", "Set name", false, t, apply_name)),
         )
         .child(
             row()
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(btn("new-proj", "New", false, t, new_pressed))
-                .child(btn("save-proj", "Save project", false, t, save_named_pressed))
-                .child(btn("recover", "Recover", false, t, recover_pressed)),
+                .child(icon_btn("new-proj", "file", "New", false, t, new_pressed))
+                .child(icon_btn("save-proj", "floppy-disk", "Save project", false, t, save_named_pressed))
+                .child(icon_btn("recover", "arrow-rotate-left", "Recover", false, t, recover_pressed)),
         );
 
     if rows.is_empty() {
@@ -647,6 +681,18 @@ loop_playback: true,
     fn open_row_key_matches_the_audited_pattern() {
         assert_eq!(open_row_key(0), "open-proj-0");
         assert_eq!(open_row_key(12), "open-proj-12");
+    }
+
+    #[test]
+    fn after_save_gates_the_recovery_and_recents_sync() {
+        // A written file earns both follow-ups.
+        assert_eq!(after_save(true), AfterSave::SyncRecoveryAndRecents);
+        // A failed save earns neither: no recovery refresh,
+        // and above all no phantom name in recents — the
+        // Phase G audit caveat this gating closes. The
+        // handler runs the sync only on the first arm, so
+        // this decision is the whole behaviour.
+        assert_eq!(after_save(false), AfterSave::Nothing);
     }
 
     #[test]

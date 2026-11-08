@@ -1,7 +1,9 @@
 //! Settings popover (Phase D, section 24 of the GPUI→Rune
 //! migration; guides toggle added in Phase E, section 21;
 //! Phase G, section 13: guide split toggles + startup
-//! workspace picker): theme, language, stage size, the
+//! workspace picker; Phase H, section 32: Font Awesome
+//! glyphs — gear card header, sun/moon theme pair, eye
+//! visibility toggles): theme, language, stage size, the
 //! project default easing, stage guides and the startup
 //! workspace, behind one "Settings" toggle. Declared
 //! under `rune_sec` from `main.rs` only — bin-crate code, not
@@ -95,6 +97,21 @@
 //!   the pick is both the current workspace and the
 //!   startup default `workspaces::from_prefs` seeds the
 //!   next launch from. No new persistence path exists.
+//! * **Icons (Phase H)** — pure presentation, no behaviour
+//!   change: the open card gains a header row (a `gear`
+//!   `icon_el` beside the "Settings" title, the shell's
+//!   icon-row idiom); the theme pair renders through
+//!   `icon_btn` — `moon` on the Dark button, `sun` on the
+//!   Light button, mirroring the labels, which name the
+//!   state each button sets (the pair is still two
+//!   set-value buttons, never a blind toggle); the card
+//!   toggle and the three guide toggles render through
+//!   `icon_btn` with the `eye` visibility glyph, labels
+//!   kept. Every key is unchanged; the language grid, the
+//!   stage steppers, the easing cycle and the workspace
+//!   grid deliberately stay plain text buttons (their
+//!   labels ARE the data: native language names, axis
+//!   letters, workspace names).
 //!
 //! ## Persistence
 //!
@@ -137,6 +154,8 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::i18n::Lang;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::icons::icon_el;
 use crate::rune_sec::workspaces::{select_workspace, Workspace};
 use crate::State;
 
@@ -423,9 +442,18 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let open = s.settings.open;
     let mut panel = col().key("settings").gap(6.0);
-    panel = panel.child(btn("settings-toggle", "Settings", open, t, |s: &mut State| {
-        toggle_open(s);
-    }));
+    // The card toggle is a panel-visibility toggle: the
+    // `eye` glyph, label and key unchanged (Phase H).
+    panel = panel.child(icon_btn(
+        "settings-toggle",
+        "eye",
+        "Settings",
+        open,
+        t,
+        |s: &mut State| {
+            toggle_open(s);
+        },
+    ));
     if open {
         let mut card = col()
             .key("settings-card")
@@ -434,17 +462,38 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
             .radius(8.0)
             .fill(t.card);
 
+        // Card header (Phase H): the `gear` glyph beside
+        // the card's title, the shell's icon-row idiom.
+        card = card.child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(icon_el("gear", 12.0, t.text_secondary))
+                .child(section_label(t, "Settings")),
+        );
+
         // Theme: each button sets its own value outright.
+        // The glyphs mirror the labels (Phase H): `moon`
+        // names the dark state the Dark button sets, `sun`
+        // the light state the Light button sets.
         let light = core.light_theme;
         card = card.child(section_label(t, "Theme")).child(
             row()
                 .key("settings-theme")
                 .gap(6.0)
-                .child(btn("settings-theme-dark", "Dark", !light, t, |s: &mut State| {
-                    set_theme(&mut s.core, false);
-                }))
-                .child(btn(
+                .child(icon_btn(
+                    "settings-theme-dark",
+                    "moon",
+                    "Dark",
+                    !light,
+                    t,
+                    |s: &mut State| {
+                        set_theme(&mut s.core, false);
+                    },
+                ))
+                .child(icon_btn(
                     "settings-theme-light",
+                    "sun",
                     "Light",
                     light,
                     t,
@@ -491,8 +540,9 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
         // highlighted while on. The stage overlay draws the
         // grid; nothing in the engine reads the flag.
         card = card.child(
-            row().key("settings-guides-row").gap(6.0).child(btn(
+            row().key("settings-guides-row").gap(6.0).child(icon_btn(
                 "settings-guides",
+                "eye",
                 "Guides",
                 s.guides,
                 t,
@@ -516,8 +566,9 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
                     .gap(6.0)
                     .pl(14.0)
                     .opacity(0.85)
-                    .child(btn(
+                    .child(icon_btn(
                         "settings-guides-frustum",
+                        "eye",
                         "Camera frame",
                         s.guides_frustum,
                         t,
@@ -525,8 +576,9 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
                             toggle_guides_frustum(s);
                         },
                     ))
-                    .child(btn(
+                    .child(icon_btn(
                         "settings-guides-safe",
+                        "eye",
                         "Safe frames",
                         s.guides_safe,
                         t,

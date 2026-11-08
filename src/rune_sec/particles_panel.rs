@@ -51,6 +51,8 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{ParticleEvent, ParticleKind};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 // ----------------------------------------------------------------
@@ -355,16 +357,27 @@ fn detail_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(btn("particles-anchor-fig", "Anchor to figure", false, t, |s| {
-                    anchor_to_figure(s)
-                }))
-                .child(btn("particles-anchor-clear", "Clear anchor", false, t, |s| {
-                    anchor_clear(s)
-                })),
+                .child(icon_btn(
+                    "particles-anchor-fig",
+                    "crosshairs",
+                    "Anchor to figure",
+                    false,
+                    t,
+                    |s| anchor_to_figure(s),
+                ))
+                .child(icon_btn(
+                    "particles-anchor-clear",
+                    "xmark",
+                    "Clear anchor",
+                    false,
+                    t,
+                    |s| anchor_clear(s),
+                )),
         )
         .child(
-            row().gap(8.0).center_y().child(btn(
+            row().gap(8.0).center_y().child(icon_btn(
                 "particles-delete",
+                "trash-can",
                 "Delete event",
                 false,
                 t,
@@ -394,6 +407,15 @@ pub fn particles_panel(s: &State, t: &Theme) -> El {
     }
     for data in rows {
         let i = data.index;
+        // Leading star in the event's own colour (the
+        // project event at this row's index carries it).
+        let color = s
+            .core
+            .project
+            .particles
+            .get(i)
+            .and_then(|e| crate::stage_view::hex_color(e.color))
+            .unwrap_or(t.text_secondary);
         list = list.child(
             row()
                 .key(format!("particle-row-{i}"))
@@ -416,6 +438,7 @@ pub fn particles_panel(s: &State, t: &Theme) -> El {
                 .on_press(move |s: &mut State| {
                     s.particle_selected = Some(i);
                 })
+                .child(icon_el("star", 12.0, color))
                 .child(
                     text(data.label)
                         .font(type_::LABEL)
@@ -450,8 +473,9 @@ pub fn particles_panel(s: &State, t: &Theme) -> El {
                 ),
         )
         .child(
-            row().gap(8.0).center_y().child(btn(
+            row().gap(8.0).center_y().child(icon_btn(
                 "particles-add",
+                "star",
                 "+ Event",
                 false,
                 t,

@@ -17,8 +17,10 @@ Key definitions recognised:
                                   e.g. `frame-{}`), one pattern entry
   - `btn("name", ...)`            the chrome `btn()` helper (and the
                                   section-local `fbtn`/`row_toggle`
-                                  variants), whose first argument is
-                                  the element key
+                                  variants, plus Phase H's
+                                  `icon_btn`/`icon_only_btn`, whose
+                                  first argument is likewise the key),
+                                  whose first argument is the element key
   - `btn(&format!("..."), ...)`   dynamic key pattern via a helper
   - `btn(match ... { A => "k" })` keys chosen by a match on the
                                   first argument (easing_panel idiom)
@@ -47,8 +49,8 @@ import sys
 
 STATIC_KEY_RE = re.compile(r'\.key\(\s*"([^"]+)"\s*\)')
 DYNAMIC_KEY_RE = re.compile(r'\.key\(\s*format!\(\s*"([^"]+)"')
-BTN_KEY_RE = re.compile(r'\b(?:btn|fbtn|row_toggle)\(\s*"([^"]+)"')
-BTN_DYN_RE = re.compile(r'\b(?:btn|fbtn|row_toggle)\(\s*&?\s*format!\(\s*"([^"]+)"')
+BTN_KEY_RE = re.compile(r'\b(?:btn|fbtn|row_toggle|icon_btn|icon_only_btn)\(\s*"([^"]+)"')
+BTN_DYN_RE = re.compile(r'\b(?:btn|fbtn|row_toggle|icon_btn|icon_only_btn)\(\s*&?\s*format!\(\s*"([^"]+)"')
 ENTRY_KEY_RE = re.compile(r'\bkey:\s*"([^"]+)"')
 ENTRY_DYN_RE = re.compile(r'\bkey:\s*format!\(\s*"([^"]+)"')
 STRING_RE = re.compile(r'"([^"]+)"')

@@ -8,14 +8,19 @@
 //!
 //! * [`COMMANDS`] is a static table of the core editing
 //!   commands. Every entry's `run` is a plain
-//!   `fn(&mut EditorCore)`: either a direct `EditorCore` op
-//!   (method reference) or a small shim in this module for ops
-//!   that take an argument (the shim passes exactly the value
-//!   the GPUI button passed — deltas verified against the
-//!   pre-removal `src/app.rs`) or that flip a public core field
-//!   (Play/Pause and Onion have no op; the GPUI app flipped the
-//!   field from its button handlers, and chrome_view still
-//!   does for those two).
+//!   `fn(&mut State)` (Phase H — it was
+//!   `fn(&mut EditorCore)` through Phase G): each entry
+//!   is a small shim in this module that forwards to the
+//!   same target the GPUI button called — an `EditorCore`
+//!   op, or a field flip for ops that don't exist
+//!   (Play/Pause and Onion have no op; the GPUI app
+//!   flipped the field from its button handlers, and
+//!   chrome_view still does for those two) — passing
+//!   exactly the argument the button passed (deltas
+//!   verified against the pre-removal `src/app.rs`).
+//!   Migrating the dispatch to shell state is also what
+//!   let the table grow the commands that write *shell*
+//!   state (Phase H, below).
 //! * Phase E added five commands over the new engine ops:
 //!   `duplicate-figure`, `delete-last-stroke`, `fade-audio`,
 //!   `reverse-audio` and `delete-audio-clip`. The two
@@ -50,8 +55,18 @@
 //!   command here that computed a value with nowhere to
 //!   store it would do nothing, which is worse than no
 //!   command. They become addable if the table's `run`
-//!   type ever migrates to `fn(&mut State)`. The longer
-//!   table (81 entries) needs no change to the recents /
+//!   type ever migrates to `fn(&mut State)`.
+//! * Phase H did that migration: `run` is now
+//!   `fn(&mut State)`, every pre-existing entry forwards
+//!   to its old target over `&mut s.core` (behaviour and
+//!   status lines byte-identical), and the two skipped
+//!   candidates landed as three commands:
+//!   `toggle-loop-playback` (the playback panel's
+//!   `pb-loop` flip of `State::loop_playback`, nothing
+//!   more) and `stroke-select-next` /
+//!   `stroke-select-prev` (delegating to
+//!   `stroke_inspector::step_stroke_selection`). The
+//!   longer table (84 entries) needs no change to the recents /
 //!   display logic: [`filter_commands`] and
 //!   [`display_commands`] are length-agnostic and still
 //!   cap every listing at [`MAX_RESULTS`].
@@ -85,7 +100,6 @@
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, text_input, Color, El, Key, KeyEvent, TextEdit, Tx};
-use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::vfx::ClipKind;
 
 use crate::State;
@@ -104,13 +118,15 @@ pub const MAX_RECENT: usize = 5;
 /// One palette command: a stable `key` (the old GPUI control
 /// id where one existed), a human `title`, the `group` it is
 /// filed under in the results list, and the `run` fn called
-/// with the editor core when the command is picked.
+/// with the shell state when the command is picked (Phase H:
+/// `&mut State`, so commands can reach shell state as well
+/// as the editor core).
 #[derive(Clone, Copy)]
 pub struct Command {
     pub key: &'static str,
     pub title: &'static str,
     pub group: &'static str,
-    pub run: fn(&mut EditorCore),
+    pub run: fn(&mut State),
 }
 
 // -- Shims: ops that take an argument, or field flips with no
@@ -122,7 +138,8 @@ pub struct Command {
 /// Play/Pause has no op: the GPUI `toggle_play` flipped the
 /// field, syncing the playhead to the shown frame first (the
 /// same sync chrome_view's `toggle_play` performs).
-fn cmd_play_pause(c: &mut EditorCore) {
+fn cmd_play_pause(s: &mut State) {
+    let c = &mut s.core;
     if !c.playing {
         c.playhead = c.current as f32;
     }
@@ -130,7 +147,8 @@ fn cmd_play_pause(c: &mut EditorCore) {
 }
 
 /// Previous frame, wrapping (chrome transport semantics).
-fn cmd_prev_frame(c: &mut EditorCore) {
+fn cmd_prev_frame(s: &mut State) {
+    let c = &mut s.core;
     let n = c.frame_count();
     if n > 0 {
         c.goto((c.current + n - 1) % n);
@@ -138,93 +156,112 @@ fn cmd_prev_frame(c: &mut EditorCore) {
 }
 
 /// Next frame, wrapping (chrome transport semantics).
-fn cmd_next_frame(c: &mut EditorCore) {
+fn cmd_next_frame(s: &mut State) {
+    let c = &mut s.core;
     let n = c.frame_count();
     if n > 0 {
         c.goto((c.current + 1) % n);
     }
 }
 
-fn cmd_first_frame(c: &mut EditorCore) {
+fn cmd_first_frame(s: &mut State) {
+    let c = &mut s.core;
     if c.frame_count() > 0 {
         c.goto(0);
     }
 }
 
-fn cmd_fps_up(c: &mut EditorCore) {
+fn cmd_fps_up(s: &mut State) {
+    let c = &mut s.core;
     c.adjust_fps(1.0);
 }
 
-fn cmd_fps_down(c: &mut EditorCore) {
+fn cmd_fps_down(s: &mut State) {
+    let c = &mut s.core;
     c.adjust_fps(-1.0);
 }
 
-fn cmd_solo_figure(c: &mut EditorCore) {
+fn cmd_solo_figure(s: &mut State) {
+    let c = &mut s.core;
     let fi = c.selected_figure;
     c.toggle_solo(fi);
 }
 
-fn cmd_lock_figure(c: &mut EditorCore) {
+fn cmd_lock_figure(s: &mut State) {
+    let c = &mut s.core;
     let fi = c.selected_figure;
     c.toggle_figure_lock(fi);
 }
 
-fn cmd_length_up(c: &mut EditorCore) {
+fn cmd_length_up(s: &mut State) {
+    let c = &mut s.core;
     c.adjust_length(4.0);
 }
 
-fn cmd_length_down(c: &mut EditorCore) {
+fn cmd_length_down(s: &mut State) {
+    let c = &mut s.core;
     c.adjust_length(-4.0);
 }
 
-fn cmd_thickness_up(c: &mut EditorCore) {
+fn cmd_thickness_up(s: &mut State) {
+    let c = &mut s.core;
     c.adjust_thickness(1.0);
 }
 
-fn cmd_thickness_down(c: &mut EditorCore) {
+fn cmd_thickness_down(s: &mut State) {
+    let c = &mut s.core;
     c.adjust_thickness(-1.0);
 }
 
-fn cmd_zoom_in(c: &mut EditorCore) {
+fn cmd_zoom_in(s: &mut State) {
+    let c = &mut s.core;
     c.camera_zoom_by(1.2);
 }
 
-fn cmd_zoom_out(c: &mut EditorCore) {
+fn cmd_zoom_out(s: &mut State) {
+    let c = &mut s.core;
     c.camera_zoom_by(1.0 / 1.2);
 }
 
 /// Onion has no op: the GPUI button flipped the field (and
 /// chrome_view's app-bar button still does).
-fn cmd_toggle_onion(c: &mut EditorCore) {
+fn cmd_toggle_onion(s: &mut State) {
+    let c = &mut s.core;
     c.onion = !c.onion;
 }
 
 /// Draw mode is a public core field the GPUI mode toggle
 /// flipped; there is no op.
-fn cmd_toggle_draw_mode(c: &mut EditorCore) {
+fn cmd_toggle_draw_mode(s: &mut State) {
+    let c = &mut s.core;
     c.draw_mode = !c.draw_mode;
 }
 
-fn cmd_particle_burst(c: &mut EditorCore) {
+fn cmd_particle_burst(s: &mut State) {
+    let c = &mut s.core;
     c.add_particle(0); // ParticleKind::Burst
 }
 
-fn cmd_particle_sparkle(c: &mut EditorCore) {
+fn cmd_particle_sparkle(s: &mut State) {
+    let c = &mut s.core;
     c.add_particle(1); // ParticleKind::Sparkle
 }
 
-fn cmd_fx_confetti(c: &mut EditorCore) {
+fn cmd_fx_confetti(s: &mut State) {
+    let c = &mut s.core;
     c.add_fx_clip(ClipKind::Confetti);
 }
 
-fn cmd_fx_lightning(c: &mut EditorCore) {
+fn cmd_fx_lightning(s: &mut State) {
+    let c = &mut s.core;
     c.add_fx_clip(ClipKind::Lightning);
 }
 
 /// Phase E: the duplicate op takes a figure index, so the
 /// shim passes the current selection — the same pattern as
 /// `cmd_solo_figure` / `cmd_lock_figure`.
-fn cmd_duplicate_figure(c: &mut EditorCore) {
+fn cmd_duplicate_figure(s: &mut State) {
+    let c = &mut s.core;
     let fi = c.selected_figure;
     c.duplicate_figure(fi);
 }
@@ -232,7 +269,8 @@ fn cmd_duplicate_figure(c: &mut EditorCore) {
 /// Phase E: `delete_stroke_at` takes a project-wide stroke
 /// index, so the shim resolves the last stroke at call time
 /// and stands down when the project has no strokes.
-fn cmd_delete_last_stroke(c: &mut EditorCore) {
+fn cmd_delete_last_stroke(s: &mut State) {
+    let c = &mut s.core;
     if let Some(i) = c.project.strokes.len().checked_sub(1) {
         c.delete_stroke_at(i);
     }
@@ -241,7 +279,8 @@ fn cmd_delete_last_stroke(c: &mut EditorCore) {
 /// Phase E: `delete_audio_clip` takes a clip index, so the
 /// shim resolves the last clip at call time and stands down
 /// when the project has no audio clips.
-fn cmd_delete_last_audio_clip(c: &mut EditorCore) {
+fn cmd_delete_last_audio_clip(s: &mut State) {
+    let c = &mut s.core;
     if let Some(i) = c.project.audio.len().checked_sub(1) {
         c.delete_audio_clip(i);
     }
@@ -255,7 +294,8 @@ fn cmd_delete_last_audio_clip(c: &mut EditorCore) {
 /// restart mid-tween starts cleanly on frame 0. The helper
 /// is not public, so this shim drives exactly those two
 /// core writes, nothing more.
-fn cmd_restart_playback(c: &mut EditorCore) {
+fn cmd_restart_playback(s: &mut State) {
+    let c = &mut s.core;
     c.goto(0);
     c.playing = true;
 }
@@ -265,9 +305,11 @@ fn cmd_restart_playback(c: &mut EditorCore) {
 /// panel's own Add button passes to
 /// `EditorCore::particle_add_event` (particles_panel.rs).
 /// The panel handler also selects the new event in shell
-/// state afterwards; the palette has no shell state to
-/// select in, so the core op is the whole command.
-fn cmd_add_particle_event(c: &mut EditorCore) {
+/// state afterwards; this command deliberately remains
+/// the core op alone (Phase H's migration kept every
+/// existing command's behaviour identical).
+fn cmd_add_particle_event(s: &mut State) {
+    let c = &mut s.core;
     let [w, h] = c.project.stage;
     let frame = c.current;
     let _ = c.particle_add_event(frame, w / 2.0, h / 2.0);
@@ -280,8 +322,266 @@ fn cmd_add_particle_event(c: &mut EditorCore) {
 /// the single snapshot, the per-channel keying and the
 /// status line, including the no-channels refusal. The
 /// returned channel count is the panel's business.
-fn cmd_key_all_channels(c: &mut EditorCore) {
+fn cmd_key_all_channels(s: &mut State) {
+    let c = &mut s.core;
     let _ = crate::rune_sec::keyframe_tools::key_all_here_core(c);
+}
+
+// -- Phase H forwarding shims: the entries that used to
+// -- name an `EditorCore` method (or `camera_panel::
+// -- follow_clear`) directly as `run`. Since the
+// -- dispatch migrated to `fn(&mut State)`, each is a
+// -- one-line forwarder to the same target over
+// -- `&mut s.core` — behaviour and status lines are the
+// -- target's own, unchanged.
+
+/// Phase H: camera follow clear — forwards to
+/// `camera_panel::follow_clear`, the panel button's own
+/// handler (it sets `project.camera_follow = None` and
+/// the "Camera follow off." status).
+fn cmd_cam_follow_clear(s: &mut State) {
+    crate::rune_sec::camera_panel::follow_clear(&mut s.core);
+}
+
+/// Phase H: toggle loop playback — the two Phase G skips
+/// this migration unblocked (see the module docs). The
+/// playback panel's `pb-loop` handler is exactly this
+/// flip of the shell flag: no core call, no status
+/// change; `poll` reads the flag to decide whether the
+/// playhead wraps or stops at the end.
+fn cmd_toggle_loop_playback(s: &mut State) {
+    s.loop_playback = !s.loop_playback;
+}
+
+/// Phase H: step the stroke selection to the next
+/// stroke — delegates to the stroke panel's own
+/// stepping fn, so the selection space, wrap rules and
+/// the empty-project status ("No strokes to select.")
+/// are the panel's, byte-identical.
+fn cmd_stroke_select_next(s: &mut State) {
+    crate::rune_sec::stroke_inspector::step_stroke_selection(s, 1);
+}
+
+/// Phase H: step the stroke selection to the previous
+/// stroke; same delegation as the next-stroke command.
+fn cmd_stroke_select_prev(s: &mut State) {
+    crate::rune_sec::stroke_inspector::step_stroke_selection(s, -1);
+}
+
+fn cmd_add_frame(s: &mut State) {
+    s.core.add_frame();
+}
+
+fn cmd_duplicate_frame(s: &mut State) {
+    s.core.duplicate_frame();
+}
+
+fn cmd_delete_frame(s: &mut State) {
+    s.core.delete_frame();
+}
+
+fn cmd_insert_inbetween(s: &mut State) {
+    s.core.insert_inbetween();
+}
+
+fn cmd_copy_frame(s: &mut State) {
+    s.core.copy_frame();
+}
+
+fn cmd_paste_frame(s: &mut State) {
+    s.core.paste_frame();
+}
+
+fn cmd_undo(s: &mut State) {
+    s.core.undo();
+}
+
+fn cmd_redo(s: &mut State) {
+    s.core.redo();
+}
+
+fn cmd_save(s: &mut State) {
+    s.core.save();
+}
+
+fn cmd_load(s: &mut State) {
+    s.core.load();
+}
+
+fn cmd_save_named_project(s: &mut State) {
+    s.core.save_named_project();
+}
+
+fn cmd_cycle_project_file(s: &mut State) {
+    s.core.cycle_project_file();
+}
+
+fn cmd_open_project_file(s: &mut State) {
+    s.core.open_project_file();
+}
+
+fn cmd_add_figure(s: &mut State) {
+    s.core.add_figure();
+}
+
+fn cmd_add_quadruped(s: &mut State) {
+    s.core.add_quadruped();
+}
+
+fn cmd_delete_figure(s: &mut State) {
+    s.core.delete_figure();
+}
+
+fn cmd_toggle_figure_hidden(s: &mut State) {
+    s.core.toggle_figure_hidden();
+}
+
+fn cmd_mirror_selected_pose(s: &mut State) {
+    s.core.mirror_selected_pose();
+}
+
+fn cmd_insert_library_figure(s: &mut State) {
+    s.core.insert_library_figure();
+}
+
+fn cmd_add_segment(s: &mut State) {
+    s.core.add_segment();
+}
+
+fn cmd_delete_segment(s: &mut State) {
+    s.core.delete_segment();
+}
+
+fn cmd_cycle_shape(s: &mut State) {
+    s.core.cycle_shape();
+}
+
+fn cmd_cycle_bend(s: &mut State) {
+    s.core.cycle_bend();
+}
+
+fn cmd_cycle_node_color(s: &mut State) {
+    s.core.cycle_node_color();
+}
+
+fn cmd_frame_all_figures(s: &mut State) {
+    s.core.frame_all_figures();
+}
+
+fn cmd_centre_on_selection(s: &mut State) {
+    s.core.centre_on_selection();
+}
+
+fn cmd_camera_clear_key(s: &mut State) {
+    s.core.camera_clear_key();
+}
+
+fn cmd_toggle_camera_follow(s: &mut State) {
+    s.core.toggle_camera_follow();
+}
+
+fn cmd_key_graph_angle(s: &mut State) {
+    s.core.key_graph_angle();
+}
+
+fn cmd_clear_graph(s: &mut State) {
+    s.core.clear_graph();
+}
+
+fn cmd_toggle_tween_playback(s: &mut State) {
+    s.core.toggle_tween_playback();
+}
+
+fn cmd_cycle_easing(s: &mut State) {
+    s.core.cycle_easing();
+}
+
+fn cmd_cycle_brush(s: &mut State) {
+    s.core.cycle_brush();
+}
+
+fn cmd_toggle_draw_tool(s: &mut State) {
+    s.core.toggle_draw_tool();
+}
+
+fn cmd_clear_frame_drawings(s: &mut State) {
+    s.core.clear_frame_drawings();
+}
+
+fn cmd_mirror_strokes_x(s: &mut State) {
+    s.core.mirror_strokes_x();
+}
+
+fn cmd_stamp_polygon(s: &mut State) {
+    s.core.stamp_polygon();
+}
+
+fn cmd_clear_particles(s: &mut State) {
+    s.core.clear_particles();
+}
+
+fn cmd_add_audio_clip(s: &mut State) {
+    s.core.add_audio_clip();
+}
+
+fn cmd_mixdown_audio(s: &mut State) {
+    s.core.mixdown_audio();
+}
+
+fn cmd_audio_echo_last(s: &mut State) {
+    s.core.audio_echo_last();
+}
+
+fn cmd_audio_lowpass_last(s: &mut State) {
+    s.core.audio_lowpass_last();
+}
+
+fn cmd_audio_trim_silence_last(s: &mut State) {
+    s.core.audio_trim_silence_last();
+}
+
+fn cmd_audio_split_at_silences_last(s: &mut State) {
+    s.core.audio_split_at_silences_last();
+}
+
+fn cmd_audio_fade_last(s: &mut State) {
+    s.core.audio_fade_last();
+}
+
+fn cmd_audio_reverse_last(s: &mut State) {
+    s.core.audio_reverse_last();
+}
+
+fn cmd_export_png(s: &mut State) {
+    s.core.export_png();
+}
+
+fn cmd_export_gif(s: &mut State) {
+    s.core.export_gif();
+}
+
+fn cmd_export_mp4(s: &mut State) {
+    s.core.export_mp4();
+}
+
+fn cmd_export_webm(s: &mut State) {
+    s.core.export_webm();
+}
+
+fn cmd_export_piv(s: &mut State) {
+    s.core.export_piv();
+}
+
+fn cmd_export_stk(s: &mut State) {
+    s.core.export_stk();
+}
+
+fn cmd_enter_3d(s: &mut State) {
+    s.core.enter_3d();
+}
+
+fn cmd_exit_3d(s: &mut State) {
+    s.core.exit_3d();
 }
 
 /// The command inventory. Order matters: it is the display
@@ -294,95 +594,98 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "next", title: "Next frame", group: "Transport", run: cmd_next_frame },
     Command { key: "first-frame", title: "Go to first frame", group: "Transport", run: cmd_first_frame },
     Command { key: "restart-playback", title: "Restart playback", group: "Transport", run: cmd_restart_playback },
+    Command { key: "toggle-loop-playback", title: "Toggle loop playback", group: "Transport", run: cmd_toggle_loop_playback },
     // -- Frames ---------------------------------------------------
-    Command { key: "add-frame", title: "Add frame", group: "Frames", run: EditorCore::add_frame },
-    Command { key: "dup-frame", title: "Duplicate frame", group: "Frames", run: EditorCore::duplicate_frame },
-    Command { key: "del-frame", title: "Delete frame", group: "Frames", run: EditorCore::delete_frame },
-    Command { key: "inbetween", title: "Insert inbetween", group: "Frames", run: EditorCore::insert_inbetween },
-    Command { key: "copy-frame", title: "Copy frame", group: "Frames", run: EditorCore::copy_frame },
-    Command { key: "paste-frame", title: "Paste frame", group: "Frames", run: EditorCore::paste_frame },
+    Command { key: "add-frame", title: "Add frame", group: "Frames", run: cmd_add_frame },
+    Command { key: "dup-frame", title: "Duplicate frame", group: "Frames", run: cmd_duplicate_frame },
+    Command { key: "del-frame", title: "Delete frame", group: "Frames", run: cmd_delete_frame },
+    Command { key: "inbetween", title: "Insert inbetween", group: "Frames", run: cmd_insert_inbetween },
+    Command { key: "copy-frame", title: "Copy frame", group: "Frames", run: cmd_copy_frame },
+    Command { key: "paste-frame", title: "Paste frame", group: "Frames", run: cmd_paste_frame },
     Command { key: "fps-up", title: "Increase FPS", group: "Frames", run: cmd_fps_up },
     Command { key: "fps-down", title: "Decrease FPS", group: "Frames", run: cmd_fps_down },
     // -- Edit -----------------------------------------------------
-    Command { key: "undo", title: "Undo", group: "Edit", run: EditorCore::undo },
-    Command { key: "redo", title: "Redo", group: "Edit", run: EditorCore::redo },
+    Command { key: "undo", title: "Undo", group: "Edit", run: cmd_undo },
+    Command { key: "redo", title: "Redo", group: "Edit", run: cmd_redo },
     // -- Projects -------------------------------------------------
-    Command { key: "save", title: "Save project", group: "Projects", run: EditorCore::save },
-    Command { key: "load", title: "Load project", group: "Projects", run: EditorCore::load },
-    Command { key: "save-named", title: "Save named project", group: "Projects", run: EditorCore::save_named_project },
-    Command { key: "cycle-project", title: "Cycle project file", group: "Projects", run: EditorCore::cycle_project_file },
-    Command { key: "open-project", title: "Open project file", group: "Projects", run: EditorCore::open_project_file },
+    Command { key: "save", title: "Save project", group: "Projects", run: cmd_save },
+    Command { key: "load", title: "Load project", group: "Projects", run: cmd_load },
+    Command { key: "save-named", title: "Save named project", group: "Projects", run: cmd_save_named_project },
+    Command { key: "cycle-project", title: "Cycle project file", group: "Projects", run: cmd_cycle_project_file },
+    Command { key: "open-project", title: "Open project file", group: "Projects", run: cmd_open_project_file },
     // -- Figures --------------------------------------------------
-    Command { key: "add-figure", title: "Add figure", group: "Figures", run: EditorCore::add_figure },
-    Command { key: "add-quadruped", title: "Add quadruped figure", group: "Figures", run: EditorCore::add_quadruped },
-    Command { key: "del-figure", title: "Delete figure", group: "Figures", run: EditorCore::delete_figure },
+    Command { key: "add-figure", title: "Add figure", group: "Figures", run: cmd_add_figure },
+    Command { key: "add-quadruped", title: "Add quadruped figure", group: "Figures", run: cmd_add_quadruped },
+    Command { key: "del-figure", title: "Delete figure", group: "Figures", run: cmd_delete_figure },
     Command { key: "duplicate-figure", title: "Duplicate figure", group: "Figures", run: cmd_duplicate_figure },
-    Command { key: "hide-figure", title: "Toggle figure hidden", group: "Figures", run: EditorCore::toggle_figure_hidden },
+    Command { key: "hide-figure", title: "Toggle figure hidden", group: "Figures", run: cmd_toggle_figure_hidden },
     Command { key: "solo-figure", title: "Solo selected figure", group: "Figures", run: cmd_solo_figure },
     Command { key: "lock-figure", title: "Lock selected figure", group: "Figures", run: cmd_lock_figure },
-    Command { key: "mirror-pose", title: "Mirror selected pose", group: "Figures", run: EditorCore::mirror_selected_pose },
-    Command { key: "insert-library-figure", title: "Insert library figure", group: "Figures", run: EditorCore::insert_library_figure },
+    Command { key: "mirror-pose", title: "Mirror selected pose", group: "Figures", run: cmd_mirror_selected_pose },
+    Command { key: "insert-library-figure", title: "Insert library figure", group: "Figures", run: cmd_insert_library_figure },
     // -- Segments -------------------------------------------------
-    Command { key: "add-segment", title: "Add segment", group: "Segments", run: EditorCore::add_segment },
-    Command { key: "del-segment", title: "Delete segment", group: "Segments", run: EditorCore::delete_segment },
+    Command { key: "add-segment", title: "Add segment", group: "Segments", run: cmd_add_segment },
+    Command { key: "del-segment", title: "Delete segment", group: "Segments", run: cmd_delete_segment },
     Command { key: "len-up", title: "Lengthen segment", group: "Segments", run: cmd_length_up },
     Command { key: "len-down", title: "Shorten segment", group: "Segments", run: cmd_length_down },
     Command { key: "thick-up", title: "Thicken segment", group: "Segments", run: cmd_thickness_up },
     Command { key: "thick-down", title: "Thin segment", group: "Segments", run: cmd_thickness_down },
-    Command { key: "cycle-shape", title: "Cycle segment shape", group: "Segments", run: EditorCore::cycle_shape },
-    Command { key: "cycle-bend", title: "Cycle segment bend", group: "Segments", run: EditorCore::cycle_bend },
-    Command { key: "cycle-node-color", title: "Cycle segment colour", group: "Segments", run: EditorCore::cycle_node_color },
+    Command { key: "cycle-shape", title: "Cycle segment shape", group: "Segments", run: cmd_cycle_shape },
+    Command { key: "cycle-bend", title: "Cycle segment bend", group: "Segments", run: cmd_cycle_bend },
+    Command { key: "cycle-node-color", title: "Cycle segment colour", group: "Segments", run: cmd_cycle_node_color },
     // -- Camera ---------------------------------------------------
     Command { key: "cam-zoom-in", title: "Camera zoom in", group: "Camera", run: cmd_zoom_in },
     Command { key: "cam-zoom-out", title: "Camera zoom out", group: "Camera", run: cmd_zoom_out },
-    Command { key: "cam-frame-all", title: "Frame all figures", group: "Camera", run: EditorCore::frame_all_figures },
-    Command { key: "cam-centre", title: "Centre on selection", group: "Camera", run: EditorCore::centre_on_selection },
-    Command { key: "cam-clear-key", title: "Clear camera key", group: "Camera", run: EditorCore::camera_clear_key },
-    Command { key: "cam-follow", title: "Toggle camera follow", group: "Camera", run: EditorCore::toggle_camera_follow },
-    Command { key: "cam-follow-clear", title: "Camera follow: clear", group: "Camera", run: crate::rune_sec::camera_panel::follow_clear },
+    Command { key: "cam-frame-all", title: "Frame all figures", group: "Camera", run: cmd_frame_all_figures },
+    Command { key: "cam-centre", title: "Centre on selection", group: "Camera", run: cmd_centre_on_selection },
+    Command { key: "cam-clear-key", title: "Clear camera key", group: "Camera", run: cmd_camera_clear_key },
+    Command { key: "cam-follow", title: "Toggle camera follow", group: "Camera", run: cmd_toggle_camera_follow },
+    Command { key: "cam-follow-clear", title: "Camera follow: clear", group: "Camera", run: cmd_cam_follow_clear },
     // -- Graph ----------------------------------------------------
-    Command { key: "key-graph-angle", title: "Key graph angle", group: "Graph", run: EditorCore::key_graph_angle },
+    Command { key: "key-graph-angle", title: "Key graph angle", group: "Graph", run: cmd_key_graph_angle },
     Command { key: "key-all-channels", title: "Key all channels here", group: "Graph", run: cmd_key_all_channels },
-    Command { key: "clear-graph", title: "Clear graph curves", group: "Graph", run: EditorCore::clear_graph },
+    Command { key: "clear-graph", title: "Clear graph curves", group: "Graph", run: cmd_clear_graph },
     // -- View -----------------------------------------------------
     Command { key: "onion", title: "Toggle onion skin", group: "View", run: cmd_toggle_onion },
     Command { key: "draw-mode", title: "Toggle draw mode", group: "View", run: cmd_toggle_draw_mode },
-    Command { key: "tween-play", title: "Toggle tween playback", group: "View", run: EditorCore::toggle_tween_playback },
-    Command { key: "cycle-easing", title: "Cycle easing", group: "View", run: EditorCore::cycle_easing },
+    Command { key: "tween-play", title: "Toggle tween playback", group: "View", run: cmd_toggle_tween_playback },
+    Command { key: "cycle-easing", title: "Cycle easing", group: "View", run: cmd_cycle_easing },
     // -- Draw -----------------------------------------------------
-    Command { key: "cycle-brush", title: "Cycle brush", group: "Draw", run: EditorCore::cycle_brush },
-    Command { key: "draw-tool", title: "Toggle brush / eraser", group: "Draw", run: EditorCore::toggle_draw_tool },
-    Command { key: "clear-drawings", title: "Clear frame drawings", group: "Draw", run: EditorCore::clear_frame_drawings },
-    Command { key: "mirror-strokes", title: "Mirror strokes horizontally", group: "Draw", run: EditorCore::mirror_strokes_x },
-    Command { key: "stamp-polygon", title: "Stamp polygon", group: "Draw", run: EditorCore::stamp_polygon },
+    Command { key: "cycle-brush", title: "Cycle brush", group: "Draw", run: cmd_cycle_brush },
+    Command { key: "draw-tool", title: "Toggle brush / eraser", group: "Draw", run: cmd_toggle_draw_tool },
+    Command { key: "clear-drawings", title: "Clear frame drawings", group: "Draw", run: cmd_clear_frame_drawings },
+    Command { key: "mirror-strokes", title: "Mirror strokes horizontally", group: "Draw", run: cmd_mirror_strokes_x },
+    Command { key: "stamp-polygon", title: "Stamp polygon", group: "Draw", run: cmd_stamp_polygon },
     Command { key: "delete-last-stroke", title: "Delete last stroke", group: "Draw", run: cmd_delete_last_stroke },
+    Command { key: "stroke-select-next", title: "Select next stroke", group: "Draw", run: cmd_stroke_select_next },
+    Command { key: "stroke-select-prev", title: "Select previous stroke", group: "Draw", run: cmd_stroke_select_prev },
     // -- Effects --------------------------------------------------
     Command { key: "particle-burst", title: "Add particle: Burst", group: "Effects", run: cmd_particle_burst },
     Command { key: "particle-sparkle", title: "Add particle: Sparkle", group: "Effects", run: cmd_particle_sparkle },
     Command { key: "particle-add-event", title: "Add particle event", group: "Effects", run: cmd_add_particle_event },
     Command { key: "fx-clip-confetti", title: "Add FX clip: Confetti", group: "Effects", run: cmd_fx_confetti },
     Command { key: "fx-clip-lightning", title: "Add FX clip: Lightning", group: "Effects", run: cmd_fx_lightning },
-    Command { key: "clear-particles", title: "Clear particles and FX", group: "Effects", run: EditorCore::clear_particles },
+    Command { key: "clear-particles", title: "Clear particles and FX", group: "Effects", run: cmd_clear_particles },
     // -- Audio ----------------------------------------------------
-    Command { key: "add-audio", title: "Add audio clip", group: "Audio", run: EditorCore::add_audio_clip },
-    Command { key: "mixdown", title: "Mix down audio", group: "Audio", run: EditorCore::mixdown_audio },
-    Command { key: "audio-echo", title: "Audio: echo last clip", group: "Audio", run: EditorCore::audio_echo_last },
-    Command { key: "audio-lowpass", title: "Audio: lowpass last clip", group: "Audio", run: EditorCore::audio_lowpass_last },
-    Command { key: "audio-trim-silence", title: "Audio: trim silence", group: "Audio", run: EditorCore::audio_trim_silence_last },
-    Command { key: "audio-split-silences", title: "Audio: split at silences", group: "Audio", run: EditorCore::audio_split_at_silences_last },
-    Command { key: "fade-audio", title: "Audio: fade last clip", group: "Audio", run: EditorCore::audio_fade_last },
-    Command { key: "reverse-audio", title: "Audio: reverse last clip", group: "Audio", run: EditorCore::audio_reverse_last },
+    Command { key: "add-audio", title: "Add audio clip", group: "Audio", run: cmd_add_audio_clip },
+    Command { key: "mixdown", title: "Mix down audio", group: "Audio", run: cmd_mixdown_audio },
+    Command { key: "audio-echo", title: "Audio: echo last clip", group: "Audio", run: cmd_audio_echo_last },
+    Command { key: "audio-lowpass", title: "Audio: lowpass last clip", group: "Audio", run: cmd_audio_lowpass_last },
+    Command { key: "audio-trim-silence", title: "Audio: trim silence", group: "Audio", run: cmd_audio_trim_silence_last },
+    Command { key: "audio-split-silences", title: "Audio: split at silences", group: "Audio", run: cmd_audio_split_at_silences_last },
+    Command { key: "fade-audio", title: "Audio: fade last clip", group: "Audio", run: cmd_audio_fade_last },
+    Command { key: "reverse-audio", title: "Audio: reverse last clip", group: "Audio", run: cmd_audio_reverse_last },
     Command { key: "delete-audio-clip", title: "Audio: delete last clip", group: "Audio", run: cmd_delete_last_audio_clip },
     // -- Export ---------------------------------------------------
-    Command { key: "export-png", title: "Export PNG sequence", group: "Export", run: EditorCore::export_png },
-    Command { key: "export-gif", title: "Export GIF", group: "Export", run: EditorCore::export_gif },
-    Command { key: "export-mp4", title: "Export MP4", group: "Export", run: EditorCore::export_mp4 },
-    Command { key: "export-webm", title: "Export WebM", group: "Export", run: EditorCore::export_webm },
-    Command { key: "export-piv", title: "Export .piv", group: "Export", run: EditorCore::export_piv },
-    Command { key: "export-stk", title: "Export .stk", group: "Export", run: EditorCore::export_stk },
+    Command { key: "export-png", title: "Export PNG sequence", group: "Export", run: cmd_export_png },
+    Command { key: "export-gif", title: "Export GIF", group: "Export", run: cmd_export_gif },
+    Command { key: "export-mp4", title: "Export MP4", group: "Export", run: cmd_export_mp4 },
+    Command { key: "export-webm", title: "Export WebM", group: "Export", run: cmd_export_webm },
+    Command { key: "export-piv", title: "Export .piv", group: "Export", run: cmd_export_piv },
+    Command { key: "export-stk", title: "Export .stk", group: "Export", run: cmd_export_stk },
     // -- 3D -------------------------------------------------------
-    Command { key: "enter-3d", title: "Enter 3D mode", group: "3D", run: EditorCore::enter_3d },
-    Command { key: "exit-3d", title: "Exit 3D mode", group: "3D", run: EditorCore::exit_3d },
+    Command { key: "enter-3d", title: "Enter 3D mode", group: "3D", run: cmd_enter_3d },
+    Command { key: "exit-3d", title: "Exit 3D mode", group: "3D", run: cmd_exit_3d },
 ];
 
 // ----------------------------------------------------------------
@@ -590,15 +893,16 @@ pub fn close_palette(s: &mut State) {
     s.palette.query.focused = false;
 }
 
-/// Run the currently highlighted command against the core and
-/// close the palette. A stale selection (query changed under
-/// it) is clamped first; an empty result list just closes.
-/// The run is recorded in the recents list.
+/// Run the currently highlighted command against the shell
+/// state and close the palette. A stale selection (query
+/// changed under it) is clamped first; an empty result
+/// list just closes. The run is recorded in the recents
+/// list.
 pub fn run_selected(s: &mut State) {
     let (results, _) = display_commands(&s.palette.query.text, &s.palette.recent);
     let row = clamped_selected(s.palette.selected, results.len());
     if let Some(&ci) = results.get(row) {
-        (COMMANDS[ci].run)(&mut s.core);
+        (COMMANDS[ci].run)(s);
         push_recent(&mut s.palette.recent, COMMANDS[ci].key);
     }
     close_palette(s);
@@ -609,7 +913,7 @@ pub fn run_selected(s: &mut State) {
 /// list.
 fn run_command(s: &mut State, ci: usize) {
     if let Some(cmd) = COMMANDS.get(ci) {
-        (cmd.run)(&mut s.core);
+        (cmd.run)(s);
         push_recent(&mut s.palette.recent, cmd.key);
     }
     close_palette(s);
@@ -818,8 +1122,12 @@ mod tests {
         assert_eq!(total, keys.len(), "duplicate command keys");
         // 77 commands through Phase F, +4 in Phase G
         // (restart-playback, particle-add-event,
-        // cam-follow-clear, key-all-channels).
-        assert_eq!(total, 81, "palette should cover 81 commands, has {total}");
+        // cam-follow-clear, key-all-channels), +3 in
+        // Phase H (toggle-loop-playback,
+        // stroke-select-next, stroke-select-prev — the
+        // two Phase G skips, unblocked by the dispatch
+        // migration to fn(&mut State)).
+        assert_eq!(total, 84, "palette should cover 84 commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }
@@ -828,24 +1136,26 @@ mod tests {
     #[test]
     fn command_runs_are_wired_to_real_ops() {
         // Smoke: a few safe commands actually change core state
-        // through the table's fn pointers.
-        let mut core = EditorCore::new();
-        let frames = core.frame_count();
-        (COMMANDS[idx_of("add-frame")].run)(&mut core);
-        assert_eq!(core.frame_count(), frames + 1);
-        (COMMANDS[idx_of("play")].run)(&mut core);
-        assert!(core.playing);
-        (COMMANDS[idx_of("play")].run)(&mut core);
-        assert!(!core.playing);
+        // through the table's fn pointers (Phase H: the
+        // pointers take the shell State; assertions read
+        // its core).
+        let mut s = crate::init();
+        let frames = s.core.frame_count();
+        (COMMANDS[idx_of("add-frame")].run)(&mut s);
+        assert_eq!(s.core.frame_count(), frames + 1);
+        (COMMANDS[idx_of("play")].run)(&mut s);
+        assert!(s.core.playing);
+        (COMMANDS[idx_of("play")].run)(&mut s);
+        assert!(!s.core.playing);
         // Onion defaults to ON in EditorCore::new(), so the
         // command must flip it off and back on.
-        assert!(core.onion);
-        (COMMANDS[idx_of("onion")].run)(&mut core);
-        assert!(!core.onion);
-        (COMMANDS[idx_of("onion")].run)(&mut core);
-        assert!(core.onion);
-        // Undo on a fresh core is a safe no-op.
-        let mut fresh = EditorCore::new();
+        assert!(s.core.onion);
+        (COMMANDS[idx_of("onion")].run)(&mut s);
+        assert!(!s.core.onion);
+        (COMMANDS[idx_of("onion")].run)(&mut s);
+        assert!(s.core.onion);
+        // Undo on a fresh shell is a safe no-op.
+        let mut fresh = crate::init();
         (COMMANDS[idx_of("undo")].run)(&mut fresh);
     }
 
@@ -864,15 +1174,15 @@ mod tests {
         }
         // Duplicate figure: the demo project starts with one
         // figure; the shim passes the selection to the op.
-        let mut core = EditorCore::new();
-        let figures = core.project.figures.len();
-        (COMMANDS[idx_of("duplicate-figure")].run)(&mut core);
-        assert_eq!(core.project.figures.len(), figures + 1);
+        let mut s = crate::init();
+        let figures = s.core.project.figures.len();
+        (COMMANDS[idx_of("duplicate-figure")].run)(&mut s);
+        assert_eq!(s.core.project.figures.len(), figures + 1);
         // Delete last stroke: the empty guard stands down,
         // then a real run removes only the newest stroke.
-        let mut core = EditorCore::new();
-        (COMMANDS[idx_of("delete-last-stroke")].run)(&mut core);
-        assert!(core.project.strokes.is_empty());
+        let mut s = crate::init();
+        (COMMANDS[idx_of("delete-last-stroke")].run)(&mut s);
+        assert!(s.core.project.strokes.is_empty());
         let stroke = |color: u32| Stroke {
             frame: 0,
             points: vec![[0.0, 0.0]],
@@ -882,33 +1192,33 @@ mod tests {
             fill: None,
             spray: None,
         };
-        core.project.strokes.push(stroke(0x111111));
-        core.project.strokes.push(stroke(0x222222));
-        (COMMANDS[idx_of("delete-last-stroke")].run)(&mut core);
-        assert_eq!(core.project.strokes.len(), 1);
-        assert_eq!(core.project.strokes[0].color, 0x111111);
+        s.core.project.strokes.push(stroke(0x111111));
+        s.core.project.strokes.push(stroke(0x222222));
+        (COMMANDS[idx_of("delete-last-stroke")].run)(&mut s);
+        assert_eq!(s.core.project.strokes.len(), 1);
+        assert_eq!(s.core.project.strokes[0].color, 0x111111);
         // The audio trio on a clipless core: every one is a
         // status-only no-op (the *_last ops self-guard, the
         // delete shim's own guard stands down first).
-        let mut core = EditorCore::new();
-        (COMMANDS[idx_of("fade-audio")].run)(&mut core);
-        (COMMANDS[idx_of("reverse-audio")].run)(&mut core);
-        (COMMANDS[idx_of("delete-audio-clip")].run)(&mut core);
-        assert!(core.project.audio.is_empty());
+        let mut s = crate::init();
+        (COMMANDS[idx_of("fade-audio")].run)(&mut s);
+        (COMMANDS[idx_of("reverse-audio")].run)(&mut s);
+        (COMMANDS[idx_of("delete-audio-clip")].run)(&mut s);
+        assert!(s.core.project.audio.is_empty());
         // Delete last clip removes exactly the newest entry.
-        core.project.audio.push(AudioClip {
+        s.core.project.audio.push(AudioClip {
             path: "a.wav".into(),
             start_frame: 0,
             gain: 1.0,
         });
-        core.project.audio.push(AudioClip {
+        s.core.project.audio.push(AudioClip {
             path: "b.wav".into(),
             start_frame: 4,
             gain: 1.0,
         });
-        (COMMANDS[idx_of("delete-audio-clip")].run)(&mut core);
-        assert_eq!(core.project.audio.len(), 1);
-        assert_eq!(core.project.audio[0].path, "a.wav");
+        (COMMANDS[idx_of("delete-audio-clip")].run)(&mut s);
+        assert_eq!(s.core.project.audio.len(), 1);
+        assert_eq!(s.core.project.audio[0].path, "a.wav");
     }
 
     #[test]
@@ -926,61 +1236,95 @@ mod tests {
         // Restart: from the last frame, stopped, the command
         // lands on frame 0 playing — the playback panel's
         // pb-restart body (`goto(0)` + `playing = true`).
-        let mut core = EditorCore::new();
-        let n = core.frame_count();
+        let mut s = crate::init();
+        let n = s.core.frame_count();
         assert!(n > 1, "demo project needs 2+ frames for this test");
-        core.goto(n - 1);
-        core.playing = false;
-        (COMMANDS[idx_of("restart-playback")].run)(&mut core);
-        assert_eq!(core.current, 0);
-        assert!(core.playing);
+        s.core.goto(n - 1);
+        s.core.playing = false;
+        (COMMANDS[idx_of("restart-playback")].run)(&mut s);
+        assert_eq!(s.core.current, 0);
+        assert!(s.core.playing);
         // Particle event: exactly one new event, on the
         // current frame, at the stage centre — the
         // particles panel's own add arguments.
-        let mut core = EditorCore::new();
-        let frame = core.current;
-        let [w, h] = core.project.stage;
-        let before = core.project.particles.len();
-        (COMMANDS[idx_of("particle-add-event")].run)(&mut core);
-        assert_eq!(core.project.particles.len(), before + 1);
-        let ev = &core.project.particles[before];
+        let mut s = crate::init();
+        let frame = s.core.current;
+        let [w, h] = s.core.project.stage;
+        let before = s.core.project.particles.len();
+        (COMMANDS[idx_of("particle-add-event")].run)(&mut s);
+        assert_eq!(s.core.project.particles.len(), before + 1);
+        let ev = &s.core.project.particles[before];
         assert_eq!(ev.frame, frame);
         assert!((ev.x - w / 2.0).abs() < 1e-4, "event x {} != centre {}", ev.x, w / 2.0);
         assert!((ev.y - h / 2.0).abs() < 1e-4, "event y {} != centre {}", ev.y, h / 2.0);
         // Camera follow clear: the field goes to None with
         // camera_panel::follow_clear's own status wording.
-        let mut core = EditorCore::new();
-        core.project.camera_follow = Some(0);
-        (COMMANDS[idx_of("cam-follow-clear")].run)(&mut core);
-        assert_eq!(core.project.camera_follow, None);
-        assert_eq!(core.status, "Camera follow off.");
+        let mut s = crate::init();
+        s.core.project.camera_follow = Some(0);
+        (COMMANDS[idx_of("cam-follow-clear")].run)(&mut s);
+        assert_eq!(s.core.project.camera_follow, None);
+        assert_eq!(s.core.status, "Camera follow off.");
         // Key all channels: with no channels the helper is
         // a status-only refusal; with one channel the
         // current frame gains a key holding the evaluated
         // value, as one undo step.
-        let mut core = EditorCore::new();
-        core.project.channels.clear();
-        (COMMANDS[idx_of("key-all-channels")].run)(&mut core);
-        assert_eq!(core.status, "No graph channels to key.");
-        core.project.channels.push(Channel {
+        let mut s = crate::init();
+        s.core.project.channels.clear();
+        (COMMANDS[idx_of("key-all-channels")].run)(&mut s);
+        assert_eq!(s.core.status, "No graph channels to key.");
+        s.core.project.channels.push(Channel {
             figure: 0,
             target: ChannelTarget::Angle(1),
             keys: vec![Key::flat(0.0, 10.0), Key::flat(2.0, 30.0)],
         });
-        if core.frame_count() > 1 {
-            core.goto(1);
+        if s.core.frame_count() > 1 {
+            s.core.goto(1);
         }
-        let at = core.current as f32;
-        (COMMANDS[idx_of("key-all-channels")].run)(&mut core);
+        let at = s.core.current as f32;
+        (COMMANDS[idx_of("key-all-channels")].run)(&mut s);
         assert_eq!(
-            core.status,
-            format!("Keyed 1 channels at frame {}.", core.current + 1)
+            s.core.status,
+            format!("Keyed 1 channels at frame {}.", s.core.current + 1)
         );
-        let keys = &core.project.channels[0].keys;
+        let keys = &s.core.project.channels[0].keys;
         assert!(
             keys.iter().any(|k| (k.frame - at).abs() < 1e-6),
             "no key at frame {at}: {keys:?}"
         );
+    }
+
+    #[test]
+    fn phase_h_commands_are_present_and_wired() {
+        // All three Phase H keys resolve (idx_of panics if not).
+        for key in ["toggle-loop-playback", "stroke-select-next", "stroke-select-prev"] {
+            idx_of(key);
+        }
+        // Loop toggle: flips the shell flag and nothing
+        // else — the pb-loop handler's exact behaviour —
+        // and a second run flips it back. The status line
+        // is untouched (no toast spam).
+        let mut s = crate::init();
+        let before = s.loop_playback;
+        let status = s.core.status.clone();
+        (COMMANDS[idx_of("toggle-loop-playback")].run)(&mut s);
+        assert_eq!(s.loop_playback, !before);
+        assert_eq!(s.core.status, status, "loop toggle must not set a status");
+        (COMMANDS[idx_of("toggle-loop-playback")].run)(&mut s);
+        assert_eq!(s.loop_playback, before);
+        assert_eq!(s.core.status, status);
+        // Stroke stepping on an empty project (the demo
+        // has no strokes): the selection stays unset and
+        // the status is the stroke panel's own refusal —
+        // proof the command delegates to
+        // step_stroke_selection rather than reimplementing.
+        let mut s = crate::init();
+        assert!(s.core.project.strokes.is_empty());
+        (COMMANDS[idx_of("stroke-select-next")].run)(&mut s);
+        assert_eq!(s.stroke_selected, None);
+        assert_eq!(s.core.status, "No strokes to select.");
+        (COMMANDS[idx_of("stroke-select-prev")].run)(&mut s);
+        assert_eq!(s.stroke_selected, None);
+        assert_eq!(s.core.status, "No strokes to select.");
     }
 
     // -- fuzzy_score -------------------------------------------

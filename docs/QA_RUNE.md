@@ -690,3 +690,51 @@ custom background (§37), text instance edit (§38),
 waveform playhead + seek (§10), Runtime tests round 4
 (§39).
 
+
+## 10. Phase H addendum — gap closure map
+
+Appended 2026-11-08, mid-wave (sections still landing;
+statuses are a snapshot — the integrator updates the CI
+column after the green run). Phase H's charter and the
+40-section table: `docs/PHASE_H.md`.
+
+**The remainders that open this phase are Phase G's own.**
+Phase G's sections named their limits as they shipped:
+§29 documented two palette commands it could not wire,
+§9 and §20 recorded the audio and style caveats in their
+own files, and §12's audit left two integrator items
+behind. This map tracks exactly those. The phase's other
+half — the Font Awesome icon adoption (§§1–35 of
+PHASE_H.md: the 7.3.1 set in `assets/icons/fontawesome/`,
+the curated 102-icon table in `src/rune_sec/icon_data.rs`,
+the `icon_path` → `icons` → `icon_btn` pipeline) — has no
+Phase G remainder behind it; it is new surface, recorded
+in PHASE_H.md §3. One honesty note travels with it: Rune
+`fill_path` compound-path (hole) rendering is not
+pixel-verified — `src/rune_sec/icons.rs` says so in its
+own header, the curated set was chosen solid so most
+glyphs read either way, and the first proof is the user's
+screenshot.
+
+| Phase G remainder | Closing section(s) | Status | CI |
+|---|---|---|---|
+| Palette dispatch cannot reach shell state — `Command.run: fn(&mut EditorCore)`, so the loop-playback toggle and stroke step-selection commands were **documented skips** in §29 | §36 command_palette dispatch migration (State-level `run`) + the two skipped commands landing with it | written *(brief)* | _integrator_ |
+| Six audio DSP ops act on the **last clip only** — Echo, Lowpass, Trim silence, Split silences, Pitch, Compress never got indexed forms (Phase G §3/§9 indexed fade/reverse/gain/move/delete only) | §37 audio_ops indexed DSP ops (the `_at(index)` family for the six) + audio_panel aiming them at the selected clip | written *(brief)* | _integrator_ |
+| Style paste is **three undo steps**, not one — §20's documented caveat: `set_node_color` does not snapshot, `set_node_cap`/`set_node_color2`/`set_node_opacity` each do | §38 `set_node_style_atomic` (engine setter, one snapshot) + inspector_style paste routed through it | written *(brief)* | _integrator_ |
+| `save_named_project` returns `()` — a failed save still writes a recovery snapshot and a phantom recent (§12 integrator item 3) | §38 `save_named_project` returns `bool`; the project_tools handler branches on it | written *(brief)* | _integrator_ |
+| Waveform carries **two coordinate mappings** — the original `waveform_el` maps peaks/playhead into the last clip's span, Phase G §10's `waveform_el_state` maps them onto the project; the builders coexist | §29 audio_panel + waveform_view unification (one mapping for playhead and seek) | written *(brief)* | _integrator_ |
+| Project-panel **key-coverage test** owed — §12's audit map cannot be asserted from the panel file (Rune's `El` has no public tree-walk); §12 integrator item 4 assigns it to the Runtime suite | §39 snap_tests round 5 (presented key set for the project section asserted against the audit map) | written *(brief)* | _integrator_ |
+| Playback audio **scrub-follow** (named open in `src/audio_play.rs` since Phase F; Phase G §2 closed the wrap case only) | Not a Phase H section | open — unchanged | — |
+| Stage draws segments straight — Phase G §19's bend steppers edit values the stage does not render (bends are export-visible only) | Not a Phase H section | open — unchanged | — |
+| `--snap` on GPU-less CI unproven (§9 row, unchanged there) | Not a Phase H section; `headless.yml` is still `workflow_dispatch`-only and has never been run | open — unchanged | — |
+
+Phase H depth work with no Phase G remainder behind it:
+the icon adoption itself (§§1–35 — the lib path parser,
+the icon builder and house buttons, then panel-by-panel
+glyph adoption across the shell's chrome and panels),
+recorded section by section in PHASE_H.md §3. Two
+boundaries of that work are stated there and repeated
+here so they are not lost: MCP does not gain §37's
+indexed DSP ops in this wave (parity is a later pass),
+and the command palette's rows stay text — §36 changes
+its dispatch, not its rendering.

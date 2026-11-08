@@ -70,6 +70,23 @@
 //! `String::new()`). The range itself is the core's real
 //! `loop_range`, set in the timeline; this panel only
 //! reads it.
+//!
+//! Phase H gives the panel Font Awesome glyphs without
+//! changing any key, label or handler: the Images /
+//! Animation / Video category headings lead with an
+//! `image` / `film` / `video` glyph and the Recent
+//! exports heading with a `clock` (via
+//! `icons::icon_el`, the frame_ops/fx_browser
+//! inline-glyph idiom — 12 pt, secondary colour, leading
+//! its row), and the media-format and bundle buttons
+//! render through `icon_btn::icon_btn` with a glyph per
+//! format type (`image` for PNG/JPEG/SVG and the images
+//! bundle, `table-cells-large` for the spritesheet,
+//! `film` for GIF/APNG, `video` for MP4/WebM and the
+//! video bundle). The range toggle keeps its plain text
+//! buttons — its active state is the text-button state —
+//! and the project-format rows keep plain `btn`: no
+//! glyph is assigned to them.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -80,6 +97,8 @@ use rune::{col, row, text, El};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 /// The `xc-*` keys whose formats have a frame-range exporter
@@ -699,14 +718,35 @@ fn section(title: &str, t: &Theme) -> El {
         .child(text(title).font(type_::SECTION).color(t.text_secondary))
 }
 
+/// A section column whose heading leads with a Font
+/// Awesome glyph (Phase H): the same [`section`] label —
+/// same font, same colour — preceded by a 12 pt
+/// [`icon_el`] in the heading's secondary colour, in a
+/// centred row: the inline-glyph idiom frame_ops and
+/// fx_browser use. Only the heading changes; the column
+/// below it is built exactly as [`section`] builds it.
+fn section_with_icon(icon: &str, title: &str, t: &Theme) -> El {
+    col().gap(6.0).child(
+        row()
+            .gap(6.0)
+            .center_y()
+            .child(icon_el(icon, 12.0, t.text_secondary))
+            .child(text(title).font(type_::SECTION).color(t.text_secondary)),
+    )
+}
+
 /// One format row for a full-export-only format: an `xc-`
 /// button calling the `EditorCore` op, plus its muted
 /// guidance note — the GPUI `xc_row` shape. The handler
 /// also records the panel recap (`recap_name` +
 /// `recap_dest`, or a failure note when the op reports
-/// one — see `note_single`).
+/// one — see `note_single`). With `icon` set (Phase H)
+/// the button renders through `icon_btn` with that glyph
+/// before the label; without one it is the plain `btn` —
+/// same key, same label, same handler either way.
 fn plain_row(
     key: &'static str,
+    icon: Option<&str>,
     label: &'static str,
     note: &'static str,
     t: &Theme,
@@ -714,26 +754,33 @@ fn plain_row(
     recap_name: &'static str,
     recap_dest: &'static str,
 ) -> El {
+    let handler = move |s: &mut State| {
+        op(&mut s.core);
+        s.export_recap = if export_failed(&s.core) {
+            failed_recap(recap_name)
+        } else {
+            single_recap(recap_name, recap_dest)
+        };
+    };
     row()
         .gap(8.0)
         .center_y()
-        .child(btn(key, label, false, t, move |s: &mut State| {
-            op(&mut s.core);
-            s.export_recap = if export_failed(&s.core) {
-                failed_recap(recap_name)
-            } else {
-                single_recap(recap_name, recap_dest)
-            };
-        }))
+        .child(match icon {
+            Some(icon) => icon_btn(key, icon, label, false, t, handler),
+            None => btn(key, label, false, t, handler),
+        })
         .child(text(note).font(type_::LABEL).color(t.text_secondary))
 }
 
-/// One format row for a range-capable format: the button's
-/// handler is one of the `export_*_action` functions above,
-/// which choose between the range exporter and the full op
-/// at press time.
+/// One format row for a range-capable format: the button
+/// (an `icon_btn` with the format type's glyph before the
+/// label — Phase H; same key, same label, same handler)
+/// is one of the `export_*_action` functions above, which
+/// choose between the range exporter and the full op at
+/// press time.
 fn range_row(
     key: &'static str,
+    icon: &str,
     label: &'static str,
     note: &'static str,
     t: &Theme,
@@ -742,16 +789,19 @@ fn range_row(
     row()
         .gap(8.0)
         .center_y()
-        .child(btn(key, label, false, t, action))
+        .child(icon_btn(key, icon, label, false, t, action))
         .child(text(note).font(type_::LABEL).color(t.text_secondary))
 }
 
-/// One bundle row: an `xc-bundle-*` button running
-/// `run_bundle` for its kind, plus the note stating that
-/// bundles always export in full (the range toggle governs
-/// only the single-format buttons).
+/// One bundle row: an `xc-bundle-*` `icon_btn` (the
+/// bundle type's glyph before the label — Phase H; same
+/// key, same label, same handler) running `run_bundle`
+/// for its kind, plus the note stating that bundles
+/// always export in full (the range toggle governs only
+/// the single-format buttons).
 fn bundle_row(
     key: &'static str,
+    icon: &str,
     label: &'static str,
     note: &'static str,
     t: &Theme,
@@ -760,7 +810,7 @@ fn bundle_row(
     row()
         .gap(8.0)
         .center_y()
-        .child(btn(key, label, false, t, move |s: &mut State| {
+        .child(icon_btn(key, icon, label, false, t, move |s: &mut State| {
             run_bundle(s, kind)
         }))
         .child(text(note).font(type_::LABEL).color(t.text_secondary))
@@ -804,9 +854,10 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             .color(t.text_secondary),
     );
 
-    let images = section("Images", t)
+    let images = section_with_icon("image", "Images", t)
         .child(range_row(
             "xc-png",
+            "image",
             "PNG",
             "PNG image sequence — one file per frame in ./export/",
             t,
@@ -814,6 +865,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ))
         .child(range_row(
             "xc-jpeg",
+            "image",
             "JPEG",
             "JPEG image sequence in out/jpeg/ (out/, not export/)",
             t,
@@ -821,6 +873,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ))
         .child(plain_row(
             "xc-svg",
+            Some("image"),
             "SVG",
             "One SVG per frame in ./export/svg/",
             t,
@@ -830,9 +883,10 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ));
     panel = panel.child(images);
 
-    let animation = section("Animation", t)
+    let animation = section_with_icon("film", "Animation", t)
         .child(plain_row(
             "xc-sheet",
+            Some("table-cells-large"),
             "Spritesheet",
             "All frames on one sheet — ./export/spritesheet.png",
             t,
@@ -842,6 +896,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ))
         .child(range_row(
             "xc-gif",
+            "film",
             "GIF",
             "Animated GIF — ./export/animation.gif",
             t,
@@ -849,6 +904,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ))
         .child(range_row(
             "xc-apng",
+            "film",
             "APNG",
             "Animated PNG — out/animation.apng (out/, not export/)",
             t,
@@ -856,9 +912,10 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ));
     panel = panel.child(animation);
 
-    let video = section("Video", t)
+    let video = section_with_icon("video", "Video", t)
         .child(range_row(
             "xc-mp4",
+            "video",
             "MP4",
             "MP4 video via ffmpeg — ./export/animation.mp4 (full export includes audio; range export is video-only)",
             t,
@@ -866,6 +923,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ))
         .child(range_row(
             "xc-webm",
+            "video",
             "WebM",
             "WebM video (VP9) — ./export/animation.webm",
             t,
@@ -876,6 +934,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
     let formats = section("Project formats", t)
         .child(plain_row(
             "xc-v2",
+            None,
             ".piv v2",
             "Pivot v2 project — ./export/animation-v2.piv",
             t,
@@ -885,6 +944,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ))
         .child(plain_row(
             "xc-v3",
+            None,
             ".piv v3",
             "Pivot v3 project — ./export/animation.piv",
             t,
@@ -894,6 +954,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ))
         .child(plain_row(
             "xc-v4",
+            None,
             ".piv v4",
             "Pivot v4 project — ./export/animation-v4.piv",
             t,
@@ -903,6 +964,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ))
         .child(plain_row(
             "xc-v5",
+            None,
             ".piv v5",
             "Pivot v5 project — out/animation-v5.piv (out/, not export/)",
             t,
@@ -912,6 +974,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ))
         .child(plain_row(
             "xc-stk",
+            None,
             ".stk",
             "Selected figure only — ./export/<figure>.stk",
             t,
@@ -921,6 +984,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ))
         .child(plain_row(
             "xc-nodes",
+            None,
             ".nodes",
             "Selected figure for Stick Nodes — ./export/<figure>.nodes",
             t,
@@ -930,6 +994,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ))
         .child(plain_row(
             "xc-stknds",
+            None,
             ".stknds",
             "Whole project for Stick Nodes — ./export/animation.stknds",
             t,
@@ -942,6 +1007,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
     let bundles = section("Bundles", t)
         .child(bundle_row(
             "xc-bundle-images",
+            "image",
             "Export all images",
             "PNG + JPEG + SVG + spritesheet in one press. Bundles always export in full — the range toggle above applies only to the single-format buttons.",
             t,
@@ -949,6 +1015,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ))
         .child(bundle_row(
             "xc-bundle-video",
+            "video",
             "Export all video",
             "MP4 + WebM in one press, full exports (the MP4 keeps its audio). Bundles always export in full — the range toggle above applies only to the single-format buttons.",
             t,
@@ -969,7 +1036,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
     // Recent exports: what is actually on disk in the two
     // output roots, newest first — read-only rows, no
     // open/reveal buttons (the shell has no file opener).
-    let mut recent = section("Recent exports", t).key("xc-history");
+    let mut recent = section_with_icon("clock", "Recent exports", t).key("xc-history");
     let history = recent_exports_cached();
     if history.is_empty() {
         recent = recent.child(

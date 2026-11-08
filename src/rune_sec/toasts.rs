@@ -16,11 +16,19 @@
 //! the toast model.
 //!
 //! Phase G adds dismissal: every live toast carries a
-//! small "×" button (`toast-dismiss-{index}`) that removes
+//! small dismiss button (`toast-dismiss-{index}`) that removes
 //! exactly that toast, and when two or more toasts are live
 //! the stack ends with a "Clear all" button
 //! (`toast-clear-all`) that removes every live toast at
 //! once ([`ToastsState::dismiss_all`]).
+//!
+//! Phase H puts Font Awesome glyphs on the stack (via the
+//! icon_btn / icons sections): the dismiss button is an
+//! icon-only "xmark" square, Undo is "arrow-rotate-left"
+//! plus its label, "Clear all" is "trash-can" plus its
+//! label, and each card leads with its severity's glyph
+//! ([`Severity::icon`]) in place of the plain dot — the
+//! severity colour now tints the glyph itself.
 //!
 //! Why hand-rolled instead of rune-kit's `Toast` /
 //! `ToastRegion` (read at `crates/rune-kit/src/toast.rs` in the
@@ -40,7 +48,7 @@
 //!   action buttons + a close button wired to app-state
 //!   handlers); these toasts are single-line status echoes
 //!   whose only actions are the newest toast's Undo button,
-//!   a per-toast dismiss "×", and a stack-wide "Clear all".
+//!   a per-toast dismiss button, and a stack-wide "Clear all".
 //! - What IS borrowed: `ToastRegion`'s proven placement —
 //!   pinned 32 pt from the right, 48 pt from the bottom, 12 pt
 //!   apart, 320 pt wide cards, 8 pt radius, 12 pt padding.
@@ -63,11 +71,12 @@
 //! its fixed width.
 
 use rune::tok::{self, type_, Theme};
-use rune::{col, el, oklch, row, text, Color, El};
+use rune::{col, oklch, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
 
-use crate::chrome_view::btn;
 use crate::rune_sec::i18n_wire;
+use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
+use crate::rune_sec::icons::icon_el_rgb;
 use crate::State;
 
 /// Most toasts on screen at once; a push past the cap drops
@@ -80,8 +89,8 @@ pub const MAX_TOASTS: usize = 4;
 pub const TOAST_TTL: f32 = 5.0;
 
 /// Minimum live toasts for the stack to offer "Clear all":
-/// with fewer than two live toasts, the per-toast "×" is
-/// dismissal enough.
+/// with fewer than two live toasts, the per-toast dismiss
+/// button is dismissal enough.
 pub const CLEAR_ALL_MIN: usize = 2;
 
 /// The last slice of a toast's life over which it fades out.
@@ -98,16 +107,47 @@ pub enum Severity {
 }
 
 impl Severity {
-    /// The severity's dot colour: bright OKLCH hues chosen to
+    /// The severity's colour: bright OKLCH hues chosen to
     /// read on the dark card at small size. (The shell is
     /// dark-only today — `tok::theme(true)` — so these are
-    /// tuned for dark.)
+    /// tuned for dark.) [`Severity::icon_color`] is this
+    /// colour's hex twin for the glyph renderer.
     pub fn color(self) -> Color {
         match self {
             Severity::Info => oklch(0.70, 0.14, 250.0),
             Severity::Success => oklch(0.72, 0.15, 155.0),
             Severity::Warn => oklch(0.78, 0.15, 75.0),
             Severity::Error => oklch(0.68, 0.20, 25.0),
+        }
+    }
+
+    /// The severity's Font Awesome glyph (icons section),
+    /// drawn at the card's leading edge: information, done,
+    /// warning, failed. Warn and Error deliberately do not
+    /// share a glyph — the triangle reads "careful", the
+    /// cross reads "this failed" (and pairs with Success's
+    /// tick); the glyph sits at the card's leading edge, far
+    /// from the trailing dismiss square, so Error's cross is
+    /// never the dismiss control.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Severity::Info => "circle-info",
+            Severity::Success => "check",
+            Severity::Warn => "triangle-exclamation",
+            Severity::Error => "xmark",
+        }
+    }
+
+    /// The glyph's hex colour, in the `0xRRGGBB` form the
+    /// icon renderer takes: the sRGB approximation of
+    /// [`Severity::color`]'s oklch hue, so the glyph carries
+    /// the same severity tint the dot had.
+    pub fn icon_color(self) -> u32 {
+        match self {
+            Severity::Info => 0x5C9BF5,
+            Severity::Success => 0x35B56B,
+            Severity::Warn => 0xE8A33D,
+            Severity::Error => 0xE5484D,
         }
     }
 }
@@ -266,7 +306,7 @@ fn clear_all_offered(live_count: usize) -> bool {
 /// predicate is read at render time, so the button appears
 /// and disappears with the core's undo stack.
 ///
-/// Every live toast carries a dismiss "×"; when at least
+/// Every live toast carries a dismiss button; when at least
 /// [`CLEAR_ALL_MIN`] toasts are live, a "Clear all" button
 /// closes the stack and removes them all at once.
 pub fn toasts_view(s: &State, now: f32) -> El {
@@ -299,14 +339,21 @@ pub fn toasts_view(s: &State, now: f32) -> El {
         ));
     }
     if clear_all_offered(s.toasts.live_count(now)) {
-        column = column.child(btn("toast-clear-all", "Clear all", false, &t, move |s: &mut State| {
-            s.toasts.dismiss_all(now);
-        }));
+        column = column.child(icon_btn(
+            "toast-clear-all",
+            "trash-can",
+            "Clear all",
+            false,
+            &t,
+            move |s: &mut State| {
+                s.toasts.dismiss_all(now);
+            },
+        ));
     }
     column
 }
 
-/// One toast card: a severity dot and the status text on the
+/// One toast card: the severity glyph and the status text on the
 /// theme card surface, fading over its last second. `index`
 /// is the toast's items index — it keys the card (stable for
 /// the toast's whole life, unlike a live position) and the
@@ -315,8 +362,9 @@ pub fn toasts_view(s: &State, now: f32) -> El {
 /// also carries the Undo button: pressing it undoes once and
 /// dismisses this toast (the undo's own status change feeds
 /// a fresh toast through the poll hook, as for any op).
-/// Every card ends with a dismiss "×" (`toast-dismiss-{index}`)
-/// that removes exactly this toast and nothing else.
+/// Every card ends with an icon-only dismiss button
+/// (`toast-dismiss-{index}`, an "xmark" glyph) that removes
+/// exactly this toast and nothing else.
 fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, undo_label: &str) -> El {
     let mut card = row()
         .key(format!("toast-{index}"))
@@ -329,12 +377,11 @@ fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, und
         .fill(t.card)
         .border(1.0, t.card_border)
         .opacity(toast.fade(now))
-        .child(
-            el()
-                .size(9.0, 9.0)
-                .radius(4.5)
-                .fill(toast.severity.color()),
-        )
+        .child(icon_el_rgb(
+            toast.severity.icon(),
+            13.0,
+            toast.severity.icon_color(),
+        ))
         .child(
             text(toast.text.clone())
                 .font(type_::LABEL)
@@ -343,15 +390,29 @@ fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, und
                 .grow(1.0),
         );
     if action {
-        card = card.child(btn("toast-undo", undo_label, false, t, move |s: &mut State| {
-            s.core.undo();
-            s.toasts.dismiss(index);
-        }));
+        card = card.child(icon_btn(
+            "toast-undo",
+            "arrow-rotate-left",
+            undo_label,
+            false,
+            t,
+            move |s: &mut State| {
+                s.core.undo();
+                s.toasts.dismiss(index);
+            },
+        ));
     }
     let dismiss_key = format!("toast-dismiss-{index}");
-    card = card.child(btn(&dismiss_key, "×", false, t, move |s: &mut State| {
-        s.toasts.dismiss(index);
-    }));
+    card = card.child(icon_only_btn(
+        &dismiss_key,
+        "xmark",
+        26.0,
+        false,
+        t,
+        move |s: &mut State| {
+            s.toasts.dismiss(index);
+        },
+    ));
     card
 }
 

@@ -72,6 +72,21 @@
 //!   being renamed cancels the rename session first, so
 //!   `renaming` can never point at a shifted entry.
 //!
+//! ## Phase H additions (section 31/40)
+//!
+//! - **Icons**: the search row leads with a
+//!   `magnifying-glass` glyph ([`icon_el`]); the per-row
+//!   Insert button renders through [`icon_btn`] with
+//!   `plus` (its handler inserts — adds — the entry into
+//!   the project), Rename through [`icon_btn`] with
+//!   `pencil`, Delete as an icon-only [`icon_only_btn`]
+//!   with `trash-can`, and the rename editor's Apply /
+//!   Cancel through [`icon_btn`] with `check` / `xmark`.
+//!   Keys, labels, handlers and the active flags are
+//!   byte-identical to the text-button versions; the
+//!   header Hide/Show toggle and the save button keep
+//!   the plain [`btn`] rendering.
+//!
 //! The successful-rename fs dispatch (a real file moved
 //! under `./library`) is deliberately **untested**, for
 //! exactly the delete reason given below: test binaries
@@ -134,6 +149,8 @@ use rune::{col, row, text, text_input, El, ScrollSpec, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
+use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 /// The name prefix `load_library` gives its three built-in
@@ -510,10 +527,10 @@ fn rename_editor_row(s: &State, t: &Theme) -> El {
                 .placeholder("New name", t.text_secondary)
                 .on_edit(|s: &mut State| &mut s.library_panel.rename),
         )
-        .child(btn("library-rename-apply", "Apply", false, t, |s: &mut State| {
+        .child(icon_btn("library-rename-apply", "check", "Apply", false, t, |s: &mut State| {
             apply_rename(s)
         }))
-        .child(btn("library-rename-cancel", "Cancel", false, t, |s: &mut State| {
+        .child(icon_btn("library-rename-cancel", "xmark", "Cancel", false, t, |s: &mut State| {
             cancel_rename(s)
         }))
 }
@@ -537,20 +554,22 @@ fn entry_row(entry: &LibraryRow, s: &State, t: &Theme) -> El {
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         )
-        .child(btn(&format!("library-insert-{i}"), "Insert", false, t, move |s: &mut State| {
+        .child(icon_btn(&format!("library-insert-{i}"), "plus", "Insert", false, t, move |s: &mut State| {
             insert_at(&mut s.core, i);
         }));
     if !entry.builtin {
-        r = r.child(btn(
+        r = r.child(icon_btn(
             &format!("library-rename-{i}"),
+            "pencil",
             "Rename",
             s.library_panel.renaming == Some(i),
             t,
             move |s: &mut State| start_rename(s, i),
         ));
-        r = r.child(btn(
+        r = r.child(icon_only_btn(
             &format!("library-delete-{i}"),
-            "Delete",
+            "trash-can",
+            26.0,
             false,
             t,
             move |s: &mut State| {
@@ -638,6 +657,7 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
                 .key("library-search-row")
                 .gap(8.0)
                 .center_y()
+                .child(icon_el("magnifying-glass", 14.0, t.text_secondary))
                 .child(
                     text_input(&s.library_panel.search, type_::BODY.lh(26.0))
                         .key("library-search")

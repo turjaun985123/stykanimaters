@@ -57,6 +57,8 @@ use rune::tok::{type_, Family, Theme};
 use rune::{col, el, row, text, El};
 use stykanimate_rs::editor::EditorCore;
 
+use crate::rune_sec::icons::icon_el;
+
 /// The keyboard shortcuts that are real in this shell, as
 /// (key label, action) rows, grouped by section in panel
 /// order (see [`group_rows`]). Concatenating [`section_rows`]
@@ -175,12 +177,22 @@ fn shortcut_row(key: &str, action: &str, t: &Theme) -> El {
 }
 
 /// One help section: a title, its description, then either
-/// its shortcut rows or its explanatory note.
+/// its shortcut rows or its explanatory note. The title
+/// carries a small glyph (Phase H): `key` for the Shortcuts
+/// section, `list` for the rest — decoration only; the
+/// section names and descriptions are untouched.
 fn help_section(name: &str, description: &str, t: &Theme) -> El {
+    let header_icon = if name == "Shortcuts" { "key" } else { "list" };
     let mut section = col()
         .key(format!("help-section-{}", name.to_lowercase()))
         .gap(4.0)
-        .child(text(name.to_string()).font(type_::TITLE).color(t.text))
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(icon_el(header_icon, 12.0, t.text))
+                .child(text(name.to_string()).font(type_::TITLE).color(t.text)),
+        )
         .child(
             text(description.to_string())
                 .font(type_::LABEL)
@@ -221,7 +233,13 @@ pub fn help_panel(core: &EditorCore, t: &Theme) -> El {
         .radius(8.0)
         .padding(12.0)
         .gap(10.0)
-        .child(text("Help".to_string()).font(type_::TITLE).color(t.text))
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(icon_el("circle-question", 14.0, t.text))
+                .child(text("Help".to_string()).font(type_::TITLE).color(t.text)),
+        )
         .child(
             text(format!(
                 "{} · {} frames · {} fps",

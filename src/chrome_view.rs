@@ -28,6 +28,7 @@ use rune::{el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::rune_sec::i18n_wire;
+use crate::rune_sec::icon_btn::icon_btn;
 use crate::State;
 
 /// One chrome button: a padded, rounded label with hover/press
@@ -90,16 +91,16 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
                 .color(t.text)
                 .grow(1.0),
         )
-        .child(btn("save", &i18n_wire::tr(core, "save"), false, t, |s| {
+        .child(icon_btn("save", "floppy-disk", &i18n_wire::tr(core, "save"), false, t, |s| {
             s.core.save()
         }))
-        .child(btn("load", &i18n_wire::tr(core, "load"), false, t, |s| {
+        .child(icon_btn("load", "folder-open", &i18n_wire::tr(core, "load"), false, t, |s| {
             s.core.load()
         }))
-        .child(btn("undo", &i18n_wire::tr(core, "undo"), false, t, |s| {
+        .child(icon_btn("undo", "arrow-rotate-left", &i18n_wire::tr(core, "undo"), false, t, |s| {
             s.core.undo()
         }))
-        .child(btn("redo", &i18n_wire::tr(core, "redo"), false, t, |s| {
+        .child(icon_btn("redo", "arrow-rotate-right", &i18n_wire::tr(core, "redo"), false, t, |s| {
             s.core.redo()
         }))
 }
@@ -118,8 +119,9 @@ pub fn transport_row(s: &State, t: &Theme) -> El {
         .w_full()
         .gap(8.0)
         .center_y()
-        .child(btn(
+        .child(icon_btn(
             "prev",
+            "chevron-left",
             &i18n_wire::tr(core, "prev_frame"),
             false,
             t,
@@ -130,9 +132,17 @@ pub fn transport_row(s: &State, t: &Theme) -> El {
                 }
             },
         ))
-        .child(btn("play", &play_label, core.playing, t, |s| toggle_play(s)))
-        .child(btn(
+        .child(icon_btn(
+            "play",
+            if core.playing { "pause" } else { "play" },
+            &play_label,
+            core.playing,
+            t,
+            |s| toggle_play(s),
+        ))
+        .child(icon_btn(
             "next",
+            "chevron-right",
             &i18n_wire::tr(core, "next_frame"),
             false,
             t,
@@ -144,8 +154,9 @@ pub fn transport_row(s: &State, t: &Theme) -> El {
             },
         ))
         .child(el().grow(1.0))
-        .child(btn(
+        .child(icon_btn(
             "add-frame",
+            "plus",
             &i18n_wire::tr(core, "add_frame"),
             false,
             t,

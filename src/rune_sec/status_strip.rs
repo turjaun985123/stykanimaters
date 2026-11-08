@@ -115,6 +115,43 @@
 //! cannot see: [`status_strip`] delegates with no
 //! selections, and the shell calls
 //! [`status_strip_state`], which passes them through.
+//!
+//! ## Phase H — one glyph, and one refusal
+//!
+//! Phase H leads the loop segment with a `repeat`
+//! icon ([`segment_with_icon`]): 11 pt tall, and
+//! because `repeat`'s view box is square (512 × 512)
+//! exactly 11 pt wide, plus a 4 pt gap — 15 pt of
+//! additive width inside a segment whose floor stays
+//! the text-only [`est_text_width`]. The absorption
+//! check, stated as the average advance the label may
+//! have before glyph + text would outpaint the floor:
+//! `(floor − 15) / chars`. For the longest pinned loop
+//! label, `Loop 999–1000` (floor 13 × 8.0 = 104 pt),
+//! the budget is ≈ 6.85 pt/char (0.57 em). The classes
+//! actually in the label run below it — letters at the
+//! documented ≈ 0.5 em, digits at ≈ 0.55 em, capitals
+//! ≈ 0.67 em for the one `L` — totalling ≈ 84 pt of
+//! text, ≈ 99 pt with the glyph, ≈ 5 pt to spare; even
+//! at a pessimistic 0.6 em tabular-digit advance the
+//! total is ≈ 103 pt, still inside, and overflow
+//! would need digits averaging over ≈ 0.61 em, beyond
+//! common UI fonts. Longer labels only amortise
+//! better: the overhead is fixed while the floor
+//! grows per character.
+//!
+//! The audio segment gets NO glyph, deliberately.
+//! `Audio on` is only 8 chars (floor 64 pt), and the
+//! honest `volume-high` glyph is wider than its 11 pt
+//! height suggests — its view box is 640 wide, so it
+//! paints 13.75 pt wide; glyph + gap ≈ 17.75 pt over
+//! 8 chars drops the budget to ≈ 5.8 pt/char
+//! (0.48 em), below even the documented *typical*
+//! glyph advance of 0.5 em (see [`LABEL_CHAR_W`]) —
+//! the floor cannot absorb it safely, so the segment
+//! stays text-only. The stroke and particle segments
+//! stay text-only too: a selection index has no
+//! honest glyph.
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, El};
@@ -394,6 +431,36 @@ fn segment(label: String, t: &Theme) -> El {
     text(label).font(type_::LABEL).color(t.text).min_w(floor)
 }
 
+/// Hex for glyph painting beside a strip label:
+/// `icon_el` takes a `0xRRGGBB` value where the label
+/// itself takes the theme's `Color`. The strip always
+/// builds with `tok::theme(true)` (see
+/// [`status_strip_state`]), whose text colour is the
+/// 2.0 palette's primary text, `#F1F3F7`.
+const GLYPH_TEXT: u32 = 0xF1F3F7;
+
+/// One fixed strip segment with a leading icon glyph
+/// (Phase H): a centred row of the glyph — 11 pt tall,
+/// width from the icon's own aspect — a 4 pt gap, and
+/// the label text, floored at the SAME
+/// [`est_text_width`] a plain [`segment`] would use.
+/// The floor stays computed from the text alone; the
+/// glyph is additive width inside the floored segment,
+/// absorbed by the floor's conservatism. Only a
+/// segment whose label is long enough to amortise the
+/// glyph may use this — the loop segment, per the
+/// width check in the module docs (the audio segment
+/// fails that check and stays text-only).
+fn segment_with_icon(label: String, icon: &str, t: &Theme) -> El {
+    let floor = est_text_width(&label);
+    row()
+        .gap(4.0)
+        .center_y()
+        .min_w(floor)
+        .child(crate::rune_sec::icons::icon_el_rgb(icon, 11.0, GLYPH_TEXT))
+        .child(text(label).font(type_::LABEL).color(t.text))
+}
+
 /// Hairline divider between segments. Floored at its
 /// own 1 pt so width pressure cannot shrink it away to
 /// nothing (the tail segment absorbs the shortage).
@@ -464,14 +531,25 @@ fn build_strip(
     ];
     // Phase G conditional segments: after the original
     // fixed segments, before the tail, in audio / loop /
-    // stroke / particle order. Each is built by the same
-    // `segment()` helper, so each is floored at its own
+    // stroke / particle order. Each is floored at its own
     // label's estimated width exactly like the original
     // fixed segments; each appears only while its
     // condition holds, so the strip's usual width is
-    // unchanged.
+    // unchanged. Phase H: the loop segment is built by
+    // `segment_with_icon` instead — same label, same
+    // floor, plus the leading `repeat` glyph whose
+    // absorption the module docs verify. The branch is
+    // chosen by comparing against this module's own
+    // `loop_segment` output, so it tracks any future
+    // formatting change; no other extra label can
+    // collide ("Audio on", "Stroke {n}", "Particle {n}").
+    let loop_label = loop_segment(core.loop_range);
     for label in extra_segments(core, stroke_selected, particle_selected) {
-        segments.push(segment(label, &t));
+        if Some(&label) == loop_label.as_ref() {
+            segments.push(segment_with_icon(label, "repeat", &t));
+        } else {
+            segments.push(segment(label, &t));
+        }
     }
     // Chrome's line ended with the core's status
     // message; keep it, dimmed, as the tail segment —
@@ -831,5 +909,27 @@ mod tests {
             extra_segments(&core, None, None),
             vec!["Loop 2–4".to_string()]
         );
+    }
+
+    #[test]
+    fn strip_builds_with_the_longest_loop_label() {
+        // Phase H: the loop segment's icon branch must
+        // build at the longest pinned label too — the
+        // label whose floor absorption the module docs
+        // verify — and the glyph leaves the label string
+        // itself unchanged.
+        let mut core = EditorCore::new();
+        core.loop_range = Some((998, 999));
+        let _ = status_strip(&core);
+        assert_eq!(
+            extra_segments(&core, None, None),
+            vec!["Loop 999–1000".to_string()]
+        );
+        // The absorption budget the module docs state:
+        // the text-only floor (104 pt) still covers the
+        // glyph (11 pt) + its gap (4 pt) + the label's
+        // painted width at the documented advances
+        // (≈ 84 pt for this label's glyph classes).
+        assert!(est_text_width("Loop 999–1000") > 11.0 + 4.0 + 84.0);
     }
 }

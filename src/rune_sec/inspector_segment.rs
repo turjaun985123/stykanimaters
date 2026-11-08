@@ -88,6 +88,16 @@
 //!   root and non-leaves with a status message.
 //!
 //! When nothing is selected the panel is one muted line.
+//!
+//! Phase H icon pass: the header title leads with the
+//! `shapes` glyph (`icons::icon_el`, rendered only when
+//! the icon set has it), Cycle bend renders through
+//! `icon_btn` with the `repeat` glyph, and Delete
+//! segment keeps its danger styling with the `trash-can`
+//! glyph inside it — element keys and labels unchanged
+//! everywhere. Every stepper (Length, Thickness,
+//! Rotate, Bend) deliberately stays text: compactness
+//! is their point.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, Color, El};
@@ -95,6 +105,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Shape;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_btn;
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -382,10 +393,20 @@ fn stepper_row(
 }
 
 /// The Delete segment button: chrome-button shape in the
-/// error colour (the 2.0 palette's `C_ERROR`).
-fn danger_btn(key: &str, label: &str, f: impl Fn(&mut State) + 'static) -> El {
+/// error colour (the 2.0 palette's `C_ERROR`), leading
+/// with the `icon` glyph (white, matching the label)
+/// when the icon set has it (Phase H). The danger
+/// styling is deliberate — this is the panel's one
+/// destructive verb — so it is not swapped for the
+/// standard `icon_btn` chrome.
+fn danger_btn(key: &str, icon: &str, label: &str, f: impl Fn(&mut State) + 'static) -> El {
     let red = hex_color(0xF16F78).unwrap_or(Color::WHITE);
     let red_dark = hex_color(0xD85560).unwrap_or(red);
+    let mut content = row().center_y().gap(6.0);
+    if crate::rune_sec::icons::has_icon(icon) {
+        content = content.child(crate::rune_sec::icons::icon_el(icon, 12.0, Color::WHITE));
+    }
+    content = content.child(text(label).font(type_::LABEL).color(Color::WHITE));
     el()
         .key(key)
         .px(10.0)
@@ -395,7 +416,7 @@ fn danger_btn(key: &str, label: &str, f: impl Fn(&mut State) + 'static) -> El {
         .hover(red_dark)
         .press(red_dark)
         .on_press(f)
-        .child(text(label).font(type_::LABEL).color(Color::WHITE))
+        .child(content)
 }
 
 /// One colour swatch: a rounded square in the palette
@@ -434,12 +455,24 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 .color(t.text_secondary),
         );
     };
+    // Panel header (Phase H): the `shapes` glyph leads
+    // the title when the icon set has it — the menus'
+    // guarded `icon_el` pattern; the title text itself
+    // is byte-identical to before.
+    let title = text(format!("Segment {} · {}", st.node, st.name))
+        .font(type_::LABEL)
+        .color(t.text);
+    let header = if crate::rune_sec::icons::has_icon("shapes") {
+        row()
+            .center_y()
+            .gap(6.0)
+            .child(crate::rune_sec::icons::icon_el("shapes", 12.0, t.text))
+            .child(title)
+    } else {
+        row().child(title)
+    };
     let mut panel = panel
-        .child(
-            text(format!("Segment {} · {}", st.node, st.name))
-                .font(type_::LABEL)
-                .color(t.text),
-        )
+        .child(header)
         .child(readout_row("Length", format!("{:.0}", st.length), t))
         .child(readout_row("Thickness", format!("{:.0}", st.thickness), t))
         .child(readout_row("Angle", format_deg(st.angle_deg), t))
@@ -532,7 +565,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(btn("cycle-bend", "Cycle bend", false, t, |s| {
+                .child(icon_btn("cycle-bend", "repeat", "Cycle bend", false, t, |s| {
                     s.core.cycle_bend()
                 }))
                 .child(btn("node-shape", "Cycle shape", false, t, |s| {
@@ -558,7 +591,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
             .gap(8.0)
             .center_y()
             .child(btn("add-seg", "+ Segment", false, t, |s| s.core.add_segment()))
-            .child(danger_btn("del-seg", "Delete segment", |s| {
+            .child(danger_btn("del-seg", "trash-can", "Delete segment", |s| {
                 s.core.delete_segment()
             })),
     )
@@ -811,6 +844,20 @@ mod tests {
             core.status
         );
         assert!(core.project.frames[core.current].bends.is_empty());
+    }
+
+    #[test]
+    fn phase_h_glyphs_exist_in_the_icon_set() {
+        // The header, Cycle bend and Delete segment glyphs
+        // must name real icons — `has_icon` false would
+        // silently drop the header/Delete glyphs (and the
+        // menus' convention is to pin this in a test).
+        for name in ["shapes", "repeat", "trash-can"] {
+            assert!(
+                crate::rune_sec::icons::has_icon(name),
+                "glyph {name} not in the icon set"
+            );
+        }
     }
 
     #[test]

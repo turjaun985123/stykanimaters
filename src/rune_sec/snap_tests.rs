@@ -89,6 +89,51 @@
 //!   the test navigates by the `ws-effects` chip and
 //!   asserts on state, so it exercises the panel as soon
 //!   as it is mounted there.
+//!
+//! Round 5 (Phase H, section 39) adds three tests: the
+//! command palette's loop-playback toggle (over section
+//! 36's State-level dispatch migration), the transport
+//! play control's key/state behaviour, and the Project
+//! section's audit-map key coverage — the Phase G §12
+//! audit's closing item, which belongs here because a
+//! unit test inside project_tools cannot walk the built
+//! element tree (rune's `El` exposes no public tree
+//! walk); only the Runtime's presented tree can prove
+//! the emitted keys. Facts they rest on, verified
+//! against the tree:
+//! * Section 36's migration landed as briefed:
+//!   `Command::run` is `fn(&mut State)`, and the toggle
+//!   command's key is exactly `toggle-loop-playback`
+//!   ("Toggle loop playback", Transport group); its
+//!   shim flips `State::loop_playback` and nothing else
+//!   — the `pb-loop` panel button's own flip. Typing in
+//!   the palette resets the highlight to row 0 (the
+//!   field's `on_input_change`), and `display_commands`
+//!   / `COMMANDS` are the same pub listing
+//!   `run_selected` resolves through, so the test
+//!   locates the toggle's row in that listing for the
+//!   typed query and walks the highlight to it with
+//!   Down — the palette's own selection key — instead
+//!   of assuming the fuzzy ranking.
+//! * The transport's play/pause control is a single
+//!   element keyed `play` in both states
+//!   (chrome_view::transport_row; its label and active
+//!   flag flip with `core.playing`) — no element keyed
+//!   `pause` exists anywhere in the shell, and
+//!   playback_controls' own transport-family keys
+//!   (`pb-restart` / `pb-play-range` / `pb-loop`) never
+//!   toggle play. The transport test therefore asserts
+//!   the one key's presence in both states plus
+//!   `core.playing` — key presence and state only,
+//!   never pixels.
+//! * `Section::Project` is gated to Animate, Export and
+//!   Home (workspaces.rs); every static key in the §12
+//!   audit map is emitted unconditionally by
+//!   `project_section`, including `proj-list` (the
+//!   empty-list text covers the no-projects case), so
+//!   all of them must appear in Animate's presented
+//!   tree. The dynamic `open-proj-{i}` rows need a saved
+//!   project on disk and are not asserted.
 
 use std::collections::BTreeSet;
 
@@ -980,4 +1025,181 @@ fn particles_panel_add_selects_the_new_event() {
     // Restore the shared prefs' workspace, as rounds 2–3 do.
     tap(&mut rt, "ws-animate");
     assert_eq!(rt.state.workspace, Workspace::Animate);
+}
+
+// ----------------------------------------------------------------
+// Round 5 (Phase H, section 39): the palette's
+// loop-playback toggle over the State-level dispatch, the
+// transport play control's key/state behaviour, and the
+// Project section's audit-map key coverage.
+// ----------------------------------------------------------------
+
+#[test]
+fn palette_toggles_loop_playback() {
+    use crate::rune_sec::command_palette::{display_commands, COMMANDS};
+
+    let mut rt = editor();
+    // Shell state, not persisted: every fresh shell starts
+    // with loop playback on (the integrator's `init`
+    // value, the Phase G default that preserved the
+    // engine's unconditional wrap).
+    assert!(rt.state.loop_playback, "loop playback starts on");
+
+    // One full pass through the palette's real run path —
+    // Ctrl+K, type the query, walk the highlight to the
+    // toggle command's row, Enter — returning the loop
+    // flag as the pass left it.
+    let run_toggle = |rt: &mut Runtime<State>| -> bool {
+        // Ctrl+K, built exactly as round 2's palette test
+        // builds it (`is_command('k')` matches
+        // `Key::Command('k')` only).
+        press_key(
+            rt,
+            Key::Command('k'),
+            Mods {
+                cmd: true,
+                ..Mods::default()
+            },
+        );
+        assert!(rt.state.palette.open, "Ctrl+K opens the palette");
+        // A settling frame: the query field claims runtime
+        // focus from the flag `open_palette` set.
+        rt.frame(DT);
+        for c in "loop".chars() {
+            type_char(rt, c);
+        }
+        assert_eq!(
+            rt.state.palette.query.text, "loop",
+            "typed characters landed in the query field"
+        );
+        // Locate the toggle in the palette's own listing
+        // for this query — the same `display_commands`
+        // `run_selected` resolves through — and walk the
+        // highlight to its row with Down, the palette's
+        // own selection key. (Typing reset the highlight
+        // to row 0; the delta walk holds either way.)
+        let (results, _) =
+            display_commands(&rt.state.palette.query.text, &rt.state.palette.recent);
+        let row = results
+            .iter()
+            .position(|&ci| COMMANDS[ci].key == "toggle-loop-playback")
+            .expect("the loop query lists toggle-loop-playback (section 36's key)");
+        let len = results.len();
+        let cur = rt.state.palette.selected % len;
+        for _ in 0..(row + len - cur) % len {
+            press_key(rt, Key::Down, Mods::default());
+        }
+        assert_eq!(
+            rt.state.palette.selected, row,
+            "the highlight sits on the toggle's row"
+        );
+        // Enter runs the selection (the field's `on_submit`
+        // and `palette_handle_key` both call `run_selected`)
+        // and running a command closes the palette. The
+        // command's shim is the `pb-loop` flip itself, now
+        // reachable because dispatch is State-level.
+        press_key(rt, Key::Enter, Mods::default());
+        assert!(
+            !rt.state.palette.open,
+            "running a command closes the palette"
+        );
+        rt.state.loop_playback
+    };
+
+    assert!(
+        !run_toggle(&mut rt),
+        "first run flips loop playback off"
+    );
+    assert!(
+        run_toggle(&mut rt),
+        "second run flips loop playback back on"
+    );
+}
+
+#[test]
+fn transport_shows_icon_buttons() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // Seed Animate (the shared-prefs discipline) — which
+    // is also the state this test leaves behind.
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // The transport's play/pause control is ONE element:
+    // chrome_view::transport_row keys it `play` in both
+    // states — the label (Play/Pause via i18n) and the
+    // active flag flip with `core.playing`; there is no
+    // separate `pause` key anywhere in the shell, so the
+    // pause state is this same control, presented active.
+    // (playback_controls' own transport-family keys —
+    // `pb-restart`, `pb-play-range`, `pb-loop` — start or
+    // loop playback but never toggle it.) Assertions stay
+    // at key presence + `core.playing`, as the round's
+    // discipline requires.
+    assert!(!rt.state.core.playing, "playback starts stopped");
+    assert!(
+        presented_keys(&rt).contains("play"),
+        "Animate presents the transport's play control"
+    );
+
+    // The press starts playback; the same key now
+    // presents the control in its pause state.
+    tap(&mut rt, "play");
+    assert!(rt.state.core.playing, "the press starts playback");
+    assert!(
+        presented_keys(&rt).contains("play"),
+        "the same control presents the pause state while playing"
+    );
+
+    // Restore: the same control pauses again.
+    tap(&mut rt, "play");
+    assert!(!rt.state.core.playing, "the second press pauses");
+}
+
+#[test]
+fn project_section_key_coverage() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // `Section::Project` is gated to Animate (also Export
+    // and Home in the workspaces table). Seed Animate —
+    // which also leaves the shared prefs naming Animate,
+    // as they started.
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+    // The freshly mounted panel presence-fades in; settle
+    // (bounded) until its root is presented before
+    // reading the whole key set.
+    for _ in 0..30 {
+        if presented_keys(&rt).contains("project-tools") {
+            break;
+        }
+        rt.frame(DT);
+    }
+
+    // The Phase G §12 audit map's static keys (the map
+    // lives in project_tools' module docs). Every one is
+    // emitted unconditionally by `project_section` — the
+    // section root, the name field's wrapper, its Set
+    // button, the New/Save/Recover row and the selector
+    // list (which renders its empty text when ./projects
+    // holds nothing) — so all of them must be in the
+    // presented tree. The dynamic `open-proj-{i}` rows
+    // need a saved project on disk, so they are NOT
+    // asserted here.
+    let keys = presented_keys(&rt);
+    for want in [
+        "project-tools",
+        "proj-name-field",
+        "proj-set-name",
+        "new-proj",
+        "save-proj",
+        "recover",
+        "proj-list",
+    ] {
+        assert!(keys.contains(want), "missing audit-map key {want:?}");
+    }
 }

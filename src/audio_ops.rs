@@ -38,6 +38,21 @@
 //! statuses stay byte-identical to Phase E; MCP and the
 //! panel's existing buttons are unaffected.
 //!
+//! Phase H (section 37): the remaining last-clip-only DSP
+//! effects get indexed primaries here too —
+//! `audio_echo_at`, `audio_lowpass_at`,
+//! `audio_trim_silence_at`, `audio_split_silences_at`,
+//! `audio_pitch_at`, `audio_compress_at`. Their originals
+//! live in `editor.rs` (`audio_echo_last` and family,
+//! Waves 11–13) and are NOT touched: each primary below
+//! mirrors its `editor.rs` body step for step — same
+//! `audio_edit` DSP call with the same fixed parameters,
+//! same product suffix, same success/failure status text
+//! with the clip number taken from the index — so the DSP
+//! maths exists exactly once, in `audio_edit`. The panel
+//! can now aim these effects at the selected clip instead
+//! of always the last one.
+//!
 //! `audio_derived_path` below is a copy of the private helper
 //! of the same name in `editor.rs`: it is private to that
 //! module, so this file cannot call it — the body is kept
@@ -289,6 +304,338 @@ impl EditorCore {
             return;
         };
         self.audio_move_at(clip_idx, delta_frames);
+    }
+
+    // ---- Phase H: indexed DSP effects ----
+    //
+    // Indexed primaries for the Wave 11–13 effects whose
+    // originals (`audio_echo_last` and family) live in
+    // `editor.rs` and hardcode the last clip. Each body
+    // mirrors its `editor.rs` original step for step — the
+    // same `audio_edit` DSP with the same fixed parameters,
+    // the same product suffix, the same status text — with
+    // the clip number taken from `index`. An out-of-range
+    // index is the status-only refusal this file's Phase G
+    // family established; no snapshot is taken.
+
+    /// Phase H: apply a feedback echo (0.18 s delay, 0.35
+    /// feedback — the fixed parameters of
+    /// `EditorCore::audio_echo_last` in `editor.rs`) to
+    /// audio clip `index` (0-based). The processed audio is
+    /// written beside the source as `<stem>.echo.wav`, the
+    /// source file is never overwritten, and only after the
+    /// write does the clip point to the new file (behind one
+    /// undo snapshot). An out-of-range index only sets the
+    /// status.
+    pub fn audio_echo_at(&mut self, index: usize) {
+        if self.project.audio.get(index).is_none() {
+            self.status = format!("Audio echo failed: no clip {}.", index + 1);
+            return;
+        }
+        let clip = self.project.audio[index].clone();
+        let mut wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio echo failed: {e}");
+                return;
+            }
+        };
+        crate::audio_edit::echo(&mut wav, 0.18, 0.35);
+        let source = PathBuf::from(&clip.path);
+        let out = audio_derived_path(&source, ".echo.wav");
+        if out == source {
+            self.status = "Audio echo failed: output would overwrite the source.".into();
+            return;
+        }
+        if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&wav)) {
+            self.status = format!("Audio echo failed: could not write {}: {e}", out.display());
+            return;
+        }
+        self.snapshot();
+        self.project.audio[index].path = out.to_string_lossy().into_owned();
+        self.status = format!(
+            "Echo applied to audio clip {} (0.18s delay, 35% feedback): {}.",
+            index + 1,
+            out.display()
+        );
+    }
+
+    /// Phase H: apply a 1200 Hz low-pass filter (the fixed
+    /// cutoff of `EditorCore::audio_lowpass_last` in
+    /// `editor.rs`) to audio clip `index` (0-based). Same
+    /// materialise-and-repoint pattern as
+    /// [`Self::audio_echo_at`]; the product is
+    /// `<stem>.lowpass.wav`. An out-of-range index only sets
+    /// the status.
+    pub fn audio_lowpass_at(&mut self, index: usize) {
+        if self.project.audio.get(index).is_none() {
+            self.status = format!("Audio low-pass failed: no clip {}.", index + 1);
+            return;
+        }
+        let clip = self.project.audio[index].clone();
+        let mut wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio low-pass failed: {e}");
+                return;
+            }
+        };
+        crate::audio_edit::lowpass(&mut wav, 1200.0);
+        let source = PathBuf::from(&clip.path);
+        let out = audio_derived_path(&source, ".lowpass.wav");
+        if out == source {
+            self.status = "Audio low-pass failed: output would overwrite the source.".into();
+            return;
+        }
+        if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&wav)) {
+            self.status = format!(
+                "Audio low-pass failed: could not write {}: {e}",
+                out.display()
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.audio[index].path = out.to_string_lossy().into_owned();
+        self.status = format!(
+            "Low-pass filter (1200 Hz) applied to audio clip {}: {}.",
+            index + 1,
+            out.display()
+        );
+    }
+
+    /// Phase H: trim leading and trailing silence (samples
+    /// below 0.02) from audio clip `index` (0-based) — the
+    /// indexed form of `EditorCore::audio_trim_silence_last`
+    /// in `editor.rs`. Same materialise-and-repoint pattern
+    /// as [`Self::audio_echo_at`]; the product is
+    /// `<stem>.silence.wav`. When the clip has no silence at
+    /// either edge there is nothing to write: no file is
+    /// created, no snapshot is taken, and the status says
+    /// so. An out-of-range index only sets the status.
+    pub fn audio_trim_silence_at(&mut self, index: usize) {
+        if self.project.audio.get(index).is_none() {
+            self.status = format!("Audio trim silence failed: no clip {}.", index + 1);
+            return;
+        }
+        let clip = self.project.audio[index].clone();
+        let mut wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio trim silence failed: {e}");
+                return;
+            }
+        };
+        let (lead, trail) = crate::audio_edit::trim_silence(&mut wav, 0.02);
+        if lead + trail == 0 {
+            self.status = format!("No silence to trim from audio clip {}.", index + 1);
+            return;
+        }
+        let source = PathBuf::from(&clip.path);
+        let out = audio_derived_path(&source, ".silence.wav");
+        if out == source {
+            self.status = "Audio trim silence failed: output would overwrite the source.".into();
+            return;
+        }
+        if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&wav)) {
+            self.status = format!(
+                "Audio trim silence failed: could not write {}: {e}",
+                out.display()
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.audio[index].path = out.to_string_lossy().into_owned();
+        self.status = format!(
+            "Trimmed {} silent frame(s) ({} at the start, {} at the end) from audio clip {}: {}.",
+            lead + trail,
+            lead,
+            trail,
+            index + 1,
+            out.display()
+        );
+    }
+
+    /// Phase H: pitch-shift audio clip `index` (0-based) up
+    /// 2 semitones — the fixed shift of
+    /// `EditorCore::audio_pitch_last` in `editor.rs`, which
+    /// takes no parameter, so neither does this primary (a
+    /// rate shift: pitch and duration change together, the
+    /// stored sample rate is untouched). Same
+    /// materialise-and-repoint pattern as
+    /// [`Self::audio_echo_at`]; the product is
+    /// `<stem>.pitch.wav` and the source file is never
+    /// overwritten. An out-of-range index only sets the
+    /// status.
+    pub fn audio_pitch_at(&mut self, index: usize) {
+        if self.project.audio.get(index).is_none() {
+            self.status = format!("Audio pitch shift failed: no clip {}.", index + 1);
+            return;
+        }
+        let clip = self.project.audio[index].clone();
+        let mut wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio pitch shift failed: {e}");
+                return;
+            }
+        };
+        crate::audio_edit::pitch_shift(&mut wav, 2.0);
+        let source = PathBuf::from(&clip.path);
+        let out = audio_derived_path(&source, ".pitch.wav");
+        if out == source {
+            self.status = "Audio pitch shift failed: output would overwrite the source.".into();
+            return;
+        }
+        if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&wav)) {
+            self.status = format!(
+                "Audio pitch shift failed: could not write {}: {e}",
+                out.display()
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.audio[index].path = out.to_string_lossy().into_owned();
+        self.status = format!(
+            "Pitch shift (+2 semitones) applied to audio clip {}: {}.",
+            index + 1,
+            out.display()
+        );
+    }
+
+    /// Phase H: run a compressor (threshold 0.5, ratio 4.0 —
+    /// the fixed parameters of
+    /// `EditorCore::audio_compress_last` in `editor.rs`,
+    /// which takes no parameters, so neither does this
+    /// primary) over audio clip `index` (0-based). Same
+    /// materialise-and-repoint pattern as
+    /// [`Self::audio_echo_at`]; the product is
+    /// `<stem>.comp.wav` and the source file is never
+    /// overwritten. An out-of-range index only sets the
+    /// status.
+    pub fn audio_compress_at(&mut self, index: usize) {
+        if self.project.audio.get(index).is_none() {
+            self.status = format!("Audio compress failed: no clip {}.", index + 1);
+            return;
+        }
+        let clip = self.project.audio[index].clone();
+        let mut wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio compress failed: {e}");
+                return;
+            }
+        };
+        crate::audio_edit::compress(&mut wav, 0.5, 4.0);
+        let source = PathBuf::from(&clip.path);
+        let out = audio_derived_path(&source, ".comp.wav");
+        if out == source {
+            self.status = "Audio compress failed: output would overwrite the source.".into();
+            return;
+        }
+        if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&wav)) {
+            self.status = format!(
+                "Audio compress failed: could not write {}: {e}",
+                out.display()
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.audio[index].path = out.to_string_lossy().into_owned();
+        self.status = format!(
+            "Compressor (threshold 0.5, ratio 4.0) applied to audio clip {}: {}.",
+            index + 1,
+            out.display()
+        );
+    }
+
+    /// Phase H: split audio clip `index` (0-based) wherever
+    /// silence (below 0.02) lasts at least a quarter second —
+    /// the indexed form of
+    /// `EditorCore::audio_split_at_silences_last` in
+    /// `editor.rs`. Each sounding range is materialised
+    /// beside the source as `<stem>.seg1.wav`,
+    /// `<stem>.seg2.wav`, ... — a segment clip pointing at
+    /// the original file would restart the audio from its
+    /// beginning, because `AudioClip` has no source-offset
+    /// field. The first segment replaces clip `index` and
+    /// the remaining segments are inserted immediately after
+    /// it, each starting at the original start plus
+    /// `round(range_start_secs * fps)` and keeping the
+    /// original clip's gain. One snapshot, taken only after
+    /// every segment file is written. Fewer than two ranges
+    /// (no qualifying silence) is a no-op: no files are
+    /// written and no snapshot is taken.
+    ///
+    /// Returns the number of clips ADDED to the timeline —
+    /// the segment count minus one (the first segment
+    /// replaces the split clip rather than adding to it) —
+    /// or 0 when nothing was split (refusal or no-op).
+    pub fn audio_split_silences_at(&mut self, index: usize) -> usize {
+        if self.project.audio.get(index).is_none() {
+            self.status = format!("Audio split at silences failed: no clip {}.", index + 1);
+            return 0;
+        }
+        let clip = self.project.audio[index].clone();
+        let wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio split at silences failed: {e}");
+                return 0;
+            }
+        };
+        let rate = wav.sample_rate;
+        let min_silence = (rate as f32 * 0.25) as usize;
+        let ranges = crate::audio_edit::split_at_silences(&wav, 0.02, min_silence);
+        if ranges.len() < 2 {
+            self.status = format!(
+                "Audio clip {} has no silence of 0.25s or more to split at.",
+                index + 1
+            );
+            return 0;
+        }
+        let source = PathBuf::from(&clip.path);
+        let ch = wav.channels as usize;
+        let fps = self.project.fps.max(1.0);
+        let mut segments: Vec<crate::model::AudioClip> =
+            Vec::with_capacity(ranges.len());
+        for (i, &(start, end)) in ranges.iter().enumerate() {
+            let seg = crate::audio_edit::WavData {
+                sample_rate: wav.sample_rate,
+                channels: wav.channels,
+                samples: wav.samples[start * ch..end * ch].to_vec(),
+            };
+            let out = audio_derived_path(&source, &format!(".seg{}.wav", i + 1));
+            if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&seg)) {
+                self.status = format!(
+                    "Audio split at silences failed: could not write {}: {e}",
+                    out.display()
+                );
+                return 0;
+            }
+            let start_secs = start as f32 / rate.max(1) as f32;
+            let shift = (start_secs * fps).round().max(0.0) as usize;
+            segments.push(crate::model::AudioClip {
+                path: out.to_string_lossy().into_owned(),
+                start_frame: clip.start_frame.saturating_add(shift),
+                gain: clip.gain,
+            });
+        }
+        let n = segments.len();
+        self.snapshot();
+        // The first segment replaces the split clip; the rest
+        // are inserted immediately after it, in order (the
+        // placement `audio_split` uses for its second half).
+        let mut segments = segments.into_iter();
+        self.project.audio[index] =
+            segments.next().expect("at least two ranges were checked");
+        for (j, seg) in segments.enumerate() {
+            self.project.audio.insert(index + 1 + j, seg);
+        }
+        self.status = format!(
+            "Audio clip {} split at silences into {n} clips.",
+            index + 1
+        );
+        n - 1
     }
 }
 
@@ -650,5 +997,303 @@ mod tests {
         assert_eq!(core.status, "Audio move failed: no clip 4.");
         assert_eq!(project_json(&core), before, "project untouched");
         assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+    }
+
+    // ---- Phase H: indexed DSP effects ----
+
+    /// Write a mono 8 kHz WAV with exactly the given samples
+    /// to `dir/name`. Returns the path as a `String`.
+    fn write_samples_wav(dir: &PathBuf, name: &str, samples: Vec<f32>) -> String {
+        let wav = crate::audio_edit::WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples,
+        };
+        let path = dir.join(name);
+        std::fs::write(&path, crate::audio_edit::write_wav(&wav)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn echo_at_targets_the_chosen_clip() {
+        let dir = temp_dir("echo-at");
+        let a = write_samples_wav(&dir, "a.wav", vec![0.5; 4000]);
+        let b = write_samples_wav(&dir, "b.wav", vec![0.25; 100]);
+        let mut core = core_with(vec![clip(&a, 0), clip(&b, 4)]);
+        let edits = core.edits_since_autosave();
+        core.audio_echo_at(0);
+        // Only clip 1 was repointed, at its own echo product.
+        let expected = dir.join("a.echo.wav").to_string_lossy().into_owned();
+        assert_eq!(paths(&core), vec![expected.as_str(), b.as_str()]);
+        assert_eq!(
+            core.status,
+            format!("Echo applied to audio clip 1 (0.18s delay, 35% feedback): {expected}.")
+        );
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        // The product really is the echo of clip 1's file:
+        // the delay is 0.18 s = 1440 frames at 8 kHz, so
+        // frame 2000 gains 35% of frame 560 (still 0.5) and
+        // frame 2880 gains 35% of the already-echoed frame
+        // 1440 (0.5 + 0.35 * 0.5).
+        let product = crate::audio_edit::read_wav(&expected).unwrap();
+        assert!((product.samples[0] - 0.5).abs() < 0.001);
+        assert!((product.samples[2000] - 0.675).abs() < 0.001);
+        assert!((product.samples[2880] - 0.73625).abs() < 0.001);
+        // Clip 2's file and clip 1's source are untouched.
+        let other = crate::audio_edit::read_wav(&b).unwrap();
+        assert_eq!(other.samples.len(), 100);
+        assert!((other.samples[0] - 0.25).abs() < 0.001);
+        let source = crate::audio_edit::read_wav(&a).unwrap();
+        assert!((source.samples[2000] - 0.5).abs() < 0.001);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lowpass_at_targets_the_chosen_clip() {
+        let dir = temp_dir("lowpass-at");
+        // Nyquist alternation: the harshest thing a 1200 Hz
+        // one-pole at 8 kHz can be shown to smooth.
+        let alternating: Vec<f32> = (0..2000)
+            .map(|i| if i % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
+        let a = write_samples_wav(&dir, "a.wav", alternating);
+        let b = write_samples_wav(&dir, "b.wav", vec![0.25; 100]);
+        let mut core = core_with(vec![clip(&a, 0), clip(&b, 4)]);
+        let edits = core.edits_since_autosave();
+        core.audio_lowpass_at(0);
+        let expected = dir.join("a.lowpass.wav").to_string_lossy().into_owned();
+        assert_eq!(paths(&core), vec![expected.as_str(), b.as_str()]);
+        assert_eq!(
+            core.status,
+            format!("Low-pass filter (1200 Hz) applied to audio clip 1: {expected}.")
+        );
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        // The filter state seeds on the first sample (frame 0
+        // passes unchanged), frame 1 moves one alpha towards
+        // -0.5, and the steady-state swing is ~0.22, well
+        // under the unfiltered 0.5.
+        let alpha = 1.0 - (-2.0 * std::f32::consts::PI * 1200.0 / 8000.0).exp();
+        let product = crate::audio_edit::read_wav(&expected).unwrap();
+        assert!((product.samples[0] - 0.5).abs() < 0.001);
+        assert!((product.samples[1] - (0.5 - alpha)).abs() < 0.002);
+        assert!(product.samples[1998].abs() > 0.15);
+        assert!(product.samples[1998].abs() < 0.26);
+        // Clip 2's file and clip 1's source are untouched.
+        let other = crate::audio_edit::read_wav(&b).unwrap();
+        assert!((other.samples[0] - 0.25).abs() < 0.001);
+        let source = crate::audio_edit::read_wav(&a).unwrap();
+        assert!((source.samples[1] - (-0.5)).abs() < 0.001);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trim_silence_at_targets_the_chosen_clip() {
+        let dir = temp_dir("trim-at");
+        let mut samples = vec![0.0; 1000];
+        samples.extend(vec![0.5; 2000]);
+        samples.extend(vec![0.0; 1000]);
+        let a = write_samples_wav(&dir, "a.wav", samples);
+        let b = write_samples_wav(&dir, "b.wav", vec![0.25; 100]);
+        let mut core = core_with(vec![clip(&a, 0), clip(&b, 4)]);
+        let edits = core.edits_since_autosave();
+        core.audio_trim_silence_at(0);
+        let expected = dir.join("a.silence.wav").to_string_lossy().into_owned();
+        assert_eq!(paths(&core), vec![expected.as_str(), b.as_str()]);
+        assert_eq!(
+            core.status,
+            format!(
+                "Trimmed 2000 silent frame(s) (1000 at the start, 1000 at the end) \
+                 from audio clip 1: {expected}."
+            )
+        );
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        // The product is exactly the sounding middle.
+        let product = crate::audio_edit::read_wav(&expected).unwrap();
+        assert_eq!(product.frames(), 2000);
+        assert!((product.samples[0] - 0.5).abs() < 0.001);
+        // Clip 2's file and clip 1's source are untouched.
+        let other = crate::audio_edit::read_wav(&b).unwrap();
+        assert!((other.samples[0] - 0.25).abs() < 0.001);
+        assert_eq!(crate::audio_edit::read_wav(&a).unwrap().frames(), 4000);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trim_silence_at_noops_when_nothing_to_trim() {
+        let dir = temp_dir("trim-noop");
+        let a = write_samples_wav(&dir, "a.wav", vec![0.5; 2000]);
+        let b = write_samples_wav(&dir, "b.wav", vec![0.25; 100]);
+        let mut core = core_with(vec![clip(&a, 0), clip(&b, 4)]);
+        let edits = core.edits_since_autosave();
+        core.audio_trim_silence_at(0);
+        assert_eq!(core.status, "No silence to trim from audio clip 1.");
+        assert_eq!(paths(&core), vec![a.as_str(), b.as_str()], "no repoint");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot on a no-op");
+        assert!(
+            !dir.join("a.silence.wav").exists(),
+            "no product file is written"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pitch_at_targets_the_chosen_clip() {
+        let dir = temp_dir("pitch-at");
+        let a = write_samples_wav(&dir, "a.wav", vec![0.5; 8000]);
+        let b = write_samples_wav(&dir, "b.wav", vec![0.25; 100]);
+        let mut core = core_with(vec![clip(&a, 0), clip(&b, 4)]);
+        let edits = core.edits_since_autosave();
+        core.audio_pitch_at(0);
+        let expected = dir.join("a.pitch.wav").to_string_lossy().into_owned();
+        assert_eq!(paths(&core), vec![expected.as_str(), b.as_str()]);
+        assert_eq!(
+            core.status,
+            format!("Pitch shift (+2 semitones) applied to audio clip 1: {expected}.")
+        );
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        // +2 semitones replays at 2^(2/12) ≈ 1.1225× rate:
+        // round(8000 / 1.1225) = 7127 frames, and a constant
+        // signal interpolates to itself.
+        let product = crate::audio_edit::read_wav(&expected).unwrap();
+        assert_eq!(product.frames(), 7127);
+        assert!((product.samples[100] - 0.5).abs() < 0.001);
+        // Clip 2's file and clip 1's source are untouched.
+        let other = crate::audio_edit::read_wav(&b).unwrap();
+        assert!((other.samples[0] - 0.25).abs() < 0.001);
+        assert_eq!(crate::audio_edit::read_wav(&a).unwrap().frames(), 8000);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn compress_at_targets_the_chosen_clip() {
+        let dir = temp_dir("compress-at");
+        let a = write_samples_wav(&dir, "a.wav", vec![0.9; 8000]);
+        let b = write_samples_wav(&dir, "b.wav", vec![0.25; 100]);
+        let mut core = core_with(vec![clip(&a, 0), clip(&b, 4)]);
+        let edits = core.edits_since_autosave();
+        core.audio_compress_at(0);
+        let expected = dir.join("a.comp.wav").to_string_lossy().into_owned();
+        assert_eq!(paths(&core), vec![expected.as_str(), b.as_str()]);
+        assert_eq!(
+            core.status,
+            format!(
+                "Compressor (threshold 0.5, ratio 4.0) applied to audio clip 1: {expected}."
+            )
+        );
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        // Compression keeps the frame count. The envelope
+        // starts at 0, so frame 0 (envelope ≈ 0.106 after one
+        // attack step, under the 0.5 threshold) passes at
+        // unity; by frame 4000 the envelope has settled at
+        // 0.9 and the gain is (0.5 / 0.9)^(1 - 1/4) ≈ 0.6436,
+        // for ≈ 0.579 out.
+        let product = crate::audio_edit::read_wav(&expected).unwrap();
+        assert_eq!(product.frames(), 8000);
+        assert!((product.samples[0] - 0.9).abs() < 0.001);
+        assert!((product.samples[4000] - 0.579).abs() < 0.005);
+        assert!(product.samples[4000] < 0.9, "the loud clip was turned down");
+        // Clip 2's file and clip 1's source are untouched.
+        let other = crate::audio_edit::read_wav(&b).unwrap();
+        assert!((other.samples[0] - 0.25).abs() < 0.001);
+        let source = crate::audio_edit::read_wav(&a).unwrap();
+        assert!((source.samples[4000] - 0.9).abs() < 0.001);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn split_silences_at_targets_the_chosen_clip() {
+        let dir = temp_dir("split-at");
+        // 0.5 s burst, 0.5 s silence, 0.5 s burst at 8 kHz:
+        // the gap clears the 0.25 s minimum, so the sounding
+        // ranges are exactly the two bursts.
+        let mut samples = vec![0.5; 4000];
+        samples.extend(vec![0.0; 4000]);
+        samples.extend(vec![0.5; 4000]);
+        let a = write_samples_wav(&dir, "a.wav", samples);
+        let b = write_samples_wav(&dir, "b.wav", vec![0.25; 100]);
+        let mut core = core_with(vec![clip(&a, 10), clip(&b, 4)]);
+        core.project.fps = 30.0;
+        core.project.audio[0].gain = 0.8;
+        let edits = core.edits_since_autosave();
+        let added = core.audio_split_silences_at(0);
+        assert_eq!(added, 1, "two segments replace one clip: one added");
+        assert_eq!(core.status, "Audio clip 1 split at silences into 2 clips.");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        // The segments land where clip 1 was, in order, and
+        // the old clip 2 rides after them untouched.
+        let seg1 = dir.join("a.seg1.wav").to_string_lossy().into_owned();
+        let seg2 = dir.join("a.seg2.wav").to_string_lossy().into_owned();
+        assert_eq!(paths(&core), vec![seg1.as_str(), seg2.as_str(), b.as_str()]);
+        // Segment 1 starts where the clip started; segment 2
+        // is offset by its range start (8000 frames = 1.0 s
+        // = 30 frames at 30 fps). Both keep the split clip's
+        // gain; the untouched clip keeps its own.
+        assert_eq!(core.project.audio[0].start_frame, 10);
+        assert_eq!(core.project.audio[1].start_frame, 40);
+        assert_eq!(core.project.audio[2].start_frame, 4);
+        assert_eq!(core.project.audio[0].gain, 0.8);
+        assert_eq!(core.project.audio[1].gain, 0.8);
+        assert_eq!(core.project.audio[2].gain, 1.0);
+        for seg in [&seg1, &seg2] {
+            let back = crate::audio_edit::read_wav(seg).unwrap();
+            assert_eq!(back.frames(), 4000, "each burst is one segment");
+        }
+        // Clip 2's file and clip 1's source are untouched.
+        let other = crate::audio_edit::read_wav(&b).unwrap();
+        assert!((other.samples[0] - 0.25).abs() < 0.001);
+        assert_eq!(crate::audio_edit::read_wav(&a).unwrap().frames(), 12000);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn split_silences_at_noops_without_a_long_gap() {
+        let dir = temp_dir("split-noop");
+        let a = write_samples_wav(&dir, "a.wav", vec![0.5; 8000]);
+        let b = write_samples_wav(&dir, "b.wav", vec![0.25; 100]);
+        let mut core = core_with(vec![clip(&a, 7), clip(&b, 4)]);
+        let edits = core.edits_since_autosave();
+        let added = core.audio_split_silences_at(0);
+        assert_eq!(added, 0);
+        assert_eq!(
+            core.status,
+            "Audio clip 1 has no silence of 0.25s or more to split at."
+        );
+        assert_eq!(paths(&core), vec![a.as_str(), b.as_str()], "no repoint");
+        assert_eq!(core.project.audio.len(), 2);
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot on a no-op");
+        assert!(!dir.join("a.seg1.wav").exists(), "no segment files written");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dsp_ops_at_out_of_range_are_status_only() {
+        // The refusal precedes any file access, so fake paths
+        // are fine here.
+        let mut core = core_with(vec![clip("a.wav", 0), clip("b.wav", 4)]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        core.audio_echo_at(2);
+        assert_eq!(core.status, "Audio echo failed: no clip 3.");
+        core.audio_lowpass_at(2);
+        assert_eq!(core.status, "Audio low-pass failed: no clip 3.");
+        core.audio_trim_silence_at(2);
+        assert_eq!(core.status, "Audio trim silence failed: no clip 3.");
+        core.audio_pitch_at(2);
+        assert_eq!(core.status, "Audio pitch shift failed: no clip 3.");
+        core.audio_compress_at(2);
+        assert_eq!(core.status, "Audio compress failed: no clip 3.");
+        assert_eq!(core.audio_split_silences_at(2), 0);
+        assert_eq!(core.status, "Audio split at silences failed: no clip 3.");
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+        // Same refusal voice on an empty project.
+        let mut empty = EditorCore::new();
+        empty.audio_echo_at(0);
+        assert_eq!(empty.status, "Audio echo failed: no clip 1.");
+        assert_eq!(empty.audio_split_silences_at(0), 0);
+        assert_eq!(
+            empty.status,
+            "Audio split at silences failed: no clip 1."
+        );
     }
 }

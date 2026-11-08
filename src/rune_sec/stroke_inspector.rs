@@ -119,6 +119,23 @@
 //! the selection row additionally reads and writes
 //! `s.stroke_selected`, declared in main.rs — no field
 //! is declared in this file.
+//!
+//! ## Icons (Phase H, section 13)
+//!
+//! The bulk row and the selection row render through
+//! the shell's icon buttons (`rune_sec::icon_btn`):
+//! Recolour all carries `palette`, Delete all
+//! `trash-can`, Go to frame `crosshairs` (each with its
+//! text label, as before), while Prev / Next / Clear
+//! are icon-only (`chevron-left` / `chevron-right` /
+//! `xmark`) — their labels were pure navigation glyphs
+//! in text form. Element keys are unchanged
+//! (`stroke-recolor-all`, `stroke-delete-all`,
+//! `stroke-sel-prev` / `-next` / `-goto` / `-clear`),
+//! and the handlers are the same presses: the selection
+//! buttons still write nothing but `s.stroke_selected`
+//! (plus `goto`'s navigation), exactly as documented
+//! above.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El};
@@ -127,6 +144,7 @@ use stykanimate_rs::model::Stroke;
 use stykanimate_rs::paint::{Brush, Nib};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -722,12 +740,26 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                     .color(t.text)
                     .grow(1.0),
             )
-            .child(btn("stroke-recolor-all", "Recolour all", false, t, |s| {
-                recolor_all_strokes(&mut s.core);
-            }))
-            .child(btn("stroke-delete-all", "Delete all", false, t, |s| {
-                delete_all_strokes(&mut s.core);
-            })),
+            .child(icon_btn(
+                "stroke-recolor-all",
+                "palette",
+                "Recolour all",
+                false,
+                t,
+                |s| {
+                    recolor_all_strokes(&mut s.core);
+                },
+            ))
+            .child(icon_btn(
+                "stroke-delete-all",
+                "trash-can",
+                "Delete all",
+                false,
+                t,
+                |s| {
+                    delete_all_strokes(&mut s.core);
+                },
+            )),
     );
 
     // Stroke selection (Phase G): project-wide stepping
@@ -747,16 +779,35 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                     .color(t.text)
                     .grow(1.0),
             )
-            .child(btn("stroke-sel-prev", "Prev", false, t, |s| {
-                step_stroke_selection(s, -1);
-            }))
-            .child(btn("stroke-sel-next", "Next", false, t, |s| {
-                step_stroke_selection(s, 1);
-            }))
-            .child(btn("stroke-sel-goto", "Go to frame", false, t, |s| {
-                goto_selected_stroke_frame(s);
-            }))
-            .child(btn("stroke-sel-clear", "Clear", false, t, |s| {
+            .child(icon_only_btn(
+                "stroke-sel-prev",
+                "chevron-left",
+                26.0, false,
+                t,
+                |s| {
+                    step_stroke_selection(s, -1);
+                },
+            ))
+            .child(icon_only_btn(
+                "stroke-sel-next",
+                "chevron-right",
+                26.0, false,
+                t,
+                |s| {
+                    step_stroke_selection(s, 1);
+                },
+            ))
+            .child(icon_btn(
+                "stroke-sel-goto",
+                "crosshairs",
+                "Go to frame",
+                false,
+                t,
+                |s| {
+                    goto_selected_stroke_frame(s);
+                },
+            ))
+            .child(icon_only_btn("stroke-sel-clear", "xmark", 26.0, false, t, |s| {
                 clear_stroke_selection(s);
             })),
     );

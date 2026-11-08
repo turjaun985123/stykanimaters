@@ -78,12 +78,27 @@
 //! Rows are listed in draw order with the front figure on
 //! top (reverse index order). The selected figure's row name
 //! renders active (accent), matching `core.selected_figure`.
+//!
+//! Phase H (section 9/40) switches the row's step buttons
+//! to Font Awesome glyphs through
+//! `icon_btn::icon_only_btn`: Down is `chevron-down`, Up is
+//! `chevron-up`. Keys and handlers are unchanged. The
+//! Top/Bottom jumps stay text on purpose: they are jumps
+//! to an end, not steps, the curated icon set carries no
+//! jump-to-end glyph (`angles-up` / `angles-down` are not
+//! in it), and giving them the same chevrons as the step
+//! buttons would make a jump look like a step. The opacity
+//! −/+ steppers also stay text, matching the figures
+//! panel's identical steppers. This panel has no
+//! visibility or solo buttons — those live on the figures
+//! panel's rows.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Drag, El, Phase, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_only_btn;
 use crate::State;
 
 /// Opacity change applied by one stepper press.
@@ -330,7 +345,9 @@ fn jump_layer(core: &mut EditorCore, fi: usize, to_top: bool) {
 
 /// One layer row: name (press selects; accent when selected),
 /// opacity readout with −/+ steppers, and Bottom/down/up/Top
-/// reorder buttons. Keys are per-figure: `layer-row-{fi}`,
+/// reorder buttons — Down/Up are chevron icon buttons,
+/// Bottom/Top stay text (see the module docs for why). Keys
+/// are per-figure: `layer-row-{fi}`,
 /// `layer-op-dec-{fi}`, `layer-op-inc-{fi}`,
 /// `layer-bottom-{fi}`, `layer-down-{fi}`, `layer-up-{fi}`,
 /// `layer-top-{fi}` (1-based in the key is avoided — keys
@@ -376,17 +393,17 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
             t,
             move |s: &mut State| jump_layer(&mut s.core, fi, false),
         ))
-        .child(btn(
+        .child(icon_only_btn(
             &format!("layer-down-{fi}"),
-            "Down",
-            false,
+            "chevron-down",
+            26.0, false,
             t,
             move |s: &mut State| move_layer(&mut s.core, fi, -1),
         ))
-        .child(btn(
+        .child(icon_only_btn(
             &format!("layer-up-{fi}"),
-            "Up",
-            false,
+            "chevron-up",
+            26.0, false,
             t,
             move |s: &mut State| move_layer(&mut s.core, fi, 1),
         ))

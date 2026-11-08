@@ -450,33 +450,33 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             let fi = s.core.selected_figure;
             s.core.smooth_path_roots(fi);
         }))
-        .child(fbtn("copy-frame", "Copy frame", false, n == 0, t, |s| {
+        .child(crate::rune_sec::icon_btn::icon_btn("copy-frame", "copy", "Copy frame", false, t, |s| {
             if s.core.frame_count() > 0 {
                 s.core.copy_frame();
                 s.frame_ops.frame_copied = true;
             }
         }))
-        .child(fbtn("paste-frame", "Paste frame", false, !ops.frame_copied, t, |s| {
+        .child(crate::rune_sec::icon_btn::icon_btn("paste-frame", "clipboard", "Paste frame", false, t, |s| {
             s.core.paste_frame();
         }))
-        .child(fbtn("range-copy", "Copy range", false, n == 0, t, |s| {
+        .child(crate::rune_sec::icon_btn::icon_btn("range-copy", "list", "Copy range", false, t, |s| {
             let (from, count) = copy_range_args(&s.core, &s.frame_ops);
             if s.core.copy_range(from, count) {
                 s.frame_ops.range_copied = true;
             }
         }))
-        .child(fbtn("range-paste", "Paste range", false, !ops.range_copied, t, |s| {
+        .child(crate::rune_sec::icon_btn::icon_btn("range-paste", "list", "Paste range", false, t, |s| {
             let at = s.core.current;
             let before = s.core.status.clone();
             if !s.core.paste_range(at) && s.core.status == before {
                 s.core.status = "Nothing to paste — copy a range first.".into();
             }
         }))
-        .child(fbtn(
+        .child(crate::rune_sec::icon_btn::icon_btn(
             "range-del",
+            "trash-can",
             "Delete range",
             false,
-            selected_range(core, ops).is_none(),
             t,
             |s| {
                 if let Some((lo, hi)) = selected_range(&s.core, &s.frame_ops) {
@@ -525,6 +525,7 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
         .w_full()
         .gap(8.0)
         .center_y()
+        .child(crate::rune_sec::icons::icon_el("clock", 12.0, t.text_secondary))
         .child(
             text("This frame")
                 .font(type_::LABEL)
@@ -591,11 +592,11 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 s.frame_ops.insert_count = step_insert_count(s.frame_ops.insert_count, 1);
             },
         ))
-        .child(fbtn(
+        .child(crate::rune_sec::icon_btn::icon_btn(
             "fop-ins-n",
+            "plus",
             "Insert frames",
             false,
-            !can_insert_frames(core),
             t,
             |s| {
                 let count = s.frame_ops.insert_count;

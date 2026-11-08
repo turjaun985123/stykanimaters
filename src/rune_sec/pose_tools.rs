@@ -140,6 +140,21 @@
 //! Library apply and mirror-apply need a pose to land on;
 //! library delete/rename act on files, not on the frame, so
 //! they are always live.
+//!
+//! Phase H (section 17/40) puts Font Awesome glyphs on
+//! the library controls through
+//! `crate::rune_sec::icon_btn::icon_btn`: Save pose
+//! (`floppy-disk`), Apply (`check`), Apply mirrored
+//! (`copy` — the catalogue carries no flip glyph, and
+//! `repeat` already means loop/cycle elsewhere in the
+//! shell), Rename (`pencil`), Del (`trash-can`), and
+//! the rename editor's Apply / Cancel (`check` /
+//! `xmark`). The gated buttons (save, apply,
+//! mirror-apply) keep the muted-inert rendering when
+//! their op would no-op, glyph included, via [`pibtn`];
+//! the pose-op buttons (mirror / copy / paste / reset /
+//! bake, copy-to) are not in this section's icon map and
+//! stay on [`pbtn`]. Keys and handlers are unchanged.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -151,6 +166,8 @@ use serde::{Deserialize, Serialize};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Pose;
 
+use crate::rune_sec::icon_btn::{icon_btn, ICON_LABEL_GAP, ICON_SIZE};
+use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 /// True when figure `fi` has a pose on the current frame —
@@ -917,15 +934,17 @@ fn rename_editor_row(s: &State, t: &Theme) -> El {
                 .on_edit(|s: &mut State| &mut s.pose_rename.field)
                 .on_submit(|s: &mut State, _tx: &mut Tx| apply_rename(s)),
         )
-        .child(pbtn(
+        .child(pibtn(
             "pose-rename-apply".to_string(),
+            "check",
             "Apply",
             true,
             t,
             |s| apply_rename(s),
         ))
-        .child(pbtn(
+        .child(pibtn(
             "pose-rename-cancel".to_string(),
+            "xmark",
             "Cancel",
             true,
             t,
@@ -955,6 +974,43 @@ fn pbtn(
     } else {
         base.fill(t.control_off)
             .child(text(label).font(type_::LABEL).color(t.text_secondary))
+    }
+}
+
+/// One icon-bearing pose-library button (Phase H): the
+/// glyph-and-label sibling of [`pbtn`], in the same
+/// metrics. Live → [`icon_btn`] itself; inert → the
+/// muted glyph-and-label rendering with NO press
+/// handler, keeping `pbtn`'s discipline (an inert
+/// element, not a control that silently does nothing).
+/// The glyph metrics are `icon_btn`'s own
+/// ([`ICON_SIZE`] / [`ICON_LABEL_GAP`]), and the muted
+/// glyph takes the muted label's colour, so the two
+/// states differ only in fill and ink, never in shape.
+fn pibtn(
+    key: String,
+    icon: &str,
+    label: &str,
+    enabled: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    if enabled {
+        icon_btn(&key, icon, label, false, t, f)
+    } else {
+        el()
+            .key(key)
+            .px(10.0)
+            .py(5.0)
+            .radius(6.0)
+            .fill(t.control_off)
+            .child(
+                row()
+                    .gap(ICON_LABEL_GAP)
+                    .center_y()
+                    .child(icon_el(icon, ICON_SIZE, t.text_secondary))
+                    .child(text(label).font(type_::LABEL).color(t.text_secondary)),
+            )
     }
 }
 
@@ -1031,8 +1087,9 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                 )),
         )
         .child(
-            row().gap(4.0).child(pbtn(
+            row().gap(4.0).child(pibtn(
                 "pose-save-lib".to_string(),
+                "floppy-disk",
                 "Save pose",
                 has_pose,
                 t,
@@ -1059,15 +1116,17 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                         .center_y()
                         .child(text(name.as_str()).font(type_::LABEL).color(t.text))
                         .child(el().grow(1.0))
-                        .child(pbtn(
+                        .child(pibtn(
                             format!("pose-lib-rename-{i}"),
+                            "pencil",
                             "Rename",
                             true,
                             t,
                             move |s: &mut State| start_rename(s, i),
                         ))
-                        .child(pbtn(
+                        .child(pibtn(
                             format!("pose-lib-del-{i}"),
+                            "trash-can",
                             "Del",
                             true,
                             t,
@@ -1087,8 +1146,9 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                 .child(
                     row()
                         .gap(4.0)
-                        .child(pbtn(
+                        .child(pibtn(
                             format!("pose-lib-apply-{i}"),
+                            "check",
                             "Apply",
                             has_pose,
                             t,
@@ -1096,8 +1156,9 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                                 apply_library_pose(&mut s.core, &apply_name)
                             },
                         ))
-                        .child(pbtn(
+                        .child(pibtn(
                             format!("pose-lib-apply-mirror-{i}"),
+                            "copy",
                             "Apply mirrored",
                             has_pose,
                             t,

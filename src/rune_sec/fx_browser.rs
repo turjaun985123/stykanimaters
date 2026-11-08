@@ -83,6 +83,16 @@
 //!   deliberately NOT filtered — it is a shortcut row, not
 //!   part of the grid.
 //!
+//! Phase H adds Font Awesome glyphs (via
+//! `rune_sec::icons::icon_el`, the frame_ops/menus
+//! inline-glyph idiom: 12 pt, secondary colour, leading
+//! its row). Each category heading carries its glyph —
+//! see [`category_icon`] — the Recent heading a `clock`,
+//! and the filter row a leading `magnifying-glass`. The
+//! kind buttons themselves keep their text labels: the
+//! kind names are the content. No keys change — the
+//! glyphs are unkeyed children of existing rows.
+//!
 //! Integrator wiring for the state: add
 //! `pub fx_browser: rune_sec::fx_browser::FxBrowserState`
 //! to `State`, initialise it with
@@ -111,6 +121,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::vfx::ClipKind;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 /// Kind buttons per row inside a category (the Particles
@@ -190,6 +201,45 @@ fn section(label: &str, t: &Theme) -> El {
     text(label.to_string())
         .font(type_::LABEL)
         .color(t.text_secondary)
+}
+
+/// The Font Awesome glyph shown before a category
+/// heading (Phase H). Presentation only, like the
+/// categories themselves — the engine has no category
+/// concept, so this table lives and dies here. Every
+/// name is in the curated icon set (`icon_data`); note
+/// "bomb" is NOT in that set, so Explosion burns
+/// ("fire") instead. An unknown category gets no glyph.
+fn category_icon(category: &str) -> Option<&'static str> {
+    Some(match category {
+        "Explosion" => "fire",
+        "Energy" => "bolt",
+        "Magic" => "wand-magic-sparkles",
+        "Nature" => "leaf",
+        "Particles" => "shapes",
+        _ => return None,
+    })
+}
+
+/// A section heading with a leading glyph (Phase H):
+/// the [`section`] label preceded by a 12 pt [`icon_el`]
+/// in the heading's secondary colour, in a centred row
+/// — the inline-glyph idiom frame_ops and menus use.
+/// A `None` glyph falls back to the plain [`section`]
+/// heading, so unrecognised headings stay honest text.
+fn section_with_icon(icon: Option<&str>, label: &str, t: &Theme) -> El {
+    let Some(icon) = icon else {
+        return section(label, t);
+    };
+    row()
+        .gap(6.0)
+        .center_y()
+        .child(icon_el(icon, 12.0, t.text_secondary))
+        .child(
+            text(label.to_string())
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
 }
 
 // ----------------------------------------------------------------
@@ -393,6 +443,7 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
             .key("fx-filter-row")
             .gap(8.0)
             .center_y()
+            .child(icon_el("magnifying-glass", 12.0, t.text_secondary))
             .child(
                 text_input(&s.fx_browser.query, type_::BODY.lh(26.0))
                     .key("fx-filter")
@@ -408,7 +459,7 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
     // from this panel, most recent first. Shown whenever
     // the list is non-empty, independent of the filter.
     if !s.fx_browser.recent.is_empty() {
-        panel = panel.child(section("Recent", t));
+        panel = panel.child(section_with_icon(Some("clock"), "Recent", t));
         let mut recent_row = row().gap(6.0);
         for entry in recent_entries(&s.fx_browser.recent) {
             let kind = entry.kind;
@@ -437,7 +488,7 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
         );
     }
     for (cat, entries) in &visible {
-        panel = panel.child(section(cat, t));
+        panel = panel.child(section_with_icon(category_icon(cat), cat, t));
         for chunk in entries.chunks(PER_ROW) {
             let mut kinds_row = row().gap(6.0);
             for entry in chunk {
@@ -577,6 +628,29 @@ mod tests {
         assert_eq!(kinds_in("Nature").len(), 4);
         assert_eq!(kinds_in("Particles").len(), 9);
         assert!(kinds_in("No such category").is_empty());
+    }
+
+    #[test]
+    fn category_icons_cover_the_five_categories_and_resolve() {
+        // The Phase H heading glyphs, pinned exactly.
+        assert_eq!(category_icon("Explosion"), Some("fire"));
+        assert_eq!(category_icon("Energy"), Some("bolt"));
+        assert_eq!(category_icon("Magic"), Some("wand-magic-sparkles"));
+        assert_eq!(category_icon("Nature"), Some("leaf"));
+        assert_eq!(category_icon("Particles"), Some("shapes"));
+        // Every presented category has one, and every
+        // glyph named here resolves in the curated icon
+        // set (a typo'd name would render as nothing).
+        for cat in FX_CATEGORIES {
+            let icon = category_icon(cat).expect("category has a glyph");
+            assert!(
+                crate::rune_sec::icon_data::icon_data(icon).is_some(),
+                "{icon} is not in the curated icon set"
+            );
+        }
+        // Unknown headings get no glyph (plain text).
+        assert_eq!(category_icon("Presets"), None);
+        assert_eq!(category_icon("No such category"), None);
     }
 
     #[test]

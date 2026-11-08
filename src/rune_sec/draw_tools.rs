@@ -52,6 +52,19 @@
 //!   core; the old `mirror-strokes` button was the action
 //!   `mirror_strokes_x` (mirror this frame's strokes across the
 //!   stage centre), and that is what the button here calls.
+//! * **Icons (Phase H).** The tool, brush and shape buttons
+//!   render through `icon_btn` — a Font Awesome glyph plus
+//!   the same text label as before, keys unchanged. Each
+//!   glyph is chosen by what the button does (see
+//!   [`brush_icon`] for the preset mapping): the Draw mode
+//!   toggle paints strokes, so "paintbrush"; the eraser tool
+//!   takes "eraser"; the shape stamps take the glyph of the
+//!   shape they stamp. Two buttons stay text-only because
+//!   the curated icon set has no honest glyph for them:
+//!   Mirror strokes (no flip/mirror glyph) and the Arrow
+//!   stamp (no plain arrow glyph). The stamp parameter
+//!   steppers stay text too — a − / value / + readout row
+//!   reads better without glyphs.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -59,6 +72,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::paint::ShapeKind;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_btn;
 use crate::State;
 
 /// Douglas-Peucker epsilon (stage units) for the Simplify
@@ -88,6 +102,24 @@ pub fn brush_names() -> Vec<&'static str> {
         .iter()
         .map(|b| b.name)
         .collect()
+}
+
+/// The Font Awesome glyph for the brush preset named `name`
+/// — the icon the preset's own button carries, and the one
+/// the brush-cycle button shows for the preset it currently
+/// names. Mapped by what the preset IS, from its name: the
+/// Pen preset takes "pen" and the Pencil preset "pencil";
+/// the markers and calligraphy presets are nib tools (the
+/// FA "pen" glyph is a nib), so they take "pen" too; the
+/// brushes and Spray apply paint broadly, so they take
+/// "paintbrush" — which is also the fallback for any name
+/// this mapping does not know.
+pub fn brush_icon(name: &str) -> &'static str {
+    match name {
+        "Pen" | "Marker" | "Chisel Marker" | "Calligraphy" | "Calligraphy L" => "pen",
+        "Pencil" => "pencil",
+        _ => "paintbrush",
+    }
 }
 
 /// The active brush's library index, clamped exactly as
@@ -401,7 +433,7 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .key("draw-tools-row")
         .gap(8.0)
         .center_y()
-        .child(btn("draw-mode", "Draw", core.draw_mode, t, |s| {
+        .child(icon_btn("draw-mode", "paintbrush", "Draw", core.draw_mode, t, |s| {
             // The old GPUI listener verbatim: flip the mode
             // field and say what the mode does.
             s.core.draw_mode = !s.core.draw_mode;
@@ -411,15 +443,17 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
                 "Pose mode.".into()
             };
         }))
-        .child(btn(
+        .child(icon_btn(
             "draw-tool",
+            "eraser",
             "Eraser",
             core.draw_tool_is_eraser(),
             t,
             |s| s.core.toggle_draw_tool(),
         ))
-        .child(btn(
+        .child(icon_btn(
             "brush-cycle",
+            brush_icon(core.active_brush().name),
             &format!("Brush: {}", core.active_brush().name),
             false,
             t,
@@ -428,20 +462,21 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .child(btn("mirror-strokes", "Mirror strokes", false, t, |s| {
             s.core.mirror_strokes_x()
         }))
-        .child(btn("simplify-strokes", "Simplify", false, t, |s| {
+        .child(icon_btn("simplify-strokes", "wand-magic-sparkles", "Simplify", false, t, |s| {
             simplify_current_frame(&mut s.core);
         }))
-        .child(btn("smooth-strokes", "Smooth", false, t, |s| {
+        .child(icon_btn("smooth-strokes", "bezier-curve", "Smooth", false, t, |s| {
             smooth_current_frame(&mut s.core);
         }))
-        .child(btn("clear-drawing", "Clear drawing", false, t, |s| {
+        .child(icon_btn("clear-drawing", "trash-can", "Clear drawing", false, t, |s| {
             s.core.clear_frame_drawings()
         }));
 
     let mut brushes = row().key("draw-brushes").gap(8.0).center_y();
     for (i, name) in brush_names().iter().enumerate() {
-        brushes = brushes.child(btn(
+        brushes = brushes.child(icon_btn(
             &brush_key(i),
+            brush_icon(name),
             *name,
             i == active_brush,
             t,
@@ -453,19 +488,19 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .key("draw-shapes")
         .gap(8.0)
         .center_y()
-        .child(btn("draw-shape-line", "Line", false, t, |s| {
+        .child(icon_btn("draw-shape-line", "shapes", "Line", false, t, |s| {
             draw_shape_button(&mut s.core, ShapeKind::Line)
         }))
-        .child(btn("draw-shape-rect", "Rect", false, t, |s| {
+        .child(icon_btn("draw-shape-rect", "square", "Rect", false, t, |s| {
             draw_shape_button(&mut s.core, ShapeKind::Rect)
         }))
-        .child(btn("draw-shape-ellipse", "Ellipse", false, t, |s| {
+        .child(icon_btn("draw-shape-ellipse", "circle", "Ellipse", false, t, |s| {
             draw_shape_button(&mut s.core, ShapeKind::Ellipse)
         }))
-        .child(btn("stamp-poly", "Polygon", false, t, |s| {
+        .child(icon_btn("stamp-poly", "draw-polygon", "Polygon", false, t, |s| {
             stamp_polygon_button(&mut s.core, &s.draw_tools)
         }))
-        .child(btn("stamp-star", "Star", false, t, |s| {
+        .child(icon_btn("stamp-star", "star", "Star", false, t, |s| {
             stamp_star_button(&mut s.core, &s.draw_tools)
         }))
         .child(btn("stamp-arrow", "Arrow", false, t, |s| {

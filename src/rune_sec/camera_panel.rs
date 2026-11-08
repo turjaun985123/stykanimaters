@@ -65,6 +65,17 @@
 //!   read as "off (missing)", never panicked on, and Clear
 //!   still clears it.
 //!
+//! * Phase H (section 19/40) puts Font Awesome glyphs on
+//!   the panel's directional and clipboard controls through
+//!   the shared icon buttons: the header gains a `camera`
+//!   glyph (`icons::icon_el`), the key-nav pair and the
+//!   follow cycle pair become icon-only chevrons
+//!   (`chevron-left` / `chevron-right`), Copy/Paste keep
+//!   their labels beside `copy` / `clipboard` glyphs, Follow
+//!   selected gains `crosshairs` and Follow clear `xmark`.
+//!   Keys, labels and handlers are unchanged; the rotation
+//!   dial stays a canvas (it is a dial, not a button).
+//!
 //! Engine facts this panel lives with (verified, not worked
 //! around silently): `camera_clear_key` does NOT snapshot, so
 //! clearing a key is not undoable; and `camera_zoom_by`'s
@@ -91,6 +102,8 @@ use rune::{canvas, col, el, row, text, Drag, El, LineCap, Phase, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
+use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 /// Zoom multiplier applied by one stepper press.
@@ -661,10 +674,10 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(btn("cam-prev-key", "Prev key", false, t, |s: &mut State| {
+                .child(icon_only_btn("cam-prev-key", "chevron-left", 26.0, false, t, |s: &mut State| {
                     goto_prev_key(&mut s.core)
                 }))
-                .child(btn("cam-next-key", "Next key", false, t, |s: &mut State| {
+                .child(icon_only_btn("cam-next-key", "chevron-right", 26.0, false, t, |s: &mut State| {
                     goto_next_key(&mut s.core)
                 })),
         )
@@ -672,10 +685,10 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(btn("cam-copy-key", "Copy key", false, t, |s: &mut State| {
+                .child(icon_btn("cam-copy-key", "copy", "Copy key", false, t, |s: &mut State| {
                     copy_key_here(&mut s.core)
                 }))
-                .child(btn("cam-paste-key", "Paste key", false, t, |s: &mut State| {
+                .child(icon_btn("cam-paste-key", "clipboard", "Paste key", false, t, |s: &mut State| {
                     paste_key_here(&mut s.core)
                 })),
         );
@@ -746,8 +759,9 @@ fn follow_block(core: &EditorCore, t: &Theme) -> El {
                     t,
                     |s: &mut State| s.core.toggle_camera_follow(),
                 ))
-                .child(btn(
+                .child(icon_btn(
                     "cam-follow-selected",
+                    "crosshairs",
                     "Selected",
                     false,
                     t,
@@ -758,13 +772,13 @@ fn follow_block(core: &EditorCore, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(btn("cam-follow-prev", "Prev", false, t, |s: &mut State| {
+                .child(icon_only_btn("cam-follow-prev", "chevron-left", 26.0, false, t, |s: &mut State| {
                     follow_cycle(&mut s.core, -1)
                 }))
-                .child(btn("cam-follow-next", "Next", false, t, |s: &mut State| {
+                .child(icon_only_btn("cam-follow-next", "chevron-right", 26.0, false, t, |s: &mut State| {
                     follow_cycle(&mut s.core, 1)
                 }))
-                .child(btn("cam-follow-clear", "Clear", false, t, |s: &mut State| {
+                .child(icon_btn("cam-follow-clear", "xmark", "Clear", false, t, |s: &mut State| {
                     follow_clear(&mut s.core)
                 })),
         )
@@ -780,9 +794,15 @@ pub fn panel(s: &State, t: &Theme) -> El {
         .key("camera-panel")
         .gap(6.0)
         .child(
-            text("Camera")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(icon_el("camera", 12.0, t.text_secondary))
+                .child(
+                    text("Camera")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                ),
         )
         .child(
             row()

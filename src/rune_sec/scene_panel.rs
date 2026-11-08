@@ -36,6 +36,14 @@
 //! a kind keeps the tuned amount/wind when switching, and uses
 //! the cycle button's per-kind preset when enabling from off.
 //!
+//! The kind buttons carry Font Awesome glyphs (Phase H):
+//! each segment is an `icon_btn` showing the kind's glyph
+//! beside its unchanged label — Off (clear sky) `sun`, Rain
+//! `cloud-rain`, Snow `snowflake`, Fireflies `star`, Fog
+//! `cloud`, Storm `bolt` (see [`kind_icon`]). Keys, labels,
+//! active state and handlers are the text buttons' own;
+//! only the leading glyph is new.
+//!
 //! Amount and Wind also have drag sliders (Phase E). The
 //! track follows the Rune settings example's `speed_control`
 //! (`examples/settings/src/main.rs`): `on_drag` with the
@@ -84,6 +92,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::vfx::{Weather, WeatherKind};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::inspector_style::{rgb_join, rgb_split, step_channel};
 use crate::stage_view::hex_color;
 use crate::State;
@@ -109,6 +118,23 @@ pub fn kind_name(kind: WeatherKind) -> &'static str {
         WeatherKind::Fireflies => "Fireflies",
         WeatherKind::Fog => "Fog",
         WeatherKind::Storm => "Storm",
+    }
+}
+
+/// Font Awesome glyph for a kind picker's segment (Phase
+/// H): Off is the clear sky (`sun`), and each kind gets the
+/// glyph that pictures it — rain cloud, snowflake, a star
+/// for the fireflies' glow, a plain cloud for fog, and the
+/// lightning bolt for the storm. Every segment has an
+/// honest glyph, so no picker button stays text-only.
+pub fn kind_icon(kind: Option<WeatherKind>) -> &'static str {
+    match kind {
+        None => "sun",
+        Some(WeatherKind::Rain) => "cloud-rain",
+        Some(WeatherKind::Snow) => "snowflake",
+        Some(WeatherKind::Fireflies) => "star",
+        Some(WeatherKind::Fog) => "cloud",
+        Some(WeatherKind::Storm) => "bolt",
     }
 }
 
@@ -599,8 +625,9 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
     let mut kind_row = row().key("wx-kind").gap(4.0).center_y();
     for (i, label) in KIND_LABELS.iter().enumerate() {
         let kind = if i == 0 { None } else { Some(KINDS[i - 1]) };
-        kind_row = kind_row.child(btn(
+        kind_row = kind_row.child(icon_btn(
             &format!("wx-seg-{}", i),
+            kind_icon(kind),
             label,
             i == active,
             t,

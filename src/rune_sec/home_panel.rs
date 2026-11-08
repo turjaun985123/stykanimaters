@@ -41,6 +41,12 @@
 //!   scan, driven by a Rune core `TextEdit` in this section's
 //!   state (the GPUI panel had no search; the audit's Q5 text
 //!   input is what makes it possible here).
+//! - **Icons (Phase H)** — the Reopen, New and per-row Open
+//!   buttons render through `icon_btn` with leading Font
+//!   Awesome glyphs (`arrow-rotate-right`, `file`,
+//!   `folder-open`), and the search row leads with a
+//!   `magnifying-glass` `icon_el`; keys, labels, active
+//!   state and handlers are unchanged.
 //!
 //! ## The scan cache (the Wave 15 lesson)
 //!
@@ -125,6 +131,8 @@ use stykanimate_rs::projects::{self, ProjectInfo};
 use stykanimate_rs::shell;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 /// View-state for this section: the search field, whether
@@ -655,7 +663,7 @@ fn project_row(info: &ProjectInfo, i: usize, t: &Theme) -> El {
                         .color(t.text_secondary),
                 ),
         )
-        .child(btn(&open_key, "Open", false, t, move |s: &mut State| {
+        .child(icon_btn(&open_key, "folder-open", "Open", false, t, move |s: &mut State| {
             dispatch_open(&mut s.core, &path, &name);
         }))
         .child(btn(&dup_key, "Duplicate", false, t, move |s: &mut State| {
@@ -699,8 +707,9 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
     if let Some(target) = reopen {
         let path = target.path.clone();
         let name = target.name.clone();
-        card = card.child(btn(
+        card = card.child(icon_btn(
             "home-reopen-last",
+            "arrow-rotate-right",
             &reopen_label(target),
             true,
             t,
@@ -721,7 +730,7 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
                     .color(t.text)
                     .grow(1.0),
             )
-            .child(btn("home-new", "New project", false, t, |s: &mut State| {
+            .child(icon_btn("home-new", "file", "New project", false, t, |s: &mut State| {
                 dispatch_new(&mut s.core);
             })),
     );
@@ -734,6 +743,7 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
             .w_full()
             .gap(8.0)
             .center_y()
+            .child(icon_el("magnifying-glass", 12.0, t.text_secondary))
             .child(
                 text_input(&home.search, type_::BODY.lh(26.0))
                     .key("home-search")

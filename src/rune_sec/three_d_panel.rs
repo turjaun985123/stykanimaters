@@ -40,6 +40,18 @@
 //!   every panel build, so they track selection, posing and
 //!   orbiting as they happen.
 //!
+//! - Icons (Phase H) — the panel header and the two
+//!   library header rows lead with a `cube` glyph
+//!   (`icons::icon_el`); the library buttons render
+//!   through `icon_btn`: Save (both libraries) is
+//!   `floppy-disk`, Mirror is `copy`, per-entry Load is
+//!   `folder-open`, per-entry Apply is `check`. Keys,
+//!   labels, active flags and handlers are unchanged —
+//!   including the GPUI-era `save-pose-3d` /
+//!   `pose3d-lib-{i}` keys the Phase G §36 audit kept
+//!   deliberately. Dimmed buttons go through [`ictl`],
+//!   which keeps the muted shape below, glyph included.
+//!
 //! Controls that need a live session render **dimmed but
 //! wired** when there is none: the press still fires, and the
 //! op/helper answers "Enter 3D mode first." in the status
@@ -54,6 +66,8 @@ use rune::{col, el, row, text, El};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::fig3d;
 
+use crate::rune_sec::icon_btn::{icon_btn, ICON_LABEL_GAP, ICON_SIZE};
+use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 /// Camera preset buttons: `(fig3d preset name, button label)`.
@@ -468,6 +482,49 @@ fn ctl(
         .child(text(label).font(type_::LABEL).color(t.text_secondary))
 }
 
+/// A panel button with a Font Awesome glyph (Phase H):
+/// [`ctl`]'s icon-bearing sibling for the library
+/// controls. Live buttons delegate to
+/// `icon_btn::icon_btn` — the glyph-and-label button that
+/// mirrors the kit button's styling value for value.
+/// `dim` keeps [`ctl`]'s muted-but-wired shape exactly
+/// (control-off fill in every state, no hover/press
+/// change, handler wired), contents laid out as
+/// `icon_btn` lays them out — glyph then label at
+/// [`ICON_LABEL_GAP`] — with both drawn in the secondary
+/// text colour, so a session-less panel mutes exactly as
+/// it did before the glyph arrived and the press still
+/// fires the refusing op.
+fn ictl(
+    key: &str,
+    icon: &str,
+    label: &str,
+    active: bool,
+    dim: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    if !dim {
+        return icon_btn(key, icon, label, active, t, f);
+    }
+    el()
+        .key(key)
+        .px(10.0)
+        .py(5.0)
+        .radius(6.0)
+        .fill(t.control_off)
+        .hover(t.control_off)
+        .press(t.control_off)
+        .on_press(f)
+        .child(
+            row()
+                .gap(ICON_LABEL_GAP)
+                .center_y()
+                .child(icon_el(icon, ICON_SIZE, t.text_secondary))
+                .child(text(label).font(type_::LABEL).color(t.text_secondary)),
+        )
+}
+
 fn section_label(text_: &str, t: &Theme) -> El {
     text(text_.to_string())
         .font(type_::LABEL)
@@ -493,6 +550,7 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
+                .child(icon_el("cube", 14.0, t.text))
                 .child(
                     text("3D")
                         .font(type_::TITLE)
@@ -666,8 +724,9 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
         row()
             .gap(6.0)
             .center_y()
+            .child(icon_el("cube", 12.0, t.text_secondary))
             .child(section_label("Figure library", t).grow(1.0))
-            .child(ctl("save-3d", "Save current", false, dim, t, |s| {
+            .child(ictl("save-3d", "floppy-disk", "Save current", false, dim, t, |s| {
                 s.core.fig3_save_to_library()
             })),
     );
@@ -691,10 +750,10 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                         .color(t.text)
                         .grow(1.0),
                 )
-                .child(ctl(
+                .child(icon_btn(
                     &format!("fig3-lib-{i}"),
+                    "folder-open",
                     "Load",
-                    false,
                     false,
                     t,
                     move |s| s.core.fig3_load_from_library(&load_name),
@@ -711,11 +770,12 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
         row()
             .gap(6.0)
             .center_y()
+            .child(icon_el("cube", 12.0, t.text_secondary))
             .child(section_label("Pose library", t).grow(1.0))
-            .child(ctl("save-pose-3d", "Save pose", false, dim, t, |s| {
+            .child(ictl("save-pose-3d", "floppy-disk", "Save pose", false, dim, t, |s| {
                 save_current_pose(&mut s.core);
             }))
-            .child(ctl("mirror-pose-3d", "Mirror pose", false, dim, t, |s| {
+            .child(ictl("mirror-pose-3d", "copy", "Mirror pose", false, dim, t, |s| {
                 apply_mirror_pose(&mut s.core);
             })),
     );
@@ -739,8 +799,9 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                         .color(t.text)
                         .grow(1.0),
                 )
-                .child(ctl(
+                .child(ictl(
                     &format!("pose3d-lib-{i}"),
+                    "check",
                     "Apply",
                     false,
                     dim,

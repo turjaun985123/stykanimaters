@@ -52,12 +52,27 @@
 //! [`count_line`]); with none it is the bare total, exactly
 //! as before. A filter that hides everything shows a
 //! "No figures match" line instead of rows.
+//!
+//! Phase H (section 8/40) switches the row's unambiguous
+//! micro-buttons to Font Awesome glyphs through
+//! `icon_btn::icon_only_btn`: the lock toggle (`lock` when
+//! locked, `lock-open` when not), the visibility toggle
+//! (`eye` when shown, `eye-slash` when hidden), reorder
+//! (`chevron-up` / `chevron-down`) and delete
+//! (`trash-can`), and puts a `magnifying-glass` glyph
+//! before the filter field. Keys and handlers are
+//! unchanged. Solo, the opacity steppers (`−` / `+`) and
+//! the opacity-cycle button (`opac`) stay text: the icon
+//! map names no glyph for them, and a cycle action is not
+//! a state a single static glyph would carry honestly.
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, text_input, Color, El, LineCap, Shape, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::V2;
 
+use crate::rune_sec::icon_btn::icon_only_btn;
+use crate::rune_sec::icons::icon_el;
 use crate::stage_view::{hex_color, ngon};
 use crate::State;
 
@@ -434,10 +449,10 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 )
-                .child(row_toggle(
-                    format!("fig-lock-{fi}"),
-                    if r.locked { "lock" } else { "open" },
-                    r.locked,
+                .child(icon_only_btn(
+                    &format!("fig-lock-{fi}"),
+                    if r.locked { "lock" } else { "lock-open" },
+                    26.0, r.locked,
                     t,
                     move |s: &mut State| s.core.toggle_figure_lock(fi),
                 ))
@@ -462,10 +477,10 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                     t,
                     move |s: &mut State| s.core.step_figure_opacity(fi, 0.1),
                 ))
-                .child(row_toggle(
-                    format!("fig-eye-{fi}"),
-                    if r.hidden { "off" } else { "eye" },
-                    r.hidden,
+                .child(icon_only_btn(
+                    &format!("fig-eye-{fi}"),
+                    if r.hidden { "eye-slash" } else { "eye" },
+                    26.0, r.hidden,
                     t,
                     // The old listener selected the figure first:
                     // `toggle_figure_hidden` acts on the selection.
@@ -483,17 +498,17 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                 .gap(6.0)
                 .center_y()
                 .child(el().grow(1.0))
-                .child(row_toggle(
-                    format!("fig-up-{fi}"),
-                    "up",
-                    false,
+                .child(icon_only_btn(
+                    &format!("fig-up-{fi}"),
+                    "chevron-up",
+                    26.0, false,
                     t,
                     move |s: &mut State| move_row(&mut s.core, fi, 1),
                 ))
-                .child(row_toggle(
-                    format!("fig-dn-{fi}"),
-                    "down",
-                    false,
+                .child(icon_only_btn(
+                    &format!("fig-dn-{fi}"),
+                    "chevron-down",
+                    26.0, false,
                     t,
                     move |s: &mut State| move_row(&mut s.core, fi, -1),
                 ))
@@ -504,10 +519,10 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                     t,
                     move |s: &mut State| cycle_row_opacity(&mut s.core, fi),
                 ))
-                .child(row_toggle(
-                    format!("fig-del-{fi}"),
-                    "del",
-                    false,
+                .child(icon_only_btn(
+                    &format!("fig-del-{fi}"),
+                    "trash-can",
+                    26.0, false,
                     t,
                     move |s: &mut State| delete_row(&mut s.core, fi),
                 )),
@@ -565,6 +580,7 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
             .w_full()
             .gap(8.0)
             .center_y()
+            .child(icon_el("magnifying-glass", 14.0, t.text_secondary))
             .child(
                 text_input(&s.figures_panel.filter, type_::BODY.lh(26.0))
                     .key("figures-filter")
