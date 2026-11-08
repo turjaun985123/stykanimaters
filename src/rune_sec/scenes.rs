@@ -1472,12 +1472,12 @@ mod tests {
         assert_eq!(s.core.project.figures.len(), 2, "two figures are present");
         assert_eq!(s.core.project.frames.len(), 5, "the frame count is untouched");
         assert_eq!(
-            crate::stats::figure_keyframes(&s.core.project, 0),
+            stykanimate_rs::stats::figure_keyframes(&s.core.project, 0),
             vec![0, 2, 4],
             "figure 0 keys at frames 0, 2, 4"
         );
         assert_eq!(
-            crate::stats::figure_keyframes(&s.core.project, 1),
+            stykanimate_rs::stats::figure_keyframes(&s.core.project, 1),
             vec![1, 3],
             "figure 1 keys at frames 1, 3"
         );
