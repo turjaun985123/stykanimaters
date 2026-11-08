@@ -476,11 +476,13 @@ fn duplicate_row(core: &mut EditorCore) {
 /// One figure row, as a two-line card: line 1 is the live
 /// thumbnail canvas (`fig-thumb-{fi}`, Phase F), then the
 /// colour dot + name (press selects), the opacity readout,
-/// then the lock / solo / opacity-stepper / eye toggles —
+/// then the lock / solo / opacity-stepper toggles —
 /// the GPUI row's trailing cluster; line 2 (Phase E) carries
 /// the remaining GPUI row controls, right-aligned under the
 /// cluster: reorder up/down (`fig-up-{fi}` / `fig-dn-{fi}`),
-/// opacity cycle (`fig-opac-{fi}`) and delete (`fig-del-{fi}`).
+/// opacity cycle (`fig-opac-{fi}`), the eye toggle
+/// (`fig-eye-{fi}` — moved down from line 1 by the Phase N
+/// pixel-check fix) and delete (`fig-del-{fi}`).
 /// Two lines keep every control at the same compact toggle
 /// size instead of squeezing nine onto one line.
 fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
@@ -573,22 +575,14 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                     t,
                     move |s: &mut State| s.core.step_figure_opacity(fi, 0.1),
                 ))
-                .child(icon_only_btn(
-                    &format!("fig-eye-{fi}"),
-                    if r.hidden { "eye-slash" } else { "eye" },
-                    26.0, r.hidden,
-                    t,
-                    // The old listener selected the figure first:
-                    // `toggle_figure_hidden` acts on the selection.
-                    move |s: &mut State| {
-                        s.core.select_figure(fi);
-                        s.core.toggle_figure_hidden();
-                    },
-                )),
         )
         .child(
-            // Line 2: reorder / opacity cycle / delete,
-            // right-aligned under line 1's toggle cluster.
+            // Line 2: reorder / opacity cycle / eye /
+            // delete, right-aligned under line 1's
+            // toggle cluster. The eye rides this line
+            // since the Phase N pixel check: as line 1's
+            // last toggle it measured past the row's
+            // right edge (and the card's).
             row()
                 .w_full()
                 .gap(6.0)
@@ -615,6 +609,18 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                     false,
                     t,
                     move |s: &mut State| cycle_row_opacity(&mut s.core, fi),
+                ))
+                .child(icon_only_btn(
+                    &format!("fig-eye-{fi}"),
+                    if r.hidden { "eye-slash" } else { "eye" },
+                    26.0, r.hidden,
+                    t,
+                    // The old listener selected the figure first:
+                    // `toggle_figure_hidden` acts on the selection.
+                    move |s: &mut State| {
+                        s.core.select_figure(fi);
+                        s.core.toggle_figure_hidden();
+                    },
                 ))
                 .child(icon_only_btn(
                     &format!("fig-del-{fi}"),
@@ -651,7 +657,20 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
                 ))
                 .child(crate::chrome_view::btn("add-figure", "+ Figure", false, t, |s| {
                     s.core.add_figure()
-                }))
+                })),
+        )
+        // Header actions row (Phase N pixel-check fix):
+        // Recolour and Duplicate used to ride the header
+        // row itself, but the Phase N headless tree dump
+        // measured that row ~127pt wider than the card's
+        // 276pt content width — `fig-duplicate` landed
+        // entirely outside the card and `fig-recolor`
+        // past the content edge. The two labelled
+        // actions keep their labels on their own row
+        // instead of pushing past the card edge.
+        .child(
+            row()
+                .gap(6.0)
                 .child(icon_btn(
                     "fig-recolor",
                     "paintbrush",
