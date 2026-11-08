@@ -2244,7 +2244,11 @@ mod tests {
         push_instance(&mut s.core, "A", 24.0, 1);
         push_instance(&mut s.core, "B", 24.0, 1);
         push_instance(&mut s.core, "C", 24.0, 1);
-        let order = |s: &State| -> Vec<&str> {
+        // The fn-pointer ascription ties the returned
+        // &str lifetime to the &State argument (a bare
+        // closure signature elides them independently
+        // and does not compile).
+        let order: fn(&State) -> Vec<&str> = |s: &State| -> Vec<&str> {
             s.core
                 .project
                 .texts
