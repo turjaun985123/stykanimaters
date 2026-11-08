@@ -2895,6 +2895,11 @@ fn timeline_clips_lane_appears_with_a_planted_clip() {
             hidden: false,
         },
     );
+    // A direct write is outside any handler: the
+    // Runtime re-runs the view only when state is
+    // marked changed, so say so (Runtime::invalidate
+    // — "marks app state changed outside a handler").
+    rt.invalidate();
     rt.frame(DT);
     // The lane mounts through the presence fade, so
     // allow the bounded settle loop before asserting
@@ -2914,6 +2919,7 @@ fn timeline_clips_lane_appears_with_a_planted_clip() {
     // row leaves through the presence fade, so allow
     // the bounded settle loop before asserting absence.
     rt.state.core.project.fx_clips.clear();
+    rt.invalidate();
     let mut gone = false;
     for _ in 0..30 {
         rt.frame(DT);
