@@ -298,6 +298,7 @@ fn tool_new_project(core: &mut EditorCore, args: &Value) -> Result<Value, String
     core.selected_node = None;
     core.solo = None;
     core.playing = false;
+    core.note_project_swapped();
     core.status = "New project (via MCP).".into();
     Ok(json!({ "ok": true, "project": project_summary(core) }))
 }
@@ -2038,6 +2039,16 @@ fn tool_draw_stroke(core: &mut EditorCore, args: &Value) -> Result<Value, String
     if width <= 0.0 {
         return Err("argument 'width' must be positive".into());
     }
+    // Dab scatter in stage units (Wave 10): 0 (the
+    // default) draws a clean line; a positive radius
+    // jitters the stroke's dabs via paint::stroke_dabs
+    // in every renderer. Negative values are refused —
+    // the model treats them as "no scatter", and
+    // accepting one would record a lie.
+    let scatter = opt_f32(args, "scatter")?.unwrap_or(0.0);
+    if scatter < 0.0 {
+        return Err("argument 'scatter' must be zero or positive".into());
+    }
     let n_points = points.len();
     core.project.strokes.push(Stroke {
         frame,
@@ -2048,6 +2059,7 @@ fn tool_draw_stroke(core: &mut EditorCore, args: &Value) -> Result<Value, String
         fill: None,
         spray: None,
         opacity: 1.0,
+        scatter,
     });
     Ok(json!({
         "ok": true,
@@ -2094,6 +2106,7 @@ fn tool_draw_shape(core: &mut EditorCore, args: &Value) -> Result<Value, String>
         fill: None,
         spray: None,
         opacity: 1.0,
+        scatter: 0.0,
     });
     Ok(json!({
         "ok": true,
@@ -2144,6 +2157,7 @@ fn tool_draw_polygon(core: &mut EditorCore, args: &Value) -> Result<Value, Strin
         fill: None,
         spray: None,
         opacity: 1.0,
+        scatter: 0.0,
     });
     Ok(json!({
         "ok": true,
@@ -2189,6 +2203,7 @@ fn tool_draw_star(core: &mut EditorCore, args: &Value) -> Result<Value, String> 
         fill: None,
         spray: None,
         opacity: 1.0,
+        scatter: 0.0,
     });
     Ok(json!({
         "ok": true,
@@ -3308,13 +3323,14 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "draw_stroke",
-            description: "Append a freehand stroke (polyline) to a frame's drawing layer. points is an array of [x, y] stage coordinates; color is 0xRRGGBB (default light grey), width in stage units (default 4, the editor's pen).",
+            description: "Append a freehand stroke (polyline) to a frame's drawing layer. points is an array of [x, y] stage coordinates; color is 0xRRGGBB (default light grey), width in stage units (default 4, the editor's pen), scatter jitters the stroke's dabs by that radius in stage units (default 0 = clean line).",
             schema: obj_schema(
                 json!({
                     "frame": { "type": "integer" },
                     "points": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 } },
                     "color": { "type": "integer", "description": "0xRRGGBB" },
-                    "width": { "type": "number" }
+                    "width": { "type": "number" },
+                    "scatter": { "type": "number", "description": "dab jitter radius in stage units, >= 0" }
                 }),
                 &["frame", "points"],
             ),

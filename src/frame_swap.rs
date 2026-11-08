@@ -334,6 +334,7 @@ mod tests {
                 fill: None,
                 spray: None,
                 opacity: 1.0,
+                scatter: 0.0,
             },
             Stroke {
                 frame: B,
@@ -344,6 +345,7 @@ mod tests {
                 fill: None,
                 spray: None,
                 opacity: 1.0,
+                scatter: 0.0,
             },
         ];
         core.project.audio = vec![

@@ -423,21 +423,141 @@ fn onion_skins(core: &EditorCore, prev: u8, next: u8) -> Vec<(Vec<(V2, V2)>, u32
     out
 }
 
+/// Clip a stage-space polygon to the stage rect
+/// `[0, 0]..stage` (Sutherland–Hodgman against the four
+/// half-planes). Vertices keep their winding and order;
+/// a polygon lying wholly inside comes back
+/// vertex-for-vertex identical, and one lying wholly
+/// outside comes back empty.
+///
+/// This exists for FX discs (see [`particle_prim`]): the
+/// Rune canvas does not clip shapes, so the intersection
+/// has to be materialised as geometry here.
+fn clip_polygon_to_stage(poly: &[[f32; 2]], stage: [f32; 2]) -> Vec<[f32; 2]> {
+    // One half-plane pass: keep the side of the axis line
+    // `p[axis] == bound` that `keep_below` selects,
+    // inserting the crossing point wherever an edge
+    // straddles the line.
+    fn pass(
+        poly: Vec<[f32; 2]>,
+        axis: usize,
+        bound: f32,
+        keep_below: bool,
+    ) -> Vec<[f32; 2]> {
+        // Signed distance to the line, positive inside.
+        let dist = |p: [f32; 2]| {
+            if keep_below {
+                bound - p[axis]
+            } else {
+                p[axis] - bound
+            }
+        };
+        let mut out = Vec::with_capacity(poly.len() + 1);
+        for i in 0..poly.len() {
+            let cur = poly[i];
+            let prev = poly[(i + poly.len() - 1) % poly.len()];
+            let (dc, dp) = (dist(cur), dist(prev));
+            if dc >= 0.0 {
+                if dp < 0.0 {
+                    // Entering: the crossing, then the point.
+                    let t = dp / (dp - dc);
+                    out.push([
+                        prev[0] + (cur[0] - prev[0]) * t,
+                        prev[1] + (cur[1] - prev[1]) * t,
+                    ]);
+                }
+                out.push(cur);
+            } else if dp >= 0.0 {
+                // Leaving: the crossing only.
+                let t = dp / (dp - dc);
+                out.push([
+                    prev[0] + (cur[0] - prev[0]) * t,
+                    prev[1] + (cur[1] - prev[1]) * t,
+                ]);
+            }
+        }
+        out
+    }
+    let mut out = poly.to_vec();
+    for (axis, bound, keep_below) in [
+        (0usize, 0.0, false),
+        (0, stage[0], true),
+        (1, 0.0, false),
+        (1, stage[1], true),
+    ] {
+        out = pass(out, axis, bound, keep_below);
+        if out.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// The stage rect FX/weather discs clip against, or
+/// `None` when the project has no positive stage size —
+/// then there is no frame to honour (the stage frame in
+/// `stage_shape` is not drawn either) and discs draw
+/// whole, as before.
+fn disc_clip_stage(stage: [f32; 2]) -> Option<[f32; 2]> {
+    (stage[0] > 0.0 && stage[1] > 0.0).then_some(stage)
+}
+
 /// Convert one stage-space particle primitive (FX clip mote or
 /// weather particle) into the shape being built, through the
 /// rotated transform: discs become small polygons (Shape has no
 /// circle primitive), lines keep a hairline-plus width.
+///
+/// `clip` is the stage rect for the FX and weather passes:
+/// a disc straddling the stage edge is clipped to the
+/// frame before it is drawn (Wave 10, closing the residual
+/// `stage_fx`'s module delta 9 left to this layer). Rune's
+/// `Shape` has no clip region, so the disc's 10-gon is
+/// built in stage space, intersected with the rect by
+/// [`clip_polygon_to_stage`], and only then mapped to the
+/// screen. A disc lying wholly inside keeps exactly its
+/// old outline (the clip returns it unchanged, and the
+/// screen-radius floor `max(radius * s, 0.8)` is preserved
+/// by flooring the stage radius at `0.8 / s` instead); the
+/// only visual change is at a straddled edge, where the
+/// polygon now ends flush with the frame instead of
+/// painting up to a full radius past it — fog banks up to
+/// 100 units, the storm lightning disc up to 300. The
+/// clipped arc follows the same 10-gon chords the disc
+/// always had, so no new approximation appears; under a
+/// rotated camera the polygon's phase rotates with the
+/// stage rather than staying screen-upright, which is
+/// invisible for a near-circle mote. The gizmo passes
+/// pass `None`: selection markers are exempt by design
+/// (stage_fx delta 9) so an off-stage anchor stays
+/// findable. The `Line` arm ignores `clip` — trail lines
+/// arrive already cut to the rect by `stage_fx`.
 fn particle_prim(
     shape: Shape,
     rt: &crate::rune_sec::stage_camera::RotTransform,
     s: f32,
     prim: crate::rune_sec::stage_fx::ParticlePrim,
+    clip: Option<[f32; 2]>,
 ) -> Shape {
     use crate::rune_sec::stage_fx::ParticlePrim;
     match prim {
         ParticlePrim::Disc { pos, radius, color, alpha } => {
             let c = hex_color(color).unwrap_or(Color::WHITE).alpha(alpha);
-            shape.fill(ngon(rt.to_screen(pos), (radius * s).max(0.8), 10), c)
+            match clip {
+                Some(stage) => {
+                    // Floor in stage units, so the clipped
+                    // path keeps the unclipped path's
+                    // minimum screen radius of 0.8.
+                    let r = if s > 0.0 { radius.max(0.8 / s) } else { radius };
+                    let poly = clip_polygon_to_stage(&ngon(pos, r, 10), stage);
+                    if poly.len() < 3 {
+                        return shape;
+                    }
+                    let screen: Vec<[f32; 2]> =
+                        poly.iter().map(|p| rt.to_screen(*p)).collect();
+                    shape.fill(screen, c)
+                }
+                None => shape.fill(ngon(rt.to_screen(pos), (radius * s).max(0.8), 10), c),
+            }
         }
         ParticlePrim::Line { a, b, color, alpha } => {
             let c = hex_color(color).unwrap_or(Color::WHITE).alpha(alpha);
@@ -1052,8 +1172,13 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     }
     // FX particles, text labels, then weather on top — the
     // rasterizer's pass order (export.rs render_frame_at).
+    // Both particle passes clip their discs to the stage
+    // rect (`particle_prim`'s `clip`): exports have no
+    // pixels outside the frame, and the canvas must not
+    // paint any there either.
+    let disc_clip = disc_clip_stage(project.stage);
     for prim in crate::rune_sec::stage_fx::fx_geometry(core) {
-        shape = particle_prim(shape, &rt, s, prim);
+        shape = particle_prim(shape, &rt, s, prim, disc_clip);
     }
     for prim in crate::rune_sec::stage_text::text_geometry(core) {
         let crate::rune_sec::stage_text::TextPrim::GlyphBox { corners, color, alpha } = prim;
@@ -1061,7 +1186,7 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         shape = shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE).alpha(alpha));
     }
     for prim in crate::rune_sec::stage_fx::weather_geometry(core) {
-        shape = particle_prim(shape, &rt, s, prim);
+        shape = particle_prim(shape, &rt, s, prim, disc_clip);
     }
     // Selected particle event's anchor gizmo (Phase G), drawn
     // last — over figures, FX, text and weather — so the
@@ -1072,7 +1197,10 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     // nothing.
     if let Some(idx) = overlays.particle_selected {
         for prim in crate::rune_sec::stage_fx::gizmo_geometry(core, idx) {
-            shape = particle_prim(shape, &rt, s, prim);
+            // No disc clip: gizmo markers are exempt by
+            // design (stage_fx delta 9) — the marker must
+            // stay findable at an off-stage anchor.
+            shape = particle_prim(shape, &rt, s, prim, None);
         }
     }
     // Selected FX clip's gizmo (Phase K), after the particle
@@ -1084,7 +1212,8 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     // empty vec and draws nothing.
     if let Some(idx) = overlays.fx_selected {
         for prim in crate::rune_sec::stage_fx::fx_clip_gizmo_geometry(core, idx) {
-            shape = particle_prim(shape, &rt, s, prim);
+            // Unclipped, like the particle gizmo above.
+            shape = particle_prim(shape, &rt, s, prim, None);
         }
     }
     shape
@@ -1124,7 +1253,7 @@ pub fn secondary_select(core: &mut EditorCore, p: V2) -> bool {
         return false;
     };
     if core.project.figures[fi].locked {
-        core.status = "Figure is locked — unlock it in the layers list.".into();
+        core.status = "Figure is locked — unlock it in the figures list.".into();
         return false;
     }
     core.select_figure(fi);
@@ -1441,6 +1570,92 @@ mod tests {
         assert!(fig3_screen_segments(&rt, vt.scale, Vec::new()).is_empty());
     }
 
+    /// Shoelace area of a stage-space polygon (absolute).
+    fn poly_area(poly: &[[f32; 2]]) -> f32 {
+        let mut sum = 0.0;
+        for i in 0..poly.len() {
+            let a = poly[i];
+            let b = poly[(i + 1) % poly.len()];
+            sum += a[0] * b[1] - b[0] * a[1];
+        }
+        (sum / 2.0).abs()
+    }
+
+    #[test]
+    fn clip_polygon_inside_the_stage_is_unchanged() {
+        // A polygon lying wholly inside comes back
+        // vertex-for-vertex: an unstraddled FX disc keeps
+        // exactly the outline it had before the clip
+        // existed.
+        let stage = [960.0, 540.0];
+        let square = [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0], [100.0, 200.0]];
+        assert_eq!(clip_polygon_to_stage(&square, stage), square.to_vec());
+        let disc = ngon([480.0, 270.0], 15.0, 10);
+        assert_eq!(clip_polygon_to_stage(&disc, stage), disc);
+    }
+
+    #[test]
+    fn clip_polygon_outside_the_stage_is_empty() {
+        let stage = [960.0, 540.0];
+        let square = [[-200.0, 100.0], [-100.0, 100.0], [-100.0, 200.0], [-200.0, 200.0]];
+        assert!(clip_polygon_to_stage(&square, stage).is_empty());
+    }
+
+    #[test]
+    fn clip_polygon_straddling_an_edge_ends_flush_with_it() {
+        // Half the square hangs past the left edge: the
+        // clipped polygon covers exactly the on-stage
+        // half, with every vertex inside the rect and at
+        // least one lying ON the boundary the disc used
+        // to paint past.
+        let stage = [960.0, 540.0];
+        let square = [[-50.0, 100.0], [50.0, 100.0], [50.0, 200.0], [-50.0, 200.0]];
+        let clipped = clip_polygon_to_stage(&square, stage);
+        assert!(clipped.len() >= 3);
+        assert!(clipped.iter().all(|p| p[0] >= 0.0 && p[0] <= stage[0] && p[1] >= 0.0 && p[1] <= stage[1]));
+        assert!(clipped.iter().any(|p| p[0].abs() < 1e-4), "a vertex sits on the stage edge");
+        assert!((poly_area(&clipped) - 5_000.0).abs() < 1e-2, "exactly the on-stage half remains");
+    }
+
+    #[test]
+    fn clip_disc_straddling_the_corner_stays_in_stage() {
+        // The fog-bank case at the corner: a radius-100
+        // disc centred ON the corner keeps only its
+        // on-stage quarter — no vertex outside the rect,
+        // and roughly a quarter of the 10-gon's area.
+        let stage = [960.0, 540.0];
+        let disc = ngon([0.0, 0.0], 100.0, 10);
+        let clipped = clip_polygon_to_stage(&disc, stage);
+        assert!(clipped.len() >= 3);
+        assert!(clipped.iter().all(|p| p[0] >= -1e-4 && p[0] <= stage[0] + 1e-4 && p[1] >= -1e-4 && p[1] <= stage[1] + 1e-4));
+        let quarter = poly_area(&disc) / 4.0;
+        assert!((poly_area(&clipped) - quarter).abs() / quarter < 0.02);
+    }
+
+    #[test]
+    fn clip_storm_disc_covers_only_the_stage() {
+        // The worst documented overshoot: the storm
+        // lightning disc, radius 300 around the centre of
+        // a 960x540 stage, reaches 30 units past the top
+        // and bottom edges. Clipped, every vertex is in
+        // the rect and the painted area is real but never
+        // more than the stage itself.
+        let stage = [960.0, 540.0];
+        let disc = ngon([480.0, 270.0], 300.0, 10);
+        let clipped = clip_polygon_to_stage(&disc, stage);
+        assert!(clipped.iter().all(|p| p[0] >= -1e-4 && p[0] <= stage[0] + 1e-4 && p[1] >= -1e-4 && p[1] <= stage[1] + 1e-4));
+        let area = poly_area(&clipped);
+        assert!(area <= stage[0] * stage[1]);
+        assert!(area > 0.4 * stage[0] * stage[1], "the flash still fills the stage");
+    }
+
+    #[test]
+    fn disc_clip_stage_rejects_a_degenerate_stage() {
+        assert_eq!(disc_clip_stage([960.0, 540.0]), Some([960.0, 540.0]));
+        assert_eq!(disc_clip_stage([0.0, 540.0]), None);
+        assert_eq!(disc_clip_stage([960.0, -1.0]), None);
+    }
+
     #[test]
     fn stage_shape_builds_with_an_fx_selection() {
         // The demo project has no FX clips, so the selected
@@ -1502,7 +1717,7 @@ mod tests {
         assert!(!secondary_select(&mut core, p));
         // The one status `begin_drag` sets on this path,
         // byte-identical — and no selection was made.
-        assert_eq!(core.status, "Figure is locked — unlock it in the layers list.");
+        assert_eq!(core.status, "Figure is locked — unlock it in the figures list.");
         assert_eq!(core.selected_node, None);
     }
 

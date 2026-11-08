@@ -115,16 +115,17 @@
 //!    circle misses the rect entirely are culled — both
 //!    exact: the rasterizer draws precisely the in-frame
 //!    part of a segment and zero pixels of a missed disc.
-//!    One residual is NOT fixable in this layer: a disc
-//!    STRADDLING the edge still paints its whole disc
-//!    past the boundary, because the prim vocabulary has
-//!    no clipped-disc shape and the consumer
-//!    (`stage_view::particle_prim`) owns the
-//!    disc-to-polygon conversion. The overshoot is
-//!    bounded by the disc's radius — small for FX motes
-//!    (≤ ~15 units), largest for Fog banks (radius
-//!    ≤ 100 at alpha ≤ 0.10) and the Storm lightning disc
-//!    (radius ≤ 300 at alpha ≤ 0.05). Weather centres
+//!    Wave 10 (B1) closed the one residual this layer
+//!    used to carry: a disc STRADDLING the edge no longer
+//!    paints its whole disc past the boundary — the
+//!    consumer (`stage_view::particle_prim`) now converts
+//!    the disc to a polygon and clips it to the stage
+//!    rect with `clip_polygon_to_stage`
+//!    (Sutherland–Hodgman in stage space), so the drawn
+//!    shape is exactly the in-stage part, for FX motes,
+//!    Fog banks (radius ≤ 100 at alpha ≤ 0.10) and the
+//!    Storm lightning disc (radius ≤ 300 at alpha
+//!    ≤ 0.05) alike. Weather centres
 //!    wrap onto the stage torus (`vfx::wrap`), so the
 //!    cull never fires for weather today; it is enforced
 //!    here anyway so the boundary contract belongs to

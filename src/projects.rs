@@ -6,10 +6,30 @@
 //! (`editor.rs::save_named_project`): one `<slug>.json` per project,
 //! where the slug is the project name lowercased with every
 //! non-alphanumeric character replaced by `-`.
+//!
+//! Two safety rules run through the module:
+//!
+//! - A name that cannot identify a file — blank, or with no
+//!   alphanumeric character at all, so its slug would be nothing
+//!   but dashes — is refused by every write path ([`file_stem_for`]).
+//! - The operations that must never overwrite ([`save_copy`],
+//!   [`duplicate_project`], [`rename_project`]) claim their target
+//!   atomically (`create_new` / the rename itself), so the
+//!   refusal and the write cannot be split by a file appearing
+//!   in between.
+//!
+//! [`scan`] caches each file's parsed summary keyed by the
+//! file's (mtime, length) stamp, so rescanning a directory of
+//! unchanged projects costs one stat per file instead of a
+//! full read + JSON parse per file; a file whose stamp moves
+//! is re-read and re-parsed on the next scan.
 
 use crate::editor::EditorCore;
 use crate::export::render_frame_at;
 use crate::model::Project;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -31,35 +51,167 @@ fn slug(name: &str) -> String {
         .replace(|c: char| !c.is_alphanumeric(), "-")
 }
 
+/// The file stem a project name maps to, or `None` when the
+/// name cannot name a library file: it is blank (empty or
+/// whitespace-only), or it contains no alphanumeric character
+/// at all — its slug would be nothing but dashes, carrying no
+/// identity and colliding with every other such name. Write
+/// paths refuse those names instead of planting files like
+/// `-.json` or `---.json` (or, for an empty name, the hidden
+/// `.json`). `pub(crate)` since Wave 10: the editor's named
+/// save applies the same rule.
+pub(crate) fn file_stem_for(name: &str) -> Option<String> {
+    if name.trim().is_empty() || !name.chars().any(|c| c.is_alphanumeric()) {
+        return None;
+    }
+    Some(slug(name))
+}
+
+/// The identity of a file's contents for cache purposes: the
+/// (modified time, length) pair from one stat. Two stamps are
+/// equal only when both halves match, so an in-place rewrite
+/// is seen whether it moved the mtime, changed the length,
+/// or (as usual) both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl FileStamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        FileStamp {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        }
+    }
+}
+
+/// The part of a parsed project a listing needs — everything
+/// in [`ProjectInfo`] except the path and the stamp, which a
+/// scan always knows first-hand.
+#[derive(Clone, Debug, PartialEq)]
+struct ScanSummary {
+    name: String,
+    figures: usize,
+    frames: usize,
+    fps: f32,
+}
+
+/// One file's cached scan outcome: the stamp it was computed
+/// under, and the summary — `None` for a file that could not
+/// be read or parsed at that stamp, so a broken file is not
+/// re-read on every scan either (it is retried as soon as its
+/// stamp moves).
+#[derive(Clone, Debug)]
+struct CachedScan {
+    stamp: FileStamp,
+    summary: Option<ScanSummary>,
+}
+
+/// Look up `path` in the scan cache under `stamp`. The outer
+/// `None` is a miss (no entry, or the entry's stamp differs —
+/// the file changed and must be re-read); `Some(None)` is a
+/// cached unparseable file; `Some(Some(summary))` is a hit.
+fn cache_get(
+    cache: &HashMap<PathBuf, CachedScan>,
+    path: &Path,
+    stamp: FileStamp,
+) -> Option<Option<ScanSummary>> {
+    let entry = cache.get(path)?;
+    if entry.stamp != stamp {
+        return None;
+    }
+    Some(entry.summary.clone())
+}
+
+/// Record `path`'s scan outcome under `stamp`, replacing any
+/// older-stamp entry for the file.
+fn cache_put(
+    cache: &mut HashMap<PathBuf, CachedScan>,
+    path: PathBuf,
+    stamp: FileStamp,
+    summary: Option<ScanSummary>,
+) {
+    cache.insert(path, CachedScan { stamp, summary });
+}
+
+/// Drop the cached entries for files directly under `dir`
+/// that the latest scan did not see, so a deleted or renamed
+/// file's entry cannot linger (or be revived if a different
+/// file later reuses the path with a colliding stamp).
+/// Entries for other directories are untouched.
+fn cache_prune_dir(cache: &mut HashMap<PathBuf, CachedScan>, dir: &Path, seen: &[PathBuf]) {
+    cache.retain(|path, _| !path.starts_with(dir) || seen.iter().any(|p| p == path));
+}
+
+thread_local! {
+    /// Per-file scan summaries, keyed by path and validated
+    /// by [`FileStamp`] — the shell's `thread_local` pattern
+    /// for process state (as in `stage_view` / `audio_play`).
+    /// Session-only: never persisted, and correctness never
+    /// depends on it — a miss simply re-reads the file.
+    static SCAN_CACHE: RefCell<HashMap<PathBuf, CachedScan>> =
+        RefCell::new(HashMap::new());
+}
+
 /// List every parseable project in `dir`, newest modified first.
 /// Files that cannot be read or parsed as a [`Project`] are
 /// skipped silently; a missing directory yields an empty list.
+///
+/// Cost: one directory listing plus one stat per `.json`
+/// file. A file whose (mtime, length) stamp matches its
+/// cached summary is not re-read or re-parsed; only new or
+/// changed files pay the read + parse.
 pub fn scan(dir: &Path) -> Vec<ProjectInfo> {
     let mut infos: Vec<ProjectInfo> = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return infos;
     };
+    let mut seen: Vec<PathBuf> = Vec::new();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.extension().map(|x| x != "json").unwrap_or(true) {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
+        seen.push(path.clone());
+        // A file whose metadata cannot be read is never
+        // cached: it is re-read on every scan and listed
+        // with `modified: None`, exactly as before.
+        let stamp = entry.metadata().ok().map(|m| FileStamp::of(&m));
+        let cached = stamp.and_then(|st| SCAN_CACHE.with(|c| cache_get(&c.borrow(), &path, st)));
+        let summary = match cached {
+            Some(summary) => summary,
+            None => {
+                let parsed = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Project>(&text).ok())
+                    .map(|project| ScanSummary {
+                        name: project.name,
+                        figures: project.figures.len(),
+                        frames: project.frames.len(),
+                        fps: project.fps,
+                    });
+                if let Some(st) = stamp {
+                    SCAN_CACHE.with(|c| {
+                        cache_put(&mut c.borrow_mut(), path.clone(), st, parsed.clone())
+                    });
+                }
+                parsed
+            }
         };
-        let Ok(project) = serde_json::from_str::<Project>(&text) else {
-            continue;
-        };
-        let modified = entry.metadata().and_then(|m| m.modified()).ok();
-        infos.push(ProjectInfo {
-            name: project.name,
-            figures: project.figures.len(),
-            frames: project.frames.len(),
-            fps: project.fps,
-            path,
-            modified,
-        });
+        if let Some(summary) = summary {
+            infos.push(ProjectInfo {
+                name: summary.name,
+                figures: summary.figures,
+                frames: summary.frames,
+                fps: summary.fps,
+                path,
+                modified: stamp.and_then(|st| st.modified),
+            });
+        }
     }
+    SCAN_CACHE.with(|c| cache_prune_dir(&mut c.borrow_mut(), dir, &seen));
     infos.sort_by(|a, b| b.modified.cmp(&a.modified));
     infos
 }
@@ -71,10 +223,20 @@ pub fn load(path: &Path) -> std::io::Result<Project> {
 }
 
 /// Save `project` into `dir` under its name slug (creating the
-/// directory if needed) and return the written path.
+/// directory if needed) and return the written path. Saving
+/// overwrites the project's own file by design; a project
+/// whose name cannot name a file ([`file_stem_for`]) is
+/// refused with an `InvalidInput` error instead of writing a
+/// hidden `.json`.
 pub fn save(project: &Project, dir: &Path) -> std::io::Result<PathBuf> {
+    let Some(stem) = file_stem_for(&project.name) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "project name produces an empty file name",
+        ));
+    };
     std::fs::create_dir_all(dir)?;
-    let path = dir.join(format!("{}.json", slug(&project.name)));
+    let path = dir.join(format!("{stem}.json"));
     let text = serde_json::to_string_pretty(project).map_err(std::io::Error::other)?;
     std::fs::write(&path, text)?;
     Ok(path)
@@ -105,22 +267,32 @@ pub fn save_copy(core: &EditorCore, new_name: &str) -> Result<PathBuf, String> {
 /// codebase's split, as in `editor.rs::save_named_project`,
 /// so tests can aim the write at a temp dir).
 fn save_copy_to(core: &EditorCore, new_name: &str, dir: &Path) -> Result<PathBuf, String> {
-    let stem = slug(new_name);
-    if stem.is_empty() {
+    let Some(stem) = file_stem_for(new_name) else {
         return Err("project name produces an empty file name".to_string());
-    }
+    };
     let path = dir.join(format!("{stem}.json"));
-    if path.exists() {
-        return Err(format!(
-            "project file already exists: {}",
-            path.display()
-        ));
-    }
     let mut copy = core.project.clone();
     copy.name = new_name.to_string();
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let text = serde_json::to_string_pretty(&copy).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    // The target is claimed with `create_new`: the refusal
+    // and the write are one atomic step, so a file that
+    // already exists — or appears at the target while this
+    // call runs — is never silently overwritten (a plain
+    // exists-check followed by `fs::write` would truncate
+    // whatever won that race).
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                format!("project file already exists: {}", path.display())
+            } else {
+                e.to_string()
+            }
+        })?;
+    file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
     Ok(path)
 }
 
@@ -134,13 +306,12 @@ fn save_copy_to(core: &EditorCore, new_name: &str, dir: &Path) -> Result<PathBuf
 /// stored inside the JSON is unchanged, so a later [`scan`]
 /// still reports the stored name until the project is re-saved.
 pub fn rename_project(path: &Path, new_name: &str) -> std::io::Result<PathBuf> {
-    let stem = slug(new_name);
-    if stem.is_empty() {
+    let Some(stem) = file_stem_for(new_name) else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "project name produces an empty file name",
         ));
-    }
+    };
     let dir = path.parent().unwrap_or_else(|| Path::new(""));
     let new_path = dir.join(format!("{stem}.json"));
     if new_path == path.to_path_buf() {
@@ -159,7 +330,10 @@ pub fn rename_project(path: &Path, new_name: &str) -> std::io::Result<PathBuf> {
 /// Copy the project file at `path` to a sibling file named
 /// `<stem>-copy.json` and return the copy's path. If that name is
 /// taken, the suffix increments: `<stem>-copy-2.json`,
-/// `<stem>-copy-3.json`, and so on. The copy's bytes are identical
+/// `<stem>-copy-3.json`, and so on. Each candidate is claimed
+/// with `create_new`, so a file that already exists (or appears
+/// while the loop runs) is never overwritten — the loop simply
+/// moves to the next suffix. The copy's bytes are identical
 /// to the source's; the source is left in place.
 pub fn duplicate_project(path: &Path) -> std::io::Result<PathBuf> {
     let stem = path
@@ -172,6 +346,7 @@ pub fn duplicate_project(path: &Path) -> std::io::Result<PathBuf> {
             )
         })?;
     let dir = path.parent().unwrap_or_else(|| Path::new(""));
+    let mut source = std::fs::File::open(path)?;
     let mut n = 1u32;
     loop {
         let file_name = if n == 1 {
@@ -180,11 +355,20 @@ pub fn duplicate_project(path: &Path) -> std::io::Result<PathBuf> {
             format!("{stem}-copy-{n}.json")
         };
         let candidate = dir.join(file_name);
-        if !candidate.exists() {
-            std::fs::copy(path, &candidate)?;
-            return Ok(candidate);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut dest) => {
+                std::io::copy(&mut source, &mut dest)?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                n += 1;
+            }
+            Err(e) => return Err(e),
         }
-        n += 1;
     }
 }
 
@@ -463,5 +647,224 @@ mod tests {
         // The refusal happens before anything is created.
         assert!(!dir.exists());
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn file_stem_for_rejects_names_that_cannot_name_a_file() {
+        // Blank names: empty, and whitespace-only (whose slug
+        // would be all dashes).
+        assert_eq!(file_stem_for(""), None);
+        assert_eq!(file_stem_for("  \t "), None);
+        // Names with no alphanumeric character at all: the
+        // slug carries no identity and collides with every
+        // other such name.
+        assert_eq!(file_stem_for("!!!"), None);
+        assert_eq!(file_stem_for("☕"), None);
+        // Ordinary names slugify exactly as before.
+        assert_eq!(file_stem_for("Untitled").as_deref(), Some("untitled"));
+        assert_eq!(file_stem_for("My Copy!").as_deref(), Some("my-copy-"));
+        // Unicode letters are alphanumeric and survive.
+        assert_eq!(file_stem_for("Café").as_deref(), Some("café"));
+    }
+
+    #[test]
+    fn save_copy_rejects_blank_and_punctuation_only_names() {
+        let dir = temp_dir("save-copy-bad-names").join("projects");
+        let core = EditorCore::new();
+        for name in ["   ", "!!!", "☕ ☕"] {
+            let err = save_copy_to(&core, name, &dir).unwrap_err();
+            assert!(
+                err.contains("empty file name"),
+                "name {name:?}: unexpected error: {err}"
+            );
+        }
+        // Every refusal happens before anything is created.
+        assert!(!dir.exists());
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn save_copy_keeps_a_unicode_name_verbatim() {
+        let dir = temp_dir("save-copy-unicode");
+        let core = EditorCore::new();
+        // 'é' is alphanumeric and is kept; the space and the
+        // emoji each become a dash.
+        let path = save_copy_to(&core, "Café ☕", &dir).unwrap();
+        assert_eq!(path, dir.join("café--.json"));
+        let infos = scan(&dir);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "Café ☕");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_copy_refuses_a_slug_collision_with_a_different_name() {
+        let dir = temp_dir("save-copy-slug-collision");
+        let core = EditorCore::new();
+        // "Foo Bar" and "Foo-Bar" are different names that
+        // slugify to the same file. The second save must be
+        // refused — never a silent overwrite of the first
+        // project.
+        let first = save_copy_to(&core, "Foo Bar", &dir).unwrap();
+        let err = save_copy_to(&core, "Foo-Bar", &dir).unwrap_err();
+        assert!(err.contains("already exists"), "unexpected error: {err}");
+        assert_eq!(load(&first).unwrap().name, "Foo Bar");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_copy_fails_honestly_on_an_overlong_name() {
+        let dir = temp_dir("save-copy-long-name");
+        let core = EditorCore::new();
+        // A 300-char name makes a 305-byte file name, over
+        // the 255-byte filesystem limit: the call errors and
+        // writes nothing, rather than truncating the slug
+        // (which could collide with another long name).
+        let name = "a".repeat(300);
+        assert!(save_copy_to(&core, &name, &dir).is_err());
+        assert!(scan(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_and_rename_refuse_names_that_cannot_name_a_file() {
+        let dir = temp_dir("bad-names-save-rename");
+        let mut project = Project::new_demo();
+        project.name = "   ".into();
+        let err = save(&project, &dir).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(scan(&dir).is_empty());
+
+        project.name = "Real".into();
+        let path = save(&project, &dir).unwrap();
+        let err = rename_project(&path, "!!!").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(path.exists(), "a refused rename leaves the file in place");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_cache_hits_only_on_an_exact_stamp_match() {
+        use std::time::Duration;
+        let path = PathBuf::from("some/dir/proj.json");
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let stamp = FileStamp {
+            modified: Some(t0),
+            len: 42,
+        };
+        let summary = ScanSummary {
+            name: "Proj".into(),
+            figures: 1,
+            frames: 2,
+            fps: 12.0,
+        };
+        let mut cache: HashMap<PathBuf, CachedScan> = HashMap::new();
+        assert_eq!(cache_get(&cache, &path, stamp), None, "empty cache misses");
+        cache_put(&mut cache, path.clone(), stamp, Some(summary.clone()));
+        assert_eq!(cache_get(&cache, &path, stamp), Some(Some(summary)));
+        // An in-place rewrite that only changed the length…
+        assert_eq!(
+            cache_get(&cache, &path, FileStamp { len: 43, ..stamp }),
+            None,
+            "a length change invalidates"
+        );
+        // …or only the mtime…
+        assert_eq!(
+            cache_get(
+                &cache,
+                &path,
+                FileStamp {
+                    modified: Some(t0 + Duration::from_secs(1)),
+                    ..stamp
+                }
+            ),
+            None,
+            "an mtime change invalidates"
+        );
+        // …and an unknown path all miss.
+        assert_eq!(cache_get(&cache, Path::new("other.json"), stamp), None);
+        // Unparseable files are cached too: a hit at the same
+        // stamp, a miss as soon as the stamp moves.
+        cache_put(&mut cache, path.clone(), stamp, None);
+        assert_eq!(cache_get(&cache, &path, stamp), Some(None));
+        assert_eq!(
+            cache_get(&cache, &path, FileStamp { len: 1, ..stamp }),
+            None
+        );
+    }
+
+    #[test]
+    fn scan_cache_prune_drops_only_vanished_files_in_the_scanned_dir() {
+        let dir = PathBuf::from("lib");
+        let kept = dir.join("kept.json");
+        let gone = dir.join("gone.json");
+        let elsewhere = PathBuf::from("elsewhere/x.json");
+        let stamp = FileStamp {
+            modified: None,
+            len: 1,
+        };
+        let mut cache: HashMap<PathBuf, CachedScan> = HashMap::new();
+        for p in [&kept, &gone, &elsewhere] {
+            cache_put(&mut cache, p.clone(), stamp, None);
+        }
+        cache_prune_dir(&mut cache, &dir, &[kept.clone()]);
+        assert!(cache_get(&cache, &kept, stamp).is_some(), "seen file kept");
+        assert!(cache_get(&cache, &gone, stamp).is_none(), "vanished file dropped");
+        assert!(
+            cache_get(&cache, &elsewhere, stamp).is_some(),
+            "other directories are untouched"
+        );
+    }
+
+    #[test]
+    fn scan_repicks_a_file_rewritten_in_place() {
+        let dir = temp_dir("scan-cache-rewrite");
+        let mut project = Project::new_demo();
+        project.name = "Alpha".into();
+        let path = save(&project, &dir).unwrap();
+        let infos = scan(&dir);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "Alpha");
+        assert_eq!(infos[0].figures, 1);
+
+        // Rewrite the SAME path in place with a different
+        // project (the editor's own save pattern — no
+        // directory entry changes). The next scan must show
+        // the new contents: the stamp moved, so the cached
+        // summary is not served.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let mut other = Project::new_demo();
+        other.name = "Beta With A Longer Name".into();
+        other.figures.push(other.figures[0].clone());
+        std::fs::write(&path, serde_json::to_string_pretty(&other).unwrap()).unwrap();
+        let infos = scan(&dir);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "Beta With A Longer Name");
+        assert_eq!(infos[0].figures, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_repicks_a_file_that_breaks_and_is_fixed() {
+        let dir = temp_dir("scan-cache-break-fix");
+        let mut project = Project::new_demo();
+        project.name = "Stable".into();
+        let path = save(&project, &dir).unwrap();
+        assert_eq!(scan(&dir).len(), 1);
+
+        // The file stops parsing: it leaves the listing (the
+        // negative outcome is cached under the broken stamp,
+        // not the good one).
+        std::fs::write(&path, "{ broken").unwrap();
+        assert!(scan(&dir).is_empty());
+
+        // And when it is fixed in place it comes back.
+        let mut fixed = Project::new_demo();
+        fixed.name = "Fixed Again".into();
+        std::fs::write(&path, serde_json::to_string_pretty(&fixed).unwrap()).unwrap();
+        let infos = scan(&dir);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "Fixed Again");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

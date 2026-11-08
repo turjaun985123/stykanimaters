@@ -213,13 +213,62 @@ fn save_clip_preset_in(
         ));
     }
     std::fs::create_dir_all(dir)
-        .map_err(|e| format!("could not create FX preset directory {}: {e}", dir.display()))?;
-    let path = preset_path(dir, &slug);
+        .map_err(|e| format!("could not create FX preset directory {}: {e}\", dir.display()))?;
     let text = serde_json::to_string_pretty(clip)
         .map_err(|e| format!("could not serialise FX preset '{name}': {e}"))?;
-    std::fs::write(&path, text)
-        .map_err(|e| format!("could not write FX preset '{name}' to {}: {e}", path.display()))?;
-    Ok(path)
+    // Wave 10 (C7): never silently destroy a different
+    // preset. The shell's auto-names are positional
+    // (`<kind>-<index+1>`), so after the clip list changes
+    // a save can land on an earlier preset's name — and
+    // the old write replaced that file wholesale. Now the
+    // write claims its file with `create_new`: an existing
+    // file holding the SAME preset (byte-identical — it
+    // was written by this same serialiser) is a successful
+    // no-op re-save; an existing file holding a different
+    // preset keeps its name and the new preset takes the
+    // next free suffix (`<slug>-2`, `<slug>-3`, …). The
+    // returned path always names the file actually
+    // written, so callers report the truth.
+    use std::io::Write as _;
+    let mut suffix = 1usize;
+    loop {
+        let candidate = if suffix == 1 {
+            slug.clone()
+        } else {
+            format!("{slug}-{suffix}")
+        };
+        let path = preset_path(dir, &candidate);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                return file
+                    .write_all(text.as_bytes())
+                    .map(|_| path.clone())
+                    .map_err(|e| {
+                        format!(
+                            "could not write FX preset '{name}' to {}: {e}",
+                            path.display()
+                        )
+                    });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::fs::read_to_string(&path).map(|t| t == text).unwrap_or(false) {
+                    return Ok(path);
+                }
+                suffix += 1;
+                if suffix > 999 {
+                    return Err(format!(
+                        "cannot save FX preset '{name}': every suffixed name is taken"
+                    ));
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "could not write FX preset '{name}' to {}: {e}",
+                    path.display()
+                ));
+            }
+        }
+    }
 }
 
 /// Load the preset called `name` from directory `dir`. A missing
@@ -558,6 +607,33 @@ mod preset_tests {
         // The slug itself is a valid name for the same file.
         let by_slug = load_clip_preset_in(&dir, "my-galaxy-").unwrap();
         assert_same_clip(&by_slug, &clip);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_never_overwrites_a_different_preset() {
+        // Wave 10 (C7): the shell's auto-names are
+        // positional, so a save can land on an earlier
+        // preset's name after the clip list changed. The
+        // first preset must survive byte-for-byte and the
+        // new one takes the next free suffix; re-saving
+        // the SAME preset is a no-op on the same path.
+        let dir = temp_dir("no-overwrite");
+        let first = sample_clip();
+        let p1 = save_clip_preset_in(&dir, &first, "sparkle-1").unwrap();
+        assert_eq!(p1, dir.join("sparkle-1.json"));
+        let before = std::fs::read_to_string(&p1).unwrap();
+
+        let mut other = sample_clip();
+        other.duration = first.duration + 5.0;
+        let p2 = save_clip_preset_in(&dir, &other, "sparkle-1").unwrap();
+        assert_eq!(p2, dir.join("sparkle-1-2.json"));
+        assert_eq!(std::fs::read_to_string(&p1).unwrap(), before);
+        assert_same_clip(&load_clip_preset_in(&dir, "sparkle-1").unwrap(), &first);
+        assert_same_clip(&load_clip_preset_in(&dir, "sparkle-1-2").unwrap(), &other);
+
+        let p3 = save_clip_preset_in(&dir, &first, "sparkle-1").unwrap();
+        assert_eq!(p3, p1, "re-saving the same preset keeps its path");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

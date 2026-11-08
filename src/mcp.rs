@@ -28,7 +28,10 @@
 //! frame easing, figure move/delete, camera-key delete and
 //! framing, camera follow, tween playback, motion-path
 //! smoothing, named save, audio split/crossfade/mixdown,
-//! particle add/clear and the 3D library),
+//! particle add/clear and the 3D library, plus the Wave-10
+//! round-2 built-ins: editor status, playback control,
+//! selection get/set, figure keyframe jumps and delete, and
+//! the transport key jumps),
 //! [`crate::mcp_tools`] (editing operations) and [`crate::mcp_io`]
 //! (file IO and export). [`all_tools`] is the single registry every
 //! consumer goes through.
@@ -91,6 +94,17 @@ pub fn all_tools() -> Vec<Tool> {
         tool_smooth_path_roots(),
         tool_set_camera_follow(),
         tool_set_tween_playback(),
+        // Wave-10 parity built-ins, round 2 (session state:
+        // editor status, playback, selection, keyframe jumps).
+        tool_get_editor_status(),
+        tool_set_playback(),
+        tool_get_selection(),
+        tool_set_selection(),
+        tool_goto_next_keyframe(),
+        tool_goto_prev_keyframe(),
+        tool_delete_keyframe(),
+        tool_goto_next_key(),
+        tool_goto_prev_key(),
     ];
     tools.extend(crate::mcp_tools::tools());
     tools.extend(crate::mcp_io::tools());
@@ -1258,6 +1272,358 @@ fn tool_set_tween_playback() -> Tool {
 }
 
 // ---------------------------------------------------------------------
+// Wave-10 parity built-ins (round 2)
+//
+// Session-state operations the GUI exposes that round 1 did not
+// cover. `get_state` above reports the project's shape and
+// `mcp_tools` carries `undo` / `redo` and `get_project_stats`;
+// what no tool could do before this round was observe or drive
+// the session state around the project: whether playback is
+// running, where the fractional playhead sits, which figure and
+// node are selected, how deep the undo history is, the
+// transport's Prev/Next key jumps, and the dopesheet's
+// per-figure keyframe navigation and delete (the
+// `EditorCore` keyframe ops that landed with Wave 10's
+// dopesheet). Each handler below
+// mirrors the GUI operation it names — same core field or
+// method, same semantics — against whichever core the router
+// was handed, so over the live-control path they act on the
+// session the user is looking at.
+// ---------------------------------------------------------------------
+
+fn tool_get_editor_status() -> Tool {
+    Tool {
+        name: "get_editor_status",
+        description: "Read-only snapshot of the editor session (not the project file): playing state, current frame, fractional playhead, loop range (or null), the selected figure and node, undo/redo history depths with can_undo/can_redo, and the status line. EditorCore exposes no saved/dirty flag — the undo depth is the observable edit history. Complements get_state, which reports the project's shape.",
+        schema: empty_args_schema(),
+        handler: |core, _args| {
+            let loop_range = match core.loop_range {
+                Some((a, b)) => json!([a, b]),
+                None => Value::Null,
+            };
+            Ok(json!({
+                "playing": core.playing,
+                "current_frame": core.current,
+                "playhead": core.playhead,
+                "loop_range": loop_range,
+                "selected_figure": core.selected_figure,
+                "selected_node": core.selected_node,
+                "can_undo": core.undo_depth() > 0,
+                "can_redo": core.redo_depth() > 0,
+                "undo_depth": core.undo_depth(),
+                "redo_depth": core.redo_depth(),
+                "status": core.status,
+            }))
+        },
+    }
+}
+
+fn tool_set_playback() -> Tool {
+    Tool {
+        name: "set_playback",
+        description: "Drive playback, mirroring the transport buttons: 'play' / 'pause' / 'toggle' flip the same playing flag the chrome Play/Pause button flips; 'restart' goes to frame 0 and plays (the Restart button); 'play_range' goes to the loop range's start — frame 0 when no range is set — and plays (the Play range button). Over the live-control path the GUI's poll observes the flag, so playback and its audio start exactly as if the button had been pressed.",
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["play", "pause", "toggle", "restart", "play_range"],
+                    "description": "Which transport action to perform",
+                },
+            },
+            "required": ["action"],
+            "additionalProperties": false,
+        }),
+        handler: |core, args| {
+            let action = arg_str(args, "action")?;
+            if !matches!(action, "play" | "pause" | "toggle" | "restart" | "play_range") {
+                return Err(format!(
+                    "invalid 'action' argument: expected one of play, pause, toggle, restart, play_range; got \"{action}\""
+                ));
+            }
+            if core.project.frames.is_empty() {
+                return Err("the project has no frames to play".to_string());
+            }
+            match action {
+                "play" => core.playing = true,
+                "pause" => core.playing = false,
+                "toggle" => core.playing = !core.playing,
+                // The Restart / Play range composition the shell
+                // shares (`start_playback_at` in
+                // playback_controls): `goto` also resets the
+                // fractional playhead, then the flag is set.
+                "restart" => {
+                    core.goto(0);
+                    core.playing = true;
+                }
+                "play_range" => {
+                    let start = core.loop_range.map(|(a, _)| a).unwrap_or(0);
+                    core.goto(start);
+                    core.playing = true;
+                }
+                _ => unreachable!("the action was validated above"),
+            }
+            Ok(json!({
+                "ok": true,
+                "playing": core.playing,
+                "current_frame": core.current,
+            }))
+        },
+    }
+}
+
+fn tool_get_selection() -> Tool {
+    Tool {
+        name: "get_selection",
+        description: "Read the current selection: the selected figure's 0-based index and name (null if the index is somehow out of range), and the selected node index within that figure (null when no node is selected).",
+        schema: empty_args_schema(),
+        handler: |core, _args| {
+            let figure_name = core
+                .project
+                .figures
+                .get(core.selected_figure)
+                .map(|f| f.name.clone());
+            Ok(json!({
+                "selected_figure": core.selected_figure,
+                "figure_name": figure_name,
+                "selected_node": core.selected_node,
+            }))
+        },
+    }
+}
+
+fn tool_set_selection() -> Tool {
+    Tool {
+        name: "set_selection",
+        description: "Select a figure by 0-based index (the figures panel row press: EditorCore::select_figure, which also clears the node selection). Optionally also select a node of that figure by 0-based index, as a stage click on the figure does; omit 'node' (or pass null) to leave the node selection cleared. An out-of-range figure or node is an error and leaves the selection untouched.",
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "figure": int_schema("0-based index of the figure to select"),
+                "node": {
+                    "type": ["integer", "null"],
+                    "minimum": 0,
+                    "description": "Optional 0-based node index within the figure, or null",
+                },
+            },
+            "required": ["figure"],
+            "additionalProperties": false,
+        }),
+        handler: |core, args| {
+            let fi = arg_usize(args, "figure")?;
+            check_figure(core, fi)?;
+            // Validate the node before applying anything, so a
+            // bad node cannot leave a half-moved selection.
+            let node = match args.get("node") {
+                None | Some(Value::Null) => None,
+                Some(_) => {
+                    let ni = arg_usize(args, "node")?;
+                    let count = core.project.figures[fi].def.nodes.len();
+                    if ni >= count {
+                        return Err(format!(
+                            "node index {ni} out of range (figure {fi} has {count} node(s))"
+                        ));
+                    }
+                    Some(ni)
+                }
+            };
+            core.select_figure(fi);
+            if let Some(ni) = node {
+                core.selected_node = Some(ni);
+            }
+            Ok(json!({
+                "ok": true,
+                "selected_figure": core.selected_figure,
+                "selected_node": core.selected_node,
+            }))
+        },
+    }
+}
+
+/// One graph key's timeline frame: `f32::round` (halves away
+/// from zero), with out-of-timeline results dropped, never
+/// clamped. A verbatim mirror of the shell's
+/// `timeline_marks::graph_key_frame` — `rune_sec` is
+/// binary-crate code the library cannot call, and the two must
+/// agree or the MCP jumps would land off the markers the
+/// timeline draws.
+fn graph_key_frame(t: f32, count: usize) -> Option<usize> {
+    if count == 0 || !t.is_finite() {
+        return None;
+    }
+    let f = t.round();
+    if f < 0.0 || f >= count as f32 {
+        return None;
+    }
+    Some(f as usize)
+}
+
+/// Every key frame in the project, sorted ascending with
+/// duplicates removed: the union of the camera keys and all
+/// graph channel keys — the exact set the transport's
+/// Prev/Next key buttons walk (`playback_controls::key_frames`
+/// in the shell, mirrored here for the same reason as
+/// [`graph_key_frame`]). Camera keys stored past the timeline
+/// end are dropped, matching the timeline's markers.
+fn key_frames_of(core: &crate::editor::EditorCore) -> Vec<usize> {
+    let count = core.frame_count();
+    let mut frames: Vec<usize> = Vec::new();
+    for key in &core.project.camera {
+        if key.frame < count {
+            frames.push(key.frame);
+        }
+    }
+    for channel in &core.project.channels {
+        for key in &channel.keys {
+            if let Some(f) = graph_key_frame(key.frame, count) {
+                frames.push(f);
+            }
+        }
+    }
+    frames.sort_unstable();
+    frames.dedup();
+    frames
+}
+
+fn tool_goto_next_keyframe() -> Tool {
+    Tool {
+        name: "goto_next_keyframe",
+        description: "Move the playhead to a figure's next keyframe (EditorCore::goto_next_keyframe, the dopesheet's navigation): a figure's keyframes are the frames where its pose changes (stats::figure_keyframes). 'figure' is a 0-based figure index. An error when the figure has no later keyframe — the core's own refusal, carried on its status line.",
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "figure": int_schema("0-based index of the figure whose keyframes to walk"),
+            },
+            "required": ["figure"],
+            "additionalProperties": false,
+        }),
+        handler: |core, args| {
+            let fi = arg_usize(args, "figure")?;
+            check_figure(core, fi)?;
+            if !core.goto_next_keyframe(fi) {
+                return Err(core.status.clone());
+            }
+            Ok(json!({
+                "ok": true,
+                "figure": fi,
+                "current_frame": core.current,
+                "key_frames": crate::stats::figure_keyframes(&core.project, fi),
+                "status": core.status,
+            }))
+        },
+    }
+}
+
+fn tool_goto_prev_keyframe() -> Tool {
+    Tool {
+        name: "goto_prev_keyframe",
+        description: "Move the playhead to a figure's previous keyframe (EditorCore::goto_prev_keyframe, the dopesheet's navigation): a figure's keyframes are the frames where its pose changes (stats::figure_keyframes). 'figure' is a 0-based figure index. An error when the figure has no earlier keyframe — the core's own refusal, carried on its status line.",
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "figure": int_schema("0-based index of the figure whose keyframes to walk"),
+            },
+            "required": ["figure"],
+            "additionalProperties": false,
+        }),
+        handler: |core, args| {
+            let fi = arg_usize(args, "figure")?;
+            check_figure(core, fi)?;
+            if !core.goto_prev_keyframe(fi) {
+                return Err(core.status.clone());
+            }
+            Ok(json!({
+                "ok": true,
+                "figure": fi,
+                "current_frame": core.current,
+                "key_frames": crate::stats::figure_keyframes(&core.project, fi),
+                "status": core.status,
+            }))
+        },
+    }
+}
+
+fn tool_delete_keyframe() -> Tool {
+    Tool {
+        name: "delete_keyframe",
+        description: "Delete a figure's keyframe at a frame (EditorCore::delete_keyframe, the dopesheet's delete): the frame takes the previous frame's held pose, so the figure no longer changes there. 'figure' and 'frame' are 0-based indices. One undo step. The core's refusals — frame 0's base pose, a frame that is not a keyframe for the figure, a frame where the figure appears — are errors carrying its status line.",
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "figure": int_schema("0-based index of the figure whose keyframe to delete"),
+                "frame": int_schema("0-based frame of the keyframe to delete"),
+            },
+            "required": ["figure", "frame"],
+            "additionalProperties": false,
+        }),
+        handler: |core, args| {
+            let fi = arg_usize(args, "figure")?;
+            let frame = arg_usize(args, "frame")?;
+            check_figure(core, fi)?;
+            check_frame(core, frame)?;
+            if !core.delete_keyframe(fi, frame) {
+                return Err(core.status.clone());
+            }
+            Ok(json!({
+                "ok": true,
+                "figure": fi,
+                "frame": frame,
+                "key_frames": crate::stats::figure_keyframes(&core.project, fi),
+                "status": core.status,
+            }))
+        },
+    }
+}
+
+fn tool_goto_next_key() -> Tool {
+    Tool {
+        name: "goto_next_key",
+        description: "Move the playhead to the next key strictly after the current frame (the transport's Next key button, pb-next-key): the keys are the sorted union of the camera keys and every graph channel's keys — not any one figure's pose keys (for those, goto_next_keyframe). Like the button, the jump only moves the playhead — playback state is untouched. An error when no key follows (the button renders inert in that state).",
+        schema: empty_args_schema(),
+        handler: |core, _args| {
+            let keys = key_frames_of(core);
+            let Some(target) = keys.iter().copied().filter(|k| *k > core.current).min() else {
+                return Err(format!(
+                    "no key after frame {} ({} key(s) in the project)",
+                    core.current,
+                    keys.len()
+                ));
+            };
+            core.goto(target);
+            Ok(json!({
+                "ok": true,
+                "current_frame": core.current,
+                "key_frames": keys,
+            }))
+        },
+    }
+}
+
+fn tool_goto_prev_key() -> Tool {
+    Tool {
+        name: "goto_prev_key",
+        description: "Move the playhead to the previous key strictly before the current frame (the transport's Prev key button, pb-prev-key): the keys are the sorted union of the camera keys and every graph channel's keys — not any one figure's pose keys (for those, goto_prev_keyframe). Like the button, the jump only moves the playhead — playback state is untouched. An error when no key precedes (the button renders inert in that state).",
+        schema: empty_args_schema(),
+        handler: |core, _args| {
+            let keys = key_frames_of(core);
+            let Some(target) = keys.iter().copied().filter(|k| *k < core.current).max() else {
+                return Err(format!(
+                    "no key before frame {} ({} key(s) in the project)",
+                    core.current,
+                    keys.len()
+                ));
+            };
+            core.goto(target);
+            Ok(json!({
+                "ok": true,
+                "current_frame": core.current,
+                "key_frames": keys,
+            }))
+        },
+    }
+}
+
+// ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
 
@@ -1869,5 +2235,397 @@ mod tests {
         assert!(!is_error);
         assert_eq!(out["enabled"], false);
         assert!(!server.core.project.tween_playback);
+    }
+
+    #[test]
+    fn wave10_editor_status_reports_session_state_via_handle_on() {
+        let mut server = McpServer::new();
+        let mut external = crate::editor::EditorCore::new();
+        let (status, is_error) =
+            call_payload_on(&mut server, &mut external, "get_editor_status", json!({}));
+        assert!(!is_error);
+        assert_eq!(status["playing"], false);
+        assert_eq!(status["current_frame"], 0);
+        assert_eq!(status["loop_range"], Value::Null);
+        assert_eq!(status["selected_figure"], 0);
+        assert_eq!(status["selected_node"], Value::Null);
+        assert_eq!(status["can_undo"], false);
+        assert_eq!(status["can_redo"], false);
+        assert_eq!(status["undo_depth"], 0);
+        // An undoable edit through the same route shows up in
+        // the reported history depths.
+        let (_out, is_error) =
+            call_payload_on(&mut server, &mut external, "duplicate_frame", json!({}));
+        assert!(!is_error);
+        let (status, is_error) =
+            call_payload_on(&mut server, &mut external, "get_editor_status", json!({}));
+        assert!(!is_error);
+        assert_eq!(status["can_undo"], true);
+        assert_eq!(status["undo_depth"], 1);
+        assert_eq!(status["current_frame"], external.current);
+        // The server's own core was not the edit target.
+        assert_eq!(server.core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn wave10_set_playback_drives_the_passed_core() {
+        let mut server = McpServer::new();
+        let mut external = crate::editor::EditorCore::new();
+        assert!(
+            external.project.frames.len() >= 4,
+            "demo project needs several frames"
+        );
+        let (out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_playback",
+            json!({ "action": "play" }),
+        );
+        assert!(!is_error);
+        assert_eq!(out["playing"], true);
+        assert!(external.playing);
+        assert!(!server.core.playing, "the server's own core stays paused");
+
+        // Toggle and pause flip the same flag.
+        let (out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_playback",
+            json!({ "action": "toggle" }),
+        );
+        assert!(!is_error);
+        assert_eq!(out["playing"], false);
+        let (out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_playback",
+            json!({ "action": "toggle" }),
+        );
+        assert!(!is_error);
+        assert_eq!(out["playing"], true);
+        let (out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_playback",
+            json!({ "action": "pause" }),
+        );
+        assert!(!is_error);
+        assert_eq!(out["playing"], false);
+
+        // Restart from mid-timeline lands on frame 0, playing.
+        let (_out, is_error) =
+            call_payload_on(&mut server, &mut external, "set_frame", json!({ "frame": 3 }));
+        assert!(!is_error);
+        let (out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_playback",
+            json!({ "action": "restart" }),
+        );
+        assert!(!is_error);
+        assert_eq!(out["current_frame"], 0);
+        assert_eq!(out["playing"], true);
+        assert_eq!(external.current, 0);
+
+        // Play range: no range falls back to frame 0; with a
+        // range it starts at the range's start.
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_playback",
+            json!({ "action": "pause" }),
+        );
+        assert!(!is_error);
+        let (_out, is_error) =
+            call_payload_on(&mut server, &mut external, "set_frame", json!({ "frame": 2 }));
+        assert!(!is_error);
+        let (out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_playback",
+            json!({ "action": "play_range" }),
+        );
+        assert!(!is_error);
+        assert_eq!(out["current_frame"], 0, "no range: play_range is restart");
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_loop_range",
+            json!({ "start": 1, "end": 3 }),
+        );
+        assert!(!is_error);
+        let (out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_playback",
+            json!({ "action": "play_range" }),
+        );
+        assert!(!is_error);
+        assert_eq!(out["current_frame"], 1, "the range's start");
+        assert_eq!(out["playing"], true);
+
+        // An unknown action is an error and changes nothing.
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_playback",
+            json!({ "action": "rewind" }),
+        );
+        assert!(is_error);
+        assert!(external.playing, "a refused action leaves playback alone");
+        assert_eq!(external.current, 1);
+    }
+
+    #[test]
+    fn wave10_selection_tools_round_trip_via_handle_on() {
+        let mut server = McpServer::new();
+        let mut external = crate::editor::EditorCore::new();
+        let (sel, is_error) =
+            call_payload_on(&mut server, &mut external, "get_selection", json!({}));
+        assert!(!is_error);
+        assert_eq!(sel["selected_figure"], 0);
+        assert_eq!(sel["selected_node"], Value::Null);
+        assert_eq!(
+            sel["figure_name"],
+            external.project.figures[0].name.as_str()
+        );
+
+        // A second figure through the same route, then select
+        // it together with its root node.
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "add_figure",
+            json!({ "kind": "mini" }),
+        );
+        assert!(!is_error);
+        let (out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_selection",
+            json!({ "figure": 1, "node": 0 }),
+        );
+        assert!(!is_error);
+        assert_eq!(out["selected_figure"], 1);
+        assert_eq!(out["selected_node"], 0);
+        assert_eq!(external.selected_figure, 1);
+        assert_eq!(external.selected_node, Some(0));
+
+        // Selecting a figure without a node clears the node
+        // (select_figure's contract).
+        let (out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_selection",
+            json!({ "figure": 0 }),
+        );
+        assert!(!is_error);
+        assert_eq!(out["selected_node"], Value::Null);
+        assert_eq!(external.selected_node, None);
+
+        // Out-of-range figure and node are errors and leave
+        // the selection untouched.
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_selection",
+            json!({ "figure": 99 }),
+        );
+        assert!(is_error);
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_selection",
+            json!({ "figure": 0, "node": 9999 }),
+        );
+        assert!(is_error);
+        assert_eq!(external.selected_figure, 0);
+        assert_eq!(external.selected_node, None);
+    }
+
+    #[test]
+    fn wave10_transport_key_jumps_walk_camera_and_graph_keys() {
+        let mut server = McpServer::new();
+        let mut external = crate::editor::EditorCore::new();
+        // Precondition: the demo project starts with no camera
+        // or graph keys, so both jumps have nowhere to go.
+        assert!(
+            external.project.camera.is_empty()
+                && external
+                    .project
+                    .channels
+                    .iter()
+                    .all(|c| c.keys.is_empty()),
+            "the demo project must start keyless for this test"
+        );
+        let (_out, is_error) =
+            call_payload_on(&mut server, &mut external, "goto_next_key", json!({}));
+        assert!(is_error, "no keys: next refuses");
+        let (_out, is_error) =
+            call_payload_on(&mut server, &mut external, "goto_prev_key", json!({}));
+        assert!(is_error, "no keys: prev refuses");
+        assert_eq!(external.current, 0, "refused jumps do not move");
+
+        // A camera key at frame 3 and a graph key at frame 1,
+        // both planted through the registry tools on the same
+        // external core.
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "set_camera",
+            json!({ "frame": 3, "x": 400.0, "y": 300.0, "zoom": 1.0 }),
+        );
+        assert!(!is_error);
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "graph_key",
+            json!({ "figure": 0, "target": "root_x", "frame": 1.0, "value": 120.0 }),
+        );
+        assert!(!is_error);
+
+        // From frame 0 the walk goes 1 (graph) then 3 (camera).
+        let (out, is_error) =
+            call_payload_on(&mut server, &mut external, "goto_next_key", json!({}));
+        assert!(!is_error);
+        assert_eq!(out["current_frame"], 1);
+        assert_eq!(out["key_frames"], json!([1, 3]));
+        let (out, is_error) =
+            call_payload_on(&mut server, &mut external, "goto_next_key", json!({}));
+        assert!(!is_error);
+        assert_eq!(out["current_frame"], 3);
+        // Standing on the last key, next refuses (strictly
+        // after), and prev walks back to 1.
+        let (_out, is_error) =
+            call_payload_on(&mut server, &mut external, "goto_next_key", json!({}));
+        assert!(is_error);
+        assert_eq!(external.current, 3, "a refused jump does not move");
+        let (out, is_error) =
+            call_payload_on(&mut server, &mut external, "goto_prev_key", json!({}));
+        assert!(!is_error);
+        assert_eq!(out["current_frame"], 1);
+        assert_eq!(external.current, 1);
+        // The jumps never touch the playing flag.
+        assert!(!external.playing);
+    }
+
+    #[test]
+    fn wave10_figure_keyframe_tools_drive_the_editor_ops() {
+        let mut server = McpServer::new();
+        let mut external = crate::editor::EditorCore::new();
+        // Fixture: rewrite figure 0's five demo poses as
+        // A A B B C, so its keyframes are exactly [0, 2, 4]
+        // (frame 0 holds a pose; frames 2 and 4 are where
+        // the pose changes).
+        assert_eq!(
+            external.project.frames.len(),
+            5,
+            "the demo project has five frames"
+        );
+        assert!(
+            external.project.frames.iter().all(|f| !f.poses.is_empty()),
+            "the demo figure poses on every frame"
+        );
+        let a = external.project.frames[0].poses[0].clone();
+        let mut b = a.clone();
+        b.root[0] += 40.0;
+        let mut c = a.clone();
+        c.root[0] += 80.0;
+        let staged = [a.clone(), a, b.clone(), b, c];
+        for (frame, pose) in external.project.frames.iter_mut().zip(staged) {
+            frame.poses[0] = pose;
+        }
+        assert_eq!(
+            crate::stats::figure_keyframes(&external.project, 0),
+            vec![0, 2, 4]
+        );
+
+        // Next walks 0 -> 2 -> 4, then refuses without moving.
+        let (out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "goto_next_keyframe",
+            json!({ "figure": 0 }),
+        );
+        assert!(!is_error);
+        assert_eq!(out["current_frame"], 2);
+        assert_eq!(out["key_frames"], json!([0, 2, 4]));
+        let (out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "goto_next_keyframe",
+            json!({ "figure": 0 }),
+        );
+        assert!(!is_error);
+        assert_eq!(out["current_frame"], 4);
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "goto_next_keyframe",
+            json!({ "figure": 0 }),
+        );
+        assert!(is_error, "no later keyframe: the core refuses");
+        assert_eq!(external.current, 4, "a refused jump does not move");
+
+        // Prev walks back to 2.
+        let (out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "goto_prev_keyframe",
+            json!({ "figure": 0 }),
+        );
+        assert!(!is_error);
+        assert_eq!(out["current_frame"], 2);
+
+        // Deleting the keyframe at frame 2 holds frame 1's
+        // pose there, so the change point moves to frame 3:
+        // the keys become [0, 3, 4], at one undo step.
+        let depth_before = external.undo_depth();
+        let (out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "delete_keyframe",
+            json!({ "figure": 0, "frame": 2 }),
+        );
+        assert!(!is_error);
+        assert_eq!(out["key_frames"], json!([0, 3, 4]));
+        assert_eq!(
+            crate::stats::figure_keyframes(&external.project, 0),
+            vec![0, 3, 4]
+        );
+        assert_eq!(external.undo_depth(), depth_before + 1, "one undo step");
+
+        // The core's refusals surface as errors: the base
+        // pose at frame 0, and frame 1, which is no keyframe.
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "delete_keyframe",
+            json!({ "figure": 0, "frame": 0 }),
+        );
+        assert!(is_error, "frame 0 is the base pose");
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "delete_keyframe",
+            json!({ "figure": 0, "frame": 1 }),
+        );
+        assert!(is_error, "frame 1 holds no keyframe for figure 0");
+
+        // An out-of-range figure refuses across the family.
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "goto_next_keyframe",
+            json!({ "figure": 99 }),
+        );
+        assert!(is_error);
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "delete_keyframe",
+            json!({ "figure": 99, "frame": 2 }),
+        );
+        assert!(is_error);
     }
 }

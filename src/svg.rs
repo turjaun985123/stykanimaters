@@ -91,7 +91,7 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
     svg += "<!--DEFS-->\n";
     let mut defs = String::new();
     let mut grad_n = 0usize;
-    for stroke in &project.strokes {
+    for (index, stroke) in project.strokes.iter().enumerate() {
         if stroke.frame != frame {
             continue;
         }
@@ -104,6 +104,30 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
             // exactly like polyline points do.
             let r = (stroke.width * 0.5).max(1.0);
             for (centre, alpha) in crate::paint::spray_dots(&stroke.points, mark) {
+                let q = view(centre);
+                svg += &format!(
+                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"{}\" fill-opacity=\"{:.2}\"/>\n",
+                    q[0],
+                    q[1],
+                    r,
+                    hex(stroke.color),
+                    alpha
+                );
+            }
+        } else if stroke.scatter > 0.0 && !stroke.points.is_empty() {
+            // Scattered stroke (Wave 10 adoption): dabs,
+            // not a polyline — the same placements the
+            // stage and the rasterizer compute
+            // (paint::stroke_dabs at the shared spacing),
+            // one circle per dab at the stroke's recorded
+            // opacity, uniform across dabs.
+            let r = (stroke.width * 0.5).max(1.0);
+            let alpha = stroke.opacity.clamp(0.0, 1.0);
+            for centre in crate::paint::stroke_dabs(
+                stroke,
+                index,
+                crate::paint::stroke_dab_spacing(stroke),
+            ) {
                 let q = view(centre);
                 svg += &format!(
                     "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"{}\" fill-opacity=\"{:.2}\"/>\n",
@@ -394,6 +418,7 @@ mod tests {
             fill: None,
             spray: Some(mark),
             opacity: 1.0,
+            scatter: 0.0,
         });
         // A plain stroke on the same frame: unchanged polyline.
         project.strokes.push(crate::model::Stroke {
@@ -405,6 +430,7 @@ mod tests {
             fill: None,
             spray: None,
             opacity: 1.0,
+            scatter: 0.0,
         });
         let dir = std::path::Path::new("/tmp/styk-svg-spray-test");
         export_svg(&project, dir).unwrap();
@@ -519,6 +545,7 @@ mod tests {
             fill: None,
             spray: None,
             opacity,
+            scatter: 0.0,
         });
         project
     }

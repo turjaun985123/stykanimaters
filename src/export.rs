@@ -410,12 +410,34 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     // geometry comes only from `paint::spray_dots`.
     let authored = (frame_f.floor() as usize).min(project.frames.len().saturating_sub(1));
     let mut spray: Vec<([f32; 2], f32, [u8; 3], f32)> = Vec::new();
-    for stroke in &project.strokes {
+    for (index, stroke) in project.strokes.iter().enumerate() {
         if stroke.frame == authored {
             if let Some(mark) = &stroke.spray {
                 let radius = (stroke.width * 0.5).max(1.0);
                 let color = rgb(stroke.color);
                 for (centre, alpha) in crate::paint::spray_dots(&stroke.points, mark) {
+                    spray.push((centre, radius, color, alpha));
+                }
+                continue;
+            }
+            // Scattered stroke (Wave 10 adoption): a
+            // non-spray stroke with scatter > 0 draws as
+            // dabs, not segments — the same placements the
+            // stage and the SVG exporter compute
+            // (paint::stroke_dabs at the shared spacing),
+            // riding this same disc pass at the stroke's
+            // recorded opacity. A filled stroke's fill
+            // (collected in its own pass) is unaffected:
+            // scatter textures the marks, not the region.
+            if stroke.scatter > 0.0 && !stroke.points.is_empty() {
+                let radius = (stroke.width * 0.5).max(1.0);
+                let color = rgb(stroke.color);
+                let alpha = stroke.opacity.clamp(0.0, 1.0);
+                for centre in crate::paint::stroke_dabs(
+                    stroke,
+                    index,
+                    crate::paint::stroke_dab_spacing(stroke),
+                ) {
                     spray.push((centre, radius, color, alpha));
                 }
                 continue;
@@ -839,12 +861,21 @@ pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
 /// AUDIO: the segments of the project's audio that intersect
 /// the range are muxed in, trimmed and offset to the range —
 /// see [`range_mux_plan`] / [`mux_audio_range`]. Muted clips
-/// never sound, exactly as in the full export, and a clip whose
-/// length cannot be probed (the engine's only duration probe
-/// reads WAV, the same rule playback planning applies) cannot
-/// be scheduled into a sub-range and is left out. When no
-/// audible clip intersects the range the export is the plain
-/// video-only encode it always was, unchanged.
+/// never sound, exactly as in the full export. A clip's length
+/// is probed by decoding it as WAV or, for a non-WAV file
+/// (MP3, OGG, …), with `ffprobe` ([`probe_duration_secs`]); a
+/// non-WAV segment that has to be mixed — because other
+/// segments sound with it, or its own gain is not 1.0 — is
+/// decoded to a temporary WAV with `ffmpeg` first, so its
+/// mute and gain are honoured exactly as a WAV clip's are. A
+/// clip no probe can measure cannot be scheduled into a
+/// sub-range: if such a clip may intersect the range, the
+/// export fails with an error naming it, before anything is
+/// written, rather than silently producing a file without
+/// its audio — the same stance the full export takes when a
+/// mux fails. When no audible clip intersects the range the
+/// export is the plain video-only encode it always was,
+/// unchanged.
 pub fn export_mp4_range(
     project: &Project,
     from: usize,
@@ -854,7 +885,18 @@ pub fn export_mp4_range(
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
     let (win_start, win_len) = range_window(project, from, times.len());
-    let plan = range_mux_plan(project, win_start, win_len);
+    let outcome = range_plan_outcome(project, win_start, win_len, &probe_duration_secs);
+    if !outcome.unprobeable.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "audio could not be included in the range export: the length of {} \
+             clip(s) could not be probed (not readable as WAV, and ffprobe \
+             failed or is not installed), so whether they intersect the range \
+             is unknown: {}",
+            outcome.unprobeable.len(),
+            outcome.unprobeable.join(", ")
+        )));
+    }
+    let plan = outcome.plan;
     if matches!(plan, RangeMuxPlan::None) {
         ffmpeg_encode_times(
             project,
@@ -1240,20 +1282,77 @@ fn range_window(project: &Project, from: usize, sample_count: usize) -> (f32, f3
     (start_units / fps, sample_count as f32 / fps)
 }
 
-/// How long the file at `path` runs, in seconds, probed the
-/// only way the engine probes durations: decoding it as WAV
+/// How long the file at `path` runs, in seconds. The first
+/// probe is the engine's own: decoding the file as WAV
 /// (`audio_edit::read_wav`, the loader behind
-/// `audio_ops::clip_duration_secs`). `None` for a missing,
-/// unreadable or non-WAV file, and for one that decodes to no
-/// sample frames — such a clip's end cannot be scheduled
-/// inside a sub-range, the same exclusion playback planning
-/// applies in `audio::playback_plan`.
+/// `audio_ops::clip_duration_secs`) — when the file decodes
+/// as WAV its verdict is final, including `None` for one
+/// that decodes to no sample frames. A file the WAV reader
+/// cannot decode at all (an MP3, OGG, …) is probed with
+/// `ffprobe` instead ([`probe_duration_ffprobe`]). `None`
+/// when neither probe measures the file — missing,
+/// unreadable, or undecodable by both — because such a
+/// clip's end cannot be scheduled inside a sub-range, the
+/// same exclusion playback planning applies in
+/// `audio::playback_plan`.
 fn probe_duration_secs(path: &str) -> Option<f32> {
-    let data = crate::audio_edit::read_wav(path).ok()?;
-    if data.sample_rate == 0 || data.frames() == 0 {
+    match crate::audio_edit::read_wav(path) {
+        Ok(data) => {
+            if data.sample_rate == 0 || data.frames() == 0 {
+                None
+            } else {
+                Some(data.frames() as f32 / data.sample_rate as f32)
+            }
+        }
+        Err(_) => probe_duration_ffprobe(path),
+    }
+}
+
+/// Parse the duration (in seconds) out of `ffprobe`'s
+/// output for `-show_entries format=duration` with the
+/// `noprint_wrappers`/`nokey` default writer: the output is
+/// normally a bare number, but a `duration=` prefix on the
+/// line is accepted too. The first line carrying a finite,
+/// positive value wins; `N/A`, an empty output, zero and
+/// negative values are no duration at all (`None`), the
+/// same verdict an empty WAV gets in
+/// [`probe_duration_secs`]. Pure, so the fixture tests need
+/// no `ffprobe` binary.
+fn parse_ffprobe_duration(output: &str) -> Option<f32> {
+    for line in output.lines() {
+        let value = line.trim();
+        let value = value.strip_prefix("duration=").unwrap_or(value);
+        if let Ok(secs) = value.parse::<f32>() {
+            if secs.is_finite() && secs > 0.0 {
+                return Some(secs);
+            }
+        }
+    }
+    None
+}
+
+/// Probe the file at `path` with the system `ffprobe` (the
+/// companion tool of the `ffmpeg` every MP4 export already
+/// shells out to). `None` when ffprobe is missing, exits
+/// non-zero (an undecodable or missing file), or prints no
+/// usable duration ([`parse_ffprobe_duration`]).
+fn probe_duration_ffprobe(path: &str) -> Option<f32> {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
         return None;
     }
-    Some(data.frames() as f32 / data.sample_rate as f32)
+    parse_ffprobe_duration(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// One clip's contribution to a range export: its file, the
@@ -1284,48 +1383,100 @@ enum RangeMuxPlan {
     Mixed(Vec<RangeSegment>),
 }
 
+/// The full outcome of planning a range export's audio:
+/// the mux plan itself, plus the audible clips that had to
+/// be left out of it. Kept separate from [`RangeMuxPlan`]
+/// so the plain plan stays the small decision
+/// [`mux_audio_range`] consumes, while the export entry
+/// point can still tell the user the truth about what it
+/// could not include (see [`export_mp4_range`]).
+#[derive(Clone, Debug, PartialEq)]
+struct RangePlanOutcome {
+    plan: RangeMuxPlan,
+    /// Paths of unmuted clips whose length no probe could
+    /// measure ([`probe_duration_secs`]) and whose start
+    /// falls before the window's end, so they may intersect
+    /// the range — as far as the export can tell, their
+    /// audio belongs in it. Missing files are NOT listed:
+    /// every mux path skips those silently, by design.
+    unprobeable: Vec<String>,
+}
+
 /// Decide the mux plan for the window
 /// `[win_start_secs, win_start_secs + win_len_secs)` of a
-/// project: muted clips are skipped (the exclusion the full
-/// mux and the playback plan both apply), each surviving
-/// clip's length is probed ([`probe_duration_secs`]) and its
-/// span — `start_frame / fps`, the placement convention of
+/// project, probing clip lengths with `probe`: muted clips
+/// are skipped (the exclusion the full mux and the playback
+/// plan both apply), each surviving clip's span —
+/// `start_frame / fps`, the placement convention of
 /// [`mux_plan`] — is intersected with the window by
-/// [`clip_window`]. Clips that miss the window, or whose
-/// length cannot be probed, contribute nothing.
-fn range_mux_plan(project: &Project, win_start_secs: f32, win_len_secs: f32) -> RangeMuxPlan {
+/// [`clip_window`]. Clips that miss the window contribute
+/// nothing; clips no probe can measure contribute no
+/// segment either, but are reported in
+/// [`RangePlanOutcome::unprobeable`] when they may
+/// intersect, so the loss is never silent.
+fn range_plan_outcome(
+    project: &Project,
+    win_start_secs: f32,
+    win_len_secs: f32,
+    probe: &dyn Fn(&str) -> Option<f32>,
+) -> RangePlanOutcome {
     let fps = project.fps.max(1.0);
-    let mut segments: Vec<RangeSegment> = project
-        .audio
-        .iter()
-        .filter(|clip| !clip.muted)
-        .filter_map(|clip| {
-            let dur = probe_duration_secs(&clip.path)?;
-            let w = clip_window(
-                clip.start_frame as f32 / fps,
-                dur,
-                win_start_secs,
-                win_len_secs,
-            )?;
-            Some(RangeSegment {
-                path: clip.path.clone(),
-                file_offset_secs: w.file_offset_secs,
-                placement_secs: w.placement_secs,
-                len_secs: w.len_secs,
-                gain: clip.gain,
-            })
-        })
-        .collect();
+    let win_end_secs = win_start_secs + win_len_secs;
+    let mut segments: Vec<RangeSegment> = Vec::new();
+    let mut unprobeable: Vec<String> = Vec::new();
+    for clip in project.audio.iter().filter(|clip| !clip.muted) {
+        let clip_start_secs = clip.start_frame as f32 / fps;
+        match probe(&clip.path) {
+            Some(dur) => {
+                if let Some(w) = clip_window(
+                    clip_start_secs,
+                    dur,
+                    win_start_secs,
+                    win_len_secs,
+                ) {
+                    segments.push(RangeSegment {
+                        path: clip.path.clone(),
+                        file_offset_secs: w.file_offset_secs,
+                        placement_secs: w.placement_secs,
+                        len_secs: w.len_secs,
+                        gain: clip.gain,
+                    });
+                }
+            }
+            None => {
+                if clip_start_secs < win_end_secs
+                    && std::path::Path::new(&clip.path).exists()
+                {
+                    unprobeable.push(clip.path.clone());
+                }
+            }
+        }
+    }
     segments.sort_by(|a, b| {
         a.placement_secs
             .partial_cmp(&b.placement_secs)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    match segments.len() {
+    let plan = match segments.len() {
         0 => RangeMuxPlan::None,
         1 => RangeMuxPlan::Single(segments.into_iter().next().unwrap()),
         _ => RangeMuxPlan::Mixed(segments),
-    }
+    };
+    RangePlanOutcome { plan, unprobeable }
+}
+
+/// Decide the mux plan for the window
+/// `[win_start_secs, win_start_secs + win_len_secs)` of a
+/// project with the real duration probe
+/// ([`probe_duration_secs`]): the plan half of
+/// [`range_plan_outcome`], for callers that only need the
+/// segments. Production goes through
+/// [`range_plan_outcome`] itself (it also needs the
+/// unprobeable list); this entry is retained for the plan
+/// tests, which pin the plan's shape directly.
+#[allow(dead_code)]
+fn range_mux_plan(project: &Project, win_start_secs: f32, win_len_secs: f32) -> RangeMuxPlan {
+    range_plan_outcome(project, win_start_secs, win_len_secs, &probe_duration_secs).plan
 }
 
 /// The ffmpeg argument list muxing one window segment onto
@@ -1404,20 +1555,79 @@ fn trim_wav(
     }
 }
 
+/// The ffmpeg argument list decoding one segment's window
+/// out of its source file into a WAV: an input `-ss`/`-t`
+/// pair cuts `[file_offset_secs, file_offset_secs +
+/// len_secs)` — the same window [`clip_window`] computed —
+/// and the audio is written as 16-bit PCM, which
+/// `audio_edit::read_wav` reads back losslessly. Pure, so
+/// the argument shape is testable without ffmpeg.
+fn decode_window_args(seg: &RangeSegment, out: &Path) -> Vec<String> {
+    vec![
+        "-y".into(),
+        "-ss".into(),
+        format!("{:.3}", seg.file_offset_secs),
+        "-t".into(),
+        format!("{:.3}", seg.len_secs),
+        "-i".into(),
+        seg.path.clone(),
+        "-c:a".into(),
+        "pcm_s16le".into(),
+        out.to_str().unwrap_or("").into(),
+    ]
+}
+
+/// Decode a segment's window out of a source the WAV
+/// reader cannot handle (MP3, OGG, …) into a temporary
+/// WAV with the system `ffmpeg` (see
+/// [`decode_window_args`]). The caller owns the returned
+/// file and removes it. An `Err` — ffmpeg missing, or
+/// exiting non-zero on an undecodable file — fails the
+/// caller's mix, which [`mux_audio_range`] answers with
+/// its existing direct-mux fallback rather than silence.
+fn decode_segment_window(seg: &RangeSegment) -> Result<std::path::PathBuf, String> {
+    let tmp = unique_temp("rangedec").with_extension("wav");
+    let status = std::process::Command::new("ffmpeg")
+        .args(decode_window_args(seg, &tmp))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("could not run ffmpeg to decode {}: {e}", seg.path))?;
+    if status.success() {
+        Ok(tmp)
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+        Err(format!("ffmpeg could not decode {}", seg.path))
+    }
+}
+
 /// Render the plan's segments into one mixed WAV: each
 /// segment's source file is decoded, trimmed to its window
 /// segment ([`trim_wav`]) and written to a temporary WAV,
 /// then the temporaries are mixed with `audio_edit::mix` at
 /// their placements and gains — the mix engine takes whole
 /// files from their beginnings, so the head trim has to
-/// happen before it. The temp files are removed either way.
+/// happen before it. A source the WAV reader cannot decode
+/// (a non-WAV clip) is first cut to exactly its window by
+/// [`decode_segment_window`] and enters the mix already
+/// trimmed, indistinguishable from a WAV segment — same
+/// placement, same gain. The temp files are removed either
+/// way.
 fn mix_range_segments(segments: &[RangeSegment]) -> Result<crate::audio_edit::WavData, String> {
     let mut temps: Vec<std::path::PathBuf> = Vec::new();
     let result = (|| {
         let mut mix_clips = Vec::with_capacity(segments.len());
         for seg in segments {
-            let data = crate::audio_edit::read_wav(&seg.path)?;
-            let trimmed = trim_wav(&data, seg.file_offset_secs, seg.len_secs);
+            let (data, trim_offset_secs) = match crate::audio_edit::read_wav(&seg.path) {
+                Ok(data) => (data, seg.file_offset_secs),
+                Err(_) => {
+                    let decoded = decode_segment_window(seg)?;
+                    temps.push(decoded.clone());
+                    let decoded_path = decoded.to_string_lossy().into_owned();
+                    (crate::audio_edit::read_wav(&decoded_path)?, 0.0)
+                }
+            };
+            let trimmed = trim_wav(&data, trim_offset_secs, seg.len_secs);
             let tmp = unique_temp("rangemix").with_extension("wav");
             std::fs::write(&tmp, crate::audio_edit::write_wav(&trimmed))
                 .map_err(|e| e.to_string())?;
@@ -1441,15 +1651,19 @@ fn mix_range_segments(segments: &[RangeSegment]) -> Result<crate::audio_edit::Wa
 /// Mux a range plan's audio into an already-encoded silent
 /// range MP4, following the full-timeline [`mux_audio`]
 /// split: exactly one segment at unity gain goes to ffmpeg
-/// directly ([`run_range_direct`]); two or more segments —
-/// or a single segment whose gain is not 1.0, which the
-/// direct path cannot scale — are trimmed and mixed into
-/// one WAV first and muxed with [`mux_mixed_wav`] (the mixed
-/// WAV starts at the window's zero, each segment's placement
-/// baked in). If the mix cannot be rendered the earliest
-/// segment is muxed directly instead, gain unapplied,
-/// mirroring the full path's mix-failure fallback. A `None`
-/// plan muxes nothing and returns `Ok(false)`.
+/// directly ([`run_range_direct`] — ffmpeg reads the
+/// segment's file itself, so a non-WAV source needs no
+/// preparation there); two or more segments — or a single
+/// segment whose gain is not 1.0, which the direct path
+/// cannot scale — are trimmed and mixed into one WAV first
+/// and muxed with [`mux_mixed_wav`] (the mixed WAV starts
+/// at the window's zero, each segment's placement baked
+/// in; a non-WAV segment is decoded to WAV for the mix,
+/// see [`mix_range_segments`]). If the mix cannot be
+/// rendered the earliest segment is muxed directly
+/// instead, gain unapplied, mirroring the full path's
+/// mix-failure fallback. A `None` plan muxes nothing and
+/// returns `Ok(false)`.
 fn mux_audio_range(plan: &RangeMuxPlan, video: &Path, out: &Path) -> std::io::Result<bool> {
     let segments: &[RangeSegment] = match plan {
         RangeMuxPlan::None => return Ok(false),
@@ -1635,7 +1849,8 @@ mod mux_tests {
 #[cfg(test)]
 mod range_mux_tests {
     use super::{
-        clip_window, probe_duration_secs, range_direct_args, range_mux_plan, range_window,
+        clip_window, decode_window_args, export_mp4_range, parse_ffprobe_duration,
+        probe_duration_secs, range_direct_args, range_mux_plan, range_plan_outcome, range_window,
         trim_wav, ClipWindow, RangeMuxPlan, RangeSegment,
     };
     use crate::model::{AudioClip, Project};
@@ -1787,7 +2002,12 @@ mod range_mux_tests {
     }
 
     #[test]
-    fn probe_rejects_non_wav_and_empty_files() {
+    fn probe_rejects_undecodable_and_empty_files() {
+        // Bytes that are not audio at all: the WAV reader
+        // rejects them, and ffprobe — where it is installed
+        // — cannot decode them either, so no probe measures
+        // a length. (Where ffprobe is absent the probe falls
+        // back to the same `None`.)
         let junk = std::env::temp_dir().join(format!(
             "styk-range-junk-{}.mp3",
             std::process::id()
@@ -1799,6 +2019,36 @@ mod range_mux_tests {
         let empty = temp_wav("empty", 0.0, 8000);
         assert_eq!(probe_duration_secs(&empty), None);
         let _ = std::fs::remove_file(&empty);
+    }
+
+    // ---- parse_ffprobe_duration: the ffprobe output parser ----
+    // Fixtures only — no test in this module needs an
+    // ffprobe binary; the subprocess probe itself is a thin
+    // shell over this parser.
+
+    #[test]
+    fn ffprobe_duration_parses_the_bare_number_output() {
+        // What `-of default=noprint_wrappers=1:nokey=1`
+        // actually prints for a 12.345678s file.
+        assert_eq!(parse_ffprobe_duration("12.345678\n"), Some(12.345678));
+        assert_eq!(parse_ffprobe_duration("0.500000"), Some(0.5));
+        // The keyed form (a writer without `nokey`) is
+        // accepted too.
+        assert_eq!(parse_ffprobe_duration("duration=3.250000\n"), Some(3.25));
+    }
+
+    #[test]
+    fn ffprobe_duration_rejects_unusable_output() {
+        // ffprobe prints N/A for a stream/container with no
+        // duration, and nothing at all on some failures.
+        assert_eq!(parse_ffprobe_duration("N/A\n"), None);
+        assert_eq!(parse_ffprobe_duration(""), None);
+        assert_eq!(parse_ffprobe_duration("not a number"), None);
+        // Zero and negative durations schedule nothing —
+        // the same verdict an empty WAV gets.
+        assert_eq!(parse_ffprobe_duration("0.000000\n"), None);
+        assert_eq!(parse_ffprobe_duration("-1.500000\n"), None);
+        assert_eq!(parse_ffprobe_duration("duration=N/A\n"), None);
     }
 
     // ---- range_mux_plan ----
@@ -1898,9 +2148,170 @@ mod range_mux_tests {
         let mut project = project_with(vec![(muted.as_str(), 10, 1.0), (junk.as_str(), 10, 1.0)]);
         project.audio[0].muted = true;
         // The muted clip is excluded by the mute filter, the
-        // MP3-named file by the WAV-only duration probe.
+        // MP3-named junk file by the duration probe: its
+        // bytes are not audio, so neither the WAV reader nor
+        // ffprobe can measure a length for it.
         assert_eq!(range_mux_plan(&project, WIN.0, WIN.1), RangeMuxPlan::None);
         let _ = std::fs::remove_file(&muted);
+        let _ = std::fs::remove_file(&junk_path);
+    }
+
+    // ---- range_plan_outcome: non-WAV clips and the
+    // unprobeable report (Wave 10) ----
+    // The probe is stubbed with the duration a real ffprobe
+    // would report for the fake non-WAV paths, so plan
+    // construction is proven with no ffprobe binary (and no
+    // ffmpeg) on the test machine.
+
+    #[test]
+    fn plan_includes_a_non_wav_clip_at_its_probed_duration() {
+        // A "song.mp3" the stub measures at 3s, starting at
+        // frame 20 (2s): placed 1s into the [1s, 3s) window
+        // and trimmed to its end — the identical segment a
+        // 3s WAV plans (see
+        // `plan_single_clip_starting_inside_the_window`).
+        let project = project_with(vec![("song.mp3", 20, 1.0)]);
+        let outcome = range_plan_outcome(&project, WIN.0, WIN.1, &|_| Some(3.0));
+        assert_eq!(
+            outcome.plan,
+            RangeMuxPlan::Single(RangeSegment {
+                path: "song.mp3".into(),
+                file_offset_secs: 0.0,
+                placement_secs: 1.0,
+                len_secs: 1.0,
+                gain: 1.0,
+            })
+        );
+        assert!(outcome.unprobeable.is_empty());
+    }
+
+    #[test]
+    fn plan_mixes_a_non_wav_segment_with_a_wav_segment() {
+        let wav = temp_wav("mixw", 1.5, 8000); // spans [0s, 1.5s)
+        let project = project_with(vec![
+            ("voice.ogg", 20, 0.5), // stub-probed at 3s: [2s, 5s)
+            (wav.as_str(), 0, 1.0),
+        ]);
+        let outcome = range_plan_outcome(&project, WIN.0, WIN.1, &|path| {
+            if path.ends_with(".ogg") {
+                Some(3.0)
+            } else {
+                Some(1.5)
+            }
+        });
+        assert_eq!(
+            outcome.plan,
+            RangeMuxPlan::Mixed(vec![
+                RangeSegment {
+                    path: wav.clone(),
+                    file_offset_secs: 1.0,
+                    placement_secs: 0.0,
+                    len_secs: 0.5,
+                    gain: 1.0,
+                },
+                RangeSegment {
+                    path: "voice.ogg".into(),
+                    file_offset_secs: 0.0,
+                    placement_secs: 1.0,
+                    len_secs: 1.0,
+                    gain: 0.5,
+                },
+            ])
+        );
+        assert!(outcome.unprobeable.is_empty());
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    #[test]
+    fn plan_reports_unprobeable_clips_that_may_intersect() {
+        // A real file (so existence holds) no probe can
+        // measure, starting before the window's end:
+        // reported by path, not silently dropped.
+        let junk_path = std::env::temp_dir().join(format!(
+            "styk-range-unprobeable-{}.mp3",
+            std::process::id()
+        ));
+        std::fs::write(&junk_path, b"not audio").unwrap();
+        let junk = junk_path.to_string_lossy().into_owned();
+        let project = project_with(vec![(junk.as_str(), 10, 1.0)]);
+        let outcome = range_plan_outcome(&project, WIN.0, WIN.1, &|_| None);
+        assert_eq!(outcome.plan, RangeMuxPlan::None);
+        assert_eq!(outcome.unprobeable, vec![junk.clone()]);
+        // A missing file is skipped silently — every mux
+        // path skips those by design — so it is not
+        // reported.
+        let project = project_with(vec![("/nonexistent/styk-range-gone.mp3", 10, 1.0)]);
+        let outcome = range_plan_outcome(&project, WIN.0, WIN.1, &|_| None);
+        assert!(outcome.unprobeable.is_empty());
+        // A clip starting after the window's end (frame 50
+        // = 5s > 3s) cannot intersect it, probed or not:
+        // not reported.
+        let project = project_with(vec![(junk.as_str(), 50, 1.0)]);
+        let outcome = range_plan_outcome(&project, WIN.0, WIN.1, &|_| None);
+        assert!(outcome.unprobeable.is_empty());
+        // A muted clip never sounds, so its unprobeability
+        // costs the export nothing: not reported.
+        let mut project = project_with(vec![(junk.as_str(), 10, 1.0)]);
+        project.audio[0].muted = true;
+        let outcome = range_plan_outcome(&project, WIN.0, WIN.1, &|_| None);
+        assert!(outcome.unprobeable.is_empty());
+        let _ = std::fs::remove_file(&junk_path);
+    }
+
+    // ---- decode_window_args: the non-WAV mix decode ----
+
+    #[test]
+    fn decode_args_cut_the_segment_window_to_pcm_wav() {
+        let seg = RangeSegment {
+            path: "song.mp3".into(),
+            file_offset_secs: 1.25,
+            placement_secs: 0.0,
+            len_secs: 0.5,
+            gain: 2.0,
+        };
+        let args = decode_window_args(&seg, Path::new("window.wav"));
+        let joined = args.join(" ");
+        // The cut is an input-option pair before the
+        // source: exactly the window the plan computed.
+        // Placement and gain are NOT ffmpeg's business here
+        // — the mix applies them afterwards, as it does for
+        // WAV segments.
+        assert!(joined.contains("-ss 1.250"), "{joined}");
+        assert!(joined.contains("-t 0.500"), "{joined}");
+        let ss = args.iter().position(|a| a == "-ss").unwrap();
+        let input = args.iter().position(|a| a == "song.mp3").unwrap();
+        assert!(ss < input, "{joined}");
+        assert!(joined.contains("-c:a pcm_s16le"), "{joined}");
+        assert_eq!(args.last().map(String::as_str), Some("window.wav"));
+    }
+
+    // ---- export_mp4_range: unprobeable audio ----
+
+    #[test]
+    fn range_export_errors_rather_than_dropping_unprobeable_audio() {
+        // A junk "MP3" starting at frame 0 of the range:
+        // neither probe can measure it, so the export
+        // refuses — before encoding, so no video-only file
+        // is written either. The refusal happens ahead of
+        // every encode, so the test holds with or without
+        // ffprobe/ffmpeg installed.
+        let junk_path = std::env::temp_dir().join(format!(
+            "styk-range-export-junk-{}.mp3",
+            std::process::id()
+        ));
+        std::fs::write(&junk_path, b"this is not audio").unwrap();
+        let junk = junk_path.to_string_lossy().into_owned();
+        let project = project_with(vec![(junk.as_str(), 0, 1.0)]);
+        let out = std::env::temp_dir().join(format!(
+            "styk-range-export-out-{}.mp4",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let err = export_mp4_range(&project, 0, 2, &out).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("could not be probed"), "{msg}");
+        assert!(msg.contains("junk"), "{msg}");
+        assert!(!out.exists(), "no silent file is written");
         let _ = std::fs::remove_file(&junk_path);
     }
 
@@ -2339,6 +2750,7 @@ mod tests {
             fill: None,
             spray: None,
             opacity: 1.0,
+            scatter: 0.0,
         }];
         project.camera.clear();
         project
@@ -2388,6 +2800,7 @@ mod tests {
             fill: None,
             spray: None,
             opacity,
+            scatter: 0.0,
         }];
         project.camera.clear();
         project
@@ -3763,6 +4176,7 @@ mod spray_render_tests {
             fill: None,
             spray,
             opacity: 1.0,
+            scatter: 0.0,
         }];
         project
     }

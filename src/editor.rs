@@ -93,10 +93,22 @@ pub struct EditorCore {
 /// clip is being edited and which of its frames is current.
 /// Runtime only — undo snapshots cover the project, not this
 /// state (same convention as `fig3`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Wave 10 (D5): the session also carries the clip's `name`
+/// from when the session was entered. Undo/redo restore the
+/// project only, so the stored index can come to name a
+/// DIFFERENT clip after a history jump (undoing a clip's
+/// creation, redoing a deletion); `undo`/`redo` compare the
+/// name and drop a session whose clip is gone or no longer
+/// the clip at its index, instead of letting the session
+/// silently retarget. Two clips sharing one name remain
+/// indistinguishable — the residual limit of an index-based
+/// session.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClipEditSession {
     pub clip: usize,
     pub frame: usize,
+    pub name: String,
 }
 
 const FIGURE_COLORS: [u32; 6] = [0xE8E8EC, 0xFF5D5D, 0x5DB2FF, 0x7BE495, 0xFFC65D, 0xC792FF];
@@ -244,6 +256,7 @@ impl EditorCore {
             if let Ok(p) = serde_json::from_str::<Project>(&s) {
                 self.project = p;
                 self.current = self.current.min(self.project.frames.len().saturating_sub(1));
+                self.repair_clip_session_after_history();
                 self.status = "Redone.".into();
             }
         } else {
@@ -262,10 +275,35 @@ impl EditorCore {
                 self.selected_figure = self
                     .selected_figure
                     .min(self.project.figures.len().saturating_sub(1));
+                self.repair_clip_session_after_history();
                 self.status = "Undone.".into();
             }
         } else {
             self.status = "Nothing to undo.".into();
+        }
+    }
+
+    /// Wave 10 (D5): after an undo/redo project restore, a
+    /// live clip-edit session survives only if the clip at
+    /// its index is still the clip it was entered on (the
+    /// name captured in the session). A session whose clip
+    /// vanished or was replaced at its index is dropped —
+    /// editing would otherwise continue into a different
+    /// clip while the panel markers followed the index.
+    /// The undo/redo status stands; the panel simply shows
+    /// no session, and the next session op reports the
+    /// no-session case as usual.
+    fn repair_clip_session_after_history(&mut self) {
+        if let Some(session) = &self.clip_edit {
+            let alive = self
+                .project
+                .clips
+                .get(session.clip)
+                .map(|c| c.name == session.name)
+                .unwrap_or(false);
+            if !alive {
+                self.clip_edit = None;
+            }
         }
     }
 
@@ -302,7 +340,7 @@ impl EditorCore {
             return false;
         };
         if self.project.figures[fi].locked {
-            self.status = "Figure is locked — unlock it in the layers list.".into();
+            self.status = "Figure is locked — unlock it in the figures list.".into();
             return false;
         }
         self.snapshot();
@@ -371,6 +409,31 @@ impl EditorCore {
 
     pub fn add_frame(&mut self) {
         self.snapshot();
+        // Zero-frame recovery (Wave 10, E9): a project with
+        // no frames — an import or an emptied timeline —
+        // has no current frame to clone, and indexing one
+        // panicked. The timeline's empty state directs the
+        // user here, so this path must work: append a
+        // fresh frame holding every figure's rest pose at
+        // the stage centre and make it current.
+        if self.project.frames.is_empty() {
+            let stage = self.project.stage;
+            let poses = self
+                .project
+                .figures
+                .iter()
+                .map(|f| f.def.rest_pose([stage[0] / 2.0, stage[1] * 0.65]))
+                .collect();
+            self.project.frames.push(crate::model::Frame {
+                poses,
+                duration: 1.0,
+                easing: None,
+                bends: Vec::new(),
+            });
+            self.current = 0;
+            self.status = "Frame 1 added.".into();
+            return;
+        }
         let poses = self.project.frames[self.current].poses.clone();
         let duration = self.project.frames[self.current].duration;
         self.project
@@ -396,6 +459,122 @@ impl EditorCore {
             self.current = self.project.frames.len() - 1;
         }
         self.status = "Frame deleted.".into();
+    }
+
+    // ---- Wave 10 (dopesheet): per-figure pose keyframes ----------
+    //
+    // Poses are stored densely — every frame holds a pose per
+    // figure — so a "keyframe" here is the derived notion in
+    // `stats::figure_keyframes`: a frame where figure `fi`'s pose
+    // first appears or changes versus the previous frame. The ops
+    // below are the engine half of the dopesheet; the shell only
+    // displays what these compute.
+
+    /// Delete figure `fi`'s keyframe at `frame`: the frame stops
+    /// introducing a new pose and instead holds the pose of the
+    /// previous frame, so playback and tweening carry through it
+    /// (the dense-model equivalent of removing a key — there is
+    /// no sparse key store to remove from). The frame's bend data
+    /// for the figure is held the same way, so the frame
+    /// introduces no visual change for the figure at all. One
+    /// undo step.
+    ///
+    /// Refusals (returns false, no snapshot): frame 0 — it holds
+    /// the base pose and has no earlier pose to hold; a frame
+    /// that is not a keyframe for the figure (out of range, the
+    /// figure absent there, or its pose already equal to the
+    /// previous frame's); and a keyframe where the figure
+    /// *appears* (no pose in the previous frame), which has no
+    /// earlier pose to hold either.
+    pub fn delete_keyframe(&mut self, fi: usize, frame: usize) -> bool {
+        let keys = crate::stats::figure_keyframes(&self.project, fi);
+        if frame == 0 && keys.contains(&0) {
+            self.status = "Frame 1 is the base pose — its keyframe cannot be deleted.".into();
+            return false;
+        }
+        if !keys.contains(&frame) {
+            self.status = format!("No keyframe for figure {} at frame {}.", fi + 1, frame + 1);
+            return false;
+        }
+        let Some(held) = self.project.frames[frame - 1].poses.get(fi).cloned() else {
+            self.status = format!(
+                "Figure {} appears at frame {} — no earlier pose to hold.",
+                fi + 1,
+                frame + 1
+            );
+            return false;
+        };
+        self.snapshot();
+        self.project.frames[frame].poses[fi] = held;
+        // Hold the bends too (see the doc comment): the target
+        // frame's entry, when it has one, takes the previous
+        // frame's entry — or zeros, which is what `bends_at`
+        // already reads a missing entry as.
+        let held_bends = self.project.frames[frame - 1].bends.get(fi).cloned();
+        if let Some(entry) = self.project.frames[frame].bends.get_mut(fi) {
+            let mut bends = held_bends.unwrap_or_default();
+            bends.resize(entry.len(), 0.0);
+            *entry = bends;
+        }
+        self.status = format!(
+            "Figure {} keyframe at frame {} deleted.",
+            fi + 1,
+            frame + 1
+        );
+        true
+    }
+
+    /// The next keyframe of figure `fi` strictly after `from`
+    /// (per `stats::figure_keyframes`), or `None` when the
+    /// figure has no later key — including an out-of-range `fi`,
+    /// which has no keys at all.
+    pub fn next_keyframe(&self, fi: usize, from: usize) -> Option<usize> {
+        crate::stats::figure_keyframes(&self.project, fi)
+            .into_iter()
+            .find(|&f| f > from)
+    }
+
+    /// The previous keyframe of figure `fi` strictly before
+    /// `from`, or `None` when the figure has no earlier key.
+    pub fn prev_keyframe(&self, fi: usize, from: usize) -> Option<usize> {
+        crate::stats::figure_keyframes(&self.project, fi)
+            .into_iter()
+            .rev()
+            .find(|&f| f < from)
+    }
+
+    /// Jump the playhead to figure `fi`'s next keyframe after
+    /// the current frame (via [`Self::goto`]). Returns false —
+    /// and leaves the playhead where it is — when there is none.
+    pub fn goto_next_keyframe(&mut self, fi: usize) -> bool {
+        match self.next_keyframe(fi, self.current) {
+            Some(target) => {
+                self.goto(target);
+                self.status = format!("Figure {} keyframe at frame {}.", fi + 1, target + 1);
+                true
+            }
+            None => {
+                self.status = format!("No later keyframe for figure {}.", fi + 1);
+                false
+            }
+        }
+    }
+
+    /// Jump the playhead to figure `fi`'s previous keyframe
+    /// before the current frame. Returns false — and leaves the
+    /// playhead where it is — when there is none.
+    pub fn goto_prev_keyframe(&mut self, fi: usize) -> bool {
+        match self.prev_keyframe(fi, self.current) {
+            Some(target) => {
+                self.goto(target);
+                self.status = format!("Figure {} keyframe at frame {}.", fi + 1, target + 1);
+                true
+            }
+            None => {
+                self.status = format!("No earlier keyframe for figure {}.", fi + 1);
+                false
+            }
+        }
     }
 
     pub fn add_figure(&mut self) {
@@ -1502,6 +1681,25 @@ impl EditorCore {
             self.status = format!("Figure {} has no pose on frame {}.", to_fig + 1, cur + 1);
             return;
         }
+        // Rig-size guard (Wave 10, D7): `model::evaluate`
+        // indexes `pose.angles[i]` directly, so copying a
+        // pose onto a figure whose pose carries a
+        // different angle count corrupts the row and
+        // panics the next render. The pose panel has
+        // always guarded its own presses; the core op now
+        // refuses too, so MCP and palette callers cannot
+        // reach the panic either. No snapshot on refusal.
+        let target_angles = self.project.frames[cur].poses[to_fig].angles.len();
+        if pose.angles.len() != target_angles {
+            self.status = format!(
+                "Copy pose failed: figure {} has {} angles but figure {} has {} — poses only copy between figures with the same rig size.",
+                from_fig + 1,
+                pose.angles.len(),
+                to_fig + 1,
+                target_angles
+            );
+            return;
+        }
         self.snapshot();
         self.project.frames[cur].poses[to_fig] = pose;
         self.status = format!(
@@ -1537,6 +1735,7 @@ impl EditorCore {
                 self.selected_figure = 0;
                 self.selected_node = None;
                 self.solo = None;
+                self.note_project_swapped();
                 self.status = format!("Opened {}", path.display());
             }
             None => self.status = format!("Could not open {} as a project.", path.display()),
@@ -1597,6 +1796,7 @@ impl EditorCore {
                 self.selected_figure = 0;
                 self.selected_node = None;
                 self.undo.clear();
+                self.note_project_swapped();
                 self.status = format!("Loaded {}", path.display());
             }
             Err(e) => self.status = format!("Load failed: {e}"),
@@ -1628,9 +1828,9 @@ impl EditorCore {
     /// status line. On failure the status reports it and the
     /// last-autosave counter is left alone, so the next call
     /// retries instead of waiting for another AUTOSAVE_EVERY
-    /// edits. Nothing calls this yet — the app layer decides
-    /// when to check (e.g. after ops); this is only the
-    /// mechanism.
+    /// edits. The app layer calls this on every poll tick
+    /// (main.rs) — the cadence decision lives there; this is
+    /// only the mechanism.
     pub fn maybe_autosave(&mut self) {
         if !Self::autosave_due(self.edit_count, self.last_autosave_count) {
             return;
@@ -2322,7 +2522,23 @@ impl EditorCore {
         );
         match crate::fx_edit::save_clip_preset(&entry.clip, &name) {
             Ok(path) => {
-                self.status = format!("FX preset '{name}' saved to {}.", path.display());
+                // Wave 10 (C7): the engine never overwrites
+                // a different preset — when the positional
+                // name was taken it writes a suffixed file
+                // instead, and the status names the file
+                // actually written.
+                let written = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| name.clone());
+                if written == name {
+                    self.status = format!("FX preset '{name}' saved to {}.", path.display());
+                } else {
+                    self.status = format!(
+                        "FX preset '{name}' saved to {} — '{name}' already holds a different preset.",
+                        path.display()
+                    );
+                }
             }
             Err(e) => self.status = format!("FX preset save failed: {e}"),
         }
@@ -2448,6 +2664,7 @@ impl EditorCore {
                 self.selected_node = None;
                 self.undo.clear();
                 self.redo.clear();
+                self.note_project_swapped();
                 self.status = format!("Imported {}", path.display());
             }
             Err(e) => self.status = format!("Import failed: {e}"),
@@ -2600,6 +2817,14 @@ impl EditorCore {
             } else {
                 recorded_stroke_opacity(brush.opacity)
             },
+            // The brush's scatter is carried by the
+            // SprayMark above — scatter > 0.0 is exactly
+            // what made this a spray stroke — so the
+            // stroke's own scatter stays 0.0 here. A
+            // non-spray stroke's scatter arrives via
+            // project files or MCP and renders through
+            // paint::stroke_dabs.
+            scatter: 0.0,
         });
         self.drawing = true;
     }
@@ -2740,6 +2965,7 @@ impl EditorCore {
             // stroke too — so it records opaque rather than
             // borrowing the active brush's opacity.
             opacity: 1.0,
+            scatter: 0.0,
         });
         self.status = format!("Shape filled with a scanline fill ({n_points} points).");
     }
@@ -2825,6 +3051,10 @@ impl EditorCore {
             fill: None,
             spray: None,
             opacity: recorded_stroke_opacity(brush.opacity),
+            // A stamp is never a spray stroke, so the
+            // brush's scatter lives on the stroke itself
+            // and the renderers jitter its dabs.
+            scatter: brush.scatter,
         });
         self.status = format!("Stamped {what} on frame {} ({n} points).", self.current + 1);
     }
@@ -3566,7 +3796,11 @@ impl EditorCore {
         }
         let name = clip.name.clone();
         let count = clip.frames.len();
-        self.clip_edit = Some(ClipEditSession { clip: clip_idx, frame: 0 });
+        self.clip_edit = Some(ClipEditSession {
+            clip: clip_idx,
+            frame: 0,
+            name: name.clone(),
+        });
         self.status = format!("Editing movieclip {name} ({count} frames).");
         true
     }
@@ -3586,7 +3820,7 @@ impl EditorCore {
     /// message. Callers first check `clip_edit.is_none()` to report
     /// the no-session case themselves.
     fn clip_session(&mut self) -> Option<(usize, usize)> {
-        let session = self.clip_edit?;
+        let session = self.clip_edit.clone()?;
         let Some(clip) = self.project.clips.get(session.clip) else {
             self.clip_edit = None;
             self.status = "Movieclip is gone — editing session closed.".into();
@@ -3711,7 +3945,7 @@ impl EditorCore {
     /// what a canvas view of the session would draw. Empty when
     /// no session is active.
     pub fn clip_positions(&self) -> Vec<V2> {
-        let Some(session) = self.clip_edit else { return Vec::new() };
+        let Some(session) = self.clip_edit.clone() else { return Vec::new() };
         let Some(clip) = self.project.clips.get(session.clip) else {
             return Vec::new();
         };
@@ -3811,16 +4045,36 @@ impl EditorCore {
         self.save_named_project_to(&dir)
     }
 
+    /// Wave 10 (D10 I1): restart the dirty baseline after a
+    /// project swap. The edit counters are lifetime counters
+    /// with `snapshot()` as their only writer, so without
+    /// this a freshly opened or created project inherits the
+    /// previous project's unsaved-edit count — the dirty dot
+    /// stays lit and discard confirms arm over a session
+    /// with nothing unsaved. Every swap path calls this:
+    /// `open_project_file` below, and the shell's raw swaps
+    /// (project tools' New / Recover, Home's New / Recover).
+    pub fn note_project_swapped(&mut self) {
+        self.edit_count = 0;
+        self.last_autosave_count = 0;
+    }
+
     /// `save_named_project` against an explicit projects
     /// directory (the codebase's `_in`-style split, so tests
     /// can aim the write at a temp dir). Same slug, same
     /// status strings, same `project_files` refresh.
     fn save_named_project_to(&mut self, dir: &std::path::Path) -> bool {
-        let slug = self
-            .project
-            .name
-            .to_lowercase()
-            .replace(|c: char| !c.is_alphanumeric(), "-");
+        // Wave 10 (B7): refuse a name that cannot name a
+        // file — blank or punctuation-only names slugged
+        // to a hidden `.json` or a bare `---.json`. The
+        // rule is the library's own (`projects::
+        // file_stem_for`, the same one save-a-copy uses).
+        let Some(slug) = crate::projects::file_stem_for(&self.project.name) else {
+            self.status =
+                "Project save failed: the project name cannot name a file — give it a name with at least one letter or digit."
+                    .into();
+            return false;
+        };
         let path = dir.join(format!("{slug}.json"));
         let result = std::fs::create_dir_all(dir)
             .and_then(|_| serde_json::to_string_pretty(&self.project).map_err(std::io::Error::other))
@@ -3828,6 +4082,12 @@ impl EditorCore {
         match result {
             Ok(()) => {
                 self.project_files = Self::list_project_files();
+                // Wave 10 (D10 I1): a successful save IS
+                // the baseline — the session no longer
+                // reads dirty for work that is on disk
+                // (the shell refreshes the recovery
+                // snapshot with this same state next).
+                self.last_autosave_count = self.edit_count;
                 self.status = format!("Project saved to {}", path.display());
                 true
             }
@@ -3872,6 +4132,7 @@ impl EditorCore {
                 // from the previous project must not hide
                 // every figure in the newly opened one.
                 self.solo = None;
+                self.note_project_swapped();
                 self.status = format!("Opened {}", path.display());
             }
             Err(e) => self.status = format!("Open failed: {e}"),
@@ -4014,7 +4275,8 @@ impl EditorCore {
                 st.camera.pitch = (st.camera.pitch + dpitch).clamp(-89.9, 89.9);
                 format!(
                     "3D camera: yaw {:.0}, pitch {:.0}.",
-                    st.camera.yaw, st.camera.pitch
+                    crate::model::norm_deg(st.camera.yaw),
+                    st.camera.pitch
                 )
             }
             None => "Enter 3D mode first.".into(),
@@ -4671,6 +4933,7 @@ mod tests {
             fill: None,
             spray: None,
             opacity: 1.0,
+            scatter: 0.0,
         };
         core.project.strokes = vec![mk(0x111111), mk(0x222222), mk(0x333333)];
         core.delete_stroke_at(1);
@@ -5083,6 +5346,7 @@ mod tests {
             fill: None,
             spray: None,
             opacity: 1.0,
+            scatter: 0.0,
         });
         core.toggle_draw_tool();
         assert_eq!(core.draw_tool, DrawTool::Eraser);
@@ -5214,6 +5478,99 @@ mod tests {
         // Demo frames 0 and 1 have root_x 480 and 494: midpoint 487.
         let root = core.project.frames[1].poses[0].root;
         assert!((root[0] - 487.0).abs() < 0.01, "root {root:?}");
+    }
+
+    #[test]
+    fn wave10_delete_keyframe_holds_previous_pose_and_undoes() {
+        let mut c = EditorCore::new();
+        // The demo animates every frame, so frame 2 is a key.
+        assert!(crate::stats::figure_keyframes(&c.project, 0).contains(&2));
+        let authored = c.project.frames[2].poses[0].clone();
+        let depth = c.undo_depth();
+        assert!(c.delete_keyframe(0, 2));
+        assert_eq!(c.undo_depth(), depth + 1, "one snapshot for the delete");
+        // The frame now holds frame 1's pose exactly...
+        assert_eq!(c.project.frames[2].poses[0].root, c.project.frames[1].poses[0].root);
+        assert_eq!(c.project.frames[2].poses[0].angles, c.project.frames[1].poses[0].angles);
+        // ...so the keyed set no longer lists it, and the pose
+        // the renderer samples at frame 2 is the held one.
+        assert!(!crate::stats::figure_keyframes(&c.project, 0).contains(&2));
+        assert_eq!(c.project.poses_at(2.0)[0].root, c.project.frames[1].poses[0].root);
+        // Undo restores the authored pose and the key.
+        c.undo();
+        assert_eq!(c.project.frames[2].poses[0].root, authored.root);
+        assert!(crate::stats::figure_keyframes(&c.project, 0).contains(&2));
+    }
+
+    #[test]
+    fn wave10_delete_keyframe_refuses_frame_zero() {
+        let mut c = EditorCore::new();
+        assert!(crate::stats::figure_keyframes(&c.project, 0).contains(&0));
+        let depth = c.undo_depth();
+        assert!(!c.delete_keyframe(0, 0));
+        assert_eq!(c.undo_depth(), depth, "a refusal takes no snapshot");
+        assert!(c.status.contains("base pose"), "status: {}", c.status);
+        assert!(crate::stats::figure_keyframes(&c.project, 0).contains(&0));
+    }
+
+    #[test]
+    fn wave10_delete_keyframe_refuses_non_keys() {
+        let mut c = EditorCore::new();
+        // Hold frame 2 at frame 1's pose: frame 2 stops being a key.
+        c.project.frames[2].poses[0] = c.project.frames[1].poses[0].clone();
+        assert!(!crate::stats::figure_keyframes(&c.project, 0).contains(&2));
+        let depth = c.undo_depth();
+        assert!(!c.delete_keyframe(0, 2));
+        assert!(c.status.contains("No keyframe"), "status: {}", c.status);
+        // Out-of-range figure / frame are refusals too, not panics.
+        assert!(!c.delete_keyframe(9, 1));
+        assert!(!c.delete_keyframe(0, 99));
+        assert_eq!(c.undo_depth(), depth, "refusals take no snapshot");
+        // A figure that appears mid-timeline — absent at frame 1,
+        // present at frame 2 — keys there, but that keyframe has
+        // no earlier pose to hold and is refused as well.
+        let mut c = EditorCore::new();
+        c.project.frames[1].poses.clear();
+        assert!(crate::stats::figure_keyframes(&c.project, 0).contains(&2));
+        assert!(!c.delete_keyframe(0, 2));
+        assert!(c.status.contains("appears at frame"), "status: {}", c.status);
+    }
+
+    #[test]
+    fn wave10_keyframe_navigation_boundaries() {
+        let mut c = EditorCore::new();
+        // Reshape the demo into sparse keys {0, 2, 4}: hold frame 1
+        // at frame 0's pose and frame 3 at frame 2's pose.
+        c.project.frames[1].poses[0] = c.project.frames[0].poses[0].clone();
+        c.project.frames[3].poses[0] = c.project.frames[2].poses[0].clone();
+        assert_eq!(crate::stats::figure_keyframes(&c.project, 0), vec![0, 2, 4]);
+        // Strictly-after / strictly-before stepping.
+        assert_eq!(c.next_keyframe(0, 0), Some(2));
+        assert_eq!(c.next_keyframe(0, 1), Some(2));
+        assert_eq!(c.next_keyframe(0, 2), Some(4));
+        assert_eq!(c.prev_keyframe(0, 4), Some(2));
+        assert_eq!(c.prev_keyframe(0, 3), Some(2));
+        assert_eq!(c.prev_keyframe(0, 2), Some(0));
+        // Boundaries: before the first key and after the last.
+        assert_eq!(c.prev_keyframe(0, 0), None);
+        assert_eq!(c.next_keyframe(0, 4), None);
+        assert_eq!(c.next_keyframe(0, 99), None);
+        // Empty: an out-of-range figure has no keys at all.
+        assert_eq!(c.next_keyframe(9, 0), None);
+        assert_eq!(c.prev_keyframe(9, 4), None);
+        // The goto wrappers move the playhead and stop at the ends.
+        c.goto(0);
+        assert!(c.goto_next_keyframe(0));
+        assert_eq!(c.current, 2);
+        assert!(c.goto_next_keyframe(0));
+        assert_eq!(c.current, 4);
+        assert!(!c.goto_next_keyframe(0), "no key after the last");
+        assert_eq!(c.current, 4, "a failed jump leaves the playhead");
+        assert!(c.goto_prev_keyframe(0));
+        assert_eq!(c.current, 2);
+        c.goto(0);
+        assert!(!c.goto_prev_keyframe(0));
+        assert_eq!(c.current, 0);
     }
 
     #[test]
@@ -5973,7 +6330,14 @@ mod tests {
         let ci = core.create_clip_from_figure(0).unwrap();
         let timeline_before = serde_json::to_string(&core.project.frames).unwrap();
         assert!(core.enter_clip(ci));
-        assert_eq!(core.clip_edit, Some(ClipEditSession { clip: ci, frame: 0 }));
+        assert_eq!(
+            core.clip_edit,
+            Some(ClipEditSession {
+                clip: ci,
+                frame: 0,
+                name: core.project.clips[ci].name.clone(),
+            })
+        );
         core.clip_goto(1);
         core.clip_set_angle(3, 42.0);
         core.clip_set_root([10.0, 20.0]);
@@ -5991,7 +6355,7 @@ mod tests {
         assert_eq!(core.project.clips[ci].frames.len(), n + 1);
         assert_eq!(core.project.clips[ci].frames[n].root, last.root);
         assert_eq!(core.project.clips[ci].frames[n].angles, last.angles);
-        assert_eq!(core.clip_edit.unwrap().frame, n);
+        assert_eq!(core.clip_edit.as_ref().unwrap().frame, n);
         core.clip_delete_frame();
         assert_eq!(core.project.clips[ci].frames.len(), n);
         // The project timeline was never touched.
@@ -6031,7 +6395,7 @@ mod tests {
         assert_eq!(core.project.clips[ci].frames[0].angles, angles_before);
         // Goto clamps to the final frame (frame 0 of one).
         core.clip_goto(500);
-        assert_eq!(core.clip_edit.unwrap().frame, 0);
+        assert_eq!(core.clip_edit.as_ref().unwrap().frame, 0);
         core.exit_clip();
         core.exit_clip(); // a second exit is a harmless no-op
         assert!(core.clip_edit.is_none());
@@ -6477,6 +6841,7 @@ mod wave12_tests {
             fill: None,
             spray: None,
             opacity: 1.0,
+            scatter: 0.0,
         }
     }
 

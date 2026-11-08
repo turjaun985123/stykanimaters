@@ -91,9 +91,11 @@
 //! SELECTED clip instead of the last one:
 //! [`waveform_mode`] decides from the selection, the clip
 //! count and the selected clip's peaks at the draw bucket
-//! count (probed via `audio_ops::clip_peaks`, the library
-//! home Phase I section 4 gave the per-clip computation;
-//! gain is NOT applied there — the bars still scale by the
+//! count (probed via [`selected_clip_peaks`] — Phase I
+//! probed through the library's `audio_ops::clip_peaks`;
+//! Wave 10 rerouted the probe through this module's
+//! cache, see the Wave 10 section below; gain is NOT
+//! applied there — the bars still scale by the
 //! clip's gain through [`bar_span`], as always). A caption
 //! element (`waveform-caption`, "Clip {n}", 1-based like
 //! the panel's own numbering) names the mode under the
@@ -233,6 +235,57 @@
 //! caption takes `Theme::text_secondary`. No geometry
 //! moved: same bars, same alphas, same line widths —
 //! only the colours' provenance changed.
+//!
+//! ## Wave 10 audit: long projects, probe cost, seek precision
+//!
+//! Three questions the earlier phases never asked of
+//! this strip, answered from the source:
+//!
+//! - LONG PROJECTS. There is no window and nothing to
+//!   follow: [`playhead_x`] maps the WHOLE project onto
+//!   the strip (frame 0 at the left edge, the last frame
+//!   at the right), so the playhead cannot run off the
+//!   drawn region — the frame clamps to the project's
+//!   last and the x to the strip, and [`with_playhead`]
+//!   draws the marker whenever the project has frames.
+//!   Visibility is by construction; what a long project
+//!   trades away is resolution, not the marker.
+//! - SEEK PRECISION. The strip is 308 pt wide at its
+//!   one mount, so one frame owns 308 / (count − 1) pt
+//!   of drag: 3.46 pt at 90 frames, 1.72 at 180, ~1.0
+//!   at 300. [`frame_at_x`] rounds to nearest, so at
+//!   the 90-frame scale every frame's target zone is
+//!   several points wide and a drag is frame-exact; the
+//!   pitch only reaches pointer granularity (~1 pt)
+//!   around 300 frames. That is the whole-project
+//!   miniature working as designed (Phases G/H), not a
+//!   defect, and this audit builds no window against
+//!   it — a window would also need somewhere to live,
+//!   and every surface in this file (playhead, bracket,
+//!   boundary ticks) is pinned to the whole-project
+//!   mapping by the phases above.
+//! - PROBE COST. The two modes probed differently, and
+//!   one of the paths was uncached: project mode reads
+//!   through this module's cached [`clip_peaks`]
+//!   (Phase E), but the builder's selected-clip probe
+//!   called the library's `audio_ops::clip_peaks`,
+//!   which decodes the clip's whole WAV on EVERY call —
+//!   and the builder calls it on every build whenever a
+//!   clip is selected, which during playback is every
+//!   frame. [`selected_clip_peaks`] now answers the
+//!   same question through the cached probe: an
+//!   unchanged file decodes once, and a file deleted
+//!   mid-session serves stale, exactly the project
+//!   path's Phase E behaviour. The library probe's one
+//!   semantic the cached probe does not carry by
+//!   itself — a file that decodes to no sample frames
+//!   counts as "no peaks" there, while
+//!   `audio_edit::peaks` gives it all-zero buckets — is
+//!   preserved through the cached probe's duration
+//!   half: zero content has a duration of exactly 0.0
+//!   (the same reading `audio_ops::clip_duration_secs`
+//!   gives a zero-frame or zero-rate file), so the
+//!   mode decision and the bars are unchanged.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -795,7 +848,7 @@ fn draw_peak_bars(
 /// The selected-clip counterpart of [`waveform_bars`]
 /// (Phase I, section 17): centre line plus bar columns for
 /// clip `index`'s own `peaks` (probed by the builder via
-/// `audio_ops::clip_peaks`, gain NOT applied there), scaled
+/// [`selected_clip_peaks`], gain NOT applied there), scaled
 /// by that clip's `gain`. The mode decision has already
 /// proven the index valid and the peaks non-empty; the
 /// index is still re-checked here so this builder is safe
@@ -1119,6 +1172,44 @@ fn waveform_seek(s: &mut State, d: &Drag) {
     }
 }
 
+/// The selected clip's peaks at `buckets`, for
+/// [`waveform_el_state`]'s mode decision and clip-mode
+/// bars (Wave 10; see the module docs' Wave 10 section):
+/// the selected clip's own peaks, or an empty vec —
+/// "no peaks", the project-mode signal — for no
+/// selection, a stale selection, or a clip whose file
+/// yields no peaks.
+///
+/// The probe goes through this module's cached
+/// [`clip_peaks`], NOT the library's
+/// `audio_ops::clip_peaks` it used through Phase I:
+/// that probe decodes the clip's whole WAV on every
+/// call, and the builder calls this on every build
+/// whenever a clip is selected — during playback, every
+/// frame. The cached probe decodes an unchanged file
+/// once and serves a deleted file stale, the project
+/// path's Phase E behaviour since section 27.
+///
+/// One library semantic is preserved deliberately: the
+/// library probe returns no peaks for a file that
+/// decodes to no sample frames, while the cached probe
+/// returns that file's all-zero buckets (non-empty —
+/// it would read as Clip mode). Zero content is the
+/// one probe whose duration reads exactly 0.0, so the
+/// duration half of the cached result carries the
+/// carve-out; a genuinely silent clip (real frames,
+/// real duration, zero peaks) still reads as Clip
+/// mode, as [`waveform_mode`] documents.
+fn selected_clip_peaks(core: &EditorCore, selected: Option<usize>, buckets: usize) -> Vec<f32> {
+    let Some(clip) = selected.and_then(|i| core.project.audio.get(i)) else {
+        return Vec::new();
+    };
+    match clip_peaks(clip, buckets) {
+        Some((peaks, duration_secs)) if duration_secs > 0.0 => peaks,
+        _ => Vec::new(),
+    }
+}
+
 /// The interactive waveform strip — the only builder in
 /// this module since Phase H (section 27) removed the
 /// core-only `waveform_el` (see the module docs). The canvas
@@ -1188,16 +1279,20 @@ fn waveform_seek(s: &mut State, d: &Drag) {
 /// before, the captioned columns totalled one point
 /// less and the bare canvas had no layout height
 /// at all.
+/// Wave 10 reroutes the selected-clip probe under
+/// this builder through [`selected_clip_peaks`] (this
+/// module's peaks cache) instead of the library's
+/// decode-on-every-call probe — same peaks, same mode
+/// decision, no per-build WAV decode (see the module
+/// docs' Wave 10 section). The element tree, geometry
+/// and gesture are exactly what they were.
 pub fn waveform_el_state(s: &State, el_size: [f32; 2], t: &Theme) -> El {
     let clip_count = s.core.project.audio.len();
-    let selected_peaks: Vec<f32> = match s.audio_panel.selected {
-        Some(i) if i < clip_count => stykanimate_rs::audio_ops::clip_peaks(
-            &s.core,
-            i,
-            strip_buckets(strip_columns(el_size[0])),
-        ),
-        _ => Vec::new(),
-    };
+    let selected_peaks: Vec<f32> = selected_clip_peaks(
+        &s.core,
+        s.audio_panel.selected,
+        strip_buckets(strip_columns(el_size[0])),
+    );
     let mode = waveform_mode(s.audio_panel.selected, clip_count, &selected_peaks);
     let muted = match mode {
         WaveformMode::Clip(i) => clip_is_muted(&s.core, i),
@@ -1452,6 +1547,104 @@ mod tests {
         std::fs::write(&path, write_wav(&sine_wav())).unwrap();
         let probed = clip_peaks(&c, 64).expect("probe once the file exists");
         assert_eq!(probed.0.len(), 64);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- Selected-clip probe (Wave 10) ----
+
+    #[test]
+    fn selected_clip_peaks_match_the_library_probe() {
+        // The rerouted probe answers the question the
+        // library probe answered, with the same values:
+        // both reduce the same decode with the same
+        // `audio_edit::peaks`, so the vecs are identical.
+        let path = temp_wav_path("selected-values");
+        std::fs::write(&path, write_wav(&sine_wav())).unwrap();
+        let mut core = EditorCore::new();
+        core.project.audio.push(clip_at(&path));
+        let via_helper = selected_clip_peaks(&core, Some(0), 64);
+        let via_library = stykanimate_rs::audio_ops::clip_peaks(&core, 0, 64);
+        assert_eq!(via_helper.len(), 64);
+        assert_eq!(via_helper, via_library);
+        assert!(via_helper.iter().all(|&v| v > 0.7 && v <= 0.81));
+        // No selection and a stale selection both read
+        // as "no peaks", as the library path did.
+        assert!(selected_clip_peaks(&core, None, 64).is_empty());
+        assert!(selected_clip_peaks(&core, Some(4), 64).is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn selected_clip_peaks_survive_file_deletion_via_the_cache() {
+        // The Wave 10 defect, pinned shut: the builder's
+        // old probe decoded on every call, so deleting
+        // the file mid-session flipped the strip back to
+        // project mode on the next build. The rerouted
+        // probe serves the cached peaks instead — the
+        // project path's Phase E stale behaviour.
+        let path = temp_wav_path("selected-cache");
+        std::fs::write(&path, write_wav(&sine_wav())).unwrap();
+        let mut core = EditorCore::new();
+        core.project.audio.push(clip_at(&path));
+        let first = selected_clip_peaks(&core, Some(0), 64);
+        assert_eq!(first.len(), 64);
+        std::fs::remove_file(&path).unwrap();
+        // The library probe now finds nothing — so an
+        // identical second result can only have come
+        // from this module's cache, never a re-decode.
+        assert!(stykanimate_rs::audio_ops::clip_peaks(&core, 0, 64).is_empty());
+        let second = selected_clip_peaks(&core, Some(0), 64);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn selected_clip_peaks_zero_content_file_has_no_peaks() {
+        // A WAV that decodes to no sample frames: the
+        // cached probe alone would report its all-zero
+        // buckets (non-empty), but the library probe this
+        // replaces reported none — the duration carve-out
+        // in `selected_clip_peaks` keeps that reading, so
+        // the mode decision still falls back to Project.
+        let path = temp_wav_path("selected-empty");
+        let silent = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: Vec::new(),
+        };
+        std::fs::write(&path, write_wav(&silent)).unwrap();
+        let c = clip_at(&path);
+        // The cached probe's raw answer, pinned so the
+        // carve-out's reason stays visible: all-zero
+        // peaks and a duration of exactly 0.0.
+        let (peaks, duration) = clip_peaks(&c, 64).expect("zero-content probe");
+        assert_eq!(peaks.len(), 64);
+        assert!(peaks.iter().all(|&v| v == 0.0));
+        assert_eq!(duration, 0.0);
+        // The builder's probe reads it as no peaks.
+        let mut core = EditorCore::new();
+        core.project.audio.push(c);
+        assert!(selected_clip_peaks(&core, Some(0), 64).is_empty());
+        assert_eq!(
+            waveform_mode(Some(0), 1, &selected_clip_peaks(&core, Some(0), 64)),
+            WaveformMode::Project
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn selected_clip_peaks_missing_file_has_no_peaks() {
+        // The ordinary fallback, unchanged by the
+        // reroute: an unprobeable selected clip reads as
+        // no peaks (failures are never cached, so a file
+        // that appears later still probes fresh through
+        // the builder's probe too).
+        let path = temp_wav_path("selected-missing");
+        let _ = std::fs::remove_file(&path);
+        let mut core = EditorCore::new();
+        core.project.audio.push(clip_at(&path));
+        assert!(selected_clip_peaks(&core, Some(0), 64).is_empty());
+        std::fs::write(&path, write_wav(&sine_wav())).unwrap();
+        assert_eq!(selected_clip_peaks(&core, Some(0), 64).len(), 64);
         let _ = std::fs::remove_file(&path);
     }
 

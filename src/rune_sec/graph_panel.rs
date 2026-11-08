@@ -269,6 +269,20 @@
 //! (Phase J); a target-only state still highlights the
 //! first match — the same resolution every edit path uses.
 //!
+//! Wave 10 bounds the block: it was the channel list's
+//! unbounded-growth defect in sibling form (one line per
+//! channel in the whole project, no cap — 17 pt of column
+//! per channel, without limit). The builder now renders
+//! [`stat_display_rows`]' projection instead of the raw
+//! rows: at most [`STATS_MAX_LINES`] lines
+//! ([`STATS_MAX_H`] tall) — the drawn channel's line in
+//! full, the first other lines in project order, and a
+//! `graph-stats-more` summary line counting the folded
+//! channels and naming the way back to them (a list row
+//! press draws the channel, restoring its full line).
+//! [`stat_rows`] itself is unchanged and still returns
+//! every channel's row.
+//!
 //! ## Value readout (Phase L)
 //!
 //! Directly under the canvas, a muted line keyed
@@ -380,6 +394,25 @@
 //!   (gridlines and fit-range labels, S12-11) is a
 //!   separate item and was not attempted here.
 //!
+//! ## Wave 10 (agent B8)
+//!
+//! The deferred sibling of Wave 9's S12-07 fix: the
+//! stats block's unbounded growth is bounded in the
+//! same kit idiom (see the Stats block section above
+//! and [`STATS_MAX_H`] / [`stat_display_rows`]). The
+//! rest of the panel was re-audited for the same class:
+//! the channel list is Wave 9's bounded viewport; the
+//! key / tangent handle loops paint `Shape` geometry
+//! inside the fixed [`GRAPH_H`] canvas, not element
+//! rows; the selector chips dedup by target over the
+//! SELECTED figure's channels only (bounded by that
+//! figure's node count, in a `flex_wrap` row — a
+//! different, much smaller growth class, left as is);
+//! the interp row, the preset chips and the actions
+//! row are fixed hand-written rows. The stats block
+//! was the only remaining per-project-channel element
+//! growth in the panel.
+//!
 //! ## State the shell must provide
 //!
 //! `State` needs one field (integrator wires it):
@@ -421,6 +454,35 @@ const FALLBACK_SIZE: [f32; 2] = [720.0, GRAPH_H];
 /// but no bound, and a Rune scroll viewport without a
 /// bounded height grows to its content).
 const CHAN_LIST_MAX_H: f32 = 156.0;
+/// Height of one stats-block line, in points: the
+/// block's lines are `type_::LABEL` text (12 pt), whose
+/// effective line height is size × 1.25 (rune
+/// `TextStyle`'s line-height fallback) = 15.
+const STAT_LINE_H: f32 = 15.0;
+/// Maximum height of the stats block, in points
+/// (Wave 10): six stats lines — 6 × 15
+/// ([`STAT_LINE_H`]) + 5 × 2 (the block's own gap) =
+/// 100. Before this bound the block was a plain
+/// unbounded column, one line per channel in the whole
+/// project at 17 pt per channel (15 line + 2 gap), so
+/// 24 channels cost 406 pt and 40 cost 678 pt of the
+/// right column, pushing the canvas, the interp row and
+/// everything under them down and eventually out of
+/// the card — the channel list's pre-Wave-9 defect
+/// (audit S12-07) in its sibling block, deferred by
+/// Wave 9's agent B6 and closed here. Past
+/// [`STATS_MAX_LINES`] the block stops growing:
+/// [`stat_display_rows`] folds the overflow into a
+/// summary line instead.
+pub const STATS_MAX_H: f32 = 100.0;
+/// Maximum number of lines the stats block renders,
+/// the summary line included: the line count
+/// [`STATS_MAX_H`] buys at [`STAT_LINE_H`] a line plus
+/// the 2 pt gap — (100 + 2) / (15 + 2) = 6. One slot
+/// of the six is the summary line whenever the project
+/// overflows, and the DRAWN channel's line is never
+/// the one folded away (see [`stat_display_rows`]).
+pub const STATS_MAX_LINES: usize = 6;
 /// The decorative `chart-line` glyphs' muted tone
 /// (channel-list rows; the panel header's glyph moved
 /// to the kit title in Phase N), in the `0xRRGGBB` form
@@ -860,6 +922,85 @@ pub fn stat_rows(core: &EditorCore, sel: &GraphPanelState) -> Vec<(String, bool)
         .enumerate()
         .map(|(i, stat)| (stat_line(stat), drawn == Some(i)))
         .collect()
+}
+
+/// One RENDERED stats-block row (Wave 10): either a
+/// channel's own line — carrying its channel index, so
+/// the builder keys it `graph-stat-{index}` by CHANNEL
+/// index exactly as the unbounded block keyed by
+/// position (the two agree whenever nothing is folded)
+/// — or the single summary line that stands for the
+/// folded channels, carrying how many it stands for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatDisplay {
+    Line {
+        index: usize,
+        line: String,
+        drawn: bool,
+    },
+    More {
+        hidden: usize,
+    },
+}
+
+/// The summary line standing for `hidden` folded
+/// channels: the count, honestly, plus the way back to
+/// the folded stats — a channel list row press draws
+/// that channel ([`select_channel`]), and the drawn
+/// channel's line is always rendered in full.
+pub fn stats_more_line(hidden: usize) -> String {
+    if hidden == 1 {
+        "+1 more channel — pick it in the list above to see its stats".to_string()
+    } else {
+        format!("+{hidden} more channels — pick one in the list above to see its stats")
+    }
+}
+
+/// The stats block's RENDERED rows (Wave 10): the bound
+/// the builder paints, projected from [`stat_rows`] —
+/// which stays the full, unfolded source every other
+/// consumer reads. While the project has at most
+/// [`STATS_MAX_LINES`] channels this is every row, in
+/// project order, exactly as the block always rendered.
+/// Past the cap the block holds at [`STATS_MAX_LINES`]
+/// lines: the DRAWN channel's line (never folded — it
+/// is the channel the canvas shows and the interp
+/// control edits, the panel's primary channel since
+/// Wave 4), the first `STATS_MAX_LINES - 2` other lines
+/// in project order, and one [`StatDisplay::More`]
+/// summary for the rest. Project order is preserved
+/// among the shown lines, and nothing vanishes
+/// silently: the summary counts the folded channels
+/// and names the way to any of them (a list row press
+/// draws it, which puts its line back in full).
+pub fn stat_display_rows(core: &EditorCore, sel: &GraphPanelState) -> Vec<StatDisplay> {
+    let rows = stat_rows(core, sel);
+    let total = rows.len();
+    if total <= STATS_MAX_LINES {
+        return rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, (line, drawn))| StatDisplay::Line { index, line, drawn })
+            .collect();
+    }
+    // Over the cap: one of the remaining slots is the
+    // summary line, and the drawn channel's line is
+    // never the one dropped, so the non-drawn budget
+    // is the cap minus the drawn line minus the
+    // summary — filled in project order.
+    let mut out: Vec<StatDisplay> = Vec::new();
+    let mut others = STATS_MAX_LINES - 2;
+    for (index, (line, drawn)) in rows.into_iter().enumerate() {
+        if drawn {
+            out.push(StatDisplay::Line { index, line, drawn });
+        } else if others > 0 {
+            others -= 1;
+            out.push(StatDisplay::Line { index, line, drawn });
+        }
+    }
+    let hidden = total - out.len();
+    out.push(StatDisplay::More { hidden });
+    out
 }
 
 /// The drawn channel's value at the playhead, as the
@@ -1735,16 +1876,35 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     // effective_channel_index — the picked row on
     // duplicates, exactly like the list's active row). No
     // channels: no block at all — the list's empty-state
-    // line above already covers that case.
-    let stat_lines = stat_rows(core, &s.graph_panel);
+    // line above already covers that case. Wave 10 bound:
+    // the block renders stat_display_rows' projection,
+    // capped at STATS_MAX_LINES lines (STATS_MAX_H) with
+    // the overflow folded into the `graph-stats-more`
+    // summary line, so a many-channel project can no
+    // longer push the canvas and everything under it
+    // down the column; shown lines keep their
+    // `graph-stat-{channel index}` keys.
+    let stat_display = stat_display_rows(core, &s.graph_panel);
     let mut stats_block = col().key("graph-stats").gap(2.0);
-    for (i, (line, is_drawn)) in stat_lines.iter().enumerate() {
-        stats_block = stats_block.child(
-            text(line.clone())
-                .key(format!("graph-stat-{i}"))
-                .font(type_::LABEL)
-                .color(if *is_drawn { t.text } else { t.text_secondary }),
-        );
+    for row in &stat_display {
+        match row {
+            StatDisplay::Line { index, line, drawn } => {
+                stats_block = stats_block.child(
+                    text(line.clone())
+                        .key(format!("graph-stat-{index}"))
+                        .font(type_::LABEL)
+                        .color(if *drawn { t.text } else { t.text_secondary }),
+                );
+            }
+            StatDisplay::More { hidden } => {
+                stats_block = stats_block.child(
+                    text(stats_more_line(*hidden))
+                        .key("graph-stats-more")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                );
+            }
+        }
     }
 
     // Interp segmented control (UI mission S12-08). While
@@ -2001,7 +2161,7 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                     )),
             );
     }
-    if !stat_lines.is_empty() {
+    if !stat_display.is_empty() {
         panel = panel.child(stats_block);
     }
     panel = panel
@@ -3049,6 +3209,153 @@ mod tests {
         // builder shows no stats block at all.
         let core = EditorCore::new();
         assert!(stat_rows(&core, &GraphPanelState::default()).is_empty());
+    }
+
+    #[test]
+    fn stats_bound_constants_agree() {
+        // The Wave 10 cap, pinned both ways: six lines,
+        // and the height those six lines cost at
+        // STAT_LINE_H with the block's 2 pt gap between
+        // them is exactly STATS_MAX_H — the constant the
+        // docs quote as the block's maximum height.
+        assert_eq!(STATS_MAX_LINES, 6);
+        assert_eq!(STATS_MAX_H, 100.0);
+        let height = STATS_MAX_LINES as f32 * STAT_LINE_H
+            + (STATS_MAX_LINES as f32 - 1.0) * 2.0;
+        assert_eq!(height, STATS_MAX_H);
+    }
+
+    #[test]
+    fn stats_more_line_counts_and_points_at_the_list() {
+        // The summary is honest both ways: the exact
+        // folded count, singular and plural, and the way
+        // back to a folded channel's stats (a list row
+        // press draws it — select_channel).
+        assert_eq!(
+            stats_more_line(1),
+            "+1 more channel — pick it in the list above to see its stats"
+        );
+        assert_eq!(
+            stats_more_line(7),
+            "+7 more channels — pick one in the list above to see its stats"
+        );
+    }
+
+    /// Ten channels on figure 0 — Angle(0) … Angle(9),
+    /// one flat key each — the synthetic many-channel
+    /// state the Wave 10 fold tests share.
+    fn ten_channel_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.channels = (0..10)
+            .map(|i| {
+                channel(
+                    ChannelTarget::Angle(i),
+                    vec![Key::flat(0.0, i as f32)],
+                )
+            })
+            .collect();
+        core
+    }
+
+    #[test]
+    fn stat_display_rows_under_the_cap_are_every_row() {
+        // Three channels (≤ STATS_MAX_LINES): the
+        // projection is every row in project order, no
+        // summary — the block renders exactly as it did
+        // before the bound.
+        let mut core = EditorCore::new();
+        core.project.channels = vec![
+            channel(ChannelTarget::RootX, vec![Key::flat(0.0, 0.0)]),
+            channel(ChannelTarget::RootY, vec![Key::flat(0.0, 1.0)]),
+            channel(ChannelTarget::Angle(2), vec![Key::flat(0.0, 2.0)]),
+        ];
+        let display = stat_display_rows(&core, &GraphPanelState::default());
+        assert_eq!(display.len(), 3);
+        for (want, row) in display.iter().enumerate() {
+            match row {
+                StatDisplay::Line { index, drawn, .. } => {
+                    assert_eq!(*index, want, "project order, channel indices");
+                    assert_eq!(*drawn, want == 0, "the fallback drawn row is flagged");
+                }
+                StatDisplay::More { .. } => panic!("no summary under the cap"),
+            }
+        }
+        // And no channels at all: no rows, so the
+        // builder still shows no block.
+        let core = EditorCore::new();
+        assert!(stat_display_rows(&core, &GraphPanelState::default()).is_empty());
+    }
+
+    #[test]
+    fn stat_display_rows_fold_the_overflow_and_keep_the_drawn_line() {
+        // Ten channels with the LAST-but-one picked as
+        // drawn (a list row press — select_channel): the
+        // block holds at STATS_MAX_LINES rendered lines —
+        // the first STATS_MAX_LINES - 2 other lines in
+        // project order, the drawn channel's own line in
+        // full, and the summary counting the folded five.
+        let mut core = ten_channel_core();
+        let mut st = GraphPanelState::default();
+        assert!(select_channel(&mut core, &mut st, 8));
+        let display = stat_display_rows(&core, &st);
+        assert_eq!(display.len(), STATS_MAX_LINES, "the block is capped");
+        let mut indices: Vec<usize> = Vec::new();
+        let mut drawn_at: Option<usize> = None;
+        for row in &display {
+            match row {
+                StatDisplay::Line { index, drawn, .. } => {
+                    indices.push(*index);
+                    if *drawn {
+                        drawn_at = Some(*index);
+                    }
+                }
+                StatDisplay::More { .. } => {}
+            }
+        }
+        assert_eq!(indices, vec![0, 1, 2, 3, 8], "order kept, drawn kept");
+        assert_eq!(drawn_at, Some(8), "the drawn line is the picked channel's");
+        match display.last() {
+            Some(StatDisplay::More { hidden }) => {
+                assert_eq!(*hidden, 5, "ten channels, five lines shown");
+                assert_eq!(
+                    stats_more_line(*hidden),
+                    "+5 more channels — pick one in the list above to see its stats"
+                );
+            }
+            other => panic!("the last row is the summary, got {other:?}"),
+        }
+        // The folded set is exactly the complement: the
+        // summary never claims a shown channel, and
+        // picking a folded channel (index 6) draws it —
+        // its line returns in full and the fold moves.
+        let mut st = GraphPanelState::default();
+        assert!(select_channel(&mut core, &mut st, 6));
+        let display = stat_display_rows(&core, &st);
+        assert!(display.iter().any(|row| matches!(
+            row,
+            StatDisplay::Line { index: 6, drawn: true, .. }
+        )));
+    }
+
+    #[test]
+    fn stat_display_rows_fold_without_a_drawn_channel() {
+        // Channels exist but none is drawn (the selected
+        // figure has none — the stats cover ALL figures):
+        // the fold still caps the block, one line under
+        // the cap because no drawn line claims a slot,
+        // and the summary counts the rest.
+        let mut core = ten_channel_core();
+        core.selected_figure = 1;
+        let display = stat_display_rows(&core, &GraphPanelState::default());
+        assert_eq!(display.len(), STATS_MAX_LINES - 1);
+        assert!(display.iter().all(|row| !matches!(
+            row,
+            StatDisplay::Line { drawn: true, .. }
+        )));
+        match display.last() {
+            Some(StatDisplay::More { hidden }) => assert_eq!(*hidden, 6),
+            other => panic!("the last row is the summary, got {other:?}"),
+        }
     }
 
     #[test]

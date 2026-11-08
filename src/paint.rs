@@ -297,9 +297,9 @@ pub fn nib_widths(points: &[V2], base: f32, nib: Nib, nib_angle_deg: f32) -> Vec
 /// stroke is finished, and how many Chaikin smoothing iterations
 /// are applied to the recorded path at that same moment. Wave 12
 /// added `opacity` and `scatter` so low-opacity, spread marks
-/// (the Spray preset) are expressible as data; the pipeline now
-/// consumes `opacity` (see its field doc), while `scatter`
-/// remains model data. Pure data — see `editor.rs`.
+/// (the Spray preset) are expressible as data; the pipeline
+/// consumes both (see their field docs). Pure data — see
+/// `editor.rs`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Brush {
     pub name: &'static str,
@@ -319,8 +319,11 @@ pub struct Brush {
     /// Scatter radius in stage units: 0.0 lands marks exactly
     /// on the recorded path; above 0.0, spray-style marks are
     /// spread within this radius of it (see [`spray_offsets`]).
-    /// Like `opacity`, carried as model data until the stroke
-    /// pipeline consumes it.
+    /// Consumed two ways: a drawn stroke with scatter > 0 is
+    /// recorded as a spray mark (`EditorCore::begin_draw`),
+    /// and stamps record it onto the stroke itself
+    /// (`Stroke::scatter`), whose dabs every renderer
+    /// spreads via [`stroke_dabs`].
     pub scatter: f32,
 }
 
@@ -580,6 +583,90 @@ pub fn scatter_dabs(points: &[V2], spacing: f32, scatter: f32, seed: u64) -> Vec
         .collect()
 }
 
+/// The per-stroke seed for an ordinary stroke's scatter dab
+/// stream: `0x5EED_0000 + frame * 131 + index`, where `index`
+/// is the stroke's position in `Project::strokes`.
+///
+/// This mirrors, term for term, the seed the editor's
+/// recorder derives for a spray mark when a scatter-brush
+/// stroke begins (`EditorCore::begin_draw`: the same
+/// `0x5EED_0000` base, the same frame multiplier 131, and
+/// the stroke's own index — there `project.strokes.len()`
+/// at push time, which is exactly the pushed stroke's
+/// index). A spray stroke stores its seed in its mark; a
+/// scattered ordinary stroke stores only its amount
+/// (`Stroke::scatter`), so a renderer re-derives the seed
+/// from the two facts it already iterates with — the
+/// stroke's frame and its project-wide index — and lands
+/// on the same value the recorder would have stored.
+pub fn stroke_scatter_seed(frame: usize, index: usize) -> u64 {
+    0x5EED_0000u64 + (frame as u64) * 131 + index as u64
+}
+
+/// Expand one ordinary stroke into the dab placements of
+/// its dab raster path, scatter included: the stroke-level
+/// entry to dab rendering for strokes that stay strokes, as
+/// [`spray_dots`] is the stroke-level entry for spray
+/// strokes. A renderer expanding an ordinary stroke into
+/// dabs calls this, so the stage, the rasterizer and the
+/// SVG exporter place the same dabs for the same stroke.
+///
+/// * `stroke.scatter <= 0.0` (or NaN) — and every stroke
+///   saved before the field existed deserializes to 0.0 —
+///   returns the unscattered placements unchanged, dab for
+///   dab: [`scatter_dabs`] at amount 0 is [`resample`]
+///   itself, so existing strokes rasterise exactly as they
+///   did before scatter was wired in.
+/// * `stroke.scatter > 0.0` displaces each dab to within
+///   `stroke.scatter` of its placement, under the seed from
+///   [`stroke_scatter_seed`]. The placements depend only on
+///   the stroke's points, frame, index and amount — never
+///   on render order, redraw count or machine — so the
+///   same stroke rasterises identically on every frame and
+///   in every export.
+///
+/// `index` is the stroke's project-wide position in
+/// `Project::strokes` (the indexing the renderers already
+/// iterate with), NOT its rank among the strokes on its
+/// frame: the recorder's derivation counts every stroke in
+/// the project. One consequence to know: the seed is
+/// positional, so deleting or reordering an earlier stroke
+/// re-rolls the scatter pattern of the strokes after it —
+/// the amount survives (it is stored on the stroke), the
+/// exact pattern follows the stroke's new position. A
+/// spray stroke's pattern cannot re-roll this way; its
+/// seed is stored in its mark.
+///
+/// Spray precedence stays the caller's, as everywhere in
+/// the renderers: a stroke with a spray mark is replaced
+/// by [`spray_dots`] and never reaches this function.
+/// `spacing` is the dab pass's own spacing — callers tie
+/// it to the stroke's width as they would for any dab pass
+/// (see [`scatter_dabs`]).
+pub fn stroke_dabs(stroke: &Stroke, index: usize, spacing: f32) -> Vec<V2> {
+    scatter_dabs(
+        &stroke.points,
+        spacing,
+        stroke.scatter,
+        stroke_scatter_seed(stroke.frame, index),
+    )
+}
+
+/// The one dab spacing every renderer uses for a scattered
+/// stroke (Wave 10 adoption): half the stroke's width, so
+/// consecutive dabs (each a disc of radius `width / 2`, the
+/// spray radius rule) overlap by half and the mark reads as
+/// a continuous textured band rather than a dotted trail;
+/// floored at 1.0 so a hairline stroke's dab count stays
+/// bounded. Centralised because the placements are a
+/// cross-renderer contract — the stage, the rasterizer
+/// and the SVG exporter must place the same dabs for the
+/// same stroke, so none of them may invent its own
+/// spacing.
+pub fn stroke_dab_spacing(stroke: &Stroke) -> f32 {
+    (stroke.width * 0.5).max(1.0)
+}
+
 /// The eraser: remove every point within `radius` of `centre`
 /// (distance `<= radius`) from every stroke, splitting a stroke
 /// into several where the erasure cuts its middle. Each surviving
@@ -596,6 +683,12 @@ pub fn scatter_dabs(points: &[V2], spacing: f32, scatter: f32, seed: u64) -> Vec
 /// stroke's original closed outline; once that outline is cut,
 /// the pieces no longer trace the filled shape, so carrying the
 /// colour over would claim a fill that matches nothing.
+///
+/// `scatter` is inherited, like `spray` and `opacity`: a cut
+/// piece keeps the original's scatter amount — the mark the
+/// user made is still a scattered mark — and its dabs derive
+/// from the piece's own points at its new position (see
+/// [`stroke_dabs`] on the positional seed).
 pub fn erase_at(strokes: &[Stroke], centre: V2, radius: f32) -> Vec<Stroke> {
     let mut out: Vec<Stroke> = Vec::new();
     for stroke in strokes {
@@ -621,6 +714,7 @@ pub fn erase_at(strokes: &[Stroke], centre: V2, radius: f32) -> Vec<Stroke> {
                     fill: None,
                     spray: stroke.spray,
                     opacity: stroke.opacity,
+                    scatter: stroke.scatter,
                 });
             }
         };
@@ -1274,6 +1368,7 @@ mod tests {
             fill: Some(0x00FF00),
             spray: None,
             opacity: 1.0,
+            scatter: 0.0,
         }
     }
 
@@ -1324,6 +1419,7 @@ mod tests {
                 fill: Some(0xABCDEF),
                 spray: None,
                 opacity: 1.0,
+                scatter: 0.0,
             },
         ];
         let out = erase_at(&strokes, [1000.0, 1000.0], 10.0);
@@ -1354,6 +1450,7 @@ mod tests {
             fill: None,
             spray: None,
             opacity: 1.0,
+            scatter: 0.0,
         };
         assert!(erase_at(&[short], [10.0, 0.0], 5.0).is_empty());
         // No strokes in, no strokes out.
@@ -2282,5 +2379,137 @@ mod scatter_dabs_tests {
         let dabs = scatter_dabs(&[[7.0, 9.0]], 10.0, 5.0, 42);
         assert_eq!(dabs.len(), 1);
         assert!(distance(dabs[0], [7.0, 9.0]) <= 5.0 + 1e-4);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wave 10 (B2): `stroke_dabs` — scatter wired into the stroke
+// raster path, gated on the stroke's own `scatter` field.
+// The field-off path must be the pre-scatter raster, dab for
+// dab; the field-on path displaces within the stroke's own
+// radius under the recorder-mirroring seed, so the same
+// stroke rasterises identically on every frame.
+#[cfg(test)]
+mod stroke_dabs_tests {
+    use super::*;
+
+    /// A stroke on frame 3 along the x axis, 0..100: the
+    /// `scatter_dabs_tests` path as model data. `resample`
+    /// at spacing 10 places 11 dabs on it.
+    fn stroke(scatter: f32) -> Stroke {
+        Stroke {
+            frame: 3,
+            points: vec![[0.0, 0.0], [100.0, 0.0]],
+            color: 0xFF0000,
+            width: 4.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+            opacity: 1.0,
+            scatter,
+        }
+    }
+
+    #[test]
+    fn scatter_seed_mirrors_the_spray_recorders_derivation() {
+        // `EditorCore::begin_draw` records a spray seed as
+        // 0x5EED_0000 + frame * 131 + strokes.len() at push
+        // time; the scatter derivation is that formula, term
+        // for term.
+        assert_eq!(stroke_scatter_seed(0, 0), 0x5EED_0000);
+        assert_eq!(stroke_scatter_seed(3, 7), 0x5EED_0000 + 3 * 131 + 7);
+        // Frame and index both feed the seed: no two distinct
+        // (frame, index) pairs in this grid share one.
+        let mut seeds = std::collections::BTreeSet::new();
+        for frame in 0..4 {
+            for index in 0..4 {
+                assert!(seeds.insert(stroke_scatter_seed(frame, index)));
+            }
+        }
+    }
+
+    #[test]
+    fn zero_scatter_stroke_renders_the_existing_dab_path() {
+        let s = stroke(0.0);
+        let plain = resample(&s.points, 10.0);
+        assert_eq!(plain.len(), 11);
+        // Dab for dab the placements the dab path produced
+        // before the field was wired in — at any index,
+        // because with no scatter the seed never engages.
+        for index in [0usize, 1, 57] {
+            assert_eq!(stroke_dabs(&s, index, 10.0), plain, "index {index}");
+        }
+        // Negative and NaN amounts behave as 0, exactly as
+        // `scatter_dabs` defines them.
+        assert_eq!(stroke_dabs(&stroke(-2.0), 0, 10.0), plain);
+        assert_eq!(stroke_dabs(&stroke(f32::NAN), 0, 10.0), plain);
+    }
+
+    #[test]
+    fn scattered_stroke_dabs_stay_within_its_scatter_radius() {
+        let s = stroke(5.0);
+        let plain = resample(&s.points, 10.0);
+        let dabs = stroke_dabs(&s, 2, 10.0);
+        assert_eq!(
+            dabs.len(),
+            plain.len(),
+            "scatter displaces dabs, never adds or drops them"
+        );
+        let mut outside = 0;
+        for (dab, home) in dabs.iter().zip(&plain) {
+            let d = distance(*dab, *home);
+            assert!(
+                d <= 5.0 + 1e-4,
+                "dab {dab:?} is {d} from its placement, past the stroke's scatter radius"
+            );
+            if !plain.contains(dab) {
+                outside += 1;
+            }
+        }
+        assert!(
+            outside > 0,
+            "scatter 5 must land at least one dab outside the unscattered dab set"
+        );
+    }
+
+    #[test]
+    fn stroke_dabs_are_deterministic_per_stroke() {
+        let s = stroke(5.0);
+        // Two renders of the same stroke at the same index
+        // agree exactly — redraws and exports cannot drift.
+        assert_eq!(stroke_dabs(&s, 2, 10.0), stroke_dabs(&s, 2, 10.0));
+        // A clone is the same stroke: same data, same dabs.
+        assert_eq!(stroke_dabs(&s, 2, 10.0), stroke_dabs(&s.clone(), 2, 10.0));
+        // The seed follows the stroke's position, as the
+        // recorder's did: the same stroke data at another
+        // index (or on another frame) scatters differently.
+        assert_ne!(stroke_dabs(&s, 2, 10.0), stroke_dabs(&s, 3, 10.0));
+        let mut other_frame = s.clone();
+        other_frame.frame = 4;
+        assert_ne!(stroke_dabs(&s, 2, 10.0), stroke_dabs(&other_frame, 2, 10.0));
+    }
+
+    #[test]
+    fn scattered_single_point_stroke_yields_one_dab_within_the_radius() {
+        let mut s = stroke(5.0);
+        s.points = vec![[7.0, 9.0]];
+        let dabs = stroke_dabs(&s, 0, 10.0);
+        assert_eq!(dabs.len(), 1);
+        assert!(distance(dabs[0], [7.0, 9.0]) <= 5.0 + 1e-4);
+        // And no points, no dabs.
+        s.points = Vec::new();
+        assert!(stroke_dabs(&s, 0, 10.0).is_empty());
+    }
+
+    #[test]
+    fn erase_at_pieces_keep_the_strokes_scatter_amount() {
+        // The eraser's split pieces inherit the amount (the
+        // production construction in `erase_at`), so a cut
+        // scattered stroke stays a scattered stroke.
+        let mut s = stroke(12.0);
+        s.points = (0..=10).map(|i| [i as f32 * 10.0, 0.0]).collect();
+        let out = erase_at(&[s], [50.0, 0.0], 15.0);
+        assert_eq!(out.len(), 2, "one cut, two pieces");
+        assert!(out.iter().all(|p| p.scatter == 12.0));
     }
 }

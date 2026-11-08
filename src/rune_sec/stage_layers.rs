@@ -397,7 +397,7 @@ pub fn stroke_geometry(core: &EditorCore) -> Vec<StrokePrim> {
     let project = &core.project;
     let authored = authored_frame(core);
     let mut out = Vec::new();
-    for stroke in &project.strokes {
+    for (index, stroke) in project.strokes.iter().enumerate() {
         if stroke.frame != authored {
             continue;
         }
@@ -435,6 +435,29 @@ pub fn stroke_geometry(core: &EditorCore) -> Vec<StrokePrim> {
                 });
                 continue;
             }
+        }
+        // Scattered stroke (Wave 10 adoption): a non-spray
+        // stroke with scatter > 0 draws as dabs — one Dots
+        // prim per dab, the spray construction — with the
+        // dab placements from paint::stroke_dabs at the
+        // shared spacing, so the stage, the rasterizer and
+        // the SVG exporter place the same dabs. The alpha
+        // is the stroke's recorded opacity, uniform across
+        // dabs (stroke_dabs yields centres, not alphas).
+        // A filled stroke never reaches here (the fill
+        // branch above wins): scatter textures the
+        // stroke's marks, not its fill region.
+        if stroke.scatter > 0.0 && !stroke.points.is_empty() {
+            let radius = (stroke.width * 0.5).max(1.0);
+            for centre in paint::stroke_dabs(stroke, index, paint::stroke_dab_spacing(stroke)) {
+                out.push(StrokePrim::Dots {
+                    pts: vec![centre],
+                    radius,
+                    color: stroke.color,
+                    opacity: stroke_alpha(stroke),
+                });
+            }
+            continue;
         }
         // Plain stroke: one polyline at the uniform width,
         // at the stroke's recorded opacity.
@@ -547,6 +570,22 @@ pub fn highlight_geometry(core: &EditorCore, project_index: usize) -> Vec<Stroke
                 opacity: stroke_alpha(stroke),
             }];
         }
+    }
+    // Scattered: the same dabs the base layer draws, at
+    // the grown dot radius — the spray highlight's
+    // construction, so a scattered stroke's highlight
+    // covers the marks the user actually sees.
+    if stroke.scatter > 0.0 && !stroke.points.is_empty() {
+        let radius = (stroke.width * 0.5).max(1.0) * HIGHLIGHT_DOT_SCALE + HIGHLIGHT_DOT_PAD;
+        return paint::stroke_dabs(stroke, project_index, paint::stroke_dab_spacing(stroke))
+            .into_iter()
+            .map(|centre| StrokePrim::Dots {
+                pts: vec![centre],
+                radius,
+                color: stroke.color,
+                opacity: stroke_alpha(stroke),
+            })
+            .collect();
     }
     // Plain: the same polyline, wider — an underlay the
     // integrator draws translucent in the accent colour.
@@ -710,6 +749,7 @@ mod tests {
             fill: None,
             spray: None,
             opacity: 1.0,
+            scatter: 0.0,
         }
     }
 
@@ -733,6 +773,47 @@ mod tests {
                 opacity: 1.0,
             }]
         );
+    }
+
+    #[test]
+    fn scattered_stroke_becomes_dabs_at_the_shared_placements() {
+        // Wave 10 adoption: a non-spray stroke with
+        // scatter > 0 emits one Dots prim per dab from
+        // paint::stroke_dabs at the shared spacing — the
+        // same placements the rasterizer and the SVG
+        // exporter compute — and no polyline.
+        let mut s = plain(0, &[[0.0, 0.0], [60.0, 0.0]], 0x3366CC, 6.0);
+        s.scatter = 8.0;
+        let core = core_with(vec![s.clone()]);
+        let geo = stroke_geometry(&core);
+        let want = stykanimate_rs::paint::stroke_dabs(
+            &s,
+            0,
+            stykanimate_rs::paint::stroke_dab_spacing(&s),
+        );
+        assert!(!want.is_empty());
+        assert_eq!(geo.len(), want.len());
+        for (prim, centre) in geo.iter().zip(want.iter()) {
+            match prim {
+                StrokePrim::Dots {
+                    pts,
+                    radius,
+                    color,
+                    opacity,
+                } => {
+                    assert_eq!(pts, &vec![*centre]);
+                    assert_eq!(*radius, 3.0);
+                    assert_eq!(*color, 0x3366CC);
+                    assert_eq!(*opacity, 1.0);
+                }
+                other => panic!("expected Dots, got {other:?}"),
+            }
+        }
+        // Every dab lands within the scatter radius of
+        // the recorded path (the scatter_dabs contract).
+        for centre in &want {
+            assert!(centre[1].abs() <= 8.0, "dab {centre:?} escaped the radius");
+        }
     }
 
     #[test]

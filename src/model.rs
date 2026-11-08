@@ -514,6 +514,15 @@ pub struct Stroke {
     /// this field existed deserialize as 1.0.
     #[serde(default = "default_stroke_opacity")]
     pub opacity: f32,
+    /// Scatter radius in stage units recorded from the
+    /// brush when the stroke was drawn: renderers spread
+    /// the stroke's own marks within this radius of the
+    /// recorded path (see `paint::scatter_dabs`), instead
+    /// of only through a spray mark. 0.0 = off — the
+    /// stroke draws exactly on its path. Projects saved
+    /// before this field existed deserialize as 0.0.
+    #[serde(default)]
+    pub scatter: f32,
 }
 
 fn default_stroke_opacity() -> f32 {
@@ -1451,6 +1460,7 @@ mod audio_gain_tests {
             fill: None,
             spray: None,
             opacity: 0.5,
+            scatter: 0.0,
         };
         let json = serde_json::to_string(&stroke).unwrap();
         assert!(
@@ -1501,5 +1511,72 @@ mod audio_gain_tests {
         );
         let back: FxClipEntry = serde_json::from_str(&json).unwrap();
         assert!(back.hidden);
+    }
+}
+
+// ---- Wave 10 scatter data model ----
+//
+// Separate module on purpose: exact-name imports only, never a
+// glob. Pins the serde contract of `Stroke::scatter`: projects
+// saved before the field existed must load with `scatter: 0.0`
+// (off — the stroke draws exactly on its path).
+#[cfg(test)]
+mod scatter_wave10_tests {
+    use crate::model::{Project, Stroke};
+
+    /// Every field a pre-scatter project file carries for a
+    /// stroke — and no `scatter` key at all.
+    const OLD_STROKE_JSON: &str = r#"{
+        "frame": 2,
+        "points": [[10.0, 20.0], [30.0, 40.0]],
+        "color": 16711680,
+        "width": 4.0,
+        "widths": [],
+        "fill": null,
+        "spray": null,
+        "opacity": 0.5
+    }"#;
+
+    #[test]
+    fn stroke_json_without_a_scatter_field_loads_with_scatter_off() {
+        let stroke: Stroke = serde_json::from_str(OLD_STROKE_JSON)
+            .expect("pre-scatter stroke JSON must still parse");
+        assert_eq!(stroke.scatter, 0.0, "missing scatter field defaults to off");
+        // The rest of the old shape is untouched by the new field.
+        assert_eq!(stroke.frame, 2);
+        assert_eq!(stroke.points.len(), 2);
+        assert_eq!(stroke.opacity, 0.5);
+    }
+
+    #[test]
+    fn stroke_scatter_round_trips_through_json() {
+        let mut stroke: Stroke =
+            serde_json::from_str(OLD_STROKE_JSON).expect("plain stroke parses");
+        stroke.scatter = 12.0;
+        let json = serde_json::to_string(&stroke).expect("scattered stroke serialises");
+        assert!(
+            json.contains("\"scatter\":12.0"),
+            "scatter field is stored: {json}"
+        );
+        let back: Stroke = serde_json::from_str(&json).expect("scattered stroke parses back");
+        assert_eq!(back.scatter, 12.0);
+    }
+
+    #[test]
+    fn demo_project_strokes_all_have_scatter_off() {
+        // The demo project authors no strokes today, so plant
+        // one old-format stroke on it — the shape a saved demo
+        // project from before the field existed would carry —
+        // and pin that every stroke on the project is
+        // unscattered (the set is non-empty by construction).
+        let mut project = Project::new_demo();
+        let old: Stroke = serde_json::from_str(OLD_STROKE_JSON)
+            .expect("pre-scatter stroke JSON must still parse");
+        project.strokes.push(old);
+        assert_eq!(project.strokes.len(), 1, "the planted stroke is present");
+        assert!(
+            project.strokes.iter().all(|s| s.scatter == 0.0),
+            "every demo-project stroke has scatter 0.0"
+        );
     }
 }

@@ -21,6 +21,35 @@
 //! bodies are capped at 4 MiB, and `Transfer-Encoding: chunked`
 //! is not supported (MCP clients send `Content-Length`).
 //!
+//! Two unauthenticated probes exist so a client can tell this
+//! live endpoint apart from the stdio server (which has no HTTP
+//! at all): `GET /` and `GET /health` answer a small JSON
+//! identity document (server name/version, `"live": true`).
+//! The JSON-RPC `ping` method also works — it is answered by
+//! the shared router, like every other method.
+//!
+//! ## Framing discipline (Wave 10 hardening)
+//!
+//! Malformed input is answered, never panicked on and never
+//! waited on forever:
+//!
+//! - The whole request (head + body) must arrive within
+//!   [`READ_DEADLINE`] of the accept — a per-read timeout alone
+//!   would let a dribbling client hold the one listener thread
+//!   indefinitely. Expiry is a clean close.
+//! - A `Content-Length` header that is present but not a plain
+//!   number, or duplicated with differing values, is HTTP 400.
+//! - `Transfer-Encoding` is refused with HTTP 501 rather than
+//!   being silently misread as an empty body.
+//! - An oversized body is refused with HTTP 413 whose body is
+//!   a JSON-RPC error object (code `-32600`, id `null`) — the
+//!   spec-shaped way to reject a request whose id was never
+//!   read.
+//! - A queued request whose reply never comes (the app wedged
+//!   before draining) is given up on after [`REPLY_TIMEOUT`]
+//!   with HTTP 504; the edit, if it later runs, still lands —
+//!   only the answer is lost.
+//!
 //! ## Synchronisation
 //!
 //! The listener thread never touches the editor core. It parses
@@ -79,7 +108,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -91,16 +120,50 @@ pub const PORT: u16 = 32117;
 
 /// Largest request body accepted: 4 MiB. Bigger bodies are
 /// refused with HTTP 413 before a byte of them is read.
+///
+/// Why 4 MiB is the right size: a request is one JSON-RPC
+/// message — a method name plus a small arguments object
+/// (names, frame numbers, toggles). Project files are never
+/// carried inline: the save/load/export tools take a `path`
+/// and the file moves over the filesystem, not the wire. The
+/// largest plausible inline payloads (a pasted pose or scene
+/// fragment) are KiB-scale, so 4 MiB is orders of magnitude of
+/// headroom — while still bounding the memory one connection
+/// can make the listener allocate (connections are served
+/// sequentially, so one buffer is all that is ever alive).
+/// The cap is request-side only: responses are not capped,
+/// because tool results (project summaries, frame data) can
+/// legitimately be large.
 const MAX_BODY: usize = 4 * 1024 * 1024;
 
 /// Largest request head (request line + headers) accepted.
 const MAX_HEAD: usize = 16 * 1024;
 
-/// How long a single connection may take to deliver its
-/// request / absorb its response before the listener gives up
-/// on it — the listener serves connections one at a time, so a
-/// stuck client must not starve every later one.
+/// How long a single socket read or write may block before
+/// the listener gives up on it — the listener serves
+/// connections one at a time, so a stuck client must not
+/// starve every later one.
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Total budget for one request to arrive, from accept to
+/// the last body byte. [`IO_TIMEOUT`] alone bounds each
+/// individual read, so a client sending one byte every few
+/// seconds would never trip it; this deadline is what
+/// actually closes a slow-dribble (slow-loris) connection.
+/// Expiry is a clean close with no response — the request
+/// never became a request, so there is nothing to answer.
+const READ_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long a connection may wait for the UI thread to
+/// answer a queued request before the listener gives up and
+/// answers HTTP 504. Generous on purpose: the wait IS the
+/// tool's runtime (a full export can take minutes), and this
+/// bound exists only so a wedged app — one whose poll loop
+/// never drains again — cannot hold the listener forever.
+/// The request itself is not cancelled: if the app recovers
+/// and drains it, the edit still lands and only the reply
+/// send fails, harmlessly.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The URL an MCP client should be pointed at while live
 /// control is enabled: `http://127.0.0.1:32117/mcp`.
@@ -291,6 +354,10 @@ fn handle_connection(mut stream: TcpStream, tx: &Sender<LiveRequest>, stop: &Arc
     // others — make the mode explicit before reading.
     let _ = stream.set_nonblocking(false);
 
+    // The whole request must arrive within READ_DEADLINE of
+    // the accept; checked before every blocking read below.
+    let read_deadline = Instant::now() + READ_DEADLINE;
+
     // --- Read the head (request line + headers). ---
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -302,28 +369,76 @@ fn handle_connection(mut stream: TcpStream, tx: &Sender<LiveRequest>, stop: &Arc
             write_response(&mut stream, 400, "Bad Request", "text/plain", b"headers too large\n");
             return;
         }
+        if Instant::now() >= read_deadline {
+            return; // slow-dribble head; clean close
+        }
         match stream.read(&mut chunk) {
             Ok(0) => return, // client went away mid-head
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
             Err(_) => return,
         }
     };
+    // The terminator can arrive in the same chunk that pushes
+    // the buffer past MAX_HEAD, so the cap is re-checked on
+    // the head itself, not just on the accumulating buffer.
+    if head_len > MAX_HEAD {
+        write_response(&mut stream, 400, "Bad Request", "text/plain", b"headers too large\n");
+        return;
+    }
     let head = String::from_utf8_lossy(&buf[..head_len]).into_owned();
 
-    // --- Only POST carries JSON-RPC. ---
-    if request_method(&head) != "POST" {
+    // --- Route on method + path. ---
+    let method = request_method(&head);
+    let path = path_of(request_target(&head));
+    if method == "GET" {
+        // Health/identity probe: the one answer that proves
+        // this port is the LIVE editor (the stdio server has
+        // no HTTP listener at all). No core access, no queue.
+        if path == "/" || path == "/health" {
+            write_json(&mut stream, 200, &health_body());
+        } else {
+            write_response(&mut stream, 404, "Not Found", "text/plain", b"no such path\n");
+        }
+        return;
+    }
+    if method != "POST" {
         write_response(&mut stream, 405, "Method Not Allowed", "text/plain", b"POST only\n");
         return;
     }
+    if path != "/mcp" {
+        write_response(&mut stream, 404, "Not Found", "text/plain", b"POST to /mcp\n");
+        return;
+    }
+    if has_transfer_encoding(&head) {
+        // Chunked bodies are not decoded (module docs); say
+        // so plainly instead of misreading the request as an
+        // empty body and answering a misleading parse error.
+        write_response(&mut stream, 501, "Not Implemented", "text/plain", b"chunked transfer encoding not supported; send Content-Length\n");
+        return;
+    }
 
-    // --- Read exactly Content-Length bytes of body. ---
-    let content_length = parse_content_length(&head).unwrap_or(0);
+    // --- Read exactly Content-Length bytes of body. A length
+    //     header that is present but unusable (not a number,
+    //     or duplicated with differing values) is a framing
+    //     error — HTTP 400 — not a licence to guess 0. ---
+    let content_length = match content_length_status(&head) {
+        ContentLength::Absent => 0,
+        ContentLength::Value(n) => n,
+        ContentLength::Invalid => {
+            write_response(&mut stream, 400, "Bad Request", "text/plain", b"bad content-length\n");
+            return;
+        }
+    };
     if content_length > MAX_BODY {
-        write_response(&mut stream, 413, "Payload Too Large", "text/plain", b"body too large\n");
+        let body = body_too_large_body();
+        write_response(&mut stream, 413, "Payload Too Large", "application/json", body.as_bytes());
         return;
     }
     let mut body: Vec<u8> = buf[head_len..].to_vec();
     while body.len() < content_length {
+        if Instant::now() >= read_deadline {
+            return; // slow-dribble body; clean close
+        }
         match stream.read(&mut chunk) {
             Ok(0) => return, // truncated body; nothing to answer
             Ok(n) => body.extend_from_slice(&chunk[..n]),
@@ -354,6 +469,7 @@ fn handle_connection(mut stream: TcpStream, tx: &Sender<LiveRequest>, stop: &Arc
         write_response(&mut stream, 500, "Internal Server Error", "text/plain", b"editor not draining\n");
         return;
     }
+    let wait_start = Instant::now();
     loop {
         match reply_rx.recv_timeout(Duration::from_millis(25)) {
             Ok(Some(response)) => {
@@ -370,6 +486,15 @@ fn handle_connection(mut stream: TcpStream, tx: &Sender<LiveRequest>, stop: &Arc
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if stop.load(Ordering::SeqCst) {
                     return; // bridge switched off mid-request
+                }
+                if wait_start.elapsed() >= REPLY_TIMEOUT {
+                    // The app is alive enough to keep us
+                    // waiting but never drained: answer 504
+                    // and free the listener. The request is
+                    // still queued — if it is drained later,
+                    // its reply send simply fails (see drain).
+                    write_response(&mut stream, 504, "Gateway Timeout", "text/plain", b"editor did not answer in time\n");
+                    return;
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -393,6 +518,41 @@ fn parse_error_body(err: &serde_json::Error) -> Value {
         "jsonrpc": "2.0",
         "id": Value::Null,
         "error": { "code": -32700, "message": format!("Parse error: {err}") },
+    })
+}
+
+/// The oversized-body rejection, as a JSON-RPC error body:
+/// the request's id was never read (that is the point of
+/// rejecting early), so the id is `null` and the code is
+/// `-32600` (Invalid Request). Serialised once per rejection;
+/// the HTTP status stays 413.
+fn body_too_large_body() -> String {
+    json!({
+        "jsonrpc": "2.0",
+        "id": Value::Null,
+        "error": {
+            "code": -32600,
+            "message": format!("Invalid Request: body exceeds the {MAX_BODY}-byte limit"),
+        },
+    })
+    .to_string()
+}
+
+/// The health/identity document served by `GET /` and
+/// `GET /health`. Name and version mirror `initialize`'s
+/// `serverInfo` exactly, so a client sees one identity over
+/// both transports; `transport`/`live` are the fields that
+/// tell this endpoint apart from the stdio server, and
+/// `auth` states the v1 security posture plainly, matching
+/// the settings card's wording.
+fn health_body() -> Value {
+    json!({
+        "server": "stykanimate-rs",
+        "version": env!("CARGO_PKG_VERSION"),
+        "transport": "live-http",
+        "live": true,
+        "endpoint": endpoint(),
+        "auth": "none",
     })
 }
 
@@ -443,16 +603,86 @@ fn request_method(head: &str) -> &str {
 /// Parse the `Content-Length` header (case-insensitive name,
 /// surrounding whitespace tolerated). `None` when the header
 /// is absent or its value is not a plain number.
+///
+/// A thin view over [`content_length_status`] (which see for
+/// the framing rules): both `Absent` and `Invalid` collapse
+/// to `None` here. Production code making accept/refuse
+/// decisions uses the status form, which keeps the two
+/// apart; this shape is retained for the callers that only
+/// ever needed the number.
 fn parse_content_length(head: &str) -> Option<usize> {
+    match content_length_status(head) {
+        ContentLength::Value(n) => Some(n),
+        ContentLength::Absent | ContentLength::Invalid => None,
+    }
+}
+
+/// What the request's `Content-Length` framing actually
+/// says — the three cases [`handle_connection`] must tell
+/// apart, where [`parse_content_length`]'s `None` conflates
+/// two of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentLength {
+    /// No header: a bodyless request (length 0).
+    Absent,
+    /// One usable length (or several headers that agree).
+    Value(usize),
+    /// A header is present but unusable: not a plain number,
+    /// or duplicated with differing values — the classic
+    /// request-smuggling shape, refused rather than guessed.
+    Invalid,
+}
+
+/// Scan ALL `Content-Length` headers (case-insensitive) and
+/// classify the framing. Identical duplicates are tolerated
+/// (some clients emit them); differing ones are `Invalid`.
+fn content_length_status(head: &str) -> ContentLength {
+    let mut found: Option<usize> = None;
     for line in head.lines() {
         let Some((name, value)) = line.split_once(':') else {
-            continue; // the request line has no colon to split
+            continue;
         };
-        if name.trim().eq_ignore_ascii_case("content-length") {
-            return value.trim().parse::<usize>().ok();
+        if !name.trim().eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        let Ok(n) = value.trim().parse::<usize>() else {
+            return ContentLength::Invalid;
+        };
+        match found {
+            None => found = Some(n),
+            Some(prev) if prev == n => {}
+            Some(_) => return ContentLength::Invalid,
         }
     }
-    None
+    match found {
+        None => ContentLength::Absent,
+        Some(n) => ContentLength::Value(n),
+    }
+}
+
+/// Whether the head carries any `Transfer-Encoding` header
+/// (case-insensitive name). Any value counts: no transfer
+/// encoding is decoded by this server, so presence alone is
+/// enough to refuse the request rather than misframe it.
+fn has_transfer_encoding(head: &str) -> bool {
+    head.lines().any(|line| {
+        line.split_once(':')
+            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("transfer-encoding"))
+    })
+}
+
+/// The request target of the request line (`/mcp`, `/`, …):
+/// the second whitespace-delimited word of the head, or ""
+/// when the request line has no second word.
+fn request_target(head: &str) -> &str {
+    head.split_whitespace().nth(1).unwrap_or("")
+}
+
+/// The path part of a request target: everything before an
+/// optional `?query`. Routing compares paths, so a query
+/// string never changes which handler a request reaches.
+fn path_of(target: &str) -> &str {
+    target.split('?').next().unwrap_or("")
 }
 
 /// First index of `needle` in `haystack`, if present.
@@ -540,6 +770,106 @@ mod tests {
     #[test]
     fn body_cap_is_four_mib() {
         assert_eq!(MAX_BODY, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn request_target_reads_the_second_word() {
+        assert_eq!(request_target(SAMPLE_HEAD), "/mcp");
+        assert_eq!(request_target("GET /health HTTP/1.1\r\n\r\n"), "/health");
+        assert_eq!(request_target("POST"), "");
+        assert_eq!(request_target(""), "");
+    }
+
+    #[test]
+    fn path_of_drops_any_query_string() {
+        assert_eq!(path_of("/mcp"), "/mcp");
+        assert_eq!(path_of("/health?verbose=1"), "/health");
+        assert_eq!(path_of("/"), "/");
+        assert_eq!(path_of(""), "");
+    }
+
+    #[test]
+    fn content_length_status_separates_absent_value_and_invalid() {
+        assert_eq!(content_length_status(SAMPLE_HEAD), ContentLength::Value(42));
+        assert_eq!(
+            content_length_status("POST /mcp HTTP/1.1\r\nHost: x"),
+            ContentLength::Absent
+        );
+        // Present but not a plain number — including a
+        // negative length and an empty value — is Invalid,
+        // never silently 0.
+        assert_eq!(
+            content_length_status("POST / HTTP/1.1\r\nContent-Length: abc"),
+            ContentLength::Invalid
+        );
+        assert_eq!(
+            content_length_status("POST / HTTP/1.1\r\nContent-Length: -5"),
+            ContentLength::Invalid
+        );
+        assert_eq!(
+            content_length_status("POST / HTTP/1.1\r\nContent-Length: "),
+            ContentLength::Invalid
+        );
+    }
+
+    #[test]
+    fn content_length_status_tolerates_agreeing_duplicates_only() {
+        assert_eq!(
+            content_length_status("POST / HTTP/1.1\r\nContent-Length: 7\r\ncontent-length: 7"),
+            ContentLength::Value(7)
+        );
+        assert_eq!(
+            content_length_status("POST / HTTP/1.1\r\nContent-Length: 7\r\nContent-Length: 8"),
+            ContentLength::Invalid
+        );
+    }
+
+    #[test]
+    fn transfer_encoding_is_detected_case_insensitively() {
+        assert!(has_transfer_encoding(
+            "POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked"
+        ));
+        assert!(has_transfer_encoding(
+            "POST /mcp HTTP/1.1\r\ntransfer-encoding: identity"
+        ));
+        assert!(!has_transfer_encoding(SAMPLE_HEAD));
+    }
+
+    #[test]
+    fn health_body_names_the_live_server() {
+        let body = health_body();
+        assert_eq!(body["server"], "stykanimate-rs");
+        assert!(body["version"].as_str().is_some_and(|v| !v.is_empty()));
+        assert_eq!(body["transport"], "live-http");
+        assert_eq!(body["live"], true);
+        assert_eq!(body["endpoint"], endpoint());
+        assert_eq!(body["auth"], "none");
+    }
+
+    #[test]
+    fn too_large_body_is_a_json_rpc_error_with_null_id() {
+        let body: Value = serde_json::from_str(&body_too_large_body()).expect("valid JSON");
+        assert_eq!(body["jsonrpc"], "2.0");
+        assert_eq!(body["id"], Value::Null);
+        assert_eq!(body["error"]["code"], -32600);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(&MAX_BODY.to_string()),
+            "the message names the limit it enforces"
+        );
+    }
+
+    #[test]
+    fn waits_are_bounded_and_ordered() {
+        // The read deadline is a real bound (not zero, not
+        // effectively infinite), and the reply wait must far
+        // outlast it: a slow REQUEST is a framing problem,
+        // while a slow REPLY is a tool doing real work.
+        assert!(READ_DEADLINE >= Duration::from_secs(5));
+        assert!(READ_DEADLINE <= Duration::from_secs(120));
+        assert!(REPLY_TIMEOUT > READ_DEADLINE);
     }
 
     // -----------------------------------------------------------------
