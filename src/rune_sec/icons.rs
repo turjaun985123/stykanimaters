@@ -161,7 +161,7 @@ mod tests {
     /// a point of slack for rounding at the edges).
     #[test]
     fn every_curated_icon_parses_inside_its_view_box() {
-        assert_eq!(ICON_NAMES.len(), 102, "the curated set is 102 icons");
+        assert_eq!(ICON_NAMES.len(), 110, "the curated set is 110 icons");
         for name in ICON_NAMES {
             let (width, d) = icon_data(name)
                 .unwrap_or_else(|| panic!("{name} is listed but has no data"));

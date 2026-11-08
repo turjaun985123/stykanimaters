@@ -1585,9 +1585,22 @@ mod tests {
     fn group_query_lists_the_whole_group() {
         let got = filter_commands("export");
         assert!(!got.is_empty());
-        assert!(got.iter().all(|&i| COMMANDS[i].group == "Export"));
-        let exports = COMMANDS.iter().filter(|c| c.group == "Export").count();
-        assert_eq!(got.len(), exports.min(MAX_RESULTS));
+        // Every Export-group command is listed...
+        let exports: Vec<usize> = COMMANDS
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.group == "Export")
+            .map(|(i, _)| i)
+            .collect();
+        assert!(exports.iter().all(|i| got.contains(i)));
+        // ...and the only outsider is the Phase I workspace
+        // jump, whose title names the workspace ("Go to
+        // Export workspace") and so matches the query
+        // honestly.
+        assert!(got.iter().all(|&i| {
+            COMMANDS[i].group == "Export" || COMMANDS[i].key == "go-export"
+        }));
+        assert_eq!(got.len(), (exports.len() + 1).min(MAX_RESULTS));
     }
 
     #[test]
