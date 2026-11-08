@@ -1358,9 +1358,12 @@ mod tests {
 
     #[test]
     fn file_recent_items_build_nothing_without_recents_and_a_block_with_recents() {
-        // Phase J: no recents → no block at all (not even
-        // the separator); two recents → separator + two
-        // items, resolved and unresolved alike.
+        // Phase J: no recents → no block at all; two
+        // recents → two items, resolved and unresolved
+        // alike. UI mission wave 3: the separator that
+        // used to head this block moved to the File arm,
+        // between the recents and Export PNG — heading
+        // the menu, it divided nothing.
         let t = rune::tok::theme(true);
         assert!(file_recent_items(&[], &[], &t).is_empty());
         let recents: Vec<String> = ["Alpha", "Gone"]
@@ -1369,7 +1372,7 @@ mod tests {
             .collect();
         let files = recent_pairs(&["Alpha"]);
         let block = file_recent_items(&recents, &files, &t);
-        assert_eq!(block.len(), 3, "separator + two recent items");
+        assert_eq!(block.len(), 2, "two recent items, separator lives in the File arm");
     }
 
     #[test]
