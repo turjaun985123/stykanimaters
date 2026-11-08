@@ -416,15 +416,22 @@ pub fn expected_frame_walk(
             pos += budget / frame_secs;
             budget = 0.0;
         } else {
+            // The crossing cap bounds the walk, checked
+            // before a crossing is performed: once it is
+            // spent, a budget that still runs out inside
+            // the current frame may finish there (the
+            // final partial frame is part of the walk,
+            // not another crossing), but no further
+            // boundary is crossed.
+            if crossings >= max_crossings {
+                break;
+            }
             budget -= rest;
             pos = pos.floor() + 1.0;
             while pos >= end {
                 pos -= span;
             }
             crossings += 1;
-            if crossings >= max_crossings {
-                break;
-            }
         }
     }
     pos
@@ -519,6 +526,12 @@ pub fn walk_wraps(
             pos += budget / frame_secs;
             budget = 0.0;
         } else {
+            // The same cap placement as the walk: checked
+            // before a crossing is performed, so at most
+            // `max_crossings` boundaries are ever crossed.
+            if crossings >= max_crossings {
+                break;
+            }
             budget -= rest;
             pos = pos.floor() + 1.0;
             while pos >= end {
@@ -526,9 +539,6 @@ pub fn walk_wraps(
                 folds += 1;
             }
             crossings += 1;
-            if crossings >= max_crossings {
-                break;
-            }
         }
     }
     folds
