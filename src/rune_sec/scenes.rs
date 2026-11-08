@@ -78,6 +78,24 @@
 //! the scene's full-window `--snap` is that drawing's
 //! pixel proof (its `--tree` dump is the same Build3D
 //! inventory fact 12 checks under `three-d`).
+//!
+//! The Phase N scenes keep the same discipline, one
+//! setter each, all of them the shell's own open paths:
+//! `palette-open` calls `command_palette::open_palette`
+//! (the palette's own open fn, the one Ctrl+K reaches
+//! through `palette_handle_key`); `menu-open` calls
+//! `MenusState::toggle` with `menus::FILE` — exactly
+//! the File trigger's handler in `menu_bar`;
+//! `settings-open` calls
+//! `settings_popover::toggle_open`, the settings-toggle
+//! button's own handler; `draw-open` switches workspace
+//! through `workspaces::select_workspace`, the chips'
+//! op, like `export-open` before it. The first three
+//! exist so the phase's restyled overlay surfaces (a
+//! card palette, a card dropdown, the settings card)
+//! get `--snap` pixel proofs; `draw-open` gives the
+//! Draw workspace — the adoption wave's densest — its
+//! first scene at all.
 
 use crate::State;
 
@@ -364,6 +382,61 @@ fn scene_loop_range(s: &mut State) {
     });
 }
 
+/// `"palette-open"` — the command palette open over the
+/// default Animate landing, so a `--snap` shows the
+/// Phase N card-styled overlay (the palette mounts in
+/// the centre column while open) and a `--tree` dump
+/// can prove the overlay mounted (fact 15). The open
+/// goes through `command_palette::open_palette` — the
+/// palette's own open fn, the same call
+/// `palette_handle_key` makes on Ctrl+K: it sets the
+/// pub `open` flag, clears the query, selects the first
+/// row and focuses the field.
+fn scene_palette_open(s: &mut State) {
+    crate::rune_sec::command_palette::open_palette(s);
+}
+
+/// `"menu-open"` — the File menu's dropdown open, so a
+/// `--snap` shows the Phase N card dropdown under its
+/// trigger (and the scrim state around it) and a
+/// `--tree` dump can prove both mounted (fact 16). The
+/// toggle is `MenusState::toggle` with `menus::FILE` —
+/// exactly the File trigger's own handler (`menu_bar`
+/// wires every trigger to `s.menus.toggle(index)`),
+/// and from the fresh state (nothing open) it lands on
+/// `Some(FILE)`.
+fn scene_menu_open(s: &mut State) {
+    s.menus.toggle(crate::rune_sec::menus::FILE);
+}
+
+/// `"settings-open"` — the settings card expanded at
+/// the top of the right column, so a `--snap` shows
+/// the Phase N card with its toggle pills and speed
+/// chips and a `--tree` dump can prove the card
+/// mounted (fact 17). The flip is
+/// `settings_popover::toggle_open` — the
+/// settings-toggle button's own handler — and from the
+/// fresh state (card closed) it lands open.
+fn scene_settings_open(s: &mut State) {
+    crate::rune_sec::settings_popover::toggle_open(s);
+}
+
+/// `"draw-open"` — the shell switched to the Draw
+/// workspace, so the snap renders the drawing set
+/// (draw tools, stroke inspector, text tool) with the
+/// Animate-only panels gated out. The switch is
+/// `workspaces::select_workspace` — the exact call the
+/// workspace chips and the palette's `go-*` commands
+/// make, as in `export-open`. Draw had no scene before
+/// Phase N: it is the adoption wave's densest
+/// workspace and had no pixel proof.
+fn scene_draw_open(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Draw,
+    );
+}
+
 /// The scene table for `AppSpec::scenes`, in `--list-scenes`
 /// display order. Element type is Rune's own, verbatim:
 /// `(&'static str, fn(&mut State))` (tooling.rs:25).
@@ -380,6 +453,10 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("three-d", scene_three_d),
         ("loop-range", scene_loop_range),
         ("three-d-stage", scene_three_d_stage),
+        ("palette-open", scene_palette_open),
+        ("menu-open", scene_menu_open),
+        ("settings-open", scene_settings_open),
+        ("draw-open", scene_draw_open),
     ]
 }
 
@@ -478,6 +555,38 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    active and a session live, the stage pass draws
 ///    the 3D figure on the MAIN STAGE, and only the PNG
 ///    proves that drawing happened.
+/// 15. Under `--scene palette-open` (Phase N): an element
+///    keyed `command-palette` exists (the palette overlay
+///    surface) and an element keyed `palette-query`
+///    exists (its search field). The view mounts the
+///    palette in the centre column only while the open
+///    flag is set, so either key missing means the
+///    scene's open call or the view's gate regressed.
+///    (The card's styling is a `--snap` fact, not a tree
+///    fact.)
+/// 16. Under `--scene menu-open` (Phase N): an element
+///    keyed `menu-file-dropdown` exists (the File
+///    dropdown surface), an element keyed `menu-scrim`
+///    exists (the click-away layer the open menu mounts
+///    with it), and an element keyed `export` exists —
+///    the File menu's Export PNG item, which is built
+///    only inside the open dropdown, so its presence
+///    proves the dropdown's contents mounted, not just
+///    its shell.
+/// 17. Under `--scene settings-open` (Phase N): an element
+///    keyed `settings-card` exists (the expanded
+///    settings card). The `settings` shell element
+///    exists under EVERY scene (the toggle is always
+///    mounted), so only the card's presence proves the
+///    scene's open flip landed. (The pills and chips
+///    inside are a `--snap` fact.)
+/// 18. Under `--scene draw-open` (Phase N): an element
+///    keyed `stroke-inspector` exists (the Draw set's
+///    stroke panel) and NO element is keyed `frames`
+///    (FrameOps belongs to Animate/Graph, not Draw) —
+///    fact 8's shape with the pair swapped: the Draw
+///    gating mounted the drawing set and left the frame
+///    tools out.
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -494,6 +603,10 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene three-d: an element keyed \"panel-3d-preview\" exists (the 3D preview canvas — see fact 12)",
         "under --scene loop-range: an element keyed \"timeline-loop-row\" exists (the loop row in its set state — see fact 13)",
         "under --scene three-d-stage: an element keyed \"panel-3d\" exists and an element keyed \"panel-3d-preview\" exists (the 3D panel, as under three-d — see fact 14)",
+        "under --scene palette-open: an element keyed \"command-palette\" exists and an element keyed \"palette-query\" exists (the palette overlay, mounted only while its open flag is set — see fact 15)",
+        "under --scene menu-open: an element keyed \"menu-file-dropdown\" exists, an element keyed \"menu-scrim\" exists and an element keyed \"export\" exists (the File dropdown, its scrim and its contents — see fact 16)",
+        "under --scene settings-open: an element keyed \"settings-card\" exists (the expanded settings card; the \"settings\" shell exists under every scene — see fact 17)",
+        "under --scene draw-open: an element keyed \"stroke-inspector\" exists and no element is keyed \"frames\" (the Draw set, with FrameOps gated out — see fact 18)",
 
     ]
 }
@@ -501,23 +614,25 @@ pub fn layout_assertions() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        scene_export_open, scene_fx_selected, scene_fx_split_mid, scene_graph_duplicates,
-        scene_loop_range, scene_three_d, scene_three_d_stage, scenes,
+        scene_draw_open, scene_export_open, scene_fx_selected, scene_fx_split_mid,
+        scene_graph_duplicates, scene_loop_range, scene_menu_open, scene_palette_open,
+        scene_settings_open, scene_three_d, scene_three_d_stage, scenes,
     };
     use crate::init;
     use crate::rune_sec::workspaces::Workspace;
 
-    /// The scene table is the headless contract: eleven
+    /// The scene table is the headless contract: fifteen
     /// scenes, each name unique (a duplicate would shadow
     /// the later entry in `with_scene`'s lookup), with the
     /// Phase J scenes in their display positions, the two
     /// Phase K scenes appended after them, the two Phase L
-    /// scenes appended after those, and the Phase M scene
+    /// scenes appended after those, the Phase M scene
+    /// appended after them, and the four Phase N scenes
     /// appended last.
     #[test]
-    fn scene_table_has_eleven_uniquely_named_scenes() {
+    fn scene_table_has_fifteen_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 11, "eleven scenes are registered");
+        assert_eq!(table.len(), 15, "fifteen scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -530,6 +645,10 @@ mod tests {
         assert_eq!(table[8].0, "three-d");
         assert_eq!(table[9].0, "loop-range");
         assert_eq!(table[10].0, "three-d-stage");
+        assert_eq!(table[11].0, "palette-open");
+        assert_eq!(table[12].0, "menu-open");
+        assert_eq!(table[13].0, "settings-open");
+        assert_eq!(table[14].0, "draw-open");
     }
 
     /// The export scene reaches the Export workspace through
@@ -731,5 +850,68 @@ mod tests {
             vec![1.0, 3.0],
             "the keys sit at exactly the loop range's ends"
         );
+    }
+
+    /// The palette scene opens the palette through its
+    /// own open fn: the open flag set, the query cleared
+    /// and the first row selected — the state Ctrl+K
+    /// leaves behind. This is also the state behind
+    /// layout fact 15 (the overlay mounts only while the
+    /// flag is set).
+    #[test]
+    fn palette_open_scene_opens_the_palette_with_a_cleared_query() {
+        let mut s = init();
+        assert!(!s.palette.open, "the palette starts closed");
+        scene_palette_open(&mut s);
+        assert!(s.palette.open, "the palette is open");
+        assert!(
+            s.palette.query.text.is_empty(),
+            "the query starts cleared"
+        );
+        assert_eq!(s.palette.selected, 0, "the first row is selected");
+    }
+
+    /// The menu scene opens the File menu through the
+    /// trigger's own toggle: from the fresh state
+    /// (nothing open) the toggle lands on `Some(FILE)` —
+    /// the state behind layout fact 16 (the dropdown and
+    /// its scrim mount only while a menu is open).
+    #[test]
+    fn menu_open_scene_opens_the_file_menu() {
+        let mut s = init();
+        assert_eq!(s.menus.open, None, "no menu starts open");
+        scene_menu_open(&mut s);
+        assert_eq!(
+            s.menus.open,
+            Some(crate::rune_sec::menus::FILE),
+            "the File menu is open"
+        );
+    }
+
+    /// The settings scene expands the settings card
+    /// through the toggle button's own handler: from the
+    /// fresh state (card closed) the flip lands open —
+    /// the state behind layout fact 17 (only the card,
+    /// not the always-mounted shell, proves it).
+    #[test]
+    fn settings_open_scene_expands_the_settings_card() {
+        let mut s = init();
+        assert!(!s.settings.open, "the settings card starts closed");
+        scene_settings_open(&mut s);
+        assert!(s.settings.open, "the settings card is expanded");
+    }
+
+    /// The draw scene reaches the Draw workspace through
+    /// the shell's own switch — the same end state a chip
+    /// press or the palette's `go-draw` command produces.
+    /// (Like those real presses, the scene persists the
+    /// workspace to the layout prefs on disk; the
+    /// snap-test suite already lives with that
+    /// shared-prefs discipline.)
+    #[test]
+    fn draw_open_scene_lands_on_the_draw_workspace() {
+        let mut s = init();
+        scene_draw_open(&mut s);
+        assert_eq!(s.workspace, Workspace::Draw);
     }
 }

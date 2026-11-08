@@ -171,6 +171,57 @@ Phase M additions (same gate, wider net again):
   any field Phase M adds is censused against every
   literal automatically.
 
+Phase N additions (same gate, new check 6):
+
+- Check 6 is the DESIGN ADOPTION census (the P17
+  verification plan section 5 / P20 section 2.2
+  design): the Phase N restyle retires every panel's
+  private layout/button dialect onto one design kit
+  (src/rune_sec/design.rs) and one button family, and
+  this check proves the adoption actually happened in
+  source — the restyle-wave analogue of check 4's
+  UNWIRED. It has four parts, all read from source:
+  (a) a kit self-check — design.rs must define every
+  charter-fixed constant (name AND value) and fn,
+  with amendment extras reported, not required;
+  (b) a per-file adoption census over the 31 panel
+  files of the adoption commit a570d60 — the floor
+  is >= 1 production-region `design::` reference per
+  file (a file at zero is UNADOPTED), plus the
+  panel_col roll: every adopted root is a
+  design::panel_col card except files named in
+  PANEL_COL_EXCEPTIONS with their charter reason;
+  (c) a consumer census (report only — a kit fn with
+  no external consumer mid-phase is the Phase K
+  UNWIRED precedent, information for the docs, not
+  a failure); (d) the retired-helper census — local
+  definitions of the retired dialects (fbtn, kbtn,
+  pbtn, pibtn, ctl, ictl, row_toggle, cap_chip,
+  preset_chip, danger_btn, and the private
+  section/section_label/section_header headings)
+  must be zero across src/rune_sec/ outside the
+  family homes, with two honest classifications
+  that are NOT survivors: a definition whose body
+  only delegates to the kit/family (the name kept
+  as a call-site adapter — inspector_style's
+  cap_chip/preset_chip, fx_browser's section) and
+  entries in RETIRED_EXEMPTIONS with a named
+  reason (graph_panel's preset_chip, a
+  canvas-content control chip_btn cannot express).
+  The foundation surfaces that predate the per-file
+  floor (the family homes chrome_view.rs /
+  icon_btn.rs, the pure-canvas stage_view.rs, and
+  the F-wave overlays) are printed as a report-only
+  census: several legitimately hold zero `design::`
+  references because they ARE the family, mirror
+  its tokens, or draw no chrome at all.
+- Checks 1-5 are untouched by Phase N: the key
+  censuses already knew the kit helpers (the P20
+  section 2.1 regex repair landed with the
+  foundation), the State census must read IDENTICAL
+  to Phase M (43 fields — Phase N adds none), and
+  the caller census guards the same ops.
+
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
 blanked source (the repo's established scan idiom), and
@@ -772,6 +823,307 @@ def count_claims() -> list[tuple[str, int, str]]:
 
 
 # ----------------------------------------------------------------
+# Check 6 — design adoption census (Phase N)
+# ----------------------------------------------------------------
+
+# The charter-fixed design kit (docs/PHASE_N_CHARTER.md):
+# constants by name AND value, fns by name. Amendment
+# extras the kit grew (text_muted, divider_keyed,
+# row_shell, swatch, ...) are reported, not required.
+CHARTER_CONSTS = {
+    "PANEL_RADIUS": "12.0",
+    "PANEL_PAD": "12.0",
+    "PANEL_GAP": "8.0",
+    "ROW_RADIUS": "8.0",
+    "CONTROL_RADIUS": "6.0",
+}
+CHARTER_FNS = [
+    "accent",
+    "selected_fill",
+    "panel_col",
+    "header_row",
+    "panel_title",
+    "section_label",
+    "divider",
+    "kbd",
+    "empty_state",
+    "list_row",
+    "toggle",
+    "toggle_row",
+    "stepper_value",
+    "slider_track",
+]
+# Kit fns the charter allows to be consumed only by
+# other kit fns: their consumer census runs tree-wide
+# INCLUDING design.rs, and the printout marks it (the
+# P17 section 5 item 2 exception).
+KIT_INTERNAL_OK = {"accent", "selected_fill"}
+
+# The 31 panel files of the adoption commit a570d60
+# ("Phase N adoption: 32 panels onto the design kit").
+# The floor (P20 section 2.2, task floor): >= 1
+# production-region `design::` reference per file; a
+# file at zero is UNADOPTED, the restyle analogue of
+# check 4's UNWIRED.
+ADOPTED_PANELS = [
+    "audio_panel",
+    "camera_panel",
+    "clips_panel",
+    "draw_tools",
+    "easing_panel",
+    "export_panel",
+    "figure_add",
+    "figures_panel",
+    "frame_ops",
+    "fx_browser",
+    "fx_clips",
+    "graph_panel",
+    "help_panel",
+    "home_panel",
+    "inspector_figure",
+    "inspector_segment",
+    "inspector_style",
+    "keyframe_tools",
+    "layers_panel",
+    "library_panel",
+    "onion_controls",
+    "particles_panel",
+    "playback_controls",
+    "pose_tools",
+    "project_tools",
+    "scene_panel",
+    "stats_view",
+    "stroke_inspector",
+    "text_tool",
+    "three_d_panel",
+    "timeline_marks",
+]
+
+# Adopted files whose root is deliberately NOT a
+# design::panel_col call, with the charter reason —
+# the exemption idiom of SAME_FILE_OPS above.
+PANEL_COL_EXCEPTIONS = {
+    "timeline_marks": (
+        "charter section 13: the timeline card is deliberately UNKEYED "
+        "and hand-built (a plain col with design::PANEL_RADIUS / "
+        "card fill / hairline); panel_col would force a key on it"
+    ),
+}
+
+# Foundation surfaces that predate the per-file
+# floor: censused and printed, never required. The
+# family homes define the buttons the kit composes;
+# stage_view is pure canvas; toasts / status_strip
+# mirror kit tokens in local constructions.
+FOUNDATION_SURFACES = [
+    "src/chrome_view.rs",
+    "src/stage_view.rs",
+    "src/rune_sec/icon_btn.rs",
+    "src/rune_sec/menus.rs",
+    "src/rune_sec/command_palette.rs",
+    "src/rune_sec/toasts.rs",
+    "src/rune_sec/status_strip.rs",
+    "src/rune_sec/settings_popover.rs",
+    "src/rune_sec/workspaces.rs",
+]
+
+# The retired local dialects: definitions must be
+# ZERO across src/rune_sec/ outside the family homes
+# (design.rs itself and icon_btn.rs are excluded from
+# the scan — design.rs DEFINES the kit section_label;
+# chrome_view.rs, the danger_btn family home, lives
+# outside src/rune_sec/ and is out of census scope).
+RETIRED_HELPERS = [
+    "fbtn",
+    "kbtn",
+    "pbtn",
+    "pibtn",
+    "ctl",
+    "ictl",
+    "row_toggle",
+    "cap_chip",
+    "preset_chip",
+    "danger_btn",
+    "section",
+    "section_label",
+    "section_header",
+]
+RETIRED_SCAN_EXCLUDE = {"design.rs", "icon_btn.rs"}
+# A surviving definition is exempt only when it is a
+# control the kit structurally cannot express, named
+# here with its reason (the SAME_FILE_OPS precedent).
+RETIRED_EXEMPTIONS = {
+    ("graph_panel.rs", "preset_chip"): (
+        "the chip carries its own drawn preview-curve canvas; "
+        "chip_btn has no content slot (the easing-picker "
+        "restyle-not-replace precedent)"
+    ),
+}
+# A retired-name definition whose body delegates to
+# the kit/family and constructs no element of its own
+# is a call-site adapter, not a surviving dialect:
+# it must CALL one of these and contain NONE of the
+# construction tokens below.
+_DELEGATION_CALLS = ("design::", "chip_btn(", "icon_btn(", "icon_only_btn(", "btn(")
+_CONSTRUCTION_TOKENS = (
+    "el()",
+    "col()",
+    "row()",
+    "text(",
+    ".fill(",
+    ".radius(",
+    ".hover(",
+    ".press(",
+    ".px(",
+    ".py(",
+    ".key(",
+)
+
+_TEST_MOD_RE = re.compile(r"(?m)^\s*#\[cfg\(test\)\]\s*\n\s*(?:pub\s+)?mod\s+tests\b")
+
+
+def production_region(blanked: str) -> str:
+    """The file's production region: everything before
+    its trailing `mod tests` (check 4's cut)."""
+    m = _TEST_MOD_RE.search(blanked)
+    return blanked[: m.start()] if m else blanked
+
+
+def check_design_adoption() -> tuple[bool, list[str]]:
+    lines: list[str] = []
+    ok = True
+
+    # (a) Kit self-check: design.rs defines the
+    # charter's constants (name and value) and fns.
+    design_raw = read("src/rune_sec/design.rs")
+    design_blanked = blank_code(design_raw)
+    missing: list[str] = []
+    for name, value in CHARTER_CONSTS.items():
+        pat = rf"pub\s+const\s+{name}\s*:\s*f32\s*=\s*{re.escape(value)}\s*;"
+        if not re.search(pat, design_raw):
+            missing.append(f"const {name} = {value}")
+    for name in CHARTER_FNS:
+        if not re.search(rf"pub\s+fn\s+{name}\s*\(", design_blanked):
+            missing.append(f"fn {name}")
+    if missing:
+        ok = False
+        lines.append(f"  kit self-check: MISSING from design.rs: {', '.join(missing)}")
+    else:
+        lines.append(
+            f"  kit self-check: all {len(CHARTER_CONSTS)} charter consts "
+            f"(name + value) and {len(CHARTER_FNS)} charter fns defined in design.rs"
+        )
+    kit_fns = sorted(set(re.findall(r"pub\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", design_blanked)))
+    extras = [n for n in kit_fns if n not in CHARTER_FNS]
+    if extras:
+        lines.append(f"  kit extras beyond the charter API (report only): {', '.join(extras)}")
+
+    # Blanked production regions for every src file.
+    paths = sorted(glob.glob(os.path.join(ROOT, "src", "**", "*.rs"), recursive=True))
+    prod_by_rel: dict[str, str] = {}
+    for full in paths:
+        rel = os.path.relpath(full, ROOT)
+        with open(full, encoding="utf-8") as fh:
+            prod_by_rel[rel] = production_region(blank_code(fh.read()))
+
+    # (b) Per-file adoption census over the 31 adopted
+    # panels + the panel_col roll.
+    lines.append(
+        "  adoption floor: >= 1 production `design::` reference per adopted "
+        "file (0 = UNADOPTED); panel roots via design::panel_col except "
+        "named exceptions"
+    )
+    adopted_roots = 0
+    for name in ADOPTED_PANELS:
+        rel = f"src/rune_sec/{name}.rs"
+        prod = prod_by_rel.get(rel)
+        if prod is None:
+            ok = False
+            lines.append(f"  {name}: FILE MISSING")
+            continue
+        n_design = len(re.findall(r"\bdesign::", prod))
+        n_col = len(re.findall(r"\bpanel_col\s*\(", prod))
+        if n_design == 0:
+            ok = False
+            lines.append(f"  {name}: UNADOPTED — zero production design:: references")
+            continue
+        if n_col > 0:
+            adopted_roots += 1
+            root = f"panel_col x{n_col}"
+        elif name in PANEL_COL_EXCEPTIONS:
+            root = "panel_col exception (see below)"
+        else:
+            ok = False
+            root = "NO panel_col ROOT AND NO NAMED EXCEPTION"
+        lines.append(f"  {name}: design:: x{n_design}, {root}")
+    for name, why in PANEL_COL_EXCEPTIONS.items():
+        lines.append(f"  panel_col exception — {name}: {why}")
+    lines.append(
+        f"  panel_col adoption: {adopted_roots} of {len(ADOPTED_PANELS)} adopted "
+        f"panel files ({len(PANEL_COL_EXCEPTIONS)} named exception(s))"
+    )
+    consumer_files = sorted(
+        rel for rel, prod in prod_by_rel.items() if re.search(r"\bdesign::", prod)
+    )
+    lines.append(
+        f"  design kit consumers: {len(consumer_files)} files "
+        f"(distinct src files naming design:: in production code)"
+    )
+    for rel in FOUNDATION_SURFACES:
+        prod = prod_by_rel.get(rel, "")
+        n = len(re.findall(r"\bdesign::", prod))
+        lines.append(f"  foundation surface (report only) {rel}: design:: x{n}")
+
+    # (c) Consumer census per kit fn (report only).
+    lines.append("  kit consumer census (report only; 0 external consumers is not a failure):")
+    for name in kit_fns:
+        call_re = re.compile(rf"design::{name}\s*\(")
+        consumers = [
+            rel
+            for rel, prod in prod_by_rel.items()
+            if rel != "src/rune_sec/design.rs" and call_re.search(prod)
+        ]
+        if name in KIT_INTERNAL_OK and re.search(rf"\b{name}\s*\(", prod_by_rel["src/rune_sec/design.rs"]):
+            consumers.append("src/rune_sec/design.rs (internal, allowed)")
+        tag = "ADOPTED" if consumers else "UNADOPTED (report only)"
+        lines.append(f"    {name}: {tag} — {len(consumers)} consumer file(s)")
+
+    # (d) Retired-helper census: definitions in
+    # src/rune_sec/ production regions, outside the
+    # family homes. A definition is a SURVIVOR (fail)
+    # unless it only delegates to the kit/family or
+    # carries a named exemption.
+    lines.append("  retired-helper census (definitions in src/rune_sec/ production code):")
+    for name in RETIRED_HELPERS:
+        def_re = re.compile(rf"fn\s+{name}\s*\(")
+        found: list[str] = []
+        for rel, prod in prod_by_rel.items():
+            if not rel.startswith("src/rune_sec/"):
+                continue
+            if os.path.basename(rel) in RETIRED_SCAN_EXCLUDE:
+                continue
+            for m in def_re.finditer(prod):
+                lineno = prod.count("\n", 0, m.start()) + 1
+                brace = prod.find("{", m.end())
+                body, _ = brace_block(prod, brace) if brace >= 0 else ("", 0)
+                base = os.path.basename(rel)
+                if (base, name) in RETIRED_EXEMPTIONS:
+                    found.append(f"{rel}:{lineno} — named exception: {RETIRED_EXEMPTIONS[(base, name)]}")
+                elif any(c in body for c in _DELEGATION_CALLS) and not any(
+                    t in body for t in _CONSTRUCTION_TOKENS
+                ):
+                    found.append(f"{rel}:{lineno} — delegating wrapper (name kept as a call-site adapter)")
+                else:
+                    ok = False
+                    found.append(f"{rel}:{lineno} — SURVIVOR: a local {name} definition the charter retired")
+        if found:
+            lines.append(f"    fn {name}: {len(found)} definition(s): {'; '.join(found)}")
+        else:
+            lines.append(f"    fn {name}: 0 definitions")
+    return ok, lines
+
+
+# ----------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------
 
@@ -817,6 +1169,9 @@ def main() -> int:
         all(n > 0 for _, n, _ in claims),
         claim_lines,
     )
+
+    ok, lines = check_design_adoption()
+    report("6. DESIGN ADOPTION (Phase N design-kit census)", ok, lines)
 
     print()
     if failures:

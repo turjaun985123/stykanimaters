@@ -375,6 +375,58 @@
 //!   the integrator: at section 35's census the lane
 //!   had not landed yet, and this file never asserts
 //!   against an unverified key.)
+//!
+//! Round 11 (Phase N, verification wave) adds ten tests
+//! over the Phase N card restructure: every panel root
+//! became a `design::panel_col` card, the timeline stack
+//! moved into one unkeyed card, the menus / palette /
+//! settings surfaces were restyled onto the kit, and the
+//! root column gained the charter §15 hairline. The
+//! round's discipline is P17's (§0 of the plan): the
+//! Runtime sees keys, rects and opacity — never fills,
+//! borders or radii — so these tests prove the
+//! restructure kept every surface MOUNTED, REACHABLE and
+//! NON-OVERLAPPING; the look itself is the headless
+//! snaps' verdict, not this file's. Facts they rest on,
+//! verified against the adopted tree:
+//! * Geometry is asserted as RELATIONS (containment,
+//!   ordering, non-overlap), never as fresh absolute
+//!   pins. The stage's height is the one number the
+//!   phase provably moves: the root column's new
+//!   hairline costs ≈13 pt (the 1 pt divider plus its
+//!   12 pt gap) and the timeline card ≈18 pt (8+8
+//!   padding, 2×1 border), both absorbed by the stage
+//!   as the centre column's grow child — down from the
+//!   Phase L tree's 522 pt to roughly 491 pt, the exact
+//!   figure being a headless-tree reading for the
+//!   integrator, not a pin taken here. The WIDTH is not
+//!   moved: the column contract in main.rs (root
+//!   padding 16, viewports 300 / 340, row gaps 12) is
+//!   unchanged, so round 8's 744 pt width pin stands
+//!   unadjusted. It is the only absolute geometry pin
+//!   in the file; no other existing test needed one.
+//! * The FX clips panel's card root is keyed
+//!   `fx-section` (fx_clips.rs); `fx-clips` is the
+//!   inner lane list inside it, built unconditionally.
+//!   P17's draft named the root `fx-clips` — the tests
+//!   assert the real root and the list both.
+//! * P17's conditional empty-state test is NOT
+//!   written: the kit's `empty_state` signature
+//!   (design.rs) carries no key parameter, so there is
+//!   no key to assert and none was invented (the
+//!   charter allows new keys only where a brief names
+//!   one). Empty states are snap-proven only.
+//! * P17's conditional help test IS written: the help
+//!   panel's card root kept its `help-panel` key
+//!   through adoption, and Help ▸ Shortcuts (the
+//!   dropdown item keyed `help`, toggling
+//!   `menus.help_open`) mounts it at the top of the
+//!   right column (main.rs `view`).
+//! * The Edit menu's separator is the kit's
+//!   `divider_keyed` under its surviving key
+//!   `menu-edit-sep` (menus.rs) — the charter §9
+//!   divider in its keyed form, asserted presented
+//!   while the Edit dropdown is open.
 
 use std::collections::BTreeSet;
 
@@ -2938,4 +2990,723 @@ fn timeline_clips_lane_appears_with_a_planted_clip() {
         }
     }
     assert!(gone, "the clips lane leaves with the last clip");
+}
+
+// ----------------------------------------------------------------
+// Round 11 (Phase N, verification wave): the card
+// restructure — panel card roots across every workspace,
+// card containment in the columns, the Edit menu's kit
+// divider, the palette and settings cards, the timeline
+// card's stacking, the shell furniture, and the help
+// panel. Relations and presence only (see the module
+// docs): the Runtime cannot see a fill or a radius, and
+// no test here pretends otherwise.
+// ----------------------------------------------------------------
+
+#[test]
+fn animate_panel_card_roots_present() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // Seed Animate through its chip (the shared-prefs
+    // discipline) and settle out whatever panels a
+    // sibling-restored workspace left presence-fading.
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+    for _ in 0..30 {
+        let keys = presented_keys(&rt);
+        if !keys.contains("draw-tools")
+            && !keys.contains("graph-panel")
+            && !keys.contains("home-panel")
+        {
+            break;
+        }
+        rt.frame(DT);
+    }
+
+    // Every gated root Animate mounts (workspaces.rs's
+    // ANIMATE table against main.rs's mount order),
+    // each now the root of a `design::panel_col` card.
+    // A builder mistake in the restructure loses the
+    // root key or the panel — presence in the live
+    // tree is the proof neither happened. The gate
+    // diffs key sets statically; this is the mounted
+    // counterpart.
+    let keys = presented_keys(&rt);
+    for want in [
+        // Left column: project, figures, library, layers.
+        "project-tools",
+        "figures-panel",
+        "library-panel",
+        "layers-panel",
+        // Right column: the three inspectors, pose and
+        // keyframe tools, playback, frame ops, camera,
+        // onion, movieclips, scene, stats.
+        "inspector-segment",
+        "inspector-figure",
+        "inspector-style",
+        "pose-tools",
+        "keyframe-tools",
+        "playback-controls",
+        "frames",
+        "camera-panel",
+        "onion-controls",
+        "clips-panel",
+        "scene-panel",
+        "stats-panel",
+    ] {
+        assert!(keys.contains(want), "Animate card root {want:?} is presented");
+    }
+    // And the workspaces Animate gates out stay out.
+    assert!(
+        !keys.contains("graph-panel"),
+        "Animate gates the Graph panel out"
+    );
+    assert!(
+        !keys.contains("home-panel"),
+        "Animate gates the Home panel out"
+    );
+}
+
+#[test]
+fn panel_card_rects_stay_inside_their_columns() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // The columns' content roots and one card per
+    // column, plus the stage. Drawn rects of scroll
+    // content translate with the column's own offset,
+    // so containment between a column and its cards
+    // holds at any scroll position (round 7/8's rect
+    // discipline).
+    let (left, _) = rt.presented("side-left").expect("left column is presented");
+    let (right, _) = rt
+        .presented("side-right")
+        .expect("right column is presented");
+    let (centre, _) = rt.presented("centre").expect("centre column is presented");
+    let (figures, _) = rt
+        .presented("figures-panel")
+        .expect("figures card is presented");
+    let (frames, _) = rt.presented("frames").expect("frames card is presented");
+    let (stage, _) = rt.presented("stage").expect("stage is presented");
+
+    // Each card lies fully inside its column's content
+    // rect: card padding lives INSIDE the card (charter
+    // §1), so a correct card can touch the column's
+    // edges but never cross them.
+    assert!(
+        rect_inside(figures, left),
+        "figures card escapes the left column: card {figures:?}, column {left:?}"
+    );
+    assert!(
+        rect_inside(frames, right),
+        "frames card escapes the right column: card {frames:?}, column {right:?}"
+    );
+
+    // The column contract as x-ranges (the charter
+    // changes padding inside surfaces, never the
+    // 300 / 744 / 340 split — main.rs): at this
+    // viewport the left content spans [16, 316] (root
+    // padding 16 + viewport 300) and the right content
+    // [1084, 1424] (16 + 300 + 12 + 744 + 12, then
+    // 340). A card swollen by its own padding would
+    // break its range even inside a taller column rect.
+    assert!(
+        figures[0] >= 16.0 - 0.5 && figures[0] + figures[2] <= 316.0 + 0.5,
+        "figures card crosses the left column's x-range: {figures:?}"
+    );
+    assert!(
+        frames[0] >= 1084.0 - 0.5 && frames[0] + frames[2] <= 1424.0 + 0.5,
+        "frames card crosses the right column's x-range: {frames:?}"
+    );
+
+    // The stage stays inside the centre column and off
+    // both side columns' cards — the Phase J overlap
+    // class, re-checked after the widest structural
+    // change since (the module docs carry the height
+    // arithmetic; relations are the durable form).
+    assert!(
+        rect_inside(stage, centre),
+        "stage escapes the centre column: stage {stage:?}, centre {centre:?}"
+    );
+    assert!(
+        !rects_intersect(stage, figures),
+        "stage paints over the figures card: stage {stage:?}, card {figures:?}"
+    );
+    assert!(
+        !rects_intersect(stage, frames),
+        "stage paints over the frames card: stage {stage:?}, card {frames:?}"
+    );
+}
+
+#[test]
+fn workspace_card_roots_sweep() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // One row per workspace chip: the workspace it
+    // selects, two or three card roots that must mount
+    // there, and one root that must be gated out. Rows
+    // are filled from workspaces.rs's gating table and
+    // each panel's adopted root key (the module docs
+    // carry the fx-section correction). The sweep walks
+    // every workspace's roots in one test because the
+    // adoption wave touched every panel's root.
+    let rows: [(&str, Workspace, &[&str], &str); 8] = [
+        (
+            "ws-animate",
+            Workspace::Animate,
+            &["figures-panel", "frames", "stats-panel"],
+            "graph-panel",
+        ),
+        (
+            "ws-draw",
+            Workspace::Draw,
+            &["draw-tools", "stroke-inspector", "figures-panel"],
+            "frames",
+        ),
+        (
+            "ws-graph",
+            Workspace::Graph,
+            &["graph-panel", "easing-panel", "figures-panel"],
+            "frames",
+        ),
+        (
+            "ws-effects",
+            Workspace::Effects,
+            &["fx-browser", "fx-section", "particles"],
+            "frames",
+        ),
+        (
+            "ws-audio",
+            Workspace::Audio,
+            &["audio-panel", "waveform-card", "playback-controls"],
+            "frames",
+        ),
+        (
+            "ws-3d",
+            Workspace::Build3D,
+            &["panel-3d", "panel-3d-preview", "camera-panel"],
+            "frames",
+        ),
+        (
+            "ws-export",
+            Workspace::Export,
+            &["export-panel", "stats-panel", "project-tools"],
+            "figures-panel",
+        ),
+        (
+            "ws-home",
+            Workspace::Home,
+            &["home-panel", "project-tools", "stats-panel"],
+            "figures-panel",
+        ),
+    ];
+    for (chip, ws, present, absent) in rows {
+        tap(&mut rt, chip);
+        rt.frame(DT);
+        assert_eq!(rt.state.workspace, ws, "{chip} selects its workspace");
+        // Mounts land through the presence fade and
+        // gate-outs leave through it — settle (bounded)
+        // both ways before asserting.
+        for _ in 0..30 {
+            if present
+                .iter()
+                .all(|k| presented_keys(&rt).contains(k))
+            {
+                break;
+            }
+            rt.frame(DT);
+        }
+        for _ in 0..30 {
+            if !presented_keys(&rt).contains(absent) {
+                break;
+            }
+            rt.frame(DT);
+        }
+        let keys = presented_keys(&rt);
+        for want in present {
+            assert!(
+                keys.contains(want),
+                "{chip}: card root {want:?} is presented"
+            );
+        }
+        assert!(
+            !keys.contains(absent),
+            "{chip}: {absent:?} is gated out"
+        );
+    }
+
+    // Restore Animate for the shared prefs, as rounds
+    // 2–10 do.
+    tap(&mut rt, "ws-animate");
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+}
+
+#[test]
+fn edit_menu_dropdown_renders_after_restyle() {
+    let mut rt = editor();
+    assert_eq!(rt.state.menus.open, None);
+
+    // Round 2 proved the File menu end to end; this is
+    // the Edit menu, whose dropdown carries a kit
+    // divider after the restyle (charter §9). The
+    // dropdown is anchored, so a settling frame before
+    // reading the tree (round 2's lesson).
+    tap(&mut rt, "menu-edit");
+    rt.frame(DT);
+    assert_eq!(
+        rt.state.menus.open,
+        Some(crate::rune_sec::menus::EDIT),
+        "Edit trigger opens the Edit menu"
+    );
+    let keys = presented_keys(&rt);
+    assert!(
+        keys.contains("menu-edit-dropdown"),
+        "Edit dropdown surface presented"
+    );
+    // The separator is the element the charter's
+    // divider replaces; it survives as the kit's
+    // keyed divider under its own key — the restyle's
+    // proof inside this dropdown.
+    assert!(
+        keys.contains("menu-edit-sep"),
+        "the kit divider keeps its key inside the Edit dropdown"
+    );
+    assert!(keys.contains("menu-scrim"), "dismissal scrim presented");
+
+    // Scrim closes, and the dropdown leaves the tree
+    // through the presence fade (bounded settle, round
+    // 2's discipline).
+    tap(&mut rt, "menu-scrim");
+    assert_eq!(rt.state.menus.open, None, "scrim press closes the menu");
+    for _ in 0..30 {
+        if !presented_keys(&rt).contains("menu-edit-dropdown") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    assert!(
+        !presented_keys(&rt).contains("menu-edit-dropdown"),
+        "Edit dropdown dismissed"
+    );
+}
+
+#[test]
+fn palette_open_card_renders_and_closes() {
+    let mut rt = editor();
+
+    // Open the palette the real way — Ctrl+K, built
+    // exactly as round 2's palette test builds it
+    // (`is_command('k')` matches `Key::Command('k')`
+    // only). The palette is now a kit card (charter
+    // §9); what this proves is the mount: the restyled
+    // overlay still appears as a centre-column child
+    // gated on `s.palette.open` (main.rs `view`).
+    press_key(
+        &mut rt,
+        Key::Command('k'),
+        Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    );
+    assert!(rt.state.palette.open, "Ctrl+K opens the palette");
+    rt.frame(DT);
+    let keys = presented_keys(&rt);
+    assert!(
+        keys.contains("command-palette"),
+        "the palette card is mounted"
+    );
+    assert!(
+        keys.contains("palette-query"),
+        "the palette's query field is mounted"
+    );
+
+    // Escape closes through `palette_handle_key` (the
+    // shell's first key hook), and the card leaves the
+    // presented set through the presence fade (bounded
+    // settle, as for the menus).
+    press_key(&mut rt, Key::Escape, Mods::default());
+    assert!(!rt.state.palette.open, "Escape closes the palette");
+    for _ in 0..30 {
+        if !presented_keys(&rt).contains("command-palette") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    assert!(
+        !presented_keys(&rt).contains("command-palette"),
+        "the palette card leaves the tree"
+    );
+}
+
+#[test]
+fn settings_card_renders_after_restyle() {
+    let mut rt = editor();
+
+    // The settings shell (keyed `settings`) is mounted
+    // ungated at the top of the right column in every
+    // workspace; the card inside it starts closed
+    // (round 2's premise).
+    assert!(!rt.state.settings.open, "settings card starts closed");
+    let keys = presented_keys(&rt);
+    assert!(keys.contains("settings"), "the settings shell is mounted");
+    assert!(
+        !keys.contains("settings-card"),
+        "no settings card while closed"
+    );
+
+    // Open: the charter §9 popover surface in miniature
+    // — the card mounts with its theme row and its
+    // Playback speed row (round 10's chips live there).
+    // Mounting lands through the presence fade, so
+    // settle (bounded) before reading the set.
+    tap(&mut rt, "settings-toggle");
+    assert!(rt.state.settings.open, "Settings toggle opens the card");
+    for _ in 0..30 {
+        if presented_keys(&rt).contains("settings-card") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    let keys = presented_keys(&rt);
+    for want in ["settings-card", "settings-theme", "settings-speed-row"] {
+        assert!(keys.contains(want), "missing element keyed {want:?}");
+    }
+
+    // Close: the card unmounts (settled through the
+    // fade) while the shell — and its toggle — remain.
+    tap(&mut rt, "settings-toggle");
+    assert!(!rt.state.settings.open, "Settings toggle closes the card");
+    for _ in 0..30 {
+        if !presented_keys(&rt).contains("settings-card") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    let keys = presented_keys(&rt);
+    assert!(
+        !keys.contains("settings-card"),
+        "the settings card unmounts on close"
+    );
+    assert!(
+        keys.contains("settings"),
+        "the settings shell remains after the card closes"
+    );
+}
+
+#[test]
+fn timeline_card_keeps_chips_marks_and_rows() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // Charter §13 wrapped the whole timeline stack in
+    // one UNKEYED card — the phase's riskiest
+    // restructure for key survival. The card has no key
+    // to assert, so its presence is proven by its keyed
+    // children and their stacking relations (below):
+    // one test, three sub-surfaces, because all three
+    // moved into the card together.
+    let keys = presented_keys(&rt);
+    for want in [
+        "timeline",
+        "timeline-ruler",
+        "timeline-chips",
+        "timeline-markers",
+        "timeline-loop-row",
+        "loop-set",
+    ] {
+        assert!(keys.contains(want), "missing element keyed {want:?}");
+    }
+    // Exactly the demo's five chips — and no sixth.
+    for n in 1..=5 {
+        assert!(
+            keys.contains(&format!("frame-{n}")),
+            "chip frame-{n} is presented"
+        );
+    }
+    assert!(
+        !keys.contains("frame-6"),
+        "no sixth chip in the five-frame demo"
+    );
+
+    // Stacking inside the card: a chip sits inside the
+    // chips row, the chips row inside the scroll row,
+    // and the loop row stacks directly under the scroll
+    // row on the same left edge (the card's inset) —
+    // the card wraps OUTSIDE the scroll row (charter
+    // amendment), so the scrolled content's geometry
+    // is untouched by the card's padding.
+    let (scroll, _) = rt.presented("timeline").expect("scroll row is presented");
+    let (chips, _) = rt
+        .presented("timeline-chips")
+        .expect("chips row is presented");
+    let (chip1, _) = rt.presented("frame-1").expect("first chip is presented");
+    assert!(
+        rect_inside(chip1, chips),
+        "chip inside the chips row: chip {chip1:?}, row {chips:?}"
+    );
+    assert!(
+        rect_inside(chips, scroll),
+        "chips row inside the scroll row: row {chips:?}, scroll {scroll:?}"
+    );
+    let (loop_row, _) = rt
+        .presented("timeline-loop-row")
+        .expect("loop row is presented");
+    assert!(
+        loop_row[1] >= scroll[1] + scroll[3] - 0.5,
+        "loop row stacks below the scroll row: loop {loop_row:?}, scroll {scroll:?}"
+    );
+    assert!(
+        (loop_row[0] - scroll[0]).abs() < 0.5,
+        "loop row shares the scroll row's left edge (the card's inset): \
+         loop {loop_row:?}, scroll {scroll:?}"
+    );
+
+    // The loop row's own control still works inside
+    // the card — Set loop spans the demo from the
+    // playhead (round 9's contract), the row stays
+    // mounted with a range set, and Clear restores it.
+    // (The timeline's own copies of these keys are the
+    // first in tree order: the centre column mounts
+    // before the right column's two other homes.)
+    tap(&mut rt, "loop-set");
+    assert_eq!(
+        rt.state.core.loop_range,
+        Some((0, 4)),
+        "Set loop spans the demo from the playhead"
+    );
+    assert!(
+        presented_keys(&rt).contains("timeline-loop-row"),
+        "the loop row stays mounted with a range set"
+    );
+    tap(&mut rt, "loop-clear");
+    assert_eq!(rt.state.core.loop_range, None, "Clear removes the range");
+
+    // The clips lane joins the stack between the
+    // scroll row and the loop row once a clip exists —
+    // planted by direct project write exactly as round
+    // 10's lane test plants it, with `invalidate`
+    // because a direct write is outside any handler.
+    rt.state.core.project.fx_clips.push(
+        stykanimate_rs::model::FxClipEntry {
+            clip: stykanimate_rs::vfx::ParticleClip {
+                start: 2.0,
+                duration: 3.0,
+                kind: stykanimate_rs::vfx::ClipKind::Burst,
+                color: 0xFFC65D,
+                color2: None,
+                seed: 7,
+                angle: 0.0,
+                length: 130.0,
+            },
+            figure: 0,
+            node: 0,
+            hidden: false,
+        },
+    );
+    rt.invalidate();
+    rt.frame(DT);
+    let mut appeared = false;
+    for _ in 0..30 {
+        rt.frame(DT);
+        if presented_keys(&rt).contains("timeline-clips") {
+            appeared = true;
+            break;
+        }
+    }
+    assert!(appeared, "the clips lane joins the card once a clip exists");
+    let (lane, _) = rt
+        .presented("timeline-clips")
+        .expect("clips lane is presented");
+    let (loop_row, _) = rt
+        .presented("timeline-loop-row")
+        .expect("loop row is still presented");
+    assert!(
+        lane[1] >= scroll[1] + scroll[3] - 0.5,
+        "clips lane stacks below the scroll row: lane {lane:?}, scroll {scroll:?}"
+    );
+    assert!(
+        lane[1] + lane[3] <= loop_row[1] + 0.5,
+        "clips lane stacks above the loop row: lane {lane:?}, loop {loop_row:?}"
+    );
+}
+
+#[test]
+fn stage_and_shell_furniture_survive() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // The permanent furniture (charter §12, §14, §15 —
+    // status strip, stage, app bar) is ungated: its
+    // keys survive every workspace, and they survive
+    // the restyle in this one.
+    let keys = presented_keys(&rt);
+    for want in [
+        "app-bar",
+        "menu-bar",
+        "ws-animate",
+        "main-row",
+        "centre",
+        "stage",
+        "stage-overlay-row",
+        "transport",
+        "status-strip",
+    ] {
+        assert!(keys.contains(want), "missing shell furniture {want:?}");
+    }
+
+    // The stage (radius 12 now, a snap-proven fact)
+    // keeps its place: fully inside the centre column,
+    // sharing no area with either side column — the
+    // relations round 7 pinned for the status strip,
+    // applied to the stage itself after its restyle.
+    let (stage, _) = rt.presented("stage").expect("stage is presented");
+    let (centre, _) = rt.presented("centre").expect("centre column is presented");
+    let (left, _) = rt.presented("side-left").expect("left column is presented");
+    let (right, _) = rt
+        .presented("side-right")
+        .expect("right column is presented");
+    assert!(
+        rect_inside(stage, centre),
+        "stage escapes the centre column: stage {stage:?}, centre {centre:?}"
+    );
+    assert!(
+        !rects_intersect(stage, left),
+        "stage runs under the left column: stage {stage:?}, column {left:?}"
+    );
+    assert!(
+        !rects_intersect(stage, right),
+        "stage runs under the right column: stage {stage:?}, column {right:?}"
+    );
+}
+
+#[test]
+fn fx_browser_and_draw_roots_present() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // Effects: the FX browser (the charter's list-row
+    // showcase) and the FX clips panel — whose card
+    // root is `fx-section`, with the `fx-clips` lane
+    // list inside it (the module docs carry the
+    // correction to P17's draft).
+    tap(&mut rt, "ws-effects");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Effects);
+    for _ in 0..30 {
+        if presented_keys(&rt).contains("fx-browser") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    let keys = presented_keys(&rt);
+    for want in ["fx-browser", "fx-section", "fx-clips"] {
+        assert!(keys.contains(want), "Effects root {want:?} is presented");
+    }
+
+    // Draw: the stroke inspector (the heaviest
+    // stepper/list adoption in that workspace) mounts
+    // with the draw tools and the text tool, Figures
+    // stays, and Animate's FrameOps leaves (settled,
+    // bounded, before the absence assert).
+    tap(&mut rt, "ws-draw");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Draw);
+    for _ in 0..30 {
+        let keys = presented_keys(&rt);
+        if keys.contains("stroke-inspector") && !keys.contains("frames") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    let keys = presented_keys(&rt);
+    for want in ["stroke-inspector", "draw-tools", "text-tool", "figures-panel"] {
+        assert!(keys.contains(want), "Draw root {want:?} is presented");
+    }
+    assert!(!keys.contains("frames"), "Draw gates FrameOps out");
+
+    // Restore Animate for the shared prefs, as rounds
+    // 2–10 do.
+    tap(&mut rt, "ws-animate");
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+}
+
+#[test]
+fn help_panel_renders_via_help_menu() {
+    let mut rt = editor();
+    // P17's conditional test, written because its
+    // precondition held: the help panel's card root
+    // kept the key `help-panel` through adoption. The
+    // panel is ungated but mounts only while
+    // `menus.help_open` is set (main.rs `view`, top of
+    // the right column).
+    assert!(!rt.state.menus.help_open, "help starts closed");
+    assert!(
+        !presented_keys(&rt).contains("help-panel"),
+        "no help panel before Shortcuts is chosen"
+    );
+
+    // Open the Help menu (settling frame, round 2's
+    // lesson) and choose Shortcuts — the dropdown item
+    // keyed `help`, whose handler is the `help_open`
+    // flip itself.
+    tap(&mut rt, "menu-help");
+    rt.frame(DT);
+    assert_eq!(
+        rt.state.menus.open,
+        Some(crate::rune_sec::menus::HELP),
+        "Help trigger opens the Help menu"
+    );
+    assert!(
+        presented_keys(&rt).contains("help"),
+        "the Shortcuts item is presented"
+    );
+    tap(&mut rt, "help");
+    assert!(rt.state.menus.help_open, "Shortcuts toggles the help panel on");
+    assert_eq!(
+        rt.state.menus.open, None,
+        "selecting the item closes the menu"
+    );
+    for _ in 0..30 {
+        if presented_keys(&rt).contains("help-panel") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    assert!(
+        presented_keys(&rt).contains("help-panel"),
+        "the help card mounts at the top of the right column"
+    );
+
+    // The same path toggles it back off, leaving the
+    // shell as the test found it.
+    tap(&mut rt, "menu-help");
+    rt.frame(DT);
+    tap(&mut rt, "help");
+    assert!(!rt.state.menus.help_open, "Shortcuts toggles the help panel off");
+    for _ in 0..30 {
+        if !presented_keys(&rt).contains("help-panel") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    assert!(
+        !presented_keys(&rt).contains("help-panel"),
+        "the help card unmounts"
+    );
 }

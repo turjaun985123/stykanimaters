@@ -86,11 +86,14 @@
 //! to Font Awesome glyphs through
 //! `icon_btn::icon_only_btn`: Down is `chevron-down`, Up is
 //! `chevron-up`. Keys and handlers are unchanged. The
-//! Top/Bottom jumps stay text on purpose: they are jumps
-//! to an end, not steps, the curated icon set carries no
-//! jump-to-end glyph (`angles-up` / `angles-down` are not
-//! in it), and giving them the same chevrons as the step
-//! buttons would make a jump look like a step. The opacity
+//! Top/Bottom jumps stayed text on purpose at the time:
+//! they are jumps to an end, not steps, the curated icon
+//! set then carried no jump-to-end glyph (`angles-up` /
+//! `angles-down` were not in it), and giving them the
+//! same chevrons as the step buttons would make a jump
+//! look like a step. (Phase N's spillover reversed this
+//! once the glyphs existed — see the Phase N note
+//! below.) The opacity
 //! −/+ steppers also stay text, matching the figures
 //! panel's identical steppers.
 //!
@@ -157,6 +160,16 @@
 //! track/knob arithmetic — all derived from `SLIDER_H` —
 //! is unchanged in shape). Keys, handlers and status
 //! strings are all byte-identical to before.
+//!
+//! Phase N (V-wave spillover): the Bottom/Top jumps are
+//! icon buttons now. The foundation wave curated the
+//! `angles-up` / `angles-down` glyphs the Phase H note
+//! above found missing, so the jumps take `icon_btn`
+//! with those glyphs beside their labels — a jump no
+//! longer looks like the chevron steps, and the Phase H
+//! paragraph's reason for keeping them text no longer
+//! holds. Keys (`layer-bottom-{fi}` / `layer-top-{fi}`),
+//! labels and handlers are unchanged.
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, Drag, El, Phase, Tx};
@@ -164,7 +177,7 @@ use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
-use crate::rune_sec::icon_btn::icon_only_btn;
+use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::State;
 
 /// Opacity change applied by one stepper press.
@@ -298,13 +311,17 @@ const SLIDER_W: f32 = 200.0;
 /// Slider drag-root height in points. 28 since Phase N
 /// (P18: a 22pt drag root fell under the 24pt hit-target
 /// floor; the drag maps x only, so growing the root is
-/// safe and the track/knob placement below — all derived
-/// from this one const — keeps its shape). The scene
-/// panel's copy of this const grows to the same 28 in its
-/// own adoption, so the two sliders do not drift.
+/// safe). The scene panel's copy of this const grows to
+/// the same 28 in its own adoption, so the two sliders
+/// do not drift.
 const SLIDER_H: f32 = 28.0;
-/// Slider knob diameter in points.
-const KNOB: f32 = 16.0;
+/// The design kit's slider-track element height in
+/// points (`design::slider_track` draws a 200x22 track
+/// with a 16pt knob, so this file keeps no knob constant
+/// of its own); the opacity slider centres it inside its
+/// 28pt drag root, exactly as the scene panel's Amount
+/// slider does.
+const KIT_SLIDER_TRACK_H: f32 = 22.0;
 
 /// Slider mapping: the opacity at local `x` on a track `w`
 /// points wide — 0.0 at the left edge, 1.0 at the right,
@@ -381,40 +398,24 @@ fn opacity_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
     }
 }
 
-/// The selected figure's opacity slider (the scene panel's
-/// `weather_slider` shape): a fixed-size track element with
-/// track, fill and knob children drawn absolutely inside
-/// it. The fill runs from the left knob centre to the
-/// current value's knob centre. All gesture logic lives in
-/// [`opacity_drag`].
+/// The selected figure's opacity slider: a fixed-size
+/// drag root whose whole visual (track, fill, knob) is
+/// the kit's `design::slider_track`, centred inside the
+/// 28pt root — the scene panel's Amount-slider shape, so
+/// the two unipolar sliders in the shell share one track
+/// construction and one set of rail/knob colours (the
+/// pre-kit hand-drawn copy used `control_off` for the
+/// rail and `text` for the knob; the V-wave audit found
+/// the drift and the integrator converted it). All
+/// gesture logic lives in [`opacity_drag`].
 fn opacity_slider(frac: f32, t: &Theme) -> El {
-    let frac = frac.clamp(0.0, 1.0);
-    let travel = SLIDER_W - KNOB;
-    let knob_cx = KNOB / 2.0 + frac * travel;
     el()
         .key("layers-opacity-slider")
         .size(SLIDER_W, SLIDER_H)
         .on_drag(opacity_drag)
         .child(
-            el()
-                .size(SLIDER_W, 4.0)
-                .absolute(0.0, (SLIDER_H - 4.0) / 2.0)
-                .radius(2.0)
-                .fill(t.control_off),
-        )
-        .child(
-            el()
-                .size((knob_cx - KNOB / 2.0).max(4.0), 4.0)
-                .absolute(KNOB / 2.0, (SLIDER_H - 4.0) / 2.0)
-                .radius(2.0)
-                .fill(tok::accent(0, true)),
-        )
-        .child(
-            el()
-                .size(KNOB, KNOB)
-                .absolute(frac * travel, (SLIDER_H - KNOB) / 2.0)
-                .radius(KNOB / 2.0)
-                .fill(t.text),
+            design::slider_track(frac, t)
+                .absolute(0.0, (SLIDER_H - KIT_SLIDER_TRACK_H) / 2.0),
         )
 }
 
@@ -482,8 +483,9 @@ fn solo_selected(core: &mut EditorCore) {
 /// figure's resolved root colour, [`layer_dot_color`]),
 /// name (press selects), opacity readout with −/+
 /// steppers, Bottom/down/up/Top reorder buttons —
-/// Down/Up are chevron icon buttons, Bottom/Top stay text
-/// (see the module docs for why) — and a muted trailing
+/// Down/Up are chevron icon-only buttons, Bottom/Top are
+/// angles-glyph icon buttons (Phase N spillover; see the
+/// module docs) — and a muted trailing
 /// joint-count readout ([`joint_label`]; unkeyed text,
 /// like the opacity readout). Keys are per-figure:
 /// `layer-row-{fi}`, `layer-dot-{fi}`,
@@ -532,8 +534,9 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
             t,
             move |s: &mut State| s.core.step_figure_opacity(fi, OPACITY_STEP),
         ))
-        .child(btn(
+        .child(icon_btn(
             &format!("layer-bottom-{fi}"),
+            "angles-down",
             "Bottom",
             false,
             t,
@@ -553,8 +556,9 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
             t,
             move |s: &mut State| move_layer(&mut s.core, fi, 1),
         ))
-        .child(btn(
+        .child(icon_btn(
             &format!("layer-top-{fi}"),
+            "angles-up",
             "Top",
             false,
             t,

@@ -198,12 +198,13 @@
 //! on the core/project and persist with the project file
 //! itself. The startup-workspace picker reuses the
 //! EXISTING `LayoutPrefs.workspace` through
-//! `workspaces::select_workspace` (above). Integrator
-//! follow-ups (in `main.rs`, not here): seed
-//! `core.light_theme` from `shell::load_layout().dark`
-//! at startup and save it back on change; the theme flip
-//! specifically is still neither loaded nor saved by the
-//! Rune shell (the workspace field is — see above).
+//! `workspaces::select_workspace` (above). The theme
+//! flip is loaded and saved by the Rune shell: `main.rs`
+//! seeds `core.light_theme` from `shell::load_layout()
+//! .dark` at startup and persists `prefs.dark` on change
+//! in `poll` (landed in the Phase D integration; an
+//! earlier note here claimed otherwise and the Phase N
+//! hygiene audit disproved it against the source).
 //!
 //! ## Integrator wiring (main.rs)
 //!

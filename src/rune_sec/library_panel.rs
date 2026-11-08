@@ -834,11 +834,17 @@ fn entry_row(entry: &LibraryRow, s: &State, t: &Theme) -> El {
             insert_at(&mut s.core, i);
         }));
     if !entry.builtin {
+        // The rename target's mark lives on the row shell
+        // alone (the list_row selected fill above); this
+        // button stays inactive so the state is never
+        // painted twice — the text_tool precedent, applied
+        // by the integrator after the V-wave audit found
+        // the doubling.
         r = r.child(icon_btn(
             &format!("library-rename-{i}"),
             "pencil",
             "Rename",
-            s.library_panel.renaming == Some(i),
+            false,
             t,
             move |s: &mut State| start_rename(s, i),
         ));

@@ -157,7 +157,7 @@ jobs:
           BIN=./target/release/stykanimate-rs
           mkdir -p headless-out
           missing=0
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open; do
             timeout 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
               > "headless-out/tree-$scene.log" 2>&1
             echo $? > "headless-out/tree-$scene.exit"
@@ -175,7 +175,7 @@ jobs:
         run: |
           set +e
           BIN=./target/release/stykanimate-rs
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open; do
             if [ ! -f "headless-out/tree-$scene.json" ]; then
               timeout 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
                 > "headless-out/tree-$scene-xvfb.log" 2>&1
@@ -209,6 +209,35 @@ jobs:
           timeout 120 "$BIN" --snap headless-out/snap-three-d-stage.png --scene three-d-stage --at 0 \
             > headless-out/snap-three-d-stage.log 2>&1
           echo $? > headless-out/snap-three-d-stage.exit
+          # Phase N (P17 section 4): the restyled surfaces only
+          # pixels can prove — the palette card, the File menu
+          # dropdown, the settings card and the Draw workspace.
+          timeout 120 "$BIN" --snap headless-out/snap-palette-open.png --scene palette-open --at 0 \
+            > headless-out/snap-palette-open.log 2>&1
+          echo $? > headless-out/snap-palette-open.exit
+          timeout 120 "$BIN" --snap headless-out/snap-menu-open.png --scene menu-open --at 0 \
+            > headless-out/snap-menu-open.log 2>&1
+          echo $? > headless-out/snap-menu-open.exit
+          timeout 120 "$BIN" --snap headless-out/snap-settings-open.png --scene settings-open --at 0 \
+            > headless-out/snap-settings-open.log 2>&1
+          echo $? > headless-out/snap-settings-open.exit
+          timeout 120 "$BIN" --snap headless-out/snap-draw-open.png --scene draw-open --at 0 \
+            > headless-out/snap-draw-open.log 2>&1
+          echo $? > headless-out/snap-draw-open.exit
+          # Two Effects-workspace snaps, because the scene
+          # names are historical: the scene NAMED fx-selected
+          # selects a particle event (State::particle_selected)
+          # and shows the FX browser + Particles detail card
+          # (P17 section 4's checklist); fx-split-mid is the
+          # only scene that selects an FX clip
+          # (State::fx_selected, playhead parked inside the
+          # clip), proving the FX inspector's selected state.
+          timeout 120 "$BIN" --snap headless-out/snap-fx-selected.png --scene fx-selected --at 0 \
+            > headless-out/snap-fx-selected.log 2>&1
+          echo $? > headless-out/snap-fx-selected.exit
+          timeout 120 "$BIN" --snap headless-out/snap-fx-split-mid.png --scene fx-split-mid --at 0 \
+            > headless-out/snap-fx-split-mid.log 2>&1
+          echo $? > headless-out/snap-fx-split-mid.exit
           if [ ! -f headless-out/snap-default.png ]; then
             timeout 120 xvfb-run -a "$BIN" --snap headless-out/snap-default.png --scene default --at 0 \
               > headless-out/snap-default-xvfb.log 2>&1

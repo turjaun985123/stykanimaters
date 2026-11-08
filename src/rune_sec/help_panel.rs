@@ -218,6 +218,25 @@
 //! changes in this pass — the stale Delete row and the
 //! Ctrl+S placement are the V-wave copy pass's, per
 //! p14. The row census is unchanged: 54 rows.
+//!
+//! Phase N (V-wave copy pass), 2026-11-08: the two copy
+//! fixes p14 scheduled for this pass. The Delete row
+//! now names the key's real priority cascade —
+//! "Delete the selected stroke, particle event or
+//! segment" — instead of the segment alone (the
+//! cascade itself landed in Phase J). Quick save
+//! moved from a Features row, where Ctrl+S hid in its
+//! prose, to a true-key Shortcuts row,
+//! `("Ctrl+S", "Quick save")`: it now wears a `kbd`
+//! chip like the other 24 real bindings, and the
+//! Features description ("none of these is a keyboard
+//! shortcut") is exact again. The census is unchanged
+//! in total — 54 rows — but the split moved with the
+//! row: Shortcuts 9 → 10, Features 30 → 29, so the
+//! true-key rows the adoption paragraph above counts
+//! are now 25 and the Features rows 29. The command
+//! palette's drift guard retired its Ctrl+S exception
+//! in the same pass — the hint is a key label now.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -249,12 +268,13 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             ("Ctrl+Z", "Undo"),
             ("Ctrl+Shift+Z", "Redo"),
             ("Ctrl+Y", "Redo"),
+            ("Ctrl+S", "Quick save"),
             ("Ctrl+K", "Open the command palette"),
             ("Down", "Next result in the command palette (palette open)"),
             ("Up", "Previous result in the command palette (palette open)"),
             ("Enter", "Run the selected command (command palette open)"),
             ("Escape", "Close the open menu or command palette"),
-            ("Delete", "Delete the selected segment"),
+            ("Delete", "Delete the selected stroke, particle event or segment"),
         ],
         "Workspaces" => vec![
             ("Alt+1", "Switch to the Animate workspace"),
@@ -378,10 +398,6 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             (
                 "Frame rate & stage size",
                 "Scene panel — Frame rate stepper and Stage size width / height steppers",
-            ),
-            (
-                "Quick save",
-                "Ctrl+S — the app-bar Save button's save, on the keyboard",
             ),
             (
                 "Delete project file",
@@ -561,8 +577,8 @@ mod tests {
 
     #[test]
     fn shortcut_rows_has_exactly_54_rows() {
-        // 9 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
-        // + 30 Features; Drawing contributes none (see the
+        // 10 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
+        // + 29 Features; Drawing contributes none (see the
         // module docs for which GPUI-era rows were dropped
         // and why). Phase G added the four palette/menu rows
         // to Shortcuts; Phase I added the Features section;
@@ -570,7 +586,9 @@ mod tests {
         // and the Phase K close-out two more (Right-press
         // selects and Reload from disk — both verified
         // user-reachable at integration time); Phase L
-        // six more; Phase M six more.
+        // six more; Phase M six more. Phase N (V wave)
+        // moved Quick save from Features to Shortcuts as
+        // a Ctrl+S row — one row each way, total stands.
         assert_eq!(shortcut_rows().len(), 54);
     }
 
@@ -624,7 +642,7 @@ mod tests {
         // this order, and nowhere else. (The count covers
         // the Phase J, Phase K, Phase L and Phase M rows
         // too — see those tests.)
-        assert_eq!(section_rows("Features").len(), 30);
+        assert_eq!(section_rows("Features").len(), 29);
     }
 
     #[test]
@@ -657,13 +675,14 @@ mod tests {
             "Export panel — SVG and Spritesheet now take the loop range too"
         )));
         // The ruler sits with the timeline rows, directly
-        // after Keyframe jump; the section holds all
-        // thirty feature rows (ten at Phase J, six more
-        // in Phase K, two at the Phase K close-out, six
-        // in Phase L, six in Phase M) and no thirty-first
-        // has crept in.
+        // after Keyframe jump; the section held thirty
+        // feature rows at Phase M (ten at Phase J, six
+        // more in Phase K, two at the Phase K close-out,
+        // six in Phase L, six in Phase M). The Phase N
+        // V-wave pass moved Quick save into Shortcuts, so
+        // twenty-nine remain and no thirtieth has crept in.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 30);
+        assert_eq!(features.len(), 29);
         let jump = features
             .iter()
             .position(|(label, _)| *label == "Keyframe jump")
@@ -714,10 +733,11 @@ mod tests {
             "Frame rate & stage size",
             "Scene panel — Frame rate stepper and Stage size width / height steppers"
         )));
-        assert!(rows.contains(&(
-            "Quick save",
-            "Ctrl+S — the app-bar Save button's save, on the keyboard"
-        )));
+        // Quick save was listed as that Features pair in
+        // Phase K; the Phase N V-wave pass moved it to
+        // the Shortcuts section as the true-key row it
+        // always was (the binding itself is unchanged).
+        assert!(rows.contains(&("Ctrl+S", "Quick save")));
         assert!(rows.contains(&(
             "Delete project file",
             "Home workspace — Delete on a project row, then confirm"
@@ -733,7 +753,7 @@ mod tests {
         // Placement: Playback speed sits with the
         // transport rows directly after Loop playback.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 30);
+        assert_eq!(features.len(), 29);
         let loop_row = features
             .iter()
             .position(|(label, _)| *label == "Loop playback")
@@ -805,7 +825,7 @@ mod tests {
         // Palette recents sits with the project rows,
         // directly after Reload from disk.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 30);
+        assert_eq!(features.len(), 29);
         let channel_row = features
             .iter()
             .position(|(label, _)| *label == "Delete graph channel")
@@ -905,7 +925,7 @@ mod tests {
         // after Split FX clip. No earlier phase's pinned
         // adjacency is disturbed by any of these.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 30);
+        assert_eq!(features.len(), 29);
         let clear_row = features
             .iter()
             .position(|(label, _)| *label == "Clear keys in loop range")
@@ -958,12 +978,13 @@ mod tests {
         assert!(rows.contains(&("Ctrl+Shift+Z", "Redo")));
         assert!(rows.contains(&("Ctrl+Y", "Redo")));
         assert!(rows.contains(&("Ctrl+K", "Open the command palette")));
+        assert!(rows.contains(&("Ctrl+S", "Quick save")));
         assert!(rows.contains(&("Alt+1", "Switch to the Animate workspace")));
         assert!(rows.contains(&("Alt+8", "Switch to the Home workspace")));
         assert!(rows.contains(&("Space", "Play / pause")));
         assert!(rows.contains(&("Left", "Previous frame (wraps around)")));
         assert!(rows.contains(&("Right", "Next frame (wraps around)")));
-        assert!(rows.contains(&("Delete", "Delete the selected segment")));
+        assert!(rows.contains(&("Delete", "Delete the selected stroke, particle event or segment")));
         assert!(rows.contains(&("N", "Add a frame after the current one")));
         assert!(rows.contains(&("I", "Insert an inbetween frame")));
         assert!(rows.contains(&("C", "Toggle camera mode")));

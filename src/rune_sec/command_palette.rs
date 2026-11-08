@@ -2249,18 +2249,17 @@ mod tests {
         // Drift guard: every hint spelling must be a key
         // label in the help panel's rows, so renaming a
         // binding breaks this test instead of leaving a
-        // lying chip on the row. One documented exception:
-        // "Ctrl+S" is a real binding (main.rs::on_key) but
-        // the help panel still carries it in the Features
-        // "Quick save" row's prose — P14 gap H1, scheduled
-        // for the V-wave help pass — so it is checked
-        // against that prose instead of the label column.
+        // lying chip on the row. "Ctrl+S" was the one
+        // documented exception while the help panel
+        // carried it only in Features prose (P14 gap H1);
+        // the Phase N V-wave help pass made it a
+        // Shortcuts key label, so the exception is
+        // retired and the guard covers it like the rest.
         let rows = crate::rune_sec::help_panel::shortcut_rows();
         for (_, hint) in EXPECTED_HINTS {
             let as_label = rows.iter().any(|(label, _)| *label == hint);
-            let in_prose = rows.iter().any(|(_, desc)| desc.contains(hint));
             assert!(
-                as_label || (hint == "Ctrl+S" && in_prose),
+                as_label,
                 "hint {hint} is not a help-panel key label"
             );
         }
