@@ -3095,17 +3095,19 @@ fn panel_card_rects_stay_inside_their_columns() {
     let (frames, _) = rt.presented("frames").expect("frames card is presented");
     let (stage, _) = rt.presented("stage").expect("stage is presented");
 
-    // Each card lies fully inside its column's content
-    // rect: card padding lives INSIDE the card (charter
-    // §1), so a correct card can touch the column's
-    // edges but never cross them.
+    // The figures card lies fully inside its column's
+    // content rect: card padding lives INSIDE the card
+    // (charter §1), so a correct card can touch the
+    // column's edges but never cross them. The frames
+    // card gets the x-range treatment below instead of
+    // full containment: the right column is a scroll
+    // viewport, so a card below the fold legitimately
+    // presents past the viewport's bottom edge (its
+    // unscrolled y is ~1773) — P17's test 2 specifies
+    // x-range containment for exactly this reason.
     assert!(
         rect_inside(figures, left),
         "figures card escapes the left column: card {figures:?}, column {left:?}"
-    );
-    assert!(
-        rect_inside(frames, right),
-        "frames card escapes the right column: card {frames:?}, column {right:?}"
     );
 
     // The column contract as x-ranges (the charter
@@ -3121,7 +3123,7 @@ fn panel_card_rects_stay_inside_their_columns() {
         "figures card crosses the left column's x-range: {figures:?}"
     );
     assert!(
-        frames[0] >= 1084.0 - 0.5 && frames[0] + frames[2] <= 1424.0 + 0.5,
+        frames[0] >= right[0] - 0.5 && frames[0] + frames[2] <= right[0] + right[2] + 0.5,
         "frames card crosses the right column's x-range: {frames:?}"
     );
 
@@ -3526,6 +3528,25 @@ fn timeline_card_keeps_chips_marks_and_rows() {
         }
     }
     assert!(appeared, "the clips lane joins the card once a clip exists");
+    // The lane's mount pushes the loop row down by the
+    // lane's height + the card gap, and Rune springs
+    // that layout change: a rect read in the appearance
+    // frame still shows the loop row at its pre-lane
+    // position, overlapping the lane. Settle (bounded)
+    // until the loop row's top clears the lane's bottom
+    // before asserting the stacking relations.
+    for _ in 0..30 {
+        let (lane_now, _) = rt
+            .presented("timeline-clips")
+            .expect("clips lane is presented");
+        let (loop_now, _) = rt
+            .presented("timeline-loop-row")
+            .expect("loop row is still presented");
+        if lane_now[1] + lane_now[3] <= loop_now[1] + 0.5 {
+            break;
+        }
+        rt.frame(DT);
+    }
     let (lane, _) = rt
         .presented("timeline-clips")
         .expect("clips lane is presented");
