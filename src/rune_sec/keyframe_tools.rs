@@ -220,6 +220,23 @@
 //! fill: `control_off` → the family's card fill, the
 //! same delta the icon inert twins recorded in Phase I.
 //! Keys, labels, guards and handlers are byte-identical.
+//!
+//! UI Mission Wave 1 (overflow repairs; audit S12-03…05)
+//! fixes the three rows of this section that crossed the
+//! right column's 316 pt content budget. The presets row
+//! measured 361 pt and painted 17 pt past the window edge;
+//! it now wraps (`flex_wrap`, the graph/frame-ops
+//! medicine), so Linear drops to a second line. The
+//! actions row (327.5 pt) splits into two lines: Key angle
+//! here + Delete key here keep `keyframe-actions`, Auto
+//! tangents moves to its own `keyframe-auto` row beneath.
+//! And Clear channel keys moves out of the clipboard row
+//! (318.8 pt) into its own `keyframe-clear-channel` row
+//! directly above the clear-range row — the one-control
+//! pattern the clear-range and fill-range rows already
+//! use — leaving Copy + Paste at ≈162 pt. The two new keys
+//! are container rows only; every button key, label, guard
+//! and handler is byte-identical.
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, El};
@@ -1018,10 +1035,13 @@ pub fn copy_key_to_frame(s: &mut State) {
 pub const NO_JOINT_NOTE_ROW_KEY: &str = "keyframe-no-joint-note";
 
 /// Element key of the row holding Key angle here /
-/// Delete key here / Auto tangents. Kept as a constant
-/// so the layout tests can prove the no-joint note row
-/// and the Delete button's row are different rows; the
-/// value is the key the row has always carried.
+/// Delete key here. (Auto tangents shared this row
+/// until UI Mission Wave 1 split it onto its own
+/// `keyframe-auto` row — see the header note.) Kept as
+/// a constant so the layout tests can prove the
+/// no-joint note row and the Delete button's row are
+/// different rows; the value is the key the row has
+/// always carried.
 pub const ACTIONS_ROW_KEY: &str = "keyframe-actions";
 
 /// Element key of the Delete key button itself — the
@@ -1066,11 +1086,11 @@ pub fn no_joint_note_row(core: &EditorCore, t: &Theme) -> Option<El> {
 }
 
 /// The keyframe tools section: header, selection target,
-/// keyed-frame indicator, the key/delete/auto buttons, the
-/// copy/paste-keys clipboard row (with Clear channel
-/// keys), the clear-range row, the fill-range row, the
-/// interp cycle row, the nudge row, the
-/// key-all / copy-key stamp row,
+/// keyed-frame indicator, the key/delete buttons and the
+/// auto-tangents row beneath them, the copy/paste-keys
+/// clipboard row, the clear-channel row, the clear-range
+/// row, the fill-range row, the interp cycle row, the
+/// nudge row, the key-all / copy-key stamp row,
 /// and the five tangent preset buttons (scoped by the op
 /// to the selected figure). Buttons highlight with real
 /// state: Delete is accent-filled exactly when a key sits
@@ -1092,7 +1112,7 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let keyed = selected_angle_channel(core).is_some_and(|ch| keyed_here(&ch.keys, core.current));
     let interp_label = interp_button_label(core);
-    let mut presets = row().key("keyframe-presets").gap(6.0);
+    let mut presets = row().key("keyframe-presets").gap(6.0).flex_wrap();
     for (preset, label, suffix) in preset_options() {
         presets = presets.child(btn(
             &format!("key-preset-{suffix}"),
@@ -1138,7 +1158,12 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                 }))
                 .child(btn(DELETE_KEY_BUTTON_KEY, "Delete key here", keyed, t, |s| {
                     delete_key_here(s)
-                }))
+                })),
+        )
+        .child(
+            row()
+                .key("keyframe-auto")
+                .gap(6.0)
                 .child(btn("key-auto", "Auto tangents", false, t, |s| {
                     s.core.smooth_graph_tangents()
                 })),
@@ -1158,7 +1183,12 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                     })
                 } else {
                     btn_inert("key-paste", "Paste keys", t)
-                })
+                }),
+        )
+        .child(
+            row()
+                .key("keyframe-clear-channel")
+                .gap(6.0)
                 .child(if clear_channel_enabled(core) {
                     icon_btn(
                         "key-clear-channel",

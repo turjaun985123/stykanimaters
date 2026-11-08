@@ -569,9 +569,16 @@ pub fn toggle_open(s: &mut State) {
 /// NOT a heading: headings render through the design
 /// kit's `section_label` (Phase N); these two lines are
 /// body prose and keep the muted LABEL rendering they
-/// have always had.
+/// have always had. They wrap at the card's width
+/// (`.wrap().w_full()`, the rune-kit card precedent):
+/// unwrapped, the guides note ran off the card's right
+/// edge mid-sentence (UI mission S19).
 fn note_line(t: &Theme, label: &str) -> El {
-    text(label).font(type_::LABEL).color(t.text_secondary)
+    text(label)
+        .font(type_::LABEL)
+        .color(t.text_secondary)
+        .wrap()
+        .w_full()
 }
 
 /// One language button: applies its language via
@@ -745,7 +752,10 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
         // current language highlighted.
         let mut grid = col().key("settings-lang-grid").gap(4.0);
         for (i, chunk) in language_entries().chunks(LANG_COLUMNS).enumerate() {
-            let mut lang_row = row().key(format!("settings-lang-row-{i}")).gap(6.0);
+            let mut lang_row = row()
+                .key(format!("settings-lang-row-{i}"))
+                .gap(6.0)
+                .flex_wrap();
             for entry in chunk {
                 lang_row = lang_row.child(language_button(entry.clone(), core.lang, t));
             }

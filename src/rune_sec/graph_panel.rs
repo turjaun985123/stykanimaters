@@ -1519,7 +1519,7 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
 
     // Channel selector: one chip per entry; the drawn channel
     // is the active one.
-    let mut selector = row().key("graph-channels").gap(4.0);
+    let mut selector = row().key("graph-channels").gap(4.0).w_full().flex_wrap();
     for entry in selector_entries(core) {
         let label = channel_label(entry);
         let key = format!("graph-ch-{}", label.replace(' ', "-").to_lowercase());
@@ -1681,6 +1681,8 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     let presets = row()
         .key("graph-presets")
         .gap(4.0)
+        .w_full()
+        .flex_wrap()
         .child(preset_chip(TangentPreset::Smooth, "Smooth", "graph-preset-smooth", t))
         .child(preset_chip(TangentPreset::EaseIn, "Ease in", "graph-preset-ease-in", t))
         .child(preset_chip(TangentPreset::EaseOut, "Ease out", "graph-preset-ease-out", t))
@@ -1690,6 +1692,8 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     let actions = row()
         .key("graph-actions")
         .gap(4.0)
+        .w_full()
+        .flex_wrap()
         .child(btn("graph-key", "Key angle", false, t, |s| s.core.key_graph_angle()))
         .child(btn("graph-smooth", "Auto tangents", false, t, |s| {
             s.core.smooth_graph_tangents()
@@ -1774,7 +1778,7 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         panel = panel.child(stats_block);
     }
     panel = panel
-        .child(selector.scroll_x().w_full())
+        .child(selector)
         .child(
             canvas(graph_shape(
                 core,
@@ -1819,7 +1823,7 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     panel
         .child(interp_row)
         .child(presets)
-        .child(actions.scroll_x().w_full())
+        .child(actions)
 }
 
 #[cfg(test)]

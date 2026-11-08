@@ -511,6 +511,7 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
         row()
             .gap(6.0)
             .center_y()
+            .flex_wrap()
             .child(icon_btn(
                 "pb-restart",
                 "backward-step",
@@ -554,6 +555,7 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
     let mut loop_row = row()
         .gap(6.0)
         .center_y()
+        .flex_wrap()
         .child(icon_btn(
             "pb-loop",
             "repeat",

@@ -846,6 +846,12 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
+                // UI-mission overflow repair (audit s15 D1,
+                // p05 O-7): the five controls measure 365 pt
+                // against the 316 pt column, leaving Orbit
+                // +15 cut off past the card edge. Wrapping
+                // packs them onto two lines inside budget.
+                .flex_wrap()
                 .child(if dim {
                     crate::chrome_view::btn_muted_live("joint-3d", "Joint>", false, t, |s| {
                         s.core.fig3_select_next()
@@ -943,6 +949,12 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
+                // UI-mission overflow repair (audit s15 D1,
+                // p05 O-7): label + five presets measure
+                // 353.5 pt against the 316 pt column, leaving
+                // Frame camera past the card edge. Wrapping
+                // packs them onto two lines inside budget.
+                .flex_wrap()
                 .child(design::section_label("Camera", t))
                 .child(if dim {
                     crate::chrome_view::btn_muted_live("cam-front-3d", "Front", false, t, |s| {

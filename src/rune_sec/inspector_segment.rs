@@ -82,7 +82,8 @@
 //!   interpolated `bends_at`, so the line can never
 //!   disagree with the Bend readout row or the stepper
 //!   row below it. Straighten (key `seg-bend-zero`,
-//!   in the Bend stepper row) calls `bend_selected`
+//!   on the Bend stepper row's second line) calls
+//!   `bend_selected`
 //!   with the exact negation of the stored radians, so
 //!   the sum lands on bit-exact 0.0 — no degrees round
 //!   trip, which can be an ulp off. At bend 0 the
@@ -796,35 +797,51 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
     // root exactly as `cycle_bend` does). Buttons speak
     // degrees like every other bend surface in the panel;
     // `bend_selected` takes radians, the storage unit.
+    // Two lines, not one (UI mission, audit s08 D1): on a
+    // single line the row overflowed the card — measured
+    // `seg-bend-zero` ended at x=1446.5 against the 1412
+    // content edge (316 budget), past the window edge
+    // too. Straighten therefore drops to its own line
+    // under the stepper cluster (the figures-panel fix-5
+    // precedent), leaving line 1 exactly the Rotate row's
+    // composition, which fits; every key, label and
+    // handler below is unchanged.
     if !st.is_root {
-        panel = panel.child(
-            row()
-                .w_full()
-                .center_y()
-                .gap(8.0)
-                .child(
-                    text("Bend")
-                        .font(type_::LABEL)
-                        .color(t.text_secondary)
-                        .grow(1.0),
-                )
-                .child(design::stepper_value(&format_deg(st.bend_deg), t))
-                .child(btn("seg-bend-m5", "−5°", false, t, |s| {
-                    bend_selected(&mut s.core, (-5.0f32).to_radians())
-                }))
-                .child(btn("seg-bend-m1", "−1°", false, t, |s| {
-                    bend_selected(&mut s.core, (-1.0f32).to_radians())
-                }))
-                .child(btn("seg-bend-p1", "+1°", false, t, |s| {
-                    bend_selected(&mut s.core, (1.0f32).to_radians())
-                }))
-                .child(btn("seg-bend-p5", "+5°", false, t, |s| {
-                    bend_selected(&mut s.core, (5.0f32).to_radians())
-                }))
-                .child(btn("seg-bend-zero", "Straighten", false, t, |s| {
-                    straighten_selected(&mut s.core)
-                })),
-        );
+        panel = panel
+            .child(
+                row()
+                    .w_full()
+                    .center_y()
+                    .gap(8.0)
+                    .child(
+                        text("Bend")
+                            .font(type_::LABEL)
+                            .color(t.text_secondary)
+                            .grow(1.0),
+                    )
+                    .child(design::stepper_value(&format_deg(st.bend_deg), t))
+                    .child(btn("seg-bend-m5", "−5°", false, t, |s| {
+                        bend_selected(&mut s.core, (-5.0f32).to_radians())
+                    }))
+                    .child(btn("seg-bend-m1", "−1°", false, t, |s| {
+                        bend_selected(&mut s.core, (-1.0f32).to_radians())
+                    }))
+                    .child(btn("seg-bend-p1", "+1°", false, t, |s| {
+                        bend_selected(&mut s.core, (1.0f32).to_radians())
+                    }))
+                    .child(btn("seg-bend-p5", "+5°", false, t, |s| {
+                        bend_selected(&mut s.core, (5.0f32).to_radians())
+                    })),
+            )
+            .child(
+                row()
+                    .w_full()
+                    .center_y()
+                    .gap(8.0)
+                    .child(btn("seg-bend-zero", "Straighten", false, t, |s| {
+                        straighten_selected(&mut s.core)
+                    })),
+            );
     }
     panel = panel
         .child(

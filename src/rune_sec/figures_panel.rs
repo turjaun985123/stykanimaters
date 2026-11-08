@@ -1,10 +1,13 @@
 //! Figures panel (Phase D, section 1/40 of the Rune rebuild;
 //! completed in Phase E, section 29/40): the figures sidebar —
-//! one row per figure with a colour dot, name, eye/lock/solo
-//! toggles and opacity steppers on the first line, and reorder
-//! (up/down), opacity-cycle and delete buttons on a second
-//! line, a header with the figure count and "+ Figure", and a
-//! footer bulk visibility row (All / None / Invert).
+//! one row per figure with a thumbnail spanning two control
+//! lines beside it: colour dot, name, opacity readout and
+//! lock/solo toggles on the first line, and reorder (up/down),
+//! opacity-cycle, eye, delete and the opacity steppers on the
+//! second (the steppers moved down in the UI-mission S07-1
+//! fix so the name has room to read), a header with the
+//! figure count and "+ Figure", and a footer bulk visibility
+//! row (All / None / Invert).
 //!
 //! Direction convention for reorder (shared with the layers
 //! panel, `rune_sec::layers_panel::move_layer`): "up" means
@@ -473,37 +476,42 @@ fn duplicate_row(core: &mut EditorCore) {
     }
 }
 
-/// One figure row, as a two-line card: line 1 is the live
-/// thumbnail canvas (`fig-thumb-{fi}`, Phase F), then the
-/// colour dot + name (press selects), the opacity readout,
-/// then the lock / solo / opacity-stepper toggles —
-/// the GPUI row's trailing cluster; line 2 (Phase E) carries
-/// the remaining GPUI row controls, right-aligned under the
-/// cluster: reorder up/down (`fig-up-{fi}` / `fig-dn-{fi}`),
-/// opacity cycle (`fig-opac-{fi}`), the eye toggle
-/// (`fig-eye-{fi}` — moved down from line 1 by the Phase N
-/// pixel-check fix) and delete (`fig-del-{fi}`).
-/// Two lines keep every control at the same compact toggle
-/// size instead of squeezing nine onto one line.
+/// One figure row: the live thumbnail canvas
+/// (`fig-thumb-{fi}`, Phase F) spans two control lines
+/// beside it. Line 1 is the colour dot + name (press
+/// selects), the opacity readout, then the lock / solo
+/// toggles; line 2 carries the remaining controls,
+/// right-aligned: reorder up/down (`fig-up-{fi}` /
+/// `fig-dn-{fi}`), opacity cycle (`fig-opac-{fi}`), the
+/// eye toggle (`fig-eye-{fi}` — moved down from line 1
+/// by the Phase N pixel-check fix), delete
+/// (`fig-del-{fi}`) and the opacity steppers
+/// (`fig-op-dn-{fi}` / `fig-op-up-{fi}` — moved down
+/// from line 1 by the UI-mission S07-1 fix, which gave
+/// the name ≈82 pt and took the row from 80 pt to
+/// 62 pt tall).
+/// Two lines keep every control at the same compact
+/// toggle size instead of squeezing nine onto one line.
 fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
     let fi = r.index;
     let dot = hex_color(r.color).unwrap_or(Color::WHITE);
     // Two-line variant of the kit list-row anatomy (P8
     // §1/FIG-1): the same px, radius, selected fill and
-    // hover as `design::list_row`, applied to a `col`
-    // because the row carries two control lines (the kit
-    // builder itself is a single-line `row`). Unselected
-    // rows rest transparent on the card, exactly as the
-    // kit shell does — the hover overlay paints the
-    // highlight.
-    let root = col()
+    // hover as `design::list_row`, applied to a `row`
+    // whose thumbnail spans a `col` of the two control
+    // lines beside it (S07-1; the kit builder itself is
+    // a single-line `row`). Unselected rows rest
+    // transparent on the card, exactly as the kit shell
+    // does — the hover overlay paints the highlight.
+    let root = row()
         .key(format!("fig-row-{fi}"))
         .w_full()
-        .gap(2.0)
+        .gap(6.0)
         .px(8.0)
         .py(4.0)
         .radius(design::ROW_RADIUS)
-        .min_h(28.0);
+        .min_h(28.0)
+        .center_y();
     let root = if r.selected {
         root.fill(design::selected_fill())
     } else {
@@ -511,124 +519,147 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
     };
     root
         .child(
-            row()
-                .w_full()
-                .gap(6.0)
-                .center_y()
-                .child(
-                    // Live silhouette of this figure's rig at
-                    // the display frame (Phase F); a pure view
-                    // element — no press handler, no op.
-                    canvas(thumb_shape(core, fi, THUMB_SIZE))
-                        .key(format!("fig-thumb-{fi}"))
-                        .size(THUMB_SIZE, THUMB_SIZE),
-                )
-                .child(
-                    // Leading cluster: dot + name; pressing it selects
-                    // the figure (old `fig-sel`).
-                    row()
-                        .key(format!("fig-sel-{fi}"))
-                        .gap(6.0)
-                        .center_y()
-                        .grow(1.0)
-                        .on_press(move |s: &mut State| s.core.select_figure(fi))
-                        .child(el().size(10.0, 10.0).radius(5.0).fill(dot))
-                        .child(
-                            text(r.name.clone())
-                                .font(type_::LABEL)
-                                .color(if r.hidden { t.text_secondary } else { t.text }),
-                        ),
-                )
-                .child(
-                    text(format!("{}%", r.opacity_pct))
-                        .font(type_::MONO_CAPTION.mono())
-                        .color(t.text_secondary),
-                )
-                .child(icon_only_btn(
-                    &format!("fig-lock-{fi}"),
-                    if r.locked { "lock" } else { "lock-open" },
-                    26.0, r.locked,
-                    t,
-                    move |s: &mut State| s.core.toggle_figure_lock(fi),
-                ))
-                .child(chip_btn(
-                    &format!("fig-solo-{fi}"),
-                    None,
-                    "solo",
-                    r.solo,
-                    t,
-                    move |s: &mut State| s.core.toggle_solo(fi),
-                ))
-                .child(chip_btn(
-                    &format!("fig-op-dn-{fi}"),
-                    None,
-                    "−",
-                    false,
-                    t,
-                    move |s: &mut State| s.core.step_figure_opacity(fi, -0.1),
-                ))
-                .child(chip_btn(
-                    &format!("fig-op-up-{fi}"),
-                    None,
-                    "+",
-                    false,
-                    t,
-                    move |s: &mut State| s.core.step_figure_opacity(fi, 0.1),
-                ))
+            // Live silhouette of this figure's rig at
+            // the display frame (Phase F); a pure view
+            // element — no press handler, no op. Since
+            // S07-1 it spans both control lines: the
+            // lines ride in the column beside it.
+            canvas(thumb_shape(core, fi, THUMB_SIZE))
+                .key(format!("fig-thumb-{fi}"))
+                .size(THUMB_SIZE, THUMB_SIZE),
         )
         .child(
-            // Line 2: reorder / opacity cycle / eye /
-            // delete, right-aligned under line 1's
-            // toggle cluster. The eye rides this line
-            // since the Phase N pixel check: as line 1's
-            // last toggle it measured past the row's
-            // right edge (and the card's).
-            row()
-                .w_full()
-                .gap(6.0)
-                .center_y()
-                .child(el().grow(1.0))
-                .child(icon_only_btn(
-                    &format!("fig-up-{fi}"),
-                    "chevron-up",
-                    26.0, false,
-                    t,
-                    move |s: &mut State| move_row(&mut s.core, fi, 1),
-                ))
-                .child(icon_only_btn(
-                    &format!("fig-dn-{fi}"),
-                    "chevron-down",
-                    26.0, false,
-                    t,
-                    move |s: &mut State| move_row(&mut s.core, fi, -1),
-                ))
-                .child(chip_btn(
-                    &format!("fig-opac-{fi}"),
-                    None,
-                    "opac",
-                    false,
-                    t,
-                    move |s: &mut State| cycle_row_opacity(&mut s.core, fi),
-                ))
-                .child(icon_only_btn(
-                    &format!("fig-eye-{fi}"),
-                    if r.hidden { "eye-slash" } else { "eye" },
-                    26.0, r.hidden,
-                    t,
-                    // The old listener selected the figure first:
-                    // `toggle_figure_hidden` acts on the selection.
-                    move |s: &mut State| {
-                        s.core.select_figure(fi);
-                        s.core.toggle_figure_hidden();
-                    },
-                ))
-                .child(icon_only_btn(
-                    &format!("fig-del-{fi}"),
-                    "trash-can",
-                    26.0, false,
-                    t,
-                    move |s: &mut State| delete_row(&mut s.core, fi),
-                )),
+            col()
+                .grow(1.0)
+                .gap(2.0)
+                .child(
+                    // Line 1: dot + name, the opacity
+                    // readout, lock and solo. The
+                    // opacity steppers moved to line 2
+                    // (S07-1): on this line they left
+                    // the name ≈28 pt; without them
+                    // the select cluster measures
+                    // 98 pt, ≈82 of it name text.
+                    row()
+                        .w_full()
+                        .gap(6.0)
+                        .center_y()
+                        .child(
+                            // Leading cluster: dot + name; pressing it selects
+                            // the figure (old `fig-sel`).
+                            row()
+                                .key(format!("fig-sel-{fi}"))
+                                .gap(6.0)
+                                .center_y()
+                                .grow(1.0)
+                                .on_press(move |s: &mut State| s.core.select_figure(fi))
+                                .child(el().size(10.0, 10.0).radius(5.0).fill(dot))
+                                .child(
+                                    text(r.name.clone())
+                                        .font(type_::LABEL)
+                                        .color(if r.hidden { t.text_secondary } else { t.text }),
+                                ),
+                        )
+                        .child(
+                            text(format!("{}%", r.opacity_pct))
+                                .font(type_::MONO_CAPTION.mono())
+                                .color(t.text_secondary),
+                        )
+                        .child(icon_only_btn(
+                            &format!("fig-lock-{fi}"),
+                            if r.locked { "lock" } else { "lock-open" },
+                            26.0, r.locked,
+                            t,
+                            move |s: &mut State| s.core.toggle_figure_lock(fi),
+                        ))
+                        .child(chip_btn(
+                            &format!("fig-solo-{fi}"),
+                            None,
+                            "solo",
+                            r.solo,
+                            t,
+                            move |s: &mut State| s.core.toggle_solo(fi),
+                        )),
+                )
+                .child(
+                    // Line 2: reorder / opacity cycle /
+                    // eye / delete / opacity steppers,
+                    // right-aligned under line 1. The
+                    // eye rides this line since the
+                    // Phase N pixel check: as line 1's
+                    // last toggle it measured past the
+                    // row's right edge (and the card's).
+                    // The steppers joined it in S07-1.
+                    // This line's gap is 4, not 6: the
+                    // seven controls at gap 6 total
+                    // 222 pt against the 210 pt beside
+                    // the thumbnail, and the last
+                    // stepper would cross the card's
+                    // content edge; at gap 4 they
+                    // total 208.
+                    row()
+                        .w_full()
+                        .gap(4.0)
+                        .center_y()
+                        .child(el().grow(1.0))
+                        .child(icon_only_btn(
+                            &format!("fig-up-{fi}"),
+                            "chevron-up",
+                            26.0, false,
+                            t,
+                            move |s: &mut State| move_row(&mut s.core, fi, 1),
+                        ))
+                        .child(icon_only_btn(
+                            &format!("fig-dn-{fi}"),
+                            "chevron-down",
+                            26.0, false,
+                            t,
+                            move |s: &mut State| move_row(&mut s.core, fi, -1),
+                        ))
+                        .child(chip_btn(
+                            &format!("fig-opac-{fi}"),
+                            None,
+                            "opac",
+                            false,
+                            t,
+                            move |s: &mut State| cycle_row_opacity(&mut s.core, fi),
+                        ))
+                        .child(icon_only_btn(
+                            &format!("fig-eye-{fi}"),
+                            if r.hidden { "eye-slash" } else { "eye" },
+                            26.0, r.hidden,
+                            t,
+                            // The old listener selected the figure first:
+                            // `toggle_figure_hidden` acts on the selection.
+                            move |s: &mut State| {
+                                s.core.select_figure(fi);
+                                s.core.toggle_figure_hidden();
+                            },
+                        ))
+                        .child(icon_only_btn(
+                            &format!("fig-del-{fi}"),
+                            "trash-can",
+                            26.0, false,
+                            t,
+                            move |s: &mut State| delete_row(&mut s.core, fi),
+                        ))
+                        .child(chip_btn(
+                            &format!("fig-op-dn-{fi}"),
+                            None,
+                            "−",
+                            false,
+                            t,
+                            move |s: &mut State| s.core.step_figure_opacity(fi, -0.1),
+                        ))
+                        .child(chip_btn(
+                            &format!("fig-op-up-{fi}"),
+                            None,
+                            "+",
+                            false,
+                            t,
+                            move |s: &mut State| s.core.step_figure_opacity(fi, 0.1),
+                        )),
+                ),
         )
 }
 

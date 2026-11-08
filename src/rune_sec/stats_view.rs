@@ -48,7 +48,7 @@
 //! render.
 
 use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, El};
+use rune::{col, row, text, El};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::stats::{busiest_figure, project_stats, root_travel};
 
@@ -375,10 +375,15 @@ fn label_slug(label: &str) -> String {
 /// (Phase N; `t.bg` inner wells are the shell's existing
 /// idiom — home_panel's rows do the same). Keyed
 /// `stat-{key}` so headless `--tree` checks can find
-/// individual cells.
+/// individual cells. The cell grows to its half of the
+/// grid row and may shrink below its content size
+/// (`min_w(0)`): that bound is what keeps the grid
+/// inside its card — see [`stats_panel`].
 fn stat_cell_el(cell: &StatCell, t: &Theme) -> El {
     col()
         .key(format!("stat-{}", cell.key))
+        .grow(1.0)
+        .min_w(0.0)
         .fill(t.bg)
         .radius(8.0)
         .padding(10.0)
@@ -524,17 +529,29 @@ fn figures_el(s: &State, t: &Theme) -> El {
 /// The stats panel: the kit card (Phase N) — a header
 /// row holding the kit's [`design::panel_title`]
 /// (chart-simple glyph + "Project stats") over a
-/// hairline divider, then a five-column grid of stat
-/// cells (two rows at the current ten cells), the
+/// hairline divider, then the stat-cell grid (two
+/// columns, five rows at the current ten cells), the
 /// Project totals count rows, the Media rows, the Flags
-/// rows and the per-figure count lines. Mount it
-/// wherever a full-width
-/// row fits; the column count is the one-line change if a
-/// narrow sidebar mount is preferred.
+/// rows and the per-figure count lines.
+///
+/// The grid is rows of two growing cells, NOT
+/// `equal_columns`: Rune's grid tracks size to the
+/// widest child's content, so the old five-column grid
+/// laid its tracks out past the card — the S19 visual
+/// QA audit measured the last cells ending +153.5 pt
+/// past the card's content edge (x 1565, off-window).
+/// Two `grow` cells with `min_w(0)` per row split the
+/// card's content width exactly, in whichever column
+/// the panel is mounted.
 pub fn stats_panel(s: &State, t: &Theme) -> El {
-    let mut grid = el().key("stats-grid").w_full().equal_columns(5).gap(8.0);
-    for cell in stat_cells(&s.core) {
-        grid = grid.child(stat_cell_el(&cell, t));
+    let cells = stat_cells(&s.core);
+    let mut grid = col().key("stats-grid").w_full().gap(8.0);
+    for pair in cells.chunks(2) {
+        let mut grid_row = row().w_full().gap(8.0);
+        for cell in pair {
+            grid_row = grid_row.child(stat_cell_el(cell, t));
+        }
+        grid = grid.child(grid_row);
     }
     design::panel_col("stats-panel", t)
         .child(

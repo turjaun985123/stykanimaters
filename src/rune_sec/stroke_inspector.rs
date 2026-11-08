@@ -1442,7 +1442,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .child(icon_btn(
                 "stroke-delete-frame",
                 "trash-can",
-                "Delete frame strokes",
+                "Delete frame",
                 false,
                 t,
                 |s| {

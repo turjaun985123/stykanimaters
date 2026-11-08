@@ -1216,7 +1216,13 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
 /// [`nudge_duration_seconds`]. With no valid selection
 /// it renders the inspector's no-selection guidance
 /// line instead of dead buttons, mirroring
-/// `fx_inspector`'s own empty state.
+/// `fx_inspector`'s own empty state. The two clusters
+/// sit on separate lines under the one `fx-nudge` key
+/// (Phase O, p05 O-8): the single line measured 343.5 pt
+/// against the 316 pt column budget, with `fx-dur-up`
+/// at the window edge; the split keeps the Dur label
+/// with its two buttons instead of letting a wrap
+/// separate them.
 pub fn nudge_row(s: &State, t: &Theme) -> El {
     if valid_selection(s.fx_selected, s.core.project.fx_clips.len()).is_none() {
         return row().key("fx-nudge").w_full().child(
@@ -1225,39 +1231,48 @@ pub fn nudge_row(s: &State, t: &Theme) -> El {
                 .color(t.text_secondary),
         );
     }
-    row()
+    col()
         .key("fx-nudge")
         .w_full()
         .gap(8.0)
-        .center_y()
         .child(
-            text("Nudge")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text("Nudge")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                )
+                .child(btn("fx-nudge-l10", "-10", false, t, |s| {
+                    nudge_start(s, -10)
+                }))
+                .child(icon_only_btn("fx-nudge-l", "chevron-left", 26.0, false, t, |s| {
+                    nudge_start(s, -1)
+                }))
+                .child(icon_only_btn("fx-nudge-r", "chevron-right", 26.0, false, t, |s| {
+                    nudge_start(s, 1)
+                }))
+                .child(btn("fx-nudge-r10", "+10", false, t, |s| {
+                    nudge_start(s, 10)
+                })),
         )
-        .child(btn("fx-nudge-l10", "-10", false, t, |s| {
-            nudge_start(s, -10)
-        }))
-        .child(icon_only_btn("fx-nudge-l", "chevron-left", 26.0, false, t, |s| {
-            nudge_start(s, -1)
-        }))
-        .child(icon_only_btn("fx-nudge-r", "chevron-right", 26.0, false, t, |s| {
-            nudge_start(s, 1)
-        }))
-        .child(btn("fx-nudge-r10", "+10", false, t, |s| {
-            nudge_start(s, 10)
-        }))
         .child(
-            text("Dur")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text("Dur")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                )
+                .child(btn("fx-dur-dn", "-0.1s", false, t, |s| {
+                    nudge_duration_seconds(s, -0.1)
+                }))
+                .child(btn("fx-dur-up", "+0.1s", false, t, |s| {
+                    nudge_duration_seconds(s, 0.1)
+                })),
         )
-        .child(btn("fx-dur-dn", "-0.1s", false, t, |s| {
-            nudge_duration_seconds(s, -0.1)
-        }))
-        .child(btn("fx-dur-up", "+0.1s", false, t, |s| {
-            nudge_duration_seconds(s, 0.1)
-        }))
 }
 
 /// The clip inspector for the selected FX clip: kind and

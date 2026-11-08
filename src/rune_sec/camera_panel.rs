@@ -970,6 +970,13 @@ pub fn panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
+                // UI-mission overflow repair (audit s15 D1,
+                // p05 O-9): the four controls measure 345.4 pt
+                // against the 316 pt column — Delete key ended
+                // at x 1441.4, past the window edge entirely.
+                // Wrapping moves it onto a second line inside
+                // budget.
+                .flex_wrap()
                 .child(btn("cam-set-key", "Set key", false, t, set_key_here))
                 .child(btn("cam-clear-key", "Clear key", false, t, |s: &mut State| {
                     s.core.camera_clear_key()

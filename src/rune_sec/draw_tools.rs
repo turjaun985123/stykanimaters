@@ -632,6 +632,12 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .key("draw-tools-row")
         .gap(8.0)
         .center_y()
+        // UI-mission overflow repair (audit s11, D-2):
+        // the seven controls measure 690 pt against the
+        // 316 pt column, leaving Simplify, Smooth and
+        // Clear drawing past the window. Wrapping packs
+        // them onto three lines (266 / 290 / Clear alone).
+        .flex_wrap()
         .child(icon_btn("draw-mode", "paintbrush", "Draw", core.draw_mode, t, |s| {
             // The old GPUI listener verbatim: flip the mode
             // field and say what the mode does.
@@ -671,7 +677,19 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
             s.core.clear_frame_drawings()
         }));
 
-    let mut brushes = row().key("draw-brushes").gap(8.0).center_y();
+    // UI-mission overflow repair (audit s11, D-1): the
+    // ten preset chips measure 879 pt against the
+    // 316 pt column — six of them sat off-canvas behind
+    // a hidden horizontal scroll. Wrapping packs them
+    // onto three lines (299 / 277 / 287), all pressable
+    // at rest; the `.scroll_x()` mitigation goes with
+    // it (a scroll container does not wrap against its
+    // own content width).
+    let mut brushes = row()
+        .key("draw-brushes")
+        .gap(8.0)
+        .center_y()
+        .flex_wrap();
     for (i, name) in brush_names().iter().enumerate() {
         brushes = brushes.child(chip_btn(
             &brush_key(i),
@@ -687,6 +705,12 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .key("draw-shapes")
         .gap(8.0)
         .center_y()
+        // UI-mission overflow repair (audit s11, D-3):
+        // the six stamps measure 448 pt against the
+        // 316 pt column — the Arrow stamp sat entirely
+        // past the window. Wrapping packs them onto two
+        // lines (313 / 127).
+        .flex_wrap()
         .child(icon_btn("draw-shape-line", "shapes", "Line", false, t, |s| {
             draw_shape_button(&mut s.core, ShapeKind::Line)
         }))
@@ -709,11 +733,19 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
     // Stamp parameter steppers (Phase F; Phase N: charter
     // order per group — label, −, kit `stepper_value`, + —
     // replacing the Phase F combined "Sides 5" readouts).
-    // The three groups share one row, so the labels are
-    // plain LABEL text rather than growing: a grow on each
-    // would spread the groups across the row instead of
-    // labelling them. Sides drives the polygon and the
-    // star alike.
+    // The labels are plain LABEL text rather than
+    // growing: a grow on each would spread the groups
+    // across the row instead of labelling them. Sides
+    // drives the polygon and the star alike.
+    // UI-mission overflow repair (audit s11, D-3): the
+    // three groups together measure 436 pt against the
+    // 316 pt column — the rotation + button sat entirely
+    // past the window. They are split explicitly into
+    // two rows (Sides + Size, then Rot) rather than
+    // wrapped, so a stepper group never splits across
+    // lines mid-group. The `draw-stamp-params` key
+    // stays on row 1; row 2 is the additive key
+    // `draw-stamp-params-2`.
     let params = &s.draw_tools;
     let stamp_params = row()
         .key("draw-stamp-params")
@@ -734,7 +766,11 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .child(design::stepper_value(&format!("{}%", params.size_pct), t))
         .child(btn("draw-size-up", "+", false, t, |s| {
             step_stamp_size(&mut s.core, &mut s.draw_tools, 1)
-        }))
+        }));
+    let stamp_params_2 = row()
+        .key("draw-stamp-params-2")
+        .gap(8.0)
+        .center_y()
         .child(text("Rot").font(type_::LABEL).color(t.text_secondary))
         .child(btn("draw-rot-dn", "−", false, t, |s| {
             step_stamp_rotation(&mut s.core, &mut s.draw_tools, -1)
@@ -769,7 +805,7 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         )
         .child(tools)
         .child(design::section_label("Brushes", t))
-        .child(brushes.scroll_x().w_full())
+        .child(brushes.w_full())
         .child(
             text(smoothing_readout(core))
                 .key("draw-smooth-readout")
@@ -786,6 +822,7 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .child(shapes)
         .child(design::section_label("Stamp", t))
         .child(stamp_params)
+        .child(stamp_params_2)
 }
 
 #[cfg(test)]

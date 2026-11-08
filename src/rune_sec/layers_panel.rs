@@ -170,14 +170,53 @@
 //! paragraph's reason for keeping them text no longer
 //! holds. Keys (`layer-bottom-{fi}` / `layer-top-{fi}`),
 //! labels and handlers are unchanged.
+//!
+//! UI mission, Wave 1 (P05 item O-3; S07 items 2, 5b
+//! and 6): the layer row is two lines now. Measured from
+//! the Phase N headless tree dumps, the single line ran
+//! ≥134 pt past the card: `layer-down-{fi}` already
+//! started past the content edge, `layer-top-{fi}` ended
+//! at x≈438 and the Phase L joint readout at ≈466 —
+//! painted into the centre gutter, unreachable by the
+//! mouse. Line 1 keeps the dot, the name and the opacity
+//! steppers; line 2 takes the reorder cluster
+//! (Bottom/down/up/Top, keys verbatim) with the joint
+//! readout trailing: 77 + 26 + 26 + 58 + 3 gaps × 6 +
+//! readout ≈ 253 of the row's 260 pt inner width. The
+//! row root is the figures panel's two-line variant of
+//! the kit list-row anatomy (the Phase N paragraph
+//! above describes the single-line shell it replaces):
+//! the same px, radius, selected fill and hover as
+//! `design::list_row`, applied to a `col` because the
+//! kit builder itself is a single-line `row`.
+//!
+//! Two behaviours ride the same restructure. The
+//! reorder buttons now render their kit inert twins at
+//! the ends of the list — Down/Up keyed off the row's
+//! `can_move_down` / `can_move_up` (computed and tested
+//! since the panel's first version, but never read by
+//! the builder until now), Bottom/Top off
+//! [`jump_target`] — so an impossible move reads as
+//! unavailable instead of silently no-oping, the pose
+//! panel's gating discipline. And a hidden figure's row
+//! dims: the name takes the chrome family's
+//! `btn_muted_live` form (same box, key and
+//! `select_figure` handler; secondary ink, no
+//! hover/press fills), the layers counterpart of the
+//! figures panel's hidden-name dimming — the dot keeps
+//! the figure colour, as there. Keys, labels and
+//! handler bodies are byte-identical throughout; the
+//! only new row data is the pure derivations on
+//! [`LayerRow`] (`hidden`, `can_jump_top`,
+//! `can_jump_bottom`).
 
 use rune::tok::{self, type_, Theme};
-use rune::{el, row, text, Drag, El, Phase, Tx};
+use rune::{col, el, row, text, Drag, El, Phase, Tx};
 use stykanimate_rs::editor::EditorCore;
 
-use crate::chrome_view::btn;
+use crate::chrome_view::{btn, btn_muted_live};
 use crate::rune_sec::design;
-use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
+use crate::rune_sec::icon_btn::{icon_btn, icon_btn_inert, icon_only_btn, icon_only_btn_inert};
 use crate::State;
 
 /// Opacity change applied by one stepper press.
@@ -203,10 +242,22 @@ pub struct LayerRow {
     pub joint_text: String,
     /// True when this is the editor's selected figure.
     pub selected: bool,
+    /// True when the figure is hidden — the row dims
+    /// (name in secondary ink; see the mission note in
+    /// the module docs).
+    pub hidden: bool,
     /// True when this row can still move up (toward front).
     pub can_move_up: bool,
     /// True when this row can still move down (toward back).
     pub can_move_down: bool,
+    /// True when a Top jump would move this row
+    /// ([`jump_target`] is `Some`) — the Top button is
+    /// live exactly then, inert otherwise.
+    pub can_jump_top: bool,
+    /// True when a Bottom jump would move this row
+    /// ([`jump_target`] is `Some`) — the Bottom button
+    /// is live exactly then, inert otherwise.
+    pub can_jump_bottom: bool,
 }
 
 /// Figure indices in panel order: front (highest index,
@@ -298,8 +349,11 @@ pub fn rows(core: &EditorCore) -> Vec<LayerRow> {
             opacity_pct: opacity_pct(figures[fi].opacity),
             joint_text: joint_label(&figures[fi]),
             selected: fi == core.selected_figure,
+            hidden: figures[fi].hidden,
             can_move_up: can_move_up(fi, figures.len()),
             can_move_down: can_move_down(fi, figures.len()),
+            can_jump_top: jump_target(fi, figures.len(), true).is_some(),
+            can_jump_bottom: jump_target(fi, figures.len(), false).is_some(),
         })
         .collect()
 }
@@ -477,18 +531,31 @@ fn solo_selected(core: &mut EditorCore) {
     core.toggle_solo(core.selected_figure);
 }
 
-/// One layer row: a kit `design::list_row` shell (which
-/// carries the selected mark — the name button no longer
-/// takes the accent fill) holding a colour dot (the
-/// figure's resolved root colour, [`layer_dot_color`]),
-/// name (press selects), opacity readout with −/+
-/// steppers, Bottom/down/up/Top reorder buttons —
-/// Down/Up are chevron icon-only buttons, Bottom/Top are
-/// angles-glyph icon buttons (Phase N spillover; see the
-/// module docs) — and a muted trailing
-/// joint-count readout ([`joint_label`]; unkeyed text,
-/// like the opacity readout). Keys are per-figure:
-/// `layer-row-{fi}`, `layer-dot-{fi}`,
+/// One layer row, on two lines (UI mission Wave 1 —
+/// see the module docs' mission note). The root is the
+/// figures panel's two-line variant of the kit list-row
+/// anatomy: the same px, radius, selected fill and hover
+/// as `design::list_row`, applied to a `col` because the
+/// row carries two control lines (the kit builder itself
+/// is a single-line `row`). The root carries the
+/// selected mark — the name button takes no accent fill.
+///
+/// Line 1: a colour dot (the figure's resolved root
+/// colour, [`layer_dot_color`]), the name (press
+/// selects; a hidden figure's name renders through the
+/// chrome family's muted-live member — same key, same
+/// handler, secondary ink), and the opacity readout
+/// with its −/+ steppers. Line 2: the reorder cluster —
+/// Bottom/down/up/Top; Down/Up are chevron icon-only
+/// buttons, Bottom/Top are angles-glyph icon buttons
+/// (Phase N spillover; see the module docs) — and the
+/// muted trailing joint-count readout ([`joint_label`];
+/// unkeyed text, like the opacity readout). A reorder
+/// button whose move is impossible from this row (the
+/// ends of the list) renders its kit inert twin — same
+/// key, same glyph, no handler — instead of a live
+/// button whose press silently no-ops. Keys are
+/// per-figure: `layer-row-{fi}`, `layer-dot-{fi}`,
 /// `layer-op-dec-{fi}`, `layer-op-inc-{fi}`,
 /// `layer-bottom-{fi}`, `layer-down-{fi}`, `layer-up-{fi}`,
 /// `layer-top-{fi}` (1-based in the key is avoided — keys
@@ -496,79 +563,155 @@ fn solo_selected(core: &mut EditorCore) {
 /// straight back to `Project::figures`).
 fn layer_row(r: &LayerRow, t: &Theme) -> El {
     let fi = r.fi;
-    design::list_row(&format!("layer-row-{fi}"), r.selected, t)
-        .child(
-            el()
-                .key(format!("layer-dot-{fi}"))
-                .size(10.0, 10.0)
-                .radius(5.0)
-                .fill(
-                    crate::stage_view::hex_color(r.dot_color)
-                        .unwrap_or(rune::Color::WHITE),
-                ),
-        )
-        .child(btn(
+    let root = col()
+        .key(format!("layer-row-{fi}"))
+        .w_full()
+        .gap(2.0)
+        .px(8.0)
+        .py(4.0)
+        .radius(design::ROW_RADIUS)
+        .min_h(28.0);
+    let root = if r.selected {
+        root.fill(design::selected_fill())
+    } else {
+        root.hover(t.hover)
+    };
+    // The name button: `btn` exactly as before, or its
+    // muted-live family member while the figure is
+    // hidden — the dimming the figures panel applies to
+    // a hidden figure's name, in this panel's button
+    // dialect. Key, label and handler are identical
+    // either way.
+    let name_btn = if r.hidden {
+        btn_muted_live(
             &format!("layer-name-{fi}"),
             &r.name,
             false,
             t,
             move |s: &mut State| s.core.select_figure(fi),
-        ))
-        .child(el().grow(1.0))
-        .child(btn(
-            &format!("layer-op-dec-{fi}"),
-            "-",
-            false,
-            t,
-            move |s: &mut State| s.core.step_figure_opacity(fi, -OPACITY_STEP),
-        ))
-        .child(
-            text(format!("{}%", r.opacity_pct))
-                .font(type_::LABEL)
-                .color(t.text),
         )
-        .child(btn(
-            &format!("layer-op-inc-{fi}"),
-            "+",
+    } else {
+        btn(
+            &format!("layer-name-{fi}"),
+            &r.name,
             false,
             t,
-            move |s: &mut State| s.core.step_figure_opacity(fi, OPACITY_STEP),
-        ))
-        .child(icon_btn(
-            &format!("layer-bottom-{fi}"),
-            "angles-down",
-            "Bottom",
-            false,
-            t,
-            move |s: &mut State| jump_layer(&mut s.core, fi, false),
-        ))
-        .child(icon_only_btn(
-            &format!("layer-down-{fi}"),
-            "chevron-down",
-            26.0, false,
-            t,
-            move |s: &mut State| move_layer(&mut s.core, fi, -1),
-        ))
-        .child(icon_only_btn(
-            &format!("layer-up-{fi}"),
-            "chevron-up",
-            26.0, false,
-            t,
-            move |s: &mut State| move_layer(&mut s.core, fi, 1),
-        ))
-        .child(icon_btn(
-            &format!("layer-top-{fi}"),
-            "angles-up",
-            "Top",
-            false,
-            t,
-            move |s: &mut State| jump_layer(&mut s.core, fi, true),
-        ))
-        .child(
-            text(r.joint_text.clone())
-                .font(type_::LABEL)
-                .color(t.text_secondary),
+            move |s: &mut State| s.core.select_figure(fi),
         )
+    };
+    root.child(
+        // Line 1: dot / name / opacity steppers.
+        row()
+            .w_full()
+            .gap(6.0)
+            .center_y()
+            .child(
+                el()
+                    .key(format!("layer-dot-{fi}"))
+                    .size(10.0, 10.0)
+                    .radius(5.0)
+                    .fill(
+                        crate::stage_view::hex_color(r.dot_color)
+                            .unwrap_or(rune::Color::WHITE),
+                    ),
+            )
+            .child(name_btn)
+            .child(el().grow(1.0))
+            .child(btn(
+                &format!("layer-op-dec-{fi}"),
+                "-",
+                false,
+                t,
+                move |s: &mut State| s.core.step_figure_opacity(fi, -OPACITY_STEP),
+            ))
+            .child(
+                text(format!("{}%", r.opacity_pct))
+                    .font(type_::LABEL)
+                    .color(t.text),
+            )
+            .child(btn(
+                &format!("layer-op-inc-{fi}"),
+                "+",
+                false,
+                t,
+                move |s: &mut State| s.core.step_figure_opacity(fi, OPACITY_STEP),
+            )),
+    )
+    .child(
+        // Line 2: the reorder cluster, with the joint
+        // readout trailing at the right edge.
+        row()
+            .w_full()
+            .gap(6.0)
+            .center_y()
+            .child(if r.can_jump_bottom {
+                icon_btn(
+                    &format!("layer-bottom-{fi}"),
+                    "angles-down",
+                    "Bottom",
+                    false,
+                    t,
+                    move |s: &mut State| jump_layer(&mut s.core, fi, false),
+                )
+            } else {
+                icon_btn_inert(
+                    &format!("layer-bottom-{fi}"),
+                    "angles-down",
+                    "Bottom",
+                    t,
+                )
+            })
+            .child(if r.can_move_down {
+                icon_only_btn(
+                    &format!("layer-down-{fi}"),
+                    "chevron-down",
+                    26.0, false,
+                    t,
+                    move |s: &mut State| move_layer(&mut s.core, fi, -1),
+                )
+            } else {
+                icon_only_btn_inert(
+                    &format!("layer-down-{fi}"),
+                    "chevron-down",
+                    26.0,
+                    t,
+                )
+            })
+            .child(if r.can_move_up {
+                icon_only_btn(
+                    &format!("layer-up-{fi}"),
+                    "chevron-up",
+                    26.0, false,
+                    t,
+                    move |s: &mut State| move_layer(&mut s.core, fi, 1),
+                )
+            } else {
+                icon_only_btn_inert(
+                    &format!("layer-up-{fi}"),
+                    "chevron-up",
+                    26.0,
+                    t,
+                )
+            })
+            .child(if r.can_jump_top {
+                icon_btn(
+                    &format!("layer-top-{fi}"),
+                    "angles-up",
+                    "Top",
+                    false,
+                    t,
+                    move |s: &mut State| jump_layer(&mut s.core, fi, true),
+                )
+            } else {
+                icon_btn_inert(&format!("layer-top-{fi}"), "angles-up", "Top", t)
+            })
+            .child(el().grow(1.0))
+            .child(
+                text(r.joint_text.clone())
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            ),
+    )
 }
 
 /// The full layers panel: a "Layers" header, one row per
@@ -1075,5 +1218,28 @@ mod tests {
         let _ = opacity_slider(0.0, &t);
         let _ = opacity_slider(0.05, &t);
         let _ = opacity_slider(1.0, &t);
+    }
+
+    #[test]
+    fn rows_carry_hidden_and_jump_reachability() {
+        let mut core = EditorCore::new();
+        core.project.add_figure("B", 0xFF0000, [200.0, 200.0]);
+        core.project.add_figure("C", 0x00FF00, [300.0, 200.0]);
+        core.project.figures[0].hidden = true;
+        let rs = rows(&core);
+        // Front figure (fi 2, first row): a Bottom jump
+        // would move it; a Top jump is already there —
+        // the flags the inert twins key off.
+        assert!(rs[0].can_jump_bottom && !rs[0].can_jump_top);
+        assert!(!rs[0].hidden);
+        // Back figure (fi 0, last row): the inverse, and
+        // its hidden flag is carried onto the row.
+        assert!(rs[2].can_jump_top && !rs[2].can_jump_bottom);
+        assert!(rs[2].hidden);
+        // A single figure can jump neither way, so both
+        // of its jump buttons render inert.
+        let single = rows(&EditorCore::new());
+        assert_eq!(single.len(), 1);
+        assert!(!single[0].can_jump_top && !single[0].can_jump_bottom);
     }
 }

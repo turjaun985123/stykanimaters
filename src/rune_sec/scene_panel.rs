@@ -879,8 +879,10 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
 
     // Kind picker: one button per segment, the current kind
     // accent-filled (keys preserve the GPUI segmented ids
-    // ("wx-seg", n) in string form).
-    let mut kind_row = row().key("wx-kind").gap(4.0).center_y();
+    // ("wx-seg", n) in string form). The row wraps (Phase O,
+    // p05 O-6): one line measured 434.3 pt against the
+    // 316 pt column budget, with wx-seg-5 past the window.
+    let mut kind_row = row().key("wx-kind").gap(4.0).center_y().flex_wrap();
     for (i, label) in KIND_LABELS.iter().enumerate() {
         let kind = if i == 0 { None } else { Some(KINDS[i - 1]) };
         kind_row = kind_row.child(icon_btn(

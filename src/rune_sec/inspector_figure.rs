@@ -42,7 +42,7 @@
 //!   index as `Option<usize>`. The panel ignores the
 //!   return value: selecting the copy and wording the
 //!   status line are the op's business. Key
-//!   `fig-duplicate`.
+//!   `insp-fig-duplicate`.
 //! * Delete figure → `delete_figure()` (editor.rs:1603) —
 //!   key `fig-del` (the GPUI sidebar's tuple-id root),
 //!   danger-styled; the op itself refuses to delete the
@@ -921,7 +921,7 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
             .child(btn("fig-flip", "Flip horizontal", false, t, |s| {
                 s.core.mirror_selected_pose()
             }))
-            .child(btn("fig-duplicate", "Duplicate", false, t, |s| {
+            .child(btn("insp-fig-duplicate", "Duplicate", false, t, |s| {
                 let fi = s.core.selected_figure;
                 s.core.duplicate_figure(fi);
             }))

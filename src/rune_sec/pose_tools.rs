@@ -1225,6 +1225,7 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
         .child(
             row()
                 .gap(4.0)
+                .flex_wrap()
                 .child(if has_pose {
                     btn("pose-copy", "Copy pose", false, t, |s| {
                         copy_pose(&mut s.core, &mut s.pose_clipboard)
