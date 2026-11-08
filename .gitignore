@@ -1,3 +1,5 @@
 /target
 /export
 project.styk.json
+
+__pycache__/
