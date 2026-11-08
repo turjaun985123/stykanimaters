@@ -84,6 +84,22 @@
 //!   added: an onion toggle already exists here as
 //!   `onion` (the GPUI-era key), and a second entry
 //!   flipping the same field would only duplicate it.
+//! * Phase J added six commands over the phase's new
+//!   capabilities: `split-fx-clip` (the selected FX
+//!   clip, split at the playhead frame),
+//!   `mirror-figure` (the selected figure mirrored on
+//!   every frame), `normalise-audio` (every audio clip
+//!   normalised to a 0.9 peak), `duplicate-particle`
+//!   and `delete-particle` (the selected particle
+//!   event) and `delete-stroke` (the selected stroke).
+//!   The four selection-taking shims resolve the shell
+//!   selections (`State::fx_selected`,
+//!   `State::particle_selected`,
+//!   `State::stroke_selected`) at call time and stand
+//!   down with an explaining status when nothing is
+//!   selected; the two delete shims clear the selection
+//!   they consumed, and `duplicate-particle` selects
+//!   the copy it made.
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -455,6 +471,118 @@ fn cmd_toggle_right_panel(s: &mut State) {
     s.show_right = !s.show_right;
 }
 
+// -- Phase J shims: the phase's new capabilities. Four
+// -- of them act on a shell selection (fx_selected,
+// -- particle_selected, stroke_selected — the same
+// -- fields the panels write), so each resolves its
+// -- selection at call time and stands down with an
+// -- explaining status when nothing is selected: a
+// -- palette command that silently did nothing, or
+// -- guessed a target, would be worse than the
+// -- explanation. The ops themselves own every other
+// -- status line (success and refusal alike).
+
+/// Phase J: split the selected FX clip at the
+/// playhead. The split point is the playhead's
+/// authored frame, `core.current` as f32 — the frame
+/// boundary the timeline shows the playhead resting
+/// on, on the same frame axis the clip spans use.
+/// The op refuses (status only, `false`) when that
+/// point is not strictly inside the clip, so an edge
+/// playhead explains itself through the op's wording.
+fn cmd_split_fx_clip(s: &mut State) {
+    match s.fx_selected {
+        Some(i) => {
+            let at = s.core.current as f32;
+            let _ = s.core.fx_split_clip(i, at);
+        }
+        None => {
+            s.core.status = "No FX clip selected to split.".into();
+        }
+    }
+}
+
+/// Phase J: mirror the selected figure on every
+/// frame — the all-frames counterpart of
+/// `mirror-pose` (which mirrors one frame's pose).
+/// Like [`cmd_duplicate_figure`], the shim resolves
+/// the selected figure at call time and forwards it;
+/// the op owns the snapshot, the status and the
+/// no-such-figure refusal.
+fn cmd_mirror_figure(s: &mut State) {
+    let c = &mut s.core;
+    let fi = c.selected_figure;
+    let _ = c.mirror_figure_all_frames(fi);
+}
+
+/// Phase J: normalise every audio clip so its peak
+/// sits at 0.9 — headroom below clipping, the level
+/// the audio panel's own normalise works to. The op
+/// rewrites each clip's gain from its measured peak
+/// and reports how many clips it adjusted; the count
+/// is the panel's business, so the shim discards it.
+fn cmd_normalise_audio(s: &mut State) {
+    let _ = s.core.normalise_all_clips(0.9);
+}
+
+/// Phase J: duplicate the selected particle event.
+/// The op inserts the copy immediately after the
+/// original and returns its index; the shim selects
+/// the copy, as the particles panel selects a newly
+/// added event — what the user just made is what they
+/// most likely want to adjust next. A stale selection
+/// is the op's status-only refusal, and the selection
+/// is left as it was.
+fn cmd_duplicate_particle(s: &mut State) {
+    match s.particle_selected {
+        Some(i) => {
+            if let Some(new) = s.core.particle_duplicate_event(i) {
+                s.particle_selected = Some(new);
+            }
+        }
+        None => {
+            s.core.status = "No particle event selected to duplicate.".into();
+        }
+    }
+}
+
+/// Phase J: delete the selected stroke — the
+/// selection-taking counterpart of
+/// `delete-last-stroke`. The op owns the snapshot
+/// and the status (including the stale-index
+/// refusal); the shim clears the selection it
+/// consumed either way, since the index it named no
+/// longer addresses the same stroke once the list
+/// shifts.
+fn cmd_delete_stroke(s: &mut State) {
+    match s.stroke_selected {
+        Some(i) => {
+            s.core.delete_stroke_at(i);
+            s.stroke_selected = None;
+        }
+        None => {
+            s.core.status = "No stroke selected to delete.".into();
+        }
+    }
+}
+
+/// Phase J: delete the selected particle event;
+/// same shape as [`cmd_delete_stroke`] over
+/// `particle_selected` — the op owns the snapshot
+/// and the status, the shim clears the consumed
+/// selection.
+fn cmd_delete_particle(s: &mut State) {
+    match s.particle_selected {
+        Some(i) => {
+            s.core.particle_delete_event(i);
+            s.particle_selected = None;
+        }
+        None => {
+            s.core.status = "No particle event selected to delete.".into();
+        }
+    }
+}
+
 fn cmd_add_frame(s: &mut State) {
     s.core.add_frame();
 }
@@ -789,6 +917,14 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "toggle-safe-frame", title: "Toggle safe frames guide", group: "View", run: crate::rune_sec::settings_popover::toggle_guides_safe },
     Command { key: "toggle-left-panel", title: "Toggle left panel", group: "View", run: cmd_toggle_left_panel },
     Command { key: "toggle-right-panel", title: "Toggle right panel", group: "View", run: cmd_toggle_right_panel },
+    // -- Phase J (appended: every entry above keeps its
+    // -- place) ------------------------------------------
+    Command { key: "split-fx-clip", title: "Split FX clip at playhead", group: "Effects", run: cmd_split_fx_clip },
+    Command { key: "mirror-figure", title: "Mirror figure (all frames)", group: "Figures", run: cmd_mirror_figure },
+    Command { key: "normalise-audio", title: "Normalise audio levels", group: "Audio", run: cmd_normalise_audio },
+    Command { key: "duplicate-particle", title: "Duplicate particle event", group: "Effects", run: cmd_duplicate_particle },
+    Command { key: "delete-stroke", title: "Delete selected stroke", group: "Draw", run: cmd_delete_stroke },
+    Command { key: "delete-particle", title: "Delete selected particle event", group: "Effects", run: cmd_delete_particle },
 ];
 
 // ----------------------------------------------------------------
@@ -1234,8 +1370,14 @@ mod tests {
         // toggle-frustum, toggle-safe-frame,
         // toggle-left-panel, toggle-right-panel — a
         // toggle-onion candidate was skipped because the
-        // onion toggle already exists as `onion`).
-        assert_eq!(total, 97, "palette should cover 97 commands, has {total}");
+        // onion toggle already exists as `onion`), +6 in
+        // Phase J (split-fx-clip, mirror-figure,
+        // normalise-audio, duplicate-particle,
+        // delete-stroke, delete-particle — the four
+        // selection-taking ones resolve the shell
+        // selections at call time and stand down with an
+        // explanation when nothing is selected).
+        assert_eq!(total, 103, "palette should cover 103 commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }
@@ -1510,6 +1652,109 @@ mod tests {
         (COMMANDS[idx_of("toggle-left-panel")].run)(&mut s);
         (COMMANDS[idx_of("toggle-right-panel")].run)(&mut s);
         assert_eq!((s.show_left, s.show_right), (l, r));
+    }
+
+    #[test]
+    fn phase_j_commands_are_present_and_wired() {
+        use stykanimate_rs::model::{FxClipEntry, Stroke};
+        use stykanimate_rs::vfx::ParticleClip;
+        // All six Phase J keys resolve (idx_of panics if not).
+        for key in [
+            "split-fx-clip",
+            "mirror-figure",
+            "normalise-audio",
+            "duplicate-particle",
+            "delete-stroke",
+            "delete-particle",
+        ] {
+            idx_of(key);
+        }
+        // Split FX clip: with nothing selected the shim
+        // stands down with an explanation and touches
+        // nothing; with a clip selected, the playhead
+        // frame splits it into two clips that between
+        // them span the original.
+        let mut s = crate::init();
+        (COMMANDS[idx_of("split-fx-clip")].run)(&mut s);
+        assert_eq!(s.core.status, "No FX clip selected to split.");
+        assert!(s.core.project.fx_clips.is_empty());
+        s.core.project.fx_clips.push(FxClipEntry {
+            clip: ParticleClip {
+                start: 0.0,
+                duration: 10.0,
+                kind: ClipKind::Burst,
+                color: 0xFF5D5D,
+                color2: None,
+                seed: 1,
+                angle: 0.0,
+                length: 100.0,
+            },
+            figure: 0,
+            node: 0,
+        });
+        s.fx_selected = Some(0);
+        s.core.goto(2);
+        (COMMANDS[idx_of("split-fx-clip")].run)(&mut s);
+        assert_eq!(s.core.project.fx_clips.len(), 2);
+        assert_eq!(s.core.project.fx_clips[0].clip.duration, 2.0);
+        assert_eq!(s.core.project.fx_clips[1].clip.start, 2.0);
+        assert_eq!(s.core.project.fx_clips[1].clip.duration, 8.0);
+        // Mirror figure: the shim passes the selected
+        // figure to the all-frames op, whose own status
+        // reports the mirror.
+        let mut s = crate::init();
+        (COMMANDS[idx_of("mirror-figure")].run)(&mut s);
+        assert!(
+            s.core.status.contains("mirrored on all"),
+            "unexpected status: {}",
+            s.core.status
+        );
+        // Delete stroke: no selection is an explaining
+        // no-op; a selection deletes exactly that stroke
+        // and clears the selection it consumed.
+        let mut s = crate::init();
+        (COMMANDS[idx_of("delete-stroke")].run)(&mut s);
+        assert_eq!(s.core.status, "No stroke selected to delete.");
+        let stroke = |color: u32| Stroke {
+            frame: 0,
+            points: vec![[0.0, 0.0]],
+            color,
+            width: 1.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+        };
+        s.core.project.strokes.push(stroke(0x111111));
+        s.core.project.strokes.push(stroke(0x222222));
+        s.stroke_selected = Some(0);
+        (COMMANDS[idx_of("delete-stroke")].run)(&mut s);
+        assert_eq!(s.core.project.strokes.len(), 1);
+        assert_eq!(s.core.project.strokes[0].color, 0x222222);
+        assert_eq!(s.stroke_selected, None);
+        // Duplicate particle: no selection explains; a
+        // selection duplicates the event and selects
+        // the copy the op reports.
+        let mut s = crate::init();
+        (COMMANDS[idx_of("duplicate-particle")].run)(&mut s);
+        assert_eq!(s.core.status, "No particle event selected to duplicate.");
+        let first = s.core.particle_add_event(0, 10.0, 10.0);
+        s.particle_selected = Some(first);
+        (COMMANDS[idx_of("duplicate-particle")].run)(&mut s);
+        assert_eq!(s.core.project.particles.len(), 2);
+        assert_eq!(s.particle_selected, Some(first + 1));
+        // Delete particle: no selection is an explaining
+        // no-op; a selection deletes exactly that event
+        // and clears the selection it consumed.
+        let mut s = crate::init();
+        (COMMANDS[idx_of("delete-particle")].run)(&mut s);
+        assert_eq!(s.core.status, "No particle event selected to delete.");
+        let a = s.core.particle_add_event(0, 10.0, 10.0);
+        s.core.particle_add_event(0, 20.0, 20.0);
+        s.particle_selected = Some(a);
+        (COMMANDS[idx_of("delete-particle")].run)(&mut s);
+        assert_eq!(s.core.project.particles.len(), 1);
+        assert_eq!(s.core.project.particles[0].x, 20.0);
+        assert_eq!(s.particle_selected, None);
     }
 
     // -- fuzzy_score -------------------------------------------

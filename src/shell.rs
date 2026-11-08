@@ -152,6 +152,15 @@ fn file_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// The recovery snapshot's modification time — when the
+/// shell last autosaved — or `None` when no snapshot
+/// exists. The status strip's autosave segment (Phase J)
+/// reads this to show how fresh the safety net is; every
+/// filesystem error folds into `None`, like `file_mtime`.
+pub fn recovery_modified() -> Option<SystemTime> {
+    file_mtime(&default_dir().join(RECOVERY_FILE))
+}
+
 /// The pure decision behind
 /// [`recovery_is_newer_than_last_project_in`]: no recovery
 /// snapshot → `false`; a snapshot with no last-saved project

@@ -24,7 +24,8 @@
 //! [`EditorCore::start_playback_audio`],
 //! [`EditorCore::stop_playback_audio`],
 //! [`EditorCore::sync_playback_audio_on_wrap`],
-//! [`EditorCore::sync_playback_audio_on_seek`] and
+//! [`EditorCore::sync_playback_audio_on_seek`],
+//! [`EditorCore::sync_playback_audio_on_drift`] and
 //! [`EditorCore::playback_audio_active`] — delegating to that
 //! same player and mix. Start uses the GPUI shell's exact
 //! playhead convention: `current` frame over `fps` (floored at
@@ -36,7 +37,14 @@
 //! seek sync closes the scrub-follow limit (Phase I): when
 //! the tracking shows the playhead jumping forward while
 //! playing, it restarts the audio from the new playhead, so a
-//! seek is heard from where the picture landed.
+//! seek is heard from where the picture landed. The drift
+//! sync (Phase J) bounds the last gap — the missing
+//! sample-clock sync: every start records a playback clock
+//! (wall-clock instant + the frame the sound started at),
+//! and when the shell's fractional playhead has wandered
+//! further from the clock's prediction than
+//! [`DRIFT_TOLERANCE_FRAMES`], the mix restarts at the
+//! playhead, re-basing the clock.
 //!
 //! ## Where the player lives, and why
 //!
@@ -54,9 +62,31 @@
 //! ## Honest limits (inherited, not new)
 //!
 //! The player does not synchronise against a sample clock
-//! (`audio.rs` documents this), so within one pass the audio
-//! and the picture can drift apart by however much their
-//! clocks disagree.
+//! (`audio.rs` documents this). Phase J's drift sync bounds
+//! what that costs: within one pass the audio and the picture
+//! can still drift apart, but only until the gap exceeds
+//! [`DRIFT_TOLERANCE_FRAMES`] (2.5 frames), at which point
+//! [`EditorCore::sync_playback_audio_on_drift`] restarts the
+//! mix at the playhead. The correction is a restart, not a
+//! nudge — a listener may hear the seam — and two things
+//! about it are approximate by construction:
+//!
+//! - **The clock's prediction ignores per-frame durations.**
+//!   The expected frame advances at the project's `fps`,
+//!   while `advance_play` divides by the current frame's
+//!   duration multiplier, so during a frame whose duration
+//!   is not 1.0 the playhead legitimately moves at a
+//!   different rate from real time while the audio does
+//!   not wait. A long slow frame can therefore trip the
+//!   tolerance on its own; the restart then re-bases both
+//!   clocks at the frame the user is looking at, which is
+//!   the least-wrong anchor available.
+//! - **The prediction is not folded.** The expected frame
+//!   counts up from the start of the current pass without
+//!   wrapping; the wrap and seek syncs restart (and so
+//!   re-base the clock) on the same discontinuities that
+//!   fold the playhead, so within a pass the two stay
+//!   comparable.
 //!
 //! The loop limit is closed for the wrap case:
 //! [`EditorCore::sync_playback_audio_on_wrap`] restarts the
@@ -88,6 +118,7 @@
 //!   but it is not impossible.
 
 use std::cell::RefCell;
+use std::time::Instant;
 
 use crate::audio::AudioPlayer;
 use crate::editor::EditorCore;
@@ -96,6 +127,18 @@ thread_local! {
     /// The one playback player for this thread (see the module
     /// docs for why it lives here rather than in `EditorCore`).
     static PLAYER: RefCell<AudioPlayer> = RefCell::new(AudioPlayer::new());
+
+    /// The playback clock for the current pass: the wall-clock
+    /// instant the running sound started, and the frame it
+    /// started at. Written by
+    /// [`EditorCore::start_playback_audio`] on every successful
+    /// start (so the wrap, seek and drift restarts — all of
+    /// which funnel through stop + start — re-base it), and
+    /// cleared by [`EditorCore::stop_playback_audio`]. It lives
+    /// beside the player for the same reason the player does:
+    /// it is process state, not project state, and does not
+    /// belong in the core's snapshot model.
+    static CLOCK: RefCell<Option<(Instant, f32)>> = const { RefCell::new(None) };
 }
 
 /// The playhead position `start_playback_audio` starts from, in
@@ -162,6 +205,61 @@ pub fn playhead_seeked(prev_frame: usize, cur_frame: usize) -> bool {
     cur_frame > prev_frame && cur_frame - prev_frame > 1
 }
 
+/// How far apart, in frames, the picture and the sound may
+/// drift before [`EditorCore::sync_playback_audio_on_drift`]
+/// restarts the mix. Two and a half frames is a little under
+/// a tenth of a second at the rates this editor targets —
+/// large enough that ordinary scheduling jitter between the
+/// shell's poll ticks and the player's process never trips
+/// it, small enough that a listener is unlikely to notice
+/// lip-sync error before the correction lands.
+pub const DRIFT_TOLERANCE_FRAMES: f32 = 2.5;
+
+/// The signed drift between where the playback clock says
+/// the sound should be (`expected`) and where the picture
+/// actually is (`actual`), in frames: positive when the
+/// playhead is ahead of the sound, negative when it trails
+/// it. Pure arithmetic behind
+/// [`EditorCore::sync_playback_audio_on_drift`].
+pub fn drift_frames(expected: f32, actual: f32) -> f32 {
+    actual - expected
+}
+
+/// Has the drift grown past [`DRIFT_TOLERANCE_FRAMES`] in
+/// either direction? The comparison is strict: a drift of
+/// exactly the tolerance is still within bounds.
+pub fn drift_exceeded(expected: f32, actual: f32) -> bool {
+    drift_frames(expected, actual).abs() > DRIFT_TOLERANCE_FRAMES
+}
+
+/// Where the playback clock predicts the playhead should be
+/// `elapsed_secs` after a pass started at `start_frame`: the
+/// start frame plus elapsed time at the project rate, the
+/// rate floored at 1 fps exactly as `playhead_secs` floors
+/// it. The prediction is deliberately not folded by the
+/// timeline length or a loop range — restarts re-base the
+/// clock on those discontinuities (see the module docs), so
+/// within one pass a plain count-up is the honest shape.
+fn expected_frame(start_frame: f32, elapsed_secs: f32, fps: f32) -> f32 {
+    start_frame + elapsed_secs * fps.max(1.0)
+}
+
+/// The drift restart decision, pure: restart only while
+/// playing, only while sound is actually running, and only
+/// when a playback clock exists to predict from and its
+/// prediction has been exceeded. `expected` is `None` when
+/// no start has recorded a clock (or a stop cleared it).
+fn drift_restart_needed(
+    playing: bool,
+    audio_active: bool,
+    expected: Option<f32>,
+    actual: f32,
+) -> bool {
+    playing
+        && audio_active
+        && expected.is_some_and(|expected| drift_exceeded(expected, actual))
+}
+
 impl EditorCore {
     /// Start hearing the project: every audio clip audible at
     /// the current frame is played together through
@@ -185,14 +283,33 @@ impl EditorCore {
         });
         if let Err(error) = result {
             self.status = format!("Audio playback failed: {error}.");
+        } else {
+            // Re-base the playback clock. The sound starts at
+            // the integer `current` frame (`playhead_secs`'
+            // convention), so that — not the fractional
+            // playhead, which may sit part-way through the
+            // frame — is the frame the clock counts from.
+            // This is the only start path: the wrap, seek and
+            // drift syncs all restart through stop + start,
+            // so every pass re-bases here. A start where
+            // nothing is audible also records a clock, but it
+            // can do no harm: the drift sync checks
+            // `playback_audio_active` before it ever reads
+            // the clock, and the next start overwrites it.
+            CLOCK.with(|clock| {
+                *clock.borrow_mut() = Some((Instant::now(), self.current as f32));
+            });
         }
     }
 
     /// Stop any sound a previous
     /// [`EditorCore::start_playback_audio`] started. Safe to
-    /// call when nothing is playing.
+    /// call when nothing is playing. Also clears the playback
+    /// clock: with no pass running there is nothing for the
+    /// drift sync to predict from.
     pub fn stop_playback_audio(&mut self) {
         PLAYER.with(|player| player.borrow_mut().stop());
+        CLOCK.with(|clock| *clock.borrow_mut() = None);
     }
 
     /// Re-sync the audio after a loop wrap: if the playhead
@@ -274,6 +391,45 @@ impl EditorCore {
     pub fn sync_playback_audio_on_seek(&mut self, prev_frame: usize, cur_frame: usize) {
         let seeked = self.playing && playhead_seeked(prev_frame, cur_frame);
         if seeked && self.playback_audio_active() {
+            self.stop_playback_audio();
+            self.start_playback_audio();
+        }
+    }
+
+    /// Re-sync the audio after clock drift: if the fractional
+    /// playhead (`core.playhead` — the shell's sub-frame
+    /// position, of which `current` is the floor) has wandered
+    /// further from the playback clock's prediction than
+    /// [`DRIFT_TOLERANCE_FRAMES`] while playing and sound is
+    /// actually running — the decision lives in
+    /// `drift_restart_needed`, over the pure `expected_frame`
+    /// and `drift_exceeded` — restart the mix at the playhead
+    /// via stop + start.
+    ///
+    /// The restart reuses [`EditorCore::start_playback_audio`],
+    /// so it inherits that method's behaviour exactly: it
+    /// starts at the current frame, succeeds silently when
+    /// nothing is audible there, reports a player launch
+    /// failure on `core.status`, and re-bases the playback
+    /// clock, so a pass that keeps drifting is corrected at
+    /// most once per tolerance of accumulated error rather
+    /// than on every tick.
+    ///
+    /// When the drift is within tolerance, playback is
+    /// stopped, no audio is active, or no clock exists (no
+    /// successful start since the last stop), this is a no-op
+    /// and writes nothing to the status line. The shell calls
+    /// it from poll beside the wrap and seek syncs, throttled
+    /// to ticks where the frame changed (integrator wiring);
+    /// the per-call cost is one clock read plus one
+    /// process-liveness check.
+    pub fn sync_playback_audio_on_drift(&mut self) {
+        let clock = CLOCK.with(|clock| *clock.borrow());
+        let expected = clock.map(|(started, start_frame)| {
+            expected_frame(start_frame, started.elapsed().as_secs_f32(), self.project.fps)
+        });
+        if drift_restart_needed(self.playing, self.playback_audio_active(), expected, self.playhead)
+        {
             self.stop_playback_audio();
             self.start_playback_audio();
         }
@@ -521,6 +677,106 @@ mod tests {
         // full-timeline fold and the loop-range fold alike.
         assert!(!playhead_seeked(9, 0));
         assert!(!playhead_seeked(7, 3));
+    }
+
+    #[test]
+    fn drift_frames_is_the_signed_gap() {
+        // Positive: the playhead is ahead of the sound.
+        assert_eq!(drift_frames(10.0, 12.5), 2.5);
+        // Negative: the playhead trails the sound.
+        assert_eq!(drift_frames(10.0, 7.5), -2.5);
+        assert_eq!(drift_frames(4.0, 4.0), 0.0);
+        assert_eq!(drift_frames(0.0, 0.25), 0.25);
+    }
+
+    #[test]
+    fn drift_exceeded_only_past_the_tolerance() {
+        // Exactly at the tolerance is still within bounds, in
+        // both directions (the comparison is strict).
+        assert!(!drift_exceeded(10.0, 10.0 + DRIFT_TOLERANCE_FRAMES));
+        assert!(!drift_exceeded(10.0, 10.0 - DRIFT_TOLERANCE_FRAMES));
+        assert!(!drift_exceeded(10.0, 10.0));
+        assert!(!drift_exceeded(10.0, 11.0));
+        // A hair past it, in either direction, is exceeded.
+        assert!(drift_exceeded(10.0, 10.0 + DRIFT_TOLERANCE_FRAMES + 0.01));
+        assert!(drift_exceeded(10.0, 10.0 - DRIFT_TOLERANCE_FRAMES - 0.01));
+        assert!(drift_exceeded(0.0, 100.0));
+        assert!(drift_exceeded(100.0, 0.0));
+    }
+
+    #[test]
+    fn expected_frame_counts_up_from_the_start() {
+        // Two seconds at 24 fps from frame 10 lands on 58.
+        assert_eq!(expected_frame(10.0, 2.0, 24.0), 58.0);
+        assert_eq!(expected_frame(0.0, 0.0, 24.0), 0.0);
+        assert_eq!(expected_frame(3.0, 0.5, 12.0), 9.0);
+        // Non-positive rates floor at 1 fps, the same
+        // defensive floor `playhead_secs` uses.
+        assert_eq!(expected_frame(10.0, 2.0, 0.0), 12.0);
+    }
+
+    #[test]
+    fn drift_restart_needs_playing_active_audio_a_clock_and_real_drift() {
+        // The one shape that restarts: playing, sound running,
+        // a clock predicting 10.0, the playhead far from it.
+        assert!(drift_restart_needed(true, true, Some(10.0), 20.0));
+        assert!(drift_restart_needed(true, true, Some(10.0), 0.0));
+        // Within tolerance: no restart.
+        assert!(!drift_restart_needed(true, true, Some(10.0), 12.5));
+        assert!(!drift_restart_needed(true, true, Some(10.0), 10.0));
+        // Paused: the playhead is not supposed to be moving,
+        // and Play makes its own fresh start.
+        assert!(!drift_restart_needed(false, true, Some(10.0), 20.0));
+        // No sound running: nothing to re-sync, however large
+        // the nominal gap (the clock may be a silent start's).
+        assert!(!drift_restart_needed(true, false, Some(10.0), 20.0));
+        // No clock: no start has recorded one (or a stop
+        // cleared it), so there is nothing to predict from.
+        assert!(!drift_restart_needed(true, true, None, 20.0));
+    }
+
+    #[test]
+    fn start_records_the_clock_and_stop_clears_it() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        // A fresh core's thread has no clock.
+        assert!(CLOCK.with(|clock| clock.borrow().is_none()));
+        core.current = 3;
+        core.start_playback_audio();
+        // The clock is based at the integer frame the sound
+        // starts from — `current`, not the fractional
+        // playhead — even though nothing was audible.
+        let recorded = CLOCK.with(|clock| *clock.borrow());
+        let (started, start_frame) = recorded.expect("start records a clock");
+        assert_eq!(start_frame, 3.0);
+        assert!(started.elapsed().as_secs_f32() < 5.0);
+        core.stop_playback_audio();
+        assert!(CLOCK.with(|clock| clock.borrow().is_none()));
+    }
+
+    #[test]
+    fn drift_sync_without_audio_is_a_silent_no_op() {
+        // Plant a clock predicting far from the playhead:
+        // started 10 s ago at frame 0 of a 24 fps project, so
+        // the prediction is frame 240 while the picture sits
+        // at frame 0 — drift far past tolerance. With no clips
+        // the player is never active, so even this textbook
+        // drift shape must leave everything untouched.
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.fps = 24.0;
+        core.playing = true;
+        core.playhead = 0.0;
+        CLOCK.with(|clock| {
+            *clock.borrow_mut() = Some((Instant::now() - std::time::Duration::from_secs(10), 0.0));
+        });
+        core.status = "Sentinel.".into();
+        core.sync_playback_audio_on_drift();
+        assert_eq!(core.status, "Sentinel.");
+        assert!(!core.playback_audio_active());
+        // A no-op does not consume the clock either.
+        assert!(CLOCK.with(|clock| clock.borrow().is_some()));
+        core.stop_playback_audio();
     }
 
     #[test]

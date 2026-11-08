@@ -139,6 +139,58 @@
 //!   prims, so the glow sits under the stroke it marks and
 //!   the stroke itself stays crisp on top.
 //!
+//! ## Vertex dots (Phase J, section 34)
+//!
+//! [`stroke_points_geometry`] marks the *edit points* of
+//! the selected stroke: [`highlight_geometry`] shows the
+//! stroke's path as a glow, but the vertices a user would
+//! grab to reshape it were invisible. The contract:
+//!
+//! * **One dot per vertex** of the stroke's *base
+//!   polyline* (`Stroke::points`), for every kind of
+//!   stroke: a plain stroke's path points, a filled
+//!   stroke's polygon vertices, and a spray stroke's base
+//!   points — **not** its scatter dots (the Phase G
+//!   picking convention, below: the authored points are
+//!   the stroke's geometry; the scatter is decoration
+//!   derived from them). No spray → filled → plain
+//!   decomposition is needed here: vertices are vertices
+//!   however the stroke renders.
+//! * **Representation**: one [`StrokePrim::Dots`] per
+//!   vertex, `pts` holding exactly that vertex and
+//!   `radius` = [`VERTEX_HALF`]. `Dots` is the prim the
+//!   stage draws as a filled disc (the `ngon` workaround),
+//!   and one prim per dot mirrors this layer's spray
+//!   convention, keeping the list homogeneous with the
+//!   highlight list it joins. A filled stroke's vertices
+//!   are its *stored* points — not the highlight
+//!   outline's expanded/shifted ones — because the dots
+//!   mark where the authored points actually are.
+//! * **Indexing and frame rule match
+//!   [`highlight_geometry`]**: project-wide index, and a
+//!   stroke not on the authored frame yields an empty
+//!   vec — the dots are part of the highlight, so they
+//!   obey its rule and the integrator can draw the
+//!   result unconditionally. An out-of-range index
+//!   yields an empty vec, never a panic.
+//! * **Degenerate strokes**: a single-point stroke gets
+//!   its one dot (the lone point is real geometry — the
+//!   picking pass treats it so, below), even though
+//!   `highlight_geometry` draws no underlay for it; a
+//!   zero-point stroke gets none. Unlike the highlight,
+//!   there is no ≥ 2-point rule: the dots mark points,
+//!   not the drawn shape.
+//! * **Colours are the stroke's own**, `opacity` 1.0 —
+//!   colour-policy-free like the highlight. The
+//!   integrator's accent pass recolours the dots to the
+//!   same accent and the conversion multiplies the
+//!   opacity by the highlight alpha, so dots land at the
+//!   same strength as the glow they accompany.
+//! * **Draw order (integrator)**: draw the dots in the
+//!   same highlight pass as [`highlight_geometry`],
+//!   immediately after its prims — same slot, same
+//!   accent, so path and points read as one selection.
+//!
 //! ## Picking (Phase G, section 5)
 //!
 //! [`stroke_at_point`] is the inverse of the draw pass:
@@ -422,6 +474,54 @@ pub fn highlight_geometry(core: &EditorCore, project_index: usize) -> Vec<Stroke
         }];
     }
     Vec::new()
+}
+
+/// Half-extent (stage units) of one vertex dot: the
+/// disc radius a vertex of the selected stroke is
+/// marked with. Sized against the highlight underlay's
+/// pad ([`HIGHLIGHT_WIDTH_PAD`], also 3.0): a dot on a
+/// hairline stroke reads at the same scale as the glow
+/// around it, and on a fat stroke it stays a point
+/// marker rather than a blob.
+pub const VERTEX_HALF: f32 = 3.0;
+
+/// Vertex-dot geometry for one authored stroke, in
+/// stage coordinates: one [`StrokePrim::Dots`] per
+/// vertex of the stroke's base polyline, each dot a
+/// disc of radius [`VERTEX_HALF`] centred exactly on
+/// its vertex. See the module docs ("Vertex dots") for
+/// the full contract: project-wide indexing and the
+/// authored-frame rule (both shared with
+/// [`highlight_geometry`] — an out-of-range index or an
+/// off-frame stroke yields an empty vec), the base
+/// polyline for every stroke kind (spray marks its
+/// authored points, never its scatter), and the colour
+/// policy (the stroke's own colour at opacity 1.0; the
+/// integrator's accent pass recolours and fades). Pure,
+/// like [`highlight_geometry`]: same project state,
+/// same result.
+pub fn stroke_points_geometry(core: &EditorCore, project_index: usize) -> Vec<StrokePrim> {
+    let project = &core.project;
+    let Some(stroke) = project.strokes.get(project_index) else {
+        return Vec::new();
+    };
+    // Only a stroke the stage draws now gets its points
+    // marked — the highlight's frame rule.
+    if stroke.frame != authored_frame(core) {
+        return Vec::new();
+    }
+    // The base polyline's vertices, one dot each,
+    // whatever kind of stroke carries them.
+    stroke
+        .points
+        .iter()
+        .map(|&p| StrokePrim::Dots {
+            pts: vec![p],
+            radius: VERTEX_HALF,
+            color: stroke.color,
+            opacity: 1.0,
+        })
+        .collect()
 }
 
 /// The pick radius, in stage units, the shell should
@@ -863,6 +963,136 @@ mod tests {
     fn highlight_sub_two_point_plain_stroke_is_empty() {
         let core = core_with(vec![plain(0, &[[5.0, 5.0]], 0x111111, 4.0)]);
         assert!(highlight_geometry(&core, 0).is_empty());
+    }
+
+    #[test]
+    fn vertex_dots_one_per_point_at_the_polyline_positions() {
+        let pts = [[10.0, 20.0], [30.0, 40.0], [50.0, 20.0]];
+        let core = core_with(vec![plain(0, &pts, 0x2686E8, 6.0)]);
+        let geo = stroke_points_geometry(&core, 0);
+        assert_eq!(geo.len(), pts.len(), "one dot prim per vertex");
+        for (prim, &p) in geo.iter().zip(pts.iter()) {
+            match prim {
+                StrokePrim::Dots {
+                    pts: dot_pts,
+                    radius,
+                    color,
+                    opacity,
+                } => {
+                    assert_eq!(*dot_pts, vec![p], "the dot sits on its vertex");
+                    assert_eq!(*radius, VERTEX_HALF);
+                    assert_eq!(*radius, 3.0, "the pinned half-extent");
+                    assert_eq!(*color, 0x2686E8, "dots carry the stroke's colour");
+                    assert_eq!(*opacity, 1.0, "the accent pass applies the fade");
+                }
+                other => panic!("vertex dots must be Dots, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn vertex_dots_uses_the_project_wide_index() {
+        // The delete_stroke_at indexing, shared with
+        // highlight_geometry: index 1 marks the second
+        // stroke's points, not the first's.
+        let core = core_with(vec![
+            plain(0, &[[0.0, 0.0], [10.0, 0.0]], 0x111111, 4.0),
+            plain(0, &[[0.0, 5.0], [10.0, 5.0], [20.0, 5.0]], 0x222222, 4.0),
+        ]);
+        let geo = stroke_points_geometry(&core, 1);
+        assert_eq!(geo.len(), 3);
+        match &geo[0] {
+            StrokePrim::Dots { pts, color, .. } => {
+                assert_eq!(*pts, vec![[0.0, 5.0]]);
+                assert_eq!(*color, 0x222222);
+            }
+            other => panic!("expected a Dots prim, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vertex_dots_missing_index_is_empty() {
+        let core = core_with(vec![plain(0, &[[0.0, 0.0], [10.0, 0.0]], 0x111111, 4.0)]);
+        assert!(stroke_points_geometry(&core, 1).is_empty());
+        assert!(stroke_points_geometry(&core, usize::MAX).is_empty());
+        let empty = core_with(Vec::new());
+        assert!(stroke_points_geometry(&empty, 0).is_empty());
+    }
+
+    #[test]
+    fn vertex_dots_spray_marks_the_base_points_not_the_scatter() {
+        let pts = [[100.0, 100.0], [160.0, 100.0]];
+        let mut s = plain(0, &pts, 0xE8862E, 6.0);
+        s.spray = Some(SprayMark {
+            seed: 7,
+            radius: 10.0,
+            opacity: 0.8,
+        });
+        let core = core_with(vec![s]);
+        let geo = stroke_points_geometry(&core, 0);
+        // Two authored points -> two dots, NOT the twelve
+        // scatter dots the base layer draws for this
+        // stroke (2 points x 6 dots per point).
+        assert_eq!(geo.len(), 2);
+        for (prim, &p) in geo.iter().zip(pts.iter()) {
+            match prim {
+                StrokePrim::Dots { pts: dot_pts, .. } => {
+                    assert_eq!(*dot_pts, vec![p], "dot on the base point, not a scatter dot");
+                }
+                other => panic!("vertex dots must be Dots, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn vertex_dots_filled_marks_the_stored_polygon_vertices() {
+        // The stored points, not the highlight outline's
+        // expanded ones: the dots mark where the authored
+        // points actually are.
+        let pts = [[0.0, 0.0], [40.0, 0.0], [20.0, 30.0]];
+        let mut s = plain(0, &pts, 0x445566, 3.0);
+        s.fill = Some(0x112233);
+        let core = core_with(vec![s]);
+        let geo = stroke_points_geometry(&core, 0);
+        assert_eq!(geo.len(), 3);
+        for (prim, &p) in geo.iter().zip(pts.iter()) {
+            match prim {
+                StrokePrim::Dots {
+                    pts: dot_pts,
+                    color,
+                    ..
+                } => {
+                    assert_eq!(*dot_pts, vec![p]);
+                    assert_eq!(*color, 0x445566, "the stroke's colour, not the fill colour");
+                }
+                other => panic!("vertex dots must be Dots, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn vertex_dots_other_frame_stroke_is_empty() {
+        // The highlight's frame rule: a stroke the stage
+        // is not drawing gets no dots either.
+        let core = core_with(vec![plain(1, &[[0.0, 0.0], [10.0, 0.0]], 0x111111, 4.0)]);
+        assert!(stroke_points_geometry(&core, 0).is_empty());
+    }
+
+    #[test]
+    fn vertex_dots_degenerate_strokes() {
+        // A lone point is real geometry (the picking pass
+        // treats it so): it gets its one dot, even though
+        // highlight_geometry draws no underlay for it.
+        let core = core_with(vec![plain(0, &[[5.0, 5.0]], 0x111111, 4.0)]);
+        let geo = stroke_points_geometry(&core, 0);
+        assert_eq!(geo.len(), 1);
+        match &geo[0] {
+            StrokePrim::Dots { pts, .. } => assert_eq!(*pts, vec![[5.0, 5.0]]),
+            other => panic!("expected a Dots prim, got {other:?}"),
+        }
+        // No points: nothing to mark.
+        let core = core_with(vec![plain(0, &[], 0x111111, 4.0)]);
+        assert!(stroke_points_geometry(&core, 0).is_empty());
     }
 
     #[test]

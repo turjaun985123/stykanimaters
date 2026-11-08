@@ -69,7 +69,11 @@
 //!   hidden entirely, and a filter matching nothing at all
 //!   shows a muted "No effects match the filter" line
 //!   instead of a silently empty grid. Presets are not
-//!   filtered.
+//!   filtered. Phase J: the filter also matches the
+//!   category names themselves ([`category_matches`]) —
+//!   a query naming a category ("energy", "nat") shows
+//!   that category's whole kind list, unioned with the
+//!   ordinary kind-name matches.
 //! * **Recent** — a row under the filter showing the last
 //!   [`MAX_RECENT`] kinds added from this panel, most
 //!   recent first, no duplicates ([`record_recent`] is the
@@ -274,10 +278,27 @@ pub struct FxBrowserState {
     pub recent: Vec<ClipKind>,
 }
 
+/// True when the filter `query` names `category`:
+/// case-insensitive substring against the category name
+/// itself (so "energy" and "nat" both name their
+/// category). An empty (or whitespace-only) query is
+/// NOT a category match — matching everything is
+/// [`kind_matches`]' empty-query rule, and conflating
+/// the two would make every category "match" an empty
+/// filter. Phase J: this is the rule that lets a filter
+/// show a whole category (see [`kind_matches`]).
+pub fn category_matches(category: &str, query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    !q.is_empty() && category.to_lowercase().contains(&q)
+}
+
 /// True when `entry` matches the filter `query`:
 /// case-insensitive substring against the kind's
 /// snake-case name and its humanised label (so "ring"
-/// finds Shock ring either way). An empty (or
+/// finds Shock ring either way) — or against the name
+/// of the category the kind belongs to, so a query
+/// naming a category matches every kind in it (Phase
+/// J; see [`category_matches`]). An empty (or
 /// whitespace-only) query matches everything — the
 /// `library_panel::name_matches` rule, mirrored.
 pub fn kind_matches(entry: &FxKindEntry, query: &str) -> bool {
@@ -285,6 +306,7 @@ pub fn kind_matches(entry: &FxKindEntry, query: &str) -> bool {
     q.is_empty()
         || entry.name.to_lowercase().contains(&q)
         || kind_label(entry.name).to_lowercase().contains(&q)
+        || category_matches(entry.category, query)
 }
 
 /// The categories the grid should show for `query`, in
@@ -294,6 +316,12 @@ pub fn kind_matches(entry: &FxKindEntry, query: &str) -> bool {
 /// it). An empty query yields all five categories at
 /// full size; a query matching nothing yields an empty
 /// vec, which the builder turns into a "no match" line.
+/// Because [`kind_matches`] also matches category
+/// names, a category the query names appears at full
+/// size; the union needs no deduplication step — every
+/// kind sits in exactly one category and is visited
+/// exactly once, so category order and table order
+/// fully determine the result.
 pub fn visible_categories(
     query: &str,
 ) -> Vec<(&'static str, Vec<&'static FxKindEntry>)> {
@@ -745,6 +773,116 @@ mod tests {
         // Nothing matches: no categories at all (the
         // builder renders the "no match" line for this).
         assert!(visible_categories("zzz-no-such-effect").is_empty());
+    }
+
+    // ---- Category-name matching (Phase J) ----
+
+    #[test]
+    fn category_matches_is_case_insensitive_substring_on_the_name() {
+        assert!(category_matches("Energy", "energy"));
+        assert!(category_matches("Energy", "ENER"));
+        assert!(category_matches("Nature", "nat"));
+        assert!(category_matches("Particles", "part"));
+        assert!(!category_matches("Energy", "magic"));
+        assert!(
+            !category_matches("Energy", "beam"),
+            "kind names are not categories"
+        );
+        // An empty filter is not a category match (that
+        // is kind_matches' match-everything rule instead).
+        assert!(!category_matches("Energy", ""));
+        assert!(!category_matches("Energy", "   "));
+    }
+
+    #[test]
+    fn kind_matches_also_matches_through_the_kinds_category() {
+        // A kind matches when the query names its
+        // category, even though neither its snake-case
+        // name nor its humanised label contains the
+        // query ("prism" has no "energy" in it).
+        assert!(kind_matches(entry_of(ClipKind::Beam), "energy"));
+        assert!(kind_matches(entry_of(ClipKind::Prism), "ENER"));
+        // A kind from another category does not match.
+        assert!(!kind_matches(entry_of(ClipKind::Burst), "energy"));
+        assert!(!kind_matches(entry_of(ClipKind::Sparkle), "energy"));
+    }
+
+    #[test]
+    fn visible_categories_for_a_category_query_is_that_category_at_full_size() {
+        // "energy" names no kind; it names the category,
+        // so the whole category shows, in table order.
+        let visible = visible_categories("energy");
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].0, "Energy");
+        let kinds: Vec<ClipKind> = visible[0].1.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ClipKind::Beam,
+                ClipKind::Aura,
+                ClipKind::Lightning,
+                ClipKind::Prism,
+            ]
+        );
+
+        // A substring of a category name works the same
+        // way: "nat" is Nature (and matches no kind name
+        // anywhere in the table — verified against
+        // FX_KINDS when this test was written).
+        let visible = visible_categories("nat");
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].0, "Nature");
+        let kinds: Vec<ClipKind> = visible[0].1.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ClipKind::Leaves,
+                ClipKind::Petals,
+                ClipKind::Bubbles,
+                ClipKind::Aurora,
+            ]
+        );
+    }
+
+    #[test]
+    fn visible_categories_unions_kind_and_category_matches_without_duplicates() {
+        // "par" is a substring of the kind name "sparkle"
+        // (Magic) and of the category name "Particles":
+        // the result is the union — Sparkle under Magic,
+        // then the whole Particles category — in category
+        // order, each kind exactly once.
+        let visible = visible_categories("par");
+        let names: Vec<&str> = visible.iter().map(|(cat, _)| *cat).collect();
+        assert_eq!(names, vec!["Magic", "Particles"]);
+        let magic: Vec<ClipKind> = visible[0].1.iter().map(|e| e.kind).collect();
+        assert_eq!(magic, vec![ClipKind::Sparkle]);
+        let particles: Vec<ClipKind> = visible[1].1.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            particles,
+            vec![
+                ClipKind::Smoke,
+                ClipKind::Ember,
+                ClipKind::Fountain,
+                ClipKind::Trail,
+                ClipKind::Confetti,
+                ClipKind::Meteor,
+                ClipKind::Comet,
+                ClipKind::Glitter,
+                ClipKind::Wave,
+            ]
+        );
+        let all: Vec<ClipKind> = visible
+            .iter()
+            .flat_map(|(_, kinds)| kinds.iter().map(|e| e.kind))
+            .collect();
+        assert_eq!(all.len(), 10);
+        for kind in all.iter() {
+            assert_eq!(
+                all.iter().filter(|k| *k == kind).count(),
+                1,
+                "{kind:?} appears more than once"
+            );
+        }
     }
 
     #[test]

@@ -171,6 +171,56 @@
 //!   routes nowhere, so the honest assertions are
 //!   presence plus a tap that changes nothing (status,
 //!   undo depth, current frame, joint positions).
+//!
+//! Round 7 (Phase J, section 37) adds four tests: two
+//! GEOMETRIC regressions for the Phase I screenshot's
+//! defects, the timeline ruler, and the palette's
+//! mirror-figure command. Facts they rest on, verified
+//! against the tree:
+//! * The screenshot's Keyframes overlap is fixed by the
+//!   keyframe section giving the no-joint note its own
+//!   row: `keyframe-no-joint-note` (the section's
+//!   `NO_JOINT_NOTE_ROW_KEY`), with the actions row
+//!   still keyed `keyframe-actions` and the Delete key
+//!   button still keyed `key-delete`. The note's text
+//!   element itself is unkeyed, but `Runtime::elements`
+//!   reports every element's text and drawn rect
+//!   (`ElementInfo.rect`, runtime/elements.rs), and
+//!   "No joint selected" is unique shell-wide — so the
+//!   test can assert on the TEXT's rect, not just its
+//!   row's. A fresh core selects no joint
+//!   (`EditorCore::new` seeds `selected_node: None`),
+//!   which is the note's premise.
+//! * The screenshot's status-strip overlap is fixed in
+//!   the shell's column split (main.rs `view`): the
+//!   side viewports keep fixed widths (300 / 340) and
+//!   the centre — which carries the strip, keyed
+//!   `status-strip` by the status section — takes the
+//!   rest, instead of all three columns growing to
+//!   equal thirds and the strip's floored tail painting
+//!   over the right column. The right column's own root
+//!   is keyed `side-right`, so the strip's right edge
+//!   can be asserted against the column's left edge
+//!   directly, at this file's 1440×900 viewport (the
+//!   Runtime's window — `AppSpec`'s own size).
+//! * The timeline's time ruler is keyed
+//!   `timeline-ruler` (timeline_marks), one slot per
+//!   chip in the chips' geometry (`timeline-chips`
+//!   below it, same left edge); frame 0 always carries
+//!   the label "0:00" (the section's `ruler_label`).
+//! * `mirror-figure` is a palette command
+//!   (command_palette's Phase J block) whose shim calls
+//!   `EditorCore::mirror_figure_all_frames`. That op's
+//!   transform — the core's own mirror definition, in
+//!   figure_ops and editor.rs — negates every pose
+//!   angle on every frame and leaves the root where it
+//!   is: the evaluated figure reflects about the
+//!   VERTICAL AXIS THROUGH ITS ROOT, so a joint at
+//!   (x, y) lands at (2·root_x − x, y). It does NOT
+//!   move the root about the stage centre; the test
+//!   asserts the real contract (root unmoved, angles
+//!   negated, a witness joint reflected) rather than
+//!   the stage-centre reading.
 
 use std::collections::BTreeSet;
 
@@ -1554,5 +1604,375 @@ fn pose_panel_inert_apply_is_present_without_a_pose() {
     assert!(
         rt.state.pose_clipboard.is_none(),
         "the clipboard stays empty"
+    );
+}
+
+// ----------------------------------------------------------------
+// Round 7 (Phase J, section 37): geometric regressions
+// for the Phase I screenshot's two overlaps, the
+// timeline ruler, and the palette's mirror-figure
+// command.
+// ----------------------------------------------------------------
+
+/// Do two drawn rects (`[x, y, w, h]`, window points)
+/// share any area? Touching edges do NOT count as an
+/// overlap — neighbouring rows and columns abut by
+/// design; the screenshot defects were one element
+/// painting ACROSS another, which is strict area
+/// overlap.
+fn rects_intersect(a: [f32; 4], b: [f32; 4]) -> bool {
+    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+}
+
+/// Is `inner` fully inside `outer` (half a point of
+/// slack for rounding at the edges)?
+fn rect_inside(inner: [f32; 4], outer: [f32; 4]) -> bool {
+    inner[0] >= outer[0] - 0.5
+        && inner[1] >= outer[1] - 0.5
+        && inner[0] + inner[2] <= outer[0] + outer[2] + 0.5
+        && inner[1] + inner[3] <= outer[1] + outer[3] + 0.5
+}
+
+#[test]
+fn keyframes_note_and_delete_button_do_not_overlap() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+    // Premise: a fresh core selects no joint, so the
+    // Keyframes section shows its no-joint note — the
+    // state the Phase I screenshot was taken in, where
+    // the note's text painted across the Delete key
+    // button below it.
+    assert_eq!(
+        rt.state.core.selected_node, None,
+        "no joint selected in a fresh shell"
+    );
+
+    // The Keyframes panel sits in the right column,
+    // below the fold — scroll the Delete button into
+    // view (the note row sits directly above it).
+    scroll_into_view(&mut rt, "key-delete");
+    let keys = presented_keys(&rt);
+    for want in [
+        "keyframe-tools",
+        "keyframe-no-joint-note",
+        "keyframe-actions",
+        "key-delete",
+    ] {
+        assert!(keys.contains(want), "missing element keyed {want:?}");
+    }
+
+    let (note_row, note_opacity) = rt
+        .presented("keyframe-no-joint-note")
+        .expect("the note row is presented");
+    let (actions, _) = rt
+        .presented("keyframe-actions")
+        .expect("the actions row is presented");
+    let (delete, delete_opacity) = rt
+        .presented("key-delete")
+        .expect("the Delete key button is presented");
+    assert!(note_opacity > 0.99, "note row fully presented");
+    assert!(delete_opacity > 0.99, "Delete button fully presented");
+
+    // The note's TEXT element is unkeyed; find it by its
+    // (shell-wide unique) text in the elements list,
+    // which reports the drawn rect of every element.
+    let note_text = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.text.as_deref() == Some("No joint selected"))
+        .expect("the note text is presented");
+
+    // The text stays inside its own row…
+    assert!(
+        rect_inside(note_text.rect, note_row),
+        "note text stays inside its own row: text {0:?}, row {note_row:?}",
+        note_text.rect
+    );
+    // …the row and the actions row are separate rows,
+    // the note's row wholly above the actions row…
+    assert!(
+        !rects_intersect(note_row, actions),
+        "note row and actions row overlap: note {note_row:?}, actions {actions:?}"
+    );
+    assert!(
+        note_row[1] + note_row[3] <= actions[1] + 0.5,
+        "note row sits above the actions row: note {note_row:?}, actions {actions:?}"
+    );
+    // …and neither the row nor the text itself touches
+    // the Delete key button — the screenshot's defect.
+    assert!(
+        !rects_intersect(note_row, delete),
+        "note row overlaps the Delete button: note {note_row:?}, delete {delete:?}"
+    );
+    assert!(
+        !rects_intersect(note_text.rect, delete),
+        "note text paints across the Delete button: text {0:?}, delete {delete:?}",
+        note_text.rect
+    );
+}
+
+#[test]
+fn status_strip_is_not_covered_by_the_right_column() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // The strip (keyed `status-strip` by its section)
+    // lives at the bottom of the CENTRE column; the
+    // right column's root is keyed `side-right`. The
+    // Phase I screenshot's defect: the strip ran the
+    // window's full width under the right column, whose
+    // bottom rows painted over its tail segments.
+    let (strip, _) = rt.presented("status-strip").expect("status strip is presented");
+    let (right, _) = rt
+        .presented("side-right")
+        .expect("right column is presented");
+
+    // The strip lies inside the window…
+    assert!(
+        strip[0] >= 0.0
+            && strip[1] >= 0.0
+            && strip[0] + strip[2] <= VIEWPORT.0
+            && strip[1] + strip[3] <= VIEWPORT.1,
+        "status strip lies inside the viewport: {strip:?}"
+    );
+    // …and ends before the right column begins — the
+    // Phase J column split's whole point (fixed side
+    // widths, the centre takes only what is left).
+    assert!(
+        !rects_intersect(strip, right),
+        "status strip runs under the right column: strip {strip:?}, column {right:?}"
+    );
+    assert!(
+        strip[0] + strip[2] <= right[0] + 0.5,
+        "status strip's right edge crosses the right column's left edge: \
+         strip {strip:?}, column {right:?}"
+    );
+
+    // The right column's own controls — the Keyframes
+    // buttons that sat beside the strip's tail in the
+    // screenshot, and the FrameOps controls below them
+    // in the column's workflow order — none of them may
+    // share area with the strip either.
+    for key in [
+        "key-angle",
+        "key-delete",
+        "key-auto",
+        "key-copy",
+        "key-paste",
+        "key-clear-channel",
+        "key-all-here",
+        "key-copy-to-frame",
+        "inbetween",
+        "copy-frame",
+        "fop-dur-half",
+    ] {
+        let (rect, _) = rt
+            .presented(key)
+            .unwrap_or_else(|| panic!("right-column control {key:?} is presented"));
+        assert!(
+            !rects_intersect(strip, rect),
+            "status strip overlaps {key}: strip {strip:?}, {key} {rect:?}"
+        );
+    }
+}
+
+#[test]
+fn timeline_ruler_shows_the_zero_label() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // The ruler, the chips and the marker row are all
+    // presented, stacked in that order inside the one
+    // scrolled timeline column.
+    let keys = presented_keys(&rt);
+    for want in ["timeline", "timeline-ruler", "timeline-chips", "timeline-markers"] {
+        assert!(keys.contains(want), "missing element keyed {want:?}");
+    }
+    let (ruler, _) = rt.presented("timeline-ruler").expect("ruler is presented");
+    let (chips, _) = rt.presented("timeline-chips").expect("chips are presented");
+
+    // The ruler sits directly above the chips, starting
+    // at the same left edge — its slots are the chips'
+    // own geometry, so the labels line up frame for
+    // frame.
+    assert!(
+        ruler[1] + ruler[3] <= chips[1] + 0.5,
+        "ruler sits above the chips: ruler {ruler:?}, chips {chips:?}"
+    );
+    assert!(
+        (ruler[0] - chips[0]).abs() < 0.5,
+        "ruler starts at the chips' left edge: ruler {ruler:?}, chips {chips:?}"
+    );
+
+    // Frame 0's slot carries the zero label: a "0:00"
+    // text element drawn INSIDE the ruler's rect (the
+    // status strip's project segment also mentions
+    // 0:00, but as part of a longer string and far
+    // outside the ruler — the containment is what pins
+    // this text to the ruler).
+    let zero = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.text.as_deref() == Some("0:00") && rect_inside(e.rect, ruler))
+        .expect("the ruler shows the 0:00 label at frame 0");
+    assert!(
+        rect_inside(zero.rect, ruler),
+        "the zero label is drawn on the ruler: {0:?}",
+        zero.rect
+    );
+
+    // The chips under the ruler still seek: chip
+    // `frame-3` is the third frame — labels are 1-based
+    // over 0-based frames, so the playhead lands on
+    // frame index 2 (round 6's marker semantics).
+    assert_eq!(rt.state.core.current, 0);
+    tap(&mut rt, "frame-3");
+    assert_eq!(
+        rt.state.core.current, 2,
+        "chip frame-3 seeks to frame index 2"
+    );
+}
+
+#[test]
+fn palette_mirror_figure_command_exists_and_runs() {
+    use crate::rune_sec::command_palette::{display_commands, COMMANDS};
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // The before picture: every frame's evaluated joints
+    // and stored angles for the selected figure.
+    let fi = rt.state.core.selected_figure;
+    let frame_count = rt.state.core.frame_count();
+    let before_positions: Vec<Vec<[f32; 2]>> = (0..frame_count)
+        .map(|f| rt.state.core.positions(f, fi))
+        .collect();
+    let before_angles: Vec<Vec<f32>> = rt
+        .state
+        .core
+        .project
+        .frames
+        .iter()
+        .map(|fr| fr.poses[fi].angles.clone())
+        .collect();
+
+    // A witness joint: the joint sitting furthest
+    // sideways from its frame's root — the joint whose
+    // reflection is largest and least mistakable. The
+    // demo figure reaches sideways (its arms), so one
+    // must exist.
+    let mut witness: Option<(usize, usize, f32)> = None;
+    for (f, joints) in before_positions.iter().enumerate() {
+        let root = joints[0];
+        for (j, p) in joints.iter().enumerate().skip(1) {
+            let dx = (p[0] - root[0]).abs();
+            if witness.map_or(true, |(_, _, best)| dx > best) {
+                witness = Some((f, j, dx));
+            }
+        }
+    }
+    let (wf, wj, wdx) = witness.expect("the demo figure has joints");
+    assert!(
+        wdx > 1.0,
+        "the demo figure reaches sideways somewhere (best offset {wdx})"
+    );
+
+    // Run the command through the palette's real path —
+    // Ctrl+K, type the command's key as the query (the
+    // dashed-key query round 2's palette facts rely on),
+    // locate its row in the palette's own listing, walk
+    // the highlight to it, Enter — exactly as rounds 5
+    // and 6 drove the palette.
+    press_key(
+        &mut rt,
+        Key::Command('k'),
+        Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    );
+    assert!(rt.state.palette.open, "Ctrl+K opens the palette");
+    // A settling frame: the query field claims runtime
+    // focus from the flag `open_palette` set.
+    rt.frame(DT);
+    for c in "mirror-figure".chars() {
+        type_char(&mut rt, c);
+    }
+    assert_eq!(
+        rt.state.palette.query.text, "mirror-figure",
+        "typed characters landed in the query field"
+    );
+    let (results, _) =
+        display_commands(&rt.state.palette.query.text, &rt.state.palette.recent);
+    let row = results
+        .iter()
+        .position(|&ci| COMMANDS[ci].key == "mirror-figure")
+        .expect("the query lists mirror-figure (the Phase J command)");
+    let len = results.len();
+    let cur = rt.state.palette.selected % len;
+    for _ in 0..(row + len - cur) % len {
+        press_key(&mut rt, Key::Down, Mods::default());
+    }
+    assert_eq!(
+        rt.state.palette.selected, row,
+        "the highlight sits on mirror-figure's row"
+    );
+    press_key(&mut rt, Key::Enter, Mods::default());
+    assert!(
+        !rt.state.palette.open,
+        "running a command closes the palette"
+    );
+    assert!(
+        rt.state.core.status.contains("mirrored on all"),
+        "the op reported the mirror: {}",
+        rt.state.core.status
+    );
+
+    // The op's contract (see the round's header note):
+    // every angle on every frame negated, the root
+    // unmoved, and the figure reflected about the
+    // vertical axis through its root.
+    for (f, frame) in rt.state.core.project.frames.iter().enumerate() {
+        for (a, b) in frame.poses[fi].angles.iter().zip(&before_angles[f]) {
+            assert_eq!(*a, -*b, "frame {f}: every angle is negated");
+        }
+    }
+    let root_before = before_positions[wf][0];
+    let joint_before = before_positions[wf][wj];
+    let after_positions = rt.state.core.positions(wf, fi);
+    let joint_after = after_positions[wj];
+    assert!(
+        (after_positions[0][0] - root_before[0]).abs() < 0.01
+            && (after_positions[0][1] - root_before[1]).abs() < 0.01,
+        "the root does not move: {root_before:?} -> {0:?}",
+        after_positions[0]
+    );
+    assert!(
+        (joint_after[0] - (2.0 * root_before[0] - joint_before[0])).abs() < 0.05,
+        "the witness joint reflects about the root's vertical axis: \
+         {joint_before:?} -> {joint_after:?} around root {root_before:?}"
+    );
+    assert!(
+        (joint_after[1] - joint_before[1]).abs() < 0.05,
+        "the witness joint keeps its height: {joint_before:?} -> {joint_after:?}"
+    );
+    assert!(
+        (joint_after[0] - joint_before[0]).abs() > 1.0,
+        "the witness joint actually moved: {joint_before:?} -> {joint_after:?}"
     );
 }

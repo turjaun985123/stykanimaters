@@ -70,6 +70,27 @@
 //!   stroke and point counts plus the summed polyline length
 //!   ([`drawing_stats`]) — with a spray count appended only
 //!   when spray strokes exist.
+//! * **Brush smoothing readout (Phase J).** Smoothing is a
+//!   field of the brush *preset* (`paint::Brush::smoothing`,
+//!   paint.rs:313 — the Chaikin iterations applied when a
+//!   stroke is finished), not writable core state: the
+//!   library is a fixed table that `paint::brush_library()`
+//!   (paint.rs:335) constructs fresh on every call, the core
+//!   stores only `brush_index` (editor.rs:73), and
+//!   `EditorCore::active_brush` (editor.rs:2735) returns a
+//!   copy out of a fresh library. A stepper here would write
+//!   into a throwaway copy and change nothing, so the panel
+//!   shows the active preset's smoothing as a readout
+//!   ([`smoothing_readout`], key `draw-smooth-readout`)
+//!   instead. Changing smoothing means choosing another
+//!   preset — the brush row above does that (and the stroke
+//!   inspector's Smoothing steppers work the same way, by
+//!   stepping the selection through the library). The value
+//!   is consulted by `EditorCore::end_draw` (editor.rs:2537)
+//!   at the moment each stroke is finished, so it governs
+//!   strokes drawn afterwards; strokes already on the canvas
+//!   are never re-smoothed by a selection change (the Smooth
+//!   button is the post-hoc path).
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -151,6 +172,37 @@ pub fn select_brush(core: &mut EditorCore, i: usize) {
     core.brush_index = i.min(lib.len() - 1);
     let b = lib[core.brush_index];
     core.status = format!("Brush: {} (width {:.0}).", b.name, b.width);
+}
+
+/// The active brush preset's smoothing, in Chaikin passes
+/// (`paint::Brush::smoothing` via `EditorCore::active_brush`).
+/// Read-only by construction — see the module docs for why
+/// no setter exists.
+pub fn active_brush_smoothing(core: &EditorCore) -> usize {
+    core.active_brush().smoothing
+}
+
+/// Format a smoothing value as the readout's text: 0 is
+/// "off", 1 is a single pass, anything higher counts its
+/// passes. The argument is an `f32` because the shell's
+/// brush-parameter machinery treats smoothing as one (the
+/// stroke inspector's `Param::value` returns it as `f32`);
+/// the value is rounded to whole passes and clamped at
+/// zero, so a negative or non-finite input reads as off
+/// rather than formatting nonsense.
+pub fn smoothing_label(v: f32) -> String {
+    let passes = v.round().max(0.0) as usize;
+    match passes {
+        0 => "Smoothing: off".to_string(),
+        1 => "Smoothing: 1 pass".to_string(),
+        n => format!("Smoothing: {n} passes"),
+    }
+}
+
+/// The smoothing readout line for the core's active brush:
+/// [`smoothing_label`] of [`active_brush_smoothing`].
+pub fn smoothing_readout(core: &EditorCore) -> String {
+    smoothing_label(active_brush_smoothing(core) as f32)
 }
 
 /// The centred drag box the shape buttons stamp into, as
@@ -479,10 +531,11 @@ pub fn drawing_stats_line(stats: &DrawingStats) -> String {
 }
 
 /// The Draw toolbar section: a "Draw" label and the drawing
-/// readout line over four rows —
+/// readout line over the control rows —
 /// tools (mode, eraser, brush cycle, mirror, simplify, smooth,
 /// clear), the brush library (one button per preset, the
-/// active one highlighted), the shape tools (Line / Rect /
+/// active one highlighted) with the active preset's smoothing
+/// readout under it, the shape tools (Line / Rect /
 /// Ellipse stamps plus the Polygon / Star / Arrow stamps), and
 /// the stamp parameter steppers (Sides / Size / Rotation).
 /// Active states read from the core's own fields
@@ -615,6 +668,12 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         )
         .child(tools)
         .child(brushes.scroll_x().w_full())
+        .child(
+            text(smoothing_readout(core))
+                .key("draw-smooth-readout")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
         .child(shapes)
         .child(stamp_params)
 }
@@ -975,6 +1034,84 @@ mod tests {
             drawing_stats_line(&sprayed),
             "3 strokes · 12 points · 173 long · 2 spray"
         );
+    }
+
+    // ---- Brush smoothing readout (Phase J) ----
+
+    #[test]
+    fn smoothing_label_formats_off_single_and_multiple_passes() {
+        assert_eq!(smoothing_label(0.0), "Smoothing: off");
+        assert_eq!(smoothing_label(1.0), "Smoothing: 1 pass");
+        assert_eq!(smoothing_label(2.0), "Smoothing: 2 passes");
+        assert_eq!(smoothing_label(3.0), "Smoothing: 3 passes");
+        // Fractional inputs round to whole passes; negative
+        // and non-finite inputs clamp to off.
+        assert_eq!(smoothing_label(1.4), "Smoothing: 1 pass");
+        assert_eq!(smoothing_label(-2.0), "Smoothing: off");
+        assert_eq!(smoothing_label(f32::NAN), "Smoothing: off");
+    }
+
+    #[test]
+    fn active_brush_smoothing_follows_the_selected_preset() {
+        let mut core = EditorCore::new();
+        // The default Pen preset records the path exactly.
+        assert_eq!(active_brush_smoothing(&core), 0);
+        assert_eq!(smoothing_readout(&core), "Smoothing: off");
+        // Library order (paint::brush_library): Marker is
+        // index 2 with 1 pass, Paint Brush index 5 with 2,
+        // Broad Brush index 8 with the library maximum of 3,
+        // and Spray (index 9) is back to none.
+        select_brush(&mut core, 2);
+        assert_eq!(active_brush_smoothing(&core), 1);
+        assert_eq!(smoothing_readout(&core), "Smoothing: 1 pass");
+        select_brush(&mut core, 5);
+        assert_eq!(active_brush_smoothing(&core), 2);
+        assert_eq!(smoothing_readout(&core), "Smoothing: 2 passes");
+        select_brush(&mut core, 8);
+        assert_eq!(active_brush_smoothing(&core), 3);
+        assert_eq!(smoothing_readout(&core), "Smoothing: 3 passes");
+        select_brush(&mut core, 9);
+        assert_eq!(active_brush_smoothing(&core), 0);
+    }
+
+    #[test]
+    fn every_library_preset_has_a_bounded_smoothing_value() {
+        let lib = stykanimate_rs::paint::brush_library();
+        assert_eq!(lib.len(), brush_names().len());
+        let mut seen = std::collections::BTreeSet::new();
+        for b in &lib {
+            // The bound paint.rs's own tests assert: no
+            // preset smooths more than 3 passes.
+            assert!(b.smoothing <= 3, "{} smoothing is bounded", b.name);
+            seen.insert(b.smoothing);
+            assert!(!smoothing_label(b.smoothing as f32).is_empty());
+        }
+        // The library exercises every level the readout can
+        // name, so each label arm is reachable from a preset.
+        assert_eq!(seen, std::collections::BTreeSet::from([0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn panel_builds_for_every_brush_preset() {
+        // The established shell-test fixture (command_palette
+        // and audio_panel tests build states the same way):
+        // init a real State and a real theme, then build the
+        // section with each preset active in turn — and once
+        // more with the eraser tool active, since the preset
+        // also sizes the eraser.
+        let mut state = crate::init();
+        let t = rune::tok::theme(true);
+        for i in 0..brush_names().len() {
+            select_brush(&mut state.core, i);
+            assert_eq!(
+                smoothing_readout(&state.core),
+                smoothing_label(active_brush_smoothing(&state.core) as f32)
+            );
+            let _panel = draw_tools(&state, &t);
+        }
+        state.core.toggle_draw_tool();
+        assert!(state.core.draw_tool_is_eraser());
+        let _panel = draw_tools(&state, &t);
     }
 
     #[test]

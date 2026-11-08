@@ -348,6 +348,15 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     // top (Phase G); a no-op while audio is inactive.
     s.core.sync_playback_audio_on_wrap(prev_frame, s.core.current);
     s.core.sync_playback_audio_on_seek(prev_frame, s.core.current);
+    // Drift correction (Phase J): on ticks where the frame
+    // actually changed, ask the player to re-align the sound
+    // with the playhead — the wrap and seek syncs above only
+    // fire on jumps, so slow drift within a pass had no
+    // remedy. A paused or idle shell never reaches this
+    // block, and a tick that did not move the frame skips it.
+    if s.core.current != prev_frame {
+        s.core.sync_playback_audio_on_drift();
+    }
     s.last_frame = s.core.current;
     let fps = s.core.project.fps.max(1.0);
     tx.wake_after(Duration::from_secs_f32(1.0 / fps));
@@ -387,9 +396,11 @@ fn text_focused(s: &State) -> bool {
 /// open). While a text field is focused, everything else is
 /// left to the field. Then: Ctrl+Z undo, Ctrl+Shift+Z /
 /// Ctrl+Y redo, Escape closes an open menu, Space play/pause,
-/// Left/Right frame step, Delete deletes the selected
-/// segment (`delete_segment` no-ops safely — status only —
-/// when nothing deletable is selected), C toggles camera
+/// Left/Right frame step, Delete removes the selected stroke
+/// if one is selected, else the selected particle event,
+/// else the selected segment (`delete_segment` no-ops safely
+/// — status only — when nothing deletable is selected),
+/// C toggles camera
 /// mode, O toggles onion skin, N adds a frame, I inserts an
 /// inbetween — the bindings the help panel documents.
 fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
@@ -440,7 +451,21 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             true
         }
         Key::Delete => {
-            s.core.delete_segment();
+            // Phase J priority: a selected stroke goes first,
+            // then a selected particle event, then the
+            // long-standing segment behaviour. The ops refuse
+            // safely (status only) on a stale index, and the
+            // selection is cleared either way — the thing it
+            // named is gone or never was.
+            if let Some(i) = s.stroke_selected {
+                s.core.delete_stroke_at(i);
+                s.stroke_selected = None;
+            } else if let Some(i) = s.particle_selected {
+                s.core.particle_delete_event(i);
+                s.particle_selected = None;
+            } else {
+                s.core.delete_segment();
+            }
             true
         }
         Key::Text(text) if text == "c" && !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt => {
@@ -624,6 +649,21 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
 
     // The side columns mount only while the View toggles show
     // them (menus section); the centre always mounts.
+    //
+    // Phase J layout fix: the side viewports keep their fixed
+    // widths (300 / 340) and the centre takes the rest. They
+    // used to also carry `.grow(1.0)`, which flattened all
+    // three columns to equal thirds (~461 pt each at 1440
+    // wide): the centre — stage, timeline and status strip —
+    // was starved to a third of the window, and the status
+    // strip's floored segments (Phase F width floors) summed
+    // wider than the strip, so its tail painted rightwards
+    // over the right column's bottom rows. The scroll
+    // viewports' heights were never the problem: main_row is
+    // the bounded `grow` child of the root column and the
+    // viewports clip their content to it (Rune's `scroll`
+    // contract — a bounded ancestor, `min_h(0.0)` on the
+    // viewport); only the width split was wrong.
     let mut main_row = row()
         .key("main-row")
         .w_full()
@@ -634,7 +674,6 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         main_row = main_row.child(
             left.scroll(ScrollSpec { stick_bottom: false })
                 .w(300.0)
-                .grow(1.0)
                 .min_h(0.0),
         );
     }
@@ -644,7 +683,6 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
             right
                 .scroll(ScrollSpec { stick_bottom: false })
                 .w(340.0)
-                .grow(1.0)
                 .min_h(0.0),
         );
     }

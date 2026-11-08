@@ -125,6 +125,42 @@
 //! one) renders no line at all, so an unselected panel
 //! gains nothing.
 //!
+//! ## Frame-scoped bulk ops (Phase J, section 23)
+//!
+//! A second bulk row, directly under the project-wide
+//! one, runs the same two presses against **this frame
+//! only** — the strokes [`frame_stroke_indices`]
+//! returns for `EditorCore::current`. The Phase F row
+//! stayed project-wide because a frame-scoped *removal*
+//! already existed (the list's Clear button); recolour
+//! had no frame-scoped form at all, and clearing one
+//! frame should not need a project-wide delete plus
+//! undo archaeology. Both presses keep the Phase F
+//! composition — one `snapshot()`, then direct
+//! `project.strokes` writes (the delete removes the
+//! highest indices first, so each removal leaves the
+//! remaining targets' indices valid) — and a frame
+//! carrying no strokes takes no snapshot, only a
+//! status report. The statuses name the frame,
+//! 1-based as everywhere in this panel:
+//! `Recoloured {n} strokes on frame {f}.` /
+//! `Deleted {n} strokes on frame {f}.`
+//!
+//! Selection hygiene differs from the project-wide
+//! delete, on purpose. `delete_all_strokes` empties
+//! the whole list, so any selection it orphans is
+//! *stale* — and stale selections are treated as unset
+//! everywhere in this panel. A frame delete instead
+//! leaves survivors whose indices shift down past the
+//! removed strokes, so an untouched selection would
+//! silently point at a **different live stroke** and
+//! the stage would highlight the wrong one. The
+//! delete press therefore runs through
+//! [`delete_frame_strokes_press`], which remaps the
+//! selection with [`selection_after_delete`]: cleared
+//! when its stroke was removed, shifted when its
+//! stroke survived.
+//!
 //! `State` access: the brush and stroke data read
 //! `s.core` (active brush, `brush_index`,
 //! `project.strokes`, `current`) and writes go through
@@ -149,7 +185,10 @@
 //! and the handlers are the same presses: the selection
 //! buttons still write nothing but `s.stroke_selected`
 //! (plus `goto`'s navigation), exactly as documented
-//! above.
+//! above. Phase J's frame row reuses `palette` /
+//! `trash-can` under the keys `stroke-recolor-frame` /
+//! `stroke-delete-frame`, in the row keyed
+//! `stroke-bulk-frame-row`.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El};
@@ -761,6 +800,117 @@ pub fn delete_all_strokes(core: &mut EditorCore) -> usize {
     n
 }
 
+/// Where a project-wide stroke selection lands after
+/// the strokes at `removed` (ascending
+/// `Project.strokes` indices) were deleted: `None`
+/// when the selected stroke itself was removed,
+/// otherwise the selection shifted down by the number
+/// of removed strokes that sat before it, so it keeps
+/// pointing at the same stroke. An unset selection
+/// stays unset. A *stale* selection (past the end of
+/// the list) is shifted arithmetically and stays
+/// stale — harmless, because every reader of the
+/// selection treats stale as unset (see the Phase G
+/// module docs); what this guards against is a valid
+/// selection silently landing on a different live
+/// stroke.
+pub fn selection_after_delete(
+    selected: Option<usize>,
+    removed: &[usize],
+) -> Option<usize> {
+    let sel = selected?;
+    if removed.contains(&sel) {
+        return None;
+    }
+    let shift = removed.iter().filter(|&&i| i < sel).count();
+    Some(sel - shift)
+}
+
+/// Frame Recolour press (Phase J): rewrite the base
+/// `color` of the **current frame's** strokes only —
+/// [`frame_stroke_indices`], which is
+/// `stroke_frame_of(..) == core.current` in index
+/// form — to [`bulk_target_color`]. Same composition
+/// as [`recolor_all_strokes`]: exactly one snapshot,
+/// taken only when the frame carries strokes; on an
+/// empty frame the press only reports so. Returns the
+/// number of strokes recoloured.
+pub fn recolor_frame_strokes(core: &mut EditorCore) -> usize {
+    let frame = core.current;
+    let targets = frame_stroke_indices(core);
+    if targets.is_empty() {
+        core.status = format!("No strokes on frame {} to recolour.", frame + 1);
+        return 0;
+    }
+    let color = bulk_target_color(core);
+    core.snapshot();
+    let n = targets.len();
+    for i in targets {
+        core.project.strokes[i].color = color;
+    }
+    core.status = format!(
+        "Recoloured {n} stroke{} on frame {}.",
+        if n == 1 { "" } else { "s" },
+        frame + 1
+    );
+    n
+}
+
+/// Frame Delete press, core half (Phase J): remove
+/// the current frame's strokes from `Project.strokes`,
+/// leaving every other frame's strokes in place and
+/// in order. Same one-snapshot composition as
+/// [`delete_all_strokes`] — looping
+/// `delete_stroke_at` would cost one undo step per
+/// stroke. Removals run highest index first: each
+/// `Vec::remove` shifts only the strokes after it,
+/// which have already been removed, so every target
+/// index stays valid until its turn. On an empty
+/// frame the press only reports so. Returns the
+/// number of strokes removed. Callers holding a
+/// stroke selection should go through
+/// [`delete_frame_strokes_press`], which also remaps
+/// the selection.
+pub fn delete_frame_strokes(core: &mut EditorCore) -> usize {
+    let frame = core.current;
+    let targets = frame_stroke_indices(core);
+    if targets.is_empty() {
+        core.status = format!("No strokes on frame {} to delete.", frame + 1);
+        return 0;
+    }
+    core.snapshot();
+    let n = targets.len();
+    for i in targets.into_iter().rev() {
+        core.project.strokes.remove(i);
+    }
+    core.status = format!(
+        "Deleted {n} stroke{} on frame {}.",
+        if n == 1 { "" } else { "s" },
+        frame + 1
+    );
+    n
+}
+
+/// Frame Delete press, as the panel's button runs it:
+/// [`delete_frame_strokes`] on the core, then the
+/// selection remap ([`selection_after_delete`]).
+/// Unlike the project-wide Delete all — which leaves
+/// any orphaned selection stale, where readers treat
+/// it as unset — a frame delete leaves live survivors
+/// whose indices move, so the selection is fixed up
+/// here rather than allowed to drift onto a different
+/// stroke. When the frame carried no strokes nothing
+/// was removed and the selection is left untouched.
+/// Returns the number of strokes removed.
+pub fn delete_frame_strokes_press(s: &mut State) -> usize {
+    let removed = frame_stroke_indices(&s.core);
+    let n = delete_frame_strokes(&mut s.core);
+    if n > 0 {
+        s.stroke_selected = selection_after_delete(s.stroke_selected, &removed);
+    }
+    n
+}
+
 /// One parameter row: label, current value, and the −/+
 /// stepper pair stepping that parameter through the preset
 /// library ([`step_param`]).
@@ -836,6 +986,47 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 t,
                 |s| {
                     delete_all_strokes(&mut s.core);
+                },
+            )),
+    );
+
+    // Frame-scoped bulk ops (Phase J): the same two
+    // presses restricted to the current frame's
+    // strokes, directly under the project-wide row —
+    // one snapshot per press, and the delete goes
+    // through the press helper so the selection is
+    // remapped (see the module docs). Always rendered,
+    // like the row above: on a frame with no strokes a
+    // press reports so and changes nothing.
+    panel = panel.child(
+        row()
+            .key("stroke-bulk-frame-row")
+            .gap(8.0)
+            .center_y()
+            .child(
+                text(format!("Frame {}", core.current + 1))
+                    .font(type_::LABEL)
+                    .color(t.text)
+                    .grow(1.0),
+            )
+            .child(icon_btn(
+                "stroke-recolor-frame",
+                "palette",
+                "Frame colour",
+                false,
+                t,
+                |s| {
+                    recolor_frame_strokes(&mut s.core);
+                },
+            ))
+            .child(icon_btn(
+                "stroke-delete-frame",
+                "trash-can",
+                "Delete frame strokes",
+                false,
+                t,
+                |s| {
+                    delete_frame_strokes_press(s);
                 },
             )),
     );
@@ -1382,6 +1573,148 @@ mod tests {
             depth,
             "an empty press must not add an undo step"
         );
+    }
+
+    #[test]
+    fn recolor_frame_strokes_touches_only_the_current_frame() {
+        let mut core = EditorCore::new();
+        core.project
+            .strokes
+            .push(colored_stroke(0, 0xAA_0000));
+        core.project
+            .strokes
+            .push(colored_stroke(1, 0x00_BB00));
+        core.project
+            .strokes
+            .push(colored_stroke(0, 0x00_00CC));
+        let fi = core.selected_figure;
+        core.project.figures[fi].color = 0x77_7777;
+        core.selected_node = None;
+        let depth = core.undo_depth();
+        assert_eq!(recolor_frame_strokes(&mut core), 2);
+        let colours: Vec<u32> =
+            core.project.strokes.iter().map(|s| s.color).collect();
+        assert_eq!(
+            colours,
+            vec![0x77_7777, 0x00_BB00, 0x77_7777],
+            "frame 2's stroke keeps its own colour"
+        );
+        assert_eq!(core.status, "Recoloured 2 strokes on frame 1.");
+        // One press = one undo step, restoring both
+        // recoloured strokes at once.
+        assert_eq!(core.undo_depth(), depth + 1);
+        core.undo();
+        let colours: Vec<u32> =
+            core.project.strokes.iter().map(|s| s.color).collect();
+        assert_eq!(colours, vec![0xAA_0000, 0x00_BB00, 0x00_00CC]);
+        // From frame 2 the press recolours only that
+        // frame's stroke, names frame 2, and uses the
+        // singular.
+        core.goto(1);
+        assert_eq!(recolor_frame_strokes(&mut core), 1);
+        assert_eq!(core.status, "Recoloured 1 stroke on frame 2.");
+        let colours: Vec<u32> =
+            core.project.strokes.iter().map(|s| s.color).collect();
+        assert_eq!(colours, vec![0xAA_0000, 0x77_7777, 0x00_00CC]);
+    }
+
+    #[test]
+    fn delete_frame_strokes_removes_only_the_current_frame() {
+        let mut core = EditorCore::new();
+        // Interleaved frames; point counts identify each
+        // stroke after the removal.
+        for (frame, pts) in [(0, 1), (1, 2), (0, 3), (1, 4), (0, 5)] {
+            core.project.strokes.push(plain_stroke(frame, pts));
+        }
+        let depth = core.undo_depth();
+        assert_eq!(delete_frame_strokes(&mut core), 3);
+        // The survivors are frame 2's two strokes, in
+        // their original order.
+        let remaining: Vec<(usize, usize)> = core
+            .project
+            .strokes
+            .iter()
+            .map(|s| (s.frame, s.points.len()))
+            .collect();
+        assert_eq!(remaining, vec![(1, 2), (1, 4)]);
+        assert_eq!(core.status, "Deleted 3 strokes on frame 1.");
+        assert_eq!(core.undo_depth(), depth + 1);
+        core.undo();
+        assert_eq!(
+            core.project.strokes.len(),
+            5,
+            "one undo restores the whole frame"
+        );
+    }
+
+    #[test]
+    fn frame_bulk_ops_on_an_empty_frame_take_no_snapshot() {
+        let mut core = EditorCore::new();
+        // A stroke exists — but on frame 2, while the
+        // current frame is 1.
+        core.project.strokes.push(plain_stroke(1, 2));
+        let depth = core.undo_depth();
+        assert_eq!(recolor_frame_strokes(&mut core), 0);
+        assert_eq!(core.status, "No strokes on frame 1 to recolour.");
+        assert_eq!(delete_frame_strokes(&mut core), 0);
+        assert_eq!(core.status, "No strokes on frame 1 to delete.");
+        assert_eq!(
+            core.undo_depth(),
+            depth,
+            "an empty-frame press must not add an undo step"
+        );
+        assert_eq!(
+            core.project.strokes.len(),
+            1,
+            "the other frame's stroke is untouched"
+        );
+    }
+
+    #[test]
+    fn selection_after_delete_clears_removed_and_shifts_survivors() {
+        // Removed indices 0, 2, 4 of a six-stroke list.
+        let removed = vec![0, 2, 4];
+        assert_eq!(selection_after_delete(None, &removed), None);
+        // The selected stroke itself was removed: clear.
+        assert_eq!(selection_after_delete(Some(0), &removed), None);
+        assert_eq!(selection_after_delete(Some(2), &removed), None);
+        assert_eq!(selection_after_delete(Some(4), &removed), None);
+        // Survivors shift down by the removed count
+        // before them, still naming the same stroke.
+        assert_eq!(selection_after_delete(Some(1), &removed), Some(0));
+        assert_eq!(selection_after_delete(Some(3), &removed), Some(1));
+        assert_eq!(selection_after_delete(Some(5), &removed), Some(2));
+        // Nothing removed: the selection is untouched.
+        assert_eq!(selection_after_delete(Some(3), &[]), Some(3));
+    }
+
+    #[test]
+    fn delete_frame_press_clears_a_removed_selection_and_keeps_a_survivor() {
+        // Frames 0, 1, 0, 1; the current frame is 0
+        // (shown as frame 1), so the press removes the
+        // strokes at project indices 0 and 2.
+        let mut core = EditorCore::new();
+        for frame in [0, 1, 0, 1] {
+            core.project.strokes.push(plain_stroke(frame, 2));
+        }
+        // Selection on a stroke the press removes: it is
+        // cleared, never left pointing at a neighbour.
+        let mut s = state_with(core, Some(2));
+        assert_eq!(delete_frame_strokes_press(&mut s), 2);
+        assert_eq!(s.stroke_selected, None);
+        assert_eq!(s.core.status, "Deleted 2 strokes on frame 1.");
+
+        // Selection on a surviving stroke: it shifts
+        // down past the two removals and still names
+        // the same (frame-index-1) stroke.
+        let mut core = EditorCore::new();
+        for frame in [0, 1, 0, 1] {
+            core.project.strokes.push(plain_stroke(frame, 2));
+        }
+        let mut s = state_with(core, Some(3));
+        assert_eq!(delete_frame_strokes_press(&mut s), 2);
+        assert_eq!(s.stroke_selected, Some(1));
+        assert_eq!(stroke_frame_of(&s.core, 1), Some(1));
     }
 
     #[test]

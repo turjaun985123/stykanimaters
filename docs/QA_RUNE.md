@@ -753,3 +753,19 @@ its dispatch, not its rendering.
 | **headless.yml never dispatched** — `--snap` on software Vulkan unproven since Phase E | Integrator dispatch during Phase I integration (run 42467268661 on the green tree) | **proven**: all 6 probes exit 0 on llvmpipe — 4 `--tree` scene dumps + 2 `--snap` PNGs; the default snap renders the full Phase I shell (icons, fig-measure, status runtime all visible in pixels) | 42467268661 |
 | Two "New project" results disagree (panel blank vs Home demo) | Not a Phase I section — user's product call | open — unchanged | — |
 | Rune `fill_path` hole rendering not pixel-verified; Phase F–I pixels + sound unverified on a real screen | Needs the user's screenshot + Play test | narrowed — the headless snap (run 42467268661) renders the shell and its solid icons correctly in pixels; sound and a real-screen screenshot are still the user's to confirm | — |
+
+## 12. Phase J — targeted remainders
+
+| Remainder | Closing section(s) | Status | CI |
+|---|---|---|---|
+| **Overlap 1** — the Keyframes header's "No joint selected" note paints across its Delete button (headless snap, run 42467268661) | §9 keyframe_tools (note in its own truncating row, `keyframe-no-joint-note`; Delete keeps `key-delete`, wording byte-identical) | wired | _integrator_ |
+| **Overlap 2** — at 2400×1350 the right column's bottom rows crowd the status strip's tail (same snap) | §10 main.rs layout (root cause: all three columns carried `.grow(1.0)` — equal thirds starved the centre and the strip's floored tail painted over the right column; side columns now fixed 300 / 340, centre takes the rest) | wired | _integrator_ |
+| Playback audio **drift within one pass** — wrap/seek re-syncs fire on jumps only (named open in `src/audio_play.rs` since Phase F) | §1 audio_play drift sync (`DRIFT_TOLERANCE_FRAMES` 2.5; playback clock per start) + §10 poll wiring (wrap → seek → drift) | wired | _integrator_ |
+| **Range family incomplete** — spritesheet and SVG whole-timeline only (Phase I §8 closed the contact sheet only) | §2 export range pair (`export_sheet_range`, `export_svg_range`) + §15 export_panel rows (`RANGE_KEYS` 7 → 9; range variants write to the full ops' destinations) | wired | _integrator_ |
+| **Duplicate graph channels** list twice and resolve to the first (Phase I §7) | §16 graph_panel (selection by row index — `GraphPanelState.selected_channel`; a picked row draws and edits its own twin) | wired | _integrator_ |
+| **Library Enter-to-insert** — Phase I recorded a filtered-index wrong-figure quirk | §25 library_panel (audit found the quirk never existed in code: no `on_submit` was wired, Enter inserted nothing; the new submit path resolves through the rows' real-index mapping from the start) | wired | _integrator_ |
+| Two "New project" results disagree (panel blank vs Home demo) | Not a Phase J section — user's product call | open — unchanged | — |
+| Head ring radius is a constant 17.0 everywhere | Not a Phase J section | open — unchanged | — |
+| `core.onion_frames` / `cycle_onion_frames` orphaned engine API | Stays deliberately: the shell keeps asymmetric onion depths in State (`onion_ui.prev` / `onion_ui.next`, Phase G §25), which the engine's single symmetric count cannot express — wiring the shell to it would lose a feature | open — by design | — |
+| Status strip's Audio segment has no glyph (Phase H width-maths refusal) | Not a Phase J section | open — unchanged | — |
+| Sound unverified on a real screen — the headless snap covers pixels, not audio; Phase J's drift sync is a bounded restart (2.5-frame tolerance), not a sample-accurate clock | Needs the user's Play test on a real screen | open — unchanged | — |

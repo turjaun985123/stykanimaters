@@ -60,6 +60,17 @@
 //! panel code. It reuses the one loader path the panel has
 //! always used (see its note below).
 //!
+//! Phase J (section 7): [`EditorCore::normalise_all_clips`]
+//! brings every clip to a common peak in one undo step. It
+//! measures each clip with [`clip_peaks`] (gain not applied,
+//! as there) and scales each gain by `target / peak` through
+//! the pure helper [`normalised_gain`], which applies the
+//! gain family's own sanitising — the 0.0..=2.0 clamp and
+//! the NaN fallback of [`EditorCore::audio_set_gain_at`].
+//! One snapshot covers the whole operation, and only when
+//! at least one clip actually changes; silent and
+//! unreadable clips are skipped with their gains untouched.
+//!
 //! `audio_derived_path` below is a copy of the private helper
 //! of the same name in `editor.rs`: it is private to that
 //! module, so this file cannot call it — the body is kept
@@ -138,6 +149,64 @@ pub fn clip_peaks(core: &EditorCore, index: usize, buckets: usize) -> Vec<f32> {
         return Vec::new();
     }
     crate::audio_edit::peaks(&data, buckets)
+}
+
+/// Bucket count [`EditorCore::normalise_all_clips`] measures
+/// each clip at. The maximum over the buckets is the clip's
+/// true peak at any count — [`crate::audio_edit::peaks`] is
+/// an exact max-abs reduction, not an estimate — so the
+/// count only decides how much intermediate data is built;
+/// 512 is fine-grained without being wasteful.
+const NORMALISE_PEAK_BUCKETS: usize = 512;
+
+/// How close a computed gain must sit to the current gain
+/// for [`normalised_gain`] to call it unchanged. Gains are
+/// shown to two decimals in the status line, so a change
+/// smaller than this could never be seen or heard.
+const GAIN_CHANGE_EPSILON: f32 = 0.001;
+
+/// Phase J (section 7): the gain that would bring a clip
+/// whose (gain-free) sample peak is `peak` onto
+/// `target_peak`: `current_gain * target / peak`, sanitised
+/// exactly as [`EditorCore::audio_set_gain_at`] sanitises
+/// its input — a NaN result falls back to unity and the
+/// value is clamped to 0.0..=2.0. Because the scaling is a
+/// ratio applied to the gain, a clip at unity gain lands
+/// its effective peak exactly on target; a clip with gain
+/// `g` lands at `g * target`.
+///
+/// Returns `None` — the caller must leave the gain
+/// untouched — when there is nothing honest to do:
+///
+/// - `peak` is not positive (a silent clip, or a defensive
+///   non-positive value; scaling by it would divide by
+///   zero or flip the sign), or
+/// - the sanitised result already equals `current_gain`
+///   within [`GAIN_CHANGE_EPSILON`]. The clamp makes this
+///   bite in both directions: a clip already at the 2.0
+///   ceiling whose raw scaling would exceed it needs no
+///   write, because the clamped result IS its current
+///   gain; a clip whose raw scaling lands past the ceiling
+///   still gets `Some(2.0)` — a partial normalisation,
+///   as far towards the target as the gain range allows.
+///
+/// Pure: no files, no state — the decision is unit-testable
+/// without fixtures.
+pub fn normalised_gain(current_gain: f32, peak: f32, target: f32) -> Option<f32> {
+    if !(peak > 0.0) {
+        return None;
+    }
+    let scaled = current_gain * (target / peak);
+    let clamped = if scaled.is_nan() {
+        1.0
+    } else {
+        scaled.clamp(0.0, 2.0)
+    };
+    if (clamped - current_gain).abs() <= GAIN_CHANGE_EPSILON {
+        None
+    } else {
+        Some(clamped)
+    }
 }
 
 impl EditorCore {
@@ -304,6 +373,55 @@ impl EditorCore {
             return;
         };
         self.audio_clip_gain_step_at(clip_idx, delta);
+    }
+
+    /// Phase J: normalise EVERY audio clip to a common peak:
+    /// scale each clip's gain by `target_peak / peak`, where
+    /// `peak` is the clip's own sample peak measured with
+    /// [`clip_peaks`] at [`NORMALISE_PEAK_BUCKETS`] buckets
+    /// (the gain is not part of the measurement, as there).
+    /// The maths — including the 0.0..=2.0 clamp and the
+    /// NaN fallback — is [`normalised_gain`]'s, the same
+    /// sanitising [`Self::audio_set_gain_at`] applies, but
+    /// the writes are made here rather than by delegating
+    /// per clip: the setter snapshots and reports once per
+    /// call, and a bulk normalise must be ONE undo step.
+    ///
+    /// The measurement pass is read-only and completes
+    /// before anything is written: if at least one clip
+    /// changes, exactly one snapshot is taken and every new
+    /// gain is applied behind it; if nothing changes, no
+    /// snapshot is taken. Clips that cannot be measured —
+    /// silent (peak 0), missing or unreadable files, and
+    /// clips already on target — are skipped with their
+    /// gains untouched.
+    ///
+    /// Returns the number of clips adjusted.
+    pub fn normalise_all_clips(&mut self, target_peak: f32) -> usize {
+        let mut changes: Vec<(usize, f32)> = Vec::new();
+        for index in 0..self.project.audio.len() {
+            let peaks = clip_peaks(self, index, NORMALISE_PEAK_BUCKETS);
+            if peaks.is_empty() {
+                continue;
+            }
+            let peak = peaks.iter().copied().fold(0.0_f32, f32::max);
+            let current = self.project.audio[index].gain;
+            if let Some(gain) = normalised_gain(current, peak, target_peak) {
+                changes.push((index, gain));
+            }
+        }
+        if changes.is_empty() {
+            self.status =
+                format!("No audio clips needed normalising to peak {target_peak:.2}.");
+            return 0;
+        }
+        self.snapshot();
+        let adjusted = changes.len();
+        for (index, gain) in changes {
+            self.project.audio[index].gain = gain;
+        }
+        self.status = format!("Normalised {adjusted} audio clips to peak {target_peak:.2}.");
+        adjusted
     }
 
     /// Phase G: delete audio clip `index` (0-based) from the
@@ -1440,6 +1558,147 @@ mod tests {
         let a = write_samples_wav(&dir, "a.wav", Vec::new());
         let core = core_with(vec![clip(&a, 0)]);
         assert!(clip_peaks(&core, 0, 8).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- Phase J: normalise all clips ----
+
+    #[test]
+    fn normalised_gain_table() {
+        // (current gain, peak, target, expected) — the pure
+        // decision behind `normalise_all_clips`, no files
+        // involved. `Some` values compare within 0.001.
+        let cases: [(f32, f32, f32, Option<f32>); 8] = [
+            // A silent clip has no peak to scale by.
+            (1.0, 0.0, 0.9, None),
+            // A non-positive peak is refused defensively:
+            // real peaks are max-abs, so this only guards
+            // the division.
+            (1.0, -0.5, 0.9, None),
+            // Already on target: the ratio is 1.
+            (1.0, 0.9, 0.9, None),
+            // Within the epsilon of no change (the scaled
+            // gain would be 0.9995, 0.0005 away).
+            (1.0, 1.0, 0.9995, None),
+            // A quiet clip is boosted towards the target.
+            (1.0, 0.5, 0.9, Some(1.8)),
+            // A loud clip is reduced towards the target.
+            (1.5, 0.9, 0.45, Some(0.75)),
+            // Clamp interaction, partial: the raw scaling is
+            // 6.0, past the gain ceiling, so the clip lands
+            // on 2.0 — as far towards the target as the
+            // 0.0..=2.0 range allows, short of the peak the
+            // target asked for.
+            (1.5, 0.25, 1.0, Some(2.0)),
+            // Clamp interaction, no-op: the raw scaling is
+            // 8.0, but clamped it equals the current gain,
+            // so there is nothing to write.
+            (2.0, 0.25, 1.0, None),
+        ];
+        for (current, peak, target, expected) in cases {
+            let got = normalised_gain(current, peak, target);
+            match (got, expected) {
+                (None, None) => {}
+                (Some(g), Some(want)) => assert!(
+                    (g - want).abs() < 0.001,
+                    "normalised_gain({current}, {peak}, {target}) = {g}, expected {want}"
+                ),
+                _ => panic!(
+                    "normalised_gain({current}, {peak}, {target}) = {got:?}, expected {expected:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn normalised_gain_scales_from_the_current_gain() {
+        // The ratio multiplies the CURRENT gain rather than
+        // replacing it: the same file peak and target scale
+        // two different gains by the same factor, so clips
+        // keep their relative balance and only a clip at
+        // unity lands its effective peak exactly on target.
+        assert_eq!(normalised_gain(1.0, 0.5, 0.5), None, "ratio 1 at unity");
+        assert_eq!(normalised_gain(2.0, 0.5, 0.5), None, "ratio 1 at any gain");
+        let halved = normalised_gain(1.0, 0.5, 0.25).unwrap();
+        assert!((halved - 0.5).abs() < 0.001, "1.0 * (0.25 / 0.5) = 0.5");
+        let halved_too = normalised_gain(0.5, 0.5, 0.25).unwrap();
+        assert!(
+            (halved_too - 0.25).abs() < 0.001,
+            "0.5 * (0.25 / 0.5) = 0.25 — the same factor, half the result"
+        );
+    }
+
+    #[test]
+    fn normalise_all_clips_scales_each_gain_once() {
+        let dir = temp_dir("normalise-all");
+        // Constant-amplitude files whose peaks survive the
+        // PCM16 round trip exactly: 0.25, 0.75 and 0.5.
+        let quiet = write_samples_wav(&dir, "quiet.wav", vec![0.25; 2000]);
+        let loud = write_samples_wav(&dir, "loud.wav", vec![0.75; 2000]);
+        let settled = write_samples_wav(&dir, "settled.wav", vec![0.5; 2000]);
+        let silent = write_samples_wav(&dir, "silent.wav", vec![0.0; 2000]);
+        let missing = dir.join("missing.wav").to_string_lossy().into_owned();
+        let mut core = core_with(vec![
+            clip(&quiet, 0),
+            clip(&loud, 4),
+            clip(&settled, 8),
+            clip(&silent, 12),
+            clip(&missing, 16),
+        ]);
+        core.project.audio[0].gain = 0.8;
+        core.project.audio[3].gain = 0.7;
+        core.project.audio[4].gain = 0.3;
+        let edits = core.edits_since_autosave();
+        let adjusted = core.normalise_all_clips(0.5);
+        // The quiet clip is boosted (0.8 * 0.5 / 0.25 = 1.6)
+        // and the loud one cut (1.0 * 0.5 / 0.75 = 0.667);
+        // the settled clip already peaks on target, and the
+        // silent and missing clips cannot be measured — all
+        // three keep their gains.
+        assert_eq!(adjusted, 2);
+        assert!((core.project.audio[0].gain - 1.6).abs() < 0.001);
+        assert!((core.project.audio[1].gain - 0.6667).abs() < 0.002);
+        assert_eq!(core.project.audio[2].gain, 1.0, "already on target");
+        assert_eq!(core.project.audio[3].gain, 0.7, "silent clip skipped");
+        assert_eq!(core.project.audio[4].gain, 0.3, "missing file skipped");
+        assert_eq!(core.status, "Normalised 2 audio clips to peak 0.50.");
+        // The whole operation is ONE undo step.
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        core.undo();
+        assert_eq!(core.project.audio[0].gain, 0.8, "undo restores the boost");
+        assert_eq!(core.project.audio[1].gain, 1.0, "undo restores the cut");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn normalise_all_clips_noops_when_nothing_needs_changing() {
+        let dir = temp_dir("normalise-noop");
+        let settled = write_samples_wav(&dir, "settled.wav", vec![0.5; 2000]);
+        let silent = write_samples_wav(&dir, "silent.wav", vec![0.0; 2000]);
+        let missing = dir.join("missing.wav").to_string_lossy().into_owned();
+        let mut core = core_with(vec![
+            clip(&settled, 0),
+            clip(&silent, 4),
+            clip(&missing, 8),
+        ]);
+        core.project.audio[1].gain = 0.7;
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        let adjusted = core.normalise_all_clips(0.5);
+        assert_eq!(adjusted, 0);
+        assert_eq!(
+            core.status,
+            "No audio clips needed normalising to peak 0.50."
+        );
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+        // An empty project is the same nothing-to-do.
+        let mut empty = EditorCore::new();
+        assert_eq!(empty.normalise_all_clips(0.9), 0);
+        assert_eq!(
+            empty.status,
+            "No audio clips needed normalising to peak 0.90."
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

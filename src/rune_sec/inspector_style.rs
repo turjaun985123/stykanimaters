@@ -75,6 +75,24 @@
 //!   ([`preset_application`] computes the call's
 //!   arguments; [`apply_preset`] makes it).
 //!
+//! * Recent colours row (Phase J) → [`RECENT_COLORS`]: a
+//!   panel-local `thread_local` list (most recent first,
+//!   no duplicates, capped at [`RECENT_COLORS_CAP`]) of
+//!   the colours this panel's own handlers have applied
+//!   to the selected node. Recorded by [`note_recent_color`]
+//!   from exactly three sites: a gradient swatch press
+//!   (its end colour, when not Off), a preset application
+//!   ([`apply_preset`]) and a paste ([`paste_style`]). The
+//!   RGB steppers deliberately do NOT record — each press
+//!   is an intermediate value on the way to a colour, and
+//!   recording them would flood the row with near-misses.
+//!   The row renders only when the list is non-empty (a
+//!   selection is already required for the panel to show
+//!   controls at all); pressing a chip applies the colour
+//!   as the node's own colour via `set_node_color` — the
+//!   op the segment inspector's palette swatches press —
+//!   and notes it again, moving it to the front.
+//!
 //! History: Phase D shipped cap and gradient as single
 //! press targets advancing `cycle_node_cap` /
 //! `cycle_node_gradient` one step per press, because no
@@ -388,6 +406,7 @@ pub fn apply_preset(core: &mut EditorCore, preset: &StylePreset) -> bool {
     };
     core.set_node_style_atomic(color, color2, cap, opacity);
     core.status = format!("Style preset: {}.", preset.name);
+    note_recent_color(color);
     true
 }
 
@@ -420,8 +439,63 @@ pub fn paste_style(core: &mut EditorCore) -> bool {
         core.status = "Select a joint first.".into();
         return false;
     }
+    note_recent_color(clip.color);
     core.status = "Style pasted.".into();
     true
+}
+
+/// Maximum number of recent colours the panel keeps.
+pub const RECENT_COLORS_CAP: usize = 8;
+
+thread_local! {
+    /// The colours this panel's own handlers have applied
+    /// to a selected node, most recent first, no
+    /// duplicates, capped at [`RECENT_COLORS_CAP`]. Like
+    /// the style clipboard above, it is panel-owned state
+    /// in a `thread_local` because the style panel has no
+    /// state struct; it survives workspace switches and
+    /// panel remounts for the life of the process and is
+    /// not persisted. The only writer is
+    /// [`note_recent_color`], which funnels through
+    /// [`push_recent`], so the ordering / dedupe / cap
+    /// policy lives in one pure function.
+    static RECENT_COLORS: RefCell<Vec<u32>> =
+        RefCell::new(Vec::new());
+}
+
+/// The recent-colours policy, pure: `color` moves to the
+/// front of `list`, any earlier occurrence of it is
+/// dropped (no duplicates), and the result is truncated
+/// to [`RECENT_COLORS_CAP`] entries, oldest last. The
+/// input is assumed duplicate-free — always true for the
+/// panel's list, whose only writer is this function.
+pub fn push_recent(list: Vec<u32>, color: u32) -> Vec<u32> {
+    let mut out = Vec::with_capacity(RECENT_COLORS_CAP + 1);
+    out.push(color);
+    out.extend(list.into_iter().filter(|&c| c != color));
+    out.truncate(RECENT_COLORS_CAP);
+    out
+}
+
+/// The panel's current recent colours, most recent first.
+pub fn recent_colors() -> Vec<u32> {
+    RECENT_COLORS.with(|c| c.borrow().clone())
+}
+
+/// Record `color` as the panel's most recent colour. The
+/// recording sites are the handlers that apply a colour
+/// to the selected node — the gradient swatch press, a
+/// preset application, a paste, and a recent chip press
+/// itself (which re-notes its colour, moving it to the
+/// front). The RGB steppers deliberately never call
+/// this: their steps are intermediate values, not chosen
+/// colours (see the module docs).
+pub fn note_recent_color(color: u32) {
+    RECENT_COLORS.with(|c| {
+        let mut slot = c.borrow_mut();
+        let list = std::mem::take(&mut *slot);
+        *slot = push_recent(list, color);
+    });
 }
 
 /// One RGB channel stepper row: channel letter, a small
@@ -535,12 +609,80 @@ fn gradient_swatch(state: usize, current: bool, t: &Theme) -> El {
         } else {
             t.control_track
         })
-        .on_press(move |s: &mut State| s.core.set_node_color2(gradient_value(state)));
+        .on_press(move |s: &mut State| {
+            let value = gradient_value(state);
+            s.core.set_node_color2(value);
+            // A swatch press applies a colour to the node:
+            // record it (the Off state applies no colour).
+            if let Some(color) = value {
+                note_recent_color(color);
+            }
+        });
     if current {
         cell.fill(tok::accent(0, true)).child(swatch)
     } else {
         cell.child(swatch)
     }
+}
+
+/// One recent-colour chip: an 18×18 colour square built
+/// exactly like a gradient swatch (same size, frame
+/// padding and accent frame when it shows the node's
+/// current colour). Pressing it applies the colour as
+/// the node's own colour through `set_node_color` — the
+/// op the segment inspector's palette swatches press —
+/// and notes it again, moving it to the front of the
+/// recent list. Keys are `style-recent-{i}` with `i` the
+/// colour's position in the recent list.
+fn recent_chip(index: usize, color: u32, current: bool, t: &Theme) -> El {
+    let swatch = el()
+        .size(18.0, 18.0)
+        .radius(4.0)
+        .fill(hex_color(color).unwrap_or(Color::WHITE));
+    let cell = el()
+        .key(format!("style-recent-{index}"))
+        .padding(2.0)
+        .radius(6.0)
+        .hover(if current {
+            tok::accent(0, true)
+        } else {
+            t.control_track
+        })
+        .on_press(move |s: &mut State| {
+            s.core.set_node_color(color);
+            note_recent_color(color);
+        });
+    if current {
+        cell.fill(tok::accent(0, true)).child(swatch)
+    } else {
+        cell.child(swatch)
+    }
+}
+
+/// The Recent colours row: a `Recent` label plus one
+/// chip per recent colour, most recent first. Built from
+/// the list passed in (rather than reading the
+/// `thread_local` itself) so the row's visibility policy
+/// is testable without panel state: `None` when the list
+/// is empty — the caller only renders what this returns.
+/// `current` is the selected node's effective colour; the
+/// chip matching it gets the accent frame.
+pub fn recents_row(recents: &[u32], current: Option<u32>, t: &Theme) -> Option<El> {
+    if recents.is_empty() {
+        return None;
+    }
+    let mut chips = row().gap(4.0).center_y();
+    for (i, &color) in recents.iter().enumerate() {
+        chips = chips.child(recent_chip(i, color, current == Some(color), t));
+    }
+    Some(
+        row()
+            .key("style-recents")
+            .gap(8.0)
+            .center_y()
+            .child(text("Recent").font(type_::LABEL).color(t.text))
+            .child(chips),
+    )
 }
 
 /// The segment style panel: a header naming the selected
@@ -650,6 +792,17 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
         panel = panel.child(channel_row(0, "R", r, t));
         panel = panel.child(channel_row(1, "G", g, t));
         panel = panel.child(channel_row(2, "B", b, t));
+    }
+
+    // Recent colours: the colours this panel's own
+    // handlers have applied to a node (see
+    // `RECENT_COLORS`), as one-press chips under the
+    // colour controls. Hidden while the list is empty;
+    // a selection is already guaranteed here (the panel
+    // returned early without one).
+    let recents = recent_colors();
+    if let Some(recent_row) = recents_row(&recents, selected_color(core), t) {
+        panel = panel.child(recent_row);
     }
 
     // Opacity: − / + stepper (0.05 steps, % readout) setting
@@ -1205,5 +1358,126 @@ mod tests {
         // Untouched by the preset: gradient end + opacity.
         assert_eq!(node.style.color2, Some(0x34_5678));
         assert_eq!(node.style.opacity, 0.55);
+    }
+
+    #[test]
+    fn push_recent_puts_the_colour_at_the_front() {
+        // Into an empty list.
+        assert_eq!(push_recent(vec![], 0x11_1111), vec![0x11_1111]);
+        // Each push lands ahead of everything before it:
+        // most recent first.
+        let list = push_recent(vec![], 0x11_1111);
+        let list = push_recent(list, 0x22_2222);
+        let list = push_recent(list, 0x33_3333);
+        assert_eq!(list, vec![0x33_3333, 0x22_2222, 0x11_1111]);
+    }
+
+    #[test]
+    fn push_recent_dedupes_by_moving_to_the_front() {
+        let list = vec![0x33_3333, 0x22_2222, 0x11_1111];
+        // Re-pushing an existing colour moves it to the
+        // front; it does not duplicate it and the relative
+        // order of the others survives.
+        let list = push_recent(list, 0x11_1111);
+        assert_eq!(list, vec![0x11_1111, 0x33_3333, 0x22_2222]);
+        // Pushing the front colour again is a no-op.
+        let list = push_recent(list, 0x11_1111);
+        assert_eq!(list, vec![0x11_1111, 0x33_3333, 0x22_2222]);
+    }
+
+    #[test]
+    fn push_recent_caps_at_eight_dropping_the_oldest() {
+        let mut list = vec![];
+        for i in 0..9u32 {
+            list = push_recent(list, 0x10_0000 + i);
+        }
+        assert_eq!(list.len(), RECENT_COLORS_CAP);
+        // The newest push is at the front; the first-ever
+        // colour (the oldest) is the one dropped.
+        assert_eq!(list[0], 0x10_0008);
+        assert!(!list.contains(&0x10_0000));
+        // Re-pushing an existing colour at the cap keeps
+        // the length and still leaves no duplicate.
+        let list = push_recent(list, 0x10_0005);
+        assert_eq!(list.len(), RECENT_COLORS_CAP);
+        assert_eq!(list[0], 0x10_0005);
+        assert_eq!(
+            list.iter().filter(|&&c| c == 0x10_0005).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn note_recent_color_records_most_recent_first() {
+        // `RECENT_COLORS` is a per-thread `thread_local`
+        // and each test runs on its own thread (the same
+        // isolation the clipboard tests above rely on), so
+        // the list starts empty here.
+        assert!(recent_colors().is_empty());
+        note_recent_color(0x11_1111);
+        note_recent_color(0x22_2222);
+        assert_eq!(recent_colors(), vec![0x22_2222, 0x11_1111]);
+        // Noting an existing colour moves it to the front.
+        note_recent_color(0x11_1111);
+        assert_eq!(recent_colors(), vec![0x11_1111, 0x22_2222]);
+    }
+
+    #[test]
+    fn recent_chip_press_path_applies_the_colour_and_refronts_it() {
+        // The chip's press body, driven without the UI:
+        // `set_node_color` (the palette swatch op) then
+        // `note_recent_color` again.
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        note_recent_color(0x22_2222);
+        note_recent_color(0x11_1111);
+        assert_eq!(recent_colors(), vec![0x11_1111, 0x22_2222]);
+
+        core.set_node_color(0x22_2222);
+        note_recent_color(0x22_2222);
+        // The colour landed as the node's own colour...
+        assert_eq!(selected_color(&core), Some(0x22_2222));
+        assert_eq!(
+            core.project.figures[0].def.nodes[1].color,
+            Some(0x22_2222)
+        );
+        // ...and moved to the front of the recent list.
+        assert_eq!(recent_colors(), vec![0x22_2222, 0x11_1111]);
+    }
+
+    #[test]
+    fn preset_and_paste_record_their_colours() {
+        // Preset application records the preset's colour.
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        assert!(recent_colors().is_empty());
+        assert!(apply_preset(&mut core, &STYLE_PRESETS[2])); // Ocean
+        assert_eq!(recent_colors(), vec![0x2B_6FD2]);
+
+        // A paste records the clipboard's colour, ahead of
+        // the preset's. Give the clipboard a colour the
+        // panel never applied — a direct core write does
+        // not record (only panel handlers do) — so the
+        // paste is the only site that can put it in front.
+        core.set_node_color(0x12_3456);
+        assert_eq!(recent_colors(), vec![0x2B_6FD2]);
+        copy_style(&mut core);
+        core.selected_node = Some(2);
+        assert!(paste_style(&mut core));
+        assert_eq!(recent_colors(), vec![0x12_3456, 0x2B_6FD2]);
+    }
+
+    #[test]
+    fn recents_row_is_hidden_for_an_empty_list() {
+        let t = tok::theme(true);
+        // No colours recorded yet → no row at all.
+        assert!(recents_row(&[], None, &t).is_none());
+        assert!(recents_row(&[], Some(0x11_1111), &t).is_none());
+        // A non-empty list builds a row, with or without a
+        // current colour to frame.
+        assert!(recents_row(&[0x11_1111], None, &t).is_some());
+        assert!(recents_row(&[0x11_1111, 0x22_2222], Some(0x22_2222), &t).is_some());
     }
 }

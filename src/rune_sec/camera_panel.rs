@@ -43,6 +43,16 @@
 //!   values: exactly one `snapshot()` (editor.rs:202), then
 //!   `Project::set_camera_key`, then the angle fix-up the op
 //!   itself applies — one paste is exactly one undo step.
+//! * Hold camera (Phase J, section 32) → [`hold_camera`]:
+//!   stamps the camera in effect at the current frame as a
+//!   key on EVERY frame of a span ([`hold_span`]: the loop
+//!   range when one is set, else the whole timeline), so a
+//!   static shot needs no key-per-frame hand work. The
+//!   write is paste's composition repeated per frame under
+//!   ONE `snapshot()` — one hold is exactly one undo step —
+//!   and keys inside the span are replaced by the held
+//!   value (that is what hold means); keys outside the
+//!   span are untouched.
 //! * Follow → `toggle_camera_follow` (editor.rs:1740); its
 //!   active state is `project.camera_follow ==
 //!   Some(selected_figure)` (model.rs:699), the same condition
@@ -370,6 +380,63 @@ pub fn paste_key_here(core: &mut EditorCore) {
         k.angle = clip.angle;
     }
     core.status = format!("Camera key pasted at frame {}.", frame + 1);
+}
+
+// ----------------------------------------------------------------
+// Hold camera (Phase J, section 32)
+// ----------------------------------------------------------------
+
+/// The span a Hold press covers, as inclusive 0-based
+/// frame bounds: the loop range when one is set (the
+/// core's `set_loop_range` already orders and clamps it
+/// to the timeline), else the whole timeline. `None`
+/// when the project has no frames at all — there is
+/// nothing to hold over.
+pub fn hold_span(
+    loop_range: Option<(usize, usize)>,
+    frame_count: usize,
+) -> Option<(usize, usize)> {
+    if frame_count == 0 {
+        return None;
+    }
+    match loop_range {
+        Some(span) => Some(span),
+        None => Some((0, frame_count - 1)),
+    }
+}
+
+/// Hold-camera button: stamp the camera in effect at the
+/// current frame as a key on every frame of the span
+/// ([`hold_span`]). The held value is read BEFORE any
+/// writing (the panel's own readouts: `camera_here` for
+/// pan/zoom, `Project::camera_angle_at` for the angle),
+/// so the keys written cannot move the value being held.
+///
+/// Write discipline: there is no no-snapshot core op for
+/// this (the engine's `set_camera_key_here` upsert is
+/// private and snapshots per call through its public
+/// wrappers), so — exactly like [`paste_key_here`] — the
+/// write composes the public parts directly: ONE
+/// `snapshot()` for the whole span, then per frame
+/// `Project::set_camera_key` plus the angle fix-up.
+/// Existing keys inside the span are replaced by the
+/// held value; keys outside it are untouched. With no
+/// frames, status-only: no snapshot, no keys.
+pub fn hold_camera(core: &mut EditorCore) {
+    let Some((a, b)) = hold_span(core.loop_range, core.frame_count()) else {
+        core.status = "No frames to hold the camera over.".into();
+        return;
+    };
+    let (x, y, zoom) = core.camera_here();
+    let angle = core.project.camera_angle_at(core.current as f32);
+    core.snapshot();
+    for frame in a..=b {
+        core.project.set_camera_key(frame, x, y, zoom);
+        if let Some(k) = core.project.camera.iter_mut().find(|k| k.frame == frame) {
+            k.angle = angle;
+        }
+    }
+    core.status = format!("Camera held over frames {}–{}.", a + 1, b + 1);
 }
 
 // ----------------------------------------------------------------
@@ -848,6 +915,9 @@ pub fn panel(s: &State, t: &Theme) -> El {
                 .child(btn("cam-set-key", "Set key", false, t, set_key_here))
                 .child(btn("cam-clear-key", "Clear key", false, t, |s: &mut State| {
                     s.core.camera_clear_key()
+                }))
+                .child(btn("cam-hold", "Hold camera", false, t, |s: &mut State| {
+                    hold_camera(&mut s.core)
                 })),
         )
         .child(key_list(core, t))
@@ -1366,5 +1436,75 @@ loop_playback: true,
         };
         let _ = panel(&s, &t);
         let _ = overlay(&s.core);
+    }
+
+    // ---- Hold camera (Phase J, section 32) ----
+
+    #[test]
+    fn hold_span_prefers_the_loop_range_and_covers_the_timeline() {
+        // No loop range: the whole timeline.
+        assert_eq!(hold_span(None, 5), Some((0, 4)));
+        assert_eq!(hold_span(None, 1), Some((0, 0)));
+        // A loop range wins over the whole timeline.
+        assert_eq!(hold_span(Some((1, 3)), 5), Some((1, 3)));
+        assert_eq!(hold_span(Some((0, 4)), 5), Some((0, 4)));
+        // No frames: nothing to hold over, loop range or not.
+        assert_eq!(hold_span(None, 0), None);
+        assert_eq!(hold_span(Some((0, 0)), 0), None);
+    }
+
+    #[test]
+    fn hold_camera_stamps_every_frame_of_the_span_in_one_undo_step() {
+        let mut core = EditorCore::new(); // demo: 5 frames, no camera keys
+        // The camera to hold: a key on frame 0 with distinct
+        // values; standing on frame 0 makes it the camera in
+        // effect.
+        pin_key(&mut core, 0, 100.0, 200.0, 1.5, 30.0);
+        // A pre-existing key inside the span with different
+        // values — the hold must replace it, angle included.
+        pin_key(&mut core, 2, 999.0, 888.0, 3.0, 45.0);
+        core.goto(0);
+        let depth0 = core.undo_depth();
+        hold_camera(&mut core);
+        assert_eq!(core.undo_depth(), depth0 + 1, "one hold is one undo step");
+        assert_eq!(core.status, "Camera held over frames 1–5.");
+        assert_eq!(core.project.camera.len(), 5);
+        for frame in 0..5 {
+            let k = core
+                .project
+                .camera
+                .iter()
+                .find(|k| k.frame == frame)
+                .unwrap_or_else(|| panic!("no key on frame {frame}"));
+            assert_eq!(
+                (k.x, k.y, k.zoom, k.angle),
+                (100.0, 200.0, 1.5, 30.0),
+                "frame {frame} holds the stamped camera"
+            );
+        }
+    }
+
+    #[test]
+    fn hold_camera_respects_the_loop_range_and_preserves_outside_keys() {
+        let mut core = EditorCore::new();
+        pin_key(&mut core, 0, 100.0, 200.0, 1.5, 30.0);
+        // A key outside the span (frame 4) — must survive
+        // the hold untouched.
+        pin_key(&mut core, 4, 400.0, 300.0, 2.0, 60.0);
+        core.goto(0);
+        core.set_loop_range(1, 3);
+        hold_camera(&mut core);
+        assert_eq!(core.status, "Camera held over frames 2–4.");
+        let at = |f: usize| {
+            core.project
+                .camera
+                .iter()
+                .find(|k| k.frame == f)
+                .map(|k| (k.x, k.y, k.zoom, k.angle))
+        };
+        assert_eq!(at(1), Some((100.0, 200.0, 1.5, 30.0)));
+        assert_eq!(at(2), Some((100.0, 200.0, 1.5, 30.0)));
+        assert_eq!(at(3), Some((100.0, 200.0, 1.5, 30.0)));
+        assert_eq!(at(4), Some((400.0, 300.0, 2.0, 60.0)));
     }
 }

@@ -33,6 +33,19 @@
 //!   why, in the core's house style, so a UI binding never
 //!   fails silently.
 //!
+//! ## Duplicating a channel onto another figure
+//!
+//! [`duplicate_channel_to_figure`] clones a whole channel —
+//! target and every key verbatim — and appends the clone to
+//! the project retargeted at another figure. It refuses,
+//! without snapshotting, when the channel or the figure does
+//! not exist, when the destination is the channel's own
+//! figure, when the destination figure already has a channel
+//! for the same target (the engine resolves duplicates to
+//! the first match, so the clone would be shadowed and
+//! silently inert), or when an angle/length target names a
+//! node the destination figure's rig does not have.
+//!
 //! ## Channel statistics
 //!
 //! [`channel_stats`] is the read-only companion: one
@@ -121,6 +134,91 @@ pub fn paste_keys(
         rebased.len(),
         at_frame,
         channel_index + 1
+    );
+    true
+}
+
+/// Duplicate the channel at `channel_index` onto figure
+/// `to_figure`: append a clone of the channel — the same
+/// target, and every key with its frame, value, tangents and
+/// [`Interp`] mode verbatim — with its `figure` retargeted.
+/// Frames are NOT rebased; the clone drives the same curve,
+/// just on another figure. On success exactly one snapshot is
+/// taken, the status line reports the duplication and the
+/// function returns `true`.
+///
+/// Returns `false` — no snapshot, project untouched — when:
+/// * no channel sits at `channel_index`;
+/// * no figure sits at `to_figure`;
+/// * `to_figure` is the channel's own figure (the clone would
+///   be an exact duplicate in place);
+/// * figure `to_figure` already has a channel for the same
+///   target — every core graph lookup resolves a
+///   (figure, target) pair to the FIRST matching channel, so
+///   the appended clone would be shadowed and never read;
+/// * the target is `Angle(n)` or `Length(n)` and figure
+///   `to_figure`'s rig has no node `n`.
+pub fn duplicate_channel_to_figure(
+    core: &mut EditorCore,
+    channel_index: usize,
+    to_figure: usize,
+) -> bool {
+    let Some(source) = core.project.channels.get(channel_index).cloned() else {
+        core.status = format!("No graph channel {} to duplicate.", channel_index + 1);
+        return false;
+    };
+    if to_figure >= core.project.figures.len() {
+        core.status = format!(
+            "No figure {} to duplicate graph channel {} onto.",
+            to_figure + 1,
+            channel_index + 1
+        );
+        return false;
+    }
+    if to_figure == source.figure {
+        core.status = format!(
+            "Graph channel {} already belongs to figure {}.",
+            channel_index + 1,
+            to_figure + 1
+        );
+        return false;
+    }
+    if channel_index_of(core, to_figure, source.target).is_some() {
+        core.status = format!(
+            "Figure {} already has a channel for {} — a duplicate would be shadowed.",
+            to_figure + 1,
+            target_label(source.target)
+        );
+        return false;
+    }
+    // Angle and length targets name a node on the rig; the
+    // destination figure must actually have that node, or the
+    // cloned channel would drive nothing.
+    let node_index = match source.target {
+        ChannelTarget::Angle(n) | ChannelTarget::Length(n) => Some(n),
+        ChannelTarget::RootX | ChannelTarget::RootY => None,
+    };
+    if let Some(n) = node_index {
+        if n >= core.project.figures[to_figure].def.nodes.len() {
+            core.status = format!(
+                "Figure {} has no node {} for {} — nothing to duplicate onto.",
+                to_figure + 1,
+                n + 1,
+                target_label(source.target)
+            );
+            return false;
+        }
+    }
+    let key_count = source.keys.len();
+    core.snapshot();
+    let mut copy = source;
+    copy.figure = to_figure;
+    core.project.channels.push(copy);
+    core.status = format!(
+        "Duplicated graph channel {} onto figure {} ({} key(s)).",
+        channel_index + 1,
+        to_figure + 1,
+        key_count
     );
     true
 }
@@ -256,6 +354,17 @@ mod tests {
             target: ChannelTarget::RootY,
             keys: Vec::new(),
         });
+        core
+    }
+
+    /// [`core_with_channels`] plus a second figure at index 1
+    /// (a renamed clone of the demo figure, full 11-node rig)
+    /// with no channels of its own.
+    fn core_with_two_figures() -> EditorCore {
+        let mut core = core_with_channels();
+        let mut second = core.project.figures[0].clone();
+        second.name = "Second".to_string();
+        core.project.figures.push(second);
         core
     }
 
@@ -403,6 +512,161 @@ mod tests {
             .map(|ch| ch.keys.len())
             .collect();
         assert_eq!(keys_before, keys_after, "project channels untouched");
+    }
+
+    #[test]
+    fn duplicate_channel_clones_keys_onto_the_other_figure() {
+        let mut core = core_with_two_figures();
+        let source_keys = core.project.channels[0].keys.clone();
+        let undo_before = core.undo_depth();
+        let edits_before = core.edits_since_autosave();
+
+        assert!(duplicate_channel_to_figure(&mut core, 0, 1));
+        assert_eq!(core.undo_depth(), undo_before + 1, "exactly one snapshot");
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before + 1,
+            "the snapshot is the only edit"
+        );
+
+        assert_eq!(core.project.channels.len(), 3, "clone appended");
+        let copy = &core.project.channels[2];
+        assert_eq!(copy.figure, 1, "clone retargeted at figure 1");
+        assert_eq!(copy.target, ChannelTarget::RootX, "target travels verbatim");
+        assert_eq!(
+            copy.keys, source_keys,
+            "every key cloned exactly — frames, values, tangents, modes"
+        );
+        // The source channel is untouched.
+        assert_eq!(core.project.channels[0].figure, 0);
+        assert_eq!(core.project.channels[0].keys, source_keys);
+        assert!(
+            core.status.contains("Duplicated graph channel 1 onto figure 2"),
+            "status reports the duplication: {}",
+            core.status
+        );
+
+        // And it is a single undo step: undoing removes
+        // exactly the clone.
+        core.undo();
+        assert_eq!(core.project.channels.len(), 2, "undo reverts the duplication");
+    }
+
+    #[test]
+    fn duplicate_channel_refuses_bad_indices_and_same_figure_without_snapshot() {
+        let mut core = core_with_two_figures();
+        let undo_before = core.undo_depth();
+
+        assert!(!duplicate_channel_to_figure(&mut core, 99, 1), "no such channel");
+        assert!(
+            core.status.contains("No graph channel 100"),
+            "status: {}",
+            core.status
+        );
+        assert!(!duplicate_channel_to_figure(&mut core, 0, 99), "no such figure");
+        assert!(
+            core.status.contains("No figure 100"),
+            "status: {}",
+            core.status
+        );
+        assert!(
+            !duplicate_channel_to_figure(&mut core, 0, 0),
+            "channel already belongs to figure 0"
+        );
+        assert!(
+            core.status.contains("already belongs to figure 1"),
+            "status: {}",
+            core.status
+        );
+
+        assert_eq!(core.undo_depth(), undo_before, "no refusal took a snapshot");
+        assert_eq!(core.project.channels.len(), 2, "no refusal appended a channel");
+    }
+
+    #[test]
+    fn duplicate_channel_refuses_when_the_target_already_has_a_channel() {
+        let mut core = core_with_two_figures();
+        assert!(duplicate_channel_to_figure(&mut core, 0, 1), "first duplication lands");
+        let undo_before = core.undo_depth();
+
+        assert!(
+            !duplicate_channel_to_figure(&mut core, 0, 1),
+            "a second clone would be shadowed by the first"
+        );
+        assert!(
+            core.status.contains("already has a channel for Root X"),
+            "status must say a channel for that target already exists: {}",
+            core.status
+        );
+        assert_eq!(core.undo_depth(), undo_before, "refusal took no snapshot");
+        assert_eq!(core.project.channels.len(), 3, "still exactly one clone");
+
+        // The same refusal when the blocking channel was
+        // already in the project rather than made here:
+        // figure 1's own RootY blocks figure 0's RootY.
+        core.project.channels.push(Channel {
+            figure: 1,
+            target: ChannelTarget::RootY,
+            keys: Vec::new(),
+        });
+        let undo_before = core.undo_depth();
+        assert!(!duplicate_channel_to_figure(&mut core, 1, 1));
+        assert!(
+            core.status.contains("already has a channel for Root Y"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.undo_depth(), undo_before, "refusal took no snapshot");
+    }
+
+    #[test]
+    fn duplicate_channel_refuses_a_node_the_target_rig_lacks() {
+        let mut core = core_with_two_figures();
+        // Shrink figure 1's rig to three nodes (indices 0..=2).
+        core.project.figures[1].def.nodes.truncate(3);
+        // Angle and length channels for node 5 are valid on
+        // figure 0's full rig but name no node on figure 1's.
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(5),
+            keys: vec![Key::flat(0.0, 30.0)],
+        });
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Length(5),
+            keys: vec![Key::flat(0.0, 40.0)],
+        });
+        let undo_before = core.undo_depth();
+
+        assert!(!duplicate_channel_to_figure(&mut core, 2, 1), "angle node missing");
+        assert!(
+            core.status.contains("has no node 6"),
+            "status: {}",
+            core.status
+        );
+        assert!(!duplicate_channel_to_figure(&mut core, 3, 1), "length node missing");
+        assert!(
+            core.status.contains("has no node 6"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.undo_depth(), undo_before, "no snapshot for either refusal");
+        assert_eq!(core.project.channels.len(), 4, "nothing appended");
+
+        // A node the small rig DOES have duplicates fine.
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(2),
+            keys: vec![Key::flat(1.0, -10.0)],
+        });
+        assert!(
+            duplicate_channel_to_figure(&mut core, 4, 1),
+            "node 2 exists on both rigs"
+        );
+        let copy = core.project.channels.last().expect("clone appended");
+        assert_eq!(copy.figure, 1);
+        assert_eq!(copy.target, ChannelTarget::Angle(2));
+        assert_eq!(copy.keys.len(), 1);
     }
 
     #[test]

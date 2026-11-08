@@ -1308,6 +1308,111 @@ fn tool_audio_split_silences(core: &mut EditorCore, args: &Value) -> Result<Valu
     }))
 }
 
+// ---------------------------------------------------------------------
+// Phase J parity tools: MCP surface for the phase's new
+// EditorCore ops (FX clip split, particle event duplicate,
+// normalise-all and whole-figure mirror). Handlers follow
+// the phase I indexed-DSP pattern: arguments are validated
+// (and indices pre-checked) before the op runs, and the
+// outcome is reported through `core.status` alongside the
+// project summary. Where an op can refuse after a valid
+// pre-check (it returns false / None), the refusal becomes
+// a clean Err carrying the op's status line — the
+// tool_fx_duplicate convention.
+// ---------------------------------------------------------------------
+
+/// Index of FX clip `index`, or a clean error when the
+/// project has no clip there (the pre-check the indexed FX
+/// tools share; mirrors check_audio_index so an
+/// out-of-range index is a clean Err, not just a status
+/// line).
+fn check_fx_index(core: &EditorCore, idx: usize) -> Result<usize, String> {
+    if idx >= core.project.fx_clips.len() {
+        Err(format!("no FX clip at index {idx}"))
+    } else {
+        Ok(idx)
+    }
+}
+
+/// Index of particle event `index`, or a clean error when
+/// the project has no event there (mirrors check_fx_index).
+fn check_particle_index(core: &EditorCore, idx: usize) -> Result<usize, String> {
+    if idx >= core.project.particles.len() {
+        Err(format!("no particle event at index {idx}"))
+    } else {
+        Ok(idx)
+    }
+}
+
+fn tool_fx_split_clip(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = check_fx_index(core, req_usize(args, "index")?)?;
+    let at_frame = req_f32(args, "at_frame")?;
+    if !core.fx_split_clip(idx, at_frame) {
+        // The op refused (e.g. the split point is not
+        // inside the clip) and explained via the status
+        // line.
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "fx_index": idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_particle_duplicate_event(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let idx = check_particle_index(core, req_usize(args, "index")?)?;
+    let Some(new_idx) = core.particle_duplicate_event(idx) else {
+        // The op refused and explained via the status line.
+        return Err(core.status.clone());
+    };
+    Ok(json!({
+        "ok": true,
+        "particle_index": new_idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_audio_normalise_all(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let target_peak = opt_f32(args, "target_peak")?.unwrap_or(0.9);
+    // The valid peak range is (0, 1]: nought would silence
+    // every clip and anything above 1.0 is not a peak a
+    // normalised file can reach. (The `!(x > 0.0)` form
+    // also rejects NaN.)
+    if !(target_peak > 0.0) || target_peak > 1.0 {
+        return Err(format!(
+            "argument 'target_peak' must be in the range (0, 1], got {target_peak}"
+        ));
+    }
+    let adjusted = core.normalise_all_clips(target_peak);
+    Ok(json!({
+        "ok": true,
+        "adjusted": adjusted,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_mirror_figure(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    if !core.mirror_figure_all_frames(fi) {
+        // The op refused and explained via the status line.
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
 /// Parse the graph `target` argument shared by graph_key and the
 /// channel transform tools: "root_x"/"root_y" (or "rootx"/"rooty"),
 /// "angle:N" / "length:N" strings, or an object {"angle": node} /
@@ -2330,6 +2435,17 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_mirror_pose,
         },
         Tool {
+            name: "mirror_figure",
+            description: "Mirror a whole figure left-right in EVERY frame (the all-frames counterpart of mirror_pose): every frame's pose is flipped around the figure's root. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" }
+                }),
+                &["figure"],
+            ),
+            handler: tool_mirror_figure,
+        },
+        Tool {
             name: "set_node",
             description: "Edit a figure definition's segment: length, thickness, colour override, or shape (\"line\" | \"circle\" | \"polygon\" | side count 3-12).",
             schema: obj_schema(
@@ -2496,6 +2612,18 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_fx_delete,
         },
         Tool {
+            name: "fx_split_clip",
+            description: "Split an FX clip into two at 'at_frame' (a frame coordinate inside the clip's span): the first part keeps the clip's start and the second starts at the split point, both on the same figure and node. Errors when the split point is not inside the clip. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "at_frame": { "type": "number", "description": "Frame coordinate to split at" }
+                }),
+                &["index", "at_frame"],
+            ),
+            handler: tool_fx_split_clip,
+        },
+        Tool {
             name: "fx_set_color",
             description: "Set an FX clip's particle colour (0xRRGGBB). One undo step.",
             schema: obj_schema(
@@ -2555,6 +2683,17 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["name", "frame"],
             ),
             handler: tool_fx_preset_add,
+        },
+        Tool {
+            name: "particle_duplicate_event",
+            description: "Duplicate a particle event (one of the project's timed particle bursts, listed in the stats' particle count): the copy is appended to the event list and its new index is returned. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_particle_duplicate_event,
         },
         Tool {
             name: "set_weather",
@@ -2691,6 +2830,17 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["index"],
             ),
             handler: tool_audio_split_silences,
+        },
+        Tool {
+            name: "audio_normalise_all",
+            description: "Normalise every audio clip on the timeline to the same peak level: each clip's gain is set so its peak reaches 'target_peak' (in the range (0, 1], default 0.9). Reports how many clips were adjusted.",
+            schema: obj_schema(
+                json!({
+                    "target_peak": { "type": "number", "description": "Peak level to normalise to, (0, 1] (default 0.9)" }
+                }),
+                &[],
+            ),
+            handler: tool_audio_normalise_all,
         },
         Tool {
             name: "graph_key",
@@ -3063,11 +3213,11 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 77);
+        assert_eq!(tools.len(), 81);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 77, "tool names must be unique");
+        assert_eq!(names.len(), 81, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
@@ -4035,6 +4185,113 @@ mod tests {
 
         let _ = std::fs::remove_file(&tone_path);
         let _ = std::fs::remove_file(&gap_path);
+    }
+
+    #[test]
+    fn phase_j_parity_tools_registered_with_right_shapes() {
+        let tools = tools();
+        // fx_split_clip needs both the clip index and the
+        // split point, the latter a number (frame coords
+        // are fractional).
+        let t = tools
+            .iter()
+            .find(|t| t.name == "fx_split_clip")
+            .expect("fx_split_clip registered");
+        assert_eq!(t.schema["required"], json!(["index", "at_frame"]));
+        assert_eq!(t.schema["properties"]["index"]["type"], "integer");
+        assert_eq!(t.schema["properties"]["at_frame"]["type"], "number");
+        // particle_duplicate_event needs just the index.
+        let t = tools
+            .iter()
+            .find(|t| t.name == "particle_duplicate_event")
+            .expect("particle_duplicate_event registered");
+        assert_eq!(t.schema["required"], json!(["index"]));
+        assert_eq!(t.schema["properties"]["index"]["type"], "integer");
+        // audio_normalise_all takes no required argument:
+        // target_peak is optional with a 0.9 default.
+        let t = tools
+            .iter()
+            .find(|t| t.name == "audio_normalise_all")
+            .expect("audio_normalise_all registered");
+        assert_eq!(t.schema["required"], json!([]));
+        assert_eq!(t.schema["properties"]["target_peak"]["type"], "number");
+        // mirror_figure needs just the figure index.
+        let t = tools
+            .iter()
+            .find(|t| t.name == "mirror_figure")
+            .expect("mirror_figure registered");
+        assert_eq!(t.schema["required"], json!(["figure"]));
+        assert_eq!(t.schema["properties"]["figure"]["type"], "integer");
+    }
+
+    #[test]
+    fn phase_j_indexed_tools_validate_before_the_op() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        // The demo project has no FX clips and no particle
+        // events: index 0 is out of range for both tools,
+        // with the pre-check wordings, and a missing index
+        // is a clean error too.
+        let err = call(&mut core, &tools, "fx_split_clip", json!({ "index": 0, "at_frame": 3.0 }))
+            .unwrap_err();
+        assert_eq!(err, "no FX clip at index 0");
+        assert!(call(&mut core, &tools, "fx_split_clip", json!({ "at_frame": 3.0 })).is_err());
+        let err = call(&mut core, &tools, "particle_duplicate_event", json!({ "index": 0 }))
+            .unwrap_err();
+        assert_eq!(err, "no particle event at index 0");
+        assert!(call(&mut core, &tools, "particle_duplicate_event", json!({})).is_err());
+        assert!(core.project.fx_clips.is_empty());
+        assert!(core.project.particles.is_empty());
+    }
+
+    #[test]
+    fn phase_j_mirror_figure_on_demo_core() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        // The demo project has exactly one figure: index 0
+        // mirrors across all its frames and reports through
+        // the status line with the project summary.
+        let r = call(&mut core, &tools, "mirror_figure", json!({ "figure": 0 })).unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["figure"], 0);
+        assert!(r["status"].is_string());
+        assert_eq!(r["project"]["figures"], 1);
+        // Out-of-range and missing figures are clean errors
+        // (the shared check_figure wording).
+        let err = call(&mut core, &tools, "mirror_figure", json!({ "figure": 1 })).unwrap_err();
+        assert_eq!(err, "figure index 1 out of range (project has 1 figure(s))");
+        assert!(call(&mut core, &tools, "mirror_figure", json!({})).is_err());
+    }
+
+    #[test]
+    fn phase_j_audio_normalise_all_on_demo_core() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        // The demo project has no audio clips: the default
+        // and boundary targets run cleanly and adjust
+        // nothing.
+        let r = call(&mut core, &tools, "audio_normalise_all", json!({})).unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["adjusted"], 0);
+        assert!(r["status"].is_string());
+        let r = call(&mut core, &tools, "audio_normalise_all", json!({ "target_peak": 1.0 }))
+            .unwrap();
+        assert_eq!(r["adjusted"], 0);
+        // The (0, 1] range is enforced before the op runs:
+        // nought, negatives, anything above 1 and a
+        // non-number are all clean errors.
+        for bad in [0.0, -0.25, 1.5] {
+            assert!(
+                call(&mut core, &tools, "audio_normalise_all", json!({ "target_peak": bad }))
+                    .is_err(),
+                "target_peak {bad} must be refused"
+            );
+        }
+        assert!(
+            call(&mut core, &tools, "audio_normalise_all", json!({ "target_peak": "0.9" }))
+                .is_err()
+        );
+        assert!(core.project.audio.is_empty());
     }
 
     #[test]

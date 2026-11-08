@@ -1262,23 +1262,68 @@ mod mux_tests {
     }
 }
 
-/// Export all authored frames as one spritesheet PNG (grid layout).
-pub fn export_spritesheet(project: &Project, path: &Path) -> std::io::Result<usize> {
+/// Write a spritesheet of `indices` to `path` (the shared
+/// writer behind the spritesheet exports, as
+/// `write_contact_sheet` is behind the contact-sheet
+/// exports): tiles are full-size frames on a square-root
+/// grid, laid out in the order the indices are given. An
+/// empty index list writes a 1x1 blank sheet and returns
+/// `Ok(0)`, mirroring the contact sheet's empty-project
+/// behaviour (the previous full-only export divided by
+/// zero on an empty project instead).
+fn write_spritesheet(
+    project: &Project,
+    indices: &[usize],
+    path: &Path,
+) -> std::io::Result<usize> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let n = project.frames.len();
+    if indices.is_empty() {
+        let sheet = ImageBuffer::from_pixel(1, 1, Rgb([0, 0, 0]));
+        sheet.save(path).map_err(std::io::Error::other)?;
+        return Ok(0);
+    }
+    let n = indices.len();
     let (w, h) = (project.stage[0] as u32, project.stage[1] as u32);
     let cols = (n as f32).sqrt().ceil() as u32;
     let rows = (n as u32 + cols - 1) / cols;
     let mut sheet = ImageBuffer::new(w * cols, h * rows);
-    for i in 0..n {
+    for (k, &i) in indices.iter().enumerate() {
         let img = render_frame(project, i);
-        let (ox, oy) = ((i as u32 % cols) * w, (i as u32 / cols) * h);
+        let (ox, oy) = ((k as u32 % cols) * w, (k as u32 / cols) * h);
         image::imageops::overlay(&mut sheet, &img, ox as i64, oy as i64);
     }
     sheet.save(path).map_err(std::io::Error::other)?;
     Ok(n)
+}
+
+/// Export all authored frames as one spritesheet PNG (grid layout).
+pub fn export_spritesheet(project: &Project, path: &Path) -> std::io::Result<usize> {
+    if project.frames.is_empty() {
+        return write_spritesheet(project, &[], path);
+    }
+    export_sheet_range(project, 0, project.frames.len() - 1, path)
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped
+/// to the timeline) as one spritesheet PNG: exactly those
+/// frames as full-size tiles on a square-root grid sized by
+/// the frame count in the range, in timeline order. Unlike
+/// the GIF/APNG range exports, a sheet tiles each authored
+/// frame exactly once: per-frame durations are not expanded,
+/// because a sheet is an overview, not a playback. Returns
+/// the number of frames tiled; an empty or inverted range
+/// is an error.
+pub fn export_sheet_range(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+) -> std::io::Result<usize> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let indices: Vec<usize> = (from..=to).collect();
+    write_spritesheet(project, &indices, path)
 }
 
 /// Export every frame as `frame-0001.png`, `frame-0002.png`, ... in `dir`.
@@ -1469,6 +1514,41 @@ pub fn export_contact_sheet_range(
     let (from, to) = clamp_frame_range(project, from, to)?;
     let indices: Vec<usize> = (from..=to).collect();
     write_contact_sheet(project, &indices, path)
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped
+/// to the timeline) as one SVG file per frame in `dir`,
+/// keeping each frame's authored index in its file name
+/// (frame 2 exports as `frame-0003.svg`, as in a full SVG
+/// export). Returns the number of files written; an empty
+/// or inverted range is an error.
+///
+/// The per-frame SVG writer lives in `crate::svg` and only
+/// exposes a whole-timeline export, so this renders the
+/// full timeline into a scratch directory and moves exactly
+/// the range's files into `dir`: the files are the full
+/// exporter's own output, byte for byte, at the cost of
+/// rendering the frames outside the range too. Extracting
+/// a per-frame writer in `svg.rs` would remove that cost.
+pub fn export_svg_range(
+    project: &Project,
+    from: usize,
+    to: usize,
+    dir: &Path,
+) -> std::io::Result<usize> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let scratch = unique_temp("svg-range");
+    let rendered = crate::svg::export_svg(project, &scratch);
+    let result = rendered.and_then(|_| {
+        std::fs::create_dir_all(dir)?;
+        for i in from..=to {
+            let name = format!("frame-{:04}.svg", i + 1);
+            std::fs::copy(scratch.join(&name), dir.join(&name))?;
+        }
+        Ok(to - from + 1)
+    });
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
 }
 
 #[cfg(test)]
@@ -2268,7 +2348,8 @@ mod range_export_tests {
     use super::{
         export_apng, export_apng_range, export_gif, export_gif_range,
         export_jpeg_sequence, export_jpeg_sequence_range, export_mp4_range,
-        export_png_sequence, export_png_sequence_range, export_webm_range,
+        export_png_sequence, export_png_sequence_range, export_sheet_range,
+        export_spritesheet, export_svg_range, export_webm_range, render_frame,
     };
     use crate::model::Project;
     use image::AnimationDecoder as _;
@@ -2621,6 +2702,167 @@ mod range_export_tests {
         }
         let _ = std::fs::remove_dir_all(&full_dir);
         let _ = std::fs::remove_dir_all(&range_dir);
+    }
+
+    /// One tile of a written spritesheet as raw RGB bytes:
+    /// the `k`-th tile in reading order on a grid of `cols`
+    /// columns of `w`x`h` tiles.
+    fn sheet_tile(path: &Path, k: usize, cols: u32, w: u32, h: u32) -> Vec<u8> {
+        let sheet = image::open(path).unwrap().to_rgb8();
+        let (x, y) = ((k as u32 % cols) * w, (k as u32 / cols) * h);
+        image::imageops::crop_imm(&sheet, x, y, w, h)
+            .to_image()
+            .into_raw()
+    }
+
+    #[test]
+    fn sheet_range_tiles_exactly_the_sub_range_frames() {
+        let project = tiny_project(); // 96x72 stage, 5 frames
+        let path = temp_file("sheet-range", "png");
+        let n = export_sheet_range(&project, 1, 3, &path).unwrap();
+        assert_eq!(n, 3, "frames 1..=3 tile exactly 3 frames");
+        // 3 tiles on the square-root grid: 2 columns x 2 rows.
+        let sheet = image::open(&path).unwrap();
+        assert_eq!((sheet.width(), sheet.height()), (192, 144));
+        // Tiles are the authored frames themselves, in order,
+        // pixel for pixel.
+        for (k, frame) in (1..=3usize).enumerate() {
+            assert_eq!(
+                sheet_tile(&path, k, 2, 96, 72),
+                render_frame(&project, frame).into_raw(),
+                "tile {k} must be authored frame {frame}"
+            );
+        }
+        // The grid's unused fourth cell stays blank.
+        assert!(
+            sheet_tile(&path, 3, 2, 96, 72).iter().all(|&b| b == 0),
+            "the unused grid cell must stay blank"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sheet_range_clamps_to_the_timeline() {
+        let project = tiny_project();
+        let path = temp_file("sheet-clamp", "png");
+        let n = export_sheet_range(&project, 2, 99, &path).unwrap();
+        assert_eq!(n, 3, "2..=99 on 5 frames clamps to frames 2..=4");
+        assert_eq!(
+            sheet_tile(&path, 0, 2, 96, 72),
+            render_frame(&project, 2).into_raw()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sheet_range_single_frame_is_one_tile() {
+        let project = tiny_project();
+        let path = temp_file("sheet-one", "png");
+        let n = export_sheet_range(&project, 2, 2, &path).unwrap();
+        assert_eq!(n, 1);
+        let sheet = image::open(&path).unwrap();
+        assert_eq!((sheet.width(), sheet.height()), (96, 72));
+        assert_eq!(
+            sheet_tile(&path, 0, 1, 96, 72),
+            render_frame(&project, 2).into_raw()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sheet_full_export_matches_the_full_range() {
+        let project = tiny_project();
+        let full_path = temp_file("sheet-full", "png");
+        let range_path = temp_file("sheet-fullrange", "png");
+        let n_full = export_spritesheet(&project, &full_path).unwrap();
+        let n_range =
+            export_sheet_range(&project, 0, project.frames.len() - 1, &range_path).unwrap();
+        assert_eq!(n_full, 5);
+        assert_eq!(n_full, n_range);
+        // Same writer, same tiles: the files are byte-identical.
+        assert_eq!(
+            std::fs::read(&full_path).unwrap(),
+            std::fs::read(&range_path).unwrap()
+        );
+        let _ = std::fs::remove_file(&full_path);
+        let _ = std::fs::remove_file(&range_path);
+    }
+
+    #[test]
+    fn sheet_range_rejects_inverted_ranges_and_empty_projects() {
+        let project = tiny_project();
+        let path = temp_file("sheet-err", "png");
+        assert!(export_sheet_range(&project, 4, 1, &path).is_err());
+        let mut empty = tiny_project();
+        empty.frames.clear();
+        assert!(export_sheet_range(&empty, 0, 0, &path).is_err());
+    }
+
+    #[test]
+    fn spritesheet_full_export_of_empty_project_writes_the_blank_sheet() {
+        let mut project = tiny_project();
+        project.frames.clear();
+        let path = temp_file("sheet-blank", "png");
+        let n = export_spritesheet(&project, &path).unwrap();
+        assert_eq!(n, 0);
+        let sheet = image::open(&path).unwrap();
+        assert_eq!((sheet.width(), sheet.height()), (1, 1));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn svg_range_writes_exactly_the_sub_range_files() {
+        let project = tiny_project();
+        let full_dir = temp_dir("svg-full");
+        let range_dir = temp_dir("svg-range");
+        let n_full = crate::svg::export_svg(&project, &full_dir).unwrap();
+        assert_eq!(n_full, 5);
+        let n = export_svg_range(&project, 1, 3, &range_dir).unwrap();
+        assert_eq!(n, 3);
+        let mut names: Vec<String> = std::fs::read_dir(&range_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        // File names keep the authored indices, as in a full export.
+        let expected: Vec<String> = ["frame-0002.svg", "frame-0003.svg", "frame-0004.svg"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(names, expected);
+        // And the files are the full exporter's own output,
+        // byte for byte.
+        for name in &names {
+            assert_eq!(
+                std::fs::read(range_dir.join(name)).unwrap(),
+                std::fs::read(full_dir.join(name)).unwrap(),
+                "{name}: range and full exports differ"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&full_dir);
+        let _ = std::fs::remove_dir_all(&range_dir);
+    }
+
+    #[test]
+    fn svg_range_single_frame_writes_one_file() {
+        let project = tiny_project();
+        let dir = temp_dir("svg-one");
+        let n = export_svg_range(&project, 2, 2, &dir).unwrap();
+        assert_eq!(n, 1);
+        assert!(dir.join("frame-0003.svg").exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn svg_range_rejects_inverted_ranges_and_empty_projects() {
+        let project = tiny_project();
+        let dir = temp_dir("svg-err");
+        assert!(export_svg_range(&project, 4, 1, &dir).is_err());
+        let mut empty = tiny_project();
+        empty.frames.clear();
+        assert!(export_svg_range(&empty, 0, 0, &dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -109,6 +109,18 @@
 //! and `EditorCore::fx_set_kind`, with the current
 //! kind labelled the way the browser labels it
 //! (`fx_browser::kind_label`).
+//!
+//! Phase J adds a Split button to the inspector: it
+//! cuts the selected clip at the playhead through
+//! `EditorCore::fx_split_clip`, at the playhead
+//! frame's centre ([`split_frame`]) rather than on
+//! the frame's integer boundary, so splitting while
+//! parked on the clip's first frame still lands
+//! strictly inside the clip. The op inserts the
+//! second half immediately after the original, so
+//! the selection stays on the first half with no
+//! repair; on refusal the op sets the status line
+//! and the panel adds nothing.
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, ScrollSpec, Shape, Tx};
@@ -119,7 +131,7 @@ use stykanimate_rs::vfx::ClipKind;
 
 use crate::chrome_view::btn;
 use crate::rune_sec::fx_browser::kind_label;
-use crate::rune_sec::icon_btn::icon_only_btn;
+use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::rune_sec::icons::icon_el;
 use crate::stage_view::hex_color;
 use crate::State;
@@ -719,6 +731,48 @@ fn cycle_selected_kind(s: &mut State, dir: i32) {
     s.core.fx_set_kind(i, next);
 }
 
+/// The frame position the Split button cuts at for
+/// playhead frame `current`: the frame's CENTRE,
+/// `current + 0.5`. `EditorCore::fx_split_clip` only
+/// cuts strictly inside the clip's span
+/// (`start < at_frame < start + duration`, with at
+/// least the backend's minimum clip duration left on
+/// both sides), so cutting on the integer `current`
+/// would refuse in exactly the case a user expects
+/// to work: parked on the clip's first frame, where
+/// `current == start` sits on the edge, not inside.
+/// The centre is strictly inside whenever the
+/// playhead rests on a frame the clip covers and the
+/// clip runs at least half a frame past that frame's
+/// start — the first-frame case included, where it
+/// leaves a half-frame first half, comfortably above
+/// the op's minimum. Split out of the handler so the
+/// choice is testable without a `State`.
+pub fn split_frame(current: usize) -> f32 {
+    current as f32 + 0.5
+}
+
+/// Split the selected clip at the playhead via
+/// `EditorCore::fx_split_clip` (Phase J), cutting at
+/// the playhead frame's centre ([`split_frame`]). The
+/// op inserts the second half immediately after the
+/// original, so the selection index still names the
+/// clip the user was editing — now its first half —
+/// and, unlike [`delete_selected`], no selection
+/// repair is needed. The selection therefore stays
+/// on the original (first half) after a successful
+/// split. On refusal (playhead outside the clip, or
+/// too close to an edge) the op sets the status line
+/// and changes nothing; the panel adds nothing of
+/// its own, exactly like the move/resize handlers.
+fn split_selected(s: &mut State) {
+    let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
+        return;
+    };
+    let at = split_frame(s.core.current);
+    s.core.fx_split_clip(i, at);
+}
+
 /// The strip's press gesture: a press (drag Down) on a
 /// clip's bar selects that clip in `State::fx_selected`
 /// — the selection the lane rows and inspector already
@@ -1013,8 +1067,10 @@ pub fn nudge_row(s: &State, t: &Theme) -> El {
 /// cycling through the browser's category order),
 /// start/duration steppers (move/resize),
 /// earlier/later nudge buttons (the GPUI panel's
-/// `fx-earlier`/`fx-later`), a nudge row (fine start
-/// moves and ±0.1 s duration steps), colour + end-colour
+/// `fx-earlier`/`fx-later`), a split row (Phase J:
+/// cut the clip at the playhead), a nudge row (fine
+/// start moves and ±0.1 s duration steps),
+/// colour + end-colour
 /// swatch rows, a re-anchor button, and
 /// duplicate/delete. With no valid selection it shows
 /// the nudge row's guidance line instead.
@@ -1137,6 +1193,20 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                 }))
                 .child(icon_only_btn(&format!("fx-del-{i}"), "trash-can", 26.0, false, t, |s| {
                     delete_selected(s)
+                })),
+        )
+        // Split row (Phase J): cut the clip at the
+        // playhead into two clips via
+        // EditorCore::fx_split_clip (see
+        // split_selected / split_frame for the
+        // frame-centre cut and the selection rule).
+        .child(
+            row()
+                .key("fx-split-row")
+                .gap(8.0)
+                .center_y()
+                .child(icon_btn("fx-split", "scissors", "Split at playhead", false, t, |s| {
+                    split_selected(s)
                 })),
         )
         // Nudge row: fine start moves (±1/±10 frames)
@@ -1725,5 +1795,142 @@ mod tests {
         assert_eq!(clip.start, 4.0);
         assert_eq!(clip.duration, 10.0);
         assert_eq!(clip.color, 0xFF5D5D);
+    }
+
+    // --------------------------------------------------
+    // Phase J: split at playhead
+    // --------------------------------------------------
+
+    /// A shell `State` over `core` with the given FX
+    /// selection — the fixture the builder and handler
+    /// tests below need (the same full-literal pattern
+    /// the other sections' test modules use).
+    fn state_with(core: EditorCore, fx_selected: Option<usize>) -> State {
+        State {
+            core,
+            last_poll: None,
+            wheel_zoom: 0.0,
+            figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
+            figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
+            library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
+            graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
+            audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            menus: crate::rune_sec::menus::MenusState::default(),
+            palette: crate::rune_sec::command_palette::PaletteState::new(),
+            settings: crate::rune_sec::settings_popover::SettingsState::default(),
+            toasts: crate::rune_sec::toasts::ToastsState::new(),
+            text_tool: crate::rune_sec::text_tool::TextToolState::new(),
+            name_edit: rune::TextEdit::new(""),
+            export_use_range: false,
+            fx_selected,
+            pose_clipboard: None,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            guides: false,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            stroke_selected: None,
+            particle_selected: None,
+            guides_frustum: true,
+            guides_safe: true,
+            onion_ui: Default::default(),
+            last_frame: 0,
+            pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+            pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
+            loop_playback: true,
+            was_playing: false,
+            last_status: String::new(),
+            toast_now: 0.0,
+            last_dark: true,
+        }
+    }
+
+    #[test]
+    fn split_frame_is_the_playhead_frames_centre() {
+        assert_eq!(split_frame(0), 0.5);
+        assert_eq!(split_frame(4), 4.5);
+        assert_eq!(split_frame(29), 29.5);
+        // The case the centre exists for: a clip
+        // starting at frame 4, playhead parked on
+        // frame 4. The cut at 4.5 is strictly inside
+        // (4, 14); the integer 4.0 would sit on the
+        // clip's start edge and the op would refuse.
+        let at = split_frame(4);
+        assert!(at > 4.0 && at < 14.0, "cut {at} must be inside the clip");
+    }
+
+    #[test]
+    fn inspector_builds_with_and_without_a_selection() {
+        let t = rune::tok::theme(true);
+        // No clips at all: the guidance branch.
+        let state = state_with(core_with(vec![]), None);
+        let _ = fx_inspector(&state, &t);
+        // Clips but no selection: still the guidance
+        // branch — the split row lives in the detail
+        // block, which only a valid selection opens
+        // (the gate inspector_data_needs_a_valid_selection
+        // pins), so it is present iff selected.
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let state = state_with(core, None);
+        let _ = fx_inspector(&state, &t);
+        // A selection: the detail block, split row
+        // included, builds.
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let state = state_with(core, Some(0));
+        let _ = fx_inspector(&state, &t);
+        // A stale selection falls back to guidance
+        // rather than a detail block on the wrong clip.
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let state = state_with(core, Some(9));
+        let _ = fx_inspector(&state, &t);
+    }
+
+    #[test]
+    fn split_selected_cuts_at_the_playhead_centre_and_keeps_the_selection() {
+        // Clip spans frames [4, 14); the playhead is
+        // parked on its FIRST frame — the case the
+        // frame-centre cut exists for.
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, Some(0));
+        state.core.current = 4;
+        split_selected(&mut state);
+        let clips = &state.core.project.fx_clips;
+        assert_eq!(clips.len(), 2, "the clip became two");
+        // First half: [4, 4.5); second half inserted
+        // right after it: [4.5, 14). Between them they
+        // are exactly the original.
+        assert_eq!(clips[0].clip.start, 4.0);
+        assert_eq!(clips[0].clip.duration, 0.5);
+        assert_eq!(clips[1].clip.start, 4.5);
+        assert_eq!(clips[1].clip.duration, 9.5);
+        // The selection stayed on the original — now
+        // the first half — with no repair.
+        assert_eq!(state.fx_selected, Some(0));
+    }
+
+    #[test]
+    fn split_selected_without_a_selection_or_inside_playhead_changes_nothing() {
+        // No selection: the handler returns before any
+        // op call, even with the playhead inside a clip.
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, None);
+        state.core.current = 6;
+        split_selected(&mut state);
+        assert_eq!(state.core.project.fx_clips.len(), 1);
+        // Playhead outside the selected clip: the op
+        // refuses (status only) and nothing is split.
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, Some(0));
+        state.core.current = 20;
+        split_selected(&mut state);
+        assert_eq!(state.core.project.fx_clips.len(), 1);
+        assert_eq!(state.core.project.fx_clips[0].clip.duration, 10.0);
     }
 }

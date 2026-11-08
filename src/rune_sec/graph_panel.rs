@@ -143,29 +143,38 @@
 //! SELECTED figure's targets, including the keyless pinned
 //! roots a user may be about to key. The list is the
 //! complementary browser — only channels that actually
-//! exist, across ALL figures. Both write the SAME state
-//! ([`select_channel`] sets `GraphPanelState::target`, plus
-//! `EditorCore::select_figure` when the channel's figure is
-//! not the selected one), so key drags, tangent drags,
-//! click-seek and the transform actions operate on exactly
-//! the channel a row names, through the existing
-//! `(selected figure, target)` plumbing — no parallel state.
-//! Switching figures through a row press behaves like any
-//! figure switch in the app (`select_figure` clears the
-//! node selection and is not an undo step); pressing a row
-//! for the already-selected figure leaves the node
-//! selection untouched.
+//! exist, across ALL figures. A row press ([`select_channel`])
+//! records the row's INDEX in
+//! `GraphPanelState::selected_channel` and keeps
+//! `GraphPanelState::target` in sync with that channel's
+//! target (plus `EditorCore::select_figure` when the
+//! channel's figure is not the selected one); a chip press
+//! writes the target alone and clears the index. Key drags,
+//! tangent drags, click-seek and the transform actions all
+//! resolve through [`effective_channel_index`], so they
+//! operate on exactly the channel a row names. Switching
+//! figures through a row press behaves like any figure
+//! switch in the app (`select_figure` clears the node
+//! selection and is not an undo step); pressing a row for
+//! the already-selected figure leaves the node selection
+//! untouched.
 //!
-//! One honesty note: the target state names a
-//! `(figure, target)` pair, and the engine itself treats a
-//! second channel with the same pair as a shadowed
+//! One honesty note, updated for Phase J: the target state
+//! names a `(figure, target)` pair, and the engine itself
+//! treats a second channel with the same pair as a shadowed
 //! duplicate ("the later one in the slice wins" —
 //! graph.rs's module docs), while `channel_index` resolves
-//! the FIRST match. If such duplicates exist, both rows are
-//! listed (with their own key counts) but both select the
-//! same effective channel. Project data written by the
-//! editor's own ops never creates duplicates
-//! (`graph::channel_mut` reuses the existing channel).
+//! the FIRST match. Before Phase J that meant both
+//! duplicate rows selected the same effective channel and
+//! the second could never be drawn or edited here. Row
+//! selection is now by index, so each duplicate can be
+//! drawn, dragged and transformed individually in this
+//! panel. What has NOT changed is the engine's own
+//! evaluation of duplicates for the stage and exports —
+//! that resolution lives in graph.rs, not in this panel.
+//! Project data written by the editor's own ops never
+//! creates duplicates (`graph::channel_mut` reuses the
+//! existing channel).
 //!
 //! The empty state names the verified way a first channel
 //! appears: `EditorCore::key_graph_angle` creates one via
@@ -211,12 +220,35 @@
 //! The block exists only when the project has channels —
 //! with none, the channel list's own empty-state line
 //! already says everything. The DRAWN channel's line (the
-//! `(selected figure, target)` the canvas shows, resolved
-//! by [`channel_index`] exactly as the list's active row
-//! is) renders in the normal text colour; every other line
-//! is muted. Duplicate `(figure, target)` channels
-//! highlight the FIRST match only — the same resolution
-//! [`select_channel`] and every edit path use.
+//! channel the canvas shows, resolved by
+//! [`effective_channel_index`] exactly as the list's active
+//! row is) renders in the normal text colour; every other
+//! line is muted. Duplicate `(figure, target)` channels
+//! highlight the PICKED row when one was picked by index
+//! (Phase J); a target-only state still highlights the
+//! first match — the same resolution every edit path uses.
+//!
+//! ## Channel selection by index (Phase J)
+//!
+//! `GraphPanelState` now carries `selected_channel:
+//! Option<usize>` beside the legacy `target`. The rule is
+//! one line: [`effective_channel_index`] returns the index
+//! while it names a live channel of the selected figure,
+//! and the legacy `(figure, target)` first-match resolution
+//! otherwise. Every drawn-channel consumer in this module
+//! — the builder's readout and canvas, the list's active
+//! row, the stats highlight, the three drag phases and the
+//! mirror/scale/reduce actions (via their new `*_at`
+//! index forms) — resolves through that one helper, so the
+//! second of two duplicate channels can finally be seen
+//! and edited. Staleness is handled by the same helper: a
+//! deleted channel or a figure switch makes the index fall
+//! back to the target path, and when that also finds
+//! nothing, nothing is drawn or highlighted. The target
+//! field is NOT vestigial: chips write it, the fallback
+//! reads it, and [`select_channel`] keeps it in sync on
+//! every row press for the consumers that still read it
+//! (the selector chips' active state among them).
 //!
 //! ## State the shell must provide
 //!
@@ -315,6 +347,27 @@ pub struct GraphPanelState {
     /// automatic choice, so the panel never draws a channel
     /// the selector doesn't offer.
     pub target: Option<ChannelTarget>,
+    /// The channel-list row pick, as an index into
+    /// `Project::channels` (Phase J). A `(figure, target)`
+    /// pair cannot tell two duplicate channels apart —
+    /// [`channel_index`] resolves the FIRST match, so a
+    /// target-only selection could never draw or edit the
+    /// second duplicate. A row press therefore records the
+    /// row's index here (and keeps [`Self::target`] in sync
+    /// with that channel's target, so every consumer that
+    /// still reads the target sees the same channel's pair).
+    ///
+    /// The index is honoured by
+    /// [`effective_channel_index`] only while it names a
+    /// live channel OF THE SELECTED FIGURE — the same
+    /// scoping [`channel_index`] has always applied. A
+    /// channel deleted elsewhere, or a figure switch that
+    /// leaves the index pointing at another figure's
+    /// channel, makes it stale: resolution falls back to
+    /// the legacy target path and nothing panics. Chip
+    /// presses clear it (a chip names a target, not a row),
+    /// so the target takes over again.
+    pub selected_channel: Option<usize>,
     /// Index into the drawn channel's `keys` of the key an
     /// in-progress canvas drag grabbed at Down. `None`
     /// outside a key drag.
@@ -425,6 +478,56 @@ pub fn channel_for<'a>(core: &'a EditorCore, target: ChannelTarget) -> Option<&'
     channel_index(core, target).map(|i| &core.project.channels[i])
 }
 
+/// The channel the panel actually draws and edits, as an
+/// index into `core.project.channels` (Phase J): the row
+/// pick [`GraphPanelState::selected_channel`] when it is
+/// still valid — it names a live channel of the selected
+/// figure — and the legacy resolution otherwise
+/// ([`channel_index`] of the [`effective_target`], i.e. the
+/// FIRST `(figure, target)` match, exactly as before this
+/// state existed). `None` when neither path finds a
+/// channel (no channels, or none for the effective
+/// target). This is the single resolution the builder's
+/// drawn channel, the channel list's active row, the stats
+/// block's highlight and the canvas drags all share, so
+/// they can never disagree about which channel is live —
+/// and with duplicate `(figure, target)` channels, a row
+/// press on the second one makes THIS return the second.
+pub fn effective_channel_index(core: &EditorCore, sel: &GraphPanelState) -> Option<usize> {
+    if let Some(i) = sel.selected_channel {
+        if let Some(ch) = core.project.channels.get(i) {
+            if ch.figure == core.selected_figure {
+                return Some(i);
+            }
+        }
+    }
+    channel_index(core, effective_target(core, sel.target))
+}
+
+/// Duplicate the drawn channel onto the NEXT figure
+/// (Phase J integrator wiring for the graph_keys op):
+/// resolves through [`effective_channel_index`] — a picked
+/// duplicate row duplicates THAT twin — and forwards to
+/// `graph_keys::duplicate_channel_to_figure`, which owns
+/// the snapshot and every refusal (same figure, existing
+/// channel, node the target rig lacks). With fewer than
+/// two figures there is nowhere to duplicate onto, so the
+/// press is a status-only refusal here.
+pub fn duplicate_channel_to_next(core: &mut EditorCore, sel: &GraphPanelState) {
+    let Some(idx) = effective_channel_index(core, sel) else {
+        core.status = "No graph channel selected to duplicate.".into();
+        return;
+    };
+    let figures = core.project.figures.len();
+    if figures < 2 {
+        core.status = "Only one figure — nowhere to duplicate the channel onto.".into();
+        return;
+    }
+    let from = core.project.channels[idx].figure;
+    let to = (from + 1) % figures;
+    stykanimate_rs::graph_keys::duplicate_channel_to_figure(core, idx, to);
+}
+
 /// The channel list's rows: EVERY channel in the project, in
 /// project order, as `(index, label, key count)` — the index
 /// is the channel's position in `core.project.channels` (the
@@ -455,8 +558,8 @@ pub fn channel_rows(core: &EditorCore) -> Vec<(usize, String, usize)> {
 /// of the channel at `index` in `core.project.channels`, or
 /// `None` when the index names no channel. This is the exact
 /// value a row press writes into `GraphPanelState::target`
-/// (via [`select_channel`]) — the state every existing edit
-/// path already reads.
+/// (via [`select_channel`], which also records the index
+/// itself in `GraphPanelState::selected_channel`).
 pub fn target_for_channel(core: &EditorCore, index: usize) -> Option<ChannelTarget> {
     core.project.channels.get(index).map(|ch| ch.target)
 }
@@ -467,18 +570,21 @@ pub fn target_for_channel(core: &EditorCore, index: usize) -> Option<ChannelTarg
 /// selected figure first (through `EditorCore::select_figure`
 /// — the app's own figure switch — but only when it differs,
 /// so a same-figure pick never clears the user's node
-/// selection), then `st.target` takes the channel's target.
-/// From there the existing plumbing resolves the pick to
-/// exactly this channel ([`effective_target`] accepts it —
-/// a real channel of the selected figure is always a
-/// selector entry — and [`channel_index`] finds it), so the
-/// canvas edits that follow operate on the listed channel.
+/// selection), then the pick is recorded BOTH ways:
+/// `st.selected_channel` takes the row's index (Phase J —
+/// the only state that can name a duplicate channel) and
+/// `st.target` takes the channel's target, kept in sync so
+/// target-reading consumers see the same channel's pair.
+/// From there [`effective_channel_index`] resolves the pick
+/// to exactly this channel — even when another channel
+/// shares its `(figure, target)` — so the canvas, the stats
+/// highlight and the drags operate on the listed channel.
 /// No snapshot: selection is view state everywhere in this
 /// app, and `select_figure` doesn't snapshot either. Returns
-/// false — nothing changed — when `index` names no channel,
-/// or when the channel's figure cannot be selected (a stale
-/// figure index in hand-edited project data;
-/// `select_figure` bounds-checks and refuses).
+/// false — nothing changed, neither field written — when
+/// `index` names no channel, or when the channel's figure
+/// cannot be selected (a stale figure index in hand-edited
+/// project data; `select_figure` bounds-checks and refuses).
 pub fn select_channel(core: &mut EditorCore, st: &mut GraphPanelState, index: usize) -> bool {
     let Some(ch) = core.project.channels.get(index) else {
         return false;
@@ -491,6 +597,7 @@ pub fn select_channel(core: &mut EditorCore, st: &mut GraphPanelState, index: us
         }
     }
     st.target = Some(target);
+    st.selected_channel = Some(index);
     true
 }
 
@@ -514,14 +621,19 @@ pub fn stat_line(stat: &ChannelStat) -> String {
 /// from [`stat_line`] over `graph_keys::channel_stats`.
 /// `channel_stats` walks `core.project.channels` in order,
 /// so a row's position IS its channel index, and the drawn
-/// channel's row is the one at [`channel_index`] of the
-/// [`effective_target`] — the exact resolution the channel
-/// list's active row uses. With duplicate `(figure,
-/// target)` channels only the FIRST match is flagged,
-/// mirroring [`select_channel`]. Empty when the project
-/// has no channels (the builder then shows no block).
-pub fn stat_rows(core: &EditorCore, sel: Option<ChannelTarget>) -> Vec<(String, bool)> {
-    let drawn = channel_index(core, effective_target(core, sel));
+/// channel's row is the one at [`effective_channel_index`]
+/// of the panel state — the exact resolution the channel
+/// list's active row and the canvas use. With duplicate
+/// `(figure, target)` channels, a row pick flags the
+/// PICKED row (Phase J); a target-only state (no row pick)
+/// still flags the first match, as before. A stale row
+/// pick falls back the same way [`effective_channel_index`]
+/// does, so a deleted channel never leaves a phantom
+/// highlight — and when no channel resolves at all, no row
+/// is flagged. Empty when the project has no channels (the
+/// builder then shows no block).
+pub fn stat_rows(core: &EditorCore, sel: &GraphPanelState) -> Vec<(String, bool)> {
+    let drawn = effective_channel_index(core, sel);
     channel_stats(core)
         .iter()
         .enumerate()
@@ -604,6 +716,10 @@ pub fn preview_points(preset: TangentPreset, w: f32, h: f32, samples: usize) -> 
 /// around the timeline's middle frame — the MCP
 /// `graph_mirror_channel_time` behaviour, default centre
 /// included. No such channel: status only, no snapshot.
+/// The target resolves through [`channel_index`] (FIRST
+/// match); [`apply_mirror_at`] is the index form the panel
+/// uses when a specific row is picked, so a duplicate
+/// channel can be mirrored too (Phase J).
 pub fn apply_mirror(core: &mut EditorCore, target: ChannelTarget) {
     let Some(idx) = channel_index(core, target) else {
         core.status = format!(
@@ -613,6 +729,18 @@ pub fn apply_mirror(core: &mut EditorCore, target: ChannelTarget) {
         );
         return;
     };
+    apply_mirror_at(core, idx);
+}
+
+/// Mirror the channel AT `idx` in `core.project.channels`
+/// in time around the timeline's middle frame — the index
+/// form of [`apply_mirror`]. A stale index (no channel
+/// there): status only, no snapshot.
+pub fn apply_mirror_at(core: &mut EditorCore, idx: usize) {
+    if core.project.channels.get(idx).is_none() {
+        core.status = "No graph channel to mirror.".to_string();
+        return;
+    }
     let centre = (core.project.frames.len().saturating_sub(1)) as f32 / 2.0;
     core.snapshot();
     let ch = &mut core.project.channels[idx];
@@ -626,7 +754,9 @@ pub fn apply_mirror(core: &mut EditorCore, target: ChannelTarget) {
 /// Scale the `(selected figure, target)` channel's values by
 /// `factor` around 0 — the MCP `graph_scale_channel_values`
 /// behaviour with its default pivot. No such channel: status
-/// only, no snapshot.
+/// only, no snapshot. The target resolves through
+/// [`channel_index`] (FIRST match); [`apply_scale_at`] is
+/// the index form for a picked row (Phase J).
 pub fn apply_scale(core: &mut EditorCore, target: ChannelTarget, factor: f32) {
     let Some(idx) = channel_index(core, target) else {
         core.status = format!(
@@ -636,6 +766,17 @@ pub fn apply_scale(core: &mut EditorCore, target: ChannelTarget, factor: f32) {
         );
         return;
     };
+    apply_scale_at(core, idx, factor);
+}
+
+/// Scale the channel AT `idx`'s values by `factor` around
+/// 0 — the index form of [`apply_scale`]. A stale index:
+/// status only, no snapshot.
+pub fn apply_scale_at(core: &mut EditorCore, idx: usize, factor: f32) {
+    if core.project.channels.get(idx).is_none() {
+        core.status = "No graph channel to scale.".to_string();
+        return;
+    }
     core.snapshot();
     let ch = &mut core.project.channels[idx];
     stykanimate_rs::graph::scale_key_values(&mut ch.keys, factor, 0.0);
@@ -646,7 +787,9 @@ pub fn apply_scale(core: &mut EditorCore, target: ChannelTarget, factor: f32) {
 /// [`REDUCE_TOLERANCE`] (`graph::reduce_keys` drops interior
 /// keys that contribute at most the tolerance and always
 /// keeps the endpoints). No such channel: status only, no
-/// snapshot.
+/// snapshot. The target resolves through [`channel_index`]
+/// (FIRST match); [`apply_reduce_at`] is the index form
+/// for a picked row (Phase J).
 pub fn apply_reduce(core: &mut EditorCore, target: ChannelTarget) {
     let Some(idx) = channel_index(core, target) else {
         core.status = format!(
@@ -656,6 +799,17 @@ pub fn apply_reduce(core: &mut EditorCore, target: ChannelTarget) {
         );
         return;
     };
+    apply_reduce_at(core, idx);
+}
+
+/// Reduce the channel AT `idx` with [`REDUCE_TOLERANCE`] —
+/// the index form of [`apply_reduce`]. A stale index:
+/// status only, no snapshot.
+pub fn apply_reduce_at(core: &mut EditorCore, idx: usize) {
+    if core.project.channels.get(idx).is_none() {
+        core.status = "No graph channel to reduce.".to_string();
+        return;
+    }
     core.snapshot();
     let removed = stykanimate_rs::graph::reduce_keys(
         &mut core.project.channels[idx],
@@ -673,7 +827,19 @@ pub fn apply_reduce(core: &mut EditorCore, target: ChannelTarget) {
 /// from the then-current project — pointer math and pixels
 /// can never be based on different transforms.
 pub fn drag_view(core: &EditorCore, target: ChannelTarget, size: [f32; 2]) -> GraphView {
-    let fit: &[Channel] = match channel_for(core, target) {
+    view_for(core, channel_for(core, target), size)
+}
+
+/// The fit over ONE specific channel (or none): the
+/// index-based sibling of [`drag_view`], used wherever the
+/// drawn channel was resolved by index
+/// ([`effective_channel_index`]) — with duplicate
+/// `(figure, target)` channels, fitting the channel the
+/// target happens to resolve to would fit the WRONG twin,
+/// so the drawing and the drags fit the picked channel
+/// itself.
+pub fn view_for(core: &EditorCore, ch: Option<&Channel>, size: [f32; 2]) -> GraphView {
+    let fit: &[Channel] = match ch {
         Some(c) => std::slice::from_ref(c),
         None => &[],
     };
@@ -868,12 +1034,13 @@ pub fn drag_down(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: 
     if size[0] <= 0.0 || size[1] <= 0.0 {
         return false;
     }
-    let target = effective_target(core, st.target);
-    let Some(ci) = channel_index(core, target) else {
+    // The drawn channel by INDEX (Phase J): a picked
+    // duplicate is the one whose keys and handles are live.
+    let Some(ci) = effective_channel_index(core, st) else {
         return false;
     };
-    let view = drag_view(core, target, size);
-    if let Some(sel) = selected_key_index(core, target) {
+    let view = view_for(core, Some(&core.project.channels[ci]), size);
+    if let Some(sel) = nearest_key(&core.project.channels[ci], core.current as f32) {
         if let Some(side) =
             hit_tangent_handle(&view, &core.project.channels[ci], sel, px, GRAB_RADIUS)
         {
@@ -910,8 +1077,7 @@ pub fn drag_move(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: 
         if size[0] <= 0.0 || size[1] <= 0.0 {
             return false;
         }
-        let target = effective_target(core, st.target);
-        let Some(ci) = channel_index(core, target) else {
+        let Some(ci) = effective_channel_index(core, st) else {
             st.drag_handle = None;
             return false;
         };
@@ -919,7 +1085,7 @@ pub fn drag_move(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: 
             st.drag_handle = None;
             return false;
         }
-        let view = drag_view(core, target, size);
+        let view = view_for(core, Some(&core.project.channels[ci]), size);
         let data = view.to_data(px);
         return drag_tangent_to(&mut core.project.channels[ci], idx, side, data);
     }
@@ -929,8 +1095,7 @@ pub fn drag_move(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: 
     if size[0] <= 0.0 || size[1] <= 0.0 {
         return false;
     }
-    let target = effective_target(core, st.target);
-    let Some(ci) = channel_index(core, target) else {
+    let Some(ci) = effective_channel_index(core, st) else {
         st.drag_key = None;
         return false;
     };
@@ -939,7 +1104,7 @@ pub fn drag_move(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: 
         st.drag_key = None;
         return false;
     };
-    let view = drag_view(core, target, size);
+    let view = view_for(core, Some(&core.project.channels[ci]), size);
     let (frame, value) = view.to_data(px);
     let ch = &mut core.project.channels[ci];
     match drag_key_to(ch, idx, frame, value) {
@@ -978,8 +1143,7 @@ pub fn drag_up(
             core.undo();
             return true;
         }
-        let target = effective_target(core, st.target);
-        if let Some(ci) = channel_index(core, target) {
+        if let Some(ci) = effective_channel_index(core, st) {
             if let Some(k) = core.project.channels[ci].keys.get(idx) {
                 let slope = match side {
                     TangentSide::In => k.in_tan,
@@ -1000,8 +1164,7 @@ pub fn drag_up(
             core.undo();
             return true;
         }
-        let target = effective_target(core, st.target);
-        if let Some(ci) = channel_index(core, target) {
+        if let Some(ci) = effective_channel_index(core, st) {
             let ch = &core.project.channels[ci];
             if let Some(idx) = resolve_drag_index(ch, hint, st.drag_anchor) {
                 let k = ch.keys[idx];
@@ -1016,8 +1179,13 @@ pub fn drag_up(
     if cancelled || travel > CLICK_TRAVEL || size[0] <= 0.0 {
         return false;
     }
-    let target = effective_target(core, st.target);
-    let view = drag_view(core, target, size);
+    // The seek fits the drawn channel too (when there is
+    // one), so the click reads frames off the same fit the
+    // curve was drawn with.
+    let view = match effective_channel_index(core, st) {
+        Some(ci) => view_for(core, Some(&core.project.channels[ci]), size),
+        None => drag_view(core, effective_target(core, st.target), size),
+    };
     match seek_frame(&view, px[0], core.frame_count()) {
         Some(f) => {
             core.goto(f);
@@ -1070,6 +1238,12 @@ fn graph_drag(s: &mut State, d: &mut Drag) {
 /// drawn larger in the accent colour while it is dragged;
 /// `sel` is the selected key (see [`selected_key_index`])
 /// and `drag_handle` the tangent drag in progress, if any.
+/// `idx` is the drawn channel's index
+/// ([`effective_channel_index`]) when the builder resolved
+/// one: the channel drawn is the channel AT that index —
+/// with duplicate `(figure, target)` channels, the picked
+/// twin, not the target's first match (Phase J). `target`
+/// remains the fallback resolution for the no-index case.
 fn graph_shape(
     core: &EditorCore,
     target: ChannelTarget,
@@ -1078,11 +1252,14 @@ fn graph_shape(
     drag: Option<usize>,
     sel: Option<usize>,
     drag_handle: Option<(usize, TangentSide)>,
+    idx: Option<usize>,
 ) -> Shape {
     let (w, h) = (size[0], size[1]);
     let accent = tok::accent(0, true);
-    let ch = channel_for(core, target);
-    let view = drag_view(core, target, size);
+    let ch = idx
+        .and_then(|i| core.project.channels.get(i))
+        .or_else(|| channel_for(core, target));
+    let view = view_for(core, ch, size);
     let mut shape = Shape::new();
     if view.val_min < 0.0 && view.val_max > 0.0 {
         let y = view.to_px(0.0, 0.0)[1];
@@ -1169,8 +1346,17 @@ fn preset_chip(preset: TangentPreset, label: &str, key: &str, t: &Theme) -> El {
 /// the Graph workspace lives.
 pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     let core = &s.core;
-    let target = effective_target(core, s.graph_panel.target);
-    let ch = channel_for(core, target);
+    // The drawn channel resolves by INDEX first (Phase J):
+    // a picked duplicate row IS the drawn channel. The
+    // target below is that channel's own target (its label
+    // for the readout and the selector chips), or the
+    // legacy effective target when no channel resolves.
+    let drawn_idx = effective_channel_index(core, &s.graph_panel);
+    let target = match drawn_idx {
+        Some(i) => core.project.channels[i].target,
+        None => effective_target(core, s.graph_panel.target),
+    };
+    let ch = drawn_idx.map(|i| &core.project.channels[i]);
     let size = cx.layout_size("graph-canvas").unwrap_or(FALLBACK_SIZE);
 
     let readout = match ch {
@@ -1196,6 +1382,10 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
             entry == target,
             t,
             move |s: &mut State| {
+                // A chip names a TARGET, not a row: clear
+                // any row pick so the target resolution
+                // takes over again (Phase J).
+                s.graph_panel.selected_channel = None;
                 s.graph_panel.target = Some(entry);
             },
         ));
@@ -1203,16 +1393,18 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
 
     // Channel list (Phase G): every channel in the project,
     // one pressable row per channel — "F{n} {target}" plus
-    // its key count — writing the same target state as the
-    // chips via select_channel (which also selects the
-    // channel's figure when it differs). The active row is
-    // the channel the panel actually draws: the first
-    // (selected figure, target) match, per channel_index —
-    // the same resolution every edit path uses. With no
-    // channels at all, the list is the empty-state line
-    // naming how the first channel appears (Key angle —
-    // key_graph_angle creates it; see the module docs).
-    let drawn_idx = channel_index(core, target);
+    // its key count — recording the pick via select_channel
+    // (which also selects the channel's figure when it
+    // differs). The active row is the channel the panel
+    // actually draws: `drawn_idx`, resolved by
+    // effective_channel_index at the top of this builder —
+    // a picked row highlights ITSELF, even when it is a
+    // duplicate of the row above it (Phase J); a
+    // target-only state highlights the first match, as
+    // before. With no channels at all, the list is the
+    // empty-state line naming how the first channel
+    // appears (Key angle — key_graph_angle creates it; see
+    // the module docs).
     let mut chan_list = col().key("graph-channel-list").gap(4.0);
     let rows = channel_rows(core);
     if rows.is_empty() {
@@ -1252,15 +1444,30 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         );
     }
 
+    // Duplicate-to-next-figure (Phase J integrator
+    // wiring): shown only while a channel is drawn; the
+    // press duplicates the drawn channel — twin-aware via
+    // the effective index — onto the following figure.
+    if drawn_idx.is_some() {
+        chan_list = chan_list.child(btn(
+            "graph-chan-duplicate",
+            "Duplicate channel to next figure",
+            false,
+            t,
+            |s: &mut State| duplicate_channel_to_next(&mut s.core, &s.graph_panel),
+        ));
+    }
+
     // Stats block (Phase I): one muted line per channel
     // under the list — figure, target, key count, value
     // range (stat_rows / stat_line over the engine's
     // channel_stats). The drawn channel's line takes the
-    // normal text colour instead (stat_rows flags it, first
-    // match on duplicates, exactly like the list's active
-    // row). No channels: no block at all — the list's
-    // empty-state line above already covers that case.
-    let stat_lines = stat_rows(core, s.graph_panel.target);
+    // normal text colour instead (stat_rows flags it by
+    // effective_channel_index — the picked row on
+    // duplicates, exactly like the list's active row). No
+    // channels: no block at all — the list's empty-state
+    // line above already covers that case.
+    let stat_lines = stat_rows(core, &s.graph_panel);
     let mut stats_block = col().key("graph-stats").gap(2.0);
     for (i, (line, is_drawn)) in stat_lines.iter().enumerate() {
         stats_block = stats_block.child(
@@ -1312,20 +1519,43 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
             s.core.smooth_graph_tangents()
         }))
         .child(btn("graph-mirror", "Mirror time", false, t, |s| {
-            let target = effective_target(&s.core, s.graph_panel.target);
-            apply_mirror(&mut s.core, target);
+            // A picked row edits THAT channel (Phase J);
+            // without a pick, the target resolution (and
+            // its "no such channel" status) applies.
+            match effective_channel_index(&s.core, &s.graph_panel) {
+                Some(i) => apply_mirror_at(&mut s.core, i),
+                None => {
+                    let target = effective_target(&s.core, s.graph_panel.target);
+                    apply_mirror(&mut s.core, target);
+                }
+            }
         }))
         .child(btn("graph-scale-up", "Scale ×2", false, t, |s| {
-            let target = effective_target(&s.core, s.graph_panel.target);
-            apply_scale(&mut s.core, target, 2.0);
+            match effective_channel_index(&s.core, &s.graph_panel) {
+                Some(i) => apply_scale_at(&mut s.core, i, 2.0),
+                None => {
+                    let target = effective_target(&s.core, s.graph_panel.target);
+                    apply_scale(&mut s.core, target, 2.0);
+                }
+            }
         }))
         .child(btn("graph-scale-down", "Scale ÷2", false, t, |s| {
-            let target = effective_target(&s.core, s.graph_panel.target);
-            apply_scale(&mut s.core, target, 0.5);
+            match effective_channel_index(&s.core, &s.graph_panel) {
+                Some(i) => apply_scale_at(&mut s.core, i, 0.5),
+                None => {
+                    let target = effective_target(&s.core, s.graph_panel.target);
+                    apply_scale(&mut s.core, target, 0.5);
+                }
+            }
         }))
         .child(btn("graph-reduce", "Reduce keys", false, t, |s| {
-            let target = effective_target(&s.core, s.graph_panel.target);
-            apply_reduce(&mut s.core, target);
+            match effective_channel_index(&s.core, &s.graph_panel) {
+                Some(i) => apply_reduce_at(&mut s.core, i),
+                None => {
+                    let target = effective_target(&s.core, s.graph_panel.target);
+                    apply_reduce(&mut s.core, target);
+                }
+            }
         }))
         .child(btn("graph-bake", "Bake", false, t, |s| {
             let last = s.core.frame_count().saturating_sub(1);
@@ -1338,12 +1568,15 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     // hint once re-sorts start permuting it — see
     // GraphPanelState::drag_key).
     let drag_idx = s.graph_panel.drag_key.and_then(|hint| {
-        let ch = channel_for(core, target)?;
+        let ch = ch?;
         resolve_drag_index(ch, hint, s.graph_panel.drag_anchor)
     });
     // The selected key, whose tangent handles the canvas
-    // draws and the drag hit-tests.
-    let sel_idx = selected_key_index(core, target);
+    // draws and the drag hit-tests: the key nearest the
+    // playhead ON THE DRAWN CHANNEL (which the index, not
+    // the target, resolved — a picked duplicate shows its
+    // own handles).
+    let sel_idx = ch.and_then(|c| nearest_key(c, core.current as f32));
 
     let mut panel = col()
         .key("graph-panel")
@@ -1377,6 +1610,7 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                 drag_idx,
                 sel_idx,
                 s.graph_panel.drag_handle,
+                drawn_idx,
             ))
                 .key("graph-canvas")
                 .w_full()
@@ -2123,9 +2357,12 @@ mod tests {
         assert!(select_channel(&mut core, &mut st, 3));
         assert_eq!(core.selected_figure, 1);
         assert_eq!(st.target, Some(ChannelTarget::Length(4)));
-        // The existing resolution now lands on exactly the
-        // listed channel — this is the channel the canvas
-        // draws and the transforms edit.
+        // Phase J: the row's index is recorded too, and the
+        // index resolution lands on exactly the listed
+        // channel — this is the channel the canvas draws
+        // and the transforms edit.
+        assert_eq!(st.selected_channel, Some(3));
+        assert_eq!(effective_channel_index(&core, &st), Some(3));
         let target = effective_target(&core, st.target);
         assert_eq!(target, ChannelTarget::Length(4));
         assert_eq!(channel_index(&core, target), Some(3));
@@ -2149,6 +2386,7 @@ mod tests {
         assert_eq!(core.selected_figure, 0);
         assert_eq!(core.selected_node, Some(2));
         assert_eq!(st.target, Some(ChannelTarget::Angle(2)));
+        assert_eq!(st.selected_channel, Some(1));
         assert_eq!(channel_index(&core, ChannelTarget::Angle(2)), Some(1));
     }
 
@@ -2159,6 +2397,7 @@ mod tests {
         assert!(!select_channel(&mut core, &mut st, 99));
         assert_eq!(core.selected_figure, 0);
         assert_eq!(st.target, None);
+        assert_eq!(st.selected_channel, None);
     }
 
     /// A fabricated stat, so the formatting tests never
@@ -2215,7 +2454,11 @@ mod tests {
         // The picked target's row is flagged; the other is
         // not. Lines carry the same numbers channel_stats
         // reports (2 keys over 0.0..10.0 here).
-        let rows = stat_rows(&core, Some(ChannelTarget::RootX));
+        let st = GraphPanelState {
+            target: Some(ChannelTarget::RootX),
+            ..Default::default()
+        };
+        let rows = stat_rows(&core, &st);
         assert_eq!(rows.len(), 2);
         assert!(rows[0].0.contains("Root X: 2 keys, 0.0..10.0"), "{}", rows[0].0);
         assert!(rows[0].1, "the drawn channel is flagged");
@@ -2223,17 +2466,18 @@ mod tests {
         // No pick: the fallback drawn channel (the figure's
         // first) is the flagged one — the block highlights
         // what the canvas actually draws.
-        let rows = stat_rows(&core, None);
+        let rows = stat_rows(&core, &GraphPanelState::default());
         assert!(rows[0].1 && !rows[1].1);
     }
 
     #[test]
     fn stat_rows_duplicates_flag_the_first_match_only() {
         let mut core = EditorCore::new();
-        // Two channels with the SAME (figure, target): the
-        // engine resolves the pair to the first, so the
-        // stats block highlights the first row only —
-        // select_channel's resolution, mirrored.
+        // Two channels with the SAME (figure, target), and a
+        // TARGET-ONLY state (no row pick): the legacy
+        // resolution flags the first match only. (A row
+        // pick flags the picked duplicate instead — see
+        // duplicate_second_row_is_drawn_highlighted_and_edited.)
         core.project.channels = vec![
             channel(ChannelTarget::RootX, vec![Key::flat(0.0, 1.0)]),
             channel(
@@ -2241,7 +2485,11 @@ mod tests {
                 vec![Key::flat(0.0, 2.0), Key::flat(3.0, 4.0)],
             ),
         ];
-        let rows = stat_rows(&core, Some(ChannelTarget::RootX));
+        let st = GraphPanelState {
+            target: Some(ChannelTarget::RootX),
+            ..Default::default()
+        };
+        let rows = stat_rows(&core, &st);
         assert_eq!(rows.len(), 2, "both duplicates still list");
         assert!(rows[0].1, "first match highlighted");
         assert!(!rows[1].1, "the shadowed duplicate is not");
@@ -2252,6 +2500,206 @@ mod tests {
         // The demo core has no channels: no rows, so the
         // builder shows no stats block at all.
         let core = EditorCore::new();
-        assert!(stat_rows(&core, None).is_empty());
+        assert!(stat_rows(&core, &GraphPanelState::default()).is_empty());
+    }
+
+    /// A core whose project carries two channels with the
+    /// SAME `(figure, target)` — the duplicate fixture for
+    /// the Phase J tests. The twins are told apart by their
+    /// keys: the first has one key at value 1.0, the second
+    /// two keys at values 2.0 and 4.0.
+    fn core_with_duplicate_channels() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.channels = vec![
+            channel(ChannelTarget::RootX, vec![Key::flat(0.0, 1.0)]),
+            channel(
+                ChannelTarget::RootX,
+                vec![Key::flat(0.0, 2.0), Key::flat(3.0, 4.0)],
+            ),
+        ];
+        core
+    }
+
+    #[test]
+    fn duplicate_second_row_is_drawn_highlighted_and_edited() {
+        let mut core = core_with_duplicate_channels();
+        let mut st = GraphPanelState::default();
+        // The legacy resolver still sees only the first
+        // twin — that is the limit being fixed, kept visible
+        // here so the contrast is pinned, not hidden.
+        assert_eq!(channel_index(&core, ChannelTarget::RootX), Some(0));
+        // Press the SECOND row: the index is recorded, the
+        // target stays in sync, and the effective resolution
+        // returns the second channel.
+        assert!(select_channel(&mut core, &mut st, 1));
+        assert_eq!(st.selected_channel, Some(1));
+        assert_eq!(st.target, Some(ChannelTarget::RootX));
+        assert_eq!(effective_channel_index(&core, &st), Some(1));
+        // The drawn channel is the second twin (two keys,
+        // not one) — the builder reads exactly this index.
+        let drawn = effective_channel_index(&core, &st).unwrap();
+        assert_eq!(core.project.channels[drawn].keys.len(), 2);
+        // The stats highlight follows the pick: the second
+        // row is flagged, the first no longer is.
+        let rows = stat_rows(&core, &st);
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].1, "the first twin is not highlighted");
+        assert!(rows[1].1, "the picked twin is highlighted");
+        // Proof by edit: scaling by index moves the second
+        // twin's keys (2 -> 4) and leaves the first alone.
+        apply_scale_at(&mut core, drawn, 2.0);
+        assert_eq!(core.project.channels[1].keys[0].value, 4.0);
+        assert_eq!(core.project.channels[0].keys[0].value, 1.0);
+    }
+
+    #[test]
+    fn duplicate_second_row_key_drag_edits_the_second_channel() {
+        let mut core = core_with_duplicate_channels();
+        let mut st = GraphPanelState::default();
+        assert!(select_channel(&mut core, &mut st, 1));
+        let size = [480.0, 170.0];
+        // Fit the SECOND twin through the panel's own
+        // index-based view and grab its frame-3 key.
+        let view = view_for(&core, Some(&core.project.channels[1]), size);
+        let grab = view.to_px(3.0, 4.0);
+        assert!(drag_down(&mut core, &mut st, grab, size));
+        assert_eq!(st.drag_key, Some(1));
+        // Move it to data (2, 9): the second twin's key
+        // follows; the first twin is untouched.
+        let dest = view.to_px(2.0, 9.0);
+        assert!(drag_move(&mut core, &mut st, dest, size));
+        assert!(drag_up(&mut core, &mut st, dest, size, 40.0, false));
+        let keys = &core.project.channels[1].keys;
+        assert!(
+            keys.iter()
+                .any(|k| approx(k.frame, 2.0) && approx(k.value, 9.0)),
+            "second twin's key moved: {keys:?}"
+        );
+        assert_eq!(core.project.channels[0].keys[0].value, 1.0);
+    }
+
+    #[test]
+    fn duplicate_channel_to_next_clones_onto_the_second_figure() {
+        // Integrator wiring (Phase J): two figures, one
+        // RootX channel on figure 0 — the press appends the
+        // clone onto figure 1 through the graph_keys op.
+        let mut core = EditorCore::new();
+        core.add_figure();
+        assert_eq!(core.project.figures.len(), 2);
+        // add_figure selects the new figure; the channel
+        // under test lives on figure 0, and channel
+        // resolution scopes to the selected figure.
+        core.selected_figure = 0;
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(0.0, 1.0), Key::flat(3.0, 4.0)],
+        )];
+        let st = GraphPanelState {
+            target: Some(ChannelTarget::RootX),
+            ..Default::default()
+        };
+        let depth = core.undo_depth();
+        duplicate_channel_to_next(&mut core, &st);
+        assert_eq!(core.project.channels.len(), 2);
+        let clone = &core.project.channels[1];
+        assert_eq!(clone.figure, 1);
+        assert_eq!(clone.target, ChannelTarget::RootX);
+        assert_eq!(clone.keys.len(), 2);
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot via the op");
+        // A second press refuses: figure 1 already has the
+        // channel (the op's own wording, no snapshot).
+        duplicate_channel_to_next(&mut core, &st);
+        assert_eq!(core.project.channels.len(), 2);
+        assert_eq!(core.undo_depth(), depth + 1);
+    }
+
+    #[test]
+    fn duplicate_channel_to_next_refuses_with_one_figure() {
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(0.0, 1.0)],
+        )];
+        let st = GraphPanelState {
+            target: Some(ChannelTarget::RootX),
+            ..Default::default()
+        };
+        let depth = core.undo_depth();
+        duplicate_channel_to_next(&mut core, &st);
+        assert_eq!(core.project.channels.len(), 1);
+        assert_eq!(core.undo_depth(), depth, "no snapshot on the refusal");
+        assert!(core.status.contains("Only one figure"));
+    }
+
+    #[test]
+    fn stale_selected_channel_falls_back_to_target_resolution() {
+        let mut core = core_with_duplicate_channels();
+        // An index past the end of the channel list (the
+        // channel was deleted elsewhere): the legacy target
+        // resolution takes over — the first match.
+        let st = GraphPanelState {
+            target: Some(ChannelTarget::RootX),
+            selected_channel: Some(99),
+            ..Default::default()
+        };
+        assert_eq!(effective_channel_index(&core, &st), Some(0));
+        let rows = stat_rows(&core, &st);
+        assert!(rows[0].1 && !rows[1].1, "fallback highlight: {rows:?}");
+        // The same fallback after a REAL deletion: pick the
+        // second row, then remove that channel — the index
+        // now names nothing, and resolution lands back on
+        // the surviving first twin.
+        let mut st = GraphPanelState::default();
+        assert!(select_channel(&mut core, &mut st, 1));
+        core.project.channels.truncate(1);
+        assert_eq!(effective_channel_index(&core, &st), Some(0));
+        // And when nothing can resolve at all — no channels
+        // left — the answer is None and no row highlights.
+        core.project.channels.clear();
+        assert_eq!(effective_channel_index(&core, &st), None);
+        assert!(stat_rows(&core, &st).is_empty());
+    }
+
+    #[test]
+    fn selected_channel_for_another_figure_is_stale() {
+        // The index is figure-scoped, exactly like
+        // channel_index: a pick that names figure 1's
+        // channel while figure 0 is selected does not draw
+        // it — the target fallback for the SELECTED figure
+        // decides instead.
+        let mut core = core_with_project_channels();
+        let st = GraphPanelState {
+            target: Some(ChannelTarget::RootX),
+            selected_channel: Some(3),
+            ..Default::default()
+        };
+        // Channel 3 is figure 1's Length(4); figure 0 is
+        // selected, so the fallback resolves figure 0's
+        // Root X channel (index 0).
+        assert_eq!(core.selected_figure, 0);
+        assert_eq!(effective_channel_index(&core, &st), Some(0));
+    }
+
+    #[test]
+    fn legacy_target_only_state_resolves_as_before() {
+        // No row pick anywhere in this state: the Phase G
+        // behaviour is byte-for-byte the fallback — the
+        // effective target's first match, for both the
+        // index resolution and the stats highlight.
+        let core = core_with_duplicate_channels();
+        let st = GraphPanelState {
+            target: Some(ChannelTarget::RootX),
+            ..Default::default()
+        };
+        assert_eq!(st.selected_channel, None);
+        assert_eq!(effective_channel_index(&core, &st), Some(0));
+        let rows = stat_rows(&core, &st);
+        assert!(rows[0].1 && !rows[1].1);
+        // And a wholly default state still falls back to
+        // the figure's first channel.
+        assert_eq!(
+            effective_channel_index(&core, &GraphPanelState::default()),
+            Some(0)
+        );
     }
 }

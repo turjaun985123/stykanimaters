@@ -18,6 +18,11 @@
 //! * [`EditorCore::recolor_figure`] is the whole-figure
 //!   counterpart of the per-node colour setters: one
 //!   snapshot, then every node's colour written directly.
+//! * [`EditorCore::mirror_figure_all_frames`] applies the
+//!   transform `mirror_selected_pose` (editor.rs) performs
+//!   on one frame — every angle negated, the root left in
+//!   place — to the figure's pose on every frame, under
+//!   one snapshot.
 //!
 //! Bookkeeping scope: duplication inserts cloned pose rows
 //! (and bend rows, where a frame stores them) into every
@@ -214,6 +219,21 @@ pub fn remap_figures_after_move(project: &mut Project, from: usize, to: usize) {
     }
 }
 
+/// Mirror one pose in place, with exactly the transform
+/// `EditorCore::mirror_selected_pose` (editor.rs) applies
+/// to a single frame's pose: every joint angle is negated
+/// and the root is left where it is. (An earlier guess
+/// that the core op also mirrors the root across the
+/// stage centre is wrong — its own test asserts the root
+/// must not move.) Kept as a free helper so the
+/// all-frames op below shares the one definition of the
+/// transform instead of drifting from the core op.
+fn mirror_pose_in_place(pose: &mut Pose) {
+    for a in &mut pose.angles {
+        *a = -*a;
+    }
+}
+
 impl EditorCore {
     /// Set figure `fi`'s colour directly (the colour picker
     /// panels). Writes the same `FigureInstance.color` the
@@ -332,6 +352,52 @@ impl EditorCore {
         self.status = format!("Figure {} recoloured.", fi + 1);
         true
     }
+
+    /// Mirror figure `fi` on EVERY frame in the project,
+    /// as one undo step. Each frame's pose for the figure
+    /// is transformed with the same maths
+    /// `mirror_selected_pose` (editor.rs) uses for a
+    /// single frame — see [`mirror_pose_in_place`]: every
+    /// angle negated, the root left in place. Exactly one
+    /// snapshot is taken up front, so a single undo
+    /// restores every frame's original pose.
+    ///
+    /// Frames whose pose table stores no row for the
+    /// figure are skipped, matching `duplicate_figure`'s
+    /// tolerance for ragged per-frame rows.
+    ///
+    /// Limit, shared with `mirror_selected_pose`: graph
+    /// channels are NOT touched. An `Angle` channel
+    /// overrides its joint's angle when a frame is
+    /// evaluated, so a figure driven by graph channels
+    /// will not visually mirror — the stored poses flip,
+    /// the evaluated poses do not. Mirroring channel keys
+    /// would be a graph op, not a figure op, and is
+    /// deliberately out of scope here.
+    ///
+    /// Returns `false`, changing nothing but the status
+    /// line (the refusal shape `recolor_figure` uses),
+    /// when `fi` names no figure; a refusal takes no
+    /// snapshot.
+    pub fn mirror_figure_all_frames(&mut self, fi: usize) -> bool {
+        if fi >= self.project.figures.len() {
+            self.status = "No figure to mirror.".into();
+            return false;
+        }
+        self.snapshot();
+        let frame_count = self.project.frames.len();
+        for frame in &mut self.project.frames {
+            if let Some(pose) = frame.poses.get_mut(fi) {
+                mirror_pose_in_place(pose);
+            }
+        }
+        self.status = format!(
+            "Figure {} mirrored on all {} frames.",
+            fi + 1,
+            frame_count
+        );
+        true
+    }
 }
 
 #[cfg(test)]
@@ -424,6 +490,96 @@ mod tests {
         assert!(!core.recolor_figure(0, 0xE8862E));
         assert_eq!(core.undo_depth(), depth, "a refusal takes no snapshot");
         assert_eq!(core.status, "Figure has no segments to recolour.");
+    }
+
+    #[test]
+    fn mirror_figure_all_frames_mirrors_every_frame_as_one_undo_step() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        // Record every frame's pose for the figure before
+        // the mirror; the demo project carries a pose row
+        // for it on each frame.
+        let before: Vec<Pose> = core
+            .project
+            .frames
+            .iter()
+            .map(|f| f.poses[fi].clone())
+            .collect();
+        assert!(before.len() > 1, "the demo project has several frames");
+        assert!(
+            before.iter().all(|p| !p.angles.is_empty()),
+            "the demo figure has angles to negate"
+        );
+        let depth = core.undo_depth();
+        assert!(core.mirror_figure_all_frames(fi));
+        assert_eq!(
+            core.undo_depth(),
+            depth + 1,
+            "exactly one snapshot for the whole figure"
+        );
+        for (frame, orig) in core.project.frames.iter().zip(&before) {
+            let pose = &frame.poses[fi];
+            assert_eq!(
+                pose.root, orig.root,
+                "mirroring negates angles only — the root stays put, as in mirror_selected_pose"
+            );
+            for (m, b) in pose.angles.iter().zip(&orig.angles) {
+                assert_eq!(*m, -*b, "every angle on every frame is negated");
+            }
+        }
+        assert_eq!(
+            core.status,
+            format!("Figure {} mirrored on all {} frames.", fi + 1, before.len())
+        );
+        // A single undo restores every frame's original
+        // pose — the proof the writes shared one snapshot.
+        core.undo();
+        for (frame, orig) in core.project.frames.iter().zip(&before) {
+            assert_eq!(frame.poses[fi].angles, orig.angles);
+            assert_eq!(frame.poses[fi].root, orig.root);
+        }
+    }
+
+    #[test]
+    fn mirror_figure_all_frames_skips_frames_without_a_pose_row() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        // Make the pose table ragged: drop the figure's
+        // pose row from the last frame.
+        let last = core.project.frames.len() - 1;
+        core.project.frames[last].poses.remove(fi);
+        let before: Vec<Vec<f32>> = core
+            .project
+            .frames
+            .iter()
+            .map(|f| {
+                f.poses
+                    .get(fi)
+                    .map(|p| p.angles.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert!(core.mirror_figure_all_frames(fi));
+        assert!(
+            core.project.frames[last].poses.get(fi).is_none(),
+            "a frame with no pose row stays without one"
+        );
+        for (idx, frame) in core.project.frames.iter().enumerate() {
+            if let Some(pose) = frame.poses.get(fi) {
+                for (m, b) in pose.angles.iter().zip(&before[idx]) {
+                    assert_eq!(*m, -*b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mirror_figure_all_frames_guards_a_stale_index_without_a_snapshot() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        assert!(!core.mirror_figure_all_frames(999));
+        assert_eq!(core.undo_depth(), depth, "a refusal takes no snapshot");
+        assert_eq!(core.status, "No figure to mirror.");
     }
 
     #[test]

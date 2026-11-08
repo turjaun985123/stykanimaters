@@ -112,6 +112,22 @@
 //!   figure *number*, "Solo off."), and because it is a
 //!   toggle, pressing the button while the selected figure
 //!   is already the solo turns solo off.
+//!
+//! Phase J (section 30/40) adds a small colour dot at the
+//! start of each row, before the figure name, so a layer
+//! can be matched to its figure's colour at a glance. The
+//! dot's colour comes from [`layer_dot_color`]: the
+//! figure's **root node** (node 0) resolved with the
+//! engine's own idiom, `node.color.unwrap_or(fig.color)`
+//! (export.rs's segment writer; the same resolution
+//! figures_panel's recolour source uses) — an explicit
+//! root colour wins, an inheriting root shows the figure
+//! colour. A layer row has no meaningful "selected node",
+//! so the root is the honest representative, and because
+//! `FigureInstance::color` is a plain `u32` (never an
+//! option) a colour always resolves; a figure whose def
+//! somehow has no nodes at all falls back to the figure
+//! colour directly.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Drag, El, Phase, Tx};
@@ -135,6 +151,9 @@ pub struct LayerRow {
     pub fi: usize,
     /// Figure name as shown.
     pub name: String,
+    /// The row's colour-dot colour: the figure's root-node
+    /// colour resolved by [`layer_dot_color`].
+    pub dot_color: u32,
     /// Layer opacity as a whole percentage (5..=100).
     pub opacity_pct: i64,
     /// True when this is the editor's selected figure.
@@ -192,6 +211,21 @@ pub fn jump_target(fi: usize, len: usize, to_top: bool) -> Option<usize> {
     }
 }
 
+/// The colour of a figure's layer-row dot: its root
+/// node's colour resolved the engine's way,
+/// `node.color.unwrap_or(fig.color)` — an explicit root
+/// colour (`NodeDef::color` is `Some`) wins; an inheriting
+/// root resolves to the figure's own colour.
+/// `FigureInstance::color` is a plain `u32`, so this
+/// always yields a colour; a def with no nodes at all
+/// falls back to the figure colour directly.
+pub fn layer_dot_color(fig: &stykanimate_rs::model::FigureInstance) -> u32 {
+    match fig.def.nodes.first() {
+        Some(root) => root.color.unwrap_or(fig.color),
+        None => fig.color,
+    }
+}
+
 /// Build the panel's row data from the core, front first.
 pub fn rows(core: &EditorCore) -> Vec<LayerRow> {
     let figures = &core.project.figures;
@@ -200,6 +234,7 @@ pub fn rows(core: &EditorCore) -> Vec<LayerRow> {
         .map(|fi| LayerRow {
             fi,
             name: figures[fi].name.clone(),
+            dot_color: layer_dot_color(&figures[fi]),
             opacity_pct: opacity_pct(figures[fi].opacity),
             selected: fi == core.selected_figure,
             can_move_up: can_move_up(fi, figures.len()),
@@ -387,11 +422,13 @@ fn solo_selected(core: &mut EditorCore) {
     core.toggle_solo(core.selected_figure);
 }
 
-/// One layer row: name (press selects; accent when selected),
-/// opacity readout with −/+ steppers, and Bottom/down/up/Top
-/// reorder buttons — Down/Up are chevron icon buttons,
-/// Bottom/Top stay text (see the module docs for why). Keys
-/// are per-figure: `layer-row-{fi}`,
+/// One layer row: a colour dot (the figure's resolved
+/// root colour, [`layer_dot_color`]), name (press selects;
+/// accent when selected), opacity readout with −/+
+/// steppers, and Bottom/down/up/Top reorder buttons —
+/// Down/Up are chevron icon buttons, Bottom/Top stay text
+/// (see the module docs for why). Keys are per-figure:
+/// `layer-row-{fi}`, `layer-dot-{fi}`,
 /// `layer-op-dec-{fi}`, `layer-op-inc-{fi}`,
 /// `layer-bottom-{fi}`, `layer-down-{fi}`, `layer-up-{fi}`,
 /// `layer-top-{fi}` (1-based in the key is avoided — keys
@@ -403,6 +440,16 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
         .key(format!("layer-row-{fi}"))
         .gap(6.0)
         .center_y()
+        .child(
+            el()
+                .key(format!("layer-dot-{fi}"))
+                .size(10.0, 10.0)
+                .radius(5.0)
+                .fill(
+                    crate::stage_view::hex_color(r.dot_color)
+                        .unwrap_or(rune::Color::WHITE),
+                ),
+        )
         .child(btn(
             &format!("layer-name-{fi}"),
             &r.name,
@@ -860,6 +907,56 @@ mod tests {
         solo_selected(&mut core);
         assert_eq!(core.solo, None);
         assert_eq!(core.status, "untouched");
+    }
+
+    #[test]
+    fn layer_dot_color_prefers_the_root_nodes_explicit_colour() {
+        let mut core = EditorCore::new();
+        // The demo figure's own colour is 0xE8E8EC; an
+        // explicit root-node colour overrides it for the
+        // dot, exactly as it would on the stage.
+        core.project.figures[0].def.nodes[0].color = Some(0x123456);
+        assert_eq!(layer_dot_color(&core.project.figures[0]), 0x123456);
+        // ...and the built row carries the same colour.
+        assert_eq!(rows(&core)[0].dot_color, 0x123456);
+    }
+
+    #[test]
+    fn layer_dot_color_falls_back_to_the_figure_colour() {
+        let core = EditorCore::new();
+        // The demo root node inherits (its colour is
+        // None), so the dot is the figure colour itself.
+        assert_eq!(core.project.figures[0].def.nodes[0].color, None);
+        assert_eq!(
+            layer_dot_color(&core.project.figures[0]),
+            core.project.figures[0].color
+        );
+        assert_eq!(rows(&core)[0].dot_color, 0xE8E8EC);
+    }
+
+    #[test]
+    fn layer_dot_color_without_nodes_is_the_figure_colour() {
+        let mut core = EditorCore::new();
+        core.project.figures[0].def.nodes.clear();
+        assert_eq!(
+            layer_dot_color(&core.project.figures[0]),
+            core.project.figures[0].color
+        );
+    }
+
+    #[test]
+    fn layer_rows_build_on_the_demo() {
+        // The row builder — the element that carries the
+        // new dot — builds for every row of the demo
+        // project (panel() itself needs a full shell
+        // State; the rows are its only per-figure input).
+        let core = EditorCore::new();
+        let t = tok::theme(true);
+        let rs = rows(&core);
+        assert_eq!(rs.len(), core.project.figures.len());
+        for r in &rs {
+            let _ = layer_row(r, &t);
+        }
     }
 
     #[test]

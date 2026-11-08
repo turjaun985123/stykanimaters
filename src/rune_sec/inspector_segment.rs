@@ -68,6 +68,29 @@
 //!   the storage unit, radians — mirroring
 //!   `rotate_selected`, whose degrees ARE the storage
 //!   unit for angles.
+//! * Bend readout + Straighten → `bend_degrees` /
+//!   `straighten_selected` (this module) — the readout
+//!   is one muted line under the header, beside the
+//!   Index line (key `seg-bend-readout`): the selected
+//!   segment's bend in whole degrees via
+//!   `format_bend_readout` (negatives show their sign;
+//!   a straight segment reads "Bend 0°").
+//!   `bend_degrees` performs the same stored-value
+//!   read as `segment_state`'s Bend readout — the
+//!   current frame's `Frame.bends` entry,
+//!   sparse-missing as 0 — NOT the renderers'
+//!   interpolated `bends_at`, so the line can never
+//!   disagree with the Bend readout row or the stepper
+//!   row below it. Straighten (key `seg-bend-zero`,
+//!   in the Bend stepper row) calls `bend_selected`
+//!   with the exact negation of the stored radians, so
+//!   the sum lands on bit-exact 0.0 — no degrees round
+//!   trip, which can be an ulp off. At bend 0 the
+//!   press is a silent no-op rather than an undo step:
+//!   `bend_selected` takes its snapshot unconditionally
+//!   once its guards pass, so even a zero delta would
+//!   snapshot — the guard lives in
+//!   `straighten_selected`, not in the shared op.
 //! * Cycle bend → `cycle_bend()` (editor.rs:1106) — key
 //!   `cycle-bend`. There is no ± bend op in the core; bend
 //!   steps 0 → +0.35 → +0.7 → −0.35 → −0.7 rad per frame.
@@ -288,6 +311,98 @@ pub fn bend_selected(core: &mut EditorCore, delta_rad: f32) {
         format_deg(new.to_degrees()),
         core.current + 1
     );
+}
+
+/// The selected node's bend at the current frame, in
+/// degrees, or `None` when no (valid) node is selected —
+/// the same defensive indexing as `segment_state`, so a
+/// stale selection reads as "nothing selected" instead
+/// of panicking. The read is the stored-value read the
+/// panel already uses for its Bend readout (the current
+/// frame's `Frame.bends` entry, sparse-missing as 0.0),
+/// NOT the renderers' interpolated
+/// `Project::bends_at`: the steppers and `cycle_bend`
+/// also work on the stored value, so every bend surface
+/// in the panel agrees. The origin qualifies (its
+/// stored bend is definitionally 0 — nothing can write
+/// it). This is the value behind the panel's
+/// `seg-bend-readout` line.
+pub fn bend_degrees(core: &EditorCore) -> Option<f32> {
+    let ni = core.selected_node?;
+    let fi = core.selected_figure;
+    let fig = core.project.figures.get(fi)?;
+    if fig.def.nodes.get(ni).is_none() {
+        return None;
+    }
+    Some(
+        core.project
+            .frames
+            .get(core.current)
+            .and_then(|f| f.bends.get(fi))
+            .and_then(|b| b.get(ni))
+            .copied()
+            .unwrap_or(0.0)
+            .to_degrees(),
+    )
+}
+
+/// Format a bend in degrees as the readout line's
+/// text: whole degrees, the sign shown on negatives
+/// ("Bend -20°"), a straight segment reading exactly
+/// "Bend 0°" (a negative zero is normalised away —
+/// `-0.0 == 0.0`, so the remap costs nothing). The
+/// single formatter behind the `seg-bend-readout`
+/// line, so the wording lives in exactly one place
+/// (and is unit testable without elements).
+pub fn format_bend_readout(deg: f32) -> String {
+    let deg = if deg == 0.0 { 0.0 } else { deg };
+    format!("Bend {deg:.0}°")
+}
+
+/// Straighten the selected node's segment: set its
+/// bend at the current frame to exactly 0, through the
+/// steppers' own write path (`bend_selected` with the
+/// negated current bend), so a press is exactly one
+/// undo step with `bend_selected`'s status. Two
+/// details keep it honest:
+///
+/// * The delta is the exact negation of the STORED
+///   RADIANS, read here — not `-bend_degrees().to_radians()`:
+///   the radians → degrees → radians round trip can be
+///   an ulp off, while `cur + (-cur)` is bit-exact 0.0.
+/// * At bend 0 the press is a silent no-op — no write,
+///   no status, NO undo step. `bend_selected` takes
+///   its snapshot unconditionally once its guards pass,
+///   so delegating a zero delta would still snapshot;
+///   the guard has to live here. With no (valid)
+///   selection there is no bend to read, so the call
+///   delegates to `bend_selected` with a zero delta
+///   purely for its refusals, which all return
+///   status-only BEFORE the snapshot — nothing is
+///   written on that path either.
+pub fn straighten_selected(core: &mut EditorCore) {
+    let Some(deg) = bend_degrees(core) else {
+        bend_selected(core, 0.0);
+        return;
+    };
+    if deg == 0.0 {
+        return;
+    }
+    // `bend_degrees` succeeded, so the selection is
+    // valid; the `unwrap_or` is unreachable armour, and
+    // node 0 would simply take `bend_selected`'s root
+    // refusal.
+    let fi = core.selected_figure;
+    let ni = core.selected_node.unwrap_or(0);
+    let cur = core
+        .project
+        .frames
+        .get(core.current)
+        .and_then(|f| f.bends.get(fi))
+        .and_then(|b| b.get(ni))
+        .copied()
+        .unwrap_or(0.0);
+    bend_selected(core, -cur);
 }
 
 /// Label for a node shape, naming the polygons `cycle_shape`
@@ -531,6 +646,19 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 .color(t.text_secondary),
         );
     }
+    // The Bend readout line: the selected segment's
+    // stored bend in whole degrees (see `bend_degrees`),
+    // keyed so shell tests can find it. `segment_state`
+    // succeeded above, so this read succeeds too; the
+    // `if let` mirrors the Index line's idiom.
+    if let Some(deg) = bend_degrees(&s.core) {
+        panel = panel.child(
+            text(format_bend_readout(deg))
+                .key("seg-bend-readout")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    }
     panel = panel
         .child(readout_row("Length", format!("{:.0}", st.length), t))
         .child(readout_row("Thickness", format!("{:.0}", st.thickness), t))
@@ -615,6 +743,9 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 }))
                 .child(btn("seg-bend-p5", "+5°", false, t, |s| {
                     bend_selected(&mut s.core, (5.0f32).to_radians())
+                }))
+                .child(btn("seg-bend-zero", "Straighten", false, t, |s| {
+                    straighten_selected(&mut s.core)
                 })),
         );
     }
@@ -944,6 +1075,96 @@ mod tests {
             core.status
         );
         assert!(core.project.frames[core.current].bends.is_empty());
+    }
+
+    #[test]
+    fn bend_degrees_is_none_without_a_valid_selection() {
+        assert!(bend_degrees(&EditorCore::new()).is_none());
+        assert!(bend_degrees(&core_with_selection(None)).is_none());
+        assert!(bend_degrees(&core_with_selection(Some(999))).is_none());
+    }
+
+    #[test]
+    fn bend_degrees_reads_zero_for_a_fresh_selection() {
+        // Sparse storage: no bend table at all reads as 0.
+        let core = core_with_selection(Some(1));
+        assert_eq!(bend_degrees(&core), Some(0.0));
+        // The origin too — it simply can never be bent.
+        let core = core_with_selection(Some(0));
+        assert_eq!(bend_degrees(&core), Some(0.0));
+    }
+
+    #[test]
+    fn bend_degrees_converts_the_stored_radians() {
+        let mut core = core_with_selection(Some(1));
+        bend_selected(&mut core, 0.35);
+        assert_eq!(bend_degrees(&core), Some(0.35f32.to_degrees()));
+        bend_selected(&mut core, -0.7);
+        assert_eq!(bend_degrees(&core), Some((-0.35f32).to_degrees()));
+        // And it agrees with the panel's existing Bend
+        // readout, which reads the same stored value.
+        let st = segment_state(&core).unwrap();
+        assert_eq!(bend_degrees(&core), Some(st.bend_deg));
+    }
+
+    #[test]
+    fn format_bend_readout_shows_whole_degrees_with_sign() {
+        assert_eq!(format_bend_readout(0.0), "Bend 0°");
+        assert_eq!(format_bend_readout(-0.0), "Bend 0°");
+        assert_eq!(format_bend_readout(20.053_523), "Bend 20°");
+        assert_eq!(format_bend_readout(-20.053_523), "Bend -20°");
+        assert_eq!(format_bend_readout(40.107_046), "Bend 40°");
+    }
+
+    #[test]
+    fn straighten_zeroes_a_bent_segment_in_one_undo_step() {
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        let frame = core.current;
+        bend_selected(&mut core, 0.35);
+        let depth = core.undo_depth();
+        straighten_selected(&mut core);
+        assert_eq!(
+            core.project.frames[frame].bends[fi][1], 0.0,
+            "the stored bend is bit-exact zero"
+        );
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot for the press");
+        assert_eq!(bend_degrees(&core), Some(0.0));
+        assert_eq!(core.status, "Segment 1 bend 0.0° on frame 1.");
+        // Undo restores the bend.
+        core.undo();
+        assert_eq!(core.project.frames[frame].bends[fi][1], 0.35);
+    }
+
+    #[test]
+    fn straighten_at_zero_is_a_silent_no_op() {
+        // `bend_selected` snapshots unconditionally once
+        // its guards pass, so the zero guard in
+        // `straighten_selected` is what stands between a
+        // press at bend 0 and a phantom undo step.
+        let mut core = core_with_selection(Some(1));
+        let depth = core.undo_depth();
+        core.status = "Sentinel.".into();
+        straighten_selected(&mut core);
+        assert_eq!(core.undo_depth(), depth, "no snapshot at bend 0");
+        assert_eq!(core.status, "Sentinel.", "no status churn at bend 0");
+        assert!(
+            core.project.frames[core.current].bends.is_empty(),
+            "the bend table is not even grown"
+        );
+    }
+
+    #[test]
+    fn straighten_without_selection_refuses_via_bend_selected() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        straighten_selected(&mut core);
+        assert_eq!(core.undo_depth(), depth, "no snapshot without a selection");
+        assert!(
+            core.status.contains("Select a segment"),
+            "refusal explains itself: {}",
+            core.status
+        );
     }
 
     #[test]

@@ -99,6 +99,21 @@
 //!   `.json` finds saved entries it could not find
 //!   before. Built-ins have no file and still match by
 //!   name only.
+//! ## Phase J additions (section 25/40)
+//!
+//! - **Enter-to-insert in the search field**: the field
+//!   now wires `on_submit` ([`submit_library_search`]),
+//!   which inserts the FIRST VISIBLE entry by its real
+//!   library slot ([`enter_insert_index`] —
+//!   [`library_rows_q`]'s first row, so the visible→real
+//!   mapping is the rows' own). A filter with no matches
+//!   makes Enter a no-op. Recorded honestly: before
+//!   this phase the field had NO submit path at all (a
+//!   Phase I summary's claim of a buggy one was never
+//!   borne out by the code), so this is a new path
+//!   built on the correct mapping, not a remapping of
+//!   an existing one.
+//!
 //! - **Count discipline**: the header count followed no
 //!   filter discipline — it always read `{total}
 //!   figures`. It now renders through [`count_line`],
@@ -168,7 +183,7 @@
 use std::path::PathBuf;
 
 use rune::tok::{type_, Theme};
-use rune::{col, row, text, text_input, El, ScrollSpec, TextEdit};
+use rune::{col, row, text, text_input, El, ScrollSpec, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
@@ -526,6 +541,44 @@ pub fn insert_at(core: &mut EditorCore, i: usize) {
     }
 }
 
+/// The library slot pressing Enter in the search field
+/// inserts: the first row the current filter shows, by
+/// its REAL library slot — the same visible→real mapping
+/// the row Insert buttons use ([`library_rows_q`] rows
+/// keep real indices while filtered). `None` when the
+/// filter matches nothing, in which case Enter inserts
+/// nothing.
+///
+/// Phase J (section 25/40): this helper did not exist
+/// before this phase. A Phase I summary described an
+/// Enter-to-insert path that used the filtered position
+/// as a full-list index, but the code never had one —
+/// the search field wired no `on_submit` at all, so
+/// Enter inserted nothing. The submit path is new here
+/// and resolves through the rows' mapping from the
+/// start, so the described wrong-figure insert can
+/// never happen.
+pub fn enter_insert_index(core: &EditorCore, query: &str) -> Option<usize> {
+    library_rows_q(core, query).first().map(|row| row.index)
+}
+
+/// The search field's Enter dispatch at the core level:
+/// insert the first visible entry by its real slot
+/// ([`enter_insert_index`] + [`insert_at`]); a filter
+/// with no matches is a silent no-op.
+pub fn insert_on_enter(core: &mut EditorCore, query: &str) {
+    if let Some(i) = enter_insert_index(core, query) {
+        insert_at(core, i);
+    }
+}
+
+/// The search field's `on_submit` handler: read the
+/// typed query, then the core-level dispatch above.
+pub fn submit_library_search(s: &mut State) {
+    let query = s.library_panel.search.text.clone();
+    insert_on_enter(&mut s.core, &query);
+}
+
 /// Flip the panel collapsed/expanded (the header toggle's
 /// handler).
 pub fn toggle_collapsed(s: &mut State) {
@@ -751,7 +804,8 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
                         .grow(1.0)
                         .color(t.text)
                         .placeholder("Search library", t.text_secondary)
-                        .on_edit(|s: &mut State| &mut s.library_panel.search),
+                        .on_edit(|s: &mut State| &mut s.library_panel.search)
+                        .on_submit(|s: &mut State, _tx: &mut Tx| submit_library_search(s)),
                 ),
         );
         if core.library.is_empty() {
@@ -1183,6 +1237,82 @@ mod tests {
         assert!(rows.iter().all(|r| !r.builtin));
         assert!(rows.iter().any(|r| r.name == "Alpha"));
         assert!(builtin_rows_q(&core, ".json").is_empty());
+    }
+
+    #[test]
+    fn enter_insert_index_is_the_first_visible_rows_real_slot() {
+        let mut core = EditorCore::new();
+        let alpha = core.library.len();
+        core.library
+            .push(("Alpha".into(), stykanimate_rs::model::FigureDef::simple()));
+        let beta = core.library.len();
+        core.library
+            .push(("Beta".into(), stykanimate_rs::model::FigureDef::simple()));
+        // The pushed entries sit past every preloaded one,
+        // so filtered positions and real slots provably
+        // differ (filtered position 0 vs real slot `beta`).
+        assert!(beta > 0);
+        // Unfiltered: the first visible row is slot 0.
+        assert_eq!(enter_insert_index(&core, ""), Some(0));
+        // Filtered: the first (only) visible row resolves
+        // to its REAL slot, never its filtered position.
+        assert_eq!(enter_insert_index(&core, "bet"), Some(beta));
+        assert_eq!(enter_insert_index(&core, "alp"), Some(alpha));
+        // File-name queries resolve through the same rows.
+        assert_eq!(enter_insert_index(&core, "beta.json"), Some(beta));
+        // No matches: nothing for Enter to insert.
+        assert_eq!(enter_insert_index(&core, "zzz-no-match"), None);
+    }
+
+    #[test]
+    fn insert_on_enter_inserts_the_visible_entry_not_the_first() {
+        let mut core = EditorCore::new();
+        core.library
+            .push(("Alpha".into(), stykanimate_rs::model::FigureDef::simple()));
+        let beta = core.library.len();
+        core.library
+            .push(("Beta".into(), stykanimate_rs::model::FigureDef::simple()));
+        let figures_before = core.project.figures.len();
+        // "bet" filters the list down to Beta alone; Enter
+        // must insert Beta — not the library's first entry
+        // (the built-in at slot 0) and not Alpha.
+        insert_on_enter(&mut core, "bet");
+        assert_eq!(core.project.figures.len(), figures_before + 1);
+        assert_eq!(core.library_index, beta);
+        assert!(
+            core.status.contains("Inserted Beta"),
+            "status: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn insert_on_enter_unfiltered_inserts_the_first_entry() {
+        // The unfiltered Enter keeps the long-standing
+        // meaning of "first entry": slot 0.
+        let mut core = EditorCore::new();
+        let figures_before = core.project.figures.len();
+        insert_on_enter(&mut core, "");
+        assert_eq!(core.project.figures.len(), figures_before + 1);
+        assert_eq!(core.library_index, 0);
+        assert!(
+            core.status.contains("Built-in: Humanoid"),
+            "status: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn insert_on_enter_with_no_matches_does_nothing() {
+        // No panic, no insert, no state drift at all.
+        let mut core = EditorCore::new();
+        let figures_before = core.project.figures.len();
+        let status_before = core.status.clone();
+        let index_before = core.library_index;
+        insert_on_enter(&mut core, "zzz-no-match");
+        assert_eq!(core.project.figures.len(), figures_before);
+        assert_eq!(core.library_index, index_before);
+        assert_eq!(core.status, status_before);
     }
 
     #[test]

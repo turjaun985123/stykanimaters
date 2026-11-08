@@ -61,6 +61,16 @@
 //! all, not even a refusal status; the live form's handler
 //! is byte-for-byte the Phase H one. The plain `fbtn`
 //! buttons keep their older muted-but-wired form.
+//!
+//! "Reverse all" (Phase J) sits beside "Reverse" in the
+//! main row and is the deliberate exception to the range
+//! model above: it always reverses the whole timeline,
+//! ignoring both the loop range and the timeline
+//! selection — that is what its label promises, while
+//! "Reverse" keeps the loop-range rule for the range
+//! itself. It renders through the Phase I inert/live icon
+//! pair, gated by [`reverse_all_enabled`]: below two
+//! frames there is no order to change.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Color, El};
@@ -190,6 +200,27 @@ pub fn can_shift_fwd(core: &EditorCore) -> bool {
 pub fn can_reverse(core: &EditorCore) -> bool {
     let (_, count) = reverse_args(core);
     count >= 2
+}
+
+/// Reverse-all's render-time guard (Phase J): reversing the
+/// whole timeline needs at least two frames to change
+/// anything; below that the press would be a no-op, so the
+/// button renders inert. Unlike [`can_reverse`] — the
+/// "Reverse" button's predicate, which follows
+/// [`reverse_args`]' loop-range rule — this guard looks at
+/// the whole timeline only, because Reverse all always
+/// acts on the whole timeline (see [`reverse_all`]).
+pub fn reverse_all_enabled(core: &EditorCore) -> bool {
+    core.frame_count() >= 2
+}
+
+/// Reverse the WHOLE timeline — the "Reverse all" button's
+/// dispatch. Deliberately NOT [`reverse_args`]: a set loop
+/// range and any timeline selection are both ignored, so
+/// the button always does what its label says. ("Reverse"
+/// keeps the loop-range rule for the range itself.)
+pub fn reverse_all(core: &mut EditorCore) {
+    core.reverse_range(0, core.frame_count());
 }
 
 /// `smooth_path_roots` needs at least three frames and a
@@ -528,6 +559,23 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             let (from, count) = reverse_args(&s.core);
             s.core.reverse_range(from, count);
         }))
+        .child(if reverse_all_enabled(core) {
+            crate::rune_sec::icon_btn::icon_btn(
+                "frames-reverse-all",
+                "arrow-right-arrow-left",
+                "Reverse all",
+                false,
+                t,
+                |s| reverse_all(&mut s.core),
+            )
+        } else {
+            crate::rune_sec::icon_btn::icon_btn_inert(
+                "frames-reverse-all",
+                "arrow-right-arrow-left",
+                "Reverse all",
+                t,
+            )
+        })
         .child(fbtn("smooth-path", "Smooth path", false, !can_smooth(core), t, |s| {
             let fi = s.core.selected_figure;
             s.core.smooth_path_roots(fi);
@@ -1164,5 +1212,78 @@ mod tests {
         assert_eq!(insert_frames_enabled(&core), can_insert_frames(&core));
         core.project.frames.clear();
         assert!(!insert_frames_enabled(&core), "no frame to insert after");
+    }
+
+    #[test]
+    fn reverse_all_guard_needs_two_frames() {
+        // Truth table for Reverse all: inert below two
+        // frames (no order to change), live from two up —
+        // and, unlike can_reverse, never swayed by a loop
+        // range, because the button ignores the loop range.
+        let mut core = EditorCore::new();
+        assert!(reverse_all_enabled(&core), "the demo's five frames reverse");
+        core.project.frames.truncate(2);
+        assert!(reverse_all_enabled(&core), "two frames are the minimum");
+        core.project.frames.truncate(1);
+        assert!(!reverse_all_enabled(&core), "one frame has no order");
+        core.project.frames.clear();
+        assert!(!reverse_all_enabled(&core), "no frames, nothing to reverse");
+        // A one-frame loop range disables "Reverse" (via
+        // reverse_args) but must not disable Reverse all.
+        let mut core = EditorCore::new();
+        core.set_loop_range(2, 2);
+        assert!(!can_reverse(&core), "the loop rule sees one frame");
+        assert!(reverse_all_enabled(&core), "Reverse all sees the timeline");
+    }
+
+    #[test]
+    fn reverse_all_reverses_the_whole_timeline() {
+        // A three-frame project, frames tagged by duration
+        // (the distinguishing per-frame value, as in the
+        // shift test above): the dispatch must move the
+        // Frame values themselves, first to last.
+        let mut core = EditorCore::new();
+        core.project.frames.truncate(3);
+        for (i, frame) in core.project.frames.iter_mut().enumerate() {
+            frame.duration = 1.0 + i as f32;
+        }
+        reverse_all(&mut core);
+        let durations: Vec<f32> = core.project.frames.iter().map(|f| f.duration).collect();
+        assert_eq!(durations, [3.0, 2.0, 1.0], "frame order fully flipped");
+        assert_eq!(core.frame_count(), 3, "reversing adds and removes nothing");
+        // A second press restores the original order.
+        reverse_all(&mut core);
+        let durations: Vec<f32> = core.project.frames.iter().map(|f| f.duration).collect();
+        assert_eq!(durations, [1.0, 2.0, 3.0], "reverse is its own inverse");
+    }
+
+    #[test]
+    fn reverse_all_ignores_the_loop_range_while_reverse_keeps_it() {
+        // The existing range behaviour is untouched: with a
+        // loop range set, "Reverse" (through reverse_args)
+        // flips only the loop's frames...
+        let mut core = EditorCore::new();
+        core.project.frames.truncate(3);
+        for (i, frame) in core.project.frames.iter_mut().enumerate() {
+            frame.duration = 1.0 + i as f32;
+        }
+        core.set_loop_range(1, 2);
+        let (from, count) = reverse_args(&core);
+        core.reverse_range(from, count);
+        let durations: Vec<f32> = core.project.frames.iter().map(|f| f.duration).collect();
+        assert_eq!(
+            durations,
+            [1.0, 3.0, 2.0],
+            "the loop-range reverse leaves frame 1 in place"
+        );
+        // ...while Reverse all, pressed with that same loop
+        // range still set, flips every frame regardless.
+        reverse_all(&mut core);
+        let durations: Vec<f32> = core.project.frames.iter().map(|f| f.duration).collect();
+        assert_eq!(
+            durations,
+            [2.0, 3.0, 1.0],
+            "Reverse all flips the whole timeline, loop range set or not"
+        );
     }
 }

@@ -26,6 +26,8 @@
 //!
 //! * add — `EditorCore::particle_add_event(frame, x, y)`
 //! * delete — `EditorCore::particle_delete_event(index)`
+//! * duplicate — `EditorCore::particle_duplicate_event(
+//!   index)` (Phase J)
 //! * frame stepper — `EditorCore::particle_set_frame(
 //!   index, frame)`
 //! * kind stepper — `EditorCore::particle_set_kind(
@@ -46,8 +48,8 @@
 //! and the detail block shows it read-only. Selection
 //! bookkeeping stays in this module (the ops know nothing
 //! of `State::particle_selected`): add selects the new
-//! event, delete repairs the selection with
-//! [`selection_after_delete`].
+//! event, duplicate selects the copy, delete repairs the
+//! selection with [`selection_after_delete`].
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, El};
@@ -296,6 +298,21 @@ fn delete_selected(s: &mut State) {
     }
 }
 
+/// Duplicate the selected event via
+/// `EditorCore::particle_duplicate_event` and select
+/// the copy, so the user lands on the new event ready
+/// to adjust it (step its frame, cycle its kind). The
+/// op returns the copy's index; when it refuses
+/// (`None`) the selection is left exactly as it was.
+fn duplicate_selected(s: &mut State) {
+    let Some(i) = selected_event(&s.core, s.particle_selected) else {
+        return;
+    };
+    if let Some(copy) = s.core.particle_duplicate_event(i) {
+        s.particle_selected = Some(copy);
+    }
+}
+
 /// Step the selected event's frame by `delta` via
 /// `EditorCore::particle_set_frame`. A press that would
 /// not move the frame (stepping earlier at frame 0)
@@ -372,8 +389,9 @@ fn anchor_clear(s: &mut State) {
 /// anchor summary, a kind stepper and colour swatches
 /// (Phase I), a frame stepper, the anchor buttons
 /// (anchor to the selected figure / clear anchor), and
-/// delete. With events present but no valid selection it
-/// renders a guidance line instead of dead buttons.
+/// duplicate and delete. With events present but no
+/// valid selection it renders a guidance line instead
+/// of dead buttons.
 fn detail_block(s: &State, t: &Theme) -> El {
     let Some(data) = detail_data(&s.core, s.particle_selected) else {
         return col().key("particles-detail").w_full().child(
@@ -516,15 +534,30 @@ fn detail_block(s: &State, t: &Theme) -> El {
                     |s| anchor_clear(s),
                 )),
         )
+        // Duplicate and delete: duplicate copies this
+        // event and selects the copy (EditorCore::
+        // particle_duplicate_event); delete removes the
+        // event (EditorCore::particle_delete_event).
         .child(
-            row().gap(8.0).center_y().child(icon_btn(
-                "particles-delete",
-                "trash-can",
-                "Delete event",
-                false,
-                t,
-                |s| delete_selected(s),
-            )),
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(icon_btn(
+                    "particles-duplicate",
+                    "copy",
+                    "Duplicate",
+                    false,
+                    t,
+                    |s| duplicate_selected(s),
+                ))
+                .child(icon_btn(
+                    "particles-delete",
+                    "trash-can",
+                    "Delete event",
+                    false,
+                    t,
+                    |s| delete_selected(s),
+                )),
         )
 }
 
@@ -882,6 +915,82 @@ mod tests {
         delete_selected(&mut state);
         assert!(state.core.project.particles.is_empty());
         assert_eq!(state.particle_selected, None);
+    }
+
+    #[test]
+    fn duplicate_selected_selects_the_copy() {
+        let mut state = demo_state();
+        state.core.project.particles = vec![
+            event(0, None, None),
+            event(5, Some(0), Some(2)),
+        ];
+        state.particle_selected = Some(0);
+        duplicate_selected(&mut state);
+        assert_eq!(state.core.project.particles.len(), 3, "one copy added");
+        // The selection moved off the original onto the
+        // index the op returned for the copy.
+        let sel = state.particle_selected.expect("the copy is selected");
+        assert_ne!(sel, 0, "the selection is the copy, not the original");
+        assert!(sel < state.core.project.particles.len());
+        // The selected event is a faithful copy of the
+        // source: same frame, kind, colour and anchor.
+        let source = &state.core.project.particles[0];
+        let copy = &state.core.project.particles[sel];
+        assert_eq!(copy.frame, source.frame);
+        assert_eq!(copy.kind, source.kind);
+        assert_eq!(copy.color, source.color);
+        assert_eq!(copy.figure, source.figure);
+        assert_eq!(copy.node, source.node);
+        assert_eq!(copy.x, source.x);
+        assert_eq!(copy.y, source.y);
+        // The other event is untouched: exactly one
+        // event still sits at its frame, and exactly
+        // two (original + copy) sit at the source's.
+        assert_eq!(
+            state
+                .core
+                .project
+                .particles
+                .iter()
+                .filter(|e| e.frame == 5)
+                .count(),
+            1
+        );
+        assert_eq!(
+            state
+                .core
+                .project
+                .particles
+                .iter()
+                .filter(|e| e.frame == 0)
+                .count(),
+            2
+        );
+        // The panel builds with the copy selected (its
+        // detail block opens on the new event).
+        let t = rune::tok::theme(true);
+        let _ = particles_panel(&state, &t);
+    }
+
+    #[test]
+    fn duplicate_selected_without_a_selection_is_a_no_op() {
+        let mut state = demo_state();
+        state.core.project.particles = vec![event(0, None, None)];
+        // No selection: nothing is copied, no panic.
+        state.particle_selected = None;
+        duplicate_selected(&mut state);
+        assert_eq!(state.core.project.particles.len(), 1);
+        assert_eq!(state.particle_selected, None);
+        // A stale selection is likewise a no-op, and
+        // the selection itself is left alone.
+        state.particle_selected = Some(9);
+        duplicate_selected(&mut state);
+        assert_eq!(state.core.project.particles.len(), 1);
+        assert_eq!(state.particle_selected, Some(9));
+        // The panel builds in both unselected states
+        // (guidance block, not a detail block).
+        let t = rune::tok::theme(true);
+        let _ = particles_panel(&state, &t);
     }
 
     #[test]

@@ -100,13 +100,26 @@
 //! strip; project mode grows no caption, so its element
 //! tree is exactly what it was before this section.
 //!
-//! Deliberate, do not "fix": the playhead and the seek
-//! gesture keep the PROJECT mapping in both modes
-//! ([`playhead_x`] / [`frame_at_x`] over the whole
-//! timeline). Clip mode changes only which peaks the bars
-//! draw — it is a display of the selected clip's shape,
-//! not a second timeline — so the marker and the press
-//! keep agreeing with the rest of the shell in both modes.
+//! The playhead DRAWING keeps the PROJECT mapping in
+//! both modes ([`playhead_x`] over the whole timeline):
+//! the marker must agree with the timeline chips and the
+//! stage, which know nothing of clip spans. Phase I
+//! (section 17) also kept the seek gesture project-mapped
+//! in both modes, deliberately at the time — clip mode
+//! was a display of the selected clip's shape, not a
+//! second timeline. Phase J (section 31) revisits
+//! exactly half of that: in clip mode the DRAG now seeks
+//! within the selected clip's own span
+//! ([`clip_seek_frame`]), because the bars under the
+//! pointer are that clip's waveform — scrubbing the
+//! whole timeline dragged the playhead off the feature
+//! under the pointer. The marker still renders
+//! project-mapped: the frame a clip-mode drag lands on
+//! is an ordinary project frame inside the clip's span,
+//! drawn the way every other surface draws it. When the
+//! clip's length is unknown (unreadable or zero-length
+//! file), the drag falls back to the project mapping
+//! unchanged.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -224,6 +237,68 @@ pub fn frame_at_x(x: f32, width: f32, frame_count: usize) -> usize {
     }
     let t = (x / width).clamp(0.0, 1.0);
     (t * (frame_count - 1) as f32).round() as usize
+}
+
+/// The project frame at strip position `x` in
+/// selected-clip mode (Phase J, section 31): the clip-span
+/// counterpart of [`frame_at_x`]. The strip's left edge is
+/// the clip's first frame and its right edge the clip's
+/// last, so the offset is `floor(t * clip_len)` over the
+/// clamped strip fraction — floor, not [`frame_at_x`]'s
+/// round-to-nearest, because the right edge must land
+/// exactly on the clip's final frame rather than rounding
+/// past it. Edge semantics, pinned:
+///
+/// - `x = 0` reads as `clip_start`; `x = width` reads as
+///   the last frame OF the clip, `clip_start + clip_len - 1`
+///   (when `clip_len > 0`).
+/// - `clip_len == 0` reads as `clip_start` at every `x`:
+///   an empty clip has only its start to stand on.
+/// - The result is clamped inside the project: a clip
+///   whose span overruns the timeline's end (a start near
+///   the end plus a long file) seeks no further than the
+///   last project frame, and a degenerate project (no
+///   frames) reads as frame 0. A stale `clip_start` past
+///   the project's end loses to the project clamp — the
+///   seek must land on a real frame.
+/// - Degenerate strip inputs (non-positive or non-finite
+///   width, non-finite `x`) read as `clip_start`, clamped
+///   as above — the [`frame_at_x`] discipline, transposed.
+pub fn clip_seek_frame(
+    x: f32,
+    width: f32,
+    clip_start: usize,
+    clip_len: usize,
+    frame_count: usize,
+) -> usize {
+    if frame_count == 0 {
+        return 0;
+    }
+    let last_project = frame_count - 1;
+    if clip_len == 0 || width <= 0.0 || !width.is_finite() || !x.is_finite() {
+        return clip_start.min(last_project);
+    }
+    let t = (x / width).clamp(0.0, 1.0);
+    let offset = (t * clip_len as f32).floor() as usize;
+    let frame = clip_start.saturating_add(offset);
+    frame
+        .min(clip_start.saturating_add(clip_len - 1))
+        .min(last_project)
+}
+
+/// A clip's length in project frames, from its probed
+/// duration in seconds: `(duration_secs * fps).round()`,
+/// the conversion the engine itself uses when it schedules
+/// clips (`src/editor.rs`, the split op's `dur_frames`).
+/// Non-positive or non-finite inputs (an unreadable or
+/// zero-length file, a hand-edited zero fps) read as 0 —
+/// "length unknown", which sends the seek back to the
+/// project mapping rather than inventing a span.
+pub fn clip_len_frames(duration_secs: f32, fps: f32) -> usize {
+    if !duration_secs.is_finite() || !fps.is_finite() || duration_secs <= 0.0 || fps <= 0.0 {
+        return 0;
+    }
+    (duration_secs * fps).round() as usize
 }
 
 /// Cache key for one probe: everything that can change its
@@ -541,6 +616,29 @@ fn waveform_shape_clip(
     )
 }
 
+/// The selected clip's span on the timeline — `(start,
+/// length in frames)` — when the audio panel's selection
+/// names a real clip and that clip's length is known
+/// (Phase J, section 31). The length rides along with the
+/// peaks cache: this module's own [`clip_peaks`] probe
+/// returns the file's duration alongside its peaks and
+/// caches the pair under the same key, so resolving a span
+/// decodes an unchanged file at most once (on the first
+/// press, at the strip's current bucket count); every
+/// later press is a cache hit. An unreadable file probes
+/// as `None` and reads as "span unknown" — failures are
+/// never cached, so a file that appears later resolves
+/// then. A zero-length file resolves to length 0, which
+/// the caller treats as unknown: an empty clip has no
+/// span to scrub within.
+fn clip_span(core: &EditorCore, selected: Option<usize>, buckets: usize) -> Option<(usize, usize)> {
+    let i = selected?;
+    let clip = core.project.audio.get(i)?;
+    let (_, duration_secs) = clip_peaks(clip, buckets)?;
+    let len = clip_len_frames(duration_secs, core.project.fps);
+    Some((clip.start_frame, len))
+}
+
 /// The seek gesture for [`waveform_el_state`]: pressing —
 /// and, holding, dragging — on the strip goes to the frame
 /// under the pointer (click-to-seek plus scrub, one gesture).
@@ -548,18 +646,40 @@ fn waveform_shape_clip(
 /// without a snapshot and posts no status, so a scrub leaves
 /// the undo stack and the status line exactly as they were
 /// (the timeline chips' click semantics). The frame comes
-/// from [`frame_at_x`] over the element's own laid-out width
-/// (`Drag::w`, the same local geometry the drag reports), so
-/// the seek follows the strip as actually drawn; a gesture
-/// on a zero-width element is ignored. `Phase::Up` does
+/// from the element's own laid-out width (`Drag::w`, the
+/// same local geometry the drag reports), so the seek
+/// follows the strip as actually drawn; a gesture on a
+/// zero-width element is ignored. `Phase::Up` does
 /// nothing — the last Down/Move position stands — and a
 /// cancelled gesture has nothing to restore, for the same
 /// reason: goto never mutated anything but the playhead.
+///
+/// Which mapping (Phase J, section 31): when the strip is
+/// in selected-clip mode and the selected clip's span is
+/// known and non-empty, the drag seeks WITHIN that span
+/// via [`clip_seek_frame`] — the bars on screen are that
+/// clip's own shape, so the pointer scrubs the clip it is
+/// looking at. In every other case — project mode, a stale
+/// selection, an unreadable or zero-length clip file —
+/// the frame comes from [`frame_at_x`] over the whole
+/// timeline, exactly the pre-Phase-J behaviour. Only the
+/// drag's mapping differs; the playhead's DRAWING stays
+/// project-mapped in both modes ([`with_playhead`]), so
+/// the marker keeps agreeing with the timeline chips and
+/// the stage: the frame a clip-mode drag lands on is an
+/// ordinary project frame inside the clip's span, and it
+/// is drawn the way every other surface draws it.
 fn waveform_seek(s: &mut State, d: &Drag) {
     match d.phase {
         Phase::Down | Phase::Move => {
             if d.w > 0.0 {
-                let frame = frame_at_x(d.x, d.w, s.core.frame_count());
+                let buckets = strip_buckets(strip_columns(d.w));
+                let frame = match clip_span(&s.core, s.audio_panel.selected, buckets) {
+                    Some((start, len)) if len > 0 => {
+                        clip_seek_frame(d.x, d.w, start, len, s.core.frame_count())
+                    }
+                    _ => frame_at_x(d.x, d.w, s.core.frame_count()),
+                };
                 s.core.goto(frame);
             }
         }
@@ -588,10 +708,12 @@ fn waveform_seek(s: &mut State, d: &Drag) {
 /// footprint) and a `waveform-caption` element under it
 /// names the clip. In Project mode the return is the bare
 /// canvas above — the element tree is byte-identical to
-/// what it was before this section. The playhead and the
-/// seek gesture are project-mapped in BOTH modes,
-/// deliberately (see the module docs): clip mode changes
-/// only which peaks the bars draw.
+/// what it was before this section. The playhead is
+/// project-mapped in BOTH modes, deliberately (see the
+/// module docs); the seek gesture is project-mapped in
+/// project mode and — since Phase J (section 31) —
+/// clip-span-mapped in clip mode when the selected
+/// clip's length is known (see [`waveform_seek`]).
 pub fn waveform_el_state(s: &State, el_size: [f32; 2]) -> El {
     let clip_count = s.core.project.audio.len();
     let selected_peaks: Vec<f32> = match s.audio_panel.selected {
@@ -941,5 +1063,104 @@ mod tests {
         assert_eq!(strip_buckets(1), 96);
         assert_eq!(strip_columns(10_000.0), 512);
         assert_eq!(strip_buckets(512), 2048);
+    }
+
+    // ---- Clip-mode seek (Phase J, section 31) ----
+
+    #[test]
+    fn clip_seek_frame_edges_and_interior() {
+        // Clip at frames 10..=29 (start 10, length 20) in a
+        // 100-frame project, strip 200 pt wide.
+        let seek = |x: f32| clip_seek_frame(x, 200.0, 10, 20, 100);
+        // Left edge is the clip's first frame, exactly.
+        assert_eq!(seek(0.0), 10);
+        // Interior: floor over the span — one frame per
+        // 10 pt, no rounding up into the next frame.
+        assert_eq!(seek(20.0), 12);
+        assert_eq!(seek(99.0), 19);
+        assert_eq!(seek(100.0), 20);
+        // The last sliver and the right edge both land on
+        // the clip's LAST frame, never one past it.
+        assert_eq!(seek(199.0), 29);
+        assert_eq!(seek(200.0), 29);
+        // Outside the strip clamps to the clip's ends.
+        assert_eq!(seek(-40.0), 10);
+        assert_eq!(seek(9_999.0), 29);
+    }
+
+    #[test]
+    fn clip_seek_frame_degenerate_spans() {
+        // A zero-length clip has only its start to stand on.
+        assert_eq!(clip_seek_frame(0.0, 200.0, 10, 0, 100), 10);
+        assert_eq!(clip_seek_frame(200.0, 200.0, 10, 0, 100), 10);
+        // A one-frame clip likewise.
+        assert_eq!(clip_seek_frame(200.0, 200.0, 10, 1, 100), 10);
+        // Degenerate strip inputs read as the clip's start.
+        assert_eq!(clip_seek_frame(100.0, 0.0, 10, 20, 100), 10);
+        assert_eq!(clip_seek_frame(f32::NAN, 200.0, 10, 20, 100), 10);
+        // No project frames at all: frame 0, the only
+        // reading that can never be out of range.
+        assert_eq!(clip_seek_frame(100.0, 200.0, 10, 20, 0), 0);
+        // A clip overrunning the project's end: the project
+        // clamp wins over the clip's own last frame (109).
+        assert_eq!(clip_seek_frame(0.0, 200.0, 90, 20, 100), 90);
+        assert_eq!(clip_seek_frame(80.0, 200.0, 90, 20, 100), 98);
+        assert_eq!(clip_seek_frame(100.0, 200.0, 90, 20, 100), 99);
+        assert_eq!(clip_seek_frame(200.0, 200.0, 90, 20, 100), 99);
+        // A stale start past the project's end loses to the
+        // project clamp even at the strip's left edge.
+        assert_eq!(clip_seek_frame(0.0, 200.0, 150, 20, 100), 99);
+    }
+
+    #[test]
+    fn clip_len_frames_conversion() {
+        // The engine's own conversion: seconds x fps,
+        // rounded (durations at 12 fps, the demo rate).
+        assert_eq!(clip_len_frames(1.0, 12.0), 12);
+        assert_eq!(clip_len_frames(0.5, 12.0), 6);
+        assert_eq!(clip_len_frames(2.5, 10.0), 25);
+        assert_eq!(clip_len_frames(0.26, 12.0), 3);
+        assert_eq!(clip_len_frames(0.3, 12.0), 4);
+        // Unknown lengths read as 0, never as an invented
+        // span: silent files, bad fps, non-finite probes.
+        assert_eq!(clip_len_frames(0.0, 12.0), 0);
+        assert_eq!(clip_len_frames(-1.0, 12.0), 0);
+        assert_eq!(clip_len_frames(1.0, 0.0), 0);
+        assert_eq!(clip_len_frames(f32::NAN, 12.0), 0);
+        assert_eq!(clip_len_frames(1.0, f32::NAN), 0);
+        assert_eq!(clip_len_frames(f32::INFINITY, 12.0), 0);
+    }
+
+    #[test]
+    fn clip_span_resolution() {
+        let mut core = EditorCore::new();
+        // No selection, and a selection with no clips at
+        // all: no span either way.
+        assert_eq!(clip_span(&core, None, 96), None);
+        assert_eq!(clip_span(&core, Some(0), 96), None);
+        // One second of sine on disk, placed at frame 3:
+        // the demo project runs at 12 fps, so the span is
+        // (3, 12) — the duration rode along with the peaks
+        // probe, no second decode path involved.
+        let path = temp_wav_path("span");
+        std::fs::write(&path, write_wav(&sine_wav())).unwrap();
+        core.project.audio.push(AudioClip {
+            path: path.to_string_lossy().into_owned(),
+            start_frame: 3,
+            gain: 1.0,
+        });
+        assert_eq!(clip_span(&core, Some(0), 96), Some((3, 12)));
+        // A stale selection resolves to nothing.
+        assert_eq!(clip_span(&core, Some(5), 96), None);
+        // A clip whose file does not exist: length unknown,
+        // so no span — the seek falls back to the project
+        // mapping rather than guessing.
+        core.project.audio.push(AudioClip {
+            path: "/nonexistent/no-such-clip.wav".to_string(),
+            start_frame: 7,
+            gain: 1.0,
+        });
+        assert_eq!(clip_span(&core, Some(1), 96), None);
+        let _ = std::fs::remove_file(&path);
     }
 }

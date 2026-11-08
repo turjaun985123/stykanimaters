@@ -99,6 +99,28 @@
 //! multi-line content stays on the row's one line.
 //! [`preview`] remains for its existing tests; the
 //! rows read [`text_preview`].
+//!
+//! ## Phase J (§24): write-back editing
+//!
+//! Until this phase the load path was one-way: a row
+//! click copied an instance's content into the field
+//! (§27, above) and editing it there could only
+//! re-stamp a *segment* via Add text — the instance
+//! itself never changed. [`update_text_instance`]
+//! closes the loop: the **Update text** button
+//! (`text-update`), shown in the loaded instance's
+//! edit area only while a live instance is loaded,
+//! writes the field's current content back into that
+//! instance's `content` field — and nothing else:
+//! its transform keys, size and colour are untouched,
+//! so position and styling survive an edit. The
+//! snapshot discipline is §27's: exactly one
+//! `snapshot()` when the content actually changes,
+//! and none (with a "Text unchanged." status) when
+//! the field still holds the instance's own content.
+//! Row previews need no fix-up after an update —
+//! [`text_instances`] rebuilds them from the live
+//! content on every render.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, text_input, El, TextEdit as FieldEdit, Tx};
@@ -387,6 +409,38 @@ pub fn resize_text_instance(core: &mut EditorCore, index: usize, dir: i32) -> bo
     true
 }
 
+/// Write `content` back into the text instance at
+/// `index` (Phase J §24): the write-back half of the
+/// row-click load ([`load_instance`]). No editor op
+/// exists for text instances, so — like this file's
+/// other instance mutations — the panel writes the
+/// project field directly. Only the `content` field
+/// changes: the instance's transform keys (its
+/// position track), size and colour are untouched.
+/// Exactly one `snapshot()` when the content actually
+/// changes, so an edit is a single undo step; when
+/// `content` already equals the instance's content the
+/// press is a status-only no-op ("Text unchanged.")
+/// that snapshots nothing. A stale index refuses the
+/// same way ("No such text."). Returns whether the
+/// content changed.
+pub fn update_text_instance(core: &mut EditorCore, index: usize, content: &str) -> bool {
+    let Some(inst) = core.project.texts.get(index) else {
+        core.status = "No such text.".into();
+        return false;
+    };
+    if inst.content == content {
+        core.status = "Text unchanged.".into();
+        return false;
+    }
+    core.snapshot();
+    if let Some(inst) = core.project.texts.get_mut(index) {
+        inst.content = content.to_string();
+    }
+    core.status = format!("Text {} updated.", index + 1);
+    true
+}
+
 /// The full (untruncated) content of the text instance at
 /// `index` — what a list-row click loads into the tool's
 /// field.
@@ -470,6 +524,20 @@ fn loaded_index(s: &mut State) -> Option<usize> {
             None
         }
     }
+}
+
+/// Update-button handler (Phase J §24): write the
+/// field's current content back into the loaded
+/// instance via [`update_text_instance`]. The button
+/// renders only while a live instance is loaded, but
+/// the op bounds-checks the index itself, so a stale
+/// `loaded` refuses there instead of writing.
+fn update_loaded(s: &mut State) {
+    let Some(i) = loaded_index(s) else {
+        return;
+    };
+    let content = s.text_tool.field.text.clone();
+    update_text_instance(&mut s.core, i, &content);
 }
 
 /// Nudge-pad handler: move the loaded instance by
@@ -685,12 +753,15 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
         }
     }
 
-    // The loaded instance's edit area: a nudge pad and
+    // The loaded instance's edit area: the Update text
+    // write-back button (Phase J §24), a nudge pad and
     // size steppers acting on `TextToolState::loaded` —
     // the instance the last row click loaded. Rendered
     // either way; with nothing loaded the handlers refuse
     // with a status line, and with a stale index the core
-    // ops refuse the same way.
+    // ops refuse the same way. The Update button is the
+    // one conditional piece: it appears only while
+    // `loaded` names an instance that still exists.
     let loaded_row = instances
         .iter()
         .find(|r| Some(r.index) == s.text_tool.loaded);
@@ -702,7 +773,7 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
         Some(r) => format!("{:.0}", r.size),
         None => "—".to_string(),
     };
-    let instance_edit = col()
+    let mut instance_edit = col()
         .key("text-instance-edit")
         .w_full()
         .gap(2.0)
@@ -710,7 +781,20 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
             text(loaded_label)
                 .font(type_::LABEL)
                 .color(t.text_secondary),
-        )
+        );
+    if loaded_row.is_some() {
+        instance_edit = instance_edit.child(
+            row()
+                .key("text-update-row")
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(btn("text-update", "Update text", false, t, |s| {
+                    update_loaded(s)
+                })),
+        );
+    }
+    instance_edit = instance_edit
         .child(
             row()
                 .key("text-nudge-pad")
@@ -1306,6 +1390,88 @@ mod tests {
         assert!(!resize_text_instance(&mut core, 7, 1));
         assert_eq!(core.status, "No such text.");
         assert_eq!(core.project.texts[0].size, 28.0, "nothing was resized");
+        assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
+    }
+
+    #[test]
+    fn update_text_instance_writes_content_and_leaves_the_rest_untouched() {
+        let mut core = EditorCore::new();
+        push_instance_pos(
+            &mut core,
+            "Old label",
+            36.0,
+            &[(0.0, 10.0, 20.0), (4.0, 50.0, 60.0)],
+        );
+        let depth_before = core.undo_depth();
+        assert!(update_text_instance(&mut core, 0, "New label"));
+        assert_eq!(core.status, "Text 1 updated.");
+        assert_eq!(core.project.texts[0].content, "New label");
+        assert_eq!(core.project.texts[0].size, 36.0, "size untouched");
+        assert_eq!(core.project.texts[0].color, 0xFF_204060, "colour untouched");
+        assert_eq!(
+            key_positions(&core, 0),
+            vec![(10.0, 20.0), (50.0, 60.0)],
+            "every key's position untouched"
+        );
+        let key = core.project.texts[0].keys[1];
+        assert_eq!(key.frame, 4.0, "key timing untouched");
+        assert_eq!(key.scale, 1.5, "key scale untouched");
+        assert_eq!(key.angle, 30.0, "key angle untouched");
+        assert_eq!(
+            text_instances(&core)[0].preview, "New label",
+            "row previews read the live content, so the edit shows at once"
+        );
+        assert_eq!(
+            core.undo_depth(),
+            depth_before + 1,
+            "exactly one snapshot for the write-back"
+        );
+        core.undo();
+        assert_eq!(
+            core.project.texts[0].content, "Old label",
+            "one undo restores the old content"
+        );
+    }
+
+    #[test]
+    fn update_text_instance_numbers_the_status_by_the_instance() {
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "A", 20.0, &[(0.0, 10.0, 20.0)]);
+        push_instance_pos(&mut core, "B", 20.0, &[(0.0, 90.0, 90.0)]);
+        assert!(update_text_instance(&mut core, 1, "B edited"));
+        assert_eq!(core.status, "Text 2 updated.");
+        assert_eq!(core.project.texts[0].content, "A", "the other instance is untouched");
+        assert_eq!(core.project.texts[1].content, "B edited");
+    }
+
+    #[test]
+    fn update_text_instance_unchanged_content_snapshots_nothing() {
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "Same", 20.0, &[(0.0, 10.0, 20.0)]);
+        let depth_before = core.undo_depth();
+        assert!(!update_text_instance(&mut core, 0, "Same"));
+        assert_eq!(core.status, "Text unchanged.");
+        assert_eq!(core.project.texts[0].content, "Same");
+        assert_eq!(
+            core.undo_depth(),
+            depth_before,
+            "an unchanged write-back snapshots nothing"
+        );
+    }
+
+    #[test]
+    fn update_text_instance_out_of_range_is_status_only_noop() {
+        // The stale-loaded case: `loaded` can outlive the
+        // instance it names, and the handler passes the
+        // index straight to this op — it must refuse
+        // without panicking and without writing.
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "A", 20.0, &[(0.0, 10.0, 20.0)]);
+        let depth_before = core.undo_depth();
+        assert!(!update_text_instance(&mut core, 7, "B"));
+        assert_eq!(core.status, "No such text.");
+        assert_eq!(core.project.texts.len(), 1, "no instance was created");
+        assert_eq!(core.project.texts[0].content, "A", "nothing was written");
         assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
     }
 

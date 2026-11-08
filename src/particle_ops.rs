@@ -2,7 +2,8 @@
 //! family for editing the project's particle EVENTS
 //! (`Project::particles`) — add, delete, retime, re-anchor
 //! and reposition (Phase G, section 4), plus kind and
-//! colour (Phase I, section 6).
+//! colour (Phase I, section 6), plus duplicate and frame
+//! nudge (Phase J, section 5).
 //!
 //! Particle events are the one-shot effects the rasterizer
 //! draws from `export::particles_at` (a burst / sparkle /
@@ -132,6 +133,43 @@ impl EditorCore {
         self.status = format!("Particle event {} deleted.", index + 1);
     }
 
+    /// Duplicate particle event `index` (Phase J,
+    /// section 5): the copy is inserted immediately after
+    /// the original, on the same frame, with every other
+    /// field carried over — except the seed. A shared seed
+    /// would make the two events draw identical particle
+    /// patterns, so the copy takes a fresh one from the
+    /// family's count-based formula (see
+    /// `particle_add_event`), computed from the event
+    /// count before the insert; the formula is a bijection
+    /// on the count, so the new seed cannot collide with
+    /// one an earlier add already handed out. One undo
+    /// step. Returns the copy's index, so the caller can
+    /// select what it just made; an out-of-range index
+    /// only sets the status and returns `None`.
+    pub fn particle_duplicate_event(&mut self, index: usize) -> Option<usize> {
+        if self.project.particles.get(index).is_none() {
+            self.status = format!(
+                "Particle event duplicate failed: no particle event {}.",
+                index + 1
+            );
+            return None;
+        }
+        let seed = (self.project.particles.len() as u32)
+            .wrapping_mul(2654435761)
+            .wrapping_add(12345);
+        let mut copy = self.project.particles[index].clone();
+        copy.seed = seed;
+        self.snapshot();
+        self.project.particles.insert(index + 1, copy);
+        self.status = format!(
+            "Particle event {} duplicated as event {}.",
+            index + 1,
+            index + 2
+        );
+        Some(index + 1)
+    }
+
     /// Move particle event `index` to `frame`, clamped to
     /// the project's last frame. One undo step; an
     /// out-of-range index only sets the status.
@@ -144,6 +182,36 @@ impl EditorCore {
             return;
         }
         let frame = self.particle_clamp_frame(frame);
+        self.snapshot();
+        self.project.particles[index].frame = frame;
+        self.status = format!(
+            "Particle event {} moved to frame {}.",
+            index + 1,
+            frame + 1
+        );
+    }
+
+    /// Nudge particle event `index`'s frame by `delta`
+    /// frames (Phase J, section 5) — a negative delta
+    /// moves the event earlier. The landing frame is
+    /// clamped to the timeline at both ends: the lower
+    /// end by the saturating arithmetic here, the upper
+    /// end by the same `particle_clamp_frame` rule
+    /// `particle_set_frame` uses. The status reports the
+    /// landing frame in the frame family's voice. One
+    /// undo step; an out-of-range index only sets the
+    /// status.
+    pub fn particle_nudge_frame(&mut self, index: usize, delta: i32) {
+        if self.project.particles.get(index).is_none() {
+            self.status = format!(
+                "Particle event frame failed: no particle event {}.",
+                index + 1
+            );
+            return;
+        }
+        let current = self.project.particles[index].frame;
+        let target = (current as i64 + i64::from(delta)).max(0) as usize;
+        let frame = self.particle_clamp_frame(target);
         self.snapshot();
         self.project.particles[index].frame = frame;
         self.status = format!(
@@ -528,6 +596,121 @@ mod tests {
         assert_eq!(
             core.status,
             "Particle event colour failed: no particle event 4."
+        );
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+    }
+
+    #[test]
+    fn duplicate_event_lands_after_original_with_fresh_seed() {
+        let mut core = core_with(vec![
+            event(1, 10.0, 1),
+            event(2, 20.0, 2),
+        ]);
+        // Give the original a distinctive shape in every
+        // field the copy must carry over unchanged.
+        let original = &mut core.project.particles[0];
+        original.figure = Some(0);
+        original.node = Some(2);
+        original.y = 30.0;
+        original.kind = ParticleKind::Sparkle;
+        original.color = 0x123456;
+        let edits = core.edits_since_autosave();
+        let new_index = core.particle_duplicate_event(0);
+        assert_eq!(new_index, Some(1), "the copy follows the original");
+        assert_eq!(core.project.particles.len(), 3);
+        let copy = &core.project.particles[1];
+        // Every field but the seed is the original's.
+        assert_eq!(copy.frame, 1);
+        assert_eq!((copy.figure, copy.node), (Some(0), Some(2)));
+        assert_eq!((copy.x, copy.y), (10.0, 30.0));
+        assert_eq!(copy.kind, ParticleKind::Sparkle);
+        assert_eq!(copy.color, 0x123456);
+        // The seed is fresh: the family's count formula at
+        // the pre-insert count of 2, as `particle_add_event`
+        // derives it — and so not the original's seed.
+        assert_eq!(
+            copy.seed,
+            2u32.wrapping_mul(2654435761).wrapping_add(12345)
+        );
+        assert_ne!(copy.seed, 1, "the copy must not share the seed");
+        // The event that followed the original shifted
+        // down one slot, untouched.
+        assert_eq!(core.project.particles[2].seed, 2);
+        assert_eq!(core.project.particles[2].frame, 2);
+        assert_eq!(
+            core.status,
+            "Particle event 1 duplicated as event 2."
+        );
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+    }
+
+    #[test]
+    fn duplicate_last_event_appends_the_copy_after_it() {
+        let mut core = core_with(vec![event(0, 10.0, 1)]);
+        let new_index = core.particle_duplicate_event(0);
+        assert_eq!(new_index, Some(1));
+        assert_eq!(core.project.particles.len(), 2);
+        assert_eq!(core.project.particles[0].seed, 1, "original stays first");
+        // Count was 1 before the insert:
+        // 1 * 2654435761 + 12345 (wrapping).
+        assert_eq!(
+            core.project.particles[1].seed,
+            2654435761u32.wrapping_add(12345)
+        );
+        assert_eq!(
+            core.status,
+            "Particle event 1 duplicated as event 2."
+        );
+    }
+
+    #[test]
+    fn duplicate_event_out_of_range_is_status_only() {
+        let mut core = core_with(vec![event(0, 0.0, 1)]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        let result = core.particle_duplicate_event(3);
+        assert_eq!(result, None);
+        assert_eq!(
+            core.status,
+            "Particle event duplicate failed: no particle event 4."
+        );
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+    }
+
+    #[test]
+    fn nudge_frame_moves_and_clamps_at_both_ends() {
+        let mut core = core_with(vec![event(1, 0.0, 1)]);
+        let last = core.frame_count() - 1;
+        let edits = core.edits_since_autosave();
+        core.particle_nudge_frame(0, 2);
+        assert_eq!(core.project.particles[0].frame, 3);
+        assert_eq!(core.status, "Particle event 1 moved to frame 4.");
+        // A nudge past the end lands on the last frame,
+        // the `particle_set_frame` clamp.
+        core.particle_nudge_frame(0, 100);
+        assert_eq!(core.project.particles[0].frame, last);
+        assert_eq!(
+            core.status,
+            format!("Particle event 1 moved to frame {}.", last + 1)
+        );
+        // A nudge before the start lands on frame 0.
+        core.particle_nudge_frame(0, -100);
+        assert_eq!(core.project.particles[0].frame, 0);
+        assert_eq!(core.status, "Particle event 1 moved to frame 1.");
+        assert_eq!(core.edits_since_autosave(), edits + 3, "one snapshot per op");
+    }
+
+    #[test]
+    fn nudge_frame_out_of_range_is_status_only() {
+        let mut core = core_with(vec![event(0, 0.0, 1)]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        core.particle_nudge_frame(1, 5);
+        assert_eq!(
+            core.status,
+            "Particle event frame failed: no particle event 2."
         );
         assert_eq!(project_json(&core), before, "project untouched");
         assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");

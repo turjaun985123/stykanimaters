@@ -44,6 +44,17 @@
 //! so the toolbar's aim is visible beside the rows
 //! themselves and not only in the line under "Operations".
 //!
+//! Phase J adds a project-wide NORMALISE ALL row under
+//! the operations toolbar (`EditorCore::
+//! normalise_all_clips`, `audio_ops`): one press sets
+//! every clip's gain so each clip's own measured peak
+//! lands on 0.9 — one snapshot for the whole pass,
+//! silent or unreadable clips skipped. It is
+//! deliberately NOT a `*_target` control: the row
+//! selection does not aim it, so it sits in its own row
+//! labelled "Whole project", and the row exists only
+//! while the project has clips at all.
+//!
 //! Every control calls a real `EditorCore` op (evidence in
 //! the handler comments). Phase E closed the gaps Phase D
 //! had to leave open — fade, reverse, gain, delete and move
@@ -386,6 +397,17 @@ fn normalize_target(s: &mut State) {
     }
 }
 
+/// Phase J: normalise EVERY clip in the project —
+/// `EditorCore::normalise_all_clips` at the fixed 0.9
+/// target peak (the `audio_ops` op: one snapshot when
+/// anything changes, silent/unreadable/on-target clips
+/// skipped, its own status either way). Project-wide by
+/// nature, so — unlike the `*_target` handlers — it
+/// never reads the row selection.
+fn normalise_all(s: &mut State) {
+    s.core.normalise_all_clips(0.9);
+}
+
 /// Fade the target clip: the indexed op when a clip is
 /// selected, the `_last` op otherwise (which also covers
 /// the no-clips status line). DEPENDENCY (Phase G): calls
@@ -535,7 +557,9 @@ fn delete_row_clip(s: &mut State, i: usize) {
 /// Split@cur, Fade and Add clip gain glyphs and Delete
 /// goes icon-only under their existing keys. Phase I adds
 /// exactly one key, `audio-readout`, for the selected-clip
-/// readout line under the rows.
+/// readout line under the rows. Phase J adds the
+/// `audio-normalise` button in its own `audio-project-ops`
+/// row under the toolbar (non-empty branch only).
 pub fn audio_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let clips = &core.project.audio;
@@ -711,6 +735,37 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             .scroll_x()
             .w_full(),
     );
+
+    // Phase J: the project-wide normalise row. Every
+    // control in the toolbar above is aimed by the row
+    // selection (or its last-clip fallback); this one is
+    // not — it normalises ALL clips at once — so it gets
+    // its own row under a "Whole project" label rather
+    // than a seat in the toolbar, and it is only built
+    // while clips exist (with none, there is nothing to
+    // measure). It renders live whenever it exists: the
+    // op itself reports when nothing needed changing.
+    if !clips.is_empty() {
+        panel = panel.child(
+            row()
+                .key("audio-project-ops")
+                .gap(6.0)
+                .center_y()
+                .child(
+                    text("Whole project")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                )
+                .child(icon_btn(
+                    "audio-normalise",
+                    "volume-high",
+                    "Normalise all",
+                    false,
+                    t,
+                    normalise_all,
+                )),
+        );
+    }
 
     // Add-clip row: file-name entry + Add. Enter in the
     // field submits too.
@@ -1199,5 +1254,123 @@ loop_playback: true,
         let _ = std::fs::remove_file(&first);
         let _ = std::fs::remove_file(&second);
         let _ = std::fs::remove_file(&new_first);
+    }
+
+    #[test]
+    fn audio_panel_builds_in_both_normalise_row_branches() {
+        // Phase J: the "Normalise all" row is constructed
+        // only under the `!clips.is_empty()` gate in
+        // `audio_panel`, so the panel must build cleanly
+        // in both shapes — no clips (no project row) and
+        // clips present (row built). Key-level presence
+        // in a built tree is the Runtime tests' domain
+        // (`El` exposes no key/children inspection outside
+        // `rune` itself), so — as with this file's other
+        // builder tests — building both branches is the
+        // assertion available here; the button's handler
+        // is dispatch-tested below.
+        let t = rune::tok::theme(true);
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        let _ = audio_panel(&state_with(core), &t);
+
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip("fake/theme.wav", 0, 1.0));
+        let _ = audio_panel(&state_with(core), &t);
+    }
+
+    #[test]
+    fn normalise_all_handler_reports_a_silent_project_as_settled() {
+        // Phase J dispatch, the nothing-to-do case: a
+        // silent file's peak is 0 and silence cannot be
+        // scaled onto the target, so the op skips it —
+        // the status is the op's own "nothing needed"
+        // line, no snapshot is taken (undo depth
+        // unchanged) and the gain is untouched.
+        let wav = audio_edit::WavData {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: vec![0.0; 800],
+        };
+        let path = std::env::temp_dir().join(format!(
+            "stykanimate-rune-audio-panel-normall-silent-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, audio_edit::write_wav(&wav)).unwrap();
+        let clip_path = path.to_string_lossy().into_owned();
+
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip(&clip_path, 0, 0.5));
+        let mut s = state_with(core);
+        let undo_before = s.core.undo_depth();
+        normalise_all(&mut s);
+
+        assert_eq!(
+            s.core.status,
+            "No audio clips needed normalising to peak 0.90."
+        );
+        assert_eq!(s.core.undo_depth(), undo_before, "no snapshot taken");
+        assert_eq!(s.core.project.audio[0].gain, 0.5, "gain untouched");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn normalise_all_handler_reaches_every_clip_not_the_selection() {
+        // Phase J dispatch, the working case: the FIRST
+        // clip is selected and silent, the LAST is silent
+        // too, and the MIDDLE one needs its gain scaled —
+        // a selection-aimed or last-clip handler would
+        // leave the middle clip alone; the project-wide
+        // handler must scale it, in exactly one undo step,
+        // and leave the silent clips' gains untouched.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir();
+        let silent_a =
+            dir.join(format!("stykanimate-rune-audio-panel-normall-a-{pid}.wav"));
+        let mid =
+            dir.join(format!("stykanimate-rune-audio-panel-normall-b-{pid}.wav"));
+        let silent_c =
+            dir.join(format!("stykanimate-rune-audio-panel-normall-c-{pid}.wav"));
+        let silence = audio_edit::WavData {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: vec![0.0; 800],
+        };
+        let half = audio_edit::WavData {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: vec![0.5; 800],
+        };
+        std::fs::write(&silent_a, audio_edit::write_wav(&silence)).unwrap();
+        std::fs::write(&mid, audio_edit::write_wav(&half)).unwrap();
+        std::fs::write(&silent_c, audio_edit::write_wav(&silence)).unwrap();
+
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip(&silent_a.to_string_lossy(), 0, 0.7));
+        core.project.audio.push(clip(&mid.to_string_lossy(), 10, 1.0));
+        core.project.audio.push(clip(&silent_c.to_string_lossy(), 20, 0.3));
+        let mut s = state_with(core);
+        s.audio_panel.selected = Some(0);
+        let undo_before = s.core.undo_depth();
+        normalise_all(&mut s);
+
+        assert_eq!(s.core.status, "Normalised 1 audio clips to peak 0.90.");
+        // 1.0 × (0.9 / 0.5) = 1.8, within the PCM16
+        // round trip's tolerance.
+        let gain = s.core.project.audio[1].gain;
+        assert!((gain - 1.8).abs() < 0.01, "middle clip gain {gain}");
+        assert_eq!(s.core.project.audio[0].gain, 0.7, "silent clip skipped");
+        assert_eq!(s.core.project.audio[2].gain, 0.3, "silent clip skipped");
+        assert_eq!(
+            s.core.undo_depth(),
+            undo_before + 1,
+            "the whole pass is one snapshot"
+        );
+        let _ = std::fs::remove_file(&silent_a);
+        let _ = std::fs::remove_file(&mid);
+        let _ = std::fs::remove_file(&silent_c);
     }
 }

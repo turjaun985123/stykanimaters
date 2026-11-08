@@ -33,6 +33,23 @@
 //! `{frame}` is the 0-based timeline index the key belongs
 //! to — the engine's own frame numbering (`CameraKey.frame`,
 //! [`graph_key_frame`]), not the chips' 1-based labels.
+//! Phase J adds `timeline-ruler` on the time ruler above
+//! the chips.
+//!
+//! ## Time ruler
+//!
+//! Above the chips sits a slim ruler in the same scrolled
+//! column, using the same [`CHIP_W`] / [`CHIP_GAP`]
+//! geometry and starting at the same x = 0 as the first
+//! chip: one fixed-width slot per frame. A slot at a whole
+//! second — where the frame index is a multiple of the
+//! project frame rate rounded to an integer, with a
+//! minimum rate of one frame per second — carries that
+//! frame's `m:ss` time in muted small text; every other
+//! slot carries a short, thin tick mark. The ruler is
+//! display-only: it has no press or drag handler, so it
+//! cannot intercept the chips' gesture or the marker
+//! presses below.
 //!
 //! ## Marker row
 //!
@@ -351,6 +368,58 @@ pub fn in_sel(range_sel: Option<(usize, usize)>, i: usize) -> bool {
 /// its chip, just tall enough for one line of glyphs.
 pub const MARKER_H: f32 = 14.0;
 
+/// Height of the time ruler in points: a slim strip above
+/// the chips, just tall enough for its 10-point labels.
+pub const RULER_H: f32 = 12.0;
+
+/// The ruler's label style: small enough that an `m:ss`
+/// label (at most five characters until ten minutes, and
+/// still short beyond it) sits inside one fixed-width chip
+/// slot without widening it; the line height matches
+/// [`RULER_H`] exactly.
+const RULER_LABEL_STYLE: tok::TextStyle = tok::TextStyle::new(10.0, 500.0).lh(RULER_H);
+
+/// The whole number of frames in one second for the ruler:
+/// the project rate rounded to the nearest integer (halves
+/// away from zero, `f32::round`), with a minimum of one so
+/// a stored rate below half a frame per second — or a
+/// non-finite one from a hand-edited file — still yields a
+/// usable ruler instead of a division by zero.
+fn ruler_fps(fps: f32) -> u64 {
+    if fps.is_finite() {
+        fps.round().max(1.0) as u64
+    } else {
+        1
+    }
+}
+
+/// The ruler label for `frame` at project rate `fps`:
+/// `Some("m:ss")` — minutes unpadded, seconds zero-padded
+/// — when the frame starts a whole second (its index is a
+/// multiple of [`ruler_fps`]), `None` for every other
+/// frame. Frame 0 always starts the first second, so it
+/// always reads `"0:00"`.
+pub fn ruler_label(frame: usize, fps: f32) -> Option<String> {
+    let frames_per_second = ruler_fps(fps);
+    let frame = frame as u64;
+    if frame % frames_per_second != 0 {
+        return None;
+    }
+    let seconds = frame / frames_per_second;
+    Some(format!("{}:{:02}", seconds / 60, seconds % 60))
+}
+
+/// One ruler slot per frame, in frame order: the
+/// [`ruler_label`] for each of the first `frame_count`
+/// frames at project rate `fps` — `Some` at whole seconds,
+/// `None` (a plain tick) elsewhere. The vector's length is
+/// exactly `frame_count`, so the ruler row the builder
+/// renders from it can never drift out of step with the
+/// chips.
+pub fn ruler_ticks(frame_count: usize, fps: f32) -> Vec<Option<String>> {
+    (0..frame_count).map(|frame| ruler_label(frame, fps)).collect()
+}
+
 /// The timeline frame a graph key at fractional time `t`
 /// belongs to: `t` rounded with `f32::round` (nearest frame,
 /// halves away from zero) — the graph panel's own seek
@@ -502,9 +571,10 @@ fn timeline_drag(s: &mut State, d: &mut Drag) {
 }
 
 /// The replacement timeline: one numbered chip per frame in a
-/// horizontally scrolling row, with the marker row (camera
-/// `◆` / graph `●`, see the module docs) directly under the
-/// chips. Current frame accent-filled; loop-range frames
+/// horizontally scrolling row, with the time ruler (see the
+/// module docs) directly above the chips and the marker row
+/// (camera `◆` / graph `●`, see the module docs) directly
+/// under them. Current frame accent-filled; loop-range frames
 /// tinted toward the accent; selected frames outlined (white
 /// on the current frame, accent elsewhere, so the outline
 /// survives the accent fill).
@@ -513,6 +583,25 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     let accent = tok::accent(0, true);
     let loop_fill = t.card.mix(accent, 0.35);
     let markers = markers_for_project(core);
+    // The time ruler: one fixed-width slot per frame in the
+    // chips' own geometry — a muted time label at whole
+    // seconds, a short tick elsewhere — and no handler of
+    // any kind, so a press over the ruler can never be
+    // mistaken for a chip or marker gesture.
+    let mut ruler = row().key("timeline-ruler").gap(CHIP_GAP);
+    for label in ruler_ticks(core.frame_count(), core.project.fps) {
+        let mut cell = row().size(CHIP_W, RULER_H).center();
+        cell = match label {
+            Some(label) => cell.child(
+                text(label)
+                    .font(RULER_LABEL_STYLE)
+                    .color(t.text_secondary)
+                    .truncate(),
+            ),
+            None => cell.child(el().size(1.0, 5.0).fill(t.text_secondary)),
+        };
+        ruler = ruler.child(cell);
+    }
     let mut chips = row()
         .key("timeline-chips")
         .gap(CHIP_GAP)
@@ -572,10 +661,11 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
         }
         marker_row = marker_row.child(cell);
     }
-    // Both rows live in one column inside the scroll
-    // viewport, so they translate together and the markers
-    // stay under their chips at any scroll offset.
-    let content = col().gap(2.0).child(chips).child(marker_row);
+    // All three rows live in one column inside the scroll
+    // viewport, so they translate together: the ruler stays
+    // above its chips and the markers stay under theirs at
+    // any scroll offset.
+    let content = col().gap(2.0).child(ruler).child(chips).child(marker_row);
     row()
         .key("timeline")
         .child(content)
@@ -898,6 +988,73 @@ mod tests {
         assert_eq!(graph_key_frame(1.0, 0), None);
         assert_eq!(graph_key_frame(f32::NAN, 5), None);
         assert_eq!(graph_key_frame(f32::INFINITY, 5), None);
+    }
+
+    // ---- time ruler (Phase J): labels only at whole
+    // seconds, counted with the project rate rounded to an
+    // integer and floored at one frame per second ----
+
+    #[test]
+    fn ruler_label_marks_whole_seconds_at_12_fps() {
+        assert_eq!(ruler_label(0, 12.0), Some("0:00".to_string()));
+        assert_eq!(ruler_label(12, 12.0), Some("0:01".to_string()));
+        assert_eq!(ruler_label(24, 12.0), Some("0:02".to_string()));
+        assert_eq!(ruler_label(1, 12.0), None);
+        assert_eq!(ruler_label(13, 12.0), None);
+    }
+
+    #[test]
+    fn ruler_label_rounds_the_rate_and_floors_it_at_one() {
+        // 12.4 rounds to 12: the second boundaries stay on
+        // frames 12 and 24.
+        assert_eq!(ruler_label(12, 12.4), Some("0:01".to_string()));
+        assert_eq!(ruler_label(24, 12.4), Some("0:02".to_string()));
+        // 12.5 rounds to 13 (halves away from zero): frame
+        // 12 is no longer a boundary, frame 13 is.
+        assert_eq!(ruler_label(12, 12.5), None);
+        assert_eq!(ruler_label(13, 12.5), Some("0:01".to_string()));
+        assert_eq!(ruler_label(26, 12.5), Some("0:02".to_string()));
+        // A rate under half a frame per second floors to
+        // one, so every frame starts a second; a non-finite
+        // rate degrades to the same floor rather than
+        // panicking.
+        assert_eq!(ruler_label(1, 0.4), Some("0:01".to_string()));
+        assert_eq!(ruler_label(2, f32::NAN), Some("0:02".to_string()));
+    }
+
+    #[test]
+    fn ruler_label_formats_minutes_unpadded_and_seconds_padded() {
+        // One frame per second: the frame index is the time
+        // in seconds.
+        assert_eq!(ruler_label(65, 1.0), Some("1:05".to_string()));
+        assert_eq!(ruler_label(754, 1.0), Some("12:34".to_string()));
+    }
+
+    #[test]
+    fn ruler_ticks_covers_every_frame_and_labels_only_boundaries() {
+        let ticks = ruler_ticks(25, 12.0);
+        assert_eq!(ticks.len(), 25);
+        assert_eq!(ticks[0], Some("0:00".to_string()));
+        assert_eq!(ticks[12], Some("0:01".to_string()));
+        assert_eq!(ticks[24], Some("0:02".to_string()));
+        assert!(ticks
+            .iter()
+            .enumerate()
+            .all(|(frame, tick)| frame % 12 == 0 || tick.is_none()));
+        assert_eq!(ruler_ticks(0, 12.0), Vec::<Option<String>>::new());
+    }
+
+    #[test]
+    fn ruler_ticks_on_the_demo_label_only_frame_zero() {
+        // The demo project: five frames at 12 fps — not one
+        // whole second long, so frame 0 is the only label.
+        let core = EditorCore::new();
+        assert_eq!(core.frame_count(), 5);
+        assert_eq!(core.project.fps, 12.0);
+        assert_eq!(
+            ruler_ticks(core.frame_count(), core.project.fps),
+            vec![Some("0:00".to_string()), None, None, None, None]
+        );
     }
 
     // ---- clickable markers (Phase I): the keys the row

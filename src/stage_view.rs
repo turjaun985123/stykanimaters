@@ -522,6 +522,15 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         for prim in recolor_prims(prims, SELECTION_ACCENT) {
             shape = highlight_prim(shape, &rt, s, prim);
         }
+        // The stroke's own vertices as dots (Phase J, §34):
+        // same accent, same pass, drawn over the glow so the
+        // authored points read as the stroke's handles. The
+        // helper shares the highlight's indexing/frame rules,
+        // so it is empty exactly when the glow is.
+        let dots = crate::rune_sec::stage_layers::stroke_points_geometry(core, idx);
+        for prim in recolor_prims(dots, SELECTION_ACCENT) {
+            shape = highlight_prim(shape, &rt, s, prim);
+        }
     }
 
     // Drawing strokes under the figures (the GPUI canvas's

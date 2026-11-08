@@ -7,7 +7,8 @@
 //! child toggles under Stage guides; Phase H: leading
 //! Font Awesome glyphs on the high-value items — see
 //! [`menu_icon`] — with keys, labels, active behaviour
-//! and handlers unchanged).
+//! and handlers unchanged; Phase J: File ▸ Open recent
+//! entries under Load — see [`recent_items`]).
 //! Declared from `main.rs` by the integrator; bin-crate
 //! code, not part of the engine library.
 //!
@@ -74,6 +75,8 @@
 //! carry the Wave 15 menu ids (`menu-file` …) on the
 //! triggers and the original GPUI button ids on the items,
 //! so headless `--tree` checks can find them.
+
+use std::path::{Path, PathBuf};
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Align, Color, El, Side};
@@ -224,7 +227,10 @@ fn hinted_item(
 /// clipboard, View's visibility toggles and sidebar
 /// switches, and Help's two entries. Fit view / Centre on
 /// selection stay unmapped (no glyph reads as clearly,
-/// and an unclear icon is worse than none).
+/// and an unclear icon is worse than none). The File ▸
+/// Open recent entries (Phase J) are the one dynamic
+/// family: their keys are `file-recent-{i}`, so they
+/// resolve by prefix to the clock glyph.
 ///
 /// Every name was verified against the icon set
 /// (`icon_data::ICON_NAMES`); even so, [`item`] checks
@@ -235,6 +241,12 @@ fn hinted_item(
 /// `menu_icons_name_real_glyphs_for_the_high_value_items`
 /// test.
 fn menu_icon(key: &str) -> Option<&'static str> {
+    // File ▸ Open recent entries (Phase J) carry dynamic
+    // keys (`file-recent-{i}`), so they resolve by prefix:
+    // every recent leads with the clock glyph.
+    if key.starts_with("file-recent-") {
+        return Some("clock");
+    }
     match key {
         // File: open / save / export out.
         "load" => Some("folder-open"),
@@ -334,6 +346,121 @@ fn item(
     }
 }
 
+/// How many Open recent entries the File menu shows at
+/// most (Phase J). The recents list itself keeps more
+/// (`shell::MAX_RECENTS`); a menu is a quick door, not
+/// the whole history.
+pub const MAX_RECENT_ITEMS: usize = 5;
+
+/// The File menu's Open recent resolution (Phase J): pair
+/// each of the first [`MAX_RECENT_ITEMS`] recent display
+/// names with the project file that carries it.
+///
+/// `recents` are display names, most recent first
+/// (`stykanimate_rs::shell::recents` — recents store
+/// names, not paths). `files` are the (stored name, path)
+/// pairs to resolve against; the menu passes the Home
+/// panel's cached library scan, filtered the way its rows
+/// are (`home_panel::visible_projects`), so a name
+/// resolves exactly the way Home ▸ Reopen last resolves
+/// it — by exact stored-name match, with the recovery
+/// snapshot and shell-owned entries already excluded.
+///
+/// A name with no matching file comes back as
+/// `(name, None)` rather than being dropped: the entry
+/// stays in the menu and its press reports "Recent
+/// project not found: {name}" on the status line (see
+/// [`open_recent`]). Silently dropping it would make the
+/// menu's contents depend on disk state without telling
+/// the user why an entry vanished — and the first recent
+/// is exactly the one whose disappearance would confuse.
+/// The cap counts names, resolved or not, so the menu
+/// never grows past five recents plus the separator.
+pub fn recent_items(
+    recents: &[String],
+    files: &[(String, PathBuf)],
+) -> Vec<(String, Option<PathBuf>)> {
+    recents
+        .iter()
+        .take(MAX_RECENT_ITEMS)
+        .map(|name| {
+            let path = files
+                .iter()
+                .find(|(file_name, _)| file_name == name)
+                .map(|(_, path)| path.clone());
+            (name.clone(), path)
+        })
+        .collect()
+}
+
+/// The (stored name, path) pairs the File menu resolves
+/// recents against: the Home section's cached library
+/// scan (`HomePanelState::projects` — scanned at most
+/// once per change to the projects directory), filtered
+/// to the entries its rows show
+/// (`home_panel::visible_projects` with no query), so
+/// the recovery snapshot can never shadow a real project
+/// of the same stored name.
+fn recent_file_pairs(s: &State) -> Vec<(String, PathBuf)> {
+    let entries = s.home_panel.projects();
+    crate::rune_sec::home_panel::visible_projects(&entries, "")
+        .into_iter()
+        .map(|info| (info.name, info.path))
+        .collect()
+}
+
+/// One Open recent press (Phase J). With a resolved file
+/// it takes the same route as every other project open:
+/// the Home section's `dispatch_open` (select the file in
+/// the core's list — adding it if unlisted — then
+/// `EditorCore::open_project_file` and record the
+/// recent), followed by the same post-open guards the
+/// Project section's row Open applies
+/// (`project_tools::clear_stale_solo`,
+/// `project_tools::sync_name_edit`), so the name field
+/// shows the opened project. Without a file — the
+/// project was deleted or renamed outside the editor —
+/// it sets a clear status and changes nothing else.
+fn open_recent(s: &mut State, name: &str, path: Option<&Path>) {
+    match path {
+        Some(path) => {
+            crate::rune_sec::home_panel::dispatch_open(&mut s.core, path, name);
+            crate::rune_sec::project_tools::clear_stale_solo(&mut s.core);
+            crate::rune_sec::project_tools::sync_name_edit(s);
+        }
+        None => {
+            s.core.status = format!("Recent project not found: {name}");
+        }
+    }
+}
+
+/// The File menu's Open recent block (Phase J): a
+/// separator plus one item per entry from
+/// [`recent_items`], keyed `file-recent-{i}` in recents
+/// order (most recent first) and labelled with the
+/// recent's display name. Empty when there are no
+/// recents — no disabled placeholder item: a menu that
+/// cannot do anything stays honest by not offering it.
+fn file_recent_items(
+    recents: &[String],
+    files: &[(String, PathBuf)],
+    t: &Theme,
+) -> Vec<El> {
+    let resolved = recent_items(recents, files);
+    if resolved.is_empty() {
+        return Vec::new();
+    }
+    let mut items = vec![separator("menu-file-sep", t)];
+    for (i, (name, path)) in resolved.into_iter().enumerate() {
+        let key = format!("file-recent-{i}");
+        let label = name.clone();
+        items.push(item(&key, &label, false, t, move |s: &mut State| {
+            open_recent(s, &name, path.as_deref());
+        }));
+    }
+    items
+}
+
 /// A thin divider line between item groups.
 fn separator(key: &str, t: &Theme) -> El {
     el().key(key).h(1.0).fill(t.separator)
@@ -396,10 +523,24 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
         FILE => {
             list = list
                 .child(item("save", "Save", false, t, |s| s.core.save()))
-                .child(item("load", "Load", false, t, |s| s.core.load()))
-                .child(item("export", "Export PNG", false, t, |s| {
-                    s.core.export_png()
-                }));
+                .child(item("load", "Load", false, t, |s| s.core.load()));
+            // Open recent (Phase J): up to five entries
+            // from the shell's recents list, resolved
+            // against the Home library scan (see
+            // `recent_items`). The recents file is read
+            // only while this menu is open, and not at
+            // all when it is empty — no scan is triggered
+            // for a menu with nothing to offer.
+            let recents = stykanimate_rs::shell::recents();
+            if !recents.is_empty() {
+                let files = recent_file_pairs(s);
+                for entry in file_recent_items(&recents, &files, t) {
+                    list = list.child(entry);
+                }
+            }
+            list = list.child(item("export", "Export PNG", false, t, |s| {
+                s.core.export_png()
+            }));
             // No "Open Home" item: the Rune shell has no
             // home view or route — `State` carries no home
             // flag and `EditorCore` has no home op (grep:
@@ -712,5 +853,124 @@ mod tests {
         let _ = menu_dropdown(&s, &t);
         s.menus.open = Some(HELP);
         let _ = menu_dropdown(&s, &t);
+    }
+
+    /// (name, path) pairs in the shape `recent_items`
+    /// resolves against, for the Phase J tests below.
+    fn recent_pairs(names: &[&str]) -> Vec<(String, std::path::PathBuf)> {
+        names
+            .iter()
+            .map(|n| {
+                (
+                    n.to_string(),
+                    std::path::PathBuf::from(format!("projects/{n}.json")),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn recent_items_caps_at_five_in_recents_order() {
+        // Phase J: the menu shows at most five recents,
+        // most recent first — the recents order is kept,
+        // not the file list's order (the pairs are
+        // deliberately reversed here).
+        let recents: Vec<String> = ["One", "Two", "Three", "Four", "Five", "Six", "Seven"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        let mut files = recent_pairs(&["One", "Two", "Three", "Four", "Five", "Six", "Seven"]);
+        files.reverse();
+        let items = recent_items(&recents, &files);
+        assert_eq!(items.len(), MAX_RECENT_ITEMS);
+        let names: Vec<&str> = items.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["One", "Two", "Three", "Four", "Five"]);
+        assert!(items.iter().all(|(_, p)| p.is_some()));
+    }
+
+    #[test]
+    fn recent_items_resolves_exact_names_and_marks_missing_files() {
+        // Phase J: an exact stored-name match resolves to
+        // that file's path; a recent whose file is gone
+        // stays in the list with `None` so its press can
+        // report the not-found status; matching is exact
+        // (case-sensitive), and files no recent names are
+        // ignored.
+        let recents: Vec<String> = ["Alpha", "Gone", "Beta"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        let files = recent_pairs(&["Beta", "Alpha", "Other"]);
+        let items = recent_items(&recents, &files);
+        assert_eq!(
+            items,
+            vec![
+                (
+                    "Alpha".to_string(),
+                    Some(std::path::PathBuf::from("projects/Alpha.json")),
+                ),
+                ("Gone".to_string(), None),
+                (
+                    "Beta".to_string(),
+                    Some(std::path::PathBuf::from("projects/Beta.json")),
+                ),
+            ]
+        );
+        let lower: Vec<String> = vec!["alpha".to_string()];
+        assert_eq!(
+            recent_items(&lower, &files),
+            vec![("alpha".to_string(), None)],
+            "a differently-cased name must not resolve"
+        );
+    }
+
+    #[test]
+    fn recent_items_with_no_recents_is_empty() {
+        assert!(recent_items(&[], &recent_pairs(&["Alpha"])).is_empty());
+    }
+
+    #[test]
+    fn file_recent_items_build_nothing_without_recents_and_a_block_with_recents() {
+        // Phase J: no recents → no block at all (not even
+        // the separator); two recents → separator + two
+        // items, resolved and unresolved alike.
+        let t = rune::tok::theme(true);
+        assert!(file_recent_items(&[], &[], &t).is_empty());
+        let recents: Vec<String> = ["Alpha", "Gone"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        let files = recent_pairs(&["Alpha"]);
+        let block = file_recent_items(&recents, &files, &t);
+        assert_eq!(block.len(), 3, "separator + two recent items");
+    }
+
+    #[test]
+    fn recent_entries_carry_the_clock_glyph_and_no_hint() {
+        // Phase J: the dynamic recent keys resolve their
+        // glyph by prefix, the glyph exists in the icon
+        // set, and no recent entry claims a shortcut hint
+        // (the shell binds no key to opening a recent).
+        assert_eq!(menu_icon("file-recent-0"), Some("clock"));
+        assert_eq!(menu_icon("file-recent-4"), Some("clock"));
+        assert!(crate::rune_sec::icons::has_icon("clock"));
+        assert_eq!(shortcut_hint("file-recent-0"), None);
+    }
+
+    #[test]
+    fn open_recent_without_a_file_reports_not_found_and_changes_nothing() {
+        // Phase J: pressing a recent whose file vanished
+        // sets the not-found status and leaves the open
+        // project, the file list and the selector index
+        // exactly as they were.
+        let mut s = crate::init();
+        let name_before = s.core.project.name.clone();
+        let files_before = s.core.project_files.len();
+        let index_before = s.core.project_index;
+        open_recent(&mut s, "Gone", None);
+        assert_eq!(s.core.status, "Recent project not found: Gone");
+        assert_eq!(s.core.project.name, name_before);
+        assert_eq!(s.core.project_files.len(), files_before);
+        assert_eq!(s.core.project_index, index_before);
     }
 }

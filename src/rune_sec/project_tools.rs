@@ -38,6 +38,7 @@
 //! | `proj-name` | text input | `on_edit` → `&mut State::name_edit`; `on_submit` → [`apply_name`] | ok — Enter and "Set name" share one path |
 //! | `proj-set-name` | "Set name" button (`icon_btn`, "check" icon) | [`apply_name`] → [`apply_project_name`]: trims, writes `Project::name` directly (no core rename op or setter exists — editor.rs has no `rename*` fn; the file-level rename is Home's `projects::rename_project`) | ok |
 //! | `proj-current-file` | "Current file: …" muted line under the name field (conditional — present only when the line resolves) | renders [`current_file_line`]: the `shell::last_opened_project` display name, shown only when it exactly matches `Project::name` | ok — Phase I §31; the match guard is the Phase G §32 lesson (recents store names, not the open file, so a mismatch would lie). `home_panel::current_project_path` was NOT used: it is the selector cursor, which `cycle-project` moves without opening |
+//! | `proj-current-meta` | "{size} · modified {time}" muted line under `proj-current-file` (conditional — present only when the §31 match holds AND the file resolves and stats) | renders [`current_file_meta`]: the §31 match (via [`current_file_path`]) gates it, the path resolves over `core.project_files` by the crate's slug rule ([`resolve_project_file`]), size via [`human_size`], time via [`modified_label`] | ok — Phase J §27; gated on the §31 decision itself, so the two lines can never disagree about which file the session is on |
 //! | `new-proj` | "New" button (`icon_btn`, "file" icon) | [`new_pressed`] → [`new_project`] + [`sync_name_edit`]: installs [`blank_project`]`("Untitled")` — field-for-field the MCP `new_project` tool's defaults and reset set (mcp_tools.rs `tool_new_project`) — clears solo, stops playback, no snapshot/confirm | ok |
 //! | `save-proj` | "Save project" button (`icon_btn`, "floppy-disk" icon) | [`save_named_pressed`] → `EditorCore::save_named_project` (slugifies the name, writes `./projects/<slug>.json`, refreshes `project_files`, sets status), then — only on success — `shell::write_recovery` + `shell::touch_recent` to keep snapshot/recents in step | fixed in Phase H — the Phase G caveat is closed: the op returns `bool` and [`after_save`] gates the recovery/recents sync on it, so a failed save no longer plants a phantom recent |
 //! | `recover` | "Recover" button (`icon_btn`, "arrow-rotate-left" icon) | [`recover_pressed`] → [`recover_snapshot`] (`shell::read_recovery` = `./projects/.recovery.json`, shell.rs) → [`apply_recovered_project`] + [`sync_name_edit`] | fixed in Phase G — the reset now also clears solo and stops playback (see the fn) |
@@ -52,7 +53,8 @@
 //! MCP rename). The fn is a no-op unless the text differs, so
 //! the overlap costs one string compare.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, text_input, El, Tx};
@@ -242,6 +244,128 @@ pub fn file_line(last_opened: Option<String>, project_name: &str) -> Option<Stri
 /// file this session last opened or saved.
 pub fn current_file_line(core: &EditorCore) -> Option<String> {
     file_line(stykanimate_rs::shell::last_opened_project(), &core.project.name)
+}
+
+/// The file-name slug for a project name: the crate-wide
+/// naming convention (`editor.rs::save_named_project`,
+/// `projects::save`, `shell::project_file_slug`) — the name
+/// lowercased with every non-alphanumeric character replaced
+/// by `-`, giving the project's file as `<slug>.json` in the
+/// projects directory. Duplicated here because every owner
+/// keeps its copy private; keep the rule in sync with them.
+fn project_file_slug(name: &str) -> String {
+    name.to_lowercase()
+        .replace(|c: char| !c.is_alphanumeric(), "-")
+}
+
+/// Resolve a project name to its file within a list of
+/// project paths (the core's `project_files`): the entry
+/// whose file stem is the name's slug — the exact file a
+/// named save of this project writes and a named open
+/// reads. This is the name→path mapping the selector rows
+/// already imply (their labels are these stems) and the
+/// one `shell` uses for its recents bookkeeping. The core's
+/// list is pre-filtered by `EditorCore::list_project_files`,
+/// so shell-owned entries (recovery, recents, layout) can
+/// never be returned. `None` when no entry matches — the
+/// file was deleted, renamed, or never saved.
+pub fn resolve_project_file<'a>(name: &str, files: &'a [PathBuf]) -> Option<&'a PathBuf> {
+    let slug = project_file_slug(name);
+    files
+        .iter()
+        .find(|path| path.file_stem().and_then(|s| s.to_str()) == Some(slug.as_str()))
+}
+
+/// The current project's file path, gated on the §31 match:
+/// the shell's last-opened record must name this project
+/// (the [`file_line`] decision itself, so the meta line can
+/// never appear under a "Current file" line that resolved
+/// to a different name), and the name must resolve to a
+/// file in the core's list (see [`resolve_project_file`]).
+/// Factored out of [`current_file_meta`] so the gating is
+/// testable without touching the disk.
+pub fn current_file_path<'a>(
+    last_opened: Option<String>,
+    project_name: &str,
+    files: &'a [PathBuf],
+) -> Option<&'a PathBuf> {
+    file_line(last_opened, project_name)?;
+    resolve_project_file(project_name, files)
+}
+
+/// A byte count humanised for the meta line: plain bytes
+/// under a thousand, then decimal KB and MB with one
+/// decimal place ("999 B", "1.0 KB", "2.5 MB"). Decimal
+/// units keep the boundaries round — a file the editor
+/// reports as 1,000 bytes is "1.0 KB" here. Sizes beyond
+/// the MB range keep growing in MB; project JSON does not
+/// reach a scale where a GB unit would read better.
+pub fn human_size(bytes: u64) -> String {
+    if bytes < 1_000 {
+        format!("{bytes} B")
+    } else if bytes < 1_000_000 {
+        format!("{:.1} KB", bytes as f64 / 1_000.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    }
+}
+
+/// The "modified {time}" part of the meta line: the
+/// wall-clock "HH:MM" when the file was modified on the
+/// same calendar day as `now`, the "YYYY-MM-DD" date
+/// otherwise. Both stamps come from
+/// `home_panel::format_modified` — the tree's existing
+/// UTC civil-from-unix conversion — so this fn adds no
+/// date maths of its own; it only chooses which half of
+/// that helper's "YYYY-MM-DD HH:MM" output to show (the
+/// split is at that format's single space, which the
+/// helper pins by test). "Today" is the UTC calendar
+/// day, the convention every timestamp in this codebase
+/// is rendered in.
+pub fn modified_label(modified: SystemTime, now: SystemTime) -> String {
+    let stamp = crate::rune_sec::home_panel::format_modified(Some(modified));
+    let today = crate::rune_sec::home_panel::format_modified(Some(now));
+    let (date, time) = stamp
+        .split_once(' ')
+        .expect("format_modified always renders \"YYYY-MM-DD HH:MM\"");
+    let (today_date, _) = today
+        .split_once(' ')
+        .expect("format_modified always renders \"YYYY-MM-DD HH:MM\"");
+    if date == today_date {
+        time.to_string()
+    } else {
+        date.to_string()
+    }
+}
+
+/// The meta line's text: "{size} · modified {time}" (see
+/// [`human_size`] and [`modified_label`]). Pure — the
+/// caller supplies the stat results and the clock — so
+/// the whole format is testable without a filesystem.
+pub fn meta_text(size_bytes: u64, modified: SystemTime, now: SystemTime) -> String {
+    format!(
+        "{} · modified {}",
+        human_size(size_bytes),
+        modified_label(modified, now)
+    )
+}
+
+/// The current-file metadata line for the open project —
+/// "{size} · modified {time}" for the file the §31 line
+/// names — or `None` when there is nothing honest to show:
+/// the §31 match does not hold, the name resolves to no
+/// file in the core's list, or the file cannot be stat'ed
+/// (deleted between the list refresh and this render). As
+/// with the §31 line, an absent line beats a wrong one.
+pub fn current_file_meta(core: &EditorCore) -> Option<String> {
+    let path = current_file_path(
+        stykanimate_rs::shell::last_opened_project(),
+        &core.project.name,
+        &core.project_files,
+    )?;
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    Some(meta_text(metadata.len(), modified, SystemTime::now()))
 }
 
 // ---------------------------------------------------------------------
@@ -467,10 +591,10 @@ fn recover_pressed(s: &mut State) {
 // ---------------------------------------------------------------------
 
 /// The Project section: name field + Set name, the
-/// current-file line when the shell's last-opened record
-/// names this project, New / Save project / Recover, the
-/// autosave line, and one Open row per saved project in
-/// the core's file list.
+/// current-file line and its metadata line when the
+/// shell's last-opened record names this project,
+/// New / Save project / Recover, the autosave line, and
+/// one Open row per saved project in the core's file list.
 pub fn project_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let rows = project_rows(core);
@@ -528,6 +652,21 @@ pub fn project_section(s: &State, t: &Theme) -> El {
         section = section.child(
             text(line)
                 .key("proj-current-file")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    }
+
+    // The metadata line sits directly under the current-file
+    // line: the resolved file's size and modification time.
+    // It is gated on the same §31 match (current_file_meta
+    // re-runs that decision), so it appears exactly when the
+    // line above it does and its file stats resolve — never
+    // under another project's name.
+    if let Some(meta) = current_file_meta(core) {
+        section = section.child(
+            text(meta)
+                .key("proj-current-meta")
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
@@ -768,6 +907,105 @@ loop_playback: true,
         assert_eq!(file_line(Some("my film".to_string()), "My Film"), None);
         // An empty record never renders a bare "Current file: ".
         assert_eq!(file_line(Some(String::new()), ""), None);
+    }
+
+    #[test]
+    fn human_size_uses_decimal_units_with_one_decimal() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(1), "1 B");
+        assert_eq!(human_size(999), "999 B");
+        // The KB boundary: 1,000 bytes is the first KB value.
+        assert_eq!(human_size(1_000), "1.0 KB");
+        assert_eq!(human_size(1_500), "1.5 KB");
+        assert_eq!(human_size(999_500), "999.5 KB");
+        // The MB boundary, and one decimal within MB.
+        assert_eq!(human_size(1_000_000), "1.0 MB");
+        assert_eq!(human_size(2_500_000), "2.5 MB");
+        assert_eq!(human_size(1_234_567), "1.2 MB");
+    }
+
+    #[test]
+    fn resolve_project_file_matches_the_saved_slug() {
+        let files = vec![
+            PathBuf::from("./projects/alpha.json"),
+            PathBuf::from("./projects/my-film.json"),
+        ];
+        // The named save of "My Film" writes my-film.json —
+        // the resolution lands on exactly that entry.
+        assert_eq!(
+            resolve_project_file("My Film", &files),
+            Some(&files[1])
+        );
+        assert_eq!(resolve_project_file("Alpha", &files), Some(&files[0]));
+    }
+
+    #[test]
+    fn resolve_project_file_absent_without_a_slug_match() {
+        let files = vec![PathBuf::from("./projects/alpha.json")];
+        // A project whose file is gone (or never saved) does
+        // not resolve to another project's file.
+        assert_eq!(resolve_project_file("Other Film", &files), None);
+        assert_eq!(resolve_project_file("Alpha", &[]), None);
+    }
+
+    #[test]
+    fn file_meta_present_exactly_when_the_31_match_holds() {
+        let files = vec![
+            PathBuf::from("./projects/alpha.json"),
+            PathBuf::from("./projects/my-film.json"),
+        ];
+        // Match + resolvable file: the meta line's path.
+        assert_eq!(
+            current_file_path(Some("My Film".to_string()), "My Film", &files),
+            Some(&files[1])
+        );
+        // The §31 guards gate the meta line identically:
+        // no last-opened record, a differing name, and an
+        // empty record all yield no meta, match or not.
+        assert_eq!(current_file_path(None, "My Film", &files), None);
+        assert_eq!(
+            current_file_path(Some("Other Film".to_string()), "Untitled", &files),
+            None
+        );
+        assert_eq!(current_file_path(Some(String::new()), "", &files), None);
+        // A match whose file is no longer in the list (deleted
+        // or renamed since) also yields no meta — the line
+        // never stats a file the session cannot name.
+        assert_eq!(
+            current_file_path(Some("Ghost".to_string()), "Ghost", &files),
+            None
+        );
+    }
+
+    #[test]
+    fn modified_label_shows_clock_today_and_date_before() {
+        let at = |secs: u64| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        // 1_794_117_426 is 2026-11-08 05:57 UTC (the value
+        // home_panel's format_modified tests pin).
+        let modified = at(1_794_117_426);
+        // Later the same UTC day: only the clock shows.
+        assert_eq!(modified_label(modified, at(1_794_117_426 + 10 * 3_600)), "05:57");
+        // The next day: only the date shows.
+        assert_eq!(
+            modified_label(modified, at(1_794_117_426 + 86_400)),
+            "2026-11-08"
+        );
+        // The epoch edge: both stamps at day zero are "today".
+        assert_eq!(modified_label(at(0), at(0)), "00:00");
+    }
+
+    #[test]
+    fn meta_text_combines_size_and_modified() {
+        let at = |secs: u64| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        let modified = at(1_794_117_426);
+        assert_eq!(
+            meta_text(1_500, modified, at(1_794_117_426 + 60)),
+            "1.5 KB · modified 05:57"
+        );
+        assert_eq!(
+            meta_text(999, modified, at(1_794_117_426 + 86_400)),
+            "999 B · modified 2026-11-08"
+        );
     }
 
     #[test]

@@ -78,6 +78,30 @@
 //!   directly (model.rs:326-330), so pasting a pose from a
 //!   differently-rigged figure would panic the renderer; the
 //!   paste refuses with a status message instead.
+//! - **Mirror figure (all frames)** (Phase J) →
+//!   `EditorCore::mirror_figure_all_frames(selected)`
+//!   (figure_ops.rs): the single-frame mirror applied to
+//!   the figure's pose on EVERY frame under one snapshot,
+//!   so one undo restores the whole timeline. Frames with
+//!   no pose row for the figure are skipped. The core
+//!   op's graph-channel limit carries over: channels are
+//!   not mirrored, so a channel-driven figure's evaluated
+//!   poses will not flip even though its stored poses do.
+//! - **Apply pose to all frames** (Phase J) → composed
+//!   here ([`apply_pose_to_all_frames`]): the clipboard
+//!   pose written over the selected figure's pose on
+//!   every frame as ONE undo step. Calling [`paste_pose`]
+//!   per frame would take one snapshot per frame
+//!   (`write_current_pose` snapshots on every call), so
+//!   the batch plans first — a frame is writable when it
+//!   holds a pose row for the figure whose angle count
+//!   matches the clipboard's, exactly Paste pose's two
+//!   guards judged per frame — then snapshots once and
+//!   makes `write_current_pose`'s own assignment
+//!   (`project.frames[f].poses[fi] = pose`) per writable
+//!   frame, addressed by index so the current frame
+//!   never moves. Skipped frames are counted in the
+//!   status, never silently passed over.
 //! - **Copy pose to…** (one button per other figure) →
 //!   `EditorCore::copy_pose_between(selected, target)`
 //!   (editor.rs:1438), reading the selection live at press
@@ -149,8 +173,10 @@
 //! Buttons whose op would no-op on the current state render
 //! muted (secondary text, no press handler — inert, not fake):
 //! mirror/copy/reset need a pose on this frame, paste needs a
-//! copied pose *and* a target pose, copy-to needs both poses,
-//! bake needs at least one graph channel and one frame.
+//! copied pose *and* a target pose, mirror-all shares
+//! mirror's gate and apply-all shares paste's, copy-to needs
+//! both poses, bake needs at least one graph channel and one
+//! frame.
 //! Library apply and mirror-apply need a pose to land on;
 //! library delete/rename act on files, not on the frame, so
 //! they are always live.
@@ -191,6 +217,18 @@
 //! or not), and the count beside the heading is the
 //! bare total while idle, "{shown} of {total} poses"
 //! while a filter is active.
+//!
+//! Phase J (section 20/40) adds the two whole-timeline
+//! pose actions beside their single-frame parents:
+//! Mirror figure (all frames) sits next to Mirror pose,
+//! and Apply pose to all frames next to Paste pose —
+//! the first button row now holds the mirror pair, the
+//! second the copy / paste / apply family. Both are
+//! plain [`pbtn`]s: the pose-op buttons were never in
+//! this section's icon map, and the all-frames pair
+//! follows them. No new `State` field: both handlers
+//! work through `core` and the existing
+//! `State::pose_clipboard`.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -337,6 +375,55 @@ fn write_current_pose(core: &mut EditorCore, pose: Pose) {
     core.snapshot();
     let (fi, fr) = (core.selected_figure, core.current);
     core.project.frames[fr].poses[fi] = pose;
+}
+
+/// Apply the clipboard pose to the selected figure on
+/// EVERY frame, as one undo step (Phase J). `paste_pose`
+/// cannot be looped per frame: its write path,
+/// [`write_current_pose`], snapshots on every call, so a
+/// per-frame loop would bury the action under one undo
+/// step per frame. Instead the batch plans first — a
+/// frame is writable when it holds a pose row for the
+/// figure whose angle count matches the clipboard's,
+/// which is Paste pose's pair of guards (a pose row
+/// exists; the angle count matches, or `model::evaluate`
+/// would panic on the mismatched rig) judged per frame —
+/// then takes ONE snapshot and makes the write path's
+/// own assignment per writable frame, addressed by frame
+/// index, so the current frame never moves. Frames that
+/// fail either guard are skipped and counted in the
+/// status. When nothing is writable there is no snapshot
+/// and no change — the refusal discipline every other
+/// composed op here follows.
+pub fn apply_pose_to_all_frames(core: &mut EditorCore, clip: &Option<Pose>) {
+    let Some(clip) = clip else {
+        core.status = "Nothing copied yet — copy a pose first.".into();
+        return;
+    };
+    if core.selected_figure >= core.project.figures.len() {
+        core.status = no_pose_status(core);
+        return;
+    }
+    let fi = core.selected_figure;
+    let mut writable: Vec<usize> = Vec::new();
+    let mut skipped = 0usize;
+    for (f, frame) in core.project.frames.iter().enumerate() {
+        match frame.poses.get(fi) {
+            Some(p) if p.angles.len() == clip.angles.len() => writable.push(f),
+            _ => skipped += 1,
+        }
+    }
+    if writable.is_empty() {
+        core.status = format!("Pose applied to 0 frames ({skipped} skipped).");
+        return;
+    }
+    let clip = clip.clone();
+    let applied = writable.len();
+    core.snapshot();
+    for f in writable {
+        core.project.frames[f].poses[fi] = clip.clone();
+    }
+    core.status = format!("Pose applied to {applied} frames ({skipped} skipped).");
 }
 
 /// Reset the selected figure's current-frame pose to its
@@ -1155,6 +1242,20 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                     |s| s.core.mirror_selected_pose(),
                 ))
                 .child(pbtn(
+                    "pose-mirror-all".to_string(),
+                    "Mirror figure (all frames)",
+                    has_pose,
+                    t,
+                    |s| {
+                        s.core
+                            .mirror_figure_all_frames(s.core.selected_figure);
+                    },
+                )),
+        )
+        .child(
+            row()
+                .gap(4.0)
+                .child(pbtn(
                     "pose-copy".to_string(),
                     "Copy pose",
                     has_pose,
@@ -1167,6 +1268,13 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                     can_paste,
                     t,
                     |s| paste_pose(&mut s.core, &s.pose_clipboard),
+                ))
+                .child(pbtn(
+                    "pose-apply-all".to_string(),
+                    "Apply pose to all frames",
+                    can_paste,
+                    t,
+                    |s| apply_pose_to_all_frames(&mut s.core, &s.pose_clipboard),
                 )),
         )
         .child(
@@ -1902,6 +2010,118 @@ mod tests {
         // silently degrade to a plain text button.
         assert_eq!(APPLY_MIRRORED_ICON, "arrow-right-arrow-left");
         assert!(crate::rune_sec::icons::has_icon(APPLY_MIRRORED_ICON));
+    }
+
+    #[test]
+    fn apply_to_all_frames_writes_every_frame_as_one_undo_step() {
+        let mut c = core();
+        let mut clip = None;
+        // Make frame 0's pose distinctive, then copy it.
+        c.mirror_selected_pose();
+        let mirrored = selected_pose(&c).unwrap().clone();
+        copy_pose(&mut c, &mut clip);
+        assert!(clip.is_some());
+        // The state one undo must restore afterwards:
+        // frame 0 mirrored, every other frame untouched.
+        let pre_apply: Vec<Pose> = c
+            .project
+            .frames
+            .iter()
+            .map(|f| f.poses[0].clone())
+            .collect();
+        let current = c.current;
+        let depth = c.undo_depth();
+        apply_pose_to_all_frames(&mut c, &clip);
+        assert_eq!(
+            c.undo_depth(),
+            depth + 1,
+            "the whole batch must be exactly one undo step"
+        );
+        assert_eq!(c.current, current, "the current frame never moves");
+        for f in &c.project.frames {
+            assert_eq!(f.poses[0].angles, mirrored.angles);
+            assert_eq!(f.poses[0].root, mirrored.root);
+        }
+        assert_eq!(
+            c.status,
+            format!(
+                "Pose applied to {} frames (0 skipped).",
+                c.frame_count()
+            )
+        );
+        c.undo();
+        for (f, before) in c.project.frames.iter().zip(&pre_apply) {
+            assert_eq!(f.poses[0].angles, before.angles);
+            assert_eq!(f.poses[0].root, before.root);
+        }
+    }
+
+    #[test]
+    fn apply_to_all_frames_skips_missing_and_mismatched_rows() {
+        let mut c = core();
+        let mut clip = None;
+        c.mirror_selected_pose();
+        copy_pose(&mut c, &mut clip);
+        let n = c.frame_count();
+        assert!(n >= 4, "demo project needs at least four frames");
+        // Frame 1 holds no pose row for the figure at
+        // all; frame 3's pose gains an angle the copied
+        // rig does not have. Both must be skipped, and
+        // frame 3's row must survive byte for byte.
+        c.project.frames[1].poses.clear();
+        c.project.frames[3].poses[0].angles.push(0.25);
+        let odd = c.project.frames[3].poses[0].clone();
+        let depth = c.undo_depth();
+        apply_pose_to_all_frames(&mut c, &clip);
+        assert_eq!(c.undo_depth(), depth + 1);
+        assert_eq!(
+            c.status,
+            format!("Pose applied to {} frames (2 skipped).", n - 2)
+        );
+        assert!(
+            c.project.frames[1].poses.is_empty(),
+            "a missing pose row stays missing"
+        );
+        assert_eq!(c.project.frames[3].poses[0].angles, odd.angles);
+        assert_eq!(c.project.frames[3].poses[0].root, odd.root);
+        let clip_pose = clip.as_ref().unwrap();
+        for (i, f) in c.project.frames.iter().enumerate() {
+            if i == 1 || i == 3 {
+                continue;
+            }
+            assert_eq!(f.poses[0].angles, clip_pose.angles);
+            assert_eq!(f.poses[0].root, clip_pose.root);
+        }
+    }
+
+    #[test]
+    fn apply_to_all_frames_without_copy_is_a_status_only_noop() {
+        let mut c = core();
+        let before = selected_pose(&c).unwrap().clone();
+        let depth = c.undo_depth();
+        apply_pose_to_all_frames(&mut c, &None);
+        assert_eq!(c.undo_depth(), depth, "a refusal takes no snapshot");
+        assert_eq!(selected_pose(&c).unwrap().angles, before.angles);
+        assert!(
+            c.status.contains("Nothing copied"),
+            "unexpected status: {}",
+            c.status
+        );
+    }
+
+    #[test]
+    fn mirror_all_gate_is_mirror_poses_gate() {
+        // Both Mirror pose and Mirror figure (all
+        // frames) render on `has_selected_pose` — the
+        // same expression in `pose_tools` — so the
+        // all-frames button is live exactly when its
+        // single-frame parent is: on the demo, and inert
+        // once the current frame holds no pose for the
+        // selected figure.
+        let mut c = core();
+        assert!(has_selected_pose(&c));
+        c.project.frames[c.current].poses.clear();
+        assert!(!has_selected_pose(&c));
     }
 }
 

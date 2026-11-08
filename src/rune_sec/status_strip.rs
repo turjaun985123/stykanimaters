@@ -40,6 +40,14 @@
 //!   / `State::particle_selected` (`main.rs`), visible
 //!   only through [`status_strip_state`]: that state
 //!   lives on `State`, not on the core
+//! - autosave freshness (Phase J, conditional) — the
+//!   recovery snapshot's age, from the mtime of
+//!   `./projects/.recovery.json` via
+//!   `stykanimate_rs::shell::recovery_modified()`,
+//!   rendered as a relative age by [`autosave_segment`]
+//!   and visible only through [`status_strip_state`]:
+//!   the snapshot is shell support data, not core
+//!   state (see the Phase J note below)
 //! - last status message — `core.status` (`editor.rs:42`),
 //!   the trailing segment chrome's line ended with, kept so
 //!   Save/Load feedback stays visible
@@ -171,6 +179,61 @@
 //! so the project segment's floor grows by exactly
 //! the runtime label's estimated width (≈ 5 chars,
 //! ≈ 40 pt) and the tail remains the single absorber.
+//!
+//! ## Phase J — autosave freshness segment
+//!
+//! The strip now also says how fresh the safety net
+//! is: while a recovery snapshot exists, a fixed
+//! segment after the Phase G block reads `Autosaved
+//! just now`, `Autosaved {n}m ago` or `Autosaved
+//! {n}h ago` ([`autosave_segment`]). The snapshot is
+//! written by `EditorCore::maybe_autosave`
+//! (`editor.rs:1622`), which the shell's poll calls
+//! every tick (`main.rs:284`); it lands as
+//! `./projects/.recovery.json` and its mtime is the
+//! last-autosave time.
+//!
+//! The label is a relative age, not a clock time,
+//! deliberately: nothing in the tree converts a
+//! `SystemTime` to local HH:MM (the only `SystemTime`
+//! maths anywhere is `UNIX_EPOCH` duration arithmetic
+//! in `audio.rs`), and a UTC clock reading would
+//! mislead. The age is also the more glanceable fact
+//! — it answers "how much work would I lose?" — and
+//! it needs no timezone at all.
+//!
+//! The mtime reaches this module through one lib
+//! call, `stykanimate_rs::shell::recovery_modified()
+//! -> Option<SystemTime>`. That accessor does not
+//! exist yet: `shell.rs` keeps both its projects-dir
+//! constructor (`default_dir`, shell.rs:41) and its
+//! mtime reader (`file_mtime`, shell.rs:149) private,
+//! and the only recovery query it publishes is the
+//! boolean `recovery_is_newer_than_last_project`
+//! (shell.rs:177) the Home panel's recovery offer
+//! reads. Adding the accessor to `shell.rs` is an
+//! integrator item; this module is written against
+//! its contract (snapshot mtime, `None` when no
+//! snapshot exists or cannot be stat'ed — the same
+//! error-swallowing as `file_mtime`).
+//!
+//! Placement and width follow the Phase G pattern:
+//! the segment is composed by
+//! [`status_strip_state`] (the core-only
+//! [`status_strip`] passes `None`, exactly as it
+//! does for the selection segments), appended after
+//! the particle segment and before the tail, and
+//! floored through [`segment`] at its own label's
+//! [`est_text_width`] — the longest plausible label,
+//! `Autosaved 999h ago`, floors at 18 × 8.0 = 144 pt,
+//! and only while a snapshot exists. With no
+//! snapshot the segment vanishes and the strip is
+//! byte-identical to Phase I's. It is deliberately
+//! NOT part of [`extra_segments`]: that composition
+//! is pure core-plus-selections, and its emptiness
+//! on a fresh core is pinned by test.
+
+use std::time::{Duration, SystemTime};
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, El};
@@ -384,6 +447,36 @@ pub fn particle_segment(selected: Option<usize>) -> Option<String> {
     selected.map(|i| format!("Particle {}", i + 1))
 }
 
+/// Autosave segment (Phase J): how long ago the
+/// recovery snapshot was written, as a relative age —
+/// `Autosaved just now` under a minute, `Autosaved
+/// {n}m ago` under an hour, `Autosaved {n}h ago`
+/// beyond that (whole units, floored: 59 minutes
+/// reads `59m`, never `1h`). `modified` is the
+/// snapshot's mtime (`shell::recovery_modified()`);
+/// `None` — no snapshot on disk — yields `None`, and
+/// the segment vanishes. A snapshot stamped in the
+/// future (clock skew between the filesystem and
+/// the process) clamps to zero age, `just now`:
+/// the snapshot is certainly not stale, and a
+/// negative age would be nonsense. Pure: both
+/// instants are parameters, so the age table is
+/// testable without touching the disk or the clock.
+/// See the module docs for why the label is an age
+/// rather than a clock time.
+pub fn autosave_segment(modified: Option<SystemTime>, now: SystemTime) -> Option<String> {
+    let modified = modified?;
+    let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+    let secs = age.as_secs();
+    if secs < 60 {
+        Some("Autosaved just now".to_string())
+    } else if secs < 3_600 {
+        Some(format!("Autosaved {}m ago", secs / 60))
+    } else {
+        Some(format!("Autosaved {}h ago", secs / 3_600))
+    }
+}
+
 /// The Phase G conditional segment labels, in strip
 /// order (audio, loop, stroke, particle), each present
 /// only while its condition holds. Pure composition of
@@ -534,28 +627,37 @@ fn divider(t: &Theme) -> El {
 /// the core can describe, including the Phase G audio
 /// and loop segments, but without the shell's stroke /
 /// particle-event selection segments (that state lives
-/// on `State`, not on the core). The delegating wrapper
-/// over the shared composer; the shell itself calls
+/// on `State`, not on the core) and without the Phase J
+/// autosave segment (the snapshot's mtime is shell
+/// support data, read by [`status_strip_state`] through
+/// the lib). The delegating wrapper over the shared
+/// composer; the shell itself calls
 /// [`status_strip_state`].
 pub fn status_strip(core: &EditorCore) -> El {
-    build_strip(core, None, None)
+    build_strip(core, None, None, None)
 }
 
 /// The status strip: project name (with the dirty dot),
 /// frame position, timecode, fps, zoom, selection, undo
 /// depth, play state, the Phase G conditional segments
 /// (audio, loop range, stroke selection, particle-event
-/// selection) and the core's current status message,
-/// divided by hairlines. The fixed segments are
-/// width-floored and the status tail is the single
-/// flexible, eliding segment, so the segments can never
-/// overlap however narrow the strip gets (see the
-/// module docs' width-discipline section).
+/// selection), the Phase J autosave segment (while a
+/// recovery snapshot exists) and the core's current
+/// status message, divided by hairlines. The fixed
+/// segments are width-floored and the status tail is
+/// the single flexible, eliding segment, so the
+/// segments can never overlap however narrow the strip
+/// gets (see the module docs' width-discipline
+/// section).
 /// Keyed `status-strip` so headless `--tree` checks can
 /// find it. Theme follows the shell's current convention
 /// (`main.rs` builds its view with `tok::theme(true)`).
 pub fn status_strip_state(s: &State) -> El {
-    build_strip(&s.core, s.stroke_selected, s.particle_selected)
+    let autosave = autosave_segment(
+        stykanimate_rs::shell::recovery_modified(),
+        SystemTime::now(),
+    );
+    build_strip(&s.core, s.stroke_selected, s.particle_selected, autosave)
 }
 
 /// Shared composer behind [`status_strip`] and
@@ -563,12 +665,16 @@ pub fn status_strip_state(s: &State) -> El {
 /// appended after the play segment and before the tail,
 /// each only while its condition holds, each floored
 /// through the same [`segment`] / [`est_text_width`]
-/// path as the original nine; the tail stays the row's
-/// single flexible member.
+/// path as the original nine; the Phase J autosave
+/// label (`autosave`, already composed by
+/// [`status_strip_state`] from the snapshot's mtime)
+/// follows them under the same rule. The tail stays
+/// the row's single flexible member.
 fn build_strip(
     core: &EditorCore,
     stroke_selected: Option<usize>,
     particle_selected: Option<usize>,
+    autosave: Option<String>,
 ) -> El {
     let t = tok::theme(true);
     let mut segments: Vec<El> = vec![
@@ -612,6 +718,15 @@ fn build_strip(
         } else {
             segments.push(segment(label, &t));
         }
+    }
+    // Phase J: the autosave segment closes the fixed
+    // block — after the Phase G conditionals, before
+    // the tail — floored through the same `segment`
+    // path, and absent entirely when no recovery
+    // snapshot exists, leaving the strip byte-identical
+    // to Phase I's.
+    if let Some(label) = autosave {
+        segments.push(segment(label, &t));
     }
     // Chrome's line ended with the core's status
     // message; keep it, dimmed, as the tail segment —
@@ -1074,5 +1189,99 @@ mod tests {
         // painted width at the documented advances
         // (≈ 84 pt for this label's glyph classes).
         assert!(est_text_width("Loop 999–1000") > 11.0 + 4.0 + 84.0);
+    }
+
+    // ---- Phase J autosave segment ----
+
+    /// A fixed reference instant for the age table
+    /// (the same arbitrary epoch the shell tests use,
+    /// shell.rs): the ages below are offsets from it,
+    /// so the table never depends on the wall clock.
+    fn ref_now() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+    }
+
+    #[test]
+    fn autosave_segment_none_without_a_snapshot() {
+        assert_eq!(autosave_segment(None, ref_now()), None);
+    }
+
+    #[test]
+    fn autosave_segment_age_table() {
+        let now = ref_now();
+        let ago = |secs: u64| Some(now - Duration::from_secs(secs));
+        // Under a minute is "just now", boundary incl.:
+        // 59 s is the last whole second of the band.
+        assert_eq!(
+            autosave_segment(ago(10), now),
+            Some("Autosaved just now".to_string())
+        );
+        assert_eq!(
+            autosave_segment(ago(59), now),
+            Some("Autosaved just now".to_string())
+        );
+        // Whole minutes, floored: 60 s opens the band,
+        // 59 whole minutes is its last reading.
+        assert_eq!(
+            autosave_segment(ago(60), now),
+            Some("Autosaved 1m ago".to_string())
+        );
+        assert_eq!(
+            autosave_segment(ago(300), now),
+            Some("Autosaved 5m ago".to_string())
+        );
+        assert_eq!(
+            autosave_segment(ago(3_599), now),
+            Some("Autosaved 59m ago".to_string())
+        );
+        // Whole hours from one hour up, unbounded:
+        // a day-old snapshot honestly reads 25h.
+        assert_eq!(
+            autosave_segment(ago(3_600), now),
+            Some("Autosaved 1h ago".to_string())
+        );
+        assert_eq!(
+            autosave_segment(ago(7_200), now),
+            Some("Autosaved 2h ago".to_string())
+        );
+        assert_eq!(
+            autosave_segment(ago(90_000), now),
+            Some("Autosaved 25h ago".to_string())
+        );
+    }
+
+    #[test]
+    fn autosave_segment_future_mtime_clamps_to_just_now() {
+        // A snapshot stamped ahead of the process clock
+        // (clock skew) is zero-age, never a negative or
+        // nonsense reading.
+        let now = ref_now();
+        let future = now + Duration::from_secs(120);
+        assert_eq!(
+            autosave_segment(Some(future), now),
+            Some("Autosaved just now".to_string())
+        );
+    }
+
+    #[test]
+    fn strip_builds_with_and_without_the_autosave_segment() {
+        // The composer takes the composed label as an
+        // `Option`, the selection-segment pattern: with
+        // `None` the strip builds exactly as Phase I's
+        // did, and with a label it builds with the
+        // segment appended — neither path panics.
+        let core = EditorCore::new();
+        let _ = build_strip(&core, None, None, None);
+        let now = ref_now();
+        let label = autosave_segment(Some(now - Duration::from_secs(300)), now);
+        assert_eq!(label, Some("Autosaved 5m ago".to_string()));
+        let _ = build_strip(&core, None, None, label);
+        // The builder floors the segment through
+        // `segment()`, i.e. at `est_text_width` of its
+        // own label — the same path as every other
+        // fixed segment, so it can never be compressed
+        // below its painted width either.
+        assert_eq!(est_text_width("Autosaved 5m ago"), 16.0 * LABEL_CHAR_W);
+        assert_eq!(est_text_width("Autosaved just now"), 18.0 * LABEL_CHAR_W);
     }
 }

@@ -70,6 +70,25 @@
 //! playback is named as what it is — the transport Loop
 //! button (`pb-loop`) or the palette's Toggle loop
 //! playback command — never as a key.
+//!
+//! Phase J (section 29/40) refresh, 2026-11-08: four more
+//! Features rows, each verified against the tree at audit
+//! time rather than taken from the phase plan. The
+//! timeline ruler is real (`timeline_marks`' `ruler_label`
+//! and the `timeline-ruler` strip above the chips). Split
+//! FX clip is real twice over: the `fx-split` Split at
+//! playhead button in `fx_clips` and the palette's
+//! `split-fx-clip` command, both over
+//! `EditorCore::fx_split_clip`. Range export is real:
+//! `xc-svg` and `xc-sheet` are `range_row`s in
+//! `export_panel` whose actions honour the loop range.
+//! Mirror whole figure names both places a user can
+//! reach it: the Pose tools `pose-mirror-all` button
+//! (landed by section 20 after this section's first
+//! verification pass — corrected at integration) and the
+//! palette's `mirror-figure` command, both over
+//! `EditorCore::mirror_figure_all_frames`.
+//! The panel now holds 34 rows.
 
 use rune::tok::{type_, Family, Theme};
 use rune::{col, el, row, text, El};
@@ -140,6 +159,10 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
                 "Prev key / Next key transport buttons — or click a timeline marker (◆ camera, ● graph)",
             ),
             (
+                "Timeline ruler",
+                "Second labels above the frame chips",
+            ),
+            (
                 "Stroke selection",
                 "Click a stroke on the stage to select it",
             ),
@@ -154,6 +177,18 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             (
                 "Bend steppers",
                 "Segment inspector buttons bend the selected segment by −5°, −1°, +1° or +5°",
+            ),
+            (
+                "Split FX clip",
+                "Effects workspace — Split at playhead button or the command palette",
+            ),
+            (
+                "Mirror whole figure",
+                "Pose tools or command palette — Mirror figure (all frames)",
+            ),
+            (
+                "Range export",
+                "Export panel — SVG and Spritesheet now take the loop range too",
             ),
         ],
         _ => vec![],
@@ -311,13 +346,14 @@ mod tests {
     use super::{group_rows, section_note, section_rows, shortcut_rows};
 
     #[test]
-    fn shortcut_rows_has_exactly_30_rows() {
+    fn shortcut_rows_has_exactly_34_rows() {
         // 9 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
-        // + 6 Features; Drawing contributes none (see the
+        // + 10 Features; Drawing contributes none (see the
         // module docs for which GPUI-era rows were dropped
         // and why). Phase G added the four palette/menu rows
-        // to Shortcuts; Phase I added the Features section.
-        assert_eq!(shortcut_rows().len(), 30);
+        // to Shortcuts; Phase I added the Features section;
+        // Phase J added four rows to it.
+        assert_eq!(shortcut_rows().len(), 34);
     }
 
     #[test]
@@ -367,8 +403,50 @@ mod tests {
             "Segment inspector buttons bend the selected segment by −5°, −1°, +1° or +5°"
         )));
         // The Features rows live in their own section, in
-        // this order, and nowhere else.
-        assert_eq!(section_rows("Features").len(), 6);
+        // this order, and nowhere else. (The count covers
+        // the Phase J rows too — see the Phase J test.)
+        assert_eq!(section_rows("Features").len(), 10);
+    }
+
+    #[test]
+    fn phase_j_feature_rows_are_listed() {
+        // The Phase J features, each verified against the
+        // tree before listing (see the module docs): the
+        // timeline ruler (`timeline_marks`), Split at
+        // playhead (`fx_clips` button + `split-fx-clip`
+        // palette command), whole-figure mirroring and the
+        // SVG / Spritesheet range rows (`export_panel`).
+        // Mirror whole figure names both homes: the Pose
+        // tools button (`pose-mirror-all`, section 20) and
+        // the palette command — both verified in the tree
+        // at integration.
+        let rows = shortcut_rows();
+        assert!(rows.contains(&(
+            "Timeline ruler",
+            "Second labels above the frame chips"
+        )));
+        assert!(rows.contains(&(
+            "Split FX clip",
+            "Effects workspace — Split at playhead button or the command palette"
+        )));
+        assert!(rows.contains(&(
+            "Mirror whole figure",
+            "Pose tools or command palette — Mirror figure (all frames)"
+        )));
+        assert!(rows.contains(&(
+            "Range export",
+            "Export panel — SVG and Spritesheet now take the loop range too"
+        )));
+        // The ruler sits with the timeline rows, directly
+        // after Keyframe jump; the section holds all ten
+        // feature rows and no eleventh has crept in.
+        let features = section_rows("Features");
+        assert_eq!(features.len(), 10);
+        let jump = features
+            .iter()
+            .position(|(label, _)| *label == "Keyframe jump")
+            .expect("Keyframe jump row");
+        assert_eq!(features[jump + 1].0, "Timeline ruler");
     }
 
     #[test]

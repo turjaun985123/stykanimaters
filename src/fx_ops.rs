@@ -3,7 +3,7 @@
 //! (`Project::fx_clips`) — move, resize, duplicate, delete,
 //! colours and anchor (Phase E, section 9), plus the clip
 //! kind setter and the kind cycle order (Phase I,
-//! section 7).
+//! section 7), plus the split op (Phase J, section 6).
 //!
 //! These ops are the engine home for what the Phase D Rune
 //! FX-clips panel (`rune_sec/fx_clips.rs`) used to do inline:
@@ -25,9 +25,9 @@
 //!   to `fx_edit` (`move_clip` / `resize_clip` /
 //!   `duplicate_clip` / `delete_clip`, which own the
 //!   clamping: start >= 0, duration >= 0.1). Colour, end
-//!   colour, kind and anchor have no `fx_edit` function,
-//!   so — exactly as the panel did — they write the field
-//!   after the snapshot.
+//!   colour, kind, anchor and split have no `fx_edit`
+//!   function, so — exactly as the panel did — they write
+//!   the fields after the snapshot.
 //! * Success is reported on `status` in the panel's voice:
 //!   1-based clip and figure numbers, the frame wording of
 //!   `add_fx_clip`, and for the anchor the panel's exact
@@ -53,6 +53,15 @@ fn frame_label(frame: f32) -> String {
         format!("{frame:.1}")
     }
 }
+
+/// The shortest a clip — or a split half — may be, in
+/// frames: the floor `fx_edit::resize_clip` clamps every
+/// duration to, so a clip never collapses to nothing. A
+/// split that would leave either half shorter than this
+/// is refused rather than clamped, because silently
+/// moving the split point would not be the split the
+/// caller asked for.
+const MIN_CLIP_DURATION: f32 = 0.1;
 
 /// All 27 clip kinds in the one canonical cycle order:
 /// the FX browser's presentation order
@@ -156,6 +165,62 @@ impl EditorCore {
             index + 1,
             frame_label(duration)
         );
+    }
+
+    /// Split FX clip `index` into two clips at `at_frame`:
+    /// the original keeps `[start, at_frame)` and a new
+    /// clip, inserted immediately after it, takes
+    /// `[at_frame, start + duration)` with every other
+    /// field — kind, figure anchor, node, colours, seed,
+    /// angle, length — identical to the original's (unlike
+    /// [`Self::fx_duplicate_clip`], whose copy is re-timed
+    /// and re-seeded: a split is one clip becoming two, so
+    /// the halves must between them be exactly the
+    /// original). No `fx_edit` backend exists for split,
+    /// so — as for colour and kind — the fields are
+    /// written after the snapshot. One undo step.
+    ///
+    /// Refusals (status only, no snapshot, `false`): the
+    /// index is out of range, or `at_frame` is not
+    /// strictly inside the clip's span with at least
+    /// [`MIN_CLIP_DURATION`] on both sides — splitting at
+    /// an edge would be a no-op dressed as a success, and
+    /// a half shorter than the resize floor could never
+    /// have been created by resizing.
+    pub fn fx_split_clip(&mut self, index: usize, at_frame: f32) -> bool {
+        let Some(entry) = self.project.fx_clips.get(index) else {
+            self.status = format!("FX clip split failed: no FX clip {}.", index + 1);
+            return false;
+        };
+        let start = entry.clip.start;
+        let first = at_frame - start;
+        let second = start + entry.clip.duration - at_frame;
+        // Both halves at least the minimum also proves
+        // `at_frame` strictly inside (start, end): an edge
+        // or outside point leaves a zero, negative or NaN
+        // half, and NaN fails every `>=` comparison.
+        if !(first >= MIN_CLIP_DURATION && second >= MIN_CLIP_DURATION) {
+            self.status = format!(
+                "FX clip split failed: frame {} is not inside clip {}.",
+                frame_label(at_frame + 1.0),
+                index + 1
+            );
+            return false;
+        }
+        self.snapshot();
+        let mut second_half = self.project.fx_clips[index].clone();
+        second_half.clip.start = at_frame;
+        second_half.clip.duration = second;
+        self.project.fx_clips[index].clip.duration = first;
+        self.project.fx_clips.insert(index + 1, second_half);
+        self.status = format!(
+            "FX clip {} split at frame {} into clips {} and {}.",
+            index + 1,
+            frame_label(at_frame + 1.0),
+            index + 1,
+            index + 2
+        );
+        true
     }
 
     /// Duplicate FX clip `index`: the copy is inserted
@@ -368,6 +433,123 @@ mod tests {
         assert_eq!(core.status, "FX clip resize failed: no FX clip 2.");
         assert_eq!(project_json(&core), before, "project untouched");
         assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+    }
+
+    #[test]
+    fn split_clip_halves_sum_clone_fields_and_snapshots_once() {
+        // An entry with distinctive values in every field,
+        // so the clone check below cannot pass by accident.
+        let original = FxClipEntry {
+            clip: ParticleClip {
+                start: 4.0,
+                duration: 10.0,
+                kind: ClipKind::Beam,
+                color: 0x5DB2FF,
+                color2: Some(0xFF7BAC),
+                seed: 42,
+                angle: 30.0,
+                length: 200.0,
+            },
+            figure: 2,
+            node: 3,
+        };
+        let mut core = core_with(vec![
+            entry(0.0, 2.0, ClipKind::Burst, 0xFF5D5D),
+            original,
+            entry(50.0, 5.0, ClipKind::Smoke, 0x9AA3B2),
+        ]);
+        let edits = core.edits_since_autosave();
+        assert!(core.fx_split_clip(1, 9.0));
+        assert_eq!(core.project.fx_clips.len(), 4);
+        let first = &core.project.fx_clips[1];
+        let second = &core.project.fx_clips[2];
+        // The original keeps [4, 9); the new clip, inserted
+        // immediately after it, takes [9, 14).
+        assert_eq!(first.clip.start, 4.0);
+        assert_eq!(first.clip.duration, 5.0);
+        assert_eq!(second.clip.start, 9.0);
+        assert_eq!(second.clip.duration, 5.0);
+        assert_eq!(
+            first.clip.duration + second.clip.duration,
+            10.0,
+            "the halves sum to the original duration"
+        );
+        // The second half is the original in every other
+        // field — kind, colours, seed, angle, length and
+        // the figure anchor all cloned, none re-derived.
+        assert_eq!(second.clip.kind, ClipKind::Beam);
+        assert_eq!(second.clip.color, 0x5DB2FF);
+        assert_eq!(second.clip.color2, Some(0xFF7BAC));
+        assert_eq!(second.clip.seed, 42);
+        assert_eq!(second.clip.angle, 30.0);
+        assert_eq!(second.clip.length, 200.0);
+        assert_eq!(second.figure, 2);
+        assert_eq!(second.node, 3);
+        // The neighbours are untouched.
+        assert_eq!(core.project.fx_clips[0].clip.kind, ClipKind::Burst);
+        assert_eq!(core.project.fx_clips[3].clip.start, 50.0);
+        assert_eq!(core.status, "FX clip 2 split at frame 10 into clips 2 and 3.");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+    }
+
+    #[test]
+    fn split_clip_fractional_point_and_minimum_halves() {
+        // A fractional split point lands exactly where
+        // asked — clip times are f32 throughout.
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        assert!(core.fx_split_clip(0, 4.5));
+        assert_eq!(core.project.fx_clips[0].clip.duration, 0.5);
+        assert_eq!(core.project.fx_clips[1].clip.start, 4.5);
+        assert_eq!(core.project.fx_clips[1].clip.duration, 9.5);
+        assert_eq!(core.status, "FX clip 1 split at frame 5.5 into clips 1 and 2.");
+        // A half of exactly the 0.1 resize floor is
+        // allowed, on either side of the split.
+        let mut core = core_with(vec![entry(0.0, 2.0, ClipKind::Burst, 0xFF5D5D)]);
+        assert!(core.fx_split_clip(0, 1.9), "second half is 0.1 frames");
+        let mut core = core_with(vec![entry(0.0, 2.0, ClipKind::Burst, 0xFF5D5D)]);
+        assert!(core.fx_split_clip(0, 0.1), "first half is 0.1 frames");
+    }
+
+    #[test]
+    fn split_clip_refusals_change_nothing() {
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        // Out-of-range index, in the family's failure voice.
+        assert!(!core.fx_split_clip(3, 9.0));
+        assert_eq!(core.status, "FX clip split failed: no FX clip 4.");
+        // Both edges: splitting there is a no-op, not a split.
+        assert!(!core.fx_split_clip(0, 4.0), "at the start edge");
+        assert_eq!(
+            core.status,
+            "FX clip split failed: frame 5 is not inside clip 1."
+        );
+        assert!(!core.fx_split_clip(0, 14.0), "at the end edge");
+        // Outside the span entirely.
+        assert!(!core.fx_split_clip(0, 2.0));
+        assert!(!core.fx_split_clip(0, 20.0));
+        // Inside, but a half would fall below the 0.1 floor.
+        assert!(!core.fx_split_clip(0, 4.05), "first half would be 0.05");
+        assert!(!core.fx_split_clip(0, 13.95), "second half would be 0.05");
+        // A NaN split point is inside nothing.
+        assert!(!core.fx_split_clip(0, f32::NAN));
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+        assert_eq!(core.project.fx_clips.len(), 1);
+    }
+
+    #[test]
+    fn split_clip_undo_restores_the_single_clip() {
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        assert!(core.fx_split_clip(0, 9.0));
+        assert_eq!(core.project.fx_clips.len(), 2);
+        // The one snapshot is a real undo step: a single
+        // undo rejoins the halves.
+        core.undo();
+        assert_eq!(core.status, "Undone.");
+        assert_eq!(core.project.fx_clips.len(), 1);
+        assert_eq!(core.project.fx_clips[0].clip.start, 4.0);
+        assert_eq!(core.project.fx_clips[0].clip.duration, 10.0);
     }
 
     #[test]

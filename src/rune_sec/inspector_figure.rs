@@ -95,6 +95,20 @@
 //!   evaluated positions the stage draws
 //!   (`EditorCore::positions_f`), so the numbers describe
 //!   the posed figure, graph channels included.
+//! * Centre figure / Ground figure →
+//!   [`centre_selected_figure`] / [`ground_selected_figure`]
+//!   — the placement row (key `fig-place-row`, buttons
+//!   `fig-centre` / `fig-ground`) under the scale row.
+//!   Each shifts the selected figure's root at the
+//!   **current frame only** by the delta between the
+//!   stage and the figure's drawn bounding box
+//!   ([`figure_bbox`]: joint positions, grown by the head
+//!   ring's radius around head-flagged joints, exactly as
+//!   the stage draws it), written through the core's own
+//!   root-move primitive `nudge_path_point`
+//!   (editor.rs) — one snapshot, one undo step. Other
+//!   frames keep their roots: centring is a pose edit at
+//!   this frame, not a project-wide move.
 //!
 //! When the project has no figures — or the selection is
 //! stale — the panel is one muted line.
@@ -272,6 +286,147 @@ pub fn measure_line(m: &FigureMeasure) -> String {
         "{} joints · {:.0} long · {:.0}×{:.0}",
         m.nodes, m.total_length, m.width, m.height
     )
+}
+
+/// Radius of the ring both renderers draw around a
+/// head-flagged joint: 17 stage units (stage_view.rs
+/// draws `17.0 * scale`; figures_panel.rs keeps the same
+/// value as its `HEAD_RING_R` for thumbnails). The ring
+/// is part of the figure as drawn, so the placement
+/// bounding box grows by it around head joints.
+pub const HEAD_RING_R: f32 = 17.0;
+
+/// The selected figure's bounding box at the display
+/// frame as `[min_x, min_y, max_x, max_y]`, in stage
+/// coordinates — or `None` under the same conditions as
+/// [`figure_measure`] (no figure, stale selection, a rig
+/// that evaluates to no joints).
+///
+/// From the same evaluated positions as the measure
+/// (`EditorCore::positions_f`, display frame), with one
+/// difference: a head-flagged joint contributes its
+/// drawn head ring, not just its point — the box grows
+/// by [`HEAD_RING_R`] on every side of each head joint,
+/// so the box bounds the figure as the stage actually
+/// draws it. That is the box Centre/Ground place by:
+/// what you see is what gets centred and grounded.
+pub fn figure_bbox(core: &EditorCore) -> Option<[f32; 4]> {
+    let fi = core.selected_figure;
+    let fig = core.project.figures.get(fi)?;
+    let pos = core.positions_f(core.display_frame(), fi);
+    if pos.is_empty() {
+        return None;
+    }
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for (i, p) in pos.iter().enumerate() {
+        let r = if fig.def.nodes.get(i).map(|n| n.head).unwrap_or(false) {
+            HEAD_RING_R
+        } else {
+            0.0
+        };
+        min_x = min_x.min(p[0] - r);
+        min_y = min_y.min(p[1] - r);
+        max_x = max_x.max(p[0] + r);
+        max_y = max_y.max(p[1] + r);
+    }
+    Some([min_x, min_y, max_x, max_y])
+}
+
+/// Root shift that centres a `[min_x, min_y, max_x,
+/// max_y]` bounding box on a `[width, height]` stage:
+/// stage centre minus box centre, per axis.
+pub fn centre_delta(bbox: [f32; 4], stage: [f32; 2]) -> [f32; 2] {
+    [
+        stage[0] / 2.0 - (bbox[0] + bbox[2]) / 2.0,
+        stage[1] / 2.0 - (bbox[1] + bbox[3]) / 2.0,
+    ]
+}
+
+/// Root shift that grounds a `[min_x, min_y, max_x,
+/// max_y]` bounding box on a `[width, height]` stage:
+/// no horizontal move; vertically, stage bottom minus
+/// box bottom. Stage coordinates are screen-like — y
+/// grows downward, as `model::evaluate` lays poses out
+/// and the stage draws them — so the box's maximum y IS
+/// its visual bottom, and adding this delta to the root
+/// sets that bottom exactly on the stage's lower edge.
+pub fn ground_delta(bbox: [f32; 4], stage: [f32; 2]) -> [f32; 2] {
+    [0.0, stage[1] - bbox[3]]
+}
+
+/// Shared tail of the two placement actions: write
+/// `delta` into the selected figure's root at the
+/// current frame through the core's own root-move
+/// primitive, `nudge_path_point` (editor.rs) — the op
+/// takes the operation's one snapshot and performs the
+/// write; only its status wording (motion-path nudging)
+/// is replaced with the placement's own, the way this
+/// panel's composed ops report themselves. The frame's
+/// pose row is validated first, so a stale selection
+/// refuses here with the panel's usual wording and no
+/// snapshot, and the op itself is only ever called when
+/// it will succeed.
+fn shift_selected_figure_root(core: &mut EditorCore, delta: [f32; 2], status: String) -> bool {
+    let fi = core.selected_figure;
+    let frame = core.current;
+    let valid = core
+        .project
+        .frames
+        .get(frame)
+        .map(|f| fi < f.poses.len())
+        .unwrap_or(false);
+    if !valid {
+        core.status = "No such figure.".into();
+        return false;
+    }
+    core.nudge_path_point(frame, fi, delta);
+    core.status = status;
+    true
+}
+
+/// Centre the selected figure on the stage at the
+/// current frame: shift its root by [`centre_delta`] of
+/// its drawn bounding box ([`figure_bbox`]) — one undo
+/// step. **Current frame only**: the root lives in this
+/// frame's pose, so other frames keep their own roots
+/// and the figure's motion path gains a step here, the
+/// same consequence as dragging the figure on the stage
+/// at this frame. Refusals (no figure, stale selection,
+/// a rig with no joints) are status-only and take no
+/// snapshot, like every other refusal in this panel.
+pub fn centre_selected_figure(core: &mut EditorCore) -> bool {
+    let Some(bbox) = figure_bbox(core) else {
+        core.status = "No such figure.".into();
+        return false;
+    };
+    let delta = centre_delta(bbox, core.project.stage);
+    let fi = core.selected_figure;
+    shift_selected_figure_root(
+        core,
+        delta,
+        format!("Figure {} centred on the stage.", fi + 1),
+    )
+}
+
+/// Ground the selected figure at the current frame:
+/// shift its root down by [`ground_delta`] of its drawn
+/// bounding box ([`figure_bbox`]) so the box's bottom —
+/// feet, or the head ring when the head hangs lowest —
+/// rests exactly on the stage's bottom edge. One undo
+/// step; **current frame only**, and the same
+/// status-only, snapshot-free refusals as
+/// [`centre_selected_figure`].
+pub fn ground_selected_figure(core: &mut EditorCore) -> bool {
+    let Some(bbox) = figure_bbox(core) else {
+        core.status = "No such figure.".into();
+        return false;
+    };
+    let delta = ground_delta(bbox, core.project.stage);
+    let fi = core.selected_figure;
+    shift_selected_figure_root(core, delta, format!("Figure {} grounded.", fi + 1))
 }
 
 /// Persistent edit state for the rename field — the one
@@ -537,6 +692,25 @@ fn scale_stepper_row(t: &Theme) -> El {
         ))
 }
 
+/// The placement row: Centre figure / Ground figure,
+/// shifting the selected figure's root at the current
+/// frame through [`centre_selected_figure`] /
+/// [`ground_selected_figure`] (which read the selection
+/// at press time, like the scale row does).
+fn place_row(t: &Theme) -> El {
+    row()
+        .key("fig-place-row")
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(btn("fig-centre", "Centre figure", false, t, |s: &mut State| {
+            centre_selected_figure(&mut s.core);
+        }))
+        .child(btn("fig-ground", "Ground figure", false, t, |s: &mut State| {
+            ground_selected_figure(&mut s.core);
+        }))
+}
+
 /// The Delete figure button: chrome-button shape in the
 /// error colour (the 2.0 palette's `C_ERROR`).
 fn danger_btn(key: &str, label: &str, f: impl Fn(&mut State) + 'static) -> El {
@@ -637,6 +811,7 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
                 .color(t.text_secondary),
         );
     }
+    panel = panel.child(place_row(t));
     panel.child(
         row()
             .w_full()
@@ -1180,5 +1355,226 @@ loop_playback: true,
             height: 288.2,
         };
         assert_eq!(measure_line(&m), "14 joints · 512 long · 121×288");
+    }
+
+    #[test]
+    fn centre_delta_is_zero_for_a_centred_box() {
+        // Box centre (480, 360) is the 960×720 stage's
+        // centre: nothing to shift.
+        let d = centre_delta([380.0, 260.0, 580.0, 460.0], [960.0, 720.0]);
+        assert_eq!(d, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn centre_delta_shifts_an_off_centre_box_exactly() {
+        // Box centre (200, 300); stage centre (480, 360).
+        let d = centre_delta([100.0, 100.0, 300.0, 500.0], [960.0, 720.0]);
+        assert_eq!(d, [280.0, 60.0]);
+        // A box past the centre shifts back by the mirror
+        // amount.
+        let d = centre_delta([660.0, 260.0, 860.0, 460.0], [960.0, 720.0]);
+        assert_eq!(d, [-280.0, 0.0]);
+    }
+
+    #[test]
+    fn ground_delta_drops_the_box_bottom_to_the_stage_bottom() {
+        // Bottom at y 500 on a 720-tall stage: 220 down,
+        // and never any horizontal shift.
+        let d = ground_delta([100.0, 100.0, 300.0, 500.0], [960.0, 720.0]);
+        assert_eq!(d, [0.0, 220.0]);
+        // Already grounded: no shift.
+        let d = ground_delta([100.0, 420.0, 300.0, 720.0], [960.0, 720.0]);
+        assert_eq!(d, [0.0, 0.0]);
+        // Bottom past the stage edge (a figure hanging
+        // off-stage): the shift is negative, lifting it
+        // back inside.
+        let d = ground_delta([100.0, 100.0, 300.0, 800.0], [960.0, 720.0]);
+        assert_eq!(d, [0.0, -80.0]);
+    }
+
+    /// The hand-built 3-node chain of
+    /// `figure_measure_matches_a_hand_built_chain`, joints
+    /// at (100, 200), (130, 200), (130, 240); `head`
+    /// marks the root node as a head when true.
+    fn chain_core(head: bool) -> EditorCore {
+        use stykanimate_rs::model::{FigureDef, NodeDef, NodeStyle, Shape};
+        let node = |name: &str, parent: Option<usize>, length: f32, head: bool| NodeDef {
+            name: name.into(),
+            parent,
+            length,
+            rest_angle: 0.0,
+            head,
+            bend: 1.0,
+            thickness: 5.0,
+            color: None,
+            ik_end: false,
+            shape: Shape::Line,
+            style: NodeStyle::default(),
+            media: None,
+        };
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        core.project.figures[fi].def = FigureDef {
+            nodes: vec![
+                node("root", None, 0.0, head),
+                node("reach", Some(0), 30.0, false),
+                node("drop", Some(1), 40.0, false),
+            ],
+        };
+        for frame in core.project.frames.iter_mut() {
+            frame.poses[fi].root = [100.0, 200.0];
+            frame.poses[fi].angles[1] = 90.0;
+            frame.poses[fi].angles[2] = -90.0;
+        }
+        core
+    }
+
+    #[test]
+    fn figure_bbox_matches_the_hand_built_chain() {
+        let core = chain_core(false);
+        assert_eq!(figure_bbox(&core), Some([100.0, 200.0, 130.0, 240.0]));
+    }
+
+    #[test]
+    fn figure_bbox_grows_around_head_joints_by_the_ring_radius() {
+        // The root is the head: the box grows by
+        // HEAD_RING_R around (100, 200) only — the other
+        // joints contribute their bare points, so max_x /
+        // max_y are unchanged.
+        let core = chain_core(true);
+        assert_eq!(
+            figure_bbox(&core),
+            Some([100.0 - HEAD_RING_R, 200.0 - HEAD_RING_R, 130.0, 240.0])
+        );
+    }
+
+    #[test]
+    fn figure_bbox_is_none_without_a_figure() {
+        let mut core = EditorCore::new();
+        core.project.figures.clear();
+        assert!(figure_bbox(&core).is_none());
+        let mut core = EditorCore::new();
+        core.selected_figure = 999;
+        assert!(figure_bbox(&core).is_none());
+    }
+
+    #[test]
+    fn centre_puts_the_demo_figures_box_centre_on_the_stage_centre() {
+        let mut core = EditorCore::new();
+        let stage = core.project.stage;
+        assert!(centre_selected_figure(&mut core));
+        let b = figure_bbox(&core).expect("the demo figure still measures");
+        let centre = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
+        assert!(
+            (centre[0] - stage[0] / 2.0).abs() < 0.5,
+            "box centre x {} vs stage centre {}",
+            centre[0],
+            stage[0] / 2.0
+        );
+        assert!(
+            (centre[1] - stage[1] / 2.0).abs() < 0.5,
+            "box centre y {} vs stage centre {}",
+            centre[1],
+            stage[1] / 2.0
+        );
+        assert!(
+            core.status.contains("centred on the stage"),
+            "status should report the centring: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn ground_puts_the_demo_figures_box_bottom_on_the_stage_bottom() {
+        let mut core = EditorCore::new();
+        let stage = core.project.stage;
+        assert!(ground_selected_figure(&mut core));
+        let b = figure_bbox(&core).expect("the demo figure still measures");
+        assert!(
+            (b[3] - stage[1]).abs() < 0.5,
+            "box bottom {} vs stage bottom {}",
+            b[3],
+            stage[1]
+        );
+        // Grounding never moves the figure sideways: the
+        // box's horizontal span is exactly what it was
+        // before the press (a fresh core holds the
+        // un-grounded demo figure).
+        let fresh = EditorCore::new();
+        let before = figure_bbox(&fresh).expect("demo figure");
+        assert_eq!(b[0], before[0]);
+        assert_eq!(b[2], before[2]);
+        assert!(
+            core.status.contains("grounded"),
+            "status should report the grounding: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn centre_is_one_undo_step_and_current_frame_only() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        let current = core.current;
+        let roots_before: Vec<_> = core
+            .project
+            .frames
+            .iter()
+            .map(|f| f.poses[fi].root)
+            .collect();
+        let depth = core.undo_depth();
+        assert!(centre_selected_figure(&mut core));
+        assert_eq!(
+            core.undo_depth(),
+            depth + 1,
+            "the whole placement must be one snapshot"
+        );
+        for (f, frame) in core.project.frames.iter().enumerate() {
+            if f != current {
+                assert_eq!(
+                    frame.poses[fi].root, roots_before[f],
+                    "frame {f} is not the current frame: its root must not move"
+                );
+            }
+        }
+        core.undo();
+        assert_eq!(
+            core.project.frames[current].poses[fi].root, roots_before[current],
+            "a single undo must restore the current frame's root"
+        );
+    }
+
+    #[test]
+    fn ground_is_exactly_one_undo_step() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        let root_before = core.project.frames[core.current].poses[fi].root;
+        let depth = core.undo_depth();
+        assert!(ground_selected_figure(&mut core));
+        assert_eq!(core.undo_depth(), depth + 1);
+        core.undo();
+        assert_eq!(
+            core.project.frames[core.current].poses[fi].root, root_before,
+            "a single undo must restore the root"
+        );
+    }
+
+    #[test]
+    fn placement_refuses_without_a_figure_and_takes_no_snapshot() {
+        let mut core = EditorCore::new();
+        core.project.figures.clear();
+        let depth = core.undo_depth();
+        assert!(!centre_selected_figure(&mut core));
+        assert!(!ground_selected_figure(&mut core));
+        assert_eq!(core.undo_depth(), depth, "refusals must be snapshot-free");
+        assert_eq!(core.status, "No such figure.");
+
+        let mut core = EditorCore::new();
+        core.selected_figure = 999;
+        let depth = core.undo_depth();
+        assert!(!centre_selected_figure(&mut core));
+        assert!(!ground_selected_figure(&mut core));
+        assert_eq!(core.undo_depth(), depth, "refusals must be snapshot-free");
+        assert_eq!(core.status, "No such figure.");
     }
 }

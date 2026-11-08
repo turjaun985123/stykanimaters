@@ -10,16 +10,17 @@
 //!
 //! Every button calls a real export. In "All frames" mode the
 //! handlers are exactly the `EditorCore` ops the GPUI centre
-//! called. Six formats also have frame-range exporters in
-//! `export.rs` (PNG/JPEG/GIF/APNG/MP4/WebM — the same free
-//! functions the MCP layer calls, e.g. `mcp_io.rs`'s
+//! called. Nine formats also have frame-range exporters in
+//! `export.rs` (PNG/JPEG/SVG, the spritesheet, the contact
+//! sheet, GIF/APNG/MP4/WebM — the same free functions the
+//! MCP layer calls, e.g. `mcp_io.rs`'s
 //! `export_mp4_range`); when the panel's range toggle is set
-//! to "Loop range" and a loop range exists, those six write
+//! to "Loop range" and a loop range exists, those nine write
 //! only the loop-range frames, to the same destinations the
 //! full ops use, and report through `core.status` in the
-//! full ops' wording. SVG, the spritesheet and all project
-//! formats have no range variant, so they always export in
-//! full — the toggle line says so rather than pretending
+//! full ops' wording. Only the project formats have no
+//! range variant, so they always export in full — the
+//! toggle line says so rather than pretending
 //! otherwise. MP4/WebM range exports are video-only (the
 //! full MP4 export muxes audio; the range path cannot), and
 //! the notes say that too.
@@ -29,11 +30,11 @@
 //! all video" (MP4 + WebM). A bundle is a composition of the
 //! same full `EditorCore` ops the single-format buttons call
 //! in "All frames" mode, run in `plan_bundle` order. Bundles
-//! deliberately ignore the range toggle: of the bundle
-//! members only PNG/JPEG/MP4/WebM have range exporters at
-//! all, and a bundle that silently ranged some formats and
-//! not others would not match its label — the bundle rows'
-//! notes say "always export in full" instead. Each op sets
+//! deliberately ignore the range toggle: every bundle
+//! member has a range exporter, but a bundle that silently
+//! wrote only the loop-range frames would not match its
+//! "Export all" label — the bundle rows' notes say
+//! "always export in full" instead. Each op sets
 //! `core.status` as it runs; when the bundle finishes, the
 //! handler overwrites the status with one recap line (built
 //! by `bundle_recap` from the ops actually called, naming
@@ -102,12 +103,14 @@ use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 /// The `xc-*` keys whose formats have a frame-range exporter
-/// in `export.rs`. Everything else always exports in full.
-pub const RANGE_KEYS: [&str; 7] = ["xc-png", "xc-jpeg", "xc-gif", "xc-apng", "xc-mp4", "xc-webm", "xc-contact"];
+/// in `export.rs`. The project formats always export in
+/// full.
+pub const RANGE_KEYS: [&str; 9] = ["xc-png", "xc-jpeg", "xc-gif", "xc-apng", "xc-mp4", "xc-webm", "xc-contact", "xc-svg", "xc-sheet"];
 
 /// Does the format behind this `xc-*` key support frame-range
-/// export? (PNG/JPEG sequences, GIF, APNG, MP4, WebM — the
-/// `*_range` functions in `export.rs`.)
+/// export? (PNG/JPEG sequences, SVG, the spritesheet, the
+/// contact sheet, GIF, APNG, MP4, WebM — the `*_range`
+/// functions in `export.rs`.)
 pub fn supports_range(key: &str) -> bool {
     RANGE_KEYS.contains(&key)
 }
@@ -141,7 +144,7 @@ pub fn range_target(core: &EditorCore, use_range: bool) -> Option<(usize, usize)
 pub fn loop_note(core: &EditorCore) -> Option<String> {
     let (a, b) = range_target(core, true)?;
     Some(format!(
-        "Loop range: frames {}–{} — with \"Loop range\" selected below, the PNG/JPEG/GIF/APNG/MP4/WebM exports write only those frames (MP4/WebM range exports are video-only).",
+        "Loop range: frames {}–{} — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (MP4/WebM range exports are video-only).",
         a + 1,
         b + 1
     ))
@@ -405,6 +408,33 @@ fn export_jpeg_action(s: &mut State) {
     note_single(s, ExportOp::Jpeg);
 }
 
+/// SVG with the range toggle (Phase J): the range variant
+/// writes into the same directory the full op uses —
+/// `EditorCore::export_svg` writes to `./export/svg` — and
+/// reports in the full op's wording with the frame range
+/// named.
+fn export_svg_action(s: &mut State) {
+    match range_target(&s.core, s.export_use_range) {
+        Some((a, b)) => {
+            let dir = export_dir().join("svg");
+            let _ = std::fs::create_dir_all(&dir);
+            match stykanimate_rs::export::export_svg_range(&s.core.project, a, b, &dir) {
+                Ok(n) => {
+                    s.core.status = format!(
+                        "Exported {n} SVG frames (frames {}–{}) to {}",
+                        a + 1,
+                        b + 1,
+                        dir.display()
+                    )
+                }
+                Err(e) => s.core.status = format!("SVG export failed: {e}"),
+            }
+        }
+        None => s.core.export_svg(),
+    }
+    note_single(s, ExportOp::Svg);
+}
+
 fn export_gif_action(s: &mut State) {
     match range_target(&s.core, s.export_use_range) {
         Some((a, b)) => {
@@ -426,6 +456,34 @@ fn export_gif_action(s: &mut State) {
         None => s.core.export_gif(),
     }
     note_single(s, ExportOp::Gif);
+}
+
+/// Spritesheet with the range toggle (Phase J): the range
+/// variant writes the one sheet to the full op's
+/// destination (`./export/spritesheet.png`) and reports in
+/// the contact-sheet action's voice — frame count, the
+/// range, the path.
+fn export_sheet_action(s: &mut State) {
+    match range_target(&s.core, s.export_use_range) {
+        Some((a, b)) => {
+            let dir = export_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join("spritesheet.png");
+            match stykanimate_rs::export::export_sheet_range(&s.core.project, a, b, &path) {
+                Ok(n) => {
+                    s.core.status = format!(
+                        "Exported {n}-frame spritesheet (frames {}–{}) to {}",
+                        a + 1,
+                        b + 1,
+                        path.display()
+                    )
+                }
+                Err(e) => s.core.status = format!("Spritesheet export failed: {e}"),
+            }
+        }
+        None => s.core.export_sheet(),
+    }
+    note_single(s, ExportOp::Spritesheet);
 }
 
 /// The full contact-sheet export (Phase I, integrator
@@ -916,28 +974,24 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             t,
             export_jpeg_action,
         ))
-        .child(plain_row(
+        .child(range_row(
             "xc-svg",
-            Some("image"),
+            "image",
             "SVG",
             "One SVG per frame in ./export/svg/",
             t,
-            EditorCore::export_svg,
-            ExportOp::Svg.name(),
-            ExportOp::Svg.dest(),
+            export_svg_action,
         ));
     panel = panel.child(images);
 
     let animation = section_with_icon("film", "Animation", t)
-        .child(plain_row(
+        .child(range_row(
             "xc-sheet",
-            Some("table-cells-large"),
+            "table-cells-large",
             "Spritesheet",
             "All frames on one sheet — ./export/spritesheet.png",
             t,
-            EditorCore::export_sheet,
-            ExportOp::Spritesheet.name(),
-            ExportOp::Spritesheet.dest(),
+            export_sheet_action,
         ))
         .child(range_row(
             "xc-contact",
@@ -1118,12 +1172,14 @@ mod tests {
 
     #[test]
     fn range_support_matches_the_export_rs_range_functions() {
-        for key in ["xc-png", "xc-jpeg", "xc-gif", "xc-apng", "xc-mp4", "xc-webm"] {
+        for key in [
+            "xc-png", "xc-jpeg", "xc-gif", "xc-apng", "xc-mp4", "xc-webm", "xc-contact",
+            "xc-svg", "xc-sheet",
+        ] {
             assert!(supports_range(key), "{key} should support range export");
         }
         for key in [
-            "xc-svg", "xc-sheet", "xc-v2", "xc-v3", "xc-v4", "xc-v5", "xc-stk", "xc-nodes",
-            "xc-stknds", "xc-bogus",
+            "xc-v2", "xc-v3", "xc-v4", "xc-v5", "xc-stk", "xc-nodes", "xc-stknds", "xc-bogus",
         ] {
             assert!(!supports_range(key), "{key} should not support range export");
         }

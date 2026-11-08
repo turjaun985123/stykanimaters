@@ -137,6 +137,18 @@
 //! tint and stay wired — their refusals remain
 //! status-only — and Copy/Paste keys keep the muting
 //! `kbtn` already gave them.
+//!
+//! Phase J (section 9/40) fixes a layout overlap from
+//! the Phase I headless screenshot: with no joint
+//! selected, the "No joint selected" note was a bare
+//! text child whose painted line could run across the
+//! Delete key button. The note now renders through
+//! [`no_joint_note_row`] — its own full-width row above
+//! the button rows, its text in Rune's truncating
+//! one-line mode — and only in the no-joint state. When
+//! a joint IS selected the section keeps the original
+//! bare target line in the same slot, so the
+//! selected-state layout is unchanged.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El};
@@ -725,6 +737,59 @@ fn kbtn(
     }
 }
 
+/// Element key of the dedicated no-joint note row
+/// (Phase J). The note lives under this key, in its own
+/// row — never inside the actions row below.
+pub const NO_JOINT_NOTE_ROW_KEY: &str = "keyframe-no-joint-note";
+
+/// Element key of the row holding Key angle here /
+/// Delete key here / Auto tangents. Kept as a constant
+/// so the layout tests can prove the no-joint note row
+/// and the Delete button's row are different rows; the
+/// value is the key the row has always carried.
+pub const ACTIONS_ROW_KEY: &str = "keyframe-actions";
+
+/// Element key of the Delete key button itself — the
+/// value it has always carried, named so the layout
+/// tests can pin that the fix did not rename it.
+pub const DELETE_KEY_BUTTON_KEY: &str = "key-delete";
+
+/// The note shown when no joint is selected, or `None`
+/// when one is. The text is [`target_text`]'s no-joint
+/// wording, unchanged — Phase J changes where the note
+/// is laid out, not what it says.
+pub fn no_joint_note(core: &EditorCore) -> Option<&'static str> {
+    match core.selected_node {
+        None => Some("No joint selected"),
+        Some(_) => None,
+    }
+}
+
+/// The no-joint note as its OWN row (Phase J): a
+/// full-width row holding one muted text in Rune's
+/// truncating one-line mode (`.grow(1.0).truncate()` —
+/// the status strip's tail-segment discipline), so the
+/// note's painted line is confined to its own box and
+/// elides with "…" under width pressure instead of
+/// running across the Delete key button below. Returns
+/// `None` when a joint is selected: the caller then
+/// renders the original bare target line, keeping the
+/// selected-state layout exactly as it was.
+pub fn no_joint_note_row(core: &EditorCore, t: &Theme) -> Option<El> {
+    no_joint_note(core).map(|note| {
+        row()
+            .key(NO_JOINT_NOTE_ROW_KEY)
+            .w_full()
+            .child(
+                text(note)
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+                    .grow(1.0)
+                    .truncate(),
+            )
+    })
+}
+
 /// The keyframe tools section: header, selection target,
 /// keyed-frame indicator, the key/delete/auto buttons, the
 /// copy/paste-keys clipboard row (with Clear channel
@@ -740,6 +805,11 @@ fn kbtn(
 /// would refuse, via the `*_enabled` predicates above
 /// (Phase I); the plain text buttons stay wired in every
 /// state and land on their ops' status-only refusals.
+/// The target slot under the header is state-dependent
+/// (Phase J): with a joint selected it is the original
+/// bare target line; with none it is the dedicated
+/// [`no_joint_note_row`], so the note can never paint
+/// across the actions row beneath it.
 pub fn keyframe_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let keyed = selected_angle_channel(core).is_some_and(|ch| keyed_here(&ch.keys, core.current));
@@ -759,9 +829,17 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
         .gap(6.0)
         .child(text("Keyframes").font(type_::TITLE).color(t.text))
         .child(
-            text(target_text(core))
-                .font(type_::LABEL)
-                .color(t.text_secondary),
+            // The target slot (Phase J): the no-joint
+            // note gets its own row; a selected joint
+            // keeps the bare target line it has always
+            // had, in the same slot.
+            if let Some(note_row) = no_joint_note_row(core, t) {
+                note_row
+            } else {
+                text(target_text(core))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+            },
         )
         .child(
             text(indicator_text(core))
@@ -770,12 +848,12 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
         )
         .child(
             row()
-                .key("keyframe-actions")
+                .key(ACTIONS_ROW_KEY)
                 .gap(6.0)
                 .child(btn("key-angle", "Key angle here", false, t, |s| {
                     s.core.key_graph_angle()
                 }))
-                .child(btn("key-delete", "Delete key here", keyed, t, |s| {
+                .child(btn(DELETE_KEY_BUTTON_KEY, "Delete key here", keyed, t, |s| {
                     delete_key_here(s)
                 }))
                 .child(btn("key-auto", "Auto tangents", false, t, |s| {
@@ -1569,5 +1647,102 @@ mod tests {
         assert!(!copy_key_enabled(&bare));
         bare.selected_node = None;
         assert!(!copy_key_enabled(&bare));
+    }
+
+    /// A shell `State` over the given core, field-for-field
+    /// the literal the other sections' build tests use —
+    /// present so the Phase J layout test can build the
+    /// whole section, not just its helpers.
+    fn state_with(core: EditorCore) -> State {
+        State {
+            core,
+            last_poll: None,
+            wheel_zoom: 0.0,
+            figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
+            figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
+            library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
+            graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
+            audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            menus: crate::rune_sec::menus::MenusState::default(),
+            palette: crate::rune_sec::command_palette::PaletteState::new(),
+            settings: crate::rune_sec::settings_popover::SettingsState::default(),
+            toasts: crate::rune_sec::toasts::ToastsState::new(),
+            text_tool: crate::rune_sec::text_tool::TextToolState::new(),
+            name_edit: rune::TextEdit::new(""),
+            export_use_range: false,
+            fx_selected: None,
+            pose_clipboard: None,
+            last_status: String::new(),
+            toast_now: 0.0,
+            last_dark: true,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            guides: false,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            stroke_selected: None,
+            particle_selected: None,
+            guides_frustum: true,
+            guides_safe: true,
+            onion_ui: Default::default(),
+            last_frame: 0,
+            pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+            pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
+            loop_playback: true,
+            was_playing: false,
+        }
+    }
+
+    #[test]
+    fn no_joint_note_gets_its_own_row_not_the_delete_buttons_row() {
+        // `El` has no public tree-walk, so — the timeline
+        // marks pattern — the layout is asserted through
+        // the helpers and key constants the builder itself
+        // uses: the note row is built by
+        // `no_joint_note_row` under
+        // `NO_JOINT_NOTE_ROW_KEY`, and the Delete button
+        // sits in the row keyed `ACTIONS_ROW_KEY`. Two
+        // different keyed rows, built by two different
+        // children of the section column, cannot be
+        // siblings in one row.
+        let t = rune::tok::theme(true);
+
+        // No joint selected: the note exists, and its row
+        // builds. The whole section builds in this state.
+        let mut no_joint = EditorCore::new();
+        no_joint.selected_node = None;
+        assert_eq!(no_joint_note(&no_joint), Some("No joint selected"));
+        assert!(
+            no_joint_note_row(&no_joint, &t).is_some(),
+            "the no-joint state renders the dedicated note row"
+        );
+        let _ = keyframe_section(&state_with(no_joint), &t);
+
+        // A joint selected: no note, no note row — the
+        // target slot falls back to the original bare
+        // target line. The whole section builds here too.
+        let selected = core_with_angle_keys();
+        assert_eq!(no_joint_note(&selected), None);
+        assert!(
+            no_joint_note_row(&selected, &t).is_none(),
+            "the selected state must not gain an empty note row"
+        );
+        assert!(target_text(&selected).starts_with("Figure"));
+        let _ = keyframe_section(&state_with(selected), &t);
+
+        // The rows are distinct, and neither the actions
+        // row nor the Delete button was renamed by the
+        // fix — their keys are the values they have
+        // always carried.
+        assert_ne!(NO_JOINT_NOTE_ROW_KEY, ACTIONS_ROW_KEY);
+        assert_eq!(ACTIONS_ROW_KEY, "keyframe-actions");
+        assert_eq!(DELETE_KEY_BUTTON_KEY, "key-delete");
     }
 }

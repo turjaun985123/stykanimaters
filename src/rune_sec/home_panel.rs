@@ -47,6 +47,21 @@
 //!   `folder-open`), and the search row leads with a
 //!   `magnifying-glass` `icon_el`; keys, labels, active
 //!   state and handlers are unchanged.
+//! - **Row metadata (Phase J)** — each row's metadata line
+//!   (keyed `home-proj-meta-{i}`) is fed by
+//!   [`project_metadata`]: a *light* read of the project
+//!   file (a `serde_json::Value` parse counting only the
+//!   top-level `figures`/`frames` arrays — never a full
+//!   `Project` deserialise), cached per file on its mtime
+//!   in [`HomePanelState::metadata_for`]. The scan's
+//!   `ProjectInfo` stays the fallback (see
+//!   [`row_meta_line`]): the scan had to fully parse every
+//!   file anyway to learn its display name, so its numbers
+//!   are already paid for — the light read's value is that
+//!   the line's figures/frames/modified are re-verified
+//!   against the file on disk whenever its mtime moves,
+//!   even when the projects *directory* (the scan cache's
+//!   key) has not changed.
 //!
 //! ## The scan cache (the Wave 15 lesson)
 //!
@@ -120,6 +135,7 @@
 //! ```
 
 use std::cell::{Ref, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -160,6 +176,16 @@ pub struct HomePanelState {
     /// mutability because the panel builder only holds
     /// `&State`, exactly as in the GPUI panel.
     scan_cache: RefCell<Option<(Option<SystemTime>, Vec<ProjectInfo>)>>,
+    /// Per-file light-metadata cache (Phase J):
+    /// path → `(mtime, figures, frames)` as last read by
+    /// [`project_metadata`]. An entry is served only while
+    /// the file's current mtime equals the stored one —
+    /// the same mtime-key discipline as the scan cache,
+    /// one level down (per file, not per directory).
+    /// Interior mutability for the same reason as
+    /// `scan_cache`; `Default` (empty map) keeps every
+    /// existing construction of this state working.
+    meta_cache: RefCell<HashMap<PathBuf, (SystemTime, usize, usize)>>,
 }
 
 impl HomePanelState {
@@ -187,6 +213,29 @@ impl HomePanelState {
         let entries = projects::scan(&dir);
         *self.scan_cache.borrow_mut() = Some((key, entries));
         Ref::map(self.scan_cache.borrow(), |c| &c.as_ref().unwrap().1)
+    }
+
+    /// One project file's light metadata
+    /// ([`project_metadata`]) through the mtime-keyed
+    /// per-file cache: one `stat` per call, a re-read only
+    /// when the file's mtime has moved since the cached
+    /// read. `None` when the file cannot be stat'ed or
+    /// parsed — the caller (the row builder) then falls
+    /// back to the scan's data, so a vanished file never
+    /// breaks a row that is already on screen.
+    pub fn metadata_for(&self, path: &Path) -> Option<(usize, usize, SystemTime)> {
+        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+        {
+            let cache = self.meta_cache.borrow();
+            if let Some((figures, frames)) = cached_meta(&cache, path, modified) {
+                return Some((figures, frames, modified));
+            }
+        }
+        let (figures, frames) = read_metadata_counts(path)?;
+        self.meta_cache
+            .borrow_mut()
+            .insert(path.to_path_buf(), (modified, figures, frames));
+        Some((figures, frames, modified))
     }
 }
 
@@ -382,6 +431,74 @@ fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32) {
     let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
     let year = if month <= 2 { y + 1 } else { y };
     (year, month as u32, day as u32, hour, minute)
+}
+
+/// A project file's light metadata: `(figures, frames,
+/// modified)` read *without* deserialising the whole
+/// `Project`. The file is parsed as a bare
+/// `serde_json::Value` and only the lengths of the
+/// top-level `figures` and `frames` arrays are counted
+/// (model.rs's `Project` serialises both under exactly
+/// those keys). `None` — never a guess — when the file is
+/// missing, unreadable, not JSON, or either key is absent
+/// or not an array: such a file is not a project file,
+/// the same verdict `projects::scan` reaches by failing
+/// its full parse.
+pub fn project_metadata(path: &Path) -> Option<(usize, usize, SystemTime)> {
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    let (figures, frames) = read_metadata_counts(path)?;
+    Some((figures, frames, modified))
+}
+
+/// The parse half of [`project_metadata`] (the counts
+/// only; the caller supplies the stat): split out so the
+/// cached accessor can stat once and parse once.
+fn read_metadata_counts(path: &Path) -> Option<(usize, usize)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let figures = value.get("figures")?.as_array()?.len();
+    let frames = value.get("frames")?.as_array()?.len();
+    Some((figures, frames))
+}
+
+/// The metadata cache's lookup rule, pure so it is
+/// testable without the filesystem: the cached counts
+/// for `path` are served only when the mtime they were
+/// read at equals the file's current mtime — a moved
+/// mtime is a miss even for the same path, and a hit is
+/// served without any re-read.
+fn cached_meta(
+    cache: &HashMap<PathBuf, (SystemTime, usize, usize)>,
+    path: &Path,
+    modified: SystemTime,
+) -> Option<(usize, usize)> {
+    match cache.get(path) {
+        Some(&(read_at, figures, frames)) if read_at == modified => Some((figures, frames)),
+        _ => None,
+    }
+}
+
+/// The metadata line a row actually renders. When the
+/// light read ([`HomePanelState::metadata_for`]) produced
+/// figures/frames/modified for the row's file, those are
+/// the numbers shown — re-verified against the file on
+/// disk at its current mtime. Fps is not part of the
+/// light read's tuple, so it still comes from the scan.
+/// When the light read failed (the file vanished or
+/// stopped parsing between the scan and this render) the
+/// line is exactly the scan's [`meta_line`] — the row is
+/// unchanged rather than blank.
+pub fn row_meta_line(info: &ProjectInfo, meta: Option<(usize, usize, SystemTime)>) -> String {
+    match meta {
+        Some((figures, frames, modified)) => format!(
+            "{} · {} · {} fps · modified {}",
+            count_label(figures, "figure", "figures"),
+            count_label(frames, "frame", "frames"),
+            format_fps(info.fps),
+            format_modified(Some(modified))
+        ),
+        None => meta_line(info),
+    }
 }
 
 /// One row's metadata line: real scan data only
@@ -637,7 +754,17 @@ fn recovery_banner(t: &Theme) -> El {
 /// Open / Duplicate on the right. Keys carry the GPUI
 /// tuple ids as strings (`home-open-{i}`, `home-dup-{i}`),
 /// matching the `frame-{n}` key style `chrome_view` uses.
-fn project_row(info: &ProjectInfo, i: usize, t: &Theme) -> El {
+/// The metadata line under the name is keyed
+/// `home-proj-meta-{i}` and renders [`row_meta_line`]:
+/// the file's light metadata (`meta`, from
+/// [`HomePanelState::metadata_for`]) preferred, the
+/// scan's line as the fallback.
+fn project_row(
+    info: &ProjectInfo,
+    i: usize,
+    t: &Theme,
+    meta: Option<(usize, usize, SystemTime)>,
+) -> El {
     let open_key = format!("home-open-{i}");
     let dup_key = format!("home-dup-{i}");
     let path = info.path.clone();
@@ -658,7 +785,8 @@ fn project_row(info: &ProjectInfo, i: usize, t: &Theme) -> El {
                 .grow(1.0)
                 .child(text(info.name.clone()).font(type_::TITLE).color(t.text))
                 .child(
-                    text(meta_line(info))
+                    text(row_meta_line(info, meta))
+                        .key(format!("home-proj-meta-{i}"))
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 ),
@@ -774,7 +902,8 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
     } else {
         let mut rows = col().key("home-rows").gap(6.0);
         for (i, info) in shown.iter().enumerate() {
-            rows = rows.child(project_row(info, i, t));
+            let meta = home.metadata_for(&info.path);
+            rows = rows.child(project_row(info, i, t, meta));
         }
         card = card.child(rows);
     }
@@ -1049,6 +1178,143 @@ mod tests {
         let mut single = info("Demo", "projects/demo.json");
         single.frames = 1;
         assert!(meta_line(&single).starts_with("1 figure · 1 frame"));
+    }
+
+    /// Minimal project-file JSON with the two arrays the
+    /// light parse counts, plus unrelated keys it must
+    /// tolerate (a real save carries far more).
+    fn project_json(figures: usize, frames: usize) -> String {
+        let figure = "{\"def\":{},\"x\":0.0,\"y\":0.0}";
+        let frame = "{\"poses\":[]}";
+        format!(
+            "{{\"name\":\"Meta\",\"fps\":12.0,\"figures\":[{}],\"frames\":[{}],\"camera\":[]}}",
+            vec![figure; figures].join(","),
+            vec![frame; frames].join(",")
+        )
+    }
+
+    #[test]
+    fn project_metadata_reads_counts_and_mtime_from_a_light_parse() {
+        let dir = temp_dir("metadata-parse");
+        let path = dir.join("meta.json");
+        std::fs::write(&path, project_json(3, 7)).unwrap();
+        let (figures, frames, modified) = project_metadata(&path).unwrap();
+        assert_eq!(figures, 3);
+        assert_eq!(frames, 7);
+        // The returned stamp is the file's own mtime.
+        let stat = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(modified, stat);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_metadata_rejects_missing_and_unparseable_files() {
+        let dir = temp_dir("metadata-reject");
+        // Missing file.
+        assert!(project_metadata(&dir.join("nope.json")).is_none());
+        // Not JSON at all.
+        let junk = dir.join("junk.json");
+        std::fs::write(&junk, b"not json").unwrap();
+        assert!(project_metadata(&junk).is_none());
+        // JSON, but neither array is present.
+        let empty = dir.join("empty.json");
+        std::fs::write(&empty, b"{}").unwrap();
+        assert!(project_metadata(&empty).is_none());
+        // A key of the wrong type is not an array to count.
+        let wrong = dir.join("wrong.json");
+        std::fs::write(&wrong, br#"{"figures":3,"frames":[]}"#).unwrap();
+        assert!(project_metadata(&wrong).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_meta_hits_only_on_an_exact_path_and_mtime_match() {
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let t1 = t0 + std::time::Duration::from_secs(60);
+        let path = PathBuf::from("projects/alpha.json");
+        let mut cache: HashMap<PathBuf, (SystemTime, usize, usize)> = HashMap::new();
+        // Empty cache misses.
+        assert_eq!(cached_meta(&cache, &path, t0), None);
+        cache.insert(path.clone(), (t0, 4, 9));
+        // Same path, the mtime it was read at: a hit.
+        assert_eq!(cached_meta(&cache, &path, t0), Some((4, 9)));
+        // Same path, a moved mtime: a miss — the file may
+        // have changed under the same name.
+        assert_eq!(cached_meta(&cache, &path, t1), None);
+        // A different path at the same mtime: a miss.
+        assert_eq!(
+            cached_meta(&cache, Path::new("projects/beta.json"), t0),
+            None
+        );
+    }
+
+    #[test]
+    fn metadata_for_serves_the_cache_until_the_mtime_moves() {
+        let dir = temp_dir("metadata-cache");
+        let path = dir.join("cached.json");
+        std::fs::write(&path, project_json(2, 5)).unwrap();
+        let state = HomePanelState::default();
+        let (figures, frames, read_at) = state.metadata_for(&path).unwrap();
+        assert_eq!((figures, frames), (2, 5));
+
+        // Rewrite the file with different counts but pin
+        // its mtime back to the cached read's stamp: the
+        // accessor must serve the cached counts — proof it
+        // did not re-read (a re-read would see 6 and 1).
+        std::fs::write(&path, project_json(6, 1)).unwrap();
+        set_mtime(&path, read_at);
+        let (figures, frames, modified) = state.metadata_for(&path).unwrap();
+        assert_eq!((figures, frames), (2, 5), "cache served, no re-read");
+        assert_eq!(modified, read_at);
+
+        // Move the mtime: the entry is stale, the file is
+        // re-read, and the new counts land.
+        let later = read_at + std::time::Duration::from_secs(60);
+        set_mtime(&path, later);
+        let (figures, frames, modified) = state.metadata_for(&path).unwrap();
+        assert_eq!((figures, frames), (6, 1));
+        assert_eq!(modified, later);
+
+        // A missing file yields nothing, cache or not.
+        assert!(state.metadata_for(&dir.join("gone.json")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn row_meta_line_prefers_the_light_read_and_falls_back_to_the_scan() {
+        let mut entry = info("Demo", "projects/demo.json");
+        entry.figures = 9;
+        entry.frames = 9;
+        entry.fps = 24.0;
+        entry.modified = None;
+        let stamp =
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426);
+        // The light read's figures/frames/modified win;
+        // fps still comes from the scan (it is not part of
+        // the light tuple).
+        assert_eq!(
+            row_meta_line(&entry, Some((3, 12, stamp))),
+            "3 figures · 12 frames · 24 fps · modified 2026-11-08 05:57"
+        );
+        // No light read: the line is the scan's, unchanged.
+        assert_eq!(row_meta_line(&entry, None), meta_line(&entry));
+        assert_eq!(
+            row_meta_line(&entry, None),
+            "9 figures · 9 frames · 24 fps · modified unknown"
+        );
+    }
+
+    #[test]
+    fn project_row_builds_with_and_without_light_metadata() {
+        // Builder smoke test: the row (including the keyed
+        // metadata line) constructs in both modes — the
+        // fallback must never cost the row itself.
+        let t = tok::theme(true);
+        let entry = info("Demo", "projects/demo.json");
+        let _ = project_row(&entry, 0, &t, None);
+        let stamp =
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426);
+        let _ = project_row(&entry, 0, &t, Some((3, 12, stamp)));
     }
 
     #[test]
