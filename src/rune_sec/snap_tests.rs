@@ -348,11 +348,18 @@ fn file_menu_opens_lists_items_and_scrim_closes() {
     // Scrim: a press on the full-window dismissal layer
     // closes the menu and the dropdown leaves the tree.
     tap(&mut rt, "menu-scrim");
-    // A settling frame, mirroring the open path above: the
-    // anchored dropdown leaves the presented tree one commit
-    // after the state closes.
-    rt.frame(DT);
     assert_eq!(rt.state.menus.open, None, "scrim press closes the menu");
+    // The anchored dropdown animates out (presence springs):
+    // its nodes stay "presented" for a few frames after the
+    // state closes — the container key goes first, the item
+    // keys a few frames later — so settle until the tree has
+    // dropped them (bounded, like a real fade-out).
+    for _ in 0..30 {
+        if !presented_keys(&rt).contains("export") {
+            break;
+        }
+        rt.frame(DT);
+    }
     let keys = presented_keys(&rt);
     assert!(!keys.contains("menu-file-dropdown"), "dropdown dismissed");
     assert!(!keys.contains("export"), "dropdown items dismissed");
