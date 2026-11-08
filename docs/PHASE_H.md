@@ -283,3 +283,16 @@ what the integrator's post-wiring run (§4) exists to
 answer — a persisting drop is a regression to explain,
 per the checklist. The integrator's run is the number of
 record.
+
+**Integrator's post-wiring run (the number of record):**
+the mid-wave dip was a counting artefact, not a loss —
+the script only recognised `btn`/`fbtn`/`row_toggle` as
+key-carrying helpers, so every button converted to
+`icon_btn`/`icon_only_btn` vanished from the count while
+keeping its key in the app. With the script taught the
+two new helpers, the integrated tree inventories **567
+unique keys (480 static + 87 dynamic)** — a key-set diff
+against Phase G's tree shows **zero keys lost** and 11
+new (clip-rename-cancel, the three palette commands,
+icon_btn's test fixtures, and keys the script can now
+see through icon_btn).
