@@ -749,7 +749,7 @@ its dispatch, not its rendering.
 | `icon_btn` has **no inert variant** — local wrappers (`pibtn`, `ictl`) and lost tints (frame_ops, keyframe_tools) | §11 icon_btn inert variants + §24 ictl deleted + §25/§26 tints restored; §23 pose_tools delegates except its active-tinted variant branch (documented partial) | wired | _integrator_ |
 | Icon gaps: **fig-scale-dn text**, **mirror buttons on "copy"** ("compress" absent from the FA set) | §10 icon_data batch 2 (102 → 110) + §22 scale-dn + §§23/24 mirror glyphs | wired | _integrator_ |
 | **Contact sheet** is whole-timeline only — the range family had one hole left | §8 export range pair + integrator's `xc-contact` row (the pair had no caller until the wiring — grep-verified) | wired | _integrator_ |
-| Palette cannot jump **workspaces** or reach several shell toggles | §27 command_palette (+14 commands, 84 → 98) | wired | _integrator_ |
+| Palette cannot jump **workspaces** or reach several shell toggles | §27 command_palette (+13 commands, 84 → 97) | wired | _integrator_ |
 | **headless.yml never dispatched** — `--snap` on software Vulkan unproven since Phase E | Integrator dispatch during Phase I integration | wired | _integrator_ |
 | Two "New project" results disagree (panel blank vs Home demo) | Not a Phase I section — user's product call | open — unchanged | — |
 | Rune `fill_path` hole rendering not pixel-verified; Phase F–I pixels + sound unverified on a real screen | Needs the user's screenshot + Play test | open — unchanged | — |

@@ -695,6 +695,7 @@ mod tests {
             onion_ui: Default::default(),
             last_frame: 0,
             pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+            pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
             loop_playback: true,
             was_playing: false,
         }

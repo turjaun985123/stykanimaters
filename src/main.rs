@@ -117,6 +117,7 @@ pub struct State {
     /// Pose-library rename session (pose_tools section,
     /// Phase G).
     pub pose_rename: rune_sec::pose_tools::PoseRenameState,
+    pub pose_library: rune_sec::pose_tools::PoseLibraryState,
     /// Previous `core.playing` as seen by `poll`, so playback
     /// audio starts/stops on the flip (Phase F audio glue).
     was_playing: bool,
@@ -183,6 +184,7 @@ fn init() -> State {
         onion_ui: Default::default(),
         loop_playback: true,
         pose_rename: rune_sec::pose_tools::PoseRenameState::new(),
+        pose_library: rune_sec::pose_tools::PoseLibraryState::new(),
         was_playing: false,
         last_frame: 0,
         last_status: status,
@@ -377,6 +379,7 @@ fn text_focused(s: &State) -> bool {
         || s.fx_browser.query.focused
         || s.figures_panel.filter.focused
         || s.pose_rename.field.focused
+        || s.pose_library.filter.focused
 }
 
 /// App shortcuts. The command palette gets first claim

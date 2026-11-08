@@ -75,16 +75,16 @@ mirror and 3D mirror (§§23/24, `arrow-right-arrow-left`).
 | 24 | src/rune_sec/three_d_panel.rs | ictl deleted — live `icon_btn` / dim `icon_btn_inert`; mirror glyph |
 | 25 | src/rune_sec/frame_ops.rs | Inert tint restored for render-checkable guards (paste ×2, delete-range, shift-by-range) |
 | 26 | src/rune_sec/keyframe_tools.rs | Inert tint restored for the seven stamp buttons via an `nudge_plan`-equivalent dry run (predicates mirror the refusal ladder rung for rung) |
-| 27 | src/rune_sec/command_palette.rs | +14 commands: 8 workspace jumps, guides/frustum/safe toggles, onion, left/right panels, solo-clear — 84 → 98 |
+| 27 | src/rune_sec/command_palette.rs | +13 commands: 8 workspace jumps + guides/frustum/safe-frame/left-panel/right-panel toggles — 84 → 97 (counted in the `COMMANDS` table; the file's own header agrees. An onion entry already existed, and no solo-clear was added) |
 | 28 | src/rune_sec/status_strip.rs | Runtime inside the project segment (`Project::total_frames`, the mixer's own clock) |
 | 29 | src/rune_sec/stats_view.rs | Media block: 13 rows over seven groups incl. audio span in frames (durations are not in the model — spans are what the data supports) |
 | 30 | src/rune_sec/help_panel.rs | 24 → 30 rows — every claim verified against the tree (two briefed items corrected: no Alt+1..8 row existed; loop is transport/palette, not a key) |
-| 31 | src/rune_sec/project_tools.rs | "Current file" line — `EditorCore::project_path()`, name agreement deliberately NOT required (a saved-as copy is shown) |
+| 31 | src/rune_sec/project_tools.rs | "Current file" line — `current_file_line` renders the `shell::last_opened_project` name, shown only on an exact match with `Project::name` (the match guard is the point: recents store names, not the open file) |
 | 32 | src/rune_sec/draw_tools.rs | `draw-stats` readout (fields verified: `points: Vec<V2>`, `frame: i32`, `spray: Option<SprayMark>`) |
 | 33 | src/rune_sec/stroke_inspector.rs | `stroke-measure` line (frame via the file's own `stroke_frame_of`) |
 | 34 | src/rune_sec/scene_panel.rs | `scene-stage-readout` with gcd-reduced aspect (decimal fallback past 40) |
 | 35 | src/rune_sec/layers_panel.rs | Show all (the figures footer's body, shared) + Solo selected via `toggle_solo` |
-| 36 | src/rune_sec/text_tool.rs | Content previews capped at 14 chars (rows showed full text on one unwrapped line) |
+| 36 | src/rune_sec/text_tool.rs | Content previews capped at `PREVIEW_CHARS` = 18 chars (rows showed full text on one unwrapped line) |
 | 37 | src/rune_sec/library_panel.rs | File-stem matching added to the existing search + the missing count line (an integrator flag claimed "pen"→"pencil"; the tree already used "pencil" — nothing to change) |
 | 38 | src/rune_sec/settings_popover.rs | Playback block: Loop toggle (inverse label idiom) + audio state line |
 | 39 | src/rune_sec/snap_tests.rs | Round 6: 19 → 23 tests (palette jump, key jumps, marker seek) — see §5 for the pose test's honest limit |
