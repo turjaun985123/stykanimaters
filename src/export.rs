@@ -1280,7 +1280,7 @@ fn write_spritesheet(
         std::fs::create_dir_all(parent)?;
     }
     if indices.is_empty() {
-        let sheet = ImageBuffer::from_pixel(1, 1, Rgb([0, 0, 0]));
+        let sheet = ImageBuffer::from_pixel(1, 1, Rgb([0u8, 0, 0]));
         sheet.save(path).map_err(std::io::Error::other)?;
         return Ok(0);
     }
