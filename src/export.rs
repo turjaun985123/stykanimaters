@@ -1739,6 +1739,23 @@ mod tests {
         assert_eq!(sheet.get_pixel(0, 0).0, [26, 29, 36, 255]);
     }
 
+    /// The 5-frame demo project on a small stage so renders
+    /// stay fast (Phase I section 8: local copies of the
+    /// range module's helpers — sibling test modules cannot
+    /// share private helpers).
+    fn tiny_project() -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [96.0, 72.0];
+        project
+    }
+
+    fn temp_file(tag: &str, ext: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "styk-sheet-{tag}-{}.{ext}",
+            std::process::id()
+        ))
+    }
+
     #[test]
     fn contact_sheet_range_tiles_exactly_the_sub_range_frames() {
         let project = tiny_project();
