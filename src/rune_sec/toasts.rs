@@ -686,17 +686,24 @@ mod tests {
 
     #[test]
     fn severity_colors_are_pairwise_distinct() {
-        let colors = [
-            Severity::Info.color(),
-            Severity::Success.color(),
-            Severity::Warn.color(),
-            Severity::Error.color(),
-        ];
-        for (i, a) in colors.iter().enumerate() {
-            for b in &colors[i + 1..] {
-                assert_ne!(a, b, "severity colours must not collide");
+        // Both themes: the Wave 7 token wiring made color()
+        // theme-aware, and the distinctness contract must hold
+        // for the light *_on variants too, not only the dark
+        // base values.
+        for dark in [true, false] {
+            let t = crate::rune_sec::app_theme::app_theme(dark);
+            let colors = [
+                Severity::Info.color(&t),
+                Severity::Success.color(&t),
+                Severity::Warn.color(&t),
+                Severity::Error.color(&t),
+            ];
+            for (i, a) in colors.iter().enumerate() {
+                for b in &colors[i + 1..] {
+                    assert_ne!(a, b, "severity colours must not collide (dark={dark})");
+                }
+                assert_eq!(a.a, 1.0, "severity dots are fully opaque");
             }
-            assert_eq!(a.a, 1.0, "severity dots are fully opaque");
         }
     }
 
