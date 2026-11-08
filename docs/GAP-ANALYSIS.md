@@ -544,7 +544,7 @@ Nothing in this section is CI-verified yet; statuses move
 to the per-wave tables above once the run is green, and
 docs/COMPARISON.md is refreshed after that run.
 
-## Wave 14 — REDESIGN program, phase 1-2 + shell (in progress, 2026-11-08)
+## Wave 14 — REDESIGN program, phase 1-2 + shell (delivered 2026-11-08, CI run 42448335711 green on ac41149, 893 tests)
 
 Wave 14 is not a feature wave. It is the first slice of a
 seven-phase professional-studio redesign directive aimed at
