@@ -18,7 +18,10 @@
 //! stroke / Delete particle event, offered only while
 //! that selection exists and running the Delete key's
 //! own branches — see the EDIT arm of
-//! [`menu_dropdown`]).
+//! [`menu_dropdown`]; Phase M: Edit ▸ Swap frame with
+//! next and Edit ▸ Mute/Unmute audio clip, two more
+//! conditional items on the same offer-only-while-
+//! the-action-can-run discipline — see the EDIT arm).
 //! Declared from `main.rs` by the integrator; bin-crate
 //! code, not part of the engine library.
 //!
@@ -189,7 +192,13 @@ fn closing(f: impl Fn(&mut State) + 'static) -> impl Fn(&mut State) + 'static {
 /// item would claim the key targets strokes, when with
 /// no stroke selected it deletes something else
 /// entirely. The items stay mouse-only doors onto the
-/// cascade's first two branches. The spellings match the
+/// cascade's first two branches. Phase M's two
+/// conditional Edit items — Swap frame with next and
+/// the audio clip Mute/Unmute toggle — get no hint
+/// either: both are state-dependent actions (a next
+/// frame must exist; an audio clip must be targeted)
+/// and no global key is bound to either one alone.
+/// The spellings match the
 /// help panel's shortcut table (`help_panel.rs`). Pinned
 /// by the `shortcut_hints_name_only_real_bindings` test.
 fn shortcut_hint(key: &str) -> Option<&'static str> {
@@ -251,14 +260,20 @@ fn hinted_item(
 /// keyed by the item's element key — or `None` when the
 /// item stays plain text. Only the high-value items are
 /// mapped: the File actions, Edit's undo/redo, frame
-/// clipboard and selection deletes, View's visibility
+/// clipboard, selection deletes and the frame swap,
+/// View's visibility
 /// toggles, its Playback speed action and sidebar
 /// switches, and Help's two entries. Fit view / Centre on
 /// selection stay unmapped (no glyph reads as clearly,
 /// and an unclear icon is worse than none). The File ▸
 /// Open recent entries (Phase J) are the one dynamic
 /// family: their keys are `file-recent-{i}`, so they
-/// resolve by prefix to the clock glyph.
+/// resolve by prefix to the clock glyph. Edit's
+/// Mute/Unmute audio clip item (Phase M) is
+/// deliberately absent from the map: its glyph depends
+/// on the targeted clip's state, so its builder picks
+/// the icon (via `mute_item_parts`) and hands it to
+/// `item_icon` directly.
 ///
 /// Every name was verified against the icon set
 /// (`icon_data::ICON_NAMES`); even so, [`item`] checks
@@ -282,13 +297,16 @@ fn menu_icon(key: &str) -> Option<&'static str> {
         "export" => Some("download"),
         // Edit: undo / redo, copy / paste frame, and the
         // selection deletes (Phase L) — the trash can
-        // reads as removal at a glance.
+        // reads as removal at a glance. The frame swap
+        // (Phase M) leads with the two-way arrows: the
+        // frames trade places.
         "undo" => Some("arrow-rotate-left"),
         "redo" => Some("arrow-rotate-right"),
         "copy-frame" => Some("copy"),
         "paste-frame" => Some("clipboard"),
         "edit-delete-stroke" => Some("trash-can"),
         "edit-delete-particle" => Some("trash-can"),
+        "edit-swap-next" => Some("arrow-right-arrow-left"),
         // View: visibility (eye), the guides sub-toggles
         // (crosshairs), the sidebar switches (list).
         "onion" => Some("eye"),
@@ -499,6 +517,61 @@ fn delete_selected_particle(s: &mut State) {
     }
 }
 
+/// One Edit ▸ Swap frame with next press (Phase M):
+/// the frame_swap section's one-step op with dir +1 —
+/// the current frame trades contents with its
+/// successor (attached data remapped, one snapshot)
+/// and the playhead index stays where it was, looking
+/// at the neighbour's content; the op sets its own
+/// status either way. A refusal on the last frame;
+/// the item is only offered while a next frame
+/// exists, so this is a guard, not a reachable path.
+fn swap_frame_with_next(s: &mut State) {
+    stykanimate_rs::frame_swap::swap_frame_with_neighbour(&mut s.core, 1);
+}
+
+/// One Edit ▸ Mute/Unmute audio clip press (Phase M):
+/// toggle the muted flag on the Audio panel's
+/// effective target — the live selection, or the last
+/// clip when nothing is selected (see
+/// `audio_panel::effective_target`) — through the
+/// audio_ops indexed toggle, which sets its own
+/// status and snapshots. A no-op when the project has
+/// no clips; the item is only offered while a target
+/// exists, so this is a guard, not a reachable path.
+fn toggle_targeted_clip_muted(s: &mut State) {
+    if let Some(target) = crate::rune_sec::audio_panel::effective_target(
+        s.audio_panel.selected,
+        s.core.project.audio.len(),
+    ) {
+        stykanimate_rs::audio_ops::audio_toggle_muted_at(&mut s.core, target);
+    }
+}
+
+/// Edit ▸ Mute/Unmute audio clip's (label, icon) for
+/// the targeted clip's current state (Phase M): the
+/// pair names the ACTION a press performs, not the
+/// state — an audible clip offers "Mute audio clip",
+/// a muted one "Unmute audio clip". The glyph comes
+/// from `audio_panel::mute_toggle_parts`, so the menu
+/// and the Audio panel's own Mute toggle always show
+/// the same icon for the same state; the menu spells
+/// the label out in full where the panel's tight row
+/// says just "Mute" / "Unmute". (The item cannot go
+/// through the static [`menu_icon`] map: its glyph
+/// depends on state the map cannot see, so the EDIT
+/// branch hands the icon to [`item_icon`] directly —
+/// see [`menu_dropdown`].)
+fn mute_item_parts(muted: bool) -> (&'static str, &'static str) {
+    let (icon, _) = crate::rune_sec::audio_panel::mute_toggle_parts(muted);
+    let label = if muted {
+        "Unmute audio clip"
+    } else {
+        "Mute audio clip"
+    };
+    (label, icon)
+}
+
 /// The File menu's Open recent block (Phase J): a
 /// separator plus one item per entry from
 /// [`recent_items`], keyed `file-recent-{i}` in recents
@@ -655,6 +728,48 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
                     false,
                     t,
                     delete_selected_particle,
+                ));
+            }
+            // Frame swap + clip mute (Phase M): two more
+            // conditional items, after the deletes, on
+            // the same discipline — each exists only
+            // while its action can run, no inert rows.
+            // Swap needs a next frame: on the last frame
+            // (or an empty timeline) there is nothing to
+            // trade with. Mute needs the Audio panel's
+            // effective target — its live selection, or
+            // the last clip as fallback; with no clips
+            // there is nothing to mute. Neither carries
+            // a shortcut hint — see `shortcut_hint`.
+            if s.core.current + 1 < s.core.project.frames.len() {
+                list = list.child(item(
+                    "edit-swap-next",
+                    "Swap frame with next",
+                    false,
+                    t,
+                    swap_frame_with_next,
+                ));
+            }
+            if let Some(target) = crate::rune_sec::audio_panel::effective_target(
+                s.audio_panel.selected,
+                s.core.project.audio.len(),
+            ) {
+                // `item_icon` directly, not `item`: the
+                // glyph depends on the targeted clip's
+                // muted state, which the static
+                // `menu_icon` map cannot express. The
+                // hint is `shortcut_hint`'s None and the
+                // handler is wrapped in `closing`, exactly
+                // as `item` would build it.
+                let (label, icon) = mute_item_parts(s.core.project.audio[target].muted);
+                list = list.child(item_icon(
+                    "edit-mute-clip",
+                    icon,
+                    label,
+                    false,
+                    shortcut_hint("edit-mute-clip"),
+                    t,
+                    closing(toggle_targeted_clip_muted),
                 ));
             }
         }
@@ -847,6 +962,8 @@ mod tests {
             "paste-frame",
             "edit-delete-stroke",
             "edit-delete-particle",
+            "edit-swap-next",
+            "edit-mute-clip",
             "view-guides",
             "view-guides-frustum",
             "view-guides-safe",
@@ -879,6 +996,7 @@ mod tests {
             ("paste-frame", "clipboard"),
             ("edit-delete-stroke", "trash-can"),
             ("edit-delete-particle", "trash-can"),
+            ("edit-swap-next", "arrow-right-arrow-left"),
             ("onion", "eye"),
             ("view-guides", "eye"),
             ("view-guides-frustum", "crosshairs"),
@@ -901,7 +1019,11 @@ mod tests {
         }
         // Items outside the high-value set — and the
         // menu triggers themselves — stay icon-less.
-        for key in ["view-fit", "view-centre", "menu-file", "bogus"] {
+        // Edit's Mute/Unmute item stays out of the map
+        // too, by design: its glyph is chosen from the
+        // targeted clip's state at build time (see
+        // `mute_item_parts`), not from this static map.
+        for key in ["view-fit", "view-centre", "menu-file", "edit-mute-clip", "bogus"] {
             assert_eq!(menu_icon(key), None, "{key} stays plain");
         }
     }
@@ -1179,6 +1301,7 @@ mod tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         });
         let ev = s.core.particle_add_event(0, 100.0, 100.0);
         s.stroke_selected = Some(0);
@@ -1209,5 +1332,126 @@ mod tests {
         delete_selected_particle(&mut s);
         assert!(s.core.project.strokes.is_empty());
         assert!(s.core.project.particles.is_empty());
+    }
+
+    #[test]
+    fn edit_menu_swap_and_mute_items_follow_the_state() {
+        // Phase M: Edit ▸ Swap frame with next exists
+        // only while a next frame exists; Edit ▸ Mute /
+        // Unmute audio clip exists only while the Audio
+        // panel has an effective target, its label and
+        // glyph naming the action for the targeted
+        // clip's current state. Presence is pinned in
+        // the Phase J/L menu-structure style (see
+        // `edit_menu_delete_items_follow_the_selections`):
+        // the pure maps and parts fns `menu_dropdown`
+        // dispatches on, a dropdown build in each state,
+        // and the handlers exercised directly.
+        use stykanimate_rs::model::AudioClip;
+
+        // The swap item leads with the two-way arrows,
+        // which exist in the curated set; neither new
+        // item claims a hint (no shell key is bound to
+        // either action alone — see `shortcut_hint`).
+        // The mute item is NOT in the static icon map:
+        // its glyph is state-dependent, so its parts
+        // come from `mute_item_parts`.
+        assert_eq!(menu_icon("edit-swap-next"), Some("arrow-right-arrow-left"));
+        assert_eq!(shortcut_hint("edit-swap-next"), None);
+        assert_eq!(menu_icon("edit-mute-clip"), None);
+        assert_eq!(shortcut_hint("edit-mute-clip"), None);
+        for icon in ["arrow-right-arrow-left", "volume-xmark", "volume-high"] {
+            assert!(crate::rune_sec::icons::has_icon(icon), "{icon}");
+            assert!(
+                crate::rune_sec::icon_data::ICON_NAMES.contains(&icon),
+                "{icon}"
+            );
+        }
+        // The parts name the action, not the state —
+        // and reuse the Audio panel's glyph choice.
+        assert_eq!(mute_item_parts(false), ("Mute audio clip", "volume-xmark"));
+        assert_eq!(mute_item_parts(true), ("Unmute audio clip", "volume-high"));
+
+        let t = rune::tok::theme(true);
+        let mut s = crate::init();
+        s.menus.open = Some(EDIT);
+        // The demo project: 5 frames, playhead on frame
+        // 0, no audio clips. The swap item is offered
+        // (a next frame exists); the mute item is not
+        // (no target) — the dropdown builds either way.
+        assert_eq!(s.core.project.frames.len(), 5);
+        assert_eq!(s.core.current, 0);
+        assert!(s.core.project.audio.is_empty());
+        let _ = menu_dropdown(&s, &t);
+
+        // The swap press: frames 0 and 1 trade contents
+        // under one snapshot and the playhead index
+        // stays. Durations are the visible difference —
+        // set them apart first so the trade shows.
+        s.core.project.frames[0].duration = 1.0;
+        s.core.project.frames[1].duration = 3.0;
+        let depth0 = s.core.undo_depth();
+        swap_frame_with_next(&mut s);
+        assert_eq!(s.core.project.frames[0].duration, 3.0);
+        assert_eq!(s.core.project.frames[1].duration, 1.0);
+        assert_eq!(s.core.current, 0);
+        assert_eq!(s.core.undo_depth(), depth0 + 1);
+
+        // On the last frame the swap item is gone, and
+        // the handler is a clean refusal: no snapshot,
+        // frames untouched, the op's own status.
+        s.core.goto(4);
+        let _ = menu_dropdown(&s, &t);
+        let depth1 = s.core.undo_depth();
+        swap_frame_with_next(&mut s);
+        assert_eq!(s.core.undo_depth(), depth1);
+        assert!(
+            s.core.status.contains("no neighbour to swap with"),
+            "status: {}",
+            s.core.status
+        );
+
+        // Mute: plant two clips with no panel
+        // selection — the effective target falls back
+        // to the LAST clip, so the item appears and its
+        // press mutes clip 1 only.
+        s.core.project.audio.push(AudioClip {
+            path: "a.wav".into(),
+            start_frame: 0,
+            gain: 1.0,
+            muted: false,
+        });
+        s.core.project.audio.push(AudioClip {
+            path: "b.wav".into(),
+            start_frame: 2,
+            gain: 1.0,
+            muted: false,
+        });
+        assert_eq!(s.audio_panel.selected, None);
+        let _ = menu_dropdown(&s, &t);
+        toggle_targeted_clip_muted(&mut s);
+        assert!(!s.core.project.audio[0].muted);
+        assert!(s.core.project.audio[1].muted);
+        // The targeted clip now names the way back.
+        assert_eq!(
+            mute_item_parts(s.core.project.audio[1].muted),
+            ("Unmute audio clip", "volume-high")
+        );
+
+        // A live selection retargets the item: clip 0
+        // mutes, clip 1 is untouched.
+        s.audio_panel.selected = Some(0);
+        let _ = menu_dropdown(&s, &t);
+        toggle_targeted_clip_muted(&mut s);
+        assert!(s.core.project.audio[0].muted);
+        assert!(s.core.project.audio[1].muted);
+
+        // No clips: the dropdown builds with no mute
+        // item and the handler is a clean no-op.
+        s.core.project.audio.clear();
+        s.audio_panel.selected = None;
+        let _ = menu_dropdown(&s, &t);
+        toggle_targeted_clip_muted(&mut s);
+        assert!(s.core.project.audio.is_empty());
     }
 }

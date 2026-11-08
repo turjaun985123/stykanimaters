@@ -182,6 +182,26 @@
 //! [`interp_cycle_enabled`]: a joint is selected, its
 //! angle channel resolves, and a key sits at the
 //! playhead.
+//!
+//! Phase M (section 23/40) adds one more icon control
+//! in the same live/inert discipline: "Fill range"
+//! (`key-fill-range`, `grip-vertical` glyph — the icon
+//! table carries no plain `grip` and no `ellipsis`),
+//! in its own row under the clear-range row. It fills
+//! the loop range's keyless frames on the selected
+//! joint's angle channel with copies of the key at the
+//! current frame, through the library's
+//! `graph_keys::fill_keys_in_range` — the op owns the
+//! single snapshot and the status line. The channel is
+//! resolved exactly as Cycle interp resolves it:
+//! [`selected_angle_channel_index`], the
+//! `graph_keys::channel_index_of` lookup. The guard is
+//! [`fill_range_enabled`]: a loop range is set AND the
+//! resolved channel holds a key at the current frame,
+//! read through [`current_key_interp`] — the interp
+//! guard's own playhead-key test — so the two buttons
+//! can never disagree about which key is "at" the
+//! playhead.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El};
@@ -304,6 +324,31 @@ pub fn clear_range_enabled(core: &EditorCore) -> bool {
         a as f32,
         b as f32,
     ) > 0
+}
+
+/// Whether Fill range can act — the render-time guard
+/// beside [`fill_keys_in_range_core`]: a loop range is
+/// set, a joint is selected, its angle channel
+/// resolves, and the channel holds a key at the current
+/// frame to fill FROM. The playhead-key half is read
+/// through [`current_key_interp`] — the interp guard's
+/// own test, over the same
+/// [`selected_angle_channel_index`] resolution and the
+/// library's nearest-key-within-0.5 lookup
+/// (`graph_keys::key_interp_at`) — so this guard and
+/// [`interp_cycle_enabled`] can never disagree about
+/// whether a key sits at the playhead. One refusal of
+/// the op is deliberately NOT read here: a range whose
+/// frames are all keyed already. That state depends on
+/// the whole range's contents; in it the button stays
+/// live and the press lands on the op's own
+/// status-only refusal, snapshot-free exactly as the
+/// op is written (the Phase H precedent: a wired press
+/// on an op's own refusal). When this is false the
+/// button renders inert (`icon_btn_inert`). Pure:
+/// reads only.
+pub fn fill_range_enabled(core: &EditorCore) -> bool {
+    core.loop_range.is_some() && current_key_interp(core).is_some()
 }
 
 /// The display name of an [`Interp`] mode — the same
@@ -731,6 +776,47 @@ pub fn clear_keys_in_range_here(s: &mut State) {
     clear_keys_in_range_core(&mut s.core);
 }
 
+/// Fill the loop range's keyless frames on the
+/// selected angle channel with copies of the key at
+/// the current frame; returns how many keys were
+/// inserted. The fill itself is the library's
+/// `graph_keys::fill_keys_in_range` over the channel
+/// [`selected_angle_channel_index`] resolves — the
+/// resolution Cycle interp uses — and the range is the
+/// core's `loop_range` pair exactly as it stands (the
+/// engine clamps it when set; Clear keys in range
+/// trusts it the same way). The library takes the
+/// single snapshot and sets the status line, including
+/// for its own nothing-to-fill refusals. The refusals
+/// the library cannot phrase for this panel — no joint
+/// selected, no loop range set, no channel on the
+/// joint — are answered here, status-only with NO
+/// snapshot, matching this section's discipline; the
+/// button renders inert in the joint/range states (see
+/// [`fill_range_enabled`]), so a press can never reach
+/// them.
+pub fn fill_keys_in_range_core(core: &mut EditorCore) -> usize {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a joint first, then Fill range.".into();
+        return 0;
+    };
+    let Some((a, b)) = core.loop_range else {
+        core.status = "Set a loop range first, then Fill range.".into();
+        return 0;
+    };
+    let fi = core.selected_figure;
+    let Some(ci) = selected_angle_channel_index(core) else {
+        core.status = format!("No graph keys for figure {} joint {} to fill from.", fi + 1, ni);
+        return 0;
+    };
+    graph_keys::fill_keys_in_range(core, ci, a, b)
+}
+
+/// `State` wrapper for [`fill_keys_in_range_core`].
+pub fn fill_keys_in_range_here(s: &mut State) {
+    fill_keys_in_range_core(&mut s.core);
+}
+
 /// Cycle the interp mode of the selected angle
 /// channel's key at the current frame — Hermite →
 /// Linear → Step → Hermite (see [`next_interp`]) — and
@@ -988,8 +1074,8 @@ pub fn no_joint_note_row(core: &EditorCore, t: &Theme) -> Option<El> {
 /// The keyframe tools section: header, selection target,
 /// keyed-frame indicator, the key/delete/auto buttons, the
 /// copy/paste-keys clipboard row (with Clear channel
-/// keys), the clear-range row, the interp cycle row,
-/// the nudge row, the
+/// keys), the clear-range row, the fill-range row, the
+/// interp cycle row, the nudge row, the
 /// key-all / copy-key stamp row,
 /// and the five tangent preset buttons (scoped by the op
 /// to the selected figure). Buttons highlight with real
@@ -997,11 +1083,11 @@ pub fn no_joint_note_row(core: &EditorCore, t: &Theme) -> Option<El> {
 /// at this frame; Copy is muted until a channel exists to
 /// copy from, and Paste is muted while the key clipboard
 /// is empty. The icon controls (Clear channel keys,
-/// Clear keys in loop range, Cycle interp, the nudge pair, Key all
+/// Clear keys in loop range, Fill range, Cycle interp, the nudge pair, Key all
 /// here, Copy key +10) render
 /// inert — muted, handler-free — exactly when their op
 /// would refuse, via the `*_enabled` predicates above
-/// (Phases I, K and L); the plain text buttons stay wired in every
+/// (Phases I, K, L and M); the plain text buttons stay wired in every
 /// state and land on their ops' status-only refusals.
 /// The target slot under the header is state-dependent
 /// (Phase J): with a joint selected it is the original
@@ -1105,6 +1191,23 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                     )
                 } else {
                     icon_btn_inert("key-clear-range", "eraser", "Clear keys in loop range", t)
+                }),
+        )
+        .child(
+            row()
+                .key("keyframe-fill-range")
+                .gap(6.0)
+                .child(if fill_range_enabled(core) {
+                    icon_btn(
+                        "key-fill-range",
+                        "grip-vertical",
+                        "Fill range",
+                        false,
+                        t,
+                        |s| fill_keys_in_range_here(s),
+                    )
+                } else {
+                    icon_btn_inert("key-fill-range", "grip-vertical", "Fill range", t)
                 }),
         )
         .child(
@@ -2046,6 +2149,151 @@ mod tests {
         on.current = 2;
         assert!(interp_cycle_enabled(&on));
         assert_eq!(interp_button_label(&on), "Interp: Hermite");
+        let _ = keyframe_section(&state_with(on), &t);
+    }
+
+    #[test]
+    fn fill_range_enabled_needs_a_loop_range_and_a_key_at_the_playhead() {
+        // Loop range set, playhead on the frame-2 key of
+        // the spread fixture (keys at 0, 2 and 4): live.
+        let mut core = core_with_spread_angle_keys();
+        core.loop_range = Some((1, 3));
+        core.current = 2;
+        assert!(fill_range_enabled(&core));
+        // No loop range: inert, even on a keyed frame.
+        let mut core = core_with_spread_angle_keys();
+        core.current = 2;
+        assert!(!fill_range_enabled(&core));
+        // Loop range set, playhead on the bare frames
+        // between keys: nothing to fill FROM, so inert.
+        let mut core = core_with_spread_angle_keys();
+        core.loop_range = Some((1, 3));
+        core.current = 1;
+        assert!(!fill_range_enabled(&core));
+        core.current = 3;
+        assert!(!fill_range_enabled(&core));
+        // No joint selected: the channel cannot be
+        // resolved, so inert even with range and key.
+        let mut core = core_with_spread_angle_keys();
+        core.loop_range = Some((1, 3));
+        core.current = 2;
+        core.selected_node = None;
+        assert!(!fill_range_enabled(&core));
+        // A joint with no channel on it: inert.
+        let mut bare = EditorCore::new();
+        bare.selected_node = Some(1);
+        bare.loop_range = Some((0, 4));
+        assert!(!fill_range_enabled(&bare));
+    }
+
+    #[test]
+    fn fill_range_guard_agrees_with_the_interp_guard_on_the_playhead_key() {
+        // Both guards read "a key sits at the playhead on
+        // the resolved channel" through the same helper
+        // (`current_key_interp`), so with a loop range set
+        // they agree on every frame of the spread fixture
+        // — the resolution-parity pin the fill button's
+        // wiring rests on.
+        let mut core = core_with_spread_angle_keys();
+        core.loop_range = Some((0, 4));
+        for frame in 0..=4 {
+            core.current = frame;
+            assert_eq!(
+                fill_range_enabled(&core),
+                interp_cycle_enabled(&core),
+                "frame {}: the two guards read the playhead key alike",
+                frame + 1
+            );
+        }
+    }
+
+    #[test]
+    fn fill_keys_in_range_core_fills_the_selected_channel_only() {
+        let mut core = core_with_spread_angle_keys(); // Angle(1) keys at 0 (10), 2 (30), 4 (50)
+        // A bystander channel on another joint, keyed
+        // inside the same range: resolution must leave it
+        // alone — the fill acts on the channel
+        // `selected_angle_channel_index` resolves, the one
+        // Cycle interp reads.
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(2),
+            keys: vec![Key::flat(2.0, 99.0)],
+        });
+        core.loop_range = Some((1, 3));
+        core.current = 2;
+        let depth = core.undo_depth();
+        assert_eq!(fill_keys_in_range_core(&mut core), 2);
+        let ch = selected_angle_channel(&core).expect("channel survives a fill");
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![0.0, 1.0, 2.0, 3.0, 4.0], "frames 1 and 3 filled");
+        assert_eq!(ch.keys[1].value, 30.0, "the fill copies the playhead key");
+        assert_eq!(ch.keys[3].value, 30.0, "the fill copies the playhead key");
+        assert_eq!(
+            core.project.channels[1].keys.len(),
+            1,
+            "the other joint's channel is untouched"
+        );
+        assert_eq!(core.undo_depth(), depth + 1, "exactly one snapshot");
+        assert!(
+            core.status.contains("Filled 2 keys"),
+            "the library owns the status: {}",
+            core.status
+        );
+        // The range is fully keyed now: the op's own
+        // nothing-to-do refusal, snapshot-free.
+        assert_eq!(fill_keys_in_range_core(&mut core), 0);
+        assert_eq!(core.undo_depth(), depth + 1, "no second snapshot");
+    }
+
+    #[test]
+    fn fill_keys_in_range_core_refuses_without_a_joint_range_or_channel() {
+        // No loop range: status-only, no snapshot, keys intact.
+        let mut core = core_with_spread_angle_keys();
+        core.current = 2;
+        let depth = core.undo_depth();
+        assert_eq!(fill_keys_in_range_core(&mut core), 0);
+        assert!(core.status.contains("loop range"));
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(selected_angle_channel(&core).map(|ch| ch.keys.len()), Some(3));
+        // No joint selected: the same discipline.
+        let mut core = core_with_spread_angle_keys();
+        core.loop_range = Some((1, 3));
+        core.current = 2;
+        core.selected_node = None;
+        let depth = core.undo_depth();
+        assert_eq!(fill_keys_in_range_core(&mut core), 0);
+        assert!(core.status.contains("Select a joint"));
+        assert_eq!(core.undo_depth(), depth);
+        // A joint with no channel on it: refused here,
+        // because the op needs the resolved index.
+        let mut bare = EditorCore::new();
+        bare.selected_node = Some(1);
+        bare.loop_range = Some((0, 4));
+        let depth = bare.undo_depth();
+        assert_eq!(fill_keys_in_range_core(&mut bare), 0);
+        assert!(bare.status.contains("No graph keys"));
+        assert_eq!(bare.undo_depth(), depth);
+    }
+
+    #[test]
+    fn fill_range_row_builds_live_and_inert() {
+        // The `interp_row_builds_live_and_inert...`
+        // pattern: the row is asserted through the guard
+        // the builder itself uses, plus a full section
+        // build in each state.
+        let t = rune::tok::theme(true);
+        // No loop range: the inert form.
+        let mut off = core_with_spread_angle_keys();
+        off.current = 2;
+        assert!(!fill_range_enabled(&off));
+        let _ = keyframe_section(&state_with(off), &t);
+        // Loop range set and a key at the playhead: the
+        // live form.
+        let mut on = core_with_spread_angle_keys();
+        on.loop_range = Some((1, 3));
+        on.current = 2;
+        assert!(fill_range_enabled(&on));
         let _ = keyframe_section(&state_with(on), &t);
     }
 

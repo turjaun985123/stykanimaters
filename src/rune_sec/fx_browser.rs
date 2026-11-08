@@ -781,6 +781,7 @@ mod tests {
                 },
                 figure: 0,
                 node: 0,
+                hidden: false,
             });
         }
         core

@@ -171,6 +171,36 @@
 //! slot (the particles panel's construction); colours
 //! are compared masked to `0xRRGGBB`, the engine's
 //! colour form.
+//!
+//! ## Phase M (§29): z-order for the loaded instance
+//!
+//! Instances draw in vec order — later entries paint
+//! over earlier ones — and until this phase a text
+//! sent behind another could only be deleted and
+//! recreated. The loaded instance's edit area gains
+//! a z-order row (`text-zorder-row`), rendered only
+//! while a live instance is loaded (the Update row's
+//! conditional discipline): **Bring to front**
+//! (`text-front`) moves the instance to the END of
+//! `Project.texts` (drawn last = on top) and **Send
+//! to back** (`text-back`) moves it to index 0. The
+//! move is a remove + insert, so every other
+//! instance keeps its relative order.
+//! [`move_text_instance`] follows §27's discipline:
+//! bounds check first, exactly one `snapshot()` per
+//! applied move, and a status-only refusal that
+//! snapshots nothing — a stale index ("No such
+//! text.") or an instance already at the target end
+//! ("Already at the front." / "Already at the
+//! back."). The success status numbers the instance
+//! by its position AFTER the move — the position
+//! the list now shows it at. The target-index math
+//! is the pure [`moved_index`], shared by the op
+//! (its move decision) and by the handler (which
+//! also uses it to follow the moved instance:
+//! `TextToolState::loaded` is rewritten to the new
+//! index, so the edit area keeps editing the same
+//! text across the reorder).
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, text_input, El, TextEdit as FieldEdit, Tx};
@@ -582,6 +612,67 @@ pub fn set_text_color(core: &mut EditorCore, index: usize, color: u32) -> bool {
     true
 }
 
+/// Where the instance at `index` in a vec of `len`
+/// instances lands when sent to an end of the draw
+/// order (Phase M §29): texts paint in vec order, so
+/// the front of the stack is the vec's END — drawn
+/// last, on top of everything else — and `to_front`
+/// targets `len - 1`; the back of the stack is index
+/// 0. `None` when there is nowhere to move to:
+/// `index` out of range, or the instance already
+/// sits at the target end (a one-instance vec is
+/// both ends at once, so it never moves). Pure.
+pub fn moved_index(len: usize, index: usize, to_front: bool) -> Option<usize> {
+    if index >= len {
+        return None;
+    }
+    let target = if to_front { len - 1 } else { 0 };
+    (index != target).then_some(target)
+}
+
+/// Move the text instance at `index` to an end of
+/// the draw order (Phase M §29): `to_front` sends it
+/// to the end of `Project.texts` (drawn last = on
+/// top), otherwise to index 0. The move is a remove
+/// + insert at the [`moved_index`] target, so every
+/// other instance keeps its relative order; the
+/// instance itself is carried verbatim — content,
+/// size, colour and transform keys all ride along.
+/// No editor op exists for text instances, so — like
+/// this file's other instance mutations — the panel
+/// writes the project field directly under exactly
+/// one `snapshot()`, making a press a single undo
+/// step. Status-only refusals (nothing snapshotted):
+/// a stale index ("No such text."), or the instance
+/// already at the target end ("Already at the
+/// front." / "Already at the back."). The success
+/// status numbers the instance by its position
+/// AFTER the move (`target + 1`) — the position the
+/// list now shows it at. Returns whether the
+/// instance moved.
+pub fn move_text_instance(core: &mut EditorCore, index: usize, to_front: bool) -> bool {
+    let len = core.project.texts.len();
+    let Some(target) = moved_index(len, index, to_front) else {
+        if index >= len {
+            core.status = "No such text.".into();
+        } else if to_front {
+            core.status = "Already at the front.".into();
+        } else {
+            core.status = "Already at the back.".into();
+        }
+        return false;
+    };
+    core.snapshot();
+    let inst = core.project.texts.remove(index);
+    core.project.texts.insert(target, inst);
+    core.status = format!(
+        "Text {} moved to the {}.",
+        target + 1,
+        if to_front { "front" } else { "back" }
+    );
+    true
+}
+
 /// The full (untruncated) content of the text instance at
 /// `index` — what a list-row click loads into the tool's
 /// field.
@@ -703,6 +794,25 @@ fn set_loaded_color(s: &mut State, color: u32) {
         return;
     };
     set_text_color(&mut s.core, i, color);
+}
+
+/// Z-order handler (Phase M §29): move the loaded
+/// instance to an end of the draw order via
+/// [`move_text_instance`], then follow it —
+/// `TextToolState::loaded` is rewritten to the
+/// instance's new index (the same [`moved_index`]
+/// computation the op moved it to), so the edit
+/// area keeps editing the same text. When the op
+/// refuses (a stale index, or the instance already
+/// at the target end) nothing moved, so `loaded`
+/// is left exactly as it was.
+fn move_loaded(s: &mut State, to_front: bool) {
+    let Some(i) = loaded_index(s) else {
+        return;
+    };
+    if move_text_instance(&mut s.core, i, to_front) {
+        s.text_tool.loaded = moved_index(s.core.project.texts.len(), i, to_front);
+    }
 }
 
 /// Nudge-pad handler: move the loaded instance by
@@ -982,9 +1092,10 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
     // the instance the last row click loaded. Rendered
     // either way; with nothing loaded the handlers refuse
     // with a status line, and with a stale index the core
-    // ops refuse the same way. The Update button is the
-    // one conditional piece: it appears only while
-    // `loaded` names an instance that still exists.
+    // ops refuse the same way. The Update button and the
+    // z-order row (Phase M §29) are the conditional
+    // pieces: they appear only while `loaded` names an
+    // instance that still exists.
     let loaded_row = instances
         .iter()
         .find(|r| Some(r.index) == s.text_tool.loaded);
@@ -1006,16 +1117,30 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                 .color(t.text_secondary),
         );
     if loaded_row.is_some() {
-        instance_edit = instance_edit.child(
-            row()
-                .key("text-update-row")
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(btn("text-update", "Update text", false, t, |s| {
-                    update_loaded(s)
-                })),
-        );
+        instance_edit = instance_edit
+            .child(
+                row()
+                    .key("text-update-row")
+                    .w_full()
+                    .gap(8.0)
+                    .center_y()
+                    .child(btn("text-update", "Update text", false, t, |s| {
+                        update_loaded(s)
+                    })),
+            )
+            .child(
+                row()
+                    .key("text-zorder-row")
+                    .w_full()
+                    .gap(8.0)
+                    .center_y()
+                    .child(btn("text-front", "Bring to front", false, t, |s| {
+                        move_loaded(s, true)
+                    }))
+                    .child(btn("text-back", "Send to back", false, t, |s| {
+                        move_loaded(s, false)
+                    })),
+            );
     }
     instance_edit = instance_edit
         .child(
@@ -1982,5 +2107,197 @@ mod tests {
         assert_eq!(loaded_after_insertion(Some(0), 1), Some(0), "before the gap is unmoved");
         assert_eq!(loaded_after_insertion(Some(1), 1), Some(2), "at the gap shifts up");
         assert_eq!(loaded_after_insertion(Some(3), 1), Some(4), "after the gap shifts up");
+    }
+
+    #[test]
+    fn moved_index_targets_the_draw_order_ends() {
+        // The front of the stack is the vec's end.
+        assert_eq!(moved_index(3, 0, true), Some(2));
+        assert_eq!(moved_index(3, 1, true), Some(2));
+        assert_eq!(moved_index(5, 2, true), Some(4));
+        // The back of the stack is index 0.
+        assert_eq!(moved_index(3, 1, false), Some(0));
+        assert_eq!(moved_index(3, 2, false), Some(0));
+        assert_eq!(moved_index(5, 4, false), Some(0));
+    }
+
+    #[test]
+    fn moved_index_is_none_when_there_is_nowhere_to_move() {
+        assert_eq!(moved_index(3, 2, true), None, "already at the front");
+        assert_eq!(moved_index(3, 0, false), None, "already at the back");
+        assert_eq!(moved_index(1, 0, true), None, "a lone instance is both ends at once");
+        assert_eq!(moved_index(1, 0, false), None, "a lone instance is both ends at once");
+        assert_eq!(moved_index(3, 3, true), None, "index out of range");
+        assert_eq!(moved_index(3, 7, false), None, "index out of range");
+        assert_eq!(moved_index(0, 0, true), None, "an empty vec has no front");
+        assert_eq!(moved_index(0, 0, false), None, "an empty vec has no back");
+    }
+
+    #[test]
+    fn move_text_instance_to_the_front_keeps_the_others_in_order() {
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "A", 20.0, &[(0.0, 10.0, 20.0)]);
+        push_instance_pos(&mut core, "B", 20.0, &[(0.0, 30.0, 40.0)]);
+        push_instance_pos(&mut core, "C", 20.0, &[(0.0, 50.0, 60.0)]);
+        push_instance_pos(&mut core, "D", 20.0, &[(0.0, 70.0, 80.0)]);
+        let depth_before = core.undo_depth();
+        assert!(move_text_instance(&mut core, 0, true));
+        assert_eq!(core.status, "Text 4 moved to the front.");
+        let contents: Vec<&str> = core
+            .project
+            .texts
+            .iter()
+            .map(|t| t.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            ["B", "C", "D", "A"],
+            "A goes last (drawn on top); B, C and D keep their relative order"
+        );
+        assert_eq!(
+            key_positions(&core, 3),
+            vec![(10.0, 20.0)],
+            "the moved instance rides along verbatim"
+        );
+        assert_eq!(
+            core.undo_depth(),
+            depth_before + 1,
+            "exactly one snapshot for the move"
+        );
+        core.undo();
+        let contents: Vec<&str> = core
+            .project
+            .texts
+            .iter()
+            .map(|t| t.content.as_str())
+            .collect();
+        assert_eq!(contents, ["A", "B", "C", "D"], "one undo restores the order");
+    }
+
+    #[test]
+    fn move_text_instance_to_the_back_keeps_the_others_in_order() {
+        let mut core = EditorCore::new();
+        push_instance(&mut core, "A", 20.0, 1);
+        push_instance(&mut core, "B", 20.0, 1);
+        push_instance(&mut core, "C", 20.0, 1);
+        let depth_before = core.undo_depth();
+        assert!(move_text_instance(&mut core, 2, false));
+        assert_eq!(core.status, "Text 1 moved to the back.");
+        let contents: Vec<&str> = core
+            .project
+            .texts
+            .iter()
+            .map(|t| t.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            ["C", "A", "B"],
+            "C goes first (drawn underneath); A and B keep their relative order"
+        );
+        assert_eq!(
+            core.undo_depth(),
+            depth_before + 1,
+            "exactly one snapshot for the move"
+        );
+    }
+
+    #[test]
+    fn move_text_instance_already_at_an_end_snapshots_nothing() {
+        let mut core = EditorCore::new();
+        push_instance(&mut core, "A", 20.0, 1);
+        push_instance(&mut core, "B", 20.0, 1);
+        let depth_before = core.undo_depth();
+        assert!(!move_text_instance(&mut core, 1, true), "B is already at the front");
+        assert_eq!(core.status, "Already at the front.");
+        assert!(!move_text_instance(&mut core, 0, false), "A is already at the back");
+        assert_eq!(core.status, "Already at the back.");
+        assert_eq!(
+            core.undo_depth(),
+            depth_before,
+            "a press that moves nothing snapshots nothing"
+        );
+        let contents: Vec<&str> = core
+            .project
+            .texts
+            .iter()
+            .map(|t| t.content.as_str())
+            .collect();
+        assert_eq!(contents, ["A", "B"], "the order is untouched");
+    }
+
+    #[test]
+    fn move_text_instance_out_of_range_is_status_only_noop() {
+        let mut core = EditorCore::new();
+        push_instance(&mut core, "A", 20.0, 1);
+        let depth_before = core.undo_depth();
+        assert!(!move_text_instance(&mut core, 7, true));
+        assert_eq!(core.status, "No such text.");
+        assert!(!move_text_instance(&mut core, 7, false));
+        assert_eq!(core.status, "No such text.");
+        assert_eq!(core.project.texts.len(), 1, "nothing moved or vanished");
+        assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
+    }
+
+    #[test]
+    fn move_loaded_front_then_back_follows_the_instance() {
+        let mut s = crate::init();
+        push_instance(&mut s.core, "A", 24.0, 1);
+        push_instance(&mut s.core, "B", 24.0, 1);
+        push_instance(&mut s.core, "C", 24.0, 1);
+        let order = |s: &State| -> Vec<&str> {
+            s.core
+                .project
+                .texts
+                .iter()
+                .map(|t| t.content.as_str())
+                .collect()
+        };
+        // Nothing loaded: the press refuses through
+        // loaded_index and reorders nothing.
+        let depth_before = s.core.undo_depth();
+        move_loaded(&mut s, true);
+        assert_eq!(s.core.status, "Load a text first.");
+        assert_eq!(order(&s), ["A", "B", "C"]);
+        assert_eq!(s.core.undo_depth(), depth_before, "nothing was snapshotted");
+
+        // Load the middle one and bring it to the front:
+        // it lands at the vec's end and `loaded` follows.
+        s.text_tool.loaded = Some(1);
+        move_loaded(&mut s, true);
+        assert_eq!(s.core.status, "Text 3 moved to the front.");
+        assert_eq!(order(&s), ["A", "C", "B"], "B is drawn last, on top");
+        assert_eq!(s.text_tool.loaded, Some(2), "loaded follows B to its new index");
+        assert_eq!(
+            s.core.undo_depth(),
+            depth_before + 1,
+            "exactly one snapshot for the move"
+        );
+
+        // Already at the front: no snapshot, no reorder,
+        // and `loaded` stays where it was.
+        move_loaded(&mut s, true);
+        assert_eq!(s.core.status, "Already at the front.");
+        assert_eq!(order(&s), ["A", "C", "B"]);
+        assert_eq!(s.text_tool.loaded, Some(2));
+        assert_eq!(s.core.undo_depth(), depth_before + 1, "nothing more was snapshotted");
+
+        // Send it to the back from there: index 0, and
+        // `loaded` follows again.
+        move_loaded(&mut s, false);
+        assert_eq!(s.core.status, "Text 1 moved to the back.");
+        assert_eq!(order(&s), ["B", "A", "C"], "B is drawn first, underneath");
+        assert_eq!(s.text_tool.loaded, Some(0), "loaded follows B to the back");
+        assert_eq!(
+            s.core.undo_depth(),
+            depth_before + 2,
+            "one more snapshot for the second move"
+        );
+
+        // Already at the back: no snapshot.
+        move_loaded(&mut s, false);
+        assert_eq!(s.core.status, "Already at the back.");
+        assert_eq!(order(&s), ["B", "A", "C"]);
+        assert_eq!(s.text_tool.loaded, Some(0));
+        assert_eq!(s.core.undo_depth(), depth_before + 2, "nothing more was snapshotted");
     }
 }

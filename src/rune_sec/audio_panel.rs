@@ -61,6 +61,17 @@
 //! ` · {d:.1}s` segment; when it does not, the line is
 //! byte-identical to the Phase I line.
 //!
+//! Phase M adds a per-clip MUTE toggle to the operations
+//! toolbar (`audio-mute`): it flips the effective
+//! target's `AudioClip.muted` through
+//! `audio_ops::audio_toggle_muted_at`, and its label and
+//! glyph state the action a press performs — "Mute"
+//! (`volume-xmark`) while the target is audible,
+//! "Unmute" (`volume-high`) while it is muted. The mute
+//! state is visible wherever a clip is named: the rows
+//! carry a ` (muted)` marker (`clip_row_label`) and the
+//! readout gains a ` · muted` segment (`clip_readout`).
+//!
 //! Every control calls a real `EditorCore` op (evidence in
 //! the handler comments). Phase E closed the gaps Phase D
 //! had to leave open — fade, reverse, gain, delete and move
@@ -185,6 +196,39 @@ pub fn effective_target(selected: Option<usize>, clip_count: usize) -> Option<us
     }
 }
 
+/// Phase M: whether the effectively-targeted clip is
+/// muted — the live selection's clip, or the last clip
+/// under the fallback (see `effective_target`). No clips
+/// means nothing is muted: `false`, so the toolbar's
+/// toggle shows its audible form.
+pub fn target_muted(clips: &[AudioClip], selected: Option<usize>) -> bool {
+    effective_target(selected, clips.len())
+        .map(|i| clips[i].muted)
+        .unwrap_or(false)
+}
+
+/// Phase M: the Mute toggle's (icon, label) for a clip's
+/// mute state. The pair names the ACTION a press
+/// performs, not the current state: an audible clip
+/// offers "Mute" (the `volume-xmark` glyph — sound
+/// crossed out), a muted clip offers "Unmute" (the
+/// `volume-high` glyph — sound restored). Both glyphs
+/// are in the icon table; `icon_btn` would degrade to a
+/// plain button if one ever went missing.
+pub fn mute_toggle_parts(muted: bool) -> (&'static str, &'static str) {
+    if muted {
+        ("volume-high", "Unmute")
+    } else {
+        ("volume-xmark", "Mute")
+    }
+}
+
+/// `" (muted)"` for a muted clip, `""` for an audible
+/// one — the row label's mute marker.
+pub fn muted_suffix(muted: bool) -> &'static str {
+    if muted { " (muted)" } else { "" }
+}
+
 /// The gain the toolbar stepper acts on now: the
 /// effective target's gain (see `effective_target`), or
 /// `None` when the project has no clips.
@@ -254,6 +298,10 @@ pub fn clip_file_name(path: &str) -> &str {
 /// file reads back as a WAV. When it does not resolve
 /// (missing or unreadable file) the line is exactly the
 /// Phase I line: no duration segment, no placeholder.
+///
+/// Phase M appends ` · muted` (after the duration
+/// segment, when one is present) when the target clip
+/// is muted; an audible target's line is unchanged.
 pub fn clip_readout(core: &EditorCore, selected: Option<usize>) -> Option<String> {
     let clips = &core.project.audio;
     let i = effective_target(selected, clips.len())?;
@@ -267,6 +315,9 @@ pub fn clip_readout(core: &EditorCore, selected: Option<usize>) -> Option<String
     );
     if let Some(d) = audio_ops::clip_duration_secs(core, i) {
         line += &format!(" · {d:.1}s");
+    }
+    if clip.muted {
+        line += " · muted";
     }
     Some(line)
 }
@@ -297,13 +348,16 @@ pub fn selection_after_delete(
 }
 
 /// One clip row's label: `{name} · f{start+1}` plus the
-/// gain suffix when non-unity (the GPUI row format).
+/// gain suffix when non-unity (the GPUI row format)
+/// and, since Phase M, the ` (muted)` marker when the
+/// clip is muted.
 pub fn clip_row_label(clip: &AudioClip) -> String {
     format!(
-        "{} · f{}{}",
+        "{} · f{}{}{}",
         clip_display_name(&clip.path),
         clip.start_frame + 1,
-        gain_suffix(clip.gain)
+        gain_suffix(clip.gain),
+        muted_suffix(clip.muted)
     )
 }
 
@@ -379,6 +433,7 @@ fn add_clip(s: &mut State) {
             path: name,
             start_frame: s.core.current,
             gain: 1.0,
+            muted: false,
         });
         s.core.status = status;
     }
@@ -440,6 +495,25 @@ fn duplicate_target(s: &mut State) {
         if let Some(new_index) = s.core.audio_duplicate_clip_at(i) {
             s.audio_panel.selected = Some(new_index);
         }
+    }
+}
+
+/// Phase M: mute or unmute the toolbar's target clip —
+/// the selected clip when the selection is live, the
+/// last clip otherwise (the `effective_target`
+/// resolution `normalize_target` and `duplicate_target`
+/// use). With no clips there is no target and the press
+/// is a no-op: the toggle op is indexed (there is no
+/// `_last` mute variant), so there is nothing to call —
+/// but the button itself renders live in every state,
+/// exactly like the rest of the toolbar, whose buttons
+/// never render inert. DEPENDENCY (Phase M): calls
+/// `audio_ops::audio_toggle_muted_at` from the parallel
+/// `audio_ops` section — until that lands this file does
+/// not compile, by design.
+fn mute_target(s: &mut State) {
+    if let Some(i) = effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
+        audio_ops::audio_toggle_muted_at(&mut s.core, i);
     }
 }
 
@@ -594,7 +668,9 @@ fn delete_row_clip(s: &mut State, i: usize) {
 /// exactly one key, `audio-readout`, for the selected-clip
 /// readout line under the rows. Phase J adds the
 /// `audio-normalise` button in its own `audio-project-ops`
-/// row under the toolbar (non-empty branch only).
+/// row under the toolbar (non-empty branch only). Phase M
+/// adds the `audio-mute` toggle to the operations toolbar,
+/// beside Fade / Reverse / Duplicate.
 pub fn audio_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let clips = &core.project.audio;
@@ -730,6 +806,13 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             .font(type_::LABEL)
             .color(t.text_secondary),
     );
+    // Phase M: the Mute toggle's face follows the
+    // effective target's mute state — the press performs
+    // the named action (see `mute_toggle_parts`). With no
+    // clips there is no target and the button shows its
+    // audible "Mute" form; it renders live regardless,
+    // like every toolbar button here.
+    let (mute_icon, mute_label) = mute_toggle_parts(target_muted(clips, selected));
     panel = panel.child(
         row()
             .key("audio-ops")
@@ -747,6 +830,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             // loudness mark (Phase H).
             .child(icon_btn("audio-fade", "chart-line", "Fade", false, t, fade_target))
             .child(btn("audio-reverse", "Reverse", false, t, reverse_target))
+            .child(icon_btn("audio-mute", mute_icon, mute_label, false, t, mute_target))
             .child(icon_btn(
                 "audio-duplicate",
                 "copy",
@@ -847,6 +931,16 @@ mod tests {
             path: path.to_string(),
             start_frame,
             gain,
+            muted: false,
+        }
+    }
+
+    /// A clip factory variant with the mute flag set, for
+    /// the Phase M tests.
+    fn muted_clip(path: &str, start_frame: usize, gain: f32) -> AudioClip {
+        AudioClip {
+            muted: true,
+            ..clip(path, start_frame, gain)
         }
     }
 
@@ -1030,6 +1124,91 @@ mod tests {
     }
 
     #[test]
+    fn clip_readout_marks_a_muted_target() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip("audio/theme.wav", 0, 1.0));
+        core.project.audio.push(muted_clip("audio\\sting.wav", 29, 0.5));
+        // The muted segment closes the line when the
+        // target is muted (here the live selection names
+        // the muted clip), while an audible target's line
+        // is the Phase I line byte-for-byte.
+        assert_eq!(
+            clip_readout(&core, Some(1)),
+            Some("Clip 2: sting.wav · starts frame 30 · gain 0.50 · muted".to_string())
+        );
+        assert_eq!(
+            clip_readout(&core, Some(0)),
+            Some("Clip 1: theme.wav · starts frame 1 · gain 1.00".to_string())
+        );
+        // The fallback names the last clip, so with no
+        // selection the muted marker rides along.
+        assert_eq!(
+            clip_readout(&core, None),
+            Some("Clip 2: sting.wav · starts frame 30 · gain 0.50 · muted".to_string())
+        );
+    }
+
+    #[test]
+    fn clip_readout_marks_muted_after_the_duration_segment() {
+        // Muted AND readable as WAV: the marker lands
+        // after the Phase L duration segment, at the very
+        // end of the line.
+        let wav = audio_edit::WavData {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: vec![0.0; 44_100],
+        };
+        let path = std::env::temp_dir().join(format!(
+            "stykanimate-rune-audio-panel-readout-muted-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, audio_edit::write_wav(&wav)).unwrap();
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(muted_clip(&path.to_string_lossy(), 4, 0.5));
+        assert_eq!(
+            clip_readout(&core, Some(0)),
+            Some(format!(
+                "Clip 1: {} · starts frame 5 · gain 0.50 · 1.0s · muted",
+                path.file_name().unwrap().to_string_lossy()
+            ))
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mute_toggle_parts_name_the_action_not_the_state() {
+        // Audible: the press MUTES, so the button says so
+        // and shows the crossed-out speaker.
+        assert_eq!(mute_toggle_parts(false), ("volume-xmark", "Mute"));
+        // Muted: the press restores the sound.
+        assert_eq!(mute_toggle_parts(true), ("volume-high", "Unmute"));
+    }
+
+    #[test]
+    fn target_muted_reads_the_effective_target() {
+        let clips = vec![clip("a.wav", 0, 1.0), muted_clip("b.wav", 3, 1.0)];
+        // A live selection names its own clip's state.
+        assert!(!target_muted(&clips, Some(0)));
+        assert!(target_muted(&clips, Some(1)));
+        // No selection — or a stale one — reads the LAST
+        // clip, the toolbar's own fallback.
+        assert!(target_muted(&clips, None));
+        assert!(target_muted(&clips, Some(9)));
+        // No clips: nothing is muted, the toggle shows
+        // its audible form.
+        assert!(!target_muted(&[], None));
+        assert!(!target_muted(&[], Some(0)));
+    }
+
+    #[test]
+    fn muted_suffix_marks_only_muted_clips() {
+        assert_eq!(muted_suffix(true), " (muted)");
+        assert_eq!(muted_suffix(false), "");
+    }
+
+    #[test]
     fn target_gain_readout_follows_the_target() {
         let clips = vec![clip("a.wav", 0, 2.0), clip("b.wav", 3, 0.5)];
         assert_eq!(target_gain(&clips, Some(0)), Some(2.0));
@@ -1102,6 +1281,20 @@ mod tests {
         assert_eq!(
             clip_row_label(&clip("a/theme.wav", 4, 2.0)),
             "theme.wav · f5 · gain 2.00"
+        );
+    }
+
+    #[test]
+    fn row_label_marks_a_muted_clip() {
+        assert_eq!(
+            clip_row_label(&muted_clip("a/theme.wav", 0, 1.0)),
+            "theme.wav · f1 (muted)"
+        );
+        // The marker closes the label, after the gain
+        // suffix when one is present.
+        assert_eq!(
+            clip_row_label(&muted_clip("a/theme.wav", 4, 2.0)),
+            "theme.wav · f5 · gain 2.00 (muted)"
         );
     }
 
@@ -1462,5 +1655,43 @@ playback_speed: 1.0,
         let _ = std::fs::remove_file(&silent_a);
         let _ = std::fs::remove_file(&mid);
         let _ = std::fs::remove_file(&silent_c);
+    }
+
+    #[test]
+    fn mute_target_toggles_the_effective_target() {
+        // Phase M dispatch, in the `*_target` handler
+        // test pattern: with the FIRST of two clips
+        // selected, the toggle must flip clip 1 only — a
+        // last-clip handler would flip clip 2 instead.
+        // (Assertions read the model flag, not the op's
+        // status wording, which is the `audio_ops`
+        // section's own surface.)
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip("fake/theme.wav", 0, 1.0));
+        core.project.audio.push(clip("fake/sting.wav", 9, 1.0));
+        let mut s = state_with(core);
+        s.audio_panel.selected = Some(0);
+        mute_target(&mut s);
+        assert!(s.core.project.audio[0].muted, "selected clip muted");
+        assert!(!s.core.project.audio[1].muted, "last clip untouched");
+        // A second press on the same target unmutes it.
+        mute_target(&mut s);
+        assert!(!s.core.project.audio[0].muted, "second press unmutes");
+
+        // No selection: the fallback target is the LAST
+        // clip (the `effective_target` discipline).
+        s.audio_panel.selected = None;
+        mute_target(&mut s);
+        assert!(!s.core.project.audio[0].muted, "first clip untouched");
+        assert!(s.core.project.audio[1].muted, "last clip muted by fallback");
+
+        // No clips at all: no target, no panic, nothing
+        // to flip.
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        let mut s = state_with(core);
+        mute_target(&mut s);
+        assert!(s.core.project.audio.is_empty());
     }
 }

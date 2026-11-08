@@ -232,6 +232,114 @@ pub fn preview_camera() -> Camera3 {
     }
 }
 
+/// Headroom factor [`frame_camera_points`] applies to the exact
+/// bounding-sphere fit distance. The sphere's angular radius
+/// seen from the camera is `asin(radius / distance)`, so a
+/// factor above 1 keeps every framed point strictly inside the
+/// frustum with margin to spare.
+pub const FRAME_POINTS_HEADROOM: f32 = 1.15;
+
+/// The camera distance [`frame_camera_points`] uses when the
+/// framed points have no extent (a single point, or all points
+/// identical): there is no sphere to fit, so the point is
+/// simply viewed from a comfortable distance.
+pub const FRAME_POINTS_ZERO_RADIUS_DISTANCE: f32 = 120.0;
+
+/// Frame a raw point set with a closed-form bounding-sphere
+/// fit: the camera targets the points' centroid at the given
+/// `yaw`/`pitch` (degrees — see [`Camera3`]), with its distance
+/// chosen so the sphere of radius `max |p − centroid|` fits the
+/// frustum: `distance = radius / sin(half_fov) ×
+/// [FRAME_POINTS_HEADROOM]`, where `half_fov` is the SMALLER of
+/// the vertical half-FOV and the horizontal half-FOV implied by
+/// `aspect` (width / height: horizontal `= 2·atan(tan(v/2) ·
+/// aspect)`). Fitting the bounding sphere makes the result
+/// sound at any orientation, with no search — fully
+/// deterministic. (This helper carries the `_points` suffix
+/// because the name `frame_camera` already belongs to the
+/// figure-based search below; the two are not interchangeable —
+/// this one is the closed form for callers that already hold
+/// world points.)
+///
+/// Degenerate inputs are sanitised rather than propagated:
+///
+/// - an empty point set, or one whose points are ALL
+///   non-finite, returns [`preview_camera`] unchanged;
+/// - individual non-finite points are skipped by both the
+///   centroid and the radius;
+/// - a non-finite, non-positive or ≥ 180° `fov_deg` falls back
+///   to [`preview_camera`]'s FOV (the result's `fov_deg` is
+///   the sanitised value); a non-finite or non-positive
+///   `aspect` is treated as 1.0;
+/// - a zero radius uses [`FRAME_POINTS_ZERO_RADIUS_DISTANCE`];
+/// - the final distance is clamped to [40, 4000], so the
+///   result is finite for every finite input.
+pub fn frame_camera_points(
+    points: &[[f32; 3]],
+    fov_deg: f32,
+    aspect: f32,
+    yaw: f32,
+    pitch: f32,
+) -> Camera3 {
+    let fov = if fov_deg.is_finite() && fov_deg > 0.0 && fov_deg < 180.0 {
+        fov_deg
+    } else {
+        preview_camera().fov_deg
+    };
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        1.0
+    };
+    // Centroid over the finite points only, accumulated in
+    // f64 so very large coordinates cannot overflow the sum
+    // (the mean of finite values lies between them, so the
+    // cast back to f32 is safe).
+    let mut sum = [0.0f64; 3];
+    let mut count = 0usize;
+    for p in points {
+        if p.iter().all(|v| v.is_finite()) {
+            sum[0] += p[0] as f64;
+            sum[1] += p[1] as f64;
+            sum[2] += p[2] as f64;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return preview_camera();
+    }
+    let n = count as f64;
+    let target = [
+        (sum[0] / n) as f32,
+        (sum[1] / n) as f32,
+        (sum[2] / n) as f32,
+    ];
+    // Bounding-sphere radius about the centroid, over the
+    // same finite points.
+    let mut radius = 0.0f32;
+    for p in points {
+        if p.iter().all(|v| v.is_finite()) {
+            let d = v_sub(*p, target);
+            radius = radius.max(v_dot(d, d).sqrt());
+        }
+    }
+    let v_half = (fov / 2.0).to_radians();
+    let h_half = (v_half.tan() * aspect).atan();
+    let sin_half = v_half.min(h_half).sin();
+    let distance = if radius > 0.0 {
+        radius / sin_half * FRAME_POINTS_HEADROOM
+    } else {
+        FRAME_POINTS_ZERO_RADIUS_DISTANCE
+    };
+    Camera3 {
+        yaw,
+        pitch,
+        distance: distance.clamp(40.0, 4000.0),
+        fov_deg: fov,
+        target,
+    }
+}
+
 /// Frame `fig` in `pose` on `stage`: a front camera (the
 /// [`default_camera`] orientation and FOV) targeted on the posed
 /// figure's centroid, with its distance chosen so the figure's
@@ -2311,8 +2419,8 @@ mod mirror_tests {
 #[cfg(test)]
 mod camera_framing_tests {
     use super::{
-        camera_preset, default_camera, evaluate3, frame_camera, humanoid3, project, Figure3,
-        Pose3,
+        camera_preset, default_camera, evaluate3, frame_camera, frame_camera_points, humanoid3,
+        preview_camera, project, Figure3, Pose3, BEHIND_DEPTH,
     };
 
     #[test]
@@ -2427,6 +2535,109 @@ mod camera_framing_tests {
         };
         let pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
         assert_eq!(frame_camera(&fig, &pose, [960.0, 720.0]), default_camera());
+    }
+
+    #[test]
+    fn frame_camera_points_frames_the_rest_humanoid() {
+        // The closed-form counterpart of the preview camera's
+        // pin: the same rest pose, framed from its own points
+        // at the preview's FOV / aspect / angles, projects
+        // ENTIRELY inside a 308x220 stage through the real
+        // project() — the bounding-sphere fit guarantees it.
+        let fig = humanoid3();
+        let pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        let pts = evaluate3(&fig, &pose);
+        let cam = frame_camera_points(&pts, 40.0, 308.0 / 220.0, 25.0, 10.0);
+        // Yaw/pitch pass through; the FOV is the (sanitised)
+        // input; the target is the points' centroid.
+        assert_eq!((cam.yaw, cam.pitch), (25.0, 10.0));
+        assert_eq!(cam.fov_deg, 40.0);
+        let projected = project(&pts, &cam, [308.0, 220.0]);
+        for p in &projected {
+            assert!(p.depth < BEHIND_DEPTH, "joint clamped behind: {:?}", p);
+            assert!(p.xy[0] >= 0.0 && p.xy[0] <= 308.0, "x out: {:?}", p.xy);
+            assert!(p.xy[1] >= 0.0 && p.xy[1] <= 220.0, "y out: {:?}", p.xy);
+        }
+    }
+
+    #[test]
+    fn frame_camera_points_wider_aspect_needs_no_more_distance() {
+        // Same points, same FOV: a narrow aspect makes the
+        // horizontal FOV the binding constraint, so the camera
+        // must sit farther away than at the wide aspect (where
+        // the vertical FOV governs).
+        let fig = humanoid3();
+        let pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        let pts = evaluate3(&fig, &pose);
+        let narrow = frame_camera_points(&pts, 40.0, 0.5, 25.0, 10.0);
+        let wide = frame_camera_points(&pts, 40.0, 308.0 / 220.0, 25.0, 10.0);
+        assert!(wide.distance <= narrow.distance);
+        assert!(
+            wide.distance < narrow.distance,
+            "the narrow aspect's horizontal limit must bind: {} vs {}",
+            wide.distance,
+            narrow.distance
+        );
+        // Only the distance differs: same target, same angles.
+        assert_eq!(wide.target, narrow.target);
+        assert_eq!((wide.yaw, wide.pitch), (narrow.yaw, narrow.pitch));
+    }
+
+    #[test]
+    fn frame_camera_points_empty_is_the_preview_camera() {
+        assert_eq!(
+            frame_camera_points(&[], 40.0, 1.4, 25.0, 10.0),
+            preview_camera()
+        );
+        // The fallback ignores the other arguments entirely.
+        assert_eq!(
+            frame_camera_points(&[], 90.0, 2.0, 0.0, 0.0),
+            preview_camera()
+        );
+    }
+
+    #[test]
+    fn frame_camera_points_single_point_uses_the_point_distance() {
+        let cam = frame_camera_points(&[[10.0, 20.0, 30.0]], 40.0, 1.4, 25.0, 10.0);
+        assert_eq!(cam.target, [10.0, 20.0, 30.0]);
+        // Zero radius: the fixed 120-unit viewing distance,
+        // inside the [40, 4000] clamp, so it survives as-is.
+        assert_eq!(cam.distance, 120.0);
+        assert_eq!(cam.distance, super::FRAME_POINTS_ZERO_RADIUS_DISTANCE);
+    }
+
+    #[test]
+    fn frame_camera_points_huge_cloud_clamps_the_distance() {
+        // Radius 5000 about the origin: the raw fit is
+        // 5000 / sin(20°) x 1.15 ~ 16,800 — far past the
+        // 4000-unit ceiling.
+        let pts = [
+            [5000.0, 0.0, 0.0],
+            [-5000.0, 0.0, 0.0],
+            [0.0, 5000.0, 0.0],
+            [0.0, -5000.0, 0.0],
+        ];
+        let cam = frame_camera_points(&pts, 40.0, 308.0 / 220.0, 25.0, 10.0);
+        assert_eq!(cam.target, [0.0, 0.0, 0.0]);
+        assert_eq!(cam.distance, 4000.0);
+    }
+
+    #[test]
+    fn frame_camera_points_skips_non_finite_points() {
+        // All non-finite: the preview camera, unchanged.
+        let bad = [[f32::NAN, 0.0, 0.0], [f32::INFINITY, 1.0, 2.0]];
+        assert_eq!(frame_camera_points(&bad, 40.0, 1.4, 25.0, 10.0), preview_camera());
+        // Mixed: the bad point is skipped by both the centroid
+        // and the radius, so the fit is over [0,0,0] and
+        // [10,0,0] alone — centroid [5,0,0], radius 5, whose
+        // raw distance (~16.8) clamps UP to the 40-unit floor.
+        let mixed = [[0.0, 0.0, 0.0], [f32::NAN, 5.0, 5.0], [10.0, 0.0, 0.0]];
+        let cam = frame_camera_points(&mixed, 40.0, 1.4, 25.0, 10.0);
+        assert_eq!(cam.target, [5.0, 0.0, 0.0]);
+        assert_eq!(cam.distance, 40.0);
+        // A degenerate FOV falls back to the preview's 40.
+        let cam = frame_camera_points(&mixed, f32::NAN, 1.4, 25.0, 10.0);
+        assert_eq!(cam.fov_deg, preview_camera().fov_deg);
     }
 }
 

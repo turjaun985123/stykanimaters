@@ -13,6 +13,7 @@ pub mod editor;
 pub mod export;
 pub mod fig3d;
 pub mod figure_ops;
+pub mod frame_swap;
 pub mod fx_edit;
 pub mod fx_ops;
 pub mod graph;

@@ -135,11 +135,26 @@
 //! handlers validate the selection the way
 //! [`split_selected`] does and otherwise add
 //! nothing of their own.
+//!
+//! Phase M adds the visibility surface for the
+//! model's per-clip `hidden` flag (hidden clips are
+//! skipped by the stage and by export renderers but
+//! stay editable): a Hide/Show toggle in the
+//! inspector ([`toggle_selected_hidden`] — no
+//! EditorCore op exists for the flag, so the handler
+//! follows the fx_ops no-backend pattern itself: one
+//! `EditorCore::snapshot`, then the direct field
+//! write, then the status line), a one-line readout
+//! under the inspector's summary ([`clip_readout`],
+//! key `fx-readout`), and strip bars for hidden
+//! clips drawn dimmed ([`bar_alpha`] scales the
+//! bar fill's alpha; geometry is untouched).
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, ScrollSpec, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::fx_edit;
+use stykanimate_rs::model::FxClipEntry;
 use stykanimate_rs::fx_ops::fx_kind_cycle;
 use stykanimate_rs::vfx::ClipKind;
 
@@ -304,6 +319,30 @@ pub fn inspector_data(core: &EditorCore, selected: Option<usize>) -> Option<FxIn
     })
 }
 
+/// The inspector's one-line readout for one clip
+/// (Phase M): `{Kind} · starts frame {first} ·
+/// {duration} frames`, with ` · hidden` appended
+/// while the clip's hidden flag is set. The kind is
+/// named the way the FX browser names it
+/// ([`kind_label`] over the engine's snake-case
+/// name); the start is the 1-based first covered
+/// frame and both frame numbers go through
+/// [`frame_label`], so whole frames render as
+/// integers and fractional ones keep their fraction
+/// — the phrasing the start/duration steppers use.
+pub fn clip_readout(entry: &FxClipEntry) -> String {
+    let mut line = format!(
+        "{} · starts frame {} · {} frames",
+        kind_label(fx_edit::kind_name(entry.clip.kind)),
+        frame_label(entry.clip.start + 1.0),
+        frame_label(entry.clip.duration)
+    );
+    if entry.hidden {
+        line.push_str(" · hidden");
+    }
+    line
+}
+
 /// Selection after clip `deleted` was removed, with
 /// `len_after` clips remaining: a selection before the gap
 /// is untouched, one after it shifts down by one, and the
@@ -377,6 +416,27 @@ pub const MIN_BAR_W: f32 = 2.0;
 /// Outline colour of the selected clip's bar (the
 /// shell's primary accent).
 pub const STRIP_ACCENT: u32 = 0x6D8CFF;
+
+/// Alpha a hidden clip's strip bar is drawn at, as a
+/// fraction of its normal opacity (Phase M): the bar
+/// keeps its colour, position and size — hidden clips
+/// are skipped by the stage and the exporters, and
+/// the strip says so by dimming, not by removing the
+/// bar (the clip is still there to select and edit).
+pub const HIDDEN_BAR_ALPHA: f32 = 0.35;
+
+/// The alpha multiplier for one clip's strip bar:
+/// [`HIDDEN_BAR_ALPHA`] for a hidden clip, 1.0 (the
+/// bar's colour untouched) for a visible one. Factored
+/// out of [`strip_shape`] so the dimming decision is
+/// testable without a `Shape`.
+pub fn bar_alpha(hidden: bool) -> f32 {
+    if hidden {
+        HIDDEN_BAR_ALPHA
+    } else {
+        1.0
+    }
+}
 
 /// The `(start, duration)` window of every FX clip in
 /// the project, in list order.
@@ -862,6 +922,34 @@ fn end_selected_at_playhead(s: &mut State) {
     s.core.fx_resize_clip(i, delta);
 }
 
+/// Toggle the selected clip's hidden flag (Phase M).
+/// No EditorCore op exists for the flag, so the
+/// handler follows the pattern the fx_ops no-backend
+/// ops themselves use (`fx_set_color` / `fx_set_kind`
+/// in fx_ops.rs): the selection is validated first,
+/// then ONE `EditorCore::snapshot`, the direct field
+/// write, and the status line. A hidden clip is
+/// skipped by the stage and by export renderers but
+/// remains in the list, editable — hiding is not
+/// deleting. With no valid selection the handler
+/// returns before the snapshot, exactly like
+/// [`split_selected`] and the playhead handlers: no
+/// snapshot, no edit, no status.
+fn toggle_selected_hidden(s: &mut State) {
+    let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
+        return;
+    };
+    s.core.snapshot();
+    let entry = &mut s.core.project.fx_clips[i];
+    entry.hidden = !entry.hidden;
+    let hidden = entry.hidden;
+    s.core.status = format!(
+        "FX clip {} {}.",
+        i + 1,
+        if hidden { "hidden" } else { "shown" }
+    );
+}
+
 /// The strip's press gesture: a press (drag Down) on a
 /// clip's bar selects that clip in `State::fx_selected`
 /// — the selection the lane rows and inspector already
@@ -942,7 +1030,8 @@ fn swatch_rows(
 /// track line, then one filled bar per clip from
 /// [`bar_rect`] in the clip's own colour; the selected
 /// clip's bar is brightened (its colour mixed toward
-/// white) and outlined in the accent. The shape carries
+/// white) and outlined in the accent, and a hidden
+/// clip's bar is dimmed through [`bar_alpha`]. The shape carries
 /// a `view_box` of the same size so it stretches to the
 /// element's laid-out size (this section receives no
 /// `Cx` to read the real one with). Bars a clip's window
@@ -975,6 +1064,13 @@ pub fn strip_shape(core: &EditorCore, selected: Option<usize>, size: [f32; 2], t
         } else {
             base
         };
+        // A hidden clip's bar draws dimmed (Phase M):
+        // its fill alpha scales by bar_alpha — ×1.0
+        // for a visible clip, so visible bars render
+        // exactly as before. The selected outline
+        // below is deliberately NOT dimmed: a hidden
+        // clip stays fully selectable and editable.
+        let fill = fill.alpha(fill.a * bar_alpha(entry.hidden));
         shape = shape.fill(
             vec![[x, y], [x + bw, y], [x + bw, y + bh], [x, y + bh]],
             fill,
@@ -1152,12 +1248,16 @@ pub fn nudge_row(s: &State, t: &Theme) -> El {
 }
 
 /// The clip inspector for the selected FX clip: kind and
-/// anchor summary, a kind stepper (Phase I: prev/next
+/// anchor summary, a one-line readout (Phase M:
+/// [`clip_readout`], key `fx-readout`), a kind stepper
+/// (Phase I: prev/next
 /// cycling through the browser's category order),
 /// start/duration steppers (move/resize),
 /// earlier/later nudge buttons (the GPUI panel's
 /// `fx-earlier`/`fx-later`), a split row (Phase J:
-/// cut the clip at the playhead), a nudge row (fine
+/// cut the clip at the playhead), a playhead row
+/// (Phase K), a visibility row (Phase M: the
+/// Hide/Show toggle, key `fx-hide`), a nudge row (fine
 /// start moves and ±0.1 s duration steps),
 /// colour + end-colour
 /// swatch rows, a re-anchor button, and
@@ -1189,6 +1289,16 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
             ))
             .font(type_::LABEL)
             .color(t.text_secondary),
+        )
+        // Readout (Phase M): the one-line summary of
+        // the clip — display kind name, first covered
+        // frame, length, and its hidden flag — built
+        // by clip_readout from the entry itself.
+        .child(
+            text(clip_readout(&s.core.project.fx_clips[i]))
+                .key("fx-readout")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
         )
         // Kind stepper (Phase I): prev/next cycle the
         // clip's kind through the FX browser's category
@@ -1317,6 +1427,28 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                     end_selected_at_playhead(s)
                 })),
         )
+        // Visibility row (Phase M): hide the selected
+        // clip (the stage and export renderers skip
+        // it; it stays listed and editable) or show it
+        // again. The button names the action it will
+        // take: eye-slash "Hide" while the clip is
+        // visible, eye "Show" while it is hidden —
+        // one key (fx-hide) for both states.
+        .child(
+            row()
+                .key("fx-visibility-row")
+                .gap(8.0)
+                .center_y()
+                .child(if s.core.project.fx_clips[i].hidden {
+                    icon_btn("fx-hide", "eye", "Show", false, t, |s| {
+                        toggle_selected_hidden(s)
+                    })
+                } else {
+                    icon_btn("fx-hide", "eye-slash", "Hide", false, t, |s| {
+                        toggle_selected_hidden(s)
+                    })
+                }),
+        )
         // Nudge row: fine start moves (±1/±10 frames)
         // and ±0.1 s duration steps.
         .child(nudge_row(s, t))
@@ -1432,6 +1564,7 @@ mod tests {
             },
             figure: 1,
             node: 5,
+            hidden: false,
         }
     }
 
@@ -2223,6 +2356,117 @@ mod tests {
         let mut gradient = entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D);
         gradient.clip.color2 = Some(0x7BE495);
         let state = state_with(core_with(vec![gradient]), Some(0));
+        let _ = fx_inspector(&state, &t);
+    }
+
+    // --------------------------------------------------
+    // Phase M: hide/show toggle, readout, strip dimming
+    // --------------------------------------------------
+
+    #[test]
+    fn clip_readout_names_kind_first_frame_duration_and_hidden_flag() {
+        // Visible, whole frames: the kind's display
+        // name (browser label over the snake name), the
+        // 1-based first covered frame as an integer,
+        // and the length in frames.
+        let visible = entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D);
+        assert_eq!(
+            clip_readout(&visible),
+            "Burst · starts frame 5 · 10 frames"
+        );
+        // Hidden appends the flag — and only that.
+        let mut hidden = entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D);
+        hidden.hidden = true;
+        assert_eq!(
+            clip_readout(&hidden),
+            "Burst · starts frame 5 · 10 frames · hidden"
+        );
+        // A fractional start (a split's second half)
+        // keeps its fraction through frame_label, and a
+        // multi-word kind humanises like the browser's
+        // buttons do.
+        let fractional = entry(4.5, 9.5, ClipKind::ShockRing, 0x5DB2FF);
+        assert_eq!(
+            clip_readout(&fractional),
+            "Shock ring · starts frame 5.5 · 9.5 frames"
+        );
+    }
+
+    #[test]
+    fn toggle_selected_hidden_flips_the_flag_with_exactly_one_snapshot() {
+        // Two clips; the SECOND is selected — the
+        // toggle must land on it and nowhere else.
+        let core = core_with(vec![
+            entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D),
+            entry(20.0, 6.0, ClipKind::ShockRing, 0x5DB2FF),
+        ]);
+        let mut state = state_with(core, Some(1));
+        let depth = state.core.undo_depth();
+        toggle_selected_hidden(&mut state);
+        assert!(state.core.project.fx_clips[1].hidden, "selected clip hid");
+        assert!(
+            !state.core.project.fx_clips[0].hidden,
+            "unselected clip untouched"
+        );
+        assert_eq!(
+            state.core.undo_depth(),
+            depth + 1,
+            "one toggle is one undo step"
+        );
+        assert_eq!(state.core.status, "FX clip 2 hidden.");
+        // Toggling back shows it again — another single
+        // snapshot, the mirrored status.
+        toggle_selected_hidden(&mut state);
+        assert!(!state.core.project.fx_clips[1].hidden, "shown again");
+        assert_eq!(state.core.undo_depth(), depth + 2);
+        assert_eq!(state.core.status, "FX clip 2 shown.");
+        // Hiding never edits the clip itself.
+        let clip = state.core.project.fx_clips[1].clip;
+        assert_eq!(clip.start, 20.0);
+        assert_eq!(clip.duration, 6.0);
+        assert_eq!(state.fx_selected, Some(1), "selection unmoved");
+    }
+
+    #[test]
+    fn toggle_selected_hidden_without_a_selection_changes_nothing() {
+        // No selection and a stale selection both make
+        // the handler return before the snapshot: no
+        // undo step, no flag change, no status.
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, None);
+        let depth = state.core.undo_depth();
+        toggle_selected_hidden(&mut state);
+        assert_eq!(state.core.undo_depth(), depth);
+        assert!(!state.core.project.fx_clips[0].hidden);
+
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, Some(9));
+        let depth = state.core.undo_depth();
+        toggle_selected_hidden(&mut state);
+        assert_eq!(state.core.undo_depth(), depth);
+        assert!(!state.core.project.fx_clips[0].hidden);
+    }
+
+    #[test]
+    fn bar_alpha_dims_only_hidden_clips() {
+        // Visible bars keep their full opacity (the
+        // ×1.0 leaves strip rendering byte-identical);
+        // hidden bars draw at HIDDEN_BAR_ALPHA.
+        assert_eq!(bar_alpha(false), 1.0);
+        assert_eq!(bar_alpha(true), HIDDEN_BAR_ALPHA);
+        assert!((bar_alpha(true) - 0.35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn inspector_builds_with_a_hidden_clip_selected() {
+        // The visibility row in its Show state and the
+        // readout in its hidden form: a hidden clip is
+        // still selected and editable, so the detail
+        // block builds exactly as for a visible one.
+        let t = rune::tok::theme(true);
+        let mut hidden = entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D);
+        hidden.hidden = true;
+        let state = state_with(core_with(vec![hidden]), Some(0));
         let _ = fx_inspector(&state, &t);
     }
 }

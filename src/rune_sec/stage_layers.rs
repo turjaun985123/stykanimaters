@@ -93,6 +93,52 @@
 //! renderers' own precedence (spray first:
 //! `src/export.rs:407`, `src/svg.rs:61`).
 //!
+//! ## Stroke opacity (Phase M, section 14)
+//!
+//! `Stroke::opacity` (`src/model.rs`) is the per-stroke
+//! opacity recorded from the brush when the stroke was
+//! drawn (serde default 1.0 — older projects deserialize
+//! as fully opaque). Every [`StrokePrim`] now carries an
+//! `opacity: f32` — the mechanism [`StrokePrim::Dots`]
+//! has always had, extended to `Polyline` and `Filled`
+//! so the whole layer speaks one alpha language. (The
+//! colour stays `0xRRGGBB`: `stage_view::hex_color`
+//! masks to 24 bits, so there is no alpha byte to carry
+//! it in, and the RGB must stay unchanged anyway.)
+//!
+//! * **Base layer** ([`stroke_geometry`]): a plain or
+//!   filled stroke's prims carry the stroke's opacity,
+//!   clamped to `[0.0, 1.0]` — the point-of-use clamp
+//!   the SVG exporter applies in its `stroke_opacity`
+//!   attribute (`src/svg.rs`). The integrator applies
+//!   the carried value as the colour's alpha at
+//!   conversion, exactly as it already does for `Dots`;
+//!   at opacity 1.0 that is fully opaque, so the drawn
+//!   result is unchanged from before this field existed.
+//! * **Spray is exempt**: a spray stroke's dots already
+//!   carry the *spray mark's* per-dot alpha (above), and
+//!   `Stroke::opacity` is recorded as 1.0 for spray
+//!   strokes. Belt and braces, the spray branch never
+//!   reads `Stroke::opacity` at all, so even a
+//!   hand-edited project with a translucent spray stroke
+//!   sprays exactly as before.
+//! * **Highlight** ([`highlight_geometry`]): the prims
+//!   carry the *same* opacity values as the base layer
+//!   (the stroke's for plain/filled, the mark's for
+//!   spray dots) — this module stays composition-free,
+//!   and the drawing side owns how the highlight alpha
+//!   composes: `stage_view`'s highlight conversion
+//!   applies its `HIGHLIGHT_ALPHA` *flat* on a polyline
+//!   or fill's colour (the carried opacity is not
+//!   multiplied in), so a selected translucent stroke's
+//!   glow stays at full half-strength and remains
+//!   visible; for spray dots it multiplies the carried
+//!   mark alpha, as it always has.
+//! * **Vertex dots** ([`stroke_points_geometry`]) keep
+//!   opacity 1.0 — they are selection handles, not the
+//!   stroke's rendering, and follow the highlight's
+//!   reasoning: a faint stroke's handles stay findable.
+//!
 //! ## Selection highlight (Phase F, section 2)
 //!
 //! [`highlight_geometry`] produces the glow/outline version
@@ -128,12 +174,15 @@
 //!   highlight never invents a shape the stage doesn't draw.
 //! * **Colours are the stroke's own** (line colour, fill
 //!   colour), carried for type consistency with the base
-//!   prims. The highlight pass is the integrator's accent
-//!   pass: it is expected to recolour every prim to the
-//!   accent colour and apply translucency at conversion
-//!   time (`StrokePrim::Polyline` has no alpha field; for
-//!   `Dots`, multiply the carried `opacity` by the accent
-//!   alpha). This module stays colour-policy-free.
+//!   prims, and so is the carried `opacity` (the stroke's
+//!   recorded opacity for plain/filled prims, the mark
+//!   alpha for spray dots — see "Stroke opacity" above).
+//!   The highlight pass is the integrator's accent pass:
+//!   it recolours every prim to the accent colour and
+//!   applies its highlight alpha at conversion time —
+//!   flat on a polyline/fill's colour, multiplied into a
+//!   `Dots` prim's carried opacity. This module stays
+//!   colour-policy-free.
 //! * **Draw order (integrator)**: draw the highlight prims
 //!   in the stroke layer's slot, *before* the base stroke
 //!   prims, so the glow sits under the stroke it marks and
@@ -181,11 +230,15 @@
 //!   there is no ≥ 2-point rule: the dots mark points,
 //!   not the drawn shape.
 //! * **Colours are the stroke's own**, `opacity` 1.0 —
-//!   colour-policy-free like the highlight. The
-//!   integrator's accent pass recolours the dots to the
-//!   same accent and the conversion multiplies the
-//!   opacity by the highlight alpha, so dots land at the
-//!   same strength as the glow they accompany.
+//!   deliberately *not* the stroke's recorded opacity
+//!   (see "Stroke opacity" above): the dots are
+//!   selection handles, and a translucent stroke's
+//!   handles stay at full strength. Colour-policy-free
+//!   like the highlight: the integrator's accent pass
+//!   recolours the dots to the same accent and the
+//!   conversion multiplies the opacity by the highlight
+//!   alpha, so dots land at the same strength as the
+//!   glow they accompany.
 //! * **Draw order (integrator)**: draw the dots in the
 //!   same highlight pass as [`highlight_geometry`],
 //!   immediately after its prims — same slot, same
@@ -277,23 +330,28 @@ use stykanimate_rs::paint;
 /// in stage coordinates. The integrator maps `pts` through
 /// `stage_view::to_screen`, multiplies `width`/`radius` by
 /// the transform's `scale`, and converts `color` with
-/// `stage_view::hex_color` (applying `opacity` as the
-/// colour's alpha for [`StrokePrim::Dots`]).
+/// `stage_view::hex_color`, applying the prim's `opacity`
+/// as the colour's alpha (1.0 = fully opaque).
 #[derive(Clone, Debug, PartialEq)]
 pub enum StrokePrim {
     /// A plain brush stroke: one polyline through `pts` at
     /// uniform `width`, round caps (both renderers' choice:
-    /// `src/export.rs:61`, `src/svg.rs:90`).
+    /// `src/export.rs:61`, `src/svg.rs:90`). `opacity` is
+    /// the stroke's recorded opacity (Phase M, section
+    /// 14 — see the module docs, "Stroke opacity").
     Polyline {
         pts: Vec<[f32; 2]>,
         width: f32,
         color: u32,
+        opacity: f32,
     },
     /// A filled closed shape: the polygon through `pts`,
-    /// filled with `color` (the stroke's stored fill colour).
+    /// filled with `color` (the stroke's stored fill
+    /// colour) at the stroke's recorded `opacity`.
     Filled {
         pts: Vec<[f32; 2]>,
         color: u32,
+        opacity: f32,
     },
     /// Spray dots sharing one radius/colour/opacity. Spray
     /// strokes emit one of these **per dot** (see the module
@@ -318,6 +376,16 @@ pub fn authored_frame(core: &EditorCore) -> usize {
         .min(core.project.frames.len().saturating_sub(1))
 }
 
+/// The alpha a stroke's prims carry: its recorded
+/// opacity clamped to `[0.0, 1.0]` — the point-of-use
+/// clamp the SVG exporter applies to the same field
+/// (`src/svg.rs`, its `stroke_opacity` attribute), so
+/// every renderer reads the field the same way even if
+/// a hand-edited project stores an out-of-range value.
+fn stroke_alpha(stroke: &Stroke) -> f32 {
+    stroke.opacity.clamp(0.0, 1.0)
+}
+
 /// Geometry for the current frame's drawing strokes, in
 /// stage coordinates and stored stroke order. Pure: reads
 /// only `core.project.strokes` and the display frame, so the
@@ -335,6 +403,12 @@ pub fn stroke_geometry(core: &EditorCore) -> Vec<StrokePrim> {
         }
         // Spray first (the renderers' precedence): dots only,
         // one prim per dot so each dot keeps its own alpha.
+        // `stroke.opacity` is deliberately NOT applied here:
+        // it is recorded as 1.0 for spray strokes, and the
+        // dots' alpha already comes from the spray mark —
+        // scaling by the stroke field as well would fade
+        // spray twice (see the module docs, "Stroke
+        // opacity").
         if let Some(mark) = &stroke.spray {
             let radius = (stroke.width * 0.5).max(1.0);
             for (centre, alpha) in paint::spray_dots(&stroke.points, mark) {
@@ -349,22 +423,27 @@ pub fn stroke_geometry(core: &EditorCore) -> Vec<StrokePrim> {
         }
         // Filled closed shape (needs at least 3 points to
         // bound a polygon; below that, fall through so the
-        // stroke still draws as its outline).
+        // stroke still draws as its outline). The fill
+        // colour is the prim's colour; the alpha is the
+        // stroke's recorded opacity.
         if let Some(fill) = stroke.fill {
             if stroke.points.len() >= 3 {
                 out.push(StrokePrim::Filled {
                     pts: stroke.points.clone(),
                     color: fill,
+                    opacity: stroke_alpha(stroke),
                 });
                 continue;
             }
         }
-        // Plain stroke: one polyline at the uniform width.
+        // Plain stroke: one polyline at the uniform width,
+        // at the stroke's recorded opacity.
         if stroke.points.len() >= 2 {
             out.push(StrokePrim::Polyline {
                 pts: stroke.points.clone(),
                 width: stroke.width,
                 color: stroke.color,
+                opacity: stroke_alpha(stroke),
             });
         }
     }
@@ -454,23 +533,32 @@ pub fn highlight_geometry(core: &EditorCore, project_index: usize) -> Vec<Stroke
             })
             .collect();
     }
-    // Filled: the expanded outline of the polygon.
+    // Filled: the expanded outline of the polygon. The
+    // carried opacity is the stroke's own, exactly as the
+    // base layer's filled prim carries it — how the
+    // highlight alpha composes with it is the drawing
+    // side's decision (module docs, "Stroke opacity").
     if let Some(fill) = stroke.fill {
         if stroke.points.len() >= 3 {
             return vec![StrokePrim::Polyline {
                 pts: expanded_outline(&stroke.points, HIGHLIGHT_EXPAND),
                 width: stroke.width + HIGHLIGHT_OUTLINE_PAD,
                 color: fill,
+                opacity: stroke_alpha(stroke),
             }];
         }
     }
     // Plain: the same polyline, wider — an underlay the
     // integrator draws translucent in the accent colour.
+    // The carried opacity is the stroke's own, as in the
+    // base layer (the spray branch above likewise keeps
+    // the mark's alphas untouched).
     if stroke.points.len() >= 2 {
         return vec![StrokePrim::Polyline {
             pts: stroke.points.clone(),
             width: stroke.width * HIGHLIGHT_WIDTH_SCALE + HIGHLIGHT_WIDTH_PAD,
             color: stroke.color,
+            opacity: stroke_alpha(stroke),
         }];
     }
     Vec::new()
@@ -621,6 +709,7 @@ mod tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         }
     }
 
@@ -641,6 +730,7 @@ mod tests {
                 pts: pts.to_vec(),
                 width: 6.0,
                 color: 0x2686E8,
+                opacity: 1.0,
             }]
         );
     }
@@ -679,6 +769,7 @@ mod tests {
             vec![StrokePrim::Filled {
                 pts: pts.to_vec(),
                 color: 0x112233,
+                opacity: 1.0,
             }]
         );
     }
@@ -832,6 +923,174 @@ mod tests {
         assert!(stroke_geometry(&core).is_empty());
     }
 
+    /// The `opacity` any prim carries, whichever variant
+    /// it is — the one alpha language the layer speaks.
+    fn prim_opacity(prim: &StrokePrim) -> f32 {
+        match prim {
+            StrokePrim::Polyline { opacity, .. }
+            | StrokePrim::Filled { opacity, .. }
+            | StrokePrim::Dots { opacity, .. } => *opacity,
+        }
+    }
+
+    #[test]
+    fn opaque_strokes_match_the_pre_change_construction() {
+        // The Phase M pin: at the recorded default (1.0)
+        // the prims are exactly what this layer produced
+        // before prims carried alpha — same points, same
+        // width, same colours — with opacity exactly 1.0,
+        // which the conversion applies as fully opaque.
+        let pts = [[10.0, 20.0], [30.0, 40.0], [50.0, 20.0]];
+        let mut filled = plain(0, &pts, 0x445566, 3.0);
+        filled.fill = Some(0x112233);
+        let core = core_with(vec![plain(0, &pts, 0x2686E8, 6.0), filled]);
+        assert_eq!(
+            stroke_geometry(&core),
+            vec![
+                StrokePrim::Polyline {
+                    pts: pts.to_vec(),
+                    width: 6.0,
+                    color: 0x2686E8,
+                    opacity: 1.0,
+                },
+                StrokePrim::Filled {
+                    pts: pts.to_vec(),
+                    color: 0x112233,
+                    opacity: 1.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn translucent_strokes_scale_prim_alpha() {
+        // Opacity 0.5 -> the carried alpha halves; the
+        // colour RGB is untouched (the alpha rides in the
+        // separate field, never in the colour).
+        let pts = [[10.0, 20.0], [30.0, 40.0], [50.0, 20.0]];
+        let mut plain_half = plain(0, &pts, 0x2686E8, 6.0);
+        plain_half.opacity = 0.5;
+        let mut filled_half = plain(0, &pts, 0x445566, 3.0);
+        filled_half.fill = Some(0x112233);
+        filled_half.opacity = 0.5;
+        let core = core_with(vec![plain_half, filled_half]);
+        let geo = stroke_geometry(&core);
+        assert_eq!(geo.len(), 2);
+        for prim in &geo {
+            assert!(
+                (prim_opacity(prim) - 0.5).abs() < 1e-6,
+                "alpha halved, got {}",
+                prim_opacity(prim)
+            );
+        }
+        match &geo[0] {
+            StrokePrim::Polyline { color, .. } => {
+                assert_eq!(*color, 0x2686E8, "plain colour unchanged")
+            }
+            other => panic!("expected a polyline, got {other:?}"),
+        }
+        match &geo[1] {
+            StrokePrim::Filled { color, .. } => {
+                assert_eq!(*color, 0x112233, "fill colour unchanged")
+            }
+            other => panic!("expected a filled prim, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stroke_opacity_is_clamped_to_the_unit_range() {
+        // The SVG exporter's point-of-use clamp, mirrored:
+        // an out-of-range stored value can neither brighten
+        // a prim past opaque nor push its alpha negative.
+        let pts = [[0.0, 0.0], [10.0, 0.0]];
+        let mut over = plain(0, &pts, 0x111111, 4.0);
+        over.opacity = 1.4;
+        let mut under = plain(0, &pts, 0x222222, 4.0);
+        under.opacity = -0.25;
+        let core = core_with(vec![over, under]);
+        let geo = stroke_geometry(&core);
+        assert_eq!(prim_opacity(&geo[0]), 1.0);
+        assert_eq!(prim_opacity(&geo[1]), 0.0);
+    }
+
+    #[test]
+    fn spray_stroke_opacity_is_never_applied() {
+        // A spray stroke with `opacity` 0.5 — a state the
+        // recorder never produces (spray records 1.0) —
+        // must spray exactly as the same stroke at 1.0:
+        // the dots' alpha comes from the spray mark alone,
+        // never scaled by the stroke field.
+        let build = |stroke_opacity: f32| {
+            let mut s = plain(0, &[[100.0, 100.0], [160.0, 100.0]], 0xE8862E, 6.0);
+            s.spray = Some(SprayMark {
+                seed: 7,
+                radius: 10.0,
+                opacity: 0.8,
+            });
+            s.opacity = stroke_opacity;
+            core_with(vec![s])
+        };
+        assert_eq!(
+            stroke_geometry(&build(0.5)),
+            stroke_geometry(&build(1.0)),
+            "spray geometry must not depend on Stroke::opacity"
+        );
+    }
+
+    #[test]
+    fn pressured_stroke_scales_every_prim() {
+        // A per-point-width stroke at opacity 0.5: however
+        // the stroke decomposes, every prim it produces
+        // carries the scaled alpha — no sub-prim escapes
+        // at full strength.
+        let mut s = plain(0, &[[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]], 0x111111, 4.0);
+        s.widths = vec![2.0, 10.0, 2.0];
+        s.opacity = 0.5;
+        let core = core_with(vec![s]);
+        let geo = stroke_geometry(&core);
+        assert!(!geo.is_empty());
+        for prim in &geo {
+            assert!(
+                (prim_opacity(prim) - 0.5).abs() < 1e-6,
+                "every sub-prim scaled, got {}",
+                prim_opacity(prim)
+            );
+        }
+    }
+
+    #[test]
+    fn highlight_carries_the_stroke_opacity_unchanged() {
+        // The composition this side of the boundary: the
+        // highlight prims carry the stroke's opacity
+        // exactly as the base layer does — NOT pre-scaled
+        // by the highlight alpha. How the accent pass
+        // composes the two is the drawing side's decision
+        // (module docs, "Stroke opacity").
+        let pts = [[10.0, 20.0], [30.0, 40.0], [50.0, 20.0]];
+        let mut plain_q = plain(0, &pts, 0x2686E8, 6.0);
+        plain_q.opacity = 0.4;
+        let core = core_with(vec![plain_q]);
+        let geo = highlight_geometry(&core, 0);
+        assert_eq!(geo.len(), 1);
+        assert!(
+            (prim_opacity(&geo[0]) - 0.4).abs() < 1e-6,
+            "highlight carries 0.4 unchanged, got {}",
+            prim_opacity(&geo[0])
+        );
+        // The filled outline carries it too.
+        let mut filled_q = plain(0, &pts, 0x445566, 3.0);
+        filled_q.fill = Some(0x112233);
+        filled_q.opacity = 0.4;
+        let core = core_with(vec![filled_q]);
+        let geo = highlight_geometry(&core, 0);
+        assert_eq!(geo.len(), 1);
+        assert!(
+            (prim_opacity(&geo[0]) - 0.4).abs() < 1e-6,
+            "filled highlight carries 0.4 unchanged, got {}",
+            prim_opacity(&geo[0])
+        );
+    }
+
     #[test]
     fn highlight_polyline_is_wider_with_the_same_points() {
         let pts = [[10.0, 20.0], [30.0, 40.0], [50.0, 20.0]];
@@ -844,6 +1103,7 @@ mod tests {
                 // 6.0 * 1.5 + 3.0 — grown, per the contract.
                 width: 12.0,
                 color: 0x2686E8,
+                opacity: 1.0,
             }]
         );
         // And strictly wider than the base layer's prim.
@@ -929,8 +1189,10 @@ mod tests {
                 pts: outline,
                 width,
                 color,
+                opacity,
             }] => {
                 assert_eq!(*color, 0x112233, "outline carries the fill colour");
+                assert_eq!(*opacity, 1.0, "outline carries the stroke's opacity");
                 assert_eq!(*width, 5.0, "width is stroke width + 2.0 pad");
                 assert_eq!(outline.len(), 4, "3 vertices + closing repeat");
                 assert_eq!(outline[0], outline[3], "outline is closed");

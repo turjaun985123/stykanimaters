@@ -53,7 +53,7 @@ pub fn clip_offset_secs(start_frame: usize, fps: f32) -> f32 {
 #[derive(Clone, Debug)]
 pub enum PlaybackPlan {
     /// Nothing is audible at the playhead — or every clip that
-    /// would be audible is missing or unreadable.
+    /// would be audible is missing, unreadable or muted.
     Silent,
     /// Exactly one audible clip, at unity gain: play its file
     /// directly, starting `offset_secs` into the file. A lone clip
@@ -82,7 +82,10 @@ pub enum PlaybackPlan {
 /// [`crate::audio_edit::audible_at`]. `durations` resolves a clip
 /// path to its duration in seconds; it must return `None` for
 /// files that are missing or unreadable, and such clips are
-/// excluded, since their end cannot be scheduled.
+/// excluded, since their end cannot be scheduled. Muted clips are
+/// excluded on the same path: a muted clip never sounds directly
+/// and never joins a mix, so a playhead covered only by muted
+/// clips plans `Silent`.
 ///
 /// This function is pure (the only contact with the filesystem is
 /// through the `durations` probe), so the decision logic is
@@ -95,7 +98,17 @@ pub fn playback_plan(
 ) -> PlaybackPlan {
     // Match audible_at's frame-rate convention exactly.
     let fps = if fps > 0.0 { fps } else { 1.0 };
-    let audible = crate::audio_edit::audible_at(clips, playhead_secs, fps, durations);
+    // `audible_at` is the single classification of which clips
+    // are eligible at the playhead (span + readable file); the
+    // mute filter narrows that same list, so every plan shape
+    // below — Direct, Mixed, and the mix-failure fallback in
+    // `play_project`, which replays `mix_clips[0]` — inherits it
+    // without a second classification anywhere.
+    let audible: Vec<(usize, f32)> =
+        crate::audio_edit::audible_at(clips, playhead_secs, fps, durations)
+            .into_iter()
+            .filter(|&(index, _)| !clips[index].muted)
+            .collect();
     let to_mix_clip = |index: usize| crate::audio_edit::MixClip {
         path: clips[index].path.clone(),
         start_secs: clips[index].start_frame as f32 / fps,
@@ -330,6 +343,16 @@ mod tests {
             path: path.to_string(),
             start_frame,
             gain: 1.0,
+            muted: false,
+        }
+    }
+
+    fn muted_clip(path: &str, start_frame: usize) -> crate::model::AudioClip {
+        crate::model::AudioClip {
+            path: path.to_string(),
+            start_frame,
+            gain: 1.0,
+            muted: true,
         }
     }
 
@@ -421,6 +444,74 @@ mod tests {
     }
 
     #[test]
+    fn playback_plan_muted_single_clip_is_silent() {
+        // The only clip covers the playhead and its file is
+        // readable, but it is muted: nothing may sound.
+        let clips = vec![muted_clip("a.wav", 0)];
+        let durations = |_: &str| Some(10.0);
+        assert!(matches!(
+            playback_plan(&clips, 1.0, 24.0, &durations),
+            PlaybackPlan::Silent
+        ));
+    }
+
+    #[test]
+    fn playback_plan_all_muted_is_silent() {
+        // Several muted clips overlapping the playhead still
+        // plan Silent — muting is not outvoted by clip count.
+        let clips = vec![muted_clip("a.wav", 0), muted_clip("b.wav", 24)];
+        let durations = |_: &str| Some(10.0);
+        assert!(matches!(
+            playback_plan(&clips, 2.0, 24.0, &durations),
+            PlaybackPlan::Silent
+        ));
+    }
+
+    #[test]
+    fn playback_plan_muted_plus_audible_plays_the_audible_directly() {
+        // Both clips cover the playhead; with A muted, B is the
+        // only audible clip, so it plays directly — the muted
+        // clip must not drag the plan into a mix.
+        let clips = vec![muted_clip("a.wav", 0), clip("b.wav", 0)];
+        let durations = |_: &str| Some(10.0);
+        match playback_plan(&clips, 1.0, 24.0, &durations) {
+            PlaybackPlan::Direct { path, offset_secs } => {
+                assert_eq!(path, "b.wav");
+                assert_eq!(offset_secs, 1.0);
+            }
+            other => panic!("expected a Direct plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn playback_plan_mix_excludes_muted_clips() {
+        // Three clips cover the playhead, but the middle one is
+        // muted: the mix holds exactly the two audible clips, in
+        // timeline order, and the muted path is absent.
+        let clips = vec![
+            clip("a.wav", 0),
+            muted_clip("b.wav", 24),
+            clip("c.wav", 48),
+        ];
+        let durations = |_: &str| Some(10.0);
+        match playback_plan(&clips, 3.0, 24.0, &durations) {
+            PlaybackPlan::Mixed {
+                mix_clips,
+                offset_secs,
+            } => {
+                assert_eq!(mix_clips.len(), 2);
+                assert_eq!(mix_clips[0].path, "a.wav");
+                assert_eq!(mix_clips[0].start_secs, 0.0);
+                assert_eq!(mix_clips[1].path, "c.wav");
+                assert_eq!(mix_clips[1].start_secs, 2.0);
+                assert!(mix_clips.iter().all(|c| c.path != "b.wav"));
+                assert_eq!(offset_secs, 3.0);
+            }
+            other => panic!("expected a Mixed plan, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn playback_smoke_test_spawns_and_stops() {
         if !ffplay_available() {
             eprintln!("skipping audio playback smoke test: ffplay is not available");
@@ -497,6 +588,7 @@ mod gain_tests {
             path: path.to_string(),
             start_frame,
             gain,
+            muted: false,
         }
     }
 

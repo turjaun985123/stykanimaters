@@ -79,6 +79,20 @@
 //! code. Both are read-only probes in the [`clip_peaks`]
 //! discipline: no snapshot, no status, failures as `None`.
 //!
+//! Phase M (section 8): [`audio_set_muted_at`] and
+//! [`audio_toggle_muted_at`] give the indexed family its
+//! mute ops, for the `AudioClip::muted` flag `model.rs`
+//! gained this phase (the playback plan in `audio.rs`
+//! excludes muted clips from the mix). Free functions in
+//! the [`clip_peaks`] shape, with the field ops'
+//! discipline: an out-of-range index is the status-only
+//! refusal and the call returns `false`; a real change
+//! takes exactly one snapshot. One refinement the gain
+//! setter never needed: asking for the state the clip is
+//! already in is a snapshot-free success (the status says
+//! the clip is already muted / audible), so a repeated
+//! mute press cannot bury the undo stack in no-op steps.
+//!
 //! `audio_derived_path` below is a copy of the private helper
 //! of the same name in `editor.rs`: it is private to that
 //! module, so this file cannot call it — the body is kept
@@ -190,6 +204,65 @@ pub fn clip_duration_secs(core: &EditorCore, index: usize) -> Option<f32> {
 pub fn clip_duration_frames(core: &EditorCore, index: usize) -> Option<usize> {
     let secs = clip_duration_secs(core, index)?;
     Some((secs * core.project.fps).round() as usize)
+}
+
+/// Phase M (section 8): set audio clip `index`'s mute flag
+/// (0-based) — a straight field write, like the gain
+/// setter: no file is materialised, because `muted` is
+/// honoured where the playback plan is built (`audio.rs`
+/// excludes muted clips from the mix).
+///
+/// Returns `true` when the clip ends the call in the
+/// requested state:
+///
+/// - a real change takes exactly ONE snapshot and the
+///   status reads "Clip {n} muted." / "Clip {n} unmuted.";
+/// - asking for the state the clip is already in takes NO
+///   snapshot and the status reads "Clip {n} is already
+///   muted." / "Clip {n} is already audible." — a success,
+///   not a failure, so callers can wire a toggle-style
+///   button without special-casing it.
+///
+/// An out-of-range index is the family's status-only
+/// refusal, "Audio mute failed: no clip {n}.", nothing
+/// changes, and the call returns `false`.
+pub fn audio_set_muted_at(core: &mut EditorCore, index: usize, muted: bool) -> bool {
+    let Some(current) = core.project.audio.get(index).map(|clip| clip.muted) else {
+        core.status = format!("Audio mute failed: no clip {}.", index + 1);
+        return false;
+    };
+    if current == muted {
+        core.status = if muted {
+            format!("Clip {} is already muted.", index + 1)
+        } else {
+            format!("Clip {} is already audible.", index + 1)
+        };
+        return true;
+    }
+    core.snapshot();
+    core.project.audio[index].muted = muted;
+    core.status = if muted {
+        format!("Clip {} muted.", index + 1)
+    } else {
+        format!("Clip {} unmuted.", index + 1)
+    };
+    true
+}
+
+/// Phase M (section 8): flip audio clip `index`'s mute
+/// flag (0-based). Reads the current value and delegates
+/// to [`audio_set_muted_at`], so the snapshot and the
+/// statuses all come from there (a toggle always changes
+/// the value, so it always takes the one snapshot). An
+/// out-of-range index never reaches the setter: the
+/// refusal is set here, in the same voice, nothing
+/// changes, and the call returns `false`.
+pub fn audio_toggle_muted_at(core: &mut EditorCore, index: usize) -> bool {
+    let Some(current) = core.project.audio.get(index).map(|clip| clip.muted) else {
+        core.status = format!("Audio mute failed: no clip {}.", index + 1);
+        return false;
+    };
+    audio_set_muted_at(core, index, !current)
 }
 
 /// Bucket count [`EditorCore::normalise_all_clips`] measures
@@ -860,6 +933,7 @@ impl EditorCore {
                 path: out.to_string_lossy().into_owned(),
                 start_frame: clip.start_frame.saturating_add(shift),
                 gain: clip.gain,
+                muted: clip.muted,
             });
         }
         let n = segments.len();
@@ -891,6 +965,7 @@ mod tests {
             path: path.into(),
             start_frame,
             gain: 1.0,
+            muted: false,
         }
     }
 
@@ -1916,5 +1991,91 @@ mod tests {
             "No audio clips needed normalising to peak 0.90."
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- Phase M: clip mute ----
+
+    #[test]
+    fn set_muted_at_mutes_and_unmutes_with_one_snapshot_each() {
+        // Clip 2 starts muted, so both directions of the
+        // setter run as real changes in one test.
+        let mut muted_clip = clip("b.wav", 4);
+        muted_clip.muted = true;
+        let mut core = core_with(vec![clip("a.wav", 0), muted_clip, clip("c.wav", 8)]);
+        let depth = core.undo_depth();
+        // Mute clip 1: field, status, exactly one snapshot;
+        // the neighbours keep their own states.
+        assert!(audio_set_muted_at(&mut core, 0, true));
+        assert!(core.project.audio[0].muted);
+        assert!(core.project.audio[1].muted, "already muted, untouched");
+        assert!(!core.project.audio[2].muted);
+        assert_eq!(core.status, "Clip 1 muted.");
+        assert_eq!(core.undo_depth(), depth + 1, "exactly one snapshot");
+        // Unmute clip 2: the same again, the other way.
+        assert!(audio_set_muted_at(&mut core, 1, false));
+        assert!(!core.project.audio[1].muted);
+        assert_eq!(core.status, "Clip 2 unmuted.");
+        assert_eq!(core.undo_depth(), depth + 2, "one snapshot per change");
+        // Each snapshot is a real undo step.
+        core.undo();
+        assert!(core.project.audio[1].muted, "undo restores the mute");
+    }
+
+    #[test]
+    fn set_muted_at_same_value_is_a_snapshot_free_success() {
+        let mut muted_clip = clip("b.wav", 4);
+        muted_clip.muted = true;
+        let mut core = core_with(vec![clip("a.wav", 0), muted_clip]);
+        let before = project_json(&core);
+        let depth = core.undo_depth();
+        assert!(audio_set_muted_at(&mut core, 1, true));
+        assert_eq!(core.status, "Clip 2 is already muted.");
+        assert!(audio_set_muted_at(&mut core, 0, false));
+        assert_eq!(core.status, "Clip 1 is already audible.");
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.undo_depth(), depth, "no snapshot taken");
+    }
+
+    #[test]
+    fn set_muted_at_out_of_range_refuses_without_a_snapshot() {
+        let mut core = core_with(vec![clip("a.wav", 0), clip("b.wav", 4)]);
+        let before = project_json(&core);
+        let depth = core.undo_depth();
+        assert!(!audio_set_muted_at(&mut core, 2, true));
+        assert_eq!(core.status, "Audio mute failed: no clip 3.");
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.undo_depth(), depth, "no snapshot taken");
+        // Same refusal voice on an empty project.
+        let mut empty = EditorCore::new();
+        assert!(!audio_set_muted_at(&mut empty, 0, true));
+        assert_eq!(empty.status, "Audio mute failed: no clip 1.");
+    }
+
+    #[test]
+    fn toggle_muted_at_flips_and_flips_back() {
+        let mut core = core_with(vec![clip("a.wav", 0), clip("b.wav", 4)]);
+        let depth = core.undo_depth();
+        assert!(audio_toggle_muted_at(&mut core, 1));
+        assert!(core.project.audio[1].muted);
+        assert!(!core.project.audio[0].muted, "neighbour untouched");
+        assert_eq!(core.status, "Clip 2 muted.");
+        assert_eq!(core.undo_depth(), depth + 1, "exactly one snapshot");
+        // A second toggle returns the clip to its original
+        // value — through the setter, so one more snapshot.
+        assert!(audio_toggle_muted_at(&mut core, 1));
+        assert!(!core.project.audio[1].muted);
+        assert_eq!(core.status, "Clip 2 unmuted.");
+        assert_eq!(core.undo_depth(), depth + 2, "one snapshot per flip");
+    }
+
+    #[test]
+    fn toggle_muted_at_out_of_range_refuses_without_a_snapshot() {
+        let mut core = core_with(vec![clip("a.wav", 0)]);
+        let before = project_json(&core);
+        let depth = core.undo_depth();
+        assert!(!audio_toggle_muted_at(&mut core, 4));
+        assert_eq!(core.status, "Audio mute failed: no clip 5.");
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.undo_depth(), depth, "no snapshot taken");
     }
 }

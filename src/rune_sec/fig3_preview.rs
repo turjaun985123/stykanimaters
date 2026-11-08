@@ -131,6 +131,26 @@ fn behind(p: &fig3d::Proj) -> bool {
     p.depth >= fig3d::BEHIND_DEPTH
 }
 
+/// The ground height for an evaluated 3D figure: the lowest
+/// joint's y — the figure's feet. The engine defines no
+/// ground plane, so the ground follows the figure (see the
+/// module docs). Non-finite joint heights are ignored; an
+/// empty world, or one with no finite joint height at all,
+/// puts the ground at 0.0.
+///
+/// This is the single source for the feet rule: the panel
+/// preview ([`preview_prims`]) and `stage_fig3`'s on-stage
+/// drawing both call it, so the two can never disagree
+/// about where the ground is.
+pub fn ground_y_of(world: &[[f32; 3]]) -> f32 {
+    world
+        .iter()
+        .map(|p| p[1])
+        .filter(|y| y.is_finite())
+        .reduce(f32::min)
+        .unwrap_or(0.0)
+}
+
 /// Build the preview's segments for one frame of the panel.
 ///
 /// - `state`: the editor's fig3d session, if one is active. The
@@ -157,13 +177,10 @@ pub fn preview_prims(
         }
     };
     // One evaluation serves both the ground offset and the
-    // figure pass below.
+    // figure pass below. With no session there is no world
+    // and the ground stays at 0.0.
     let world = state.map(|s| fig3d::evaluate3(&s.figure, &s.pose));
-    let ground_y = world
-        .as_deref()
-        .and_then(|w| w.iter().map(|p| p[1]).reduce(f32::min))
-        .filter(|y| y.is_finite())
-        .unwrap_or(0.0);
+    let ground_y = world.as_deref().map(ground_y_of).unwrap_or(0.0);
 
     let mut prims = Vec::new();
 
@@ -197,7 +214,13 @@ pub fn preview_prims(
 /// Clip a 2D segment to the viewport rectangle
 /// `[0, w] × [0, h]` (Liang–Barsky); `None` when the
 /// segment lies wholly outside or the viewport is empty.
-fn clip_segment_to_viewport(
+///
+/// Also used by `stage_fig3` to clip the on-stage 3D
+/// drawing to the stage rect — for the same reason the
+/// preview clips here: the canvas does not clip its
+/// drawing to the element rect, so any line that projects
+/// outside the rect would paint over the rest of the UI.
+pub fn clip_segment_to_viewport(
     a: [f32; 2],
     b: [f32; 2],
     viewport: [f32; 2],
@@ -606,5 +629,68 @@ mod tests {
         assert!(!grid_visible());
         assert!(toggle_grid());
         assert!(grid_visible());
+    }
+
+    #[test]
+    fn ground_y_of_empty_world_is_zero() {
+        // No joints at all: the ground stays at the origin
+        // height, the same fallback the no-session preview
+        // uses.
+        assert_eq!(ground_y_of(&[]), 0.0);
+    }
+
+    #[test]
+    fn ground_y_of_takes_the_lowest_joint() {
+        // The feet rule: the minimum y over the evaluated
+        // joints — x and z play no part.
+        let world = [
+            [10.0, 58.0, 0.0],
+            [-4.0, -70.0, 12.0],
+            [0.0, 0.0, -30.0],
+        ];
+        assert_eq!(ground_y_of(&world), -70.0);
+        // A figure entirely above the origin grounds at its
+        // own lowest joint, not at 0.
+        let world = [[0.0, 12.5, 0.0], [0.0, 40.0, 0.0]];
+        assert_eq!(ground_y_of(&world), 12.5);
+    }
+
+    #[test]
+    fn ground_y_of_ignores_non_finite_joints() {
+        // NaN and both infinities are skipped, not folded
+        // into the minimum: the finite joints decide.
+        let world = [
+            [0.0, f32::NAN, 0.0],
+            [0.0, f32::INFINITY, 0.0],
+            [0.0, f32::NEG_INFINITY, 0.0],
+            [0.0, -42.0, 0.0],
+            [0.0, 10.0, 0.0],
+        ];
+        assert_eq!(ground_y_of(&world), -42.0);
+    }
+
+    #[test]
+    fn ground_y_of_all_non_finite_is_zero() {
+        // Nothing finite to stand on: the 0.0 fallback.
+        let world = [
+            [0.0, f32::NAN, 0.0],
+            [0.0, f32::INFINITY, 0.0],
+            [0.0, f32::NEG_INFINITY, 0.0],
+        ];
+        assert_eq!(ground_y_of(&world), 0.0);
+    }
+
+    #[test]
+    fn preview_prims_with_a_session_still_places_grid_prims() {
+        // Sanity that the ground_y_of extraction changed no
+        // behaviour: a session with the grid on still leads
+        // with grid prims, exactly as before the extraction.
+        let state = rest_state(0);
+        let prims = preview_prims(Some(&state), true, VP);
+        assert!(
+            prims.iter().any(|p| p.color == GRID_COLOR),
+            "the session preview still draws its ground grid"
+        );
+        assert_eq!(prims[0].color, GRID_COLOR, "the grid still leads");
     }
 }

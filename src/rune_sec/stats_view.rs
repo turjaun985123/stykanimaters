@@ -8,12 +8,14 @@
 //! motion stats. Nothing here mutates the core, and the
 //! builder takes `&State` like the other chrome builders.
 //!
-//! Below the grid sit three counts-only blocks the stats
+//! Below the grid sit four counts-only blocks the stats
 //! module does not cover: **Project totals**
 //! ([`project_totals`] — every content vec on the project
 //! model, counted), **Media** ([`media_totals`] — the
 //! audio start-frame span, the summed FX-clip duration,
-//! texts and strokes) and **Figures** ([`figure_rows`] —
+//! texts and strokes), **Flags** ([`flag_totals`] — the
+//! muted-audio, hidden-FX and translucent-stroke counts)
+//! and **Figures** ([`figure_rows`] —
 //! per figure: node count plus how many graph channels,
 //! FX clips and particle events are anchored to it). They
 //! are labelled as counts and deliberately recompute none
@@ -264,6 +266,34 @@ pub fn media_totals(core: &EditorCore) -> Vec<(String, String)> {
     ]
 }
 
+/// Content-flag counts as `(label, value)` pairs, the
+/// value a plain count: how much of the project's media
+/// is switched off or softened —
+/// [`stykanimate_rs::model::AudioClip::muted`] clips (on
+/// the timeline but silent in playback plans and export
+/// mixes), [`stykanimate_rs::model::FxClipEntry::hidden`]
+/// clips (skipped by the stage and the export renderers)
+/// and translucent
+/// [`stykanimate_rs::model::Stroke`]s. The stroke test
+/// is a plain `opacity < 1.0`, deliberately without an
+/// epsilon: the recorded values are exact brush opacities
+/// and the default is exactly 1.0, so a stored 0.999 from
+/// a stepper is genuinely translucent and counts.
+pub fn flag_totals(core: &EditorCore) -> Vec<(String, String)> {
+    let p = &core.project;
+    let muted = p.audio.iter().filter(|c| c.muted).count();
+    let hidden = p.fx_clips.iter().filter(|e| e.hidden).count();
+    let translucent = p.strokes.iter().filter(|s| s.opacity < 1.0).count();
+    vec![
+        ("Muted audio clips".to_string(), format_count(muted)),
+        ("Hidden FX clips".to_string(), format_count(hidden)),
+        (
+            "Translucent strokes".to_string(),
+            format_count(translucent),
+        ),
+    ]
+}
+
 /// One figure's counts for the per-figure block: its name,
 /// the node count of its definition, and how many of the
 /// project's figure-indexed entries belong to it — graph
@@ -393,6 +423,35 @@ fn media_el(s: &State, t: &Theme) -> El {
     block
 }
 
+/// One flags row: the label and its count, both muted,
+/// mirroring [`media_row_el`]. Keyed `stats-flag-{i}` by
+/// row index.
+fn flag_row_el(index: usize, label: &str, value: &str, t: &Theme) -> El {
+    row()
+        .key(format!("stats-flag-{index}"))
+        .gap(8.0)
+        .child(text(label.to_string()).color(t.text_secondary))
+        .child(text(value.to_string()).color(t.text_secondary))
+}
+
+/// The Flags block: a caption over the count rows from
+/// [`flag_totals`] — muted audio clips, hidden FX clips
+/// and translucent strokes. Rendered always, like the
+/// Media block above it, so a project with no flagged
+/// content reads three plain "0" rows instead of the
+/// block vanishing. Keyed `stats-flags`.
+fn flags_el(s: &State, t: &Theme) -> El {
+    let mut block = col().key("stats-flags").w_full().gap(2.0).child(
+        text("Flags")
+            .font(type_::SECTION)
+            .color(t.text_secondary),
+    );
+    for (i, (label, value)) in flag_totals(&s.core).iter().enumerate() {
+        block = block.child(flag_row_el(i, label, value, t));
+    }
+    block
+}
+
 /// The per-figure block: a "Figures" caption over one
 /// compact line per figure from [`figure_rows`] — name,
 /// then its node / channel / FX-clip / particle counts.
@@ -418,7 +477,8 @@ fn figures_el(s: &State, t: &Theme) -> El {
 /// The stats panel: a "Project stats" caption over a
 /// five-column grid of stat cells (two rows at the current
 /// ten cells), then the Project totals count rows, the
-/// Media rows and the per-figure count lines. Mount it
+/// Media rows, the Flags rows and the per-figure count
+/// lines. Mount it
 /// wherever a full-width
 /// row fits; the column count is the one-line change if a
 /// narrow sidebar mount is preferred.
@@ -439,6 +499,7 @@ pub fn stats_panel(s: &State, t: &Theme) -> El {
         .child(grid)
         .child(totals_el(s, t))
         .child(media_el(s, t))
+        .child(flags_el(s, t))
         .child(figures_el(s, t))
 }
 
@@ -589,6 +650,7 @@ mod tests {
                 widths: Vec::new(),
                 fill: None,
                 spray: None,
+                opacity: 1.0,
             });
         }
         let event = |figure: Option<usize>| ParticleEvent {
@@ -617,6 +679,7 @@ mod tests {
             },
             figure,
             node: 0,
+            hidden: false,
         };
         p.fx_clips.push(fx(0));
         p.fx_clips.push(fx(1));
@@ -624,6 +687,7 @@ mod tests {
             path: "clip.wav".into(),
             start_frame: 0,
             gain: 1.0,
+            muted: false,
         });
         p.clips.push(ClipDef {
             name: "wave".into(),
@@ -777,6 +841,7 @@ mod tests {
                 path: "clip.wav".into(),
                 start_frame: start,
                 gain: 1.0,
+                muted: false,
             });
         }
         // FX durations do live in the model and sum:
@@ -795,6 +860,7 @@ mod tests {
                 },
                 figure: 0,
                 node: 0,
+                hidden: false,
             });
         }
         let media = media_totals(&core);
@@ -811,6 +877,80 @@ mod tests {
                 "FX clips".to_string(),
                 "2 · 3.5 frames of effects".to_string()
             )
+        );
+    }
+
+    #[test]
+    fn flag_totals_on_the_demo_project_are_zeroed() {
+        // The demo has no muted, hidden or translucent
+        // content, so every flag row reads a plain "0" —
+        // and all three rows are present in order.
+        let core = EditorCore::new();
+        assert_eq!(
+            flag_totals(&core),
+            vec![
+                ("Muted audio clips".to_string(), "0".to_string()),
+                ("Hidden FX clips".to_string(), "0".to_string()),
+                ("Translucent strokes".to_string(), "0".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn flag_totals_count_muted_hidden_and_translucent() {
+        use stykanimate_rs::model::{AudioClip, FxClipEntry, Stroke};
+        use stykanimate_rs::vfx::{ClipKind, ParticleClip};
+
+        let mut core = EditorCore::new();
+        let p = &mut core.project;
+        // Three audio clips, two of them muted.
+        for muted in [true, false, true] {
+            p.audio.push(AudioClip {
+                path: "clip.wav".into(),
+                start_frame: 0,
+                gain: 1.0,
+                muted,
+            });
+        }
+        // Two FX clips, one of them hidden.
+        for hidden in [false, true] {
+            p.fx_clips.push(FxClipEntry {
+                clip: ParticleClip {
+                    start: 0.0,
+                    duration: 1.0,
+                    kind: ClipKind::Burst,
+                    color: 0xFFFFFF,
+                    seed: 1,
+                    angle: 0.0,
+                    length: 10.0,
+                    color2: None,
+                },
+                figure: 0,
+                node: 0,
+                hidden,
+            });
+        }
+        // Three strokes: opaque, half and nearly clear —
+        // the two below exactly 1.0 count as translucent.
+        for opacity in [1.0f32, 0.5, 0.05] {
+            p.strokes.push(Stroke {
+                frame: 0,
+                points: vec![[0.0, 0.0], [10.0, 10.0]],
+                color: 0xFFFFFF,
+                width: 2.0,
+                widths: Vec::new(),
+                fill: None,
+                spray: None,
+                opacity,
+            });
+        }
+        assert_eq!(
+            flag_totals(&core),
+            vec![
+                ("Muted audio clips".to_string(), "2".to_string()),
+                ("Hidden FX clips".to_string(), "1".to_string()),
+                ("Translucent strokes".to_string(), "2".to_string()),
+            ]
         );
     }
 

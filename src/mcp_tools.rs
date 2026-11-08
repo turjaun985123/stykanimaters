@@ -873,6 +873,7 @@ fn tool_add_fx_clip(core: &mut EditorCore, args: &Value) -> Result<Value, String
         },
         figure: fi,
         node: ni,
+        hidden: false,
     });
     Ok(json!({
         "ok": true,
@@ -1119,7 +1120,7 @@ fn tool_add_audio_clip(core: &mut EditorCore, args: &Value) -> Result<Value, Str
         return Err("argument 'path' must not be empty".into());
     }
     let start_frame = req_usize(args, "start_frame")?;
-    core.project.audio.push(AudioClip { path: path.to_string(), start_frame, gain: 1.0 });
+    core.project.audio.push(AudioClip { path: path.to_string(), start_frame, gain: 1.0 , muted: false});
     Ok(json!({
         "ok": true,
         "audio_index": core.project.audio.len() - 1,
@@ -1309,6 +1310,23 @@ fn tool_audio_split_silences(core: &mut EditorCore, args: &Value) -> Result<Valu
     }))
 }
 
+fn tool_audio_set_muted(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = check_audio_index(core, req_usize(args, "index")?)?;
+    let muted = opt_bool(args, "muted")?
+        .ok_or_else(|| "missing required argument 'muted'".to_string())?;
+    if !crate::audio_ops::audio_set_muted_at(core, idx, muted) {
+        // The op refused and explained via the status line.
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "muted": muted,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
 // ---------------------------------------------------------------------
 // Phase J parity tools: MCP surface for the phase's new
 // EditorCore ops (FX clip split, particle event duplicate,
@@ -1374,6 +1392,52 @@ fn tool_particle_duplicate_event(
     Ok(json!({
         "ok": true,
         "particle_index": new_idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+/// Parse a particle kind name for particle_set_kind: the
+/// three ParticleKind shapes, case-insensitively (the
+/// panel's kind cycler names them Burst / Sparkle /
+/// Smoke). Mirrors parse_clip_kind's error shape.
+fn parse_particle_kind(name: &str) -> Result<crate::model::ParticleKind, String> {
+    use crate::model::ParticleKind;
+    match name.to_ascii_lowercase().as_str() {
+        "burst" => Ok(ParticleKind::Burst),
+        "sparkle" => Ok(ParticleKind::Sparkle),
+        "smoke" => Ok(ParticleKind::Smoke),
+        other => Err(format!(
+            "unknown particle kind '{other}' (expected \"burst\", \"sparkle\" or \"smoke\")"
+        )),
+    }
+}
+
+fn tool_particle_set_kind(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = check_particle_index(core, req_usize(args, "index")?)?;
+    let kind = parse_particle_kind(req_str(args, "kind")?)?;
+    // The op returns no bool: the pre-check above is the
+    // guard, and the op reports through the status line
+    // (the tool_fx_set_kind convention).
+    core.particle_set_kind(idx, kind);
+    Ok(json!({
+        "ok": true,
+        "particle_index": idx,
+        "kind": format!("{kind:?}"),
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_particle_set_color(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = check_particle_index(core, req_usize(args, "index")?)?;
+    let color = opt_color(args, "color")?
+        .ok_or_else(|| "missing required argument 'color'".to_string())?;
+    core.particle_set_color(idx, color);
+    Ok(json!({
+        "ok": true,
+        "particle_index": idx,
+        "color": core.project.particles[idx].color,
         "status": core.status,
         "project": project_summary(core),
     }))
@@ -1466,6 +1530,40 @@ fn tool_delete_graph_channel(core: &mut EditorCore, args: &Value) -> Result<Valu
     Ok(json!({
         "ok": true,
         "channel": idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+/// Parse an interpolation mode name for set_key_interp:
+/// the three Interp modes graph_paste_keys accepts per
+/// key, with the same error wording.
+fn parse_interp_name(name: &str) -> Result<crate::graph::Interp, String> {
+    use crate::graph::Interp;
+    match name {
+        "hermite" => Ok(Interp::Hermite),
+        "linear" => Ok(Interp::Linear),
+        "step" => Ok(Interp::Step),
+        other => Err(format!(
+            "unknown interp '{other}' (expected \"hermite\", \"linear\" or \"step\")"
+        )),
+    }
+}
+
+fn tool_set_key_interp(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = check_graph_channel(core, req_usize(args, "channel")?)?;
+    let key = req_usize(args, "key")?;
+    let interp = parse_interp_name(req_str(args, "interp")?)?;
+    if !crate::graph_keys::set_key_interp(core, idx, key, interp) {
+        // The op refused (no key at that index on the
+        // channel) and explained via the status line.
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "key": key,
+        "interp": interp_name(interp),
         "status": core.status,
         "project": project_summary(core),
     }))
@@ -1949,6 +2047,7 @@ fn tool_draw_stroke(core: &mut EditorCore, args: &Value) -> Result<Value, String
         widths: Vec::new(),
         fill: None,
         spray: None,
+        opacity: 1.0,
     });
     Ok(json!({
         "ok": true,
@@ -1994,6 +2093,7 @@ fn tool_draw_shape(core: &mut EditorCore, args: &Value) -> Result<Value, String>
         widths: Vec::new(),
         fill: None,
         spray: None,
+        opacity: 1.0,
     });
     Ok(json!({
         "ok": true,
@@ -2043,6 +2143,7 @@ fn tool_draw_polygon(core: &mut EditorCore, args: &Value) -> Result<Value, Strin
         widths: Vec::new(),
         fill: None,
         spray: None,
+        opacity: 1.0,
     });
     Ok(json!({
         "ok": true,
@@ -2087,6 +2188,7 @@ fn tool_draw_star(core: &mut EditorCore, args: &Value) -> Result<Value, String> 
         widths: Vec::new(),
         fill: None,
         spray: None,
+        opacity: 1.0,
     });
     Ok(json!({
         "ok": true,
@@ -2829,6 +2931,30 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_particle_duplicate_event,
         },
         Tool {
+            name: "particle_set_kind",
+            description: "Set a particle event's kind by name: burst, sparkle or smoke (case-insensitive; the shapes the Particles panel cycles). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "kind": { "type": "string", "description": "Particle kind name" }
+                }),
+                &["index", "kind"],
+            ),
+            handler: tool_particle_set_kind,
+        },
+        Tool {
+            name: "particle_set_color",
+            description: "Set a particle event's colour (0xRRGGBB) — the tint every particle of the event is drawn in. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "color": { "type": "integer", "description": "0xRRGGBB" }
+                }),
+                &["index", "color"],
+            ),
+            handler: tool_particle_set_color,
+        },
+        Tool {
             name: "set_weather",
             description: "Set continuous weather over the whole timeline, or turn it off.",
             schema: obj_schema(
@@ -2965,6 +3091,18 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_audio_split_silences,
         },
         Tool {
+            name: "audio_set_muted",
+            description: "Mute or unmute the audio clip at 'index': a muted clip keeps its place on the timeline but is left out of playback and exports. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "muted": { "type": "boolean" }
+                }),
+                &["index", "muted"],
+            ),
+            handler: tool_audio_set_muted,
+        },
+        Tool {
             name: "audio_normalise_all",
             description: "Normalise every audio clip on the timeline to the same peak level: each clip's gain is set so its peak reaches 'target_peak' (in the range (0, 1], default 0.9). Reports how many clips were adjusted.",
             schema: obj_schema(
@@ -3093,6 +3231,19 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["channel"],
             ),
             handler: tool_delete_graph_channel,
+        },
+        Tool {
+            name: "set_key_interp",
+            description: "Set the interpolation mode of one key on a graph channel — addressed by the channel's index in the project's channel list and the key's index within it: \"hermite\" (smooth tangents), \"linear\" or \"step\". Frame, value and tangents are untouched. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "channel": { "type": "integer", "description": "Index into the project's graph channel list" },
+                    "key": { "type": "integer", "description": "Index of the key within the channel" },
+                    "interp": { "type": "string", "description": "\"hermite\", \"linear\" or \"step\"" }
+                }),
+                &["channel", "key", "interp"],
+            ),
+            handler: tool_set_key_interp,
         },
         Tool {
             name: "set_project_fps",
@@ -3403,11 +3554,11 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 87);
+        assert_eq!(tools.len(), 91);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 87, "tool names must be unique");
+        assert_eq!(names.len(), 91, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
@@ -4435,6 +4586,137 @@ mod tests {
     }
 
     #[test]
+    fn phase_m_parity_tools_registered_with_right_shapes() {
+        let tools = tools();
+        // set_key_interp addresses a key by channel + key
+        // index and names its mode.
+        let t = tools
+            .iter()
+            .find(|t| t.name == "set_key_interp")
+            .expect("set_key_interp registered");
+        assert_eq!(t.schema["required"], json!(["channel", "key", "interp"]));
+        assert_eq!(t.schema["properties"]["channel"]["type"], "integer");
+        assert_eq!(t.schema["properties"]["key"]["type"], "integer");
+        assert_eq!(t.schema["properties"]["interp"]["type"], "string");
+        // particle_set_kind / particle_set_color address an
+        // event by index; the colour travels as an integer.
+        let t = tools
+            .iter()
+            .find(|t| t.name == "particle_set_kind")
+            .expect("particle_set_kind registered");
+        assert_eq!(t.schema["required"], json!(["index", "kind"]));
+        assert_eq!(t.schema["properties"]["kind"]["type"], "string");
+        let t = tools
+            .iter()
+            .find(|t| t.name == "particle_set_color")
+            .expect("particle_set_color registered");
+        assert_eq!(t.schema["required"], json!(["index", "color"]));
+        assert_eq!(t.schema["properties"]["color"]["type"], "integer");
+        // audio_set_muted needs the clip index and the flag.
+        let t = tools
+            .iter()
+            .find(|t| t.name == "audio_set_muted")
+            .expect("audio_set_muted registered");
+        assert_eq!(t.schema["required"], json!(["index", "muted"]));
+        assert_eq!(t.schema["properties"]["muted"]["type"], "boolean");
+    }
+
+    #[test]
+    fn phase_m_parity_tools_run() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        // set_key_interp: two graph_key calls build channel
+        // 0 with two hermite keys; the second key goes step.
+        call(&mut core, &tools, "graph_key", json!({
+            "figure": 0, "target": "root_x", "frame": 0.0, "value": 0.0
+        }))
+        .unwrap();
+        call(&mut core, &tools, "graph_key", json!({
+            "figure": 0, "target": "root_x", "frame": 4.0, "value": 100.0
+        }))
+        .unwrap();
+        let r = call(&mut core, &tools, "set_key_interp", json!({
+            "channel": 0, "key": 1, "interp": "step"
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["interp"], "step");
+        assert!(matches!(
+            core.project.channels[0].keys[1].interp,
+            crate::graph::Interp::Step
+        ));
+        assert!(matches!(
+            core.project.channels[0].keys[0].interp,
+            crate::graph::Interp::Hermite
+        ));
+        // A key index past the channel's keys is the op's
+        // own refusal, carried by the status line; a bad
+        // mode name and a bad channel fail before the op.
+        let err = call(&mut core, &tools, "set_key_interp", json!({
+            "channel": 0, "key": 9, "interp": "step"
+        }))
+        .unwrap_err();
+        assert_eq!(err, "No key 10 on graph channel 1 to set.");
+        assert!(call(&mut core, &tools, "set_key_interp", json!({
+            "channel": 0, "key": 0, "interp": "bouncy"
+        }))
+        .is_err());
+        let err = call(&mut core, &tools, "set_key_interp", json!({
+            "channel": 3, "key": 0, "interp": "step"
+        }))
+        .unwrap_err();
+        assert_eq!(err, "no graph channel at index 3");
+
+        // Particle tools: one event, kind cycled with a
+        // mixed-case name, colour set as an integer.
+        let idx = core.particle_add_event(0, 100.0, 100.0);
+        assert_eq!(idx, 0);
+        let r = call(&mut core, &tools, "particle_set_kind", json!({
+            "index": 0, "kind": "Sparkle"
+        }))
+        .unwrap();
+        assert_eq!(r["kind"], "Sparkle");
+        assert!(matches!(
+            core.project.particles[0].kind,
+            crate::model::ParticleKind::Sparkle
+        ));
+        let r = call(&mut core, &tools, "particle_set_color", json!({
+            "index": 0, "color": 0x35B6D9
+        }))
+        .unwrap();
+        assert_eq!(r["color"], 0x35B6D9);
+        assert_eq!(core.project.particles[0].color, 0x35B6D9);
+        let err = call(&mut core, &tools, "particle_set_kind", json!({
+            "index": 4, "kind": "burst"
+        }))
+        .unwrap_err();
+        assert_eq!(err, "no particle event at index 4");
+
+        // audio_set_muted: the fake path is enough — muting
+        // touches no file. Mute, then unmute.
+        call(&mut core, &tools, "add_audio_clip", json!({
+            "path": "a.wav", "start_frame": 0
+        }))
+        .unwrap();
+        let r = call(&mut core, &tools, "audio_set_muted", json!({
+            "index": 0, "muted": true
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["muted"], true);
+        let r = call(&mut core, &tools, "audio_set_muted", json!({
+            "index": 0, "muted": false
+        }))
+        .unwrap();
+        assert_eq!(r["muted"], false);
+        let err = call(&mut core, &tools, "audio_set_muted", json!({
+            "index": 1, "muted": true
+        }))
+        .unwrap_err();
+        assert_eq!(err, "no audio clip at index 1");
+    }
+
+    #[test]
     fn phase_j_mirror_figure_on_demo_core() {
         let tools = tools();
         let mut core = EditorCore::new();
@@ -4978,6 +5260,20 @@ mod tests {
             ("set_stage_size", json!({ "width": 800, "height": "600" })), // height must be a number
             ("set_head_ring_scale", json!({})), // scale required
             ("set_head_ring_scale", json!({ "scale": "big" })), // scale must be a number
+            ("set_key_interp", json!({ "channel": 0, "key": 0, "interp": "hermite" })), // no channels yet
+            ("set_key_interp", json!({ "key": 0, "interp": "hermite" })), // channel required
+            ("set_key_interp", json!({ "channel": 0, "key": 0 })), // interp required
+            ("set_key_interp", json!({ "channel": 0, "key": 0, "interp": "bouncy" })), // unknown interp (and no channels yet)
+            ("particle_set_kind", json!({ "index": 0, "kind": "burst" })), // no events yet
+            ("particle_set_kind", json!({ "index": 0 })), // kind required
+            ("particle_set_kind", json!({ "index": 0, "kind": "laser" })), // unknown kind (and no events yet)
+            ("particle_set_color", json!({ "index": 0, "color": 16711680 })), // no events yet
+            ("particle_set_color", json!({ "index": 0 })), // colour required
+            ("particle_set_color", json!({ "index": 0, "color": "red" })), // colour must be an integer
+            ("audio_set_muted", json!({ "index": 0, "muted": true })), // no clips yet
+            ("audio_set_muted", json!({ "index": 0 })), // muted required
+            ("audio_set_muted", json!({ "muted": true })), // index required
+            ("audio_set_muted", json!({ "index": 0, "muted": "yes" })), // muted must be a boolean
         ];
         for (name, args) in cases {
             let r = call(&mut core, &tools, name, args.clone());

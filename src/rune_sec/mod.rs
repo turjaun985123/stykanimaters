@@ -48,6 +48,7 @@ pub mod scenes;
 pub mod settings_popover;
 pub mod stage_camera;
 pub mod stage_fx;
+pub mod stage_fig3;
 pub mod stage_layers;
 pub mod stage_text;
 pub mod stats_view;

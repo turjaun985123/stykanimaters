@@ -302,6 +302,7 @@ mod tests {
             },
             figure: 0, // on Styk
             node: 2,
+            hidden: false,
         });
         p.particles.push(ParticleEvent {
             frame: 0,

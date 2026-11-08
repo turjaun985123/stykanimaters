@@ -77,6 +77,23 @@
 //! status line and takes **no snapshot**; a success snapshots
 //! exactly once.
 //!
+//! ## Shifting and filling keys
+//!
+//! [`shift_keys`] moves every key of one channel by the
+//! same frame offset — the graph editor's "nudge the whole
+//! curve" operation. It is all-or-nothing: a shift that
+//! would land any key before frame 0 is refused whole,
+//! never clamped per key, so the curve is never silently
+//! distorted. [`fill_keys_in_range`] is the keyframe
+//! panel's "fill the loop range" operation: it copies the
+//! key sitting at the playhead onto every keyless frame of
+//! a range, turning a held value into per-frame keys. Both
+//! follow the house discipline: a refusal (no such
+//! channel, a useless offset, an empty channel, a reversed
+//! range, nothing to fill from, nothing to fill) sets the
+//! status line and takes **no snapshot**; a success
+//! snapshots exactly once, however many keys it touched.
+//!
 //! ## Channel statistics
 //!
 //! [`channel_stats`] is the read-only companion: one
@@ -450,6 +467,145 @@ pub fn key_interp_at(core: &EditorCore, channel_index: usize, frame: f32) -> Opt
         }
     }
     best.map(|i| channel.keys[i].interp)
+}
+
+/// Move EVERY key of the channel at `channel_index` by
+/// `delta` frames (a negative delta moves keys earlier).
+/// Values, tangents and [`Interp`] modes are untouched —
+/// only frames move — and because every key moves by the
+/// same offset their relative order is preserved, so no
+/// re-sort is needed. On success exactly one snapshot is
+/// taken and the status line reports the key count, the
+/// channel's target label and the signed offset; returns
+/// `true`.
+///
+/// Returns `false` — no snapshot, project untouched — when:
+/// * no channel sits at `channel_index`;
+/// * `delta` is zero or not finite (a shift by nothing, or
+///   by a non-number, is not an edit);
+/// * the channel holds no keys (nothing to move);
+/// * ANY key would land before frame 0 — the whole shift
+///   is refused, never clamped per key, so the curve can
+///   never be silently distorted. A key landing exactly
+///   ON frame 0 is fine.
+pub fn shift_keys(core: &mut EditorCore, channel_index: usize, delta: f32) -> bool {
+    let Some(channel) = core.project.channels.get(channel_index) else {
+        core.status = format!("No graph channel {} to shift.", channel_index + 1);
+        return false;
+    };
+    let label = target_label(channel.target);
+    if !delta.is_finite() || delta == 0.0 {
+        core.status = format!(
+            "Nothing to shift on {label} — the offset is zero or not a number."
+        );
+        return false;
+    }
+    if channel.keys.is_empty() {
+        core.status = format!("No keys on {label} to shift.");
+        return false;
+    }
+    if channel.keys.iter().any(|k| k.frame + delta < 0.0) {
+        core.status = "Shifting would move a key before frame 1.".into();
+        return false;
+    }
+    let count = channel.keys.len();
+    core.snapshot();
+    for k in &mut core.project.channels[channel_index].keys {
+        k.frame += delta;
+    }
+    core.status = format!("Shifted {count} keys on {label} by {delta:+} frames.");
+    true
+}
+
+/// Fill the keyless frames of `[from, to]` (integer frame
+/// numbers, both ends inclusive) in the channel at
+/// `channel_index` with copies of the channel's key at the
+/// current frame ([`EditorCore::current`]) — the keyframe
+/// panel's "fill the loop range" operation: the playhead
+/// key's value, tangents and [`Interp`] mode, held across
+/// the range as per-frame keys. A frame counts as already
+/// keyed when a key sits within 0.5 frames of it — the
+/// shell's key-at-frame convention (see [`key_interp_at`]),
+/// which also resolves which key is "at" the playhead
+/// (nearest within the window, ties to the earlier key).
+/// Keyed frames are skipped, never duplicated or
+/// overwritten. The inserted keys are merged in and the
+/// channel re-sorted, so its keys stay in frame order. On
+/// success exactly one snapshot is taken, however many
+/// keys were inserted, and the number inserted is
+/// returned.
+///
+/// Returns 0 — no snapshot, project untouched — when:
+/// * no channel sits at `channel_index`;
+/// * `from` is after `to` (a reversed range fills nothing);
+/// * no key of the channel sits at the current frame
+///   (there is nothing to fill FROM);
+/// * every frame of the range already has a key.
+pub fn fill_keys_in_range(
+    core: &mut EditorCore,
+    channel_index: usize,
+    from: usize,
+    to: usize,
+) -> usize {
+    let Some(channel) = core.project.channels.get(channel_index) else {
+        core.status = format!("No graph channel {} to fill.", channel_index + 1);
+        return 0;
+    };
+    let label = target_label(channel.target);
+    if from > to {
+        core.status = format!(
+            "Nothing to fill on {label} — frame {} is after frame {}.",
+            from + 1,
+            to + 1
+        );
+        return 0;
+    }
+    // The source key: the one sitting at the playhead,
+    // resolved with the same nearest-within-half-a-frame
+    // lookup `key_interp_at` performs.
+    let at = core.current as f32;
+    let mut source: Option<Key> = None;
+    let mut best_dist = f32::INFINITY;
+    for k in &channel.keys {
+        let d = (k.frame - at).abs();
+        if d <= 0.5 && d < best_dist {
+            best_dist = d;
+            source = Some(*k);
+        }
+    }
+    let Some(source) = source else {
+        core.status = "No key at the current frame to fill from.".into();
+        return 0;
+    };
+    // The keyless frames of the range, decided against the
+    // keys as they stand. An inserted key sits exactly on
+    // its integer frame, a full frame from each neighbour,
+    // so it can never fall within 0.5 of another frame of
+    // the range and change this list.
+    let missing: Vec<usize> = (from..=to)
+        .filter(|&f| {
+            !channel
+                .keys
+                .iter()
+                .any(|k| (k.frame - f as f32).abs() <= 0.5)
+        })
+        .collect();
+    if missing.is_empty() {
+        core.status = "Every frame in the range already has a key.".into();
+        return 0;
+    }
+    let count = missing.len();
+    core.snapshot();
+    let channel = &mut core.project.channels[channel_index];
+    for f in missing {
+        channel.keys.push(Key {
+            frame: f as f32,
+            ..source
+        });
+    }
+    channel.sort_keys();
+    core.status = format!("Filled {count} keys on {label}.");
+    count
 }
 
 /// Human label for a channel target, in UI casing: "Root X",
@@ -1336,5 +1492,322 @@ mod tests {
         // the setter is the mode found at that key's frame.
         assert!(set_key_interp(&mut core, 0, 0, Interp::Step));
         assert_eq!(key_interp_at(&core, 0, 10.0), Some(Interp::Step));
+    }
+
+    #[test]
+    fn shift_keys_moves_every_key_and_reports_the_offset() {
+        // Channel 0 (RootX) holds keys at frames 10/14/20.
+        let mut core = core_with_channels();
+        let undo_before = core.undo_depth();
+
+        assert!(shift_keys(&mut core, 0, 4.0));
+        assert_eq!(core.undo_depth(), undo_before + 1, "exactly one snapshot");
+        let ch = &core.project.channels[0];
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert!(
+            approx(frames[0], 14.0) && approx(frames[1], 18.0) && approx(frames[2], 24.0),
+            "every key moved by the same +4: {frames:?}"
+        );
+        // Only frames moved: values, tangents and modes are
+        // the keys' own, verbatim.
+        assert!(approx(ch.keys[0].value, 100.0));
+        assert!(
+            approx(ch.keys[0].in_tan, 1.5) && approx(ch.keys[0].out_tan, -2.0),
+            "tangents untouched"
+        );
+        assert_eq!(ch.keys[0].interp, Interp::Linear, "interp untouched");
+        assert_eq!(ch.keys[2].interp, Interp::Step);
+        assert!(
+            core.status.contains("Shifted 3 keys on Root X by +4 frames."),
+            "status reports count, label and signed offset: {}",
+            core.status
+        );
+
+        // One undo step restores the original frames.
+        core.undo();
+        let frames: Vec<f32> = core.project.channels[0]
+            .keys
+            .iter()
+            .map(|k| k.frame)
+            .collect();
+        assert!(
+            approx(frames[0], 10.0) && approx(frames[1], 14.0) && approx(frames[2], 20.0),
+            "undo restores the unshifted frames: {frames:?}"
+        );
+    }
+
+    #[test]
+    fn shift_keys_moves_backwards_and_fractionally() {
+        let mut core = core_with_channels();
+
+        assert!(shift_keys(&mut core, 0, -5.0), "a negative delta moves keys earlier");
+        let frames: Vec<f32> = core.project.channels[0]
+            .keys
+            .iter()
+            .map(|k| k.frame)
+            .collect();
+        assert!(
+            approx(frames[0], 5.0) && approx(frames[1], 9.0) && approx(frames[2], 15.0),
+            "frames after a -5 shift: {frames:?}"
+        );
+        assert!(
+            core.status.contains("by -5 frames."),
+            "the signed offset prints its minus: {}",
+            core.status
+        );
+
+        assert!(shift_keys(&mut core, 0, 0.5), "a fractional delta is a real shift");
+        let frames: Vec<f32> = core.project.channels[0]
+            .keys
+            .iter()
+            .map(|k| k.frame)
+            .collect();
+        assert!(
+            approx(frames[0], 5.5) && approx(frames[1], 9.5) && approx(frames[2], 15.5),
+            "frames after a +0.5 shift: {frames:?}"
+        );
+        assert!(
+            core.status.contains("by +0.5 frames."),
+            "the fractional offset prints with its plus: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn shift_keys_may_land_a_key_exactly_on_frame_zero() {
+        let mut core = core_with_channels();
+        // The earliest key sits at frame 10: a -10 shift
+        // lands it exactly on frame 0, which is allowed —
+        // only landing BEFORE frame 0 refuses.
+        assert!(shift_keys(&mut core, 0, -10.0));
+        let frames: Vec<f32> = core.project.channels[0]
+            .keys
+            .iter()
+            .map(|k| k.frame)
+            .collect();
+        assert!(
+            approx(frames[0], 0.0) && approx(frames[1], 4.0) && approx(frames[2], 10.0),
+            "frames after a -10 shift: {frames:?}"
+        );
+    }
+
+    #[test]
+    fn shift_keys_refuses_without_snapshot() {
+        let mut core = core_with_channels();
+        let undo_before = core.undo_depth();
+        let channels_before = core.project.channels.clone();
+
+        // No such channel.
+        assert!(!shift_keys(&mut core, 99, 4.0), "no channel 100");
+        assert!(
+            core.status.contains("No graph channel 100 to shift."),
+            "status: {}",
+            core.status
+        );
+        // A zero offset moves nothing.
+        assert!(!shift_keys(&mut core, 0, 0.0), "zero delta");
+        assert!(
+            core.status.contains("Nothing to shift on Root X"),
+            "status: {}",
+            core.status
+        );
+        // Non-finite offsets are not numbers of frames.
+        assert!(!shift_keys(&mut core, 0, f32::NAN), "NaN delta");
+        assert!(!shift_keys(&mut core, 0, f32::INFINITY), "infinite delta");
+        assert!(!shift_keys(&mut core, 0, f32::NEG_INFINITY), "negative infinite delta");
+        // The empty channel has nothing to move.
+        assert!(!shift_keys(&mut core, 1, 3.0), "empty channel");
+        assert!(
+            core.status.contains("No keys on Root Y to shift."),
+            "status: {}",
+            core.status
+        );
+        // One key past frame zero refuses the WHOLE shift:
+        // -10.5 would put the frame-10 key at -0.5, so not
+        // even the keys that could move do.
+        assert!(!shift_keys(&mut core, 0, -10.5), "a key would land before frame 0");
+        assert_eq!(
+            core.status, "Shifting would move a key before frame 1.",
+            "the refusal names the frame-1 boundary"
+        );
+
+        assert_eq!(core.undo_depth(), undo_before, "no refusal took a snapshot");
+        assert_eq!(core.project.channels, channels_before, "project untouched");
+    }
+
+    #[test]
+    fn fill_keys_in_range_fills_keyless_frames_from_the_current_key() {
+        // Channel 0 (RootX) holds keys at frames 10/14/20;
+        // the playhead sits on the frame-10 key (value 100,
+        // tangents 1.5/-2.0, Linear).
+        let mut core = core_with_channels();
+        core.current = 10;
+        let undo_before = core.undo_depth();
+
+        // Frames 10 and 14 are keyed; 11, 12, 13 are not.
+        assert_eq!(fill_keys_in_range(&mut core, 0, 10, 14), 3);
+        assert_eq!(
+            core.undo_depth(),
+            undo_before + 1,
+            "three inserts are still exactly one snapshot"
+        );
+        assert!(
+            core.status.contains("Filled 3 keys on Root X."),
+            "status reports the count and the label: {}",
+            core.status
+        );
+
+        let ch = &core.project.channels[0];
+        assert_eq!(ch.keys.len(), 6, "three originals plus three fills");
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert!(
+            approx(frames[0], 10.0)
+                && approx(frames[1], 11.0)
+                && approx(frames[2], 12.0)
+                && approx(frames[3], 13.0)
+                && approx(frames[4], 14.0)
+                && approx(frames[5], 20.0),
+            "keys stay sorted by frame: {frames:?}"
+        );
+        // Each fill is the playhead key verbatim — value,
+        // tangents and interp — with only its frame changed.
+        for filled in &ch.keys[1..4] {
+            assert!(approx(filled.value, 100.0), "value copied");
+            assert!(
+                approx(filled.in_tan, 1.5) && approx(filled.out_tan, -2.0),
+                "tangents copied"
+            );
+            assert_eq!(filled.interp, Interp::Linear, "interp copied");
+        }
+        // The pre-existing keys are untouched.
+        assert!(approx(ch.keys[4].value, 140.0), "frame-14 key unchanged");
+        assert_eq!(ch.keys[4].interp, Interp::Hermite);
+        assert!(approx(ch.keys[5].value, 90.0), "frame-20 key unchanged");
+
+        // One undo removes all three fills at once.
+        core.undo();
+        assert_eq!(core.project.channels[0].keys.len(), 3, "undo reverts the fill");
+    }
+
+    #[test]
+    fn fill_keys_in_range_uses_the_half_frame_key_convention() {
+        // Keys at 10.4 and 12.4: the playhead on frame 10
+        // still names the 10.4 key (0.4 away, inside the
+        // half-frame window), frame 10 counts as keyed by
+        // it, and frame 12 counts as keyed by the 12.4 key
+        // — while frames 11 and 13 sit more than half a
+        // frame from every key and get filled.
+        let mut core = core_with_channels();
+        core.project.channels[0].keys = vec![
+            key(10.4, 55.0, 3.0, 4.0, Interp::Step),
+            key(12.4, 66.0, 0.0, 0.0, Interp::Hermite),
+        ];
+        core.current = 10;
+
+        assert_eq!(fill_keys_in_range(&mut core, 0, 10, 13), 2);
+        let ch = &core.project.channels[0];
+        assert_eq!(ch.keys.len(), 4, "two originals plus two fills");
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert!(
+            approx(frames[0], 10.4)
+                && approx(frames[1], 11.0)
+                && approx(frames[2], 12.4)
+                && approx(frames[3], 13.0),
+            "fills merged in sorted, fractional keys undisturbed: {frames:?}"
+        );
+        // The fills copy the playhead key (the 10.4 one),
+        // not the nearer-in-list 12.4 key.
+        for filled in [&ch.keys[1], &ch.keys[3]] {
+            assert!(approx(filled.value, 55.0), "value copied from the 10.4 key");
+            assert!(
+                approx(filled.in_tan, 3.0) && approx(filled.out_tan, 4.0),
+                "tangents copied"
+            );
+            assert_eq!(filled.interp, Interp::Step, "interp copied");
+        }
+    }
+
+    #[test]
+    fn fill_keys_in_range_inserts_before_existing_keys_sorted() {
+        // Playhead on the frame-20 key (value 90, Step);
+        // the range lies entirely BEFORE every existing
+        // key, so the fills must merge in at the front in
+        // frame order, not append at the end.
+        let mut core = core_with_channels();
+        core.current = 20;
+
+        assert_eq!(fill_keys_in_range(&mut core, 0, 0, 2), 3);
+        let ch = &core.project.channels[0];
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames.len(), 6);
+        assert!(
+            approx(frames[0], 0.0)
+                && approx(frames[1], 1.0)
+                && approx(frames[2], 2.0)
+                && approx(frames[3], 10.0)
+                && approx(frames[4], 14.0)
+                && approx(frames[5], 20.0),
+            "fills sorted ahead of the originals: {frames:?}"
+        );
+        for filled in &ch.keys[0..3] {
+            assert!(approx(filled.value, 90.0), "copies of the frame-20 key");
+            assert_eq!(filled.interp, Interp::Step);
+        }
+    }
+
+    #[test]
+    fn fill_keys_in_range_refuses_without_snapshot() {
+        let mut core = core_with_channels();
+        let undo_before = core.undo_depth();
+        let channels_before = core.project.channels.clone();
+
+        // No such channel.
+        core.current = 10;
+        assert_eq!(fill_keys_in_range(&mut core, 99, 10, 14), 0, "no channel 100");
+        assert!(
+            core.status.contains("No graph channel 100 to fill."),
+            "status: {}",
+            core.status
+        );
+        // A reversed range fills nothing.
+        assert_eq!(fill_keys_in_range(&mut core, 0, 14, 10), 0, "from after to");
+        assert!(
+            core.status.contains("Nothing to fill on Root X"),
+            "status: {}",
+            core.status
+        );
+        // No key at the playhead: frame 12 sits midway
+        // between the keys at 10 and 14, more than half a
+        // frame from both — there is nothing to fill FROM.
+        core.current = 12;
+        assert_eq!(fill_keys_in_range(&mut core, 0, 10, 14), 0);
+        assert_eq!(
+            core.status, "No key at the current frame to fill from.",
+            "the refusal says there is no source key"
+        );
+        // The empty channel has no source key either.
+        core.current = 10;
+        assert_eq!(fill_keys_in_range(&mut core, 1, 10, 14), 0);
+        assert_eq!(core.status, "No key at the current frame to fill from.");
+
+        assert_eq!(core.undo_depth(), undo_before, "no refusal took a snapshot");
+        assert_eq!(core.project.channels, channels_before, "project untouched");
+    }
+
+    #[test]
+    fn fill_keys_in_range_reports_a_fully_keyed_range() {
+        let mut core = core_with_channels();
+        core.current = 10;
+        let undo_before = core.undo_depth();
+
+        // Frame 10 already has the playhead key itself, so
+        // a range of just that frame has nothing to fill.
+        assert_eq!(fill_keys_in_range(&mut core, 0, 10, 10), 0);
+        assert_eq!(
+            core.status, "Every frame in the range already has a key.",
+            "the status says the range was already full"
+        );
+        assert_eq!(core.undo_depth(), undo_before, "no snapshot for a no-op fill");
+        assert_eq!(core.project.channels[0].keys.len(), 3, "no key duplicated");
     }
 }

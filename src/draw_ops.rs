@@ -412,6 +412,7 @@ mod mirror_tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         }
     }
 
@@ -477,6 +478,7 @@ mod tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         }
     }
 
@@ -664,6 +666,7 @@ mod simplify_tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         }
     }
 
@@ -769,6 +772,7 @@ mod simplify_at_tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         }
     }
 

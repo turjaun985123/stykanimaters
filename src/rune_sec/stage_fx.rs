@@ -176,7 +176,11 @@ pub fn weather_geometry(core: &EditorCore) -> Vec<ParticlePrim> {
 /// figure, hidden figure and out-of-range node entries are
 /// skipped, and clips outside their `[start, start +
 /// duration)` window emit nothing (that window check lives
-/// inside `clip_particles` itself).
+/// inside `clip_particles` itself). One further guard is
+/// this layer's own: an entry the user has hidden
+/// (`entry.hidden`) is skipped whole — no motes, no trail —
+/// exactly as if it were not in the list. Its gizmo still
+/// draws; see `fx_clip_gizmo_geometry`.
 ///
 /// Live `Trail` clips also contribute their node's real
 /// path as `Line` prims via `export::node_trail` with the
@@ -195,6 +199,14 @@ pub fn fx_geometry(core: &EditorCore) -> Vec<ParticlePrim> {
             continue;
         }
         if project.figures[entry.figure].hidden {
+            continue;
+        }
+        // A clip the user has hidden emits nothing at all:
+        // gated here, at the top of the loop, so the Trail
+        // branch below is covered by the same skip. (The
+        // clip's gizmo is NOT gated — it never samples
+        // particles; see `fx_clip_gizmo_geometry`.)
+        if entry.hidden {
             continue;
         }
         let pos = core.positions_f(frame_f, entry.figure);
@@ -409,6 +421,14 @@ fn fx_clip_anchor(core: &EditorCore, entry: &FxClipEntry) -> Option<[f32; 2]> {
 /// anchor is precisely when the marker is needed), and
 /// the anchor goes through `positions_f`, so graph
 /// channels apply exactly as the stage draws the figure.
+/// The same logic extends to a hidden *clip*:
+/// `fx_geometry` skips `entry.hidden` entries whole, but
+/// this gizmo still draws for one — the marker is how
+/// the user finds the clip again to unhide it. No gate
+/// had to be split to allow that: this path never shared
+/// the sampling path, since `fx_clip_anchor` only
+/// evaluates the anchor and samples no particles, so the
+/// hidden skip in `fx_geometry` has nothing to reach.
 pub fn fx_clip_gizmo_geometry(core: &EditorCore, clip_index: usize) -> Vec<ParticlePrim> {
     let Some(entry) = core.project.fx_clips.get(clip_index) else {
         return Vec::new();
@@ -445,6 +465,7 @@ mod tests {
             },
             figure: 0,
             node: 1,
+            hidden: false,
         }
     }
 
@@ -541,6 +562,59 @@ mod tests {
         bad_node.node = 999;
         core.project.fx_clips.push(bad_node);
         assert!(fx_geometry(&core).is_empty());
+    }
+
+    #[test]
+    fn fx_hidden_clip_emits_nothing() {
+        // Visible control: the same entry the hidden case
+        // uses, emitting the burst's 26 motes at frame 0.
+        let mut core = EditorCore::new();
+        core.project.fx_clips.push(burst_entry(0.0, 4.0));
+        assert_eq!(fx_geometry(&core).len(), 26);
+
+        // Hidden: zero clip particles at any point of the
+        // clip's window — the gate is on the entry, not on
+        // the frame.
+        let mut core = EditorCore::new();
+        let mut entry = burst_entry(0.0, 4.0);
+        entry.hidden = true;
+        core.project.fx_clips.push(entry);
+        assert!(fx_geometry(&core).is_empty());
+        core.goto(2);
+        assert!(fx_geometry(&core).is_empty());
+    }
+
+    #[test]
+    fn fx_gizmo_still_draws_for_a_hidden_clip() {
+        // The gizmo is how the user finds a hidden clip to
+        // unhide it, so it must be non-empty and identical
+        // to the visible case — the hidden gate lives only
+        // in `fx_geometry`, never on the anchor path.
+        let mut visible = EditorCore::new();
+        visible.project.fx_clips.push(burst_entry(2.0, 4.0));
+        let mut hidden = EditorCore::new();
+        let mut entry = burst_entry(2.0, 4.0);
+        entry.hidden = true;
+        hidden.project.fx_clips.push(entry);
+        let prims = fx_clip_gizmo_geometry(&hidden, 0);
+        assert!(!prims.is_empty());
+        assert_eq!(prims, fx_clip_gizmo_geometry(&visible, 0));
+    }
+
+    #[test]
+    fn particle_event_path_is_unaffected_by_a_hidden_clip() {
+        // Particle events carry no hidden flag, and this
+        // file's event path (the gizmo) must not be reached
+        // by the clip gate: with a hidden clip in the
+        // project, the event's marker still draws at its
+        // point while the clip itself emits nothing.
+        let mut core = EditorCore::new();
+        let mut entry = burst_entry(0.0, 4.0);
+        entry.hidden = true;
+        core.project.fx_clips.push(entry);
+        core.project.particles.push(free_event(50.0, 60.0));
+        assert!(fx_geometry(&core).is_empty());
+        assert_gizmo_at(&gizmo_geometry(&core, 0), [50.0, 60.0]);
     }
 
     #[test]

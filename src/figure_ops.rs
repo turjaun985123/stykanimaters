@@ -645,6 +645,7 @@ mod tests {
             },
             figure,
             node: 0,
+            hidden: false,
         }
     }
 

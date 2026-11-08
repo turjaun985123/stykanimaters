@@ -795,11 +795,13 @@ pub fn split_clip(
             path: clip.path.clone(),
             start_frame: clip.start_frame,
             gain: clip.gain,
+            muted: false,
         },
         crate::model::AudioClip {
             path: clip.path.clone(),
             start_frame: at_frame,
             gain: clip.gain,
+            muted: false,
         },
     ))
 }
@@ -968,16 +970,19 @@ mod tests {
                 path: "a.wav".into(),
                 start_frame: 0,
                 gain: 1.0,
+                muted: false,
             },
             AudioClip {
                 path: "b.wav".into(),
                 start_frame: 24,
                 gain: 1.0,
+                muted: false,
             },
             AudioClip {
                 path: "c.wav".into(),
                 start_frame: 48,
                 gain: 1.0,
+                muted: false,
             },
         ];
         // All clips last 1.5 s; fps 24 -> starts at 0s, 1s, 2s.
@@ -1299,6 +1304,7 @@ mod tests {
             path: "x.wav".into(),
             start_frame: 24,
             gain: 1.0,
+            muted: false,
         };
         let (first, second) = split_clip(&clip, 48, 48).unwrap();
         assert_eq!(first.start_frame, 24);

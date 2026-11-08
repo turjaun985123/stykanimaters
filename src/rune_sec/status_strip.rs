@@ -55,6 +55,12 @@
 //!   [`status_strip_state`]: the speed is shell
 //!   state, not core state (see the Phase L note
 //!   below)
+//! - 3D session (Phase M, conditional) — `3D`
+//!   while a fig3 session is active on the core
+//!   (`core.fig3`), composed by [`fig3_segment`]
+//!   and visible only through
+//!   [`status_strip_state`] (see the Phase M note
+//!   below)
 //! - last status message — `core.status` (`editor.rs:42`),
 //!   the trailing segment chrome's line ended with, kept so
 //!   Save/Load feedback stays visible
@@ -323,6 +329,49 @@
 //! overflow — the tail remains the single flexible
 //! absorber and truncates, exactly as it does when
 //! every Phase G segment is present at once.
+//!
+//! ## Phase M — 3D-session segment
+//!
+//! One more conditional segment: while a fig3
+//! session is active on the core (`core.fig3`,
+//! started by `EditorCore::enter_3d`), a fixed
+//! segment directly after the speed segment reads
+//! `3D` — composed by [`fig3_segment`] and passed
+//! into the composer by [`status_strip_state`]
+//! exactly as the Phase L speed label is (the
+//! core-only [`status_strip`] passes `None`: this
+//! wrapper stays the reduced view, as it does for
+//! the speed segment). It sits with the speed
+//! segment at the head of the conditional block,
+//! ahead of the Phase G segments, because both
+//! qualify the shell's current editing state rather
+//! than the project; it is floored through
+//! [`segment`] at its own label's
+//! [`est_text_width`], like every other fixed
+//! segment.
+//!
+//! The segment is **text only, deliberately no
+//! glyph**: the icon table does carry a `cube`
+//! glyph, and because the segment is absent in the
+//! default state it would fit the width maths
+//! pinned above — but the strip's conditional
+//! state segments are text-only by the Phase H/K
+//! audio decision, the loop segment's `repeat` icon
+//! being the strip's only icon glyph, and two
+//! characters of text name the state without
+//! spending the glyph width discipline on it.
+//! Consistency with the audio decision wins over
+//! the available room.
+//!
+//! The segment is likewise **excluded from the
+//! Phase K floors pinned above**: with no session
+//! active — the default state — [`fig3_segment`]
+//! returns `None`, so the default strip, its floors
+//! and the pinned arithmetic test are byte-identical
+//! to Phase K's. While a session is active the
+//! fixed sum grows by the segment's own floor (2
+//! characters, 16 pt) and the tail truncates — the
+//! designed behaviour, as with the speed segment.
 
 use std::time::{Duration, SystemTime};
 
@@ -600,6 +649,31 @@ pub fn speed_segment(speed: f32) -> Option<String> {
     Some(format!("{}×", speed_factor(speed)))
 }
 
+/// 3D-session segment (Phase M): `3D` while a fig3
+/// session is active on the core — the caller reads
+/// `core.fig3.is_some()` (the session
+/// `EditorCore::enter_3d` starts). The session's
+/// presence is the whole signal: which joint is
+/// selected and where the 3D camera sits are the 3D
+/// panel's business, and the session's own actions
+/// already land in the strip's status tail. `None`
+/// with no session, so the default strip stays
+/// byte-identical to Phase K's (see the module docs'
+/// Phase M note on the pinned floors). Text only,
+/// deliberately no glyph: the icon table carries a
+/// `cube` glyph and it would fit the width maths —
+/// the segment is absent by default — but the
+/// strip's conditional state segments are text-only
+/// by the Phase H/K audio decision, and consistency
+/// with that decision wins (see the module docs).
+pub fn fig3_segment(active: bool) -> Option<&'static str> {
+    if active {
+        Some("3D")
+    } else {
+        None
+    }
+}
+
 /// The Phase G conditional segment labels, in strip
 /// order (audio, loop, stroke, particle), each present
 /// only while its condition holds. Pure composition of
@@ -753,20 +827,24 @@ fn divider(t: &Theme) -> El {
 /// on `State`, not on the core), without the Phase J
 /// autosave segment (the snapshot's mtime is shell
 /// support data, read by [`status_strip_state`] through
-/// the lib) and without the Phase L speed segment (the
-/// playback speed likewise lives on `State`). The
-/// delegating wrapper over the shared composer; the
-/// shell itself calls [`status_strip_state`].
+/// the lib), without the Phase L speed segment (the
+/// playback speed likewise lives on `State`) and
+/// without the Phase M 3D-session segment (composed
+/// by [`status_strip_state`] — this wrapper stays the
+/// reduced view, as it does for the speed segment).
+/// The delegating wrapper over the shared composer;
+/// the shell itself calls [`status_strip_state`].
 pub fn status_strip(core: &EditorCore) -> El {
-    build_strip(core, None, None, None, None)
+    build_strip(core, None, None, None, None, None)
 }
 
 /// The status strip: project name (with the dirty dot),
 /// frame position, timecode, fps, zoom, selection, undo
 /// depth, play state, the Phase L speed segment (while
-/// the playback speed differs from normal), the Phase G
-/// conditional segments (audio, loop range, stroke
-/// selection, particle-event selection), the Phase J
+/// the playback speed differs from normal), the Phase M
+/// 3D-session segment (while a fig3 session is active),
+/// the Phase G conditional segments (audio, loop range,
+/// stroke selection, particle-event selection), the Phase J
 /// autosave segment (while a recovery snapshot exists)
 /// and the core's current status message, divided by
 /// hairlines. The fixed segments are width-floored and
@@ -787,6 +865,7 @@ pub fn status_strip_state(s: &State) -> El {
         s.stroke_selected,
         s.particle_selected,
         speed_segment(s.playback_speed),
+        fig3_segment(s.core.fig3.is_some()),
         autosave,
     )
 }
@@ -795,8 +874,11 @@ pub fn status_strip_state(s: &State) -> El {
 /// [`status_strip_state`]. The Phase L speed label
 /// (`speed`, already composed by [`status_strip_state`]
 /// from `State::playback_speed`) heads the conditional
-/// block, directly after the play segment; the Phase G
-/// segments follow it and the Phase J autosave label
+/// block, directly after the play segment; the Phase M
+/// 3D-session label (`fig3`, likewise composed by
+/// [`status_strip_state`], from the core's fig3
+/// session) follows it; the Phase G segments follow
+/// those and the Phase J autosave label
 /// (`autosave`, already composed by
 /// [`status_strip_state`] from the snapshot's mtime)
 /// closes the block — each only while its condition
@@ -809,6 +891,7 @@ fn build_strip(
     stroke_selected: Option<usize>,
     particle_selected: Option<usize>,
     speed: Option<String>,
+    fig3: Option<&'static str>,
     autosave: Option<String>,
 ) -> El {
     let t = tok::theme(true);
@@ -841,6 +924,18 @@ fn build_strip(
     // docs' Phase L note on the pinned floors).
     if let Some(label) = speed {
         segments.push(segment(label, &t));
+    }
+    // Phase M: the 3D-session segment follows the
+    // speed segment in the conditional block — both
+    // qualify the shell's editing state rather than
+    // the project — ahead of the Phase G extras,
+    // floored through the same `segment` path, and
+    // absent entirely with no session, leaving the
+    // strip byte-identical to Phase K's (see the
+    // module docs' Phase M note on the pinned
+    // floors).
+    if let Some(label) = fig3 {
+        segments.push(segment(label.to_string(), &t));
     }
     // Phase G conditional segments: after the original
     // fixed segments, before the tail, in audio / loop /
@@ -1416,11 +1511,11 @@ mod tests {
         // did, and with a label it builds with the
         // segment appended — neither path panics.
         let core = EditorCore::new();
-        let _ = build_strip(&core, None, None, None, None);
+        let _ = build_strip(&core, None, None, None, None, None);
         let now = ref_now();
         let label = autosave_segment(Some(now - Duration::from_secs(300)), now);
         assert_eq!(label, Some("Autosaved 5m ago".to_string()));
-        let _ = build_strip(&core, None, None, None, label);
+        let _ = build_strip(&core, None, None, None, None, label);
         // The builder floors the segment through
         // `segment()`, i.e. at `est_text_width` of its
         // own label — the same path as every other
@@ -1564,9 +1659,82 @@ mod tests {
         // floored through `segment()` at its own label's
         // `est_text_width` — 2 characters for `2×`.
         let core = EditorCore::new();
-        let _ = build_strip(&core, None, None, speed_segment(1.0), None);
-        let _ = build_strip(&core, None, None, speed_segment(2.0), None);
+        let _ = build_strip(&core, None, None, speed_segment(1.0), None, None);
+        let _ = build_strip(&core, None, None, speed_segment(2.0), None, None);
         assert_eq!(est_text_width("2×"), 2.0 * LABEL_CHAR_W);
         assert_eq!(est_text_width("0.25×"), 5.0 * LABEL_CHAR_W);
+    }
+
+    // ---- Phase M 3D-session segment ----
+
+    #[test]
+    fn fig3_segment_truth_table() {
+        // No session is the default state: no segment,
+        // so the pinned Phase K floors above describe
+        // the strip exactly as built.
+        assert_eq!(fig3_segment(false), None);
+        // A live session names itself with two
+        // characters of text — and no glyph (see the
+        // module docs' Phase M note).
+        assert_eq!(fig3_segment(true), Some("3D"));
+        assert_eq!(est_text_width("3D"), 2.0 * LABEL_CHAR_W);
+    }
+
+    #[test]
+    fn strip_fig3_segment_only_with_a_session() {
+        // Composed-strip level, through the same
+        // composition `status_strip_state` performs: a
+        // fresh shell state has no fig3 session, so the
+        // composed label is `None` and the strip builds
+        // exactly as Phase L's did; once the session
+        // starts, the composed label is `Some("3D")`
+        // and the strip builds with the segment in the
+        // conditional block.
+        let mut s = crate::init();
+        assert!(s.core.fig3.is_none());
+        assert_eq!(fig3_segment(s.core.fig3.is_some()), None);
+        let _ = status_strip_state(&s);
+        s.core.enter_3d();
+        assert!(s.core.fig3.is_some());
+        assert_eq!(fig3_segment(s.core.fig3.is_some()), Some("3D"));
+        let _ = status_strip_state(&s);
+        // The composer takes the composed label as an
+        // `Option`, the autosave/speed pattern: both
+        // paths build without panicking, and the
+        // segment is floored through `segment()` at
+        // its own label's `est_text_width` — 2
+        // characters for `3D` (pinned above).
+        let core = EditorCore::new();
+        let _ = build_strip(&core, None, None, None, fig3_segment(false), None);
+        let _ = build_strip(&core, None, None, None, fig3_segment(true), None);
+    }
+
+    #[test]
+    fn default_strip_segment_texts_unchanged() {
+        // Byte-identity of the default strip, pinned at
+        // the composition level: on a fresh shell state
+        // every conditional label is absent — speed
+        // `None` (Phase L), 3D `None` (Phase M), the
+        // Phase G extras empty — and the eight fixed
+        // labels are exactly the texts the Phase K
+        // floor arithmetic charges (512 pt of floors in
+        // all). Any change to a default label breaks
+        // here and re-opens the pinned arithmetic
+        // loudly, next to the test that owns it.
+        let s = crate::init();
+        assert_eq!(speed_segment(s.playback_speed), None);
+        assert_eq!(fig3_segment(s.core.fig3.is_some()), None);
+        assert!(
+            extra_segments(&s.core, s.stroke_selected, s.particle_selected).is_empty()
+        );
+        let core = &s.core;
+        assert_eq!(project_text(core), "Untitled · 0:00");
+        assert_eq!(frame_text(core), "Frame 1/5");
+        assert_eq!(timecode(core.current, core.project.fps), "0:00.0");
+        assert_eq!(format!("{} fps", fps_text(core.project.fps)), "12 fps");
+        assert_eq!(zoom_text(core), "Zoom 100%");
+        assert_eq!(selection_text(core), "Styk");
+        assert_eq!(undo_text(core), "Undo 0");
+        assert_eq!(play_text(core.playing), "❚❚ Paused");
     }
 }

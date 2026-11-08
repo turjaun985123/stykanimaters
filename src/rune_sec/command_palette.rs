@@ -140,6 +140,25 @@
 //!   no test can pass or fail because of what a real run
 //!   last saved into `./projects` — the tests assert the
 //!   pure merge and the cache instead.
+//! * Phase M added five commands over the phase's new
+//!   ops, appended like Phase J's: `mute-audio-clip`
+//!   (the audio panel's target clip — its
+//!   `effective_target` resolution over
+//!   `State::audio_panel`, the same one the panel's own
+//!   mute button uses), `swap-frame-prev` /
+//!   `swap-frame-next` (`frame_swap::swap_frame_with_neighbour`,
+//!   the op owns every status including the end-of-timeline
+//!   refusals) and the two Graph commands
+//!   `shift-channel-right` / `fill-keys-range`, which
+//!   resolve the drawn channel through the graph panel's
+//!   `effective_channel_index` over `State::graph_panel`
+//!   — the panel's single resolution, reused rather than
+//!   copied, so the palette can never act on a different
+//!   channel than the one on screen. The selection-taking
+//!   shims stand down with an explaining status in the
+//!   Phase J form; `fill-keys-range` answers its
+//!   loop-range guard first, in the keyframe tools'
+//!   wording.
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -172,6 +191,8 @@ use std::cell::RefCell;
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, text_input, Color, El, Key, KeyEvent, TextEdit, Tx};
+use stykanimate_rs::audio_ops;
+use stykanimate_rs::graph_keys;
 use stykanimate_rs::vfx::ClipKind;
 
 use crate::rune_sec::workspaces::Workspace;
@@ -625,6 +646,96 @@ fn cmd_delete_particle(s: &mut State) {
     }
 }
 
+// -- Phase M shims: five commands over the phase's new
+// -- ops. The frame swaps forward to the frame_swap op,
+// -- which owns every status (including the first/last
+// -- frame refusals); the other three resolve a target
+// -- the way their panels do — the audio panel's
+// -- effective_target for the mute, the graph panel's
+// -- effective_channel_index for the graph pair — and
+// -- stand down with an explaining status when there is
+// -- nothing to act on, the Phase J discipline above.
+
+/// Phase M: toggle mute on the audio panel's target
+/// clip — the selected clip when the selection is live,
+/// the last clip otherwise, exactly the resolution the
+/// audio panel's own mute button uses
+/// (`audio_panel::effective_target` over
+/// `State::audio_panel`). The indexed op owns the
+/// snapshot and the status; with no clips there is no
+/// target at all, so the shim explains instead.
+fn cmd_mute_audio_clip(s: &mut State) {
+    match crate::rune_sec::audio_panel::effective_target(
+        s.audio_panel.selected,
+        s.core.project.audio.len(),
+    ) {
+        Some(i) => {
+            let _ = audio_ops::audio_toggle_muted_at(&mut s.core, i);
+        }
+        None => {
+            s.core.status = "No audio clip selected to mute.".into();
+        }
+    }
+}
+
+/// Phase M: swap the current frame's content with the
+/// previous frame's. The op owns the snapshot, the
+/// attached-data remap and every status, including the
+/// first-frame refusal — the shim is a pure forward.
+fn cmd_swap_frame_prev(s: &mut State) {
+    let _ = stykanimate_rs::frame_swap::swap_frame_with_neighbour(&mut s.core, -1);
+}
+
+/// Phase M: swap the current frame's content with the
+/// next frame's; same shape as [`cmd_swap_frame_prev`].
+fn cmd_swap_frame_next(s: &mut State) {
+    let _ = stykanimate_rs::frame_swap::swap_frame_with_neighbour(&mut s.core, 1);
+}
+
+/// Phase M: shift every key on the drawn graph channel
+/// one frame later. The channel resolves through the
+/// graph panel's own [`crate::rune_sec::graph_panel::effective_channel_index`]
+/// — the panel's single resolution, reused so the
+/// command always acts on the channel the panel is
+/// showing. The op owns the snapshot, the status and
+/// the before-frame-0 refusal (the whole shift is
+/// refused, never clamped per key).
+fn cmd_shift_channel_right(s: &mut State) {
+    match crate::rune_sec::graph_panel::effective_channel_index(&s.core, &s.graph_panel) {
+        Some(idx) => {
+            let _ = graph_keys::shift_keys(&mut s.core, idx, 1.0);
+        }
+        None => {
+            s.core.status = "No graph channel selected to shift.".into();
+        }
+    }
+}
+
+/// Phase M: fill the loop range's keyless frames on
+/// the drawn graph channel with copies of the key at
+/// the current frame. Two guards the op cannot phrase
+/// for this command are answered here, status-only:
+/// no loop range (the keyframe tools' wording) and no
+/// drawn channel. The op owns everything else — the
+/// no-key-at-the-playhead and already-full refusals
+/// included — and the count it returns is the panel's
+/// business, so the shim discards it, as
+/// [`cmd_normalise_audio`] discards its count.
+fn cmd_fill_keys_range(s: &mut State) {
+    let Some((a, b)) = s.core.loop_range else {
+        s.core.status = "Set a loop range first, then Fill keys.".into();
+        return;
+    };
+    match crate::rune_sec::graph_panel::effective_channel_index(&s.core, &s.graph_panel) {
+        Some(idx) => {
+            let _ = graph_keys::fill_keys_in_range(&mut s.core, idx, a, b);
+        }
+        None => {
+            s.core.status = "No graph channel selected to fill.".into();
+        }
+    }
+}
+
 fn cmd_add_frame(s: &mut State) {
     s.core.add_frame();
 }
@@ -967,6 +1078,13 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "duplicate-particle", title: "Duplicate particle event", group: "Effects", run: cmd_duplicate_particle },
     Command { key: "delete-stroke", title: "Delete selected stroke", group: "Draw", run: cmd_delete_stroke },
     Command { key: "delete-particle", title: "Delete selected particle event", group: "Effects", run: cmd_delete_particle },
+    // -- Phase M (appended: every entry above keeps its
+    // -- place) ------------------------------------------
+    Command { key: "mute-audio-clip", title: "Toggle mute on the selected audio clip", group: "Audio", run: cmd_mute_audio_clip },
+    Command { key: "swap-frame-prev", title: "Swap frame with previous", group: "Frames", run: cmd_swap_frame_prev },
+    Command { key: "swap-frame-next", title: "Swap frame with next", group: "Frames", run: cmd_swap_frame_next },
+    Command { key: "shift-channel-right", title: "Shift graph channel keys +1 frame", group: "Graph", run: cmd_shift_channel_right },
+    Command { key: "fill-keys-range", title: "Fill keys across the loop range", group: "Graph", run: cmd_fill_keys_range },
 ];
 
 // ----------------------------------------------------------------
@@ -1540,8 +1658,14 @@ mod tests {
         // delete-stroke, delete-particle — the four
         // selection-taking ones resolve the shell
         // selections at call time and stand down with an
-        // explanation when nothing is selected).
-        assert_eq!(total, 103, "palette should cover 103 commands, has {total}");
+        // explanation when nothing is selected), +5 in
+        // Phase M (mute-audio-clip, swap-frame-prev,
+        // swap-frame-next, shift-channel-right,
+        // fill-keys-range — the mute resolves the audio
+        // panel's target, the graph pair the graph
+        // panel's drawn channel, and both stand down
+        // with an explanation when there is no target).
+        assert_eq!(total, 108, "palette should cover 108 commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }
@@ -1605,6 +1729,7 @@ mod tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         };
         s.core.project.strokes.push(stroke(0x111111));
         s.core.project.strokes.push(stroke(0x222222));
@@ -1624,11 +1749,13 @@ mod tests {
             path: "a.wav".into(),
             start_frame: 0,
             gain: 1.0,
+            muted: false,
         });
         s.core.project.audio.push(AudioClip {
             path: "b.wav".into(),
             start_frame: 4,
             gain: 1.0,
+            muted: false,
         });
         (COMMANDS[idx_of("delete-audio-clip")].run)(&mut s);
         assert_eq!(s.core.project.audio.len(), 1);
@@ -1855,6 +1982,7 @@ mod tests {
             },
             figure: 0,
             node: 0,
+            hidden: false,
         });
         s.fx_selected = Some(0);
         s.core.goto(2);
@@ -1887,6 +2015,7 @@ mod tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         };
         s.core.project.strokes.push(stroke(0x111111));
         s.core.project.strokes.push(stroke(0x222222));
@@ -1919,6 +2048,116 @@ mod tests {
         assert_eq!(s.core.project.particles.len(), 1);
         assert_eq!(s.core.project.particles[0].x, 20.0);
         assert_eq!(s.particle_selected, None);
+    }
+
+    #[test]
+    fn phase_m_commands_are_present_and_wired() {
+        use stykanimate_rs::graph::{Channel, ChannelTarget, Key};
+        use stykanimate_rs::model::AudioClip;
+        // All five Phase M keys resolve (idx_of panics if not).
+        for key in [
+            "mute-audio-clip",
+            "swap-frame-prev",
+            "swap-frame-next",
+            "shift-channel-right",
+            "fill-keys-range",
+        ] {
+            idx_of(key);
+        }
+        // Each new command is findable by a query fragment
+        // of its key (the key field is scored too, so a
+        // dashed fragment reaches the command).
+        for (query, key) in [
+            ("mute-audio", "mute-audio-clip"),
+            ("swap-frame-p", "swap-frame-prev"),
+            ("swap-frame-n", "swap-frame-next"),
+            ("shift-channel", "shift-channel-right"),
+            ("fill-keys", "fill-keys-range"),
+        ] {
+            let got = filter_commands(query);
+            assert!(
+                got.iter().any(|&i| COMMANDS[i].key == key),
+                "query {query:?} should find {key}, got {:?}",
+                got.iter().map(|&i| COMMANDS[i].key).collect::<Vec<_>>()
+            );
+        }
+        // Mute: with no clips the shim stands down with an
+        // explanation and touches nothing; with a clip
+        // present, the panel resolution (no selection →
+        // last clip) reaches it and the op flips its mute
+        // flag, twice.
+        let mut s = crate::init();
+        (COMMANDS[idx_of("mute-audio-clip")].run)(&mut s);
+        assert_eq!(s.core.status, "No audio clip selected to mute.");
+        assert!(s.core.project.audio.is_empty());
+        s.core.project.audio.push(AudioClip {
+            path: "clip.wav".into(),
+            start_frame: 0,
+            gain: 1.0,
+            muted: false,
+        });
+        (COMMANDS[idx_of("mute-audio-clip")].run)(&mut s);
+        assert!(s.core.project.audio[0].muted);
+        (COMMANDS[idx_of("mute-audio-clip")].run)(&mut s);
+        assert!(!s.core.project.audio[0].muted);
+        // Swap frame next/prev on a three-frame fixture
+        // whose frames are marked by duration: the slots'
+        // contents trade places while the playhead index
+        // itself never moves (the op's documented
+        // semantics). At the first frame, swap-prev is
+        // the op's own refusal and nothing moves.
+        let durations = |s: &State| -> Vec<f32> {
+            s.core.project.frames.iter().map(|f| f.duration).collect()
+        };
+        let mut s = crate::init();
+        s.core.project.frames.truncate(3);
+        for (i, f) in s.core.project.frames.iter_mut().enumerate() {
+            f.duration = (i + 1) as f32;
+        }
+        s.core.goto(0);
+        (COMMANDS[idx_of("swap-frame-next")].run)(&mut s);
+        assert_eq!(durations(&s), [2.0, 1.0, 3.0]);
+        assert_eq!(s.core.current, 0);
+        (COMMANDS[idx_of("swap-frame-prev")].run)(&mut s);
+        assert_eq!(durations(&s), [2.0, 1.0, 3.0]);
+        s.core.goto(1);
+        (COMMANDS[idx_of("swap-frame-prev")].run)(&mut s);
+        assert_eq!(durations(&s), [1.0, 2.0, 3.0]);
+        assert_eq!(s.core.current, 1);
+        // Shift channel right: with no channels the shim
+        // stands down with an explanation; with a channel
+        // drawn (the panel state picks it, the resolution
+        // the command reuses) every key moves one frame
+        // later.
+        let mut s = crate::init();
+        (COMMANDS[idx_of("shift-channel-right")].run)(&mut s);
+        assert_eq!(s.core.status, "No graph channel selected to shift.");
+        s.core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(0.0, 0.0), Key::flat(2.0, 10.0)],
+        });
+        s.graph_panel.selected_channel = Some(0);
+        (COMMANDS[idx_of("shift-channel-right")].run)(&mut s);
+        let frames: Vec<f32> =
+            s.core.project.channels[0].keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, [1.0, 3.0]);
+        // Fill keys: the loop-range guard answers first;
+        // with a range set and the channel drawn, the
+        // range's keyless frames gain copies of the key
+        // at the current frame (frame 0 here).
+        let mut s = crate::init();
+        (COMMANDS[idx_of("fill-keys-range")].run)(&mut s);
+        assert_eq!(s.core.status, "Set a loop range first, then Fill keys.");
+        s.core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(0.0, 5.0)],
+        });
+        s.graph_panel.selected_channel = Some(0);
+        s.core.loop_range = Some((0, 2));
+        (COMMANDS[idx_of("fill-keys-range")].run)(&mut s);
+        assert_eq!(s.core.project.channels[0].keys.len(), 3);
     }
 
     // -- fuzzy_score -------------------------------------------

@@ -66,6 +66,18 @@
 //! `graph-duplicates` direct-write exception, for the
 //! same reason: no op keys chosen values at chosen
 //! frames.
+//!
+//! The Phase M scene keeps the same discipline:
+//! `three-d-stage` reaches exactly the state `three-d`
+//! reaches — Build3D workspace, a session started
+//! through `EditorCore::enter_3d`, the same orbit and
+//! selection — and exists under its own name because
+//! the proof it feeds is different: this phase's stage
+//! pass draws the 3D figure on the MAIN STAGE while the
+//! Build3D workspace is active with a session live, and
+//! the scene's full-window `--snap` is that drawing's
+//! pixel proof (its `--tree` dump is the same Build3D
+//! inventory fact 12 checks under `three-d`).
 
 use crate::State;
 
@@ -294,6 +306,29 @@ fn scene_three_d(s: &mut State) {
     s.core.fig3_select_next();
 }
 
+/// `"three-d-stage"` — the SAME end state as `three-d`
+/// (Build3D workspace, a live fig3 session entered
+/// through `EditorCore::enter_3d`, the camera orbited
+/// yaw +35° / pitch +18°, joint 1 selected), reached
+/// through the same real ops in the same order. The
+/// separate name exists for the proof, not the state:
+/// Phase M's stage pass draws the 3D figure on the
+/// MAIN STAGE while the Build3D workspace is active
+/// with a session live, so this scene's full-window
+/// `--snap` is the pixel proof of that drawing (under
+/// `three-d` the snaps exercised the panel preview).
+/// Its `--tree` dump carries the same Build3D panel
+/// inventory as `three-d`'s (fact 14 mirrors fact 12).
+fn scene_three_d_stage(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Build3D,
+    );
+    s.core.enter_3d();
+    s.core.fig3_orbit(35.0, 18.0);
+    s.core.fig3_select_next();
+}
+
 /// `"loop-range"` — the Animate workspace with a loop
 /// range over frames 1..=3 (0-based, the timeline marks'
 /// loop edges) and ONE graph channel planted for
@@ -344,6 +379,7 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("fx-split-mid", scene_fx_split_mid),
         ("three-d", scene_three_d),
         ("loop-range", scene_loop_range),
+        ("three-d-stage", scene_three_d_stage),
     ]
 }
 
@@ -431,6 +467,17 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    this fact to the real key once the row was in the
 ///    tree. (The loop edges themselves are drawn on the
 ///    timeline canvas, so they are a `--snap` fact.)
+/// 14. Under `--scene three-d-stage` (Phase M): the same
+///    Build3D tree as fact 12 — an element keyed
+///    `panel-3d` exists (the 3D panel root the fact-12
+///    census named) and an element keyed
+///    `panel-3d-preview` exists (the preview canvas
+///    itself), because the scene mounts the same panels
+///    as `three-d`. The scene's actual point is NOT the
+///    tree but the `--snap`: with the Build3D workspace
+///    active and a session live, the stage pass draws
+///    the 3D figure on the MAIN STAGE, and only the PNG
+///    proves that drawing happened.
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -446,6 +493,7 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene fx-split-mid: an element keyed \"fx-split\" exists (the Split at playhead button, mounted only with a clip selection)",
         "under --scene three-d: an element keyed \"panel-3d-preview\" exists (the 3D preview canvas — see fact 12)",
         "under --scene loop-range: an element keyed \"timeline-loop-row\" exists (the loop row in its set state — see fact 13)",
+        "under --scene three-d-stage: an element keyed \"panel-3d\" exists and an element keyed \"panel-3d-preview\" exists (the 3D panel, as under three-d — see fact 14)",
 
     ]
 }
@@ -454,21 +502,22 @@ pub fn layout_assertions() -> Vec<&'static str> {
 mod tests {
     use super::{
         scene_export_open, scene_fx_selected, scene_fx_split_mid, scene_graph_duplicates,
-        scene_loop_range, scene_three_d, scenes,
+        scene_loop_range, scene_three_d, scene_three_d_stage, scenes,
     };
     use crate::init;
     use crate::rune_sec::workspaces::Workspace;
 
-    /// The scene table is the headless contract: ten
+    /// The scene table is the headless contract: eleven
     /// scenes, each name unique (a duplicate would shadow
     /// the later entry in `with_scene`'s lookup), with the
     /// Phase J scenes in their display positions, the two
-    /// Phase K scenes appended after them, and the two
-    /// Phase L scenes appended after those.
+    /// Phase K scenes appended after them, the two Phase L
+    /// scenes appended after those, and the Phase M scene
+    /// appended last.
     #[test]
-    fn scene_table_has_ten_uniquely_named_scenes() {
+    fn scene_table_has_eleven_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 10, "ten scenes are registered");
+        assert_eq!(table.len(), 11, "eleven scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -480,6 +529,7 @@ mod tests {
         assert_eq!(table[7].0, "fx-split-mid");
         assert_eq!(table[8].0, "three-d");
         assert_eq!(table[9].0, "loop-range");
+        assert_eq!(table[10].0, "three-d-stage");
     }
 
     /// The export scene reaches the Export workspace through
@@ -621,6 +671,30 @@ mod tests {
             st.figure.nodes.len() > 1,
             "the session figure has a joint 1 to select"
         );
+    }
+
+    /// The three-d-stage scene lands on exactly the end
+    /// state `three-d` lands on — the Build3D workspace
+    /// with a live fig3 session, the camera orbited to
+    /// yaw 35 / pitch 18 and joint 1 selected — because
+    /// the stage pass it exercises gates on precisely
+    /// that state (Build3D active + session live). This
+    /// is also the state behind layout fact 14 (the same
+    /// 3D panel inventory as `three-d` mounts).
+    #[test]
+    fn three_d_stage_scene_starts_a_session_on_build3d() {
+        let mut s = init();
+        assert!(s.core.fig3.is_none(), "no session before the scene");
+        scene_three_d_stage(&mut s);
+        assert_eq!(s.workspace, Workspace::Build3D);
+        let st = s
+            .core
+            .fig3
+            .as_ref()
+            .expect("the scene started a session");
+        assert_eq!(st.camera.yaw, 35.0, "yaw orbited by +35 degrees");
+        assert_eq!(st.camera.pitch, 18.0, "pitch orbited by +18 degrees");
+        assert_eq!(st.selected, 1, "joint 1 is selected");
     }
 
     /// The loop-range scene lands on the Animate workspace

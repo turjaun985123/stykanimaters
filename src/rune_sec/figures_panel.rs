@@ -87,6 +87,20 @@
 //! miniature rings — and fit room — at the same proportion
 //! as its stage. At the default scale the radius is exactly
 //! [`HEAD_RING_R`] and the geometry is unchanged.
+//!
+//! Phase M (section 21/40) adds a "Duplicate" button to the
+//! header (key `fig-duplicate`, `copy` glyph via
+//! `icon_btn`), beside Recolour: it duplicates the selected
+//! figure through `EditorCore::duplicate_figure`
+//! (figure_ops.rs — one snapshot, per-frame poses and bend
+//! rows cloned, every figure-indexed reference remapped).
+//! The op names the copy "<name> copy", selects it itself
+//! (with no node selected) and sets its own status, so the
+//! dispatch in [`duplicate_row`] adds neither. The button
+//! is always live like Recolour, and with no figure at the
+//! selected index — an empty project, a stale selection —
+//! the press is silent: the dispatch resolves the figure
+//! first, so no status is set and nothing is snapshotted.
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, text_input, Color, El, LineCap, Shape, TextEdit};
@@ -454,6 +468,23 @@ fn recolor_row(core: &mut EditorCore) {
     }
 }
 
+/// Duplicate dispatch for the header button: duplicate the
+/// selected figure via `EditorCore::duplicate_figure` (one
+/// snapshot; the op names the copy "<name> copy", inserts
+/// it right after the original, selects it with no node
+/// selected, remaps every figure-indexed reference, and
+/// sets its own status — so the dispatch adds neither a
+/// selection nor a status of its own). With no figure at
+/// the selected index — an empty project or a stale
+/// selection — the press is silent, the Recolour
+/// convention: the guard resolves first, so no status is
+/// set and nothing is snapshotted.
+fn duplicate_row(core: &mut EditorCore) {
+    if core.project.figures.get(core.selected_figure).is_some() {
+        let _ = core.duplicate_figure(core.selected_figure);
+    }
+}
+
 /// One figure row, as a two-line card: line 1 is the live
 /// thumbnail canvas (`fig-thumb-{fi}`, Phase F), then the
 /// colour dot + name (press selects), the opacity readout,
@@ -640,6 +671,14 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
                     false,
                     t,
                     |s: &mut State| recolor_row(&mut s.core),
+                ))
+                .child(icon_btn(
+                    "fig-duplicate",
+                    "copy",
+                    "Duplicate",
+                    false,
+                    t,
+                    |s: &mut State| duplicate_row(&mut s.core),
                 )),
         );
     if collapsed {
@@ -1158,5 +1197,42 @@ mod tests {
             .iter()
             .all(|n| n.color == Some(0x123456)));
         assert_eq!(core.status, format!("Figure {} recoloured.", fi + 1));
+    }
+
+    #[test]
+    fn duplicate_row_clones_the_selected_figure_and_selects_the_copy() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        let name = core.project.figures[fi].name.clone();
+        let n = core.project.figures.len();
+        // A selected joint proves the op's contract: the
+        // copy becomes the selection with no node selected.
+        core.selected_node = Some(0);
+        duplicate_row(&mut core);
+        assert_eq!(core.project.figures.len(), n + 1);
+        // The copy sits right after the original and carries
+        // the op's naming, "<name> copy"; the original is
+        // untouched. The op itself selects the copy and sets
+        // the status — the dispatch adds neither.
+        assert_eq!(core.project.figures[fi].name, name);
+        assert_eq!(core.project.figures[fi + 1].name, format!("{name} copy"));
+        assert_eq!(core.selected_figure, fi + 1);
+        assert_eq!(core.selected_node, None);
+        assert_eq!(core.status, "Figure duplicated.");
+    }
+
+    #[test]
+    fn duplicate_row_on_an_empty_project_is_a_silent_no_op() {
+        // No figure at the selected index: the press is
+        // silent — no panic, no figure appears, and the
+        // status line is left exactly as it was (the op's
+        // own "No figure to duplicate." never fires because
+        // the dispatch resolves first).
+        let mut core = EditorCore::new();
+        core.project.figures.clear();
+        let status = core.status.clone();
+        duplicate_row(&mut core);
+        assert!(core.project.figures.is_empty());
+        assert_eq!(core.status, status);
     }
 }

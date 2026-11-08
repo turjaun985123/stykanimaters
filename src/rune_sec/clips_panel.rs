@@ -25,6 +25,14 @@
 //!   (editor.rs:3225) — adds a figure playing the FIRST clip;
 //!   the op takes no index, and with no clips it only sets the
 //!   status line, exactly as the GPUI button behaved.
+//! * Per-row "Insert" -> `insert_clip_figure_at` in this
+//!   module (Phase M) — the engine op's construction with
+//!   the row's own clip index parameterised, under this
+//!   module's field-write discipline ("No such clip.", no
+//!   snapshot, when out of range; exactly one snapshot
+//!   otherwise). The clips vec is untouched, so no stored
+//!   clip index shifts and neither the panel selection nor
+//!   an open rename target needs repair.
 //! * The loop-mode segmented control -> `apply_loop_mode`,
 //!   which reaches the target mode through the one loop op
 //!   the core exposes, `EditorCore::cycle_clip_loop`
@@ -438,6 +446,52 @@ pub fn move_clip(core: &mut EditorCore, clip_idx: usize, up: bool) -> bool {
     true
 }
 
+/// The figure colour palette, mirrored from editor.rs's
+/// private `FIGURE_COLORS` — the const is not exported, so
+/// consumers keep a copy (the mcp_io.rs precedent); keep
+/// the values in step. `insert_clip_figure_at` picks from
+/// it with the engine op's own offset.
+const FIGURE_COLORS: [u32; 6] = [0xE8E8EC, 0xFF5D5D, 0x5DB2FF, 0x7BE495, 0xFFC65D, 0xC792FF];
+
+/// Insert a figure playing clip `clip_idx` (the per-row
+/// "Insert" button's dispatch). The core's own op,
+/// `EditorCore::insert_clip_figure`, always inserts the
+/// FIRST clip — it takes no index — so this is that op's
+/// body with the index parameterised, under this module's
+/// field-write discipline: an out-of-range index only
+/// sets the status line ("No such clip.", no snapshot);
+/// otherwise exactly one `snapshot()`, then the engine
+/// op's construction unchanged — a figure built by
+/// `Project::add_figure_with` from the clip's def and
+/// name (unlocked, visible, full opacity, the def's rest
+/// pose rooted at `[380 + 40 * idx, 450]` pushed into
+/// every frame), coloured `FIGURE_COLORS[(idx + 3) % 6]`
+/// where `idx` is the pre-insert figure count, then
+/// pointed at the clip (`clip: Some(clip_idx)`), selected,
+/// and confirmed with the engine op's own status line
+/// ("Inserted movieclip {name}."). The clips vec itself
+/// is untouched — nothing added, removed or reordered —
+/// so no stored clip index shifts and neither the panel
+/// selection nor an open rename target needs repair
+/// (contrast `delete_clip` / `move_clip`, whose dispatch
+/// wrappers exist for exactly that repair). Returns true
+/// when a figure was inserted.
+pub fn insert_clip_figure_at(core: &mut EditorCore, clip_idx: usize) -> bool {
+    let Some(clip) = core.project.clips.get(clip_idx).cloned() else {
+        core.status = "No such clip.".into();
+        return false;
+    };
+    core.snapshot();
+    let idx = core.project.figures.len();
+    let color = FIGURE_COLORS[(idx + 3) % FIGURE_COLORS.len()];
+    core.project
+        .add_figure_with(clip.def.clone(), &clip.name, color, [380.0 + 40.0 * idx as f32, 450.0]);
+    core.project.figures[idx].clip = Some(clip_idx);
+    core.selected_figure = idx;
+    core.status = format!("Inserted movieclip {}.", clip.name);
+    true
+}
+
 /// Delete clip `clip_idx` from the panel (the "Del"
 /// button's handler): `delete_clip` on the core, then the
 /// panel-local repairs the core cannot do — the
@@ -651,6 +705,16 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
             move |s: &mut State| {
                 update_panel_state(|p| p.select(index));
                 begin_rename(s, index);
+            },
+        ))
+        .child(icon_btn(
+            &format!("clip-insert-{index}"),
+            "plus",
+            "Insert",
+            false,
+            t,
+            move |s: &mut State| {
+                insert_clip_figure_at(&mut s.core, index);
             },
         ))
         .child(icon_only_btn(
@@ -1549,5 +1613,104 @@ playback_speed: 1.0,
         assert_eq!(panel_state().selected, Some(1));
         assert_eq!(clip_names(&state.core), ["Bravo", "Charlie"]);
         update_panel_state(|p| *p = ClipsPanelState::default());
+    }
+
+    fn core_with_two_clips() -> EditorCore {
+        let mut core = EditorCore::new();
+        for name in ["Alpha", "Bravo"] {
+            let mut clip = clip_with_frames(2);
+            clip.name = name.to_string();
+            core.project.clips.push(clip);
+        }
+        core
+    }
+
+    #[test]
+    fn insert_clip_figure_at_inserts_the_chosen_clip() {
+        let mut core = core_with_two_clips();
+        let figures_before = core.project.figures.len();
+        let depth = core.undo_depth();
+        assert!(insert_clip_figure_at(&mut core, 1));
+        // Exactly one snapshot, exactly one new figure.
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert_eq!(core.project.figures.len(), figures_before + 1);
+        let idx = figures_before;
+        let fig = &core.project.figures[idx];
+        // The chosen clip — index 1, not the engine op's
+        // hard-wired first clip.
+        assert_eq!(fig.clip, Some(1));
+        // The engine op's construction, field by field:
+        // the clip's name and def, the palette colour at
+        // (idx + 3) % 6, unlocked, visible, full opacity.
+        assert_eq!(fig.name, "Bravo");
+        assert_eq!(fig.def.nodes.len(), core.project.clips[1].def.nodes.len());
+        assert_eq!(fig.def.nodes[0].name, core.project.clips[1].def.nodes[0].name);
+        assert_eq!(fig.color, 0xFFC65D, "FIGURE_COLORS[(1 + 3) % 6]");
+        assert!(!fig.locked);
+        assert!(!fig.hidden);
+        assert_eq!(fig.opacity, 1.0);
+        // The def's rest pose went into every frame at the
+        // op's root, [380 + 40 * idx, 450].
+        for frame in &core.project.frames {
+            assert_eq!(frame.poses[idx].root, [420.0, 450.0]);
+        }
+        // The new figure is selected, under the engine
+        // op's own status line.
+        assert_eq!(core.selected_figure, idx);
+        assert_eq!(core.status, "Inserted movieclip Bravo.");
+        // The clips vec is untouched — no stored index
+        // shifted, so no selection or rename repair is
+        // owed (the rename-session guarantee).
+        assert_eq!(clip_names(&core), ["Alpha", "Bravo"]);
+        // One undo removes the inserted figure.
+        core.undo();
+        assert_eq!(core.project.figures.len(), figures_before);
+    }
+
+    #[test]
+    fn insert_clip_figure_at_zero_matches_the_engine_op() {
+        // Parity at index 0: the same project through the
+        // engine op and through this module's op must end
+        // with the same figure, selection and status.
+        let mut engine = core_with_two_clips();
+        engine.insert_clip_figure();
+        let mut panel = core_with_two_clips();
+        assert!(insert_clip_figure_at(&mut panel, 0));
+        assert_eq!(panel.project.figures.len(), engine.project.figures.len());
+        let a = &engine.project.figures[engine.selected_figure];
+        let b = &panel.project.figures[panel.selected_figure];
+        assert_eq!(b.clip, Some(0));
+        assert_eq!(a.clip, b.clip);
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.color, b.color);
+        assert_eq!(a.def.nodes.len(), b.def.nodes.len());
+        assert_eq!(
+            panel.project.frames[0].poses[panel.selected_figure].root,
+            engine.project.frames[0].poses[engine.selected_figure].root
+        );
+        assert_eq!(panel.selected_figure, engine.selected_figure);
+        assert_eq!(panel.status, engine.status);
+    }
+
+    #[test]
+    fn insert_clip_figure_at_bad_index_refuses_without_a_snapshot() {
+        let mut core = core_with_two_clips();
+        let figures_before = core.project.figures.len();
+        let depth = core.undo_depth();
+        assert!(!insert_clip_figure_at(&mut core, 2));
+        assert!(!insert_clip_figure_at(&mut core, 99));
+        assert_eq!(core.status, "No such clip.");
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.project.figures.len(), figures_before);
+        // No clips at all: even index 0 refuses the same
+        // way, with no snapshot and no figure.
+        let mut empty = EditorCore::new();
+        assert!(empty.project.clips.is_empty());
+        let depth = empty.undo_depth();
+        let figures_before = empty.project.figures.len();
+        assert!(!insert_clip_figure_at(&mut empty, 0));
+        assert_eq!(empty.status, "No such clip.");
+        assert_eq!(empty.undo_depth(), depth);
+        assert_eq!(empty.project.figures.len(), figures_before);
     }
 }

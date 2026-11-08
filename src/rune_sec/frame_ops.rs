@@ -71,6 +71,16 @@
 //! itself. It renders through the Phase I inert/live icon
 //! pair, gated by [`reverse_all_enabled`]: below two
 //! frames there is no order to change.
+//!
+//! "Swap with previous" / "Swap with next" (Phase M) sit
+//! beside "Reverse all" and exchange the current frame
+//! with its neighbour through the lib op
+//! `frame_swap::swap_frame_with_neighbour`, which leaves
+//! `current` numerically unchanged while the two frames'
+//! contents exchange. They render through the same
+//! inert/live icon pair, gated by [`swap_prev_enabled`] /
+//! [`swap_next_enabled`]: at the timeline's ends there is
+//! no neighbour to swap with.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Color, El};
@@ -221,6 +231,22 @@ pub fn reverse_all_enabled(core: &EditorCore) -> bool {
 /// keeps the loop-range rule for the range itself.)
 pub fn reverse_all(core: &mut EditorCore) {
     core.reverse_range(0, core.frame_count());
+}
+
+/// Swap-with-previous's render-time guard (Phase M): the
+/// current frame needs a frame before it to swap with, so
+/// the button renders inert on frame 0 — and on an empty
+/// project, where `current` is 0 as well.
+pub fn swap_prev_enabled(core: &EditorCore) -> bool {
+    core.current > 0
+}
+
+/// Swap-with-next's render-time guard (Phase M): the
+/// current frame needs a frame after it to swap with, so
+/// the button renders inert on the last frame — and on an
+/// empty project, where there is no next frame either.
+pub fn swap_next_enabled(core: &EditorCore) -> bool {
+    core.current + 1 < core.frame_count()
 }
 
 /// `smooth_path_roots` needs at least three frames and a
@@ -517,8 +543,8 @@ fn fbtn(
 }
 
 /// The "Frames" toolbar section: the main row in GPUI
-/// tool-group order — Inbetween / Shift / Reverse / Smooth
-/// path, the clipboards, the loop endpoints, then the duration
+/// tool-group order — Inbetween / Shift / Reverse / Swap /
+/// Smooth path, the clipboards, the loop endpoints, then the duration
 /// steppers with their readout — over a second row, "This
 /// frame", carrying the current frame's duration multiplier
 /// with ×0.5 / ×2 / Reset 1.0 controls (Phase F), and a third
@@ -573,6 +599,44 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 "frames-reverse-all",
                 "arrow-right-arrow-left",
                 "Reverse all",
+                t,
+            )
+        })
+        .child(if swap_prev_enabled(core) {
+            crate::rune_sec::icon_btn::icon_btn(
+                "fop-swap-prev",
+                "chevron-left",
+                "Swap with previous",
+                false,
+                t,
+                |s| {
+                    stykanimate_rs::frame_swap::swap_frame_with_neighbour(&mut s.core, -1);
+                },
+            )
+        } else {
+            crate::rune_sec::icon_btn::icon_btn_inert(
+                "fop-swap-prev",
+                "chevron-left",
+                "Swap with previous",
+                t,
+            )
+        })
+        .child(if swap_next_enabled(core) {
+            crate::rune_sec::icon_btn::icon_btn(
+                "fop-swap-next",
+                "chevron-right",
+                "Swap with next",
+                false,
+                t,
+                |s| {
+                    stykanimate_rs::frame_swap::swap_frame_with_neighbour(&mut s.core, 1);
+                },
+            )
+        } else {
+            crate::rune_sec::icon_btn::icon_btn_inert(
+                "fop-swap-next",
+                "chevron-right",
+                "Swap with next",
                 t,
             )
         })
@@ -1285,5 +1349,64 @@ mod tests {
             [2.0, 3.0, 1.0],
             "Reverse all flips the whole timeline, loop range set or not"
         );
+    }
+
+    #[test]
+    fn swap_guards_follow_the_current_frame() {
+        // Truth table for the two Swap buttons (Phase M): a
+        // direction is live exactly while the current frame
+        // has a neighbour on that side.
+        let mut core = EditorCore::new();
+        core.project.frames.truncate(3);
+        core.current = 0;
+        assert!(!swap_prev_enabled(&core), "frame 0 has no previous frame");
+        assert!(swap_next_enabled(&core), "frame 0 has a next frame");
+        core.current = 1;
+        assert!(swap_prev_enabled(&core), "the middle frame has a previous");
+        assert!(swap_next_enabled(&core), "the middle frame has a next");
+        core.current = 2;
+        assert!(swap_prev_enabled(&core), "the last frame has a previous");
+        assert!(!swap_next_enabled(&core), "the last frame has no next frame");
+        // A single frame has no neighbour on either side.
+        core.project.frames.truncate(1);
+        core.current = 0;
+        assert!(!swap_prev_enabled(&core), "one frame: no previous");
+        assert!(!swap_next_enabled(&core), "one frame: no next");
+        // Neither does an empty project.
+        core.project.frames.clear();
+        assert!(!swap_prev_enabled(&core), "no frames: no previous");
+        assert!(!swap_next_enabled(&core), "no frames: no next");
+    }
+
+    #[test]
+    fn swap_buttons_exchange_content_and_keep_current() {
+        // Handler level, through the lib op the buttons
+        // call: on a three-frame project tagged by duration,
+        // swapping at the middle frame exchanges the two
+        // frames' contents while `current` stays numerically
+        // where it was — the playhead does not chase the
+        // moved frame (the op's contract).
+        let mut core = EditorCore::new();
+        core.project.frames.truncate(3);
+        for (i, frame) in core.project.frames.iter_mut().enumerate() {
+            frame.duration = 1.0 + i as f32;
+        }
+        core.current = 1;
+        assert!(stykanimate_rs::frame_swap::swap_frame_with_neighbour(&mut core, -1));
+        let durations: Vec<f32> = core.project.frames.iter().map(|f| f.duration).collect();
+        assert_eq!(
+            durations,
+            [2.0, 1.0, 3.0],
+            "the current frame's content swapped with the previous frame's"
+        );
+        assert_eq!(core.current, 1, "the playhead's index does not move");
+        // Swapping the other way acts on the frames now at
+        // indices 1 and 2 (the op follows the index, not a
+        // frame identity), again without moving `current`.
+        assert!(stykanimate_rs::frame_swap::swap_frame_with_neighbour(&mut core, 1));
+        let durations: Vec<f32> = core.project.frames.iter().map(|f| f.duration).collect();
+        assert_eq!(durations, [2.0, 3.0, 1.0], "the second swap exchanges indices 1 and 2");
+        assert_eq!(core.current, 1, "still on frame 1 after both swaps");
+        assert_eq!(core.frame_count(), 3, "swapping adds and removes nothing");
     }
 }

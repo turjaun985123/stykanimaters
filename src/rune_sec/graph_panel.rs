@@ -276,6 +276,19 @@
 //! past it shifts down one row, and `target` is never
 //! touched.
 //!
+//! ## Shift channel keys (Phase M)
+//!
+//! The same conditional block gains a `graph-shift-l` /
+//! `graph-shift-r` pair (icon buttons, "Shift -1" /
+//! "Shift +1"): each press moves EVERY key of the drawn
+//! channel one frame earlier or later through
+//! `graph_keys::shift_keys`. The handler
+//! [`shift_drawn_channel`] resolves through
+//! [`effective_channel_index`] exactly as Delete does,
+//! so the pair acts on the channel Delete would remove;
+//! the op owns the snapshot and the frame-0 refusal
+//! (the whole shift is refused, never clamped per key).
+//!
 //! ## State the shell must provide
 //!
 //! `State` needs one field (integrator wires it):
@@ -291,6 +304,7 @@ use stykanimate_rs::graph_panel::{preset_preview, GraphView};
 use stykanimate_rs::model::V2;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::icons::icon_el_rgb;
 use crate::stage_view::hex_color;
 use crate::State;
@@ -592,6 +606,28 @@ pub fn delete_drawn_channel(core: &mut EditorCore, sel: &mut GraphPanelState) {
     if stykanimate_rs::graph_keys::delete_channel(core, idx) {
         sel.selected_channel = selection_after_delete(sel.selected_channel, idx);
     }
+}
+
+/// Shift the drawn channel's keys in time (Phase M):
+/// resolves through [`effective_channel_index`] — the
+/// very helper [`delete_drawn_channel`] resolves
+/// through, so the shift buttons and Delete can never
+/// disagree about which channel they act on (a picked
+/// duplicate row shifts THAT twin) — and forwards to
+/// `graph_keys::shift_keys`, which owns the snapshot,
+/// the success wording and every refusal, including the
+/// frame-0 wall (the whole shift is refused, never
+/// clamped per key). The pick needs no repair — no
+/// channel is added or removed — so `sel` is shared,
+/// like [`duplicate_channel_to_next`]. With nothing
+/// drawn the press is a status-only refusal, mirroring
+/// Delete's.
+pub fn shift_drawn_channel(core: &mut EditorCore, sel: &GraphPanelState, delta: f32) {
+    let Some(idx) = effective_channel_index(core, sel) else {
+        core.status = "No graph channel selected to shift.".into();
+        return;
+    };
+    stykanimate_rs::graph_keys::shift_keys(core, idx, delta);
 }
 
 /// The channel list's rows: EVERY channel in the project, in
@@ -1537,6 +1573,11 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     // under the same condition, in the same plain-btn
     // style: the press removes the drawn channel through
     // delete_drawn_channel, which repairs the stored pick.
+    // The Shift pair (Phase M) closes the block under the
+    // same condition: icon buttons moving every key of the
+    // drawn channel one frame either way through
+    // shift_drawn_channel — repeated presses accumulate,
+    // and the op refuses cleanly at the frame-0 wall.
     if drawn_idx.is_some() {
         chan_list = chan_list.child(btn(
             "graph-chan-duplicate",
@@ -1552,6 +1593,27 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
             t,
             |s: &mut State| delete_drawn_channel(&mut s.core, &mut s.graph_panel),
         ));
+        chan_list = chan_list.child(
+            row()
+                .key("graph-shift-row")
+                .gap(4.0)
+                .child(icon_btn(
+                    "graph-shift-l",
+                    "chevron-left",
+                    "Shift -1",
+                    false,
+                    t,
+                    |s: &mut State| shift_drawn_channel(&mut s.core, &s.graph_panel, -1.0),
+                ))
+                .child(icon_btn(
+                    "graph-shift-r",
+                    "chevron-right",
+                    "Shift +1",
+                    false,
+                    t,
+                    |s: &mut State| shift_drawn_channel(&mut s.core, &s.graph_panel, 1.0),
+                )),
+        );
     }
 
     // Stats block (Phase I): one muted line per channel
@@ -2914,6 +2976,118 @@ mod tests {
         assert_eq!(core.undo_depth(), depth, "no snapshot on the refusal");
         assert_eq!(st.selected_channel, None);
         assert!(core.status.contains("No graph channel selected to delete"));
+    }
+
+    #[test]
+    fn shift_drawn_channel_moves_the_picked_twin_only() {
+        // Phase M: the shift handler resolves through the
+        // SAME helper as Delete — pick the second of the
+        // duplicate twins and shift: only that twin's keys
+        // move (0/3 -> 1/4), the first twin is untouched,
+        // and exactly one undo step is taken (the op's
+        // snapshot). Delete on an identical setup removes
+        // that same index (the Phase K test above), so the
+        // two buttons can never disagree about their
+        // channel.
+        let mut core = core_with_duplicate_channels();
+        let mut st = GraphPanelState::default();
+        assert!(select_channel(&mut core, &mut st, 1));
+        assert_eq!(effective_channel_index(&core, &st), Some(1));
+        let depth = core.undo_depth();
+        shift_drawn_channel(&mut core, &st, 1.0);
+        let frames: Vec<f32> = core.project.channels[1]
+            .keys
+            .iter()
+            .map(|k| k.frame)
+            .collect();
+        assert_eq!(frames, vec![1.0, 4.0]);
+        let frames: Vec<f32> = core.project.channels[0]
+            .keys
+            .iter()
+            .map(|k| k.frame)
+            .collect();
+        assert_eq!(frames, vec![0.0], "the first twin never moves");
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot via the op");
+        assert_eq!(st.selected_channel, Some(1), "shifting keeps the pick");
+    }
+
+    #[test]
+    fn shift_drawn_channel_moves_keys_by_the_delta() {
+        // Phase M, the buttons' own handler path: a
+        // channel keyed at frames 2 and 5 shifts +1 to 3
+        // and 6 (the task's pinned case); presses
+        // accumulate, and one -1 press walks it back.
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(2.0, 1.0), Key::flat(5.0, 2.0)],
+        )];
+        let st = GraphPanelState {
+            target: Some(ChannelTarget::RootX),
+            ..Default::default()
+        };
+        let frames = |core: &EditorCore| -> Vec<f32> {
+            core.project.channels[0]
+                .keys
+                .iter()
+                .map(|k| k.frame)
+                .collect()
+        };
+        let depth = core.undo_depth();
+        shift_drawn_channel(&mut core, &st, 1.0);
+        assert_eq!(frames(&core), vec![3.0, 6.0]);
+        shift_drawn_channel(&mut core, &st, 1.0);
+        assert_eq!(frames(&core), vec![4.0, 7.0], "presses accumulate");
+        shift_drawn_channel(&mut core, &st, -1.0);
+        assert_eq!(frames(&core), vec![3.0, 6.0]);
+        assert_eq!(core.undo_depth(), depth + 3, "one snapshot per shift");
+        assert!(core.status.contains("Shifted 2 keys"));
+    }
+
+    #[test]
+    fn shift_drawn_channel_refuses_at_the_frame_zero_wall() {
+        // Phase M: the op refuses the WHOLE shift when
+        // any key would land before frame 0 — keys
+        // unmoved, no snapshot, the op's own wording. A
+        // key landing exactly ON frame 0 is fine.
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(2.0, 1.0), Key::flat(5.0, 2.0)],
+        )];
+        let st = GraphPanelState {
+            target: Some(ChannelTarget::RootX),
+            ..Default::default()
+        };
+        let frames = |core: &EditorCore| -> Vec<f32> {
+            core.project.channels[0]
+                .keys
+                .iter()
+                .map(|k| k.frame)
+                .collect()
+        };
+        let depth = core.undo_depth();
+        shift_drawn_channel(&mut core, &st, -3.0);
+        assert_eq!(frames(&core), vec![2.0, 5.0], "a refused shift moves nothing");
+        assert_eq!(core.undo_depth(), depth, "no snapshot on the refusal");
+        assert!(core.status.contains("before frame 1"));
+        shift_drawn_channel(&mut core, &st, -2.0);
+        assert_eq!(frames(&core), vec![0.0, 3.0], "landing on frame 0 is allowed");
+        assert_eq!(core.undo_depth(), depth + 1);
+    }
+
+    #[test]
+    fn shift_drawn_channel_without_channels_changes_nothing() {
+        // Phase M refusal, mirroring Delete's: the demo
+        // core has no channels, so nothing is drawn — no
+        // movement, no snapshot, only the refusal wording.
+        let mut core = EditorCore::new();
+        let st = GraphPanelState::default();
+        let depth = core.undo_depth();
+        shift_drawn_channel(&mut core, &st, 1.0);
+        assert!(core.project.channels.is_empty());
+        assert_eq!(core.undo_depth(), depth, "no snapshot on the refusal");
+        assert!(core.status.contains("No graph channel selected to shift"));
     }
 
     #[test]

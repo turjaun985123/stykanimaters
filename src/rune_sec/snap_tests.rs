@@ -334,6 +334,47 @@
 //!   key is not `ws-build3d`). Presence is asserted
 //!   on the presented tree, round 5's coverage-test
 //!   mechanism, not on pixels.
+//!
+//! Round 10 (Phase M, section 35) adds four tests over
+//! the phase's new surfaces: the Frames section's swap
+//! buttons, the 3D panel's session toggle, the
+//! settings card's direct-select speed chips, and the
+//! timeline's clips lane. Facts they rest on:
+//! * The swap buttons are a live/inert pair under one
+//!   key (`fop-swap-next`): `icon_btn` while
+//!   `swap_next_enabled` holds, `icon_btn_inert` at
+//!   the last frame — so the end-of-timeline assertion
+//!   is round 6's inert pattern (presence, then a tap
+//!   that changes nothing), not absence. The swap
+//!   itself is `frame_swap::swap_frame_with_neighbour`:
+//!   whole `Frame` values trade slots (durations
+//!   travel), the playhead keeps its slot, and a
+//!   success takes exactly one snapshot. Durations are
+//!   planted through the section's own ×2 stepper
+//!   (`fop-dur-double` → `adjust_frame_duration`, a
+//!   direct field write with no snapshot), never by
+//!   writing project state in setup.
+//! * The 3D panel's header toggle (`mode-3d`) enters
+//!   and exits the session (`EditorCore::enter_3d` /
+//!   `exit_3d`), so session state is assertable off
+//!   `rt.state.core.fig3` — round 9's preview-presence
+//!   test needed no session at all.
+//! * The settings card is a right-column panel (not an
+//!   overlay), so its deep rows — the Playback block's
+//!   speed chips, `settings-speed-{i}` over the
+//!   transport's `SPEEDS` table — are reached with the
+//!   same `scroll_into_view` discipline as any other
+//!   right-column row.
+//! * The clips lane (`timeline-clips`, timeline_marks)
+//!   renders only when the project carries at least
+//!   one audio or FX clip span, so the lane test
+//!   plants an FX clip by direct project write (the
+//!   graph-duplicates precedent) and asserts presence,
+//!   then clears it and asserts absence after a
+//!   bounded settle loop. (This test was added by
+//!   the integrator: at section 35's census the lane
+//!   had not landed yet, and this file never asserts
+//!   against an unverified key.)
 
 use std::collections::BTreeSet;
 
@@ -2564,4 +2605,313 @@ fn build3d_workspace_presents_the_3d_preview() {
     // 2–8 do.
     tap(&mut rt, "ws-animate");
     assert_eq!(rt.state.workspace, Workspace::Animate);
+}
+
+// ----------------------------------------------------------------
+// Round 10 (Phase M, section 35): the Frames section's
+// frame swap, the 3D panel's session toggle, and the
+// settings card's direct-select speed chips — each
+// driven through the real shell. (The round's fourth
+// planned test, the timeline's FX clips lane, is not
+// here: its key existed nowhere in the tree at census
+// time — see the module docs.)
+// ----------------------------------------------------------------
+
+#[test]
+fn swap_next_button_exchanges_frame_contents() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // The frames' durations are the contents this test
+    // watches trade places: the swap moves whole
+    // `Frame` values, so a planted duration is a
+    // planted identity.
+    let durations = |rt: &Runtime<State>| -> Vec<f32> {
+        rt.state
+            .core
+            .project
+            .frames
+            .iter()
+            .map(|f| f.duration)
+            .collect()
+    };
+    assert_eq!(
+        durations(&rt),
+        vec![1.0; 5],
+        "premise: the demo's five frames sit at the default duration"
+    );
+    assert_eq!(
+        rt.state.core.current, 0,
+        "premise: the playhead starts on frame 0"
+    );
+
+    // Plant distinguishable durations through the
+    // Frames section's own ×2 stepper (right column):
+    // frame 0 to 2×, then seek to frame 1 and double
+    // it twice, to 4×. The stepper writes the field
+    // directly (no snapshot), so the undo depth must
+    // not move while planting.
+    let undo0 = rt.state.core.undo_depth();
+    scroll_into_view(&mut rt, "fop-dur-double");
+    tap(&mut rt, "fop-dur-double");
+    assert_eq!(durations(&rt)[0], 2.0, "frame 0 planted at 2x");
+    tap(&mut rt, "frame-2");
+    assert_eq!(rt.state.core.current, 1, "the chip seeks to frame 1");
+    scroll_into_view(&mut rt, "fop-dur-double");
+    tap(&mut rt, "fop-dur-double");
+    tap(&mut rt, "fop-dur-double");
+    assert_eq!(
+        durations(&rt),
+        vec![2.0, 4.0, 1.0, 1.0, 1.0],
+        "both plants landed"
+    );
+    assert_eq!(
+        rt.state.core.undo_depth(),
+        undo0,
+        "planting takes no undo steps"
+    );
+
+    // Back on frame 0, Swap with next trades the two
+    // frames' contents: the durations move with their
+    // frames, the playhead keeps naming slot 0, and
+    // the swap costs exactly one undo step.
+    tap(&mut rt, "frame-1");
+    assert_eq!(rt.state.core.current, 0);
+    scroll_into_view(&mut rt, "fop-swap-next");
+    tap(&mut rt, "fop-swap-next");
+    assert_eq!(
+        durations(&rt),
+        vec![4.0, 2.0, 1.0, 1.0, 1.0],
+        "the two frames traded contents"
+    );
+    assert_eq!(
+        rt.state.core.current, 0,
+        "the playhead stays on its slot"
+    );
+    assert_eq!(
+        rt.state.core.undo_depth(),
+        undo0 + 1,
+        "one swap is one undo step"
+    );
+
+    // On the last frame the same key renders in its
+    // inert form (`icon_btn_inert`: same key, no
+    // handler attached). Presence plus a tap that
+    // changes nothing is the honest assertion — round
+    // 6's pose-paste pattern.
+    tap(&mut rt, "frame-5");
+    assert_eq!(
+        rt.state.core.current, 4,
+        "the playhead sits on the last frame"
+    );
+    scroll_into_view(&mut rt, "fop-swap-next");
+    assert!(
+        presented_keys(&rt).contains("fop-swap-next"),
+        "the inert Swap with next is presented on the last frame"
+    );
+    let status = rt.state.core.status.clone();
+    let undo = rt.state.core.undo_depth();
+    tap(&mut rt, "fop-swap-next");
+    assert_eq!(
+        durations(&rt),
+        vec![4.0, 2.0, 1.0, 1.0, 1.0],
+        "the inert press swaps nothing"
+    );
+    assert_eq!(
+        rt.state.core.status, status,
+        "the inert press writes no status"
+    );
+    assert_eq!(
+        rt.state.core.undo_depth(),
+        undo,
+        "the inert press adds no undo step"
+    );
+    assert_eq!(
+        rt.state.core.current, 4,
+        "the inert press does not seek"
+    );
+}
+
+#[test]
+fn build3d_workspace_shows_fig3_stage_state() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // Seed Animate through its chip (the shared-prefs
+    // discipline), as round 9's preview test does.
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    tap(&mut rt, "ws-3d");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Build3D);
+
+    // Premise: a 3D session exists only once the
+    // panel's own toggle starts one — round 9 asserted
+    // the preview's presence without one; this test
+    // pins the session state itself. (The preview's
+    // Shape contents are not visible to the tree; the
+    // headless snap is the pixel proof, not this test.)
+    assert!(
+        rt.state.core.fig3.is_none(),
+        "premise: no 3D session yet"
+    );
+    let keys = presented_keys(&rt);
+    assert!(keys.contains("panel-3d"), "the 3D panel is presented");
+    assert!(
+        keys.contains("panel-3d-preview"),
+        "the preview viewport is presented"
+    );
+    assert!(
+        keys.contains("stage"),
+        "the stage stays mounted in the 3D workspace"
+    );
+
+    // Enter through the panel header's toggle
+    // (`mode-3d`): with no session, its handler runs
+    // the core's `enter_3d`.
+    scroll_into_view(&mut rt, "mode-3d");
+    tap(&mut rt, "mode-3d");
+    assert!(
+        rt.state.core.fig3.is_some(),
+        "the toggle started a 3D session"
+    );
+    let keys = presented_keys(&rt);
+    assert!(
+        keys.contains("panel-3d-preview"),
+        "the preview stays presented in session"
+    );
+    assert!(
+        keys.contains("stage"),
+        "the stage stays presented in session"
+    );
+
+    // The same toggle exits, leaving no session state
+    // behind in this shell.
+    scroll_into_view(&mut rt, "mode-3d");
+    tap(&mut rt, "mode-3d");
+    assert!(
+        rt.state.core.fig3.is_none(),
+        "the toggle exits the session"
+    );
+
+    // Restore Animate for the shared prefs.
+    tap(&mut rt, "ws-animate");
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+}
+
+#[test]
+fn settings_speed_chips_set_playback_speed() {
+    let mut rt = editor();
+
+    // Premise, mirrored from round 9's pb-speed test:
+    // the speed is shell state seeded by `init` at
+    // normal speed, and nothing persists it between
+    // shells.
+    assert_eq!(
+        rt.state.playback_speed, 1.0,
+        "premise: a fresh shell plays at normal speed"
+    );
+
+    // Open the settings card as rounds 3/5 do. The
+    // card is a right-column panel, so its Playback
+    // block — deep in the card, past the theme and
+    // language blocks — is reached with the usual
+    // scroll-into-view discipline (which also settles
+    // the children's presence fade).
+    tap(&mut rt, "settings-toggle");
+    assert!(rt.state.settings.open, "Settings toggle opens the card");
+    scroll_into_view(&mut rt, "settings-speed-3");
+    assert!(
+        presented_keys(&rt).contains("settings-speed-row"),
+        "the speed row is presented"
+    );
+
+    // Chip 3 of the transport's SPEEDS table
+    // ([0.25, 0.5, 1.0, 1.5, 2.0]) is 1.5×: one press
+    // writes the shell field outright (the section's
+    // `set_playback_speed` — silent, exactly like the
+    // pb-speed cycle round 9 pinned).
+    tap(&mut rt, "settings-speed-3");
+    assert_eq!(
+        rt.state.playback_speed, 1.5,
+        "chip 3 sets the playback speed to 1.5x"
+    );
+
+    // Chip 2 is normal speed, in the same row.
+    tap(&mut rt, "settings-speed-2");
+    assert_eq!(
+        rt.state.playback_speed, 1.0,
+        "chip 2 restores normal speed"
+    );
+}
+
+#[test]
+fn timeline_clips_lane_appears_with_a_planted_clip() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // Seed Animate through its chip (the shared-prefs
+    // discipline), as the other round 10 tests do.
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // Premise: the demo project carries no audio or FX
+    // clips, so the lane is absent — the timeline is
+    // byte-identical to its pre-lane shape.
+    assert!(
+        rt.state.core.project.fx_clips.is_empty()
+            && rt.state.core.project.audio.is_empty(),
+        "premise: the demo project has no clips"
+    );
+    assert!(
+        !presented_keys(&rt).contains("timeline-clips"),
+        "no clips, no clips lane"
+    );
+
+    // Plant an FX clip by direct project write (the
+    // graph-duplicates precedent): a Burst clip on
+    // figure 0 starting at frame 2 for 3 frames.
+    rt.state.core.project.fx_clips.push(
+        stykanimate_rs::model::FxClipEntry {
+            clip: stykanimate_rs::vfx::ParticleClip {
+                start: 2.0,
+                duration: 3.0,
+                kind: stykanimate_rs::vfx::ClipKind::Burst,
+                color: 0xFFC65D,
+                color2: None,
+                seed: 7,
+                angle: 0.0,
+                length: 130.0,
+            },
+            figure: 0,
+            node: 0,
+            hidden: false,
+        },
+    );
+    rt.frame(DT);
+    assert!(
+        presented_keys(&rt).contains("timeline-clips"),
+        "the clips lane appears once a clip exists"
+    );
+
+    // Clearing the clips removes the lane again; the
+    // row leaves through the presence fade, so allow
+    // the bounded settle loop before asserting absence.
+    rt.state.core.project.fx_clips.clear();
+    let mut gone = false;
+    for _ in 0..30 {
+        rt.frame(DT);
+        if !presented_keys(&rt).contains("timeline-clips") {
+            gone = true;
+            break;
+        }
+    }
+    assert!(gone, "the clips lane leaves with the last clip");
 }

@@ -5,7 +5,9 @@
 //! glyphs — gear card header, sun/moon theme pair, eye
 //! visibility toggles; Phase I, section 38: the Playback
 //! block — loop toggle + playback-audio readout;
-//! Phase K, section 32: the Reset layout button): theme,
+//! Phase K, section 32: the Reset layout button;
+//! Phase M, section 25: the Playback block gains a
+//! direct-select speed row): theme,
 //! language, stage size, the project default easing,
 //! stage guides, playback, the startup workspace and a
 //! layout reset, behind one "Settings" toggle. Declared
@@ -108,6 +110,25 @@
 //!   process may exit at once after a successful start, and
 //!   the line then honestly reads off (the fn's own docs
 //!   say the same).
+//! * **Playback speed (Phase M)** — a direct-select row
+//!   of five chips under the loop toggle, one per step
+//!   of the transport cycle's `SPEEDS` table
+//!   (`playback_controls.rs`), each labelled with the
+//!   bare value in the cycle button's own trim
+//!   ("0.25×" … "2×" — [`speed_chip_label`]). The chip
+//!   for the current `State.playback_speed` is
+//!   highlighted ([`active_speed_index`]); a press
+//!   writes the field directly
+//!   ([`set_playback_speed`]) — silent, exactly like
+//!   the `pb-speed` cycle: no status, no snapshot. The
+//!   shell's `poll` notes the field into the audio
+//!   engine and scales the advance itself, so the new
+//!   rate needs no call from here. This row is a third
+//!   home for the one field (transport cycle, View
+//!   menu cycle, these chips), not a second speed
+//!   state. The chips render through plain `btn`, the
+//!   popover's picker-grid idiom (the language and
+//!   workspace grids): their labels ARE the data.
 //! * **Startup workspace (Phase G)** — a compact picker
 //!   (eight buttons, the language grid's 4-wide layout)
 //!   naming the workspace the shell opens in. Picking one
@@ -195,6 +216,7 @@ use stykanimate_rs::i18n::Lang;
 use crate::chrome_view::btn;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::icons::icon_el;
+use crate::rune_sec::playback_controls::SPEEDS;
 use crate::rune_sec::workspaces::{select_workspace, Workspace};
 use crate::State;
 
@@ -413,6 +435,50 @@ pub fn audio_state_line(active: bool) -> &'static str {
     }
 }
 
+/// A speed chip's label: the bare value with the
+/// transport cycle button's own trim — `1.0` renders
+/// "1×", never "1.0×" — minus that button's "Speed "
+/// prefix. The trim is `speed_label`'s exact code
+/// (`playback_controls.rs`): format at two decimals,
+/// strip trailing zeros, strip a trailing dot. A test
+/// pins the two formatters together over the whole
+/// `SPEEDS` table, so the chips can never drift from
+/// the button they mirror.
+pub fn speed_chip_label(speed: f32) -> String {
+    let digits = format!("{speed:.2}");
+    let trimmed = digits.trim_end_matches('0').trim_end_matches('.');
+    format!("{trimmed}×")
+}
+
+/// The `SPEEDS` index of the shell's current playback
+/// speed — the chip the speed row highlights — or
+/// `None` when the field holds an off-table value (then
+/// no chip highlights). Exact `f32` equality is sound
+/// here: the field's only production writers are the
+/// integrator's `1.0` seed (`main.rs`, itself a table
+/// entry) and `cycle_playback_speed`, which writes
+/// `next_speed`'s result — always a `SPEEDS` entry
+/// (verified by grepping the tree for the field's
+/// assignments; the remaining writes are test State
+/// literals at `1.0` and one status_strip test
+/// assigning `2.0`, itself a table entry).
+pub fn active_speed_index(speed: f32) -> Option<usize> {
+    SPEEDS.iter().position(|&step| step == speed)
+}
+
+/// Set the shell's playback speed outright — one chip
+/// press of the speed row. A bare field write, silent
+/// exactly like the transport's `pb-speed` cycle
+/// (`cycle_playback_speed`): no core call, no status
+/// line, no undo snapshot. The shell's `poll` reads the
+/// field every tick — it scales `advance_play` by it
+/// and notes it into the audio engine
+/// (`note_playback_speed`) — so no call is needed from
+/// here for the new rate to take effect.
+pub fn set_playback_speed(s: &mut State, speed: f32) {
+    s.playback_speed = speed;
+}
+
 // ---- Startup workspace ----
 
 /// Workspace buttons per row in the picker grid (the
@@ -544,14 +610,38 @@ fn stage_axis_row(s: &State, t: &Theme, axis: usize, heading: &str) -> El {
         }))
 }
 
+/// The Playback block's speed row: one chip per
+/// `SPEEDS` entry (keys `settings-speed-{i}`, labels
+/// from [`speed_chip_label`]), the current speed's chip
+/// highlighted ([`active_speed_index`]). Plain `btn`,
+/// the popover's picker idiom (the language / workspace
+/// grids): the labels are the data. A press applies its
+/// step through [`set_playback_speed`].
+fn speed_row(s: &State, t: &Theme) -> El {
+    let active = active_speed_index(s.playback_speed);
+    let mut chips = row().key("settings-speed-row").gap(6.0);
+    for (i, &speed) in SPEEDS.iter().enumerate() {
+        chips = chips.child(btn(
+            &format!("settings-speed-{i}"),
+            &speed_chip_label(speed),
+            active == Some(i),
+            t,
+            move |s: &mut State| {
+                set_playback_speed(s, speed);
+            },
+        ));
+    }
+    chips
+}
+
 /// The section as mounted in the shell column: the
 /// "Settings" toggle (accent-filled while open), and — when
 /// `s.settings.open` — the settings card under it: Theme,
 /// Language grid, Stage W / H steppers, the default
 /// easing cycle, the stage-guides toggle with its two
 /// child toggles, the Reset layout button, the Playback
-/// block (loop toggle + playback-audio readout), and
-/// the startup-workspace picker.
+/// block (loop toggle, speed chips + playback-audio
+/// readout), and the startup-workspace picker.
 pub fn settings_popover(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let open = s.settings.open;
@@ -736,7 +826,10 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
         // `repeat` glyph. Under it, a muted readout of the
         // audio player's liveness — a pure readout with no
         // handler (audio_state_line over the core's
-        // playback_audio_active).
+        // playback_audio_active). Between them sits the
+        // speed row (Phase M): five direct-select chips
+        // over the transport cycle's SPEEDS table
+        // (speed_row), the current speed's chip lit.
         card = card
             .child(section_label(t, "Playback"))
             .child(
@@ -751,6 +844,7 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
                     },
                 )),
             )
+            .child(speed_row(s, t))
             .child(
                 text(audio_state_line(core.playback_audio_active()))
                     .key("settings-audio-state")
@@ -1180,5 +1274,72 @@ playback_speed: 1.0,
             audio_state_line(core.playback_audio_active()),
             "Playback audio: off"
         );
+    }
+
+    #[test]
+    fn speed_chip_labels_cover_the_whole_speeds_table() {
+        // The five chips, in SPEEDS order — the labels
+        // the speed row renders.
+        assert_eq!(SPEEDS.len(), 5);
+        let expected = ["0.25×", "0.5×", "1×", "1.5×", "2×"];
+        for (i, &speed) in SPEEDS.iter().enumerate() {
+            assert_eq!(speed_chip_label(speed).as_str(), expected[i]);
+        }
+        // Pinned against the transport cycle button: the
+        // chip label is speed_label's value text with the
+        // "Speed " prefix removed, for every table entry.
+        for &speed in &SPEEDS {
+            assert_eq!(
+                crate::rune_sec::playback_controls::speed_label(speed),
+                format!("Speed {}", speed_chip_label(speed))
+            );
+        }
+        // The trim itself, off-table: whole values lose
+        // the fraction entirely, fractions keep exactly
+        // the digits they need.
+        assert_eq!(speed_chip_label(1.0), "1×");
+        assert_eq!(speed_chip_label(0.5), "0.5×");
+        assert_eq!(speed_chip_label(3.0), "3×");
+    }
+
+    #[test]
+    fn active_speed_index_matches_table_entries_only() {
+        for (i, &speed) in SPEEDS.iter().enumerate() {
+            assert_eq!(active_speed_index(speed), Some(i));
+        }
+        // The integrator's seed is the middle entry.
+        assert_eq!(active_speed_index(1.0), Some(2));
+        // Off-table values highlight nothing (NaN orders
+        // against nothing, so it is off-table too).
+        assert_eq!(active_speed_index(0.75), None);
+        assert_eq!(active_speed_index(3.0), None);
+        assert_eq!(active_speed_index(f32::NAN), None);
+    }
+
+    #[test]
+    fn set_playback_speed_writes_the_field_silently() {
+        let t = rune::tok::theme(true);
+        let mut state = shell_state();
+        // Integrator seed: normal speed, the middle chip.
+        assert_eq!(state.playback_speed, 1.0);
+        assert_eq!(active_speed_index(state.playback_speed), Some(2));
+        let status_before = state.core.status.clone();
+
+        set_playback_speed(&mut state, SPEEDS[0]);
+        assert_eq!(state.playback_speed, 0.25);
+        assert_eq!(active_speed_index(state.playback_speed), Some(0));
+        // Silent, like the pb-speed cycle: no status
+        // churn — the field is the only thing that moved.
+        assert_eq!(state.core.status, status_before);
+
+        set_playback_speed(&mut state, SPEEDS[4]);
+        assert_eq!(state.playback_speed, 2.0);
+        assert_eq!(active_speed_index(state.playback_speed), Some(4));
+        assert_eq!(state.core.status, status_before);
+
+        // The open card builds at a non-default speed
+        // (the speed row renders in the Playback block).
+        state.settings.open = true;
+        let _ = settings_popover(&state, &t);
     }
 }

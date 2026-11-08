@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase J+K+L pre-commit gate for StykAnimate-RS (integrator checks).
+"""Phase J+K+L+M pre-commit gate for StykAnimate-RS (integrator checks).
 
 Run from the repo root:
 
@@ -40,10 +40,10 @@ What each check guards (and the Phase I failure behind it):
    census catches a missing field BEFORE CI does, and
    names the exact literals that lack it.
 
-4. CALLER CENSUS — each Phase J+K+L lib op must have at
-   least one production (non-test, non-defining-file)
-   call site. One Phase L entry is a panel-local helper
-   whose only caller lives in its own file; it is
+4. CALLER CENSUS — each Phase J+K+L+M lib op must have
+   at least one production (non-test, non-defining-file)
+   call site. Two entries are helpers whose only
+   production caller lives in their own file; they are
    censused under a same-file rule (see SAME_FILE_OPS).
    This is the Phase I section 8 failure: the contact-
    sheet range export pair landed in export.rs with NO
@@ -124,6 +124,52 @@ Phase L additions (same gate, wider net again):
   `playback_speed` was the last), so the State census
   needs no change: the live parse covers the struct
   exactly as it stands.
+
+Phase M additions (same gate, wider net again):
+
+- The caller census now also watches the Phase M lib
+  ops (PHASE_M_OPS below). Caller files verified at
+  gate-writing time: `swap_frame_with_neighbour`
+  (frame_swap.rs; frame_ops.rs buttons — palette and
+  menus entries are further callers as they land),
+  `audio_set_muted_at` (audio_ops.rs; mcp_tools.rs,
+  with the audio_panel caller as it lands),
+  `shift_keys` (graph_keys.rs; graph_panel.rs),
+  `fill_keys_in_range` (graph_keys.rs;
+  keyframe_tools.rs), `stage_fig3_prims`
+  (rune_sec/stage_fig3.rs; stage_view.rs). One entry
+  is expected to read UNWIRED on a mid-phase tree:
+  `frame_camera` (fig3d.rs) — its only production
+  caller is three_d_panel's frame action, which had
+  not landed when this gate was widened; the flag is
+  the gate working, not a script bug.
+- `swap_frames` (frame_swap.rs) is censused under
+  the same-file rule (SAME_FILE_OPS below): its only
+  production caller is `swap_frame_with_neighbour`
+  in the same file, so the cross-file rule would
+  report it UNWIRED forever even though every user
+  path reaches it through the neighbour op — which
+  is itself censused cross-file above.
+- The count claims stay read-from-source (still no
+  expected number hard-coded anywhere in this
+  script); the Phase M numbers the docs must match
+  are whatever this gate prints on the final tree.
+  The expectations at gate-writing time are palette
+  108 (five over Phase L's 103), MCP registry 92
+  (five over 87; total 103 with the built-ins),
+  curated icons 111 (unchanged), scenes 11 (one
+  over 10) — mid-phase runs print lower palette /
+  registry numbers until those sections land, which
+  is the live read doing its job. (Integrator's
+  correction at Phase M integration: the registry
+  expectation was wrong — `fx_set_color2` already
+  existed, so only four tools were added: registry
+  91, total 102. The gate's own live read printed
+  91 throughout.)
+- The State census needs no change either way: the
+  field list is parsed live from src/main.rs, so
+  any field Phase M adds is censused against every
+  literal automatically.
 
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
@@ -500,7 +546,7 @@ def check_state_literals(fields: list[str]) -> tuple[bool, list[str]]:
 
 
 # ----------------------------------------------------------------
-# Check 4 — caller census for the Phase J+K+L lib ops
+# Check 4 — caller census for the Phase J+K+L+M lib ops
 # ----------------------------------------------------------------
 
 PHASE_J_OPS = [
@@ -550,6 +596,29 @@ PHASE_L_OPS = [
     "set_key_interp",
 ]
 
+# Phase M additions. Caller files verified at
+# gate-writing time: swap_frame_with_neighbour —
+# frame_ops.rs (command_palette.rs / menus.rs entries
+# are further callers as they land);
+# audio_set_muted_at — mcp_tools.rs (audio_panel.rs
+# as it lands); shift_keys — graph_panel.rs;
+# fill_keys_in_range — keyframe_tools.rs;
+# frame_camera_points — three_d_panel.rs (the Phase M
+# point-cloud framer; plain `frame_camera` is the older
+# figure-based search in the same file, a different op);
+# stage_fig3_prims — stage_view.rs. `swap_frames`
+# itself is NOT in this list: its only production
+# caller is swap_frame_with_neighbour in its own
+# file, so it is censused same-file below.
+PHASE_M_OPS = [
+    "swap_frame_with_neighbour",
+    "audio_set_muted_at",
+    "shift_keys",
+    "fill_keys_in_range",
+    "frame_camera_points",
+    "stage_fig3_prims",
+]
+
 # Same-file ops: the op's defining file is also its
 # only production caller, so the cross-file rule in
 # check_callers (which skips the defining file) would
@@ -562,11 +631,18 @@ PHASE_L_OPS = [
 # there and called by the panel's own key-row builder
 # there (the older `clear_key_at` in the same file is
 # the non-undoable clear and is not this entry).
+# `swap_frames` is Phase M's frame_swap.rs core op:
+# defined there and called in production only by
+# `swap_frame_with_neighbour` in the same file (its
+# remaining callers are the file's own tests); every
+# user path reaches it through the neighbour op,
+# which is censused cross-file in PHASE_M_OPS above.
 SAME_FILE_OPS = [
     "delete_camera_key_at",
+    "swap_frames",
 ]
 
-CENSUS_OPS = PHASE_J_OPS + PHASE_K_OPS + PHASE_L_OPS
+CENSUS_OPS = PHASE_J_OPS + PHASE_K_OPS + PHASE_L_OPS + PHASE_M_OPS
 
 
 def check_callers() -> tuple[bool, list[str]]:
@@ -709,7 +785,7 @@ def main() -> int:
         if not ok:
             failures += 1
 
-    print("Phase J+K+L pre-commit checks")
+    print("Phase J+K+L+M pre-commit checks")
     print(f"Repo: {ROOT}")
     print(f"Key-diff base ref: {base}")
     print()
@@ -729,7 +805,7 @@ def main() -> int:
     report("3. STATE LITERAL CENSUS", ok, lines)
 
     ok, lines = check_callers()
-    report("4. CALLER CENSUS (Phase J+K+L lib ops)", ok, lines)
+    report("4. CALLER CENSUS (Phase J+K+L+M lib ops)", ok, lines)
 
     claims = count_claims()
     claim_lines = [f"{label}: {n}  ({how})" for label, n, how in claims]

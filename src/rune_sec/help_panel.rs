@@ -155,6 +155,46 @@
 //! all three present with their handlers. No
 //! candidate was dropped this phase. The panel now
 //! holds 48 rows.
+//!
+//! Phase M (section 36/40) refresh, 2026-11-08: six
+//! more Features rows. Shift graph channel is verified
+//! whole: the `graph-shift-l` / `graph-shift-r` buttons
+//! in `graph_panel` over `graph_keys::shift_keys`, and
+//! the row's second half names `keyframe_tools`'
+//! `key-fill-range` button (`fill_range_enabled`: a
+//! loop range and a key at the playhead). Swap frames
+//! is verified at its buttons — `fop-swap-prev` /
+//! `fop-swap-next` in `frame_ops` over
+//! `frame_swap::swap_frame_with_neighbour`, whose own
+//! census remaps camera, particles, strokes, audio,
+//! FX, graph keys, texts and sprites with the frames.
+//! Hide FX clips is verified at `fx_clips`' `fx-hide`
+//! toggle: `stage_fx` emits nothing for a hidden clip
+//! and `export.rs` skips it. Mute audio clips is
+//! verified at the `audio-mute` button in `audio_panel`
+//! over `audio_ops::audio_toggle_muted_at`, with
+//! `audio.rs`' playback plan filtering muted clips out
+//! of direct play and mixes alike. Stroke opacity is
+//! verified in its plumbing: a stroke carries
+//! `opacity`, recorded from the brush by
+//! `recorded_stroke_opacity` in `editor.rs`, and the
+//! stage (`stage_layers`) and the SVG export honour
+//! it. 3D figure on the stage is verified in its pass:
+//! `stage_fig3::stage_fig3_prims` builds the figure,
+//! its ground shadow and the ground grid in stage
+//! space, and `stage_view` draws them when the
+//! overlays' `fig3_stage` flag is set and a session
+//! exists. Five briefed pieces were NOT in the tree
+//! at this census and are flagged for the integrator's
+//! re-check rather than silently dropped (the Phase K
+//! lesson, run the other way): the shell wiring that
+//! sets `fig3_stage` in the 3D workspace (the
+//! `StageOverlays` literal in `main.rs` does not name
+//! it yet); the Mute command-palette command and
+//! Edit-menu item; the Swap palette command; the
+//! `stroke-opacity-dn` / `stroke-opacity-up` steppers
+//! in the stroke panel; and the timeline's
+//! `timeline-clips` lane. The panel now holds 54 rows.
 
 use rune::tok::{type_, Family, Theme};
 use rune::{col, el, row, text, El};
@@ -237,6 +277,10 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
                 "Keyframes — eraser button clears the selected joint's keys inside the loop range",
             ),
             (
+                "Shift graph channel",
+                "Graph panel — Shift −1 / +1 buttons move every key in the channel; Keyframes Fill range copies the current key across the loop range",
+            ),
+            (
                 "Delete graph channel",
                 "Graph panel — Delete channel button removes the drawn channel",
             ),
@@ -247,6 +291,10 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             (
                 "Camera key delete",
                 "Camera panel — Delete key button removes the camera key at the current frame",
+            ),
+            (
+                "Swap frames",
+                "Frame ops — Swap with previous / next buttons or the command palette; camera, particle and graph keys follow the swap",
             ),
             (
                 "Stroke selection",
@@ -261,8 +309,16 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
                 "Stroke inspector — Simplify button reduces the selected stroke's points",
             ),
             (
+                "Stroke opacity",
+                "Draw workspace — stroke panel opacity steppers; brushes record opacity on strokes, and the stage and exports honour it",
+            ),
+            (
                 "Particles panel",
                 "Effects workspace — add, select and delete particle events",
+            ),
+            (
+                "Mute audio clips",
+                "Audio panel — Mute button, command palette or Edit menu; muted clips are excluded from playback and exports",
             ),
             (
                 "Audio clip selection",
@@ -273,12 +329,20 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
                 "3D workspace — live preview of the 3D figure; drag to orbit, Grid toggle shows the ground grid",
             ),
             (
+                "3D figure on the stage",
+                "3D workspace — follows the open 3D session: the stage itself draws the 3D figure and its ground grid, like the panel preview",
+            ),
+            (
                 "Bend steppers",
                 "Segment inspector buttons bend the selected segment by −5°, −1°, +1° or +5°",
             ),
             (
                 "Split FX clip",
                 "Effects workspace — Split at playhead button or the command palette",
+            ),
+            (
+                "Hide FX clips",
+                "Effects workspace — FX panel Hide button keeps a clip in the project but out of the stage and exports; the timeline clips lane dims muted and hidden spans",
             ),
             (
                 "Mirror whole figure",
@@ -468,9 +532,9 @@ mod tests {
     use super::{group_rows, section_note, section_rows, shortcut_rows};
 
     #[test]
-    fn shortcut_rows_has_exactly_48_rows() {
+    fn shortcut_rows_has_exactly_54_rows() {
         // 9 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
-        // + 24 Features; Drawing contributes none (see the
+        // + 30 Features; Drawing contributes none (see the
         // module docs for which GPUI-era rows were dropped
         // and why). Phase G added the four palette/menu rows
         // to Shortcuts; Phase I added the Features section;
@@ -478,8 +542,8 @@ mod tests {
         // and the Phase K close-out two more (Right-press
         // selects and Reload from disk — both verified
         // user-reachable at integration time); Phase L
-        // six more.
-        assert_eq!(shortcut_rows().len(), 48);
+        // six more; Phase M six more.
+        assert_eq!(shortcut_rows().len(), 54);
     }
 
     #[test]
@@ -530,9 +594,9 @@ mod tests {
         )));
         // The Features rows live in their own section, in
         // this order, and nowhere else. (The count covers
-        // the Phase J, Phase K and Phase L rows too — see
-        // those tests.)
-        assert_eq!(section_rows("Features").len(), 24);
+        // the Phase J, Phase K, Phase L and Phase M rows
+        // too — see those tests.)
+        assert_eq!(section_rows("Features").len(), 30);
     }
 
     #[test]
@@ -566,11 +630,12 @@ mod tests {
         )));
         // The ruler sits with the timeline rows, directly
         // after Keyframe jump; the section holds all
-        // twenty-four feature rows (ten at Phase J, six more
+        // thirty feature rows (ten at Phase J, six more
         // in Phase K, two at the Phase K close-out, six
-        // in Phase L) and no twenty-fifth has crept in.
+        // in Phase L, six in Phase M) and no thirty-first
+        // has crept in.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 24);
+        assert_eq!(features.len(), 30);
         let jump = features
             .iter()
             .position(|(label, _)| *label == "Keyframe jump")
@@ -640,7 +705,7 @@ mod tests {
         // Placement: Playback speed sits with the
         // transport rows directly after Loop playback.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 24);
+        assert_eq!(features.len(), 30);
         let loop_row = features
             .iter()
             .position(|(label, _)| *label == "Loop playback")
@@ -712,7 +777,7 @@ mod tests {
         // Palette recents sits with the project rows,
         // directly after Reload from disk.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 24);
+        assert_eq!(features.len(), 30);
         let channel_row = features
             .iter()
             .position(|(label, _)| *label == "Delete graph channel")
@@ -739,6 +804,110 @@ mod tests {
             .position(|(label, _)| *label == "Reload from disk")
             .expect("Reload from disk row");
         assert_eq!(features[reload_row + 1].0, "Palette recents");
+    }
+
+    #[test]
+    fn phase_m_feature_rows_are_listed() {
+        // The Phase M features, censused against the tree
+        // before listing (see the module docs): Shift
+        // graph channel — the `graph-shift-l` /
+        // `graph-shift-r` buttons in `graph_panel` over
+        // `graph_keys::shift_keys`, and `key-fill-range`
+        // in `keyframe_tools` (`fill_range_enabled`);
+        // Swap frames — the `fop-swap-prev` /
+        // `fop-swap-next` buttons in `frame_ops` over
+        // `frame_swap::swap_frame_with_neighbour` (its
+        // remap census covers camera, particles and
+        // graph keys); Hide FX clips — the `fx-hide`
+        // toggle in `fx_clips`, with `stage_fx` and
+        // `export.rs` both honouring the hidden flag;
+        // Mute audio clips — the `audio-mute` button in
+        // `audio_panel` over
+        // `audio_ops::audio_toggle_muted_at`, with
+        // `audio.rs`' plan filtering muted clips out;
+        // Stroke opacity — `Stroke.opacity` recorded
+        // from the brush (`recorded_stroke_opacity` in
+        // `editor.rs`), honoured by `stage_layers` and
+        // the SVG export; 3D figure on the stage — the
+        // `stage_fig3::stage_fig3_prims` pass drawn by
+        // `stage_view` under its `fig3_stage` overlay
+        // flag while a session exists. Five briefed
+        // pieces were not yet in the tree at census
+        // (the `fig3_stage` shell wiring, Mute's palette
+        // and Edit-menu homes, Swap's palette home, the
+        // `stroke-opacity-dn` / `stroke-opacity-up`
+        // steppers, the `timeline-clips` lane) and are
+        // flagged in the module docs for the
+        // integrator's re-check.
+        let rows = shortcut_rows();
+        assert!(rows.contains(&(
+            "3D figure on the stage",
+            "3D workspace — follows the open 3D session: the stage itself draws the 3D figure and its ground grid, like the panel preview"
+        )));
+        assert!(rows.contains(&(
+            "Mute audio clips",
+            "Audio panel — Mute button, command palette or Edit menu; muted clips are excluded from playback and exports"
+        )));
+        assert!(rows.contains(&(
+            "Stroke opacity",
+            "Draw workspace — stroke panel opacity steppers; brushes record opacity on strokes, and the stage and exports honour it"
+        )));
+        assert!(rows.contains(&(
+            "Swap frames",
+            "Frame ops — Swap with previous / next buttons or the command palette; camera, particle and graph keys follow the swap"
+        )));
+        assert!(rows.contains(&(
+            "Shift graph channel",
+            "Graph panel — Shift −1 / +1 buttons move every key in the channel; Keyframes Fill range copies the current key across the loop range"
+        )));
+        assert!(rows.contains(&(
+            "Hide FX clips",
+            "Effects workspace — FX panel Hide button keeps a clip in the project but out of the stage and exports; the timeline clips lane dims muted and hidden spans"
+        )));
+        // Placement: Shift graph channel sits with the
+        // keyframe / graph rows, directly after Clear
+        // keys in loop range; Swap frames sits with the
+        // frame rows, directly after Camera key delete;
+        // Stroke opacity sits with the stroke rows,
+        // directly after Stroke simplify; Mute audio
+        // clips sits with the audio rows, directly after
+        // Particles panel; 3D figure on the stage sits
+        // with the 3D rows, directly after 3D preview;
+        // Hide FX clips sits with the FX rows, directly
+        // after Split FX clip. No earlier phase's pinned
+        // adjacency is disturbed by any of these.
+        let features = section_rows("Features");
+        assert_eq!(features.len(), 30);
+        let clear_row = features
+            .iter()
+            .position(|(label, _)| *label == "Clear keys in loop range")
+            .expect("Clear keys in loop range row");
+        assert_eq!(features[clear_row + 1].0, "Shift graph channel");
+        let camera_row = features
+            .iter()
+            .position(|(label, _)| *label == "Camera key delete")
+            .expect("Camera key delete row");
+        assert_eq!(features[camera_row + 1].0, "Swap frames");
+        let simplify_row = features
+            .iter()
+            .position(|(label, _)| *label == "Stroke simplify")
+            .expect("Stroke simplify row");
+        assert_eq!(features[simplify_row + 1].0, "Stroke opacity");
+        let particles_row = features
+            .iter()
+            .position(|(label, _)| *label == "Particles panel")
+            .expect("Particles panel row");
+        assert_eq!(features[particles_row + 1].0, "Mute audio clips");
+        let preview_row = features
+            .iter()
+            .position(|(label, _)| *label == "3D preview")
+            .expect("3D preview row");
+        assert_eq!(features[preview_row + 1].0, "3D figure on the stage");
+        let split_row = features
+            .iter()
+            .position(|(label, _)| *label == "Split FX clip")
+            .expect("Split FX clip row");
+        assert_eq!(features[split_row + 1].0, "Hide FX clips");
     }
 
     #[test]

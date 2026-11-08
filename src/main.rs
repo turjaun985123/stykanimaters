@@ -688,6 +688,8 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                     stroke_selected: s.stroke_selected,
                     particle_selected: s.particle_selected,
                     fx_selected: s.fx_selected,
+                    fig3_stage: s.workspace == rune_sec::workspaces::Workspace::Build3D
+                        && core.fig3.is_some(),
                     onion_prev: s.onion_ui.prev,
                     onion_next: s.onion_ui.next,
                 },

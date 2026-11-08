@@ -309,6 +309,7 @@ mod tests {
             },
             figure: 2,
             node: 5,
+            hidden: false,
         }
     }
 

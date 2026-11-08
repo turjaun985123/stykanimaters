@@ -25,6 +25,15 @@
 //! full MP4 export muxes audio; the range path cannot), and
 //! the notes say that too.
 //!
+//! Phase M adds one more note, deliberately conditional:
+//! when the range toggle is on and the project has a clip
+//! that would actually be heard in a full export (unmuted,
+//! file present on disk), a warning under the toggle row
+//! (key `xc-range-audio-note`, decision in
+//! `range_audio_note_shown`) states that range video
+//! exports are silent — a range MP4/WebM otherwise loses
+//! the project's sound with nothing saying so.
+//!
 //! Two bundle buttons sit under the categories: "Export
 //! all images" (PNG + JPEG + SVG + spritesheet) and "Export
 //! all video" (MP4 + WebM). A bundle is a composition of the
@@ -170,6 +179,34 @@ pub fn effective_text(core: &EditorCore, use_range: bool) -> String {
         }
         (false, _) => format!("Exports write all {n} frames."),
     }
+}
+
+/// The exact wording of the range-mode audio warning
+/// (element key `xc-range-audio-note`).
+pub const RANGE_AUDIO_NOTE: &str =
+    "Range video exports are silent — audio is only in full-timeline MP4/WebM.";
+
+/// Whether the range-mode audio warning shows: the range
+/// toggle is on AND at least one clip would actually be
+/// heard in a full export — unmuted (`AudioClip::muted`)
+/// and its file present on disk. The audibility half
+/// mirrors the exclusions in `audio::playback_plan` (a
+/// muted clip never sounds, and a clip whose file is
+/// missing is dropped from the plan). The plan itself
+/// probes files with `read_wav`; no dedicated existence
+/// helper exists in the panel/waveform code, so the check
+/// here is the plain `Path::exists` on the clip path —
+/// the warning's question is only "is there a file the
+/// full export would use", not "does it decode". Pure
+/// apart from that one stat per clip.
+pub fn range_audio_note_shown(core: &EditorCore, use_range: bool) -> bool {
+    if !use_range {
+        return false;
+    }
+    core.project
+        .audio
+        .iter()
+        .any(|clip| !clip.muted && Path::new(&clip.path).exists())
 }
 
 /// The `./export` directory under the working directory —
@@ -921,7 +958,8 @@ fn bundle_row(
 
 /// The export panel: header, the loop-range note (when a
 /// range is set), the All frames / Loop range toggle with
-/// its effective-behaviour line, the four category sections
+/// its effective-behaviour line and (when it applies) the
+/// range audio warning, the four category sections
 /// with all 16 `xc-*` rows, the Bundles section (two
 /// `xc-bundle-*` rows), — once anything has been exported —
 /// the recap line showing the last export, and the Recent
@@ -951,6 +989,14 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             s.export_use_range = true;
         }));
     panel = panel.child(toggle);
+    if range_audio_note_shown(core, use_range) {
+        panel = panel.child(
+            text(RANGE_AUDIO_NOTE)
+                .key("xc-range-audio-note")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    }
     panel = panel.child(
         text(effective_text(core, use_range))
             .font(type_::LABEL)
@@ -1450,5 +1496,99 @@ mod tests {
             Vec::new()
         });
         assert_eq!(reads, 2, "a changed root mtime must rescan");
+    }
+
+    // ---- Range audio warning (Phase M, section 32) ----
+
+    /// A clip literal for the warning matrix.
+    fn clip(path: &str, muted: bool) -> stykanimate_rs::model::AudioClip {
+        stykanimate_rs::model::AudioClip {
+            path: path.into(),
+            start_frame: 0,
+            gain: 1.0,
+            muted,
+        }
+    }
+
+    /// Create a real (empty) file in the temp dir and
+    /// return its path; the caller removes it. The warning
+    /// checks existence only, so the file needs no WAV
+    /// content.
+    fn existing_clip_file(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "stykanimate-rs-xc-note-{tag}-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"").expect("create the temp clip file");
+        path
+    }
+
+    /// A temp-dir path that is never created — the
+    /// "file does not exist" fixture.
+    fn missing_clip_path() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "stykanimate-rs-xc-note-missing-{}.wav",
+            std::process::id()
+        ));
+        assert!(!path.exists(), "fixture path must not exist: {path:?}");
+        path
+    }
+
+    #[test]
+    fn range_audio_note_wording_is_exact() {
+        assert_eq!(
+            RANGE_AUDIO_NOTE,
+            "Range video exports are silent — audio is only in full-timeline MP4/WebM."
+        );
+    }
+
+    #[test]
+    fn range_audio_note_hidden_when_range_off_even_with_audible_clip() {
+        let file = existing_clip_file("range-off");
+        let mut core = EditorCore::new();
+        core.project.audio.push(clip(&file.to_string_lossy(), false));
+        assert!(!range_audio_note_shown(&core, false));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn range_audio_note_hidden_for_the_demo_project() {
+        // The demo project ships with no audio clips at all
+        // (`Project::new_demo`'s audio vec is empty), so
+        // with the range toggle on there is nothing a full
+        // export would carry — the note stays hidden.
+        let core = EditorCore::new();
+        assert!(core.project.audio.is_empty(), "demo premise");
+        assert!(!range_audio_note_shown(&core, true));
+    }
+
+    #[test]
+    fn range_audio_note_hidden_with_only_muted_clips() {
+        // The clip's file exists; muting alone hides the
+        // note, because a full export would not carry it.
+        let file = existing_clip_file("muted");
+        let mut core = EditorCore::new();
+        core.project.audio.push(clip(&file.to_string_lossy(), true));
+        assert!(!range_audio_note_shown(&core, true));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn range_audio_note_hidden_when_audible_clip_file_is_missing() {
+        let missing = missing_clip_path();
+        let mut core = EditorCore::new();
+        core.project
+            .audio
+            .push(clip(&missing.to_string_lossy(), false));
+        assert!(!range_audio_note_shown(&core, true));
+    }
+
+    #[test]
+    fn range_audio_note_shown_with_an_audible_existing_clip() {
+        let file = existing_clip_file("audible");
+        let mut core = EditorCore::new();
+        core.project.audio.push(clip(&file.to_string_lossy(), false));
+        assert!(range_audio_note_shown(&core, true));
+        let _ = std::fs::remove_file(&file);
     }
 }

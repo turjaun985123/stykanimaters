@@ -421,18 +421,33 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                 continue;
             }
             let pressured = stroke.widths.len() == stroke.points.len();
+            // Per-stroke opacity (Phase M), recorded from the
+            // brush: it rides the segment's own opacity, so the
+            // pixel pass composites the stroke through
+            // `style::blend_over` — the same dst*(1-a) + src*a
+            // blend the spray discs get in the particle pass.
+            // At 1.0 `blend_over` returns the source colour
+            // exactly, so opaque strokes render byte-identically
+            // to before the field existed. Spray strokes never
+            // reach this path (handled above; their dots carry
+            // the mark's opacity, and their recorded stroke
+            // opacity is always 1.0).
+            let opacity = stroke.opacity.clamp(0.0, 1.0);
             for (i, w) in stroke.points.windows(2).enumerate() {
                 let width = if pressured {
                     (stroke.widths[i] + stroke.widths[i + 1]) / 2.0
                 } else {
                     stroke.width
                 };
-                segments.push(StyledSeg::solid(
-                    view(w[0]),
-                    view(w[1]),
-                    stroke.color,
-                    width / 2.0 * zoom * ss as f32,
-                ));
+                segments.push(StyledSeg {
+                    opacity,
+                    ..StyledSeg::solid(
+                        view(w[0]),
+                        view(w[1]),
+                        stroke.color,
+                        width / 2.0 * zoom * ss as f32,
+                    )
+                });
             }
         }
     }
@@ -453,6 +468,14 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     // kind is Fog. Blended in the pixel pass at the same layer as
     // the weather particles — over the figures, like rain and snow.
     for entry in &project.fx_clips {
+        // Hidden clips (Phase M) stay on the timeline but
+        // render nothing. The skip sits here, at the render
+        // source, so every path built on `render_frame_at`
+        // (image sequences, contact sheets, spritesheets)
+        // honours it too.
+        if entry.hidden {
+            continue;
+        }
         if entry.figure < project.figures.len() {
             let fig = &project.figures[entry.figure];
             if !fig.hidden {
@@ -951,15 +974,17 @@ enum MuxPlan {
     Mixed(Vec<(String, f32, f32)>),
 }
 
-/// Decide the mux plan for a project: clips whose files are missing
-/// are skipped, start offsets are `start_frame / fps` seconds, and
-/// the surviving clips are sorted by start offset.
+/// Decide the mux plan for a project: muted clips and clips
+/// whose files are missing are skipped (the same exclusion the
+/// playback plan applies in `audio::playback_plan`), start
+/// offsets are `start_frame / fps` seconds, and the surviving
+/// clips are sorted by start offset.
 fn mux_plan(project: &Project) -> MuxPlan {
     let fps = project.fps.max(1.0);
     let mut audible: Vec<(String, f32, f32)> = project
         .audio
         .iter()
-        .filter(|clip| std::path::Path::new(&clip.path).exists())
+        .filter(|clip| !clip.muted && std::path::Path::new(&clip.path).exists())
         .map(|clip| {
             (
                 clip.path.clone(),
@@ -1159,6 +1184,7 @@ mod mux_tests {
                 path: path.to_string(),
                 start_frame,
                 gain: 1.0,
+                muted: false,
             })
             .collect();
         project
@@ -1176,6 +1202,31 @@ mod mux_tests {
             ("/nonexistent/styk-mux-a.wav", 0),
             ("/nonexistent/styk-mux-b.wav", 25),
         ]);
+        assert_eq!(mux_plan(&project), MuxPlan::None);
+    }
+
+    #[test]
+    fn muted_clips_are_excluded_from_the_plan() {
+        // Phase M: a muted clip never reaches the mux, exactly
+        // as the playback plan excludes it — one muted + one
+        // audible clip is a Single plan for the audible one,
+        // and an all-muted project is silent.
+        let muted_path = temp_audio("muted");
+        let audible_path = temp_audio("audible");
+        let mut project = project_with(vec![
+            (muted_path.as_str(), 0),
+            (audible_path.as_str(), 10),
+        ]);
+        project.audio[0].muted = true;
+        assert_eq!(
+            mux_plan(&project),
+            MuxPlan::Single {
+                path: audible_path.clone(),
+                start_secs: 1.0,
+                gain: 1.0,
+            }
+        );
+        project.audio[1].muted = true;
         assert_eq!(mux_plan(&project), MuxPlan::None);
     }
 
@@ -1234,6 +1285,7 @@ mod mux_tests {
                 path: path.to_string(),
                 start_frame,
                 gain,
+                muted: false,
             })
             .collect();
         project
@@ -1531,32 +1583,17 @@ pub fn export_contact_sheet_range(
 /// export). Returns the number of files written; an empty
 /// or inverted range is an error.
 ///
-/// The per-frame SVG writer lives in `crate::svg` and only
-/// exposes a whole-timeline export, so this renders the
-/// full timeline into a scratch directory and moves exactly
-/// the range's files into `dir`: the files are the full
-/// exporter's own output, byte for byte, at the cost of
-/// rendering the frames outside the range too. Extracting
-/// a per-frame writer in `svg.rs` would remove that cost.
+/// The per-frame SVG writer lives in `crate::svg` (Phase M
+/// extracted it from the whole-timeline export), so this is a
+/// direct delegation: only the range's frames are rendered,
+/// under their authored file names.
 pub fn export_svg_range(
     project: &Project,
     from: usize,
     to: usize,
     dir: &Path,
 ) -> std::io::Result<usize> {
-    let (from, to) = clamp_frame_range(project, from, to)?;
-    let scratch = unique_temp("svg-range");
-    let rendered = crate::svg::export_svg(project, &scratch);
-    let result = rendered.and_then(|_| {
-        std::fs::create_dir_all(dir)?;
-        for i in from..=to {
-            let name = format!("frame-{:04}.svg", i + 1);
-            std::fs::copy(scratch.join(&name), dir.join(&name))?;
-        }
-        Ok(to - from + 1)
-    });
-    let _ = std::fs::remove_dir_all(&scratch);
-    result
+    crate::svg::export_svg_range(project, from, to, dir)
 }
 
 #[cfg(test)]
@@ -1632,6 +1669,7 @@ mod tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         }];
         project.camera.clear();
         project
@@ -1652,6 +1690,106 @@ mod tests {
         let rotated = render_frame_at(&project, 0.0);
         assert_eq!(rotated.get_pixel(100, 35), &white, "+90 must move the bar to the top");
         assert_eq!(rotated.get_pixel(165, 100), &black, "+90 must vacate the right side");
+    }
+
+    /// One horizontal red stroke at the given opacity on a
+    /// mid-grey 200x200 stage, no figures, camera cleared —
+    /// stage units map 1:1 onto output pixels, and the
+    /// stroke's centre pixel (100, 100) is covered at every
+    /// supersample sub-pixel, so it shows the stroke colour
+    /// composited over the background at exactly the stroke's
+    /// opacity (no partial-coverage averaging).
+    fn opacity_marker_project(opacity: f32) -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [200.0, 200.0];
+        project.background = 0x646464;
+        project.figures.clear();
+        project.frames = vec![crate::model::Frame {
+            poses: Vec::new(),
+            duration: 1.0,
+            easing: None,
+            bends: Vec::new(),
+        }];
+        project.strokes = vec![crate::model::Stroke {
+            frame: 0,
+            points: vec![[50.0, 100.0], [150.0, 100.0]],
+            color: 0xFF0000,
+            width: 12.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+            opacity,
+        }];
+        project.camera.clear();
+        project
+    }
+
+    #[test]
+    fn stroke_opacity_blends_over_the_background() {
+        let bg = Rgb([100u8, 100, 100]);
+        // Opacity 1.0: the centre pixel is the pure stroke
+        // colour — the byte-identical fast path.
+        let opaque = render_frame_at(&opacity_marker_project(1.0), 0.0);
+        assert_eq!(opaque.get_pixel(100, 100), &Rgb([255u8, 0, 0]));
+        assert_eq!(opaque.get_pixel(10, 10), &bg);
+        // Opacity 0.5: approximately the 50% blend of stroke
+        // colour and background ((100+255)/2, 50, 50) — the
+        // segment blend truncates, so allow a small tolerance.
+        let half = render_frame_at(&opacity_marker_project(0.5), 0.0);
+        let px = half.get_pixel(100, 100).0;
+        let ideal = [177.5f32, 50.0, 50.0];
+        for ch in 0..3 {
+            assert!(
+                (px[ch] as f32 - ideal[ch]).abs() <= 2.0,
+                "channel {ch}: got {px:?}, ideal {ideal:?}"
+            );
+        }
+        assert_eq!(half.get_pixel(10, 10), &bg);
+        // Opacity 0.0: the background is untouched, exactly.
+        let clear = render_frame_at(&opacity_marker_project(0.0), 0.0);
+        assert_eq!(clear.get_pixel(100, 100), &bg);
+        assert_eq!(clear.get_pixel(10, 10), &bg);
+    }
+
+    #[test]
+    fn hidden_fx_clip_renders_nothing() {
+        // A Burst clip on the demo figure's root, starting at
+        // frame 0: at t = 0 its particles sit on the anchor at
+        // full alpha, so the visible render must differ from
+        // the plain project; the same clip flagged hidden must
+        // render byte-identically to no clip at all.
+        let burst = |hidden: bool| crate::model::FxClipEntry {
+            clip: crate::vfx::ParticleClip {
+                start: 0.0,
+                duration: 10.0,
+                kind: crate::vfx::ClipKind::Burst,
+                color: 0xFF4040,
+                seed: 5,
+                angle: 0.0,
+                length: 80.0,
+                color2: None,
+            },
+            figure: 0,
+            node: 0,
+            hidden,
+        };
+        let plain = render_frame_at(&Project::new_demo(), 0.0);
+        let mut visible_project = Project::new_demo();
+        visible_project.fx_clips.push(burst(false));
+        let visible = render_frame_at(&visible_project, 0.0);
+        assert_ne!(
+            visible.as_raw(),
+            plain.as_raw(),
+            "a live Burst clip must draw at its start frame"
+        );
+        let mut hidden_project = Project::new_demo();
+        hidden_project.fx_clips.push(burst(true));
+        let hidden = render_frame_at(&hidden_project, 0.0);
+        assert_eq!(
+            hidden.as_raw(),
+            plain.as_raw(),
+            "a hidden clip must render exactly as if it were absent"
+        );
     }
 
     /// A single horizontal white bar (length 200, thickness 10)
@@ -2387,6 +2525,7 @@ mod trail_tests {
             },
             figure: 0,
             node: 0,
+            hidden: false,
         });
         let trailed = render_frame_at(&with_clip, 4.0);
         let px = trailed.get_pixel(265, 300).0;
@@ -2954,6 +3093,7 @@ mod spray_render_tests {
             widths: Vec::new(),
             fill: None,
             spray,
+            opacity: 1.0,
         }];
         project
     }

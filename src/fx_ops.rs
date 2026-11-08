@@ -367,6 +367,7 @@ mod tests {
             },
             figure: 1,
             node: 5,
+            hidden: false,
         }
     }
 
@@ -452,6 +453,7 @@ mod tests {
             },
             figure: 2,
             node: 3,
+            hidden: false,
         };
         let mut core = core_with(vec![
             entry(0.0, 2.0, ClipKind::Burst, 0xFF5D5D),

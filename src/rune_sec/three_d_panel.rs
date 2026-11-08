@@ -81,6 +81,23 @@
 //!   call `fig3_rotate`, and `orbit-3d` already calls
 //!   `fig3_orbit`.
 //!
+//! - Preview framing + zoom (Phase M): the Preview row
+//!   also carries Frame (`d3-frame`, [`ictl`] with the
+//!   `expand` glyph) and the distance steppers
+//!   `d3-zoom-dn` / `d3-zoom-up` ([`ctl`]). Frame runs
+//!   the closed-form `fig3d::frame_camera_points` over
+//!   the evaluated session points at the preview's own
+//!   aspect and writes back only the returned target
+//!   and distance — yaw, pitch and FOV stay the user's.
+//!   That is the preview counterpart of the Camera
+//!   row's stage-aspect "Frame camera", which replaces
+//!   the whole camera. The steppers scale the camera
+//!   distance through the pure [`zoom_distance`].
+//!   Camera moves in this panel take no undo snapshot
+//!   (`fig3_orbit` doesn't either — the camera is
+//!   session state, not project state), so both follow
+//!   it: snapshot-free.
+//!
 //! Controls that need a live session render dimmed when
 //! there is none. The text controls ([`ctl`]) stay
 //! **dimmed but wired**: the press still fires, and the
@@ -123,6 +140,15 @@ pub const CAMERA_PRESETS: [(&str, &str); 4] = [
 /// A named constant so the tests can pin the choice (an
 /// element's children are not readable from a unit test).
 pub const MIRROR_ICON: &str = "arrow-right-arrow-left";
+
+/// The Frame button's glyph (Phase M): Font Awesome's
+/// `expand` — four corners pushing outward, the
+/// frame-the-whole-figure gesture. It is in the icon
+/// table, so no fallback glyph is needed. A named
+/// constant so the tests can pin the choice (an
+/// element's children are not readable from a unit
+/// test), like [`MIRROR_ICON`].
+pub const FRAME_ICON: &str = "expand";
 
 /// One of the four humanoid limbs the IK buttons solve.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -233,6 +259,107 @@ pub fn apply_frame_camera(core: &mut EditorCore) -> bool {
         core.status = "Enter 3D mode first.".into();
     }
     ok
+}
+
+/// One preview-zoom step's distance factor: each press
+/// multiplies or divides the camera distance by this.
+pub const ZOOM_FACTOR: f32 = 1.25;
+
+/// The camera-distance range the preview zoom stays
+/// inside — the same clamp `fig3d::frame_camera_points`
+/// applies to the distances it returns, so a framed
+/// distance and a stepped distance live in one range.
+pub const ZOOM_DISTANCE_MIN: f32 = 40.0;
+/// See [`ZOOM_DISTANCE_MIN`].
+pub const ZOOM_DISTANCE_MAX: f32 = 4000.0;
+
+/// The distance a zoom step starts from when the
+/// current distance is not finite:
+/// `fig3d::preview_camera`'s distance, the preview's
+/// own default (a test pins the two together so they
+/// cannot drift apart).
+pub const ZOOM_FALLBACK_DISTANCE: f32 = 300.0;
+
+/// One preview-zoom step applied to a camera distance:
+/// `dir > 0` zooms in (distance ÷ [`ZOOM_FACTOR`]),
+/// `dir < 0` zooms out (× [`ZOOM_FACTOR`]), `dir == 0`
+/// leaves the distance alone. The result is clamped to
+/// [`ZOOM_DISTANCE_MIN`]..=[`ZOOM_DISTANCE_MAX`] (an
+/// overflowing step saturates at the cap); a non-finite
+/// input yields [`ZOOM_FALLBACK_DISTANCE`]. Pure and
+/// unit-tested.
+pub fn zoom_distance(distance: f32, dir: i32) -> f32 {
+    if !distance.is_finite() {
+        return ZOOM_FALLBACK_DISTANCE;
+    }
+    let stepped = if dir > 0 {
+        distance / ZOOM_FACTOR
+    } else if dir < 0 {
+        distance * ZOOM_FACTOR
+    } else {
+        distance
+    };
+    stepped.clamp(ZOOM_DISTANCE_MIN, ZOOM_DISTANCE_MAX)
+}
+
+/// Frame the session figure in the PREVIEW (Phase M):
+/// evaluate the session pose and run the closed-form
+/// `fig3d::frame_camera_points` at the preview's aspect
+/// on the session camera's own yaw/pitch/FOV, then
+/// write back only the returned target and distance —
+/// the orbit angles and FOV are the user's and stay
+/// put. (The Camera row's [`apply_frame_camera`]
+/// instead replaces the whole camera, framed for the
+/// stage.) Snapshot-free, like every camera move in
+/// this panel: `EditorCore::fig3_orbit` takes no
+/// snapshot, the camera being session state. Returns
+/// false (status set) without a session.
+pub fn apply_frame_preview(core: &mut EditorCore) -> bool {
+    let mut ok = false;
+    if let Some(st) = &mut core.fig3 {
+        let points = fig3d::evaluate3(&st.figure, &st.pose);
+        let (fov, yaw, pitch) = (st.camera.fov_deg, st.camera.yaw, st.camera.pitch);
+        let framed = fig3d::frame_camera_points(
+            &points,
+            fov,
+            fig3_preview::PREVIEW_W / fig3_preview::PREVIEW_H,
+            yaw,
+            pitch,
+        );
+        st.camera.target = framed.target;
+        st.camera.distance = framed.distance;
+        ok = true;
+    }
+    if ok {
+        core.status = "3D preview framed on the figure.".into();
+    } else {
+        core.status = "Enter 3D mode first.".into();
+    }
+    ok
+}
+
+/// One preview-zoom step (Phase M): scale the session
+/// camera's distance through [`zoom_distance`]. The
+/// panel's `d3-zoom-dn` / `d3-zoom-up` buttons call it
+/// with −1 / +1. Snapshot-free (see
+/// [`apply_frame_preview`]). Returns false (status set)
+/// without a session.
+pub fn apply_preview_zoom(core: &mut EditorCore, dir: i32) -> bool {
+    let mut stepped = None;
+    if let Some(st) = &mut core.fig3 {
+        st.camera.distance = zoom_distance(st.camera.distance, dir);
+        stepped = Some(st.camera.distance);
+    }
+    match stepped {
+        Some(d) => {
+            core.status = format!("3D camera distance {}.", fmt_fixed(d, 2));
+            true
+        }
+        None => {
+            core.status = "Enter 3D mode first.".into();
+            false
+        }
+    }
 }
 
 /// Apply a saved pose-library entry to the session figure:
@@ -729,7 +856,23 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                     |_s| {
                         fig3_preview::toggle_grid();
                     },
-                )),
+                ))
+                // Frame + distance steppers (Phase M):
+                // Frame fits the whole figure into the
+                // preview (target + distance only, via
+                // ictl's inert-when-no-session form); the
+                // − / + steppers scale the camera distance
+                // (ctl's dimmed-but-wired form, like the
+                // camera preset row).
+                .child(ictl("d3-frame", FRAME_ICON, "Frame", false, dim, t, |s| {
+                    apply_frame_preview(&mut s.core);
+                }))
+                .child(ctl("d3-zoom-dn", "−", false, dim, t, |s| {
+                    apply_preview_zoom(&mut s.core, -1);
+                }))
+                .child(ctl("d3-zoom-up", "+", false, dim, t, |s| {
+                    apply_preview_zoom(&mut s.core, 1);
+                })),
         )
         .child(
             text(session_summary(core))
@@ -1383,5 +1526,116 @@ mod tests {
         let _ = ictl("k-dim", "floppy-disk", "Save pose", false, true, &t, |_| {});
         let _ = ictl("k-dim-mirror", MIRROR_ICON, "Mirror pose", false, true, &t, |_| {});
         let _ = ictl("k-dim-apply", "check", "Apply", false, true, &t, |_| {});
+    }
+
+    // ---- Preview framing + zoom (Phase M) ----
+
+    #[test]
+    fn frame_button_glyph_is_in_the_icon_table() {
+        // Like MIRROR_ICON: the pinned glyph must exist
+        // in the catalogue, so neither the live button
+        // nor its inert twin degrades to a glyph-less
+        // box.
+        assert_eq!(FRAME_ICON, "expand");
+        assert!(crate::rune_sec::icons::has_icon(FRAME_ICON));
+    }
+
+    #[test]
+    fn zoom_distance_steps_in_and_out_by_the_factor() {
+        // dir > 0 zooms in (closer), dir < 0 back out;
+        // 1.25 is exact in binary, so the round trip is
+        // exact too.
+        assert_eq!(zoom_distance(300.0, 1), 240.0);
+        assert_eq!(zoom_distance(300.0, -1), 375.0);
+        assert_eq!(zoom_distance(zoom_distance(300.0, 1), -1), 300.0);
+        // No direction, no move.
+        assert_eq!(zoom_distance(300.0, 0), 300.0);
+    }
+
+    #[test]
+    fn zoom_distance_clamps_to_the_framing_range() {
+        assert_eq!(zoom_distance(4000.0, -1), ZOOM_DISTANCE_MAX);
+        assert_eq!(zoom_distance(3900.0, -1), ZOOM_DISTANCE_MAX);
+        assert_eq!(zoom_distance(40.0, 1), ZOOM_DISTANCE_MIN);
+        assert_eq!(zoom_distance(41.0, 1), ZOOM_DISTANCE_MIN);
+        // A huge finite distance steps without escaping
+        // the range: the product saturates at the cap.
+        assert_eq!(zoom_distance(1.0e30, -1), ZOOM_DISTANCE_MAX);
+        assert_eq!(zoom_distance(1.0e30, 1), ZOOM_DISTANCE_MAX);
+    }
+
+    #[test]
+    fn zoom_distance_non_finite_is_the_preview_default() {
+        assert_eq!(zoom_distance(f32::NAN, 1), ZOOM_FALLBACK_DISTANCE);
+        assert_eq!(zoom_distance(f32::INFINITY, -1), ZOOM_FALLBACK_DISTANCE);
+        assert_eq!(zoom_distance(f32::NEG_INFINITY, 1), ZOOM_FALLBACK_DISTANCE);
+        // The fallback is preview_camera's distance —
+        // the preview's own default — pinned so the two
+        // cannot drift apart.
+        assert_eq!(ZOOM_FALLBACK_DISTANCE, fig3d::preview_camera().distance);
+    }
+
+    #[test]
+    fn frame_preview_pulls_a_far_camera_in_and_keeps_the_orbit() {
+        let mut core = EditorCore::new();
+        core.enter_3d();
+        // Park the camera far away, off-target, on a
+        // distinctive orbit: Frame may move target and
+        // distance only.
+        {
+            let st = core.fig3.as_mut().unwrap();
+            st.camera.distance = 3000.0;
+            st.camera.target = [0.0, 0.0, 0.0];
+            st.camera.yaw = 33.0;
+            st.camera.pitch = 12.0;
+        }
+        let fov_before = core.fig3.as_ref().unwrap().camera.fov_deg;
+        assert!(apply_frame_preview(&mut core));
+        assert_eq!(core.status, "3D preview framed on the figure.");
+        let cam = &core.fig3.as_ref().unwrap().camera;
+        assert!(
+            cam.distance < 3000.0,
+            "framing must pull the camera in: {cam:?}"
+        );
+        assert!(cam.distance >= ZOOM_DISTANCE_MIN);
+        assert_eq!((cam.yaw, cam.pitch, cam.fov_deg), (33.0, 12.0, fov_before));
+        // The target is the evaluated figure's centroid.
+        let st = core.fig3.as_ref().unwrap();
+        let points = fig3d::evaluate3(&st.figure, &st.pose);
+        let n = points.len() as f32;
+        let centroid = [
+            points.iter().map(|p| p[0]).sum::<f32>() / n,
+            points.iter().map(|p| p[1]).sum::<f32>() / n,
+            points.iter().map(|p| p[2]).sum::<f32>() / n,
+        ];
+        for axis in 0..3 {
+            assert!(
+                (cam.target[axis] - centroid[axis]).abs() < 1.0,
+                "target {cam:?} vs centroid {centroid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn frame_preview_and_zoom_refuse_without_a_session() {
+        let mut core = EditorCore::new();
+        assert!(!apply_frame_preview(&mut core));
+        assert_eq!(core.status, "Enter 3D mode first.");
+        assert!(!apply_preview_zoom(&mut core, 1));
+        assert!(!apply_preview_zoom(&mut core, -1));
+        assert_eq!(core.status, "Enter 3D mode first.");
+    }
+
+    #[test]
+    fn preview_zoom_steps_the_session_distance() {
+        let mut core = EditorCore::new();
+        core.enter_3d();
+        // A fresh session's default camera sits at 400.
+        assert_eq!(core.fig3.as_ref().unwrap().camera.distance, 400.0);
+        assert!(apply_preview_zoom(&mut core, 1));
+        assert_eq!(core.fig3.as_ref().unwrap().camera.distance, 320.0);
+        assert_eq!(core.status, "3D camera distance 320.00.");
+        assert!(apply_preview_zoom(&mut core, -1));
+        assert_eq!(core.fig3.as_ref().unwrap().camera.distance, 400.0);
     }
 }

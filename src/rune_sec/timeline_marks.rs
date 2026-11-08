@@ -38,7 +38,10 @@
 //! row under the timeline (see the Loop row section
 //! below), with `loop-set` / `loop-clear` and the four
 //! endpoint steppers `loop-a-dn` / `loop-a-up` /
-//! `loop-b-dn` / `loop-b-up` inside it.
+//! `loop-b-dn` / `loop-b-up` inside it. Phase M adds
+//! `timeline-clips` on the clips lane in the same
+//! under-timeline stack (see the Clips lane section
+//! below).
 //!
 //! ## Time ruler
 //!
@@ -208,13 +211,56 @@
 //! buttons: one action, one key, three homes. Like the
 //! edge drag, the row takes no snapshots: `loop_range` is
 //! runtime state the core never undoes.
+//!
+//! ## Clips lane (Phase M)
+//!
+//! Under the scrolled timeline, in the same
+//! outside-the-viewport stack as the loop row (and above
+//! it — the lane summarises the timeline's content, the
+//! loop row carries controls), sits a clips lane
+//! (`timeline-clips`): one slim bar per audio or FX clip,
+//! so the timeline itself shows where the project's
+//! clips sit without opening the Audio or Effects
+//! panels. The lane renders **only when at least one
+//! clip exists** — a clip-free project gets no lane
+//! element at all, so its timeline is exactly what it
+//! was before the lane existed.
+//!
+//! Bars use the chips' own geometry: [`span_rect`] maps
+//! a span's fractional frame range through the same
+//! [`CHIP_W`] / [`CHIP_GAP`] pitch from the same x = 0
+//! the ruler and chips start at, and the canvas is
+//! content-width, like the chips row it mirrors. The
+//! drawing is one `Shape` of round-cap bars (the fx
+//! strip's canvas idiom) in the 2.0 palette: audio in
+//! the primary accent `0x6D8CFF`, FX in the secondary
+//! accent `0xA184FF`. A muted audio clip or a hidden FX
+//! clip still draws, dimmed to [`CLIP_DIM_ALPHA`] — the
+//! lane shows where a clip *is*, its state included.
+//!
+//! An FX clip's span is its own stored window (`start`
+//! to `start + duration`, both fractional). An audio
+//! clip stores no length, so its span's length is
+//! probed from its file
+//! (`stykanimate_rs::audio_ops::clip_duration_frames`);
+//! when the probe cannot read the file, the span falls
+//! back to a one-frame tick at the start frame — a
+//! marker that a clip starts there, never an invented
+//! duration. A probed length is floored at one frame
+//! for the same reason: a span must show.
+//!
+//! Like the loop row, the lane does not scroll with the
+//! chips (it is not part of the scrolled column), so on
+//! a timeline scrolled far right the lane still reads
+//! from the timeline's first frame.
 
 use rune::tok::{self, type_, Theme};
-use rune::{col, el, row, text, Color, Drag, El, Phase, Tx};
+use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
 use crate::rune_sec::frame_ops::{selected_range, FrameOpsState};
+use crate::stage_view::hex_color;
 use crate::State;
 
 /// Chip width in points — chrome_view's timeline chip size,
@@ -849,10 +895,25 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // far the chips scroll. With nothing to show (an empty
     // project) the timeline element is returned exactly as
     // it was before the row existed.
-    match loop_row(s, t) {
-        Some(loop_row) => col().gap(2.0).child(timeline).child(loop_row),
-        None => timeline,
+    //
+    // Phase M: the clips lane joins the loop row in that
+    // under-timeline stack — lane first (it summarises the
+    // timeline's content), then the loop row's controls.
+    // With neither present, the timeline is returned
+    // exactly as before either row existed.
+    let clips = clips_lane(core);
+    let loop_row = loop_row(s, t);
+    if clips.is_none() && loop_row.is_none() {
+        return timeline;
     }
+    let mut stack = col().gap(2.0).child(timeline);
+    if let Some(clips) = clips {
+        stack = stack.child(clips);
+    }
+    if let Some(loop_row) = loop_row {
+        stack = stack.child(loop_row);
+    }
+    stack
 }
 
 /// The loop row under the timeline (Phase L, see the
@@ -892,6 +953,198 @@ fn loop_row(s: &State, t: &Theme) -> Option<El> {
     Some(r)
 }
 
+/// Height of the clips lane in points: a slim strip in
+/// the marker row's spirit ([`MARKER_H`] is 14), just
+/// tall enough for one bar.
+pub const CLIPS_H: f32 = 10.0;
+
+/// Height of one clip bar inside the lane: the lane
+/// minus a point of breathing room above and below.
+pub const CLIP_BAR_H: f32 = 8.0;
+
+/// The clips lane's audio colour: the 2.0 palette's
+/// primary accent.
+pub const AUDIO_SPAN_RGB: u32 = 0x6D8CFF;
+
+/// The clips lane's FX colour: the 2.0 palette's
+/// secondary accent.
+pub const FX_SPAN_RGB: u32 = 0xA184FF;
+
+/// The alpha a muted or hidden clip's bar is drawn at:
+/// the clip is still on the lane, just visibly off.
+pub const CLIP_DIM_ALPHA: f32 = 0.35;
+
+/// Which kind of clip a [`ClipSpan`] summarises.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpanKind {
+    /// An audio clip (`Project::audio`).
+    Audio,
+    /// An FX clip (`Project::fx_clips`).
+    Fx,
+}
+
+/// One clip's span on the timeline, in fractional
+/// frames: the window `from_frame..to_frame` the clip
+/// occupies, plus whether it is muted (audio) or hidden
+/// (FX) — flagged, not filtered out, so the lane can
+/// draw it dimmed (see [`clip_spans`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipSpan {
+    /// Which kind of clip this is (it picks the bar's
+    /// colour).
+    pub kind: SpanKind,
+    /// The frame the clip starts on (fractional for FX
+    /// clips, whose stored start is an `f32`).
+    pub from_frame: f32,
+    /// The frame the clip ends on: start plus length.
+    pub to_frame: f32,
+    /// Audio: the clip is muted. FX: the clip is hidden.
+    /// Either way the bar draws at [`CLIP_DIM_ALPHA`].
+    pub muted_or_hidden: bool,
+}
+
+/// The timeline's total content width in points for
+/// `frame_count` frames: every chip plus the gaps
+/// between them — the width the ruler, chips and marker
+/// rows lay out to, and the width [`span_rect`] clamps
+/// against. Zero frames have no width.
+pub fn timeline_width(frame_count: usize) -> f32 {
+    if frame_count == 0 {
+        return 0.0;
+    }
+    frame_count as f32 * (CHIP_W + CHIP_GAP) - CHIP_GAP
+}
+
+/// Every clip in the project as a [`ClipSpan`]: audio
+/// clips first (in project order), then FX clips (in
+/// project order). See the module docs for the audio
+/// length probe and its one-frame fallback.
+pub fn clip_spans(core: &EditorCore) -> Vec<ClipSpan> {
+    let mut spans = Vec::new();
+    for (i, clip) in core.project.audio.iter().enumerate() {
+        let from = clip.start_frame as f32;
+        // The clip's length lives only in its file, so
+        // it is probed; an unreadable file (or a probe
+        // that rounds to nothing) falls back to a
+        // one-frame tick at the start frame — the lane
+        // marks that a clip starts there and invents no
+        // duration.
+        let len = stykanimate_rs::audio_ops::clip_duration_frames(core, i)
+            .map(|frames| (frames as f32).max(1.0))
+            .unwrap_or(1.0);
+        spans.push(ClipSpan {
+            kind: SpanKind::Audio,
+            from_frame: from,
+            to_frame: from + len,
+            muted_or_hidden: clip.muted,
+        });
+    }
+    for entry in &core.project.fx_clips {
+        spans.push(ClipSpan {
+            kind: SpanKind::Fx,
+            from_frame: entry.clip.start,
+            to_frame: entry.clip.start + entry.clip.duration,
+            muted_or_hidden: entry.hidden,
+        });
+    }
+    spans
+}
+
+/// A span's rectangle in timeline points, as
+/// `[x, width]` in the chips' geometry: frame `f`'s
+/// chip starts at `f * (CHIP_W + CHIP_GAP)`, and a span
+/// ending at frame `t` ends at the end of chip `t - 1`,
+/// so fractional endpoints interpolate linearly through
+/// the pitch. Both edges clamp to the timeline's extent
+/// ([`timeline_width`]): a span running past the last
+/// frame draws up to the last chip and no further, and
+/// a span wholly past the end comes back zero-width at
+/// the end. A non-finite endpoint, or no frames, gives
+/// `[0.0, 0.0]`.
+pub fn span_rect(span: &ClipSpan, frame_count: usize) -> [f32; 2] {
+    if frame_count == 0 || !span.from_frame.is_finite() || !span.to_frame.is_finite() {
+        return [0.0, 0.0];
+    }
+    let total = timeline_width(frame_count);
+    let stride = CHIP_W + CHIP_GAP;
+    let x = (span.from_frame * stride).clamp(0.0, total);
+    let right = (span.to_frame * stride - CHIP_GAP).clamp(x, total);
+    [x, right - x]
+}
+
+/// The lane colour for a span kind, as a palette token
+/// ([`AUDIO_SPAN_RGB`] / [`FX_SPAN_RGB`]).
+pub fn span_rgb(kind: SpanKind) -> u32 {
+    match kind {
+        SpanKind::Audio => AUDIO_SPAN_RGB,
+        SpanKind::Fx => FX_SPAN_RGB,
+    }
+}
+
+/// The clips lane's drawing as one `Shape` in a nominal
+/// `timeline_width × CLIPS_H` space (the fx strip's
+/// canvas idiom): one bar per span at [`span_rect`]'s
+/// rect, skipped when zero-width. A bar is a round-cap
+/// line of [`CLIP_BAR_H`] — a capsule exactly the
+/// span's width — except a span narrower than the bar
+/// is tall, which draws as an octagon dot at its centre
+/// (the stage's polygon-circle idiom), so a very short
+/// clip still marks its place. Muted/hidden spans draw
+/// at [`CLIP_DIM_ALPHA`].
+pub fn clips_shape(spans: &[ClipSpan], frame_count: usize) -> Shape {
+    let total = timeline_width(frame_count);
+    let mut shape = Shape::new();
+    if total <= 0.0 {
+        return shape;
+    }
+    let cy = CLIPS_H / 2.0;
+    let r = CLIP_BAR_H / 2.0;
+    for span in spans {
+        let [x, w] = span_rect(span, frame_count);
+        if w <= 0.0 {
+            continue;
+        }
+        let base = hex_color(span_rgb(span.kind)).unwrap_or(Color::WHITE);
+        let color = if span.muted_or_hidden {
+            base.alpha(CLIP_DIM_ALPHA)
+        } else {
+            base
+        };
+        if w >= CLIP_BAR_H {
+            shape = shape.line([x + r, cy], [x + w - r, cy], CLIP_BAR_H, LineCap::Round, color);
+        } else {
+            let cx = x + w / 2.0;
+            let dot: Vec<[f32; 2]> = (0..8)
+                .map(|k| {
+                    let a = std::f32::consts::TAU * k as f32 / 8.0;
+                    [cx + r * a.cos(), cy + r * a.sin()]
+                })
+                .collect();
+            shape = shape.fill(dot, color);
+        }
+    }
+    shape.view_box(total, CLIPS_H)
+}
+
+/// The clips lane under the timeline (Phase M, see the
+/// module docs): a content-width canvas keyed
+/// `timeline-clips` carrying [`clips_shape`]. `None`
+/// when the project has no audio and no FX clips — the
+/// lane exists only when it has something to show.
+fn clips_lane(core: &EditorCore) -> Option<El> {
+    let spans = clip_spans(core);
+    if spans.is_empty() {
+        return None;
+    }
+    let shape = clips_shape(&spans, core.frame_count());
+    Some(
+        canvas(shape)
+            .key("timeline-clips")
+            .w(timeline_width(core.frame_count()))
+            .h(CLIPS_H),
+    )
+}
+
 /// Kept for the integrator: the selection this row produces,
 /// normalised the way the Frames section reads it.
 pub fn timeline_selection(core: &EditorCore, ops: &FrameOpsState) -> Option<(usize, usize)> {
@@ -902,7 +1155,8 @@ pub fn timeline_selection(core: &EditorCore, ops: &FrameOpsState) -> Option<(usi
 mod tests {
     use super::*;
     use stykanimate_rs::graph::{Channel, ChannelTarget, Key};
-    use stykanimate_rs::model::CameraKey;
+    use stykanimate_rs::model::{AudioClip, CameraKey, FxClipEntry};
+    use stykanimate_rs::vfx::{ClipKind, ParticleClip};
 
     // ---- frame_at_x ----
 
@@ -1621,5 +1875,174 @@ playback_speed: 1.0,
         state.core.set_loop_range(1, 3);
         assert!(loop_row(&state, &t).is_some());
         let _ = timeline_marks(&state, &t);
+    }
+
+    // ---- clips lane (Phase M): spans factored from the
+    // project's audio and FX clips, in chip geometry ----
+
+    /// The clips fixture: direct field writes on the demo
+    /// core, the graph-duplicates precedent. One audio
+    /// clip at frame 1 whose path names no real file (so
+    /// the duration probe fails and the one-frame
+    /// fallback applies), and one FX clip stored over
+    /// frames 2..6.
+    fn clipped_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.audio.push(AudioClip {
+            path: "clips-lane-test/no-such-file.wav".to_string(),
+            start_frame: 1,
+            gain: 1.0,
+            muted: false,
+        });
+        core.project.fx_clips.push(FxClipEntry {
+            clip: ParticleClip {
+                start: 2.0,
+                duration: 4.0,
+                kind: ClipKind::Burst,
+                color: 0xFFFFFF,
+                color2: None,
+                seed: 11,
+                angle: 0.0,
+                length: 130.0,
+            },
+            figure: 0,
+            node: 0,
+            hidden: false,
+        });
+        core
+    }
+
+    #[test]
+    fn clip_spans_empty_project_has_no_spans() {
+        // The demo project carries no audio and no FX
+        // clips, so the lane would have nothing to show.
+        let core = EditorCore::new();
+        assert!(clip_spans(&core).is_empty());
+    }
+
+    #[test]
+    fn clip_spans_audio_falls_back_to_a_one_frame_tick() {
+        // The planted path names no real file, so
+        // `clip_duration_frames` returns None and the
+        // span is the one-frame fallback at the start
+        // frame — no duration is invented.
+        let core = clipped_core();
+        let spans = clip_spans(&core);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(
+            spans[0],
+            ClipSpan {
+                kind: SpanKind::Audio,
+                from_frame: 1.0,
+                to_frame: 2.0,
+                muted_or_hidden: false,
+            }
+        );
+    }
+
+    #[test]
+    fn clip_spans_fx_uses_its_stored_window() {
+        // Start 2.0, duration 4.0 → the span is [2, 6].
+        let core = clipped_core();
+        let spans = clip_spans(&core);
+        assert_eq!(
+            spans[1],
+            ClipSpan {
+                kind: SpanKind::Fx,
+                from_frame: 2.0,
+                to_frame: 6.0,
+                muted_or_hidden: false,
+            }
+        );
+    }
+
+    #[test]
+    fn clip_spans_flags_muted_and_hidden_clips() {
+        let mut core = clipped_core();
+        core.project.audio[0].muted = true;
+        core.project.fx_clips[0].hidden = true;
+        let spans = clip_spans(&core);
+        assert!(spans[0].muted_or_hidden, "muted audio is flagged");
+        assert!(spans[1].muted_or_hidden, "hidden fx is flagged");
+        // The unflagged fixture reads unflagged.
+        let spans = clip_spans(&clipped_core());
+        assert!(!spans[0].muted_or_hidden);
+        assert!(!spans[1].muted_or_hidden);
+    }
+
+    #[test]
+    fn span_rect_uses_the_chip_geometry() {
+        // Chip pitch 34: frame 2 starts at x = 68, and a
+        // span to frame 6 ends at the end of chip 5,
+        // x = 200 — width 132.
+        let span = ClipSpan {
+            kind: SpanKind::Fx,
+            from_frame: 2.0,
+            to_frame: 6.0,
+            muted_or_hidden: false,
+        };
+        assert_eq!(span_rect(&span, 8), [68.0, 132.0]);
+        // A one-frame tick is exactly one chip wide.
+        let tick = ClipSpan {
+            kind: SpanKind::Audio,
+            from_frame: 0.0,
+            to_frame: 1.0,
+            muted_or_hidden: false,
+        };
+        assert_eq!(span_rect(&tick, 8), [0.0, CHIP_W]);
+        // The total width the rect clamps against.
+        assert_eq!(timeline_width(8), 8.0 * (CHIP_W + CHIP_GAP) - CHIP_GAP);
+        assert_eq!(timeline_width(1), CHIP_W);
+        assert_eq!(timeline_width(0), 0.0);
+    }
+
+    #[test]
+    fn span_rect_clamps_to_the_timeline() {
+        // Running past the last frame: frame 4 of 5 starts
+        // at 136 and the span draws to the timeline's end
+        // (166) — one chip's width, no further.
+        let span = ClipSpan {
+            kind: SpanKind::Fx,
+            from_frame: 4.0,
+            to_frame: 9.0,
+            muted_or_hidden: false,
+        };
+        assert_eq!(span_rect(&span, 5), [136.0, CHIP_W]);
+        // Wholly past the end: zero width, at the end.
+        let past = ClipSpan {
+            kind: SpanKind::Fx,
+            from_frame: 9.0,
+            to_frame: 12.0,
+            muted_or_hidden: false,
+        };
+        assert_eq!(span_rect(&past, 5), [timeline_width(5), 0.0]);
+        // No frames, or a non-finite endpoint: nothing.
+        assert_eq!(span_rect(&span, 0), [0.0, 0.0]);
+        let nan = ClipSpan {
+            from_frame: f32::NAN,
+            ..span
+        };
+        assert_eq!(span_rect(&nan, 5), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn clips_lane_is_absent_without_clips_and_builds_with_them() {
+        let t = rune::tok::theme(true);
+        let mut state = demo_state();
+        // Clip-free: no lane element, and the timeline
+        // builds exactly as it did before the lane.
+        assert!(clips_lane(&state.core).is_none());
+        let _ = timeline_marks(&state, &t);
+        // With clips planted: the lane exists, the whole
+        // timeline still builds, and the shape carries
+        // bars (on the 5-frame demo the fx span clamps to
+        // frames 2..5 and still draws).
+        state.core = clipped_core();
+        assert!(clips_lane(&state.core).is_some());
+        let _ = timeline_marks(&state, &t);
+        let shape = clips_shape(&clip_spans(&state.core), state.core.frame_count());
+        assert!(!shape.is_empty());
+        // No frames at all: an empty shape, no panic.
+        assert!(clips_shape(&clip_spans(&state.core), 0).is_empty());
     }
 }

@@ -163,6 +163,24 @@
 //! contributes no ticks — its span is unknown, and an
 //! invented edge would be a false claim about where
 //! the clip sits.
+//!
+//! ## Muted clips (Phase M, section 16)
+//!
+//! `AudioClip::muted` (Phase M) silences a clip in
+//! playback and export mixes; this strip makes the
+//! state VISIBLE. In clip mode a muted clip's bars keep
+//! their geometry and hue but draw at
+//! [`MUTED_BAR_ALPHA`] of their usual alpha
+//! ([`bar_colors`]), and the caption gains its suffix
+//! through [`clip_caption`]: "Clip {n} · muted" (the
+//! unmuted caption is byte-identical to Phase I's).
+//! In project mode the bars are untouched — they show
+//! the last clip, selected or not — but the SELECTED
+//! clip's span bracket dims by the same factor
+//! ([`bracket_color`]) when that clip is muted; the
+//! all-clip boundary ticks stay as Phase L left them,
+//! muted or not. [`clip_is_muted`] is the one read of
+//! the flag both paths share.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -203,6 +221,15 @@ const SPAN_BRACKET_W: f32 = 1.5;
 /// bracket stays the strong mark and the other clips'
 /// edges read as quiet context under it.
 const ALL_TICKS_ALPHA: f32 = 0.35;
+/// Alpha multiplier for a muted clip's marks (Phase M,
+/// section 16): the clip-mode bars and the selected
+/// clip's span bracket keep their geometry and hue at
+/// this fraction of their usual alpha — the strip's
+/// visual "this clip makes no sound". (The value
+/// matches [`ALL_TICKS_ALPHA`] by coincidence only;
+/// the two constants mean different things and are
+/// free to drift apart.)
+const MUTED_BAR_ALPHA: f32 = 0.35;
 
 /// Convert a `0xRRGGBB` colour to a Rune colour (the same
 /// helper `stage_view` carries; duplicated so this section
@@ -510,6 +537,21 @@ pub fn clip_peaks(clip: &AudioClip, buckets: usize) -> Option<(Vec<f32>, f32)> {
     Some(probed)
 }
 
+/// Whether clip `index` is muted (Phase M, section 16):
+/// the strip's one read of `AudioClip::muted`, shared by
+/// the clip-mode bars/caption and the span bracket so
+/// the two paths can never disagree about what "muted"
+/// means here. An out-of-range index reads as `false` —
+/// a stale selection is unmuted for drawing purposes,
+/// like every other stale-selection read in this module.
+pub fn clip_is_muted(core: &EditorCore, index: usize) -> bool {
+    core.project
+        .audio
+        .get(index)
+        .map(|clip| clip.muted)
+        .unwrap_or(false)
+}
+
 /// Which clip's peaks the strip draws (Phase I,
 /// section 17): the project view (the last clip, as
 /// always) or one selected clip's own peaks.
@@ -547,15 +589,31 @@ pub fn waveform_mode(
     }
 }
 
+/// The caption text for clip `index` (0-based; the
+/// caption counts from 1, the audio panel's own
+/// numbering — its op statuses count clips from 1):
+/// `"Clip {n}"`, or `"Clip {n} · muted"` when the clip
+/// is muted (Phase M, section 16). The unmuted string
+/// is byte-identical to the caption Phase I introduced;
+/// muting only appends the suffix.
+pub fn clip_caption(index: usize, muted: bool) -> String {
+    if muted {
+        format!("Clip {} · muted", index + 1)
+    } else {
+        format!("Clip {}", index + 1)
+    }
+}
+
 /// The caption naming the strip's mode, or `None` when no
-/// caption element is built at all: `"Clip {n}"` in clip
-/// mode, with `n` 1-based (the audio panel's own numbering
-/// — its op statuses count clips from 1), and `None` in
-/// project mode, whose element tree stays exactly what it
-/// was before Phase I (section 17).
-pub fn waveform_caption(mode: WaveformMode) -> Option<String> {
+/// caption element is built at all: [`clip_caption`] of
+/// the selected clip in clip mode, and `None` in project
+/// mode, whose element tree stays exactly what it was
+/// before Phase I (section 17). `muted` is the mode's
+/// clip's flag ([`clip_is_muted`]); it is ignored in
+/// project mode, which grows no caption either way.
+pub fn waveform_caption(mode: WaveformMode, muted: bool) -> Option<String> {
     match mode {
-        WaveformMode::Clip(i) => Some(format!("Clip {}", i + 1)),
+        WaveformMode::Clip(i) => Some(clip_caption(i, muted)),
         WaveformMode::Project => None,
     }
 }
@@ -604,7 +662,32 @@ fn waveform_bars(core: &EditorCore, el_size: [f32; 2]) -> Shape {
     let Some((peaks, _)) = clip_peaks(clip, buckets) else {
         return shape;
     };
-    draw_peak_bars(shape, &peaks, clip.gain, w, h)
+    // Project mode never dims its bars: they show the
+    // last clip, selected or not, and Phase M dims only
+    // the selected clip's marks (its clip-mode bars and
+    // its span bracket) — hence `false` here, always.
+    draw_peak_bars(shape, &peaks, clip.gain, false, w, h)
+}
+
+/// The bar colours `(outer, inner)` for one clip's
+/// peaks: the accent at half alpha around the opaque
+/// accent — the pair [`draw_peak_bars`] has drawn since
+/// Phase D. A muted clip keeps both hues at
+/// [`MUTED_BAR_ALPHA`] of those alphas (Phase M,
+/// section 16): `Color::alpha` SETS the component, so
+/// the multiplication happens here, in the open, where
+/// a test can pin it — the bars' geometry is untouched
+/// either way.
+fn bar_colors(muted: bool) -> (Color, Color) {
+    let accent = hex_color(WAVE_HEX).unwrap_or(Color::WHITE);
+    if muted {
+        (
+            accent.alpha(0.5 * MUTED_BAR_ALPHA),
+            accent.alpha(MUTED_BAR_ALPHA),
+        )
+    } else {
+        (accent.alpha(0.5), accent)
+    }
 }
 
 /// Append the mirrored bar columns for `peaks` (reduced to
@@ -612,14 +695,15 @@ fn waveform_bars(core: &EditorCore, el_size: [f32; 2]) -> Shape {
 /// `gain` through [`bar_span`]) to `shape` — the drawing
 /// tail [`waveform_bars`] and [`waveform_bars_clip`] share,
 /// so project mode and selected-clip mode render peaks
-/// identically; only the peaks' source differs.
-fn draw_peak_bars(shape: Shape, peaks: &[f32], gain: f32, w: f32, h: f32) -> Shape {
+/// identically; only the peaks' source differs. `muted`
+/// dims the bar colours through [`bar_colors`] without
+/// touching a single bar's geometry.
+fn draw_peak_bars(shape: Shape, peaks: &[f32], gain: f32, muted: bool, w: f32, h: f32) -> Shape {
     let mut shape = shape;
     let mid = h / 2.0;
     let columns = strip_columns(w);
     let cols = reduce_columns(peaks, columns);
-    let accent = hex_color(WAVE_HEX).unwrap_or(Color::WHITE);
-    let outer = accent.alpha(0.5);
+    let (outer, accent) = bar_colors(muted);
     let pitch = w / columns as f32;
     let bar_w = (pitch - 1.0).max(1.0);
     for (i, &(min, max)) in cols.iter().enumerate() {
@@ -659,7 +743,27 @@ fn waveform_bars_clip(
     let Some(clip) = core.project.audio.get(index) else {
         return shape;
     };
-    draw_peak_bars(shape, peaks, clip.gain, w, h)
+    // A muted selected clip draws its bars dimmed
+    // (Phase M, section 16) — the flag rides along with
+    // the gain, straight from the clip itself.
+    draw_peak_bars(shape, peaks, clip.gain, clip.muted, w, h)
+}
+
+/// The span bracket's colour: the selection accent at
+/// 0.75 — or at [`MUTED_BAR_ALPHA`] of that when the
+/// bracketed clip is muted (Phase M, section 16), the
+/// same dimming the clip-mode bars get, applied the
+/// same way (the product computed here, then set via
+/// `Color::alpha`, which does not multiply). Factored
+/// out of [`with_span_bracket`] so a test can pin the
+/// arithmetic.
+fn bracket_color(muted: bool) -> Color {
+    let accent = hex_color(WAVE_HEX).unwrap_or(Color::WHITE);
+    if muted {
+        accent.alpha(0.75 * MUTED_BAR_ALPHA)
+    } else {
+        accent.alpha(0.75)
+    }
 }
 
 /// Append the selected clip's span bracket to a bars
@@ -697,7 +801,14 @@ fn with_span_bracket(
     let Some((left, right)) = span_bracket(span, core.frame_count(), w) else {
         return shape;
     };
-    let bracket = hex_color(WAVE_HEX).unwrap_or(Color::WHITE).alpha(0.75);
+    // The bracket belongs to the selected clip in both
+    // modes; a muted selected clip dims it (Phase M,
+    // section 16) exactly as it dims its clip-mode bars.
+    // `span` resolved, so `selected` names a real clip —
+    // the muted read still goes through the shared
+    // helper, never the field directly.
+    let muted = selected.map(|i| clip_is_muted(core, i)).unwrap_or(false);
+    let bracket = bracket_color(muted);
     let y = SPAN_BRACKET_Y;
     let tick = y + SPAN_TICK_H;
     shape = shape.line([left, y], [right, y], SPAN_BRACKET_W, LineCap::Butt, bracket);
@@ -948,6 +1059,11 @@ fn waveform_seek(s: &mut State, d: &Drag) {
 /// (see the module docs): again no new element, and
 /// the clip shape, the seek and the playhead are
 /// exactly what they were.
+/// Phase M (section 16) makes a muted clip look muted
+/// (see the module docs): dimmer bars and a "· muted"
+/// caption suffix in clip mode, a dimmer span bracket
+/// in both modes — colours and one string only, no
+/// element, geometry or gesture changes.
 pub fn waveform_el_state(s: &State, el_size: [f32; 2]) -> El {
     let clip_count = s.core.project.audio.len();
     let selected_peaks: Vec<f32> = match s.audio_panel.selected {
@@ -959,7 +1075,11 @@ pub fn waveform_el_state(s: &State, el_size: [f32; 2]) -> El {
         _ => Vec::new(),
     };
     let mode = waveform_mode(s.audio_panel.selected, clip_count, &selected_peaks);
-    if let (WaveformMode::Clip(i), Some(caption)) = (mode, waveform_caption(mode)) {
+    let muted = match mode {
+        WaveformMode::Clip(i) => clip_is_muted(&s.core, i),
+        WaveformMode::Project => false,
+    };
+    if let (WaveformMode::Clip(i), Some(caption)) = (mode, waveform_caption(mode, muted)) {
         let canvas_h = (el_size[1] - CAPTION_STRIP_H).max(0.0);
         return col()
             .gap(2.0)
@@ -1108,6 +1228,7 @@ mod tests {
             path: path.to_string_lossy().into_owned(),
             start_frame: 0,
             gain: 1.0,
+            muted: false,
         }
     }
 
@@ -1275,15 +1396,110 @@ mod tests {
     fn waveform_caption_only_in_clip_mode() {
         // 1-based, the audio panel's own numbering.
         assert_eq!(
-            waveform_caption(WaveformMode::Clip(0)).as_deref(),
+            waveform_caption(WaveformMode::Clip(0), false).as_deref(),
             Some("Clip 1")
         );
         assert_eq!(
-            waveform_caption(WaveformMode::Clip(4)).as_deref(),
+            waveform_caption(WaveformMode::Clip(4), false).as_deref(),
             Some("Clip 5")
         );
         // Project mode grows no caption element at all.
-        assert_eq!(waveform_caption(WaveformMode::Project), None);
+        assert_eq!(waveform_caption(WaveformMode::Project, false), None);
+    }
+
+    // ---- Muted clips (Phase M, section 16) ----
+
+    #[test]
+    fn clip_is_muted_reads_the_flag() {
+        let mut core = EditorCore::new();
+        // No clips at all: every index is out of range.
+        assert!(!clip_is_muted(&core, 0));
+        assert!(!clip_is_muted(&core, 9));
+        core.project.audio.push(AudioClip {
+            path: "/nonexistent/a.wav".to_string(),
+            start_frame: 0,
+            gain: 1.0,
+            muted: false,
+        });
+        core.project.audio.push(AudioClip {
+            path: "/nonexistent/b.wav".to_string(),
+            start_frame: 4,
+            gain: 1.0,
+            muted: true,
+        });
+        assert!(!clip_is_muted(&core, 0));
+        assert!(clip_is_muted(&core, 1));
+        // Past the end reads as unmuted, never a panic.
+        assert!(!clip_is_muted(&core, 2));
+    }
+
+    #[test]
+    fn clip_caption_muted_suffix() {
+        // Unmuted: byte-identical to Phase I's caption.
+        assert_eq!(clip_caption(0, false), "Clip 1");
+        assert_eq!(clip_caption(4, false), "Clip 5");
+        // Muted: the suffix is appended, nothing else moves.
+        assert_eq!(clip_caption(0, true), "Clip 1 · muted");
+        assert_eq!(clip_caption(4, true), "Clip 5 · muted");
+        // The mode-level caption routes through the same
+        // string, and project mode stays captionless even
+        // when handed a muted flag.
+        assert_eq!(
+            waveform_caption(WaveformMode::Clip(0), true).as_deref(),
+            Some("Clip 1 · muted")
+        );
+        assert_eq!(waveform_caption(WaveformMode::Project, true), None);
+    }
+
+    #[test]
+    fn bar_colors_dim_when_muted() {
+        // Unmuted is the pair the strip has always drawn:
+        // outer at half alpha, inner opaque.
+        let (outer, inner) = bar_colors(false);
+        assert_eq!(outer.a, 0.5);
+        assert_eq!(inner.a, 1.0);
+        // Muted: the SAME hues at MUTED_BAR_ALPHA of those
+        // alphas — the multiplication Color::alpha does
+        // not do, pinned here.
+        let (m_outer, m_inner) = bar_colors(true);
+        assert_eq!(m_outer.a, 0.5 * MUTED_BAR_ALPHA);
+        assert_eq!(m_inner.a, MUTED_BAR_ALPHA);
+        assert_eq!((m_outer.r, m_outer.g, m_outer.b), (outer.r, outer.g, outer.b));
+        assert_eq!((m_inner.r, m_inner.g, m_inner.b), (inner.r, inner.g, inner.b));
+    }
+
+    #[test]
+    fn bracket_color_dims_when_muted() {
+        // Unmuted: the Phase K bracket weight.
+        assert_eq!(bracket_color(false).a, 0.75);
+        // Muted: the same factor as the bars.
+        assert_eq!(bracket_color(true).a, 0.75 * MUTED_BAR_ALPHA);
+        // Same hue, only quieter.
+        let (a, b) = (bracket_color(false), bracket_color(true));
+        assert_eq!((a.r, a.g, a.b), (b.r, b.g, b.b));
+    }
+
+    #[test]
+    fn waveform_builds_with_a_muted_selected_clip() {
+        // End-to-end smoke over the muted paths: a muted
+        // clip with a readable file, selected — the
+        // builder takes clip mode (dimmed bars, suffixed
+        // caption), and the project shape builds with the
+        // dimmed bracket over it.
+        let path = temp_wav_path("muted-build");
+        std::fs::write(&path, write_wav(&sine_wav())).unwrap();
+        let mut s = crate::init();
+        s.core.project.audio.push(AudioClip {
+            path: path.to_string_lossy().into_owned(),
+            start_frame: 3,
+            gain: 1.0,
+            muted: true,
+        });
+        s.audio_panel.selected = Some(0);
+        assert!(clip_is_muted(&s.core, 0));
+        let _clip_mode = waveform_el_state(&s, [308.0, 56.0]);
+        let _project_shape = waveform_shape_project(&s.core, Some(0), [308.0, 56.0]);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -1382,6 +1598,7 @@ mod tests {
             path: path.to_string_lossy().into_owned(),
             start_frame: 3,
             gain: 1.0,
+            muted: false,
         });
         assert_eq!(clip_span(&core, Some(0), 96), Some((3, 12)));
         // A stale selection resolves to nothing.
@@ -1393,6 +1610,7 @@ mod tests {
             path: "/nonexistent/no-such-clip.wav".to_string(),
             start_frame: 7,
             gain: 1.0,
+            muted: false,
         });
         assert_eq!(clip_span(&core, Some(1), 96), None);
         let _ = std::fs::remove_file(&path);
@@ -1448,6 +1666,7 @@ mod tests {
             path: path.to_string_lossy().into_owned(),
             start_frame: 3,
             gain: 1.0,
+            muted: false,
         });
         s.audio_panel.selected = Some(0);
         // The span the bracket draws: 1 s at the demo
@@ -1495,6 +1714,7 @@ mod tests {
             path: path.to_string_lossy().into_owned(),
             start_frame,
             gain: 1.0,
+            muted: false,
         });
     }
 
@@ -1548,6 +1768,7 @@ mod tests {
             path: "/nonexistent/no-such-clip.wav".to_string(),
             start_frame: 7,
             gain: 1.0,
+            muted: false,
         });
         assert_eq!(all_clip_edges(&core, 96, 240.0), vec![0.0, 120.0]);
         let _ = std::fs::remove_file(&path);

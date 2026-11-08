@@ -943,6 +943,7 @@ mod tests {
             path: path.to_string(),
             start_frame,
             gain: 1.0,
+            muted: false,
         }
     }
 

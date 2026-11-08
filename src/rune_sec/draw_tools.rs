@@ -317,6 +317,15 @@ pub fn push_stamp_stroke(core: &mut EditorCore, points: Vec<[f32; 2]>, what: &st
         widths: vec![brush.width; n],
         fill: None,
         spray: None,
+        // The editor's stamp records the active brush's opacity
+        // (editor.rs `recorded_stroke_opacity`: NaN -> 1.0, else
+        // clamped to [0, 1]); stamps are never spray strokes, so
+        // no mark owns this stroke's alpha.
+        opacity: if brush.opacity.is_nan() {
+            1.0
+        } else {
+            brush.opacity.clamp(0.0, 1.0)
+        },
     });
     core.status = format!("Stamped {what} on frame {} ({n} points).", core.current + 1);
 }

@@ -196,7 +196,8 @@
 //! A **Simplify** button (key `stroke-simplify`,
 //! `wand-magic-sparkles` glyph — the same glyph the
 //! Draw panel's frame-wide Simplify carries) under
-//! the width row, rendered under the same
+//! the width row (Phase M's opacity row now sits
+//! between them), rendered under the same
 //! valid-selection condition, runs Douglas-Peucker
 //! over the one selected stroke through the engine
 //! op `draw_ops::simplify_stroke_at` (Phase L,
@@ -217,12 +218,64 @@
 //! width press's discipline: the button is not even
 //! rendered then.
 //!
+//! ## Selected stroke opacity (Phase M, section 27)
+//!
+//! Until this phase a recorded stroke's `opacity`
+//! (`Stroke.opacity`, model.rs — recorded from the
+//! brush at draw time; projects saved before the
+//! field existed deserialize as 1.0) was fixed at
+//! draw time, exactly as its `width` was until Phase
+//! K. A row under the width row (key
+//! `stroke-opacity-row`, so the Simplify button now
+//! sits under this row) closes that, following the
+//! width row's pattern exactly: the pure
+//! [`opacity_after`] steps by [`OPACITY_STEP`] (0.1)
+//! clamped to [[`MIN_STROKE_OPACITY`],
+//! [`MAX_STROKE_OPACITY`]]; the press
+//! ([`set_selected_stroke_opacity`]) is one
+//! `core.snapshot()` then a direct `project.strokes`
+//! write — one undo step — and the status names the
+//! stroke and its new opacity as a percent
+//! (`Stroke {n} opacity {p}.`, `{p}` rendered by
+//! [`opacity_label`]). Unlike width there is no
+//! per-point taper to rescale: opacity is a single
+//! scalar on the stroke. With no selection, or a
+//! stale one, the press is a silent no-op and the
+//! row is not rendered — the width press's
+//! discipline, unchanged.
+//!
+//! The floor is [`MIN_STROKE_OPACITY`] (0.05), not
+//! 0.0: a fully invisible stroke is a trap — it
+//! still exists in the project, still exports as
+//! nothing visible, and cannot be seen to be
+//! selected on the stage — so the stepper stops at
+//! a faint-but-visible 5%, and a stroke can never
+//! be faded past the point where its owner can
+//! still find it.
+//!
+//! Spray strokes are refused. A spray stroke's
+//! visible opacity lives on its spray mark
+//! (`SprayMark.opacity` — the value its dots render
+//! with, and the one [`stroke_summary`] reports);
+//! the stroke's own `opacity` field is recorded 1.0
+//! for a spray stroke and plays no part in how its
+//! dots render, so stepping it here would be a fake
+//! control. The row is therefore absent for a spray
+//! selection — the width row's treatment of its own
+//! inapplicable case: no valid selection renders no
+//! row — and the press refuses silently too.
+//! [`selected_stroke_opacity`] is the shared gate:
+//! it yields the value only for a valid selection
+//! on a non-spray stroke, and both the row and the
+//! press read it (the press restates the same guard
+//! inline, as the width pair does).
+//!
 //! `State` access: the brush and stroke data read
 //! `s.core` (active brush, `brush_index`,
 //! `project.strokes`, `current`) and writes go through
 //! the `brush_index` field write, the frame-clear op,
-//! `delete_stroke_at`, the width op below or the bulk
-//! composition above;
+//! `delete_stroke_at`, the width and opacity ops
+//! below or the bulk composition above;
 //! the selection row additionally reads and writes
 //! `s.stroke_selected`, declared in main.rs — no field
 //! is declared in this file.
@@ -836,6 +889,124 @@ pub fn set_selected_stroke_width(
     true
 }
 
+/// One opacity-stepper press moves a stroke's
+/// opacity by this much: a tenth of the full range —
+/// fine enough to fade a stroke in stages, coarse
+/// enough that the whole range is ten presses.
+pub const OPACITY_STEP: f32 = 0.1;
+
+/// The faintest opacity the stepper writes. The
+/// floor is 0.05, not 0.0, on purpose: a fully
+/// invisible stroke is a trap — it still exists in
+/// the project, still exports as nothing visible,
+/// and cannot be seen to be selected on the stage —
+/// so the stepper stops at a faint-but-visible 5%,
+/// and a stroke can never be faded past the point
+/// where its owner can still find it.
+pub const MIN_STROKE_OPACITY: f32 = 0.05;
+
+/// The most opaque value the stepper writes: fully
+/// opaque, the model's own ceiling — also the value
+/// strokes recorded before the field existed carry.
+pub const MAX_STROKE_OPACITY: f32 = 1.0;
+
+/// The opacity a non-finite stored opacity is
+/// recovered to before a step applies: 1.0, the
+/// model's serde default for the field
+/// (`default_stroke_opacity`, model.rs) — a corrupt
+/// value steps from fully opaque, never from itself.
+pub const DEFAULT_STROKE_OPACITY: f32 = 1.0;
+
+/// The opacity after one stepper press in direction
+/// `dir` (−1 / +1; larger magnitudes step further):
+/// `current` moved by `dir` × [`OPACITY_STEP`] and
+/// clamped to [[`MIN_STROKE_OPACITY`],
+/// [`MAX_STROKE_OPACITY`]] — [`width_after`]'s shape
+/// applied to opacity. A non-finite `current` (a
+/// corrupt or hand-edited project file) is first
+/// recovered to [`DEFAULT_STROKE_OPACITY`], so the
+/// press always lands on a real, usable opacity.
+/// Pure.
+pub fn opacity_after(current: f32, dir: i32) -> f32 {
+    let base = if current.is_finite() {
+        current
+    } else {
+        DEFAULT_STROKE_OPACITY
+    };
+    (base + dir as f32 * OPACITY_STEP).clamp(MIN_STROKE_OPACITY, MAX_STROKE_OPACITY)
+}
+
+/// A stroke opacity as a percent (`55%`). The
+/// computation is the codebase's standing one —
+/// `(opacity * 100.0).round()`, as this panel's own
+/// [`opacity_text`] renders brush opacities and
+/// `layers_panel::opacity_label` renders layer
+/// opacities — and `f32::round` breaks ties away
+/// from zero, so a stored 0.575 (whose × 100 lands
+/// on exactly 57.5 in f32) reads `58%`. The opacity
+/// row's readout and the press's status share this
+/// one formatter.
+pub fn opacity_label(opacity: f32) -> String {
+    format!("{}%", (opacity * 100.0).round() as i64)
+}
+
+/// The selected stroke's current opacity, or `None`
+/// when there is nothing the opacity steppers may
+/// act on: no (or a stale) selection — the width
+/// row's render condition, in [`selected_stroke_width`]'s
+/// guard shape — or the selected stroke is a **spray**
+/// stroke. A spray stroke's visible opacity lives on
+/// its spray mark (`SprayMark.opacity`, the value
+/// its dots render with); the stroke's own `opacity`
+/// is recorded 1.0 there and unused, so stepping it
+/// would change nothing on screen — the steppers
+/// refuse spray strokes rather than pretend. This
+/// is the opacity row's render condition and value
+/// source; the press restates the same guard inline,
+/// as the width pair does, so the row and the press
+/// can never disagree.
+pub fn selected_stroke_opacity(core: &EditorCore, selected: Option<usize>) -> Option<f32> {
+    let i = selected.filter(|&i| i < core.project.strokes.len())?;
+    let stroke = &core.project.strokes[i];
+    if stroke.spray.is_some() {
+        return None;
+    }
+    Some(stroke.opacity)
+}
+
+/// Opacity stepper press: step the selected stroke's
+/// recorded `opacity` by [`opacity_after`]. The
+/// write is the width press's composition — exactly
+/// one `core.snapshot()`, then a direct
+/// `project.strokes` write — so the press is one
+/// undo step; unlike width there is no per-point
+/// taper to rescale, because opacity is a single
+/// scalar on the stroke. With no selection, a stale
+/// one, or a spray stroke selected, the press is a
+/// silent no-op: `false`, no snapshot, no status
+/// (see [`selected_stroke_opacity`] for the spray
+/// rule). On success the status names the stroke and
+/// its new opacity, in the measure line's voice:
+/// `Stroke {n} opacity {p}.`, with `{p}` from
+/// [`opacity_label`].
+pub fn set_selected_stroke_opacity(
+    core: &mut EditorCore,
+    selected: Option<usize>,
+    dir: i32,
+) -> bool {
+    let Some(i) = selected.filter(|&i| i < core.project.strokes.len()) else {
+        return false;
+    };
+    if core.project.strokes[i].spray.is_some() {
+        return false;
+    }
+    let new = opacity_after(core.project.strokes[i].opacity, dir);
+    core.snapshot();
+    core.project.strokes[i].opacity = new;
+    core.status = format!("Stroke {} opacity {}.", i + 1, opacity_label(new));
+    true
+}
+
 /// Simplify press: Douglas-Peucker the selected
 /// stroke at [`SIMPLIFY_EPSILON`] through the engine
 /// op `draw_ops::simplify_stroke_at` (Phase L,
@@ -1343,8 +1514,52 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
         );
     }
 
+    // Selected stroke opacity (Phase M): steppers
+    // under the width row, rendered while the
+    // selection is valid and the stroke is not a
+    // spray stroke (`selected_stroke_opacity` is the
+    // gate — a spray stroke's opacity lives on its
+    // mark, not this field; see the module docs).
+    // Each press is one undo step (see
+    // `set_selected_stroke_opacity`).
+    if let Some(o) = selected_stroke_opacity(core, s.stroke_selected) {
+        panel = panel.child(
+            row()
+                .key("stroke-opacity-row")
+                .gap(8.0)
+                .center_y()
+                .child(text("Opacity").font(type_::LABEL).color(t.text))
+                .child(
+                    text(opacity_label(o))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .grow(1.0),
+                )
+                .child(icon_only_btn(
+                    "stroke-opacity-dn",
+                    "chevron-down",
+                    26.0, false,
+                    t,
+                    |s| {
+                        let sel = s.stroke_selected;
+                        set_selected_stroke_opacity(&mut s.core, sel, -1);
+                    },
+                ))
+                .child(icon_only_btn(
+                    "stroke-opacity-up",
+                    "chevron-up",
+                    26.0, false,
+                    t,
+                    |s| {
+                        let sel = s.stroke_selected;
+                        set_selected_stroke_opacity(&mut s.core, sel, 1);
+                    },
+                )),
+        );
+    }
+
     // Selected stroke simplify (Phase L): a Simplify
-    // button under the width row, under the same
+    // button under the opacity row, under the same
     // valid-selection condition — Douglas-Peucker over
     // the one selected stroke, one undo step when it
     // changes anything (see `simplify_selected`).
@@ -1516,6 +1731,7 @@ mod tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         }
     }
 
@@ -2399,6 +2615,164 @@ mod tests {
         assert_eq!(selected_stroke_width(&core, Some(99)), None);
         core.project.strokes.clear();
         assert_eq!(selected_stroke_width(&core, Some(0)), None);
+    }
+
+    /// f32 step arithmetic at a 0.1 step is not exact
+    /// (0.5 + 0.1 lands a hair above 0.6), so opacity
+    /// steps compare within a hair, never exactly —
+    /// unlike the width tests above, whose 0.5 steps
+    /// are exact in binary.
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    #[test]
+    fn opacity_after_steps_by_a_tenth() {
+        assert!(near(opacity_after(0.5, 1), 0.6));
+        assert!(near(opacity_after(0.5, -1), 0.4));
+        // A magnitude-2 dir steps twice, as width does.
+        assert!(near(opacity_after(0.5, 2), 0.7));
+        // No direction: the value holds.
+        assert!(near(opacity_after(0.5, 0), 0.5));
+    }
+
+    #[test]
+    fn opacity_after_clamps_at_full_and_at_the_faint_floor() {
+        // At and past the top the value is exactly the
+        // clamp constant, 1.0.
+        assert_eq!(opacity_after(1.0, 1), 1.0);
+        assert_eq!(opacity_after(0.98, 1), 1.0);
+        // The floor is 0.05 — faint but visible — never
+        // 0.0, however far down the press starts.
+        assert_eq!(opacity_after(0.05, -1), 0.05);
+        assert_eq!(opacity_after(0.1, -1), 0.05);
+        assert_eq!(opacity_after(0.0, -1), 0.05);
+    }
+
+    #[test]
+    fn opacity_after_recovers_a_non_finite_opacity_to_full() {
+        // A corrupt stored opacity steps from fully
+        // opaque (the model's default), never from the
+        // corrupt value itself.
+        assert!(near(opacity_after(f32::NAN, -1), 0.9));
+        assert_eq!(opacity_after(f32::NAN, 1), 1.0);
+        assert!(near(opacity_after(f32::INFINITY, -1), 0.9));
+        assert!(near(opacity_after(f32::NEG_INFINITY, -1), 0.9));
+    }
+
+    #[test]
+    fn opacity_label_formats_percents_with_half_away_rounding() {
+        assert_eq!(opacity_label(0.0), "0%");
+        assert_eq!(opacity_label(0.05), "5%");
+        assert_eq!(opacity_label(0.5), "50%");
+        assert_eq!(opacity_label(0.55), "55%");
+        assert_eq!(opacity_label(1.0), "100%");
+        // 0.575 × 100 lands on exactly 57.5 in f32 and
+        // the round breaks the tie away from zero:
+        // 58%, not 57%.
+        assert_eq!(opacity_label(0.575), "58%");
+    }
+
+    #[test]
+    fn selected_stroke_opacity_reads_only_a_steppable_selection() {
+        let mut core = core_with_strokes();
+        core.project.strokes[0].opacity = 0.5;
+        assert_eq!(selected_stroke_opacity(&core, None), None);
+        assert_eq!(selected_stroke_opacity(&core, Some(0)), Some(0.5));
+        assert_eq!(selected_stroke_opacity(&core, Some(99)), None);
+        // A spray stroke yields nothing: its visible
+        // opacity lives on the mark, not this field.
+        core.project.strokes[1].spray = Some(SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        });
+        assert_eq!(selected_stroke_opacity(&core, Some(1)), None);
+        core.project.strokes.clear();
+        assert_eq!(selected_stroke_opacity(&core, Some(0)), None);
+    }
+
+    #[test]
+    fn set_selected_stroke_opacity_writes_the_field_as_one_undo_step() {
+        let mut core = EditorCore::new();
+        let mut s = plain_stroke(0, 3);
+        s.opacity = 0.5;
+        core.project.strokes.push(s);
+        let depth = core.undo_depth();
+        assert!(set_selected_stroke_opacity(&mut core, Some(0), 1));
+        assert!(near(core.project.strokes[0].opacity, 0.6));
+        assert_eq!(core.undo_depth(), depth + 1, "exactly one snapshot");
+        assert_eq!(core.status, "Stroke 1 opacity 60%.");
+        // The one press is exactly one undo step.
+        core.undo();
+        assert_eq!(core.project.strokes[0].opacity, 0.5);
+    }
+
+    #[test]
+    fn set_selected_stroke_opacity_without_a_selection_is_a_silent_no_op() {
+        let mut core = core_with_strokes();
+        core.project.strokes[0].opacity = 0.5;
+        let depth = core.undo_depth();
+        let status_before = core.status.clone();
+        // No selection, and a stale one past the end:
+        // both refuse silently — no write, no snapshot,
+        // no status.
+        assert!(!set_selected_stroke_opacity(&mut core, None, 1));
+        assert!(!set_selected_stroke_opacity(&mut core, Some(99), -1));
+        assert_eq!(core.undo_depth(), depth, "no snapshot taken");
+        assert_eq!(core.status, status_before, "no status written");
+        assert_eq!(core.project.strokes[0].opacity, 0.5, "opacity untouched");
+    }
+
+    #[test]
+    fn set_selected_stroke_opacity_refuses_a_spray_stroke() {
+        let mut core = EditorCore::new();
+        let mut s = plain_stroke(0, 3);
+        // The stroke's own field carries the default
+        // 1.0; the mark carries the opacity the dots
+        // actually render with.
+        s.spray = Some(SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        });
+        core.project.strokes.push(s);
+        let depth = core.undo_depth();
+        let status_before = core.status.clone();
+        // Both directions refuse silently: neither
+        // opacity is written, no snapshot, no status.
+        assert!(!set_selected_stroke_opacity(&mut core, Some(0), -1));
+        assert!(!set_selected_stroke_opacity(&mut core, Some(0), 1));
+        assert_eq!(core.undo_depth(), depth, "no snapshot taken");
+        assert_eq!(core.status, status_before, "no status written");
+        let stroke = &core.project.strokes[0];
+        assert_eq!(stroke.opacity, 1.0, "the stroke field is not written");
+        assert_eq!(
+            stroke.spray.as_ref().map(|m| m.opacity),
+            Some(0.5),
+            "the mark's opacity is not written either"
+        );
+    }
+
+    #[test]
+    fn stroke_panel_builds_with_spray_and_plain_selections() {
+        let t = rune::tok::theme(true);
+        // Spray selection: the opacity row's render
+        // branch (the `selected_stroke_opacity` gate)
+        // is not taken, so the row is absent — the
+        // panel builds without it.
+        let mut core = core_with_strokes();
+        core.project.strokes[0].spray = Some(SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        });
+        let s = state_with(core, Some(0));
+        let _ = stroke_panel(&s, &t);
+        // Plain selection: the branch is taken and the
+        // panel builds with the row.
+        let s = state_with(core_with_strokes(), Some(0));
+        let _ = stroke_panel(&s, &t);
     }
 
     #[test]

@@ -297,9 +297,9 @@ pub fn nib_widths(points: &[V2], base: f32, nib: Nib, nib_angle_deg: f32) -> Vec
 /// stroke is finished, and how many Chaikin smoothing iterations
 /// are applied to the recorded path at that same moment. Wave 12
 /// added `opacity` and `scatter` so low-opacity, spread marks
-/// (the Spray preset) are expressible as data; the stroke
-/// pipeline does not consume those two fields yet. Pure data —
-/// the editor owns the behaviour (see `editor.rs`).
+/// (the Spray preset) are expressible as data; the pipeline now
+/// consumes `opacity` (see its field doc), while `scatter`
+/// remains model data. Pure data — see `editor.rs`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Brush {
     pub name: &'static str,
@@ -312,9 +312,9 @@ pub struct Brush {
     /// 0 = keep the path exactly as recorded.
     pub smoothing: usize,
     /// Stroke opacity, 0.0 (invisible) to 1.0 (fully opaque).
-    /// Model data for now: `Stroke` carries no opacity yet, so
-    /// the stroke pipeline does not apply this field — a
-    /// follow-up wires it into rendering.
+    /// Strokes record the active brush's opacity (`Stroke::opacity`)
+    /// and the rasterizer, SVG export and stage apply it; spray
+    /// strokes are the exception — theirs lives on the spray mark.
     pub opacity: f32,
     /// Scatter radius in stage units: 0.0 lands marks exactly
     /// on the recorded path; above 0.0, spray-style marks are
@@ -347,7 +347,7 @@ pub fn brush_library() -> Vec<Brush> {
             nib: Nib::Round,
             nib_angle: 0.0,
             smoothing: 0,
-            opacity: 1.0,
+            opacity: 0.55, // Phase M: the translucent plain preset (see brush_opacity_tests).
             scatter: 0.0,
         },
         Brush {
@@ -438,12 +438,12 @@ pub fn brush_library() -> Vec<Brush> {
         Brush {
             // Spray: a wide round nib at half opacity whose
             // marks scatter up to 12 units around the recorded
-            // path (placement: `spray_offsets`). The opacity and
-            // scatter are model data today — the stroke pipeline
-            // does not apply them yet, so until the follow-up
-            // wires the renderer, this preset records like a
-            // wide round pen and the fields describe the mark it
-            // is meant to make.
+            // path (placement: `spray_offsets`). Its opacity
+            // rides on the stroke's spray mark rather than on
+            // `Stroke::opacity` — a spray stroke records 1.0
+            // there — so the scattered dots render at half
+            // opacity without the two ever double-applying.
+            // The mark is where its translucency lives.
             name: "Spray",
             width: 14.0,
             nib: Nib::Round,
@@ -568,6 +568,7 @@ pub fn erase_at(strokes: &[Stroke], centre: V2, radius: f32) -> Vec<Stroke> {
                     },
                     fill: None,
                     spray: stroke.spray,
+                    opacity: stroke.opacity,
                 });
             }
         };
@@ -1220,6 +1221,7 @@ mod tests {
             widths: (0..=10).map(|i| 4.0 + i as f32).collect(),
             fill: Some(0x00FF00),
             spray: None,
+            opacity: 1.0,
         }
     }
 
@@ -1269,6 +1271,7 @@ mod tests {
                 widths: Vec::new(),
                 fill: Some(0xABCDEF),
                 spray: None,
+                opacity: 1.0,
             },
         ];
         let out = erase_at(&strokes, [1000.0, 1000.0], 10.0);
@@ -1298,6 +1301,7 @@ mod tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         };
         assert!(erase_at(&[short], [10.0, 0.0], 5.0).is_empty());
         // No strokes in, no strokes out.
@@ -1767,10 +1771,16 @@ mod brush_wave12_tests {
     #[test]
     fn existing_brushes_keep_opaque_unscattered_defaults() {
         let lib = brush_library();
-        // Behaviour unchanged for every pre-Wave-12 preset: fully
-        // opaque, marks exactly on the path.
-        for b in &lib[..9] {
-            assert_eq!(b.opacity, 1.0, "{} stays fully opaque", b.name);
+        // Behaviour unchanged for every pre-Wave-12 preset:
+        // marks exactly on the path, and fully opaque — with
+        // one later exception: Phase M converted Pencil
+        // (index 1) into the translucent plain preset, so its
+        // opacity is exempted here and pinned in
+        // `brush_opacity_tests` instead.
+        for (i, b) in lib[..9].iter().enumerate() {
+            if i != 1 {
+                assert_eq!(b.opacity, 1.0, "{} stays fully opaque", b.name);
+            }
             assert_eq!(b.scatter, 0.0, "{} stays unscattered", b.name);
         }
         // Every preset carries sane model values.
@@ -1838,6 +1848,84 @@ mod brush_wave12_tests {
             seeded_zero.iter().any(|&p| p != seeded_zero[0]),
             "seed 0 must not emit a single repeated offset"
         );
+    }
+}
+
+// ---- Phase M brush opacity ----
+//
+// Separate module on purpose (same pattern as the Wave 10 and
+// Wave 12 modules): exact-name imports only, never a glob.
+// Phase M wired `Brush::opacity` through the stroke pipeline:
+// a plain stroke records the active brush's opacity on
+// `Stroke::opacity`, and the rasterizer, SVG export and stage
+// apply it. That left one gap — every plain preset was 1.0, so
+// no translucent freehand stroke could be drawn through the
+// library. Pencil (index 1) was converted to close it: it was
+// the least-distinct preset (Pen's round nib, angle and
+// smoothing at width 2.0 — width was its only differing
+// field), and converting beats appending because the
+// library's length is pinned elsewhere (the draw-tools panel
+// asserts 10 brush names and clamps a stale brush index to
+// 9, the last index). Spray stays exactly as it was: its 0.5
+// predates the wiring and acts through the spray mark, never
+// through `Stroke::opacity`.
+#[cfg(test)]
+mod brush_opacity_tests {
+    use crate::paint::{brush_library, Brush, Nib};
+
+    #[test]
+    fn pencil_is_the_translucent_plain_preset() {
+        let lib = brush_library();
+        let b = lib[1];
+        assert_eq!(b.name, "Pencil");
+        // The conversion touched opacity alone: the fields
+        // that made Pencil the least-distinct preset are
+        // exactly as they were.
+        assert_eq!(b.width, 2.0);
+        assert_eq!(b.nib, Nib::Round);
+        assert_eq!(b.nib_angle, 0.0);
+        assert_eq!(b.smoothing, 0);
+        assert_eq!(b.scatter, 0.0);
+        assert!(
+            (b.opacity - 0.55).abs() < 1e-6,
+            "translucent opacity: {}",
+            b.opacity
+        );
+    }
+
+    #[test]
+    fn translucent_presets_are_pencil_and_spray_only() {
+        let lib = brush_library();
+        let translucent: Vec<&Brush> =
+            lib.iter().filter(|b| b.opacity < 1.0).collect();
+        assert_eq!(translucent.len(), 2, "Pencil + Spray: {translucent:?}");
+        // Every other preset is exactly opaque.
+        for b in &lib {
+            if b.name != "Pencil" && b.name != "Spray" {
+                assert_eq!(b.opacity, 1.0, "{} stays fully opaque", b.name);
+            }
+        }
+        // Among plain presets (no spray mark), Pencil is the
+        // only translucent one — the only preset whose opacity
+        // reaches `Stroke::opacity`.
+        let plain: Vec<&&Brush> =
+            translucent.iter().filter(|b| b.scatter == 0.0).collect();
+        assert_eq!(plain.len(), 1, "one plain translucent preset: {plain:?}");
+        assert_eq!(plain[0].name, "Pencil");
+        // Spray's translucency is its own, older design.
+        let spray = lib
+            .iter()
+            .find(|b| b.name == "Spray")
+            .expect("Spray exists");
+        assert!((spray.opacity - 0.5).abs() < 1e-6, "Spray stays at half");
+    }
+
+    #[test]
+    fn library_shape_is_unchanged_by_the_conversion() {
+        let lib = brush_library();
+        assert_eq!(lib.len(), 10, "conversion, not append: no index moved");
+        assert_eq!(lib[0].name, "Pen");
+        assert_eq!(lib[9].name, "Spray");
     }
 }
 

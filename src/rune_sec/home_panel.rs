@@ -61,7 +61,13 @@
 //!   the line's figures/frames/modified are re-verified
 //!   against the file on disk whenever its mtime moves,
 //!   even when the projects *directory* (the scan cache's
-//!   key) has not changed.
+//!   key) has not changed. The line also carries the
+//!   file's size (Phase M): the byte length of the same
+//!   single stat the mtime comes from, formatted by
+//!   project_tools' [`human_size`] — the size rides the
+//!   mtime cache with the counts, so it costs no extra
+//!   disk read, and the scan-only fallback line keeps
+//!   its old shape (the scan never stats for a length).
 //! - **Delete (Phase K)** — each row's `home-proj-del-{i}`
 //!   button only *arms* a deletion: it records the row's
 //!   path in [`HomePanelState::confirm_delete`] and the
@@ -195,6 +201,7 @@ use stykanimate_rs::shell;
 use crate::chrome_view::btn;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::icons::icon_el;
+use crate::rune_sec::project_tools::human_size;
 use crate::State;
 
 /// View-state for this section: the search field, whether
@@ -223,15 +230,17 @@ pub struct HomePanelState {
     /// `&State`, exactly as in the GPUI panel.
     scan_cache: RefCell<Option<(Option<SystemTime>, Vec<ProjectInfo>)>>,
     /// Per-file light-metadata cache (Phase J):
-    /// path → `(mtime, figures, frames)` as last read by
-    /// [`project_metadata`]. An entry is served only while
+    /// path → `(mtime, figures, frames, size_bytes)` as
+    /// last read by [`project_metadata`] (the size joined
+    /// in Phase M, from the same stat as the mtime). An
+    /// entry is served only while
     /// the file's current mtime equals the stored one —
     /// the same mtime-key discipline as the scan cache,
     /// one level down (per file, not per directory).
     /// Interior mutability for the same reason as
     /// `scan_cache`; `Default` (empty map) keeps every
     /// existing construction of this state working.
-    meta_cache: RefCell<HashMap<PathBuf, (SystemTime, usize, usize)>>,
+    meta_cache: RefCell<HashMap<PathBuf, (SystemTime, usize, usize, u64)>>,
     /// The project file whose deletion is armed and
     /// awaiting its confirm press (Phase K): the row for
     /// this path renders the confirm line instead of its
@@ -283,20 +292,26 @@ impl HomePanelState {
     /// read. `None` when the file cannot be stat'ed or
     /// parsed — the caller (the row builder) then falls
     /// back to the scan's data, so a vanished file never
-    /// breaks a row that is already on screen.
-    pub fn metadata_for(&self, path: &Path) -> Option<(usize, usize, SystemTime)> {
-        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    /// breaks a row that is already on screen. The size
+    /// (Phase M) rides the same discipline as the counts:
+    /// it is taken from the call's one stat on a miss and
+    /// served from the cache on a hit, so a returned tuple
+    /// is always one moment's read, never a mix.
+    pub fn metadata_for(&self, path: &Path) -> Option<(usize, usize, u64, SystemTime)> {
+        let stat = std::fs::metadata(path).ok()?;
+        let modified = stat.modified().ok()?;
+        let size_bytes = stat.len();
         {
             let cache = self.meta_cache.borrow();
-            if let Some((figures, frames)) = cached_meta(&cache, path, modified) {
-                return Some((figures, frames, modified));
+            if let Some((figures, frames, size)) = cached_meta(&cache, path, modified) {
+                return Some((figures, frames, size, modified));
             }
         }
         let (figures, frames) = read_metadata_counts(path)?;
         self.meta_cache
             .borrow_mut()
-            .insert(path.to_path_buf(), (modified, figures, frames));
-        Some((figures, frames, modified))
+            .insert(path.to_path_buf(), (modified, figures, frames, size_bytes));
+        Some((figures, frames, size_bytes, modified))
     }
 
     /// Drop both caches wholesale (Phase K): the next
@@ -542,20 +557,24 @@ fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32) {
 }
 
 /// A project file's light metadata: `(figures, frames,
-/// modified)` read *without* deserialising the whole
-/// `Project`. The file is parsed as a bare
+/// size_bytes, modified)` read *without* deserialising
+/// the whole `Project`. The file is parsed as a bare
 /// `serde_json::Value` and only the lengths of the
 /// top-level `figures` and `frames` arrays are counted
 /// (model.rs's `Project` serialises both under exactly
-/// those keys). `None` — never a guess — when the file is
+/// those keys). The size is the file's byte length,
+/// taken from the same single `stat` that yields the
+/// mtime (Phase M) — no second filesystem call. `None`
+/// — never a guess — when the file is
 /// missing, unreadable, not JSON, or either key is absent
 /// or not an array: such a file is not a project file,
 /// the same verdict `projects::scan` reaches by failing
 /// its full parse.
-pub fn project_metadata(path: &Path) -> Option<(usize, usize, SystemTime)> {
-    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+pub fn project_metadata(path: &Path) -> Option<(usize, usize, u64, SystemTime)> {
+    let stat = std::fs::metadata(path).ok()?;
+    let modified = stat.modified().ok()?;
     let (figures, frames) = read_metadata_counts(path)?;
-    Some((figures, frames, modified))
+    Some((figures, frames, stat.len(), modified))
 }
 
 /// The parse half of [`project_metadata`] (the counts
@@ -571,38 +590,49 @@ fn read_metadata_counts(path: &Path) -> Option<(usize, usize)> {
 
 /// The metadata cache's lookup rule, pure so it is
 /// testable without the filesystem: the cached counts
-/// for `path` are served only when the mtime they were
-/// read at equals the file's current mtime — a moved
-/// mtime is a miss even for the same path, and a hit is
-/// served without any re-read.
+/// and size for `path` are served only when the mtime
+/// they were read at equals the file's current mtime —
+/// a moved mtime is a miss even for the same path, and
+/// a hit is served without any re-read.
 fn cached_meta(
-    cache: &HashMap<PathBuf, (SystemTime, usize, usize)>,
+    cache: &HashMap<PathBuf, (SystemTime, usize, usize, u64)>,
     path: &Path,
     modified: SystemTime,
-) -> Option<(usize, usize)> {
+) -> Option<(usize, usize, u64)> {
     match cache.get(path) {
-        Some(&(read_at, figures, frames)) if read_at == modified => Some((figures, frames)),
+        Some(&(read_at, figures, frames, size)) if read_at == modified => {
+            Some((figures, frames, size))
+        }
         _ => None,
     }
 }
 
 /// The metadata line a row actually renders. When the
 /// light read ([`HomePanelState::metadata_for`]) produced
-/// figures/frames/modified for the row's file, those are
-/// the numbers shown — re-verified against the file on
-/// disk at its current mtime. Fps is not part of the
-/// light read's tuple, so it still comes from the scan.
-/// When the light read failed (the file vanished or
-/// stopped parsing between the scan and this render) the
-/// line is exactly the scan's [`meta_line`] — the row is
-/// unchanged rather than blank.
-pub fn row_meta_line(info: &ProjectInfo, meta: Option<(usize, usize, SystemTime)>) -> String {
+/// figures/frames/size/modified for the row's file, those
+/// are the numbers shown — re-verified against the file
+/// on disk at its current mtime. The size segment (Phase
+/// M) is the byte length from that read's one stat,
+/// rendered by project_tools' [`human_size`] — the same
+/// formatter the Project section's own meta line uses.
+/// Fps is not part of the light read's tuple, so it still
+/// comes from the scan. When the light read failed (the
+/// file vanished or stopped parsing between the scan and
+/// this render) the line is exactly the scan's
+/// [`meta_line`] — no size segment (the scan never stats
+/// for a length) and the row is unchanged rather than
+/// blank.
+pub fn row_meta_line(
+    info: &ProjectInfo,
+    meta: Option<(usize, usize, u64, SystemTime)>,
+) -> String {
     match meta {
-        Some((figures, frames, modified)) => format!(
-            "{} · {} · {} fps · modified {}",
+        Some((figures, frames, size_bytes, modified)) => format!(
+            "{} · {} · {} fps · {} · modified {}",
             count_label(figures, "figure", "figures"),
             count_label(frames, "frame", "frames"),
             format_fps(info.fps),
+            human_size(size_bytes),
             format_modified(Some(modified))
         ),
         None => meta_line(info),
@@ -958,7 +988,7 @@ fn project_row(
     info: &ProjectInfo,
     i: usize,
     t: &Theme,
-    meta: Option<(usize, usize, SystemTime)>,
+    meta: Option<(usize, usize, u64, SystemTime)>,
 ) -> El {
     project_row_confirm(info, i, t, meta, false)
 }
@@ -977,7 +1007,7 @@ fn project_row_confirm(
     info: &ProjectInfo,
     i: usize,
     t: &Theme,
-    meta: Option<(usize, usize, SystemTime)>,
+    meta: Option<(usize, usize, u64, SystemTime)>,
     confirming: bool,
 ) -> El {
     if confirming {
@@ -1200,7 +1230,7 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
         let mut metas: Vec<(usize, usize)> = Vec::new();
         for (i, info) in shown.iter().enumerate() {
             let meta = home.metadata_for(&info.path);
-            if let Some((figures, frames, _)) = meta {
+            if let Some((figures, frames, _, _)) = meta {
                 metas.push((figures, frames));
             }
             let confirming = confirm_pending(home, &info.path);
@@ -1504,16 +1534,22 @@ mod tests {
     }
 
     #[test]
-    fn project_metadata_reads_counts_and_mtime_from_a_light_parse() {
+    fn project_metadata_reads_counts_size_and_mtime_from_a_light_parse() {
         let dir = temp_dir("metadata-parse");
         let path = dir.join("meta.json");
-        std::fs::write(&path, project_json(3, 7)).unwrap();
-        let (figures, frames, modified) = project_metadata(&path).unwrap();
+        let written = project_json(3, 7);
+        let expected_size = written.len() as u64;
+        std::fs::write(&path, written).unwrap();
+        let (figures, frames, size_bytes, modified) = project_metadata(&path).unwrap();
         assert_eq!(figures, 3);
         assert_eq!(frames, 7);
+        // The size is the file's byte length — the exact
+        // bytes written, from the same stat as the mtime.
+        assert_eq!(size_bytes, expected_size);
         // The returned stamp is the file's own mtime.
-        let stat = std::fs::metadata(&path).unwrap().modified().unwrap();
-        assert_eq!(modified, stat);
+        let stat = std::fs::metadata(&path).unwrap();
+        assert_eq!(modified, stat.modified().unwrap());
+        assert_eq!(size_bytes, stat.len());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1542,12 +1578,13 @@ mod tests {
         let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let t1 = t0 + std::time::Duration::from_secs(60);
         let path = PathBuf::from("projects/alpha.json");
-        let mut cache: HashMap<PathBuf, (SystemTime, usize, usize)> = HashMap::new();
+        let mut cache: HashMap<PathBuf, (SystemTime, usize, usize, u64)> = HashMap::new();
         // Empty cache misses.
         assert_eq!(cached_meta(&cache, &path, t0), None);
-        cache.insert(path.clone(), (t0, 4, 9));
-        // Same path, the mtime it was read at: a hit.
-        assert_eq!(cached_meta(&cache, &path, t0), Some((4, 9)));
+        cache.insert(path.clone(), (t0, 4, 9, 1_500));
+        // Same path, the mtime it was read at: a hit —
+        // counts and size served together.
+        assert_eq!(cached_meta(&cache, &path, t0), Some((4, 9, 1_500)));
         // Same path, a moved mtime: a miss — the file may
         // have changed under the same name.
         assert_eq!(cached_meta(&cache, &path, t1), None);
@@ -1564,25 +1601,34 @@ mod tests {
         let path = dir.join("cached.json");
         std::fs::write(&path, project_json(2, 5)).unwrap();
         let state = HomePanelState::default();
-        let (figures, frames, read_at) = state.metadata_for(&path).unwrap();
+        let (figures, frames, size_bytes, read_at) = state.metadata_for(&path).unwrap();
         assert_eq!((figures, frames), (2, 5));
+        assert_eq!(size_bytes, project_json(2, 5).len() as u64);
 
-        // Rewrite the file with different counts but pin
-        // its mtime back to the cached read's stamp: the
-        // accessor must serve the cached counts — proof it
-        // did not re-read (a re-read would see 6 and 1).
+        // Rewrite the file with different counts (and a
+        // different length) but pin its mtime back to the
+        // cached read's stamp: the accessor must serve the
+        // cached counts and size — proof it did not
+        // re-read (a re-read would see 6, 1 and the new
+        // length).
         std::fs::write(&path, project_json(6, 1)).unwrap();
         set_mtime(&path, read_at);
-        let (figures, frames, modified) = state.metadata_for(&path).unwrap();
+        let (figures, frames, size_bytes, modified) = state.metadata_for(&path).unwrap();
         assert_eq!((figures, frames), (2, 5), "cache served, no re-read");
+        assert_eq!(
+            size_bytes,
+            project_json(2, 5).len() as u64,
+            "the cached read's size is served with its counts"
+        );
         assert_eq!(modified, read_at);
 
         // Move the mtime: the entry is stale, the file is
-        // re-read, and the new counts land.
+        // re-read, and the new counts and size land.
         let later = read_at + std::time::Duration::from_secs(60);
         set_mtime(&path, later);
-        let (figures, frames, modified) = state.metadata_for(&path).unwrap();
+        let (figures, frames, size_bytes, modified) = state.metadata_for(&path).unwrap();
         assert_eq!((figures, frames), (6, 1));
+        assert_eq!(size_bytes, project_json(6, 1).len() as u64);
         assert_eq!(modified, later);
 
         // A missing file yields nothing, cache or not.
@@ -1599,14 +1645,17 @@ mod tests {
         entry.modified = None;
         let stamp =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426);
-        // The light read's figures/frames/modified win;
-        // fps still comes from the scan (it is not part of
-        // the light tuple).
+        // The light read's figures/frames/size/modified
+        // win; fps still comes from the scan (it is not
+        // part of the light tuple). The size segment sits
+        // between fps and modified, formatted by
+        // `human_size` (1_500 bytes → "1.5 KB").
         assert_eq!(
-            row_meta_line(&entry, Some((3, 12, stamp))),
-            "3 figures · 12 frames · 24 fps · modified 2026-11-08 05:57"
+            row_meta_line(&entry, Some((3, 12, 1_500, stamp))),
+            "3 figures · 12 frames · 24 fps · 1.5 KB · modified 2026-11-08 05:57"
         );
-        // No light read: the line is the scan's, unchanged.
+        // No light read: the line is the scan's, unchanged
+        // — the old shape exactly, with no size segment.
         assert_eq!(row_meta_line(&entry, None), meta_line(&entry));
         assert_eq!(
             row_meta_line(&entry, None),
@@ -1624,7 +1673,7 @@ mod tests {
         let _ = project_row(&entry, 0, &t, None);
         let stamp =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426);
-        let _ = project_row(&entry, 0, &t, Some((3, 12, stamp)));
+        let _ = project_row(&entry, 0, &t, Some((3, 12, 1_500, stamp)));
     }
 
     #[test]
@@ -1900,7 +1949,7 @@ mod tests {
         panel
             .meta_cache
             .borrow_mut()
-            .insert(path.clone(), (SystemTime::UNIX_EPOCH, 1, 1));
+            .insert(path.clone(), (SystemTime::UNIX_EPOCH, 1, 1, 0));
         arm_delete(&mut panel, path.clone());
         let mut core = EditorCore::new();
         dispatch_delete_confirm(&mut core, &mut panel, "Demo");

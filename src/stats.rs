@@ -290,11 +290,13 @@ mod tests {
             },
             figure: 0,
             node: 0,
+            hidden: false,
         });
         p.audio.push(AudioClip {
             path: "clip.wav".into(),
             start_frame: 0,
             gain: 1.0,
+            muted: false,
         });
         p.strokes.push(Stroke {
             frame: 0,
@@ -304,6 +306,7 @@ mod tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         });
         let s = project_stats(&p);
         assert_eq!(s.figures, 2);

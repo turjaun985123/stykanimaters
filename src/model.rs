@@ -508,6 +508,16 @@ pub struct Stroke {
     /// solid stroke).
     #[serde(default)]
     pub spray: Option<SprayMark>,
+    /// Per-stroke opacity recorded from the brush when the
+    /// stroke was drawn; renderers apply it over the stroke
+    /// colour. 1.0 = fully opaque. Projects saved before
+    /// this field existed deserialize as 1.0.
+    #[serde(default = "default_stroke_opacity")]
+    pub opacity: f32,
+}
+
+fn default_stroke_opacity() -> f32 {
+    1.0
 }
 
 fn default_audio_gain() -> f32 {
@@ -526,6 +536,12 @@ pub struct AudioClip {
     /// this field existed deserialize as 1.0.
     #[serde(default = "default_audio_gain")]
     pub gain: f32,
+    /// Muted clips stay on the timeline but are excluded
+    /// from playback plans and export mixes when true.
+    /// Projects saved before this field existed deserialize
+    /// as unmuted.
+    #[serde(default)]
+    pub muted: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -689,6 +705,11 @@ pub struct FxClipEntry {
     pub clip: crate::vfx::ParticleClip,
     pub figure: usize,
     pub node: usize,
+    /// Hidden clips are skipped by the stage and by export
+    /// renderers but remain editable. Projects saved before
+    /// this field existed deserialize as visible.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1373,6 +1394,7 @@ mod audio_gain_tests {
             path: "song.wav".to_string(),
             start_frame: 12,
             gain: 0.5,
+            muted: false,
         });
         let json = serde_json::to_string(&project).unwrap();
         assert!(json.contains("\"gain\":0.5"), "gain is serialized: {json}");
@@ -1381,5 +1403,103 @@ mod audio_gain_tests {
         let back: Project = serde_json::from_str(&old_json).unwrap();
         assert_eq!(back.audio.len(), 1);
         assert_eq!(back.audio[0].gain, 1.0);
+    }
+
+    #[test]
+    fn audio_clip_without_muted_loads_unmuted() {
+        // Back-compatibility: a clip saved before the field
+        // existed has no `muted` key and must load unmuted.
+        let clip: AudioClip =
+            serde_json::from_str(r#"{"path":"a.wav","start_frame":7,"gain":0.25}"#).unwrap();
+        assert!(!clip.muted);
+    }
+
+    #[test]
+    fn audio_clip_muted_round_trips() {
+        let clip = AudioClip {
+            path: "a.wav".to_string(),
+            start_frame: 7,
+            gain: 1.0,
+            muted: true,
+        };
+        let json = serde_json::to_string(&clip).unwrap();
+        assert!(json.contains("\"muted\":true"), "muted is serialized: {json}");
+        let back: AudioClip = serde_json::from_str(&json).unwrap();
+        assert!(back.muted);
+    }
+
+    #[test]
+    fn stroke_without_opacity_loads_fully_opaque() {
+        // Back-compatibility: a stroke saved before the
+        // field existed has no `opacity` key and must load
+        // at 1.0, not fail or default to 0.
+        let stroke: Stroke = serde_json::from_str(
+            r#"{"frame":3,"points":[[10.0,20.0],[30.0,40.0]],"color":16711680,"width":4.0}"#,
+        )
+        .unwrap();
+        assert_eq!(stroke.opacity, 1.0);
+    }
+
+    #[test]
+    fn stroke_opacity_round_trips() {
+        let stroke = Stroke {
+            frame: 3,
+            points: vec![[10.0, 20.0], [30.0, 40.0]],
+            color: 0xFF0000,
+            width: 4.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+            opacity: 0.5,
+        };
+        let json = serde_json::to_string(&stroke).unwrap();
+        assert!(
+            json.contains("\"opacity\":0.5"),
+            "opacity is serialized: {json}"
+        );
+        let back: Stroke = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.opacity, 0.5);
+    }
+
+    fn fx_entry(hidden: bool) -> FxClipEntry {
+        FxClipEntry {
+            clip: crate::vfx::ParticleClip {
+                start: 0.0,
+                duration: 16.0,
+                kind: crate::vfx::ClipKind::Burst,
+                color: 0xFFFFFF,
+                seed: 11,
+                angle: 0.0,
+                length: 130.0,
+                color2: None,
+            },
+            figure: 0,
+            node: 0,
+            hidden,
+        }
+    }
+
+    #[test]
+    fn fx_clip_entry_without_hidden_loads_visible() {
+        // Back-compatibility: an entry saved before the
+        // field existed has no `hidden` key and must load
+        // visible. Strip the key from a serialised current
+        // entry so the nested clip keeps the writer's shape.
+        let mut value = serde_json::to_value(fx_entry(false)).unwrap();
+        let removed = value.as_object_mut().unwrap().remove("hidden");
+        assert!(removed.is_some(), "serialised entry carries the field");
+        let restored: FxClipEntry = serde_json::from_value(value).unwrap();
+        assert!(!restored.hidden);
+    }
+
+    #[test]
+    fn fx_clip_entry_hidden_round_trips() {
+        let json = serde_json::to_string(&fx_entry(true)).unwrap();
+        assert!(
+            json.contains("\"hidden\":true"),
+            "hidden is serialized: {json}"
+        );
+        let back: FxClipEntry = serde_json::from_str(&json).unwrap();
+        assert!(back.hidden);
     }
 }

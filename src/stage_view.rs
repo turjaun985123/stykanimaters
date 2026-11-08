@@ -330,10 +330,10 @@ const HIGHLIGHT_ALPHA: f32 = 0.5;
 /// Shell-side overlay choices for [`stage_shape`] (Phase G):
 /// everything the stage draws that lives in the shell's
 /// `State` rather than in the engine core — the guide toggles,
-/// the three selection indices, and the per-side onion depths.
-/// Bundled into one `Copy` value so the call site names each
-/// choice once and future overlays don't grow the signature
-/// again.
+/// the three selection indices, the per-side onion depths,
+/// and the 3D stage flag. Bundled into one `Copy` value so
+/// the call site names each choice once and future overlays
+/// don't grow the signature again.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StageOverlays {
     /// Master guides switch: the thirds grid, and the gate
@@ -358,6 +358,12 @@ pub struct StageOverlays {
     /// list from `particle_selected`'s events); `None` — or
     /// a stale index — draws no gizmo.
     pub fx_selected: Option<usize>,
+    /// Draw the 3D session's figure on the stage (Phase M):
+    /// set by the shell only in the Build3D workspace while
+    /// a fig3 session is active. Even with the flag set, the
+    /// pass in [`stage_shape`] draws only while `core.fig3`
+    /// actually holds a session.
+    pub fig3_stage: bool,
     /// Onion skins behind the current frame (0 = none).
     pub onion_prev: u8,
     /// Onion skins ahead of the current frame (0 = none).
@@ -366,10 +372,11 @@ pub struct StageOverlays {
 
 impl Default for StageOverlays {
     /// Matches the shell's own initial state: guides off,
-    /// both sub-toggles on, nothing selected, and 1/1 onion
-    /// depths — the depths the core's historical single
-    /// `onion_frames` count defaulted to, so a default
-    /// overlays value reproduces the pre-Phase-G stage.
+    /// both sub-toggles on, nothing selected, no 3D stage
+    /// pass, and 1/1 onion depths — the depths the core's
+    /// historical single `onion_frames` count defaulted to,
+    /// so a default overlays value reproduces the
+    /// pre-Phase-G stage.
     fn default() -> Self {
         StageOverlays {
             guides: false,
@@ -378,6 +385,7 @@ impl Default for StageOverlays {
             stroke_selected: None,
             particle_selected: None,
             fx_selected: None,
+            fig3_stage: false,
             onion_prev: 1,
             onion_next: 1,
         }
@@ -400,8 +408,12 @@ fn recolor_prims(
     prims
         .into_iter()
         .map(|prim| match prim {
-            StrokePrim::Polyline { pts, width, .. } => StrokePrim::Polyline { pts, width, color: rgb },
-            StrokePrim::Filled { pts, .. } => StrokePrim::Filled { pts, color: rgb },
+            StrokePrim::Polyline { pts, width, opacity, .. } => {
+                StrokePrim::Polyline { pts, width, color: rgb, opacity }
+            }
+            StrokePrim::Filled { pts, opacity, .. } => {
+                StrokePrim::Filled { pts, color: rgb, opacity }
+            }
             StrokePrim::Dots { pts, radius, opacity, .. } => {
                 StrokePrim::Dots { pts, radius, color: rgb, opacity }
             }
@@ -412,9 +424,12 @@ fn recolor_prims(
 /// Convert one recoloured highlight prim into the shape being
 /// built: the base stroke layer's conversions (see
 /// [`stage_shape`]) at [`HIGHLIGHT_ALPHA`] — polylines and
-/// fills take the alpha on the colour (their prims carry no
-/// alpha field), spray dots multiply it into the opacity each
-/// dot already carries, per `stage_layers`' contract.
+/// fills take the flat alpha on the colour (their carried
+/// stroke opacity is deliberately NOT applied: the selection
+/// glow stays at full half-strength so a faint stroke is
+/// still visibly selected — the Phase M section 14 contract),
+/// spray dots multiply it into the opacity each dot already
+/// carries, per `stage_layers`' contract.
 fn highlight_prim(
     shape: Shape,
     rt: &crate::rune_sec::stage_camera::RotTransform,
@@ -423,7 +438,7 @@ fn highlight_prim(
 ) -> Shape {
     use crate::rune_sec::stage_layers::StrokePrim;
     match prim {
-        StrokePrim::Polyline { pts, width, color } => {
+        StrokePrim::Polyline { pts, width, color, .. } => {
             let screen: Vec<[f32; 2]> = pts.iter().map(|p| rt.to_screen(*p)).collect();
             shape.stroke_with(
                 screen,
@@ -433,7 +448,7 @@ fn highlight_prim(
                 hex_color(color).unwrap_or(Color::WHITE).alpha(HIGHLIGHT_ALPHA),
             )
         }
-        StrokePrim::Filled { pts, color } => {
+        StrokePrim::Filled { pts, color, .. } => {
             let screen: Vec<[f32; 2]> = pts.iter().map(|p| rt.to_screen(*p)).collect();
             shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE).alpha(HIGHLIGHT_ALPHA))
         }
@@ -448,6 +463,36 @@ fn highlight_prim(
             shape
         }
     }
+}
+
+/// Map the 3D session's stage-space prims (`stage_fig3`)
+/// into screen-space draw tuples — `(a, b, colour, width)`
+/// per prim: the endpoints through the same rotated
+/// transform the figure bones are drawn with
+/// (`RotTransform::to_screen`, which at angle 0 is
+/// [`to_screen`] verbatim), the colour through
+/// [`hex_color`], and the width scaled by the view scale
+/// exactly as a bone's thickness is (`width * s`, no
+/// clamp). Pure so the mapping is testable without a
+/// `Shape` readback; an empty prim list maps to an empty
+/// list, which is how the stage's fig3 pass draws nothing
+/// when the session projects nothing onto the stage.
+fn fig3_screen_segments(
+    rt: &crate::rune_sec::stage_camera::RotTransform,
+    s: f32,
+    prims: Vec<crate::rune_sec::stage_fig3::StageFig3Prim>,
+) -> Vec<([f32; 2], [f32; 2], Color, f32)> {
+    prims
+        .into_iter()
+        .map(|prim| {
+            (
+                rt.to_screen(prim.a),
+                rt.to_screen(prim.b),
+                hex_color(prim.color).unwrap_or(Color::WHITE),
+                prim.width * s,
+            )
+        })
+        .collect()
 }
 
 /// The whole stage as one vector `Shape` in canvas-element
@@ -479,6 +524,9 @@ fn highlight_prim(
 /// selected FX clip's gizmo, drawn after the particle
 /// gizmo — it locates the clip being edited, so it follows
 /// the particle gizmo's rules exactly.
+/// Phase M adds one content pass between the figures and
+/// the FX: the 3D session's figure on the stage, drawn
+/// when `overlays.fig3_stage` is set and a session exists.
 pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays) -> Shape {
     let project = &core.project;
     let display = core.display_frame();
@@ -548,19 +596,19 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     for prim in crate::rune_sec::stage_layers::stroke_geometry(core) {
         use crate::rune_sec::stage_layers::StrokePrim;
         match prim {
-            StrokePrim::Polyline { pts, width, color } => {
+            StrokePrim::Polyline { pts, width, color, opacity } => {
                 let screen: Vec<[f32; 2]> = pts.iter().map(|p| rt.to_screen(*p)).collect();
                 shape = shape.stroke_with(
                     screen,
                     false,
                     (width * s).max(1.0),
                     LineCap::Round,
-                    hex_color(color).unwrap_or(Color::WHITE),
+                    hex_color(color).unwrap_or(Color::WHITE).alpha(opacity),
                 );
             }
-            StrokePrim::Filled { pts, color } => {
+            StrokePrim::Filled { pts, color, opacity } => {
                 let screen: Vec<[f32; 2]> = pts.iter().map(|p| rt.to_screen(*p)).collect();
-                shape = shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE));
+                shape = shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE).alpha(opacity));
             }
             StrokePrim::Dots { pts, radius, color, opacity } => {
                 let c = hex_color(color).unwrap_or(Color::WHITE).alpha(opacity);
@@ -687,6 +735,21 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
                     .unwrap_or(Color::WHITE);
                 shape = shape.fill(ngon(rt.to_screen(*joint), r, 8), color);
             }
+        }
+    }
+    // The 3D session's figure on the stage (Phase M): the
+    // projected prims from `stage_fig3` — stage coordinates,
+    // already clipped to the stage rect — drawn over the
+    // 2D figures and their onion skins but under the FX,
+    // text and weather: the session figure is stage
+    // content, not an effect, and the FX/weather passes
+    // must still fall over it. Gated twice: the shell sets
+    // the overlay flag only in the Build3D workspace, and
+    // a fig3 session must actually exist.
+    if overlays.fig3_stage && core.fig3.is_some() {
+        let prims = crate::rune_sec::stage_fig3::stage_fig3_prims(core);
+        for (a, b, color, width) in fig3_screen_segments(&rt, s, prims) {
+            shape = shape.line(a, b, width, LineCap::Round, color);
         }
     }
     // FX particles, text labels, then weather on top — the
@@ -915,6 +978,55 @@ mod tests {
     }
 
     #[test]
+    fn overlays_default_has_no_fig3_stage() {
+        // Phase M: the 3D stage pass is workspace-gated
+        // shell state; a default overlays value never asks
+        // for it, so the pre-Phase-M stage is unchanged.
+        assert!(!StageOverlays::default().fig3_stage);
+    }
+
+    #[test]
+    fn fig3_screen_segments_map_through_the_view_transform() {
+        // The Phase C transform numbers: element 800×600,
+        // stage 960×720, camera `cam()` = (400, 300, 2.0).
+        // Fit is height-limited (600/720), so the scale is
+        // 5/3 and the camera centre lands on the element
+        // centre. Angle 0, so the rotated transform is the
+        // plain `to_screen` path the bones use.
+        let vt = view_transform([800.0, 600.0], [960.0, 720.0], cam());
+        let rt = crate::rune_sec::stage_camera::RotTransform::new(vt, 0.0);
+        let prim = crate::rune_sec::stage_fig3::StageFig3Prim {
+            a: [400.0, 300.0],
+            b: [460.0, 300.0],
+            color: 0xFF0000,
+            width: 3.0,
+        };
+        let segs = fig3_screen_segments(&rt, vt.scale, vec![prim]);
+        assert_eq!(segs.len(), 1);
+        let (a, b, color, width) = segs[0];
+        // a is the camera centre: exactly the element centre.
+        assert_eq!(a, [400.0, 300.0]);
+        // b sits 60 stage units right of centre: 60 · 5/3
+        // = 100 element points further right, same row.
+        assert!((b[0] - 500.0).abs() < 1e-3 && (b[1] - 300.0).abs() < 1e-3);
+        // The prim's hex colour, converted like every other
+        // pass converts; the width scaled by the view scale
+        // as a bone's thickness is: 3.0 · 5/3 = 5.0.
+        assert_eq!(color, hex_color(0xFF0000).unwrap());
+        assert!((width - 5.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn fig3_screen_segments_of_nothing_is_nothing() {
+        // The pass's empty case at the mapping level — the
+        // flag off, or no session, both reach the draw loop
+        // with no prims, and no prims map to no segments.
+        let vt = view_transform([800.0, 600.0], [960.0, 720.0], cam());
+        let rt = crate::rune_sec::stage_camera::RotTransform::new(vt, 0.0);
+        assert!(fig3_screen_segments(&rt, vt.scale, Vec::new()).is_empty());
+    }
+
+    #[test]
     fn stage_shape_builds_with_an_fx_selection() {
         // The demo project has no FX clips, so the selected
         // index is stale: the gizmo fn yields no prims and
@@ -994,8 +1106,8 @@ mod tests {
     fn recolor_prims_replaces_only_the_colour() {
         use crate::rune_sec::stage_layers::StrokePrim;
         let prims = vec![
-            StrokePrim::Polyline { pts: vec![[1.0, 2.0], [3.0, 4.0]], width: 7.0, color: 0x111111 },
-            StrokePrim::Filled { pts: vec![[0.0, 0.0], [5.0, 0.0], [5.0, 5.0]], color: 0x222222 },
+            StrokePrim::Polyline { pts: vec![[1.0, 2.0], [3.0, 4.0]], width: 7.0, color: 0x111111, opacity: 0.6 },
+            StrokePrim::Filled { pts: vec![[0.0, 0.0], [5.0, 0.0], [5.0, 5.0]], color: 0x222222, opacity: 0.3 },
             StrokePrim::Dots { pts: vec![[9.0, 9.0]], radius: 3.0, color: 0x333333, opacity: 0.4 },
         ];
         let out = recolor_prims(prims, SELECTION_ACCENT);
@@ -1006,10 +1118,12 @@ mod tests {
                     pts: vec![[1.0, 2.0], [3.0, 4.0]],
                     width: 7.0,
                     color: SELECTION_ACCENT,
+                    opacity: 0.6,
                 },
                 StrokePrim::Filled {
                     pts: vec![[0.0, 0.0], [5.0, 0.0], [5.0, 5.0]],
                     color: SELECTION_ACCENT,
+                    opacity: 0.3,
                 },
                 // The dots' opacity is NOT scaled here: the
                 // HIGHLIGHT_ALPHA factor applies at conversion

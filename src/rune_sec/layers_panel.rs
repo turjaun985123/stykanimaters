@@ -744,6 +744,7 @@ mod tests {
             },
             figure: 0, // on the jumping figure
             node: 2,
+            hidden: false,
         });
         core.project.particles.push(stykanimate_rs::model::ParticleEvent {
             frame: 0,

@@ -101,6 +101,18 @@ pub struct ClipEditSession {
 
 const FIGURE_COLORS: [u32; 6] = [0xE8E8EC, 0xFF5D5D, 0x5DB2FF, 0x7BE495, 0xFFC65D, 0xC792FF];
 
+/// The opacity a newly recorded stroke carries from a brush
+/// opacity: clamped to [0.0, 1.0]; a NaN brush opacity (no
+/// preset produces one) falls back to fully opaque rather
+/// than recording a value renderers cannot apply.
+fn recorded_stroke_opacity(brush_opacity: f32) -> f32 {
+    if brush_opacity.is_nan() {
+        1.0
+    } else {
+        brush_opacity.clamp(0.0, 1.0)
+    }
+}
+
 impl EditorCore {
     pub fn new() -> Self {
         EditorCore {
@@ -2285,6 +2297,7 @@ impl EditorCore {
             },
             figure: self.selected_figure,
             node,
+            hidden: false,
         });
         let _ = ClipKind::Burst;
         self.status = format!("FX clip ({kind:?}) added at frame {}.", self.current + 1);
@@ -2334,6 +2347,7 @@ impl EditorCore {
             clip,
             figure: self.selected_figure,
             node: 0,
+            hidden: false,
         });
         self.status = format!("FX preset '{name}' added at frame {}.", self.current + 1);
     }
@@ -2576,6 +2590,16 @@ impl EditorCore {
             widths: vec![brush.width],
             fill: None,
             spray,
+            // A spray stroke records 1.0 here on purpose: its
+            // dots already carry the brush's opacity in the
+            // SprayMark, and a renderer applying both would
+            // double-apply it. A plain stroke records the
+            // brush's opacity itself.
+            opacity: if spray.is_some() {
+                1.0
+            } else {
+                recorded_stroke_opacity(brush.opacity)
+            },
         });
         self.drawing = true;
     }
@@ -2711,6 +2735,11 @@ impl EditorCore {
             widths: Vec::new(),
             fill: Some(color),
             spray: None,
+            // Generated from the source stroke, not drawn with
+            // the brush — its colour and width come from that
+            // stroke too — so it records opaque rather than
+            // borrowing the active brush's opacity.
+            opacity: 1.0,
         });
         self.status = format!("Shape filled with a scanline fill ({n_points} points).");
     }
@@ -2779,8 +2808,9 @@ impl EditorCore {
     /// ONE stroke on the current frame, built exactly like a
     /// drawn stroke (`begin_draw`): the selected figure's
     /// colour, the active brush's width recorded per point (a
-    /// drawn stroke carries a width for every point), and no
-    /// fill. One snapshot per stamp.
+    /// drawn stroke carries a width for every point), the
+    /// active brush's opacity, and no fill. One snapshot per
+    /// stamp.
     fn stamp_points(&mut self, points: Vec<V2>, what: &str) {
         let brush = self.active_brush();
         let color = self.project.figures[self.selected_figure].color;
@@ -2794,6 +2824,7 @@ impl EditorCore {
             widths: vec![brush.width; n],
             fill: None,
             spray: None,
+            opacity: recorded_stroke_opacity(brush.opacity),
         });
         self.status = format!("Stamped {what} on frame {} ({n} points).", self.current + 1);
     }
@@ -2882,6 +2913,7 @@ impl EditorCore {
             path: path.to_string_lossy().into_owned(),
             start_frame: self.current,
             gain: 1.0,
+            muted: false,
         });
         self.status = format!("Audio clip added at frame {}: {}", self.current + 1, path.display());
     }
@@ -3450,6 +3482,7 @@ impl EditorCore {
                 path: out.to_string_lossy().into_owned(),
                 start_frame: clip.start_frame.saturating_add(shift),
                 gain: clip.gain,
+                muted: false,
             });
         }
         let n = segments.len();
@@ -4637,6 +4670,7 @@ mod tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         };
         core.project.strokes = vec![mk(0x111111), mk(0x222222), mk(0x333333)];
         core.delete_stroke_at(1);
@@ -5048,6 +5082,7 @@ mod tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         });
         core.toggle_draw_tool();
         assert_eq!(core.draw_tool, DrawTool::Eraser);
@@ -5321,6 +5356,7 @@ mod tests {
             path: source.clone(),
             start_frame: 3,
             gain: 1.0,
+            muted: false,
         });
 
         core.audio_normalize(0);
@@ -5356,6 +5392,7 @@ mod tests {
             path: source.clone(),
             start_frame: 4,
             gain: 1.0,
+            muted: false,
         });
 
         core.audio_normalize(0);
@@ -5391,6 +5428,7 @@ mod tests {
             path: source,
             start_frame: 7,
             gain: 1.0,
+            muted: false,
         });
 
         core.audio_trim(0, 0.25, 0.75);
@@ -5413,6 +5451,7 @@ mod tests {
             path: source.clone(),
             start_frame: 9,
             gain: 1.0,
+            muted: false,
         });
 
         core.audio_trim(0, 0.75, 0.25);
@@ -5440,11 +5479,13 @@ mod tests {
             path: source,
             start_frame: 12,
             gain: 1.0,
+            muted: false,
         });
         core.project.audio.push(crate::model::AudioClip {
             path: other.clone(),
             start_frame: 30,
             gain: 1.0,
+            muted: false,
         });
 
         // The source lasts 12 timeline frames (1s at 12 fps), so
@@ -5475,6 +5516,7 @@ mod tests {
             path: source.clone(),
             start_frame: 12,
             gain: 1.0,
+            muted: false,
         });
 
         // The clip spans timeline frames 12..24; neither endpoint is
@@ -5500,11 +5542,13 @@ mod tests {
             path: first,
             start_frame: 0,
             gain: 1.0,
+            muted: false,
         });
         core.project.audio.push(crate::model::AudioClip {
             path: second,
             start_frame: 3,
             gain: 1.0,
+            muted: false,
         });
 
         // Each clip lasts 0.5s. The second starts at 0.3s, so the
@@ -5536,11 +5580,13 @@ mod tests {
             path: first,
             start_frame: 0,
             gain: 1.0,
+            muted: false,
         });
         core.project.audio.push(crate::model::AudioClip {
             path: second,
             start_frame: 15,
             gain: 1.0,
+            muted: false,
         });
 
         // Two adjacent 1.5s clips: the default fade is 1.0s, so
@@ -5567,11 +5613,13 @@ mod tests {
             path: first.clone(),
             start_frame: 0,
             gain: 1.0,
+            muted: false,
         });
         core.project.audio.push(crate::model::AudioClip {
             path: second.clone(),
             start_frame: 10,
             gain: 1.0,
+            muted: false,
         });
 
         // The first 0.5s clip ends at frame 5; the second starts at
@@ -5876,11 +5924,13 @@ mod tests {
             path: first.clone(),
             start_frame: 0,
             gain: 1.0,
+            muted: false,
         });
         core.project.audio.push(crate::model::AudioClip {
             path: second.clone(),
             start_frame: 3,
             gain: 1.0,
+            muted: false,
         });
 
         core.audio_crossfade(0);
@@ -6234,6 +6284,7 @@ mod wave11_tests {
             path,
             start_frame: 0,
             gain: 1.0,
+            muted: false,
         });
         core
     }
@@ -6355,6 +6406,7 @@ mod wave12_tests {
             path,
             start_frame: 0,
             gain: 1.0,
+            muted: false,
         });
         core
     }
@@ -6424,6 +6476,7 @@ mod wave12_tests {
             widths: Vec::new(),
             fill: None,
             spray: None,
+            opacity: 1.0,
         }
     }
 
@@ -6688,6 +6741,54 @@ mod wave13_tests {
         assert!(core.project.strokes[0].spray.is_none());
     }
 
+    #[test]
+    fn spray_stroke_keeps_its_opacity_on_the_mark_not_the_stroke() {
+        // The Spray preset is the library's one translucent
+        // brush, and its opacity lives on the SprayMark — the
+        // scattered dots carry it. The stroke itself must
+        // record 1.0: a renderer applying both would
+        // double-apply the opacity.
+        let mut core = EditorCore::new();
+        core.project.strokes.clear();
+        set_brush(&mut core, "Spray");
+        let brush_opacity = core.active_brush().opacity;
+        assert!(
+            brush_opacity != 1.0,
+            "the Spray preset is the translucent one"
+        );
+        core.begin_draw([0.0, 0.0]);
+        core.draw_to([30.0, 0.0]);
+        core.end_draw();
+        let s = &core.project.strokes[0];
+        assert_eq!(
+            s.spray.expect("a scatter brush records a spray mark").opacity,
+            brush_opacity,
+            "the mark carries the brush's opacity"
+        );
+        assert_eq!(s.opacity, 1.0, "the stroke itself stays opaque");
+    }
+
+    #[test]
+    fn drawn_and_stamped_strokes_record_the_active_brush_opacity() {
+        // With the default Pen (opacity 1.0) both recording
+        // paths — a drawn stroke and a shape stamp — carry
+        // the active brush's opacity onto the stroke. No
+        // non-spray preset in the library is translucent yet,
+        // so a translucent freehand stroke cannot be drawn
+        // through a preset here; the spray test above covers
+        // the one brush whose opacity is not 1.0.
+        let mut core = EditorCore::new();
+        core.project.strokes.clear();
+        let brush_opacity = core.active_brush().opacity;
+        core.begin_draw([0.0, 0.0]);
+        core.draw_to([30.0, 0.0]);
+        core.end_draw();
+        assert_eq!(core.project.strokes[0].opacity, brush_opacity);
+        core.stamp_polygon();
+        assert_eq!(core.project.strokes.len(), 2);
+        assert_eq!(core.project.strokes[1].opacity, brush_opacity);
+    }
+
     fn fx_entry(kind: crate::vfx::ClipKind, seed: u32) -> crate::model::FxClipEntry {
         crate::model::FxClipEntry {
             clip: crate::vfx::ParticleClip {
@@ -6702,6 +6803,7 @@ mod wave13_tests {
             },
             figure: 0,
             node: 0,
+            hidden: false,
         }
     }
 
