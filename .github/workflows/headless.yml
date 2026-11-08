@@ -155,16 +155,21 @@ jobs:
         run: |
           set +e
           BIN=./target/release/stykanimate-rs
-          # Every probe process gets a FRESH HOME (Phase N
-          # close-out): the app persists layout prefs,
-          # including the workspace, and a scene process
-          # that selects a workspace otherwise leaks it
-          # into the next probe whose scene does not set
-          # one — the first Phase N headless run rendered
+          # Every probe process starts from a CLEAN slate
+          # (Phase N close-out): the app persists layout
+          # prefs — including the workspace — to
+          # ./projects/.layout.json relative to the CWD
+          # (shell::load_layout), and a scene process that
+          # selects a workspace otherwise leaks it into
+          # the next probe whose scene does not set one.
+          # The first Phase N headless run rendered
           # snap-default in the Draw workspace because the
           # draw-open tree probe ran last and left Draw
-          # prefs on disk.
-          probe() { HOME="$(mktemp -d)" timeout "$@"; }
+          # prefs behind; a fresh HOME alone did NOT fix
+          # it (run 42488210880) — the prefs file is
+          # CWD-relative, so probe() also wipes ./projects
+          # before every invocation.
+          probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
           mkdir -p headless-out
           missing=0
           for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open; do
@@ -185,16 +190,21 @@ jobs:
         run: |
           set +e
           BIN=./target/release/stykanimate-rs
-          # Every probe process gets a FRESH HOME (Phase N
-          # close-out): the app persists layout prefs,
-          # including the workspace, and a scene process
-          # that selects a workspace otherwise leaks it
-          # into the next probe whose scene does not set
-          # one — the first Phase N headless run rendered
+          # Every probe process starts from a CLEAN slate
+          # (Phase N close-out): the app persists layout
+          # prefs — including the workspace — to
+          # ./projects/.layout.json relative to the CWD
+          # (shell::load_layout), and a scene process that
+          # selects a workspace otherwise leaks it into
+          # the next probe whose scene does not set one.
+          # The first Phase N headless run rendered
           # snap-default in the Draw workspace because the
           # draw-open tree probe ran last and left Draw
-          # prefs on disk.
-          probe() { HOME="$(mktemp -d)" timeout "$@"; }
+          # prefs behind; a fresh HOME alone did NOT fix
+          # it (run 42488210880) — the prefs file is
+          # CWD-relative, so probe() also wipes ./projects
+          # before every invocation.
+          probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
           for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open; do
             if [ ! -f "headless-out/tree-$scene.json" ]; then
               probe 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
@@ -216,16 +226,21 @@ jobs:
         run: |
           set +e
           BIN=./target/release/stykanimate-rs
-          # Every probe process gets a FRESH HOME (Phase N
-          # close-out): the app persists layout prefs,
-          # including the workspace, and a scene process
-          # that selects a workspace otherwise leaks it
-          # into the next probe whose scene does not set
-          # one — the first Phase N headless run rendered
+          # Every probe process starts from a CLEAN slate
+          # (Phase N close-out): the app persists layout
+          # prefs — including the workspace — to
+          # ./projects/.layout.json relative to the CWD
+          # (shell::load_layout), and a scene process that
+          # selects a workspace otherwise leaks it into
+          # the next probe whose scene does not set one.
+          # The first Phase N headless run rendered
           # snap-default in the Draw workspace because the
           # draw-open tree probe ran last and left Draw
-          # prefs on disk.
-          probe() { HOME="$(mktemp -d)" timeout "$@"; }
+          # prefs behind; a fresh HOME alone did NOT fix
+          # it (run 42488210880) — the prefs file is
+          # CWD-relative, so probe() also wipes ./projects
+          # before every invocation.
+          probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
           mkdir -p headless-out
           probe 120 "$BIN" --snap headless-out/snap-default.png --scene default --at 0 \
             > headless-out/snap-default.log 2>&1
