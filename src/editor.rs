@@ -6902,6 +6902,7 @@ mod wave13_tests {
             path,
             start_frame,
             gain: 1.0,
+            muted: false,
         });
         core
     }

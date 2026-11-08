@@ -1072,7 +1072,7 @@ fn tool_fx_preset_add(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
         0
     };
     let kind = format!("{:?}", clip.kind);
-    core.project.fx_clips.push(crate::model::FxClipEntry { clip, figure, node: 0 });
+    core.project.fx_clips.push(crate::model::FxClipEntry { clip, figure, node: 0, hidden: false });
     Ok(json!({
         "ok": true,
         "fx_index": core.project.fx_clips.len() - 1,
