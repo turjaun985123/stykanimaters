@@ -50,11 +50,12 @@
 //! .child(rune_sec::figure_add::figure_add_panel(s, &t))
 //! ```
 
-use rune::tok::{type_, Theme};
-use rune::{col, row, text, El};
+use rune::tok::Theme;
+use rune::{col, row, El};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::State;
 
 /// View-state for this section: whether the add-figure panel
@@ -150,11 +151,6 @@ pub fn toggle_open(s: &mut State) {
     s.figure_add.open = !s.figure_add.open;
 }
 
-/// A small muted section heading inside the panel card.
-fn section_label(t: &Theme, label: &str) -> El {
-    text(label).font(type_::LABEL).color(t.text_secondary)
-}
-
 /// One entry button: dispatches its op, then closes the
 /// panel (dismiss-on-pick).
 fn entry_button(entry: Entry, t: &Theme) -> El {
@@ -167,13 +163,17 @@ fn entry_button(entry: Entry, t: &Theme) -> El {
     })
 }
 
-/// The section as mounted in the shell column: the
-/// "+ Add figure" toggle (accent-filled while open), and —
-/// when `s.figure_add.open` — the preset row and the library
-/// list in a card under it.
+/// The section as mounted in the shell column: the kit
+/// panel card (Phase N) holding the "+ Add figure" toggle
+/// (accent-filled while open) as its header control, and —
+/// when `s.figure_add.open` — a hairline divider over the
+/// preset row and the library list in the body column
+/// under it. The body keeps its `figure-add-card` key but
+/// is a plain column now: the root is the card, so there
+/// is no card inside the card.
 pub fn figure_add_panel(s: &State, t: &Theme) -> El {
     let open = s.figure_add.open;
-    let mut panel = col().key("figure-add").gap(6.0);
+    let mut panel = design::panel_col("figure-add", t);
     panel = panel.child(btn(
         "figure-add-toggle",
         "+ Add figure",
@@ -182,23 +182,21 @@ pub fn figure_add_panel(s: &State, t: &Theme) -> El {
         |s: &mut State| toggle_open(s),
     ));
     if open {
-        let mut card = col()
-            .key("figure-add-card")
-            .gap(6.0)
-            .padding(10.0)
-            .radius(8.0)
-            .fill(t.card);
-        let mut presets = row().key("figure-add-presets").gap(6.0);
+        panel = panel.child(design::divider(t));
+        let mut card = col().key("figure-add-card").gap(design::PANEL_GAP);
+        let mut presets = row().key("figure-add-presets").gap(design::PANEL_GAP);
         for entry in preset_entries() {
             presets = presets.child(entry_button(entry, t));
         }
-        card = card.child(section_label(t, "Presets")).child(presets);
-        card = card.child(section_label(t, "Library"));
+        card = card
+            .child(design::section_label("Presets", t))
+            .child(presets);
+        card = card.child(design::section_label("Library", t));
         let entries = library_entries(&s.core);
         if entries.is_empty() {
-            card = card.child(section_label(t, "Library is empty"));
+            card = card.child(design::empty_state("shapes", "Library is empty", t));
         } else {
-            let mut lib = col().key("figure-add-library").gap(4.0);
+            let mut lib = col().key("figure-add-library").gap(design::PANEL_GAP);
             for entry in entries {
                 lib = lib.child(entry_button(entry, t));
             }

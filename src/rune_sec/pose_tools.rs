@@ -191,13 +191,13 @@
 //! the rename editor's Apply / Cancel (`check` /
 //! `xmark`). The gated buttons (save, apply,
 //! mirror-apply) keep the muted-inert rendering when
-//! their op would no-op, glyph included, via [`pibtn`];
+//! their op would no-op, glyph included, via `pibtn`;
 //! the pose-op buttons (mirror / copy / paste / reset /
 //! bake, copy-to) are not in this section's icon map and
-//! stay on [`pbtn`]. Keys and handlers are unchanged.
+//! stay on `pbtn`. Keys and handlers are unchanged.
 //!
 //! Phase I (section 23/40) retires the local half of
-//! that arrangement: [`pibtn`]'s inert branch is now
+//! that arrangement: `pibtn`'s inert branch is now
 //! icon_btn's shared inert twin
 //! (`crate::rune_sec::icon_btn::icon_btn_inert`,
 //! section 11) instead of a hand-rolled muted row —
@@ -224,11 +224,33 @@
 //! and Apply pose to all frames next to Paste pose —
 //! the first button row now holds the mirror pair, the
 //! second the copy / paste / apply family. Both are
-//! plain [`pbtn`]s: the pose-op buttons were never in
+//! plain `pbtn`s: the pose-op buttons were never in
 //! this section's icon map, and the all-frames pair
 //! follows them. No new `State` field: both handlers
 //! work through `core` and the existing
 //! `State::pose_clipboard`.
+//!
+//! Phase N (adoption) restyles the panel in the
+//! charter's card language and retires the two local
+//! button dialects: the root is a kit
+//! `design::panel_col` card with a `panel_title`
+//! header and hairline divider; `pbtn` is deleted —
+//! its live sites call `chrome_view::btn` and its
+//! inert sites `chrome_view::btn_inert` (the same
+//! no-handler inert discipline `pbtn` documented,
+//! in the family's one implementation; a snap test
+//! pins that an inert press writes no status);
+//! `pibtn` is deleted — its call sites call
+//! `icon_btn` / `icon_btn_inert` directly, as they
+//! already dispatched. Library entries become the
+//! two-line list-row shells (kit px / radius /
+//! selected fill / hover on a `col`), the rename
+//! target now carrying the selected fill (the
+//! library panel's convention); the section labels
+//! ("Pose library", "Copy pose to") come from
+//! `design::section_label`, and the filter's
+//! no-match line is a kit `empty_state`. Keys,
+//! labels and handlers are byte-identical throughout.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -240,6 +262,8 @@ use serde::{Deserialize, Serialize};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Pose;
 
+use crate::chrome_view::{btn, btn_inert};
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::{icon_btn, icon_btn_inert};
 use crate::rune_sec::icons::icon_el;
 use crate::State;
@@ -1126,47 +1150,22 @@ fn rename_editor_row(s: &State, t: &Theme) -> El {
                 .on_edit(|s: &mut State| &mut s.pose_rename.field)
                 .on_submit(|s: &mut State, _tx: &mut Tx| apply_rename(s)),
         )
-        .child(pibtn(
-            "pose-rename-apply".to_string(),
+        .child(icon_btn(
+            "pose-rename-apply",
             "check",
             "Apply",
-            true,
+            false,
             t,
             |s| apply_rename(s),
         ))
-        .child(pibtn(
-            "pose-rename-cancel".to_string(),
+        .child(icon_btn(
+            "pose-rename-cancel",
             "xmark",
             "Cancel",
-            true,
+            false,
             t,
             |s| cancel_rename(s),
         ))
-}
-
-/// One pose-tools button, in the chrome's metrics
-/// (`chrome_view::btn`): padded rounded label. When
-/// `enabled` is false the button renders muted and carries
-/// NO press handler — an inert element, not a control that
-/// silently does nothing.
-fn pbtn(
-    key: String,
-    label: &str,
-    enabled: bool,
-    t: &Theme,
-    f: impl Fn(&mut State) + 'static,
-) -> El {
-    let base = el().key(key).px(10.0).py(5.0).radius(6.0);
-    if enabled {
-        base.fill(t.card)
-            .hover(t.control_track)
-            .press(t.control_off)
-            .on_press(f)
-            .child(text(label).font(type_::LABEL).color(t.text))
-    } else {
-        base.fill(t.control_off)
-            .child(text(label).font(type_::LABEL).color(t.text_secondary))
-    }
 }
 
 /// The glyph on the library Apply-mirrored buttons:
@@ -1177,33 +1176,6 @@ fn pbtn(
 /// choice is pinned by a test rather than buried in a
 /// call site.
 pub const APPLY_MIRRORED_ICON: &str = "arrow-right-arrow-left";
-
-/// One icon-bearing pose-library button: the
-/// glyph-and-label sibling of [`pbtn`], kept as a thin
-/// dispatch because the library rows call it seven
-/// times over. Live → [`icon_btn`] itself; inert →
-/// [`icon_btn_inert`], the shared muted twin (Phase I
-/// section 11): same box metrics, glyph and label in
-/// the muted colour, NO press handler — `pbtn`'s
-/// discipline (an inert element, not a control that
-/// silently does nothing), now in the one shared form
-/// every migrated panel uses. Which buttons are inert
-/// when is decided by the callers' gates, unchanged
-/// from Phase H.
-fn pibtn(
-    key: String,
-    icon: &str,
-    label: &str,
-    enabled: bool,
-    t: &Theme,
-    f: impl Fn(&mut State) + 'static,
-) -> El {
-    if enabled {
-        icon_btn(&key, icon, label, false, t, f)
-    } else {
-        icon_btn_inert(&key, icon, label, t)
-    }
-}
 
 /// The Pose tools section: a labelled group with the pose
 /// ops for the selected figure on the current frame.
@@ -1216,98 +1188,95 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
     } else {
         "No figure".to_string()
     };
-    let mut body = col()
-        .key("pose-tools")
-        .gap(6.0)
+    let mut body = design::panel_col("pose-tools", t)
         .child(
             row()
+                .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(
-                    text("Pose tools")
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                )
-                .child(el().grow(1.0))
-                .child(text(caption).font(type_::LABEL).color(t.text_secondary)),
+                .child(design::panel_title(None, "Pose tools", Some(&caption), t)),
+        )
+        .child(design::divider(t))
+        .child(
+            row()
+                .gap(4.0)
+                .child(if has_pose {
+                    btn("pose-mirror", "Mirror pose", false, t, |s| {
+                        s.core.mirror_selected_pose()
+                    })
+                } else {
+                    btn_inert("pose-mirror", "Mirror pose", t)
+                })
+                .child(if has_pose {
+                    btn(
+                        "pose-mirror-all",
+                        "Mirror figure (all frames)",
+                        false,
+                        t,
+                        |s| {
+                            s.core
+                                .mirror_figure_all_frames(s.core.selected_figure);
+                        },
+                    )
+                } else {
+                    btn_inert("pose-mirror-all", "Mirror figure (all frames)", t)
+                }),
         )
         .child(
             row()
                 .gap(4.0)
-                .child(pbtn(
-                    "pose-mirror".to_string(),
-                    "Mirror pose",
-                    has_pose,
-                    t,
-                    |s| s.core.mirror_selected_pose(),
-                ))
-                .child(pbtn(
-                    "pose-mirror-all".to_string(),
-                    "Mirror figure (all frames)",
-                    has_pose,
-                    t,
-                    |s| {
-                        s.core
-                            .mirror_figure_all_frames(s.core.selected_figure);
-                    },
-                )),
+                .child(if has_pose {
+                    btn("pose-copy", "Copy pose", false, t, |s| {
+                        copy_pose(&mut s.core, &mut s.pose_clipboard)
+                    })
+                } else {
+                    btn_inert("pose-copy", "Copy pose", t)
+                })
+                .child(if can_paste {
+                    btn("pose-paste", "Paste pose", false, t, |s| {
+                        paste_pose(&mut s.core, &s.pose_clipboard)
+                    })
+                } else {
+                    btn_inert("pose-paste", "Paste pose", t)
+                })
+                .child(if can_paste {
+                    btn(
+                        "pose-apply-all",
+                        "Apply pose to all frames",
+                        false,
+                        t,
+                        |s| apply_pose_to_all_frames(&mut s.core, &s.pose_clipboard),
+                    )
+                } else {
+                    btn_inert("pose-apply-all", "Apply pose to all frames", t)
+                }),
         )
         .child(
             row()
                 .gap(4.0)
-                .child(pbtn(
-                    "pose-copy".to_string(),
-                    "Copy pose",
-                    has_pose,
-                    t,
-                    |s| copy_pose(&mut s.core, &mut s.pose_clipboard),
-                ))
-                .child(pbtn(
-                    "pose-paste".to_string(),
-                    "Paste pose",
-                    can_paste,
-                    t,
-                    |s| paste_pose(&mut s.core, &s.pose_clipboard),
-                ))
-                .child(pbtn(
-                    "pose-apply-all".to_string(),
-                    "Apply pose to all frames",
-                    can_paste,
-                    t,
-                    |s| apply_pose_to_all_frames(&mut s.core, &s.pose_clipboard),
-                )),
-        )
-        .child(
-            row()
-                .gap(4.0)
-                .child(pbtn(
-                    "pose-reset".to_string(),
-                    "Reset pose",
-                    has_pose,
-                    t,
-                    |s| reset_pose(&mut s.core),
-                ))
-                .child(pbtn(
-                    "pose-bake-graph".to_string(),
-                    "Bake graph",
-                    can_bake(core),
-                    t,
-                    |s| {
+                .child(if has_pose {
+                    btn("pose-reset", "Reset pose", false, t, |s| {
+                        reset_pose(&mut s.core)
+                    })
+                } else {
+                    btn_inert("pose-reset", "Reset pose", t)
+                })
+                .child(if can_bake(core) {
+                    btn("pose-bake-graph", "Bake graph", false, t, |s| {
                         let last = s.core.frame_count().saturating_sub(1);
                         s.core.bake_graph_channels(0, last);
-                    },
-                )),
+                    })
+                } else {
+                    btn_inert("pose-bake-graph", "Bake graph", t)
+                }),
         )
-        .child(
-            row().gap(4.0).child(pibtn(
-                "pose-save-lib".to_string(),
-                "floppy-disk",
-                "Save pose",
-                has_pose,
-                t,
-                |s| save_current_pose(&mut s.core),
-            )),
-        );
+        .child(row().gap(4.0).child(if has_pose {
+            icon_btn("pose-save-lib", "floppy-disk", "Save pose", false, t, |s| {
+                save_current_pose(&mut s.core)
+            })
+        } else {
+            icon_btn_inert("pose-save-lib", "floppy-disk", "Save pose", t)
+        }));
     let saved = saved_pose_names();
     if !saved.is_empty() {
         let query = s.pose_library.filter.text.clone();
@@ -1318,11 +1287,7 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                     .key("pose-lib-header")
                     .gap(8.0)
                     .center_y()
-                    .child(
-                        text("Pose library")
-                            .font(type_::LABEL)
-                            .color(t.text_secondary),
-                    )
+                    .child(design::section_label("Pose library", t))
                     .child(
                         text(pose_count_line(visible.len(), saved.len(), &query))
                             .font(type_::LABEL)
@@ -1354,28 +1319,51 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
             let apply_name = name.clone();
             let mirror_name = name.clone();
             let del_name = name.clone();
-            let mut entry = col()
+            // The entry being renamed carries the kit
+            // selected fill — the row state the rename
+            // editor below it belongs to (the library
+            // panel's convention).
+            let renaming_this = s.pose_rename.target.is_some()
+                && s.pose_rename.name.as_str() == name.as_str();
+            // Two-line variant of the kit list-row
+            // anatomy (P8): the same px, radius, selected
+            // fill and hover as `design::list_row`,
+            // applied to a `col` because the entry
+            // carries two control lines (the kit builder
+            // itself is a single-line `row`).
+            let entry_root = col()
                 .key(format!("pose-lib-row-{i}"))
+                .w_full()
                 .gap(4.0)
+                .px(8.0)
+                .py(4.0)
+                .radius(design::ROW_RADIUS)
+                .min_h(28.0);
+            let entry_root = if renaming_this {
+                entry_root.fill(design::selected_fill())
+            } else {
+                entry_root.hover(t.hover)
+            };
+            let mut entry = entry_root
                 .child(
                     row()
                         .gap(4.0)
                         .center_y()
                         .child(text(name.as_str()).font(type_::LABEL).color(t.text))
                         .child(el().grow(1.0))
-                        .child(pibtn(
-                            format!("pose-lib-rename-{i}"),
+                        .child(icon_btn(
+                            &format!("pose-lib-rename-{i}"),
                             "pencil",
                             "Rename",
-                            true,
+                            false,
                             t,
                             move |s: &mut State| start_rename(s, i),
                         ))
-                        .child(pibtn(
-                            format!("pose-lib-del-{i}"),
+                        .child(icon_btn(
+                            &format!("pose-lib-del-{i}"),
                             "trash-can",
                             "Del",
-                            true,
+                            false,
                             t,
                             move |s: &mut State| {
                                 // Deleting the entry being
@@ -1393,64 +1381,76 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                 .child(
                     row()
                         .gap(4.0)
-                        .child(pibtn(
-                            format!("pose-lib-apply-{i}"),
-                            "check",
-                            "Apply",
-                            has_pose,
-                            t,
-                            move |s: &mut State| {
-                                apply_library_pose(&mut s.core, &apply_name)
-                            },
-                        ))
-                        .child(pibtn(
-                            format!("pose-lib-apply-mirror-{i}"),
-                            APPLY_MIRRORED_ICON,
-                            "Apply mirrored",
-                            has_pose,
-                            t,
-                            move |s: &mut State| {
-                                apply_library_pose_mirrored(
-                                    &mut s.core,
-                                    &mirror_name,
-                                )
-                            },
-                        )),
+                        .child(if has_pose {
+                            icon_btn(
+                                &format!("pose-lib-apply-{i}"),
+                                "check",
+                                "Apply",
+                                false,
+                                t,
+                                move |s: &mut State| {
+                                    apply_library_pose(&mut s.core, &apply_name)
+                                },
+                            )
+                        } else {
+                            icon_btn_inert(
+                                &format!("pose-lib-apply-{i}"),
+                                "check",
+                                "Apply",
+                                t,
+                            )
+                        })
+                        .child(if has_pose {
+                            icon_btn(
+                                &format!("pose-lib-apply-mirror-{i}"),
+                                APPLY_MIRRORED_ICON,
+                                "Apply mirrored",
+                                false,
+                                t,
+                                move |s: &mut State| {
+                                    apply_library_pose_mirrored(
+                                        &mut s.core,
+                                        &mirror_name,
+                                    )
+                                },
+                            )
+                        } else {
+                            icon_btn_inert(
+                                &format!("pose-lib-apply-mirror-{i}"),
+                                APPLY_MIRRORED_ICON,
+                                "Apply mirrored",
+                                t,
+                            )
+                        }),
                 );
-            if s.pose_rename.target.is_some()
-                && s.pose_rename.name.as_str() == name.as_str()
-            {
+            if renaming_this {
                 entry = entry.child(rename_editor_row(s, t));
             }
             body = body.child(entry);
         }
         if visible.is_empty() {
-            body = body.child(
-                text(format!("No poses match \"{}\".", query.trim()))
-                    .font(type_::LABEL)
-                    .color(t.text_secondary),
-            );
+            body = body.child(design::empty_state(
+                "magnifying-glass",
+                &format!("No poses match \"{}\".", query.trim()),
+                t,
+            ));
         }
     }
     let targets = pose_targets(core);
     if !targets.is_empty() {
-        body = body.child(
-            text("Copy pose to")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        body = body.child(design::section_label("Copy pose to", t));
         let mut trow = row().gap(4.0);
         for j in targets {
             let enabled = has_pose && pose_exists(core, j);
-            trow = trow.child(pbtn(
-                format!("pose-copy-to-{}", j + 1),
-                &figure_label(core, j),
-                enabled,
-                t,
-                move |s: &mut State| {
+            let key = format!("pose-copy-to-{}", j + 1);
+            let label = figure_label(core, j);
+            trow = trow.child(if enabled {
+                btn(&key, &label, false, t, move |s: &mut State| {
                     s.core.copy_pose_between(s.core.selected_figure, j)
-                },
-            ));
+                })
+            } else {
+                btn_inert(&key, &label, t)
+            });
         }
         body = body.child(trow.scroll_x().w_full());
     }

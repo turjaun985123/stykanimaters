@@ -195,12 +195,35 @@
 //! `stroke-opacity-dn` / `stroke-opacity-up` steppers
 //! in the stroke panel; and the timeline's
 //! `timeline-clips` lane. The panel now holds 54 rows.
+//!
+//! Phase N adoption, 2026-11-08: the panel adopts the
+//! charter's card language without touching a single
+//! row, string or key. The hand-rolled root (fill
+//! `t.card`, border `control_track`, radius 8) becomes
+//! `design::panel_col` (hairline `card_border`, radius
+//! 12, kit gap); the header becomes a `design::
+//! panel_title` cluster (the project line rides as its
+//! meta, in the same LABEL / `text_secondary` it already
+//! used) over a kit `divider`; section titles move from
+//! TITLE to SECTION / `t.text` through the same
+//! `panel_title` treatment (p11's ruling for this panel:
+//! a section title heads a section inside the card, so
+//! it takes the panel-header treatment, glyph kept).
+//! The local `key_cap` is retired onto `design::kbd` —
+//! but only for the 24 true-key rows (Shortcuts,
+//! Workspaces, Posing, Timeline): the 30 Features rows
+//! name features, not keys, and a chip would claim a
+//! binding that does not exist (p14 §3), so their first
+//! column now renders as plain LABEL text. No copy
+//! changes in this pass — the stale Delete row and the
+//! Ctrl+S placement are the V-wave copy pass's, per
+//! p14. The row census is unchanged: 54 rows.
 
-use rune::tok::{type_, Family, Theme};
-use rune::{col, el, row, text, El};
+use rune::tok::{type_, Theme};
+use rune::{col, row, text, El};
 use stykanimate_rs::editor::EditorCore;
 
-use crate::rune_sec::icons::icon_el;
+use crate::rune_sec::design;
 
 /// The keyboard shortcuts that are real in this shell, as
 /// (key label, action) rows, grouped by section in panel
@@ -422,36 +445,41 @@ pub fn group_rows() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// One key cap: a small bordered pill holding the key label
-/// in the mono label style.
-fn key_cap(key: &str, t: &Theme) -> El {
-    el()
-        .px(6.0)
-        .py(2.0)
-        .radius(4.0)
-        .fill(t.card)
-        .border(1.0, t.control_track)
-        .child(
-            text(key.to_string())
-                .font(type_::LABEL.family(Family::Mono))
-                .color(t.text),
-        )
-}
-
-/// One shortcut row: a key cap, then the action it performs.
+/// One shortcut row: a kit `kbd` chip, then the action it
+/// performs. Only for rows whose first column names a real
+/// key (the Shortcuts, Workspaces, Posing and Timeline
+/// sections) — Features rows render through
+/// [`feature_row`] instead.
 fn shortcut_row(key: &str, action: &str, t: &Theme) -> El {
     row()
         .gap(8.0)
         .center_y()
-        .child(key_cap(key, t))
+        .child(design::kbd(key, t))
+        .child(text(action.to_string()).font(type_::LABEL).color(t.text))
+}
+
+/// One Features row: the feature name as plain text, then
+/// how the feature is reached. The first column names a
+/// feature, not a key, so it must not wear a `kbd` chip —
+/// a chip would claim a keyboard binding that does not
+/// exist (p14 §3).
+fn feature_row(label: &str, action: &str, t: &Theme) -> El {
+    row()
+        .gap(8.0)
+        .center_y()
+        .child(text(label.to_string()).font(type_::LABEL).color(t.text))
         .child(text(action.to_string()).font(type_::LABEL).color(t.text))
 }
 
 /// One help section: a title, its description, then either
-/// its shortcut rows or its explanatory note. The title
-/// carries a small glyph (Phase H): `key` for the Shortcuts
-/// section, `list` for the rest — decoration only; the
-/// section names and descriptions are untouched.
+/// its rows or its explanatory note. The title carries a
+/// small glyph (Phase H): `key` for the Shortcuts section,
+/// `list` for the rest — decoration only; the section
+/// names and descriptions are untouched. Phase N renders
+/// the title through `design::panel_title` (SECTION /
+/// `t.text`, the kit's header treatment), and the rows
+/// split by kind: true-key sections get `kbd` chips,
+/// Features rows stay plain text (see [`feature_row`]).
 fn help_section(name: &str, description: &str, t: &Theme) -> El {
     let header_icon = if name == "Shortcuts" { "key" } else { "list" };
     let mut section = col()
@@ -459,10 +487,10 @@ fn help_section(name: &str, description: &str, t: &Theme) -> El {
         .gap(4.0)
         .child(
             row()
-                .gap(6.0)
+                .w_full()
+                .gap(8.0)
                 .center_y()
-                .child(icon_el(header_icon, 12.0, t.text))
-                .child(text(name.to_string()).font(type_::TITLE).color(t.text)),
+                .child(design::panel_title(Some(header_icon), name, None, t)),
         )
         .child(
             text(description.to_string())
@@ -477,6 +505,10 @@ fn help_section(name: &str, description: &str, t: &Theme) -> El {
                     .font(type_::LABEL)
                     .color(t.text_secondary),
             );
+        }
+    } else if name == "Features" {
+        for (label, action) in rows {
+            section = section.child(feature_row(label, action, t));
         }
     } else {
         for (key, action) in rows {
@@ -497,30 +529,26 @@ pub fn help_panel(core: &EditorCore, t: &Theme) -> El {
     } else {
         format!("{fps:.1}")
     };
-    let mut panel = col()
-        .key("help-panel")
-        .fill(t.card)
-        .border(1.0, t.control_track)
-        .radius(8.0)
-        .padding(12.0)
-        .gap(10.0)
+    let meta = format!(
+        "{} · {} frames · {} fps",
+        core.project.name,
+        core.frame_count(),
+        fps_txt
+    );
+    let mut panel = design::panel_col("help-panel", t)
         .child(
             row()
-                .gap(6.0)
+                .w_full()
+                .gap(8.0)
                 .center_y()
-                .child(icon_el("circle-question", 14.0, t.text))
-                .child(text("Help".to_string()).font(type_::TITLE).color(t.text)),
+                .child(design::panel_title(
+                    Some("circle-question"),
+                    "Help",
+                    Some(&meta),
+                    t,
+                )),
         )
-        .child(
-            text(format!(
-                "{} · {} frames · {} fps",
-                core.project.name,
-                core.frame_count(),
-                fps_txt
-            ))
-            .font(type_::LABEL)
-            .color(t.text_secondary),
-        );
+        .child(design::divider(t));
     for (name, description) in group_rows() {
         panel = panel.child(help_section(name, description, t));
     }

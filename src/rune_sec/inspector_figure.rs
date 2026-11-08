@@ -118,10 +118,11 @@
 //!   0.1 through the core's own
 //!   `EditorCore::set_head_ring_scale` — clamped
 //!   [0.5, 2.0], one snapshot per real change, the
-//!   op's status line reports the press. The row's
-//!   muted readout names the current scale
-//!   ([`head_ring_label`]: "Head ring 1×",
-//!   "Head ring 1.5×"). The scale is project-wide,
+//!   op's status line reports the press. The row pairs
+//!   a "Head ring" label with a mono readout of the
+//!   current scale ([`head_ring_value`]: "1×",
+//!   "1.5×" — the trimmed multiplier [`head_ring_label`]
+//!   formats). The scale is project-wide,
 //!   not per-figure — it lives in this panel because
 //!   the ring is part of how a figure reads — and
 //!   [`figure_bbox`] grows head joints by the scaled
@@ -131,6 +132,18 @@
 //!
 //! When the project has no figures — or the selection is
 //! stale — the panel is one muted line.
+//!
+//! Phase N adoption: the root is the design kit's card
+//! (`panel_col`), the heading is the kit's `panel_title`
+//! over a hairline divider, the "Colour" heading is a
+//! kit `section_label`, the opacity and head-ring rows
+//! are charter-order steppers with kit mono readouts
+//! (the ring row's label/value split is p09's D4;
+//! `head_ring_label`'s format is unchanged), and Delete
+//! figure is the button family's one `danger_btn` — the
+//! local copy, whose `0xF16F78` fill measures ≈2.9:1
+//! against white text, is retired for the family's
+//! deeper red (p12).
 //!
 //! ## Integrator wiring (main.rs)
 //!
@@ -153,10 +166,11 @@
 //! ```
 
 use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, text_input, Color, El, TextEdit, Tx};
+use rune::{row, text, text_input, Color, El, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 
-use crate::chrome_view::btn;
+use crate::chrome_view::{btn, danger_btn};
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::stage_view::hex_color;
 use crate::State;
@@ -655,9 +669,11 @@ fn readout_row(label: &str, value: String, t: &Theme) -> El {
         .child(text(value).font(type_::LABEL).color(t.text))
 }
 
-/// The opacity stepper row: label, current percentage, −
-/// and + buttons wired to `step_figure_opacity` (chrome
-/// `btn` styling, inspector key style).
+/// The opacity stepper row in charter order (Phase N):
+/// label, − button, the current percentage as the kit's
+/// mono stepper readout, and the + button, wired to
+/// `step_figure_opacity` (chrome `btn` styling,
+/// inspector key style).
 fn opacity_stepper_row(st: &InspectorFigureState, t: &Theme) -> El {
     let fi = st.figure;
     row()
@@ -670,14 +686,10 @@ fn opacity_stepper_row(st: &InspectorFigureState, t: &Theme) -> El {
                 .color(t.text_secondary)
                 .grow(1.0),
         )
-        .child(
-            text(format!("{}%", st.opacity_pct))
-                .font(type_::LABEL)
-                .color(t.text),
-        )
         .child(btn("insp-fop-dn", "−", false, t, move |s: &mut State| {
             s.core.step_figure_opacity(fi, -OPACITY_STEP)
         }))
+        .child(design::stepper_value(&format!("{}%", st.opacity_pct), t))
         .child(btn("insp-fop-up", "+", false, t, move |s: &mut State| {
             s.core.step_figure_opacity(fi, OPACITY_STEP)
         }))
@@ -694,6 +706,16 @@ pub const HEAD_RING_STEP: f32 = 0.1;
 /// decimals, trailing zeros and a bare dot dropped),
 /// the way the transport's speed label trims.
 pub fn head_ring_label(scale: f32) -> String {
+    format!("Head ring {}", head_ring_value(scale))
+}
+
+/// The head-ring row's stepper readout for a scale: the
+/// trimmed multiplier alone ("1×", "1.5×") — the number
+/// [`head_ring_label`] formats, split out so the row can
+/// pair a plain "Head ring" label with the kit's mono
+/// stepper value (Phase N, p09's D4 split). One trim
+/// implementation serves both strings.
+pub fn head_ring_value(scale: f32) -> String {
     let mut n = format!("{scale:.2}");
     while n.ends_with('0') {
         n.pop();
@@ -701,7 +723,7 @@ pub fn head_ring_label(scale: f32) -> String {
     if n.ends_with('.') {
         n.pop();
     }
-    format!("Head ring {n}×")
+    format!("{n}×")
 }
 
 /// One press of the head-ring steppers: move the
@@ -756,13 +778,15 @@ fn scale_stepper_row(t: &Theme) -> El {
         ))
 }
 
-/// The head-ring row, under the scale row: a muted
-/// readout naming the project's current head-ring
-/// scale ([`head_ring_label`]) and the −/+ steppers
-/// that move it by [`HEAD_RING_STEP`] through
-/// [`step_head_ring_scale`]. Plain buttons like the
-/// opacity steppers — the row's state is the readout
-/// itself, not a toggle.
+/// The head-ring row, under the scale row, in charter
+/// order (Phase N): a "Head ring" label, the −/+
+/// steppers that move the project's head-ring scale by
+/// [`HEAD_RING_STEP`] through [`step_head_ring_scale`],
+/// and the kit's mono readout of the current scale
+/// ([`head_ring_value`]) between the buttons — the
+/// label/value split p09 calls D4. Plain buttons like
+/// the opacity steppers — the row's state is the
+/// readout itself, not a toggle.
 fn ring_stepper_row(core: &EditorCore, t: &Theme) -> El {
     row()
         .key("fig-ring-row")
@@ -770,7 +794,7 @@ fn ring_stepper_row(core: &EditorCore, t: &Theme) -> El {
         .center_y()
         .gap(8.0)
         .child(
-            text(head_ring_label(core.project.head_ring_scale))
+            text("Head ring")
                 .font(type_::LABEL)
                 .color(t.text_secondary)
                 .grow(1.0),
@@ -778,6 +802,10 @@ fn ring_stepper_row(core: &EditorCore, t: &Theme) -> El {
         .child(btn("fig-ring-dn", "−", false, t, |s: &mut State| {
             step_head_ring_scale(&mut s.core, -HEAD_RING_STEP);
         }))
+        .child(design::stepper_value(
+            &head_ring_value(core.project.head_ring_scale),
+            t,
+        ))
         .child(btn("fig-ring-up", "+", false, t, |s: &mut State| {
             step_head_ring_scale(&mut s.core, HEAD_RING_STEP);
         }))
@@ -802,58 +830,35 @@ fn place_row(t: &Theme) -> El {
         }))
 }
 
-/// The Delete figure button: chrome-button shape in the
-/// error colour (the 2.0 palette's `C_ERROR`).
-fn danger_btn(key: &str, label: &str, f: impl Fn(&mut State) + 'static) -> El {
-    let red = hex_color(0xF16F78).unwrap_or(Color::WHITE);
-    let red_dark = hex_color(0xD85560).unwrap_or(red);
-    el()
-        .key(key)
-        .px(10.0)
-        .py(5.0)
-        .radius(6.0)
-        .fill(red)
-        .hover(red_dark)
-        .press(red_dark)
-        .on_press(f)
-        .child(text(label).font(type_::LABEL).color(Color::WHITE))
-}
-
-/// One colour swatch: a rounded square in the palette
-/// colour; the figure's current colour gets a white
-/// border. Pressing applies it through the engine op
+/// One colour swatch: the kit's single swatch
+/// construction ([`design::swatch`] — the Phase N
+/// adoption retired this panel's hand-rolled 22×22
+/// square and its white selected border for the kit's
+/// 24×24 square with the accent selected ring and the
+/// `card_border` hairline when unselected), carrying
+/// this panel's `fig-color-{rgb:06x}` key. Pressing
+/// applies the colour through the engine op
 /// `EditorCore::set_figure_color`, targeted at whatever
 /// figure is selected at press time.
-fn swatch(rgb: u32, selected: bool) -> El {
+fn swatch(rgb: u32, selected: bool, t: &Theme) -> El {
     let fill = hex_color(rgb).unwrap_or(Color::WHITE);
-    let mut e = el()
-        .key(format!("fig-color-{rgb:06x}"))
-        .size(22.0, 22.0)
-        .radius(6.0)
-        .fill(fill)
-        .hover(fill)
-        .press(fill)
-        .on_press(move |s: &mut State| {
+    design::swatch(
+        &format!("fig-color-{rgb:06x}"),
+        fill,
+        selected,
+        t,
+        move |s: &mut State| {
             let fi = s.core.selected_figure;
             s.core.set_figure_color(fi, rgb);
-        });
-    if selected {
-        e = e.border(2.0, Color::WHITE);
-    }
-    e
+        },
+    )
 }
 
 /// The Figure inspector panel. Mount it wherever the shell
 /// shows selection details; it reads `State.core` plus the
 /// rename field's buffer in `State::inspector_figure`.
 pub fn inspector_figure(s: &State, t: &Theme) -> El {
-    let panel = col()
-        .key("inspector-figure")
-        .w_full()
-        .padding(12.0)
-        .gap(8.0)
-        .radius(8.0)
-        .fill(t.card);
+    let panel = design::panel_col("inspector-figure", t);
     let Some(st) = figure_state(&s.core) else {
         return panel.child(
             text("No figures in the project.")
@@ -863,10 +868,18 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
     };
     let mut panel = panel
         .child(
-            text(format!("Figure {} · {}", st.figure + 1, st.name))
-                .font(type_::LABEL)
-                .color(t.text),
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(
+                    None,
+                    &format!("Figure {}", st.figure + 1),
+                    Some(&st.name),
+                    t,
+                )),
         )
+        .child(design::divider(t))
         .child(name_field_row(s, t))
         .child(readout_row("Colour", format!("#{:06X}", st.color), t))
         .child(readout_row("Segments", format!("{}", st.segments), t));
@@ -880,15 +893,11 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
         }
         panel = panel.child(readout_row("State", flags.join(" · "), t));
     }
-    panel = panel.child(
-        text("Colour")
-            .font(type_::LABEL)
-            .color(t.text_secondary),
-    );
+    panel = panel.child(design::section_label("Colour", t));
     for chunk in PALETTE.chunks(8) {
         let mut swatches = row().gap(6.0).center_y();
         for &rgb in chunk {
-            swatches = swatches.child(swatch(rgb, st.color == rgb));
+            swatches = swatches.child(swatch(rgb, st.color == rgb, t));
         }
         panel = panel.child(swatches);
     }
@@ -916,7 +925,7 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
                 let fi = s.core.selected_figure;
                 s.core.duplicate_figure(fi);
             }))
-            .child(danger_btn("fig-del", "Delete figure", |s| {
+            .child(danger_btn("fig-del", "Delete figure", t, |s| {
                 s.core.delete_figure()
             })),
     )

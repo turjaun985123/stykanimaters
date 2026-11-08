@@ -114,6 +114,17 @@
 //! `main.rs`'s `text_focused` must also gain
 //! `|| s.clips_rename.field.focused`, or global shortcuts
 //! (Space, N, Delete…) would fire while typing a name.
+//!
+//! Phase N (adoption): the panel root is the kit card
+//! (`design::panel_col`, key `clips-panel` unchanged), the
+//! header is `design::panel_title` (film glyph + title +
+//! clip count) over a `design::divider`, clip rows are
+//! `design::list_row` shells with the row's `.on_press`
+//! and children attached verbatim, and the no-clips line
+//! is a `design::empty_state` carrying the old message
+//! byte-identical. Keys, handlers and status strings are
+//! untouched — row keys stay 1-based (`clip-row-{n}`),
+//! the standing exception the gate preserves.
 
 use std::cell::RefCell;
 
@@ -123,8 +134,8 @@ use stykanimate_rs::editor::{ClipEditSession, EditorCore};
 use stykanimate_rs::model::{ClipDef, ClipLoop, FigureInstance};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
-use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 /// Panel-local state for the movieclips panel (see the module
@@ -651,16 +662,8 @@ pub fn usage_text(figures: &[FigureInstance], clip_idx: usize) -> String {
 fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
     let core = &s.core;
     let clip = &core.project.clips[index];
-    row()
-        .key(format!("clip-row-{}", index + 1))
+    design::list_row(&format!("clip-row-{}", index + 1), selected, t)
         .w_full()
-        .gap(8.0)
-        .center_y()
-        .px(8.0)
-        .py(4.0)
-        .radius(6.0)
-        .fill(if selected { t.control_track } else { t.card })
-        .hover(t.control_track)
         .on_press(move |_s: &mut State| {
             update_panel_state(|p| p.select(index));
         })
@@ -817,11 +820,7 @@ fn loop_mode_row(s: &State, t: &Theme, selected: Option<usize>) -> El {
         .w_full()
         .gap(8.0)
         .center_y()
-        .child(
-            text("Loop mode:")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        )
+        .child(design::section_label("Loop mode:", t))
         .child(btn(
             "clip-loop-loop",
             "Loop",
@@ -953,31 +952,20 @@ pub fn clips_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let clips = &core.project.clips;
     let selected = panel_state().clamped(clips.len());
-    let mut panel = col()
-        .key("clips-panel")
-        .w_full()
-        .fill(t.card)
-        .radius(8.0)
-        .padding(10.0)
-        .gap(6.0)
+    let mut panel = design::panel_col("clips-panel", t)
         .child(
             row()
                 .w_full()
-                .gap(8.0)
+                .gap(design::PANEL_GAP)
                 .center_y()
-                .child(icon_el("film", 14.0, t.text_secondary))
-                .child(
-                    text("Movieclips")
-                        .font(type_::SECTION)
-                        .color(t.text)
-                        .grow(1.0),
-                )
-                .child(
-                    text(format!("{} clip(s)", clips.len()))
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                ),
+                .child(design::panel_title(
+                    Some("film"),
+                    "Movieclips",
+                    Some(&format!("{} clip(s)", clips.len())),
+                    t,
+                )),
         )
+        .child(design::divider(t))
         .child(
             row()
                 .w_full()
@@ -991,11 +979,11 @@ pub fn clips_panel(s: &State, t: &Theme) -> El {
         );
     if clips.is_empty() {
         return panel
-            .child(
-                text("No movieclips in this project. \"Make clip\" builds one from the selected figure.")
-                    .font(type_::LABEL)
-                    .color(t.text_secondary),
-            )
+            .child(design::empty_state(
+                "film",
+                "No movieclips in this project. \"Make clip\" builds one from the selected figure.",
+                t,
+            ))
             .child(clip_edit_section(s, t));
     }
     for i in 0..clips.len() {

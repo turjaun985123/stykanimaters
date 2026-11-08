@@ -76,8 +76,11 @@
 //! snapshot; this one does not.)
 //!
 //! Rows are listed in draw order with the front figure on
-//! top (reverse index order). The selected figure's row name
-//! renders active (accent), matching `core.selected_figure`.
+//! top (reverse index order). The selected figure's row is
+//! the marked one, matching `core.selected_figure` (the
+//! name button took the accent before Phase N; the kit
+//! row shell carries the mark now — see the Phase N note
+//! below).
 //!
 //! Phase H (section 9/40) switches the row's step buttons
 //! to Font Awesome glyphs through
@@ -137,12 +140,30 @@
 //! idiom), short enough that the row's controls keep
 //! their room in the 300pt column; the name button is the
 //! row's flexible element and absorbs any squeeze.
+//!
+//! Phase N (adoption) restyles the panel to the charter's
+//! card language: the root is the kit's
+//! `design::panel_col` (card fill, hairline border,
+//! radius 12, padding 12), the header is the kit's
+//! `panel_title` over a kit `divider`, and each layer row
+//! is a kit `design::list_row` shell (min height 28,
+//! px 8, radius 8, hover) whose selected fill carries the
+//! selection — the name button inside no longer takes the
+//! accent fill, keeping only its key and its
+//! `select_figure` press. The "Opacity" caption is the
+//! kit's `section_label`. The opacity slider's drag root
+//! grows from 22 to 28pt tall (P18: the drag height
+//! clears the 24pt floor; the drag maps x only, so the
+//! track/knob arithmetic — all derived from `SLIDER_H` —
+//! is unchanged in shape). Keys, handlers and status
+//! strings are all byte-identical to before.
 
 use rune::tok::{self, type_, Theme};
-use rune::{col, el, row, text, Drag, El, Phase, Tx};
+use rune::{el, row, text, Drag, El, Phase, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::icon_only_btn;
 use crate::State;
 
@@ -274,8 +295,14 @@ pub fn rows(core: &EditorCore) -> Vec<LayerRow> {
 /// geometry, so every drag slider in the shell feels the
 /// same).
 const SLIDER_W: f32 = 200.0;
-/// Slider track height in points.
-const SLIDER_H: f32 = 22.0;
+/// Slider drag-root height in points. 28 since Phase N
+/// (P18: a 22pt drag root fell under the 24pt hit-target
+/// floor; the drag maps x only, so growing the root is
+/// safe and the track/knob placement below — all derived
+/// from this one const — keeps its shape). The scene
+/// panel's copy of this const grows to the same 28 in its
+/// own adoption, so the two sliders do not drift.
+const SLIDER_H: f32 = 28.0;
 /// Slider knob diameter in points.
 const KNOB: f32 = 16.0;
 
@@ -449,9 +476,11 @@ fn solo_selected(core: &mut EditorCore) {
     core.toggle_solo(core.selected_figure);
 }
 
-/// One layer row: a colour dot (the figure's resolved
-/// root colour, [`layer_dot_color`]), name (press selects;
-/// accent when selected), opacity readout with −/+
+/// One layer row: a kit `design::list_row` shell (which
+/// carries the selected mark — the name button no longer
+/// takes the accent fill) holding a colour dot (the
+/// figure's resolved root colour, [`layer_dot_color`]),
+/// name (press selects), opacity readout with −/+
 /// steppers, Bottom/down/up/Top reorder buttons —
 /// Down/Up are chevron icon buttons, Bottom/Top stay text
 /// (see the module docs for why) — and a muted trailing
@@ -465,10 +494,7 @@ fn solo_selected(core: &mut EditorCore) {
 /// straight back to `Project::figures`).
 fn layer_row(r: &LayerRow, t: &Theme) -> El {
     let fi = r.fi;
-    row()
-        .key(format!("layer-row-{fi}"))
-        .gap(6.0)
-        .center_y()
+    design::list_row(&format!("layer-row-{fi}"), r.selected, t)
         .child(
             el()
                 .key(format!("layer-dot-{fi}"))
@@ -482,7 +508,7 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
         .child(btn(
             &format!("layer-name-{fi}"),
             &r.name,
-            r.selected,
+            false,
             t,
             move |s: &mut State| s.core.select_figure(fi),
         ))
@@ -556,10 +582,22 @@ pub fn panel(s: &State, t: &Theme) -> El {
     // below only by reference, but the flag is cheapest
     // read once here).
     let solo_on_selected = s.core.solo == Some(s.core.selected_figure);
-    let mut body = col()
-        .key("layers-panel")
-        .gap(6.0)
-        .child(text("Layers").font(type_::LABEL).color(t.text_secondary));
+    // Card root + header (Phase N): the kit's `panel_col`
+    // under its existing key, then `panel_title` in a
+    // plain row — the header has never carried a key and
+    // invents none now; it wears `header_row`'s layout
+    // (full width, gap 8, centre-aligned) rather than the
+    // keyed builder — over a kit hairline divider
+    // (charter §2).
+    let mut body = design::panel_col("layers-panel", t)
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(None, "Layers", None, t)),
+        )
+        .child(design::divider(t));
     for r in rows(&s.core) {
         body = body.child(layer_row(&r, t));
     }
@@ -570,7 +608,7 @@ pub fn panel(s: &State, t: &Theme) -> El {
                     .key("layers-opacity-row")
                     .gap(6.0)
                     .center_y()
-                    .child(text("Opacity").font(type_::LABEL).color(t.text_secondary))
+                    .child(design::section_label("Opacity", t))
                     .child(el().grow(1.0))
                     .child(
                         text(opacity_label(fig.opacity))

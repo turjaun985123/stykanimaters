@@ -97,6 +97,16 @@
 //! buttons — its active state is the text-button state —
 //! and the project-format rows keep plain `btn`: no
 //! glyph is assigned to them.
+//!
+//! Phase N restyles the panel's shell without touching
+//! a key, label or handler: the root is the kit card
+//! (`design::panel_col`, key `export-panel` as ever),
+//! the header is a kit `panel_title` over a hairline
+//! `divider` with the subtitle kept as the first body
+//! line beneath it, and the private section helpers
+//! are retired — every category group is now a plain
+//! column headed by `design::section_label`, the icon
+//! variant keeping its local glyph + label row.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -107,6 +117,7 @@ use rune::{col, row, text, El};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::icons::icon_el;
 use crate::State;
@@ -847,33 +858,16 @@ pub fn recent_exports_cached() -> Vec<ExportRow> {
     })
 }
 
-// ---- Rows and sections ------------------------------------
-
-/// A section column: the category label, then one row per
-/// format (Wave 15 grouping: Images / Animation / Video /
-/// Project formats).
-fn section(title: &str, t: &Theme) -> El {
-    col()
-        .gap(6.0)
-        .child(text(title).font(type_::SECTION).color(t.text_secondary))
-}
-
-/// A section column whose heading leads with a Font
-/// Awesome glyph (Phase H): the same [`section`] label —
-/// same font, same colour — preceded by a 12 pt
-/// [`icon_el`] in the heading's secondary colour, in a
-/// centred row: the inline-glyph idiom frame_ops and
-/// fx_browser use. Only the heading changes; the column
-/// below it is built exactly as [`section`] builds it.
-fn section_with_icon(icon: &str, title: &str, t: &Theme) -> El {
-    col().gap(6.0).child(
-        row()
-            .gap(6.0)
-            .center_y()
-            .child(icon_el(icon, 12.0, t.text_secondary))
-            .child(text(title).font(type_::SECTION).color(t.text_secondary)),
-    )
-}
+// ---- Rows and groups -----------------------------------
+// The category groups (Wave 15 grouping: Images /
+// Animation / Video / Project formats) are plain columns
+// built inline in `export_panel`, each headed by the
+// kit's `design::section_label` — the Phase N form of
+// the private section helpers this file used to keep.
+// The icon variant's heading stays a local row: a 12 pt
+// `icon_el` glyph in the secondary colour before the
+// kit label, the inline-glyph idiom frame_ops and
+// fx_browser use (Phase H).
 
 /// One format row for a full-export-only format: an `xc-`
 /// button calling the `EditorCore` op, plus its muted
@@ -967,8 +961,24 @@ fn bundle_row(
 pub fn export_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let use_range = s.export_use_range;
-    let mut panel = col().key("export-panel").w_full().gap(10.0);
-    panel = panel.child(text("Export").font(type_::TITLE).color(t.text));
+    let mut panel = design::panel_col("export-panel", t);
+    // Card header (charter §2): the kit's `panel_title`
+    // over a hairline divider. The header row has never
+    // carried a key and invents none now: it is a plain
+    // row wearing the header layout (full width, gap 8,
+    // centre-aligned), like the settings card's. The
+    // subtitle stays as the first body line under the
+    // divider — it is descriptive copy, not a count, so
+    // it does not move into the title's meta slot
+    // (P04 §3).
+    panel = panel.child(
+        row()
+            .w_full()
+            .gap(8.0)
+            .center_y()
+            .child(design::panel_title(None, "Export", None, t)),
+    );
+    panel = panel.child(design::divider(t));
     panel = panel.child(
         text("Export centre — every format in one place")
             .font(type_::LABEL)
@@ -1003,7 +1013,15 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             .color(t.text_secondary),
     );
 
-    let images = section_with_icon("image", "Images", t)
+    let images = col()
+        .gap(6.0)
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(icon_el("image", 12.0, t.text_secondary))
+                .child(design::section_label("Images", t)),
+        )
         .child(range_row(
             "xc-png",
             "image",
@@ -1030,7 +1048,15 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ));
     panel = panel.child(images);
 
-    let animation = section_with_icon("film", "Animation", t)
+    let animation = col()
+        .gap(6.0)
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(icon_el("film", 12.0, t.text_secondary))
+                .child(design::section_label("Animation", t)),
+        )
         .child(range_row(
             "xc-sheet",
             "table-cells-large",
@@ -1065,7 +1091,15 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ));
     panel = panel.child(animation);
 
-    let video = section_with_icon("video", "Video", t)
+    let video = col()
+        .gap(6.0)
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(icon_el("video", 12.0, t.text_secondary))
+                .child(design::section_label("Video", t)),
+        )
         .child(range_row(
             "xc-mp4",
             "video",
@@ -1084,7 +1118,9 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ));
     panel = panel.child(video);
 
-    let formats = section("Project formats", t)
+    let formats = col()
+        .gap(6.0)
+        .child(design::section_label("Project formats", t))
         .child(plain_row(
             "xc-v2",
             None,
@@ -1157,7 +1193,9 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         ));
     panel = panel.child(formats);
 
-    let bundles = section("Bundles", t)
+    let bundles = col()
+        .gap(6.0)
+        .child(design::section_label("Bundles", t))
         .child(bundle_row(
             "xc-bundle-images",
             "image",
@@ -1189,7 +1227,16 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
     // Recent exports: what is actually on disk in the two
     // output roots, newest first — read-only rows, no
     // open/reveal buttons (the shell has no file opener).
-    let mut recent = section_with_icon("clock", "Recent exports", t).key("xc-history");
+    let mut recent = col()
+        .gap(6.0)
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(icon_el("clock", 12.0, t.text_secondary))
+                .child(design::section_label("Recent exports", t)),
+        )
+        .key("xc-history");
     let history = recent_exports_cached();
     if history.is_empty() {
         recent = recent.child(

@@ -202,14 +202,33 @@
 //! guard's own playhead-key test — so the two buttons
 //! can never disagree about which key is "at" the
 //! playhead.
+//!
+//! Phase N (adoption) restyles the section to the
+//! charter's card language: the root is the kit
+//! `design::panel_col` under the same `keyframe-tools`
+//! key, the header is `design::panel_title` over a
+//! hairline `design::divider`, and the local `kbtn`
+//! clipboard-button dialect is deleted. Copy/Paste keys
+//! now dispatch on their unchanged guards to the shared
+//! family — `chrome_view::btn` when the guard holds,
+//! `chrome_view::btn_inert` when it does not — which is
+//! exactly the live/inert split `kbtn` itself drew: a
+//! disabled `kbtn` carried NO press handler, so no
+//! press behaviour changes, and the guards were never
+//! refusal-status sites (that is the `btn` row above
+//! them). The one visual standardisation is the inert
+//! fill: `control_off` → the family's card fill, the
+//! same delta the icon inert twins recorded in Phase I.
+//! Keys, labels, guards and handlers are byte-identical.
 
 use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, El};
+use rune::{row, text, El};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::graph::{Channel, ChannelTarget, Interp, Key, TangentPreset};
 use stykanimate_rs::graph_keys;
 
-use crate::chrome_view::btn;
+use crate::chrome_view::{btn, btn_inert};
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::{icon_btn, icon_btn_inert, icon_only_btn, icon_only_btn_inert};
 use crate::State;
 
@@ -993,31 +1012,6 @@ pub fn copy_key_to_frame(s: &mut State) {
     copy_key_to_frame_core(&mut s.core);
 }
 
-/// One clipboard button, in the chrome's metrics
-/// (`chrome_view::btn`). When `enabled` is false the button
-/// renders muted (off fill, secondary text) and carries NO
-/// press handler — an inert element, not a control that
-/// silently does nothing (the pose_tools muting pattern).
-fn kbtn(
-    key: &str,
-    label: &str,
-    enabled: bool,
-    t: &Theme,
-    f: impl Fn(&mut State) + 'static,
-) -> El {
-    let base = el().key(key).px(10.0).py(5.0).radius(6.0);
-    if enabled {
-        base.fill(t.card)
-            .hover(t.control_track)
-            .press(t.control_off)
-            .on_press(f)
-            .child(text(label).font(type_::LABEL).color(t.text))
-    } else {
-        base.fill(t.control_off)
-            .child(text(label).font(type_::LABEL).color(t.text_secondary))
-    }
-}
-
 /// Element key of the dedicated no-joint note row
 /// (Phase J). The note lives under this key, in its own
 /// row — never inside the actions row below.
@@ -1108,11 +1102,15 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
             move |s: &mut State| s.core.apply_graph_ease_preset(preset),
         ));
     }
-    col()
-        .key("keyframe-tools")
-        .w_full()
-        .gap(6.0)
-        .child(text("Keyframes").font(type_::TITLE).color(t.text))
+    design::panel_col("keyframe-tools", t)
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(None, "Keyframes", None, t)),
+        )
+        .child(design::divider(t))
         .child(
             // The target slot (Phase J): the no-joint
             // note gets its own row; a selected joint
@@ -1149,20 +1147,18 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
             row()
                 .key("keyframe-clipboard")
                 .gap(6.0)
-                .child(kbtn(
-                    "key-copy",
-                    "Copy keys",
-                    selected_angle_channel_index(core).is_some(),
-                    t,
-                    |s| copy_keys_here(s),
-                ))
-                .child(kbtn(
-                    "key-paste",
-                    "Paste keys",
-                    s.key_clipboard.as_ref().is_some_and(|k| !k.is_empty()),
-                    t,
-                    |s| paste_keys_here(s),
-                ))
+                .child(if selected_angle_channel_index(core).is_some() {
+                    btn("key-copy", "Copy keys", false, t, |s| copy_keys_here(s))
+                } else {
+                    btn_inert("key-copy", "Copy keys", t)
+                })
+                .child(if s.key_clipboard.as_ref().is_some_and(|k| !k.is_empty()) {
+                    btn("key-paste", "Paste keys", false, t, |s| {
+                        paste_keys_here(s)
+                    })
+                } else {
+                    btn_inert("key-paste", "Paste keys", t)
+                })
                 .child(if clear_channel_enabled(core) {
                     icon_btn(
                         "key-clear-channel",

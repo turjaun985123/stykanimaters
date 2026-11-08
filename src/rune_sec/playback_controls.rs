@@ -122,6 +122,20 @@
 //!   the `loop-start` / `loop-end` buttons further down,
 //!   which SET the range ends to the current frame; these
 //!   jump TO them.
+//! * **Card adoption** (Phase N) — the panel root is the
+//!   kit card (`design::panel_col`, key `playback-
+//!   controls` unchanged) with a `design::panel_title`
+//!   header and a hairline divider; the private
+//!   `section()` helper is retired onto
+//!   `design::section_label` (section texts byte-
+//!   identical, several of them dynamic). The timecode
+//!   readout's font goes TITLE → MONO_CAPTION with the
+//!   Mono family applied (the charter §12 numeric
+//!   treatment, mirroring the status strip's
+//!   `numeric_font`). The loop toggle, speed cycler,
+//!   tween toggle and fps steppers stay on the button
+//!   family by ruling — state buttons with labels, not
+//!   kit switch-rows.
 //!
 //! `State` fields: everything reads `s.core` live
 //! (`project.fps` `model.rs:683`, `loop_range`, `current`,
@@ -132,10 +146,11 @@
 //! `State::playback_speed` (integrator-owned, initialised
 //! `1.0`).
 
-use rune::tok::{type_, Theme};
-use rune::{col, row, text, El};
+use rune::tok::{self, type_, Theme};
+use rune::{row, text, El};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::timeline_marks::graph_key_frame;
 use crate::State;
@@ -443,10 +458,14 @@ pub fn timecode_label(current_frame: usize, frame_count: usize, fps: f32) -> Str
     )
 }
 
-/// A muted section heading inside the panel (same helper
-/// shape as the other `rune_sec` panels).
-fn section(label: String, t: &Theme) -> El {
-    text(label).font(type_::LABEL).color(t.text_secondary)
+/// The numeric readout style (charter §12, mirroring the
+/// status strip's `numeric_font`): `type_::MONO_CAPTION`
+/// with the Mono family actually applied — the token
+/// alone keeps the Sans family in the pinned Rune rev.
+/// Used by the timecode readout only; every other label
+/// in the panel stays on its existing font.
+fn numeric_font() -> tok::TextStyle {
+    type_::MONO_CAPTION.mono()
 }
 
 /// The playback extras panel body. Mounting (and any
@@ -475,17 +494,19 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
         .get(core.current)
         .map(|f| f.duration);
 
-    let mut panel = col()
-        .key("playback-controls")
-        .gap(8.0)
-        .padding(10.0)
-        .fill(t.card)
-        .radius(8.0)
-        .child(text("Playback").font(type_::TITLE).color(t.text));
+    let mut panel = design::panel_col("playback-controls", t)
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(None, "Playback", None, t)),
+        )
+        .child(design::divider(t));
 
     // ---- Transport basics: restart from the top, or play
     // from the loop range's start (frame 0 without a range).
-    panel = panel.child(section("Transport".to_string(), t));
+    panel = panel.child(design::section_label("Transport", t));
     panel = panel.child(
         row()
             .gap(6.0)
@@ -529,7 +550,7 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
     // advance_play always performs. Off = poll pauses at the
     // end (see should_stop_at_end); the button itself only
     // flips the State flag — no core call, no undo snapshot.
-    panel = panel.child(section("Loop playback".to_string(), t));
+    panel = panel.child(design::section_label("Loop playback", t));
     let mut loop_row = row()
         .gap(6.0)
         .center_y()
@@ -566,18 +587,21 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
                 }
             }));
     }
-    loop_row = loop_row.child(section(
+    loop_row = loop_row.child(design::section_label(
         if loop_playback {
-            "On — wraps at the end".to_string()
+            "On — wraps at the end"
         } else {
-            "Off — stops at the end".to_string()
+            "Off — stops at the end"
         },
         t,
     ));
     panel = panel.child(loop_row);
 
     // ---- Frame rate: stepper + current-rate readout.
-    panel = panel.child(section(format!("Frame rate — now {}", fps_text(fps)), t));
+    panel = panel.child(design::section_label(
+        &format!("Frame rate — now {}", fps_text(fps)),
+        t,
+    ));
     let mut rate_row = row().gap(6.0).center_y();
     rate_row = rate_row.child(btn("fps-dn", "FPS −", false, t, |s| {
         s.core.adjust_fps(-1.0);
@@ -605,7 +629,7 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
     panel = panel.child(preset_row);
 
     // ---- Tween playback toggle (project.tween_playback).
-    panel = panel.child(section("Tween playback".to_string(), t));
+    panel = panel.child(design::section_label("Tween playback", t));
     panel = panel.child(
         row()
             .gap(6.0)
@@ -613,11 +637,11 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
             .child(btn("tween", "Tween play", tween_on, t, |s| {
                 s.core.toggle_tween_playback();
             }))
-            .child(section(
+            .child(design::section_label(
                 if tween_on {
-                    "On — in-between frames while playing".to_string()
+                    "On — in-between frames while playing"
                 } else {
-                    "Off — authored frames only".to_string()
+                    "Off — authored frames only"
                 },
                 t,
             )),
@@ -625,7 +649,7 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
 
     // ---- Loop range: move either end to the current frame
     // (GPUI handlers verbatim), or clear.
-    panel = panel.child(section(loop_range_text(loop_range), t));
+    panel = panel.child(design::section_label(&loop_range_text(loop_range), t));
     panel = panel.child(
         row()
             .gap(6.0)
@@ -659,8 +683,8 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
 
     // ---- Current-frame duration stepper (0.5x / 2x, the
     // GPUI factors; the op clamps 0.25..=8.0).
-    panel = panel.child(section(
-        match cur_duration {
+    panel = panel.child(design::section_label(
+        &match cur_duration {
             Some(d) => format!(
                 "Frame {} duration — now {}",
                 core.current + 1,
@@ -683,11 +707,11 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
     );
 
     // ---- Timecode readout (read-only).
-    panel = panel.child(section("Time".to_string(), t));
+    panel = panel.child(design::section_label("Time", t));
     panel = panel.child(
         text(timecode_label(core.current, core.frame_count(), fps))
             .key("timecode")
-            .font(type_::TITLE)
+            .font(numeric_font())
             .color(t.text),
     );
 

@@ -109,6 +109,27 @@
 //! and the Recent row keeps the bare labels (it is a
 //! shortcut row, not part of the grid).
 //!
+//! Phase N restyles the panel onto the charter's card
+//! language: the root is the kit card
+//! (`design::panel_col`, key `fx-browser` unchanged)
+//! with a `design::panel_title` header — the
+//! `wand-magic-sparkles` glyph P13 §3b assigns this
+//! panel — over a hairline `design::divider`; section
+//! headings render through `design::section_label`
+//! (the local LABEL helper retired; the icon-led
+//! variant keeps its 12 pt leading glyph). The kind
+//! buttons now lead with their category's glyph via
+//! `icon_btn` (P13 §1's optional polish, taken): keys,
+//! labels — including the Phase K counted form — and
+//! press behaviour are byte-identical, and only the
+//! Phase H note above ("keep their text labels") is
+//! superseded, in that the labels now follow a glyph.
+//! The preset-save button gains `floppy-disk` (P13
+//! Tier A). Recent and preset-apply buttons stay
+//! plain text (P13's keep-text list rows); the two
+//! muted empty lines stay as they are — no glyph is
+//! assigned to either state in any plan.
+//!
 //! Integrator wiring for the state: add
 //! `pub fx_browser: rune_sec::fx_browser::FxBrowserState`
 //! to `State`, initialise it with
@@ -132,11 +153,13 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
-use rune::{col, row, text, text_input, El, TextEdit};
+use rune::{row, text, text_input, El, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::vfx::ClipKind;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
+use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::icons::icon_el;
 use crate::State;
 
@@ -242,11 +265,11 @@ pub fn kind_button_label(core: &EditorCore, entry: &FxKindEntry) -> String {
     }
 }
 
-/// A muted section heading inside the panel.
+/// A muted section heading inside the panel (Phase N:
+/// the kit's [`design::section_label`] — SECTION in
+/// `text_secondary`; the local LABEL rendering retired).
 fn section(label: &str, t: &Theme) -> El {
-    text(label.to_string())
-        .font(type_::LABEL)
-        .color(t.text_secondary)
+    design::section_label(label, t)
 }
 
 /// The Font Awesome glyph shown before a category
@@ -281,11 +304,7 @@ fn section_with_icon(icon: Option<&str>, label: &str, t: &Theme) -> El {
         .gap(6.0)
         .center_y()
         .child(icon_el(icon, 12.0, t.text_secondary))
-        .child(
-            text(label.to_string())
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        )
+        .child(design::section_label(label, t))
 }
 
 // ----------------------------------------------------------------
@@ -498,13 +517,20 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let query = s.fx_browser.query.text.clone();
 
-    let mut panel = col()
-        .key("fx-browser")
-        .gap(8.0)
-        .padding(10.0)
-        .fill(t.card)
-        .radius(8.0)
-        .child(text("Effects").font(type_::TITLE).color(t.text));
+    let mut panel = design::panel_col("fx-browser", t)
+        .child(
+            row()
+                .w_full()
+                .gap(design::PANEL_GAP)
+                .center_y()
+                .child(design::panel_title(
+                    Some("wand-magic-sparkles"),
+                    "Effects",
+                    None,
+                    t,
+                )),
+        )
+        .child(design::divider(t));
 
     // ---- Filter field (Phase F): substring-filters the
     // kind grid below through `visible_categories`.
@@ -563,20 +589,26 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
             let mut kinds_row = row().gap(6.0);
             for entry in chunk {
                 let kind = entry.kind;
-                kinds_row = kinds_row.child(btn(
-                    entry.key,
-                    // Phase K: the counted label — bare
-                    // at zero usage, "{label} · {n}" once
-                    // the project holds the kind. Key and
-                    // press behaviour are unchanged.
-                    &kind_button_label(core, entry),
-                    false,
-                    t,
-                    move |s| {
-                        record_recent(&mut s.fx_browser.recent, kind);
-                        s.core.add_fx_clip(kind);
-                    },
-                ));
+                // Phase K: the counted label — bare
+                // at zero usage, "{label} · {n}" once
+                // the project holds the kind. Key and
+                // press behaviour are unchanged.
+                let label = kind_button_label(core, entry);
+                let press = move |s: &mut State| {
+                    record_recent(&mut s.fx_browser.recent, kind);
+                    s.core.add_fx_clip(kind);
+                };
+                // Phase N (P13 §1, adopter's call taken):
+                // the button leads with its category's
+                // glyph via `icon_btn`; the kind name —
+                // the content — stays the label. A kind
+                // whose category had no glyph would fall
+                // back to the plain family `btn` (all
+                // five categories resolve today).
+                kinds_row = kinds_row.child(match category_icon(entry.category) {
+                    Some(icon) => icon_btn(entry.key, icon, &label, false, t, press),
+                    None => btn(entry.key, &label, false, t, press),
+                });
             }
             panel = panel.child(kinds_row);
         }
@@ -608,8 +640,11 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
         }
     }
     if !core.project.fx_clips.is_empty() {
-        panel = panel.child(btn(
+        // Phase N (P13 Tier A): Save carries the
+        // shell-wide save glyph, `floppy-disk`.
+        panel = panel.child(icon_btn(
             "fx-preset-save",
+            "floppy-disk",
             "Save last clip as preset",
             false,
             t,

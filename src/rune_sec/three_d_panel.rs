@@ -51,7 +51,7 @@
 //!   labels, active flags and handlers are unchanged —
 //!   including the GPUI-era `save-pose-3d` /
 //!   `pose3d-lib-{i}` keys the Phase G §36 audit kept
-//!   deliberately. Dimmed buttons go through [`ictl`].
+//!   deliberately. Dimmed buttons go through `ictl`.
 //!
 //! - Preview (Phase L): the panel's top now carries a
 //!   live viewport — a canvas (`panel-3d-preview`, sized
@@ -69,7 +69,7 @@
 //!   move through the pure [`orbit_degrees`] helper
 //!   (0.4° per point, dragging up pitches up). The
 //!   Grid toggle (`d3-grid-toggle`) flips
-//!   `fig3_preview`'s grid flag through [`ictl`]
+//!   `fig3_preview`'s grid flag through `ictl`
 //!   with the `border-all` glyph — the glyph was
 //!   absent at this section's first census and
 //!   landed mid-phase (Phase L §30), so the icon
@@ -82,9 +82,9 @@
 //!   `fig3_orbit`.
 //!
 //! - Preview framing + zoom (Phase M): the Preview row
-//!   also carries Frame (`d3-frame`, [`ictl`] with the
+//!   also carries Frame (`d3-frame`, `ictl` with the
 //!   `expand` glyph) and the distance steppers
-//!   `d3-zoom-dn` / `d3-zoom-up` ([`ctl`]). Frame runs
+//!   `d3-zoom-dn` / `d3-zoom-up` (`ctl`). Frame runs
 //!   the closed-form `fig3d::frame_camera_points` over
 //!   the evaluated session points at the preview's own
 //!   aspect and writes back only the returned target
@@ -99,24 +99,40 @@
 //!   it: snapshot-free.
 //!
 //! Controls that need a live session render dimmed when
-//! there is none. The text controls ([`ctl`]) stay
+//! there is none. The text controls (`ctl`) stay
 //! **dimmed but wired**: the press still fires, and the
 //! op/helper answers "Enter 3D mode first." in the status
 //! line, so the muted look never hides a dead button.
-//! The icon library controls ([`ictl`]) went inert in
+//! The icon library controls (`ictl`) went inert in
 //! Phase I instead: with no session they render through
 //! `icon_btn::icon_btn_inert` — same box, glyph and label
 //! in the muted colour, and no press handler at all.
+//!
+//! - Phase N adoption: the root is the kit card
+//!   (`design::panel_col`), the header is
+//!   `design::panel_title` over a `design::divider`, and
+//!   the group captions come from
+//!   `design::section_label`. The local `ctl` / `ictl`
+//!   dialects are retired — call sites dispatch on the
+//!   same `dim` flag directly: text controls to
+//!   `chrome_view::btn` when live and
+//!   `chrome_view::btn_muted_live` when dimmed (the
+//!   muted visual with the handler kept, so the op's
+//!   "Enter 3D mode first." refusal still answers), icon
+//!   controls to `icon_btn` when live and
+//!   `icon_btn_inert` when dimmed. Keys, labels and
+//!   handlers are unchanged at every site.
 //!
 //! Element keys reuse the old GPUI control ids where one
 //! existed (`mode-3d`, `bake-3d`, …) so headless `--tree`
 //! checks keep finding them.
 
 use rune::tok::{type_, Theme};
-use rune::{canvas, col, el, row, text, Drag, El, LineCap, Phase, Shape, Tx};
+use rune::{canvas, row, text, Drag, El, LineCap, Phase, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::fig3d;
 
+use crate::rune_sec::design;
 use crate::rune_sec::fig3_preview;
 use crate::rune_sec::icon_btn::{icon_btn, icon_btn_inert};
 use crate::rune_sec::icons::icon_el;
@@ -625,72 +641,6 @@ pub fn camera_readout_text(core: &EditorCore) -> Option<String> {
     ))
 }
 
-/// A panel button. Live buttons delegate to
-/// `chrome_view::btn` so the geometry matches the rest of
-/// the chrome exactly; `dim` renders the same shape muted
-/// (track fill, secondary text, no hover/press change) but
-/// keeps the handler wired — see the module docs.
-fn ctl(
-    key: &str,
-    label: &str,
-    active: bool,
-    dim: bool,
-    t: &Theme,
-    f: impl Fn(&mut State) + 'static,
-) -> El {
-    if !dim {
-        return crate::chrome_view::btn(key, label, active, t, f);
-    }
-    el()
-        .key(key)
-        .px(10.0)
-        .py(5.0)
-        .radius(6.0)
-        .fill(t.control_off)
-        .hover(t.control_off)
-        .press(t.control_off)
-        .on_press(f)
-        .child(text(label).font(type_::LABEL).color(t.text_secondary))
-}
-
-/// A panel button with a Font Awesome glyph (Phase H):
-/// [`ctl`]'s icon-bearing sibling for the library
-/// controls. Live buttons delegate to
-/// `icon_btn::icon_btn` — the glyph-and-label button that
-/// mirrors the kit button's styling value for value.
-///
-/// `dim` (Phase I) delegates to
-/// `icon_btn::icon_btn_inert`, the shared inert variant:
-/// the same box, glyph and label in the muted colour,
-/// and NO press handler at all. Phase H's dim branch
-/// hand-rolled [`ctl`]'s muted-but-wired shape here; the
-/// inert form is stronger — with no session a press
-/// cannot fire the refusing op, so there is no status
-/// churn and nothing to snapshot. The dimming condition
-/// itself is unchanged: callers pass the same `dim` they
-/// always did, and the handler argument is simply not
-/// attached on the dim branch.
-fn ictl(
-    key: &str,
-    icon: &str,
-    label: &str,
-    active: bool,
-    dim: bool,
-    t: &Theme,
-    f: impl Fn(&mut State) + 'static,
-) -> El {
-    if !dim {
-        return icon_btn(key, icon, label, active, t, f);
-    }
-    icon_btn_inert(key, icon, label, t)
-}
-
-fn section_label(text_: &str, t: &Theme) -> El {
-    text(text_.to_string())
-        .font(type_::LABEL)
-        .color(t.text_secondary)
-}
-
 /// The 3D preview canvas's element key (Phase L). A named
 /// constant so the tests can pin the string the headless
 /// `--tree` probes look for — an element's key is not
@@ -807,32 +757,28 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
     let dim = !in_session;
     let pose_b_marked = core.fig3.as_ref().is_some_and(|st| st.pose_b.is_some());
 
-    let mut panel = col()
-        .key("panel-3d")
-        .w_full()
-        .gap(8.0)
-        .padding(12.0)
-        .radius(8.0)
-        .fill(t.card)
+    let mut panel = design::panel_col("panel-3d", t)
         .child(
             row()
+                .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(icon_el("cube", 14.0, t.text))
-                .child(
-                    text("3D")
-                        .font(type_::TITLE)
-                        .color(t.text)
-                        .grow(1.0),
-                )
-                .child(ctl("mode-3d", toggle_label(in_session), in_session, false, t, |s| {
-                    if s.core.fig3.is_some() {
-                        s.core.exit_3d();
-                    } else {
-                        s.core.enter_3d();
-                    }
-                })),
+                .child(design::panel_title(Some("cube"), "3D", None, t))
+                .child(crate::chrome_view::btn(
+                    "mode-3d",
+                    toggle_label(in_session),
+                    in_session,
+                    t,
+                    |s| {
+                        if s.core.fig3.is_some() {
+                            s.core.exit_3d();
+                        } else {
+                            s.core.enter_3d();
+                        }
+                    },
+                )),
         )
+        .child(design::divider(t))
         // Preview viewport (Phase L): the session figure
         // projected live, at the top of the panel above
         // the control groups; dragging it orbits the
@@ -845,13 +791,12 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(section_label("Preview", t))
-                .child(ictl(
+                .child(design::section_label("Preview", t))
+                .child(icon_btn(
                     "d3-grid-toggle",
                     "border-all",
                     "Grid",
                     fig3_preview::grid_visible(),
-                    false,
                     t,
                     |_s| {
                         fig3_preview::toggle_grid();
@@ -860,19 +805,36 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 // Frame + distance steppers (Phase M):
                 // Frame fits the whole figure into the
                 // preview (target + distance only, via
-                // ictl's inert-when-no-session form); the
-                // − / + steppers scale the camera distance
-                // (ctl's dimmed-but-wired form, like the
-                // camera preset row).
-                .child(ictl("d3-frame", FRAME_ICON, "Frame", false, dim, t, |s| {
-                    apply_frame_preview(&mut s.core);
-                }))
-                .child(ctl("d3-zoom-dn", "−", false, dim, t, |s| {
-                    apply_preview_zoom(&mut s.core, -1);
-                }))
-                .child(ctl("d3-zoom-up", "+", false, dim, t, |s| {
-                    apply_preview_zoom(&mut s.core, 1);
-                })),
+                // the icon family's inert-when-no-session
+                // form); the − / + steppers scale the
+                // camera distance (the text family's
+                // dimmed-but-wired form, like the camera
+                // preset row).
+                .child(if dim {
+                    icon_btn_inert("d3-frame", FRAME_ICON, "Frame", t)
+                } else {
+                    icon_btn("d3-frame", FRAME_ICON, "Frame", false, t, |s| {
+                        apply_frame_preview(&mut s.core);
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("d3-zoom-dn", "−", false, t, |s| {
+                        apply_preview_zoom(&mut s.core, -1);
+                    })
+                } else {
+                    crate::chrome_view::btn("d3-zoom-dn", "−", false, t, |s| {
+                        apply_preview_zoom(&mut s.core, -1);
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("d3-zoom-up", "+", false, t, |s| {
+                        apply_preview_zoom(&mut s.core, 1);
+                    })
+                } else {
+                    crate::chrome_view::btn("d3-zoom-up", "+", false, t, |s| {
+                        apply_preview_zoom(&mut s.core, 1);
+                    })
+                }),
         )
         .child(
             text(session_summary(core))
@@ -884,37 +846,66 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(ctl("joint-3d", "Joint>", false, dim, t, |s| {
-                    s.core.fig3_select_next()
-                }))
-                .child(ctl("rotx-3d", "RotX +15", false, dim, t, |s| {
-                    s.core.fig3_rotate(0, 15.0)
-                }))
-                .child(ctl("roty-3d", "RotY +15", false, dim, t, |s| {
-                    s.core.fig3_rotate(1, 15.0)
-                }))
-                .child(ctl("rotz-3d", "RotZ +15", false, dim, t, |s| {
-                    s.core.fig3_rotate(2, 15.0)
-                }))
-                .child(ctl("orbit-3d", "Orbit +15", false, dim, t, |s| {
-                    s.core.fig3_orbit(15.0, 0.0)
-                })),
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("joint-3d", "Joint>", false, t, |s| {
+                        s.core.fig3_select_next()
+                    })
+                } else {
+                    crate::chrome_view::btn("joint-3d", "Joint>", false, t, |s| {
+                        s.core.fig3_select_next()
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("rotx-3d", "RotX +15", false, t, |s| {
+                        s.core.fig3_rotate(0, 15.0)
+                    })
+                } else {
+                    crate::chrome_view::btn("rotx-3d", "RotX +15", false, t, |s| {
+                        s.core.fig3_rotate(0, 15.0)
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("roty-3d", "RotY +15", false, t, |s| {
+                        s.core.fig3_rotate(1, 15.0)
+                    })
+                } else {
+                    crate::chrome_view::btn("roty-3d", "RotY +15", false, t, |s| {
+                        s.core.fig3_rotate(1, 15.0)
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("rotz-3d", "RotZ +15", false, t, |s| {
+                        s.core.fig3_rotate(2, 15.0)
+                    })
+                } else {
+                    crate::chrome_view::btn("rotz-3d", "RotZ +15", false, t, |s| {
+                        s.core.fig3_rotate(2, 15.0)
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("orbit-3d", "Orbit +15", false, t, |s| {
+                        s.core.fig3_orbit(15.0, 0.0)
+                    })
+                } else {
+                    crate::chrome_view::btn("orbit-3d", "Orbit +15", false, t, |s| {
+                        s.core.fig3_orbit(15.0, 0.0)
+                    })
+                }),
         );
 
     // Joint list: one row per joint of the session figure;
     // pressing a row selects that joint directly (the field
     // `fig3_select_next` cycles), the current joint renders
     // active. Without a session there is no figure to list.
-    panel = panel.child(section_label("Joints", t));
+    panel = panel.child(design::section_label("Joints", t));
     if in_session {
         let selected = core.fig3.as_ref().unwrap().selected;
         for (i, name) in joint_rows(core) {
             panel = panel.child(
-                row().gap(6.0).center_y().child(ctl(
+                row().gap(6.0).center_y().child(crate::chrome_view::btn(
                     &format!("joint-sel-3d-{i}"),
                     &format!("{i} · {name}"),
                     i == selected,
-                    false,
                     t,
                     move |s| {
                         select_joint(&mut s.core, i);
@@ -940,7 +931,7 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 row()
                     .gap(6.0)
                     .center_y()
-                    .child(section_label("Position", t))
+                    .child(design::section_label("Position", t))
                     .child(text(line).font(type_::LABEL).color(t.text)),
             );
         }
@@ -952,22 +943,64 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(section_label("Camera", t))
-                .child(ctl("cam-front-3d", "Front", false, dim, t, |s| {
-                    apply_camera_preset(&mut s.core, "front");
-                }))
-                .child(ctl("cam-side-3d", "Side", false, dim, t, |s| {
-                    apply_camera_preset(&mut s.core, "side");
-                }))
-                .child(ctl("cam-three-quarter-3d", "3/4", false, dim, t, |s| {
-                    apply_camera_preset(&mut s.core, "three-quarter");
-                }))
-                .child(ctl("cam-top-3d", "Top", false, dim, t, |s| {
-                    apply_camera_preset(&mut s.core, "top");
-                }))
-                .child(ctl("cam-frame-3d", "Frame camera", false, dim, t, |s| {
-                    apply_frame_camera(&mut s.core);
-                })),
+                .child(design::section_label("Camera", t))
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("cam-front-3d", "Front", false, t, |s| {
+                        apply_camera_preset(&mut s.core, "front");
+                    })
+                } else {
+                    crate::chrome_view::btn("cam-front-3d", "Front", false, t, |s| {
+                        apply_camera_preset(&mut s.core, "front");
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("cam-side-3d", "Side", false, t, |s| {
+                        apply_camera_preset(&mut s.core, "side");
+                    })
+                } else {
+                    crate::chrome_view::btn("cam-side-3d", "Side", false, t, |s| {
+                        apply_camera_preset(&mut s.core, "side");
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live(
+                        "cam-three-quarter-3d",
+                        "3/4",
+                        false,
+                        t,
+                        |s| {
+                            apply_camera_preset(&mut s.core, "three-quarter");
+                        },
+                    )
+                } else {
+                    crate::chrome_view::btn("cam-three-quarter-3d", "3/4", false, t, |s| {
+                        apply_camera_preset(&mut s.core, "three-quarter");
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("cam-top-3d", "Top", false, t, |s| {
+                        apply_camera_preset(&mut s.core, "top");
+                    })
+                } else {
+                    crate::chrome_view::btn("cam-top-3d", "Top", false, t, |s| {
+                        apply_camera_preset(&mut s.core, "top");
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live(
+                        "cam-frame-3d",
+                        "Frame camera",
+                        false,
+                        t,
+                        |s| {
+                            apply_frame_camera(&mut s.core);
+                        },
+                    )
+                } else {
+                    crate::chrome_view::btn("cam-frame-3d", "Frame camera", false, t, |s| {
+                        apply_frame_camera(&mut s.core);
+                    })
+                }),
         );
 
     // Camera orbit readout (Phase F): azimuth / elevation /
@@ -981,7 +1014,7 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 row()
                     .gap(6.0)
                     .center_y()
-                    .child(section_label("Orbit", t))
+                    .child(design::section_label("Orbit", t))
                     .child(text(line).font(type_::LABEL).color(t.text)),
             );
         }
@@ -993,19 +1026,43 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(section_label("IK", t))
-                .child(ctl("ik-arm-l-3d", "Arm L", false, dim, t, |s| {
-                    apply_ik(&mut s.core, Limb::ArmL);
-                }))
-                .child(ctl("ik-arm-r-3d", "Arm R", false, dim, t, |s| {
-                    apply_ik(&mut s.core, Limb::ArmR);
-                }))
-                .child(ctl("ik-leg-l-3d", "Leg L", false, dim, t, |s| {
-                    apply_ik(&mut s.core, Limb::LegL);
-                }))
-                .child(ctl("ik-leg-r-3d", "Leg R", false, dim, t, |s| {
-                    apply_ik(&mut s.core, Limb::LegR);
-                })),
+                .child(design::section_label("IK", t))
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("ik-arm-l-3d", "Arm L", false, t, |s| {
+                        apply_ik(&mut s.core, Limb::ArmL);
+                    })
+                } else {
+                    crate::chrome_view::btn("ik-arm-l-3d", "Arm L", false, t, |s| {
+                        apply_ik(&mut s.core, Limb::ArmL);
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("ik-arm-r-3d", "Arm R", false, t, |s| {
+                        apply_ik(&mut s.core, Limb::ArmR);
+                    })
+                } else {
+                    crate::chrome_view::btn("ik-arm-r-3d", "Arm R", false, t, |s| {
+                        apply_ik(&mut s.core, Limb::ArmR);
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("ik-leg-l-3d", "Leg L", false, t, |s| {
+                        apply_ik(&mut s.core, Limb::LegL);
+                    })
+                } else {
+                    crate::chrome_view::btn("ik-leg-l-3d", "Leg L", false, t, |s| {
+                        apply_ik(&mut s.core, Limb::LegL);
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("ik-leg-r-3d", "Leg R", false, t, |s| {
+                        apply_ik(&mut s.core, Limb::LegR);
+                    })
+                } else {
+                    crate::chrome_view::btn("ik-leg-r-3d", "Leg R", false, t, |s| {
+                        apply_ik(&mut s.core, Limb::LegR);
+                    })
+                }),
         )
         // Bake: pose B mark, animation to frames, still to a
         // 2D figure. 8 frames matches the GPUI Bake anim.
@@ -1013,16 +1070,46 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(section_label("Bake", t))
-                .child(ctl("mark-b-3d", "Mark pose B", pose_b_marked, dim, t, |s| {
-                    s.core.fig3_mark_pose_b()
-                }))
-                .child(ctl("bake-anim-3d", "Bake to frames", false, dim, t, |s| {
-                    s.core.fig3_bake_animation(8)
-                }))
-                .child(ctl("bake-3d", "Bake to 2D", false, dim, t, |s| {
-                    s.core.fig3_bake()
-                })),
+                .child(design::section_label("Bake", t))
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live(
+                        "mark-b-3d",
+                        "Mark pose B",
+                        pose_b_marked,
+                        t,
+                        |s| {
+                            s.core.fig3_mark_pose_b()
+                        },
+                    )
+                } else {
+                    crate::chrome_view::btn("mark-b-3d", "Mark pose B", pose_b_marked, t, |s| {
+                        s.core.fig3_mark_pose_b()
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live(
+                        "bake-anim-3d",
+                        "Bake to frames",
+                        false,
+                        t,
+                        |s| {
+                            s.core.fig3_bake_animation(8)
+                        },
+                    )
+                } else {
+                    crate::chrome_view::btn("bake-anim-3d", "Bake to frames", false, t, |s| {
+                        s.core.fig3_bake_animation(8)
+                    })
+                })
+                .child(if dim {
+                    crate::chrome_view::btn_muted_live("bake-3d", "Bake to 2D", false, t, |s| {
+                        s.core.fig3_bake()
+                    })
+                } else {
+                    crate::chrome_view::btn("bake-3d", "Bake to 2D", false, t, |s| {
+                        s.core.fig3_bake()
+                    })
+                }),
         );
 
     // Figure library: names from the core's scan of
@@ -1034,10 +1121,14 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             .gap(6.0)
             .center_y()
             .child(icon_el("cube", 12.0, t.text_secondary))
-            .child(section_label("Figure library", t).grow(1.0))
-            .child(ictl("save-3d", "floppy-disk", "Save current", false, dim, t, |s| {
-                s.core.fig3_save_to_library()
-            })),
+            .child(design::section_label("Figure library", t).grow(1.0))
+            .child(if dim {
+                icon_btn_inert("save-3d", "floppy-disk", "Save current", t)
+            } else {
+                icon_btn("save-3d", "floppy-disk", "Save current", false, t, |s| {
+                    s.core.fig3_save_to_library()
+                })
+            }),
     );
     let figures = core.fig3_library_list();
     if figures.is_empty() {
@@ -1080,13 +1171,21 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             .gap(6.0)
             .center_y()
             .child(icon_el("cube", 12.0, t.text_secondary))
-            .child(section_label("Pose library", t).grow(1.0))
-            .child(ictl("save-pose-3d", "floppy-disk", "Save pose", false, dim, t, |s| {
-                save_current_pose(&mut s.core);
-            }))
-            .child(ictl("mirror-pose-3d", MIRROR_ICON, "Mirror pose", false, dim, t, |s| {
-                apply_mirror_pose(&mut s.core);
-            })),
+            .child(design::section_label("Pose library", t).grow(1.0))
+            .child(if dim {
+                icon_btn_inert("save-pose-3d", "floppy-disk", "Save pose", t)
+            } else {
+                icon_btn("save-pose-3d", "floppy-disk", "Save pose", false, t, |s| {
+                    save_current_pose(&mut s.core);
+                })
+            })
+            .child(if dim {
+                icon_btn_inert("mirror-pose-3d", MIRROR_ICON, "Mirror pose", t)
+            } else {
+                icon_btn("mirror-pose-3d", MIRROR_ICON, "Mirror pose", false, t, |s| {
+                    apply_mirror_pose(&mut s.core);
+                })
+            }),
     );
     let poses = fig3d::scan_pose_library();
     if poses.is_empty() {
@@ -1108,17 +1207,20 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                         .color(t.text)
                         .grow(1.0),
                 )
-                .child(ictl(
-                    &format!("pose3d-lib-{i}"),
-                    "check",
-                    "Apply",
-                    false,
-                    dim,
-                    t,
-                    move |s| {
-                        apply_pose(&mut s.core, &pose_name);
-                    },
-                )),
+                .child(if dim {
+                    icon_btn_inert(&format!("pose3d-lib-{i}"), "check", "Apply", t)
+                } else {
+                    icon_btn(
+                        &format!("pose3d-lib-{i}"),
+                        "check",
+                        "Apply",
+                        false,
+                        t,
+                        move |s| {
+                            apply_pose(&mut s.core, &pose_name);
+                        },
+                    )
+                }),
         );
     }
 
@@ -1515,17 +1617,21 @@ mod tests {
     }
 
     #[test]
-    fn ictl_builds_live_and_inert_forms() {
+    fn icon_controls_build_live_and_inert_forms() {
         // Element construction is pure (a press needs a
-        // Runtime), so this pins that both branches of the
+        // Runtime), so this pins that both forms of the
         // Phase I migration construct: live → `icon_btn`,
         // dim → `icon_btn_inert`. The dimming condition is
-        // the caller's `dim` flag, unchanged.
+        // the caller's `dim` flag, unchanged. (Phase N
+        // retired the local `ictl` dispatch wrapper; this
+        // test — formerly `ictl_builds_live_and_inert_forms`
+        // — now builds the family members the call sites
+        // dispatch to directly, under the same keys.)
         let t = rune::tok::theme(true);
-        let _ = ictl("k-live", "floppy-disk", "Save pose", false, false, &t, |_| {});
-        let _ = ictl("k-dim", "floppy-disk", "Save pose", false, true, &t, |_| {});
-        let _ = ictl("k-dim-mirror", MIRROR_ICON, "Mirror pose", false, true, &t, |_| {});
-        let _ = ictl("k-dim-apply", "check", "Apply", false, true, &t, |_| {});
+        let _ = icon_btn("k-live", "floppy-disk", "Save pose", false, &t, |_| {});
+        let _ = icon_btn_inert("k-dim", "floppy-disk", "Save pose", &t);
+        let _ = icon_btn_inert("k-dim-mirror", MIRROR_ICON, "Mirror pose", &t);
+        let _ = icon_btn_inert("k-dim-apply", "check", "Apply", &t);
     }
 
     // ---- Preview framing + zoom (Phase M) ----

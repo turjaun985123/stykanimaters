@@ -172,6 +172,30 @@
 //! capture-before-write behaviour for later opens is
 //! unchanged.
 //!
+//! ## Phase N adoption — the card language
+//!
+//! The panel root is the kit card ([`design::panel_col`]
+//! on the existing `home-panel` key); the old hand-rolled
+//! inner card (`home-card`) is a plain column inside it.
+//! The `home-header` row is the kit header
+//! ([`design::header_row`] + [`design::panel_title`])
+//! with a [`design::divider`] under it. Project rows are
+//! kit list rows ([`design::list_row`]): the row for the
+//! project the core's selector currently points at
+//! ([`is_current_project`] — matched by file name, the
+//! panel's established rule) carries the kit selected
+//! fill, so the open project is marked in its own list;
+//! the armed delete-confirm line renders under the same
+//! row key on the selected fill (P10's
+//! selected-for-danger read) with the family's
+//! [`danger_btn`] as its confirm. The two empty-list
+//! messages render through [`design::empty_state`]
+//! (folder-open for an empty library, magnifying-glass
+//! for a search with no match) — the strings themselves
+//! are byte-identical to the bare label rows they
+//! replace, as are every key, label and handler in the
+//! panel.
+//!
 //! ## Integrator wiring (main.rs)
 //!
 //! ```ignore
@@ -198,7 +222,8 @@ use stykanimate_rs::model::Project;
 use stykanimate_rs::projects::{self, ProjectInfo};
 use stykanimate_rs::shell;
 
-use crate::chrome_view::btn;
+use crate::chrome_view::{btn, danger_btn};
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::icons::icon_el;
 use crate::rune_sec::project_tools::human_size;
@@ -443,6 +468,26 @@ pub fn current_project_path(core: &EditorCore) -> Option<&Path> {
     core.project_files
         .get(core.project_index)
         .map(|p| p.as_path())
+}
+
+/// Whether `info` is the project `current` points at
+/// (Phase N): the row for the currently open project
+/// carries the kit selected fill, so the open project is
+/// marked in its own list. The comparison follows the
+/// panel's established matching rule — by file name,
+/// because the scan reports `./projects/…` relative
+/// paths while the core's list is cwd-absolute (the
+/// same rule [`project_file_index`] and
+/// [`reopen_target`] use, with the same exact-path
+/// fallback when a name is unavailable on either side).
+pub fn is_current_project(info: &ProjectInfo, current: Option<&Path>) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    match (info.path.file_name(), current.file_name()) {
+        (Some(a), Some(b)) => a == b,
+        _ => info.path == current,
+    }
 }
 
 /// The "Reopen last project" target: the library entry
@@ -942,11 +987,6 @@ fn initial_state_for(decision: StartupRecovery) -> HomePanelState {
 
 // ---- Elements ----
 
-/// A small muted section heading inside the panel card.
-fn section_label(t: &Theme, label: &str) -> El {
-    text(label).font(type_::LABEL).color(t.text_secondary)
-}
-
 /// The recovery banner: shown only while
 /// [`HomePanelState::recovery_offer`] holds (the verdict
 /// captured at open time). Recover runs the real snapshot
@@ -1010,28 +1050,39 @@ fn project_row_confirm(
     meta: Option<(usize, usize, u64, SystemTime)>,
     confirming: bool,
 ) -> El {
+    project_row_marked(info, i, t, meta, confirming, false)
+}
+
+/// [`project_row_confirm`] with the Phase N current
+/// marking: the row shell is the kit list row
+/// ([`design::list_row`]) under the same `home-row-{i}`
+/// key — the currently open project's row (`selected`,
+/// from [`is_current_project`]) carries the kit selected
+/// fill, and the armed confirm line renders on that
+/// same selected fill (P10's selected-for-danger read)
+/// with the family's [`danger_btn`] as its confirm.
+fn project_row_marked(
+    info: &ProjectInfo,
+    i: usize,
+    t: &Theme,
+    meta: Option<(usize, usize, u64, SystemTime)>,
+    confirming: bool,
+    selected: bool,
+) -> El {
     if confirming {
         let name = info.name.clone();
         let confirm_name = info.name.clone();
-        return row()
-            .key(format!("home-row-{i}"))
+        return design::list_row(&format!("home-row-{i}"), true, t)
             .w_full()
-            .gap(8.0)
-            .center_y()
-            .px(10.0)
-            .py(6.0)
-            .radius(8.0)
-            .fill(t.bg)
             .child(
                 text(format!("Delete {name}?"))
                     .font(type_::TITLE)
                     .color(t.text)
                     .grow(1.0),
             )
-            .child(btn(
+            .child(danger_btn(
                 "home-proj-del-confirm",
                 "Delete file",
-                false,
                 t,
                 move |s: &mut State| {
                     dispatch_delete_confirm(&mut s.core, &mut s.home_panel, &confirm_name);
@@ -1054,15 +1105,8 @@ fn project_row_confirm(
     let dup_path = info.path.clone();
     let del_path = info.path.clone();
     let name = info.name.clone();
-    row()
-        .key(format!("home-row-{i}"))
+    design::list_row(&format!("home-row-{i}"), selected, t)
         .w_full()
-        .gap(8.0)
-        .center_y()
-        .px(10.0)
-        .py(6.0)
-        .radius(8.0)
-        .fill(t.bg)
         .child(
             col()
                 .gap(2.0)
@@ -1098,7 +1142,7 @@ fn project_row_confirm(
 /// field, New project, and the project rows.
 pub fn home_panel(s: &State, t: &Theme) -> El {
     let home = &s.home_panel;
-    let mut panel = col().key("home-panel").gap(6.0);
+    let mut panel = design::panel_col("home-panel", t);
     panel = panel.child(btn("home", "Home", home.open, t, |s: &mut State| {
         toggle_open(s);
     }));
@@ -1115,18 +1159,13 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
     // the search query (see `reopen_target`).
     let library = visible_projects(&entries, "");
     let last_opened = shell::last_opened_project();
-    let reopen = reopen_target(
-        &library,
-        last_opened.as_deref(),
-        current_project_path(&s.core),
-    );
-    let mut card = col()
-        .key("home-card")
-        .w_full()
-        .gap(8.0)
-        .padding(12.0)
-        .radius(10.0)
-        .fill(t.card);
+    // The file the core's selector points at — the open
+    // project. Resolved once here: it feeds both the
+    // reopen target and the rows' current marking
+    // (`is_current_project`).
+    let current_path = current_project_path(&s.core);
+    let reopen = reopen_target(&library, last_opened.as_deref(), current_path);
+    let mut card = col().key("home-card").gap(8.0);
     if let Some(target) = reopen {
         let path = target.path.clone();
         let name = target.name.clone();
@@ -1145,21 +1184,18 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
         ));
     }
     card = card.child(
-        row()
-            .key("home-header")
-            .w_full()
-            .gap(8.0)
-            .center_y()
-            .child(
-                text("Saved projects in ./projects")
-                    .font(type_::TITLE)
-                    .color(t.text)
-                    .grow(1.0),
-            )
+        design::header_row("home-header")
+            .child(design::panel_title(
+                None,
+                "Saved projects in ./projects",
+                None,
+                t,
+            ))
             .child(icon_btn("home-new", "file", "New project", false, t, |s: &mut State| {
                 dispatch_new(&mut s.core);
             })),
     );
+    card = card.child(design::divider(t));
     if home.recovery_offer {
         card = card.child(recovery_banner(t));
     }
@@ -1186,13 +1222,13 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
                         cancel_delete(&mut s.home_panel);
                     }),
             )
-            .child(section_label(
-                t,
+            .child(design::section_label(
                 &format!(
                     "{} {}",
                     shown.len(),
                     if shown.len() == 1 { "project" } else { "projects" }
                 ),
+                t,
             ))
             .child(btn(
                 "home-sort",
@@ -1209,13 +1245,18 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
             )),
     );
     if shown.is_empty() {
-        card = card.child(section_label(
-            t,
+        card = card.child(design::empty_state(
+            if home.search.text.is_empty() {
+                "folder-open"
+            } else {
+                "magnifying-glass"
+            },
             if home.search.text.is_empty() {
                 "No saved projects yet — use \"Save project\" to add one."
             } else {
                 "No projects match the search."
             },
+            t,
         ));
     } else {
         let mut rows = col().key("home-rows").gap(6.0);
@@ -1234,7 +1275,8 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
                 metas.push((figures, frames));
             }
             let confirming = confirm_pending(home, &info.path);
-            rows = rows.child(project_row_confirm(info, i, t, meta, confirming));
+            let selected = is_current_project(info, current_path);
+            rows = rows.child(project_row_marked(info, i, t, meta, confirming, selected));
         }
         card = card.child(rows);
         // Inside the non-empty branch on purpose: with
@@ -1721,6 +1763,43 @@ mod tests {
         let entry = info("Demo", "projects/demo.json");
         let _ = project_row_confirm(&entry, 0, &t, None, false);
         let _ = project_row_confirm(&entry, 0, &t, None, true);
+    }
+
+    #[test]
+    fn is_current_project_matches_by_file_name() {
+        // The Phase N current marking follows the panel's
+        // established rule: the scan's relative path and
+        // the core's cwd-absolute path are the same
+        // project when their file names agree.
+        let entry = info("Demo", "projects/demo.json");
+        assert!(is_current_project(
+            &entry,
+            Some(Path::new("/abs/projects/demo.json"))
+        ));
+        assert!(is_current_project(
+            &entry,
+            Some(Path::new("projects/demo.json"))
+        ));
+        assert!(!is_current_project(
+            &entry,
+            Some(Path::new("/abs/projects/other.json"))
+        ));
+        // No current file (the core lists none): nothing
+        // is marked.
+        assert!(!is_current_project(&entry, None));
+    }
+
+    #[test]
+    fn project_row_marked_builds_in_both_markings() {
+        // Builder smoke test for the Phase N entry point:
+        // the kit list-row shell constructs with and
+        // without the current marking, and the armed
+        // confirm line constructs on the marked shell.
+        let t = tok::theme(true);
+        let entry = info("Demo", "projects/demo.json");
+        let _ = project_row_marked(&entry, 0, &t, None, false, false);
+        let _ = project_row_marked(&entry, 0, &t, None, false, true);
+        let _ = project_row_marked(&entry, 0, &t, None, true, true);
     }
 
     #[test]

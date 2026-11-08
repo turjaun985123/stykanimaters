@@ -41,6 +41,17 @@
 //! (`graph_panel.rs:225`), which applies the preset to the
 //! canonical ramp channel and evaluates it through
 //! `Channel::value_at` — the same curve the engine will play.
+//!
+//! Phase N adoption: the panel root is the kit card
+//! (`design::panel_col`), the header is `design::panel_title`
+//! + `design::divider`, and the group headings are
+//! `design::section_label` — the local `section` helper is
+//! retired. `picker_cell` keeps its curve content (the kit
+//! `chip_btn` has no content slot — plan P03: "keep the
+//! content; rebuild the shell on btn-family metrics") with
+//! its shell aligned to the button family's state table and
+//! press feedback. Keys, handlers and status behaviour are
+//! unchanged.
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, El, Shape};
@@ -49,7 +60,8 @@ use stykanimate_rs::graph::TangentPreset;
 use stykanimate_rs::model::Easing;
 
 use crate::chrome_view::btn;
-use crate::rune_sec::icons::icon_el;
+use crate::rune_sec::design;
+use crate::rune_sec::icon_btn::PRESS_SCALE;
 use crate::State;
 
 /// Width / height (points) of each preset's curve preview box.
@@ -207,8 +219,19 @@ fn preset_row(preview: El, button: El) -> El {
 /// and give the strip real per-curve clicks.) Active
 /// styling mirrors `btn`: accent fill with white content;
 /// inactive cells keep the card fill with a muted curve.
+///
+/// Phase N: the kit's `chip_btn` absorbs the shell's
+/// text-only chips, but it has no slot for this cell's
+/// curve canvas — P03's ruling for this cell is to keep
+/// the content and align the shell, so the shell now
+/// spells its radius via the kit (`CONTROL_RADIUS`),
+/// takes the accent from `design::accent()` and carries
+/// the button family's press feedback (`PRESS_SCALE`).
+/// Padding stays px 4 / py 5 on purpose: at the chip's
+/// px 6 the four cells plus gaps would span ≈322pt and
+/// overflow the panel card's 316pt inner width.
 fn picker_cell(e: Easing, samples: &[f32], active: bool, t: &Theme) -> El {
-    let accent = tok::accent(0, true);
+    let accent = design::accent();
     let curve_color = if active { Color::WHITE } else { t.text_secondary };
     el()
         .key(match e {
@@ -219,7 +242,8 @@ fn picker_cell(e: Easing, samples: &[f32], active: bool, t: &Theme) -> El {
         })
         .px(4.0)
         .py(5.0)
-        .radius(6.0)
+        .radius(design::CONTROL_RADIUS)
+        .press_scale(PRESS_SCALE)
         .fill(if active { accent } else { t.card })
         .hover(if active { accent } else { t.control_track })
         .press(if active { accent } else { t.control_off })
@@ -256,16 +280,13 @@ fn picker_strip(core: &EditorCore, t: &Theme) -> El {
 }
 
 /// A curve preview chip: the sampled curve on a card fill.
+/// (Phase N: radius aligned to the kit's control radius,
+/// per P03 — chips elsewhere are r6; content unchanged.)
 fn preview(samples: &[f32], color: Color, t: &Theme) -> El {
     canvas(curve_shape(samples, CURVE_W, CURVE_H, color))
         .size(CURVE_W, CURVE_H)
         .fill(t.card)
-        .radius(4.0)
-}
-
-/// A muted section heading inside the panel.
-fn section(label: String, t: &Theme) -> El {
-    text(label).font(type_::LABEL).color(t.text_secondary)
+        .radius(design::CONTROL_RADIUS)
 }
 
 /// The easing panel body. Mounting (and any show/hide state)
@@ -275,7 +296,7 @@ fn section(label: String, t: &Theme) -> El {
 /// find every control.
 pub fn easing_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
-    let accent = tok::accent(0, true);
+    let accent = design::accent();
     let frame_easing = core
         .project
         .frames
@@ -283,32 +304,29 @@ pub fn easing_panel(s: &State, t: &Theme) -> El {
         .and_then(|f| f.easing);
     let project_easing = core.project.easing;
 
-    let mut panel = col()
-        .key("easing-panel")
-        .gap(8.0)
-        .padding(10.0)
-        .fill(t.card)
-        .radius(8.0)
+    // Panel header (Phase H, kit form since Phase N): the
+    // chart-line glyph — axes with a rising curve, the
+    // shape an easing curve is — before the title, via
+    // `design::panel_title` (13pt glyph in
+    // `text_secondary`, title in SECTION), with the kit
+    // hairline under it. The preset buttons below
+    // deliberately stay text: each already sits beside
+    // its sampled curve preview, and no glyph honestly
+    // distinguishes ease-in from ease-out — the drawn
+    // curve does that.
+    let mut panel = design::panel_col("easing-panel", t)
         .child(
-            // Panel header (Phase H): the chart-line glyph
-            // — axes with a rising curve, the shape an
-            // easing curve is — before the title, following
-            // the shell's icon-row idiom (`icons::icon_el`
-            // at the title's own 13pt). The preset buttons
-            // below deliberately stay text: each already
-            // sits beside its sampled curve preview, and no
-            // glyph honestly distinguishes ease-in from
-            // ease-out — the drawn curve does that.
             row()
-                .gap(6.0)
+                .w_full()
+                .gap(design::PANEL_GAP)
                 .center_y()
-                .child(icon_el("chart-line", 13.0, t.text))
-                .child(text("Easing").font(type_::TITLE).color(t.text)),
-        );
+                .child(design::panel_title(Some("chart-line"), "Easing", None, t)),
+        )
+        .child(design::divider(t));
 
     // ---- Frame tween: set_frame_easing on the current frame.
-    panel = panel.child(section(
-        format!("Frame {} tween → next frame", core.current + 1),
+    panel = panel.child(design::section_label(
+        &format!("Frame {} tween → next frame", core.current + 1),
         t,
     ));
     // "Project default" is `None`: its effective curve is the
@@ -342,8 +360,8 @@ pub fn easing_panel(s: &State, t: &Theme) -> El {
     }
 
     // ---- Project tween: set_project_easing on the project.
-    panel = panel.child(section(
-        "Project tween (default for all frames)".to_string(),
+    panel = panel.child(design::section_label(
+        "Project tween (default for all frames)",
         t,
     ));
     panel = panel.child(picker_strip(core, t));
@@ -366,10 +384,7 @@ pub fn easing_panel(s: &State, t: &Theme) -> El {
     }
 
     // ---- Graph keys: apply_graph_ease_preset, one-shot.
-    panel = panel.child(section(
-        "Graph keys — selected figure".to_string(),
-        t,
-    ));
+    panel = panel.child(design::section_label("Graph keys — selected figure", t));
     for p in TANGENT_PRESETS {
         panel = panel.child(preset_row(
             preview(&tangent_curve(p, CURVE_SAMPLES), accent, t),

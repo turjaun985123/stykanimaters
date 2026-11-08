@@ -46,11 +46,28 @@
 //! `0x4D` nearest, `0x26` older); future frames share one
 //! green tint, [`FUTURE_ONION_RGB`] (`0x7BE495`), with the
 //! same falloff. The legend line below states exactly that.
+//!
+//! ## Phase N: the card shell
+//!
+//! The root is the kit's card (`design::panel_col`, root
+//! key `onion-controls` unchanged), the header the kit's
+//! `panel_title` over a hairline `divider`, and the depth
+//! steppers follow the charter order — side label growing,
+//! `−`, the count in `design::stepper_value`, `+`. The old
+//! combined readout (one LABEL text, `Prev {n}`) split
+//! into label + mono value, and its formatter
+//! (`depth_readout`) retired with it; the clamp it relied
+//! on is still `step_depth`'s, pinned below. The On/Off
+//! control stays the button family's `btn`: it is a
+//! standalone toggle button (its active fill is the state
+//! display), not a labelled row with a separate switch,
+//! so the kit's `toggle_row` does not apply to it.
 
 use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, Color, El};
+use rune::{el, row, text, Color, El};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -92,12 +109,6 @@ pub fn step_depth(cur: u8, delta: i32) -> u8 {
     (cur as i32 + delta).clamp(0, MAX_ONION_DEPTH as i32) as u8
 }
 
-/// Stepper readout for one side: `Prev {n}` / `Next {n}`,
-/// with the count clamped for display like everywhere else.
-pub fn depth_readout(side: &str, n: u8) -> String {
-    format!("{side} {}", step_depth(n, 0))
-}
-
 /// The legend line under the controls. Wording is pinned by
 /// test: past skins keep each figure's own colour, future
 /// skins are the shared green (see the module docs).
@@ -105,21 +116,23 @@ pub fn legend_text() -> &'static str {
     "Past = figure colour · Future = green"
 }
 
-/// The Onion section: header, the On/Off toggle, the Prev
-/// and Next depth steppers (`-` / readout / `+` each), and
-/// the colour legend with a swatch in the renderer's actual
+/// The Onion section (Phase N card form): the kit header,
+/// the On/Off toggle, the Prev and Next depth steppers in
+/// charter order (label / `−` / value / `+` each), and the
+/// colour legend with a swatch in the renderer's actual
 /// future-frame green.
 pub fn onion_controls(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let future_green = hex_color(FUTURE_ONION_RGB).unwrap_or(Color::WHITE);
-    col()
-        .key("onion-controls")
-        .gap(6.0)
+    design::panel_col("onion-controls", t)
         .child(
-            text("Onion skin")
-                .font(type_::SECTION)
-                .color(t.text_secondary),
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(None, "Onion skin", None, t)),
         )
+        .child(design::divider(t))
         .child(btn("onion-toggle", "Onion", core.onion, t, |s| {
             s.core.onion = !s.core.onion;
         }))
@@ -127,14 +140,19 @@ pub fn onion_controls(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(btn("onion-prev-dn", "-", false, t, |s| {
+                .child(
+                    text("Prev")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .grow(1.0),
+                )
+                .child(btn("onion-prev-dn", "−", false, t, |s| {
                     s.onion_ui.prev = step_depth(s.onion_ui.prev, -1);
                 }))
-                .child(
-                    text(depth_readout("Prev", s.onion_ui.prev))
-                        .font(type_::LABEL)
-                        .color(t.text),
-                )
+                .child(design::stepper_value(
+                    &step_depth(s.onion_ui.prev, 0).to_string(),
+                    t,
+                ))
                 .child(btn("onion-prev-up", "+", false, t, |s| {
                     s.onion_ui.prev = step_depth(s.onion_ui.prev, 1);
                 })),
@@ -143,14 +161,19 @@ pub fn onion_controls(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(btn("onion-next-dn", "-", false, t, |s| {
+                .child(
+                    text("Next")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .grow(1.0),
+                )
+                .child(btn("onion-next-dn", "−", false, t, |s| {
                     s.onion_ui.next = step_depth(s.onion_ui.next, -1);
                 }))
-                .child(
-                    text(depth_readout("Next", s.onion_ui.next))
-                        .font(type_::LABEL)
-                        .color(t.text),
-                )
+                .child(design::stepper_value(
+                    &step_depth(s.onion_ui.next, 0).to_string(),
+                    t,
+                ))
                 .child(btn("onion-next-up", "+", false, t, |s| {
                     s.onion_ui.next = step_depth(s.onion_ui.next, 1);
                 })),
@@ -218,16 +241,6 @@ mod tests {
         // pin fails and the two must be reconciled.
         let d = OnionControlsState::default();
         assert_eq!((d.prev, d.next), (1, 1));
-    }
-
-    #[test]
-    fn readout_names_the_side_and_the_count() {
-        assert_eq!(depth_readout("Prev", 0), "Prev 0");
-        assert_eq!(depth_readout("Prev", 1), "Prev 1");
-        assert_eq!(depth_readout("Next", 2), "Next 2");
-        assert_eq!(depth_readout("Next", 3), "Next 3");
-        // Display clamps like the stepper does.
-        assert_eq!(depth_readout("Prev", 8), "Prev 3");
     }
 
     #[test]

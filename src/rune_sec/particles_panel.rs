@@ -92,6 +92,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{ParticleEvent, ParticleKind};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::rune_sec::icons::icon_el;
 use crate::State;
@@ -523,27 +524,20 @@ fn detail_block(s: &State, t: &Theme) -> El {
         );
     };
     let i = data.index;
-    // Colour swatches (the scene panel's construction): a
-    // 26 pt slot per colour, accent-filled behind the
-    // 22 pt colour chip when it is the event's colour.
-    let accent = tok::accent(0, true);
+    // Colour swatches: the kit's one swatch construction
+    // (Phase N) — a 24 pt colour square per palette entry,
+    // the event's current colour marked by the accent
+    // border. Keys and the press handler are the ones the
+    // hand-rolled slot construction carried.
     let mut colors = row().key("particles-colors").gap(4.0).center_y();
     for (ci, &rgb) in PARTICLE_PALETTE.iter().enumerate() {
-        colors = colors.child(
-            el()
-                .key(format!("particles-color-{ci}"))
-                .size(26.0, 26.0)
-                .radius(8.0)
-                .fill(if data.color == rgb { accent } else { t.bg })
-                .center()
-                .on_press(move |s: &mut State| set_selected_color(s, rgb))
-                .child(
-                    el()
-                        .size(22.0, 22.0)
-                        .radius(6.0)
-                        .fill(crate::stage_view::hex_color(rgb).unwrap_or(t.bg)),
-                ),
-        );
+        colors = colors.child(design::swatch(
+            &format!("particles-color-{ci}"),
+            crate::stage_view::hex_color(rgb).unwrap_or(t.bg),
+            data.color == rgb,
+            t,
+            move |s: &mut State| set_selected_color(s, rgb),
+        ));
     }
     // Final action row (Phase K, built mutably like the
     // swatches above): "To playhead" is always present;
@@ -595,11 +589,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(
-                    text("Kind")
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                )
+                .child(design::section_label("Kind", t).grow(1.0))
                 .child(icon_only_btn(
                     "particles-kind-prev",
                     "chevron-left",
@@ -608,11 +598,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
                     t,
                     |s| cycle_selected_kind(s, -1),
                 ))
-                .child(
-                    text(kind_name(data.kind_value))
-                        .font(type_::BODY)
-                        .color(t.text),
-                )
+                .child(design::stepper_value(kind_name(data.kind_value), t))
                 .child(icon_only_btn(
                     "particles-kind-next",
                     "chevron-right",
@@ -628,11 +614,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(
-                    text("Colour")
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                )
+                .child(design::section_label("Colour", t))
                 .child(colors),
         )
         // Frame stepper: -/+ move the event by one frame
@@ -641,19 +623,11 @@ fn detail_block(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(
-                    text("Frame")
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                )
-                .child(btn("particles-frame-dn", "-", false, t, |s| {
+                .child(design::section_label("Frame", t).grow(1.0))
+                .child(btn("particles-frame-dn", "−", false, t, |s| {
                     step_frame(s, -1)
                 }))
-                .child(
-                    text(format!("{}", data.frame + 1))
-                        .font(type_::BODY)
-                        .color(t.text),
-                )
+                .child(design::stepper_value(&format!("{}", data.frame + 1), t))
                 .child(btn("particles-frame-up", "+", false, t, |s| {
                     step_frame(s, 1)
                 })),
@@ -761,11 +735,11 @@ pub fn particles_panel(s: &State, t: &Theme) -> El {
     let accent = tok::accent(0, true);
     let mut list = col().key("particles-list").gap(4.0);
     if rows.is_empty() {
-        list = list.child(
-            text("No particle events yet — they arrive with imports, or add one.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        list = list.child(design::empty_state(
+            "star",
+            "No particle events yet — they arrive with imports, or add one.",
+            t,
+        ));
     }
     for data in rows {
         let i = data.index;
@@ -779,24 +753,8 @@ pub fn particles_panel(s: &State, t: &Theme) -> El {
             .and_then(|e| crate::stage_view::hex_color(e.color))
             .unwrap_or(t.text_secondary);
         list = list.child(
-            row()
-                .key(format!("particle-row-{i}"))
+            design::list_row(&format!("particle-row-{i}"), data.selected, t)
                 .w_full()
-                .gap(8.0)
-                .center_y()
-                .px(8.0)
-                .py(5.0)
-                .radius(6.0)
-                .fill(if data.selected {
-                    t.control_track
-                } else {
-                    t.card
-                })
-                .hover(if data.selected {
-                    t.control_track
-                } else {
-                    t.control_off
-                })
                 .on_press(move |s: &mut State| {
                     s.particle_selected = Some(i);
                 })
@@ -819,21 +777,23 @@ pub fn particles_panel(s: &State, t: &Theme) -> El {
                 }),
         );
     }
-    let mut panel = col()
-        .key("particles")
-        .w_full()
-        .gap(6.0)
+    let mut panel = design::panel_col("particles", t)
         .child(
             row()
+                .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(text("Particles").font(type_::TITLE).color(t.text))
-                .child(
-                    text(format!("{} event(s)", s.core.project.particles.len()))
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                ),
+                .child(design::panel_title(
+                    None,
+                    "Particles",
+                    Some(&format!(
+                        "{} event(s)",
+                        s.core.project.particles.len()
+                    )),
+                    t,
+                )),
         )
+        .child(design::divider(t))
         .child(
             row().gap(8.0).center_y().child(icon_btn(
                 "particles-add",

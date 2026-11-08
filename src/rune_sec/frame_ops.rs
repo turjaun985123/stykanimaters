@@ -81,12 +81,35 @@
 //! inert/live icon pair, gated by [`swap_prev_enabled`] /
 //! [`swap_next_enabled`]: at the timeline's ends there is
 //! no neighbour to swap with.
+//!
+//! Phase N adoption: the section is a kit card —
+//! `design::panel_col` under the section's existing
+//! `frames` key (which moves from the main row to the
+//! card root; the key set is unchanged), a
+//! `design::panel_title` header over a `design::divider`,
+//! and kit section labels. The local `fbtn` helper is
+//! retired onto the button family: live sites render
+//! through `chrome_view::btn`, and muted sites through
+//! `chrome_view::btn_muted_live` — `fbtn`'s muted branch
+//! never dropped its handler (the press still ran the op
+//! and its refusal status was the designed feedback), so
+//! by P05's migration rule every muted site is
+//! muted-live and none becomes inert; the only visual
+//! change is the resting fill (`control_off` → the
+//! family's card fill, P05 §4). The duration and
+//! Insert-N readouts become `design::stepper_value` in
+//! the charter stepper order (label, −, value, +). The
+//! icon buttons' Phase I inert/live pairs are already
+//! family and are untouched, as is the main row's
+//! `flex_wrap` (the Phase M pressability fix).
 
-use rune::tok::{self, type_, Theme};
-use rune::{col, el, row, text, Color, El};
+use rune::tok::{type_, Theme};
+use rune::{row, text, El};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Frame;
 
+use crate::chrome_view::{btn, btn_muted_live};
+use crate::rune_sec::design;
 use crate::State;
 
 /// Duration clamp the core applies in
@@ -508,40 +531,6 @@ pub fn range_label(core: &EditorCore, ops: &FrameOpsState) -> Option<String> {
     None
 }
 
-/// One section button: chrome_view::btn's look (accent when
-/// `active`), plus a muted rendering for controls whose op
-/// would no-op from the current core state. Muted buttons stay
-/// fully wired — the press still runs the handler (and the
-/// op's own status message) — they only lose the hover/press
-/// highlight and take the secondary text colour.
-fn fbtn(
-    key: &str,
-    label: &str,
-    active: bool,
-    muted: bool,
-    t: &Theme,
-    f: impl Fn(&mut State) + 'static,
-) -> El {
-    let accent = tok::accent(0, true);
-    let (fill, hover, press, ink) = if active {
-        (accent, accent, accent, Color::WHITE)
-    } else if muted {
-        (t.control_off, t.control_off, t.control_off, t.text_secondary)
-    } else {
-        (t.card, t.control_track, t.control_off, t.text)
-    };
-    el()
-        .key(key)
-        .px(10.0)
-        .py(5.0)
-        .radius(6.0)
-        .fill(fill)
-        .hover(hover)
-        .press(press)
-        .on_press(f)
-        .child(text(label).font(type_::LABEL).color(ink))
-}
-
 /// The "Frames" toolbar section: the main row in GPUI
 /// tool-group order — Inbetween / Shift / Reverse / Swap /
 /// Smooth path, the clipboards, the loop endpoints, then the duration
@@ -558,7 +547,6 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
     let loop_on = core.loop_range.is_some();
 
     let mut section = row()
-        .key("frames")
         .w_full()
         .gap(8.0)
         .center_y()
@@ -571,30 +559,58 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
         // not be pressed at all (Phase M's swap test
         // proved this against the clipped row).
         .flex_wrap()
-        .child(
-            text("Frames")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        )
-        .child(fbtn("inbetween", "Inbetween", false, !can_inbetween(core), t, |s| {
-            s.core.insert_inbetween();
-        }))
-        .child(fbtn("shift-back", "< Shift", false, !can_shift_back(core), t, |s| {
-            let cur = s.core.current;
-            if !s.core.shift_frames(cur, 1, -1) {
-                s.core.status = "First frame: cannot shift it earlier.".into();
+        .child({
+            // Muted-live dispatch (Phase N): fbtn kept the
+            // handler in both states, so the gated form is
+            // btn_muted_live, never inert — the handler is
+            // bound once and moved into whichever branch
+            // renders.
+            let press = |s: &mut State| {
+                s.core.insert_inbetween();
+            };
+            if can_inbetween(core) {
+                btn("inbetween", "Inbetween", false, t, press)
+            } else {
+                btn_muted_live("inbetween", "Inbetween", false, t, press)
             }
-        }))
-        .child(fbtn("shift-fwd", "Shift >", false, !can_shift_fwd(core), t, |s| {
-            let cur = s.core.current;
-            if !s.core.shift_frames(cur, 1, 1) {
-                s.core.status = "Last frame: cannot shift it later.".into();
+        })
+        .child({
+            let press = |s: &mut State| {
+                let cur = s.core.current;
+                if !s.core.shift_frames(cur, 1, -1) {
+                    s.core.status = "First frame: cannot shift it earlier.".into();
+                }
+            };
+            if can_shift_back(core) {
+                btn("shift-back", "< Shift", false, t, press)
+            } else {
+                btn_muted_live("shift-back", "< Shift", false, t, press)
             }
-        }))
-        .child(fbtn("reverse-range", "Reverse", false, !can_reverse(core), t, |s| {
-            let (from, count) = reverse_args(&s.core);
-            s.core.reverse_range(from, count);
-        }))
+        })
+        .child({
+            let press = |s: &mut State| {
+                let cur = s.core.current;
+                if !s.core.shift_frames(cur, 1, 1) {
+                    s.core.status = "Last frame: cannot shift it later.".into();
+                }
+            };
+            if can_shift_fwd(core) {
+                btn("shift-fwd", "Shift >", false, t, press)
+            } else {
+                btn_muted_live("shift-fwd", "Shift >", false, t, press)
+            }
+        })
+        .child({
+            let press = |s: &mut State| {
+                let (from, count) = reverse_args(&s.core);
+                s.core.reverse_range(from, count);
+            };
+            if can_reverse(core) {
+                btn("reverse-range", "Reverse", false, t, press)
+            } else {
+                btn_muted_live("reverse-range", "Reverse", false, t, press)
+            }
+        })
         .child(if reverse_all_enabled(core) {
             crate::rune_sec::icon_btn::icon_btn(
                 "frames-reverse-all",
@@ -650,10 +666,17 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 t,
             )
         })
-        .child(fbtn("smooth-path", "Smooth path", false, !can_smooth(core), t, |s| {
-            let fi = s.core.selected_figure;
-            s.core.smooth_path_roots(fi);
-        }))
+        .child({
+            let press = |s: &mut State| {
+                let fi = s.core.selected_figure;
+                s.core.smooth_path_roots(fi);
+            };
+            if can_smooth(core) {
+                btn("smooth-path", "Smooth path", false, t, press)
+            } else {
+                btn_muted_live("smooth-path", "Smooth path", false, t, press)
+            }
+        })
         .child(if copy_frame_enabled(core) {
             crate::rune_sec::icon_btn::icon_btn("copy-frame", "copy", "Copy frame", false, t, |s| {
                 if s.core.frame_count() > 0 {
@@ -710,30 +733,66 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
         } else {
             crate::rune_sec::icon_btn::icon_btn_inert("range-del", "trash-can", "Delete range", t)
         })
-        .child(fbtn("loop-start", "Loop start", loop_on, n == 0, t, |s| {
-            let cur = s.core.current;
-            let (_, b) = s.core.loop_range.unwrap_or((cur, cur));
-            s.core.set_loop_range(cur, b);
-        }))
-        .child(fbtn("loop-end", "Loop end", loop_on, n == 0, t, |s| {
-            let cur = s.core.current;
-            let (a, _) = s.core.loop_range.unwrap_or((cur, cur));
-            s.core.set_loop_range(a, cur);
-        }))
-        .child(fbtn("loop-clear", "Loop clear", false, !loop_on, t, |s| {
-            s.core.clear_loop_range();
-        }))
-        .child(
-            text(format!("Dur {}", duration_label(core)))
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        )
-        .child(fbtn("dur-dn", "Dur -", false, !can_duration_down(core), t, |s| {
-            s.core.adjust_frame_duration(DUR_DOWN_FACTOR);
-        }))
-        .child(fbtn("dur-up", "Dur +", false, !can_duration_up(core), t, |s| {
-            s.core.adjust_frame_duration(DUR_UP_FACTOR);
-        }));
+        .child({
+            // fbtn's precedence was active first: an ON
+            // loop endpoint renders as btn's active state
+            // even though its mute condition (an empty
+            // timeline) cannot hold while a loop exists.
+            let press = |s: &mut State| {
+                let cur = s.core.current;
+                let (_, b) = s.core.loop_range.unwrap_or((cur, cur));
+                s.core.set_loop_range(cur, b);
+            };
+            if n == 0 && !loop_on {
+                btn_muted_live("loop-start", "Loop start", false, t, press)
+            } else {
+                btn("loop-start", "Loop start", loop_on, t, press)
+            }
+        })
+        .child({
+            let press = |s: &mut State| {
+                let cur = s.core.current;
+                let (a, _) = s.core.loop_range.unwrap_or((cur, cur));
+                s.core.set_loop_range(a, cur);
+            };
+            if n == 0 && !loop_on {
+                btn_muted_live("loop-end", "Loop end", false, t, press)
+            } else {
+                btn("loop-end", "Loop end", loop_on, t, press)
+            }
+        })
+        .child({
+            let press = |s: &mut State| {
+                s.core.clear_loop_range();
+            };
+            if loop_on {
+                btn("loop-clear", "Loop clear", false, t, press)
+            } else {
+                btn_muted_live("loop-clear", "Loop clear", false, t, press)
+            }
+        })
+        .child(design::section_label("Dur", t))
+        .child({
+            let press = |s: &mut State| {
+                s.core.adjust_frame_duration(DUR_DOWN_FACTOR);
+            };
+            if can_duration_down(core) {
+                btn("dur-dn", "Dur -", false, t, press)
+            } else {
+                btn_muted_live("dur-dn", "Dur -", false, t, press)
+            }
+        })
+        .child(design::stepper_value(&duration_label(core), t))
+        .child({
+            let press = |s: &mut State| {
+                s.core.adjust_frame_duration(DUR_UP_FACTOR);
+            };
+            if can_duration_up(core) {
+                btn("dur-up", "Dur +", false, t, press)
+            } else {
+                btn_muted_live("dur-up", "Dur +", false, t, press)
+            }
+        });
 
     if let Some(label) = range_label(core, ops) {
         section = section.child(text(label).font(type_::LABEL).color(t.text_secondary));
@@ -750,32 +809,38 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
         .gap(8.0)
         .center_y()
         .child(crate::rune_sec::icons::icon_el("clock", 12.0, t.text_secondary))
-        .child(
-            text("This frame")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        )
-        .child(
-            text(duration_label(core))
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        )
-        .child(fbtn("fop-dur-half", "×0.5", false, !can_duration_down(core), t, |s| {
-            s.core.adjust_frame_duration(DUR_DOWN_FACTOR);
-        }))
-        .child(fbtn("fop-dur-double", "×2", false, !can_duration_up(core), t, |s| {
-            s.core.adjust_frame_duration(DUR_UP_FACTOR);
-        }))
-        .child(fbtn(
-            "fop-dur-reset",
-            "Reset 1.0",
-            false,
-            !can_duration_reset(core),
-            t,
-            |s| {
+        .child(design::section_label("This frame", t).grow(1.0))
+        .child(design::stepper_value(&duration_label(core), t))
+        .child({
+            let press = |s: &mut State| {
+                s.core.adjust_frame_duration(DUR_DOWN_FACTOR);
+            };
+            if can_duration_down(core) {
+                btn("fop-dur-half", "×0.5", false, t, press)
+            } else {
+                btn_muted_live("fop-dur-half", "×0.5", false, t, press)
+            }
+        })
+        .child({
+            let press = |s: &mut State| {
+                s.core.adjust_frame_duration(DUR_UP_FACTOR);
+            };
+            if can_duration_up(core) {
+                btn("fop-dur-double", "×2", false, t, press)
+            } else {
+                btn_muted_live("fop-dur-double", "×2", false, t, press)
+            }
+        })
+        .child({
+            let press = |s: &mut State| {
                 set_duration_here(&mut s.core, 1.0);
-            },
-        ));
+            };
+            if can_duration_reset(core) {
+                btn("fop-dur-reset", "Reset 1.0", false, t, press)
+            } else {
+                btn_muted_live("fop-dur-reset", "Reset 1.0", false, t, press)
+            }
+        });
 
     // "Insert" row: the count stepper keeps
     // FrameOpsState.insert_count inside 1..=60 (plain presses,
@@ -786,36 +851,35 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
         .w_full()
         .gap(8.0)
         .center_y()
-        .child(
-            text("Insert")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        )
-        .child(fbtn(
-            "fop-ins-n-dn",
-            "-",
-            false,
-            ops.insert_count <= INSERT_COUNT_MIN,
-            t,
-            |s| {
+        .child(design::section_label("Insert", t).grow(1.0))
+        .child({
+            // Muted-live, as everywhere fbtn was muted:
+            // the handler stays (a press at the bound runs
+            // step_insert_count, which clamps — and heals
+            // a stale out-of-range stored value).
+            let press = |s: &mut State| {
                 s.frame_ops.insert_count = step_insert_count(s.frame_ops.insert_count, -1);
-            },
-        ))
-        .child(
-            text(format!("{} frames", clamp_insert_count(ops.insert_count)))
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        )
-        .child(fbtn(
-            "fop-ins-n-up",
-            "+",
-            false,
-            ops.insert_count >= INSERT_COUNT_MAX,
+            };
+            if ops.insert_count <= INSERT_COUNT_MIN {
+                btn_muted_live("fop-ins-n-dn", "-", false, t, press)
+            } else {
+                btn("fop-ins-n-dn", "-", false, t, press)
+            }
+        })
+        .child(design::stepper_value(
+            &format!("{} frames", clamp_insert_count(ops.insert_count)),
             t,
-            |s| {
-                s.frame_ops.insert_count = step_insert_count(s.frame_ops.insert_count, 1);
-            },
         ))
+        .child({
+            let press = |s: &mut State| {
+                s.frame_ops.insert_count = step_insert_count(s.frame_ops.insert_count, 1);
+            };
+            if ops.insert_count >= INSERT_COUNT_MAX {
+                btn_muted_live("fop-ins-n-up", "+", false, t, press)
+            } else {
+                btn("fop-ins-n-up", "+", false, t, press)
+            }
+        })
         .child(if insert_frames_enabled(core) {
             crate::rune_sec::icon_btn::icon_btn(
                 "fop-ins-n",
@@ -832,9 +896,15 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             crate::rune_sec::icon_btn::icon_btn_inert("fop-ins-n", "plus", "Insert frames", t)
         });
 
-    col()
-        .w_full()
-        .gap(6.0)
+    design::panel_col("frames", t)
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(None, "Frames", None, t)),
+        )
+        .child(design::divider(t))
         .child(section)
         .child(this_frame)
         .child(insert_row)

@@ -122,6 +122,20 @@
 //! `EditorCore::snapshot()` — none of this module's fns do,
 //! steppers included. A drag therefore costs exactly as
 //! many undo entries as the steppers: zero.
+//!
+//! Phase N (adoption) restyles the panel to the charter's
+//! card language: the root is the kit's `design::panel_col`,
+//! the header is `design::panel_title` over a kit divider,
+//! local labels are `design::section_label`, and steppers
+//! use the charter order with `design::stepper_value`
+//! readouts. The Amount slider's visual is the kit's
+//! unipolar `design::slider_track`; the Wind slider keeps
+//! its local bipolar centre-fill and centre tick (the
+//! ratified exception) on the kit rail/knob colours. Both
+//! drag roots grow from 22 to 28 pt tall. The named
+//! background presets are kit `chip_btn`s, superseding the
+//! Phase L colour-core chip construction. Keys, handlers,
+//! status strings and value formatters are unchanged.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Drag, El, Phase, Tx};
@@ -129,7 +143,8 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::vfx::{Weather, WeatherKind};
 
 use crate::chrome_view::btn;
-use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::design;
+use crate::rune_sec::icon_btn::{chip_btn, icon_btn};
 use crate::rune_sec::inspector_style::{rgb_join, rgb_split, step_channel};
 use crate::stage_view::hex_color;
 use crate::State;
@@ -689,9 +704,9 @@ fn stepper_row(
     row()
         .gap(6.0)
         .center_y()
-        .child(text(label).font(type_::LABEL).color(t.text_secondary))
+        .child(design::section_label(label, t).grow(1.0))
         .child(btn(dn_key, "−", false, t, dn))
-        .child(text(value).font(type_::LABEL).color(t.text))
+        .child(design::stepper_value(&value, t))
         .child(btn(up_key, "+", false, t, up))
 }
 
@@ -707,16 +722,11 @@ fn bg_channel_row(channel: usize, label: &str, value: u8, t: &Theme) -> El {
         .key(format!("scene-bg-{lower}"))
         .gap(8.0)
         .center_y()
-        .child(text(label).font(type_::LABEL).color(t.text))
-        .child(
-            text(value.to_string())
-                .font(type_::LABEL)
-                .color(t.text_secondary)
-                .grow(1.0),
-        )
+        .child(design::section_label(label, t).grow(1.0))
         .child(btn(&format!("scene-bg-{lower}-dn"), "−", false, t, move |s| {
             step_background_channel(&mut s.core, channel, -1)
         }))
+        .child(design::stepper_value(&value.to_string(), t))
         .child(btn(&format!("scene-bg-{lower}-up"), "+", false, t, move |s| {
             step_background_channel(&mut s.core, channel, 1)
         }))
@@ -732,16 +742,11 @@ fn fps_row(core: &EditorCore, t: &Theme) -> El {
         .key("scene-fps-row")
         .gap(8.0)
         .center_y()
-        .child(text("Frame rate").font(type_::LABEL).color(t.text))
-        .child(
-            text(fps_label(core.project.fps))
-                .font(type_::LABEL)
-                .color(t.text_secondary)
-                .grow(1.0),
-        )
+        .child(design::section_label("Frame rate", t).grow(1.0))
         .child(btn("scene-fps-dn", "−", false, t, |s| {
             step_fps(&mut s.core, -1)
         }))
+        .child(design::stepper_value(&fps_label(core.project.fps), t))
         .child(btn("scene-fps-up", "+", false, t, |s| {
             step_fps(&mut s.core, 1)
         }))
@@ -764,34 +769,41 @@ fn stage_axis_row(axis: usize, label: &str, value: f32, t: &Theme) -> El {
     row()
         .gap(8.0)
         .center_y()
-        .child(text(label).font(type_::LABEL).color(t.text))
-        .child(
-            text(format!("{}", value as i32))
-                .font(type_::LABEL)
-                .color(t.text_secondary)
-                .grow(1.0),
-        )
+        .child(design::section_label(label, t).grow(1.0))
         .child(btn(dn_key, "−", false, t, move |s| {
             step_stage_axis(&mut s.core, axis, -1)
         }))
+        .child(design::stepper_value(&format!("{}", value as i32), t))
         .child(btn(up_key, "+", false, t, move |s| {
             step_stage_axis(&mut s.core, axis, 1)
         }))
 }
 
-/// Slider track width/height and knob diameter (the
-/// settings example's proportions, slightly wider).
+/// Slider track width and knob diameter (the settings
+/// example's proportions, slightly wider).
 const SLIDER_W: f32 = 200.0;
-const SLIDER_H: f32 = 22.0;
+/// Slider drag-root height. 28 since Phase N (P18: a
+/// 22 pt drag root fell under the 24 pt hit-target floor;
+/// the drag maps x only, so growing the root is safe).
+/// The layers panel's copy of this const grows to the
+/// same 28 in its own adoption, so the two sliders do
+/// not drift.
+const SLIDER_H: f32 = 28.0;
 const KNOB: f32 = 16.0;
+/// Height of the kit's visual-only slider track
+/// (`design::slider_track`), centred inside the taller
+/// drag root for the unipolar Amount slider.
+const KIT_SLIDER_TRACK_H: f32 = 22.0;
 
 /// One weather drag slider (the settings example's
-/// `speed_control` shape): a fixed-size track element with
-/// track, fill and knob children drawn absolutely inside
-/// it. The fill runs from `fill_from`'s knob centre (0.0
-/// for Amount, 0.5 for Wind) to the current value's knob
-/// centre; `centre_tick` marks zero on the bipolar wind
-/// track. All gesture logic lives in the drag handlers.
+/// `speed_control` shape): a fixed-size drag root whose
+/// visual is drawn inside it. The unipolar Amount slider
+/// delegates its track, fill and knob to the kit's
+/// `design::slider_track`. The Wind slider is the
+/// ratified bipolar exception: its local fill still runs
+/// from `fill_from`'s centre knob position to the current
+/// value's knob centre, and `centre_tick` still marks
+/// zero. All gesture logic lives in the drag handlers.
 fn weather_slider(
     key: &'static str,
     frac: f32,
@@ -809,23 +821,29 @@ fn weather_slider(
     } else {
         (knob_cx, origin_cx - knob_cx)
     };
-    let mut slider = el()
-        .key(key)
-        .size(SLIDER_W, SLIDER_H)
-        .on_drag(handler)
+    let root = el().key(key).size(SLIDER_W, SLIDER_H).on_drag(handler);
+    if !centre_tick {
+        // Unipolar (Amount): the kit owns the whole visual;
+        // this root keeps only the key, size and drag.
+        return root.child(
+            design::slider_track(frac, t)
+                .absolute(0.0, (SLIDER_H - KIT_SLIDER_TRACK_H) / 2.0),
+        );
+    }
+    let mut slider = root
         .child(
             el()
                 .size(SLIDER_W, 4.0)
                 .absolute(0.0, (SLIDER_H - 4.0) / 2.0)
                 .radius(2.0)
-                .fill(t.control_off),
+                .fill(t.control_track),
         )
         .child(
             el()
                 .size(fill_w.max(4.0), 4.0)
                 .absolute(fill_x, (SLIDER_H - 4.0) / 2.0)
                 .radius(2.0)
-                .fill(tok::accent(0, true)),
+                .fill(design::accent()),
         );
     if centre_tick {
         slider = slider.child(
@@ -841,7 +859,7 @@ fn weather_slider(
             .size(KNOB, KNOB)
             .absolute(frac * travel, (SLIDER_H - KNOB) / 2.0)
             .radius(KNOB / 2.0)
-            .fill(t.text),
+            .fill(t.knob),
     )
 }
 
@@ -904,30 +922,28 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
         swatches = swatches.child(swatch_row);
     }
 
-    // Background presets (Phase L): one row of six named
-    // colours under the Background header. The chips mirror
-    // the swatch idiom exactly — 26×26 slot, accent-filled
-    // behind the current colour, 22×22 colour core — with
-    // positional keys, and a press writes through the
-    // swatches' own `set_background`.
-    let mut bg_presets = row().key("scene-bg-presets").gap(4.0).center_y();
-    for (i, &(_, rgb)) in BG_PRESETS.iter().enumerate() {
-        let is_current = bg_preset_active(core, i);
-        bg_presets = bg_presets.child(
-            el()
-                .key(format!("scene-bg-preset-{}", i))
-                .size(26.0, 26.0)
-                .radius(8.0)
-                .fill(if is_current { accent } else { t.bg })
-                .center()
-                .on_press(move |s: &mut State| set_background(&mut s.core, rgb))
-                .child(
-                    el()
-                        .size(22.0, 22.0)
-                        .radius(6.0)
-                        .fill(hex_color(rgb).unwrap_or(t.bg)),
-                ),
-        );
+    // Background presets (Phase L; kit chips in Phase N):
+    // six named colours under the Background header, three
+    // per row so the named chips fit the panel. Positional
+    // keys and the active highlight are the Phase L ones,
+    // and a press writes through the swatches' own
+    // `set_background`.
+    let mut bg_presets = col().key("scene-bg-presets").gap(4.0);
+    for chunk_start in (0..BG_PRESETS.len()).step_by(3) {
+        let mut preset_row = row().gap(4.0).center_y();
+        let chunk_end = (chunk_start + 3).min(BG_PRESETS.len());
+        for i in chunk_start..chunk_end {
+            let (name, rgb) = BG_PRESETS[i];
+            preset_row = preset_row.child(chip_btn(
+                &format!("scene-bg-preset-{}", i),
+                None,
+                name,
+                bg_preset_active(core, i),
+                t,
+                move |s: &mut State| set_background(&mut s.core, rgb),
+            ));
+        }
+        bg_presets = bg_presets.child(preset_row);
     }
 
     // Stage-size presets (Phase F): one button per preset,
@@ -949,18 +965,20 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
         stage_presets = stage_presets.child(preset_row);
     }
 
-    col()
-        .key("scene-panel")
-        .gap(8.0)
-        .padding(12.0)
-        .fill(t.card)
-        .radius(8.0)
-        .child(text("Scene").font(type_::TITLE).color(t.text))
+    design::panel_col("scene-panel", t)
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(None, "Scene", None, t)),
+        )
+        .child(design::divider(t))
         .child(
             row()
                 .gap(8.0)
                 .center_y()
-                .child(text("Weather").font(type_::LABEL).color(t.text_secondary))
+                .child(design::section_label("Weather", t))
                 .child(
                     text(weather_summary(weather))
                         .font(type_::LABEL)
@@ -1015,7 +1033,7 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(text("Stage").font(type_::LABEL).color(t.text_secondary))
+                .child(design::section_label("Stage", t))
                 .child(
                     text(format!(
                         "{} × {}",
@@ -1051,9 +1069,7 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
                 .child(stage_axis_row(0, "Width", core.project.stage[0], t))
                 .child(stage_axis_row(1, "Height", core.project.stage[1], t)),
         )
-        .child(
-            text("Stage size").font(type_::LABEL).color(t.text_secondary),
-        )
+        .child(design::section_label("Stage size", t))
         .child(stage_presets)
         .child(
             text(stage_readout(core))
@@ -1071,7 +1087,7 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
                 .key("scene-bg-header")
                 .gap(8.0)
                 .center_y()
-                .child(text("Background").font(type_::LABEL).color(t.text_secondary))
+                .child(design::section_label("Background", t))
                 .child(
                     el()
                         .key("scene-bg-preview")

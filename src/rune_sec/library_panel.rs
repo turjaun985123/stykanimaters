@@ -148,6 +148,37 @@
 //!   the sort on, Enter inserts the first row the user
 //!   actually sees.
 //!
+//! ## Phase N adoption
+//!
+//! - **Card language**: the panel root is the kit's
+//!   [`design::panel_col`] (card fill, hairline border,
+//!   radius 12, padding 12) under the same `library-panel`
+//!   key; the old inner card (`library-card`) keeps its
+//!   key as a plain grouping column — the root is the
+//!   card now, not a card inside a card. The header rides
+//!   the kit's keyed [`design::header_row`] shell with a
+//!   [`design::panel_title`] cluster (`book-open` glyph,
+//!   per P13; the count line is the cluster's meta), and
+//!   a kit [`design::divider`] sits under it while the
+//!   panel is expanded.
+//! - **Sort toggle**: `lib-sort` renders through
+//!   [`icon_btn`] with `arrow-down-a-z` (P13: the label
+//!   is literally "Sort: A–Z"); key, labels, active flag
+//!   and handler are unchanged from the plain-[`btn`]
+//!   version.
+//! - **Rows**: entry rows ride the kit's
+//!   [`design::list_row`] shell under the same
+//!   `library-row-{i}` keys; the shell's selected fill
+//!   marks the rename target — the only per-row state
+//!   the panel has. Row children (name, segment count,
+//!   Insert / Rename / Delete) keep their keys and
+//!   handlers verbatim.
+//! - **Labels & empty states**: group headings are the
+//!   kit's [`design::section_label`]; the two bare
+//!   "nothing here" lines are the kit's
+//!   [`design::empty_state`] with their message strings
+//!   byte-identical.
+//!
 //! The successful-rename fs dispatch (a real file moved
 //! under `./library`) is deliberately **untested**, for
 //! exactly the delete reason given below: test binaries
@@ -210,6 +241,7 @@ use rune::{col, row, text, text_input, El, ScrollSpec, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::rune_sec::icons::icon_el;
 use crate::State;
@@ -743,11 +775,6 @@ pub fn cancel_rename(s: &mut State) {
     s.library_panel.rename = TextEdit::default();
 }
 
-/// A small muted group heading inside the panel.
-fn group_label(t: &Theme, label: &str) -> El {
-    text(label).font(type_::LABEL).color(t.text_secondary)
-}
-
 /// The rename editor row rendered under the row being
 /// renamed: the name field plus Apply and Cancel. Only
 /// one rename session can be open, so the keys are
@@ -782,12 +809,21 @@ fn rename_editor_row(s: &State, t: &Theme) -> El {
 /// file, and [`rename_saved`]/[`delete_saved`] would
 /// refuse them anyway. While this row is the rename
 /// target, the rename editor renders directly under it.
+///
+/// Phase N: the row rides the kit's [`design::list_row`]
+/// shell (min height 28, px 8, radius 8, hover overlay)
+/// under the same `library-row-{i}` key; the shell's
+/// selected fill marks the rename target — the only
+/// per-row state the panel carries. The shell takes no
+/// handler: the row's pressable children below keep
+/// their keys and handlers exactly as before.
 fn entry_row(entry: &LibraryRow, s: &State, t: &Theme) -> El {
     let i = entry.index;
-    let mut r = row()
-        .key(format!("library-row-{i}"))
-        .gap(8.0)
-        .center_y()
+    let mut r = design::list_row(
+        &format!("library-row-{i}"),
+        s.library_panel.renaming == Some(i),
+        t,
+    )
         .child(text(entry.name.clone()).font(type_::LABEL).color(t.text).grow(1.0))
         .child(
             text(format!("{} seg", entry.segments))
@@ -838,7 +874,7 @@ fn entry_row(entry: &LibraryRow, s: &State, t: &Theme) -> El {
 fn group(key: &str, label: &str, rows: &[LibraryRow], s: &State, t: &Theme) -> El {
     let mut g = col().key(key.to_string()).gap(4.0);
     if !rows.is_empty() {
-        g = g.child(group_label(t, label));
+        g = g.child(design::section_label(label, t));
         for entry in rows {
             g = g.child(entry_row(entry, s, t));
         }
@@ -865,23 +901,22 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
         core.library.len(),
         &query,
     );
-    let mut panel = col().key("library-panel").gap(6.0);
+    // Phase N: the root is the kit card (panel_col) under
+    // the same key; the header rides the kit's keyed
+    // header shell — panel_title cluster (book-open glyph
+    // per P13, the count line as its meta) with the
+    // Hide/Show toggle trailing — over a hairline divider
+    // while expanded. The old inner card keeps its key as
+    // a plain grouping column: the root is the card now.
+    let mut panel = design::panel_col("library-panel", t);
     panel = panel.child(
-        row()
-            .key("library-header")
-            .gap(8.0)
-            .center_y()
-            .child(
-                text("Library")
-                    .font(type_::TITLE)
-                    .color(t.text)
-                    .grow(1.0),
-            )
-            .child(
-                text(header_count)
-                    .font(type_::LABEL)
-                    .color(t.text_secondary),
-            )
+        design::header_row("library-header")
+            .child(design::panel_title(
+                Some("book-open"),
+                "Library",
+                Some(&header_count),
+                t,
+            ))
             .child(btn(
                 "library-collapse",
                 if collapsed { "Show" } else { "Hide" },
@@ -891,12 +926,8 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
             )),
     );
     if !collapsed {
-        let mut card = col()
-            .key("library-card")
-            .gap(6.0)
-            .padding(10.0)
-            .radius(8.0)
-            .fill(t.card);
+        panel = panel.child(design::divider(t));
+        let mut card = col().key("library-card").gap(6.0);
         card = card.child(btn(
             "library-save",
             "Save current figure to library",
@@ -920,8 +951,9 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
                         .on_edit(|s: &mut State| &mut s.library_panel.search)
                         .on_submit(|s: &mut State, _tx: &mut Tx| submit_library_search(s)),
                 )
-                .child(btn(
+                .child(icon_btn(
                     "lib-sort",
+                    "arrow-down-a-z",
                     if sort_by_name { "Sort: A–Z" } else { "Sort: added" },
                     sort_by_name,
                     t,
@@ -929,17 +961,19 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
                 )),
         );
         if core.library.is_empty() {
-            card = card.child(group_label(
-                t,
+            card = card.child(design::empty_state(
+                "shapes",
                 "Library is empty — save a figure to add one.",
+                t,
             ));
         } else {
             let builtins = sort_rows(builtin_rows_q(core, &query), sort_by_name);
             let saved = sort_rows(saved_rows_q(core, &query), sort_by_name);
             if builtins.is_empty() && saved.is_empty() {
-                card = card.child(group_label(
-                    t,
+                card = card.child(design::empty_state(
+                    "magnifying-glass",
                     &format!("No library figures match \"{}\".", query.trim()),
+                    t,
                 ));
             }
             let list = col()
@@ -1594,5 +1628,38 @@ mod tests {
             "status: {}",
             core.status
         );
+    }
+
+    #[test]
+    fn panel_builds_in_every_shape() {
+        // Phase N construction smoke test: element
+        // internals are opaque to a unit test (the design
+        // kit's own convention), so this pins only that
+        // the kit-shell builder constructs without
+        // panicking in each of the panel's shapes —
+        // expanded, collapsed, a filter matching nothing
+        // (the no-match empty state), an empty library
+        // (the empty-library empty state) and a rename
+        // session open (the selected row shell + editor).
+        let t = rune::tok::theme(true);
+        let mut s = crate::init();
+        let _ = library_panel(&s, &t);
+        s.library_panel.collapsed = true;
+        let _ = library_panel(&s, &t);
+        s.library_panel.collapsed = false;
+        s.library_panel.search = TextEdit::new("zzz-no-match".to_string());
+        let _ = library_panel(&s, &t);
+        s.library_panel.search = TextEdit::default();
+        s.core.library.clear();
+        let _ = library_panel(&s, &t);
+        s.core = EditorCore::new();
+        s.core.library.push((
+            "smoke-saved".into(),
+            stykanimate_rs::model::FigureDef::simple(),
+        ));
+        let idx = s.core.library.len() - 1;
+        start_rename(&mut s, idx);
+        assert_eq!(s.library_panel.renaming, Some(idx));
+        let _ = library_panel(&s, &t);
     }
 }

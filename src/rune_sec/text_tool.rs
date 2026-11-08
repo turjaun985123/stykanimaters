@@ -201,14 +201,36 @@
 //! `TextToolState::loaded` is rewritten to the new
 //! index, so the edit area keeps editing the same
 //! text across the reorder).
+//!
+//! ## Phase N: kit adoption (visual only)
+//!
+//! The panel adopts the design kit's card language:
+//! the root is a [`design::panel_col`] with the kit
+//! header ([`design::panel_title`] + [`design::divider`]),
+//! the list headings render through
+//! [`design::section_label`], the keyed instance rows
+//! sit on [`design::list_row`] shells (the loaded
+//! instance's row carries the selected fill, so the
+//! loaded text is finally marked in its own list),
+//! the unkeyed segment lines sit on
+//! [`design::row_shell`] shells, both size readouts
+//! render through [`design::stepper_value`], and the
+//! colour row's palette swatches are [`design::swatch`]
+//! (the §23 accent-slot construction retired; the
+//! current-colour readout keeps its key and its
+//! non-pressable role, restyled to the swatch
+//! metrics). Every element key, handler and status
+//! string is byte-identical to the pre-adoption
+//! panel; only structure and styling moved.
 
-use rune::tok::{self, type_, Theme};
+use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, text_input, El, TextEdit as FieldEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{InstanceKey, SegmentMedia, TextInstance};
 use stykanimate_rs::text_edit::{TextEdit as SegTextEdit, DEFAULT_TEXT_SIZE};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::State;
 
 /// Smallest glyph height the stepper allows (stage units).
@@ -974,55 +996,43 @@ fn step_from_button(s: &mut State, dir: i32) {
 /// loaded instance's nudge pad, rotate row and size
 /// steppers.
 /// The loaded instance's colour row (Phase L §23):
-/// the [`TEXT_PALETTE`] swatches in the particles
-/// panel's construction — a 26 pt slot per colour,
-/// accent-filled behind the 22 pt colour chip when it
-/// is the loaded instance's colour (compared masked
-/// to `0xRRGGBB`) — plus a readout chip
-/// (`text-color-custom`) carrying the instance's own
-/// colour even when no swatch matches it. Built
-/// either way, like the nudge pad: with nothing
-/// loaded no slot is lit and no readout shows, and a
-/// press refuses through [`loaded_index`].
+/// the [`TEXT_PALETTE`] swatches as kit swatches
+/// ([`design::swatch`] — the Phase N adoption retired
+/// the §23 accent-slot construction for the kit's one
+/// swatch: a 24 pt colour square, the loaded
+/// instance's colour carrying the 2 pt accent border;
+/// compared masked to `0xRRGGBB`) — plus a readout
+/// chip (`text-color-custom`) in the same metrics
+/// carrying the instance's own colour even when no
+/// swatch matches it. The readout keeps its key and
+/// stays non-pressable, as before. Built either way,
+/// like the nudge pad: with nothing loaded no swatch
+/// is marked and no readout shows, and a press
+/// refuses through [`loaded_index`].
 fn text_color_row(s: &State, t: &Theme) -> El {
     let loaded_color = s
         .text_tool
         .loaded
         .and_then(|i| s.core.project.texts.get(i))
         .map(|inst| inst.color & 0xFF_FFFF);
-    let accent = tok::accent(0, true);
     let mut row_el = row().key("text-color-row").w_full().gap(4.0).center_y();
     for (ci, &rgb) in TEXT_PALETTE.iter().enumerate() {
-        row_el = row_el.child(
-            el()
-                .key(format!("text-color-{ci}"))
-                .size(26.0, 26.0)
-                .radius(8.0)
-                .fill(if loaded_color == Some(rgb) { accent } else { t.bg })
-                .center()
-                .on_press(move |s: &mut State| set_loaded_color(s, rgb))
-                .child(
-                    el()
-                        .size(22.0, 22.0)
-                        .radius(6.0)
-                        .fill(crate::stage_view::hex_color(rgb).unwrap_or(t.bg)),
-                ),
-        );
+        row_el = row_el.child(design::swatch(
+            &format!("text-color-{ci}"),
+            crate::stage_view::hex_color(rgb).unwrap_or(t.bg),
+            loaded_color == Some(rgb),
+            t,
+            move |s: &mut State| set_loaded_color(s, rgb),
+        ));
     }
     if let Some(current) = loaded_color {
         row_el = row_el.child(
             el()
                 .key("text-color-custom")
-                .size(26.0, 26.0)
-                .radius(8.0)
-                .fill(t.bg)
-                .center()
-                .child(
-                    el()
-                        .size(22.0, 22.0)
-                        .radius(6.0)
-                        .fill(crate::stage_view::hex_color(current).unwrap_or(t.bg)),
-                ),
+                .size(24.0, 24.0)
+                .radius(design::CONTROL_RADIUS)
+                .fill(crate::stage_view::hex_color(current).unwrap_or(t.bg))
+                .border(1.0, t.card_border),
         );
     }
     row_el
@@ -1041,11 +1051,7 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
     // real vec index.
     let instances = text_instances(core);
     let mut texts_list = col().key("text-instances").gap(2.0);
-    texts_list = texts_list.child(
-        text("Existing texts")
-            .font(type_::LABEL)
-            .color(t.text_secondary),
-    );
+    texts_list = texts_list.child(design::section_label("Existing texts", t));
     if instances.is_empty() {
         texts_list = texts_list.child(
             text("No free-standing texts.")
@@ -1056,11 +1062,7 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
         for r in &instances {
             let i = r.index;
             texts_list = texts_list.child(
-                row()
-                    .key(format!("text-row-{i}"))
-                    .w_full()
-                    .gap(8.0)
-                    .center_y()
+                design::list_row(&format!("text-row-{i}"), s.text_tool.loaded == Some(i), t)
                     .child(btn(&format!("text-load-{i}"), &r.preview, false, t, move |s: &mut State| {
                         load_instance(s, i)
                     }))
@@ -1111,11 +1113,7 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
         .key("text-instance-edit")
         .w_full()
         .gap(2.0)
-        .child(
-            text(loaded_label)
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        .child(design::section_label(&loaded_label, t));
     if loaded_row.is_some() {
         instance_edit = instance_edit
             .child(
@@ -1185,11 +1183,7 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                 .child(btn("text-isize-dn", "Size −", false, t, |s| {
                     resize_loaded(s, -1)
                 }))
-                .child(
-                    text(loaded_size)
-                        .font(type_::LABEL)
-                        .color(t.text),
-                )
+                .child(design::stepper_value(&loaded_size, t))
                 .child(btn("text-isize-up", "Size +", false, t, |s| {
                     resize_loaded(s, 1)
                 })),
@@ -1206,25 +1200,27 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
         for r in &rows {
             let selected = core.selected_node == Some(r.node);
             list = list.child(
-                text(format!(
-                    "{}: “{}” · {:.0}",
-                    r.name, r.content, r.size
-                ))
-                .font(type_::LABEL)
-                .color(if selected { t.text } else { t.text_secondary }),
+                design::row_shell(selected, t).child(
+                    text(format!(
+                        "{}: “{}” · {:.0}",
+                        r.name, r.content, r.size
+                    ))
+                    .font(type_::LABEL)
+                    .color(if selected { t.text } else { t.text_secondary }),
+                ),
             );
         }
     }
 
-    col()
-        .key("text-tool")
-        .w_full()
-        .gap(6.0)
+    design::panel_col("text-tool", t)
         .child(
-            text("Text")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(None, "Text", None, t)),
         )
+        .child(design::divider(t))
         .child(
             text_input(&s.text_tool.field, type_::BODY.lh(26.0))
                 .key("text-input")
@@ -1249,11 +1245,7 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                 .child(btn("text-size-down", "Size −", false, t, |s| {
                     step_from_button(s, -1)
                 }))
-                .child(
-                    text(format!("{shown_size:.0}"))
-                        .font(type_::LABEL)
-                        .color(t.text),
-                )
+                .child(design::stepper_value(&format!("{shown_size:.0}"), t))
                 .child(btn("text-size-up", "Size +", false, t, |s| {
                     step_from_button(s, 1)
                 })),

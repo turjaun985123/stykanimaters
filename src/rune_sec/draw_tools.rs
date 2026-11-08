@@ -112,14 +112,28 @@
 //!   paint.rs:430) — so [`width_label`]'s fractional and
 //!   fallback arms exist only so a future preset can
 //!   never make the readout print nonsense.
+//! * **Panel card (Phase N).** The section is a kit panel
+//!   card now, not a loose column of rows (P16: "a row
+//!   pretending to be a panel"): the root is
+//!   `design::panel_col` under the existing `draw-tools`
+//!   key, the "Draw" header is the kit `panel_title`
+//!   (pen-nib glyph; the active brush's name as meta) over
+//!   a hairline divider, the Brushes / Shapes / Stamp
+//!   blocks sit under kit `section_label`s, the brush
+//!   presets are kit `chip_btn`s, and the stamp steppers
+//!   follow the charter order (label, −, `stepper_value`,
+//!   +). The smoothing and width lines stay readouts —
+//!   the Phase J/K reasoning above is untouched. Keys and
+//!   handlers are unchanged throughout.
 
 use rune::tok::{type_, Theme};
-use rune::{col, row, text, El};
+use rune::{row, text, El};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::paint::ShapeKind;
 
 use crate::chrome_view::btn;
-use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::design;
+use crate::rune_sec::icon_btn::{chip_btn, icon_btn};
 use crate::State;
 
 /// Douglas-Peucker epsilon (stage units) for the Simplify
@@ -595,18 +609,21 @@ pub fn drawing_stats_line(stats: &DrawingStats) -> String {
     line
 }
 
-/// The Draw toolbar section: a "Draw" label and the drawing
-/// readout line over the control rows —
-/// tools (mode, eraser, brush cycle, mirror, simplify, smooth,
-/// clear), the brush library (one button per preset, the
-/// active one highlighted) with the active preset's smoothing
-/// and width readouts under it, the shape tools (Line / Rect /
-/// Ellipse stamps plus the Polygon / Star / Arrow stamps), and
-/// the stamp parameter steppers (Sides / Size / Rotation).
-/// Active states read from the core's own fields
-/// (`draw_mode`, `draw_tool_is_eraser`, `brush_index` via
-/// [`active_brush_index`]); the stamp parameters read from
-/// the panel-local [`DrawToolsState`].
+/// The Draw toolbar panel (Phase N: the kit card shell —
+/// see the module docs): a header row holding the kit
+/// title (the existing "Draw" text, the active brush's
+/// name as meta) over a hairline divider, then the drawing
+/// readout line and the control blocks under kit section
+/// labels — tools (mode, eraser, brush cycle, mirror,
+/// simplify, smooth, clear), Brushes (one chip per preset,
+/// the active one highlighted) with the active preset's
+/// smoothing and width readouts under it, Shapes (Line /
+/// Rect / Ellipse stamps plus the Polygon / Star / Arrow
+/// stamps), and Stamp (the parameter steppers: Sides /
+/// Size / Rotation). Active states read from the core's
+/// own fields (`draw_mode`, `draw_tool_is_eraser`,
+/// `brush_index` via [`active_brush_index`]); the stamp
+/// parameters read from the panel-local [`DrawToolsState`].
 pub fn draw_tools(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let active_brush = active_brush_index(core);
@@ -656,9 +673,9 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
 
     let mut brushes = row().key("draw-brushes").gap(8.0).center_y();
     for (i, name) in brush_names().iter().enumerate() {
-        brushes = brushes.child(icon_btn(
+        brushes = brushes.child(chip_btn(
             &brush_key(i),
-            brush_icon(name),
+            Some(brush_icon(name)),
             *name,
             i == active_brush,
             t,
@@ -689,42 +706,61 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
             stamp_arrow_button(&mut s.core, &s.draw_tools)
         }));
 
-    // Stamp parameter steppers (Phase F): the values the
-    // three stamp buttons above read, each with a readout
-    // between its − / + buttons (the camera panel's zoom
-    // idiom). Sides drives the polygon and the star alike.
+    // Stamp parameter steppers (Phase F; Phase N: charter
+    // order per group — label, −, kit `stepper_value`, + —
+    // replacing the Phase F combined "Sides 5" readouts).
+    // The three groups share one row, so the labels are
+    // plain LABEL text rather than growing: a grow on each
+    // would spread the groups across the row instead of
+    // labelling them. Sides drives the polygon and the
+    // star alike.
     let params = &s.draw_tools;
-    let readout = |label: String, t: &Theme| text(label).font(type_::LABEL).color(t.text_secondary);
     let stamp_params = row()
         .key("draw-stamp-params")
         .gap(8.0)
         .center_y()
-        .child(btn("draw-sides-dn", "-", false, t, |s| {
+        .child(text("Sides").font(type_::LABEL).color(t.text_secondary))
+        .child(btn("draw-sides-dn", "−", false, t, |s| {
             step_stamp_sides(&mut s.core, &mut s.draw_tools, -1)
         }))
-        .child(readout(format!("Sides {}", params.sides), t))
+        .child(design::stepper_value(&format!("{}", params.sides), t))
         .child(btn("draw-sides-up", "+", false, t, |s| {
             step_stamp_sides(&mut s.core, &mut s.draw_tools, 1)
         }))
-        .child(btn("draw-size-dn", "-", false, t, |s| {
+        .child(text("Size").font(type_::LABEL).color(t.text_secondary))
+        .child(btn("draw-size-dn", "−", false, t, |s| {
             step_stamp_size(&mut s.core, &mut s.draw_tools, -1)
         }))
-        .child(readout(format!("Size {}%", params.size_pct), t))
+        .child(design::stepper_value(&format!("{}%", params.size_pct), t))
         .child(btn("draw-size-up", "+", false, t, |s| {
             step_stamp_size(&mut s.core, &mut s.draw_tools, 1)
         }))
-        .child(btn("draw-rot-dn", "-", false, t, |s| {
+        .child(text("Rot").font(type_::LABEL).color(t.text_secondary))
+        .child(btn("draw-rot-dn", "−", false, t, |s| {
             step_stamp_rotation(&mut s.core, &mut s.draw_tools, -1)
         }))
-        .child(readout(format!("Rot {}°", params.rotation_deg), t))
+        .child(design::stepper_value(
+            &format!("{}°", params.rotation_deg),
+            t,
+        ))
         .child(btn("draw-rot-up", "+", false, t, |s| {
             step_stamp_rotation(&mut s.core, &mut s.draw_tools, 1)
         }));
 
-    col()
-        .key("draw-tools")
-        .gap(6.0)
-        .child(text("Draw").font(type_::LABEL).color(t.text_secondary))
+    design::panel_col("draw-tools", t)
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(
+                    Some("pen-nib"),
+                    "Draw",
+                    Some(core.active_brush().name),
+                    t,
+                )),
+        )
+        .child(design::divider(t))
         .child(
             text(drawing_stats_line(&drawing_stats(core)))
                 .key("draw-stats")
@@ -732,6 +768,7 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
                 .color(t.text_secondary),
         )
         .child(tools)
+        .child(design::section_label("Brushes", t))
         .child(brushes.scroll_x().w_full())
         .child(
             text(smoothing_readout(core))
@@ -745,7 +782,9 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         )
+        .child(design::section_label("Shapes", t))
         .child(shapes)
+        .child(design::section_label("Stamp", t))
         .child(stamp_params)
 }
 

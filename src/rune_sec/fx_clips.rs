@@ -149,6 +149,20 @@
 //! key `fx-readout`), and strip bars for hidden
 //! clips drawn dimmed ([`bar_alpha`] scales the
 //! bar fill's alpha; geometry is untouched).
+//!
+//! Phase N restyles the section onto the design kit
+//! without touching behaviour: the `fx-section` root
+//! is a kit card ([`design::panel_col`]), the lane
+//! header is a kit [`design::panel_title`] (the
+//! `wand-magic-sparkles` glyph, the clip count as its
+//! meta) over a kit [`design::divider`], the Colour /
+//! End colour group labels are kit
+//! [`design::section_label`]s, and the colour
+//! swatches are the kit's 24×24 [`design::swatch`] —
+//! the local 18×18 white-outline construction is
+//! retired. The strip's geometry, keys and seek
+//! behaviour are unchanged, as are every handler,
+//! readout and status line.
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, ScrollSpec, Shape, Tx};
@@ -159,9 +173,9 @@ use stykanimate_rs::fx_ops::fx_kind_cycle;
 use stykanimate_rs::vfx::ClipKind;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::fx_browser::kind_label;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
-use crate::rune_sec::icons::icon_el;
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -984,23 +998,19 @@ fn strip_press(s: &mut State, d: &Drag) {
 // Views
 // ----------------------------------------------------------------
 
-/// One colour swatch: a rounded square filled with the
-/// colour; the current value carries a white outline
-/// ring. Pressing it runs `f` (a colour-set handler).
-fn swatch(key: String, hex: u32, current: bool, f: impl Fn(&mut State) + 'static) -> El {
+/// One colour swatch: the kit's 24×24 pressable
+/// ([`design::swatch`]) filled with the colour; the
+/// current value carries the kit's 2 pt accent ring,
+/// the others a 1 pt card hairline so pale colours
+/// stay visible on the panel card. Pressing it runs
+/// `f` (a colour-set handler). Phase N retired the
+/// local 18×18 white-outline construction onto the
+/// kit — the outline dialect's last user (P09 forms
+/// census, F-SWATCH). The key arrives by value from
+/// [`swatch_rows`]' format and is passed on untouched.
+fn swatch(key: String, hex: u32, current: bool, t: &Theme, f: impl Fn(&mut State) + 'static) -> El {
     let fill = hex_color(hex).unwrap_or(Color::WHITE);
-    let swatch = el()
-        .key(key)
-        .size(18.0, 18.0)
-        .radius(5.0)
-        .fill(fill)
-        .hover(fill)
-        .on_press(f);
-    if current {
-        swatch.outline(2.0, 1.0, Color::WHITE)
-    } else {
-        swatch
-    }
+    design::swatch(&key, fill, current, t, f)
 }
 
 /// A labelled row of swatches (two rows of eight, so the
@@ -1011,6 +1021,7 @@ fn swatch_rows(
     clip_index: usize,
     key_stem: &str,
     current: Option<u32>,
+    t: &Theme,
     mut make: impl FnMut(u32) -> Box<dyn Fn(&mut State)>,
 ) -> El {
     let mut rows = col().gap(4.0);
@@ -1018,7 +1029,7 @@ fn swatch_rows(
         let mut row = row().gap(4.0);
         for &hex in chunk {
             let key = format!("{key_stem}-{}-{hex:06x}", clip_index);
-            row = row.child(swatch(key, hex, current == Some(hex), make(hex)));
+            row = row.child(swatch(key, hex, current == Some(hex), t, make(hex)));
         }
         rows = rows.child(row);
     }
@@ -1174,22 +1185,24 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
                 }),
         );
     }
+    let count = format!("{} clip(s)", s.core.project.fx_clips.len());
     col()
         .key("fx-lane")
         .w_full()
         .gap(6.0)
         .child(
             row()
+                .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(icon_el("wand-magic-sparkles", 14.0, t.text))
-                .child(text("FX clips").font(type_::TITLE).color(t.text))
-                .child(
-                    text(format!("{} clip(s)", s.core.project.fx_clips.len()))
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                ),
+                .child(design::panel_title(
+                    Some("wand-magic-sparkles"),
+                    "FX clips",
+                    Some(&count),
+                    t,
+                )),
         )
+        .child(design::divider(t))
         .child(strip_view(s, t))
         .child(list.scroll(ScrollSpec { stick_bottom: false }).min_h(0.0))
 }
@@ -1460,23 +1473,15 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
         // its direct children, so the layout is
         // unchanged — the key just gives the row a name
         // of its own.
-        .child(
-            text("Colour")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        )
-        .child(swatch_rows(i, "fx-color", Some(data.color), |hex| {
+        .child(design::section_label("Colour", t))
+        .child(swatch_rows(i, "fx-color", Some(data.color), t, |hex| {
             Box::new(move |s: &mut State| set_color(s, hex))
         }))
         .child(
             col()
                 .key("fx-color2-row")
                 .gap(8.0)
-                .child(
-                    text("End colour")
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                )
+                .child(design::section_label("End colour", t))
                 .child(
                     row()
                         .gap(8.0)
@@ -1498,7 +1503,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                             .color(t.text_secondary),
                         ),
                 )
-                .child(swatch_rows(i, "fx-color2", data.color2, |hex| {
+                .child(swatch_rows(i, "fx-color2", data.color2, t, |hex| {
                     Box::new(move |s: &mut State| set_color2(s, Some(hex)))
                 })),
         )
@@ -1535,11 +1540,12 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
 
 /// Lane + inspector stacked — the whole section 14
 /// surface, for the shell layout to mount as one block.
+/// Phase N: the root is the kit card
+/// ([`design::panel_col`]) under the same `fx-section`
+/// key — card fill, hairline border, radius 12,
+/// padding 12, gap 8.
 pub fn fx_section(s: &State, t: &Theme) -> El {
-    col()
-        .key("fx-section")
-        .w_full()
-        .gap(10.0)
+    design::panel_col("fx-section", t)
         .child(fx_lane(s, t))
         .child(fx_inspector(s, t))
 }
@@ -2143,6 +2149,24 @@ mod tests {
         let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
         let state = state_with(core, Some(9));
         let _ = fx_inspector(&state, &t);
+    }
+
+    #[test]
+    fn section_builds_with_and_without_clips() {
+        let t = rune::tok::theme(true);
+        // Phase N: the whole section — kit card root,
+        // kit header over its divider, the strip, and
+        // (with a valid selection) the inspector with
+        // its kit swatch rows — builds in every state
+        // the lane/inspector pair can be in.
+        let state = state_with(core_with(vec![]), None);
+        let _ = fx_section(&state, &t);
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let state = state_with(core, None);
+        let _ = fx_section(&state, &t);
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let state = state_with(core, Some(0));
+        let _ = fx_section(&state, &t);
     }
 
     #[test]

@@ -72,6 +72,29 @@
 //! carry a ` (muted)` marker (`clip_row_label`) and the
 //! readout gains a ` · muted` segment (`clip_readout`).
 //!
+//! Phase N restyles the panel onto the design kit
+//! (charter "card + hairline"): the root is
+//! `design::panel_col`, the header is a `design::
+//! panel_title` cluster (`music` glyph, per P13 §3b)
+//! over a kit divider, the clip rows are
+//! `design::list_row` shells (the kit selected fill
+//! replaces the hand-rolled control-track fill), the
+//! section captions are `design::section_label`, the
+//! empty state is `design::empty_state`, and the gain
+//! readout is `design::stepper_value`. The DSP buttons
+//! gain the Font Awesome glyphs P13 assigns them —
+//! Tier A: Normalise / per-row Norm (`volume-high`),
+//! Echo (`repeat`), Trim silence (`scissors`), Reverse
+//! (`left-right`), Earlier / Later (`chevron-left` /
+//! `chevron-right`), Mixdown (`layer-group`); Tier B:
+//! Lowpass (`filter`), Split silences (`wave-square`),
+//! Pitch +2 (`arrow-trend-up`), Compress (`compress`),
+//! per-row Xfade (`shuffle`). Fade keeps its Phase H
+//! `chart-line`, Mute its volume pair, Duplicate its
+//! `copy`. Every key, label and handler is unchanged;
+//! the header count rides as the title cluster's meta
+//! (`{n} clip(s)`), the charter §2 shape.
+//!
 //! Every control calls a real `EditorCore` op (evidence in
 //! the handler comments). Phase E closed the gaps Phase D
 //! had to leave open — fade, reverse, gain, delete and move
@@ -87,13 +110,14 @@
 //! playback and mixdown honour.
 
 use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, text_input, El, TextEdit, Tx};
+use rune::{row, text, text_input, El, TextEdit, Tx};
 use stykanimate_rs::audio_edit;
 use stykanimate_rs::audio_ops;
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::AudioClip;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::State;
 
@@ -676,58 +700,50 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
     let clips = &core.project.audio;
     let selected = s.audio_panel.selected;
 
-    let mut panel = col()
-        .key("audio-panel")
-        .w_full()
-        .gap(6.0)
+    // Phase N: the kit card root + header (the `music`
+    // glyph is P13 §3b's for this panel; the clip count
+    // rides as the title cluster's meta, charter §2),
+    // over the kit divider. Root key unchanged.
+    let mut panel = design::panel_col("audio-panel", t)
         .child(
             row()
                 .w_full()
+                .gap(8.0)
                 .center_y()
-                .child(text("Audio").font(type_::TITLE).color(t.text))
-                .child(el().grow(1.0))
-                .child(
-                    text(format!("Audio — {} clip(s)", clips.len()))
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                ),
-        );
+                .child(design::panel_title(
+                    Some("music"),
+                    "Audio",
+                    Some(&format!("{} clip(s)", clips.len())),
+                    t,
+                )),
+        )
+        .child(design::divider(t));
 
     if clips.is_empty() {
-        panel = panel.child(
-            text("No audio clips in this project.")
-                .font(type_::BODY)
-                .color(t.text_secondary),
-        );
+        panel = panel.child(design::empty_state(
+            "music",
+            "No audio clips in this project.",
+            t,
+        ));
     } else {
         panel = panel.child(
             text(summary_line(clips))
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
-        panel = panel.child(text("Clips").font(type_::LABEL).color(t.text_secondary));
+        panel = panel.child(design::section_label("Clips", t));
         for (i, clip) in clips.iter().enumerate() {
             // Phase G: a row press selects the clip for the
             // operations toolbar (the `fx_clips` lane
             // pattern — the row carries the fill, the inner
             // buttons stay the press targets inside their
-            // own boxes); the selected row is filled with
-            // the control-track colour.
+            // own boxes). Phase N: the row shell is the
+            // kit `list_row` — the selected row carries
+            // the kit selected fill (accent at 16%),
+            // replacing the hand-rolled control-track fill.
             let is_selected = selected == Some(i);
-            let mut clip_row = row()
-                .key(format!("audio-clip-{i}"))
+            let mut clip_row = design::list_row(&format!("audio-clip-{i}"), is_selected, t)
                 .w_full()
-                .center_y()
-                .gap(6.0)
-                .px(8.0)
-                .py(5.0)
-                .radius(6.0)
-                .fill(if is_selected { t.control_track } else { t.card })
-                .hover(if is_selected {
-                    t.control_track
-                } else {
-                    t.control_off
-                })
                 .on_press(move |s: &mut State| {
                     s.audio_panel.selected = Some(i);
                 })
@@ -741,9 +757,14 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                     .color(t.text)
                     .grow(1.0),
                 )
-                .child(btn(&format!("audio-norm-{i}"), "Norm", false, t, move |s| {
-                    s.core.audio_normalize(i)
-                }))
+                .child(icon_btn(
+                    &format!("audio-norm-{i}"),
+                    "volume-high",
+                    "Norm",
+                    false,
+                    t,
+                    move |s| s.core.audio_normalize(i),
+                ))
                 .child(icon_btn(
                     &format!("audio-split-{i}"),
                     "scissors",
@@ -756,8 +777,9 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                     },
                 ));
             if i + 1 < clips.len() {
-                clip_row = clip_row.child(btn(
+                clip_row = clip_row.child(icon_btn(
                     &format!("audio-xfade-{i}"),
+                    "shuffle",
                     "Xfade",
                     false,
                     t,
@@ -800,7 +822,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
     // silence, Split silences, Pitch, Compress) the same
     // way, through §37's indexed variants; no toolbar op
     // is last-clip-only. Mixdown is whole-project.
-    panel = panel.child(text("Operations").font(type_::LABEL).color(t.text_secondary));
+    panel = panel.child(design::section_label("Operations", t));
     panel = panel.child(
         text(target_line(clips, selected))
             .font(type_::LABEL)
@@ -818,18 +840,21 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             .key("audio-ops")
             .gap(6.0)
             .center_y()
-            .child(btn("audio-norm-last", "Normalise", false, t, normalize_target))
-            .child(btn("audio-echo", "Echo", false, t, echo_target))
-            .child(btn("audio-lowpass", "Lowpass", false, t, lowpass_target))
-            .child(btn("audio-trimsil", "Trim silence", false, t, trim_silence_target))
-            .child(btn("audio-split-sil", "Split silences", false, t, split_silences_target))
-            .child(btn("audio-pitch", "Pitch +2", false, t, pitch_target))
-            .child(btn("audio-comp", "Compress", false, t, compress_target))
+            // Phase N: the DSP buttons carry the glyphs
+            // P13 assigns them (Tier A + Tier B tables) —
+            // keys, labels and handlers verbatim.
+            .child(icon_btn("audio-norm-last", "volume-high", "Normalise", false, t, normalize_target))
+            .child(icon_btn("audio-echo", "repeat", "Echo", false, t, echo_target))
+            .child(icon_btn("audio-lowpass", "filter", "Lowpass", false, t, lowpass_target))
+            .child(icon_btn("audio-trimsil", "scissors", "Trim silence", false, t, trim_silence_target))
+            .child(icon_btn("audio-split-sil", "wave-square", "Split silences", false, t, split_silences_target))
+            .child(icon_btn("audio-pitch", "arrow-trend-up", "Pitch +2", false, t, pitch_target))
+            .child(icon_btn("audio-comp", "compress", "Compress", false, t, compress_target))
             // Fade is an amplitude ramp (in and out), so
             // its glyph is the rising `chart-line`, not a
             // loudness mark (Phase H).
             .child(icon_btn("audio-fade", "chart-line", "Fade", false, t, fade_target))
-            .child(btn("audio-reverse", "Reverse", false, t, reverse_target))
+            .child(icon_btn("audio-reverse", "left-right", "Reverse", false, t, reverse_target))
             .child(icon_btn("audio-mute", mute_icon, mute_label, false, t, mute_target))
             .child(icon_btn(
                 "audio-duplicate",
@@ -842,21 +867,28 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             .child(btn("audio-gain-dn", "Gain -", false, t, |s| {
                 gain_step_target(s, -0.1);
             }))
-            .child(
-                text(target_gain_readout(clips, selected))
-                    .font(type_::LABEL)
-                    .color(t.text_secondary),
-            )
+            // Phase N: the gain readout is the kit
+            // stepper value (centred mono, min-width 34);
+            // the readout string itself is unchanged.
+            // The − / + buttons keep their `btn` form and
+            // labels — the stepper lives inside this
+            // scrolling toolbar, where a growing label
+            // (the charter §6 panel-row form) has no width
+            // to grow into; the readout carries the name.
+            .child(design::stepper_value(
+                &target_gain_readout(clips, selected),
+                t,
+            ))
             .child(btn("audio-gain-up", "Gain +", false, t, |s| {
                 gain_step_target(s, 0.1);
             }))
-            .child(btn("audio-move-earlier", "Earlier", false, t, |s| {
+            .child(icon_btn("audio-move-earlier", "chevron-left", "Earlier", false, t, |s| {
                 move_target(s, -1);
             }))
-            .child(btn("audio-move-later", "Later", false, t, |s| {
+            .child(icon_btn("audio-move-later", "chevron-right", "Later", false, t, |s| {
                 move_target(s, 1);
             }))
-            .child(btn("mixdown", "Mixdown", false, t, |s| {
+            .child(icon_btn("mixdown", "layer-group", "Mixdown", false, t, |s| {
                 s.core.mixdown_audio()
             }))
             .scroll_x()
@@ -878,11 +910,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 .key("audio-project-ops")
                 .gap(6.0)
                 .center_y()
-                .child(
-                    text("Whole project")
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                )
+                .child(design::section_label("Whole project", t))
                 .child(icon_btn(
                     "audio-normalise",
                     "volume-high",

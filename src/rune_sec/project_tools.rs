@@ -32,14 +32,14 @@
 //!
 //! | key | control | handler → action | verdict |
 //! |---|---|---|---|
-//! | `project-tools` | section root (col) | — container, no handler | ok |
-//! | *(title row, unkeyed)* | "Project" title + autosave text | renders `autosave_line(core.edits_since_autosave())` (editor.rs:1599) | ok — counter is the core's; see the autosave note on [`autosave_line`] |
+//! | `project-tools` | section root — the kit card (`design::panel_col`, Phase N) | — container, no handler | ok |
+//! | *(title row, unkeyed)* | "Project" header (`design::panel_title`: folder-open glyph + SECTION title, autosave text trailing, kit divider under — Phase N) + autosave text | renders `autosave_line(core.edits_since_autosave())` (editor.rs:1599) | ok — counter is the core's; see the autosave note on [`autosave_line`] |
 //! | `proj-name-field` | name-field wrapper (el) | — container, no handler | ok |
 //! | `proj-name` | text input | `on_edit` → `&mut State::name_edit`; `on_submit` → [`apply_name`] | ok — Enter and "Set name" share one path |
 //! | `proj-set-name` | "Set name" button (`icon_btn`, "check" icon) | [`apply_name`] → [`apply_project_name`]: trims, writes `Project::name` directly (no core rename op or setter exists — editor.rs has no `rename*` fn; the file-level rename is Home's `projects::rename_project`) | ok |
 //! | `proj-current-file` | "Current file: …" muted line under the name field (conditional — present only when the line resolves) | renders [`current_file_line`]: the `shell::last_opened_project` display name, shown only when it exactly matches `Project::name` | ok — Phase I §31; the match guard is the Phase G §32 lesson (recents store names, not the open file, so a mismatch would lie). `home_panel::current_project_path` was NOT used: it is the selector cursor, which `cycle-project` moves without opening |
 //! | `proj-current-meta` | "{size} · modified {time}" muted line under `proj-current-file` (conditional — present only when the §31 match holds AND the file resolves and stats) | renders [`current_file_meta`]: the §31 match (via [`current_file_path`]) gates it, the path resolves over `core.project_files` by the crate's slug rule ([`resolve_project_file`]), size via [`human_size`], time via [`modified_label`] | ok — Phase J §27; gated on the §31 decision itself, so the two lines can never disagree about which file the session is on |
-//! | `proj-reload` | "Reload from disk" button (plain text `btn` — the selector rows' idiom, not an `icon_btn`) | [`reload_pressed`] → [`reload_target`] (the §27 gate as an owned path) → [`reload_from_disk`]: no target → status "No saved file to reload.", open never called; target → the open rows' exact discipline (point `project_index` at the file, `EditorCore::open_project_file` — it takes no path argument and returns `()`, editor.rs:3787 — [`clear_stale_solo`], [`sync_name_edit`]), with the success status overridden to name the discard | ok — Phase K §27; see the reload note below |
+//! | `proj-reload` | "Reload from disk" button (`icon_btn`, "rotate-right" icon — Phase N; p13: rotate-right, not Redo's arrow-rotate-right) | [`reload_pressed`] → [`reload_target`] (the §27 gate as an owned path) → [`reload_from_disk`]: no target → status "No saved file to reload.", open never called; target → the open rows' exact discipline (point `project_index` at the file, `EditorCore::open_project_file` — it takes no path argument and returns `()`, editor.rs:3787 — [`clear_stale_solo`], [`sync_name_edit`]), with the success status overridden to name the discard | ok — Phase K §27; see the reload note below |
 //! | `new-proj` | "New" button (`icon_btn`, "file" icon) | [`new_pressed`] → [`new_project`] + [`sync_name_edit`]: installs [`blank_project`]`("Untitled")` — field-for-field the MCP `new_project` tool's defaults and reset set (mcp_tools.rs `tool_new_project`) — clears solo, stops playback, no snapshot/confirm | ok |
 //! | `save-proj` | "Save project" button (`icon_btn`, "floppy-disk" icon) | [`save_named_pressed`] → `EditorCore::save_named_project` (slugifies the name, writes `./projects/<slug>.json`, refreshes `project_files`, sets status), then — only on success — `shell::write_recovery` + `shell::touch_recent` to keep snapshot/recents in step | fixed in Phase H — the Phase G caveat is closed: the op returns `bool` and [`after_save`] gates the recovery/recents sync on it, so a failed save no longer plants a phantom recent |
 //! | `recover` | "Recover" button (`icon_btn`, "arrow-rotate-left" icon) | [`recover_pressed`] → [`recover_snapshot`] (`shell::read_recovery` = `./projects/.recovery.json`, shell.rs) → [`apply_recovered_project`] + [`sync_name_edit`] | fixed in Phase G — the reset now also clears solo and stops playback (see the fn) |
@@ -76,6 +76,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{Easing, FigureDef, FigureInstance, Frame, Project};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::State;
 
@@ -718,23 +719,20 @@ pub fn project_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let rows = project_rows(core);
 
-    let mut section = col()
-        .key("project-tools")
-        .w_full()
-        .gap(8.0)
+    let mut section = design::panel_col("project-tools", t)
         .child(
             row()
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(text("Project").font(type_::TITLE).color(t.text))
-                .child(el().grow(1.0))
+                .child(design::panel_title(Some("folder-open"), "Project", None, t))
                 .child(
                     text(autosave_line(core.edits_since_autosave()))
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 ),
         )
+        .child(design::divider(t))
         .child(
             row()
                 .w_full()
@@ -803,7 +801,7 @@ pub fn project_section(s: &State, t: &Theme) -> El {
             .w_full()
             .gap(8.0)
             .center_y()
-            .child(btn("proj-reload", "Reload from disk", false, t, reload_pressed)),
+            .child(icon_btn("proj-reload", "rotate-right", "Reload from disk", false, t, reload_pressed)),
     );
 
     section = section.child(

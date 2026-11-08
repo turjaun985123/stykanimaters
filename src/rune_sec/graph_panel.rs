@@ -289,6 +289,30 @@
 //! the op owns the snapshot and the frame-0 refusal
 //! (the whole shift is refused, never clamped per key).
 //!
+//! ## Phase N adoption
+//!
+//! The panel root is the design kit's card
+//! ([`design::panel_col`]): card fill, hairline border,
+//! radius 12, padding 12. The header is the kit
+//! [`design::panel_title`] — the `chart-line` glyph at
+//! the kit's 13 pt in `text_secondary`, the title in
+//! SECTION — with the readout kept as the header row's
+//! trailing LABEL line, over a kit [`design::divider`].
+//! Channel-list rows are kit [`design::list_row`]
+//! shells (selected = the kit's accent-at-16% fill,
+//! replacing the `control_track` / `card` fills) with
+//! the press and children verbatim, and the list's
+//! empty line is the kit [`design::empty_state`] under
+//! the panel's own glyph. The interp row's caption is
+//! a kit [`design::section_label`]. The curve canvas
+//! (`graph-canvas`, its `.on_drag` and every hit-test),
+//! the tangent handles, the preset chips (each carries
+//! its own drawn curve) and the stats / value lines
+//! are unchanged: canvas work and readouts, not
+//! chrome. The "No graph keys on this channel yet"
+//! line stays a muted LABEL line — per-channel
+//! guidance under the canvas, not a list empty state.
+//!
 //! ## State the shell must provide
 //!
 //! `State` needs one field (integrator wires it):
@@ -304,6 +328,7 @@ use stykanimate_rs::graph_panel::{preset_preview, GraphView};
 use stykanimate_rs::model::V2;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::icons::icon_el_rgb;
 use crate::stage_view::hex_color;
@@ -316,9 +341,10 @@ pub const GRAPH_H: f32 = 170.0;
 /// exactly as the stage's does).
 const FALLBACK_SIZE: [f32; 2] = [720.0, GRAPH_H];
 /// Muted hex for the decorative `chart-line` glyphs
-/// (panel header, channel-list rows) — the shell
-/// palette's muted-text token (#707B8C) in the
-/// `0xRRGGBB` form [`icon_el`] takes.
+/// (channel-list rows; the panel header's glyph moved
+/// to the kit title in Phase N) — the shell palette's
+/// muted-text token (#707B8C) in the `0xRRGGBB` form
+/// [`icon_el`] takes.
 const GLYPH_MUTED: u32 = 0x707B8C;
 /// Key-reduction tolerance, in channel value units (degrees
 /// for angle channels, stage units for root/length): interior
@@ -1529,25 +1555,17 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     let mut chan_list = col().key("graph-channel-list").gap(4.0);
     let rows = channel_rows(core);
     if rows.is_empty() {
-        chan_list = chan_list.child(
-            text("No graph channels yet — select a joint on the stage, then Key angle starts the first one.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        chan_list = chan_list.child(design::empty_state(
+            "chart-line",
+            "No graph channels yet — select a joint on the stage, then Key angle starts the first one.",
+            t,
+        ));
     }
     for (i, label, count) in rows {
         let active = drawn_idx == Some(i);
         chan_list = chan_list.child(
-            row()
-                .key(format!("graph-chan-{i}"))
+            design::list_row(&format!("graph-chan-{i}"), active, t)
                 .w_full()
-                .gap(8.0)
-                .center_y()
-                .px(8.0)
-                .py(5.0)
-                .radius(6.0)
-                .fill(if active { t.control_track } else { t.card })
-                .hover(if active { t.control_track } else { t.control_off })
                 .on_press(move |s: &mut State| {
                     select_channel(&mut s.core, &mut s.graph_panel, i);
                 })
@@ -1649,7 +1667,7 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         .key("graph-interp")
         .gap(4.0)
         .center_y()
-        .child(text(interp_label).font(type_::LABEL).color(t.text_secondary))
+        .child(design::section_label(&interp_label, t))
         .child(btn("graph-interp-hermite", "Hermite", interp_now == Some(Interp::Hermite), t, |s| {
             s.core.set_graph_key_interp(Interp::Hermite)
         }))
@@ -1736,23 +1754,21 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     // own handles).
     let sel_idx = ch.and_then(|c| nearest_key(c, core.current as f32));
 
-    let mut panel = col()
-        .key("graph-panel")
-        .w_full()
-        .gap(8.0)
+    let mut panel = design::panel_col("graph-panel", t)
         .child(
             row()
+                .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(icon_el_rgb("chart-line", 14.0, GLYPH_MUTED))
-                .child(
-                    text(format!("Graph — figure {}", core.selected_figure + 1))
-                        .font(type_::TITLE)
-                        .color(t.text)
-                        .grow(1.0),
-                )
+                .child(design::panel_title(
+                    Some("chart-line"),
+                    &format!("Graph — figure {}", core.selected_figure + 1),
+                    None,
+                    t,
+                ))
                 .child(text(readout).font(type_::LABEL).color(t.text_secondary)),
         )
+        .child(design::divider(t))
         .child(chan_list.scroll(ScrollSpec { stick_bottom: false }).min_h(0.0));
     if !stat_lines.is_empty() {
         panel = panel.child(stats_block);

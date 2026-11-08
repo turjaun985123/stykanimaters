@@ -101,13 +101,29 @@
 //! selected index — an empty project, a stale selection —
 //! the press is silent: the dispatch resolves the figure
 //! first, so no status is set and nothing is snapshotted.
+//!
+//! Phase N (adoption) restyles the panel onto the design
+//! kit (`rune_sec::design`): the root is a `panel_col`
+//! card, the header is a kit `header_row` + `panel_title`
+//! (title in SECTION, the count as its meta) over a
+//! hairline `divider`, each row root carries the two-line
+//! list-row anatomy (px 8, `ROW_RADIUS`, selected =
+//! `selected_fill()`, hover `t.hover`), the private
+//! `row_toggle` helper is retired onto `icon_btn::
+//! chip_btn` (the kit chip that absorbed its metrics),
+//! the opacity readout moves to MONO_CAPTION, the filter
+//! glyph takes the kit's 13px search size, and the
+//! filter-no-match line becomes a kit `empty_state` with
+//! its message byte-identical. Keys, handlers and status
+//! strings are unchanged throughout.
 
-use rune::tok::{self, type_, Theme};
+use rune::tok::{type_, Theme};
 use rune::{canvas, col, el, row, text, text_input, Color, El, LineCap, Shape, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::V2;
 
-use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
+use crate::rune_sec::design;
+use crate::rune_sec::icon_btn::{chip_btn, icon_btn, icon_only_btn};
 use crate::rune_sec::icons::icon_el;
 use crate::stage_view::{hex_color, ngon};
 use crate::State;
@@ -373,34 +389,6 @@ pub fn thumb_shape(core: &EditorCore, fi: usize, size: f32) -> Shape {
     shape
 }
 
-/// A compact row toggle in the chrome button style (same
-/// fill/hover/press treatment as `chrome_view::btn`, tighter
-/// padding so five of them fit a sidebar row). `active`
-/// renders accent-filled.
-fn row_toggle(
-    key: String,
-    label: &str,
-    active: bool,
-    t: &Theme,
-    f: impl Fn(&mut State) + 'static,
-) -> El {
-    let accent = tok::accent(0, true);
-    el()
-        .key(key)
-        .px(6.0)
-        .py(3.0)
-        .radius(5.0)
-        .fill(if active { accent } else { t.card })
-        .hover(if active { accent } else { t.control_track })
-        .press(if active { accent } else { t.control_off })
-        .on_press(f)
-        .child(
-            text(label)
-                .font(type_::LABEL)
-                .color(if active { Color::WHITE } else { t.text }),
-        )
-}
-
 /// Reorder dispatch shared by the up/down buttons: select
 /// figure `fi`, then move it one slot with the full layers
 /// engine (`EditorCore::move_figure_full` acts on the
@@ -497,21 +485,29 @@ fn duplicate_row(core: &mut EditorCore) {
 /// size instead of squeezing nine onto one line.
 fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
     let fi = r.index;
-    let accent = tok::accent(0, true);
     let dot = hex_color(r.color).unwrap_or(Color::WHITE);
-    col()
+    // Two-line variant of the kit list-row anatomy (P8
+    // §1/FIG-1): the same px, radius, selected fill and
+    // hover as `design::list_row`, applied to a `col`
+    // because the row carries two control lines (the kit
+    // builder itself is a single-line `row`). Unselected
+    // rows rest transparent on the card, exactly as the
+    // kit shell does — the hover overlay paints the
+    // highlight.
+    let root = col()
         .key(format!("fig-row-{fi}"))
         .w_full()
         .gap(2.0)
-        .px(6.0)
+        .px(8.0)
         .py(4.0)
-        .radius(6.0)
-        .fill(if r.selected {
-            accent.alpha(0.22)
-        } else {
-            Color::TRANSPARENT
-        })
-        .hover(t.control_track)
+        .radius(design::ROW_RADIUS)
+        .min_h(28.0);
+    let root = if r.selected {
+        root.fill(design::selected_fill())
+    } else {
+        root.hover(t.hover)
+    };
+    root
         .child(
             row()
                 .w_full()
@@ -543,7 +539,7 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                 )
                 .child(
                     text(format!("{}%", r.opacity_pct))
-                        .font(type_::LABEL)
+                        .font(type_::MONO_CAPTION.mono())
                         .color(t.text_secondary),
                 )
                 .child(icon_only_btn(
@@ -553,22 +549,25 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                     t,
                     move |s: &mut State| s.core.toggle_figure_lock(fi),
                 ))
-                .child(row_toggle(
-                    format!("fig-solo-{fi}"),
+                .child(chip_btn(
+                    &format!("fig-solo-{fi}"),
+                    None,
                     "solo",
                     r.solo,
                     t,
                     move |s: &mut State| s.core.toggle_solo(fi),
                 ))
-                .child(row_toggle(
-                    format!("fig-op-dn-{fi}"),
+                .child(chip_btn(
+                    &format!("fig-op-dn-{fi}"),
+                    None,
                     "−",
                     false,
                     t,
                     move |s: &mut State| s.core.step_figure_opacity(fi, -0.1),
                 ))
-                .child(row_toggle(
-                    format!("fig-op-up-{fi}"),
+                .child(chip_btn(
+                    &format!("fig-op-up-{fi}"),
+                    None,
                     "+",
                     false,
                     t,
@@ -609,8 +608,9 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                     t,
                     move |s: &mut State| move_row(&mut s.core, fi, -1),
                 ))
-                .child(row_toggle(
-                    format!("fig-opac-{fi}"),
+                .child(chip_btn(
+                    &format!("fig-opac-{fi}"),
+                    None,
                     "opac",
                     false,
                     t,
@@ -630,30 +630,18 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
 /// "+ Figure"), the name-filter field, one row per visible
 /// figure, and the bulk visibility footer (All / None /
 /// Invert). When `s.figures_panel.collapsed` is set, only
-/// the header renders.
+/// the header and its divider render.
 pub fn figures_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let collapsed = s.figures_panel.collapsed;
     let query = s.figures_panel.filter.text.clone();
     let visible = visible_figures(core, &query);
     let total = core.project.figures.len();
-    let mut panel = col()
-        .key("figures-panel")
-        .w_full()
-        .gap(6.0)
+    let count = count_line(visible.len(), total, &query);
+    let mut panel = design::panel_col("figures-panel", t)
         .child(
-            row()
-                .key("figures-panel-header")
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(text("Figures").font(type_::LABEL).color(t.text))
-                .child(
-                    text(count_line(visible.len(), total, &query))
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                )
-                .child(el().grow(1.0))
+            design::header_row("figures-panel-header")
+                .child(design::panel_title(None, "Figures", Some(&count), t))
                 .child(crate::chrome_view::btn(
                     "fig-collapse",
                     if collapsed { "Show" } else { "Hide" },
@@ -680,7 +668,8 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
                     t,
                     |s: &mut State| duplicate_row(&mut s.core),
                 )),
-        );
+        )
+        .child(design::divider(t));
     if collapsed {
         return panel;
     }
@@ -693,7 +682,7 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
             .w_full()
             .gap(8.0)
             .center_y()
-            .child(icon_el("magnifying-glass", 14.0, t.text_secondary))
+            .child(icon_el("magnifying-glass", 13.0, t.text_secondary))
             .child(
                 text_input(&s.figures_panel.filter, type_::BODY.lh(26.0))
                     .key("figures-filter")
@@ -712,11 +701,11 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
         panel = panel.child(figure_row(&rows[*fi], core, t));
     }
     if visible.is_empty() && total > 0 {
-        panel = panel.child(
-            text(format!("No figures match \"{}\".", query.trim()))
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        panel = panel.child(design::empty_state(
+            "magnifying-glass",
+            &format!("No figures match \"{}\".", query.trim()),
+            t,
+        ));
     }
     // Bulk visibility footer: the layers ops own the `hidden`
     // flags; each handler also clears solo so the bulk result

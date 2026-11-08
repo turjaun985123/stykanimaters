@@ -41,7 +41,9 @@
 //! `loop-b-dn` / `loop-b-up` inside it. Phase M adds
 //! `timeline-clips` on the clips lane in the same
 //! under-timeline stack (see the Clips lane section
-//! below).
+//! below). Phase N adds NO key: the timeline card (see
+//! the Timeline card section below) is deliberately
+//! unkeyed.
 //!
 //! ## Time ruler
 //!
@@ -87,7 +89,13 @@
 //! press on a marker never reaches it. The glyphs, their
 //! colours, the cell geometry and the row's height are
 //! exactly what the display-only row had; the pressable
-//! wrapper adds no fill, padding or radius.
+//! wrapper adds no fill, padding or radius. Phase N grows
+//! the wrapper to fill its share of the cell — the full
+//! `CHIP_W × MARKER_H` for a lone marker, an equal split
+//! when both glyphs share one cell — so the press target
+//! is the cell, not the ~11-point glyph (P18's smallest
+//! target in the app); the glyph itself is drawn exactly
+//! as before, centred in the wrapper.
 //!
 //! Graph keys live at fractional times (`graph::Key.frame:
 //! f32`), so "on a frame" needs the engine's own mapping:
@@ -253,12 +261,42 @@
 //! chips (it is not part of the scrolled column), so on
 //! a timeline scrolled far right the lane still reads
 //! from the timeline's first frame.
+//!
+//! ## Timeline card (Phase N)
+//!
+//! The whole stack — the scrolled ruler / chips /
+//! markers column, then the clips lane, then the loop
+//! row, in that order — sits in one card (charter §13):
+//! fill `t.card`, border 1.0 `t.card_border`, radius
+//! [`design::PANEL_RADIUS`], padding 8. The card is
+//! **unkeyed** (a `timeline-card` key was considered
+//! and rejected — the gate diffs key sets and every key
+//! a test uses lives on the card's children) and it
+//! wraps **outside** the scroll row: no padded element
+//! sits between the scroll row and its content column,
+//! so the drag handlers keep reading element-local
+//! content coordinates and every drag maps exactly as
+//! it did before the card existed (see the press / drag
+//! semantics above — an 8-point shift would mis-map
+//! clicks by a full loop-edge zone). The stack's
+//! internal gap stays 2.0 — the charter's panel gap
+//! (8) is for control panels; the marker row must sit
+//! directly under its chips. Two consequences inside
+//! the card: an idle chip's resting fill is
+//! `t.control_off`, not `t.card` (a `t.card` chip on a
+//! `t.card` ground would be invisible), and the loop
+//! row's button gap is 8, the card's spacing, rather
+//! than the chips' [`CHIP_GAP`]. Every geometry
+//! constant, handler, label and key is unchanged; the
+//! card is always returned, even when it holds the
+//! scroll row alone.
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::frame_ops::{selected_range, FrameOpsState};
 use crate::stage_view::hex_color;
 use crate::State;
@@ -832,12 +870,19 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     for i in 0..core.frame_count() {
         let current = i == core.current;
         let duration = core.project.frames[i].duration;
+        // Phase N: the chips sit on the timeline card
+        // (fill `t.card`), so an idle chip filled `t.card`
+        // would vanish into its ground — its resting fill
+        // is `t.control_off`, the theme's resting-control
+        // tone. The current frame's accent and the loop
+        // tint (`t.card` mixed toward the accent, still
+        // visibly bluer than the ground) are unchanged.
         let fill = if current {
             accent
         } else if in_loop(core.loop_range, i) {
             loop_fill
         } else {
-            t.card
+            t.control_off
         };
         let mut chip = el()
             .key(format!("frame-{}", i + 1))
@@ -861,8 +906,13 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // the display-only row it replaces — each glyph now
     // wrapped in a transparent pressable element keyed by
     // its frame, pressing it seeks there (see the module
-    // docs). The camera diamond takes the accent so it
-    // reads apart from the graph dot at a glance.
+    // docs). Phase N: the wrapper grows to fill its share
+    // of the cell (the whole `CHIP_W × MARKER_H` cell for
+    // a lone marker, an equal split when both glyphs
+    // share one) so the press target is the cell, not the
+    // glyph — the glyph is drawn unchanged, centred in
+    // the wrapper. The camera diamond takes the accent so
+    // it reads apart from the graph dot at a glance.
     let mut marker_row = row().key("timeline-markers").gap(CHIP_GAP);
     for (i, &(camera, graph)) in markers.iter().enumerate() {
         let mut cell = row().size(CHIP_W, MARKER_H).center().gap(2.0);
@@ -870,6 +920,9 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
             cell = cell.child(
                 el()
                     .key(camera_marker_key(i))
+                    .grow(1.0)
+                    .h(MARKER_H)
+                    .center()
                     .on_press(move |s: &mut State| goto_marker(s, i))
                     .child(text("◆").font(type_::LABEL).color(accent)),
             );
@@ -878,6 +931,9 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
             cell = cell.child(
                 el()
                     .key(graph_marker_key(i))
+                    .grow(1.0)
+                    .h(MARKER_H)
+                    .center()
                     .on_press(move |s: &mut State| goto_marker(s, i))
                     .child(text("●").font(type_::LABEL).color(t.text_secondary)),
             );
@@ -890,30 +946,36 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // any scroll offset.
     let content = col().gap(2.0).child(ruler).child(chips).child(marker_row);
     let timeline = row().key("timeline").child(content).scroll_x().w_full();
-    // The loop row hangs under the scrolled timeline,
-    // outside the viewport, so its buttons stay put however
-    // far the chips scroll. With nothing to show (an empty
-    // project) the timeline element is returned exactly as
-    // it was before the row existed.
-    //
-    // Phase M: the clips lane joins the loop row in that
-    // under-timeline stack — lane first (it summarises the
-    // timeline's content), then the loop row's controls.
-    // With neither present, the timeline is returned
-    // exactly as before either row existed.
-    let clips = clips_lane(core);
-    let loop_row = loop_row(s, t);
-    if clips.is_none() && loop_row.is_none() {
-        return timeline;
+    // Phase N (charter §13, see the module docs' Timeline
+    // card section): the whole stack sits in one unkeyed
+    // card — fill `t.card`, hairline border, radius 12,
+    // padding 8, internal gap still 2.0. The card wraps
+    // OUTSIDE the scroll row, so no padded element enters
+    // the chain between the scroll row and its content
+    // column and every drag keeps its content coordinates.
+    // The clips lane and the loop row hang under the
+    // scrolled timeline, outside the viewport, so the lane
+    // never scrolls away and the loop buttons stay put
+    // however far the chips scroll — lane first (it
+    // summarises the timeline's content), then the loop
+    // row's controls. The card is returned even when it
+    // holds the scroll row alone (an empty project): the
+    // centre column's slot no longer alternates between a
+    // bare row and a stack column.
+    let mut card = col()
+        .gap(2.0)
+        .fill(t.card)
+        .border(1.0, t.card_border)
+        .radius(design::PANEL_RADIUS)
+        .padding(8.0)
+        .child(timeline);
+    if let Some(clips) = clips_lane(core) {
+        card = card.child(clips);
     }
-    let mut stack = col().gap(2.0).child(timeline);
-    if let Some(clips) = clips {
-        stack = stack.child(clips);
+    if let Some(loop_row) = loop_row(s, t) {
+        card = card.child(loop_row);
     }
-    if let Some(loop_row) = loop_row {
-        stack = stack.child(loop_row);
-    }
-    stack
+    card
 }
 
 /// The loop row under the timeline (Phase L, see the
@@ -927,7 +989,10 @@ fn loop_row(s: &State, t: &Theme) -> Option<El> {
     if core.frame_count() == 0 {
         return None;
     }
-    let mut r = row().key("timeline-loop-row").gap(CHIP_GAP).center_y();
+    // Phase N: the row's button gap is 8.0 — the timeline
+    // card's spacing — not the chips' `CHIP_GAP` pitch it
+    // borrowed before. Keys, label and handlers unchanged.
+    let mut r = row().key("timeline-loop-row").gap(8.0).center_y();
     match core.loop_range {
         None => {
             r = r.child(btn("loop-set", "Set loop", false, t, set_loop_here));

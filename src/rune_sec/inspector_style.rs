@@ -118,6 +118,25 @@
 //! Deliberately absent: shade steps (fig3d's
 //! `segment_shades` is a computed depth shading over a 3D
 //! pose, not a stored per-segment style an op can set).
+//!
+//! Phase N restyle — pure presentation, no behaviour
+//! change: the root is the design kit's `panel_col`, the
+//! header the kit's `panel_title` over a kit `divider`,
+//! row labels the kit's `section_label`, the cap and
+//! preset chips the button family's `chip_btn` (the
+//! preset chip's 12×12 colour square goes away —
+//! `chip_btn` has no content slot, and the charter names
+//! `preset_chip` among the chips it absorbs), the
+//! gradient and recent-colour swatches the kit's one
+//! `swatch` construction (24×24; the two local copies
+//! collapse onto it), and the RGB / gradient-RGB /
+//! opacity steppers the charter order (label grows, −,
+//! kit `stepper_value`, +) — `channel_row` and
+//! `gradient_channel_row` merge into one builder with a
+//! key-stem parameter, as plan P03 prescribed. The
+//! colour header row's 18×18 preview square is
+//! display-only (no key, no handler) and stays a plain
+//! element, like the channel rows' mini-swatches.
 
 use std::cell::RefCell;
 
@@ -127,7 +146,8 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{CapKind, NodeStyle};
 
 use crate::chrome_view::btn;
-use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::design;
+use crate::rune_sec::icon_btn::{chip_btn, icon_btn};
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -556,59 +576,33 @@ pub fn note_recent_color(color: u32) {
     });
 }
 
-/// One RGB channel stepper row: channel letter, a small
-/// square in the channel's own colour (the R row shows red
-/// at the channel's value, and so on — the Colour header
-/// row's preview idiom), the channel's current value, and
-/// − / + buttons stepping it by [`RGB_STEP`] via
-/// [`step_color_channel`]. Keys are `style-<letter>-dn` /
-/// `style-<letter>-up`.
-fn channel_row(channel: usize, label: &str, value: u8, t: &Theme) -> El {
-    let lower = label.to_lowercase();
-    let swatch_rgb = match channel {
-        0 => rgb_join(value, 0, 0),
-        1 => rgb_join(0, value, 0),
-        _ => rgb_join(0, 0, value),
-    };
-    let swatch = el()
-        .size(12.0, 12.0)
-        .radius(3.0)
-        .fill(hex_color(swatch_rgb).unwrap_or(Color::WHITE));
-    row()
-        .key(format!("style-{lower}-row"))
-        .gap(8.0)
-        .center_y()
-        .child(text(label).font(type_::LABEL).color(t.text))
-        .child(swatch)
-        .child(
-            text(value.to_string())
-                .font(type_::LABEL)
-                .color(t.text_secondary)
-                .grow(1.0),
-        )
-        .child(btn(&format!("style-{lower}-dn"), "−", false, t, move |s| {
-            step_color_channel(&mut s.core, channel, -1)
-        }))
-        .child(btn(&format!("style-{lower}-up"), "+", false, t, move |s| {
-            step_color_channel(&mut s.core, channel, 1)
-        }))
-}
-
-/// One gradient RGB channel stepper row (Phase K):
-/// [`channel_row`]'s construction with a `g` key infix —
-/// the full "Gradient R" / "Gradient G" / "Gradient B"
-/// label, the same channel-coloured square and value
-/// readout, and − / + buttons stepping the gradient end
-/// by [`RGB_STEP`] via [`step_gradient_channel`]. Keys
-/// are `style-g<letter>-dn` / `style-g<letter>-up` in a
-/// row keyed `style-g<letter>-row` — the primary rows'
-/// `style-<letter>-…` pattern with the infix.
-fn gradient_channel_row(channel: usize, label: &str, value: u8, t: &Theme) -> El {
-    let stem = match channel {
-        0 => "gr",
-        1 => "gg",
-        _ => "gb",
-    };
+/// The one RGB channel stepper row builder (Phase N
+/// merged the primary and gradient copies — plan P03:
+/// the gradient row was "a copy made for a key prefix").
+/// `stem` is the key infix (`r` / `g` / `b` for the
+/// node's own colour, `gr` / `gg` / `gb` for the
+/// gradient end); `step` is the press op
+/// ([`step_color_channel`] or [`step_gradient_channel`] —
+/// both share the `(core, channel, dir)` shape).
+///
+/// Layout is the charter stepper order: the label (kit
+/// `section_label`) grows, a small square in the
+/// channel's own colour (the R row shows red at the
+/// channel's value, and so on — the Colour header row's
+/// preview idiom; display-only, kept beside the label),
+/// the − button, the value in the kit's
+/// `stepper_value` mono readout, and the + button
+/// stepping by [`RGB_STEP`]. Keys are
+/// `style-<stem>-dn` / `style-<stem>-up` in a row keyed
+/// `style-<stem>-row`.
+fn channel_row_impl(
+    stem: &str,
+    label: &str,
+    channel: usize,
+    value: u8,
+    step: fn(&mut EditorCore, usize, i32),
+    t: &Theme,
+) -> El {
     let swatch_rgb = match channel {
         0 => rgb_join(value, 0, 0),
         1 => rgb_join(0, value, 0),
@@ -622,96 +616,98 @@ fn gradient_channel_row(channel: usize, label: &str, value: u8, t: &Theme) -> El
         .key(format!("style-{stem}-row"))
         .gap(8.0)
         .center_y()
-        .child(text(label).font(type_::LABEL).color(t.text))
+        .child(design::section_label(label, t).grow(1.0))
         .child(swatch)
-        .child(
-            text(value.to_string())
-                .font(type_::LABEL)
-                .color(t.text_secondary)
-                .grow(1.0),
-        )
         .child(btn(&format!("style-{stem}-dn"), "−", false, t, move |s| {
-            step_gradient_channel(&mut s.core, channel, -1)
+            step(&mut s.core, channel, -1)
         }))
+        .child(design::stepper_value(&value.to_string(), t))
         .child(btn(&format!("style-{stem}-up"), "+", false, t, move |s| {
-            step_gradient_channel(&mut s.core, channel, 1)
+            step(&mut s.core, channel, 1)
         }))
 }
 
-/// One cap segment chip: accent-filled when it is the current
-/// cap, card-filled otherwise. Each chip is its own press
-/// target — pressing it sets exactly that cap through
-/// `EditorCore::set_node_cap`.
+/// One RGB channel stepper row over the node's own
+/// colour: keys are `style-<letter>-dn` / `style-<letter>-up`.
+fn channel_row(channel: usize, label: &str, value: u8, t: &Theme) -> El {
+    let lower = label.to_lowercase();
+    channel_row_impl(&lower, label, channel, value, step_color_channel, t)
+}
+
+/// One gradient RGB channel stepper row (Phase K):
+/// [`channel_row`]'s construction with a `g` key infix —
+/// the full "Gradient R" / "Gradient G" / "Gradient B"
+/// label, stepping the gradient end by [`RGB_STEP`] via
+/// [`step_gradient_channel`]. Keys are
+/// `style-g<letter>-dn` / `style-g<letter>-up` in a row
+/// keyed `style-g<letter>-row` — the primary rows'
+/// `style-<letter>-…` pattern with the infix.
+fn gradient_channel_row(channel: usize, label: &str, value: u8, t: &Theme) -> El {
+    let stem = match channel {
+        0 => "gr",
+        1 => "gg",
+        _ => "gb",
+    };
+    channel_row_impl(stem, label, channel, value, step_gradient_channel, t)
+}
+
+/// One cap segment chip: a button-family `chip_btn`,
+/// active when it is the current cap. Each chip is its
+/// own press target — pressing it sets exactly that cap
+/// through `EditorCore::set_node_cap`. (Phase N: the
+/// hand-rolled chip had no press state — hover only;
+/// the family chip supplies it.)
 fn cap_chip(cap: CapKind, current: bool, t: &Theme) -> El {
-    let accent = tok::accent(0, true);
-    el()
-        .key(format!("style-cap-{}", cap_label(cap).to_lowercase()))
-        .px(10.0)
-        .py(5.0)
-        .radius(6.0)
-        .fill(if current { accent } else { t.card })
-        .hover(if current { accent } else { t.control_track })
-        .on_press(move |s: &mut State| s.core.set_node_cap(cap))
-        .child(
-            text(cap_label(cap))
-                .font(type_::LABEL)
-                .color(if current { Color::WHITE } else { t.text }),
-        )
+    chip_btn(
+        &format!("style-cap-{}", cap_label(cap).to_lowercase()),
+        None,
+        cap_label(cap),
+        current,
+        t,
+        move |s: &mut State| s.core.set_node_cap(cap),
+    )
 }
 
-/// One preset chip: a small colour swatch in the preset's
-/// own colour beside its name (the panel's swatch + label
-/// idiom, as in the Colour header row), card-filled like a
-/// cap chip. Pressing it applies the preset via
+/// One preset chip: a button-family `chip_btn` carrying
+/// the preset's name. Pressing it applies the preset via
 /// [`apply_preset`]. Keys are `style-preset-{i}` with `i`
-/// the preset's index in [`STYLE_PRESETS`].
+/// the preset's index in [`STYLE_PRESETS`]. (Phase N:
+/// the hand-rolled chip's 12×12 colour square beside the
+/// name is gone — `chip_btn` has no content slot, and
+/// the charter names `preset_chip` among the chips it
+/// absorbs; the name alone identifies the preset now.)
 fn preset_chip(index: usize, preset: StylePreset, t: &Theme) -> El {
-    let swatch = el()
-        .size(12.0, 12.0)
-        .radius(3.0)
-        .fill(hex_color(preset.color).unwrap_or(Color::WHITE));
-    el()
-        .key(format!("style-preset-{index}"))
-        .px(8.0)
-        .py(5.0)
-        .radius(6.0)
-        .fill(t.card)
-        .hover(t.control_track)
-        .on_press(move |s: &mut State| {
+    chip_btn(
+        &format!("style-preset-{index}"),
+        None,
+        preset.name,
+        false,
+        t,
+        move |s: &mut State| {
             apply_preset(&mut s.core, &preset);
-        })
-        .child(
-            row()
-                .gap(6.0)
-                .center_y()
-                .child(swatch)
-                .child(text(preset.name).font(type_::LABEL).color(t.text)),
-        )
+        },
+    )
 }
 
-/// One gradient swatch: an 18×18 colour square (the `Off`
-/// state uses the theme's off-track fill). The current state
-/// gets an accent frame. Each swatch is its own press
-/// target — pressing it sets exactly that gradient end
-/// colour through `EditorCore::set_node_color2`
-/// ([`gradient_value`]).
+/// One gradient swatch: the kit's one `swatch`
+/// construction (24×24; the current state gets the 2 pt
+/// accent border). The `Off` state keeps its
+/// `control_off` fill — it is a value, not an empty
+/// slot. Each swatch is its own press target — pressing
+/// it sets exactly that gradient end colour through
+/// `EditorCore::set_node_color2` ([`gradient_value`]).
 fn gradient_swatch(state: usize, current: bool, t: &Theme) -> El {
     let fill = match state {
         1 => hex_color(0xFF_FFFF).unwrap_or(Color::WHITE),
         2 => hex_color(0x22_2222).unwrap_or(t.text),
         _ => t.control_off,
     };
-    let swatch = el().size(18.0, 18.0).radius(4.0).fill(fill);
-    let cell = el()
-        .key(format!("style-gradient-{state}"))
-        .padding(2.0)
-        .radius(6.0)
-        .hover(if current {
-            tok::accent(0, true)
-        } else {
-            t.control_track
-        })
-        .on_press(move |s: &mut State| {
+    design::swatch(
+        &format!("style-gradient-{state}"),
+        fill,
+        current,
+        t,
+        move |s: &mut State| {
             let value = gradient_value(state);
             s.core.set_node_color2(value);
             // A swatch press applies a colour to the node:
@@ -719,46 +715,30 @@ fn gradient_swatch(state: usize, current: bool, t: &Theme) -> El {
             if let Some(color) = value {
                 note_recent_color(color);
             }
-        });
-    if current {
-        cell.fill(tok::accent(0, true)).child(swatch)
-    } else {
-        cell.child(swatch)
-    }
+        },
+    )
 }
 
-/// One recent-colour chip: an 18×18 colour square built
-/// exactly like a gradient swatch (same size, frame
-/// padding and accent frame when it shows the node's
-/// current colour). Pressing it applies the colour as
-/// the node's own colour through `set_node_color` — the
-/// op the segment inspector's palette swatches press —
-/// and notes it again, moving it to the front of the
-/// recent list. Keys are `style-recent-{i}` with `i` the
-/// colour's position in the recent list.
+/// One recent-colour chip: the kit's one `swatch`
+/// construction, like a gradient swatch (the two local
+/// copies collapsed onto the kit at Phase N). Pressing
+/// it applies the colour as the node's own colour
+/// through `set_node_color` — the op the segment
+/// inspector's palette swatches press — and notes it
+/// again, moving it to the front of the recent list.
+/// Keys are `style-recent-{i}` with `i` the colour's
+/// position in the recent list.
 fn recent_chip(index: usize, color: u32, current: bool, t: &Theme) -> El {
-    let swatch = el()
-        .size(18.0, 18.0)
-        .radius(4.0)
-        .fill(hex_color(color).unwrap_or(Color::WHITE));
-    let cell = el()
-        .key(format!("style-recent-{index}"))
-        .padding(2.0)
-        .radius(6.0)
-        .hover(if current {
-            tok::accent(0, true)
-        } else {
-            t.control_track
-        })
-        .on_press(move |s: &mut State| {
+    design::swatch(
+        &format!("style-recent-{index}"),
+        hex_color(color).unwrap_or(Color::WHITE),
+        current,
+        t,
+        move |s: &mut State| {
             s.core.set_node_color(color);
             note_recent_color(color);
-        });
-    if current {
-        cell.fill(tok::accent(0, true)).child(swatch)
-    } else {
-        cell.child(swatch)
-    }
+        },
+    )
 }
 
 /// The Recent colours row: a `Recent` label plus one
@@ -782,7 +762,7 @@ pub fn recents_row(recents: &[u32], current: Option<u32>, t: &Theme) -> Option<E
             .key("style-recents")
             .gap(8.0)
             .center_y()
-            .child(text("Recent").font(type_::LABEL).color(t.text))
+            .child(design::section_label("Recent", t))
             .child(chips),
     )
 }
@@ -794,12 +774,27 @@ pub fn recents_row(recents: &[u32], current: Option<u32>, t: &Theme) -> Option<E
 /// (the style ops would only answer "Select a joint first.").
 pub fn style_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
-    let mut panel = col().key("inspector-style").w_full().gap(8.0);
+    let mut panel = design::panel_col("inspector-style", t);
     let header = match core.selected_node {
         Some(ni) => format!("Segment style · Segment {}", ni + 1),
         None => "Segment style".to_string(),
     };
-    panel = panel.child(text(header).font(type_::LABEL).color(t.text));
+    // Card header (Phase N, charter §2): the kit's
+    // `panel_title` over a hairline divider. The header
+    // has never carried a key and invents none now: it
+    // is a plain row wearing `header_row`'s layout
+    // (full width, gap 8, centre-aligned) rather than
+    // the keyed builder, exactly as the settings card's
+    // header is built.
+    panel = panel
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(None, &header, None, t)),
+        )
+        .child(design::divider(t));
     let Some(style) = selected_style(core) else {
         return panel.child(
             text("Select a segment on the stage.")
@@ -816,7 +811,7 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
             .key("style-taper-row")
             .gap(8.0)
             .center_y()
-            .child(text("Taper").font(type_::LABEL).color(t.text))
+            .child(design::section_label("Taper", t))
             .child(
                 text(taper_text(style.taper))
                     .font(type_::LABEL)
@@ -840,7 +835,7 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
             .key("style-cap-row")
             .gap(8.0)
             .center_y()
-            .child(text("Cap").font(type_::LABEL).color(t.text))
+            .child(design::section_label("Cap", t))
             .child(el().key("style-cap").radius(6.0).child(cap_row)),
     );
 
@@ -857,7 +852,7 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
             .key("style-gradient-row")
             .gap(8.0)
             .center_y()
-            .child(text("Gradient").font(type_::LABEL).color(t.text))
+            .child(design::section_label("Gradient", t))
             .child(el().key("style-gradient").radius(6.0).child(swatches))
             .child(
                 text(gradient_label(style.color2))
@@ -897,7 +892,7 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
                 .key("style-color-row")
                 .gap(8.0)
                 .center_y()
-                .child(text("Colour").font(type_::LABEL).color(t.text))
+                .child(design::section_label("Colour", t))
                 .child(preview)
                 .child(
                     text(color_text(rgb))
@@ -923,21 +918,18 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
 
     // Opacity: − / + stepper (0.05 steps, % readout) setting
     // the selected node's opacity via `set_node_opacity`.
+    // Charter stepper order (Phase N): the label grows,
+    // then −, the kit `stepper_value` readout, +.
     panel = panel.child(
         row()
             .key("style-opacity-row")
             .gap(8.0)
             .center_y()
-            .child(text("Opacity").font(type_::LABEL).color(t.text))
-            .child(
-                text(opacity_text(style.opacity))
-                    .font(type_::LABEL)
-                    .color(t.text_secondary)
-                    .grow(1.0),
-            )
+            .child(design::section_label("Opacity", t).grow(1.0))
             .child(btn("style-opacity-dn", "−", false, t, |s| {
                 step_opacity(&mut s.core, -1)
             }))
+            .child(design::stepper_value(&opacity_text(style.opacity), t))
             .child(btn("style-opacity-up", "+", false, t, |s| {
                 step_opacity(&mut s.core, 1)
             })),
@@ -953,7 +945,7 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
             .key("style-copy-paste-row")
             .gap(8.0)
             .center_y()
-            .child(text("Style").font(type_::LABEL).color(t.text))
+            .child(design::section_label("Style", t))
             .child(icon_btn("style-copy", "copy", "Copy", false, t, |s| {
                 copy_style(&mut s.core)
             }))
@@ -980,7 +972,7 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
         row()
             .key("style-presets")
             .gap(8.0)
-            .child(text("Presets").font(type_::LABEL).color(t.text))
+            .child(design::section_label("Presets", t))
             .child(preset_grid),
     );
 

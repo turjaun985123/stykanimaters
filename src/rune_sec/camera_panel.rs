@@ -94,6 +94,21 @@
 //!   Keys, labels and handlers are unchanged; the rotation
 //!   dial stays a canvas (it is a dial, not a button).
 //!
+//! * Phase N (adoption) restyles the panel onto the design
+//!   kit (`rune_sec::design`): the root is a `panel_col`
+//!   card under its existing key, the header is a kit
+//!   `panel_title` over a hairline `divider`, the "Keys"
+//!   and "Follow" headings become kit `section_label`s,
+//!   key-list rows ride on `list_row` shells (the shell
+//!   carries the current-key mark; the goto button's own
+//!   accent fill is retired so the mark shows once), the
+//!   zoom and angle readouts become kit `stepper_value`s
+//!   under their existing keys, and the overlay root
+//!   becomes the charter §14 floating card pill — on the
+//!   same `theme(true)` the function already built with,
+//!   so pill and buttons can never disagree (P06 §3.2).
+//!   Keys, labels and handlers are unchanged.
+//!
 //! Engine facts this panel lives with (verified, not worked
 //! around silently): `camera_clear_key` does NOT snapshot, so
 //! clearing a key is not undoable; and `camera_zoom_by`'s
@@ -120,8 +135,8 @@ use rune::{canvas, col, el, row, text, Drag, El, LineCap, Phase, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
-use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 /// Zoom multiplier applied by one stepper press.
@@ -745,23 +760,21 @@ fn angle_dial(core: &EditorCore, t: &Theme) -> El {
 // Views
 // ----------------------------------------------------------------
 
-/// The zoom readout chip (`cam-zoom-label`): the current zoom
-/// percentage as centred label text.
+/// The zoom readout (`cam-zoom-label`): the current zoom
+/// percentage as the kit's stepper value (charter §6 —
+/// MONO_CAPTION, centred, min-width 34), so the readout's
+/// width no longer changes with the label ("50%" vs
+/// "100%") and the + button beside it never shifts. The
+/// key stays on the readout element itself (P06 §3.2).
 fn zoom_readout(core: &EditorCore, t: &Theme) -> El {
-    el()
-        .key("cam-zoom-label")
-        .px(6.0)
-        .center()
-        .child(text(zoom_label(core)).font(type_::LABEL).color(t.text))
+    design::stepper_value(&zoom_label(core), t).key("cam-zoom-label")
 }
 
-/// The angle readout chip (`cam-angle-label`).
+/// The angle readout (`cam-angle-label`): the same kit
+/// stepper value as the zoom readout — one readout, one
+/// look — under its existing key.
 fn angle_readout(core: &EditorCore, t: &Theme) -> El {
-    el()
-        .key("cam-angle-label")
-        .px(6.0)
-        .center()
-        .child(text(angle_label(core)).font(type_::LABEL).color(t.text))
+    design::stepper_value(&angle_label(core), t).key("cam-angle-label")
 }
 
 /// The camera-key list section: a "Keys" header, the
@@ -769,20 +782,17 @@ fn angle_readout(core: &EditorCore, t: &Theme) -> El {
 /// nearest key either side of the playhead) and the
 /// clipboard row (Copy key / Paste key for the key on the
 /// current frame), then one row per key — a goto button
-/// labelled with the key's frame, zoom and angle
-/// (accent-filled when the key is on the current frame) and
-/// a per-row Clear button (the goto-then-clear composition
+/// labelled with the key's frame, zoom and angle on a kit
+/// list-row shell (selected-filled when the key is on the
+/// current frame), plus a per-row Clear button (the
+/// goto-then-clear composition
 /// in [`clear_key_at`]). With no keys, an explanatory empty
 /// line instead of rows; the nav/clipboard rows stay, since
 /// Paste is exactly how a first key can arrive.
 fn key_list(core: &EditorCore, t: &Theme) -> El {
     let rows = key_rows(core);
     let mut list = col().key("cam-key-list").gap(4.0);
-    list = list.child(
-        text("Keys")
-            .font(type_::LABEL)
-            .color(t.text_secondary),
-    );
+    list = list.child(design::section_label("Keys", t));
     list = list
         .child(
             row()
@@ -815,15 +825,18 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
     }
     for r in rows {
         let frame = r.frame;
+        // Phase N: the row rides on the kit `list_row`
+        // shell, which carries the current-key mark
+        // (selected fill) — so the goto button's own
+        // accent fill is retired and the mark shows once
+        // (the layers-panel precedent). Keys, labels and
+        // handlers are verbatim.
         list = list.child(
-            row()
-                .key(format!("cam-key-row-{frame}"))
-                .gap(6.0)
-                .center_y()
+            design::list_row(&format!("cam-key-row-{frame}"), r.is_current, t)
                 .child(btn(
                     &format!("cam-key-{frame}"),
                     &r.label(),
-                    r.is_current,
+                    false,
                     t,
                     move |s: &mut State| s.core.goto(frame),
                 ))
@@ -852,11 +865,7 @@ fn follow_block(core: &EditorCore, t: &Theme) -> El {
     col()
         .key("cam-follow-block")
         .gap(4.0)
-        .child(
-            text("Follow")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        )
+        .child(design::section_label("Follow", t))
         .child(
             el()
                 .key("cam-follow-label")
@@ -904,20 +913,22 @@ fn follow_block(core: &EditorCore, t: &Theme) -> El {
 /// Clear key), the camera-key list and the follow block.
 pub fn panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
-    col()
-        .key("camera-panel")
-        .gap(6.0)
+    // Card root + header (Phase N): the kit's `panel_col`
+    // under its existing key, then `panel_title` in a
+    // plain row — the header has never carried a key and
+    // invents none now; it wears `header_row`'s layout
+    // (full width, gap 8, centre-aligned) rather than the
+    // keyed builder — over a kit hairline divider
+    // (charter §§1–2).
+    design::panel_col("camera-panel", t)
         .child(
             row()
-                .gap(6.0)
+                .w_full()
+                .gap(8.0)
                 .center_y()
-                .child(icon_el("camera", 12.0, t.text_secondary))
-                .child(
-                    text("Camera")
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                ),
+                .child(design::panel_title(Some("camera"), "Camera", None, t)),
         )
+        .child(design::divider(t))
         .child(
             row()
                 .gap(6.0)
@@ -983,12 +994,25 @@ pub fn panel(s: &State, t: &Theme) -> El {
 /// readouts and active states need nothing else — and uses
 /// the dark theme, as the shell's `view` does
 /// (`tok::theme(true)` in `main.rs`).
+///
+/// Phase N: the root row is the charter §14 floating card
+/// pill — card fill, hairline border, radius 999, px 10 /
+/// py 4 — styled from the SAME `theme(true)` the buttons
+/// already build with, so pill and buttons can never
+/// disagree (P06 §3.2). The children rest flat on the
+/// pill (their resting fill is also `t.card`); hover and
+/// press still read.
 pub fn overlay(core: &EditorCore) -> El {
     let t = tok::theme(true);
     row()
         .key("camera-overlay")
         .gap(4.0)
         .center_y()
+        .fill(t.card)
+        .border(1.0, t.card_border)
+        .radius(999.0)
+        .px(10.0)
+        .py(4.0)
         .child(btn("view-fit", "Fit", false, &t, |s: &mut State| {
             s.core.frame_all_figures()
         }))

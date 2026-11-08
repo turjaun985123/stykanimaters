@@ -148,14 +148,30 @@
 //! everywhere. Every stepper (Length, Thickness,
 //! Rotate, Bend) deliberately stays text: compactness
 //! is their point.
+//!
+//! Phase N adoption: the root is the kit card
+//! (`design::panel_col`), the header is
+//! `design::panel_title` (the `shapes` glyph rides
+//! inside it, still guarded by the kit's own `has_icon`
+//! check) over a `design::divider`, the steppers are
+//! F-STEP (charter order — label, −, `design::
+//! stepper_value`, +; the Rotate/Bend multi-step
+//! clusters keep their buttons and only their readouts
+//! become `stepper_value`), Delete segment is the kit
+//! `danger_icon_btn` (this file's local hex-literal
+//! copy is deleted), the colour swatches are
+//! `design::swatch`, and the "Colour" heading is a kit
+//! `section_label`. Keys, handlers and status strings
+//! are unchanged.
 
 use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, Color, El};
+use rune::{row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{NodeDef, Shape};
 
 use crate::chrome_view::btn;
-use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::design;
+use crate::rune_sec::icon_btn::{danger_icon_btn, icon_btn};
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -599,8 +615,11 @@ fn readout_row(label: &str, value: String, t: &Theme) -> El {
         .child(text(value).font(type_::LABEL).color(t.text))
 }
 
-/// One stepper row: label, current value, − and + buttons
-/// (chrome `btn` styling, GPUI inspector keys).
+/// One stepper row in the charter's F-STEP order
+/// (charter §6): the label grows, then the − button,
+/// the value as the kit's centred mono readout
+/// (`design::stepper_value`), and the + button (chrome
+/// `btn` styling, GPUI inspector keys).
 fn stepper_row(
     label: &str,
     value: String,
@@ -620,67 +639,33 @@ fn stepper_row(
                 .color(t.text_secondary)
                 .grow(1.0),
         )
-        .child(text(value).font(type_::LABEL).color(t.text))
         .child(btn(dn_key, "−", false, t, dn))
+        .child(design::stepper_value(&value, t))
         .child(btn(up_key, "+", false, t, up))
 }
 
-/// The Delete segment button: chrome-button shape in the
-/// error colour (the 2.0 palette's `C_ERROR`), leading
-/// with the `icon` glyph (white, matching the label)
-/// when the icon set has it (Phase H). The danger
-/// styling is deliberate — this is the panel's one
-/// destructive verb — so it is not swapped for the
-/// standard `icon_btn` chrome.
-fn danger_btn(key: &str, icon: &str, label: &str, f: impl Fn(&mut State) + 'static) -> El {
-    let red = hex_color(0xF16F78).unwrap_or(Color::WHITE);
-    let red_dark = hex_color(0xD85560).unwrap_or(red);
-    let mut content = row().center_y().gap(6.0);
-    if crate::rune_sec::icons::has_icon(icon) {
-        content = content.child(crate::rune_sec::icons::icon_el(icon, 12.0, Color::WHITE));
-    }
-    content = content.child(text(label).font(type_::LABEL).color(Color::WHITE));
-    el()
-        .key(key)
-        .px(10.0)
-        .py(5.0)
-        .radius(6.0)
-        .fill(red)
-        .hover(red_dark)
-        .press(red_dark)
-        .on_press(f)
-        .child(content)
-}
-
-/// One colour swatch: a rounded square in the palette
-/// colour; the node's current colour gets a white border.
-/// Pressing writes it via `set_node_color`.
-fn swatch(rgb: u32, selected: bool) -> El {
+/// One colour swatch: the kit's single swatch
+/// construction ([`design::swatch`] — the Phase N
+/// adoption retired this file's hand-rolled 22×22
+/// square and its white selected border for the kit's
+/// 24×24 square with the accent selected ring),
+/// carrying this panel's `seg-color-{rgb:06x}` key.
+/// Pressing writes the colour via `set_node_color`.
+fn swatch(rgb: u32, selected: bool, t: &Theme) -> El {
     let fill = hex_color(rgb).unwrap_or(Color::WHITE);
-    let mut e = el()
-        .key(format!("seg-color-{rgb:06x}"))
-        .size(22.0, 22.0)
-        .radius(6.0)
-        .fill(fill)
-        .hover(fill)
-        .press(fill)
-        .on_press(move |s: &mut State| s.core.set_node_color(rgb));
-    if selected {
-        e = e.border(2.0, Color::WHITE);
-    }
-    e
+    design::swatch(
+        &format!("seg-color-{rgb:06x}"),
+        fill,
+        selected,
+        t,
+        move |s: &mut State| s.core.set_node_color(rgb),
+    )
 }
 
 /// The Segment inspector panel. Mount it wherever the shell
 /// shows selection details; it reads only `State.core`.
 pub fn inspector_segment(s: &State, t: &Theme) -> El {
-    let panel = col()
-        .key("inspector-segment")
-        .w_full()
-        .padding(12.0)
-        .gap(8.0)
-        .radius(8.0)
-        .fill(t.card);
+    let panel = design::panel_col("inspector-segment", t);
     let Some(st) = segment_state(&s.core) else {
         return panel.child(
             text("Select a segment on the stage to edit it.")
@@ -688,23 +673,26 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 .color(t.text_secondary),
         );
     };
-    // Panel header (Phase H): the `shapes` glyph leads
-    // the title when the icon set has it — the menus'
-    // guarded `icon_el` pattern; the title text itself
-    // is byte-identical to before.
-    let title = text(format!("Segment {} · {}", st.node, st.name))
-        .font(type_::LABEL)
-        .color(t.text);
-    let header = if crate::rune_sec::icons::has_icon("shapes") {
-        row()
-            .center_y()
-            .gap(6.0)
-            .child(crate::rune_sec::icons::icon_el("shapes", 12.0, t.text))
-            .child(title)
-    } else {
-        row().child(title)
-    };
-    let mut panel = panel.child(header);
+    // Panel header (Phase N): the kit title cluster —
+    // the `shapes` glyph leads when the icon set has it
+    // (the kit checks `has_icon` itself, the Phase H
+    // guard's exact behaviour), the title text is
+    // byte-identical to before, and a hairline divider
+    // sits under the header (charter §2).
+    let mut panel = panel
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(
+                    Some("shapes"),
+                    &format!("Segment {} · {}", st.node, st.name),
+                    None,
+                    t,
+                )),
+        )
+        .child(design::divider(t));
     // The Index line: one muted line under the header
     // naming the node's place in the figure tree (see
     // `segment_topology`). `segment_state` succeeded
@@ -788,7 +776,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                         .color(t.text_secondary)
                         .grow(1.0),
                 )
-                .child(text(format_deg(st.angle_deg)).font(type_::LABEL).color(t.text))
+                .child(design::stepper_value(&format_deg(st.angle_deg), t))
                 .child(btn("seg-rot-m5", "−5°", false, t, |s| {
                     rotate_selected(&mut s.core, -5.0)
                 }))
@@ -820,7 +808,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                         .color(t.text_secondary)
                         .grow(1.0),
                 )
-                .child(text(format_deg(st.bend_deg)).font(type_::LABEL).color(t.text))
+                .child(design::stepper_value(&format_deg(st.bend_deg), t))
                 .child(btn("seg-bend-m5", "−5°", false, t, |s| {
                     bend_selected(&mut s.core, (-5.0f32).to_radians())
                 }))
@@ -851,14 +839,10 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                     s.core.cycle_shape()
                 })),
         )
-        .child(
-            text("Colour")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        .child(design::section_label("Colour", t));
     let mut swatches = row().gap(6.0).center_y();
     for rgb in PALETTE {
-        swatches = swatches.child(swatch(rgb, st.color == Some(rgb)));
+        swatches = swatches.child(swatch(rgb, st.color == Some(rgb), t));
     }
     swatches = swatches.child(btn("node-color", "Cycle", false, t, |s| {
         s.core.cycle_node_color()
@@ -870,9 +854,14 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
             .gap(8.0)
             .center_y()
             .child(btn("add-seg", "+ Segment", false, t, |s| s.core.add_segment()))
-            .child(danger_btn("del-seg", "trash-can", "Delete segment", |s| {
-                s.core.delete_segment()
-            })),
+            .child(danger_icon_btn(
+                "del-seg",
+                "trash-can",
+                "Delete segment",
+                false,
+                t,
+                |s| s.core.delete_segment(),
+            )),
     )
 }
 

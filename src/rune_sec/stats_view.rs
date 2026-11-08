@@ -21,6 +21,21 @@
 //! are labelled as counts and deliberately recompute none
 //! of the motion statistics above.
 //!
+//! Phase N adoption: the panel root is the design kit's
+//! card ([`design::panel_col`], key `stats-panel`
+//! unchanged), the header is the kit's
+//! [`design::panel_title`] (chart-simple glyph, P13's
+//! assignment for this panel) over a kit
+//! [`design::divider`], and the four block captions are
+//! kit [`design::section_label`]s. The row text takes
+//! P11 §4D's font assignment: labels LABEL /
+//! `text_secondary`, counts and values MONO_CAPTION /
+//! `t.text`, the per-figure prose line LABEL / `t.text`;
+//! the grid cells keep their TITLE values (P11: the one
+//! display-numeral role TITLE retains). Every display
+//! string is byte-identical to before — only the chrome
+//! moved.
+//!
 //! Cost note for the integrator: `project_stats` is linear
 //! in frames × poses and the segment count is linear in
 //! total nodes — both trivial. `busiest_figure` is the one
@@ -37,6 +52,7 @@ use rune::{col, el, row, text, El};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::stats::{busiest_figure, project_stats, root_travel};
 
+use crate::rune_sec::design;
 use crate::State;
 
 /// One stat cell's data: stable element key suffix, the
@@ -353,85 +369,115 @@ fn label_slug(label: &str) -> String {
     out
 }
 
-/// One cell element: the value over its caption, on a card
-/// fill. Keyed `stat-{key}` so headless `--tree` checks can
-/// find individual cells.
+/// One cell element: the value over its caption, on the
+/// window-bg fill so the tile still reads as a tile now
+/// that the panel root itself carries the card fill
+/// (Phase N; `t.bg` inner wells are the shell's existing
+/// idiom — home_panel's rows do the same). Keyed
+/// `stat-{key}` so headless `--tree` checks can find
+/// individual cells.
 fn stat_cell_el(cell: &StatCell, t: &Theme) -> El {
     col()
         .key(format!("stat-{}", cell.key))
-        .fill(t.card)
+        .fill(t.bg)
         .radius(8.0)
         .padding(10.0)
         .gap(2.0)
         .child(text(cell.value.clone()).font(type_::TITLE).color(t.text))
-        .child(
-            text(cell.label.clone())
-                .font(type_::SECTION)
-                .color(t.text_secondary),
-        )
+        .child(design::section_label(&cell.label, t))
 }
 
 /// One totals row: the label in secondary text, the count
-/// after it. Keyed `stats-total-{slug}`.
+/// after it. Fonts are P11 §4D's assignment (Phase N):
+/// label LABEL / secondary, count MONO_CAPTION / `t.text`
+/// (before Phase N both rendered at implicit BODY). Keyed
+/// `stats-total-{slug}`.
 fn total_row_el(label: &str, count: usize, t: &Theme) -> El {
     row()
         .key(format!("stats-total-{}", label_slug(label)))
         .gap(8.0)
-        .child(text(label.to_string()).color(t.text_secondary))
-        .child(text(format_count(count)).color(t.text))
+        .child(
+            text(label.to_string())
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(
+            text(format_count(count))
+                .font(type_::MONO_CAPTION.mono())
+                .color(t.text),
+        )
 }
 
 /// The Project totals block: a caption over the compact
 /// count rows from [`project_totals`]. Keyed
 /// `stats-totals`.
 fn totals_el(s: &State, t: &Theme) -> El {
-    let mut block = col().key("stats-totals").w_full().gap(2.0).child(
-        text("Project totals")
-            .font(type_::SECTION)
-            .color(t.text_secondary),
-    );
+    let mut block = col()
+        .key("stats-totals")
+        .w_full()
+        .gap(2.0)
+        .child(design::section_label("Project totals", t));
     for (label, count) in project_totals(&s.core) {
         block = block.child(total_row_el(&label, count, t));
     }
     block
 }
 
-/// One media row: the label and its formatted value, both
-/// muted — these rows annotate the counts above rather
-/// than headline anything. Keyed `stats-media-{slug}`.
+/// One media row: the label and its formatted value.
+/// Fonts are P11 §4D's assignment (Phase N): label LABEL
+/// / secondary, value MONO_CAPTION / `t.text` (before
+/// Phase N both rendered muted at implicit BODY). Keyed
+/// `stats-media-{slug}`.
 fn media_row_el(label: &str, value: &str, t: &Theme) -> El {
     row()
         .key(format!("stats-media-{}", label_slug(label)))
         .gap(8.0)
-        .child(text(label.to_string()).color(t.text_secondary))
-        .child(text(value.to_string()).color(t.text_secondary))
+        .child(
+            text(label.to_string())
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(
+            text(value.to_string())
+                .font(type_::MONO_CAPTION.mono())
+                .color(t.text),
+        )
 }
 
-/// The Media block: a caption over the muted rows from
+/// The Media block: a caption over the rows from
 /// [`media_totals`] — audio clip count and start-frame
 /// span, FX clip count and summed duration, text and
 /// stroke counts. Keyed `stats-media`.
 fn media_el(s: &State, t: &Theme) -> El {
-    let mut block = col().key("stats-media").w_full().gap(2.0).child(
-        text("Media")
-            .font(type_::SECTION)
-            .color(t.text_secondary),
-    );
+    let mut block = col()
+        .key("stats-media")
+        .w_full()
+        .gap(2.0)
+        .child(design::section_label("Media", t));
     for (label, value) in media_totals(&s.core) {
         block = block.child(media_row_el(&label, &value, t));
     }
     block
 }
 
-/// One flags row: the label and its count, both muted,
-/// mirroring [`media_row_el`]. Keyed `stats-flag-{i}` by
-/// row index.
+/// One flags row: the label and its count, with
+/// [`media_row_el`]'s P11 §4D fonts (Phase N): label
+/// LABEL / secondary, value MONO_CAPTION / `t.text`.
+/// Keyed `stats-flag-{i}` by row index.
 fn flag_row_el(index: usize, label: &str, value: &str, t: &Theme) -> El {
     row()
         .key(format!("stats-flag-{index}"))
         .gap(8.0)
-        .child(text(label.to_string()).color(t.text_secondary))
-        .child(text(value.to_string()).color(t.text_secondary))
+        .child(
+            text(label.to_string())
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(
+            text(value.to_string())
+                .font(type_::MONO_CAPTION.mono())
+                .color(t.text),
+        )
 }
 
 /// The Flags block: a caption over the count rows from
@@ -441,11 +487,11 @@ fn flag_row_el(index: usize, label: &str, value: &str, t: &Theme) -> El {
 /// content reads three plain "0" rows instead of the
 /// block vanishing. Keyed `stats-flags`.
 fn flags_el(s: &State, t: &Theme) -> El {
-    let mut block = col().key("stats-flags").w_full().gap(2.0).child(
-        text("Flags")
-            .font(type_::SECTION)
-            .color(t.text_secondary),
-    );
+    let mut block = col()
+        .key("stats-flags")
+        .w_full()
+        .gap(2.0)
+        .child(design::section_label("Flags", t));
     for (i, (label, value)) in flag_totals(&s.core).iter().enumerate() {
         block = block.child(flag_row_el(i, label, value, t));
     }
@@ -457,28 +503,31 @@ fn flags_el(s: &State, t: &Theme) -> El {
 /// then its node / channel / FX-clip / particle counts.
 /// Keyed `stats-figures`.
 fn figures_el(s: &State, t: &Theme) -> El {
-    let mut block = col().key("stats-figures").w_full().gap(2.0).child(
-        text("Figures")
-            .font(type_::SECTION)
-            .color(t.text_secondary),
-    );
+    let mut block = col()
+        .key("stats-figures")
+        .w_full()
+        .gap(2.0)
+        .child(design::section_label("Figures", t));
     for r in figure_rows(&s.core) {
         block = block.child(
             text(format!(
                 "{} — {} nodes · {} channels · {} FX clips · {} particles",
                 r.name, r.nodes, r.channels, r.fx_clips, r.particles
             ))
+            .font(type_::LABEL)
             .color(t.text),
         );
     }
     block
 }
 
-/// The stats panel: a "Project stats" caption over a
-/// five-column grid of stat cells (two rows at the current
-/// ten cells), then the Project totals count rows, the
-/// Media rows, the Flags rows and the per-figure count
-/// lines. Mount it
+/// The stats panel: the kit card (Phase N) — a header
+/// row holding the kit's [`design::panel_title`]
+/// (chart-simple glyph + "Project stats") over a
+/// hairline divider, then a five-column grid of stat
+/// cells (two rows at the current ten cells), the
+/// Project totals count rows, the Media rows, the Flags
+/// rows and the per-figure count lines. Mount it
 /// wherever a full-width
 /// row fits; the column count is the one-line change if a
 /// narrow sidebar mount is preferred.
@@ -487,15 +536,20 @@ pub fn stats_panel(s: &State, t: &Theme) -> El {
     for cell in stat_cells(&s.core) {
         grid = grid.child(stat_cell_el(&cell, t));
     }
-    col()
-        .key("stats-panel")
-        .w_full()
-        .gap(8.0)
+    design::panel_col("stats-panel", t)
         .child(
-            text("Project stats")
-                .font(type_::SECTION)
-                .color(t.text_secondary),
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(design::panel_title(
+                    Some("chart-simple"),
+                    "Project stats",
+                    None,
+                    t,
+                )),
         )
+        .child(design::divider(t))
         .child(grid)
         .child(totals_el(s, t))
         .child(media_el(s, t))

@@ -299,14 +299,40 @@
 //! `trash-can` under the keys `stroke-recolor-frame` /
 //! `stroke-delete-frame`, in the row keyed
 //! `stroke-bulk-frame-row`.
+//!
+//! ## Phase N adoption
+//!
+//! The panel root is the kit card
+//! (`design::panel_col`, key `stroke-inspector`
+//! unchanged) with a `design::panel_title` header
+//! ("Stroke inspector" — the panel carried no title
+//! before this phase) over a `design::divider`. The
+//! brush parameter rows ([`param_row`]) and the
+//! selected-stroke Width / Opacity rows are rebuilt in
+//! the charter's stepper order: the label grows, then
+//! the − button, the value as `design::stepper_value`,
+//! and the + button; the brush rows' − glyph is now
+//! U+2212, and the Width / Opacity rows keep their
+//! chevron steppers (the F-STEP-CHEV variant) with
+//! only the value readout kitted. The nib segmented
+//! row takes the segmented gap (4). The two in-panel
+//! section headings — `Brush · {name}` and the stroke
+//! list's `strokes-header` text — render through
+//! `design::section_label`. The stroke rows' 14×14
+//! colour chips are display readouts, not swatch
+//! controls (p09 §2.4), and stay as they are; the
+//! bulk rows hold no swatches at all — Recolour is a
+//! button press against [`bulk_target_color`]. Keys,
+//! handlers and status strings are unchanged.
 
 use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, El};
+use rune::{el, row, text, El};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Stroke;
 use stykanimate_rs::paint::{Brush, Nib};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::stage_view::hex_color;
 use crate::State;
@@ -1290,8 +1316,11 @@ pub fn delete_frame_strokes_press(s: &mut State) -> usize {
     n
 }
 
-/// One parameter row: label, current value, and the −/+
-/// stepper pair stepping that parameter through the preset
+/// One parameter row in the charter's stepper order
+/// (Phase N): the label grows, then the − button, the
+/// value as the kit's centred mono readout
+/// (`design::stepper_value`), and the + button — the
+/// pair steps that parameter through the preset
 /// library ([`step_param`]).
 fn param_row(
     label: &str,
@@ -1304,16 +1333,16 @@ fn param_row(
     row()
         .gap(8.0)
         .center_y()
-        .child(text(label).font(type_::LABEL).color(t.text))
         .child(
-            text(value)
+            text(label)
                 .font(type_::LABEL)
                 .color(t.text_secondary)
                 .grow(1.0),
         )
-        .child(btn(dec_key, "-", false, t, move |s: &mut State| {
+        .child(btn(dec_key, "−", false, t, move |s: &mut State| {
             step_param(&mut s.core, param, -1);
         }))
+        .child(design::stepper_value(&value, t))
         .child(btn(inc_key, "+", false, t, move |s: &mut State| {
             step_param(&mut s.core, param, 1);
         }))
@@ -1329,7 +1358,19 @@ fn param_row(
 pub fn stroke_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let brush = core.active_brush();
-    let mut panel = col().key("stroke-inspector").w_full().gap(8.0);
+    let mut panel = design::panel_col("stroke-inspector", t);
+
+    // Panel header (Phase N): the kit title in a plain
+    // row — this panel's header never carried a key —
+    // over the hairline divider.
+    panel = panel.child(
+        row()
+            .w_full()
+            .gap(8.0)
+            .center_y()
+            .child(design::panel_title(None, "Stroke inspector", None, t)),
+    );
+    panel = panel.child(design::divider(t));
 
     // Bulk stroke ops, at the panel top per the brief:
     // both act on every stroke in the project (all
@@ -1484,9 +1525,8 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .key("stroke-width-row")
                 .gap(8.0)
                 .center_y()
-                .child(text("Width").font(type_::LABEL).color(t.text))
                 .child(
-                    text(format!("{w:.1}"))
+                    text("Width")
                         .font(type_::LABEL)
                         .color(t.text_secondary)
                         .grow(1.0),
@@ -1501,6 +1541,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                         set_selected_stroke_width(&mut s.core, sel, -1);
                     },
                 ))
+                .child(design::stepper_value(&format!("{w:.1}"), t))
                 .child(icon_only_btn(
                     "stroke-width-up",
                     "chevron-up",
@@ -1528,9 +1569,8 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .key("stroke-opacity-row")
                 .gap(8.0)
                 .center_y()
-                .child(text("Opacity").font(type_::LABEL).color(t.text))
                 .child(
-                    text(opacity_label(o))
+                    text("Opacity")
                         .font(type_::LABEL)
                         .color(t.text_secondary)
                         .grow(1.0),
@@ -1545,6 +1585,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                         set_selected_stroke_opacity(&mut s.core, sel, -1);
                     },
                 ))
+                .child(design::stepper_value(&opacity_label(o), t))
                 .child(icon_only_btn(
                     "stroke-opacity-up",
                     "chevron-up",
@@ -1574,11 +1615,10 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
         ));
     }
 
-    panel = panel.child(
-        text(format!("Brush · {}", brush.name))
-            .font(type_::LABEL)
-            .color(t.text),
-    );
+    panel = panel.child(design::section_label(
+        &format!("Brush · {}", brush.name),
+        t,
+    ));
     panel = panel.child(
         text(tool_text(core))
             .font(type_::LABEL)
@@ -1614,7 +1654,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
     // press selects the first preset carrying that nib.
     let mut nib_row = row()
         .key("brush-nib-row")
-        .gap(8.0)
+        .gap(4.0)
         .center_y()
         .child(text("Nib").font(type_::LABEL).color(t.text));
     for nib in NIB_ORDER {
@@ -1654,12 +1694,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
         .key("strokes-header")
         .gap(8.0)
         .center_y()
-        .child(
-            text(strokes_header(core))
-                .font(type_::LABEL)
-                .color(t.text)
-                .grow(1.0),
-        );
+        .child(design::section_label(&strokes_header(core), t).grow(1.0));
     if !rows.is_empty() {
         header = header.child(btn("strokes-clear", "Clear frame", false, t, |s| {
             s.core.clear_frame_drawings()
