@@ -2896,10 +2896,19 @@ fn timeline_clips_lane_appears_with_a_planted_clip() {
         },
     );
     rt.frame(DT);
-    assert!(
-        presented_keys(&rt).contains("timeline-clips"),
-        "the clips lane appears once a clip exists"
-    );
+    // The lane mounts through the presence fade, so
+    // allow the bounded settle loop before asserting
+    // presence (the same discipline as absence,
+    // below).
+    let mut appeared = false;
+    for _ in 0..30 {
+        rt.frame(DT);
+        if presented_keys(&rt).contains("timeline-clips") {
+            appeared = true;
+            break;
+        }
+    }
+    assert!(appeared, "the clips lane appears once a clip exists");
 
     // Clearing the clips removes the lane again; the
     // row leaves through the presence fade, so allow

@@ -545,7 +545,8 @@ fn fbtn(
 /// The "Frames" toolbar section: the main row in GPUI
 /// tool-group order — Inbetween / Shift / Reverse / Swap /
 /// Smooth path, the clipboards, the loop endpoints, then the duration
-/// steppers with their readout — over a second row, "This
+/// steppers with their readout (the row wraps inside the
+/// side column — see the `flex_wrap` note in the builder) — over a second row, "This
 /// frame", carrying the current frame's duration multiplier
 /// with ×0.5 / ×2 / Reset 1.0 controls (Phase F), and a third
 /// row, "Insert", carrying the Insert-N count stepper and the
@@ -561,6 +562,15 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
         .w_full()
         .gap(8.0)
         .center_y()
+        // The main row carries ~17 controls in GPUI
+        // tool-group order — far wider than the side
+        // column it now lives in. Wrapping keeps every
+        // button inside the column (and pressable);
+        // unwrapped, the tail of the row overflowed
+        // past the panel edge and its buttons could
+        // not be pressed at all (Phase M's swap test
+        // proved this against the clipped row).
+        .flex_wrap()
         .child(
             text("Frames")
                 .font(type_::LABEL)

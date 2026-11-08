@@ -1780,12 +1780,17 @@ mod tests {
     #[test]
     fn step_by_opacity_and_scatter_reach_spray() {
         let lib = lib();
-        // Only Spray (idx 9) is below full opacity / above
-        // zero scatter; from Spray, +opacity ties across all
-        // full-opacity presets and resolves to the lowest
-        // index (Pen).
-        assert_eq!(step_index_by(&lib, 0, -1, |b| b.opacity), Some(9));
-        assert_eq!(step_index_by(&lib, 9, 1, |b| b.opacity), Some(0));
+        // Two presets are below full opacity since
+        // Phase M converted Pencil: Pencil (idx 1,
+        // 0.55) and Spray (idx 9, 0.5). Stepping down
+        // from Pen walks them nearest-first; stepping
+        // up from Spray reaches Pencil first, then the
+        // full-opacity tie resolves to the lowest
+        // index (Pen). Scatter is still Spray-only.
+        assert_eq!(step_index_by(&lib, 0, -1, |b| b.opacity), Some(1));
+        assert_eq!(step_index_by(&lib, 1, -1, |b| b.opacity), Some(9));
+        assert_eq!(step_index_by(&lib, 9, 1, |b| b.opacity), Some(1));
+        assert_eq!(step_index_by(&lib, 1, 1, |b| b.opacity), Some(0));
         assert_eq!(step_index_by(&lib, 0, 1, |b| b.scatter), Some(9));
         assert_eq!(step_index_by(&lib, 9, -1, |b| b.scatter), Some(0));
     }
