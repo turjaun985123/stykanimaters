@@ -625,7 +625,7 @@ Nothing in this section is CI-verified yet; statuses move
 to the per-wave tables above once the run is green, and
 docs/COMPARISON.md is refreshed after that run.
 
-## Wave 15 — STYKANIMATE 2.0: the wall comes down (in progress, 2026-11-08)
+## Wave 15 — STYKANIMATE 2.0: the wall comes down (DELIVERED — CI run 42451617130 GREEN on b367357, 912 tests: 902 unit + 10 integration; 2026-11-08)
 
 Wave 14 reorganised the button wall into labelled tool
 groups under eight workspace presets — and the user
@@ -637,9 +637,8 @@ corrective. It changes what renders, not how what renders
 is arranged: tool groups and panels are gated by the
 active workspace, the app bar is cut down to menus, and
 the space the hidden controls free up goes to the stage.
-As with Wave 14, everything below is implemented in this
-wave and CI verification happens at integration, so no
-item here is claimed verified yet.
+Verified by CI run 42451617130 (push, b367357): build and
+full test suite green, 912 tests passed, 0 failed.
 
 - **Render gating (the headline change)** — the tool
   groups and toggleable panels now render only in the
