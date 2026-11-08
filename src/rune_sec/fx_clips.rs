@@ -186,7 +186,7 @@ use crate::chrome_view::btn;
 use crate::rune_sec::design;
 use crate::rune_sec::fx_browser::kind_label;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
-use crate::rune_sec::icons::icon_el;
+use crate::rune_sec::icons::{icon_el, icon_width};
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -471,6 +471,20 @@ pub fn bar_alpha(hidden: bool) -> f32 {
     } else {
         1.0
     }
+}
+
+/// The laid-out width of the lane row's eye-slash
+/// marker slot, in points (Wave 9): `icon_el` sizes by
+/// the glyph's aspect, so at 12 pt tall the 576×512
+/// eye-slash lays out 13.5 pt wide — not the 12 pt the
+/// live rows' spacer originally used, which shifted a
+/// hidden row's anchor text 1.5 pt left of its live
+/// neighbours'. The spacer takes this width, so the
+/// anchor column and the selection dot line up across
+/// hidden and live rows alike. Factored out so the
+/// width the builder uses is testable without an `El`.
+pub fn eye_slash_slot_width() -> f32 {
+    icon_width("eye-slash", 12.0).unwrap_or(12.0)
 }
 
 /// The `(start, duration)` window of every FX clip in
@@ -1146,8 +1160,10 @@ pub fn strip_view(s: &State, t: &Theme) -> El {
 /// mission Wave 4, audit S13-1): its colour dot dims by
 /// the strip's own [`bar_alpha`] rule, its name drops to
 /// the secondary colour, and an `eye-slash` marker sits
-/// before the selection dot (a same-size spacer on live
-/// rows keeps the trailing edge aligned). The empty
+/// before the selection dot (a spacer of the glyph's
+/// own laid-out width — [`eye_slash_slot_width`],
+/// Wave 9 — on live rows keeps the anchor column and
+/// the trailing edge aligned). The empty
 /// lane is the kit [`design::empty_state`] under
 /// `wand-magic-sparkles` (audit S13-3), text unchanged.
 pub fn fx_lane(s: &State, t: &Theme) -> El {
@@ -1218,7 +1234,7 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
                 .child(if data.hidden {
                     icon_el("eye-slash", 12.0, t.text_secondary)
                 } else {
-                    el().size(12.0, 12.0)
+                    el().size(eye_slash_slot_width(), 12.0)
                 })
                 .child(if data.selected {
                     el().size(8.0, 8.0).radius(4.0).fill(accent)
@@ -2555,6 +2571,22 @@ mod tests {
         assert_eq!(bar_alpha(false), 1.0);
         assert_eq!(bar_alpha(true), HIDDEN_BAR_ALPHA);
         assert!((bar_alpha(true) - 0.35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn eye_slash_slot_width_is_the_glyphs_laid_out_width() {
+        // Wave 9: the live rows' spacer must match the
+        // marker it stands in for, or a hidden row's
+        // anchor column shifts. The eye-slash view box
+        // is 576×512, so at 12 pt tall the glyph lays
+        // out 13.5 pt wide — the helper the builder
+        // sizes the spacer with returns exactly the
+        // icon system's own aspect maths.
+        assert_eq!(eye_slash_slot_width(), 13.5);
+        assert_eq!(
+            eye_slash_slot_width(),
+            icon_width("eye-slash", 12.0).expect("eye-slash is in the curated set")
+        );
     }
 
     #[test]

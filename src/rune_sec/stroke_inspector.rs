@@ -343,6 +343,31 @@
 //! bulk rows hold no swatches at all — Recolour is a
 //! button press against [`bulk_target_color`]. Keys,
 //! handlers and status strings are unchanged.
+//!
+//! ## Wave 9 polish (agent B5)
+//!
+//! Three fixes, all inside this file. (1) The per-row
+//! Delete and the header's Clear frame were the two
+//! removal paths that never remapped the selection —
+//! the frame delete has since Phase J, for the reason
+//! stated there — so both now run through presses
+//! ([`delete_stroke_press`],
+//! [`clear_frame_strokes_press`]) that apply
+//! [`selection_after_delete`] after the removal. (2)
+//! The selected stroke's list row renders on the
+//! kit's `design::row_shell` in its selected form —
+//! the list itself now shows the selection the
+//! readout names. (3) Row widths re-proven against
+//! the 316 pt content budget from the headless tree
+//! (draw workspace): the nib row's fixed children sum
+//! to 273 pt (43 pt slack), the stepper rows' fixed
+//! parts to 115 pt with the label flexing, and the
+//! Width / Opacity rows share that construction
+//! (fixed 110 pt at the value box's 34 pt minimum).
+//! The frame-strokes empty state is the kit
+//! `design::empty_state` (Wave 6 conversion, verified
+//! in place) and its message names the frame scope
+//! the list actually filters by.
 
 use rune::tok::{type_, Theme};
 use rune::{el, row, text, El};
@@ -695,6 +720,55 @@ pub fn stroke_rows(core: &EditorCore) -> Vec<StrokeRow> {
 /// across a deletion.
 pub fn delete_stroke(core: &mut EditorCore, project_index: usize) {
     core.delete_stroke_at(project_index);
+}
+
+/// Row Delete press, as the list's button runs it:
+/// [`delete_stroke`] on the core, then the selection
+/// remap ([`selection_after_delete`] over the single
+/// removed index). The Phase J frame delete remaps
+/// for exactly this reason — a removal shifts every
+/// later stroke down one index, so an untouched
+/// selection would silently point at a **different
+/// live stroke**: the stage would highlight the wrong
+/// stroke, and the Width / Opacity rows would edit
+/// it. The per-row delete (Phase E) predates that
+/// discipline and never received it; this press is
+/// the fix — same helper, same semantics (the
+/// selected stroke itself deleted → selection
+/// cleared; a survivor keeps its stroke). A stale
+/// target (index past the end — the row cannot be
+/// rendered then, so a press can only go stale if
+/// the project changed under it) keeps the core
+/// op's standing behaviour: it reports "No stroke
+/// {n} to delete." and the selection is untouched.
+pub fn delete_stroke_press(s: &mut State, project_index: usize) {
+    if project_index >= s.core.project.strokes.len() {
+        delete_stroke(&mut s.core, project_index);
+        return;
+    }
+    delete_stroke(&mut s.core, project_index);
+    s.stroke_selected = selection_after_delete(s.stroke_selected, &[project_index]);
+}
+
+/// Clear frame press, as the strokes header's button
+/// runs it: `EditorCore::clear_frame_drawings` on the
+/// core, then the same selection remap as
+/// [`delete_stroke_press`], over the frame's removed
+/// indices ([`frame_stroke_indices`], read **before**
+/// the clear — the same set the op's retain filter
+/// removes). The header button previously called the
+/// core op bare, with the same wrong-stroke hazard
+/// as the row Delete: the frame delete in this panel
+/// remapped, the frame clear did not. An empty frame
+/// removes nothing and the selection is left alone;
+/// the op still runs, so its "Cleared 0 stroke(s)…"
+/// report is unchanged.
+pub fn clear_frame_strokes_press(s: &mut State) {
+    let removed = frame_stroke_indices(&s.core);
+    s.core.clear_frame_drawings();
+    if !removed.is_empty() {
+        s.stroke_selected = selection_after_delete(s.stroke_selected, &removed);
+    }
 }
 
 /// Total strokes in the project, across all frames — the
@@ -1739,7 +1813,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
         .child(design::section_label(&strokes_header(core), t).grow(1.0));
     if !rows.is_empty() {
         header = header.child(btn("strokes-clear", "Clear frame", false, t, |s| {
-            s.core.clear_frame_drawings()
+            clear_frame_strokes_press(s)
         }));
     }
     panel = panel.child(header);
@@ -1753,10 +1827,27 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
     } else {
         for srow in rows {
             let idx = srow.project_index;
+            // Selection feedback (Wave 9): the row of
+            // the stroke `s.stroke_selected` names —
+            // when that stroke is on this frame — is
+            // built on the kit's row shell in its
+            // selected form, so the list shows WHICH
+            // stroke the readout, the measure line and
+            // the Width / Opacity rows are talking
+            // about. Until now the rows were plain and
+            // indistinguishable, and the readout's
+            // number is the project-wide index while
+            // the row label is the frame-local
+            // position, so nothing on screen connected
+            // the two. The shell is the kit's unkeyed
+            // list-row form (these rows never carried
+            // a key of their own); its gap (PANEL_GAP,
+            // the 8.0 this row used) and centre
+            // alignment come with it. The row stays
+            // display-only — no press handler is added.
+            let selected = s.stroke_selected == Some(idx);
             panel = panel.child(
-                row()
-                    .gap(8.0)
-                    .center_y()
+                design::row_shell(selected, t)
                     .child(
                         el()
                             .size(14.0, 14.0)
@@ -1780,7 +1871,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                         false,
                         t,
                         move |s: &mut State| {
-                            delete_stroke(&mut s.core, idx);
+                            delete_stroke_press(s, idx);
                         },
                     )),
             );
@@ -2279,6 +2370,127 @@ mod tests {
         assert_eq!(delete_frame_strokes_press(&mut s), 2);
         assert_eq!(s.stroke_selected, Some(1));
         assert_eq!(stroke_frame_of(&s.core, 1), Some(1));
+    }
+
+    #[test]
+    fn delete_stroke_press_remaps_the_selection() {
+        // Frames 0, 1, 0 at project indices 0, 1, 2 —
+        // point counts identify the strokes.
+        // Deleting a stroke BEFORE the selection: the
+        // selection shifts down one and still names
+        // the same (3-point, frame-0) stroke.
+        let mut core = EditorCore::new();
+        for (frame, pts) in [(0, 1), (1, 2), (0, 3)] {
+            core.project.strokes.push(plain_stroke(frame, pts));
+        }
+        let mut s = state_with(core, Some(2));
+        delete_stroke_press(&mut s, 0);
+        assert_eq!(s.stroke_selected, Some(1));
+        assert_eq!(s.core.project.strokes[1].points.len(), 3);
+        assert_eq!(s.core.status, "Stroke 1 deleted.");
+
+        // Deleting the selected stroke itself: the
+        // selection is cleared, never left pointing at
+        // the stroke that slid into its index.
+        let mut core = EditorCore::new();
+        for (frame, pts) in [(0, 1), (1, 2), (0, 3)] {
+            core.project.strokes.push(plain_stroke(frame, pts));
+        }
+        let mut s = state_with(core, Some(1));
+        delete_stroke_press(&mut s, 1);
+        assert_eq!(s.stroke_selected, None);
+
+        // Deleting a stroke AFTER the selection: the
+        // selection is untouched.
+        let mut core = EditorCore::new();
+        for (frame, pts) in [(0, 1), (1, 2), (0, 3)] {
+            core.project.strokes.push(plain_stroke(frame, pts));
+        }
+        let mut s = state_with(core, Some(0));
+        delete_stroke_press(&mut s, 2);
+        assert_eq!(s.stroke_selected, Some(0));
+
+        // A stale target: the core op reports and
+        // nothing else changes — no removal, no remap,
+        // no snapshot.
+        let mut core = EditorCore::new();
+        for (frame, pts) in [(0, 1), (1, 2)] {
+            core.project.strokes.push(plain_stroke(frame, pts));
+        }
+        let depth = core.undo_depth();
+        let mut s = state_with(core, Some(1));
+        delete_stroke_press(&mut s, 9);
+        assert_eq!(s.stroke_selected, Some(1));
+        assert_eq!(s.core.project.strokes.len(), 2);
+        assert_eq!(s.core.status, "No stroke 10 to delete.");
+        assert_eq!(s.core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn clear_frame_press_remaps_the_selection() {
+        // Frames 0, 1, 0, 1; the current frame is 0,
+        // so the press removes project indices 0 and 2.
+        // A selection on a removed stroke clears.
+        let mut core = EditorCore::new();
+        for frame in [0, 1, 0, 1] {
+            core.project.strokes.push(plain_stroke(frame, 2));
+        }
+        let mut s = state_with(core, Some(2));
+        clear_frame_strokes_press(&mut s);
+        assert_eq!(s.stroke_selected, None);
+        assert_eq!(s.core.project.strokes.len(), 2);
+        assert_eq!(s.core.status, "Cleared 2 stroke(s) on this frame.");
+
+        // A selection on a survivor after both removed
+        // indices shifts down by two, still naming the
+        // same (frame-1) stroke.
+        let mut core = EditorCore::new();
+        for frame in [0, 1, 0, 1] {
+            core.project.strokes.push(plain_stroke(frame, 2));
+        }
+        let mut s = state_with(core, Some(3));
+        clear_frame_strokes_press(&mut s);
+        assert_eq!(s.stroke_selected, Some(1));
+        assert_eq!(stroke_frame_of(&s.core, 1), Some(1));
+
+        // A selection on a survivor with exactly one
+        // removed index before it shifts down by one.
+        let mut core = EditorCore::new();
+        for frame in [0, 1, 0, 1] {
+            core.project.strokes.push(plain_stroke(frame, 2));
+        }
+        let mut s = state_with(core, Some(1));
+        clear_frame_strokes_press(&mut s);
+        assert_eq!(s.stroke_selected, Some(0));
+        assert_eq!(stroke_frame_of(&s.core, 0), Some(1));
+
+        // An empty current frame removes nothing and
+        // the selection is left exactly as it was.
+        let mut core = EditorCore::new();
+        core.project.strokes.push(plain_stroke(1, 2));
+        let mut s = state_with(core, Some(0));
+        clear_frame_strokes_press(&mut s);
+        assert_eq!(s.stroke_selected, Some(0));
+        assert_eq!(s.core.status, "Cleared 0 stroke(s) on this frame.");
+    }
+
+    #[test]
+    fn stroke_panel_builds_with_rows_and_a_selection() {
+        // Build smoke for the Wave 9 row-shell change:
+        // a current frame carrying strokes, one of them
+        // selected, must build the whole panel (bulk
+        // rows, selection row, width/opacity rows, list
+        // rows on the kit shell) without panicking.
+        let mut core = EditorCore::new();
+        core.project.strokes.push(plain_stroke(0, 3));
+        core.project.strokes.push(plain_stroke(0, 5));
+        let s = state_with(core, Some(1));
+        let t = crate::rune_sec::app_theme::app_theme(true);
+        let _ = stroke_panel(&s, &t);
+        // And with no strokes at all: the kit empty
+        // state branch builds too.
+        let s = state_with(EditorCore::new(), None);
+        let _ = stroke_panel(&s, &t);
     }
 
     #[test]

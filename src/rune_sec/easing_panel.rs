@@ -411,6 +411,14 @@ pub fn easing_panel(s: &State, t: &Theme) -> El {
     // for figure N."), so the group shows the kit
     // empty state instead — the same predicate
     // `apply_graph_ease_preset` itself no-ops on.
+    // Wave 9 (agent D9): the empty state's "Key angle"
+    // below is the graph panel's button name verbatim
+    // — the graph panel owns the channels this group
+    // is about and sits directly above this panel in
+    // the Graph workspace column. It is deliberately
+    // NOT the keyframe tools' "Key angle here" (that
+    // section's playhead dialect); do not "correct"
+    // the sentence to match it.
     let fig_has_channels = core
         .project
         .channels

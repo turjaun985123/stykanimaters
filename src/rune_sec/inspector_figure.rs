@@ -149,6 +149,21 @@
 //! against white text, is retired for the family's
 //! deeper red (p12).
 //!
+//! Wave 9 polish (three proven defects): the header's
+//! meta name is fitted by [`fit_header_name`] — the name
+//! is unbounded user input in a non-shrinking text slot,
+//! so a long name painted past the card; the readout
+//! rows follow the P11 §4D assignment the stats panel
+//! documents (counts and formatted values in
+//! MONO_CAPTION via [`readout_row`], prose in LABEL via
+//! [`prose_readout_row`]) where they previously set
+//! every value in LABEL; and the opacity / scale /
+//! head-ring steppers sit under a kit `section_label`
+//! ("Adjust") instead of reading as part of the Colour
+//! group — the sibling inspectors head every post-header
+//! group. Keys, handlers and status strings are
+//! unchanged throughout.
+//!
 //! ## Integrator wiring (main.rs)
 //!
 //! ```ignore
@@ -658,8 +673,77 @@ fn name_field_row(s: &State, t: &Theme) -> El {
         ))
 }
 
-/// One read-only label/value row.
+/// Character budget for the figure name in the panel
+/// header's meta slot. The header is a fixed cluster —
+/// SECTION title ("Figure {n}"), an 8 pt gap, then the
+/// name in LABEL — inside the card's 316 pt content
+/// column, and a plain `text` does not shrink to fit
+/// (the status strip's documented Rune semantics: only
+/// `.truncate()`d text flexes), so an unfitted name
+/// paints past the card's right edge — the overflow
+/// class the UI mission's scan guards. The name itself
+/// is unbounded user input: [`clean_figure_name`]
+/// refuses only emptiness. At the strip's conservative
+/// 8 pt/char accounting the worst title ("Figure 100",
+/// ≈86 pt) plus the gap plus 24 characters of name
+/// (≈192 pt) totals ≈286 pt, inside the column with
+/// slack; names within the budget render byte-identical
+/// to before, and the rename field always shows the
+/// full name — only the header's display copy is fitted.
+pub const HEADER_NAME_MAX_CHARS: usize = 24;
+
+/// Fit a figure name for the panel header: returned
+/// unchanged within [`HEADER_NAME_MAX_CHARS`], otherwise
+/// cut to the budget with an ellipsis — at a word
+/// boundary when a space sits in the kept prefix's
+/// second half, else a hard cut (the status strip's
+/// `fit_hint` rule, character-counted so multibyte
+/// names are never split mid-character).
+pub fn fit_header_name(name: &str) -> String {
+    if name.chars().count() <= HEADER_NAME_MAX_CHARS {
+        return name.to_string();
+    }
+    let budget = HEADER_NAME_MAX_CHARS - 1; // room for '…'
+    let prefix: String = name.chars().take(budget).collect();
+    if let Some(pos) = prefix.rfind(' ') {
+        if pos >= budget / 2 {
+            return format!("{}…", &prefix[..pos]);
+        }
+    }
+    format!("{prefix}…")
+}
+
+/// One read-only label/value row. Fonts follow the
+/// readout assignment the stats panel documents (P11
+/// §4D): the label in LABEL / `text_secondary`, counts
+/// and formatted values in MONO_CAPTION with the Mono
+/// family applied / `t.text` — the kit's numeric
+/// readout style, as in `design::stepper_value`. Prose
+/// values take [`prose_readout_row`] instead.
 fn readout_row(label: &str, value: String, t: &Theme) -> El {
+    row()
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(
+            text(label)
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
+        .child(
+            text(value)
+                .font(type_::MONO_CAPTION.mono())
+                .color(t.text),
+        )
+}
+
+/// One read-only label/value row whose value is prose
+/// words rather than a count or a formatted value: the
+/// value stays in LABEL (P11 §4D's prose exception —
+/// the stats panel's per-figure prose line is LABEL
+/// too), the label in LABEL / `text_secondary`.
+fn prose_readout_row(label: &str, value: String, t: &Theme) -> El {
     row()
         .w_full()
         .center_y()
@@ -883,6 +967,7 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
                 t,
             ));
     };
+    let header_name = fit_header_name(&st.name);
     let mut panel = panel
         .child(
             row()
@@ -892,7 +977,7 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
                 .child(design::panel_title(
                     None,
                     &format!("Figure {}", st.figure + 1),
-                    Some(&st.name),
+                    Some(&header_name),
                     t,
                 )),
         )
@@ -908,7 +993,7 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
         if st.locked {
             flags.push("locked");
         }
-        panel = panel.child(readout_row("State", flags.join(" · "), t));
+        panel = panel.child(prose_readout_row("State", flags.join(" · "), t));
     }
     panel = panel.child(design::section_label("Colour", t));
     for chunk in PALETTE.chunks(8) {
@@ -918,6 +1003,15 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
         }
         panel = panel.child(swatches);
     }
+    // The adjustment group gets its own kit section
+    // label (Wave 9): without one, the opacity / scale /
+    // head-ring steppers read as part of the Colour group
+    // above them — every sibling inspector heads each of
+    // its post-header groups (style: Taper / Cap /
+    // Gradient / Colour / Opacity / Style / Presets). The
+    // placement and action rows stay unlabelled after it,
+    // the segment inspector's trailing action-row form.
+    panel = panel.child(design::section_label("Adjust", t));
     panel = panel.child(opacity_stepper_row(&st, t));
     panel = panel.child(scale_stepper_row(t));
     panel = panel.child(ring_stepper_row(&s.core, t));
@@ -1014,6 +1108,55 @@ mod tests {
         assert!(PALETTE.starts_with(&[
             0xE8E8EC, 0xFF5D5D, 0x5DB2FF, 0x7BE495, 0xFFC65D, 0xC792FF
         ]));
+    }
+
+    #[test]
+    fn header_name_within_budget_is_byte_identical() {
+        // Every realistic name — including the demo
+        // figure's — renders exactly as before the fit
+        // existed; the budget boundary itself is a fit,
+        // not a cut.
+        assert_eq!(fit_header_name("Styk"), "Styk");
+        assert_eq!(fit_header_name(""), "");
+        let at_budget = "x".repeat(HEADER_NAME_MAX_CHARS);
+        assert_eq!(fit_header_name(&at_budget), at_budget);
+    }
+
+    #[test]
+    fn header_name_over_budget_is_fitted_with_an_ellipsis() {
+        // One character over: hard cut (no space to cut
+        // at), total length exactly the budget.
+        let over = "x".repeat(HEADER_NAME_MAX_CHARS + 1);
+        let fitted = fit_header_name(&over);
+        assert_eq!(fitted.chars().count(), HEADER_NAME_MAX_CHARS);
+        assert!(fitted.ends_with('…'));
+        // A long single word: same hard cut, never longer
+        // than the budget however long the input runs.
+        let fitted = fit_header_name(&"y".repeat(200));
+        assert_eq!(fitted.chars().count(), HEADER_NAME_MAX_CHARS);
+        assert!(fitted.ends_with('…'));
+    }
+
+    #[test]
+    fn header_name_cuts_at_a_word_boundary_in_the_second_half() {
+        // The space before "Protector" sits past the
+        // kept prefix's halfway point, so the cut lands
+        // there instead of mid-word.
+        let fitted = fit_header_name("Captain Scarlet Protector Of Worlds");
+        assert_eq!(fitted, "Captain Scarlet…");
+        assert!(fitted.chars().count() <= HEADER_NAME_MAX_CHARS);
+    }
+
+    #[test]
+    fn header_name_counts_characters_not_bytes() {
+        // 'é' is two bytes in UTF-8; a byte-based cut
+        // would split it or misjudge the length (the
+        // status strip's fit_hint contract).
+        let name = "é".repeat(HEADER_NAME_MAX_CHARS + 6);
+        let fitted = fit_header_name(&name);
+        assert_eq!(fitted.chars().count(), HEADER_NAME_MAX_CHARS);
+        assert!(fitted.ends_with('…'));
+        assert!(fitted.starts_with('é'));
     }
 
     #[test]

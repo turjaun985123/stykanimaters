@@ -145,6 +145,51 @@
 //! 0.5/4.0) — so the panel labels honestly instead of
 //! inventing controls no op would honour (audit I-4 is
 //! the ops-side follow-up).
+//!
+//! Wave 9 (deep polish) fixes three label/layout
+//! defects the earlier waves left, all proven from the
+//! kit's own metrics (content budget 316 pt = the
+//! 340 pt right-column card minus `panel_col`'s
+//! 2 × 12 pt padding; LABEL advances measured off
+//! headless tree dumps at ≈6 pt/char):
+//! (1) Scope read from labels alone was weaker than
+//! the Wave 4 split intended: the three clip-scope
+//! groups sat under a bare "Operations" header whose
+//! only scope statement was the target line, the
+//! middle group was named just "Clip" (true of every
+//! group), and "Whole project" rode INSIDE its button
+//! row instead of heading it like its siblings. The
+//! umbrella now reads "Operations — target clip", the
+//! middle group is "Mute & duplicate" (its contents,
+//! in the "Position & gain" compound style), and
+//! "Whole project" heads its row from above. Label
+//! strings only — no key, glyph or handler changed,
+//! and the effects caption still only NAMES the fixed
+//! settings (no steppers invented).
+//! (2) Every free-text line in the panel (summary,
+//! target line, readout, effects caption) was a plain
+//! unwrapped `text()`: Rune text does not wrap unless
+//! `.wrap()` is set, and an unwrapped line wider than
+//! its card spills past the edge (the Wave 2
+//! `empty_state` root-fix class). The effects caption
+//! is 144 chars ≈ 880 pt — it spilled on EVERY render.
+//! All four lines now take the kit prose treatment
+//! (`.wrap().w_full()`, the settings `note_line`
+//! pattern); a line that fits renders exactly as
+//! before.
+//! (3) A clip row's fixed load — row padding, gaps,
+//! Norm / Split@cur / Xfade / Delete at kit button
+//! metrics — totals ≈309 pt for a healthy non-last
+//! clip (≈329 pt with the warning glyph, PAST the
+//! card), leaving the growing name label ≈7 pt: its
+//! unwrapped glyphs spilled under the buttons for
+//! any realistic file name. The label now
+//! `.truncate()`s (the row-label pattern of
+//! `keyframe_tools` / `timeline_marks`) and the row
+//! `.flex_wrap()`s (the Wave 4 toolbar-row pattern),
+//! so a crowded row wraps its buttons under the name
+//! instead of crushing it or pushing Delete past the
+//! card edge. Row key and per-row handlers unchanged.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -1009,9 +1054,15 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             .map(|clip| probe_clip(&s.audio_panel.probe_cache, clip))
             .collect();
         panel = panel.child(
+            // Wave 9: kit prose treatment — the line's
+            // numbers are unbounded (clip count, total
+            // duration), so it wraps inside the card
+            // instead of spilling past its edge.
             text(summary_line(clips, &probes))
                 .font(type_::LABEL)
-                .color(t.text_secondary),
+                .color(t.text_secondary)
+                .wrap()
+                .w_full(),
         );
         panel = panel.child(design::section_label("Clips", t));
         for (i, clip) in clips.iter().enumerate() {
@@ -1027,6 +1078,14 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             let probe = &probes[i];
             let mut clip_row = design::list_row(&format!("audio-clip-{i}"), is_selected, t)
                 .w_full()
+                // Wave 9: the row's fixed load (Norm /
+                // Split@cur / Xfade / Delete at kit
+                // metrics) leaves the name label only a
+                // few points on a non-last clip — the row
+                // wraps its buttons under the name rather
+                // than crush it or spill past the card
+                // (the toolbar rows' Wave 4 pattern).
+                .flex_wrap()
                 .on_press(move |s: &mut State| {
                     s.audio_panel.selected = Some(i);
                 })
@@ -1039,7 +1098,12 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                     ))
                     .font(type_::BODY)
                     .color(t.text)
-                    .grow(1.0),
+                    .grow(1.0)
+                    // Wave 9: elide inside the label's own
+                    // box instead of painting unwrapped
+                    // glyphs under the row's buttons (the
+                    // `keyframe_tools` row-label pattern).
+                    .truncate(),
                 );
             // Wave 4 (audit D2): a non-healthy clip —
             // missing, unsupported or unreadable file —
@@ -1104,10 +1168,16 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
         let target_probe = effective_target(selected, clips.len()).map(|i| &probes[i]);
         if let Some(readout) = clip_readout(core, selected, target_probe) {
             panel = panel.child(
+                // Wave 9: the readout embeds the target's
+                // (unbounded) file name plus up to four
+                // segments — it wraps inside the card
+                // instead of spilling (kit prose pattern).
                 text(readout)
                     .key("audio-readout")
                     .font(type_::LABEL)
-                    .color(t.text_secondary),
+                    .color(t.text_secondary)
+                    .wrap()
+                    .w_full(),
             );
         }
     }
@@ -1122,11 +1192,21 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
     // silence, Split silences, Pitch, Compress) the same
     // way, through §37's indexed variants; no toolbar op
     // is last-clip-only. Mixdown is whole-project.
-    panel = panel.child(design::section_label("Operations", t));
+    // Wave 9: the umbrella header states the scope the
+    // target line then specifies — the three groups
+    // under it (Effects / Mute & duplicate / Position &
+    // gain) all act on this one clip, in contrast to
+    // the Whole project row below.
+    panel = panel.child(design::section_label("Operations — target clip", t));
     panel = panel.child(
+        // Wave 9: the line embeds the target's
+        // (unbounded) file name — kit prose treatment,
+        // wraps inside the card instead of spilling.
         text(target_line(clips, selected))
             .font(type_::LABEL)
-            .color(t.text_secondary),
+            .color(t.text_secondary)
+            .wrap()
+            .w_full(),
     );
     // Phase M: the Mute toggle's face follows the
     // effective target's mute state — the press performs
@@ -1175,12 +1255,23 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
     // Wave 4 (audit D3): the effects' fixed parameters,
     // stated before the fact — the values were previously
     // learnable only from the after-the-fact status line.
+    // Wave 9: the caption is 144 chars — as a plain
+    // unwrapped line it measured ≈880 pt against the
+    // 316 pt card and spilled on every render; it now
+    // takes the kit prose treatment and wraps. The
+    // wording is unchanged: it still only NAMES the
+    // fixed settings the ops apply.
     panel = panel.child(
         text(effects_settings_line())
             .font(type_::LABEL)
-            .color(t.text_secondary),
+            .color(t.text_secondary)
+            .wrap()
+            .w_full(),
     );
-    panel = panel.child(design::section_label("Clip", t));
+    // Wave 9: the group is named for its contents (the
+    // "Position & gain" compound style) — bare "Clip"
+    // said nothing the other two group headers don't.
+    panel = panel.child(design::section_label("Mute & duplicate", t));
     panel = panel.child(
         row()
             .key("audio-ops-clip")
@@ -1239,12 +1330,18 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
     // measure). It renders live whenever it exists: the
     // op itself reports when nothing needed changing.
     if !clips.is_empty() {
+        // Wave 9: "Whole project" heads its row from
+        // above, like every other group header in the
+        // panel — it rode INSIDE the row before, which
+        // broke the parallel structure (and spent
+        // ≈91 pt of the row's 316 pt budget on the
+        // label; the two buttons alone measure ≈205 pt).
+        panel = panel.child(design::section_label("Whole project", t));
         panel = panel.child(
             row()
                 .key("audio-project-ops")
                 .gap(6.0)
                 .center_y()
-                .child(design::section_label("Whole project", t))
                 .child(icon_btn(
                     "audio-normalise",
                     "volume-high",
@@ -1807,6 +1904,55 @@ mod tests {
         // never resurrects it).
         let _ = std::fs::remove_file(&path);
         assert_eq!(probe_clip(&cache, &c).health, ClipHealth::Missing);
+    }
+
+    #[test]
+    fn panel_prose_lines_cannot_fit_one_card_line() {
+        // Wave 9 premise, pinned: the panel's content
+        // budget is 316 pt (the 340 pt card minus
+        // `panel_col`'s 2 × 12 pt padding) and LABEL
+        // advances measure ≈6 pt/char off headless tree
+        // dumps, so a one-line LABEL string busts the
+        // card past ≈52 chars. The effects caption is a
+        // FIXED string far past that — as an unwrapped
+        // line it spilled on every render — and the
+        // target line / readout embed unbounded user
+        // file names on top of fixed segments already
+        // near the limit. That is why all three (plus
+        // the summary) carry `.wrap().w_full()` in the
+        // view. If a future edit shortens these strings
+        // under the limit, this test fails and the wrap
+        // question must be re-asked on fresh numbers.
+        let caption = effects_settings_line();
+        assert!(
+            caption.chars().count() > 120,
+            "caption is {} chars",
+            caption.chars().count()
+        );
+        let clips = vec![clip(
+            "audio/my-very-long-background-music-track.wav",
+            0,
+            1.0,
+        )];
+        let line = target_line(&clips, None);
+        assert!(
+            line.chars().count() > 52,
+            "target line is {} chars: {line}",
+            line.chars().count()
+        );
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip(
+            "audio/my-very-long-background-music-track.wav",
+            29,
+            0.5,
+        ));
+        let readout = clip_readout(&core, None, None).expect("one clip reads out");
+        assert!(
+            readout.chars().count() > 52,
+            "readout is {} chars: {readout}",
+            readout.chars().count()
+        );
     }
 
     #[test]

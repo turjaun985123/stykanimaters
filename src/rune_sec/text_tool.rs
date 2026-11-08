@@ -229,7 +229,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{InstanceKey, SegmentMedia, TextInstance};
 use stykanimate_rs::text_edit::{TextEdit as SegTextEdit, DEFAULT_TEXT_SIZE};
 
-use crate::chrome_view::btn;
+use crate::chrome_view::{btn, btn_muted_live};
 use crate::rune_sec::design;
 use crate::State;
 
@@ -990,6 +990,30 @@ fn step_from_button(s: &mut State, dir: i32) {
     }
 }
 
+/// One loaded-instance edit button, gated on an instance
+/// actually being loaded (Wave 9 C10): fully live [`btn`]
+/// while one is; with nothing loaded, the chrome family's
+/// muted-live member — the inert visual (card fill,
+/// secondary ink, no hover/press feedback) with the
+/// handler KEPT, so a press still earns the pinned
+/// "Load a text first." refusal from [`loaded_index`]
+/// instead of flashing like a live control that then
+/// does nothing (the Phase-1 audit's D-8 class; the
+/// `btn_muted_live` contract is exactly this case).
+fn edit_btn(
+    key: &str,
+    label: &str,
+    live: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    if live {
+        btn(key, label, false, t, f)
+    } else {
+        btn_muted_live(key, label, false, t, f)
+    }
+}
+
 /// The Text section: field + Add text, the size stepper,
 /// the selected figure's existing text segments, the
 /// project's free-standing text instances, and the
@@ -1005,10 +1029,15 @@ fn step_from_button(s: &mut State, dir: i32) {
 /// chip (`text-color-custom`) in the same metrics
 /// carrying the instance's own colour even when no
 /// swatch matches it. The readout keeps its key and
-/// stays non-pressable, as before. Built either way,
-/// like the nudge pad: with nothing loaded no swatch
-/// is marked and no readout shows, and a press
-/// refuses through [`loaded_index`].
+/// stays non-pressable, as before. Gated like the
+/// rest of the edit area (Wave 9 C10): while an
+/// instance is loaded these are the kit swatches;
+/// with nothing loaded the palette renders as plain
+/// unpressable squares in the same metrics (the
+/// readout chip's own construction) — colour data on
+/// display, not a control that flashes live and then
+/// refuses through [`loaded_index`]. No readout chip
+/// shows in that state either, as before.
 fn text_color_row(s: &State, t: &Theme) -> El {
     let loaded_color = s
         .text_tool
@@ -1017,13 +1046,29 @@ fn text_color_row(s: &State, t: &Theme) -> El {
         .map(|inst| inst.color & 0xFF_FFFF);
     let mut row_el = row().key("text-color-row").w_full().gap(4.0).center_y();
     for (ci, &rgb) in TEXT_PALETTE.iter().enumerate() {
-        row_el = row_el.child(design::swatch(
-            &format!("text-color-{ci}"),
-            crate::stage_view::hex_color(rgb).unwrap_or(t.bg),
-            loaded_color == Some(rgb),
-            t,
-            move |s: &mut State| set_loaded_color(s, rgb),
-        ));
+        let color = crate::stage_view::hex_color(rgb).unwrap_or(t.bg);
+        // The format! stays inline at both key sites so the
+        // key census's dynamic-pattern scan sees the
+        // `text-color-{i}` family in both branches (Wave 9
+        // integration: a `let key = format!(...)` binding
+        // made the family invisible to the census even
+        // though the keys mount identically).
+        row_el = row_el.child(if loaded_color.is_some() {
+            design::swatch(
+                &format!("text-color-{ci}"),
+                color,
+                loaded_color == Some(rgb),
+                t,
+                move |s: &mut State| set_loaded_color(s, rgb),
+            )
+        } else {
+            el()
+                .key(format!("text-color-{ci}"))
+                .size(24.0, 24.0)
+                .radius(design::CONTROL_RADIUS)
+                .fill(color)
+                .border(1.0, t.card_border)
+        });
     }
     if let Some(current) = loaded_color {
         row_el = row_el.child(
@@ -1066,6 +1111,17 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                     .child(btn(&format!("text-load-{i}"), &r.preview, false, t, move |s: &mut State| {
                         load_instance(s, i)
                     }))
+                    // The row's one flexible member
+                    // (Wave 9 C10): at the preview's
+                    // 14-character cap the fixed members
+                    // (load ≈110 pt at the measured
+                    // 6 pt/glyph, Delete 56, Duplicate
+                    // 74, row padding + gaps 40) already
+                    // take ≈280 of the 316 pt content
+                    // width, so the count/size label —
+                    // up to "999 keys · 160" — truncates
+                    // instead of pushing Duplicate out
+                    // of the card.
                     .child(
                         text(format!(
                             "{} key{} · {:.0}",
@@ -1074,7 +1130,8 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                             r.size
                         ))
                         .font(type_::LABEL)
-                        .color(t.text_secondary),
+                        .color(t.text_secondary)
+                        .truncate(),
                     )
                     .child(btn(&format!("text-del-{i}"), "Delete", false, t, move |s: &mut State| {
                         delete_instance_row(s, i)
@@ -1092,12 +1149,15 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
     // L §23) and size steppers acting
     // on `TextToolState::loaded` —
     // the instance the last row click loaded. Rendered
-    // either way; with nothing loaded the handlers refuse
-    // with a status line, and with a stale index the core
-    // ops refuse the same way. The Update button and the
-    // z-order row (Phase M §29) are the conditional
-    // pieces: they appear only while `loaded` names an
-    // instance that still exists.
+    // either way; with nothing loaded the buttons render
+    // muted-live through `edit_btn` (their handlers still
+    // refuse with a status line) and the colour row shows
+    // unpressable squares, so nothing in the area looks
+    // live with nothing to act on (Wave 9 C10); with a
+    // stale index the core ops refuse the same way. The
+    // Update button and the z-order row (Phase M §29)
+    // are the conditional pieces: they appear only while
+    // `loaded` names an instance that still exists.
     let loaded_row = instances
         .iter()
         .find(|r| Some(r.index) == s.text_tool.loaded);
@@ -1109,6 +1169,7 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
         Some(r) => format!("{:.0}", r.size),
         None => "—".to_string(),
     };
+    let edit_live = loaded_row.is_some();
     let mut instance_edit = col()
         .key("text-instance-edit")
         .w_full()
@@ -1147,16 +1208,16 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(btn("text-nudge-l", "←", false, t, |s| {
+                .child(edit_btn("text-nudge-l", "←", edit_live, t, |s| {
                     nudge_loaded(s, -NUDGE_STEP, 0.0)
                 }))
-                .child(btn("text-nudge-u", "↑", false, t, |s| {
+                .child(edit_btn("text-nudge-u", "↑", edit_live, t, |s| {
                     nudge_loaded(s, 0.0, -NUDGE_STEP)
                 }))
-                .child(btn("text-nudge-d", "↓", false, t, |s| {
+                .child(edit_btn("text-nudge-d", "↓", edit_live, t, |s| {
                     nudge_loaded(s, 0.0, NUDGE_STEP)
                 }))
-                .child(btn("text-nudge-r", "→", false, t, |s| {
+                .child(edit_btn("text-nudge-r", "→", edit_live, t, |s| {
                     nudge_loaded(s, NUDGE_STEP, 0.0)
                 })),
         )
@@ -1166,10 +1227,10 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(btn("text-rot-l", "Rotate −15°", false, t, |s| {
+                .child(edit_btn("text-rot-l", "Rotate −15°", edit_live, t, |s| {
                     rotate_loaded(s, -ROTATE_STEP_RAD)
                 }))
-                .child(btn("text-rot-r", "Rotate +15°", false, t, |s| {
+                .child(edit_btn("text-rot-r", "Rotate +15°", edit_live, t, |s| {
                     rotate_loaded(s, ROTATE_STEP_RAD)
                 })),
         )
@@ -1180,11 +1241,11 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(btn("text-isize-dn", "Size −", false, t, |s| {
+                .child(edit_btn("text-isize-dn", "Size −", edit_live, t, |s| {
                     resize_loaded(s, -1)
                 }))
                 .child(design::stepper_value(&loaded_size, t))
-                .child(btn("text-isize-up", "Size +", false, t, |s| {
+                .child(edit_btn("text-isize-up", "Size +", edit_live, t, |s| {
                     resize_loaded(s, 1)
                 })),
         );
@@ -2051,7 +2112,14 @@ mod tests {
         let mut s = crate::init();
         let _ = text_tool(&s, &t);
         push_instance(&mut s.core, "Loaded", 24.0, 1);
+        // Instances exist but none is loaded: the edit
+        // area builds in its muted state (Wave 9 C10).
+        let _ = text_tool(&s, &t);
         s.text_tool.loaded = Some(0);
+        let _ = text_tool(&s, &t);
+        // A stale loaded index gates on the instances
+        // list, not the raw index, and still builds.
+        s.text_tool.loaded = Some(9);
         let _ = text_tool(&s, &t);
     }
 

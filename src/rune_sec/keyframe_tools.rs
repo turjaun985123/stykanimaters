@@ -251,6 +251,48 @@
 //! keys, labels, guards and handlers unchanged; the
 //! inert forms stay `icon_btn_inert`, the handler-free
 //! muted state, as before.
+//!
+//! UI mission Wave 9 (agent D9) re-verified the wave 4
+//! chip convergence against the easing panel and
+//! audited this section's labels against the panels it
+//! shares the Graph workspace with (`GRAPH_SECTIONS`
+//! in workspaces.rs: Graph, Easing, KeyframeTools —
+//! all three mount in the same right column at once):
+//!
+//! * Chip parity HOLDS. This file's one
+//!   [`design::tangent_preset_chip`] call and the
+//!   easing panel's one call pass the same preset
+//!   order (Smooth, EaseIn, EaseOut, EaseInOut,
+//!   Linear), byte-identical labels, `active: false`
+//!   and the same `apply_graph_ease_preset` handler.
+//!   Sizes and help text cannot differ between the
+//!   two: the kit fixes the preview box (52×30,
+//!   `TANGENT_PREVIEW_W`/`H`, 24 samples) and derives
+//!   `.help()` from the label internally, so neither
+//!   call site has a size or help parameter to drift.
+//!   Only the element keys differ, by design:
+//!   `key-preset-*` here, `ease-graph-*` there.
+//! * "Auto tangents" is one dialect already: the
+//!   graph panel's button for the same op
+//!   (`smooth_graph_tangents`) carries the identical
+//!   label, and the easing panel has no such control
+//!   at all — nothing to converge.
+//! * "Key angle here" (this section) vs the graph
+//!   panel's "Key angle" — the same op
+//!   (`key_graph_angle`), two dialects, co-visible in
+//!   the Graph workspace. The split is deliberate and
+//!   stays: every playhead-relative action in THIS
+//!   section carries "here" ("Delete key here",
+//!   "Key all here"; the section is framed by its
+//!   at-frame indicator), so dropping it here would
+//!   break the section's own consistency, and
+//!   converging the graph panel's side belongs to
+//!   that panel's owner. The easing panel's empty
+//!   state ("…— Key angle starts one.") uses the
+//!   graph panel's short name because the graph
+//!   panel is the channel-owning surface directly
+//!   above it in the same column — see the note at
+//!   that call site.
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, El};

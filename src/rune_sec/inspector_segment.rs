@@ -170,6 +170,16 @@
 //! `design::swatch`, and the "Colour" heading is a kit
 //! `section_label`. Keys, handlers and status strings
 //! are unchanged.
+//!
+//! UI mission Wave 9 convergence: the header title now
+//! follows the figure inspector's exact construction —
+//! `panel_title`'s title is "Segment {node}" and the
+//! node name rides in the meta slot (`Some(&st.name)`),
+//! where this panel used to bake both into one title
+//! string with a " · " separator. Same information,
+//! same order, same glyph; the name now renders in the
+//! kit's LABEL/`text_secondary` meta style like the
+//! figure panel's name does.
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, Color, El};
@@ -619,6 +629,28 @@ fn readout_row(label: &str, value: String, t: &Theme) -> El {
                 .color(t.text_secondary)
                 .grow(1.0),
         )
+        .child(
+            text(value)
+                .font(type_::MONO_CAPTION.mono())
+                .color(t.text),
+        )
+}
+
+/// A readout row whose value is prose (the Shape name),
+/// not a count: the P11 §4D prose exception keeps LABEL,
+/// matching inspector_figure's `prose_readout_row`
+/// (Wave 9 integration parity with B2's figure fix).
+fn prose_readout_row(label: &str, value: String, t: &Theme) -> El {
+    row()
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(
+            text(label)
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
         .child(text(value).font(type_::LABEL).color(t.text))
 }
 
@@ -709,8 +741,8 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 .center_y()
                 .child(design::panel_title(
                     Some("shapes"),
-                    &format!("Segment {} · {}", st.node, st.name),
-                    None,
+                    &format!("Segment {}", st.node),
+                    Some(&st.name),
                     t,
                 )),
         )
@@ -763,7 +795,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
         .child(readout_row("Thickness", format!("{:.0}", st.thickness), t))
         .child(readout_row("Angle", format_deg(st.angle_deg), t))
         .child(readout_row("Bend", format_deg(st.bend_deg), t))
-        .child(readout_row("Shape", st.shape_label.clone(), t));
+        .child(prose_readout_row("Shape", st.shape_label.clone(), t));
     // The origin has no segment to lengthen (the op no-ops);
     // the GPUI inspector omitted the row there too.
     if !st.is_root {

@@ -209,6 +209,28 @@
 //! only new row data is the pure derivations on
 //! [`LayerRow`] (`hidden`, `can_jump_top`,
 //! `can_jump_bottom`).
+//!
+//! UI mission, Wave 9 (the gap the Wave 6 empty-state
+//! sweep flagged and skipped): with zero figures the
+//! panel now renders the kit's `design::empty_state`
+//! (`layer-group` glyph, [`EMPTY_MESSAGE`]) between the
+//! rows area and the opacity block, on the predicate
+//! `s.core.project.figures.is_empty()`. Before, the
+//! panel was header + note + footer with a silent gap
+//! where the layers belong. The message points at the
+//! panel's real next action: this panel has no
+//! add-figure control of its own, and Layers mounts
+//! only in the Animate workspace (workspaces.rs), where
+//! the Figures section — the "+ Figure" button and the
+//! figure-add card — renders directly above it in the
+//! same column, so "add one with + Figure above" is
+//! literally where the control sits. The note and the
+//! visibility footer stay in the empty state too: the
+//! note explains what a layer is, and the footer
+//! presses remain the harmless, truthfully-reporting
+//! no-ops they already were with no figures ("All
+//! figures shown (0 changed)."; solo is a guarded
+//! no-op — both pinned by tests below).
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Drag, El, Phase, Tx};
@@ -225,6 +247,13 @@ pub const OPACITY_STEP: f32 = 0.1;
 /// The panel's honest note about ordering in this engine.
 pub const ORDER_NOTE: &str =
     "Order = figure order: top row is drawn in front, bottom row at the back.";
+
+/// The zero-figures empty state's message (Wave 9 — see
+/// the module docs). It names the real next action and
+/// where it lives: the Figures area's "+ Figure" button,
+/// which renders above this panel in the only workspace
+/// that mounts it.
+pub const EMPTY_MESSAGE: &str = "No figures yet — add one with + Figure above.";
 
 /// One display row of the panel, in panel order (front first).
 #[derive(Clone, Debug, PartialEq)]
@@ -723,9 +752,10 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
 /// figure's opacity slider with its % readout, the
 /// ordering note, and the visibility footer row
 /// (`layers-vis-row`: Show all + Solo selected). With no
-/// figures the panel is just header + note + footer (no
-/// slider — there is no selected figure to fade; the
-/// footer presses are harmless no-ops then).
+/// figures the panel is header + the kit empty state
+/// (Wave 9; no slider — there is no selected figure to
+/// fade) + note + footer; the footer presses are
+/// harmless no-ops then.
 pub fn panel(s: &State, t: &Theme) -> El {
     // The Solo selected button renders active while the
     // solo target is the selected figure (computed up
@@ -751,6 +781,14 @@ pub fn panel(s: &State, t: &Theme) -> El {
         .child(design::divider(t));
     for r in rows(&s.core) {
         body = body.child(layer_row(&r, t));
+    }
+    // Zero figures (Wave 9): the kit empty state fills
+    // the rows area — the one bare gap the Wave 6 sweep
+    // left. The opacity block below self-guards on a
+    // selected figure existing, so nothing else in the
+    // empty panel changes shape.
+    if s.core.project.figures.is_empty() {
+        body = body.child(design::empty_state("layer-group", EMPTY_MESSAGE, t));
     }
     if let Some(fig) = s.core.project.figures.get(s.core.selected_figure) {
         body = body
@@ -1245,5 +1283,55 @@ mod tests {
         let single = rows(&EditorCore::new());
         assert_eq!(single.len(), 1);
         assert!(!single[0].can_jump_top && !single[0].can_jump_bottom);
+    }
+
+    // ---- UI mission Wave 9: the zero-figures empty state ----
+
+    #[test]
+    fn empty_message_names_the_real_next_action() {
+        // The message points at the Figures area's
+        // "+ Figure" button — the control that actually
+        // creates a figure, mounted above this panel in
+        // the Animate workspace (the only workspace whose
+        // section set includes Layers). It must not name
+        // a control this panel does not have.
+        assert!(EMPTY_MESSAGE.contains("+ Figure"));
+        assert!(EMPTY_MESSAGE.starts_with("No figures yet"));
+        // The glyph the empty state renders is in the
+        // curated set (design::empty_state silently drops
+        // an unknown icon, which would hide the mistake).
+        assert!(crate::rune_sec::icons::has_icon("layer-group"));
+    }
+
+    #[test]
+    fn panel_builds_with_no_figures() {
+        // The Wave 9 state: the predicate the builder
+        // branches on is the project's figure list
+        // itself, and the full panel — header, empty
+        // state, note, visibility footer — builds on an
+        // empty project without panicking (the footer's
+        // handlers are the guarded no-ops pinned above).
+        let mut s = crate::init();
+        s.core.project.figures.clear();
+        assert!(s.core.project.figures.is_empty());
+        assert!(rows(&s.core).is_empty());
+        let t = tok::theme(true);
+        let _ = panel(&s, &t);
+        let t = tok::theme(false);
+        let _ = panel(&s, &t);
+    }
+
+    #[test]
+    fn panel_builds_with_figures_present() {
+        // The non-empty path is untouched by the Wave 9
+        // branch: the demo project (one figure) builds
+        // the panel in both themes, rows and slider
+        // included.
+        let s = crate::init();
+        assert!(!s.core.project.figures.is_empty());
+        let t = tok::theme(true);
+        let _ = panel(&s, &t);
+        let t = tok::theme(false);
+        let _ = panel(&s, &t);
     }
 }

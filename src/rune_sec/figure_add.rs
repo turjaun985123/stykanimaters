@@ -6,17 +6,23 @@
 //! groups, every button wired to a real `EditorCore` op:
 //!
 //! - **Presets** — Humanoid (`EditorCore::add_figure`,
-//!   editor.rs:366 — the project's default figure,
-//!   `FigureDef::humanoid()` via model.rs:971), Quadruped
-//!   (`EditorCore::add_quadruped`, editor.rs:646) and Mini
-//!   (`EditorCore::add_simple`, editor.rs:658 —
-//!   `FigureDef::simple()`).
+//!   editor.rs:401 — the project's default figure,
+//!   `FigureDef::humanoid()` via model.rs:183/1034, 11 nodes,
+//!   created as `Styk {n}`), Quadruped
+//!   (`EditorCore::add_quadruped`, editor.rs:689 —
+//!   `FigureDef::quadruped()`, model.rs:224, 13 nodes,
+//!   created as `Quad {n}`) and Mini
+//!   (`EditorCore::add_simple`, editor.rs:701 —
+//!   `FigureDef::simple()`, model.rs:265, 7 nodes with merged
+//!   two-segment limbs, created as `Mini {n}`). The button
+//!   labels name exactly the constructor each one runs
+//!   (Wave 9 E8 re-verified against the sources, 2026-11-08).
 //! - **Library** — one button per entry of the core's figure
 //!   library (`EditorCore::library`, editor.rs:64: the
 //!   `./library/*.json` definitions plus three built-ins, so
 //!   it is never empty in practice). Pressing one points
 //!   `library_index` (editor.rs:65) at that entry and calls
-//!   `EditorCore::insert_library_figure` (editor.rs:2100),
+//!   `EditorCore::insert_library_figure` (editor.rs:2371),
 //!   the same op the GPUI Library panel's Insert button used.
 //!
 //! Picking any entry closes the panel again, matching the
@@ -46,8 +52,22 @@
 //! pub figure_add: figure_add::FigureAddState,
 //! // in `init()`:
 //! figure_add: figure_add::FigureAddState::default(),
-//! // in `view()`, after the app bar:
-//! .child(rune_sec::figure_add::figure_add_panel(s, &t))
+//! // in `view()`, in the LEFT column, inside the same
+//! // `if vis(Sec::Figures)` block that mounts the figures
+//! // panel (main.rs) — figure-add is the Figures area's own
+//! // chrome, so it renders in exactly the workspaces whose
+//! // table lists `Section::Figures` (workspaces.rs: the
+//! // ANIMATE/DRAW/GRAPH/EFFECTS/AUDIO/BUILD3D section lists;
+//! // only HOME_SECTIONS and EXPORT_SECTIONS omit it) and
+//! // never orphans into Home or Export (UI mission Wave 3, audit
+//! // S05 D1; this file carries no gating predicate of its
+//! // own — the gate is the shared mount in main.rs, and the
+//! // headless tree dumps show `figure-add` and
+//! // `figures-panel` co-present in every scene, 18/18):
+//! if vis(Sec::Figures) {
+//!     left = left.child(rune_sec::figures_panel::figures_panel(s, &t));
+//!     left = left.child(rune_sec::figure_add::figure_add_panel(s, &t));
+//! }
 //! ```
 
 use rune::tok::Theme;

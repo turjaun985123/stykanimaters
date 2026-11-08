@@ -135,6 +135,19 @@
 //! `design::empty_state` now wraps its message at the
 //! card width, so this panel uses the kit builder
 //! unchanged and the message stays inside the card.
+//!
+//! UI mission Wave 9 (deep polish): the populated clip
+//! ROW had the same disease the empty state had, one
+//! level down — six action buttons plus three text runs
+//! on one line totalled ≈424–504 pt of fixed width
+//! against the row's 300 pt, and no headless scene ever
+//! populates `Project::clips`, so the overflow scan
+//! never contained a clip row to catch it. The row is
+//! now a three-line stack in the same `list_row` shell
+//! (see `clip_row`'s docs for the full accounting) and
+//! carries an "Editing" marker for the clip an edit
+//! session is on (`is_editing`). Keys and handlers are
+//! unchanged.
 
 use std::cell::RefCell;
 
@@ -589,6 +602,17 @@ pub fn session_active(core: &EditorCore) -> bool {
     core.clip_edit.is_some()
 }
 
+/// Whether the clip-edit session is editing clip `index`
+/// (UI mission Wave 9) — the clip row's "Editing" marker
+/// predicate. The session section below the list names the
+/// edited clip, but the row itself carried no sign of it:
+/// the selection can move mid-session (row presses stay
+/// live), so the edited clip and the selected clip can be
+/// different rows with nothing to tell them apart.
+pub fn is_editing(core: &EditorCore, index: usize) -> bool {
+    core.clip_edit.map(|session| session.clip) == Some(index)
+}
+
 /// The session section's label while a session is active:
 /// which clip is being edited and where the session sits in
 /// it ("Editing <name> · frame <f> of <n>"). `None` when no
@@ -670,99 +694,152 @@ pub fn usage_text(figures: &[FigureInstance], clip_idx: usize) -> String {
 /// One clip row: name, span + usage, current loop mode.
 /// Pressing the row selects the clip (panel-local state) for
 /// the loop-mode segmented control below the list.
+///
+/// UI mission Wave 9 (width proof): the row used to lay ALL
+/// of that plus six action buttons on ONE line inside
+/// `list_row`. The fixed children alone — four labelled
+/// `icon_btn`s (≈58–87 pt each: 2×10 padding + 13 glyph +
+/// 6 gap + label), two 26 pt icon-only buttons, the loop
+/// label and the row's eight 8 pt gaps — total ≈424 pt at
+/// realistic LABEL advances, ≈504 pt at the status strip's
+/// conservative 8 pt/char accounting, against the 300 pt a
+/// right-column card leaves inside the row's own padding
+/// (316 content − 2×8). A populated row overflowed its
+/// card under EVERY accounting, name and span text still
+/// uncounted; the mission's overflow scan never saw it
+/// because no headless scene populates `Project::clips`
+/// (scenes seed `fx_clips` only), so no tree ever contained
+/// a clip row. The row is now a three-line stack inside the
+/// same `list_row` shell: name (truncating, grown) + the
+/// session's "Editing" marker + loop mode on line 1, the
+/// span · usage line wrapped on line 2 (the kit's prose
+/// treatment), and the six actions as `icon_only_btn`s on
+/// line 3 — 6×26 + 5×8 = 196 pt, inside the budget under
+/// every accounting. Keys and handlers are byte-identical;
+/// the four buttons that lost their visible words carry
+/// them as help labels instead (the Wave 6 icon-only
+/// convention: the label names the action).
 fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
     let core = &s.core;
     let clip = &core.project.clips[index];
+    let mut name_line = row()
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(
+            text(clip.name.clone())
+                .font(type_::LABEL)
+                .color(t.text)
+                .grow(1.0)
+                .truncate(),
+        );
+    if is_editing(core, index) {
+        name_line = name_line.child(
+            text("Editing")
+                .font(type_::LABEL)
+                .color(crate::rune_sec::app_theme::accent(t)),
+        );
+    }
+    name_line = name_line.child(
+        text(loop_label(clip.loop_mode))
+            .font(type_::LABEL)
+            .color(t.text_secondary),
+    );
     design::list_row(&format!("clip-row-{}", index + 1), selected, t)
         .w_full()
         .on_press(move |_s: &mut State| {
             update_panel_state(|p| p.select(index));
         })
         .child(
-            text(clip.name.clone())
-                .font(type_::LABEL)
-                .color(t.text)
-                .grow(1.0),
+            col()
+                .grow(1.0)
+                .gap(4.0)
+                .child(name_line)
+                .child(
+                    text(format!(
+                        "{} · {}",
+                        span_text(clip),
+                        usage_text(&core.project.figures, index)
+                    ))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+                    .wrap()
+                    .w_full(),
+                )
+                .child(
+                    row()
+                        .gap(8.0)
+                        .child(icon_only_btn(
+                            &format!("clip-dup-{index}"),
+                            "copy",
+                            "Duplicate",
+                            26.0,
+                            false,
+                            t,
+                            move |s: &mut State| {
+                                if let Some(new_index) = duplicate_clip(&mut s.core, index) {
+                                    update_panel_state(|p| p.select(new_index));
+                                }
+                            },
+                        ))
+                        .child(icon_only_btn(
+                            &format!("clip-rename-{index}"),
+                            "pencil",
+                            "Rename",
+                            26.0,
+                            false,
+                            t,
+                            move |s: &mut State| {
+                                update_panel_state(|p| p.select(index));
+                                begin_rename(s, index);
+                            },
+                        ))
+                        .child(icon_only_btn(
+                            &format!("clip-insert-{index}"),
+                            "plus",
+                            "Insert",
+                            26.0,
+                            false,
+                            t,
+                            move |s: &mut State| {
+                                insert_clip_figure_at(&mut s.core, index);
+                            },
+                        ))
+                        .child(icon_only_btn(
+                            &format!("clip-up-{index}"),
+                            "chevron-up",
+                            "Move up",
+                            26.0,
+                            false,
+                            t,
+                            move |s: &mut State| {
+                                move_clip_at(s, index, true);
+                            },
+                        ))
+                        .child(icon_only_btn(
+                            &format!("clip-dn-{index}"),
+                            "chevron-down",
+                            "Move down",
+                            26.0,
+                            false,
+                            t,
+                            move |s: &mut State| {
+                                move_clip_at(s, index, false);
+                            },
+                        ))
+                        .child(icon_only_btn(
+                            &format!("clip-del-{index}"),
+                            "trash-can",
+                            "Delete",
+                            26.0,
+                            false,
+                            t,
+                            move |s: &mut State| {
+                                delete_clip_at(s, index);
+                            },
+                        )),
+                ),
         )
-        .child(
-            text(format!(
-                "{} · {}",
-                span_text(clip),
-                usage_text(&core.project.figures, index)
-            ))
-            .font(type_::LABEL)
-            .color(t.text_secondary),
-        )
-        .child(
-            text(loop_label(clip.loop_mode))
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        )
-        .child(icon_btn(
-            &format!("clip-dup-{index}"),
-            "copy",
-            "Dup",
-            false,
-            t,
-            move |s: &mut State| {
-                if let Some(new_index) = duplicate_clip(&mut s.core, index) {
-                    update_panel_state(|p| p.select(new_index));
-                }
-            },
-        ))
-        .child(icon_btn(
-            &format!("clip-rename-{index}"),
-            "pencil",
-            "Rename",
-            false,
-            t,
-            move |s: &mut State| {
-                update_panel_state(|p| p.select(index));
-                begin_rename(s, index);
-            },
-        ))
-        .child(icon_btn(
-            &format!("clip-insert-{index}"),
-            "plus",
-            "Insert",
-            false,
-            t,
-            move |s: &mut State| {
-                insert_clip_figure_at(&mut s.core, index);
-            },
-        ))
-        .child(icon_only_btn(
-            &format!("clip-up-{index}"),
-            "chevron-up",
-            "Move up",
-            26.0,
-            false,
-            t,
-            move |s: &mut State| {
-                move_clip_at(s, index, true);
-            },
-        ))
-        .child(icon_only_btn(
-            &format!("clip-dn-{index}"),
-            "chevron-down",
-            "Move down",
-            26.0,
-            false,
-            t,
-            move |s: &mut State| {
-                move_clip_at(s, index, false);
-            },
-        ))
-        .child(icon_btn(
-            &format!("clip-del-{index}"),
-            "trash-can",
-            "Del",
-            false,
-            t,
-            move |s: &mut State| {
-                delete_clip_at(s, index);
-            },
-        ))
 }
 
 /// The rename editor row, mounted under the clip list
@@ -1207,6 +1284,37 @@ playback_speed: 1.0,
         assert_eq!(core.clip_edit.map(|s| s.frame), Some(0));
         core.exit_clip();
         update_panel_state(|p| *p = ClipsPanelState::default());
+    }
+
+    #[test]
+    fn is_editing_tracks_the_session_clip() {
+        let mut core = EditorCore::new();
+        // No clips, no session: nothing is being edited.
+        assert!(!is_editing(&core, 0));
+        core.make_clip_from_figure();
+        // A clip exists but no session is open yet.
+        assert!(!is_editing(&core, 0));
+        assert!(core.enter_clip(0));
+        assert!(is_editing(&core, 0));
+        assert!(!is_editing(&core, 1));
+        core.exit_clip();
+        assert!(!is_editing(&core, 0));
+    }
+
+    #[test]
+    fn clip_row_action_line_fits_the_column_budget() {
+        // Wave 9 width proof, pinned (see `clip_row`'s
+        // docs): the action line is six 26 pt icon-only
+        // buttons and five 8 pt gaps = 196 pt, inside the
+        // 300 pt a right-column card leaves within a list
+        // row's padding (316 content − 2×8 row px). The
+        // pre-Wave-9 single-line row's FIXED children
+        // alone (four labelled icon_btns at 2×10 padding
+        // + 13 glyph + 6 gap + label, two 26 pt squares,
+        // the loop label, eight 8 pt gaps) exceeded that
+        // 300 pt under every text accounting.
+        assert_eq!(6.0 * 26.0 + 5.0 * 8.0, 196.0);
+        assert!(196.0 <= 316.0 - 16.0);
     }
 
     #[test]

@@ -474,7 +474,13 @@ pub fn apply_pose_to_all_frames(core: &mut EditorCore, clip: &Option<Pose>) {
         }
     }
     if writable.is_empty() {
-        core.status = format!("Pose applied to 0 frames ({skipped} skipped).");
+        // A zero-frame apply changed nothing, so it must
+        // not wear the success sentence's shape: worded as
+        // a refusal, the status classifier reads it as a
+        // warning (the "No …" family), not a neutral
+        // confirmation (Wave 9 audit D7).
+        core.status =
+            format!("No frame could take the copied pose ({skipped} skipped).");
         return;
     }
     let clip = clip.clone();
@@ -801,7 +807,14 @@ pub fn save_current_pose(core: &mut EditorCore) {
     let name = figure_label(core, core.selected_figure);
     match save_pose_library(&pose, &name) {
         Ok(_) => {
-            core.status = format!("Pose saved to the library as '{name}'.");
+            // The classifier's Success family is the
+            // "Saved …" prefix — the shape the 3D pose
+            // library's save already uses ("Saved 3D pose
+            // '{name}'.", three_d_panel) and the shape a
+            // classifier test pins for a library save.
+            // "Pose saved …" missed the family and read as
+            // a neutral Info (Wave 9 audit D7).
+            core.status = format!("Saved pose '{name}'.");
         }
         Err(e) => {
             core.status = format!("Save pose failed: {e}");
@@ -1070,9 +1083,13 @@ fn rename_library_pose_in(
             // written and loads under the new name — but
             // the stale old file remains and will list as
             // a second entry until it is deleted. Say
-            // exactly that; the session is settled.
+            // exactly that; the session is settled. The
+            // wording uses "cannot" deliberately: it puts
+            // the partial failure in the status
+            // classifier's warning grammar instead of
+            // letting it read as a plain confirmation.
             core.status = format!(
-                "Pose '{old}' renamed to '{new_name}', but the old file could not be removed ({e})."
+                "Pose '{old}' renamed to '{new_name}', but the old file cannot be removed ({e})."
             );
             return true;
         }
@@ -1403,7 +1420,20 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                     row()
                         .gap(4.0)
                         .center_y()
-                        .child(text(name.as_str()).font(type_::LABEL).color(t.text))
+                        // The name is an unbounded user string
+                        // (Save takes the figure's name, Rename
+                        // accepts anything typed): without
+                        // Rune's one-line truncate mode it would
+                        // measure at full width and push the
+                        // Rename / Del buttons past the card
+                        // edge — the figures_panel row name
+                        // truncates for exactly this reason.
+                        .child(
+                            text(name.as_str())
+                                .font(type_::LABEL)
+                                .color(t.text)
+                                .truncate(),
+                        )
                         .child(el().grow(1.0))
                         .child(icon_btn(
                             &format!("pose-lib-rename-{i}"),
@@ -2146,6 +2176,31 @@ mod tests {
             assert_eq!(f.poses[0].angles, clip_pose.angles);
             assert_eq!(f.poses[0].root, clip_pose.root);
         }
+    }
+
+    #[test]
+    fn apply_to_all_frames_with_no_writable_frame_reports_a_refusal() {
+        // Wave 9 audit D7: with a pose copied but no
+        // frame able to take it, the batch changes
+        // nothing — no snapshot — and the status must
+        // read as the refusal it is (the classifier's
+        // "No …" warning family), not in the success
+        // sentence's shape.
+        let mut c = core();
+        let mut clip = None;
+        copy_pose(&mut c, &mut clip);
+        assert!(clip.is_some());
+        for f in &mut c.project.frames {
+            f.poses.clear();
+        }
+        let depth = c.undo_depth();
+        apply_pose_to_all_frames(&mut c, &clip);
+        assert_eq!(c.undo_depth(), depth, "no writable frame, no snapshot");
+        assert!(
+            c.status.starts_with("No frame could take the copied pose"),
+            "unexpected status: {}",
+            c.status
+        );
     }
 
     #[test]

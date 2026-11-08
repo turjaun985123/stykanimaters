@@ -947,7 +947,7 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
                 .key("library-search-row")
                 .gap(8.0)
                 .center_y()
-                .child(icon_el("magnifying-glass", 14.0, t.text_secondary))
+                .child(icon_el("magnifying-glass", 13.0, t.text_secondary))
                 .child(
                     text_input(&s.library_panel.search, type_::BODY.lh(26.0))
                         .key("library-search")

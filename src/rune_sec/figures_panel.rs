@@ -476,6 +476,23 @@ fn duplicate_row(core: &mut EditorCore) {
     }
 }
 
+/// Gap (points) between line 2's controls. The line's
+/// width budget beside the thumbnail is 210 pt (the
+/// panel's 276 pt content width, less the row's px 8 on
+/// both sides, the 44 pt thumbnail and the 6 pt row
+/// gap); the seven controls measure 186 pt (four 26 pt
+/// icon-only squares, the 41 pt `opac` chip and two
+/// 20.5 pt stepper chips — chip widths as laid out in
+/// the headless tree dump), and the grow spacer makes
+/// EIGHT children, so there are seven gaps to charge:
+/// at gap 4 the line totals 214 pt and its last stepper
+/// ends 4 pt past the row's content edge (the dump
+/// shows both lines ending at x 300 against a 296 pt
+/// content edge); at this gap the total is 207 pt and
+/// the spacer absorbs the remaining 3 pt. Pinned by
+/// `line_two_controls_fit_beside_the_thumbnail`.
+const LINE2_GAP: f32 = 3.0;
+
 /// One figure row: the live thumbnail canvas
 /// (`fig-thumb-{fi}`, Phase F) spans two control lines
 /// beside it. Line 1 is the colour dot + name (press
@@ -546,17 +563,40 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                         .center_y()
                         .child(
                             // Leading cluster: dot + name; pressing it selects
-                            // the figure (old `fig-sel`).
+                            // the figure (old `fig-sel`). It is the row's
+                            // main press target, so it carries the kit's
+                            // hover/press overlays like every other
+                            // pressable in the panel (the button/chip
+                            // builders all carry both) — without them a
+                            // press on the already-selected figure gave
+                            // no visual answer at all. `min_h` matches
+                            // the line's 26 pt control height: the hit
+                            // box was the 15 pt text line alone, in a
+                            // line whose other controls are 26 pt tall
+                            // (the line's height is unchanged — the
+                            // lock button already sets it). The name
+                            // truncates: it is an unbounded user string
+                            // in a fixed-sum line (its budget is the
+                            // ≈82 pt the S07-1 comment measures), and
+                            // without Rune's one-line truncate mode a
+                            // longer name's min-content width forces
+                            // the whole line past the card's edge
+                            // instead of eliding.
                             row()
                                 .key(format!("fig-sel-{fi}"))
                                 .gap(6.0)
                                 .center_y()
                                 .grow(1.0)
+                                .min_h(26.0)
+                                .radius(design::ROW_RADIUS)
+                                .hover(t.hover)
+                                .press(t.press)
                                 .on_press(move |s: &mut State| s.core.select_figure(fi))
                                 .child(el().size(10.0, 10.0).radius(5.0).fill(dot))
                                 .child(
                                     text(r.name.clone())
                                         .font(type_::LABEL)
+                                        .truncate()
                                         .color(if r.hidden { t.text_secondary } else { t.text }),
                                 ),
                         )
@@ -591,16 +631,18 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                     // last toggle it measured past the
                     // row's right edge (and the card's).
                     // The steppers joined it in S07-1.
-                    // This line's gap is 4, not 6: the
-                    // seven controls at gap 6 total
-                    // 222 pt against the 210 pt beside
-                    // the thumbnail, and the last
-                    // stepper would cross the card's
-                    // content edge; at gap 4 they
-                    // total 208.
+                    // The gap is LINE2_GAP (see its
+                    // budget arithmetic): an earlier
+                    // comment here claimed gap 4 totals
+                    // 208 pt, but that counted only the
+                    // six gaps between the controls and
+                    // under-measured the chips — with
+                    // the spacer's gap charged and the
+                    // chips at their laid-out widths the
+                    // line totals 214 pt, 4 over budget.
                     row()
                         .w_full()
-                        .gap(4.0)
+                        .gap(LINE2_GAP)
                         .center_y()
                         .child(el().grow(1.0))
                         .child(icon_only_btn(
@@ -1278,5 +1320,55 @@ mod tests {
         duplicate_row(&mut core);
         assert!(core.project.figures.is_empty());
         assert_eq!(core.status, status);
+    }
+
+    #[test]
+    fn line_two_controls_fit_beside_the_thumbnail() {
+        // The 210 pt beside the thumbnail: the panel's
+        // 276 pt content width, less the row's px 8 on
+        // both sides (260), the 44 pt thumbnail and the
+        // 6 pt row gap. The seven controls' widths are
+        // their laid-out widths in the headless tree
+        // dump (tree-default): four icon-only squares at
+        // the 26 pt size this builder passes, the `opac`
+        // chip at 41, the two stepper chips at 20.5. The
+        // grow spacer is an eighth child, so seven gaps
+        // are charged — the count an earlier version of
+        // this budget got wrong (it charged six gaps and
+        // claimed 208 pt at gap 4; the true gap-4 total
+        // is 214, and the dump showed the line ending
+        // 4 pt past the row's content edge).
+        let controls = 26.0 + 26.0 + 41.0 + 26.0 + 26.0 + 20.5 + 20.5;
+        assert_eq!(controls, 186.0);
+        assert_eq!(controls + 7.0 * 4.0, 214.0, "gap 4 overflows the 210 budget");
+        assert_eq!(LINE2_GAP, 3.0);
+        let total = controls + 7.0 * LINE2_GAP;
+        assert_eq!(total, 207.0);
+        assert!(total <= 210.0, "line 2 totals {total} against the 210 budget");
+    }
+
+    #[test]
+    fn figure_row_constructs_on_all_state_branches() {
+        // Construction-only pin (element internals are
+        // opaque to a bin-crate unit test — the Phase G
+        // §12 finding): the row builds for selected and
+        // unselected, hidden and visible figures, with
+        // the select cluster's hover/press overlays and
+        // the name's truncate mode wired. Layout truth
+        // is the headless tree's job, as elsewhere.
+        let core = EditorCore::new();
+        let t = rune::tok::theme(true);
+        let mut r = figure_rows(&core)[0].clone();
+        for selected in [true, false] {
+            for hidden in [true, false] {
+                r.selected = selected;
+                r.hidden = hidden;
+                let _ = figure_row(&r, &core, &t);
+            }
+        }
+        // A name far past the ≈82 pt line-1 budget
+        // (a renamed figure) still constructs.
+        r.name = "A very long figure name indeed, far past the budget".to_string();
+        let _ = figure_row(&r, &core, &t);
     }
 }

@@ -1,6 +1,6 @@
 //! Project tools section (Rune Phase D, section 34) — project
-//! name field, New / Save-to-projects / Reload / Recover, and
-//! the saved project selector. Bin-crate code, declared from `main.rs`
+//! name field, New / Save-to-projects / Save a copy / Reload /
+//! Recover, and the saved project selector. Bin-crate code, declared from `main.rs`
 //! only; every control delegates to a real engine op or mirrors
 //! a listener the GPUI app had, verbatim where one existed.
 //!
@@ -42,6 +42,7 @@
 //! | `proj-reload` | "Reload from disk" button (`icon_btn`, "rotate-right" icon — Phase N; p13: rotate-right, not Redo's arrow-rotate-right) | [`reload_pressed`] → [`reload_target`] (the §27 gate as an owned path) → [`reload_from_disk`]: no target → status "No saved file to reload.", open never called; target → the open rows' exact discipline (point `project_index` at the file, `EditorCore::open_project_file` — it takes no path argument and returns `()`, editor.rs:3787 — [`clear_stale_solo`], [`sync_name_edit`]), with the success status overridden to name the discard | ok — Phase K §27; see the reload note below. UI mission Wave 4 (S16 D2): with a target and a dirty session the first press arms instead (`ConfirmAction::ReloadProject`; the button re-renders as the danger "Discard changes?") |
 //! | `new-proj` | "New" button (`icon_btn`, "file" icon) | [`new_pressed`] → [`new_project`] + [`sync_name_edit`]: installs [`blank_project`]`("Untitled")` — field-for-field the MCP `new_project` tool's defaults and reset set (mcp_tools.rs `tool_new_project`) — clears solo, stops playback, no snapshot | ok — UI mission Wave 4 (S16 D2): a dirty session arms first (`ConfirmAction::NewProject`, danger "Discard changes?" re-render); clean, the press runs at once |
 //! | `save-proj` | "Save project" button (`icon_btn`, "floppy-disk" icon) | [`save_named_pressed`] → `EditorCore::save_named_project` (slugifies the name, writes `./projects/<slug>.json`, refreshes `project_files`, sets status), then — only on success — `shell::write_recovery` + `shell::touch_recent` to keep snapshot/recents in step | fixed in Phase H — the Phase G caveat is closed: the op returns `bool` and [`after_save`] gates the recovery/recents sync on it, so a failed save no longer plants a phantom recent |
+//! | `save-copy-proj` | "Save a copy" button (`icon_btn`, "copy" icon) on its own row under the New / Save / Recover row | [`save_copy_pressed`] → [`save_project_copy`] → `projects::save_copy` (projects.rs): writes a renamed clone of the current project to `./projects/<slug>.json`, refusing to overwrite; on success the path joins `project_files` at its sorted position ([`insert_sorted_project_file`]) so the copy's selector row appears at once; the session itself — its name, current file and recovery association — is untouched, and recents is deliberately NOT updated (the copy is not the session's file, and the §31 match reads recents) | ok — Wave 9 (D5): the copy's name is derived, not typed: "{project name} copy" ([`copy_project_name`]). A name input would need a second `TextEdit` on `State` (the integrator's field to add, not this section's to invent), and the name field's own buffer is not reusable input — it is the rename draft (see [`save_project_copy`]). A second press therefore collides with the first copy's file and the refusal lands in the status line |
 //! | `recover` | "Recover" button (`icon_btn`, "arrow-rotate-left" icon) | [`recover_pressed`] → [`recover_snapshot`] (`shell::read_recovery` = `./projects/.recovery.json`, shell.rs) → [`apply_recovered_project`] + [`sync_name_edit`] | fixed in Phase G — the reset now also clears solo and stops playback (see the fn). UI mission Wave 4: offered only while the snapshot is newer than the last save (S06-2 — otherwise `icon_btn_inert` under the same key), and a dirty session arms first (S06-3 / S16 D2, `ConfirmAction::RecoverSnapshot`) |
 //! | `proj-list` | selector list (col) | — container, no handler | ok |
 //! | `open-proj-{i}` | "Open" button per row (plain text `btn` — list rows stay text; no icon), accent-styled when `i == core.project_index` | [`open_row_pressed`] → sets `project_index`, `EditorCore::open_project_file` (editor.rs:3636: reads the file; resets current/playhead/figure/node; sets status), [`clear_stale_solo`], [`sync_name_edit`] | fixed in Phase G — stale-solo guard added; the highlight tracks the core's cycle cursor (the palette's `cycle-project` moves it without opening), exactly as [`ProjectRow`] documents. UI mission Wave 4 (S16 D2): a dirty session arms first (`ConfirmAction::OpenProject`; every row's button re-renders as the danger "Discard changes?", and the confirming press opens the row it sits on) |
@@ -96,6 +97,14 @@ pub fn clean_project_name(raw: &str) -> Option<String> {
     } else {
         Some(name.to_string())
     }
+}
+
+/// The name "Save a copy" writes under: the project name as
+/// it stands, plus " copy" ("Untitled" → "Untitled copy").
+/// Derived, never typed — see [`save_project_copy`] for why
+/// the card offers no name input for the copy.
+pub fn copy_project_name(project_name: &str) -> String {
+    format!("{project_name} copy")
 }
 
 /// The selector-row label for one saved project file: the file
@@ -290,6 +299,25 @@ pub fn resolve_project_file<'a>(name: &str, files: &'a [PathBuf]) -> Option<&'a 
     files
         .iter()
         .find(|path| path.file_stem().and_then(|s| s.to_str()) == Some(slug.as_str()))
+}
+
+/// Insert a just-written project file into the core's file
+/// list at its sorted position — the list's own invariant
+/// (`EditorCore::list_project_files` collects the same
+/// directory in the same path shape and sorts it; that fn
+/// is private, and the refreshes through it live on the
+/// open/save op paths, so a copy written by the
+/// library-level `projects::save_copy` joins the list here
+/// instead). An already-listed path is left alone — the
+/// list never holds a file twice. `project_index` is
+/// deliberately untouched, exactly as the core's own
+/// refresh inside `save_named_project` leaves it: the
+/// index is the selector cursor, not the open file (the
+/// Phase G §32 lesson).
+pub fn insert_sorted_project_file(files: &mut Vec<PathBuf>, path: &Path) {
+    if let Err(pos) = files.binary_search_by(|p| p.as_path().cmp(path)) {
+        files.insert(pos, path.to_path_buf());
+    }
 }
 
 /// The current project's file path, gated on the §31 match:
@@ -554,6 +582,63 @@ pub fn reload_from_disk(core: &mut EditorCore, target: Option<&Path>) -> bool {
     }
 }
 
+/// The status line a "Save a copy" attempt earns, factored
+/// out of [`save_project_copy`] so both arms are testable
+/// without writing a file (the write itself targets the
+/// real `./projects/`, which tests must not pollute — the
+/// factored-wrapper precedent of [`reload_target`]).
+/// Success names the copy and its file; failure passes the
+/// library's own wording through under the save family's
+/// failure prefix (the named save's is "Project save
+/// failed: …"), so a collision reads "Save a copy failed:
+/// project file already exists: …".
+pub fn copy_status(copy_name: &str, result: &Result<PathBuf, String>) -> String {
+    match result {
+        Ok(path) => format!("Saved a copy as \"{copy_name}\" ({}).", path.display()),
+        Err(e) => format!("Save a copy failed: {e}"),
+    }
+}
+
+/// "Save a copy" at the core level: write the current
+/// project — unsaved changes included, exactly as it sits
+/// in memory — to `./projects/` under a derived new name
+/// ([`copy_project_name`]) via `projects::save_copy`, which
+/// stores the copy carrying that name in its JSON and
+/// refuses to overwrite an existing file. The session is
+/// not re-pointed at the copy: its name, current file,
+/// recovery association and recents all keep naming the
+/// original. Recents especially — the current-file line's
+/// §31 match reads them, and the copy is not the file this
+/// session is on.
+///
+/// Why the name is derived rather than typed: a name
+/// input would need a second text-edit state, which lives
+/// on `State` — the integrator's field to add, not this
+/// section's to invent. The one field the card does have
+/// is not a substitute: its buffer is the *rename* draft
+/// (unapplied typing for "Set name"), and copying under a
+/// half-typed rename the user never confirmed would name
+/// the file after text they may be about to discard. So
+/// the button always writes "{project name} copy"; a
+/// second press meets the first copy's file, the library
+/// refuses, and the refusal is the status line — rename
+/// the project (or remove the old copy) to copy again.
+///
+/// On success the written path joins the selector's list
+/// at its sorted position ([`insert_sorted_project_file`]),
+/// so the copy's Open row appears at once. Returns
+/// whether the copy was written.
+pub fn save_project_copy(core: &mut EditorCore) -> bool {
+    let copy_name = copy_project_name(&core.project.name);
+    let result = stykanimate_rs::projects::save_copy(core, &copy_name);
+    if let Ok(path) = &result {
+        insert_sorted_project_file(&mut core.project_files, path);
+    }
+    let saved = result.is_ok();
+    core.status = copy_status(&copy_name, &result);
+    saved
+}
+
 // ---------------------------------------------------------------------
 // State-level handlers
 // ---------------------------------------------------------------------
@@ -690,6 +775,21 @@ fn save_named_pressed(s: &mut State) {
     }
 }
 
+/// "Save a copy": [`save_project_copy`] — the current
+/// state written under a derived "{name} copy" file; the
+/// session stays on the original project. Copying
+/// discards nothing, so no confirm arm gates it (unlike
+/// New / Open / Recover / Reload); like every press in
+/// this panel it stands down an arm left by another
+/// button (the [`apply_name`] discipline). `pub(crate)`
+/// since Wave 9 integration: the command palette's
+/// "Save a copy" entry names this handler directly, the
+/// settings-toggle idiom.
+pub(crate) fn save_copy_pressed(s: &mut State) {
+    s.confirm_action = None;
+    save_project_copy(&mut s.core);
+}
+
 /// Drop a solo index the current project does not have
 /// (Phase G audit). `open_project_file` leaves `solo`
 /// untouched, and `layers::visible_figures` hides EVERY
@@ -794,9 +894,9 @@ fn reload_pressed(s: &mut State) {
 /// The Project section: name field + Set name, the
 /// current-file line and its metadata line when the
 /// shell's last-opened record names this project,
-/// Reload from disk, New / Save project / Recover, the
-/// autosave line, and one Open row per saved project in
-/// the core's file list.
+/// Reload from disk, New / Save project / Recover, a
+/// Save-a-copy row, the autosave line, and one Open row
+/// per saved project in the core's file list.
 pub fn project_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let rows = project_rows(core);
@@ -928,6 +1028,20 @@ pub fn project_section(s: &State, t: &Theme) -> El {
             } else {
                 icon_btn("recover", "arrow-rotate-left", "Recover", false, t, recover_pressed)
             }),
+    );
+
+    // Save a copy gets its own row under the New / Save /
+    // Recover row: that row is full, and the copy belongs
+    // beside the Save it variants — same write family,
+    // different file. The press is never gated and never
+    // arms: copying discards nothing (see
+    // save_copy_pressed).
+    section = section.child(
+        row()
+            .w_full()
+            .gap(8.0)
+            .center_y()
+            .child(icon_btn("save-copy-proj", "copy", "Save a copy", false, t, save_copy_pressed)),
     );
 
     if rows.is_empty() {
@@ -1358,6 +1472,59 @@ playback_speed: 1.0,
         // handler runs the sync only on the first arm, so
         // this decision is the whole behaviour.
         assert_eq!(after_save(false), AfterSave::Nothing);
+    }
+
+    #[test]
+    fn copy_name_appends_copy_to_the_project_name() {
+        assert_eq!(copy_project_name("Untitled"), "Untitled copy");
+        assert_eq!(copy_project_name("My Film"), "My Film copy");
+        // A project already named like a copy copies again
+        // under its own derivation — the rule is the plain
+        // suffix, with no special case.
+        assert_eq!(copy_project_name("My Film copy"), "My Film copy copy");
+    }
+
+    #[test]
+    fn copy_status_names_the_copy_and_passes_failures_through() {
+        // Success names the copy and the file it landed in.
+        let written: Result<PathBuf, String> =
+            Ok(PathBuf::from("/home/user/projects/my-film-copy.json"));
+        assert_eq!(
+            copy_status("My Film copy", &written),
+            "Saved a copy as \"My Film copy\" (/home/user/projects/my-film-copy.json)."
+        );
+        // The collision wording is the library's own,
+        // carried verbatim under the save family's failure
+        // prefix — the user is told which file blocked the
+        // copy and why.
+        let collision: Result<PathBuf, String> = Err(
+            "project file already exists: /home/user/projects/my-film-copy.json"
+                .to_string(),
+        );
+        assert_eq!(
+            copy_status("My Film copy", &collision),
+            "Save a copy failed: project file already exists: \
+             /home/user/projects/my-film-copy.json"
+        );
+    }
+
+    #[test]
+    fn sorted_insert_keeps_the_file_list_sorted_and_unique() {
+        let mut files = vec![
+            PathBuf::from("/p/alpha.json"),
+            PathBuf::from("/p/zeta.json"),
+        ];
+        // Middle, front and end insertions all land at
+        // their sorted positions — the list_project_files
+        // invariant the selector's row order comes from.
+        insert_sorted_project_file(&mut files, Path::new("/p/mid.json"));
+        insert_sorted_project_file(&mut files, Path::new("/p/a-first.json"));
+        insert_sorted_project_file(&mut files, Path::new("/p/zz-last.json"));
+        let labels: Vec<String> = files.iter().map(|p| project_file_label(p)).collect();
+        assert_eq!(labels, ["a-first", "alpha", "mid", "zeta", "zz-last"]);
+        // A path already listed is not duplicated.
+        insert_sorted_project_file(&mut files, Path::new("/p/mid.json"));
+        assert_eq!(files.len(), 5);
     }
 
     #[test]

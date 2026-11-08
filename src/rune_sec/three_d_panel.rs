@@ -631,11 +631,25 @@ pub fn joint_position_text(core: &EditorCore) -> Option<String> {
 /// moved — `Camera3` is not `Copy`. Angles print with one
 /// decimal, distance with two ([`fmt_fixed`]). `None`
 /// without a session.
+///
+/// The azimuth prints as the equivalent heading inside
+/// one turn (`rem_euclid(360.0)`): `fig3_orbit`
+/// accumulates yaw without bound (editor.rs — twelve
+/// Orbit presses are a full 360°, and preview drags add
+/// hundreds of degrees), while the projection is
+/// periodic in yaw, so 725° and 5° are the same view.
+/// Printing the raw accumulation would also let this
+/// line grow past the panel card — at the measured
+/// ≈5.7 pt per LABEL character, an azimuth of −720°
+/// already overruns the 316 pt column; wrapped into
+/// [0, 360) the longest possible line is the pinned
+/// 52-character extreme in the tests. Display-only: the
+/// stored camera is untouched.
 pub fn camera_readout_text(core: &EditorCore) -> Option<String> {
     let cam = &core.fig3.as_ref()?.camera;
     Some(format!(
         "azimuth {}° · elevation {}° · distance {}",
-        fmt_fixed(cam.yaw, 1),
+        fmt_fixed(cam.yaw.rem_euclid(360.0), 1),
         fmt_fixed(cam.pitch, 1),
         fmt_fixed(cam.distance, 2)
     ))
@@ -907,10 +921,27 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
     // pressing a row selects that joint directly (the field
     // `fig3_select_next` cycles), the current joint renders
     // active. Without a session there is no figure to list.
+    // A session figure with no nodes at all — only
+    // reachable from a hand-made library file, since
+    // `fig3d::load_library_figure` deserialises without
+    // validating the node count — gets the same kit
+    // treatment with its own message, so the section never
+    // renders as a bare label.
     panel = panel.child(design::section_label("Joints", t));
-    if in_session {
+    let rows = joint_rows(core);
+    if rows.is_empty() {
+        panel = panel.child(design::empty_state(
+            "cube",
+            if in_session {
+                "This figure has no joints."
+            } else {
+                "Enter 3D to list the figure's joints."
+            },
+            t,
+        ));
+    } else {
         let selected = core.fig3.as_ref().unwrap().selected;
-        for (i, name) in joint_rows(core) {
+        for (i, name) in rows {
             panel = panel.child(
                 row().gap(6.0).center_y().child(crate::chrome_view::btn(
                     &format!("joint-sel-3d-{i}"),
@@ -923,18 +954,17 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 )),
             );
         }
-    } else {
-        panel = panel.child(design::empty_state(
-            "cube",
-            "Enter 3D to list the figure's joints.",
-            t,
-        ));
     }
 
     // Selected-joint position readout (Phase F): the
     // solved world position of `st.selected`, recomputed
     // from the live session on every build, so it tracks
-    // selection and posing changes as they happen.
+    // selection and posing changes as they happen. The
+    // text truncates (the status strip tail's one-line
+    // mode): a loaded figure's long joint name or large
+    // coordinates elide inside the row instead of
+    // painting past the card — at every ordinary value
+    // the line fits whole and nothing is elided.
     if in_session {
         if let Some(line) = joint_position_text(core) {
             panel = panel.child(
@@ -942,7 +972,7 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                     .gap(6.0)
                     .center_y()
                     .child(design::section_label("Position", t))
-                    .child(text(line).font(type_::LABEL).color(t.text)),
+                    .child(text(line).font(type_::LABEL).color(t.text).truncate()),
             );
         }
     }
@@ -1024,6 +1054,11 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
     // camera controls. The panel's only orbit stepper is
     // the "Orbit +15" button in the posing row — there are
     // no per-axis steppers for the readout to sit beside.
+    // The text truncates like the Position readout's: the
+    // azimuth is already wrapped into one turn (see
+    // `camera_readout_text`), and this keeps even the
+    // longest remaining line — widest azimuth, clamped
+    // pitch, maximum distance at once — inside the card.
     if in_session {
         if let Some(line) = camera_readout_text(core) {
             panel = panel.child(
@@ -1031,7 +1066,7 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                     .gap(6.0)
                     .center_y()
                     .child(design::section_label("Orbit", t))
-                    .child(text(line).font(type_::LABEL).color(t.text)),
+                    .child(text(line).font(type_::LABEL).color(t.text).truncate()),
             );
         }
     }
@@ -1575,6 +1610,67 @@ mod tests {
     }
 
     #[test]
+    fn camera_readout_wraps_the_azimuth_into_one_turn() {
+        let mut core = EditorCore::new();
+        core.enter_3d();
+        // fig3_orbit accumulates yaw without bound
+        // (editor.rs): a -15° orbit from the default
+        // camera stores -15, and the readout shows the
+        // equivalent heading inside one turn.
+        core.fig3_orbit(-15.0, 0.0);
+        assert_eq!(core.fig3.as_ref().unwrap().camera.yaw, -15.0);
+        assert!(
+            camera_readout_text(&core)
+                .unwrap()
+                .starts_with("azimuth 345.0°")
+        );
+        // Past a full turn the stored value keeps
+        // growing; the displayed heading does not — and
+        // the stored camera is left exactly as it was
+        // (the wrap is display-only).
+        core.fig3.as_mut().unwrap().camera.yaw = 725.0;
+        assert!(
+            camera_readout_text(&core)
+                .unwrap()
+                .starts_with("azimuth 5.0°")
+        );
+        assert_eq!(core.fig3.as_ref().unwrap().camera.yaw, 725.0);
+        core.fig3.as_mut().unwrap().camera.yaw = 360.0;
+        assert!(
+            camera_readout_text(&core)
+                .unwrap()
+                .starts_with("azimuth 0.0°")
+        );
+    }
+
+    #[test]
+    fn camera_readout_line_is_the_pinned_extreme_at_the_bounds() {
+        let mut core = EditorCore::new();
+        core.enter_3d();
+        {
+            let st = core.fig3.as_mut().unwrap();
+            st.camera.yaw = 359.9;
+            st.camera.pitch = -89.9;
+            st.camera.distance = 4000.0;
+        }
+        // The longest line the readout can produce once
+        // the azimuth wraps: widest wrapped heading, the
+        // projector's pitch clamp, and the zoom range's
+        // maximum distance. 52 characters ≈ 295 pt at
+        // the LABEL advance measured from the headless
+        // tree (278.5 pt for the 49-character default
+        // line) — the row's truncate() is what keeps
+        // this corner inside the card (see the Orbit
+        // row's comment in `three_d_panel`).
+        let line = camera_readout_text(&core).unwrap();
+        assert_eq!(
+            line,
+            "azimuth 359.9° · elevation -89.9° · distance 4000.00"
+        );
+        assert_eq!(line.chars().count(), 52);
+    }
+
+    #[test]
     fn mirror_button_glyph_is_the_left_right_swap() {
         // Phase I: the Mirror pose button's glyph is the
         // left/right swap, not Phase H's `copy` — mirroring
@@ -1636,6 +1732,24 @@ mod tests {
         state.core.enter_3d();
         assert!(state.core.fig3.is_some());
         let _ = preview_el(&state, &t);
+        let _ = three_d_panel(&state, &t);
+    }
+
+    #[test]
+    fn panel_builds_with_a_zero_node_session_figure() {
+        // `fig3d::load_library_figure` deserialises a
+        // Figure3 without validating its node count, so
+        // a hand-made library entry can start a session
+        // whose figure has no joints at all. The Joints
+        // section must fall back to its empty state
+        // rather than render as a bare label, and the
+        // whole panel — preview, readouts, libraries —
+        // must still build.
+        let mut state = crate::init();
+        let t = rune::tok::theme(true);
+        state.core.enter_3d();
+        state.core.fig3.as_mut().unwrap().figure.nodes.clear();
+        assert!(joint_rows(&state.core).is_empty());
         let _ = three_d_panel(&state, &t);
     }
 

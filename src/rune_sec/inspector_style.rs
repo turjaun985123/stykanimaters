@@ -137,6 +137,31 @@
 //! colour header row's 18×18 preview square is
 //! display-only (no key, no handler) and stays a plain
 //! element, like the channel rows' mini-swatches.
+//!
+//! UI mission Wave 9 convergence — this panel was the
+//! one inspector still diverging from the figure
+//! inspector's converged row constructions, with no
+//! functional reason: its in-row labels were the kit's
+//! `section_label` (the SECTION-weight heading style
+//! the other two inspectors use only for standalone
+//! headings, e.g. "Colour" over a swatch grid), its
+//! rows carried no `w_full()` where the figure and
+//! segment rows all do, its value readouts (taper,
+//! gradient end, colour hex) sat in `text_secondary`
+//! where the shared `readout_row` idiom paints values
+//! in `t.text`, the taper row grew its value instead
+//! of its label, and its kit-swatch rows used a 4 pt
+//! internal gap against the other inspectors' 6 pt.
+//! All converged: in-row labels are now plain LABEL
+//! text in `text_secondary` (growing exactly where the
+//! figure rows' labels grow), every row is `w_full()`,
+//! values read in `t.text`, and kit-swatch rows gap
+//! 6 pt. Chip groups (cap, presets) keep their 4 pt
+//! internal gap — no other inspector has a chip group
+//! to converge with. The Presets label stays
+//! top-aligned beside its two-row grid (a centred
+//! label would float between the rows). Keys, labels,
+//! handlers and status strings are unchanged.
 
 use std::cell::RefCell;
 
@@ -585,14 +610,17 @@ pub fn note_recent_color(color: u32) {
 /// ([`step_color_channel`] or [`step_gradient_channel`] —
 /// both share the `(core, channel, dir)` shape).
 ///
-/// Layout is the charter stepper order: the label (kit
-/// `section_label`) grows, a small square in the
-/// channel's own colour (the R row shows red at the
-/// channel's value, and so on — the Colour header row's
-/// preview idiom; display-only, kept beside the label),
-/// the − button, the value in the kit's
-/// `stepper_value` mono readout, and the + button
-/// stepping by [`RGB_STEP`]. Keys are
+/// Layout is the charter stepper order: the label grows
+/// (plain LABEL text in `text_secondary` — the figure
+/// inspector's in-row label construction; UI mission
+/// Wave 9 converged this builder onto it from the kit
+/// `section_label` it used through Phase N), a small
+/// square in the channel's own colour (the R row shows
+/// red at the channel's value, and so on — the Colour
+/// header row's preview idiom; display-only, kept
+/// beside the label), the − button, the value in the
+/// kit's `stepper_value` mono readout, and the +
+/// button stepping by [`RGB_STEP`]. Keys are
 /// `style-<stem>-dn` / `style-<stem>-up` in a row keyed
 /// `style-<stem>-row`.
 fn channel_row_impl(
@@ -614,9 +642,15 @@ fn channel_row_impl(
         .fill(hex_color(swatch_rgb).unwrap_or(Color::WHITE));
     row()
         .key(format!("style-{stem}-row"))
+        .w_full()
         .gap(8.0)
         .center_y()
-        .child(design::section_label(label, t).grow(1.0))
+        .child(
+            text(label)
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
         .child(swatch)
         .child(btn(&format!("style-{stem}-dn"), "−", false, t, move |s| {
             step(&mut s.core, channel, -1)
@@ -753,16 +787,21 @@ pub fn recents_row(recents: &[u32], current: Option<u32>, t: &Theme) -> Option<E
     if recents.is_empty() {
         return None;
     }
-    let mut chips = row().gap(4.0).center_y();
+    let mut chips = row().gap(6.0).center_y();
     for (i, &color) in recents.iter().enumerate() {
         chips = chips.child(recent_chip(i, color, current == Some(color), t));
     }
     Some(
         row()
             .key("style-recents")
+            .w_full()
             .gap(8.0)
             .center_y()
-            .child(design::section_label("Recent", t))
+            .child(
+                text("Recent")
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            )
             .child(chips),
     )
 }
@@ -820,14 +859,19 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
     panel = panel.child(
         row()
             .key("style-taper-row")
+            .w_full()
             .gap(8.0)
             .center_y()
-            .child(design::section_label("Taper", t))
             .child(
-                text(taper_text(style.taper))
+                text("Taper")
                     .font(type_::LABEL)
                     .color(t.text_secondary)
                     .grow(1.0),
+            )
+            .child(
+                text(taper_text(style.taper))
+                    .font(type_::LABEL)
+                    .color(t.text),
             )
             .child(btn("style-taper", "Step", false, t, |s| {
                 s.core.cycle_node_taper()
@@ -844,9 +888,14 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
     panel = panel.child(
         row()
             .key("style-cap-row")
+            .w_full()
             .gap(8.0)
             .center_y()
-            .child(design::section_label("Cap", t))
+            .child(
+                text("Cap")
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            )
             .child(el().key("style-cap").radius(6.0).child(cap_row)),
     );
 
@@ -854,21 +903,26 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
     // framed; each swatch sets its own colour directly via
     // `set_node_color2`.
     let gstate = gradient_state(style.color2);
-    let mut swatches = row().gap(4.0).center_y();
+    let mut swatches = row().gap(6.0).center_y();
     for state in 0..3 {
         swatches = swatches.child(gradient_swatch(state, state == gstate, t));
     }
     panel = panel.child(
         row()
             .key("style-gradient-row")
+            .w_full()
             .gap(8.0)
             .center_y()
-            .child(design::section_label("Gradient", t))
+            .child(
+                text("Gradient")
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            )
             .child(el().key("style-gradient").radius(6.0).child(swatches))
             .child(
                 text(gradient_label(style.color2))
                     .font(type_::LABEL)
-                    .color(t.text_secondary),
+                    .color(t.text),
             ),
     );
 
@@ -901,14 +955,20 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
         panel = panel.child(
             row()
                 .key("style-color-row")
+                .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(design::section_label("Colour", t))
+                .child(
+                    text("Colour")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .grow(1.0),
+                )
                 .child(preview)
                 .child(
                     text(color_text(rgb))
                         .font(type_::LABEL)
-                        .color(t.text_secondary),
+                        .color(t.text),
                 ),
         );
         panel = panel.child(channel_row(0, "R", r, t));
@@ -934,9 +994,15 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
     panel = panel.child(
         row()
             .key("style-opacity-row")
+            .w_full()
             .gap(8.0)
             .center_y()
-            .child(design::section_label("Opacity", t).grow(1.0))
+            .child(
+                text("Opacity")
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+                    .grow(1.0),
+            )
             .child(btn("style-opacity-dn", "−", false, t, |s| {
                 step_opacity(&mut s.core, -1)
             }))
@@ -954,9 +1020,15 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
     panel = panel.child(
         row()
             .key("style-copy-paste-row")
+            .w_full()
             .gap(8.0)
             .center_y()
-            .child(design::section_label("Style", t))
+            .child(
+                text("Style")
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+                    .grow(1.0),
+            )
             .child(icon_btn("style-copy", "copy", "Copy", false, t, |s| {
                 copy_style(&mut s.core)
             }))
@@ -982,8 +1054,13 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
     panel = panel.child(
         row()
             .key("style-presets")
+            .w_full()
             .gap(8.0)
-            .child(design::section_label("Presets", t))
+            .child(
+                text("Presets")
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            )
             .child(preset_grid),
     );
 

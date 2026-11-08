@@ -143,6 +143,18 @@
 //! wraps instead of crossing the card edge. Keys,
 //! labels and handlers are unchanged throughout.
 //!
+//! UI mission Wave 9 closes the guard's residual hole:
+//! wrapping bounds a row's SUM, but it cannot shrink
+//! ONE button whose label alone is wider than the
+//! card — and preset names are arbitrary file stems
+//! (`fx_edit::list_clip_presets_in` accepts any
+//! `*.json` stem), so a long name still painted past
+//! the edge. Preset apply buttons now display
+//! [`preset_button_label`] — the name itself while it
+//! fits, middle-truncated with "…" once it cannot —
+//! while the element key and the apply handler keep
+//! the full name, exactly as before.
+//!
 //! Integrator wiring for the state: add
 //! `pub fx_browser: rune_sec::fx_browser::FxBrowserState`
 //! to `State`, initialise it with
@@ -528,6 +540,97 @@ pub fn preset_names_cached(core: &EditorCore) -> Vec<String> {
     })
 }
 
+/// Text-width budget for one preset apply button's label,
+/// in points: the panel's content width (316) minus the
+/// kit `btn`'s horizontal padding (10 + 10), with a small
+/// safety margin. Wave 4's `.flex_wrap()` bounds a preset
+/// row's SUM, but wrapping cannot shrink one button whose
+/// name alone is wider than the card — and preset names
+/// are arbitrary file stems, unbounded in length. The
+/// display label is therefore bounded to this budget by
+/// [`preset_button_label`]; the element key and the apply
+/// handler always keep the full name (Wave 9).
+pub const PRESET_LABEL_BUDGET: f32 = 288.0;
+
+/// Conservative advance estimate for one character of a
+/// preset name at the button's LABEL font (12 pt, weight
+/// 500). Every class is an UPPER bound against measured
+/// tree text ("Shock ring" measures 61.5 pt for ten
+/// characters; this model charges 66), so a label the
+/// model passes truly fits — the model may truncate a
+/// borderline name early, never late. Non-ASCII
+/// characters are charged the full em (12 pt), the CJK
+/// advance at this size.
+fn preset_char_width(c: char) -> f32 {
+    match c {
+        ' ' => 4.0,
+        'i' | 'l' | 'j' | 't' | 'f' | '.' | ',' | ':' | ';' | '!' | '|' | '\'' | '`' => 4.0,
+        '-' | '_' | '(' | ')' | '[' | ']' | '{' | '}' => 6.0,
+        'm' | 'w' => 10.0,
+        'M' | 'W' => 12.0,
+        '0'..='9' => 7.0,
+        'A'..='Z' => 9.0,
+        'a'..='z' => 7.0,
+        _ if c.is_ascii() => 7.0,
+        _ => 12.0,
+    }
+}
+
+/// The estimated painted width of `name` as a preset
+/// button label, per [`preset_char_width`].
+pub fn preset_label_width(name: &str) -> f32 {
+    name.chars().map(preset_char_width).sum()
+}
+
+/// The apply button's DISPLAY label for preset `name`:
+/// the name itself while it fits [`PRESET_LABEL_BUDGET`],
+/// otherwise the name middle-truncated with "…" — head
+/// and tail both kept, growing alternately so neither
+/// side starves — until the estimate fits. Display only:
+/// the caller keys the button by, and applies, the full
+/// name, so a truncated label loses no function (the
+/// shell's filename treatment; Rune's own text system
+/// middle-truncates paths the same way). The truncating
+/// branch is only reached when the whole name exceeds
+/// the budget, which is more than the ellipsis leaves
+/// room for, so head and tail can never meet.
+pub fn preset_button_label(name: &str) -> String {
+    if preset_label_width(name) <= PRESET_LABEL_BUDGET {
+        return name.to_string();
+    }
+    // The ellipsis is charged a full em, like any wide
+    // glyph in the model above.
+    let room = PRESET_LABEL_BUDGET - 12.0;
+    let chars: Vec<char> = name.chars().collect();
+    let (mut head, mut tail, mut used) = (0usize, 0usize, 0.0f32);
+    loop {
+        let mut progressed = false;
+        if head + tail < chars.len() {
+            let w = preset_char_width(chars[head]);
+            if used + w <= room {
+                head += 1;
+                used += w;
+                progressed = true;
+            }
+        }
+        if head + tail < chars.len() {
+            let w = preset_char_width(chars[chars.len() - 1 - tail]);
+            if used + w <= room {
+                tail += 1;
+                used += w;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(&chars[chars.len() - tail..]);
+    out
+}
+
 /// The effects browser body. Mounting (and any show/hide
 /// state) is the caller's business; this builds the full
 /// panel for the current core state and the panel's own
@@ -657,13 +760,18 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
             // Wrapped at the card width (S13-13), like
             // the kind rows: preset names are filenames
             // and unbounded, so three apply buttons can
-            // sum past the 316 pt budget.
+            // sum past the 316 pt budget. Wave 9: the
+            // wrap bounds the row's sum only, so the
+            // button's DISPLAY label is additionally
+            // bounded by `preset_button_label` — the
+            // key and the apply closure keep the full
+            // name.
             let mut preset_row = row().gap(6.0).w_full().flex_wrap();
             for name in chunk {
                 let apply_name = name.clone();
                 preset_row = preset_row.child(btn(
                     &format!("fx-preset-apply-{name}"),
-                    name,
+                    &preset_button_label(name),
                     false,
                     t,
                     move |s| s.core.fx_apply_preset(&apply_name),
@@ -909,6 +1017,69 @@ mod tests {
             kind_button_label(&core, entry_of(ClipKind::Beam)),
             "Beam"
         );
+    }
+
+    // ---- Preset label budget (Wave 9) ----
+
+    #[test]
+    fn preset_label_width_charges_upper_bounds() {
+        // Pinned model values: each class is an upper
+        // bound against measured tree text ("Shock ring"
+        // paints 61.5 pt wide in the headless dumps; the
+        // model charges 66), so a passing label truly
+        // fits and only a borderline name truncates
+        // early.
+        assert_eq!(preset_label_width("Shock ring"), 66.0);
+        assert_eq!(preset_label_width("lightning-12"), 71.0);
+        assert_eq!(preset_label_width(""), 0.0);
+        // The widest classes: capital W and any
+        // non-ASCII character cost a full em.
+        assert_eq!(preset_label_width("W"), 12.0);
+        assert_eq!(preset_label_width("界"), 12.0);
+    }
+
+    #[test]
+    fn preset_button_label_keeps_names_that_fit() {
+        // Everything the app itself can generate (kind
+        // slug + index) and ordinary user names pass
+        // through byte-identical.
+        for name in ["alpha", "lightning-12", "my-big-explosion-preset-v2"] {
+            assert_eq!(preset_button_label(name), name);
+        }
+    }
+
+    #[test]
+    fn preset_button_label_truncates_a_long_name_in_the_middle() {
+        // 30 + 1 + 30 characters at 7 pt each = 427 pt
+        // of label in a 316 pt card: the row wrap cannot
+        // help a single button this wide.
+        let name = format!("{}-{}", "a".repeat(30), "z".repeat(30));
+        let label = preset_button_label(&name);
+        assert_ne!(label, name);
+        assert!(label.contains('…'), "the cut is marked: {label}");
+        assert!(label.starts_with("aaa"), "the head survives: {label}");
+        assert!(label.ends_with("zzz"), "the tail survives: {label}");
+        assert!(
+            preset_label_width(&label) <= PRESET_LABEL_BUDGET,
+            "the truncated label fits its budget: {}",
+            preset_label_width(&label)
+        );
+    }
+
+    #[test]
+    fn preset_button_label_bounds_pathological_names() {
+        // All-widest-glyph names, Latin and CJK: the
+        // truncated label still fits the budget, by the
+        // same estimate the builder trusts.
+        for name in ["W".repeat(40), "界".repeat(40)] {
+            let label = preset_button_label(&name);
+            assert!(label.contains('…'), "{label}");
+            assert!(
+                preset_label_width(&label) <= PRESET_LABEL_BUDGET,
+                "label for {name:?} fits: {}",
+                preset_label_width(&label)
+            );
+        }
     }
 
     #[test]

@@ -146,19 +146,27 @@
 //! as it always did. Nothing here pretends otherwise.
 //!
 //! The tangent presets exist three times in the Graph
-//! workspace — this panel's preview chips
-//! ([`preset_chip`]), the keyframe tools' bare text
-//! buttons over their `preset_options` table, and the
-//! easing panel's preview+button rows over its own
-//! `TANGENT_PRESETS` list — with no shared construction
-//! anywhere (the kit has no tangent-preset builder;
-//! `inspector_style`'s `preset_chip` is a different
-//! thing, a stroke-`StylePreset` chip). All three call
-//! the same `apply_graph_ease_preset`. Converging them
-//! is the mission's S12-09 decision, not a local fix:
-//! it needs a kit-level builder plus edits in two other
-//! panels. Recorded here so the duplication is owned,
-//! not discovered again.
+//! workspace, and since UI mission Wave 9 they share
+//! ONE construction: the kit's
+//! [`design::tangent_preset_chip`], which Wave 4 lifted
+//! from this panel's own chip (the canonical surface —
+//! the only copy whose presentation carried the drawn
+//! preview) and which the keyframe tools and the
+//! easing panel adopted then. This panel kept a private
+//! copy until Wave 9 (agent B6) verified the two
+//! identical metric for metric — preview box 52×30,
+//! 24 samples, padding 4, gap 2, radius 6, card fill
+//! with `control_track` / `control_off` hover/press,
+//! LABEL text in `t.text`, the same
+//! `apply_graph_ease_preset` press — and converged.
+//! The one real difference the convergence brings is
+//! the kit chip's `.help(label)` tooltip, the Wave 6
+//! convention this panel's chips were still missing.
+//! [`preview_points`] stays below as this module's
+//! pinned reference for the preview mapping (the kit
+//! keeps its own private copy; design's docs note the
+//! two agree point for point), exercised by its unit
+//! test like [`selected_key_index`].
 //!
 //! ## Channel list (Phase G)
 //!
@@ -349,6 +357,29 @@
 //! the earlier Phase N ruling that kept it a bare
 //! muted LABEL line as per-channel guidance).
 //!
+//! ## Wave 9 polish (agent B6)
+//!
+//! Three audit leftovers closed, each verified at
+//! source before it was touched:
+//!
+//! - **S12-09, this panel's half.** The tangent-preset
+//!   chips build through the kit (see the scoping
+//!   section above); the private copy is gone.
+//! - **S12-07 / D2.** The channel list's scroll
+//!   viewport gained its missing bound
+//!   ([`CHAN_LIST_MAX_H`], five rows), so the canvas
+//!   keeps its place however many channels the project
+//!   grows; the Duplicate / Delete / Shift block moved
+//!   from inside the list to directly under the
+//!   viewport so the bound cannot hide it.
+//! - **S12-12 / D8, the boundary half.** The curve
+//!   canvas takes `.border(1.0, t.card_border)` — the
+//!   kit hairline the panel card itself wears — so the
+//!   viewport reads as a viewport against the identical
+//!   `t.card` fill in both themes. The rest of D8
+//!   (gridlines and fit-range labels, S12-11) is a
+//!   separate item and was not attempted here.
+//!
 //! ## State the shell must provide
 //!
 //! `State` needs one field (integrator wires it):
@@ -377,6 +408,19 @@ pub const GRAPH_H: f32 = 170.0;
 /// exists (the `Cx::layout_size` read settles after one frame,
 /// exactly as the stage's does).
 const FALLBACK_SIZE: [f32; 2] = [720.0, GRAPH_H];
+/// Maximum height of the channel list's scroll viewport,
+/// in points (Wave 9, audit S12-07): five channel rows.
+/// The kit row's own metrics set the price — `list_row`
+/// rows are `min_h` 28 (design's `row_base`) and the
+/// list gaps 4 — so five full rows are 5 × 28 + 4 × 4 =
+/// 156. Past five channels the list scrolls inside its
+/// own viewport instead of pushing the canvas, the
+/// interp row and everything below them further down
+/// the column with every added channel (the audit's
+/// D2: the viewport previously carried `.min_h(0.0)`
+/// but no bound, and a Rune scroll viewport without a
+/// bounded height grows to its content).
+const CHAN_LIST_MAX_H: f32 = 156.0;
 /// The decorative `chart-line` glyphs' muted tone
 /// (channel-list rows; the panel header's glyph moved
 /// to the kit title in Phase N), in the `0xRRGGBB` form
@@ -404,9 +448,6 @@ fn pack(c: Color) -> u32 {
 /// dropped. Deliberately conservative — it removes
 /// near-duplicates, not shape.
 pub const REDUCE_TOLERANCE: f32 = 0.5;
-/// Tangent-preset preview chip size, in points.
-const PREVIEW_W: f32 = 52.0;
-const PREVIEW_H: f32 = 30.0;
 /// Grab radius for key handles on the curve canvas, in
 /// points. The handles DRAW at radius 4.5; the pick radius is
 /// deliberately more forgiving.
@@ -1581,31 +1622,6 @@ fn graph_shape(
     shape
 }
 
-/// One tangent-preset chip: the preset's real preview curve
-/// (a tiny canvas) over its name; pressing applies the preset
-/// to the selected figure's channels
-/// (`EditorCore::apply_graph_ease_preset`). Presets are
-/// actions, not state, so no chip highlights as "active".
-fn preset_chip(preset: TangentPreset, label: &str, key: &str, t: &Theme) -> El {
-    let shape = Shape::new().stroke(
-        preview_points(preset, PREVIEW_W, PREVIEW_H, 24),
-        1.5,
-        t.text,
-    );
-    col()
-        .key(key)
-        .padding(4.0)
-        .gap(2.0)
-        .radius(6.0)
-        .fill(t.card)
-        .hover(t.control_track)
-        .press(t.control_off)
-        .center()
-        .on_press(move |s: &mut State| s.core.apply_graph_ease_preset(preset))
-        .child(canvas(shape).size(PREVIEW_W, PREVIEW_H))
-        .child(text(label).font(type_::LABEL).color(t.text))
-}
-
 /// The Graph panel: header + readout, channel selector,
 /// curve canvas, interp segmented control, tangent presets
 /// and the transform actions. Mounted by the shell wherever
@@ -1702,57 +1718,14 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         );
     }
 
-    // Duplicate-to-next-figure (Phase J integrator
-    // wiring): shown only while a channel is drawn; the
-    // press duplicates the drawn channel — twin-aware via
-    // the effective index — onto the following figure.
-    // Delete channel (Phase K) sits directly beside it,
-    // under the same condition, in the chrome family's
-    // danger styling (UI mission S12-10: the press deletes
-    // a whole channel — it should look like it): the press
-    // removes the drawn channel through
-    // delete_drawn_channel, which repairs the stored pick.
-    // The Shift pair (Phase M) closes the block under the
-    // same condition: icon buttons moving every key of the
-    // drawn channel one frame either way through
-    // shift_drawn_channel — repeated presses accumulate,
-    // and the op refuses cleanly at the frame-0 wall.
-    if drawn_idx.is_some() {
-        chan_list = chan_list.child(btn(
-            "graph-chan-duplicate",
-            "Duplicate channel to next figure",
-            false,
-            t,
-            |s: &mut State| duplicate_channel_to_next(&mut s.core, &s.graph_panel),
-        ));
-        chan_list = chan_list.child(danger_btn(
-            "graph-chan-delete",
-            "Delete channel",
-            t,
-            |s: &mut State| delete_drawn_channel(&mut s.core, &mut s.graph_panel),
-        ));
-        chan_list = chan_list.child(
-            row()
-                .key("graph-shift-row")
-                .gap(4.0)
-                .child(icon_btn(
-                    "graph-shift-l",
-                    "chevron-left",
-                    "Shift -1",
-                    false,
-                    t,
-                    |s: &mut State| shift_drawn_channel(&mut s.core, &s.graph_panel, -1.0),
-                ))
-                .child(icon_btn(
-                    "graph-shift-r",
-                    "chevron-right",
-                    "Shift +1",
-                    false,
-                    t,
-                    |s: &mut State| shift_drawn_channel(&mut s.core, &s.graph_panel, 1.0),
-                )),
-        );
-    }
+    // The channel actions (Duplicate / Delete / Shift)
+    // are NOT children of this list: since Wave 9 the
+    // list's scroll viewport is height-bounded (see the
+    // panel assembly below), and actions inside a bounded
+    // viewport would scroll away under their own list in
+    // a many-channel project. They mount on the panel
+    // directly under the viewport instead, under the same
+    // `drawn_idx.is_some()` condition as before.
 
     // Stats block (Phase I): one muted line per channel
     // under the list — figure, target, key count, value
@@ -1812,16 +1785,60 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
             set_drawn_interp(&mut s.core, &s.graph_panel, Interp::Step)
         }));
 
+    // Tangent presets (Wave 9 convergence, audit
+    // S12-09): the kit's drawn-preview chip — this
+    // panel's own construction, lifted into design in
+    // Wave 4 and adopted by the keyframe tools and the
+    // easing panel then; the private copy kept here was
+    // verified identical (preview box, samples, fills,
+    // handler) and retired. Keys, labels and the
+    // `apply_graph_ease_preset` presses are unchanged;
+    // presets are actions, not state, so never active.
     let presets = row()
         .key("graph-presets")
         .gap(4.0)
         .w_full()
         .flex_wrap()
-        .child(preset_chip(TangentPreset::Smooth, "Smooth", "graph-preset-smooth", t))
-        .child(preset_chip(TangentPreset::EaseIn, "Ease in", "graph-preset-ease-in", t))
-        .child(preset_chip(TangentPreset::EaseOut, "Ease out", "graph-preset-ease-out", t))
-        .child(preset_chip(TangentPreset::EaseInOut, "Ease in-out", "graph-preset-ease-in-out", t))
-        .child(preset_chip(TangentPreset::Linear, "Linear", "graph-preset-linear", t));
+        .child(design::tangent_preset_chip(
+            "graph-preset-smooth",
+            TangentPreset::Smooth,
+            "Smooth",
+            false,
+            t,
+            |s: &mut State| s.core.apply_graph_ease_preset(TangentPreset::Smooth),
+        ))
+        .child(design::tangent_preset_chip(
+            "graph-preset-ease-in",
+            TangentPreset::EaseIn,
+            "Ease in",
+            false,
+            t,
+            |s: &mut State| s.core.apply_graph_ease_preset(TangentPreset::EaseIn),
+        ))
+        .child(design::tangent_preset_chip(
+            "graph-preset-ease-out",
+            TangentPreset::EaseOut,
+            "Ease out",
+            false,
+            t,
+            |s: &mut State| s.core.apply_graph_ease_preset(TangentPreset::EaseOut),
+        ))
+        .child(design::tangent_preset_chip(
+            "graph-preset-ease-in-out",
+            TangentPreset::EaseInOut,
+            "Ease in-out",
+            false,
+            t,
+            |s: &mut State| s.core.apply_graph_ease_preset(TangentPreset::EaseInOut),
+        ))
+        .child(design::tangent_preset_chip(
+            "graph-preset-linear",
+            TangentPreset::Linear,
+            "Linear",
+            false,
+            t,
+            |s: &mut State| s.core.apply_graph_ease_preset(TangentPreset::Linear),
+        ));
 
     let actions = row()
         .key("graph-actions")
@@ -1916,12 +1933,87 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                 .child(text(readout).font(type_::LABEL).color(t.text_secondary)),
         )
         .child(design::divider(t))
-        .child(chan_list.scroll(ScrollSpec { stick_bottom: false }).min_h(0.0));
+        // The list's viewport is bounded (Wave 9, audit
+        // S12-07): at most five rows tall
+        // (CHAN_LIST_MAX_H), scrolling internally past
+        // that, so a growing project can no longer push
+        // the canvas and everything below it down the
+        // column (the audit's D2).
+        .child(
+            chan_list
+                .scroll(ScrollSpec { stick_bottom: false })
+                .min_h(0.0)
+                .max_h(CHAN_LIST_MAX_H),
+        );
+    // Duplicate-to-next-figure (Phase J integrator
+    // wiring): shown only while a channel is drawn; the
+    // press duplicates the drawn channel — twin-aware via
+    // the effective index — onto the following figure.
+    // Delete channel (Phase K) sits directly beside it,
+    // under the same condition, in the chrome family's
+    // danger styling (UI mission S12-10: the press deletes
+    // a whole channel — it should look like it): the press
+    // removes the drawn channel through
+    // delete_drawn_channel, which repairs the stored pick.
+    // The Shift pair (Phase M) closes the block under the
+    // same condition: icon buttons moving every key of the
+    // drawn channel one frame either way through
+    // shift_drawn_channel — repeated presses accumulate,
+    // and the op refuses cleanly at the frame-0 wall.
+    // (Wave 9: the block moved out of `chan_list` to sit
+    // directly under its bounded viewport — see the note
+    // at the list's construction — with keys, order and
+    // handlers unchanged.)
+    if drawn_idx.is_some() {
+        panel = panel
+            .child(btn(
+                "graph-chan-duplicate",
+                "Duplicate channel to next figure",
+                false,
+                t,
+                |s: &mut State| duplicate_channel_to_next(&mut s.core, &s.graph_panel),
+            ))
+            .child(danger_btn(
+                "graph-chan-delete",
+                "Delete channel",
+                t,
+                |s: &mut State| delete_drawn_channel(&mut s.core, &mut s.graph_panel),
+            ))
+            .child(
+                row()
+                    .key("graph-shift-row")
+                    .gap(4.0)
+                    .child(icon_btn(
+                        "graph-shift-l",
+                        "chevron-left",
+                        "Shift -1",
+                        false,
+                        t,
+                        |s: &mut State| shift_drawn_channel(&mut s.core, &s.graph_panel, -1.0),
+                    ))
+                    .child(icon_btn(
+                        "graph-shift-r",
+                        "chevron-right",
+                        "Shift +1",
+                        false,
+                        t,
+                        |s: &mut State| shift_drawn_channel(&mut s.core, &s.graph_panel, 1.0),
+                    )),
+            );
+    }
     if !stat_lines.is_empty() {
         panel = panel.child(stats_block);
     }
     panel = panel
         .child(selector)
+        // The canvas wears the kit hairline (Wave 9,
+        // audit S12-12): its fill is the panel's own
+        // `t.card`, so without a border the viewport had
+        // no visible edge in either theme — only its
+        // radius distinguished it. Rune borders are
+        // paint-only (crates/rune/src/el/visuals.rs), so
+        // the layout box, the fit and the drag geometry
+        // are all untouched.
         .child(
             canvas(graph_shape(
                 core,
@@ -1938,6 +2030,7 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                 .h(GRAPH_H)
                 .fill(t.card)
                 .radius(8.0)
+                .border(1.0, t.card_border)
                 .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| graph_drag(s, d)),
         );
     // Value readout (Phase L): the drawn channel's value

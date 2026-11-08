@@ -116,6 +116,18 @@
 //!   so pill and buttons can never disagree (P06 §3.2).
 //!   Keys, labels and handlers are unchanged.
 //!
+//! * UI mission Wave 9 (deep polish): the rotation dial's
+//!   marker was the file's last unmigrated
+//!   `tok::accent(0, true)` — upstream Rune's dark accent in
+//!   BOTH themes, disagreeing with the app accent every
+//!   other surface adopted in Waves 7–8. It now resolves
+//!   through [`dial_marker_color`] → `app_theme::accent(t)`,
+//!   the seam `app_theme`'s own docs name as that call
+//!   site's successor. The overlay's `tok::theme(true)` is
+//!   NOT the same case: the pill floats over the stage,
+//!   which is dark project space in both themes (see
+//!   [`overlay`]).
+//!
 //! Engine facts this panel lives with (verified, not worked
 //! around silently): `camera_clear_key` does NOT snapshot, so
 //! clearing a key is not undoable; and `camera_zoom_by`'s
@@ -138,7 +150,7 @@
 use std::cell::RefCell;
 
 use rune::tok::{self, type_, Theme};
-use rune::{canvas, col, el, row, text, Drag, El, LineCap, Phase, Shape, Tx};
+use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
@@ -705,6 +717,17 @@ fn dial_drag(s: &mut State, d: &mut Drag) {
     dial_gesture(&mut s.core, d.phase, d.x, d.w, &mut d.data, cancelled);
 }
 
+/// The dial marker's colour: the app theme's accent for
+/// the theme the panel was built with — `#6C8CFF` in dark,
+/// `#4666D8` in light. Wave 9: this replaces the hard-coded
+/// `tok::accent(0, true)` (upstream's dark accent in both
+/// themes), the migration `app_theme::accent`'s docs name
+/// for exactly this call-site shape; the track and ticks
+/// already read `t` directly.
+fn dial_marker_color(t: &Theme) -> Color {
+    crate::rune_sec::app_theme::accent(t)
+}
+
 /// The dial's shape in its 360×26 view box: the track line,
 /// ticks at −180/−90/0/90/180 (the centre tick taller) and an
 /// accent diamond marker at the angle in effect. Positions
@@ -714,7 +737,7 @@ fn dial_drag(s: &mut State, d: &mut Drag) {
 /// wants — the track and marker keep their weight at any
 /// panel width.
 pub fn dial_shape(core: &EditorCore, t: &Theme) -> Shape {
-    let accent = tok::accent(0, true);
+    let accent = dial_marker_color(t);
     let mid = DIAL_H / 2.0;
     let mut shape = Shape::new()
         .view_box(DIAL_W, DIAL_H)
@@ -1476,6 +1499,30 @@ mod tests {
         for a in [-135.0f32, -45.0, 30.0, 179.0] {
             assert_eq!(angle_at(marker_x(a), DIAL_W), a);
         }
+    }
+
+    #[test]
+    fn dial_marker_colour_follows_the_app_theme() {
+        // Wave 9: the marker resolves through the app_theme
+        // seam in BOTH themes — the value every other
+        // surface adopted in Waves 7–8 — and the two themes
+        // disagree, which the old hard-coded
+        // `tok::accent(0, true)` could never do.
+        let dark = crate::rune_sec::app_theme::app_theme(true);
+        let light = crate::rune_sec::app_theme::app_theme(false);
+        assert_eq!(
+            dial_marker_color(&dark),
+            crate::rune_sec::app_theme::accent(&dark)
+        );
+        assert_eq!(
+            dial_marker_color(&light),
+            crate::rune_sec::app_theme::accent(&light)
+        );
+        assert_ne!(dial_marker_color(&dark), dial_marker_color(&light));
+        // The shape still builds under both app themes.
+        let core = EditorCore::new();
+        let _ = dial_shape(&core, &dark);
+        let _ = dial_shape(&core, &light);
     }
 
     #[test]

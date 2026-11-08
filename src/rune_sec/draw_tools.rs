@@ -125,6 +125,22 @@
 //!   +). The smoothing and width lines stay readouts —
 //!   the Phase J/K reasoning above is untouched. Keys and
 //!   handlers are unchanged throughout.
+//! * **Wave 9 budget pass.** Every row re-measured at real
+//!   font metrics against the 276 pt content budget. The
+//!   three `flex_wrap` rows (tools, brushes, shapes) fit
+//!   by construction — their widest single control is
+//!   117.9 pt, so wrapping reflows them at any width —
+//!   but the unwrapped stamp-parameter rows did not: no
+//!   pairing of the Sides / Size / Rot groups fits 276
+//!   (294.5 / 289 / 281.5), so each group now has its own
+//!   row (see the builder comment). The tools block also
+//!   gained the kit `section_label` its sibling blocks
+//!   already had ("Tools" — it was the one unlabelled
+//!   group in the panel). Selected-brush visibility was
+//!   audited, not changed: the active preset's chip
+//!   renders in the accent fill against the inactive
+//!   card fill, the panel header's meta names it, and
+//!   the cycle button's label names it — three cues.
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, El};
@@ -614,7 +630,7 @@ pub fn drawing_stats_line(stats: &DrawingStats) -> String {
 /// title (the existing "Draw" text, the active brush's
 /// name as meta) over a hairline divider, then the drawing
 /// readout line and the control blocks under kit section
-/// labels — tools (mode, eraser, brush cycle, mirror,
+/// labels — Tools (mode, eraser, brush cycle, mirror,
 /// simplify, smooth, clear), Brushes (one chip per preset,
 /// the active one highlighted) with the active preset's
 /// smoothing and width readouts under it, Shapes (Line /
@@ -674,7 +690,13 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
             smooth_current_frame(&mut s.core);
         }))
         .child(icon_btn("clear-drawing", "trash-can", "Clear drawing", false, t, |s| {
-            s.core.clear_frame_drawings()
+            // The stroke panel's press, not the bare core
+            // op: it remaps `stroke_selected` over the
+            // removed indices, so the selection cannot
+            // silently land on a different live stroke
+            // (Wave 9 integration, B5's flag — the header
+            // Clear in stroke_inspector got the same fix).
+            crate::rune_sec::stroke_inspector::clear_frame_strokes_press(s)
         }));
 
     // UI-mission overflow repair (audit s11, D-1): the
@@ -740,12 +762,20 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
     // UI-mission overflow repair (audit s11, D-3): the
     // three groups together measure 436 pt against the
     // 316 pt column — the rotation + button sat entirely
-    // past the window. They are split explicitly into
-    // two rows (Sides + Size, then Rot) rather than
-    // wrapped, so a stepper group never splits across
-    // lines mid-group. The `draw-stamp-params` key
-    // stays on row 1; row 2 is the additive key
-    // `draw-stamp-params-2`.
+    // past the window. They were split explicitly into
+    // rows rather than wrapped, so a stepper group never
+    // splits across lines mid-group.
+    // Wave 9 budget re-measurement (rendered widths from
+    // the headless tree dump, real font metrics): against
+    // the stricter 276 pt content budget NO pairing of
+    // the groups fits — Sides+Size 294.5, Sides+Rot 289,
+    // Size+Rot 281.5 — so each group now sits on its own
+    // row: Sides 147, Size 139.5, Rot 134, each with
+    // more than 129 pt to spare. The `draw-stamp-params`
+    // key stays on row 1 (Sides), `draw-stamp-params-2`
+    // moves to the Size row, and Rot takes the additive
+    // key `draw-stamp-params-3`. Every stepper key and
+    // handler is unchanged.
     let params = &s.draw_tools;
     let stamp_params = row()
         .key("draw-stamp-params")
@@ -758,7 +788,11 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .child(design::stepper_value(&format!("{}", params.sides), t))
         .child(btn("draw-sides-up", "+", false, t, |s| {
             step_stamp_sides(&mut s.core, &mut s.draw_tools, 1)
-        }))
+        }));
+    let stamp_params_2 = row()
+        .key("draw-stamp-params-2")
+        .gap(8.0)
+        .center_y()
         .child(text("Size").font(type_::LABEL).color(t.text_secondary))
         .child(btn("draw-size-dn", "−", false, t, |s| {
             step_stamp_size(&mut s.core, &mut s.draw_tools, -1)
@@ -767,8 +801,8 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .child(btn("draw-size-up", "+", false, t, |s| {
             step_stamp_size(&mut s.core, &mut s.draw_tools, 1)
         }));
-    let stamp_params_2 = row()
-        .key("draw-stamp-params-2")
+    let stamp_params_3 = row()
+        .key("draw-stamp-params-3")
         .gap(8.0)
         .center_y()
         .child(text("Rot").font(type_::LABEL).color(t.text_secondary))
@@ -803,6 +837,7 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         )
+        .child(design::section_label("Tools", t))
         .child(tools)
         .child(design::section_label("Brushes", t))
         .child(brushes.w_full())
@@ -823,6 +858,7 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .child(design::section_label("Stamp", t))
         .child(stamp_params)
         .child(stamp_params_2)
+        .child(stamp_params_3)
 }
 
 #[cfg(test)]
