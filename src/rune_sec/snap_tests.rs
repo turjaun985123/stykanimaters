@@ -631,6 +631,10 @@ fn guides_toggle_flips_state() {
     // holds in whatever workspace the prefs seeded.
     tap(&mut rt, "settings-toggle");
     assert!(rt.state.settings.open, "Settings toggle opens the card");
+    // Settle two frames so the opened card's layout is the
+    // presented one before pressing inside it.
+    rt.frame(DT);
+    rt.frame(DT);
 
     // State-level only, by design: the guides are drawn
     // into the stage canvas `Shape`, whose pixels the
@@ -640,8 +644,12 @@ fn guides_toggle_flips_state() {
     // Value-agnostic, like round 2's theme test: whatever
     // the flag starts at, each tap must invert it.
     let before = rt.state.guides;
+    let rect = rt.presented("settings-guides");
     tap(&mut rt, "settings-guides");
-    assert_eq!(rt.state.guides, !before, "Guides tap flips the flag");
+    assert_eq!(
+        rt.state.guides, !before,
+        "Guides tap flips the flag (button rect: {rect:?})"
+    );
     tap(&mut rt, "settings-guides");
     assert_eq!(rt.state.guides, before, "second tap flips it back");
 }

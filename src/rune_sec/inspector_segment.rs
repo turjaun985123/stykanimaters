@@ -564,14 +564,23 @@ mod tests {
 
     #[test]
     fn rotate_selected_moves_the_readout_by_the_same_step() {
-        // The readout is the solved world angle; a local
-        // +5° step moves it by exactly +5° (mod 360).
+        // The readout is the solved world direction in
+        // screen space (atan2 over y-down positions, so it
+        // grows clockwise on screen); pose angles turn the
+        // other way (the engine's counter-clockwise
+        // convention, the same one drag posing and graph
+        // keys use). A local +5° step therefore moves the
+        // readout by exactly 5° in the readout's own sense:
+        // −5° (mod 360). The magnitude is what must match.
         let mut core = core_with_selection(Some(1));
         let before = segment_state(&core).unwrap().angle_deg;
         rotate_selected(&mut core, 5.0);
         let after = segment_state(&core).unwrap().angle_deg;
         let moved = norm_deg_360(after - before);
-        assert!((moved - 5.0).abs() < 0.01, "readout moved {moved}, want 5");
+        assert!(
+            (moved - 355.0).abs() < 0.01,
+            "readout moved {moved}, want 355 (−5 in readout sense)"
+        );
     }
 
     #[test]
