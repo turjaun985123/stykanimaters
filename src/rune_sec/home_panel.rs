@@ -1012,7 +1012,7 @@ fn project_row_confirm(
             dispatch_duplicate(&mut s.core, &dup_path);
         }))
         .child(btn(&del_key, "Delete", false, t, move |s: &mut State| {
-            arm_delete(&mut s.home_panel, del_path);
+            arm_delete(&mut s.home_panel, del_path.clone());
         }))
 }
 
