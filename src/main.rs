@@ -395,6 +395,13 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     // top (Phase G); a no-op while audio is inactive.
     s.core.sync_playback_audio_on_wrap(prev_frame, s.core.current);
     s.core.sync_playback_audio_on_seek(prev_frame, s.core.current);
+    // Full-loop restart (Phase L): a tick that crossed a
+    // whole loop without the playhead decreasing is invisible
+    // to the wrap and seek syncs above; the fold-counting
+    // walk detects it from the audio clock and restarts the
+    // pass. It stands down on any frame decrease, so a real
+    // wrap never restarts twice.
+    s.core.sync_playback_audio_on_full_loop(prev_frame);
     // Drift correction (Phase J): on ticks where the frame
     // actually changed, ask the player to re-align the sound
     // with the playhead — the wrap and seek syncs above only

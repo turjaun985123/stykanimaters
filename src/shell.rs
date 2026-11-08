@@ -265,6 +265,14 @@ pub struct LayoutPrefs {
     /// is visible.
     #[serde(default = "default_true")]
     pub sidebar_visible: bool,
+    /// Command keys most recently run from the command
+    /// palette, most recent first. Stored here so the
+    /// palette's recents survive a restart; read and
+    /// written through [`palette_recents`] /
+    /// [`save_palette_recents`], which preserve every
+    /// other field.
+    #[serde(default)]
+    pub palette_recents: Vec<String>,
 }
 
 impl Default for LayoutPrefs {
@@ -276,6 +284,7 @@ impl Default for LayoutPrefs {
             dark: true,
             timeline_collapsed: false,
             sidebar_visible: true,
+            palette_recents: Vec::new(),
         }
     }
 }
@@ -311,6 +320,41 @@ pub fn save_layout_in(dir: &Path, prefs: &LayoutPrefs) {
             let _ = std::fs::write(dir.join(LAYOUT_FILE), text);
         }
     }
+}
+
+// ---- Command-palette recents ----
+
+/// The command keys most recently run from the command
+/// palette, most recent first, as persisted in the layout
+/// preferences. An empty list when nothing has been
+/// recorded yet (or the prefs file is missing or corrupt —
+/// [`load_layout`] already folds those into the default
+/// preferences, whose recents are empty).
+pub fn palette_recents() -> Vec<String> {
+    palette_recents_in(&default_dir())
+}
+
+/// [`palette_recents`] with an explicit base directory.
+pub fn palette_recents_in(dir: &Path) -> Vec<String> {
+    load_layout_in(dir).palette_recents
+}
+
+/// Persist the command palette's recents list into the
+/// layout preferences: a load-modify-save that replaces
+/// only [`LayoutPrefs::palette_recents`] and preserves
+/// every other field exactly (the same pattern
+/// `workspaces.rs`' `prefs_with_workspace` uses for the
+/// workspace name). Best-effort, like [`save_layout`] —
+/// write failures are swallowed.
+pub fn save_palette_recents(recents: &[String]) {
+    save_palette_recents_in(&default_dir(), recents);
+}
+
+/// [`save_palette_recents`] with an explicit base directory.
+pub fn save_palette_recents_in(dir: &Path, recents: &[String]) {
+    let mut prefs = load_layout_in(dir);
+    prefs.palette_recents = recents.to_vec();
+    save_layout_in(dir, &prefs);
 }
 
 #[cfg(test)]
@@ -586,6 +630,7 @@ mod tests {
             dark: true,
             timeline_collapsed: true,
             sidebar_visible: false,
+            palette_recents: Vec::new(),
         };
         save_layout_in(&dir, &prefs);
         // The non-default values are really on disk, not
@@ -594,6 +639,83 @@ mod tests {
         assert!(text.contains("\"timeline_collapsed\": true"), "{text}");
         assert!(text.contains("\"sidebar_visible\": false"), "{text}");
         assert_eq!(load_layout_in(&dir), prefs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn palette_recents_round_trip_and_preserve_other_fields() {
+        let dir = temp_dir("palette-recents-roundtrip");
+        // Distinct values in every other field first, so the
+        // load-modify-save has something to lose.
+        let prefs = LayoutPrefs {
+            workspace: "Effects".to_string(),
+            dark: false,
+            timeline_collapsed: true,
+            sidebar_visible: false,
+            palette_recents: Vec::new(),
+        };
+        save_layout_in(&dir, &prefs);
+
+        let keys = vec![
+            "go-export".to_string(),
+            "toggle-loop-playback".to_string(),
+            "add-frame".to_string(),
+        ];
+        save_palette_recents_in(&dir, &keys);
+        assert_eq!(palette_recents_in(&dir), keys);
+        // The recents really are on disk inside the layout
+        // file, not just reconstructed on load.
+        let text = std::fs::read_to_string(dir.join(LAYOUT_FILE)).unwrap();
+        assert!(text.contains("\"palette_recents\""), "{text}");
+        assert!(text.contains("\"go-export\""), "{text}");
+
+        // Every other field survived the save untouched.
+        let after = load_layout_in(&dir);
+        assert_eq!(after.workspace, "Effects");
+        assert!(!after.dark);
+        assert!(after.timeline_collapsed);
+        assert!(!after.sidebar_visible);
+        assert_eq!(
+            after,
+            LayoutPrefs {
+                palette_recents: keys,
+                ..prefs
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn palette_recents_missing_file_is_empty() {
+        let dir = temp_dir("palette-recents-missing");
+        assert!(palette_recents_in(&dir).is_empty());
+        // A directory that does not exist at all is also
+        // just "nothing recorded yet".
+        assert!(palette_recents_in(&dir.join("nope")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_without_palette_recents_field_loads_with_empty_recents() {
+        let dir = temp_dir("layout-no-palette-recents");
+        // A `.layout.json` written before the palette
+        // recents field existed: every other field present,
+        // no `palette_recents` key at all.
+        std::fs::write(
+            dir.join(LAYOUT_FILE),
+            "{\"workspace\":\"Draw\",\"dark\":false,\
+             \"timeline_collapsed\":true,\"sidebar_visible\":false}",
+        )
+        .unwrap();
+        let prefs = load_layout_in(&dir);
+        assert_eq!(prefs.workspace, "Draw");
+        assert!(!prefs.dark);
+        assert!(prefs.timeline_collapsed);
+        assert!(!prefs.sidebar_visible);
+        // The missing field takes its default — an empty
+        // list — instead of making the file read as corrupt.
+        assert!(prefs.palette_recents.is_empty());
+        assert!(palette_recents_in(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

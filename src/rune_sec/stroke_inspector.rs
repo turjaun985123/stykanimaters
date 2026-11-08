@@ -191,6 +191,32 @@
 //! even rendered then, so a press can only go stale
 //! if the project changed under it.
 //!
+//! ## Selected stroke simplify (Phase L, section 22)
+//!
+//! A **Simplify** button (key `stroke-simplify`,
+//! `wand-magic-sparkles` glyph — the same glyph the
+//! Draw panel's frame-wide Simplify carries) under
+//! the width row, rendered under the same
+//! valid-selection condition, runs Douglas-Peucker
+//! over the one selected stroke through the engine
+//! op `draw_ops::simplify_stroke_at` (Phase L,
+//! section 21) at [`SIMPLIFY_EPSILON`]. The op takes
+//! no snapshot — the caller snapshots — so the press
+//! probes first with the same algorithm's index form,
+//! `draw_ops::douglas_peucker_indices`: when the
+//! probe would keep every point, the stroke is
+//! already simple at this epsilon and the press only
+//! reports that (`Stroke {n} is already simple.`),
+//! taking no snapshot and adding no undo step for a
+//! change that does not exist. Otherwise exactly one
+//! `core.snapshot()` precedes the op, and the status
+//! reports the surviving count (`Stroke {n}
+//! simplified to {m} points.`) — one press, one undo
+//! step, like the width steppers. With no selection,
+//! or a stale one, the press is a silent no-op, the
+//! width press's discipline: the button is not even
+//! rendered then.
+//!
 //! `State` access: the brush and stroke data read
 //! `s.core` (active brush, `brush_index`,
 //! `project.strokes`, `current`) and writes go through
@@ -732,6 +758,19 @@ pub const MAX_STROKE_WIDTH: f32 = 40.0;
 /// is what `begin_draw` records a fresh stroke with.
 pub const DEFAULT_STROKE_WIDTH: f32 = 4.0;
 
+/// Douglas-Peucker epsilon (stage units) for the
+/// selected stroke's Simplify press — the same value
+/// the Draw panel's frame-wide Simplify uses
+/// (`draw_tools::SIMPLIFY_EPSILON`, Phase H): hand-drawn
+/// strokes record points only when the pointer has
+/// moved more than 2 units (`EditorCore::draw_to`), so
+/// an epsilon of 2.0 removes sub-recording jitter
+/// without eating deliberate corners at typical stroke
+/// scales. Both panels simplifying at one tolerance
+/// keeps the gesture predictable: a stroke the frame
+/// press would leave alone, this press leaves alone.
+pub const SIMPLIFY_EPSILON: f32 = 2.0;
+
 /// The width after one stepper press in direction
 /// `dir` (−1 / +1; larger magnitudes step further):
 /// `current` moved by `dir` × [`STROKE_WIDTH_STEP`]
@@ -795,6 +834,54 @@ pub fn set_selected_stroke_width(
     }
     core.status = format!("Stroke {} width {:.1}.", i + 1, new);
     true
+}
+
+/// Simplify press: Douglas-Peucker the selected
+/// stroke at [`SIMPLIFY_EPSILON`] through the engine
+/// op `draw_ops::simplify_stroke_at` (Phase L,
+/// section 21). The op mutates in place and takes no
+/// snapshot — the caller snapshots — so the press
+/// first probes with the op's own index form,
+/// `draw_ops::douglas_peucker_indices`, over the
+/// stroke's points: if the probe keeps every point,
+/// the stroke is already simple at this epsilon and
+/// the press only reports that (`Stroke {n} is
+/// already simple.`), taking NO snapshot — an undo
+/// step for a change that does not exist would be a
+/// lie in the undo history. Otherwise exactly one
+/// `core.snapshot()` precedes the op, so the press is
+/// one undo step, and the status names the surviving
+/// point count read back from the stroke itself
+/// (`Stroke {n} simplified to {m} points.`). With no
+/// selection, or a stale one, the press is a silent
+/// no-op — no snapshot, no status — the width press's
+/// discipline; the button is not rendered then, so a
+/// press can only go stale if the project changed
+/// under it.
+pub fn simplify_selected(s: &mut State) {
+    let Some(i) = s
+        .stroke_selected
+        .filter(|&i| i < s.core.project.strokes.len())
+    else {
+        return;
+    };
+    let kept = stykanimate_rs::draw_ops::douglas_peucker_indices(
+        &s.core.project.strokes[i].points,
+        SIMPLIFY_EPSILON,
+    );
+    if kept.len() == s.core.project.strokes[i].points.len() {
+        s.core.status = format!("Stroke {} is already simple.", i + 1);
+        return;
+    }
+    s.core.snapshot();
+    if stykanimate_rs::draw_ops::simplify_stroke_at(
+        &mut s.core.project,
+        i,
+        SIMPLIFY_EPSILON,
+    ) {
+        let m = s.core.project.strokes[i].points.len();
+        s.core.status = format!("Stroke {} simplified to {} points.", i + 1, m);
+    }
 }
 
 /// Prev / Next press: step `s.stroke_selected` through
@@ -1254,6 +1341,22 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                     },
                 )),
         );
+    }
+
+    // Selected stroke simplify (Phase L): a Simplify
+    // button under the width row, under the same
+    // valid-selection condition — Douglas-Peucker over
+    // the one selected stroke, one undo step when it
+    // changes anything (see `simplify_selected`).
+    if selected_stroke_width(core, s.stroke_selected).is_some() {
+        panel = panel.child(icon_btn(
+            "stroke-simplify",
+            "wand-magic-sparkles",
+            "Simplify",
+            false,
+            t,
+            |s| simplify_selected(s),
+        ));
     }
 
     panel = panel.child(
@@ -2308,6 +2411,122 @@ mod tests {
         // Strokes present, one selected: the row renders
         // the position/frame readout.
         let s = state_with(core_with_strokes(), Some(1));
+        let _ = stroke_panel(&s, &t);
+    }
+
+    /// A jittery near-straight stroke: seven points
+    /// alternating ±1.0 around the x-axis. Every
+    /// interior point sits within 1.0 of the chord, so
+    /// Douglas-Peucker at [`SIMPLIFY_EPSILON`] (2.0)
+    /// drops them all and keeps only the endpoints.
+    fn jitter_stroke() -> Stroke {
+        let mut s = plain_stroke(0, 0);
+        s.points = vec![
+            [0.0, 0.0],
+            [8.0, 1.0],
+            [16.0, 0.0],
+            [24.0, -1.0],
+            [32.0, 0.0],
+            [40.0, 1.0],
+            [48.0, 0.0],
+        ];
+        s
+    }
+
+    /// A stroke with one deliberate corner: the middle
+    /// point stands 50 units off the chord, far beyond
+    /// [`SIMPLIFY_EPSILON`], so the probe keeps all
+    /// three points — already simple at this epsilon.
+    fn corner_stroke() -> Stroke {
+        let mut s = plain_stroke(0, 0);
+        s.points = vec![[0.0, 0.0], [50.0, 50.0], [100.0, 0.0]];
+        s
+    }
+
+    #[test]
+    fn simplify_epsilon_matches_the_draw_panels_value() {
+        // The two Simplify presses (this panel's
+        // per-stroke one, the Draw panel's frame-wide
+        // one) share one tolerance — pinned against the
+        // sibling module's constant, not just the
+        // number, so the two cannot drift apart.
+        assert_eq!(SIMPLIFY_EPSILON, 2.0);
+        assert_eq!(
+            SIMPLIFY_EPSILON,
+            crate::rune_sec::draw_tools::SIMPLIFY_EPSILON
+        );
+    }
+
+    #[test]
+    fn simplify_selected_reduces_a_jittery_stroke_in_one_undo_step() {
+        let mut core = EditorCore::new();
+        core.project.strokes.push(jitter_stroke());
+        let mut s = state_with(core, Some(0));
+        let depth = s.core.undo_depth();
+        simplify_selected(&mut s);
+        // Every jitter point is gone; the endpoints
+        // survive verbatim (simplification never moves
+        // a kept point).
+        assert_eq!(
+            s.core.project.strokes[0].points,
+            vec![[0.0, 0.0], [48.0, 0.0]]
+        );
+        assert_eq!(s.core.status, "Stroke 1 simplified to 2 points.");
+        assert_eq!(s.core.undo_depth(), depth + 1, "exactly one snapshot");
+        // And the one press is exactly one undo step.
+        s.core.undo();
+        assert_eq!(
+            s.core.project.strokes[0].points.len(),
+            7,
+            "one undo restores every point"
+        );
+    }
+
+    #[test]
+    fn simplify_selected_on_an_already_simple_stroke_takes_no_snapshot() {
+        let mut core = EditorCore::new();
+        core.project.strokes.push(corner_stroke());
+        let mut s = state_with(core, Some(0));
+        let depth = s.core.undo_depth();
+        simplify_selected(&mut s);
+        // The probe kept every point, so the press only
+        // reports — no snapshot, no undo step, no write.
+        assert_eq!(s.core.status, "Stroke 1 is already simple.");
+        assert_eq!(s.core.undo_depth(), depth, "no snapshot taken");
+        assert_eq!(
+            s.core.project.strokes[0].points,
+            vec![[0.0, 0.0], [50.0, 50.0], [100.0, 0.0]],
+            "points untouched"
+        );
+    }
+
+    #[test]
+    fn simplify_selected_without_a_selection_is_a_silent_no_op() {
+        let mut s = state_with(core_with_strokes(), None);
+        let depth = s.core.undo_depth();
+        let status_before = s.core.status.clone();
+        simplify_selected(&mut s);
+        assert_eq!(s.core.undo_depth(), depth, "no snapshot taken");
+        assert_eq!(s.core.status, status_before, "no status written");
+        // A stale selection past the end: same silence.
+        s.stroke_selected = Some(99);
+        simplify_selected(&mut s);
+        assert_eq!(s.core.undo_depth(), depth, "no snapshot taken");
+        assert_eq!(s.core.status, status_before, "no status written");
+    }
+
+    #[test]
+    fn stroke_panel_builds_for_the_simplify_button_with_and_without_a_selection() {
+        let t = rune::tok::theme(true);
+        // No selection: the Simplify button's render
+        // branch (the width row's valid-selection
+        // condition) is not taken, so the button is
+        // absent — the panel builds without it.
+        let s = state_with(core_with_strokes(), None);
+        let _ = stroke_panel(&s, &t);
+        // Valid selection: the branch is taken and the
+        // panel builds with the button.
+        let s = state_with(core_with_strokes(), Some(0));
         let _ = stroke_panel(&s, &t);
     }
 }

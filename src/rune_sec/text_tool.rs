@@ -151,9 +151,29 @@
 //! "Text {n} rotated." and returns true, keeping the
 //! press a real (if empty) undo step rather than a
 //! silent dead button.
+//!
+//! ## Phase L (§23): colouring the loaded instance
+//!
+//! The loaded instance gains a colour row
+//! (`text-color-row`): eight swatch chips
+//! (`text-color-{i}`) over [`TEXT_PALETTE`] — the
+//! particles panel's palette, reused value for value
+//! so the shell's swatch language stays one language —
+//! plus a current-colour readout chip
+//! (`text-color-custom`) showing the loaded instance's
+//! own colour, including colours no swatch carries.
+//! A swatch press recolours through
+//! [`set_text_color`]: only the instance's `color`
+//! field changes, under exactly one `snapshot()`,
+//! with the same stale-index refusal as
+//! [`update_text_instance`]. The swatch whose colour
+//! the instance already wears sits in an accent-filled
+//! slot (the particles panel's construction); colours
+//! are compared masked to `0xRRGGBB`, the engine's
+//! colour form.
 
-use rune::tok::{type_, Theme};
-use rune::{col, row, text, text_input, El, TextEdit as FieldEdit, Tx};
+use rune::tok::{self, type_, Theme};
+use rune::{col, el, row, text, text_input, El, TextEdit as FieldEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{InstanceKey, SegmentMedia, TextInstance};
 use stykanimate_rs::text_edit::{TextEdit as SegTextEdit, DEFAULT_TEXT_SIZE};
@@ -182,6 +202,23 @@ pub const NUDGE_STEP: f32 = 4.0;
 /// step size is all a press can mean (the nudge pad's
 /// same limit).
 pub const ROTATE_STEP_RAD: f32 = std::f32::consts::PI / 12.0;
+
+/// The colour row's swatches (`0xRRGGBB`): the
+/// particles panel's palette
+/// (`particles_panel::PARTICLE_PALETTE`), reused value
+/// for value so a colour means the same swatch in both
+/// panels — six hues around the wheel, then white and
+/// black.
+pub const TEXT_PALETTE: [u32; 8] = [
+    0xFF5D5D, // red
+    0xFF9F43, // orange
+    0xFFC65D, // amber
+    0x7BE495, // green
+    0x57C7E3, // sky
+    0xA184FF, // violet
+    0xFFFFFF, // white
+    0x000000, // black
+];
 
 /// View state for the text tool: the Rune field's edit
 /// model plus the pending glyph height used by the next
@@ -520,6 +557,31 @@ pub fn rotate_text_instance(core: &mut EditorCore, index: usize, delta_rad: f32)
     true
 }
 
+/// Set the text instance at `index`'s colour to
+/// `color` (Phase L §23): the colouring half of the
+/// loaded instance's edit area. No editor op exists
+/// for text instances, so — like this file's other
+/// instance mutations — the panel writes the project
+/// field directly. Only the `color` field changes:
+/// content, size and the transform keys are untouched.
+/// Exactly one `snapshot()`, so a swatch press is a
+/// single undo step; a stale index refuses exactly as
+/// [`update_text_instance`] does ("No such text.",
+/// nothing snapshotted). Returns whether the colour
+/// was set.
+pub fn set_text_color(core: &mut EditorCore, index: usize, color: u32) -> bool {
+    let Some(_inst) = core.project.texts.get(index) else {
+        core.status = "No such text.".into();
+        return false;
+    };
+    core.snapshot();
+    if let Some(inst) = core.project.texts.get_mut(index) {
+        inst.color = color;
+    }
+    core.status = format!("Text {} colour set to #{color:06X}.", index + 1);
+    true
+}
+
 /// The full (untruncated) content of the text instance at
 /// `index` — what a list-row click loads into the tool's
 /// field.
@@ -630,6 +692,17 @@ fn rotate_loaded(s: &mut State, delta_rad: f32) {
         return;
     };
     rotate_text_instance(&mut s.core, i, delta_rad);
+}
+
+/// Swatch-press handler (Phase L §23): recolour the
+/// loaded instance via [`set_text_color`]. Resolution
+/// and refusal are [`loaded_index`]'s and the op's,
+/// exactly like the rotate row's presses.
+fn set_loaded_color(s: &mut State, color: u32) {
+    let Some(i) = loaded_index(s) else {
+        return;
+    };
+    set_text_color(&mut s.core, i, color);
 }
 
 /// Nudge-pad handler: move the loaded instance by
@@ -790,6 +863,61 @@ fn step_from_button(s: &mut State, dir: i32) {
 /// project's free-standing text instances, and the
 /// loaded instance's nudge pad, rotate row and size
 /// steppers.
+/// The loaded instance's colour row (Phase L §23):
+/// the [`TEXT_PALETTE`] swatches in the particles
+/// panel's construction — a 26 pt slot per colour,
+/// accent-filled behind the 22 pt colour chip when it
+/// is the loaded instance's colour (compared masked
+/// to `0xRRGGBB`) — plus a readout chip
+/// (`text-color-custom`) carrying the instance's own
+/// colour even when no swatch matches it. Built
+/// either way, like the nudge pad: with nothing
+/// loaded no slot is lit and no readout shows, and a
+/// press refuses through [`loaded_index`].
+fn text_color_row(s: &State, t: &Theme) -> El {
+    let loaded_color = s
+        .text_tool
+        .loaded
+        .and_then(|i| s.core.project.texts.get(i))
+        .map(|inst| inst.color & 0xFF_FFFF);
+    let accent = tok::accent(0, true);
+    let mut row_el = row().key("text-color-row").w_full().gap(4.0).center_y();
+    for (ci, &rgb) in TEXT_PALETTE.iter().enumerate() {
+        row_el = row_el.child(
+            el()
+                .key(format!("text-color-{ci}"))
+                .size(26.0, 26.0)
+                .radius(8.0)
+                .fill(if loaded_color == Some(rgb) { accent } else { t.bg })
+                .center()
+                .on_press(move |s: &mut State| set_loaded_color(s, rgb))
+                .child(
+                    el()
+                        .size(22.0, 22.0)
+                        .radius(6.0)
+                        .fill(crate::stage_view::hex_color(rgb).unwrap_or(t.bg)),
+                ),
+        );
+    }
+    if let Some(current) = loaded_color {
+        row_el = row_el.child(
+            el()
+                .key("text-color-custom")
+                .size(26.0, 26.0)
+                .radius(8.0)
+                .fill(t.bg)
+                .center()
+                .child(
+                    el()
+                        .size(22.0, 22.0)
+                        .radius(6.0)
+                        .fill(crate::stage_view::hex_color(current).unwrap_or(t.bg)),
+                ),
+        );
+    }
+    row_el
+}
+
 pub fn text_tool(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let rows = text_segments(core);
@@ -848,7 +976,8 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
 
     // The loaded instance's edit area: the Update text
     // write-back button (Phase J §24), a nudge pad, a
-    // rotate row (Phase K §30) and size steppers acting
+    // rotate row (Phase K §30), a colour row (Phase
+    // L §23) and size steppers acting
     // on `TextToolState::loaded` —
     // the instance the last row click loaded. Rendered
     // either way; with nothing loaded the handlers refuse
@@ -921,6 +1050,7 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                     rotate_loaded(s, ROTATE_STEP_RAD)
                 })),
         )
+        .child(text_color_row(s, t))
         .child(
             row()
                 .key("text-instance-size")
@@ -1717,6 +1847,95 @@ mod tests {
         assert_eq!(core.status, "No such text.");
         assert_eq!(key_angles(&core, 0), vec![30.0], "nothing was rotated");
         assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
+    }
+
+    #[test]
+    fn set_text_color_writes_the_colour_and_nothing_else() {
+        let mut core = EditorCore::new();
+        // The fixture's colour is 0xFF_102030.
+        push_instance_angled(
+            &mut core,
+            "Coloured",
+            &[(0.0, 10.0, 20.0, 0.25), (3.0, 40.0, 50.0, -0.25)],
+        );
+        let depth_before = core.undo_depth();
+        assert!(set_text_color(&mut core, 0, TEXT_PALETTE[3]));
+        assert_eq!(core.status, "Text 1 colour set to #7BE495.");
+        let inst = &core.project.texts[0];
+        assert_eq!(inst.color, 0x7BE495, "the swatch colour is written verbatim");
+        assert_eq!(inst.content, "Coloured", "content untouched");
+        assert_eq!(inst.size, 24.0, "size untouched");
+        assert_eq!(
+            key_angles(&core, 0),
+            vec![0.25, -0.25],
+            "transform keys untouched"
+        );
+        assert_eq!(
+            core.undo_depth(),
+            depth_before + 1,
+            "exactly one snapshot for the recolour"
+        );
+        core.undo();
+        assert_eq!(
+            core.project.texts[0].color, 0xFF_102030,
+            "one undo restores the old colour"
+        );
+    }
+
+    #[test]
+    fn set_text_color_out_of_range_is_status_only_noop() {
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "A", 20.0, &[(0.0, 10.0, 20.0)]);
+        let depth_before = core.undo_depth();
+        assert!(!set_text_color(&mut core, 7, TEXT_PALETTE[0]));
+        assert_eq!(core.status, "No such text.");
+        assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
+    }
+
+    #[test]
+    fn set_loaded_color_recolours_the_loaded_instance_only() {
+        let mut s = crate::init();
+        push_instance(&mut s.core, "First", 24.0, 1);
+        push_instance(&mut s.core, "Second", 24.0, 1);
+        // Nothing loaded: the press refuses through
+        // loaded_index and recolours nothing.
+        set_loaded_color(&mut s, TEXT_PALETTE[0]);
+        assert_eq!(s.core.status, "Load a text first.");
+        assert_eq!(s.core.project.texts[0].color, 0xFF_FFFF);
+        assert_eq!(s.core.project.texts[1].color, 0xFF_FFFF);
+        // Loaded = the second instance: only it changes.
+        s.text_tool.loaded = Some(1);
+        set_loaded_color(&mut s, TEXT_PALETTE[0]);
+        assert_eq!(s.core.status, "Text 2 colour set to #FF5D5D.");
+        assert_eq!(
+            s.core.project.texts[0].color, 0xFF_FFFF,
+            "the unloaded instance keeps its colour"
+        );
+        assert_eq!(s.core.project.texts[1].color, TEXT_PALETTE[0]);
+    }
+
+    #[test]
+    fn text_palette_is_the_particles_palette() {
+        // One swatch language across the shell: the
+        // values are the particles panel's, exactly.
+        assert_eq!(
+            TEXT_PALETTE,
+            crate::rune_sec::particles_panel::PARTICLE_PALETTE
+        );
+        let mut sorted = TEXT_PALETTE.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 8, "every swatch colour is distinct");
+    }
+
+    #[test]
+    fn text_tool_builds_with_and_without_a_loaded_instance() {
+        let t = rune::tok::theme(true);
+        let mut s = crate::init();
+        let _ = text_tool(&s, &t);
+        push_instance(&mut s.core, "Loaded", 24.0, 1);
+        s.text_tool.loaded = Some(0);
+        let _ = text_tool(&s, &t);
     }
 
     #[test]

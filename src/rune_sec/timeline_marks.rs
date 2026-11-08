@@ -34,7 +34,11 @@
 //! to — the engine's own frame numbering (`CameraKey.frame`,
 //! [`graph_key_frame`]), not the chips' 1-based labels.
 //! Phase J adds `timeline-ruler` on the time ruler above
-//! the chips.
+//! the chips. Phase L adds `timeline-loop-row` on the loop
+//! row under the timeline (see the Loop row section
+//! below), with `loop-set` / `loop-clear` and the four
+//! endpoint steppers `loop-a-dn` / `loop-a-up` /
+//! `loop-b-dn` / `loop-b-up` inside it.
 //!
 //! ## Time ruler
 //!
@@ -171,11 +175,45 @@
 //! a ruler: a horizontal drag on the chips selects instead
 //! of scrolling the viewport (pointer capture); the wheel
 //! still scrolls.
+//!
+//! ## Loop row (Phase L)
+//!
+//! Under the scrolled timeline — outside the scroll
+//! viewport, so its buttons never scroll away on a long
+//! timeline — sits a small loop row (`timeline-loop-row`),
+//! rendered only when it has content:
+//!
+//! - **No loop range**: one `loop-set` button ("Set loop")
+//!   that asks the core for a loop from the current frame
+//!   to four frames on, clamped to the last frame
+//!   ([`loop_set_range`]). On a zero-frame project the row
+//!   renders nothing at all — there is nothing to loop.
+//! - **A loop range**: the [`loop_label`] readout ("Loop
+//!   {a+1}–{b+1}", the status strip's wording), four
+//!   steppers moving one endpoint by one frame
+//!   (`loop-a-dn` / `loop-a-up` for the start, `loop-b-dn`
+//!   / `loop-b-up` for the end) and a `loop-clear` button
+//!   ("Clear").
+//!
+//! Every write goes through the core's own ops, once per
+//! press: the steppers hand [`loop_after_step`]'s adjusted
+//! pair to `set_loop_range`, which orders and clamps it —
+//! so stepping an endpoint *past* the other one swaps the
+//! endpoints' roles (the stepped endpoint becomes the far
+//! end), exactly the handover an edge drag across the
+//! range performs. Clear calls `clear_loop_range`, the
+//! core's own op (it also posts "Loop range cleared.") —
+//! the same op, under the same `loop-clear` key, as the
+//! transport's and the Frames section's Loop clear
+//! buttons: one action, one key, three homes. Like the
+//! edge drag, the row takes no snapshots: `loop_range` is
+//! runtime state the core never undoes.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Color, Drag, El, Phase, Tx};
 use stykanimate_rs::editor::EditorCore;
 
+use crate::chrome_view::btn;
 use crate::rune_sec::frame_ops::{selected_range, FrameOpsState};
 use crate::State;
 
@@ -328,6 +366,88 @@ fn apply_loop_edge(core: &mut EditorCore, edge: Edge, frame: usize) {
     if let Some(next) = loop_after_edge_drag(core.loop_range, edge, frame, core.frame_count()) {
         core.loop_range = Some(next);
     }
+}
+
+/// The loop range the loop row's Set loop button asks for:
+/// from `current`, four frames on, the end clamped to the
+/// last frame — so near the end of the timeline the loop
+/// is simply shorter, and on the last frame it is a
+/// single-frame loop. `None` only when there are no
+/// frames. The pair is what the handler hands to
+/// `EditorCore::set_loop_range`, which applies its own
+/// ordering and clamping on top (a hand-built `current`
+/// past the end therefore still lands on the last frame).
+pub fn loop_set_range(current: usize, frame_count: usize) -> Option<(usize, usize)> {
+    if frame_count == 0 {
+        return None;
+    }
+    let last = frame_count - 1;
+    Some((current, current.saturating_add(4).min(last)))
+}
+
+/// The loop range after one stepper press: the chosen
+/// endpoint moved one frame in `dir`'s sign (negative
+/// towards the start of the timeline, positive towards
+/// the end), saturating at frame 0 — the one bound
+/// `set_loop_range` cannot apply for the caller, since a
+/// `usize` endpoint stepped below zero would wrap before
+/// the op ever saw it. The input is normalised first, so
+/// `Edge::Start` always names the earlier endpoint, the
+/// one the row's label prints first. The result is the
+/// raw pair for `set_loop_range`: deliberately *not*
+/// ordered or end-clamped here, because the op does both
+/// — an endpoint stepped past the other one therefore
+/// comes back from the op with the roles swapped.
+pub fn loop_after_step(range: (usize, usize), edge: Edge, dir: i32) -> (usize, usize) {
+    let (a, b) = (range.0.min(range.1), range.0.max(range.1));
+    let step = |v: usize| {
+        if dir < 0 {
+            v.saturating_sub(1)
+        } else {
+            v.saturating_add(1)
+        }
+    };
+    match edge {
+        Edge::Start => (step(a), b),
+        Edge::End => (a, step(b)),
+    }
+}
+
+/// The loop row's readout for a range: "Loop {a+1}–{b+1}"
+/// — 1-based, en dash, the status strip's `loop_segment`
+/// wording for the same state. A hand-built unordered
+/// range reads in timeline order.
+pub fn loop_label(range: (usize, usize)) -> String {
+    let (a, b) = (range.0.min(range.1), range.0.max(range.1));
+    format!("Loop {}–{}", a + 1, b + 1)
+}
+
+/// What the loop row's Set loop button does: ask the core
+/// for [`loop_set_range`]'s pair at the playhead. On an
+/// empty project there is no pair and nothing happens —
+/// the button is not rendered then anyway.
+fn set_loop_here(s: &mut State) {
+    if let Some((a, b)) = loop_set_range(s.core.current, s.core.frame_count()) {
+        s.core.set_loop_range(a, b);
+    }
+}
+
+/// What one loop-row stepper press does: hand the adjusted
+/// endpoint pair to `set_loop_range`, whose ordering and
+/// clamping settle it (see [`loop_after_step`]). No range,
+/// no press — the steppers render only beside a range.
+fn step_loop(s: &mut State, edge: Edge, dir: i32) {
+    if let Some(range) = s.core.loop_range {
+        let (a, b) = loop_after_step(range, edge, dir);
+        s.core.set_loop_range(a, b);
+    }
+}
+
+/// What the loop row's Clear button does: the core's own
+/// `clear_loop_range` — the shell's one way of clearing a
+/// loop, shared with the transport and Frames buttons.
+fn clear_loop_here(s: &mut State) {
+    s.core.clear_loop_range();
 }
 
 /// The drag-scratch sentinel for an edge gesture (the
@@ -723,11 +843,53 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // above its chips and the markers stay under theirs at
     // any scroll offset.
     let content = col().gap(2.0).child(ruler).child(chips).child(marker_row);
-    row()
-        .key("timeline")
-        .child(content)
-        .scroll_x()
-        .w_full()
+    let timeline = row().key("timeline").child(content).scroll_x().w_full();
+    // The loop row hangs under the scrolled timeline,
+    // outside the viewport, so its buttons stay put however
+    // far the chips scroll. With nothing to show (an empty
+    // project) the timeline element is returned exactly as
+    // it was before the row existed.
+    match loop_row(s, t) {
+        Some(loop_row) => col().gap(2.0).child(timeline).child(loop_row),
+        None => timeline,
+    }
+}
+
+/// The loop row under the timeline (Phase L, see the
+/// module docs): a Set loop button while no loop range
+/// exists, or the range's label with its four endpoint
+/// steppers and a Clear button while one does. `None`
+/// only on a zero-frame project, where there is nothing
+/// to loop and nothing to clear.
+fn loop_row(s: &State, t: &Theme) -> Option<El> {
+    let core = &s.core;
+    if core.frame_count() == 0 {
+        return None;
+    }
+    let mut r = row().key("timeline-loop-row").gap(CHIP_GAP).center_y();
+    match core.loop_range {
+        None => {
+            r = r.child(btn("loop-set", "Set loop", false, t, set_loop_here));
+        }
+        Some(range) => {
+            r = r
+                .child(text(loop_label(range)).font(type_::LABEL).color(t.text))
+                .child(btn("loop-a-dn", "Start -", false, t, |s: &mut State| {
+                    step_loop(s, Edge::Start, -1);
+                }))
+                .child(btn("loop-a-up", "Start +", false, t, |s: &mut State| {
+                    step_loop(s, Edge::Start, 1);
+                }))
+                .child(btn("loop-b-dn", "End -", false, t, |s: &mut State| {
+                    step_loop(s, Edge::End, -1);
+                }))
+                .child(btn("loop-b-up", "End +", false, t, |s: &mut State| {
+                    step_loop(s, Edge::End, 1);
+                }))
+                .child(btn("loop-clear", "Clear", false, t, clear_loop_here));
+        }
+    }
+    Some(r)
 }
 
 /// Kept for the integrator: the selection this row produces,
@@ -1323,6 +1485,141 @@ playback_speed: 1.0,
             target: ChannelTarget::RootX,
             keys: vec![Key::flat(2.5, 1.0)],
         });
+        let _ = timeline_marks(&state, &t);
+    }
+
+    // ---- loop row (Phase L): Set loop from the playhead,
+    // per-endpoint steppers through the core's own op, and
+    // Clear through `clear_loop_range` ----
+
+    #[test]
+    fn loop_set_range_spans_four_frames_from_current() {
+        assert_eq!(loop_set_range(0, 20), Some((0, 4)));
+        assert_eq!(loop_set_range(3, 20), Some((3, 7)));
+        assert_eq!(loop_set_range(15, 20), Some((15, 19)));
+    }
+
+    #[test]
+    fn loop_set_range_clamps_near_the_end() {
+        // The end clamps to the last frame: the loop is
+        // shorter near the end, and a single frame on the
+        // last frame itself.
+        assert_eq!(loop_set_range(3, 5), Some((3, 4)));
+        assert_eq!(loop_set_range(4, 5), Some((4, 4)));
+        assert_eq!(loop_set_range(0, 1), Some((0, 0)));
+        // No frames, no range to ask for.
+        assert_eq!(loop_set_range(0, 0), None);
+    }
+
+    #[test]
+    fn set_loop_button_loops_from_the_playhead() {
+        let mut state = demo_state();
+        state.core.goto(1);
+        set_loop_here(&mut state);
+        assert_eq!(state.core.loop_range, Some((1, 4)));
+        assert_eq!(state.core.status, "Looping frames 2–5.");
+        // On the last frame the set loop is that frame
+        // alone.
+        state.core.clear_loop_range();
+        state.core.goto(4);
+        set_loop_here(&mut state);
+        assert_eq!(state.core.loop_range, Some((4, 4)));
+    }
+
+    #[test]
+    fn loop_after_step_moves_the_named_endpoint() {
+        let range = (1, 3);
+        assert_eq!(loop_after_step(range, Edge::Start, -1), (0, 3));
+        assert_eq!(loop_after_step(range, Edge::Start, 1), (2, 3));
+        assert_eq!(loop_after_step(range, Edge::End, -1), (1, 2));
+        assert_eq!(loop_after_step(range, Edge::End, 1), (1, 4));
+        // Only the sign of `dir` matters.
+        assert_eq!(loop_after_step(range, Edge::Start, -5), (0, 3));
+        // A hand-built unordered range steps its earlier
+        // endpoint when Start is named.
+        assert_eq!(loop_after_step((3, 1), Edge::Start, 1), (2, 3));
+    }
+
+    #[test]
+    fn loop_after_step_saturates_at_frame_zero() {
+        // The start cannot step below frame 0 (the op
+        // never sees a wrapped usize); the end of a
+        // single-frame loop at 0 saturates the same way.
+        assert_eq!(loop_after_step((0, 3), Edge::Start, -1), (0, 3));
+        assert_eq!(loop_after_step((0, 0), Edge::End, -1), (0, 0));
+    }
+
+    #[test]
+    fn loop_steppers_move_the_right_endpoint_through_the_op() {
+        let mut state = demo_state();
+        state.core.set_loop_range(1, 3);
+        step_loop(&mut state, Edge::Start, 1);
+        assert_eq!(state.core.loop_range, Some((2, 3)));
+        assert_eq!(state.core.status, "Looping frames 3–4.");
+        step_loop(&mut state, Edge::End, -1);
+        assert_eq!(state.core.loop_range, Some((2, 2)));
+        // Stepping the end past the start hands the pair
+        // to `set_loop_range` unordered; the op orders
+        // them, so the roles swap — the end the user is
+        // stepping is now the range's start side.
+        step_loop(&mut state, Edge::End, -1);
+        assert_eq!(state.core.loop_range, Some((1, 2)));
+        // Stepping the end beyond the last frame clamps
+        // there, in the op.
+        step_loop(&mut state, Edge::End, 1);
+        step_loop(&mut state, Edge::End, 1);
+        step_loop(&mut state, Edge::End, 1);
+        assert_eq!(state.core.loop_range, Some((1, 4)));
+    }
+
+    #[test]
+    fn loop_steppers_without_a_range_do_nothing() {
+        let mut state = demo_state();
+        assert_eq!(state.core.loop_range, None);
+        let status_before = state.core.status.clone();
+        step_loop(&mut state, Edge::Start, 1);
+        step_loop(&mut state, Edge::End, -1);
+        assert_eq!(state.core.loop_range, None);
+        assert_eq!(state.core.status, status_before);
+    }
+
+    #[test]
+    fn loop_clear_button_empties_the_range() {
+        let mut state = demo_state();
+        state.core.set_loop_range(1, 3);
+        clear_loop_here(&mut state);
+        assert_eq!(state.core.loop_range, None);
+        // The op's own status line, word for word.
+        assert_eq!(state.core.status, "Loop range cleared.");
+    }
+
+    #[test]
+    fn loop_label_reads_one_based_in_timeline_order() {
+        assert_eq!(loop_label((1, 3)), "Loop 2–4");
+        assert_eq!(loop_label((0, 4)), "Loop 1–5");
+        assert_eq!(loop_label((2, 2)), "Loop 3–3");
+        // A hand-built unordered range reads ordered.
+        assert_eq!(loop_label((3, 1)), "Loop 2–4");
+    }
+
+    #[test]
+    fn loop_row_is_absent_on_an_empty_project() {
+        // No frames: `loop_row` has nothing to offer, the
+        // Set button's handler is a no-op there, and the
+        // whole timeline still builds with the row absent.
+        let t = rune::tok::theme(true);
+        let mut state = demo_state();
+        state.core.project.frames.clear();
+        assert_eq!(state.core.frame_count(), 0);
+        assert!(loop_row(&state, &t).is_none());
+        set_loop_here(&mut state);
+        assert_eq!(state.core.loop_range, None);
+        let _ = timeline_marks(&state, &t);
+        // With frames, the row exists in both its forms.
+        let mut state = demo_state();
+        assert!(loop_row(&state, &t).is_some());
+        state.core.set_loop_range(1, 3);
+        assert!(loop_row(&state, &t).is_some());
         let _ = timeline_marks(&state, &t);
     }
 }

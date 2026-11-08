@@ -62,6 +62,21 @@
 //! a success snapshots exactly once. Range ends are
 //! inclusive, and range statuses display the ends 1-based.
 //!
+//! ## Per-key interpolation
+//!
+//! [`set_key_interp`] sets one key's [`Interp`] mode — the
+//! per-key counterpart of the editor core's own
+//! `set_graph_key_interp`, which only reaches the key nearest
+//! the playhead on the selected figure's angle channel; this
+//! one addresses any channel and any key by index, so a graph
+//! panel or an MCP tool can set the mode of the exact key it
+//! is showing. [`key_interp_at`] is its read-only half: the
+//! mode of the key sitting at a given frame, resolved with
+//! the shell's key-at-frame convention (see its docs). The
+//! setter follows the house discipline: a refusal sets the
+//! status line and takes **no snapshot**; a success snapshots
+//! exactly once.
+//!
 //! ## Channel statistics
 //!
 //! [`channel_stats`] is the read-only companion: one
@@ -71,7 +86,7 @@
 //! the status line and never mutates the project.
 
 use crate::editor::EditorCore;
-use crate::graph::{ChannelTarget, Key};
+use crate::graph::{ChannelTarget, Interp, Key};
 
 /// Index of the channel for (`figure`, `target`) in
 /// `core.project.channels` — the first match, which is the
@@ -344,6 +359,97 @@ pub fn delete_keys_in_range(
         .retain(|k| !(from..=to).contains(&k.frame));
     core.status = format!("Cleared {count} key(s) in frames {range}.");
     count
+}
+
+/// Display name for an [`Interp`] mode, in UI casing:
+/// "Hermite", "Linear", "Step" — the variant names verbatim,
+/// as the editor core's own interp status prints them.
+fn interp_name(interp: Interp) -> &'static str {
+    match interp {
+        Interp::Hermite => "Hermite",
+        Interp::Linear => "Linear",
+        Interp::Step => "Step",
+    }
+}
+
+/// Set the [`Interp`] mode of one key — the key at
+/// `key_index` in the channel at `channel_index` (both
+/// indices into `core.project.channels` and that channel's
+/// `keys`). The mode governs the segment STARTING at that
+/// key (see [`Key`]'s docs). On success exactly one snapshot
+/// is taken, the key's mode is replaced — frame, value and
+/// tangents untouched — and the status line names the key
+/// (1-based), the channel's target label and the new mode;
+/// returns `true`.
+///
+/// Returns `false` — no snapshot, project untouched — when
+/// no channel sits at `channel_index` or the channel holds
+/// no key at `key_index`; the status line reports both
+/// 1-based numbers either way, mirroring [`delete_channel`]'s
+/// refusal phrasing, so a UI binding never fails silently.
+/// Setting the mode a key already has is still a success
+/// (one snapshot): the caller asked for a state, and the
+/// state now holds.
+pub fn set_key_interp(
+    core: &mut EditorCore,
+    channel_index: usize,
+    key_index: usize,
+    interp: Interp,
+) -> bool {
+    let refusal = format!(
+        "No key {} on graph channel {} to set.",
+        key_index + 1,
+        channel_index + 1
+    );
+    let Some(channel) = core.project.channels.get(channel_index) else {
+        core.status = refusal;
+        return false;
+    };
+    if key_index >= channel.keys.len() {
+        core.status = refusal;
+        return false;
+    }
+    let label = target_label(channel.target);
+    core.snapshot();
+    core.project.channels[channel_index].keys[key_index].interp = interp;
+    core.status = format!(
+        "Key {} on {} interpolation set to {}.",
+        key_index + 1,
+        label,
+        interp_name(interp)
+    );
+    true
+}
+
+/// The [`Interp`] mode of the key of the channel at
+/// `channel_index` that sits at `frame` — read-only: no
+/// snapshot, no status write, no mutation.
+///
+/// "Sits at" is the shell's key-at-frame convention, the
+/// same one `Channel::remove_key` and `Channel::set_tangents`
+/// apply (via the channel's nearest-key lookup) and the
+/// shell's `keyed_here` check states outright: a key matches
+/// when `|key.frame - frame| <= 0.5` — keys land on whole
+/// frames, and half a frame either side still names that
+/// key. When two keys fall inside the window the NEAREST
+/// one wins, ties going to the earlier key, again like the
+/// channel's own lookup. `None` when no channel sits at
+/// `channel_index`, when the channel is empty, or when no
+/// key lies within the window — a frame between keys two or
+/// more frames apart therefore reads as no key, never as
+/// the nearest key's mode.
+pub fn key_interp_at(core: &EditorCore, channel_index: usize, frame: f32) -> Option<Interp> {
+    let channel = core.project.channels.get(channel_index)?;
+    let mut best: Option<usize> = None;
+    let mut best_dist = f32::INFINITY;
+    for (i, k) in channel.keys.iter().enumerate() {
+        let d = (k.frame - frame).abs();
+        if d <= 0.5 && d < best_dist {
+            best_dist = d;
+            best = Some(i);
+        }
+    }
+    best.map(|i| channel.keys[i].interp)
 }
 
 /// Human label for a channel target, in UI casing: "Root X",
@@ -1103,5 +1209,132 @@ mod tests {
 
         assert_eq!(core.undo_depth(), undo_before, "no refusal took a snapshot");
         assert_eq!(core.project.channels, channels_before, "project untouched");
+    }
+
+    #[test]
+    fn set_key_interp_sets_each_variant_and_undo_restores() {
+        // Channel 0 (RootX) starts with Linear / Hermite /
+        // Step on keys 1 / 2 / 3 (frames 10 / 14 / 20).
+        let mut core = core_with_channels();
+
+        // Key 1: Linear -> Step. Exactly one snapshot, and the
+        // rest of the key is untouched.
+        let undo_before = core.undo_depth();
+        assert!(set_key_interp(&mut core, 0, 0, Interp::Step));
+        assert_eq!(core.undo_depth(), undo_before + 1, "exactly one snapshot");
+        let k = core.project.channels[0].keys[0];
+        assert_eq!(k.interp, Interp::Step);
+        assert!(approx(k.frame, 10.0) && approx(k.value, 100.0), "frame/value untouched");
+        assert!(
+            approx(k.in_tan, 1.5) && approx(k.out_tan, -2.0),
+            "tangents untouched"
+        );
+        assert!(
+            core.status.contains("Key 1 on Root X interpolation set to Step."),
+            "status names the key, the target label and the mode: {}",
+            core.status
+        );
+        // Undo restores the mode the key had.
+        core.undo();
+        assert_eq!(
+            core.project.channels[0].keys[0].interp,
+            Interp::Linear,
+            "undo restores the previous mode"
+        );
+
+        // Key 2: Hermite -> Linear.
+        assert!(set_key_interp(&mut core, 0, 1, Interp::Linear));
+        assert_eq!(core.project.channels[0].keys[1].interp, Interp::Linear);
+        assert!(
+            core.status.contains("Key 2 on Root X interpolation set to Linear."),
+            "status: {}",
+            core.status
+        );
+        core.undo();
+        assert_eq!(core.project.channels[0].keys[1].interp, Interp::Hermite);
+
+        // Key 3: Step -> Hermite.
+        assert!(set_key_interp(&mut core, 0, 2, Interp::Hermite));
+        assert_eq!(core.project.channels[0].keys[2].interp, Interp::Hermite);
+        assert!(
+            core.status.contains("Key 3 on Root X interpolation set to Hermite."),
+            "status: {}",
+            core.status
+        );
+        core.undo();
+        assert_eq!(core.project.channels[0].keys[2].interp, Interp::Step);
+    }
+
+    #[test]
+    fn set_key_interp_refuses_bad_indices_without_snapshot() {
+        let mut core = core_with_channels();
+        let undo_before = core.undo_depth();
+        let channels_before = core.project.channels.clone();
+
+        // No such channel.
+        assert!(!set_key_interp(&mut core, 99, 0, Interp::Step), "no channel 100");
+        assert!(
+            core.status.contains("No key 1 on graph channel 100 to set."),
+            "status: {}",
+            core.status
+        );
+        // Channel exists, no such key.
+        assert!(!set_key_interp(&mut core, 0, 99, Interp::Linear), "no key 100");
+        assert!(
+            core.status.contains("No key 100 on graph channel 1 to set."),
+            "status: {}",
+            core.status
+        );
+        // The empty channel (index 1) has no key 1 either.
+        assert!(!set_key_interp(&mut core, 1, 0, Interp::Hermite), "empty channel");
+        assert!(
+            core.status.contains("No key 1 on graph channel 2 to set."),
+            "status: {}",
+            core.status
+        );
+
+        assert_eq!(core.undo_depth(), undo_before, "no refusal took a snapshot");
+        assert_eq!(core.project.channels, channels_before, "project untouched");
+    }
+
+    #[test]
+    fn key_interp_at_finds_the_key_at_its_frame_and_misses_between_keys() {
+        let mut core = core_with_channels();
+        let edits_before = core.edits_since_autosave();
+        let status_before = core.status.clone();
+
+        // Channel 0's keys: frame 10 Linear, 14 Hermite, 20 Step.
+        assert_eq!(key_interp_at(&core, 0, 10.0), Some(Interp::Linear));
+        assert_eq!(key_interp_at(&core, 0, 14.0), Some(Interp::Hermite));
+        assert_eq!(key_interp_at(&core, 0, 20.0), Some(Interp::Step));
+        // Inside the half-frame window either side, the key
+        // still names itself.
+        assert_eq!(key_interp_at(&core, 0, 10.4), Some(Interp::Linear));
+        assert_eq!(key_interp_at(&core, 0, 13.6), Some(Interp::Hermite));
+        assert_eq!(key_interp_at(&core, 0, 20.5), Some(Interp::Step));
+
+        // Between keys — closer to no key than half a frame —
+        // there is no key to read, never the nearest one's mode.
+        assert_eq!(key_interp_at(&core, 0, 12.0), None, "midway between 10 and 14");
+        assert_eq!(key_interp_at(&core, 0, 17.0), None, "midway between 14 and 20");
+        assert_eq!(key_interp_at(&core, 0, 0.0), None, "before every key");
+        assert_eq!(key_interp_at(&core, 0, 30.0), None, "after every key");
+
+        // No channel, and the empty channel, both read as None.
+        assert_eq!(key_interp_at(&core, 99, 10.0), None);
+        assert_eq!(key_interp_at(&core, 1, 10.0), None);
+
+        // Pure read: no snapshot, no status write.
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before,
+            "key_interp_at takes no snapshot"
+        );
+        assert_eq!(core.status, status_before, "key_interp_at writes no status");
+
+        // And it reads the live project: a mode set through
+        // the setter is the mode found at that key's frame.
+        assert!(set_key_interp(&mut core, 0, 0, Interp::Step));
+        assert_eq!(key_interp_at(&core, 0, 10.0), Some(Interp::Step));
     }
 }

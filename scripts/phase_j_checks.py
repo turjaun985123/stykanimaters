@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase J+K pre-commit gate for StykAnimate-RS (integrator checks).
+"""Phase J+K+L pre-commit gate for StykAnimate-RS (integrator checks).
 
 Run from the repo root:
 
@@ -40,9 +40,11 @@ What each check guards (and the Phase I failure behind it):
    census catches a missing field BEFORE CI does, and
    names the exact literals that lack it.
 
-4. CALLER CENSUS — each Phase J+K lib op must have at
+4. CALLER CENSUS — each Phase J+K+L lib op must have at
    least one production (non-test, non-defining-file)
-   call site.
+   call site. One Phase L entry is a panel-local helper
+   whose only caller lives in its own file; it is
+   censused under a same-file rule (see SAME_FILE_OPS).
    This is the Phase I section 8 failure: the contact-
    sheet range export pair landed in export.rs with NO
    caller anywhere — finished-looking work that no user
@@ -85,6 +87,43 @@ modes above did not change, only the surface did):
   is parsed live from src/main.rs, so any field added
   to the struct is censused against every literal with
   no script change.
+
+Phase L additions (same gate, wider net again):
+
+- The caller census now also watches the Phase L lib
+  ops (PHASE_L_OPS below), each with its caller
+  verified in the tree at gate-writing time:
+  `set_head_ring_scale` (editor.rs; the
+  inspector_figure fig-ring steppers), `clip_duration_secs`
+  (audio_ops.rs; audio_panel's clip_readout),
+  `simplify_stroke_at` (draw_ops.rs; stroke_inspector),
+  `set_key_interp` (graph_keys.rs; keyframe_tools).
+  Unlike Phase K, NO Phase L entry is wired by the
+  integrator: every section wires its own panel, so
+  there are no by-design UNWIRED entries this phase —
+  an UNWIRED Phase L line on a mid-phase tree simply
+  means that op's caller section has not landed yet,
+  and the flag is the gate working.
+- The camera panel's key-delete fn is censused
+  separately (SAME_FILE_OPS below):
+  `delete_camera_key_at` (section 39, camera_panel.rs)
+  is defined in the panel file and its production
+  caller is the panel's key-row builder in the SAME
+  file, which the cross-file rule above would report
+  as UNWIRED forever. The same-file rule counts call
+  sites in the defining file's production region
+  (before its trailing `mod tests`, the definition
+  site itself excluded).
+- The count claims stay read-from-source; the Phase L
+  numbers the docs must match are whatever this gate
+  prints. On the final Phase L tree they read: scenes
+  10 (two over Phase K's 8), MCP registry 87 (three
+  over 84), curated icons 111 (one over 110), palette
+  103 (unchanged).
+- Phase L adds no State fields (Phase K's
+  `playback_speed` was the last), so the State census
+  needs no change: the live parse covers the struct
+  exactly as it stands.
 
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
@@ -461,7 +500,7 @@ def check_state_literals(fields: list[str]) -> tuple[bool, list[str]]:
 
 
 # ----------------------------------------------------------------
-# Check 4 — caller census for the Phase J+K lib ops
+# Check 4 — caller census for the Phase J+K+L lib ops
 # ----------------------------------------------------------------
 
 PHASE_J_OPS = [
@@ -493,7 +532,41 @@ PHASE_K_OPS = [
     "note_playback_speed",
 ]
 
-CENSUS_OPS = PHASE_J_OPS + PHASE_K_OPS
+# Phase L additions. Every Phase L section wires its
+# own panel, so no entry here is integrator-wired and
+# none is expected to read UNWIRED on the integrated
+# tree; on a mid-phase tree an entry whose caller
+# section has not landed yet reads UNWIRED, which is
+# the gate working (the Phase K rule, restated in the
+# header). Caller files verified at gate-writing time:
+# set_head_ring_scale — inspector_figure.rs;
+# clip_duration_secs — audio_panel.rs;
+# simplify_stroke_at — stroke_inspector.rs;
+# set_key_interp — keyframe_tools.rs.
+PHASE_L_OPS = [
+    "set_head_ring_scale",
+    "clip_duration_secs",
+    "simplify_stroke_at",
+    "set_key_interp",
+]
+
+# Same-file ops: the op's defining file is also its
+# only production caller, so the cross-file rule in
+# check_callers (which skips the defining file) would
+# report UNWIRED forever. For these, call sites in the
+# defining file's own production region count too —
+# same test-region cut as everywhere else, with the
+# definition site itself excluded. `delete_camera_key_at`
+# is Phase L section 39's undoable camera-key delete:
+# a panel-local helper in camera_panel.rs, defined
+# there and called by the panel's own key-row builder
+# there (the older `clear_key_at` in the same file is
+# the non-undoable clear and is not this entry).
+SAME_FILE_OPS = [
+    "delete_camera_key_at",
+]
+
+CENSUS_OPS = PHASE_J_OPS + PHASE_K_OPS + PHASE_L_OPS
 
 
 def check_callers() -> tuple[bool, list[str]]:
@@ -505,13 +578,15 @@ def check_callers() -> tuple[bool, list[str]]:
         with open(full, encoding="utf-8") as fh:
             blanked_by_file[rel] = blank_code(fh.read())
     ok = True
-    for name in CENSUS_OPS:
+
+    def census_one(name: str, same_file_ok: bool) -> None:
+        nonlocal ok
         def_re = re.compile(rf"fn\s+{name}\s*\(")
         defining = [rel for rel, b in blanked_by_file.items() if def_re.search(b)]
         call_re = re.compile(rf"\b{name}\b")
         callers: list[str] = []
         for rel, b in blanked_by_file.items():
-            if rel in defining:
+            if rel in defining and not same_file_ok:
                 continue
             # The test region starts at the file's trailing
             # `mod tests` declaration — NOT at the first
@@ -523,18 +598,33 @@ def check_callers() -> tuple[bool, list[str]]:
                 r"(?m)^\s*#\[cfg\(test\)\]\s*\n\s*(?:pub\s+)?mod\s+tests\b", b
             )
             test_at = m_tests.start() if m_tests else -1
+            # In the defining file (same-file ops only), the
+            # definition itself is not a call site.
+            def_spans = (
+                [(m.start(), m.end()) for m in def_re.finditer(b)]
+                if rel in defining
+                else []
+            )
             for m in call_re.finditer(b):
                 if 0 <= test_at <= m.start():
                     continue  # inside the file's test region
+                if any(a <= m.start() < z for a, z in def_spans):
+                    continue  # the definition, not a call
                 lineno = b.count("\n", 0, m.start()) + 1
                 callers.append(f"{rel}:{lineno}")
         where = ", ".join(defining) if defining else "NOT DEFINED ANYWHERE"
+        suffix = " (same-file caller allowed)" if same_file_ok else ""
         if not callers:
             ok = False
-            lines.append(f"  {name} (defined in {where}): UNWIRED — zero production callers")
+            lines.append(f"  {name} (defined in {where}){suffix}: UNWIRED — zero production callers")
         else:
             shown = ", ".join(callers[:6]) + ("…" if len(callers) > 6 else "")
-            lines.append(f"  {name} (defined in {where}): {len(callers)} production call site(s): {shown}")
+            lines.append(f"  {name} (defined in {where}){suffix}: {len(callers)} production call site(s): {shown}")
+
+    for name in CENSUS_OPS:
+        census_one(name, same_file_ok=False)
+    for name in SAME_FILE_OPS:
+        census_one(name, same_file_ok=True)
     return ok, lines
 
 
@@ -619,7 +709,7 @@ def main() -> int:
         if not ok:
             failures += 1
 
-    print("Phase J+K pre-commit checks")
+    print("Phase J+K+L pre-commit checks")
     print(f"Repo: {ROOT}")
     print(f"Key-diff base ref: {base}")
     print()
@@ -639,7 +729,7 @@ def main() -> int:
     report("3. STATE LITERAL CENSUS", ok, lines)
 
     ok, lines = check_callers()
-    report("4. CALLER CENSUS (Phase J+K lib ops)", ok, lines)
+    report("4. CALLER CENSUS (Phase J+K+L lib ops)", ok, lines)
 
     claims = count_claims()
     claim_lines = [f"{label}: {n}  ({how})" for label, n, how in claims]

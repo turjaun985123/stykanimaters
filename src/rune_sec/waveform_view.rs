@@ -140,6 +140,29 @@
 //! no selection, a stale selection, or an unknown span
 //! it does not, and the shapes are exactly what they
 //! were before this section.
+//!
+//! ## Clip boundary ticks (Phase L, section 36)
+//!
+//! Project mode additionally marks EVERY clip's
+//! boundaries: for each clip whose span resolves
+//! ([`clip_span`], the same cached probe, one index at
+//! a time), a short tick at each span edge
+//! ([`all_clip_edges`] collects the edges,
+//! project-mapped through [`span_bracket`] exactly as
+//! the bracket's are), drawn in the same accent at a
+//! fainter alpha ([`ALL_TICKS_ALPHA`]) and WITHOUT the
+//! bracket's top rule — so the selected clip's bracket
+//! still reads as the strong mark and the rest read as
+//! a quiet boundary rhythm under it. The draw order in
+//! the project shape is bars, then all the ticks, then
+//! the selected bracket (which draws over its own
+//! clip's ticks), then the playhead. Clip mode is
+//! untouched: its strip shows one clip, whose span the
+//! bracket already frames, so a boundary rhythm would
+//! only repeat it. A clip whose file will not decode
+//! contributes no ticks — its span is unknown, and an
+//! invented edge would be a false claim about where
+//! the clip sits.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -174,6 +197,12 @@ const CAPTION_STRIP_H: f32 = 18.0;
 const SPAN_BRACKET_Y: f32 = 2.0;
 const SPAN_TICK_H: f32 = 6.0;
 const SPAN_BRACKET_W: f32 = 1.5;
+/// Alpha of the all-clips boundary ticks (Phase L,
+/// section 36): the selection accent at a fainter
+/// weight than the selected bracket's 0.75, so the
+/// bracket stays the strong mark and the other clips'
+/// edges read as quiet context under it.
+const ALL_TICKS_ALPHA: f32 = 0.35;
 
 /// Convert a `0xRRGGBB` colour to a Rune colour (the same
 /// helper `stage_view` carries; duplicated so this section
@@ -677,17 +706,57 @@ fn with_span_bracket(
     shape
 }
 
+/// Append every clip's boundary ticks to a bars shape
+/// (Phase L, section 36): a [`SPAN_TICK_H`]-long tick
+/// down from [`SPAN_BRACKET_Y`] at each edge
+/// [`all_clip_edges`] resolves — the bracket's tick
+/// geometry at [`ALL_TICKS_ALPHA`], with no top rule,
+/// so the selected clip's bracket (appended after this,
+/// by the caller) still reads as the strong mark and
+/// draws over its own clip's ticks. Project mode only:
+/// the selected-clip shape never calls this (see the
+/// module docs). No resolvable spans — no clips, or
+/// every clip's file unreadable — leaves the shape
+/// untouched.
+fn with_all_clip_ticks(shape: Shape, core: &EditorCore, el_size: [f32; 2]) -> Shape {
+    let mut shape = shape;
+    let (w, h) = (el_size[0], el_size[1]);
+    if w <= 0.0 || h <= 0.0 {
+        return shape;
+    }
+    let buckets = strip_buckets(strip_columns(w));
+    let edges = all_clip_edges(core, buckets, w);
+    if edges.is_empty() {
+        return shape;
+    }
+    let tick_color = hex_color(WAVE_HEX).unwrap_or(Color::WHITE).alpha(ALL_TICKS_ALPHA);
+    let y = SPAN_BRACKET_Y;
+    let tick = y + SPAN_TICK_H;
+    for x in edges {
+        shape = shape.line([x, y], [x, tick], SPAN_BRACKET_W, LineCap::Butt, tick_color);
+    }
+    shape
+}
+
 /// The strip for [`waveform_el_state`]: the centre line and
-/// bars of [`waveform_bars`], plus the selected clip's
-/// span bracket ([`with_span_bracket`], Phase K) and the
-/// project-mapped playhead ([`with_playhead`]).
+/// bars of [`waveform_bars`], plus every clip's boundary
+/// ticks ([`with_all_clip_ticks`], Phase L), the selected
+/// clip's span bracket ([`with_span_bracket`], Phase K)
+/// and the project-mapped playhead ([`with_playhead`]) —
+/// in that draw order, so each stronger mark lands over
+/// the quieter one.
 fn waveform_shape_project(
     core: &EditorCore,
     selected: Option<usize>,
     el_size: [f32; 2],
 ) -> Shape {
     with_playhead(
-        with_span_bracket(waveform_bars(core, el_size), core, selected, el_size),
+        with_span_bracket(
+            with_all_clip_ticks(waveform_bars(core, el_size), core, el_size),
+            core,
+            selected,
+            el_size,
+        ),
         core,
         el_size,
     )
@@ -759,6 +828,40 @@ fn clip_span(core: &EditorCore, selected: Option<usize>, buckets: usize) -> Opti
     let (_, duration_secs) = clip_peaks(clip, buckets)?;
     let len = clip_len_frames(duration_secs, core.project.fps);
     Some((clip.start_frame, len))
+}
+
+/// The x positions, in element points, of every audio
+/// clip's span edges on a strip `width` points wide —
+/// the project-mode boundary ticks' source (Phase L,
+/// section 36). Each clip index resolves through the
+/// very same path the selected clip's bracket uses —
+/// [`clip_span`] at `buckets`, then [`span_bracket`]
+/// over the project's frame count — so a tick always
+/// stands exactly where a bracket edge for that clip
+/// would. A clip contributes both its edges or none:
+/// an unreadable file (span unknown) and a zero-length
+/// span (no bracket) both skip, never invent. The
+/// positions come back sorted ascending, ready to
+/// draw; duplicates are kept — two clips sharing a
+/// boundary frame each contribute their own edge
+/// there, and a span collapsing onto the strip's right
+/// edge contributes it twice — because the collection
+/// is per-clip by construction, and the caller asked
+/// for every clip's edges, not a merged set.
+pub fn all_clip_edges(core: &EditorCore, buckets: usize, width: f32) -> Vec<f32> {
+    let frame_count = core.frame_count();
+    let mut edges = Vec::new();
+    for i in 0..core.project.audio.len() {
+        let Some(span) = clip_span(core, Some(i), buckets) else {
+            continue;
+        };
+        if let Some((left, right)) = span_bracket(span, frame_count, width) {
+            edges.push(left);
+            edges.push(right);
+        }
+    }
+    edges.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    edges
 }
 
 /// The seek gesture for [`waveform_el_state`]: pressing —
@@ -840,6 +943,11 @@ fn waveform_seek(s: &mut State, d: &Drag) {
 /// bracket to both shapes (see the module docs): no new
 /// element, no height or hit-area change — the canvas
 /// and the caption are exactly what they were.
+/// Phase L (section 36) adds every clip's boundary
+/// ticks to the PROJECT shape only, under the bracket
+/// (see the module docs): again no new element, and
+/// the clip shape, the seek and the playhead are
+/// exactly what they were.
 pub fn waveform_el_state(s: &State, el_size: [f32; 2]) -> El {
     let clip_count = s.core.project.audio.len();
     let selected_peaks: Vec<f32> = match s.audio_panel.selected {
@@ -1363,6 +1471,100 @@ mod tests {
         // the bare canvas, no bracket.
         s.audio_panel.selected = None;
         let _project_mode = waveform_el_state(&s, [308.0, 56.0]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- All-clip boundary ticks (Phase L, section 36) ----
+
+    /// A core whose timeline runs to exactly 24 frames
+    /// (the demo's handful, extended with `add_frame`),
+    /// so the edge arithmetic in these tests lands on
+    /// whole points: at width 240 each frame cell is
+    /// exactly 10 pt.
+    fn core_with_24_frames() -> EditorCore {
+        let mut core = EditorCore::new();
+        while core.frame_count() < 24 {
+            core.add_frame();
+        }
+        assert_eq!(core.frame_count(), 24);
+        core
+    }
+
+    fn plant_clip(core: &mut EditorCore, path: &std::path::Path, start_frame: usize) {
+        core.project.audio.push(AudioClip {
+            path: path.to_string_lossy().into_owned(),
+            start_frame,
+            gain: 1.0,
+        });
+    }
+
+    #[test]
+    fn all_clip_edges_two_clips_four_edges() {
+        // Two 1-second clips on disk: at the demo
+        // project's 12 fps each spans 12 frames. Over a
+        // 24-frame project at width 240 (10 pt cells):
+        // clip A at frame 0 spans (0, 12) -> edges 0 and
+        // 120; clip B at frame 6 spans (6, 12) -> edges
+        // 60 and 180. Collected and sorted: four edges.
+        let mut core = core_with_24_frames();
+        let path_a = temp_wav_path("edges-a");
+        let path_b = temp_wav_path("edges-b");
+        std::fs::write(&path_a, write_wav(&sine_wav())).unwrap();
+        std::fs::write(&path_b, write_wav(&sine_wav())).unwrap();
+        plant_clip(&mut core, &path_a, 0);
+        plant_clip(&mut core, &path_b, 6);
+        assert_eq!(
+            all_clip_edges(&core, 96, 240.0),
+            vec![0.0, 60.0, 120.0, 180.0]
+        );
+        // The project shape builds with the ticks drawn
+        // (bars, ticks, no selection so no bracket,
+        // playhead) — a smoke pass over the drawing path.
+        let _shape = waveform_shape_project(&core, None, [240.0, 56.0]);
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
+    #[test]
+    fn all_clip_edges_no_clips_is_empty() {
+        // The demo project carries no audio: no spans,
+        // no edges, whatever the strip width.
+        let core = EditorCore::new();
+        assert!(all_clip_edges(&core, 96, 240.0).is_empty());
+        assert!(all_clip_edges(&core, 96, 308.0).is_empty());
+    }
+
+    #[test]
+    fn all_clip_edges_skips_unreadable_files() {
+        // One readable clip and one whose file does not
+        // exist: the missing clip's span is unknown, so
+        // it contributes no edges — only the real clip's
+        // two edges stand.
+        let mut core = core_with_24_frames();
+        let path = temp_wav_path("edges-good");
+        std::fs::write(&path, write_wav(&sine_wav())).unwrap();
+        plant_clip(&mut core, &path, 0);
+        core.project.audio.push(AudioClip {
+            path: "/nonexistent/no-such-clip.wav".to_string(),
+            start_frame: 7,
+            gain: 1.0,
+        });
+        assert_eq!(all_clip_edges(&core, 96, 240.0), vec![0.0, 120.0]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn all_clip_edges_degenerate_width_is_empty() {
+        // A strip with no usable width brackets nothing,
+        // so it ticks nothing either — the span_bracket
+        // gate, inherited per clip.
+        let mut core = core_with_24_frames();
+        let path = temp_wav_path("edges-width");
+        std::fs::write(&path, write_wav(&sine_wav())).unwrap();
+        plant_clip(&mut core, &path, 0);
+        assert!(all_clip_edges(&core, 96, 0.0).is_empty());
+        assert!(all_clip_edges(&core, 96, -8.0).is_empty());
+        assert!(all_clip_edges(&core, 96, f32::NAN).is_empty());
         let _ = std::fs::remove_file(&path);
     }
 }

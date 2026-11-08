@@ -611,6 +611,7 @@ mod tests {
             dark: false,
             timeline_collapsed: true,
             sidebar_visible: false,
+            palette_recents: Vec::new(),
         };
         let out = prefs_with_workspace(&prefs, Workspace::Audio);
         assert_eq!(out.workspace, "Audio");

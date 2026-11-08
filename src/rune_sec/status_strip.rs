@@ -48,6 +48,13 @@
 //!   and visible only through [`status_strip_state`]:
 //!   the snapshot is shell support data, not core
 //!   state (see the Phase J note below)
+//! - playback speed (Phase L, conditional) — the
+//!   shell's `State::playback_speed` (`main.rs`),
+//!   shown only while it differs from normal speed
+//!   (1.0×) and visible only through
+//!   [`status_strip_state`]: the speed is shell
+//!   state, not core state (see the Phase L note
+//!   below)
 //! - last status message — `core.status` (`editor.rs:42`),
 //!   the trailing segment chrome's line ended with, kept so
 //!   Save/Load feedback stays visible
@@ -284,6 +291,38 @@
 //! the icon size or the strip's width fails that
 //! test and re-opens the question loudly instead
 //! of letting the refusal ride on stale numbers.
+//!
+//! ## Phase L — playback-speed segment
+//!
+//! One more conditional segment: while the shell's
+//! playback speed (`State::playback_speed`, cycled by
+//! the transport's `pb-speed` button) differs from
+//! normal, a fixed segment directly after the play
+//! segment reads `{x}×` — `0.25×`, `1.5×`, `2×` —
+//! composed by [`speed_segment`] and passed into the
+//! composer by [`status_strip_state`] exactly as the
+//! Phase J autosave label is (the core-only
+//! [`status_strip`] passes `None`: the speed lives on
+//! `State`, not on the core). It heads the conditional
+//! block, ahead of the Phase G segments, because it
+//! qualifies the play segment it follows; it is
+//! floored through [`segment`] at its own label's
+//! [`est_text_width`], like every other fixed segment.
+//!
+//! The segment is deliberately **excluded from the
+//! Phase K floors pinned above** (512 pt of default
+//! floors, 576 pt with audio): those numbers describe
+//! the *default* state, and at the default speed of
+//! 1.0× the segment is absent — [`speed_segment`]
+//! returns `None` — so the default strip, its floors
+//! and the pinned arithmetic test are byte-identical
+//! to Phase K's. At a non-default speed the fixed sum
+//! can exceed the old totals by the segment's own
+//! floor (at most `2×` / `0.25×`: 2–4 characters,
+//! 16–32 pt); that is the designed behaviour, not an
+//! overflow — the tail remains the single flexible
+//! absorber and truncates, exactly as it does when
+//! every Phase G segment is present at once.
 
 use std::time::{Duration, SystemTime};
 
@@ -529,6 +568,38 @@ pub fn autosave_segment(modified: Option<SystemTime>, now: SystemTime) -> Option
     }
 }
 
+/// The number inside a speed label, formatted exactly
+/// as `playback_controls::speed_label` formats it
+/// (Phase K): two decimals, trailing zeroes trimmed,
+/// then a bare trailing point trimmed — `1.5`, `0.25`,
+/// `2`. That formatter is private to `speed_label`'s
+/// body, so the rule is replicated here; the two must
+/// not drift — `speed_segment_numbers_match_speed_label`
+/// in the tests pins this helper's output against
+/// `speed_label`'s for the whole speed table.
+fn speed_factor(speed: f32) -> String {
+    let digits = format!("{speed:.2}");
+    digits.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Playback-speed segment (Phase L): `{x}×` while the
+/// shell's playback speed (`State::playback_speed`)
+/// differs from normal — `0.25×`, `1.5×`, `2×`, the
+/// number formatted by [`speed_factor`], the same rule
+/// the transport button's `Speed {x}×` label uses.
+/// `None` at exactly 1.0 (normal speed is the default
+/// state and spends no floored width — see the module
+/// docs on the pinned Phase K floors) and `None` for a
+/// non-finite speed (a NaN or infinite rate names no
+/// speed at all; the cycle maps NaN back to 1.0 before
+/// the field can persist, so this is belt-and-braces).
+pub fn speed_segment(speed: f32) -> Option<String> {
+    if !speed.is_finite() || speed == 1.0 {
+        return None;
+    }
+    Some(format!("{}×", speed_factor(speed)))
+}
+
 /// The Phase G conditional segment labels, in strip
 /// order (audio, loop, stroke, particle), each present
 /// only while its condition holds. Pure composition of
@@ -679,28 +750,30 @@ fn divider(t: &Theme) -> El {
 /// the core can describe, including the Phase G audio
 /// and loop segments, but without the shell's stroke /
 /// particle-event selection segments (that state lives
-/// on `State`, not on the core) and without the Phase J
+/// on `State`, not on the core), without the Phase J
 /// autosave segment (the snapshot's mtime is shell
 /// support data, read by [`status_strip_state`] through
-/// the lib). The delegating wrapper over the shared
-/// composer; the shell itself calls
-/// [`status_strip_state`].
+/// the lib) and without the Phase L speed segment (the
+/// playback speed likewise lives on `State`). The
+/// delegating wrapper over the shared composer; the
+/// shell itself calls [`status_strip_state`].
 pub fn status_strip(core: &EditorCore) -> El {
-    build_strip(core, None, None, None)
+    build_strip(core, None, None, None, None)
 }
 
 /// The status strip: project name (with the dirty dot),
 /// frame position, timecode, fps, zoom, selection, undo
-/// depth, play state, the Phase G conditional segments
-/// (audio, loop range, stroke selection, particle-event
-/// selection), the Phase J autosave segment (while a
-/// recovery snapshot exists) and the core's current
-/// status message, divided by hairlines. The fixed
-/// segments are width-floored and the status tail is
-/// the single flexible, eliding segment, so the
-/// segments can never overlap however narrow the strip
-/// gets (see the module docs' width-discipline
-/// section).
+/// depth, play state, the Phase L speed segment (while
+/// the playback speed differs from normal), the Phase G
+/// conditional segments (audio, loop range, stroke
+/// selection, particle-event selection), the Phase J
+/// autosave segment (while a recovery snapshot exists)
+/// and the core's current status message, divided by
+/// hairlines. The fixed segments are width-floored and
+/// the status tail is the single flexible, eliding
+/// segment, so the segments can never overlap however
+/// narrow the strip gets (see the module docs'
+/// width-discipline section).
 /// Keyed `status-strip` so headless `--tree` checks can
 /// find it. Theme follows the shell's current convention
 /// (`main.rs` builds its view with `tok::theme(true)`).
@@ -709,23 +782,33 @@ pub fn status_strip_state(s: &State) -> El {
         stykanimate_rs::shell::recovery_modified(),
         SystemTime::now(),
     );
-    build_strip(&s.core, s.stroke_selected, s.particle_selected, autosave)
+    build_strip(
+        &s.core,
+        s.stroke_selected,
+        s.particle_selected,
+        speed_segment(s.playback_speed),
+        autosave,
+    )
 }
 
 /// Shared composer behind [`status_strip`] and
-/// [`status_strip_state`]. The Phase G segments are
-/// appended after the play segment and before the tail,
-/// each only while its condition holds, each floored
-/// through the same [`segment`] / [`est_text_width`]
-/// path as the original nine; the Phase J autosave
-/// label (`autosave`, already composed by
+/// [`status_strip_state`]. The Phase L speed label
+/// (`speed`, already composed by [`status_strip_state`]
+/// from `State::playback_speed`) heads the conditional
+/// block, directly after the play segment; the Phase G
+/// segments follow it and the Phase J autosave label
+/// (`autosave`, already composed by
 /// [`status_strip_state`] from the snapshot's mtime)
-/// follows them under the same rule. The tail stays
-/// the row's single flexible member.
+/// closes the block — each only while its condition
+/// holds, each floored through the same [`segment`] /
+/// [`est_text_width`] path as the original nine, all
+/// before the tail. The tail stays the row's single
+/// flexible member.
 fn build_strip(
     core: &EditorCore,
     stroke_selected: Option<usize>,
     particle_selected: Option<usize>,
+    speed: Option<String>,
     autosave: Option<String>,
 ) -> El {
     let t = tok::theme(true);
@@ -749,6 +832,16 @@ fn build_strip(
             })
             .min_w(est_text_width(play_text(core.playing))),
     ];
+    // Phase L: the speed segment heads the conditional
+    // block — directly after the play segment it
+    // qualifies, ahead of the Phase G extras — floored
+    // through the same `segment` path, and absent
+    // entirely at normal speed, leaving the strip
+    // byte-identical to Phase K's (see the module
+    // docs' Phase L note on the pinned floors).
+    if let Some(label) = speed {
+        segments.push(segment(label, &t));
+    }
     // Phase G conditional segments: after the original
     // fixed segments, before the tail, in audio / loop /
     // stroke / particle order. Each is floored at its own
@@ -1323,11 +1416,11 @@ mod tests {
         // did, and with a label it builds with the
         // segment appended — neither path panics.
         let core = EditorCore::new();
-        let _ = build_strip(&core, None, None, None);
+        let _ = build_strip(&core, None, None, None, None);
         let now = ref_now();
         let label = autosave_segment(Some(now - Duration::from_secs(300)), now);
         assert_eq!(label, Some("Autosaved 5m ago".to_string()));
-        let _ = build_strip(&core, None, None, label);
+        let _ = build_strip(&core, None, None, None, label);
         // The builder floors the segment through
         // `segment()`, i.e. at `est_text_width` of its
         // own label — the same path as every other
@@ -1401,5 +1494,79 @@ mod tests {
             total + 160.0 > 744.0,
             "with the glyph charged, the tail would fall below 160 pt"
         );
+    }
+
+    // ---- Phase L speed segment ----
+
+    #[test]
+    fn speed_segment_truth_table() {
+        // Normal speed is the default state: no segment,
+        // so the pinned Phase K floors above describe
+        // the strip exactly as built.
+        assert_eq!(speed_segment(1.0), None);
+        // The off-normal steps of the cycle, formatted
+        // with the transport label's trim rule.
+        assert_eq!(speed_segment(1.5), Some("1.5×".to_string()));
+        assert_eq!(speed_segment(0.25), Some("0.25×".to_string()));
+        assert_eq!(speed_segment(0.5), Some("0.5×".to_string()));
+        assert_eq!(speed_segment(2.0), Some("2×".to_string()));
+        // A non-finite speed names no speed at all.
+        assert_eq!(speed_segment(f32::NAN), None);
+        assert_eq!(speed_segment(f32::INFINITY), None);
+        assert_eq!(speed_segment(f32::NEG_INFINITY), None);
+    }
+
+    #[test]
+    fn speed_segment_numbers_match_speed_label() {
+        // `speed_factor` replicates the number rule
+        // private to `playback_controls::speed_label`;
+        // pin the two together over the whole cycle
+        // table plus an off-table value, so a change to
+        // either formatting breaks here instead of
+        // letting the strip and the button drift apart.
+        for speed in crate::rune_sec::playback_controls::SPEEDS {
+            let button = crate::rune_sec::playback_controls::speed_label(speed);
+            let number = button
+                .strip_prefix("Speed ")
+                .expect("the button label keeps its prefix");
+            if speed == 1.0 {
+                assert_eq!(speed_segment(speed), None);
+            } else {
+                assert_eq!(speed_segment(speed), Some(number.to_string()));
+            }
+        }
+        assert_eq!(speed_segment(0.75), Some("0.75×".to_string()));
+        assert_eq!(
+            crate::rune_sec::playback_controls::speed_label(0.75),
+            "Speed 0.75×"
+        );
+    }
+
+    #[test]
+    fn strip_speed_segment_only_off_normal_speed() {
+        // Segment-list level, through the same
+        // composition `status_strip_state` performs: a
+        // fresh shell state sits at normal speed, so the
+        // composed label is `None` and the strip builds
+        // exactly as Phase K's did; at double speed the
+        // label is present and the strip builds with the
+        // segment appended after the play segment.
+        let mut s = crate::init();
+        assert_eq!(s.playback_speed, 1.0);
+        assert_eq!(speed_segment(s.playback_speed), None);
+        let _ = status_strip_state(&s);
+        s.playback_speed = 2.0;
+        assert_eq!(speed_segment(s.playback_speed), Some("2×".to_string()));
+        let _ = status_strip_state(&s);
+        // The composer takes the composed label as an
+        // `Option`, the autosave pattern: both paths
+        // build without panicking, and the segment is
+        // floored through `segment()` at its own label's
+        // `est_text_width` — 2 characters for `2×`.
+        let core = EditorCore::new();
+        let _ = build_strip(&core, None, None, speed_segment(1.0), None);
+        let _ = build_strip(&core, None, None, speed_segment(2.0), None);
+        assert_eq!(est_text_width("2×"), 2.0 * LABEL_CHAR_W);
+        assert_eq!(est_text_width("0.25×"), 4.0 * LABEL_CHAR_W);
     }
 }

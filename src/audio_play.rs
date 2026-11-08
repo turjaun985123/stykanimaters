@@ -26,6 +26,7 @@
 //! [`EditorCore::sync_playback_audio_on_wrap`],
 //! [`EditorCore::sync_playback_audio_on_seek`],
 //! [`EditorCore::sync_playback_audio_on_drift`],
+//! [`EditorCore::sync_playback_audio_on_full_loop`],
 //! [`EditorCore::playback_audio_active`] and
 //! [`EditorCore::note_playback_speed`] — delegating to that
 //! same player and mix. Start uses the GPUI shell's exact
@@ -49,7 +50,11 @@
 //! walks the timeline at each frame's real duration and
 //! at the speed the shell notes on every playing tick
 //! (Phase K), so slow frames and fast playback are
-//! predicted as the picture actually moves.
+//! predicted as the picture actually moves. The full-loop
+//! sync (Phase L) reads the same clock and walk a second
+//! way — counting its folds — to close the last loop
+//! shape: a whole loop completed inside one poll tick,
+//! which the frame-comparing wrap sync cannot see.
 //!
 //! ## Where the player lives, and why
 //!
@@ -117,20 +122,23 @@
 //! [`EditorCore::sync_playback_audio_on_seek`] restarts the
 //! audio whenever a tick shows the playhead jumping forward
 //! by more than one frame. The shell's poll calls the two
-//! syncs side by side each tick (integrator wiring). One
-//! thing remains open, plainly:
+//! syncs side by side each tick (integrator wiring).
 //!
-//! - **A wrap inside a single tick can still be missed in
-//!   one narrow shape.** The detection compares whole frames
-//!   between ticks; a tick that advanced the playhead by a
-//!   full loop or more and landed on the previous frame or
-//!   the one after it is indistinguishable from holding or
-//!   ordinary forward motion, so no restart fires. Landing
-//!   further ahead is caught by the seek restart instead —
-//!   it restarts from the landed frame either way, which is
-//!   where the picture is. At the shell's per-frame tick
-//!   rate this needs a stall of a whole loop's duration,
-//!   but it is not impossible.
+//! The last loop shape is closed too (Phase L): a tick
+//! that advanced the playhead by a full loop or more and
+//! landed on the previous frame or the one after it was,
+//! to the frame comparison, indistinguishable from holding
+//! or ordinary forward motion, so no restart fired — the
+//! standing miss since Phase I.
+//! [`EditorCore::sync_playback_audio_on_full_loop`] detects
+//! that loop from the playback clock instead: [`walk_wraps`]
+//! counts the folds in the same duration- and speed-aware
+//! walk the drift sync predicts with, and a completed fold
+//! since the running pass started restarts the mix at the
+//! current playhead. Its guard stands down whenever the
+//! playhead decreased across the tick — that shape is the
+//! wrap sync's, and visible to it — so the two never
+//! restart for the same tick.
 
 use std::cell::RefCell;
 use std::time::Instant;
@@ -422,6 +430,133 @@ pub fn expected_frame_walk(
     pos
 }
 
+/// How many times the walk in [`expected_frame_walk`]
+/// folds: the same walk, over the same arguments, counting
+/// each fold — each moment the advancing position reaches
+/// the fold end (the loop range's end, or the timeline's)
+/// and steps back by the span to the fold start. A count of
+/// 1 or more therefore means at least one full loop of the
+/// fold window completed inside the walked time, which is
+/// the signal [`EditorCore::sync_playback_audio_on_full_loop`]
+/// exists to catch: a loop the frame-comparing wrap sync
+/// cannot see because the playhead landed on or past the
+/// frame it started the tick from.
+///
+/// The conventions are [`expected_frame_walk`]'s own,
+/// unchanged: the fold window is clamped as `advance_play`
+/// clamps it, durations are floored at 0.05, the elapsed
+/// time is spent at the sanitised `speed`, and the position
+/// is derived with `advance_play`'s frame clamp — so with
+/// uniform durations and speed 1.0 the count agrees with
+/// the walk's folded result by construction (half a loop
+/// counts 0, a full loop 1, two and a half loops 2).
+///
+/// Two details, stated plainly:
+///
+/// - The stale-start fold the walk applies before walking
+///   (a start already past the fold end, folded back even
+///   at zero elapsed) is *not* counted: it normalises a
+///   standing position rather than completing a loop, and
+///   in the one shape it can occur the picture's `current`
+///   decreases on the next advance, which the wrap sync
+///   already owns.
+/// - The walk's crossing cap (`2 * frame count + 2`)
+///   bounds this count too: an absurd elapsed saturates
+///   the crossings exactly as it saturates the walk, and
+///   the count so far comes back — still at least 1
+///   whenever a real loop completed well inside the cap,
+///   which is all the caller asks.
+///
+/// An empty `durations` slice (no timeline) and a
+/// non-positive or NaN elapsed budget both count 0.
+pub fn walk_wraps(
+    start_frame: f32,
+    elapsed_secs: f32,
+    speed: f32,
+    fps: f32,
+    durations: &[f32],
+    loop_range: Option<(usize, usize)>,
+) -> u32 {
+    let n = durations.len();
+    if n == 0 {
+        return 0;
+    }
+    let fps = fps.max(1.0);
+    // The fold window, clamped exactly as
+    // `expected_frame_walk` (and `advance_play`) clamp it.
+    let (lo, end) = match loop_range {
+        Some((a, b)) => {
+            let b = b.min(n - 1);
+            let a = a.min(b);
+            (a as f32, (b + 1) as f32)
+        }
+        None => (0.0, n as f32),
+    };
+    let span = end - lo;
+    let mut pos = start_frame;
+    // The stale-start fold, applied as the walk applies it
+    // but not counted (see the docs above).
+    while pos >= end {
+        pos -= span;
+    }
+    let mut budget = elapsed_secs * sanitise_playback_speed(speed);
+    if !(budget > 0.0) {
+        return 0;
+    }
+    let max_crossings = 2 * n + 2;
+    let mut crossings = 0usize;
+    let mut folds: u32 = 0;
+    while budget > 0.0 {
+        // The frame the position sits in — the walk's own
+        // clamp, as in `expected_frame_walk`.
+        let idx = (pos.floor() as usize).min(n - 1);
+        let frame_secs = durations[idx].max(0.05) / fps;
+        // The budget left inside this frame.
+        let rest = (1.0 - (pos - pos.floor())) * frame_secs;
+        if budget < rest {
+            // The budget runs out inside this frame: no
+            // boundary is crossed, so nothing can fold.
+            pos += budget / frame_secs;
+            budget = 0.0;
+        } else {
+            budget -= rest;
+            pos = pos.floor() + 1.0;
+            while pos >= end {
+                pos -= span;
+                folds += 1;
+            }
+            crossings += 1;
+            if crossings >= max_crossings {
+                break;
+            }
+        }
+    }
+    folds
+}
+
+/// The full-loop sync's fold count for one recorded clock:
+/// [`walk_wraps`] over the core's real frame durations, its
+/// loop range and the noted playback speed, for the time
+/// since the clock's start — `predicted_frame`'s exact
+/// inputs and collection, counting folds instead of
+/// predicting a position.
+fn predicted_folds(core: &EditorCore, started: Instant, start_frame: f32) -> u32 {
+    let durations: Vec<f32> = core
+        .project
+        .frames
+        .iter()
+        .map(|frame| frame.duration)
+        .collect();
+    walk_wraps(
+        start_frame,
+        started.elapsed().as_secs_f32(),
+        playback_speed(),
+        core.project.fps,
+        &durations,
+        core.loop_range,
+    )
+}
+
 /// The drift sync's prediction for one recorded clock:
 /// [`expected_frame_walk`] over the core's real frame
 /// durations, its loop range and the noted playback speed,
@@ -461,6 +596,33 @@ fn drift_restart_needed(
     playing
         && audio_active
         && expected.is_some_and(|expected| drift_exceeded(expected, actual))
+}
+
+/// The full-loop restart decision, pure: restart only
+/// while playing, only while sound is actually running,
+/// only when a playback clock exists to count folds from
+/// (`folds` is `None` when no start has recorded one), and
+/// only when the playhead did not *decrease* across the
+/// tick. The last guard is what keeps this sync out of the
+/// wrap sync's shape: a decrease is the wrap signal
+/// [`EditorCore::sync_playback_audio_on_wrap`] reads, and
+/// if it already restarted for this tick a second restart
+/// here would be pure waste. The missed shape is precisely
+/// the complement — the playhead landed on its previous
+/// frame (`cur_frame == prev_frame`) or just past it after
+/// advancing a full loop or more inside one tick — so
+/// equality must pass, not fail.
+fn full_loop_detected(
+    playing: bool,
+    audio_active: bool,
+    prev_frame: usize,
+    cur_frame: usize,
+    folds: Option<u32>,
+) -> bool {
+    playing
+        && audio_active
+        && cur_frame >= prev_frame
+        && folds.is_some_and(|folds| folds >= 1)
 }
 
 impl EditorCore {
@@ -655,6 +817,75 @@ impl EditorCore {
         let expected = clock.map(|(started, start_frame)| predicted_frame(self, started, start_frame));
         if drift_restart_needed(self.playing, self.playback_audio_active(), expected, self.playhead)
         {
+            self.stop_playback_audio();
+            self.start_playback_audio();
+        }
+    }
+
+    /// Re-sync the audio after a full loop completed inside
+    /// a single poll tick (Phase L): the one wrap shape the
+    /// frame comparison in
+    /// [`EditorCore::sync_playback_audio_on_wrap`] cannot
+    /// see. That sync reads a *decrease* in `current` as its
+    /// signal, so a tick that advanced the playhead by a
+    /// whole loop or more — a stall of a full loop's
+    /// duration — and landed it on the frame it started
+    /// from, or just past it, looks exactly like holding or
+    /// ordinary forward motion, and the sound keeps playing
+    /// its first pass while the picture starts its second.
+    ///
+    /// This sync detects the loop from the playback clock
+    /// instead of the frame delta: [`walk_wraps`] counts
+    /// how many times the clock's own walk — the drift
+    /// sync's duration- and speed-aware prediction, folded
+    /// at the same end `advance_play` folds at — has folded
+    /// since the running pass started. One or more folds
+    /// means a loop completed on the sound's own timeline;
+    /// when the tick's frames also pass the
+    /// `full_loop_detected` guard, the mix restarts at the
+    /// current playhead via stop + start, exactly as the
+    /// wrap sync restarts.
+    ///
+    /// `prev_frame` is the frame the shell saw before the
+    /// tick's advance (the same value it hands the wrap
+    /// sync); the current frame is read from the core. The
+    /// guard's `current >= prev_frame` condition keeps the
+    /// two syncs disjoint per tick: when the playhead
+    /// decreased, the wrap was visible to the wrap sync and
+    /// belongs to it, and this sync stands down even if the
+    /// clock's walk has folded — so a tick never restarts
+    /// twice. When the playhead landed ahead by more than a
+    /// frame the seek sync may also fire for the same tick;
+    /// both restarts start from the landed frame, so the
+    /// outcome is the same single re-anchor.
+    ///
+    /// The restart reuses
+    /// [`EditorCore::start_playback_audio`], so it inherits
+    /// that method's behaviour exactly: it starts at the
+    /// current frame, succeeds silently when nothing is
+    /// audible there, reports a player launch failure on
+    /// `core.status`, and re-bases the playback clock — so
+    /// after a restart the fold count starts again from the
+    /// new pass and this sync cannot fire twice for one
+    /// loop.
+    ///
+    /// When playback is stopped, no audio is active, no
+    /// clock exists, or no full loop has completed on the
+    /// clock's walk, this is a no-op and writes nothing to
+    /// the status line. The shell calls it from poll beside
+    /// the other syncs (integrator wiring); the per-call
+    /// cost is one clock read, the fold walk over the
+    /// project's durations, and one process-liveness check.
+    pub fn sync_playback_audio_on_full_loop(&mut self, prev_frame: usize) {
+        let clock = CLOCK.with(|clock| *clock.borrow());
+        let folds = clock.map(|(started, start_frame)| predicted_folds(self, started, start_frame));
+        if full_loop_detected(
+            self.playing,
+            self.playback_audio_active(),
+            prev_frame,
+            self.current,
+            folds,
+        ) {
             self.stop_playback_audio();
             self.start_playback_audio();
         }
@@ -1187,5 +1418,126 @@ mod tests {
         let started = Instant::now() - std::time::Duration::from_millis(343);
         let predicted = predicted_frame(&core, started, 0.0);
         assert!((predicted - 2.5).abs() < 0.05, "predicted at 2x: {predicted}");
+    }
+
+    #[test]
+    fn walk_wraps_counts_completed_loops_on_a_uniform_timeline() {
+        // Five frames at fps 8: a frame is 0.125 s and a
+        // full loop 0.625 s — all exact in binary, so the
+        // counts (and the agreement checks against the
+        // walk's own folded result) are exact.
+        let durations = [1.0; 5];
+        // Half a loop folds nothing and lands mid-timeline.
+        assert_eq!(walk_wraps(0.0, 0.3125, 1.0, 8.0, &durations, None), 0);
+        assert_eq!(expected_frame_walk(0.0, 0.3125, 1.0, 8.0, &durations, None), 2.5);
+        // Exactly one loop: one fold, back at the start.
+        assert_eq!(walk_wraps(0.0, 0.625, 1.0, 8.0, &durations, None), 1);
+        assert_eq!(expected_frame_walk(0.0, 0.625, 1.0, 8.0, &durations, None), 0.0);
+        // Two and a half loops: two folds, landing where
+        // the half loop landed.
+        assert_eq!(walk_wraps(0.0, 1.5625, 1.0, 8.0, &durations, None), 2);
+        assert_eq!(expected_frame_walk(0.0, 1.5625, 1.0, 8.0, &durations, None), 2.5);
+        // A start inside the loop folds as soon as its
+        // remaining frame time carries it past the end.
+        assert_eq!(walk_wraps(4.0, 0.125, 1.0, 8.0, &durations, None), 1);
+        // No time passed: nothing completes.
+        assert_eq!(walk_wraps(0.0, 0.0, 1.0, 8.0, &durations, None), 0);
+    }
+
+    #[test]
+    fn walk_wraps_counts_folds_inside_a_loop_range() {
+        // Range (2, 4) on 8 frames: the fold window is
+        // [2, 5) with span 3, so one loop of the range is
+        // 3 frames — 0.375 s at fps 8.
+        let durations = [1.0; 8];
+        let range = Some((2, 4));
+        // The companion of `walk_wraps_inside_a_loop_range`:
+        // from the range's last frame, 2.5 frames of travel
+        // fold once and land half-way through frame 3.
+        assert_eq!(walk_wraps(4.0, 0.3125, 1.0, 8.0, &durations, range), 1);
+        assert_eq!(expected_frame_walk(4.0, 0.3125, 1.0, 8.0, &durations, range), 3.5);
+        // Seven frames from the range start wrap the range
+        // twice and land one frame in.
+        assert_eq!(walk_wraps(2.0, 0.875, 1.0, 8.0, &durations, range), 2);
+        assert_eq!(expected_frame_walk(2.0, 0.875, 1.0, 8.0, &durations, range), 3.0);
+        // Two frames from the range start never reach the
+        // fold end.
+        assert_eq!(walk_wraps(2.0, 0.25, 1.0, 8.0, &durations, range), 0);
+    }
+
+    #[test]
+    fn walk_wraps_counts_non_uniform_loops_and_saturates() {
+        // Two frames of duration 2.0 at fps 8: each lasts
+        // 0.25 s, so the loop is 0.5 s of real time however
+        // the frames are counted.
+        let durations = [2.0, 2.0];
+        assert_eq!(walk_wraps(0.0, 0.25, 1.0, 8.0, &durations, None), 0);
+        assert_eq!(walk_wraps(0.0, 0.5, 1.0, 8.0, &durations, None), 1);
+        assert_eq!(walk_wraps(0.0, 1.0, 1.0, 8.0, &durations, None), 2);
+        // Saturation: one frame and an hour of elapsed. The
+        // crossing cap (2 * 1 + 2) stops the count at 4 —
+        // bounded, and still ≥ 1, which is all the caller
+        // asks of a gap that large.
+        let folds = walk_wraps(0.0, 3600.0, 1.0, 30.0, &[1.0], None);
+        assert_eq!(folds, 4);
+        assert!(folds <= 2 * 1 + 2);
+        // Nothing to walk, or no time to walk in: zero.
+        assert_eq!(walk_wraps(3.0, 5.0, 1.0, 12.0, &[], None), 0);
+        assert_eq!(walk_wraps(0.0, f32::NAN, 1.0, 8.0, &durations, None), 0);
+    }
+
+    #[test]
+    fn full_loop_detected_needs_playing_audio_no_decrease_and_a_fold() {
+        // The missed shape itself: the playhead landed on
+        // the frame it started the tick from, with a full
+        // loop completed on the clock's walk.
+        assert!(full_loop_detected(true, true, 3, 3, Some(1)));
+        // Landed just past the previous frame, two loops in.
+        assert!(full_loop_detected(true, true, 3, 4, Some(2)));
+        // No completed loop: ordinary motion, however the
+        // frames moved.
+        assert!(!full_loop_detected(true, true, 3, 3, Some(0)));
+        assert!(!full_loop_detected(true, true, 3, 4, Some(0)));
+        // A decrease belongs to the wrap sync — stand down
+        // even when the walk folded, so a tick never
+        // restarts twice.
+        assert!(!full_loop_detected(true, true, 3, 2, Some(1)));
+        assert!(!full_loop_detected(true, true, 3, 0, Some(3)));
+        // Paused, silent, or clockless: nothing to re-sync.
+        assert!(!full_loop_detected(false, true, 3, 3, Some(1)));
+        assert!(!full_loop_detected(true, false, 3, 3, Some(1)));
+        assert!(!full_loop_detected(true, true, 3, 3, None));
+    }
+
+    #[test]
+    fn full_loop_sync_without_audio_is_a_silent_no_op() {
+        // Plant a clock ten seconds old at fps 8 — many
+        // full loops on its walk — in the textbook missed
+        // shape (playhead on the frame the tick started
+        // from). With no clips the player is never active,
+        // so even this must leave everything untouched.
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.fps = 8.0;
+        core.playing = true;
+        core.current = 3;
+        CLOCK.with(|clock| {
+            *clock.borrow_mut() = Some((Instant::now() - std::time::Duration::from_secs(10), 0.0));
+        });
+        core.status = "Sentinel.".into();
+        core.sync_playback_audio_on_full_loop(3);
+        assert_eq!(core.status, "Sentinel.");
+        assert!(!core.playback_audio_active());
+        // A no-op does not consume the clock either.
+        assert!(CLOCK.with(|clock| clock.borrow().is_some()));
+        // Paused, and the decrease shape, are equally inert.
+        core.playing = false;
+        core.sync_playback_audio_on_full_loop(3);
+        core.playing = true;
+        core.current = 0;
+        core.sync_playback_audio_on_full_loop(3);
+        assert_eq!(core.status, "Sentinel.");
+        assert!(!core.playback_audio_active());
+        core.stop_playback_audio();
     }
 }

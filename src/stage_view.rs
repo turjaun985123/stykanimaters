@@ -659,14 +659,16 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         }
         // Head rings for every figure (both prior renderers draw
         // them; a figure without its head ring is a broken
-        // drawing, not a scope choice). The radius is the
-        // model's `HEAD_RING_RADIUS` (Phase K): one constant
-        // shared by the stage, the rasterizer and the SVG
-        // exporter, where the literal 17.0 used to be copied.
+        // drawing, not a scope choice). The radius is read from
+        // the project (Phase L): `Project::head_ring_radius()`
+        // returns the model's `HEAD_RING_RADIUS` constant
+        // (Phase K) scaled by the project's head-ring scale, so
+        // at the default scale the ring is exactly the constant
+        // the stage, the rasterizer and the SVG exporter shared.
         for (i, node) in fig.def.nodes.iter().enumerate() {
             if node.head {
                 shape = shape.stroke_with(
-                    ngon(rt.to_screen(pos[i]), model::HEAD_RING_RADIUS * s, 24),
+                    ngon(rt.to_screen(pos[i]), core.project.head_ring_radius() * s, 24),
                     true,
                     5.0 * s,
                     LineCap::Round,

@@ -19,6 +19,9 @@ pub type V2 = [f32; 2];
 /// this radius. It is a plain radius in stage units,
 /// scaled by each site's own zoom/scale factor exactly as
 /// the literal 17.0 was before the constant existed.
+/// A project may scale the ring via
+/// [`Project::head_ring_radius`], which multiplies this
+/// base value by the project's `head_ring_scale`.
 pub const HEAD_RING_RADIUS: f32 = 17.0;
 
 pub fn add(a: V2, b: V2) -> V2 {
@@ -730,6 +733,16 @@ pub struct Project {
     /// Continuous weather effect over the whole timeline.
     #[serde(default)]
     pub weather: Option<crate::vfx::Weather>,
+    /// Per-project scale for the head ring radius, applied
+    /// by [`Project::head_ring_radius`]. 1.0 draws the ring
+    /// at [`HEAD_RING_RADIUS`]. Files saved before this
+    /// field existed carry no value and load as 1.0.
+    #[serde(default = "default_head_ring_scale")]
+    pub head_ring_scale: f32,
+}
+
+fn default_head_ring_scale() -> f32 {
+    1.0
 }
 
 impl Project {
@@ -779,7 +792,24 @@ impl Project {
             sprites: Vec::new(),
             texts: Vec::new(),
             weather: None,
+            head_ring_scale: 1.0,
         }
+    }
+
+    /// The head ring radius for this project, in stage
+    /// units: [`HEAD_RING_RADIUS`] multiplied by
+    /// `head_ring_scale`. The scale is sanitised at read —
+    /// a non-finite value falls back to 1.0 and any finite
+    /// value is clamped into [0.25, 4.0] — so a hand-edited
+    /// or corrupt project file can never produce an
+    /// invisible or absurd ring.
+    pub fn head_ring_radius(&self) -> f32 {
+        let scale = if self.head_ring_scale.is_finite() {
+            self.head_ring_scale.clamp(0.25, 4.0)
+        } else {
+            1.0
+        };
+        HEAD_RING_RADIUS * scale
     }
 
     /// Poses of every figure at a fractional frame time. Without
@@ -1011,6 +1041,53 @@ mod tests {
         // fails loudly here instead of drifting the ring
         // in one renderer at a time.
         assert_eq!(HEAD_RING_RADIUS, 17.0);
+    }
+
+    #[test]
+    fn head_ring_radius_defaults_to_the_base_constant() {
+        let project = Project::new_demo();
+        assert_eq!(project.head_ring_scale, 1.0);
+        assert_eq!(project.head_ring_radius(), 17.0);
+    }
+
+    #[test]
+    fn head_ring_radius_scales_with_the_project() {
+        let mut project = Project::new_demo();
+        project.head_ring_scale = 2.0;
+        assert_eq!(project.head_ring_radius(), 34.0);
+        project.head_ring_scale = 0.5;
+        assert_eq!(project.head_ring_radius(), 8.5);
+    }
+
+    #[test]
+    fn head_ring_radius_sanitises_the_scale_at_read() {
+        let mut project = Project::new_demo();
+        project.head_ring_scale = f32::NAN;
+        assert_eq!(project.head_ring_radius(), 17.0);
+        project.head_ring_scale = f32::INFINITY;
+        assert_eq!(project.head_ring_radius(), 17.0);
+        // Finite but out of range: clamped to the 4.0 cap
+        // (and the 0.25 floor below).
+        project.head_ring_scale = 100.0;
+        assert_eq!(project.head_ring_radius(), 68.0);
+        project.head_ring_scale = 0.0;
+        assert_eq!(project.head_ring_radius(), 4.25);
+    }
+
+    #[test]
+    fn project_without_head_ring_scale_loads_at_scale_one() {
+        // Back-compatibility: a project file saved before
+        // the field existed has no `head_ring_scale` key
+        // and must still load, at the default scale.
+        let mut value = serde_json::to_value(Project::new_demo()).unwrap();
+        let removed = value
+            .as_object_mut()
+            .unwrap()
+            .remove("head_ring_scale");
+        assert!(removed.is_some(), "serialised project carries the field");
+        let restored: Project = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.head_ring_scale, 1.0);
+        assert_eq!(restored.head_ring_radius(), 17.0);
     }
 
     #[test]

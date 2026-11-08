@@ -23,6 +23,7 @@ pub mod figures_panel;
 pub mod frame_ops;
 pub mod fx_browser;
 pub mod fx_clips;
+pub mod fig3_preview;
 pub mod particles_panel;
 pub mod graph_panel;
 pub mod help_panel;

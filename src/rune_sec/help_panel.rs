@@ -119,6 +119,42 @@
 //! **Reload from disk** — §27's `proj-reload` button
 //! landed in `project_tools` after §39's census ran.
 //! The panel now holds 42 rows.
+//!
+//! Phase L (section 28/40) refresh, 2026-11-08: six
+//! more Features rows, verified against the tree the
+//! same way. 3D preview is real: the 3D panel builds a
+//! live canvas keyed `panel-3d-preview` (the
+//! `PREVIEW_KEY` constant in `three_d_panel`) drawing
+//! `fig3_preview::preview_prims`, with the
+//! `d3-grid-toggle` button under it flipping
+//! `fig3_preview`'s ground-grid flag. Head ring size
+//! is the figure inspector's `fig-ring-dn` /
+//! `fig-ring-up` steppers over `step_head_ring_scale`
+//! (the project's `head_ring_scale`). Loop range
+//! steppers are the timeline's `timeline-loop-row`:
+//! `loop-set` plus the `loop-a-dn` / `loop-a-up` and
+//! `loop-b-dn` / `loop-b-up` Start / End steppers and
+//! `loop-clear`, all over `loop_range` /
+//! `set_loop_range`. Three more rows complete the
+//! six: Stroke simplify is the stroke inspector's
+//! `stroke-simplify` button under the width row,
+//! running Douglas-Peucker over the one selected
+//! stroke through `draw_ops::simplify_stroke_at`.
+//! Palette recents persist: `command_palette` loads
+//! them through `shell::palette_recents` and writes
+//! them back through `shell::save_palette_recents`,
+//! so recent commands survive a restart. Camera key
+//! delete is the camera panel's `cam-delete-key`
+//! button over `delete_camera_key_at` at the current
+//! frame. A census note, for the record: those last
+//! three landed DURING this section's census — the
+//! first greps found no `stroke-simplify`, no
+//! `cam-delete-key` and no `palette_recents` call,
+//! and only re-verification against the tree (the
+//! Phase K lesson: a census is a claim too) found
+//! all three present with their handlers. No
+//! candidate was dropped this phase. The panel now
+//! holds 48 rows.
 
 use rune::tok::{type_, Family, Theme};
 use rune::{col, el, row, text, El};
@@ -205,6 +241,14 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
                 "Graph panel — Delete channel button removes the drawn channel",
             ),
             (
+                "Loop range steppers",
+                "Timeline — Set loop button and Start / End steppers below the frame chips",
+            ),
+            (
+                "Camera key delete",
+                "Camera panel — Delete key button removes the camera key at the current frame",
+            ),
+            (
                 "Stroke selection",
                 "Click a stroke on the stage to select it",
             ),
@@ -213,12 +257,20 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
                 "Stage — right-press a figure to select it and its joint",
             ),
             (
+                "Stroke simplify",
+                "Stroke inspector — Simplify button reduces the selected stroke's points",
+            ),
+            (
                 "Particles panel",
                 "Effects workspace — add, select and delete particle events",
             ),
             (
                 "Audio clip selection",
                 "Click a clip row — the effects then act on that clip",
+            ),
+            (
+                "3D preview",
+                "3D workspace — live preview of the 3D figure; drag to orbit, Grid toggle shows the ground grid",
             ),
             (
                 "Bend steppers",
@@ -231,6 +283,10 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             (
                 "Mirror whole figure",
                 "Pose tools or command palette — Mirror figure (all frames)",
+            ),
+            (
+                "Head ring size",
+                "Figure inspector — −/+ steppers scale the project's head ring",
             ),
             (
                 "Frame rate & stage size",
@@ -247,6 +303,10 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             (
                 "Reload from disk",
                 "Project tools — Reload from disk button re-reads the saved file",
+            ),
+            (
+                "Palette recents",
+                "Command palette — recent commands are remembered between sessions",
             ),
             (
                 "Range export",
@@ -408,17 +468,18 @@ mod tests {
     use super::{group_rows, section_note, section_rows, shortcut_rows};
 
     #[test]
-    fn shortcut_rows_has_exactly_42_rows() {
+    fn shortcut_rows_has_exactly_48_rows() {
         // 9 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
-        // + 18 Features; Drawing contributes none (see the
+        // + 24 Features; Drawing contributes none (see the
         // module docs for which GPUI-era rows were dropped
         // and why). Phase G added the four palette/menu rows
         // to Shortcuts; Phase I added the Features section;
         // Phase J added four rows to it; Phase K six more,
         // and the Phase K close-out two more (Right-press
         // selects and Reload from disk — both verified
-        // user-reachable at integration time).
-        assert_eq!(shortcut_rows().len(), 42);
+        // user-reachable at integration time); Phase L
+        // six more.
+        assert_eq!(shortcut_rows().len(), 48);
     }
 
     #[test]
@@ -469,9 +530,9 @@ mod tests {
         )));
         // The Features rows live in their own section, in
         // this order, and nowhere else. (The count covers
-        // the Phase J and Phase K rows too — see those
-        // tests.)
-        assert_eq!(section_rows("Features").len(), 18);
+        // the Phase J, Phase K and Phase L rows too — see
+        // those tests.)
+        assert_eq!(section_rows("Features").len(), 24);
     }
 
     #[test]
@@ -505,11 +566,11 @@ mod tests {
         )));
         // The ruler sits with the timeline rows, directly
         // after Keyframe jump; the section holds all
-        // eighteen feature rows (ten at Phase J, six more
-        // in Phase K, two at the Phase K close-out) and no
-        // nineteenth has crept in.
+        // twenty-four feature rows (ten at Phase J, six more
+        // in Phase K, two at the Phase K close-out, six
+        // in Phase L) and no twenty-fifth has crept in.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 18);
+        assert_eq!(features.len(), 24);
         let jump = features
             .iter()
             .position(|(label, _)| *label == "Keyframe jump")
@@ -579,12 +640,105 @@ mod tests {
         // Placement: Playback speed sits with the
         // transport rows directly after Loop playback.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 18);
+        assert_eq!(features.len(), 24);
         let loop_row = features
             .iter()
             .position(|(label, _)| *label == "Loop playback")
             .expect("Loop playback row");
         assert_eq!(features[loop_row + 1].0, "Playback speed");
+    }
+
+    #[test]
+    fn phase_l_feature_rows_are_listed() {
+        // The Phase L features, each verified against the
+        // tree before listing (see the module docs): 3D
+        // preview — the `panel-3d-preview` canvas
+        // (`PREVIEW_KEY`) in `three_d_panel` drawing
+        // `fig3_preview::preview_prims`, with the
+        // `d3-grid-toggle` button flipping the ground
+        // grid; Head ring size — the `fig-ring-dn` /
+        // `fig-ring-up` steppers in `inspector_figure`
+        // over `step_head_ring_scale`; Loop range
+        // steppers — the `timeline-loop-row` in
+        // `timeline_marks` (`loop-set`, the Start / End
+        // `loop-a-*` / `loop-b-*` steppers, `loop-clear`).
+        // Stroke simplify — the `stroke-simplify` button
+        // in `stroke_inspector`, over
+        // `draw_ops::simplify_stroke_at`; Palette recents
+        // — `command_palette` loading through
+        // `shell::palette_recents` and saving through
+        // `shell::save_palette_recents`; Camera key
+        // delete — the `cam-delete-key` button in
+        // `camera_panel`, over `delete_camera_key_at`.
+        // Those last three landed during this section's
+        // census — the first greps found none of them,
+        // and re-verification against the tree found all
+        // three with their handlers (see the module
+        // docs). No candidate was dropped this phase.
+        let rows = shortcut_rows();
+        assert!(rows.contains(&(
+            "3D preview",
+            "3D workspace — live preview of the 3D figure; drag to orbit, Grid toggle shows the ground grid"
+        )));
+        assert!(rows.contains(&(
+            "Head ring size",
+            "Figure inspector — −/+ steppers scale the project's head ring"
+        )));
+        assert!(rows.contains(&(
+            "Loop range steppers",
+            "Timeline — Set loop button and Start / End steppers below the frame chips"
+        )));
+        assert!(rows.contains(&(
+            "Stroke simplify",
+            "Stroke inspector — Simplify button reduces the selected stroke's points"
+        )));
+        assert!(rows.contains(&(
+            "Palette recents",
+            "Command palette — recent commands are remembered between sessions"
+        )));
+        assert!(rows.contains(&(
+            "Camera key delete",
+            "Camera panel — Delete key button removes the camera key at the current frame"
+        )));
+        // Placement: the loop steppers sit with the
+        // timeline / graph rows, directly after Delete
+        // graph channel, with Camera key delete directly
+        // after them; Stroke simplify sits with the
+        // stroke rows, directly after Right-press
+        // selects; the 3D preview sits with the
+        // workspace panel rows, directly after Audio clip
+        // selection; the head ring sits with the figure
+        // rows, directly after Mirror whole figure;
+        // Palette recents sits with the project rows,
+        // directly after Reload from disk.
+        let features = section_rows("Features");
+        assert_eq!(features.len(), 24);
+        let channel_row = features
+            .iter()
+            .position(|(label, _)| *label == "Delete graph channel")
+            .expect("Delete graph channel row");
+        assert_eq!(features[channel_row + 1].0, "Loop range steppers");
+        assert_eq!(features[channel_row + 2].0, "Camera key delete");
+        let press_row = features
+            .iter()
+            .position(|(label, _)| *label == "Right-press selects")
+            .expect("Right-press selects row");
+        assert_eq!(features[press_row + 1].0, "Stroke simplify");
+        let audio_row = features
+            .iter()
+            .position(|(label, _)| *label == "Audio clip selection")
+            .expect("Audio clip selection row");
+        assert_eq!(features[audio_row + 1].0, "3D preview");
+        let mirror_row = features
+            .iter()
+            .position(|(label, _)| *label == "Mirror whole figure")
+            .expect("Mirror whole figure row");
+        assert_eq!(features[mirror_row + 1].0, "Head ring size");
+        let reload_row = features
+            .iter()
+            .position(|(label, _)| *label == "Reload from disk")
+            .expect("Reload from disk row");
+        assert_eq!(features[reload_row + 1].0, "Palette recents");
     }
 
     #[test]

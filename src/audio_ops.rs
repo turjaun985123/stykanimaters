@@ -71,6 +71,14 @@
 //! at least one clip actually changes; silent and
 //! unreadable clips are skipped with their gains untouched.
 //!
+//! Phase L (section 5): [`clip_duration_secs`] and
+//! [`clip_duration_frames`] probe a clip's length through
+//! the same loader [`clip_peaks`] uses, so timeline code
+//! can lay a clip against the frame grid without decoding
+//! it a second time or re-deriving the maths in panel
+//! code. Both are read-only probes in the [`clip_peaks`]
+//! discipline: no snapshot, no status, failures as `None`.
+//!
 //! `audio_derived_path` below is a copy of the private helper
 //! of the same name in `editor.rs`: it is private to that
 //! module, so this file cannot call it — the body is kept
@@ -149,6 +157,39 @@ pub fn clip_peaks(core: &EditorCore, index: usize, buckets: usize) -> Vec<f32> {
         return Vec::new();
     }
     crate::audio_edit::peaks(&data, buckets)
+}
+
+/// Phase L (section 5): how long the clip at `index` runs,
+/// in seconds: the file's sample-frame count divided by its
+/// sample rate. This is the duration counterpart of
+/// [`clip_peaks`] — the same loader path
+/// (`audio_edit::read_wav` on the clip's path), the same
+/// read-only discipline (takes `&EditorCore`, no snapshot,
+/// no status write), and the same error tolerance, except
+/// that every failure reads as `None` rather than an empty
+/// vec: an out-of-range `index`, a missing or unreadable
+/// file, a file with a zero sample rate, or one that
+/// decodes to no sample frames at all. The clip's `gain`
+/// plays no part — gain scales loudness, never length.
+pub fn clip_duration_secs(core: &EditorCore, index: usize) -> Option<f32> {
+    let clip = core.project.audio.get(index)?;
+    let data = crate::audio_edit::read_wav(&clip.path).ok()?;
+    if data.sample_rate == 0 || data.frames() == 0 {
+        return None;
+    }
+    Some(data.frames() as f32 / data.sample_rate as f32)
+}
+
+/// Phase L (section 5): how long the clip at `index` runs,
+/// in project frames: [`clip_duration_secs`] scaled by the
+/// project's frame rate, rounded half away from zero — the
+/// shell's rounding convention, so a clip that ends halfway
+/// through a frame still claims that frame on the timeline.
+/// `None` exactly when the seconds probe is `None`.
+/// Read-only, like it: no snapshot, no status write.
+pub fn clip_duration_frames(core: &EditorCore, index: usize) -> Option<usize> {
+    let secs = clip_duration_secs(core, index)?;
+    Some((secs * core.project.fps).round() as usize)
 }
 
 /// Bucket count [`EditorCore::normalise_all_clips`] measures
@@ -1651,6 +1692,88 @@ mod tests {
         let a = write_samples_wav(&dir, "a.wav", Vec::new());
         let core = core_with(vec![clip(&a, 0)]);
         assert!(clip_peaks(&core, 0, 8).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- Phase L: clip duration probes ----
+
+    #[test]
+    fn clip_duration_secs_measures_the_written_file() {
+        let dir = temp_dir("duration-secs");
+        // One second at 8 kHz mono: 8000 sample frames; the
+        // second clip is half that, so the probe must read
+        // each indexed clip's own file.
+        let a = write_samples_wav(&dir, "a.wav", vec![0.5; 8000]);
+        let b = write_samples_wav(&dir, "b.wav", vec![0.25; 4000]);
+        let mut core = core_with(vec![clip(&a, 0), clip(&b, 4)]);
+        core.status = "untouched".into();
+        let depth = core.undo_depth();
+        let secs = clip_duration_secs(&core, 0).expect("one-second clip");
+        assert!((secs - 1.0).abs() < 0.001, "got {secs}");
+        let secs = clip_duration_secs(&core, 1).expect("half-second clip");
+        assert!((secs - 0.5).abs() < 0.001, "got {secs}");
+        // A probe: no status write, no snapshot.
+        assert_eq!(core.status, "untouched");
+        assert_eq!(core.undo_depth(), depth, "no snapshot taken");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clip_duration_frames_scales_by_the_project_fps() {
+        let dir = temp_dir("duration-frames");
+        let a = write_samples_wav(&dir, "a.wav", vec![0.5; 8000]);
+        let core = core_with(vec![clip(&a, 0)]);
+        // The demo project runs at 12 fps, so a one-second
+        // clip spans exactly 12 frames.
+        assert_eq!(core.project.fps, 12.0);
+        assert_eq!(clip_duration_frames(&core, 0), Some(12));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clip_duration_frames_rounds_half_away_from_zero() {
+        let dir = temp_dir("duration-rounding");
+        // 5000 frames at 8 kHz is 0.625 s; at 12 fps that is
+        // exactly 7.5 frames, which rounds half away from
+        // zero to 8 — a truncation or banker's rounding
+        // would give 7.
+        let a = write_samples_wav(&dir, "a.wav", vec![0.5; 5000]);
+        let core = core_with(vec![clip(&a, 0)]);
+        assert_eq!(clip_duration_frames(&core, 0), Some(8));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clip_duration_is_none_for_missing_and_out_of_range() {
+        let dir = temp_dir("duration-refusals");
+        let a = write_samples_wav(&dir, "a.wav", vec![0.5; 8000]);
+        // A path that was never written.
+        let missing = dir.join("missing.wav").to_string_lossy().into_owned();
+        let core = core_with(vec![clip(&a, 0), clip(&missing, 4)]);
+        assert_eq!(clip_duration_secs(&core, 1), None, "missing file");
+        assert_eq!(clip_duration_frames(&core, 1), None, "missing file");
+        assert_eq!(clip_duration_secs(&core, 2), None, "index past the end");
+        assert_eq!(
+            clip_duration_frames(&core, 99),
+            None,
+            "index far past the end"
+        );
+        // No clips at all: even index 0 is out of range.
+        let empty = EditorCore::new();
+        assert_eq!(clip_duration_secs(&empty, 0), None);
+        assert_eq!(clip_duration_frames(&empty, 0), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clip_duration_is_none_for_a_clip_with_no_samples() {
+        let dir = temp_dir("duration-empty");
+        // A well-formed WAV with an empty data chunk decodes
+        // successfully but has no sample frames: no duration.
+        let a = write_samples_wav(&dir, "a.wav", Vec::new());
+        let core = core_with(vec![clip(&a, 0)]);
+        assert_eq!(clip_duration_secs(&core, 0), None);
+        assert_eq!(clip_duration_frames(&core, 0), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 

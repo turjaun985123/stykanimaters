@@ -125,6 +125,29 @@
 //!   (`No library figures match "…".`) already mirrored
 //!   the figures panel's and is unchanged.
 //!
+//! ## Phase L additions (section 20/40)
+//!
+//! - **Sort toggle**: the search row gains a `lib-sort`
+//!   button (plain [`btn`] — the Home panel's Phase K
+//!   sort precedent) flipping
+//!   [`LibraryPanelState::sort_by_name`]. The label
+//!   names the order in effect: "Sort: A–Z" while
+//!   sorting, "Sort: added" otherwise — the library's
+//!   own order, the order `load_library` added the
+//!   entries: the three built-ins first (constructed in
+//!   code), then saved entries in the order their files
+//!   were read (file paths sorted, editor.rs:183-189).
+//!   Sorting applies to the rows projection only
+//!   ([`sort_rows`]: stable, case-insensitive on the
+//!   display name), within each group — the Built-in /
+//!   Saved grouping itself is unchanged — and rows keep
+//!   their real library slots, so Insert, Rename and
+//!   Delete target exactly the same entries as
+//!   unsorted. Enter-to-insert follows the visible
+//!   order too ([`enter_insert_index_sorted`]): with
+//!   the sort on, Enter inserts the first row the user
+//!   actually sees.
+//!
 //! The successful-rename fs dispatch (a real file moved
 //! under `./library`) is deliberately **untested**, for
 //! exactly the delete reason given below: test binaries
@@ -204,19 +227,20 @@ pub const BUILTIN_PREFIX: &str = "Built-in: ";
 pub const LIST_HEIGHT: f32 = 200.0;
 
 /// View-state for this section: whether the panel body is
-/// collapsed, the search field, and the rename session.
-/// Owned by `State` (see the module docs for the wiring);
-/// everything about the library itself lives in
-/// `EditorCore`.
+/// collapsed, the search field, the rename session, and
+/// the list sort order. Owned by `State` (see the module
+/// docs for the wiring); everything about the library
+/// itself lives in `EditorCore`.
 ///
 /// The derive drops `Eq` (kept through Phase D) because
 /// Rune's `TextEdit` is `PartialEq` but not `Eq`
 /// (rune `edit.rs`: `#[derive(Clone, Default, PartialEq)]`).
 /// The derived `Default` covers the Phase F fields too:
 /// `TextEdit` defaults to empty (the `search` field
-/// already relies on it) and `Option` defaults to `None`,
-/// so `LibraryPanelState::default()` keeps working for
-/// the integrator's `init()`.
+/// already relies on it) and `Option` defaults to `None`
+/// (and `bool` to `false`, the Phase L sort field), so
+/// `LibraryPanelState::default()` keeps working for the
+/// integrator's `init()`.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct LibraryPanelState {
     /// When true, only the header renders (the save button
@@ -238,6 +262,13 @@ pub struct LibraryPanelState {
     /// by [`apply_rename`] (when the rename settles) and
     /// [`cancel_rename`].
     pub renaming: Option<usize>,
+    /// Row order (Phase L): `false` (the `Default`) keeps
+    /// the library's own order — the order `load_library`
+    /// added the entries (built-ins first, then saved
+    /// entries in sorted file order); `true` sorts the
+    /// rendered rows by name via [`sort_rows`]. Flipped
+    /// by the `lib-sort` toggle in the search row.
+    pub sort_by_name: bool,
 }
 
 /// Display-ready data for one library row, derived from the
@@ -372,6 +403,33 @@ pub fn saved_rows_q(core: &EditorCore, query: &str) -> Vec<LibraryRow> {
 /// The saved-figure rows (everything not built-in).
 pub fn saved_rows(core: &EditorCore) -> Vec<LibraryRow> {
     saved_rows_q(core, "")
+}
+
+/// The rows in the order the panel renders them
+/// (Phase L): with `by_name` false the rows pass
+/// through untouched — the library's own order, the
+/// order `load_library` added the entries (the three
+/// built-ins first, then saved entries in sorted file
+/// order). With `by_name` true they are sorted by
+/// display name, case-insensitively; the sort is
+/// stable, so entries whose names fold to the same
+/// string keep their library order relative to each
+/// other. Rows carry their real library slots
+/// ([`LibraryRow::index`]) through the reorder, so
+/// sorting the projection never changes what Insert,
+/// Rename or Delete target. The panel applies this
+/// within each group (Built-in / Saved) — the
+/// grouping itself does not change. The Home panel's
+/// [`sort_entries`] discipline, carried over.
+///
+/// [`sort_entries`]: crate::rune_sec::home_panel::sort_entries
+pub fn sort_rows(rows: Vec<LibraryRow>, by_name: bool) -> Vec<LibraryRow> {
+    if !by_name {
+        return rows;
+    }
+    let mut rows = rows;
+    rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    rows
 }
 
 /// The backing file of a saved library entry:
@@ -572,17 +630,68 @@ pub fn insert_on_enter(core: &mut EditorCore, query: &str) {
     }
 }
 
+/// The library slot pressing Enter inserts, under the
+/// panel's sort order (Phase L): the first row the user
+/// actually sees. With `by_name` false this IS
+/// [`enter_insert_index`] — the same rows in the same
+/// order, so the unsorted Enter is byte-identical to
+/// before. With `by_name` true the visible order is
+/// the grouped projection the panel renders — the
+/// Built-in group first, each group name-sorted via
+/// [`sort_rows`] — so the first visible row is the
+/// first sorted built-in row, or the first sorted
+/// saved row when no built-in matches. Either way the
+/// row carries its real library slot.
+pub fn enter_insert_index_sorted(
+    core: &EditorCore,
+    query: &str,
+    by_name: bool,
+) -> Option<usize> {
+    if !by_name {
+        return enter_insert_index(core, query);
+    }
+    let builtins = sort_rows(builtin_rows_q(core, query), true);
+    if let Some(row) = builtins.first() {
+        return Some(row.index);
+    }
+    sort_rows(saved_rows_q(core, query), true)
+        .first()
+        .map(|row| row.index)
+}
+
+/// The sort-aware Enter dispatch at the core level:
+/// insert the first visible entry under the panel's
+/// sort order ([`enter_insert_index_sorted`] +
+/// [`insert_at`]); a filter with no matches is a
+/// silent no-op.
+pub fn insert_on_enter_sorted(core: &mut EditorCore, query: &str, by_name: bool) {
+    if let Some(i) = enter_insert_index_sorted(core, query, by_name) {
+        insert_at(core, i);
+    }
+}
+
 /// The search field's `on_submit` handler: read the
-/// typed query, then the core-level dispatch above.
+/// typed query, then the sort-aware core-level dispatch
+/// above — Enter inserts the first row visible under
+/// the panel's current sort order.
 pub fn submit_library_search(s: &mut State) {
     let query = s.library_panel.search.text.clone();
-    insert_on_enter(&mut s.core, &query);
+    let by_name = s.library_panel.sort_by_name;
+    insert_on_enter_sorted(&mut s.core, &query, by_name);
 }
 
 /// Flip the panel collapsed/expanded (the header toggle's
 /// handler).
 pub fn toggle_collapsed(s: &mut State) {
     s.library_panel.collapsed = !s.library_panel.collapsed;
+}
+
+/// Flip the list order between the library's own order
+/// and name order (the `lib-sort` toggle's handler in
+/// the search row). Pure view state — no engine op;
+/// the rows keep their real library slots either way.
+pub fn toggle_sort(s: &mut State) {
+    s.library_panel.sort_by_name = !s.library_panel.sort_by_name;
 }
 
 /// Open the rename editor for library slot `i` (the
@@ -747,6 +856,10 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
     // count and the card's row groups both derive from
     // it, so the count can never disagree with the rows.
     let query = s.library_panel.search.text.clone();
+    // The sort order in effect (Phase L): applied to
+    // the row projections below and named by the
+    // `lib-sort` toggle's label.
+    let sort_by_name = s.library_panel.sort_by_name;
     let header_count = count_line(
         library_rows_q(core, &query).len(),
         core.library.len(),
@@ -806,7 +919,14 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
                         .placeholder("Search library", t.text_secondary)
                         .on_edit(|s: &mut State| &mut s.library_panel.search)
                         .on_submit(|s: &mut State, _tx: &mut Tx| submit_library_search(s)),
-                ),
+                )
+                .child(btn(
+                    "lib-sort",
+                    if sort_by_name { "Sort: A–Z" } else { "Sort: added" },
+                    sort_by_name,
+                    t,
+                    |s: &mut State| toggle_sort(s),
+                )),
         );
         if core.library.is_empty() {
             card = card.child(group_label(
@@ -814,8 +934,8 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
                 "Library is empty — save a figure to add one.",
             ));
         } else {
-            let builtins = builtin_rows_q(core, &query);
-            let saved = saved_rows_q(core, &query);
+            let builtins = sort_rows(builtin_rows_q(core, &query), sort_by_name);
+            let saved = sort_rows(saved_rows_q(core, &query), sort_by_name);
             if builtins.is_empty() && saved.is_empty() {
                 card = card.child(group_label(
                     t,
@@ -1325,5 +1445,154 @@ mod tests {
         assert_eq!(count_line(1, 4, "alp"), "1 of 4 figures");
         assert_eq!(count_line(0, 4, "zzz"), "0 of 4 figures");
         assert_eq!(count_line(4, 4, "a"), "4 of 4 figures");
+    }
+
+    #[test]
+    fn state_default_sort_is_library_order() {
+        // The Phase L field rides on the derived
+        // Default: rows start in the library's own
+        // order, not name order.
+        assert!(!LibraryPanelState::default().sort_by_name);
+    }
+
+    #[test]
+    fn sort_rows_orders_by_name_and_indices_follow_their_entries() {
+        let mut core = EditorCore::new();
+        let zebra = core.library.len();
+        core.library
+            .push(("Zebra".into(), stykanimate_rs::model::FigureDef::simple()));
+        let apple = core.library.len();
+        core.library
+            .push(("apple".into(), stykanimate_rs::model::FigureDef::simple()));
+        let mango = core.library.len();
+        core.library
+            .push(("Mango".into(), stykanimate_rs::model::FigureDef::simple()));
+        let sorted = sort_rows(saved_rows(&core), true);
+        // Case-insensitive name order…
+        assert_eq!(
+            sorted.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["apple", "Mango", "Zebra"]
+        );
+        // …and each row still carries the real library
+        // slot of its entry, so Insert / Rename / Delete
+        // pressed from the sorted list hit the same
+        // entries as from the unsorted one.
+        assert_eq!(sorted[0].index, apple);
+        assert_eq!(sorted[1].index, mango);
+        assert_eq!(sorted[2].index, zebra);
+    }
+
+    #[test]
+    fn sort_rows_sorts_the_builtin_group_by_name_too() {
+        // Library order is Humanoid / Quadruped / Mini;
+        // name order moves Mini ahead of Quadruped, and
+        // the slots move with their entries.
+        let core = EditorCore::new();
+        let sorted = sort_rows(builtin_rows(&core), true);
+        assert_eq!(
+            sorted.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["Built-in: Humanoid", "Built-in: Mini", "Built-in: Quadruped"]
+        );
+        assert_eq!(
+            sorted.iter().map(|r| r.index).collect::<Vec<_>>(),
+            [0, 2, 1]
+        );
+    }
+
+    #[test]
+    fn sort_rows_by_name_is_stable_for_folded_equals() {
+        let mut core = EditorCore::new();
+        let first = core.library.len();
+        core.library
+            .push(("beta".into(), stykanimate_rs::model::FigureDef::simple()));
+        let second = core.library.len();
+        core.library
+            .push(("BETA".into(), stykanimate_rs::model::FigureDef::simple()));
+        let sorted = sort_rows(saved_rows(&core), true);
+        // Both names fold to "beta"; the stable sort
+        // keeps their library order relative to each
+        // other.
+        assert_eq!(sorted.len(), 2);
+        assert_eq!(sorted[0].index, first);
+        assert_eq!(sorted[1].index, second);
+    }
+
+    #[test]
+    fn sort_rows_off_passes_rows_through_untouched() {
+        // The toggle-off projection is the rows
+        // themselves, byte-identical — the same Vec the
+        // panel rendered before Phase L, in the
+        // library's own order.
+        let mut core = EditorCore::new();
+        core.library
+            .push(("Zebra".into(), stykanimate_rs::model::FigureDef::simple()));
+        core.library
+            .push(("apple".into(), stykanimate_rs::model::FigureDef::simple()));
+        assert_eq!(sort_rows(library_rows(&core), false), library_rows(&core));
+        assert_eq!(sort_rows(saved_rows(&core), false), saved_rows(&core));
+        assert_eq!(sort_rows(builtin_rows(&core), false), builtin_rows(&core));
+    }
+
+    #[test]
+    fn enter_insert_index_sorted_matches_unsorted_when_sort_is_off() {
+        let mut core = EditorCore::new();
+        core.library
+            .push(("Jinx".into(), stykanimate_rs::model::FigureDef::simple()));
+        core.library
+            .push(("Jade".into(), stykanimate_rs::model::FigureDef::simple()));
+        for q in ["", "j", "jad", "zzz-no-match"] {
+            assert_eq!(
+                enter_insert_index_sorted(&core, q, false),
+                enter_insert_index(&core, q),
+                "query {q:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn enter_insert_index_sorted_is_the_first_visible_row() {
+        let mut core = EditorCore::new();
+        let jinx = core.library.len();
+        core.library
+            .push(("Jinx".into(), stykanimate_rs::model::FigureDef::simple()));
+        let jade = core.library.len();
+        core.library
+            .push(("Jade".into(), stykanimate_rs::model::FigureDef::simple()));
+        // "j" matches Jinx and Jade among the saved
+        // entries and no built-in. In library order Jinx
+        // is the first visible row; in name order Jade
+        // is — Enter must follow what the user sees.
+        assert_eq!(enter_insert_index(&core, "j"), Some(jinx));
+        assert_eq!(enter_insert_index_sorted(&core, "j", true), Some(jade));
+        // Unfiltered, the first visible row under the
+        // sort is the name-smallest built-in — still
+        // slot 0 ("Built-in: Humanoid" sorts before
+        // Mini and Quadruped).
+        assert_eq!(enter_insert_index_sorted(&core, "", true), Some(0));
+        // No matches: nothing for Enter to insert,
+        // sorted or not.
+        assert_eq!(enter_insert_index_sorted(&core, "zzz-no-match", true), None);
+    }
+
+    #[test]
+    fn insert_on_enter_sorted_inserts_the_first_visible_entry() {
+        let mut core = EditorCore::new();
+        core.library
+            .push(("Jinx".into(), stykanimate_rs::model::FigureDef::simple()));
+        let jade = core.library.len();
+        core.library
+            .push(("Jade".into(), stykanimate_rs::model::FigureDef::simple()));
+        let figures_before = core.project.figures.len();
+        // "j" shows Jinx then Jade in library order,
+        // Jade then Jinx sorted; Enter inserts Jade —
+        // the first VISIBLE row — by its real slot.
+        insert_on_enter_sorted(&mut core, "j", true);
+        assert_eq!(core.project.figures.len(), figures_before + 1);
+        assert_eq!(core.library_index, jade);
+        assert!(
+            core.status.contains("Inserted Jade"),
+            "status: {}",
+            core.status
+        );
     }
 }

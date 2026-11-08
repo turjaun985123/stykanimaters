@@ -45,16 +45,20 @@
 //! * anchor to joint — `EditorCore::particle_set_anchor(
 //!   index, Some(figure), Some(node))`, the pair resolved
 //!   by [`anchor_target`] (Phase K)
+//! * position nudge — `EditorCore::particle_set_position(
+//!   index, x, y)` (Phase L)
 //!
-//! `particle_set_position` exists in the same op file and
-//! the model supports it (the event carries `x`/`y`), but
-//! this panel deliberately offers no position control:
-//! a free event's point is set by import or by the stage,
-//! and the detail block shows it read-only. Selection
-//! bookkeeping stays in this module (the ops know nothing
-//! of `State::particle_selected`): add selects the new
-//! event, duplicate selects the copy, delete repairs the
-//! selection with [`selection_after_delete`].
+//! `particle_set_position` exists in the same op file
+//! and the model supports it (the event carries `x`/`y`).
+//! Until Phase L this panel deliberately offered no
+//! position control — a free event's point was set by
+//! import or by the stage, and the detail block showed
+//! it read-only; Phase L adds the nudge pad below.
+//! Selection bookkeeping stays in this module (the ops
+//! know nothing of `State::particle_selected`): add
+//! selects the new event, duplicate selects the copy,
+//! delete repairs the selection with
+//! [`selection_after_delete`].
 //!
 //! Phase K adds two actions to the detail block's final
 //! action row area, beside Duplicate/Delete: "To
@@ -69,6 +73,18 @@
 //! constructor (`icon_btn_inert` is not among this file's
 //! imports, so the button is omitted, not greyed, when
 //! no joint is selected).
+//!
+//! Phase L adds a position nudge pad under the final
+//! action row: four plain arrow buttons
+//! (`particles-nudge-l`/`r`/`u`/`d`, the text tool's pad
+//! construction) stepping the selected event's stored
+//! point by [`NUDGE_STEP`] (4.0 stage units, defined
+//! locally) through `particle_set_position`, plus the
+//! pad's own keyed position readout (`particles-pos`,
+//! "At {x}, {y}"). The detail block's summary line
+//! already carried the same point fused with the anchor
+//! text ("{anchor} · at {x}, {y}", unkeyed); the keyed
+//! readout is the pad's feedback, not a replacement.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, El};
@@ -459,6 +475,31 @@ fn anchor_clear(s: &mut State) {
     s.core.particle_set_anchor(i, None, None);
 }
 
+/// One nudge-pad step, in stage units (Phase L) — the
+/// same step the text tool's pad uses (its own
+/// `NUDGE_STEP` in text_tool.rs; defined locally here
+/// rather than imported, as each panel owns its
+/// constants).
+pub const NUDGE_STEP: f32 = 4.0;
+
+/// Nudge the selected event's stored stage point by
+/// `(dx, dy)` via `EditorCore::particle_set_position`
+/// (Phase L), reading the event's current `x`/`y` first
+/// so repeated presses accumulate. The pad's buttons
+/// pass one [`NUDGE_STEP`] on a single axis (up is
+/// negative `y` — the stage's y grows downward). Every
+/// press is a real move, so every press takes the op's
+/// snapshot; with no valid selection the press is a
+/// no-op and nothing is snapshotted.
+fn nudge_selected(s: &mut State, dx: f32, dy: f32) {
+    let Some(i) = selected_event(&s.core, s.particle_selected) else {
+        return;
+    };
+    let event = &s.core.project.particles[i];
+    let (x, y) = (event.x + dx, event.y + dy);
+    s.core.particle_set_position(i, x, y);
+}
+
 // ----------------------------------------------------------------
 // Views
 // ----------------------------------------------------------------
@@ -467,9 +508,10 @@ fn anchor_clear(s: &mut State) {
 /// anchor summary, a kind stepper and colour swatches
 /// (Phase I), a frame stepper, the anchor buttons
 /// (anchor to the selected figure / clear anchor),
-/// duplicate and delete, and a final action row (to
+/// duplicate and delete, a final action row (to
 /// playhead, plus anchor to joint while a joint is
-/// selected — Phase K). With events present but no
+/// selected — Phase K), and a position nudge pad with
+/// its readout (Phase L). With events present but no
 /// valid selection it renders a guidance line instead
 /// of dead buttons.
 fn detail_block(s: &State, t: &Theme) -> El {
@@ -670,6 +712,40 @@ fn detail_block(s: &State, t: &Theme) -> El {
         // a joint is selected, anchor to joint
         // (EditorCore::particle_set_anchor).
         .child(place_row)
+        // Nudge pad (Phase L, the text tool's pad
+        // construction): four plain buttons stepping the
+        // event's stored point by NUDGE_STEP on one axis
+        // (EditorCore::particle_set_position; up is −y).
+        .child(
+            row()
+                .key("particles-nudge-row")
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(btn("particles-nudge-l", "←", false, t, |s| {
+                    nudge_selected(s, -NUDGE_STEP, 0.0)
+                }))
+                .child(btn("particles-nudge-u", "↑", false, t, |s| {
+                    nudge_selected(s, 0.0, -NUDGE_STEP)
+                }))
+                .child(btn("particles-nudge-d", "↓", false, t, |s| {
+                    nudge_selected(s, 0.0, NUDGE_STEP)
+                }))
+                .child(btn("particles-nudge-r", "→", false, t, |s| {
+                    nudge_selected(s, NUDGE_STEP, 0.0)
+                })),
+        )
+        // The pad's position readout: the event's stored
+        // point, keyed for tree probes. (The summary line
+        // at the top of this block already carries the
+        // same point fused with the anchor text; this is
+        // the pad's own readout, updating as it nudges.)
+        .child(
+            text(format!("At {:.0}, {:.0}", data.x, data.y))
+                .key("particles-pos")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
 }
 
 /// The particle events panel: header + count, an add
@@ -1304,5 +1380,73 @@ mod tests {
         // action row and the panel still builds.
         state.core.selected_node = Some(0);
         let _ = particles_panel(&state, &t);
+    }
+
+    #[test]
+    fn nudge_selected_steps_the_event_by_the_step_on_each_axis() {
+        // The briefed step, pinned: the pad moves the
+        // event by exactly 4.0 stage units per press.
+        assert_eq!(NUDGE_STEP, 4.0);
+        let mut state = demo_state();
+        // The fixture event sits at (100, 50).
+        state.core.project.particles = vec![event(0, None, None)];
+        state.particle_selected = Some(0);
+        let depth = state.core.undo_depth();
+        // Left: x − 4, y untouched, one snapshot.
+        nudge_selected(&mut state, -NUDGE_STEP, 0.0);
+        assert_eq!(state.core.project.particles[0].x, 96.0);
+        assert_eq!(state.core.project.particles[0].y, 50.0);
+        assert_eq!(state.core.undo_depth(), depth + 1, "one snapshot per press");
+        // Right: back to the start.
+        nudge_selected(&mut state, NUDGE_STEP, 0.0);
+        assert_eq!(state.core.project.particles[0].x, 100.0);
+        // Up is −y (the stage's y grows downward).
+        nudge_selected(&mut state, 0.0, -NUDGE_STEP);
+        assert_eq!(state.core.project.particles[0].y, 46.0);
+        assert_eq!(state.core.project.particles[0].x, 100.0);
+        // Down: back to the start; four presses, four
+        // snapshots in total.
+        nudge_selected(&mut state, 0.0, NUDGE_STEP);
+        assert_eq!(state.core.project.particles[0].y, 50.0);
+        assert_eq!(state.core.undo_depth(), depth + 4);
+    }
+
+    #[test]
+    fn nudge_selected_accumulates_over_repeated_presses() {
+        let mut state = demo_state();
+        state.core.project.particles = vec![event(0, None, None)];
+        state.particle_selected = Some(0);
+        // Each press reads the event's current point, so
+        // presses add up rather than resetting to a base.
+        nudge_selected(&mut state, -NUDGE_STEP, 0.0);
+        nudge_selected(&mut state, -NUDGE_STEP, 0.0);
+        nudge_selected(&mut state, 0.0, -NUDGE_STEP);
+        assert_eq!(state.core.project.particles[0].x, 92.0);
+        assert_eq!(state.core.project.particles[0].y, 46.0);
+        // Only the selected event moves: a second event
+        // keeps its point throughout.
+        state.core.project.particles.push(event(2, None, None));
+        state.particle_selected = Some(1);
+        nudge_selected(&mut state, NUDGE_STEP, 0.0);
+        assert_eq!(state.core.project.particles[1].x, 104.0);
+        assert_eq!(state.core.project.particles[0].x, 92.0);
+    }
+
+    #[test]
+    fn nudge_selected_without_a_selection_is_a_no_op() {
+        let mut state = demo_state();
+        state.core.project.particles = vec![event(0, None, None)];
+        let depth = state.core.undo_depth();
+        // No selection: nothing moves, no snapshot.
+        state.particle_selected = None;
+        nudge_selected(&mut state, -NUDGE_STEP, 0.0);
+        assert_eq!(state.core.project.particles[0].x, 100.0);
+        assert_eq!(state.core.undo_depth(), depth, "no snapshot");
+        // A stale selection (past the list end) is the
+        // same no-op — the guard never reaches the op.
+        state.particle_selected = Some(9);
+        nudge_selected(&mut state, 0.0, NUDGE_STEP);
+        assert_eq!(state.core.project.particles[0].y, 50.0);
+        assert_eq!(state.core.undo_depth(), depth, "no snapshot");
     }
 }

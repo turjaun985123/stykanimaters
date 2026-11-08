@@ -166,11 +166,27 @@
 //! a loop range is set AND the resolved channel holds
 //! at least one key inside it (counted read-only by
 //! `graph_keys::keys_in_range`).
+//!
+//! Phase L (section 32/40) adds one more icon control
+//! in the same live/inert discipline: "Cycle interp"
+//! (`key-interp`, `bezier-curve` glyph), in its own row
+//! under the clear-range row. It cycles the selected
+//! joint's angle key at the current frame through the
+//! [`Interp`] modes — Hermite → Linear → Step →
+//! Hermite — through the library's
+//! `graph_keys::set_key_interp`; the current mode is
+//! read back through `graph_keys::key_interp_at`, and
+//! the live button's label names it ("Interp:
+//! Hermite"), so the control says what the key IS, not
+//! what a press would make it. The guard is
+//! [`interp_cycle_enabled`]: a joint is selected, its
+//! angle channel resolves, and a key sits at the
+//! playhead.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El};
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::graph::{Channel, ChannelTarget, Key, TangentPreset};
+use stykanimate_rs::graph::{Channel, ChannelTarget, Interp, Key, TangentPreset};
 use stykanimate_rs::graph_keys;
 
 use crate::chrome_view::btn;
@@ -288,6 +304,62 @@ pub fn clear_range_enabled(core: &EditorCore) -> bool {
         a as f32,
         b as f32,
     ) > 0
+}
+
+/// The display name of an [`Interp`] mode — the same
+/// words the graph panel's interp buttons carry
+/// ("Hermite" / "Linear" / "Step").
+pub fn interp_name(interp: Interp) -> &'static str {
+    match interp {
+        Interp::Hermite => "Hermite",
+        Interp::Linear => "Linear",
+        Interp::Step => "Step",
+    }
+}
+
+/// The next [`Interp`] mode in the cycle the
+/// `key-interp` button walks: Hermite → Linear → Step →
+/// Hermite.
+pub fn next_interp(interp: Interp) -> Interp {
+    match interp {
+        Interp::Hermite => Interp::Linear,
+        Interp::Linear => Interp::Step,
+        Interp::Step => Interp::Hermite,
+    }
+}
+
+/// The interp mode of the selected angle channel's key
+/// at the current frame, read through the library's
+/// `graph_keys::key_interp_at` over the channel
+/// [`selected_angle_channel_index`] resolves. `None`
+/// when no joint is selected, no channel exists on the
+/// joint, or no key sits at the playhead. Pure: reads
+/// only.
+pub fn current_key_interp(core: &EditorCore) -> Option<Interp> {
+    let ci = selected_angle_channel_index(core)?;
+    graph_keys::key_interp_at(core, ci, core.current as f32)
+}
+
+/// Whether Cycle interp would change anything — the
+/// render-time twin of [`cycle_key_interp_core`]'s
+/// refusal set: a joint is selected, its angle channel
+/// exists, and the channel holds a key at the current
+/// frame. When this is false the button renders inert
+/// (`icon_btn_inert`). Pure: reads only.
+pub fn interp_cycle_enabled(core: &EditorCore) -> bool {
+    current_key_interp(core).is_some()
+}
+
+/// The `key-interp` button's label: "Interp: {current}"
+/// while a key sits at the playhead — naming the mode
+/// the key currently holds, the one a press cycles
+/// away from — and the bare "Interp" in the inert
+/// state, where there is no current mode to name.
+pub fn interp_button_label(core: &EditorCore) -> String {
+    match current_key_interp(core) {
+        Some(interp) => format!("Interp: {}", interp_name(interp)),
+        None => "Interp".to_string(),
+    }
 }
 
 /// The tangent preset buttons: every `TangentPreset` variant,
@@ -659,6 +731,51 @@ pub fn clear_keys_in_range_here(s: &mut State) {
     clear_keys_in_range_core(&mut s.core);
 }
 
+/// Cycle the interp mode of the selected angle
+/// channel's key at the current frame — Hermite →
+/// Linear → Step → Hermite (see [`next_interp`]) — and
+/// return whether the key's mode changed. The write
+/// itself is the library's `graph_keys::set_key_interp`
+/// over the channel [`selected_angle_channel_index`]
+/// resolves: it owns the single snapshot and the status
+/// line. The key is found with this section's own
+/// [`key_index_near`] — the nearest key within half a
+/// frame, the window [`keyed_here`] reads by — and the
+/// current mode through `graph_keys::key_interp_at`,
+/// so the guard ([`interp_cycle_enabled`]) and the op
+/// agree on which key is "at" the playhead. The
+/// refusals the library cannot phrase — no joint
+/// selected, no channel on the joint, no key at the
+/// playhead — are answered here, status-only with NO
+/// snapshot, matching this section's discipline; the
+/// button renders inert in exactly those states, so a
+/// press can never reach them.
+pub fn cycle_key_interp_core(core: &mut EditorCore) -> bool {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a joint first, then Cycle interp.".into();
+        return false;
+    };
+    let fi = core.selected_figure;
+    let Some(ci) = selected_angle_channel_index(core) else {
+        core.status = format!("No graph keys for figure {} joint {}.", fi + 1, ni);
+        return false;
+    };
+    let Some(current) = graph_keys::key_interp_at(core, ci, core.current as f32) else {
+        core.status = format!("No key at frame {} to cycle.", core.current + 1);
+        return false;
+    };
+    let Some(ki) = key_index_near(&core.project.channels[ci].keys, core.current as f32) else {
+        core.status = format!("No key at frame {} to cycle.", core.current + 1);
+        return false;
+    };
+    graph_keys::set_key_interp(core, ci, ki, next_interp(current))
+}
+
+/// `State` wrapper for [`cycle_key_interp_core`].
+pub fn cycle_key_interp_here(s: &mut State) {
+    cycle_key_interp_core(&mut s.core);
+}
+
 /// Key one bare channel at `frame` with the value the
 /// channel itself evaluates to there: `Channel::value_at`
 /// is read first, then `Channel::add_key` — the engine's
@@ -871,7 +988,8 @@ pub fn no_joint_note_row(core: &EditorCore, t: &Theme) -> Option<El> {
 /// The keyframe tools section: header, selection target,
 /// keyed-frame indicator, the key/delete/auto buttons, the
 /// copy/paste-keys clipboard row (with Clear channel
-/// keys), the clear-range row, the nudge row, the
+/// keys), the clear-range row, the interp cycle row,
+/// the nudge row, the
 /// key-all / copy-key stamp row,
 /// and the five tangent preset buttons (scoped by the op
 /// to the selected figure). Buttons highlight with real
@@ -879,11 +997,11 @@ pub fn no_joint_note_row(core: &EditorCore, t: &Theme) -> Option<El> {
 /// at this frame; Copy is muted until a channel exists to
 /// copy from, and Paste is muted while the key clipboard
 /// is empty. The icon controls (Clear channel keys,
-/// Clear keys in loop range, the nudge pair, Key all
+/// Clear keys in loop range, Cycle interp, the nudge pair, Key all
 /// here, Copy key +10) render
 /// inert — muted, handler-free — exactly when their op
 /// would refuse, via the `*_enabled` predicates above
-/// (Phases I and K); the plain text buttons stay wired in every
+/// (Phases I, K and L); the plain text buttons stay wired in every
 /// state and land on their ops' status-only refusals.
 /// The target slot under the header is state-dependent
 /// (Phase J): with a joint selected it is the original
@@ -893,6 +1011,7 @@ pub fn no_joint_note_row(core: &EditorCore, t: &Theme) -> Option<El> {
 pub fn keyframe_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let keyed = selected_angle_channel(core).is_some_and(|ch| keyed_here(&ch.keys, core.current));
+    let interp_label = interp_button_label(core);
     let mut presets = row().key("keyframe-presets").gap(6.0);
     for (preset, label, suffix) in preset_options() {
         presets = presets.child(btn(
@@ -986,6 +1105,23 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                     )
                 } else {
                     icon_btn_inert("key-clear-range", "eraser", "Clear keys in loop range", t)
+                }),
+        )
+        .child(
+            row()
+                .key("keyframe-interp")
+                .gap(6.0)
+                .child(if interp_cycle_enabled(core) {
+                    icon_btn(
+                        "key-interp",
+                        "bezier-curve",
+                        &interp_label,
+                        false,
+                        t,
+                        |s| cycle_key_interp_here(s),
+                    )
+                } else {
+                    icon_btn_inert("key-interp", "bezier-curve", "Interp", t)
                 }),
         )
         .child(
@@ -1796,6 +1932,121 @@ mod tests {
         assert_eq!(clear_keys_in_range_core(&mut core), 0);
         assert!(core.status.contains("Select a joint"));
         assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn interp_cycle_enabled_needs_a_key_at_the_playhead() {
+        // Keys at 0, 2 and 4 on the selected joint's
+        // channel: live exactly on those frames.
+        let mut core = core_with_spread_angle_keys();
+        core.current = 2;
+        assert!(interp_cycle_enabled(&core));
+        core.current = 0;
+        assert!(interp_cycle_enabled(&core));
+        core.current = 4;
+        assert!(interp_cycle_enabled(&core));
+        // A bare frame between keys: no key at the
+        // playhead, so inert.
+        core.current = 1;
+        assert!(!interp_cycle_enabled(&core));
+        core.current = 3;
+        assert!(!interp_cycle_enabled(&core));
+        // No joint selected: the channel cannot be
+        // resolved, so inert even on a keyed frame.
+        core.current = 2;
+        core.selected_node = None;
+        assert!(!interp_cycle_enabled(&core));
+        // A joint with no channel on it: inert.
+        let mut bare = EditorCore::new();
+        bare.selected_node = Some(1);
+        bare.current = 0;
+        assert!(!interp_cycle_enabled(&bare));
+    }
+
+    #[test]
+    fn cycle_key_interp_core_walks_the_whole_cycle_on_the_playhead_key() {
+        let mut core = core_with_spread_angle_keys(); // keys at 0, 2, 4, all Hermite
+        core.current = 2;
+        assert_eq!(current_key_interp(&core), Some(Interp::Hermite));
+        assert_eq!(interp_button_label(&core), "Interp: Hermite");
+        let depth = core.undo_depth();
+        // Hermite → Linear: the mode lands on the frame-2
+        // key only, the library's status names the new
+        // mode, and the press is exactly one snapshot.
+        assert!(cycle_key_interp_core(&mut core));
+        assert_eq!(current_key_interp(&core), Some(Interp::Linear));
+        assert_eq!(interp_button_label(&core), "Interp: Linear");
+        assert!(
+            core.status.contains("Linear"),
+            "the library owns the status: {}",
+            core.status
+        );
+        assert_eq!(core.undo_depth(), depth + 1, "exactly one snapshot");
+        let ch = selected_angle_channel(&core).expect("channel survives an interp cycle");
+        assert_eq!(ch.keys[0].interp, Interp::Hermite, "the frame-0 key is untouched");
+        assert_eq!(ch.keys[2].interp, Interp::Hermite, "the frame-4 key is untouched");
+        // Linear → Step → Hermite: the cycle closes.
+        assert!(cycle_key_interp_core(&mut core));
+        assert_eq!(current_key_interp(&core), Some(Interp::Step));
+        assert!(cycle_key_interp_core(&mut core));
+        assert_eq!(current_key_interp(&core), Some(Interp::Hermite));
+        assert_eq!(core.undo_depth(), depth + 3, "one snapshot per press");
+    }
+
+    #[test]
+    fn cycle_key_interp_core_refuses_without_a_joint_channel_or_key() {
+        // No key at the playhead: status-only, no
+        // snapshot, modes intact.
+        let mut core = core_with_spread_angle_keys();
+        core.current = 1;
+        let depth = core.undo_depth();
+        assert!(!cycle_key_interp_core(&mut core));
+        assert!(core.status.contains("No key at frame"));
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(
+            selected_angle_channel(&core).map(|ch| ch.keys[1].interp),
+            Some(Interp::Hermite)
+        );
+        // No joint selected: the same discipline.
+        let mut core = core_with_spread_angle_keys();
+        core.current = 2;
+        core.selected_node = None;
+        let depth = core.undo_depth();
+        assert!(!cycle_key_interp_core(&mut core));
+        assert!(core.status.contains("Select a joint"));
+        assert_eq!(core.undo_depth(), depth);
+        // A joint with no channel on it: refused, no
+        // snapshot.
+        let mut bare = EditorCore::new();
+        bare.selected_node = Some(1);
+        let depth = bare.undo_depth();
+        assert!(!cycle_key_interp_core(&mut bare));
+        assert!(bare.status.contains("No graph keys"));
+        assert_eq!(bare.undo_depth(), depth);
+    }
+
+    #[test]
+    fn interp_row_builds_live_and_inert_with_matching_labels() {
+        // `El` has no public tree-walk, so — the file's
+        // established pattern — the row is asserted
+        // through the helpers and label the builder
+        // itself uses, plus a full section build in each
+        // state.
+        let t = rune::tok::theme(true);
+        // No key at the playhead: the inert form, under
+        // the bare label.
+        let mut off = core_with_spread_angle_keys();
+        off.current = 1;
+        assert!(!interp_cycle_enabled(&off));
+        assert_eq!(interp_button_label(&off), "Interp");
+        let _ = keyframe_section(&state_with(off), &t);
+        // A key at the playhead: the live form, its
+        // label naming the key's current mode.
+        let mut on = core_with_spread_angle_keys();
+        on.current = 2;
+        assert!(interp_cycle_enabled(&on));
+        assert_eq!(interp_button_label(&on), "Interp: Hermite");
+        let _ = keyframe_section(&state_with(on), &t);
     }
 
     #[test]

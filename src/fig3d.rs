@@ -164,6 +164,74 @@ pub fn camera_preset(name: &str) -> Option<Camera3> {
     }
 }
 
+/// Segments of a square ground grid on the y = 0 plane (the
+/// engine defines no ground plane — [`project`] fixes only the
+/// Y-up convention; consumers offset the plane as they need),
+/// as pairs of world
+/// endpoints ready to be projected with [`project`] and drawn as
+/// lines: for each `i` in `-extent..=extent`, one segment runs
+/// along z at `x = i * step` (from `z = -extent * step` to
+/// `z = +extent * step`) and one runs along x at `z = i * step`
+/// (from `x = -extent * step` to `x = +extent * step`). The
+/// centre lines (i = 0) are included, so the count is
+/// `2 * (2 * extent + 1)`.
+///
+/// Order is deterministic: first all the x-constant segments in
+/// ascending `i` (the lines running along z), then all the
+/// z-constant segments in ascending `i` (the lines running along
+/// x). Degenerate inputs — `extent <= 0`, or `step` non-finite or
+/// `<= 0.0` — return an empty vector rather than a meaningless
+/// or unbounded grid.
+pub fn grid_line_points(extent: i32, step: f32) -> Vec<([f32; 3], [f32; 3])> {
+    if extent <= 0 || !step.is_finite() || step <= 0.0 {
+        return Vec::new();
+    }
+    let reach = extent as f32 * step;
+    let mut out = Vec::with_capacity(2 * (2 * extent as usize + 1));
+    for i in -extent..=extent {
+        let x = i as f32 * step;
+        out.push(([x, 0.0, -reach], [x, 0.0, reach]));
+    }
+    for i in -extent..=extent {
+        let z = i as f32 * step;
+        out.push(([-reach, 0.0, z], [reach, 0.0, z]));
+    }
+    out
+}
+
+/// The 3D preview's default camera: frames the REST
+/// [`humanoid3`] figure (posed by [`Pose3::rest`] at the origin)
+/// in a small panel viewport (the shell's preview is 308×220).
+///
+/// The arithmetic, from [`project`]'s maths. The rest figure's
+/// joints span y from −70 (the feet: hips at 0, thigh −4, shin
+/// −34, foot −32) to +58 (the head joint: chest +30, head +28),
+/// so its height is H = 128 world units and its vertical centre
+/// is y = −6; horizontally the hands reach x = ±62.
+/// [`project`]'s focal length for a viewport of height h is
+/// `(h / 2) / tan(fov / 2)`, so a figure of height H projected
+/// from depth d occupies `H * (h / 2) / (tan(fov / 2) * d)`
+/// pixels vertically. Setting that equal to h gives the
+/// exact-fill distance `(H / 2) / tan(fov / 2)` — at fov 40°
+/// that is 64 / tan(20°) ≈ 175.8. This camera multiplies the
+/// exact-fill distance by a headroom factor of ≈ 1.7 and rounds
+/// to 300, and targets the figure's centre [0, −6, 0], so the
+/// projected rest pose sits well inside the viewport
+/// (x ≈ 100..218, y ≈ 44..173 of 308×220, verified against
+/// [`project`]) with room for the head ring and modest posing.
+/// Yaw 25° / pitch 10° give the three-quarter view that makes
+/// the ground grid read in perspective; the FOV matches
+/// [`default_camera`]'s 40°.
+pub fn preview_camera() -> Camera3 {
+    Camera3 {
+        yaw: 25.0,
+        pitch: 10.0,
+        distance: 300.0,
+        fov_deg: 40.0,
+        target: [0.0, -6.0, 0.0],
+    }
+}
+
 /// Frame `fig` in `pose` on `stage`: a front camera (the
 /// [`default_camera`] orientation and FOV) targeted on the posed
 /// figure's centroid, with its distance chosen so the figure's
@@ -1611,6 +1679,59 @@ mod tests {
             distance: 400.0,
             fov_deg: 40.0,
             target: [0.0, 0.0, 0.0],
+        }
+    }
+
+    #[test]
+    fn grid_line_points_count_endpoints_and_symmetry() {
+        let segs = grid_line_points(5, 10.0);
+        // 2 * (2 * extent + 1) segments: 11 lines each way.
+        assert_eq!(segs.len(), 22);
+        for (a, b) in &segs {
+            // Every endpoint lies on the ground plane.
+            assert_eq!(a[1], 0.0);
+            assert_eq!(b[1], 0.0);
+            // Symmetric reach: 5 * 10 = 50 in the running axis.
+            let run_a = if a[0] == b[0] { a[2] } else { a[0] };
+            let run_b = if a[0] == b[0] { b[2] } else { b[0] };
+            assert_eq!(run_a, -50.0);
+            assert_eq!(run_b, 50.0);
+        }
+        // Documented order: the x-constant (along-z) lines come
+        // first, ascending; the first is x = -50, the last of
+        // that block is x = +50, then the z-constant block.
+        assert_eq!(segs[0], ([-50.0, 0.0, -50.0], [-50.0, 0.0, 50.0]));
+        assert_eq!(segs[10], ([50.0, 0.0, -50.0], [50.0, 0.0, 50.0]));
+        assert_eq!(segs[11], ([-50.0, 0.0, -50.0], [50.0, 0.0, -50.0]));
+        assert_eq!(segs[21], ([-50.0, 0.0, 50.0], [50.0, 0.0, 50.0]));
+    }
+
+    #[test]
+    fn grid_line_points_degenerate_inputs_are_empty() {
+        assert!(grid_line_points(0, 10.0).is_empty());
+        assert!(grid_line_points(-3, 10.0).is_empty());
+        assert!(grid_line_points(5, 0.0).is_empty());
+        assert!(grid_line_points(5, -10.0).is_empty());
+        assert!(grid_line_points(5, f32::NAN).is_empty());
+        assert!(grid_line_points(5, f32::INFINITY).is_empty());
+    }
+
+    #[test]
+    fn preview_camera_is_finite_and_frames_the_rest_figure() {
+        let cam = preview_camera();
+        assert!(cam.yaw.is_finite() && cam.pitch.is_finite());
+        assert!(cam.fov_deg.is_finite() && cam.fov_deg > 0.0);
+        assert!(cam.distance.is_finite() && cam.distance > 0.0);
+        assert!(cam.target.iter().all(|v| v.is_finite()));
+        // The documented contract the preview relies on: the
+        // projected rest pose lands inside a 308x220 viewport.
+        let fig = humanoid3();
+        let pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        let pts = evaluate3(&fig, &pose);
+        let projected = project(&pts, &cam, [308.0, 220.0]);
+        for p in &projected {
+            assert!(p.xy[0] >= 0.0 && p.xy[0] <= 308.0, "x out: {:?}", p.xy);
+            assert!(p.xy[1] >= 0.0 && p.xy[1] <= 220.0, "y out: {:?}", p.xy);
         }
     }
 

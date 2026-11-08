@@ -4,7 +4,7 @@
 //! ring, with 2x supersampling for anti-aliasing.
 
 use crate::model::{
-    dist, evaluate, CapKind, HEAD_RING_RADIUS, ParticleKind, Project, Shape, V2,
+    dist, evaluate, CapKind, ParticleKind, Project, Shape, V2,
 };
 use image::{ImageBuffer, Rgb};
 use std::path::Path;
@@ -293,11 +293,13 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
             (oy * zoom + project.stage[1] / 2.0) * ss as f32,
         ]
     };
-    // The head ring's radius is the model's single
-    // `HEAD_RING_RADIUS` constant (Phase K) — the same
-    // value the stage and the figure thumbnails use, so
-    // exports can never drift from the editor's ring.
-    let head_r = HEAD_RING_RADIUS * zoom * ss as f32;
+    // The head ring's radius is the project's own
+    // `head_ring_radius()` (Phase L): the model's single
+    // `HEAD_RING_RADIUS` constant scaled by the project's
+    // `head_ring_scale` — the same value the stage and the
+    // figure thumbnails use, so exports can never drift
+    // from the editor's ring.
+    let head_r = project.head_ring_radius() * zoom * ss as f32;
 
     // Collect drawables: segments (a, b, color, half-width), head
     // rings (centre, color, half-width), shape circles and polygons.
@@ -1701,6 +1703,53 @@ mod tests {
         assert_eq!(bent.get_pixel(200, 150), &black, "the chord midpoint is vacated");
     }
 
+    /// A lone white head node at the centre of a black
+    /// 400x300 stage, one figure, no camera keys (so the
+    /// camera is the stage centre at zoom 1.0) — nothing
+    /// else draws, so the only non-background pixels are
+    /// the head ring's band.
+    fn head_only_project() -> Project {
+        let mut project = Project::new_demo();
+        project.stage = [400.0, 300.0];
+        project.background = 0x000000;
+        project.figures.clear();
+        for frame in &mut project.frames {
+            frame.poses.clear();
+        }
+        project.camera.clear();
+        let src = crate::model::FigureDef::humanoid();
+        let mut head = src.nodes[0].clone();
+        head.head = true;
+        head.thickness = 4.0;
+        head.color = Some(0xFFFFFF);
+        let def = crate::model::FigureDef { nodes: vec![head] };
+        project.add_figure_with(def, "Head", 0xFFFFFF, [200.0, 150.0]);
+        project
+    }
+
+    #[test]
+    fn head_ring_scale_doubles_the_rendered_ring_radius() {
+        let white = Rgb([255u8, 255, 255]);
+        let black = Rgb([0u8, 0, 0]);
+        // Default scale (1.0): the ring band (radius 17,
+        // half-width 2 at zoom 1) covers the pixel 17 px
+        // right of the head centre (200, 150); 34 px out is
+        // background.
+        let project = head_only_project();
+        let plain = render_frame_at(&project, 0.0);
+        assert_eq!(plain.get_pixel(217, 150), &white, "base ring at radius 17");
+        assert_eq!(plain.get_pixel(234, 150), &black, "nothing at radius 34 at scale 1");
+        // Scale 2.0: `head_ring_radius()` is 34.0, so the
+        // band moves out to 34 x zoom — covered at 34 px,
+        // vacated at 17 px.
+        let mut project = head_only_project();
+        project.head_ring_scale = 2.0;
+        assert_eq!(project.head_ring_radius(), 34.0);
+        let scaled = render_frame_at(&project, 0.0);
+        assert_eq!(scaled.get_pixel(234, 150), &white, "scaled ring at radius 34");
+        assert_eq!(scaled.get_pixel(217, 150), &black, "radius 17 vacated at scale 2");
+    }
+
     #[test]
     fn camera_angle_zero_renders_byte_identical() {
         let project = Project::new_demo();
@@ -2002,6 +2051,7 @@ mod tests {
             sprites: Vec::new(),
             texts: Vec::new(),
             weather: None,
+            head_ring_scale: 1.0,
         }
     }
 

@@ -78,10 +78,11 @@
 //!   helper); segment thickness (stroke widths are
 //!   `NodeDef.thickness`, a separate field with its own
 //!   stepper elsewhere); node style (cap / colour2 /
-//!   opacity); and the head ring — its radius is stored
-//!   nowhere: both renderers draw a constant 17 units for
-//!   nodes flagged `head` (stage_view.rs, export.rs), so
-//!   a scaled figure keeps the same head size. Both
+//!   opacity); and the head ring — figure scaling leaves
+//!   it alone, so a scaled figure keeps the same head
+//!   size; the ring's size is a project setting of its
+//!   own since Phase L (see the Head ring bullet below).
+//!   Both
 //!   buttons carry Font Awesome glyphs via `icon_btn`:
 //!   the 110% button's `expand` since Phase H, and the
 //!   90% button's `down-left-and-up-right-to-center`
@@ -109,6 +110,24 @@
 //!   (editor.rs) — one snapshot, one undo step. Other
 //!   frames keep their roots: centring is a pose edit at
 //!   this frame, not a project-wide move.
+//! * Head ring −/+ → [`step_head_ring_scale`] — a
+//!   stepper row under the scale row (row key
+//!   `fig-ring-row`, buttons `fig-ring-dn` /
+//!   `fig-ring-up`): the project's head-ring scale
+//!   (`Project::head_ring_scale`, Phase L) stepped by
+//!   0.1 through the core's own
+//!   `EditorCore::set_head_ring_scale` — clamped
+//!   [0.5, 2.0], one snapshot per real change, the
+//!   op's status line reports the press. The row's
+//!   muted readout names the current scale
+//!   ([`head_ring_label`]: "Head ring 1×",
+//!   "Head ring 1.5×"). The scale is project-wide,
+//!   not per-figure — it lives in this panel because
+//!   the ring is part of how a figure reads — and
+//!   [`figure_bbox`] grows head joints by the scaled
+//!   radius (`Project::head_ring_radius()`), so
+//!   Centre/Ground keep bounding the figure as drawn
+//!   at any scale.
 //!
 //! When the project has no figures — or the selection is
 //! stale — the panel is one muted line.
@@ -288,15 +307,17 @@ pub fn measure_line(m: &FigureMeasure) -> String {
     )
 }
 
-/// Radius of the ring both renderers draw around a
-/// head-flagged joint: 17 stage units (stage_view.rs
-/// draws `17.0 * scale`; figures_panel.rs keeps the same
-/// value as its `HEAD_RING_R` for thumbnails). The ring
-/// is part of the figure as drawn, so the placement
-/// bounding box grows by it around head joints. The
-/// value itself has a single source — the model's
-/// `HEAD_RING_RADIUS` — re-exported here under this
-/// panel's established name (Phase K).
+/// Base radius of the ring drawn around a head-flagged
+/// joint: 17 stage units, before the project's
+/// head-ring scale. Since Phase L the drawn radius is
+/// `Project::head_ring_radius()` — this base times
+/// `Project::head_ring_scale` — and [`figure_bbox`]
+/// grows by that current radius, so the placement box
+/// keeps bounding the figure as drawn at any scale.
+/// The base value has a single source, the model's
+/// `HEAD_RING_RADIUS`, re-exported here under this
+/// panel's established name (Phase K) because the
+/// panel's docs and tests still name the base value.
 pub use stykanimate_rs::model::HEAD_RING_RADIUS as HEAD_RING_R;
 
 /// The selected figure's bounding box at the display
@@ -309,10 +330,13 @@ pub use stykanimate_rs::model::HEAD_RING_RADIUS as HEAD_RING_R;
 /// (`EditorCore::positions_f`, display frame), with one
 /// difference: a head-flagged joint contributes its
 /// drawn head ring, not just its point — the box grows
-/// by [`HEAD_RING_R`] on every side of each head joint,
-/// so the box bounds the figure as the stage actually
-/// draws it. That is the box Centre/Ground place by:
-/// what you see is what gets centred and grounded.
+/// by the project's current ring radius
+/// (`Project::head_ring_radius()`, the base
+/// [`HEAD_RING_R`] times the project's head-ring
+/// scale) on every side of each head joint, so the box
+/// bounds the figure as the stage actually draws it.
+/// That is the box Centre/Ground place by: what you
+/// see is what gets centred and grounded.
 pub fn figure_bbox(core: &EditorCore) -> Option<[f32; 4]> {
     let fi = core.selected_figure;
     let fig = core.project.figures.get(fi)?;
@@ -320,13 +344,14 @@ pub fn figure_bbox(core: &EditorCore) -> Option<[f32; 4]> {
     if pos.is_empty() {
         return None;
     }
+    let ring_r = core.project.head_ring_radius();
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
     let mut max_y = f32::NEG_INFINITY;
     for (i, p) in pos.iter().enumerate() {
         let r = if fig.def.nodes.get(i).map(|n| n.head).unwrap_or(false) {
-            HEAD_RING_R
+            ring_r
         } else {
             0.0
         };
@@ -658,6 +683,42 @@ fn opacity_stepper_row(st: &InspectorFigureState, t: &Theme) -> El {
         }))
 }
 
+/// Head-ring scale step for the −/+ stepper: a tenth
+/// per press, the granularity the ring row's readout
+/// shows (one decimal at most).
+pub const HEAD_RING_STEP: f32 = 0.1;
+
+/// The head-ring row's readout for a scale: "Head ring
+/// 1×" at the default, "Head ring 1.5×" at one and a
+/// half — the number formatted trim-style (up to two
+/// decimals, trailing zeros and a bare dot dropped),
+/// the way the transport's speed label trims.
+pub fn head_ring_label(scale: f32) -> String {
+    let mut n = format!("{scale:.2}");
+    while n.ends_with('0') {
+        n.pop();
+    }
+    if n.ends_with('.') {
+        n.pop();
+    }
+    format!("Head ring {n}×")
+}
+
+/// One press of the head-ring steppers: move the
+/// project's head-ring scale by `delta` through the
+/// core's own setter, `EditorCore::set_head_ring_scale`
+/// — the op clamps to [0.5, 2.0] and takes the
+/// snapshot, and its status line reports the press, so
+/// this helper only reads the current scale
+/// (`Project::head_ring_scale`) and hands the op the
+/// stepped value. The scale is project-wide, not
+/// per-figure: it resizes every head ring the
+/// renderers draw, whichever figure is selected.
+pub fn step_head_ring_scale(core: &mut EditorCore, delta: f32) {
+    let next = core.project.head_ring_scale + delta;
+    core.set_head_ring_scale(next);
+}
+
 /// The scale row: label and the 90% / 110% buttons that
 /// resize the whole selected figure through
 /// [`scale_selected_figure`] (which reads the selection at
@@ -693,6 +754,33 @@ fn scale_stepper_row(t: &Theme) -> El {
                 scale_selected_figure(&mut s.core, 1.1);
             },
         ))
+}
+
+/// The head-ring row, under the scale row: a muted
+/// readout naming the project's current head-ring
+/// scale ([`head_ring_label`]) and the −/+ steppers
+/// that move it by [`HEAD_RING_STEP`] through
+/// [`step_head_ring_scale`]. Plain buttons like the
+/// opacity steppers — the row's state is the readout
+/// itself, not a toggle.
+fn ring_stepper_row(core: &EditorCore, t: &Theme) -> El {
+    row()
+        .key("fig-ring-row")
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(
+            text(head_ring_label(core.project.head_ring_scale))
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
+        .child(btn("fig-ring-dn", "−", false, t, |s: &mut State| {
+            step_head_ring_scale(&mut s.core, -HEAD_RING_STEP);
+        }))
+        .child(btn("fig-ring-up", "+", false, t, |s: &mut State| {
+            step_head_ring_scale(&mut s.core, HEAD_RING_STEP);
+        }))
 }
 
 /// The placement row: Centre figure / Ground figure,
@@ -806,6 +894,7 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
     }
     panel = panel.child(opacity_stepper_row(&st, t));
     panel = panel.child(scale_stepper_row(t));
+    panel = panel.child(ring_stepper_row(&s.core, t));
     if let Some(m) = figure_measure(&s.core) {
         panel = panel.child(
             text(measure_line(&m))
@@ -1454,6 +1543,21 @@ playback_speed: 1.0,
     }
 
     #[test]
+    fn figure_bbox_grows_by_the_scaled_ring_radius() {
+        // At head-ring scale 2.0 the drawn radius is
+        // 2 × 17 = 34, and the box grows by that — the
+        // growth follows the project's scale, not the
+        // base constant.
+        let mut core = chain_core(true);
+        core.set_head_ring_scale(2.0);
+        assert_eq!(core.project.head_ring_radius(), 34.0);
+        assert_eq!(
+            figure_bbox(&core),
+            Some([100.0 - 34.0, 200.0 - 34.0, 130.0, 240.0])
+        );
+    }
+
+    #[test]
     fn figure_bbox_is_none_without_a_figure() {
         let mut core = EditorCore::new();
         core.project.figures.clear();
@@ -1581,5 +1685,48 @@ playback_speed: 1.0,
         assert!(!ground_selected_figure(&mut core));
         assert_eq!(core.undo_depth(), depth, "refusals must be snapshot-free");
         assert_eq!(core.status, "No such figure.");
+    }
+
+    #[test]
+    fn head_ring_label_trims_the_scale() {
+        assert_eq!(head_ring_label(1.0), "Head ring 1×");
+        assert_eq!(head_ring_label(1.5), "Head ring 1.5×");
+        assert_eq!(head_ring_label(0.5), "Head ring 0.5×");
+        assert_eq!(head_ring_label(2.0), "Head ring 2×");
+        assert_eq!(head_ring_label(1.95), "Head ring 1.95×");
+    }
+
+    #[test]
+    fn head_ring_stepper_steps_and_clamps_through_the_op() {
+        // From the default 1.0, one press up is 1.1 and
+        // one press back down returns to 1.0 — the value
+        // lands on the project via the real setter.
+        let mut core = EditorCore::new();
+        assert_eq!(core.project.head_ring_scale, 1.0);
+        step_head_ring_scale(&mut core, HEAD_RING_STEP);
+        assert!((core.project.head_ring_scale - 1.1).abs() < 1e-6);
+        step_head_ring_scale(&mut core, -HEAD_RING_STEP);
+        assert!((core.project.head_ring_scale - 1.0).abs() < 1e-6);
+
+        // 1.95 + 0.1 overshoots the top of the op's
+        // [0.5, 2.0] range and clamps to exactly 2.0;
+        // a further press up is clamped to the current
+        // scale, so the op takes no further snapshot.
+        core.set_head_ring_scale(1.95);
+        step_head_ring_scale(&mut core, HEAD_RING_STEP);
+        assert_eq!(core.project.head_ring_scale, 2.0);
+        let depth = core.undo_depth();
+        step_head_ring_scale(&mut core, HEAD_RING_STEP);
+        assert_eq!(core.project.head_ring_scale, 2.0);
+        assert_eq!(
+            core.undo_depth(),
+            depth,
+            "a press clamped to the current scale must not snapshot"
+        );
+
+        // The bottom clamps the same way at 0.5.
+        core.set_head_ring_scale(0.5);
+        step_head_ring_scale(&mut core, -HEAD_RING_STEP);
+        assert_eq!(core.project.head_ring_scale, 0.5);
     }
 }

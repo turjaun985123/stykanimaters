@@ -54,6 +54,18 @@
 //! browser's op, called the way the browser calls it —
 //! after selecting a node the way the `selected` scene
 //! does, since the op refuses without one.
+//!
+//! The Phase L scenes keep the same discipline:
+//! `three-d` enters its session through
+//! `EditorCore::enter_3d` — the exact call the 3D panel's
+//! start control makes — then orbits and selects through
+//! the panel's own session ops (`fig3_orbit`,
+//! `fig3_select_next`); `loop-range` sets its range
+//! through `EditorCore::set_loop_range` (the timeline's
+//! op) and plants its one keyed channel by the
+//! `graph-duplicates` direct-write exception, for the
+//! same reason: no op keys chosen values at chosen
+//! frames.
 
 use crate::State;
 
@@ -257,6 +269,66 @@ fn scene_fx_split_mid(s: &mut State) {
     }
 }
 
+/// `"three-d"` — the 3D workspace with a live fig3
+/// session: the 3D humanoid at rest, the camera orbited
+/// off its default (yaw +35°, pitch +18°), and joint 1
+/// selected. The session starts through
+/// `EditorCore::enter_3d` — the single call the 3D
+/// panel's start control makes (`three_d_panel`'s
+/// handler calls exactly it) — which loads
+/// `fig3d::humanoid3()` at rest with the default camera
+/// and joint 0 selected. The orbit goes through
+/// `EditorCore::fig3_orbit`, the panel's camera op, and
+/// the selection through `EditorCore::fig3_select_next`,
+/// the panel's joint-cycling op: one call from the start
+/// op's joint 0 lands on joint 1. The orbited camera is
+/// what makes the Phase L preview's ground grid read as
+/// a floor rather than a flat backdrop in the snap.
+fn scene_three_d(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Build3D,
+    );
+    s.core.enter_3d();
+    s.core.fig3_orbit(35.0, 18.0);
+    s.core.fig3_select_next();
+}
+
+/// `"loop-range"` — the Animate workspace with a loop
+/// range over frames 1..=3 (0-based, the timeline marks'
+/// loop edges) and ONE graph channel planted for
+/// figure 0 with flat keys at exactly the range's ends,
+/// so a `--tree` dump shows the timeline's loop row in
+/// its set state and a `--snap` shows the loop edges
+/// drawn around chips 2–4. The range goes through
+/// `EditorCore::set_loop_range` — the op the timeline's
+/// loop-edge drag writes — which orders and clamps its
+/// ends against the timeline. The channel is planted by
+/// the `graph-duplicates` direct-write exception (see
+/// the module docs): flat keys at frames 1.0 and 3.0 on
+/// the RootX target, values 0.0 and 48.0 so the channel
+/// visibly moves the root across the loop. Figure 0 is
+/// left selected, since channel resolution scopes to
+/// the selected figure; on a figure-less project the
+/// scene stops after setting the range.
+fn scene_loop_range(s: &mut State) {
+    use stykanimate_rs::graph::{Channel, ChannelTarget, Key};
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Animate,
+    );
+    s.core.set_loop_range(1, 3);
+    if s.core.project.figures.is_empty() {
+        return;
+    }
+    s.core.select_figure(0);
+    s.core.project.channels.push(Channel {
+        figure: 0,
+        target: ChannelTarget::RootX,
+        keys: vec![Key::flat(1.0, 0.0), Key::flat(3.0, 48.0)],
+    });
+}
+
 /// The scene table for `AppSpec::scenes`, in `--list-scenes`
 /// display order. Element type is Rune's own, verbatim:
 /// `(&'static str, fn(&mut State))` (tooling.rs:25).
@@ -270,6 +342,8 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("fx-selected", scene_fx_selected),
         ("graph-duplicates", scene_graph_duplicates),
         ("fx-split-mid", scene_fx_split_mid),
+        ("three-d", scene_three_d),
+        ("loop-range", scene_loop_range),
     ]
 }
 
@@ -336,6 +410,27 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    playhead itself is timeline state: the `frame-N`
 ///    chips' active styling is drawn, not keyed, so the
 ///    park is a `--snap` fact.)
+/// 12. Under `--scene three-d` (Phase L): an element
+///    keyed `panel-3d-preview` exists (the 3D panel's
+///    preview canvas, landed by the phase's panel
+///    section). The scene was written before the canvas
+///    landed and carried a census substitution (the
+///    `panel-3d` root + the session state, which the
+///    scene's unit test still pins); the integrator
+///    upgraded this fact to the real key once the canvas
+///    was in the tree. The grid and figure are
+///    canvas-drawn, so they are `--snap` facts, not
+///    tree facts.
+/// 13. Under `--scene loop-range` (Phase L): an element
+///    keyed `timeline-loop-row` exists (the timeline's
+///    loop row in its set state, landed by the phase's
+///    timeline section). The scene was written before
+///    the row landed and carried a census substitution
+///    (the loop-range state itself, which the scene's
+///    unit test still pins); the integrator upgraded
+///    this fact to the real key once the row was in the
+///    tree. (The loop edges themselves are drawn on the
+///    timeline canvas, so they are a `--snap` fact.)
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -349,6 +444,9 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene fx-selected: an element keyed \"particles\" exists and \"particles-detail\" contains an element keyed \"particles-kind-prev\"",
         "under --scene graph-duplicates: an element keyed \"graph-chan-1\" exists (the second planted channel row)",
         "under --scene fx-split-mid: an element keyed \"fx-split\" exists (the Split at playhead button, mounted only with a clip selection)",
+        "under --scene three-d: an element keyed \"panel-3d-preview\" exists (the 3D preview canvas — see fact 12)",
+        "under --scene loop-range: an element keyed \"timeline-loop-row\" exists (the loop row in its set state — see fact 13)",
+
     ]
 }
 
@@ -356,20 +454,21 @@ pub fn layout_assertions() -> Vec<&'static str> {
 mod tests {
     use super::{
         scene_export_open, scene_fx_selected, scene_fx_split_mid, scene_graph_duplicates,
-        scenes,
+        scene_loop_range, scene_three_d, scenes,
     };
     use crate::init;
     use crate::rune_sec::workspaces::Workspace;
 
-    /// The scene table is the headless contract: eight
+    /// The scene table is the headless contract: ten
     /// scenes, each name unique (a duplicate would shadow
     /// the later entry in `with_scene`'s lookup), with the
-    /// Phase J scenes in their display positions and the
-    /// two Phase K scenes appended after them.
+    /// Phase J scenes in their display positions, the two
+    /// Phase K scenes appended after them, and the two
+    /// Phase L scenes appended after those.
     #[test]
-    fn scene_table_has_eight_uniquely_named_scenes() {
+    fn scene_table_has_ten_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 8, "eight scenes are registered");
+        assert_eq!(table.len(), 10, "ten scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -379,6 +478,8 @@ mod tests {
         assert_eq!(table[5].0, "fx-selected");
         assert_eq!(table[6].0, "graph-duplicates");
         assert_eq!(table[7].0, "fx-split-mid");
+        assert_eq!(table[8].0, "three-d");
+        assert_eq!(table[9].0, "loop-range");
     }
 
     /// The export scene reaches the Export workspace through
@@ -495,6 +596,66 @@ mod tests {
         assert!(
             s.core.current > start_frame,
             "the playhead actually moved off the starting frame"
+        );
+    }
+
+    /// The three-d scene lands on the 3D workspace with a
+    /// live fig3 session started through the panel's own
+    /// start op: the camera orbited to yaw 35 / pitch 18
+    /// off the default camera's 0 / 0, and joint 1
+    /// selected (the start op leaves joint 0; one
+    /// select-next lands on 1). This is also layout fact
+    /// 12's census substitute: until the preview canvas
+    /// lands, the session state is what proves the scene.
+    #[test]
+    fn three_d_scene_starts_a_session_orbits_and_selects_joint_1() {
+        let mut s = init();
+        assert!(s.core.fig3.is_none(), "no session before the scene");
+        scene_three_d(&mut s);
+        assert_eq!(s.workspace, Workspace::Build3D);
+        let st = s.core.fig3.as_ref().expect("the scene started a session");
+        assert_eq!(st.camera.yaw, 35.0, "yaw orbited by +35 degrees");
+        assert_eq!(st.camera.pitch, 18.0, "pitch orbited by +18 degrees");
+        assert_eq!(st.selected, 1, "joint 1 is selected");
+        assert!(
+            st.figure.nodes.len() > 1,
+            "the session figure has a joint 1 to select"
+        );
+    }
+
+    /// The loop-range scene lands on the Animate workspace
+    /// with the loop range set over frames 1..=3 and
+    /// exactly one channel planted for figure 0 — RootX,
+    /// flat keys at exactly the range's two ends. This is
+    /// also the state behind layout fact 13 (the keyed
+    /// loop row renders exactly this range).
+    #[test]
+    fn loop_range_scene_sets_the_range_and_plants_one_channel() {
+        use stykanimate_rs::graph::ChannelTarget;
+        let mut s = init();
+        let len_before = s.core.project.channels.len();
+        scene_loop_range(&mut s);
+        assert_eq!(s.workspace, Workspace::Animate);
+        assert_eq!(
+            s.core.loop_range,
+            Some((1, 3)),
+            "the loop range covers frames 1..=3"
+        );
+        assert_eq!(s.core.selected_figure, 0, "figure 0 is left selected");
+        let channels = &s.core.project.channels;
+        assert_eq!(
+            channels.len(),
+            len_before + 1,
+            "exactly one channel was planted"
+        );
+        let ch = &channels[len_before];
+        assert_eq!(ch.figure, 0, "the channel belongs to figure 0");
+        assert_eq!(ch.target, ChannelTarget::RootX, "the channel is RootX");
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert_eq!(
+            frames,
+            vec![1.0, 3.0],
+            "the keys sit at exactly the loop range's ends"
         );
     }
 }

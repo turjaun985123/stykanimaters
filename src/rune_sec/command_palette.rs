@@ -34,8 +34,9 @@
 //!   duplicates). An empty query lists the recents first,
 //!   under a "Recent" heading (see [`display_commands`]);
 //!   a typed query filters exactly as before and ignores
-//!   the recents entirely. Recents are session-only — the
-//!   list starts empty on every launch.
+//!   the recents entirely. Recents were session-only at
+//!   first — the list started empty on every launch;
+//!   Phase L persists them (below).
 //! * Phase G added four commands over capabilities that
 //!   landed as callable core-level functions, each running
 //!   the same code path as its panel button:
@@ -119,6 +120,26 @@
 //!   likewise no separate group-query code path: a
 //!   "group query" is an ordinary query whose text
 //!   scores against the group field.
+//! * Phase L made the recents survive restarts:
+//!   `shell::palette_recents` /
+//!   `shell::save_palette_recents` hold them on disk as
+//!   plain strings. This file keeps a process-wide cache
+//!   ([`persisted_recents`]) loaded once from disk and
+//!   merged against the live table ([`merge_persisted`]
+//!   — unknown keys dropped, so a renamed or removed
+//!   command never leaves a ghost entry).
+//!   [`PaletteState::recent`] stays the working copy:
+//!   [`open_palette`] seeds it from the cache while it
+//!   is still empty (the first open of a process), and
+//!   the run paths record through [`record_recent`],
+//!   which pushes, mirrors into the cache and saves.
+//!   Seeding lives in the open path, not in
+//!   [`PaletteState::new`], so constructing a `State`
+//!   stays side-effect-free; and both the disk read and
+//!   the disk write are compiled out of test builds, so
+//!   no test can pass or fail because of what a real run
+//!   last saved into `./projects` — the tests assert the
+//!   pure merge and the cache instead.
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -146,6 +167,8 @@
 //!    arrows fall through to the transport bindings (a focused
 //!    field normally claims typed keys first per audit Q4's
 //!    routing, but belt and braces costs nothing).
+
+use std::cell::RefCell;
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, text_input, Color, El, Key, KeyEvent, TextEdit, Tx};
@@ -1072,6 +1095,114 @@ pub fn display_commands(query: &str, recent: &[&'static str]) -> (Vec<usize>, us
     (rows, recent_rows)
 }
 
+// ----------------------------------------------------------------
+// Recents persistence (Phase L)
+// ----------------------------------------------------------------
+
+thread_local! {
+    /// The persisted recents, cached for the life of the
+    /// process: loaded once (lazily, on first access) from
+    /// `shell::palette_recents`, then kept in step with
+    /// every recorded run by [`record_recent`]. A
+    /// `thread_local` because the palette's callers all
+    /// run on the UI thread, and the sibling panels keep
+    /// their process-lifetime state the same way (the
+    /// camera panel's clipboard, `clips_panel`'s
+    /// selection).
+    static RECENTS_CACHE: RefCell<Option<Vec<&'static str>>> = RefCell::new(None);
+}
+
+/// Merge a persisted recents list — plain strings, as
+/// `shell::palette_recents` returns them — into palette
+/// keys: order preserved, strings that no longer name a
+/// command in the table dropped, duplicates dropped, and
+/// the result capped at [`MAX_RECENT`]. Pure, so the disk
+/// format is fully testable without touching the disk.
+pub fn merge_persisted(saved: &[String]) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for name in saved {
+        if let Some(cmd) = COMMANDS.iter().find(|c| c.key == name.as_str()) {
+            if !out.contains(&cmd.key) {
+                out.push(cmd.key);
+            }
+        }
+    }
+    out.truncate(MAX_RECENT);
+    out
+}
+
+/// The persisted form of a recents list: the exact
+/// strings [`record_recent`] hands to
+/// `shell::save_palette_recents`. [`merge_persisted`] is
+/// its inverse over the keys that still exist.
+pub fn recent_strings(recent: &[&'static str]) -> Vec<String> {
+    recent.iter().map(|key| (*key).to_string()).collect()
+}
+
+/// The first cache load: the on-disk recents, merged
+/// against the live table. Test builds never touch the
+/// disk — the cache starts empty there and the tests
+/// seed it explicitly, so no test's outcome can depend
+/// on whatever a real run last saved into `./projects`.
+fn load_recents_cache() -> Vec<&'static str> {
+    #[cfg(test)]
+    {
+        Vec::new()
+    }
+    #[cfg(not(test))]
+    {
+        merge_persisted(&stykanimate_rs::shell::palette_recents())
+    }
+}
+
+/// The persisted recents for this process, loading them
+/// on first access. After a [`record_recent`] this is
+/// exactly the working list that was recorded.
+pub fn persisted_recents() -> Vec<&'static str> {
+    RECENTS_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .get_or_insert_with(load_recents_cache)
+            .clone()
+    })
+}
+
+/// Record a command run — the one write path for recents
+/// since Phase L. [`push_recent`] applied to the working
+/// list `recent`, the result mirrored into the process
+/// cache and written back through
+/// `shell::save_palette_recents`, so the list survives a
+/// restart. A working list that was never seeded (still
+/// empty) is seeded from the cache first, so a run can
+/// never clobber earlier sessions' recents. The disk
+/// write itself is compiled out of test builds (see
+/// [`load_recents_cache`]); there the cache mirror —
+/// asserted by the tests — is the observable effect.
+pub fn record_recent(recent: &mut Vec<&'static str>, key: &'static str) {
+    if recent.is_empty() {
+        *recent = persisted_recents();
+    }
+    push_recent(recent, key);
+    RECENTS_CACHE.with(|cache| *cache.borrow_mut() = Some(recent.clone()));
+    #[cfg(not(test))]
+    stykanimate_rs::shell::save_palette_recents(&recent_strings(recent));
+}
+
+/// Test-only: empty the process cache, so a test starts
+/// from the no-recents state whatever earlier code on
+/// this thread recorded.
+#[cfg(test)]
+fn reset_recents_cache() {
+    RECENTS_CACHE.with(|cache| *cache.borrow_mut() = Some(Vec::new()));
+}
+
+/// Test-only: plant the process cache, standing in for a
+/// disk load of a previous session's recents.
+#[cfg(test)]
+fn seed_recents_cache(keys: &[&'static str]) {
+    RECENTS_CACHE.with(|cache| *cache.borrow_mut() = Some(keys.to_vec()));
+}
+
 /// How many rows the palette currently lists for `s`
 /// (recents-aware): the length keyboard navigation wraps
 /// within.
@@ -1113,8 +1244,13 @@ pub struct PaletteState {
     pub selected: usize,
     /// Keys of the commands most recently run from the
     /// palette, most-recent-first, capped at [`MAX_RECENT`]
-    /// with no duplicates. Session-only: it starts empty on
-    /// every launch and survives open/close cycles.
+    /// with no duplicates. The working copy of the
+    /// persisted recents (Phase L): [`PaletteState::new`]
+    /// starts it empty, [`open_palette`] seeds it from
+    /// [`persisted_recents`] on the first open of a
+    /// process, and every run writes it back through
+    /// [`record_recent`] — so it survives restarts as
+    /// well as open/close cycles.
     pub recent: Vec<&'static str>,
 }
 
@@ -1137,8 +1273,17 @@ impl Default for PaletteState {
 
 /// Open the palette: fresh empty query, first row selected,
 /// and the field flagged focused (the launcher example's
-/// focus pattern) so typing lands in it immediately.
+/// focus pattern) so typing lands in it immediately. On
+/// the first open of a process the recents working list
+/// is still empty, so it is seeded from the persisted
+/// recents ([`persisted_recents`]) and the previous
+/// session's commands lead the list; a non-empty list is
+/// this session's own — at least as new as the cache —
+/// and is never overwritten.
 pub fn open_palette(s: &mut State) {
+    if s.palette.recent.is_empty() {
+        s.palette.recent = persisted_recents();
+    }
     s.palette.open = true;
     s.palette.query.clear();
     s.palette.selected = 0;
@@ -1155,24 +1300,24 @@ pub fn close_palette(s: &mut State) {
 /// state and close the palette. A stale selection (query
 /// changed under it) is clamped first; an empty result
 /// list just closes. The run is recorded in the recents
-/// list.
+/// list (and persisted — see [`record_recent`]).
 pub fn run_selected(s: &mut State) {
     let (results, _) = display_commands(&s.palette.query.text, &s.palette.recent);
     let row = clamped_selected(s.palette.selected, results.len());
     if let Some(&ci) = results.get(row) {
         (COMMANDS[ci].run)(s);
-        push_recent(&mut s.palette.recent, COMMANDS[ci].key);
+        record_recent(&mut s.palette.recent, COMMANDS[ci].key);
     }
     close_palette(s);
 }
 
 /// Run the command at table index `ci` (a result-row press)
 /// and close the palette. The run is recorded in the recents
-/// list.
+/// list (and persisted — see [`record_recent`]).
 fn run_command(s: &mut State, ci: usize) {
     if let Some(cmd) = COMMANDS.get(ci) {
         (cmd.run)(s);
-        push_recent(&mut s.palette.recent, cmd.key);
+        record_recent(&mut s.palette.recent, cmd.key);
     }
     close_palette(s);
 }
@@ -2044,5 +2189,83 @@ mod tests {
         let (rows, recent_rows) = display_commands("", &recent);
         assert_eq!(recent_rows, 1);
         assert_eq!(rows[0], idx_of("undo"));
+    }
+
+    // -- recents persistence (Phase L) -------------------------
+    //
+    // The disk itself is out of reach of these tests on
+    // purpose: test builds compile the read and the write
+    // out (see `load_recents_cache`), so what is asserted
+    // here is the pure merge at the disk boundary and the
+    // process cache the save call mirrors.
+
+    #[test]
+    fn merge_persisted_drops_unknown_keys_and_duplicates() {
+        let saved: Vec<String> = ["undo", "no-such-command", "play", "undo", "save"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(merge_persisted(&saved), vec!["undo", "play", "save"]);
+    }
+
+    #[test]
+    fn merge_persisted_caps_at_max_recent() {
+        // Six distinct live keys on disk: the oldest falls
+        // off, exactly as `push_recent` caps the live list.
+        let saved: Vec<String> = ["add-frame", "save", "load", "undo", "redo", "play"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let merged = merge_persisted(&saved);
+        assert_eq!(merged.len(), MAX_RECENT);
+        assert_eq!(merged[0], "add-frame");
+        assert_eq!(merged[MAX_RECENT - 1], "redo");
+        assert!(!merged.contains(&"play"), "oldest entry fell off: {merged:?}");
+    }
+
+    #[test]
+    fn recent_strings_round_trip_through_merge_persisted() {
+        let recent: Vec<&'static str> = vec!["export-mp4", "undo", "play"];
+        assert_eq!(merge_persisted(&recent_strings(&recent)), recent);
+    }
+
+    #[test]
+    fn record_recent_mirrors_the_working_list_into_the_cache() {
+        reset_recents_cache();
+        seed_recents_cache(&["undo"]);
+        // An unseeded (empty) working list inherits the
+        // persisted recents before the push, so the run
+        // cannot clobber the previous session's list.
+        let mut recent: Vec<&'static str> = Vec::new();
+        record_recent(&mut recent, "play");
+        assert_eq!(recent, vec!["play", "undo"]);
+        // The cache now holds exactly the recorded list —
+        // and its `recent_strings` form is the payload
+        // `save_palette_recents` receives in a real build.
+        assert_eq!(persisted_recents(), vec!["play", "undo"]);
+        assert_eq!(
+            recent_strings(&persisted_recents()),
+            vec!["play".to_string(), "undo".to_string()]
+        );
+        // A second run on the seeded list records on top.
+        record_recent(&mut recent, "save");
+        assert_eq!(recent, vec!["save", "play", "undo"]);
+        assert_eq!(persisted_recents(), recent);
+    }
+
+    #[test]
+    fn open_palette_seeds_recents_from_the_cache_once() {
+        reset_recents_cache();
+        seed_recents_cache(&["export-mp4", "undo"]);
+        let mut s = crate::init();
+        assert!(s.palette.recent.is_empty());
+        open_palette(&mut s);
+        assert_eq!(s.palette.recent, vec!["export-mp4", "undo"]);
+        // Once the session has a list of its own, reopening
+        // never overwrites it with the cache.
+        s.palette.recent = vec!["play"];
+        close_palette(&mut s);
+        open_palette(&mut s);
+        assert_eq!(s.palette.recent, vec!["play"]);
     }
 }

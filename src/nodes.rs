@@ -937,6 +937,7 @@ pub fn import_nodes(data: &[u8]) -> Result<Project, String> {
         sprites: Vec::new(),
         texts: Vec::new(),
         weather: None,
+        head_ring_scale: 1.0,
     })
 }
 

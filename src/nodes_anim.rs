@@ -2341,6 +2341,7 @@ fn empty_project(name: String, fps: f32, auto_tween: bool) -> Project {
         sprites: Vec::new(),
         texts: Vec::new(),
         weather: None,
+        head_ring_scale: 1.0,
     }
 }
 

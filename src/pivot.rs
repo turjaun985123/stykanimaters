@@ -974,6 +974,7 @@ fn assemble(
         sprites: Vec::new(),
         texts: Vec::new(),
         weather: None,
+        head_ring_scale: 1.0,
     }
 }
 
@@ -1751,6 +1752,7 @@ fn import_v5(r: &mut Reader) -> Result<Project, String> {
         sprites: Vec::new(),
         texts: Vec::new(),
         weather: None,
+        head_ring_scale: 1.0,
     })
 }
 

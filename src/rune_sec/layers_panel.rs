@@ -128,6 +128,15 @@
 //! option) a colour always resolves; a figure whose def
 //! somehow has no nodes at all falls back to the figure
 //! colour directly.
+//!
+//! Phase L (section 35/40) adds a muted trailing readout
+//! to each row: the figure's joint count from
+//! [`joint_label`] ("{n} joints", "1 joint" singular) —
+//! `fig.def.nodes.len()`, nothing more. It sits after the
+//! Top button as plain unkeyed text (the opacity readout's
+//! idiom), short enough that the row's controls keep
+//! their room in the 300pt column; the name button is the
+//! row's flexible element and absorbs any squeeze.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Drag, El, Phase, Tx};
@@ -156,6 +165,8 @@ pub struct LayerRow {
     pub dot_color: u32,
     /// Layer opacity as a whole percentage (5..=100).
     pub opacity_pct: i64,
+    /// Trailing joint-count readout text ([`joint_label`]).
+    pub joint_text: String,
     /// True when this is the editor's selected figure.
     pub selected: bool,
     /// True when this row can still move up (toward front).
@@ -226,6 +237,21 @@ pub fn layer_dot_color(fig: &stykanimate_rs::model::FigureInstance) -> u32 {
     }
 }
 
+/// The layer row's trailing joint-count readout: the
+/// figure's def node count as "{n} joints", with the
+/// singular "1 joint" for a one-node def (and "0 joints"
+/// for an empty one). Display only — the count is
+/// `fig.def.nodes.len()`, read from the same def the dot
+/// colour resolves. Kept to the count alone so the short
+/// muted label fits the 300pt column after the row's
+/// existing controls.
+pub fn joint_label(fig: &stykanimate_rs::model::FigureInstance) -> String {
+    match fig.def.nodes.len() {
+        1 => "1 joint".to_string(),
+        n => format!("{n} joints"),
+    }
+}
+
 /// Build the panel's row data from the core, front first.
 pub fn rows(core: &EditorCore) -> Vec<LayerRow> {
     let figures = &core.project.figures;
@@ -236,6 +262,7 @@ pub fn rows(core: &EditorCore) -> Vec<LayerRow> {
             name: figures[fi].name.clone(),
             dot_color: layer_dot_color(&figures[fi]),
             opacity_pct: opacity_pct(figures[fi].opacity),
+            joint_text: joint_label(&figures[fi]),
             selected: fi == core.selected_figure,
             can_move_up: can_move_up(fi, figures.len()),
             can_move_down: can_move_down(fi, figures.len()),
@@ -425,9 +452,11 @@ fn solo_selected(core: &mut EditorCore) {
 /// One layer row: a colour dot (the figure's resolved
 /// root colour, [`layer_dot_color`]), name (press selects;
 /// accent when selected), opacity readout with −/+
-/// steppers, and Bottom/down/up/Top reorder buttons —
+/// steppers, Bottom/down/up/Top reorder buttons —
 /// Down/Up are chevron icon buttons, Bottom/Top stay text
-/// (see the module docs for why). Keys are per-figure:
+/// (see the module docs for why) — and a muted trailing
+/// joint-count readout ([`joint_label`]; unkeyed text,
+/// like the opacity readout). Keys are per-figure:
 /// `layer-row-{fi}`, `layer-dot-{fi}`,
 /// `layer-op-dec-{fi}`, `layer-op-inc-{fi}`,
 /// `layer-bottom-{fi}`, `layer-down-{fi}`, `layer-up-{fi}`,
@@ -505,6 +534,11 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
             t,
             move |s: &mut State| jump_layer(&mut s.core, fi, true),
         ))
+        .child(
+            text(r.joint_text.clone())
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
 }
 
 /// The full layers panel: a "Layers" header, one row per
@@ -942,6 +976,39 @@ mod tests {
             layer_dot_color(&core.project.figures[0]),
             core.project.figures[0].color
         );
+    }
+
+    #[test]
+    fn joint_label_counts_the_demo_figures_nodes() {
+        // The expected count comes from the fixture
+        // itself, not a hard-coded number: the label is
+        // the demo figure's real def node count, plural.
+        let core = EditorCore::new();
+        let fig = &core.project.figures[0];
+        let n = fig.def.nodes.len();
+        assert!(n > 1, "the demo figure is not a one-joint figure");
+        assert_eq!(joint_label(fig), format!("{n} joints"));
+        // ...and the built row carries the same text.
+        assert_eq!(rows(&core)[0].joint_text, format!("{n} joints"));
+    }
+
+    #[test]
+    fn joint_label_singular_for_a_one_node_figure() {
+        // The dot tests' own trick: shrink the demo def
+        // to a single node rather than fabricating a
+        // FigureInstance literal.
+        let mut core = EditorCore::new();
+        core.project.figures[0].def.nodes.truncate(1);
+        assert_eq!(core.project.figures[0].def.nodes.len(), 1);
+        assert_eq!(joint_label(&core.project.figures[0]), "1 joint");
+        assert_eq!(rows(&core)[0].joint_text, "1 joint");
+    }
+
+    #[test]
+    fn joint_label_zero_for_an_empty_def() {
+        let mut core = EditorCore::new();
+        core.project.figures[0].def.nodes.clear();
+        assert_eq!(joint_label(&core.project.figures[0]), "0 joints");
     }
 
     #[test]

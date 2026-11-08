@@ -55,6 +55,12 @@
 //! labelled "Whole project", and the row exists only
 //! while the project has clips at all.
 //!
+//! Phase L extends the readout: when the engine's
+//! duration probe (`audio_ops::clip_duration_secs`)
+//! resolves for the target clip, the line gains a
+//! ` · {d:.1}s` segment; when it does not, the line is
+//! byte-identical to the Phase I line.
+//!
 //! Every control calls a real `EditorCore` op (evidence in
 //! the handler comments). Phase E closed the gaps Phase D
 //! had to leave open — fade, reverse, gain, delete and move
@@ -72,6 +78,7 @@
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, text_input, El, TextEdit, Tx};
 use stykanimate_rs::audio_edit;
+use stykanimate_rs::audio_ops;
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::AudioClip;
 
@@ -239,19 +246,29 @@ pub fn clip_file_name(path: &str) -> &str {
 /// the same `effective_target` the DSP buttons use, so
 /// the line always names the clip an effect would hit:
 /// the live selection, or the last clip as the fallback.
-/// `None` when the project has no clips. Pure: reads only
-/// the in-memory clip list, never the filesystem.
+/// `None` when the project has no clips.
+///
+/// Phase L appends the clip's duration (` · {d:.1}s`)
+/// when the engine's probe (`audio_ops::
+/// clip_duration_secs`) resolves for the target — the
+/// file reads back as a WAV. When it does not resolve
+/// (missing or unreadable file) the line is exactly the
+/// Phase I line: no duration segment, no placeholder.
 pub fn clip_readout(core: &EditorCore, selected: Option<usize>) -> Option<String> {
     let clips = &core.project.audio;
     let i = effective_target(selected, clips.len())?;
     let clip = &clips[i];
-    Some(format!(
+    let mut line = format!(
         "Clip {}: {} · starts frame {} · gain {:.2}",
         i + 1,
         clip_file_name(&clip.path),
         clip.start_frame + 1,
         clip.gain
-    ))
+    );
+    if let Some(d) = audio_ops::clip_duration_secs(core, i) {
+        line += &format!(" · {d:.1}s");
+    }
+    Some(line)
 }
 
 /// Repair a selection after clip `deleted` was removed
@@ -964,6 +981,52 @@ mod tests {
         core.project.audio.clear();
         assert_eq!(clip_readout(&core, None), None);
         assert_eq!(clip_readout(&core, Some(0)), None);
+    }
+
+    #[test]
+    fn clip_readout_appends_duration_for_a_readable_wav() {
+        // One second of silence at 44.1 kHz, written with
+        // the engine's own WAV writer (the
+        // `duration_suffix_reads_readable_wavs_only`
+        // fixture pattern).
+        let wav = audio_edit::WavData {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: vec![0.0; 44_100],
+        };
+        let path = std::env::temp_dir().join(format!(
+            "stykanimate-rune-audio-panel-readout-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, audio_edit::write_wav(&wav)).unwrap();
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip(&path.to_string_lossy(), 4, 0.5));
+        // The probe resolves, so the line gains the
+        // duration segment: start frame 4 shows as frame
+        // 5, and 44 100 samples at 44.1 kHz is 1.0 s.
+        assert_eq!(
+            clip_readout(&core, Some(0)),
+            Some(format!(
+                "Clip 1: {} · starts frame 5 · gain 0.50 · 1.0s",
+                path.file_name().unwrap().to_string_lossy()
+            ))
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn clip_readout_omits_duration_for_a_missing_file() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip("no/such/file.wav", 0, 1.0));
+        // The probe cannot resolve a path that does not
+        // exist, so the line is the Phase I line exactly —
+        // no duration segment, no placeholder.
+        assert_eq!(
+            clip_readout(&core, Some(0)),
+            Some("Clip 1: file.wav · starts frame 1 · gain 1.00".to_string())
+        );
     }
 
     #[test]

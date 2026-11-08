@@ -78,6 +78,15 @@
 //! press is silent — no status, no snapshot — the guarded
 //! style the editor's own selection ops use (e.g.
 //! `cycle_node_color` returns silently with no selection).
+//!
+//! Phase L (section 12/40) makes the thumbnail's head ring
+//! follow the project: [`thumb_prims`] reads the radius from
+//! `Project::head_ring_radius()` (the project's head scale
+//! applied to the base constant) and [`thumb_fit`] takes it
+//! as a parameter, so a project whose heads are scaled draws
+//! miniature rings — and fit room — at the same proportion
+//! as its stage. At the default scale the radius is exactly
+//! [`HEAD_RING_R`] and the geometry is unchanged.
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, text_input, Color, El, LineCap, Shape, TextEdit};
@@ -207,10 +216,13 @@ const THUMB_MARGIN: f32 = 4.0;
 /// rings — one hairline weight for the whole miniature.
 const THUMB_WIDTH: f32 = 1.5;
 
-/// Head-ring radius in stage units, re-exported under the
-/// panel's long-standing name: the single source is the
-/// model's `HEAD_RING_RADIUS`, so the miniature keeps the
-/// stage's proportions by construction.
+/// Base head-ring radius in stage units, re-exported under
+/// the panel's long-standing name: the single source is the
+/// model's `HEAD_RING_RADIUS`. Since Phase L the thumbnails
+/// themselves read the project's scaled radius through
+/// `Project::head_ring_radius()`; this name stays as the
+/// unscaled base value (and other panels keep their own
+/// re-exports of the same constant).
 pub use stykanimate_rs::model::HEAD_RING_RADIUS as HEAD_RING_R;
 
 /// Sides of the thumbnail head-ring polygon (the stage uses
@@ -254,12 +266,13 @@ impl ThumbFit {
 /// Fit the bounding box of `positions` into a `size` square,
 /// keeping [`THUMB_MARGIN`] to spare on the limiting axis.
 /// When the figure has a head node the box first grows by
-/// the head-ring radius on every side, so the ring stays
+/// `head_r` — the project's head-ring radius, passed in by
+/// the caller (Phase L) — on every side, so the ring stays
 /// inside the canvas instead of clipping at the box edge.
 /// Degenerate boxes (one point, a straight vertical line)
 /// clamp their extents to 1 stage unit so the scale stays
 /// finite and the content lands centred.
-pub fn thumb_fit(positions: &[V2], has_head: bool, size: f32) -> ThumbFit {
+pub fn thumb_fit(positions: &[V2], has_head: bool, size: f32, head_r: f32) -> ThumbFit {
     let mut lo = [f32::INFINITY; 2];
     let mut hi = [f32::NEG_INFINITY; 2];
     for p in positions {
@@ -271,8 +284,8 @@ pub fn thumb_fit(positions: &[V2], has_head: bool, size: f32) -> ThumbFit {
         hi = [0.0, 0.0];
     }
     if has_head {
-        lo = [lo[0] - HEAD_RING_R, lo[1] - HEAD_RING_R];
-        hi = [hi[0] + HEAD_RING_R, hi[1] + HEAD_RING_R];
+        lo = [lo[0] - head_r, lo[1] - head_r];
+        hi = [hi[0] + head_r, hi[1] + head_r];
     }
     let extents = [(hi[0] - lo[0]).max(1.0), (hi[1] - lo[1]).max(1.0)];
     let avail = (size - 2.0 * THUMB_MARGIN).max(1.0);
@@ -300,7 +313,11 @@ pub fn thumb_prims(core: &EditorCore, fi: usize, size: f32) -> Vec<ThumbPrim> {
     }
     let pos = core.positions_f(core.display_frame(), fi);
     let has_head = fig.def.nodes.iter().any(|n| n.head);
-    let fit = thumb_fit(&pos, has_head, size);
+    // Phase L: the ring — and the room the fit leaves for
+    // it — follow the project's head scale, not the bare
+    // base constant.
+    let head_r = core.project.head_ring_radius();
+    let fit = thumb_fit(&pos, has_head, size, head_r);
     let mut prims = Vec::new();
     for (i, node) in fig.def.nodes.iter().enumerate() {
         if let Some(p) = node.parent {
@@ -313,7 +330,7 @@ pub fn thumb_prims(core: &EditorCore, fi: usize, size: f32) -> Vec<ThumbPrim> {
     for (i, node) in fig.def.nodes.iter().enumerate() {
         if node.head {
             prims.push(ThumbPrim::Ring {
-                pts: ngon(fit.map(pos[i]), HEAD_RING_R * fit.scale, HEAD_RING_SIDES),
+                pts: ngon(fit.map(pos[i]), head_r * fit.scale, HEAD_RING_SIDES),
             });
         }
     }
@@ -952,7 +969,7 @@ mod tests {
         // the box centre, and the corners sit on or inside
         // the margin on the limiting axis.
         let pos = vec![[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]];
-        let fit = thumb_fit(&pos, false, THUMB_SIZE);
+        let fit = thumb_fit(&pos, false, THUMB_SIZE, HEAD_RING_R);
         assert!((fit.scale - 0.36).abs() < 1e-6);
         assert_eq!(fit.map([50.0, 25.0]), [22.0, 22.0]);
         for p in pos {
@@ -961,11 +978,11 @@ mod tests {
             assert!(m[1] >= THUMB_MARGIN - 1e-4 && m[1] <= THUMB_SIZE - THUMB_MARGIN + 1e-4);
         }
         // A single point maps to the centre at a finite scale.
-        let dot = thumb_fit(&[[7.0, 9.0]], false, THUMB_SIZE);
+        let dot = thumb_fit(&[[7.0, 9.0]], false, THUMB_SIZE, HEAD_RING_R);
         assert!(dot.scale.is_finite() && dot.scale > 0.0);
         assert_eq!(dot.map([7.0, 9.0]), [22.0, 22.0]);
         // No points at all: still a finite, positive scale.
-        let empty = thumb_fit(&[], true, THUMB_SIZE);
+        let empty = thumb_fit(&[], true, THUMB_SIZE, HEAD_RING_R);
         assert!(empty.scale.is_finite() && empty.scale > 0.0);
     }
 
@@ -975,10 +992,118 @@ mod tests {
         // zoom out (the ring needs 17 stage units of room on
         // every side) yet still centre the rig.
         let pos = vec![[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]];
-        let plain = thumb_fit(&pos, false, THUMB_SIZE);
-        let headed = thumb_fit(&pos, true, THUMB_SIZE);
+        let plain = thumb_fit(&pos, false, THUMB_SIZE, HEAD_RING_R);
+        let headed = thumb_fit(&pos, true, THUMB_SIZE, HEAD_RING_R);
         assert!(headed.scale < plain.scale);
         assert_eq!(headed.map([50.0, 25.0]), [22.0, 22.0]);
+    }
+
+    #[test]
+    fn thumb_fit_scales_the_head_room_with_the_radius() {
+        // Phase L: the fit takes the radius as a parameter.
+        // Doubling it (a project with heads scaled 2x) grows
+        // the box by the extra radius on every side: the
+        // 100-wide rig's limiting extent goes 134 -> 168, so
+        // the scale drops from 36/134 to 36/168, and the rig
+        // still centres.
+        let pos = vec![[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]];
+        let base = thumb_fit(&pos, true, THUMB_SIZE, HEAD_RING_R);
+        let doubled = thumb_fit(&pos, true, THUMB_SIZE, HEAD_RING_R * 2.0);
+        assert!((base.scale - 36.0 / 134.0).abs() < 1e-6);
+        assert!((doubled.scale - 36.0 / 168.0).abs() < 1e-6);
+        assert!(doubled.scale < base.scale);
+        assert_eq!(doubled.map([50.0, 25.0]), [22.0, 22.0]);
+        // A ring of the doubled radius around a corner head
+        // still lands inside the canvas under the doubled
+        // fit: centre mapped, edge at centre + r * scale on
+        // the limiting axis reaches exactly the margin.
+        let corner = doubled.map([0.0, 0.0]);
+        let edge = corner[0] - HEAD_RING_R * 2.0 * doubled.scale;
+        assert!((edge - THUMB_MARGIN).abs() < 1e-4, "edge {edge}");
+    }
+
+    #[test]
+    fn thumb_prims_ring_radius_uses_the_project_radius() {
+        // At the default head scale the project's radius is
+        // the base constant, and the ring polygon the panel
+        // builds has exactly that radius times the fit scale
+        // — the Phase L wiring, pinned at scale 1.0.
+        let core = EditorCore::new();
+        assert_eq!(core.project.head_ring_radius(), HEAD_RING_R);
+        let fi = core
+            .project
+            .figures
+            .iter()
+            .position(|f| f.def.nodes.iter().any(|n| n.head))
+            .expect("a demo figure with a head node");
+        let pos = core.positions_f(core.display_frame(), fi);
+        let fit = thumb_fit(&pos, true, THUMB_SIZE, HEAD_RING_R);
+        let prims = thumb_prims(&core, fi, THUMB_SIZE);
+        let ring = prims
+            .iter()
+            .find_map(|p| match p {
+                ThumbPrim::Ring { pts } => Some(pts),
+                _ => None,
+            })
+            .expect("a head ring prim");
+        let centre = [
+            ring.iter().map(|p| p[0]).sum::<f32>() / ring.len() as f32,
+            ring.iter().map(|p| p[1]).sum::<f32>() / ring.len() as f32,
+        ];
+        let radius = ring
+            .iter()
+            .map(|p| (p[0] - centre[0]).hypot(p[1] - centre[1]))
+            .fold(0.0f32, f32::max);
+        assert!(
+            (radius - HEAD_RING_R * fit.scale).abs() < 1e-3,
+            "ring radius {radius}, expected {}",
+            HEAD_RING_R * fit.scale
+        );
+    }
+
+    #[test]
+    fn thumb_prims_ring_radius_follows_a_scaled_project() {
+        // The same figure in a project whose head scale is
+        // 2.0: `thumb_prims` must draw the ring at the
+        // project's doubled radius (times the new fit's
+        // scale), not at the base constant.
+        let mut core = EditorCore::new();
+        core.project.head_ring_scale = 2.0;
+        assert_eq!(core.project.head_ring_radius(), HEAD_RING_R * 2.0);
+        let fi = core
+            .project
+            .figures
+            .iter()
+            .position(|f| f.def.nodes.iter().any(|n| n.head))
+            .expect("a demo figure with a head node");
+        let pos = core.positions_f(core.display_frame(), fi);
+        let fit = thumb_fit(&pos, true, THUMB_SIZE, HEAD_RING_R * 2.0);
+        let prims = thumb_prims(&core, fi, THUMB_SIZE);
+        let ring = prims
+            .iter()
+            .find_map(|p| match p {
+                ThumbPrim::Ring { pts } => Some(pts),
+                _ => None,
+            })
+            .expect("a head ring prim");
+        let centre = [
+            ring.iter().map(|p| p[0]).sum::<f32>() / ring.len() as f32,
+            ring.iter().map(|p| p[1]).sum::<f32>() / ring.len() as f32,
+        ];
+        let radius = ring
+            .iter()
+            .map(|p| (p[0] - centre[0]).hypot(p[1] - centre[1]))
+            .fold(0.0f32, f32::max);
+        assert!(
+            (radius - HEAD_RING_R * 2.0 * fit.scale).abs() < 1e-3,
+            "ring radius {radius}, expected {}",
+            HEAD_RING_R * 2.0 * fit.scale
+        );
+        // And the ring still stays inside the box.
+        for p in ring {
+            assert!(p[0] >= -1e-3 && p[0] <= THUMB_SIZE + 1e-3);
+            assert!(p[1] >= -1e-3 && p[1] <= THUMB_SIZE + 1e-3);
+        }
     }
 
     #[test]

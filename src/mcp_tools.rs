@@ -291,6 +291,7 @@ fn tool_new_project(core: &mut EditorCore, args: &Value) -> Result<Value, String
         sprites: Vec::new(),
         texts: Vec::new(),
         weather: None,
+        head_ring_scale: 1.0,
     };
     core.current = 0;
     core.selected_figure = 0;
@@ -1483,6 +1484,51 @@ fn tool_fx_set_kind(core: &mut EditorCore, args: &Value) -> Result<Value, String
     Ok(json!({
         "ok": true,
         "fx_index": idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+// ---------------------------------------------------------------------
+// Phase L parity tools: the project settings the panels
+// set directly — frame rate and stage size (Phase K) and
+// the head-ring scale (Phase L). Each op returns no bool:
+// it clamps into its range, always sets the status line,
+// and snapshots only on a real change, so the handler
+// just reads every argument before the op runs (a bad
+// argument never leaves a half-applied change) and
+// echoes the resulting value plus the status.
+// ---------------------------------------------------------------------
+
+fn tool_set_project_fps(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fps = req_f32(args, "fps")?;
+    core.set_project_fps(fps);
+    Ok(json!({
+        "ok": true,
+        "fps": core.project.fps,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_set_stage_size(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let width = req_f32(args, "width")?;
+    let height = req_f32(args, "height")?;
+    core.set_stage_size(width, height);
+    Ok(json!({
+        "ok": true,
+        "stage": core.project.stage,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_set_head_ring_scale(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let scale = req_f32(args, "scale")?;
+    core.set_head_ring_scale(scale);
+    Ok(json!({
+        "ok": true,
+        "head_ring_scale": core.project.head_ring_scale,
         "status": core.status,
         "project": project_summary(core),
     }))
@@ -3049,6 +3095,40 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_delete_graph_channel,
         },
         Tool {
+            name: "set_project_fps",
+            description: "Set the project's frame rate in frames per second (clamped to 1-60; the Scene panel's frame-rate stepper). One undo step when the rate changes.",
+            schema: obj_schema(
+                json!({
+                    "fps": { "type": "number", "description": "Frames per second" }
+                }),
+                &["fps"],
+            ),
+            handler: tool_set_project_fps,
+        },
+        Tool {
+            name: "set_stage_size",
+            description: "Set the stage size in pixels (each axis clamped to 64-4096; the Scene panel's stage-size steppers). One undo step when the size changes.",
+            schema: obj_schema(
+                json!({
+                    "width": { "type": "number", "description": "Stage width in pixels" },
+                    "height": { "type": "number", "description": "Stage height in pixels" }
+                }),
+                &["width", "height"],
+            ),
+            handler: tool_set_stage_size,
+        },
+        Tool {
+            name: "set_head_ring_scale",
+            description: "Set the head-ring size as a multiple of the base ring radius (clamped to 0.5-2; applies to every figure's head ring in the stage and all exports). One undo step when the scale changes.",
+            schema: obj_schema(
+                json!({
+                    "scale": { "type": "number", "description": "Head-ring scale multiplier" }
+                }),
+                &["scale"],
+            ),
+            handler: tool_set_head_ring_scale,
+        },
+        Tool {
             name: "layers",
             description: "Apply layer state to a figure: locked, hidden, opacity (0.05-1.0), and solo (true solos this figure in the editor, false clears its solo).",
             schema: obj_schema(
@@ -3323,11 +3403,11 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 84);
+        assert_eq!(tools.len(), 87);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 84, "tool names must be unique");
+        assert_eq!(names.len(), 87, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
@@ -4564,6 +4644,83 @@ mod tests {
     }
 
     #[test]
+    fn phase_l_settings_tools_registered_with_right_shapes() {
+        let tools = tools();
+        // set_project_fps needs just the rate.
+        let t = tools
+            .iter()
+            .find(|t| t.name == "set_project_fps")
+            .expect("set_project_fps registered");
+        assert_eq!(t.schema["required"], json!(["fps"]));
+        assert_eq!(t.schema["properties"]["fps"]["type"], "number");
+        // set_stage_size needs both axes.
+        let t = tools
+            .iter()
+            .find(|t| t.name == "set_stage_size")
+            .expect("set_stage_size registered");
+        assert_eq!(t.schema["required"], json!(["width", "height"]));
+        assert_eq!(t.schema["properties"]["width"]["type"], "number");
+        assert_eq!(t.schema["properties"]["height"]["type"], "number");
+        // set_head_ring_scale needs just the multiplier.
+        let t = tools
+            .iter()
+            .find(|t| t.name == "set_head_ring_scale")
+            .expect("set_head_ring_scale registered");
+        assert_eq!(t.schema["required"], json!(["scale"]));
+        assert_eq!(t.schema["properties"]["scale"]["type"], "number");
+    }
+
+    #[test]
+    fn phase_l_settings_tools_set_and_echo_status() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        // Demo defaults: 12 fps, 960x720 stage, ring scale 1.
+        assert_eq!(core.project.fps, 12.0);
+        assert_eq!(core.project.stage, [960.0, 720.0]);
+        assert_eq!(core.project.head_ring_scale, 1.0);
+
+        // Frame rate: the field changes, the result echoes
+        // the new value and the op's status, and the
+        // summary follows.
+        let r = call(&mut core, &tools, "set_project_fps", json!({ "fps": 24 })).unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["fps"], 24.0);
+        assert_eq!(r["status"], "Frame rate set to 24 fps.");
+        assert_eq!(r["project"]["fps"], 24.0);
+        assert_eq!(core.project.fps, 24.0);
+        // Out-of-range rates clamp inside the op.
+        let r = call(&mut core, &tools, "set_project_fps", json!({ "fps": 500 })).unwrap();
+        assert_eq!(r["fps"], 60.0);
+        assert_eq!(r["status"], "Frame rate set to 60 fps.");
+        assert_eq!(core.project.fps, 60.0);
+
+        // Stage size: both axes land together.
+        let r = call(&mut core, &tools, "set_stage_size", json!({
+            "width": 800, "height": 600
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["stage"], json!([800.0, 600.0]));
+        assert_eq!(r["status"], "Stage size set to 800×600.");
+        assert_eq!(r["project"]["stage"], json!([800.0, 600.0]));
+        assert_eq!(core.project.stage, [800.0, 600.0]);
+
+        // Head-ring scale: the field changes and the
+        // status names the multiplier.
+        let r = call(&mut core, &tools, "set_head_ring_scale", json!({ "scale": 1.5 }))
+            .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["head_ring_scale"], 1.5);
+        assert_eq!(r["status"], "Head ring size set to 1.5×.");
+        assert_eq!(core.project.head_ring_scale, 1.5);
+        // Out-of-range scales clamp inside the op.
+        let r = call(&mut core, &tools, "set_head_ring_scale", json!({ "scale": 9 }))
+            .unwrap();
+        assert_eq!(r["head_ring_scale"], 2.0);
+        assert_eq!(core.project.head_ring_scale, 2.0);
+    }
+
+    #[test]
     fn phase_f_parity_tools() {
         let tools = tools();
         let mut core = EditorCore::new();
@@ -4815,6 +4972,12 @@ mod tests {
             ("delete_graph_channel", json!({ "channel": 0 })), // no channels yet
             ("fx_set_kind", json!({ "index": 0, "kind": "burst" })), // no clips yet
             ("fx_set_kind", json!({ "index": 0, "kind": "laser" })), // unknown kind (and no clips yet)
+            ("set_project_fps", json!({})), // fps required
+            ("set_project_fps", json!({ "fps": "24" })), // fps must be a number
+            ("set_stage_size", json!({ "width": 800 })), // height required
+            ("set_stage_size", json!({ "width": 800, "height": "600" })), // height must be a number
+            ("set_head_ring_scale", json!({})), // scale required
+            ("set_head_ring_scale", json!({ "scale": "big" })), // scale must be a number
         ];
         for (name, args) in cases {
             let r = call(&mut core, &tools, name, args.clone());

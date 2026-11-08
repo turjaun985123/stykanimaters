@@ -1320,8 +1320,14 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
         // Nudge row: fine start moves (±1/±10 frames)
         // and ±0.1 s duration steps.
         .child(nudge_row(s, t))
-        // Colours: primary, then gradient end colour
-        // (with a Solid chip clearing color2 to None).
+        // Colours: primary, then the gradient end
+        // colour block (keyed fx-color2-row since
+        // Phase L; a Solid chip clears color2 to None).
+        // The block's children are spaced by the same
+        // 8.0 gap the panel column used when they were
+        // its direct children, so the layout is
+        // unchanged — the key just gives the row a name
+        // of its own.
         .child(
             text("Colour")
                 .font(type_::LABEL)
@@ -1331,34 +1337,39 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
             Box::new(move |s: &mut State| set_color(s, hex))
         }))
         .child(
-            text("End colour")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        )
-        .child(
-            row()
+            col()
+                .key("fx-color2-row")
                 .gap(8.0)
-                .center_y()
-                .child(btn(
-                    &format!("fx-color2-none-{i}"),
-                    "Solid",
-                    data.color2.is_none(),
-                    t,
-                    |s| set_color2(s, None),
-                ))
                 .child(
-                    text(if data.color2.is_none() {
-                        "no gradient"
-                    } else {
-                        "gradient end"
-                    })
-                    .font(type_::LABEL)
-                    .color(t.text_secondary),
-                ),
+                    text("End colour")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                )
+                .child(
+                    row()
+                        .gap(8.0)
+                        .center_y()
+                        .child(btn(
+                            &format!("fx-color2-none-{i}"),
+                            "Solid",
+                            data.color2.is_none(),
+                            t,
+                            |s| set_color2(s, None),
+                        ))
+                        .child(
+                            text(if data.color2.is_none() {
+                                "no gradient"
+                            } else {
+                                "gradient end"
+                            })
+                            .font(type_::LABEL)
+                            .color(t.text_secondary),
+                        ),
+                )
+                .child(swatch_rows(i, "fx-color2", data.color2, |hex| {
+                    Box::new(move |s: &mut State| set_color2(s, Some(hex)))
+                })),
         )
-        .child(swatch_rows(i, "fx-color2", data.color2, |hex| {
-            Box::new(move |s: &mut State| set_color2(s, Some(hex)))
-        }))
         // Anchor: re-anchor to the selected joint.
         .child(
             row()
@@ -2125,5 +2136,93 @@ mod tests {
         let clip = state.core.project.fx_clips[0].clip;
         assert_eq!(clip.start, 4.0);
         assert_eq!(clip.duration, 10.0);
+    }
+
+    // --------------------------------------------------
+    // Phase L: gradient end colour row (fx-color2-row)
+    // --------------------------------------------------
+    // The row itself predates Phase L (Phase D built
+    // the End colour label, the Solid chip and the
+    // fx-color2 swatches over `set_color2`); what the
+    // phase adds is the keyed fx-color2-row container
+    // and these handler tests — the press path had no
+    // coverage at all.
+
+    #[test]
+    fn set_color2_swatch_press_sets_the_end_on_the_selected_clip_only() {
+        // Two clips; the SECOND is selected. The press
+        // the fx-color2 swatch runs is
+        // set_color2(s, Some(hex)) — it must land on
+        // the selected clip and nowhere else.
+        let core = core_with(vec![
+            entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D),
+            entry(20.0, 6.0, ClipKind::ShockRing, 0x5DB2FF),
+        ]);
+        let mut state = state_with(core, Some(1));
+        set_color2(&mut state, Some(0xFF7BAC));
+        let clips = &state.core.project.fx_clips;
+        assert_eq!(clips[1].clip.color2, Some(0xFF7BAC));
+        assert_eq!(clips[0].clip.color2, None, "unselected clip untouched");
+        // The gradient end is its own field: neither
+        // clip's start colour moved.
+        assert_eq!(clips[1].clip.color, 0x5DB2FF);
+        assert_eq!(clips[0].clip.color, 0xFF5D5D);
+        // The op's own status names the clip and the
+        // colour it was given.
+        assert_eq!(
+            state.core.status,
+            "FX clip 2 end colour set to #FF7BAC."
+        );
+    }
+
+    #[test]
+    fn set_color2_solid_chip_clears_the_end_back_to_none() {
+        // A clip that already has a gradient end; the
+        // Solid chip's press is set_color2(s, None).
+        let mut gradient = entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D);
+        gradient.clip.color2 = Some(0x7BE495);
+        let core = core_with(vec![gradient]);
+        let mut state = state_with(core, Some(0));
+        set_color2(&mut state, None);
+        let clip = state.core.project.fx_clips[0].clip;
+        assert_eq!(clip.color2, None, "cleared back to solid");
+        assert_eq!(clip.color, 0xFF5D5D, "start colour untouched");
+        assert_eq!(state.core.status, "FX clip 1 end colour cleared.");
+    }
+
+    #[test]
+    fn set_color2_without_a_valid_selection_changes_nothing() {
+        // No selection and a stale selection both make
+        // the handler return before the op: no
+        // snapshot (undo depth unchanged), no edit,
+        // no status written by the handler itself.
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, None);
+        let depth = state.core.undo_depth();
+        set_color2(&mut state, Some(0xFF7BAC));
+        set_color2(&mut state, None);
+        assert_eq!(state.core.undo_depth(), depth);
+        assert_eq!(state.core.project.fx_clips[0].clip.color2, None);
+
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, Some(9));
+        let depth = state.core.undo_depth();
+        set_color2(&mut state, Some(0xFF7BAC));
+        assert_eq!(state.core.undo_depth(), depth);
+        assert_eq!(state.core.project.fx_clips[0].clip.color2, None);
+    }
+
+    #[test]
+    fn inspector_builds_with_a_gradient_end_selected() {
+        // The fx-color2-row block in its gradient
+        // state: the selected clip carries a color2,
+        // so the Solid chip renders inactive, the
+        // caption reads "gradient end" and the current
+        // end swatch takes the ring.
+        let t = rune::tok::theme(true);
+        let mut gradient = entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D);
+        gradient.clip.color2 = Some(0x7BE495);
+        let state = state_with(core_with(vec![gradient]), Some(0));
+        let _ = fx_inspector(&state, &t);
     }
 }

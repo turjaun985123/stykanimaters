@@ -14,7 +14,11 @@
 //! [`shortcut_hint`] — and View ▸ Playback speed, an
 //! action item cycling the shell's playback-speed
 //! factor through the playback section's
-//! `cycle_playback_speed`).
+//! `cycle_playback_speed`; Phase L: Edit ▸ Delete
+//! stroke / Delete particle event, offered only while
+//! that selection exists and running the Delete key's
+//! own branches — see the EDIT arm of
+//! [`menu_dropdown`]).
 //! Declared from `main.rs` by the integrator; bin-crate
 //! code, not part of the engine library.
 //!
@@ -175,7 +179,17 @@ fn closing(f: impl Fn(&mut State) + 'static) -> impl Fn(&mut State) + 'static {
 /// the sidebar toggles, Stage guides, Camera frame, Safe
 /// frames, Playback speed, Shortcuts — has NO
 /// shell key binding and gets no hint: an invented hint
-/// would be a lie on screen. The spellings match the
+/// would be a lie on screen. The Edit menu's selection
+/// deletes (Phase L: Delete stroke / Delete particle
+/// event) get no hint either, for a subtler reason: the
+/// shell's Delete key IS bound, but to `on_key`'s
+/// priority cascade — stroke first, then particle
+/// event, then the selected segment — not to either
+/// item's single action. A "Delete" hint on the stroke
+/// item would claim the key targets strokes, when with
+/// no stroke selected it deletes something else
+/// entirely. The items stay mouse-only doors onto the
+/// cascade's first two branches. The spellings match the
 /// help panel's shortcut table (`help_panel.rs`). Pinned
 /// by the `shortcut_hints_name_only_real_bindings` test.
 fn shortcut_hint(key: &str) -> Option<&'static str> {
@@ -236,9 +250,9 @@ fn hinted_item(
 /// The Font Awesome glyph an item leads with (Phase H),
 /// keyed by the item's element key — or `None` when the
 /// item stays plain text. Only the high-value items are
-/// mapped: the File actions, Edit's undo/redo and frame
-/// clipboard, View's visibility toggles, its Playback
-/// speed action and sidebar
+/// mapped: the File actions, Edit's undo/redo, frame
+/// clipboard and selection deletes, View's visibility
+/// toggles, its Playback speed action and sidebar
 /// switches, and Help's two entries. Fit view / Centre on
 /// selection stay unmapped (no glyph reads as clearly,
 /// and an unclear icon is worse than none). The File ▸
@@ -266,11 +280,15 @@ fn menu_icon(key: &str) -> Option<&'static str> {
         "load" => Some("folder-open"),
         "save" => Some("floppy-disk"),
         "export" => Some("download"),
-        // Edit: undo / redo, copy / paste frame.
+        // Edit: undo / redo, copy / paste frame, and the
+        // selection deletes (Phase L) — the trash can
+        // reads as removal at a glance.
         "undo" => Some("arrow-rotate-left"),
         "redo" => Some("arrow-rotate-right"),
         "copy-frame" => Some("copy"),
         "paste-frame" => Some("clipboard"),
+        "edit-delete-stroke" => Some("trash-can"),
+        "edit-delete-particle" => Some("trash-can"),
         // View: visibility (eye), the guides sub-toggles
         // (crosshairs), the sidebar switches (list).
         "onion" => Some("eye"),
@@ -452,6 +470,35 @@ fn open_recent(s: &mut State, name: &str, path: Option<&Path>) {
     }
 }
 
+/// One Edit ▸ Delete stroke press (Phase L): exactly
+/// the Delete key's stroke branch in `main.rs::on_key`
+/// — delete the selected stroke through the core op,
+/// then clear the selection. The op refuses safely
+/// (status only) on a stale index and the selection is
+/// cleared either way, matching the key. A no-op when
+/// nothing is selected (the item is only offered while
+/// a stroke is selected, so this is a guard, not a
+/// reachable path).
+fn delete_selected_stroke(s: &mut State) {
+    if let Some(i) = s.stroke_selected {
+        s.core.delete_stroke_at(i);
+        s.stroke_selected = None;
+    }
+}
+
+/// One Edit ▸ Delete particle event press (Phase L):
+/// exactly the Delete key's particle branch in
+/// `main.rs::on_key` — delete the selected event
+/// through the particle op, then clear the selection.
+/// Same stale-index discipline as
+/// [`delete_selected_stroke`].
+fn delete_selected_particle(s: &mut State) {
+    if let Some(i) = s.particle_selected {
+        s.core.particle_delete_event(i);
+        s.particle_selected = None;
+    }
+}
+
 /// The File menu's Open recent block (Phase J): a
 /// separator plus one item per entry from
 /// [`recent_items`], keyed `file-recent-{i}` in recents
@@ -576,6 +623,40 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
                 .child(item("paste-frame", "Paste frame", false, t, |s| {
                     s.core.paste_frame()
                 }));
+            // Selection deletes (Phase L): the Delete
+            // key's first two branches as menu items, so
+            // the removals are discoverable without the
+            // keyboard. Each item exists only while its
+            // selection exists — no inert rows, the
+            // Open-recent discipline — and when both
+            // selections are live both items appear,
+            // stroke first, matching the key's priority.
+            // The handlers are the key's branches
+            // verbatim (see `delete_selected_stroke` /
+            // `delete_selected_particle`); the shared
+            // `item` wrapper closes the menu on select,
+            // as for every item. Neither item carries a
+            // shortcut hint — see `shortcut_hint` for why
+            // the Delete key does not count as their
+            // binding.
+            if s.stroke_selected.is_some() {
+                list = list.child(item(
+                    "edit-delete-stroke",
+                    "Delete stroke",
+                    false,
+                    t,
+                    delete_selected_stroke,
+                ));
+            }
+            if s.particle_selected.is_some() {
+                list = list.child(item(
+                    "edit-delete-particle",
+                    "Delete particle event",
+                    false,
+                    t,
+                    delete_selected_particle,
+                ));
+            }
         }
         VIEW => {
             // Core view state/ops: `core.onion` is a public
@@ -764,6 +845,8 @@ mod tests {
             "export",
             "copy-frame",
             "paste-frame",
+            "edit-delete-stroke",
+            "edit-delete-particle",
             "view-guides",
             "view-guides-frustum",
             "view-guides-safe",
@@ -794,6 +877,8 @@ mod tests {
             ("redo", "arrow-rotate-right"),
             ("copy-frame", "copy"),
             ("paste-frame", "clipboard"),
+            ("edit-delete-stroke", "trash-can"),
+            ("edit-delete-particle", "trash-can"),
             ("onion", "eye"),
             ("view-guides", "eye"),
             ("view-guides-frustum", "crosshairs"),
@@ -1044,5 +1129,85 @@ mod tests {
         assert_eq!(s.core.project.name, name_before);
         assert_eq!(s.core.project_files.len(), files_before);
         assert_eq!(s.core.project_index, index_before);
+    }
+
+    #[test]
+    fn edit_menu_delete_items_follow_the_selections() {
+        // Phase L: Edit ▸ Delete stroke / Delete particle
+        // event exist only while their selection exists.
+        // Rune's `El` exposes no public tree-walk, so — in
+        // the Phase J menu-structure style — presence is
+        // pinned through the pure maps `item` dispatches
+        // on, plus a build of the EDIT dropdown in each
+        // selection state; the handlers are exercised
+        // directly (they are the fns the items call).
+        use stykanimate_rs::model::Stroke;
+
+        // Both items lead with the trash can, which
+        // exists in the curated set, and neither claims a
+        // hint: the Delete key is bound to `on_key`'s
+        // priority cascade, not to either item (see
+        // `shortcut_hint`).
+        for key in ["edit-delete-stroke", "edit-delete-particle"] {
+            assert_eq!(menu_icon(key), Some("trash-can"), "{key}");
+            assert_eq!(shortcut_hint(key), None, "{key}");
+        }
+        assert!(crate::rune_sec::icons::has_icon("trash-can"));
+        assert!(crate::rune_sec::icon_data::ICON_NAMES.contains(&"trash-can"));
+
+        let t = rune::tok::theme(true);
+        let mut s = crate::init();
+        // The demo project starts with no strokes and no
+        // particle events, and nothing selected: the EDIT
+        // dropdown builds with neither delete item.
+        assert!(s.core.project.strokes.is_empty());
+        assert!(s.core.project.particles.is_empty());
+        assert_eq!(s.stroke_selected, None);
+        assert_eq!(s.particle_selected, None);
+        s.menus.open = Some(EDIT);
+        let _ = menu_dropdown(&s, &t);
+
+        // Plant one stroke and one particle event and
+        // select both: the dropdown builds with both
+        // items offered (their rendering is fully
+        // decided by the maps pinned above).
+        s.core.project.strokes.push(Stroke {
+            frame: 0,
+            points: vec![[0.0, 0.0], [10.0, 10.0]],
+            color: 0xFFFFFF,
+            width: 2.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+        });
+        let ev = s.core.particle_add_event(0, 100.0, 100.0);
+        s.stroke_selected = Some(0);
+        s.particle_selected = Some(ev);
+        let _ = menu_dropdown(&s, &t);
+
+        // The stroke item's press: the stroke is deleted
+        // and the selection cleared; the particle event
+        // and its selection are untouched — the key's
+        // priority, one branch at a time.
+        delete_selected_stroke(&mut s);
+        assert!(s.core.project.strokes.is_empty());
+        assert_eq!(s.stroke_selected, None);
+        assert_eq!(s.core.project.particles.len(), 1);
+        assert_eq!(s.particle_selected, Some(ev));
+
+        // The particle item's press: the event is
+        // deleted and its selection cleared.
+        delete_selected_particle(&mut s);
+        assert!(s.core.project.particles.is_empty());
+        assert_eq!(s.particle_selected, None);
+
+        // With neither selection the dropdown builds
+        // with neither item again, and both handlers are
+        // clean no-ops.
+        let _ = menu_dropdown(&s, &t);
+        delete_selected_stroke(&mut s);
+        delete_selected_particle(&mut s);
+        assert!(s.core.project.strokes.is_empty());
+        assert!(s.core.project.particles.is_empty());
     }
 }

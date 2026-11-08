@@ -276,6 +276,64 @@
 //!   selected-clip detail — cuts at the playhead
 //!   frame's centre (frame 2 → 2.5), the first clip
 //!   keeping [0, 2.5) and the new one taking the rest.
+//!
+//! Round 9 (Phase L, section 26) adds four tests over
+//! the Phase K/L surfaces rounds 1–8 never drove
+//! through the Runtime: the transport's speed cycle,
+//! the figure inspector's head-ring stepper, the
+//! timeline's own loop row, and the 3D panel's new
+//! preview viewport. Facts they rest on, verified
+//! against the tree:
+//! * `pb-speed` lives in the Playback panel (Animate
+//!   and Audio workspaces) and its handler is
+//!   `playback_controls::cycle_playback_speed`, which
+//!   only rewrites `State::playback_speed` — shell
+//!   state `init` seeds at 1.0 and nothing persists —
+//!   through the `SPEEDS` table, whose next step above
+//!   1.0 is 1.5. The button stays mounted after the
+//!   press; only its label (the speed itself) and its
+//!   active flag change, so the test asserts the field
+//!   and the key's continued presence, never pixels.
+//! * `fig-ring-up` is the figure inspector's head-ring
+//!   stepper: `step_head_ring_scale` adds
+//!   `HEAD_RING_STEP` (0.1) and hands the sum to
+//!   `EditorCore::set_head_ring_scale`, which writes
+//!   `Project::head_ring_scale` (a fresh demo's field
+//!   is exactly 1.0, model.rs) under a [0.5, 2.0]
+//!   clamp — one press therefore lands on 1.1, above
+//!   1.0 by the step, nowhere near the clamp.
+//! * The timeline's loop row (`timeline_marks`'
+//!   `loop_row`, Phase L) renders under the chips in
+//!   the centre column: with no loop range it carries
+//!   only `loop-set` ("Set loop"), whose handler asks
+//!   for `loop_set_range(current, frame_count)` —
+//!   from the playhead, four frames on, clamped to
+//!   the last frame; the demo (playhead 0, five
+//!   frames) gets (0, 4). With a range the row swaps
+//!   to the readout, endpoint steppers and
+//!   `loop-clear`. That key is shared by three homes
+//!   (this row, the Playback panel, the Frames
+//!   section) — `find` returns the first in tree
+//!   order, and the centre column mounts before the
+//!   right column, so after Set loop the timeline
+//!   row's own Clear is the one a tap lands on; all
+//!   three handlers call the same core op
+//!   (`clear_loop_range`) in any case. No absence
+//!   assert is made on `loop-clear`: the other homes
+//!   render it whatever the range, so only the state
+//!   transitions and `loop-set`'s return are honest
+//!   signals.
+//! * The 3D preview is a canvas keyed
+//!   `panel-3d-preview` (`three_d_panel::PREVIEW_KEY`)
+//!   mounted unconditionally at the top of the 3D
+//!   panel — with no session it draws an empty shape
+//!   over its field, so presence needs no session
+//!   setup. The `ThreeD` section is gated to the 3D
+//!   workspace alone, whose chip key is `ws-3d`
+//!   (workspaces.rs — the persisted name is "3D", the
+//!   key is not `ws-build3d`). Presence is asserted
+//!   on the presented tree, round 5's coverage-test
+//!   mechanism, not on pixels.
 
 use std::collections::BTreeSet;
 
@@ -2306,6 +2364,204 @@ fn fx_split_button_cuts_the_selected_clip_at_the_playhead() {
 
     // Restore Animate for the shared prefs, as rounds
     // 2–7 do.
+    tap(&mut rt, "ws-animate");
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+}
+
+// ----------------------------------------------------------------
+// Round 9 (Phase L, section 26): the transport's speed
+// cycle, the figure inspector's head-ring stepper, the
+// timeline's loop row, and the 3D panel's preview
+// viewport — each driven through the real shell, none
+// set up by writing core or shell state.
+// ----------------------------------------------------------------
+
+#[test]
+fn pb_speed_button_cycles_the_shell_playback_speed() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // Premise: the speed is shell state seeded by
+    // `init` at normal speed — no test in this file
+    // writes it during setup (this file never writes
+    // state in setup at all), and nothing persists it
+    // between shells.
+    assert_eq!(
+        rt.state.playback_speed, 1.0,
+        "premise: a fresh shell plays at normal speed"
+    );
+
+    // The Playback panel sits in the right column,
+    // below the fold — scroll the speed button into
+    // view and press it. Its handler is the section's
+    // `cycle_playback_speed`: the field alone moves,
+    // to the SPEEDS table's next step above 1.0.
+    scroll_into_view(&mut rt, "pb-speed");
+    tap(&mut rt, "pb-speed");
+    assert_eq!(
+        rt.state.playback_speed, 1.5,
+        "one press cycles the speed 1.0 -> 1.5"
+    );
+
+    // The button itself persists across the press —
+    // it re-renders with the new speed in its label
+    // and its active flag set, under the same key.
+    assert!(
+        presented_keys(&rt).contains("pb-speed"),
+        "the speed button is still presented after the press"
+    );
+    assert!(
+        rt.elements().iter().any(|e| e.text.as_deref() == Some("Speed 1.5×")),
+        "the button's label now names the new speed"
+    );
+}
+
+#[test]
+fn fig_ring_up_button_raises_the_head_ring_scale() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // Premise: a fresh demo project's head-ring scale
+    // is exactly 1.0 (the model's field default), so
+    // one step of the inspector's 0.1 stepper has the
+    // whole distance to the setter's 2.0 clamp.
+    assert_eq!(
+        rt.state.core.project.head_ring_scale, 1.0,
+        "premise: the demo project starts at ring scale 1.0"
+    );
+
+    // The figure inspector is a right-column panel
+    // and the ring row sits deep inside it — scroll
+    // the + stepper into view and press it.
+    scroll_into_view(&mut rt, "fig-ring-up");
+    tap(&mut rt, "fig-ring-up");
+
+    // The field the renderers scale the ring by has
+    // risen by exactly the step, and the setter's own
+    // status line says so.
+    let scale = rt.state.core.project.head_ring_scale;
+    assert!(
+        scale > 1.0,
+        "one press raises the head-ring scale above 1.0: {scale}"
+    );
+    assert!(
+        (scale - 1.1).abs() < 1e-6,
+        "the raise is the 0.1 step, to 1.1: {scale}"
+    );
+    assert!(
+        rt.state.core.status.contains("Head ring size set"),
+        "the setter reported the change: {}",
+        rt.state.core.status
+    );
+}
+
+#[test]
+fn timeline_loop_row_sets_and_clears_the_loop_range() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // Premise: the demo project carries no loop range
+    // (a fresh core's field is None), so the timeline's
+    // loop row — under the chips in the centre column,
+    // no scrolling — offers Set loop, and only that.
+    assert_eq!(
+        rt.state.core.loop_range, None,
+        "premise: the demo project has no loop range"
+    );
+    assert!(
+        presented_keys(&rt).contains("loop-set"),
+        "the loop row offers Set loop while no range is set"
+    );
+
+    // Set loop asks for the playhead's range: from the
+    // current frame (0), four frames on, clamped to
+    // the last frame — the whole five-frame demo.
+    tap(&mut rt, "loop-set");
+    assert_eq!(
+        rt.state.core.loop_range,
+        Some((0, 4)),
+        "Set loop spans the demo from the playhead"
+    );
+    assert!(
+        rt.state.core.status.contains("Looping frames 1–5."),
+        "the core reported the range: {}",
+        rt.state.core.status
+    );
+
+    // With a range set, the row carries its own Clear
+    // under the shared `loop-clear` key — first in
+    // tree order here, because the centre column
+    // mounts before the right column's two other
+    // homes of the same key (see the round's header
+    // note). One tap clears through the core's op.
+    tap(&mut rt, "loop-clear");
+    assert_eq!(
+        rt.state.core.loop_range, None,
+        "Clear removes the loop range"
+    );
+    assert!(
+        rt.state.core.status.contains("Loop range cleared."),
+        "the core reported the clear: {}",
+        rt.state.core.status
+    );
+
+    // And the row is back to offering Set loop.
+    assert!(
+        presented_keys(&rt).contains("loop-set"),
+        "the loop row offers Set loop again after the clear"
+    );
+}
+
+#[test]
+fn build3d_workspace_presents_the_3d_preview() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // Seed Animate through its chip (the shared-prefs
+    // discipline), so the switch below is a real switch
+    // whatever a sibling test left persisted.
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // To the 3D workspace through its chip — key
+    // `ws-3d` (workspaces.rs; the workspace's name is
+    // "3D", its key is not `ws-build3d`).
+    tap(&mut rt, "ws-3d");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Build3D);
+
+    // The 3D panel mounts there (its section is gated
+    // to this workspace alone), and the Phase L
+    // preview canvas sits at the top of it — present
+    // in the presented tree with no 3D session needed:
+    // the viewport renders its field and an empty
+    // shape until a session projects into it.
+    let keys = presented_keys(&rt);
+    assert!(keys.contains("panel-3d"), "the 3D panel is presented");
+    assert!(
+        keys.contains("panel-3d-preview"),
+        "the 3D preview viewport is presented"
+    );
+    assert!(
+        rt.find("panel-3d-preview").is_some(),
+        "the preview has a findable centre"
+    );
+
+    // Restore Animate for the shared prefs, as rounds
+    // 2–8 do.
     tap(&mut rt, "ws-animate");
     assert_eq!(rt.state.workspace, Workspace::Animate);
 }

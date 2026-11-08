@@ -53,6 +53,14 @@
 //!   and keys inside the span are replaced by the held
 //!   value (that is what hold means); keys outside the
 //!   span are untouched.
+//! * Delete key (Phase L, section 39) →
+//!   [`delete_camera_key_at`]: the undoable delete — the
+//!   frame is checked first (a refusal is status-only, no
+//!   snapshot), then ONE `snapshot()` and the model's
+//!   `remove_camera_key`. Distinct from Clear key above:
+//!   `camera_clear_key` never snapshots, so its clear
+//!   cannot be undone, and it only ever names the current
+//!   frame.
 //! * Follow → `toggle_camera_follow` (editor.rs:1740); its
 //!   active state is `project.camera_follow ==
 //!   Some(selected_figure)` (model.rs:699), the same condition
@@ -437,6 +445,45 @@ pub fn hold_camera(core: &mut EditorCore) {
         }
     }
     core.status = format!("Camera held over frames {}–{}.", a + 1, b + 1);
+}
+
+// ----------------------------------------------------------------
+// Delete key at a frame (Phase L, section 39)
+// ----------------------------------------------------------------
+
+/// Delete the camera key at `frame` — the undoable delete,
+/// behind the panel's Delete key button (which passes the
+/// current frame).
+///
+/// This is the third deletion path in the panel, and the
+/// only one that can be undone: `camera_clear_key`
+/// (editor.rs) removes the key at the *current* frame and
+/// never snapshots, so its clear is lost to undo, and
+/// [`clear_key_at`] composes `goto` + that op for the key
+/// list's per-row Clear, inheriting both limits (the
+/// playhead moves; no undo). This fn takes the frame
+/// directly, never moves the playhead, and is exactly one
+/// undo step.
+///
+/// The removal itself is the model's own
+/// `Project::remove_camera_key` (a retain over
+/// `Project::camera`); the existence check runs first so
+/// the refusal below takes NO snapshot. Angle fix-ups:
+/// none are needed — `set_camera_key` does not touch an
+/// existing key's angle on write (the fix-ups in
+/// [`hold_camera`] / [`paste_key_here`] repair only the
+/// key being written), and deleting a key changes no
+/// surviving key's stored values; interpolation simply
+/// reads the survivors as stored.
+pub fn delete_camera_key_at(core: &mut EditorCore, frame: usize) -> bool {
+    if !core.project.camera.iter().any(|k| k.frame == frame) {
+        core.status = format!("No camera key at frame {}.", frame + 1);
+        return false;
+    }
+    core.snapshot();
+    core.project.remove_camera_key(frame);
+    core.status = format!("Camera key at frame {} deleted.", frame + 1);
+    true
 }
 
 // ----------------------------------------------------------------
@@ -918,6 +965,10 @@ pub fn panel(s: &State, t: &Theme) -> El {
                 }))
                 .child(btn("cam-hold", "Hold camera", false, t, |s: &mut State| {
                     hold_camera(&mut s.core)
+                }))
+                .child(icon_btn("cam-delete-key", "trash-can", "Delete key", false, t, |s: &mut State| {
+                    let frame = s.core.current;
+                    delete_camera_key_at(&mut s.core, frame);
                 })),
         )
         .child(key_list(core, t))
@@ -1507,5 +1558,77 @@ playback_speed: 1.0,
         assert_eq!(at(2), Some((100.0, 200.0, 1.5, 30.0)));
         assert_eq!(at(3), Some((100.0, 200.0, 1.5, 30.0)));
         assert_eq!(at(4), Some((400.0, 300.0, 2.0, 60.0)));
+    }
+
+    // ---- Delete key at a frame (Phase L, section 39) ----
+
+    #[test]
+    fn delete_camera_key_at_removes_exactly_that_key() {
+        let mut core = EditorCore::new(); // demo: 5 frames, no camera keys
+        pin_key(&mut core, 0, 100.0, 200.0, 1.5, 30.0);
+        pin_key(&mut core, 2, 999.0, 888.0, 3.0, 45.0);
+        pin_key(&mut core, 4, 400.0, 300.0, 2.0, 60.0);
+        assert!(delete_camera_key_at(&mut core, 2));
+        assert_eq!(core.status, "Camera key at frame 3 deleted.");
+        // Exactly the frame-2 key is gone; both neighbours
+        // survive with every stored value intact.
+        let at = |f: usize| {
+            core.project
+                .camera
+                .iter()
+                .find(|k| k.frame == f)
+                .map(|k| (k.x, k.y, k.zoom, k.angle))
+        };
+        assert_eq!(core.project.camera.len(), 2);
+        assert_eq!(at(0), Some((100.0, 200.0, 1.5, 30.0)));
+        assert_eq!(at(2), None);
+        assert_eq!(at(4), Some((400.0, 300.0, 2.0, 60.0)));
+    }
+
+    #[test]
+    fn delete_camera_key_at_is_one_undo_step() {
+        let mut core = EditorCore::new();
+        pin_key(&mut core, 2, 999.0, 888.0, 3.0, 45.0);
+        let depth0 = core.undo_depth();
+        assert!(delete_camera_key_at(&mut core, 2));
+        assert_eq!(core.undo_depth(), depth0 + 1, "one delete is one undo step");
+        assert!(core.project.camera.is_empty());
+        core.undo();
+        assert_eq!(core.project.camera.len(), 1);
+        let k = core.project.camera[0];
+        assert_eq!((k.frame, k.x, k.y, k.zoom, k.angle), (2, 999.0, 888.0, 3.0, 45.0));
+    }
+
+    #[test]
+    fn delete_camera_key_at_refuses_without_a_snapshot() {
+        let mut core = EditorCore::new();
+        pin_key(&mut core, 0, 100.0, 200.0, 1.5, 30.0);
+        let depth0 = core.undo_depth();
+        assert!(!delete_camera_key_at(&mut core, 3));
+        assert_eq!(core.status, "No camera key at frame 4.");
+        // No snapshot was taken and nothing was removed.
+        assert_eq!(core.undo_depth(), depth0);
+        assert_eq!(core.project.camera.len(), 1);
+        assert_eq!(core.project.camera[0].frame, 0);
+    }
+
+    #[test]
+    fn delete_camera_key_at_via_the_current_frame() {
+        // The Delete key button's own shape: read the
+        // current frame, then call — the playhead itself
+        // never moves (unlike clear_key_at's goto).
+        let mut core = EditorCore::new();
+        pin_key(&mut core, 0, 100.0, 200.0, 1.5, 30.0);
+        pin_key(&mut core, 2, 999.0, 888.0, 3.0, 45.0);
+        core.goto(2);
+        let frame = core.current;
+        assert!(delete_camera_key_at(&mut core, frame));
+        assert_eq!(core.current, 2);
+        assert_eq!(core.project.camera.len(), 1);
+        assert_eq!(core.project.camera[0].frame, 0);
+        // A second press on the now-keyless frame refuses.
+        let frame = core.current;
+        assert!(!delete_camera_key_at(&mut core, frame));
+        assert_eq!(core.status, "No camera key at frame 3.");
     }
 }

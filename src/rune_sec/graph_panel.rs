@@ -228,6 +228,19 @@
 //! (Phase J); a target-only state still highlights the
 //! first match — the same resolution every edit path uses.
 //!
+//! ## Value readout (Phase L)
+//!
+//! Directly under the canvas, a muted line keyed
+//! `graph-value` ([`value_line`]) states the drawn
+//! channel's value at the playhead — "Value at frame
+//! {current+1}: {v:.1}", the real `Channel::value_at`
+//! evaluation. It duplicates the header readout's tail
+//! deliberately: the header is a wide row of small print,
+//! and the value under the curve is the number a graph
+//! edit is checked against. The line exists only while a
+//! channel is drawn, resolved by
+//! [`effective_channel_index`] exactly as the canvas is.
+//!
 //! ## Channel selection by index (Phase J)
 //!
 //! `GraphPanelState` now carries `selected_channel:
@@ -692,6 +705,25 @@ pub fn stat_rows(core: &EditorCore, sel: &GraphPanelState) -> Vec<(String, bool)
         .enumerate()
         .map(|(i, stat)| (stat_line(stat), drawn == Some(i)))
         .collect()
+}
+
+/// The drawn channel's value at the playhead, as the
+/// panel's `graph-value` readout line (Phase L): "Value
+/// at frame {current+1}: {v:.1}" — the frame 1-based, the
+/// value the REAL evaluation (`Channel::value_at`) at the
+/// current frame, to one decimal like the header
+/// readout's tail. Resolves through
+/// [`effective_channel_index`], so a picked duplicate
+/// reports ITS value, never its twin's. `None` when no
+/// channel is drawn (the builder then shows no line).
+pub fn value_line(core: &EditorCore, sel: &GraphPanelState) -> Option<String> {
+    let idx = effective_channel_index(core, sel)?;
+    let ch = &core.project.channels[idx];
+    Some(format!(
+        "Value at frame {}: {:.1}",
+        core.current + 1,
+        ch.value_at(core.current as f32)
+    ))
 }
 
 /// Index of the key nearest `frame` — the same pick
@@ -1683,6 +1715,22 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                 .radius(8.0)
                 .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| graph_drag(s, d)),
         );
+    // Value readout (Phase L): the drawn channel's value
+    // at the playhead on its own muted line directly
+    // under the canvas — the number the header readout's
+    // tail carries, readable without scanning the header.
+    // Absent when no channel is drawn: value_line
+    // resolves through effective_channel_index, the same
+    // index the canvas drew, so the line can never name
+    // a value for a channel that is not on screen.
+    if let Some(line) = value_line(core, &s.graph_panel) {
+        panel = panel.child(
+            text(line)
+                .key("graph-value")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    }
     if ch.is_none() {
         panel = panel.child(
             text("No graph keys on this channel yet — select a joint on the stage, then Key angle.")
@@ -2565,6 +2613,88 @@ mod tests {
         // builder shows no stats block at all.
         let core = EditorCore::new();
         assert!(stat_rows(&core, &GraphPanelState::default()).is_empty());
+    }
+
+    #[test]
+    fn value_line_reports_the_flat_value_at_the_playhead() {
+        // Flat keys (Key::flat: Hermite, zero tangents):
+        // at the segment midpoint the tangent terms vanish
+        // and the basis weights are both 0.5, so frame 2
+        // evaluates to exactly (10.0 + 30.0) / 2 = 20.0 —
+        // reported exactly, frame 1-based.
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(0.0, 10.0), Key::flat(4.0, 30.0)],
+        )];
+        core.goto(2);
+        assert_eq!(
+            value_line(&core, &GraphPanelState::default()).as_deref(),
+            Some("Value at frame 3: 20.0")
+        );
+        // At a key frame the stored value comes back
+        // exactly (value_at's contract).
+        core.goto(0);
+        assert_eq!(
+            value_line(&core, &GraphPanelState::default()).as_deref(),
+            Some("Value at frame 1: 10.0")
+        );
+    }
+
+    #[test]
+    fn value_line_is_none_without_a_drawn_channel() {
+        // The demo core has no channels: nothing is drawn,
+        // so there is no line.
+        let core = EditorCore::new();
+        assert_eq!(value_line(&core, &GraphPanelState::default()), None);
+    }
+
+    #[test]
+    fn value_line_follows_the_playhead() {
+        // The same channel read at two playhead positions
+        // reports each frame's own value — the line tracks
+        // goto, it is not a static channel summary.
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 0.0).with_interp(Interp::Linear),
+                Key::flat(4.0, 40.0),
+            ],
+        )];
+        let st = GraphPanelState::default();
+        core.goto(1);
+        assert_eq!(
+            value_line(&core, &st).as_deref(),
+            Some("Value at frame 2: 10.0")
+        );
+        core.goto(3);
+        assert_eq!(
+            value_line(&core, &st).as_deref(),
+            Some("Value at frame 4: 30.0")
+        );
+    }
+
+    #[test]
+    fn value_line_reports_the_picked_duplicate() {
+        // Two (figure, target) twins: a row pick makes the
+        // SECOND the drawn channel, and the line reports
+        // its value (2.0), not the first match's (1.0) —
+        // the resolution is effective_channel_index's.
+        let mut core = EditorCore::new();
+        core.project.channels = vec![
+            channel(ChannelTarget::RootX, vec![Key::flat(0.0, 1.0)]),
+            channel(ChannelTarget::RootX, vec![Key::flat(0.0, 2.0)]),
+        ];
+        let st = GraphPanelState {
+            target: Some(ChannelTarget::RootX),
+            selected_channel: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            value_line(&core, &st).as_deref(),
+            Some("Value at frame 1: 2.0")
+        );
     }
 
     /// A core whose project carries two channels with the

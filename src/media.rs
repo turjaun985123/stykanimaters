@@ -542,6 +542,7 @@ mod tests {
             sprites: Vec::new(),
             texts: Vec::new(),
             weather: None,
+            head_ring_scale: 1.0,
         }
     }
 

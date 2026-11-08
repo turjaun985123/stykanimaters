@@ -53,6 +53,34 @@
 //!   `pose3d-lib-{i}` keys the Phase G §36 audit kept
 //!   deliberately. Dimmed buttons go through [`ictl`].
 //!
+//! - Preview (Phase L): the panel's top now carries a
+//!   live viewport — a canvas (`panel-3d-preview`, sized
+//!   by `fig3_preview::PREVIEW_W` × `PREVIEW_H`) drawing
+//!   the segment prims `fig3_preview::preview_prims`
+//!   projects from the session, over a recessed
+//!   `control_off` field. This closes the Phase K §33
+//!   stop: until now the panel rendered no figure at
+//!   all, so nothing could be drawn into it. Dragging
+//!   the viewport orbits the session camera through
+//!   the engine's own `fig3_orbit` — `Drag.dx`/`dy`
+//!   are travel *since the press*, not per-event
+//!   deltas, so the handler tracks the last pointer
+//!   position in a thread-local and converts each
+//!   move through the pure [`orbit_degrees`] helper
+//!   (0.4° per point, dragging up pitches up). The
+//!   Grid toggle (`d3-grid-toggle`) flips
+//!   `fig3_preview`'s grid flag through [`ictl`]
+//!   with the `border-all` glyph — the glyph was
+//!   absent at this section's first census and
+//!   landed mid-phase (Phase L §30), so the icon
+//!   form is used; the toggle never dims, because
+//!   the grid flag is shell view state, meaningful
+//!   with or without a session.
+//!   No new rotate row was added: the posing row's
+//!   `rotx-3d` / `roty-3d` / `rotz-3d` buttons already
+//!   call `fig3_rotate`, and `orbit-3d` already calls
+//!   `fig3_orbit`.
+//!
 //! Controls that need a live session render dimmed when
 //! there is none. The text controls ([`ctl`]) stay
 //! **dimmed but wired**: the press still fires, and the
@@ -68,12 +96,14 @@
 //! checks keep finding them.
 
 use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, El};
+use rune::{canvas, col, el, row, text, Drag, El, LineCap, Phase, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::fig3d;
 
+use crate::rune_sec::fig3_preview;
 use crate::rune_sec::icon_btn::{icon_btn, icon_btn_inert};
 use crate::rune_sec::icons::icon_el;
+use crate::stage_view::hex_color;
 use crate::State;
 
 /// Camera preset buttons: `(fig3d preset name, button label)`.
@@ -534,6 +564,114 @@ fn section_label(text_: &str, t: &Theme) -> El {
         .color(t.text_secondary)
 }
 
+/// The 3D preview canvas's element key (Phase L). A named
+/// constant so the tests can pin the string the headless
+/// `--tree` probes look for — an element's key is not
+/// readable back from a built `El` in a unit test.
+pub const PREVIEW_KEY: &str = "panel-3d-preview";
+
+/// Orbit sensitivity for the preview drag, in degrees of
+/// camera travel per point of pointer travel (Phase L).
+pub const ORBIT_DEG_PER_POINT: f32 = 0.4;
+
+thread_local! {
+    /// The preview drag's last pointer position, in
+    /// canvas points. `Drag.dx` / `dy` report travel
+    /// since the press, so per-move orbit steps are
+    /// computed against this instead (the shell's
+    /// thread-local state pattern — cf. the camera
+    /// panel's clipboard).
+    static ORBIT_LAST: std::cell::Cell<Option<[f32; 2]>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The camera orbit a preview-drag move applies, as
+/// `[dyaw, dpitch]` in degrees: pointer travel since
+/// `prev`, scaled by [`ORBIT_DEG_PER_POINT`], with the
+/// pitch sign flipped — dragging up (falling y) pitches
+/// the camera up. A missing `prev` (the press itself)
+/// orbits nothing. Pure and unit-tested.
+pub fn orbit_degrees(prev: Option<[f32; 2]>, cur: [f32; 2]) -> [f32; 2] {
+    match prev {
+        Some(p) => [
+            (cur[0] - p[0]) * ORBIT_DEG_PER_POINT,
+            -(cur[1] - p[1]) * ORBIT_DEG_PER_POINT,
+        ],
+        None => [0.0, 0.0],
+    }
+}
+
+/// The preview canvas's drag handler (Phase L): Down
+/// seeds the tracked position, Move orbits the session
+/// camera through `fig3_orbit` by the step since the
+/// last position, Up clears the tracking. Without a
+/// session the gesture is tracked but never applied —
+/// a silent no-op, so a stray drag over the empty
+/// viewport cannot churn the status line with the op's
+/// "Enter 3D mode first." refusal.
+fn preview_drag(s: &mut State, d: &mut Drag) {
+    match d.phase {
+        Phase::Down => {
+            ORBIT_LAST.with(|c| c.set(Some([d.x, d.y])));
+        }
+        Phase::Move => {
+            let prev = ORBIT_LAST.with(|c| c.get());
+            ORBIT_LAST.with(|c| c.set(Some([d.x, d.y])));
+            if s.core.fig3.is_none() {
+                return;
+            }
+            let [dyaw, dpitch] = orbit_degrees(prev, [d.x, d.y]);
+            if dyaw != 0.0 || dpitch != 0.0 {
+                s.core.fig3_orbit(dyaw, dpitch);
+            }
+        }
+        Phase::Up => {
+            ORBIT_LAST.with(|c| c.set(None));
+        }
+    }
+}
+
+/// The preview viewport's shape (Phase L): the segment
+/// prims `fig3_preview::preview_prims` projects from
+/// the live session (bones, plus the ground grid while
+/// `fig3_preview::grid_visible()`), drawn the way the
+/// main stage draws its segments — one round-capped
+/// line per prim at the prim's own width, colours
+/// through the stage's `hex_color`. The projection
+/// takes the session as an `Option` and handles its
+/// absence itself: with no session only the grid
+/// appears, through its fallback camera, so the empty
+/// viewport still shows the floor the figure will
+/// stand on.
+pub fn preview_shape(core: &EditorCore) -> Shape {
+    let mut shape = Shape::new();
+    let prims = fig3_preview::preview_prims(
+        core.fig3.as_ref(),
+        fig3_preview::grid_visible(),
+        [fig3_preview::PREVIEW_W, fig3_preview::PREVIEW_H],
+    );
+    for prim in prims {
+        if let Some(c) = hex_color(prim.color) {
+            shape = shape.line(prim.a, prim.b, prim.width, LineCap::Round, c);
+        }
+    }
+    shape
+}
+
+/// The preview viewport element (Phase L): a fixed
+/// `PREVIEW_W` × `PREVIEW_H` canvas keyed
+/// [`PREVIEW_KEY`], recessed `control_off` fill, with
+/// the orbit drag attached. Mounted at the top of the
+/// panel by [`three_d_panel`].
+pub fn preview_el(s: &State, t: &Theme) -> El {
+    canvas(preview_shape(&s.core))
+        .key(PREVIEW_KEY)
+        .size(fig3_preview::PREVIEW_W, fig3_preview::PREVIEW_H)
+        .fill(t.control_off)
+        .radius(6.0)
+        .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| preview_drag(s, d))
+}
+
 /// The 3D panel: session toggle + summary, joint posing,
 /// camera, IK, bake, and the figure / pose libraries.
 pub fn three_d_panel(s: &State, t: &Theme) -> El {
@@ -567,6 +705,31 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                         s.core.enter_3d();
                     }
                 })),
+        )
+        // Preview viewport (Phase L): the session figure
+        // projected live, at the top of the panel above
+        // the control groups; dragging it orbits the
+        // camera. The Grid toggle under it flips the
+        // ground-grid flag the projection reads; it
+        // never dims (the flag is shell view state, not
+        // session state).
+        .child(preview_el(s, t))
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(section_label("Preview", t))
+                .child(ictl(
+                    "d3-grid-toggle",
+                    "border-all",
+                    "Grid",
+                    fig3_preview::grid_visible(),
+                    false,
+                    t,
+                    |_s| {
+                        fig3_preview::toggle_grid();
+                    },
+                )),
         )
         .child(
             text(session_summary(core))
@@ -1154,6 +1317,58 @@ mod tests {
         assert_eq!(MIRROR_ICON, "arrow-right-arrow-left");
         assert_ne!(MIRROR_ICON, "copy");
         assert!(crate::rune_sec::icons::has_icon(MIRROR_ICON));
+    }
+
+    // ---- Preview viewport (Phase L) ----
+
+    #[test]
+    fn preview_key_is_the_headless_tree_name() {
+        // The key the `--tree` probes look for, pinned
+        // because a built element's key cannot be read
+        // back from a unit test.
+        assert_eq!(PREVIEW_KEY, "panel-3d-preview");
+    }
+
+    #[test]
+    fn orbit_degrees_scales_pointer_travel() {
+        // The press itself orbits nothing.
+        assert_eq!(orbit_degrees(None, [50.0, 60.0]), [0.0, 0.0]);
+        // Dragging right 10 pt yaws +4°; the pitch is
+        // untouched when y does not move.
+        assert_eq!(
+            orbit_degrees(Some([50.0, 60.0]), [60.0, 60.0]),
+            [4.0, 0.0]
+        );
+        // Dragging up 10 pt (y falls) pitches +4° —
+        // the sign flip that makes the drag feel like
+        // grabbing the figure, not the floor.
+        assert_eq!(
+            orbit_degrees(Some([50.0, 60.0]), [50.0, 50.0]),
+            [0.0, 4.0]
+        );
+        // Dragging left and down negates both.
+        assert_eq!(
+            orbit_degrees(Some([50.0, 60.0]), [40.0, 70.0]),
+            [-4.0, -4.0]
+        );
+    }
+
+    #[test]
+    fn panel_and_preview_build_with_and_without_a_session() {
+        // The established shell-test fixture: a real
+        // State from `crate::init()` and a real theme.
+        // Without a session the preview shows the grid
+        // only; entering 3D adds the figure — both
+        // builds must construct.
+        let mut state = crate::init();
+        let t = rune::tok::theme(true);
+        assert!(state.core.fig3.is_none());
+        let _ = preview_el(&state, &t);
+        let _ = three_d_panel(&state, &t);
+        state.core.enter_3d();
+        assert!(state.core.fig3.is_some());
+        let _ = preview_el(&state, &t);
+        let _ = three_d_panel(&state, &t);
     }
 
     #[test]

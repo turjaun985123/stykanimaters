@@ -90,6 +90,24 @@
 //!   and name order ([`sort_entries`]: stable,
 //!   case-insensitive). The toggle's label names the
 //!   order in effect: "Sort: recent" / "Sort: A–Z".
+//! - **Totals footer (Phase L)** — under the project
+//!   rows (non-empty list only), a muted line keyed
+//!   `home-totals` sums the *visible* rows — the list
+//!   after the search filter and the sort — via
+//!   [`totals_line`]: "{n} projects · {f} figures ·
+//!   {m} frames". The figures/frames come from the same
+//!   light reads ([`HomePanelState::metadata_for`],
+//!   through the mtime meta cache) that feed the rows'
+//!   own metadata lines, collected during the row loop,
+//!   so the footer costs no extra disk reads. A project
+//!   whose light read fails (it vanished or stopped
+//!   parsing between the scan and this render) counts
+//!   toward the project total with 0 figures and 0
+//!   frames — it is still a listed project, and the
+//!   footer never guesses its contents. Wording reuses
+//!   `count_label`, the rows' own helper, so 1 is
+//!   singular ("1 project · 1 figure · 1 frame") and
+//!   every other count plural — decided once, there.
 //!
 //! ## The scan cache (the Wave 15 lesson)
 //!
@@ -589,6 +607,33 @@ pub fn row_meta_line(info: &ProjectInfo, meta: Option<(usize, usize, SystemTime)
         ),
         None => meta_line(info),
     }
+}
+
+/// The project list's totals footer line (Phase L):
+/// "{n} projects · {f} figures · {m} frames" over the
+/// *visible* rows — the list after the search filter
+/// and the sort. `entries_meta` holds one
+/// `(figures, frames)` pair per visible project whose
+/// light read ([`project_metadata`], served through
+/// [`HomePanelState::metadata_for`]) succeeded, in row
+/// order; `project_count` is the visible count itself.
+/// A project whose read failed is *absent* from
+/// `entries_meta` but present in `project_count`: it
+/// counts as a project with 0 figures and 0 frames —
+/// the sums simply never see it, and nothing about it
+/// is guessed (see the module docs). Singular/plural
+/// wording is `count_label`'s — the same helper the
+/// rows' own metadata lines use — so exactly 1 is
+/// singular and every other count, 0 included, plural.
+pub fn totals_line(entries_meta: &[(usize, usize)], project_count: usize) -> String {
+    let figures: usize = entries_meta.iter().map(|(figures, _)| figures).sum();
+    let frames: usize = entries_meta.iter().map(|(_, frames)| frames).sum();
+    format!(
+        "{} · {} · {}",
+        count_label(project_count, "project", "projects"),
+        count_label(figures, "figure", "figures"),
+        count_label(frames, "frame", "frames")
+    )
 }
 
 /// One row's metadata line: real scan data only
@@ -1144,12 +1189,33 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
         ));
     } else {
         let mut rows = col().key("home-rows").gap(6.0);
+        // The totals footer's inputs (Phase L): the
+        // (figures, frames) of every visible project
+        // whose light read succeeded, collected from the
+        // same reads that feed the rows themselves — no
+        // extra disk traffic. A failed read pushes
+        // nothing: that project still counts in
+        // `shown.len()` with 0 figures / 0 frames (see
+        // `totals_line`).
+        let mut metas: Vec<(usize, usize)> = Vec::new();
         for (i, info) in shown.iter().enumerate() {
             let meta = home.metadata_for(&info.path);
+            if let Some((figures, frames, _)) = meta {
+                metas.push((figures, frames));
+            }
             let confirming = confirm_pending(home, &info.path);
             rows = rows.child(project_row_confirm(info, i, t, meta, confirming));
         }
         card = card.child(rows);
+        // Inside the non-empty branch on purpose: with
+        // no visible projects the panel keeps its empty
+        // message and no footer element is rendered.
+        card = card.child(
+            text(totals_line(&metas, shown.len()))
+                .key("home-totals")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
     }
     panel.child(card)
 }
@@ -1559,6 +1625,42 @@ mod tests {
         let stamp =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426);
         let _ = project_row(&entry, 0, &t, Some((3, 12, stamp)));
+    }
+
+    #[test]
+    fn totals_line_sums_the_visible_projects() {
+        // Fabricated light-read results, in row order:
+        // the figures and frames sum across every entry.
+        let metas = [(2, 5), (3, 10), (0, 1)];
+        assert_eq!(totals_line(&metas, 3), "3 projects · 5 figures · 16 frames");
+    }
+
+    #[test]
+    fn totals_line_singularises_one() {
+        // The wording is `count_label`'s, decided once:
+        // exactly 1 is singular for all three counts.
+        assert_eq!(totals_line(&[(1, 1)], 1), "1 project · 1 figure · 1 frame");
+    }
+
+    #[test]
+    fn totals_line_counts_an_unreadable_project_as_zero() {
+        // Two projects are visible, but only one light
+        // read succeeded: the other still counts as a
+        // project, contributing 0 figures / 0 frames —
+        // its absence from the slice is the whole rule.
+        assert_eq!(totals_line(&[(2, 5)], 2), "2 projects · 2 figures · 5 frames");
+    }
+
+    #[test]
+    fn totals_line_for_no_readable_projects() {
+        // The unreadable extreme: projects counted,
+        // nothing read — and an empty slice with a zero
+        // count still formats (0 is plural, like the
+        // rows). The builder renders the footer only
+        // under a non-empty list, so neither shape can
+        // appear beside the empty message.
+        assert_eq!(totals_line(&[], 2), "2 projects · 0 figures · 0 frames");
+        assert_eq!(totals_line(&[], 0), "0 projects · 0 figures · 0 frames");
     }
 
     #[test]

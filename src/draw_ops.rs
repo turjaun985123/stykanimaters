@@ -14,6 +14,10 @@
 //! consumer (the rasterizer only honours the parallel form), so
 //! the operations here never produce one and normalise it away
 //! where they rewrite a stroke, matching `erase_at`'s behaviour.
+//! One deliberate exception: [`simplify_stroke_at`] never
+//! rewrites `widths` unless they are exactly parallel — its
+//! contract is index-exactness, so a broken vector is left
+//! exactly as found rather than normalised (see its docs).
 
 use crate::model::{Project, Stroke, V2};
 use crate::paint::{erase_at, mirror_points_x, nib_widths, simplify_points, smooth_path, Nib};
@@ -252,6 +256,146 @@ pub fn simplify_strokes(project: &mut Project, frame: usize, epsilon: f32) -> us
         reduced += 1;
     }
     reduced
+}
+
+/// Distance from `p` to the segment `a`–`b`, computed exactly as
+/// `paint`'s private helper of the same name (which is not
+/// exported): the perpendicular distance when the projection of
+/// `p` falls between the endpoints, the distance to the nearer
+/// endpoint otherwise; a zero-length segment degrades to the
+/// plain distance to `a`. Kept in step with the measure
+/// [`simplify_points`] uses so [`douglas_peucker_indices`]
+/// selects precisely the points that function keeps.
+fn point_segment_distance(p: V2, a: V2, b: V2) -> f32 {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let len_sq = ab[0] * ab[0] + ab[1] * ab[1];
+    let t = if len_sq > 0.0 {
+        let ap = [p[0] - a[0], p[1] - a[1]];
+        ((ap[0] * ab[0] + ap[1] * ab[1]) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let closest = [a[0] + t * ab[0], a[1] + t * ab[1]];
+    let d = [p[0] - closest[0], p[1] - closest[1]];
+    (d[0] * d[0] + d[1] * d[1]).sqrt()
+}
+
+/// The indices [`simplify_points`] would keep, without losing
+/// the mapping back to the original polyline: the
+/// Douglas-Peucker kept set of `points` at tolerance `epsilon`,
+/// as ascending indices into `points`. The endpoints are always
+/// kept, so a non-empty result starts with 0 and ends with
+/// `points.len() - 1`; the traversal is the same keep-flag/stack
+/// walk `simplify_points` performs (same distance measure, same
+/// first-farthest tie-breaking), so for every finite
+/// `epsilon > 0.0`, `points` gathered at these indices equals
+/// `simplify_points(points, epsilon)` exactly.
+///
+/// Degenerate cases: an empty polyline gives no indices, one
+/// point gives `[0]`, two points give `[0, 1]`. A tolerance that
+/// cannot honestly drop anything — `epsilon <= 0.0`, or a
+/// non-finite `epsilon` (NaN or infinite, a caller error) —
+/// returns every index: unlike `simplify_points`, whose
+/// comparisons simply go false against a non-finite tolerance
+/// and collapse the polyline to its endpoints, the index form
+/// refuses to destroy points over a meaningless tolerance.
+/// Pairing the kept indices with a parallel per-point vector
+/// (widths, say) is what this function exists for: see
+/// [`simplify_stroke_at`].
+pub fn douglas_peucker_indices(points: &[[f32; 2]], epsilon: f32) -> Vec<usize> {
+    let n = points.len();
+    if n < 3 || epsilon <= 0.0 || !epsilon.is_finite() {
+        return (0..n).collect();
+    }
+    let mut keep = vec![false; n];
+    keep[0] = true;
+    keep[n - 1] = true;
+    // Spans between two kept endpoints still to examine.
+    let mut stack = vec![(0, n - 1)];
+    while let Some((first, last)) = stack.pop() {
+        if last <= first + 1 {
+            continue;
+        }
+        let (a, b) = (points[first], points[last]);
+        let mut farthest = first + 1;
+        let mut max_dist = 0.0f32;
+        for i in first + 1..last {
+            let d = point_segment_distance(points[i], a, b);
+            if d > max_dist {
+                max_dist = d;
+                farthest = i;
+            }
+        }
+        if max_dist > epsilon {
+            keep[farthest] = true;
+            stack.push((first, farthest));
+            stack.push((farthest, last));
+        }
+    }
+    (0..n).filter(|&i| keep[i]).collect()
+}
+
+/// Simplify the single stroke at project-wide `index` (the same
+/// indexing `EditorCore::delete_stroke_at` and the shell's
+/// stroke picking use — position in `Project.strokes`, with no
+/// regard to frames) with Douglas-Peucker at tolerance
+/// `epsilon`, keeping the stroke's per-point widths aligned with
+/// its points. Returns `true` when the stroke actually lost
+/// points; `false` for a bad index and when nothing changed
+/// (already simple, degenerate, or a tolerance that drops
+/// nothing). Like its project-level siblings this function takes
+/// no snapshot and sets no status — the caller (the shell's
+/// stroke panel) owns the undo step.
+///
+/// Widths are carried by *index*, not resampled: when
+/// `Stroke.widths` is exactly parallel to the points going in,
+/// the surviving points keep their own widths, gathered at the
+/// same kept indices (see [`douglas_peucker_indices`]). This is
+/// the deliberate difference from the frame-wide
+/// [`simplify_strokes`], which resamples the profile onto the
+/// survivors by arc position and so shifts interior widths.
+/// When `widths` is not exactly parallel going in — empty (the
+/// uniform form) or a broken non-parallel vector — it is left
+/// byte-for-byte untouched: a non-parallel vector defines no
+/// association between its entries and the points, so there is
+/// no honest subset of it to pick, and indexing into it anyway
+/// would fabricate a width profile. (The frame-wide ops
+/// normalise such a vector away instead; this function's
+/// contract is index-exactness, so it does not.)
+///
+/// A spray stroke is simplified by its *base* polyline, like
+/// every other stroke: the `spray` mark itself (seed, radius,
+/// opacity) is untouched, and the scatter dots consumers derive
+/// from the base points follow the simplified path on their own.
+/// A `fill` is kept, as in [`simplify_strokes`]: the kept points
+/// are a subset of the original, so the outline stays valid.
+pub fn simplify_stroke_at(project: &mut Project, index: usize, epsilon: f32) -> bool {
+    let Some(stroke) = project.strokes.get_mut(index) else {
+        return false;
+    };
+    let keep = douglas_peucker_indices(&stroke.points, epsilon);
+    if keep.len() >= stroke.points.len() {
+        return false;
+    }
+    let new_points: Vec<V2> = keep.iter().map(|&i| stroke.points[i]).collect();
+    // Only an exactly-parallel widths vector has entries that
+    // belong to points; gather it at the same indices so each
+    // surviving point keeps its own width. Anything else (empty
+    // = uniform, or broken) is left exactly as found.
+    let new_widths = if stroke.widths.len() == stroke.points.len() {
+        Some(
+            keep.iter()
+                .map(|&i| stroke.widths[i])
+                .collect::<Vec<f32>>(),
+        )
+    } else {
+        None
+    };
+    stroke.points = new_points;
+    if let Some(widths) = new_widths {
+        stroke.widths = widths;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -607,5 +751,271 @@ mod simplify_tests {
         let after: Vec<Vec<V2>> =
             p.strokes.iter().map(|s| s.points.clone()).collect();
         assert_eq!(before, after);
+    }
+}
+
+#[cfg(test)]
+mod simplify_at_tests {
+    use super::{douglas_peucker_indices, simplify_stroke_at, simplify_strokes};
+    use crate::model::{Project, SprayMark, Stroke, V2};
+    use crate::paint::simplify_points;
+
+    fn stroke(frame: usize, points: Vec<V2>) -> Stroke {
+        Stroke {
+            frame,
+            points,
+            color: 0xFF0000,
+            width: 4.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+        }
+    }
+
+    fn project_with(strokes: Vec<Stroke>) -> Project {
+        let mut p = Project::new_demo();
+        p.strokes = strokes;
+        p
+    }
+
+    /// Symmetric zigzag, peaks 10 above the baseline. At
+    /// epsilon 7 the kept set is [0, 1, 4]: the first peak is
+    /// 10 from the full chord, and both later interior points
+    /// sit ~6.32 from the peak-to-end chord, within tolerance.
+    fn zigzag() -> Vec<V2> {
+        vec![
+            [0.0, 0.0],
+            [10.0, 10.0],
+            [20.0, 0.0],
+            [30.0, 10.0],
+            [40.0, 0.0],
+        ]
+    }
+
+    fn pressured_zigzag(frame: usize) -> Stroke {
+        let mut s = stroke(frame, zigzag());
+        s.widths = vec![2.0, 4.0, 6.0, 8.0, 10.0];
+        s
+    }
+
+    #[test]
+    fn indices_degenerate_inputs_keep_everything() {
+        let empty: Vec<V2> = Vec::new();
+        assert_eq!(douglas_peucker_indices(&empty, 1.0), Vec::<usize>::new());
+        assert_eq!(douglas_peucker_indices(&[[3.0, 4.0]], 1.0), vec![0]);
+        // Two points are both endpoints, even at a huge epsilon.
+        assert_eq!(
+            douglas_peucker_indices(&[[0.0, 0.0], [9.0, 9.0]], 1000.0),
+            vec![0, 1]
+        );
+        // Tolerances that may not drop anything: zero, negative,
+        // NaN and infinite all return the identity index list.
+        let pts = zigzag();
+        let all: Vec<usize> = (0..pts.len()).collect();
+        for eps in [0.0, -1.5, f32::NAN, f32::INFINITY] {
+            assert_eq!(douglas_peucker_indices(&pts, eps), all, "epsilon {eps}");
+        }
+    }
+
+    #[test]
+    fn indices_are_ascending_endpoints_included_and_match_simplify_points() {
+        let cases: Vec<(Vec<V2>, f32)> = vec![
+            (zigzag(), 7.0),
+            (zigzag(), 1.0),
+            (
+                vec![
+                    [0.0, 0.0],
+                    [10.0, 0.4],
+                    [20.0, -0.3],
+                    [30.0, 0.2],
+                    [40.0, 0.0],
+                ],
+                1.0,
+            ),
+            (vec![[0.0, 0.0], [20.0, 0.0], [20.0, 20.0]], 1.0),
+            (
+                vec![
+                    [0.0, 0.0],
+                    [5.0, 3.0],
+                    [11.0, -2.0],
+                    [17.0, 8.0],
+                    [23.0, 1.0],
+                    [29.0, -4.0],
+                    [35.0, 0.0],
+                ],
+                2.5,
+            ),
+        ];
+        for (pts, eps) in cases {
+            let idx = douglas_peucker_indices(&pts, eps);
+            assert_eq!(idx.first(), Some(&0), "first endpoint kept");
+            assert_eq!(idx.last(), Some(&(pts.len() - 1)), "last endpoint kept");
+            assert!(
+                idx.windows(2).all(|w| w[0] < w[1]),
+                "indices strictly ascending: {idx:?}"
+            );
+            // The gathered points are exactly what the point-only
+            // simplifier returns — the index form loses nothing.
+            let gathered: Vec<V2> = idx.iter().map(|&i| pts[i]).collect();
+            assert_eq!(gathered, simplify_points(&pts, eps), "epsilon {eps}");
+        }
+        // The brief's zigzag at epsilon 7, pinned exactly.
+        assert_eq!(douglas_peucker_indices(&zigzag(), 7.0), vec![0, 1, 4]);
+        // A collinear run collapses to its endpoints.
+        let line = vec![[0.0, 0.0], [10.0, 0.0], [20.0, 0.0], [30.0, 0.0]];
+        assert_eq!(douglas_peucker_indices(&line, 0.5), vec![0, 3]);
+    }
+
+    #[test]
+    fn zigzag_simplifies_with_widths_following_their_points_exactly() {
+        let mut p = project_with(vec![pressured_zigzag(0)]);
+
+        assert!(simplify_stroke_at(&mut p, 0, 7.0));
+
+        let s = &p.strokes[0];
+        assert_eq!(s.points, vec![[0.0, 0.0], [10.0, 10.0], [40.0, 0.0]]);
+        // Kept indices are [0, 1, 4], so the widths are the
+        // points' own original widths — exactly, not resampled.
+        assert_eq!(s.widths, vec![2.0, 4.0, 10.0]);
+        // Metadata untouched.
+        assert_eq!(s.frame, 0);
+        assert_eq!(s.color, 0xFF0000);
+        assert_eq!(s.width, 4.0);
+    }
+
+    #[test]
+    fn per_stroke_widths_are_index_exact_where_frame_wide_resamples() {
+        // The frame-wide op resamples the profile by arc
+        // position: on the same stroke its interior width lands
+        // at ~4.47, between the original 4 and 6. The per-stroke
+        // op keeps the surviving point's own 4.0. This pins the
+        // documented difference between the two treatments.
+        let mut p = project_with(vec![pressured_zigzag(0)]);
+        assert_eq!(simplify_strokes(&mut p, 0, 7.0), 1);
+        let resampled = p.strokes[0].widths[1];
+        assert!(
+            (resampled - 4.0).abs() > 0.1,
+            "frame-wide simplify resamples widths (got {resampled})"
+        );
+
+        let mut p = project_with(vec![pressured_zigzag(0)]);
+        assert!(simplify_stroke_at(&mut p, 0, 7.0));
+        assert_eq!(p.strokes[0].widths[1], 4.0, "per-stroke keeps the exact width");
+    }
+
+    #[test]
+    fn straight_line_collapses_to_its_endpoints() {
+        let mut s = stroke(0, vec![[0.0, 0.0], [10.0, 0.0], [20.0, 0.0], [30.0, 0.0]]);
+        s.widths = vec![1.0, 2.0, 3.0, 4.0];
+        let mut p = project_with(vec![s]);
+
+        assert!(simplify_stroke_at(&mut p, 0, 1.0));
+        assert_eq!(p.strokes[0].points, vec![[0.0, 0.0], [30.0, 0.0]]);
+        assert_eq!(p.strokes[0].widths, vec![1.0, 4.0]);
+    }
+
+    #[test]
+    fn epsilon_zero_and_friends_change_nothing_and_report_false() {
+        for eps in [0.0, -2.0, f32::NAN] {
+            let mut p = project_with(vec![pressured_zigzag(0)]);
+            let (pts, wds) = (p.strokes[0].points.clone(), p.strokes[0].widths.clone());
+            assert!(!simplify_stroke_at(&mut p, 0, eps), "epsilon {eps}");
+            assert_eq!(p.strokes[0].points, pts);
+            assert_eq!(p.strokes[0].widths, wds);
+        }
+        // Nothing to lose also reports false: two points, one
+        // point, and an already-simple corner at a fine epsilon.
+        let mut p = project_with(vec![
+            stroke(0, vec![[0.0, 0.0], [30.0, 0.0]]),
+            stroke(0, vec![[5.0, 5.0]]),
+            stroke(0, vec![[0.0, 0.0], [20.0, 0.0], [20.0, 20.0]]),
+        ]);
+        for i in 0..3 {
+            assert!(!simplify_stroke_at(&mut p, i, 1.0), "stroke {i}");
+        }
+        assert_eq!(p.strokes[2].points.len(), 3);
+    }
+
+    #[test]
+    fn bad_index_reports_false_and_touches_nothing() {
+        let mut p = project_with(Vec::new());
+        assert!(!simplify_stroke_at(&mut p, 0, 1.0), "empty project");
+
+        let mut p = project_with(vec![pressured_zigzag(0)]);
+        let before = p.strokes[0].points.clone();
+        assert!(!simplify_stroke_at(&mut p, 1, 7.0));
+        assert!(!simplify_stroke_at(&mut p, 99, 7.0));
+        assert_eq!(p.strokes[0].points, before);
+    }
+
+    #[test]
+    fn index_is_project_wide_not_frame_relative() {
+        // Two collapsible strokes share frame 3; a third sits on
+        // frame 0. The index names the position in
+        // Project.strokes, whichever frame that stroke is on.
+        let collapsible = |frame: usize| {
+            stroke(
+                frame,
+                vec![
+                    [0.0, 0.0],
+                    [10.0, 0.4],
+                    [20.0, -0.3],
+                    [30.0, 0.2],
+                    [40.0, 0.0],
+                ],
+            )
+        };
+        let mut p = project_with(vec![collapsible(3), collapsible(3), collapsible(0)]);
+
+        assert!(simplify_stroke_at(&mut p, 1, 1.0));
+        assert_eq!(p.strokes[0].points.len(), 5, "same-frame neighbour untouched");
+        assert_eq!(p.strokes[1].points, vec![[0.0, 0.0], [40.0, 0.0]]);
+        assert_eq!(p.strokes[2].points.len(), 5, "other frame untouched");
+
+        assert!(simplify_stroke_at(&mut p, 2, 1.0));
+        assert_eq!(p.strokes[2].points.len(), 2, "frame is no barrier");
+    }
+
+    #[test]
+    fn uniform_and_broken_widths_are_left_exactly_as_found() {
+        // Uniform form: empty widths stay empty.
+        let mut s = stroke(0, zigzag());
+        let mut p = project_with(vec![s.clone()]);
+        assert!(simplify_stroke_at(&mut p, 0, 7.0));
+        assert!(p.strokes[0].widths.is_empty());
+
+        // Broken form: a non-empty, non-parallel vector defines
+        // no point association, so it is left byte-for-byte as
+        // found even though the points were reduced.
+        s.widths = vec![1.0, 2.0];
+        let mut p = project_with(vec![s]);
+        assert!(simplify_stroke_at(&mut p, 0, 7.0));
+        assert_eq!(p.strokes[0].points.len(), 3);
+        assert_eq!(p.strokes[0].widths, vec![1.0, 2.0], "broken widths untouched");
+    }
+
+    #[test]
+    fn spray_stroke_simplifies_its_base_polyline_and_keeps_the_mark() {
+        let mut s = pressured_zigzag(0);
+        s.spray = Some(SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        });
+        let mut p = project_with(vec![s]);
+
+        assert!(simplify_stroke_at(&mut p, 0, 7.0));
+        let s = &p.strokes[0];
+        assert_eq!(s.points, vec![[0.0, 0.0], [10.0, 10.0], [40.0, 0.0]]);
+        assert_eq!(s.widths, vec![2.0, 4.0, 10.0]);
+        assert_eq!(
+            s.spray,
+            Some(SprayMark {
+                seed: 7,
+                radius: 12.0,
+                opacity: 0.5
+            }),
+            "the spray mark itself is untouched"
+        );
     }
 }

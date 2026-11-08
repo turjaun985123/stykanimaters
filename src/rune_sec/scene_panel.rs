@@ -99,6 +99,22 @@
 //! here) and hands it over. The readout grows the rate as
 //! a suffix: `960×720 · 4:3 · 12 fps`.
 //!
+//! Background presets (Phase L): a row of six named
+//! colours ([`BG_PRESETS`], row key `scene-bg-presets`)
+//! sits under the Background header, above the RGB
+//! steppers. The chips mirror the swatch idiom below —
+//! same 26×26 slot, accent ring on the exact-equality
+//! match ([`bg_preset_active`]), 22×22 colour core — but
+//! the keys are positional (`scene-bg-preset-{i}`),
+//! because two preset names repeat swatch names with
+//! different colours (the preset Sky and Forest are not
+//! the swatch Sky and Forest). A press writes through
+//! [`set_background`], the swatches' own handler body:
+//! same field write, same status string, no snapshot.
+//! The first preset, Midnight, is the engine default
+//! (`Project::new_demo`'s `background`, 0x232830), so a
+//! fresh project lights exactly one preset chip.
+//!
 //! No undo snapshots, on purpose: weather writes were never
 //! snapshotted. The GPUI listeners wrote `project.weather`
 //! directly (the wiring note above), and in this engine a
@@ -606,6 +622,38 @@ pub fn set_background(core: &mut EditorCore, rgb: u32) {
     core.status = format!("Background: #{:06X}.", core.project.background);
 }
 
+/// Background colour presets (Phase L): (name, `0xRRGGBB`).
+/// A named quick path beside the 16-swatch grid: the
+/// swatches are bare colours, these six are the curated
+/// stage moods. Midnight is the engine's own default —
+/// `Project::new_demo`'s `background` field (model.rs) —
+/// so a fresh project starts on a lit preset. Two names
+/// repeat swatch names at different colours (Sky, Forest):
+/// harmless, because preset keys are positional
+/// (`scene-bg-preset-{i}`), never name-based.
+pub const BG_PRESETS: [(&str, u32); 6] = [
+    ("Midnight", 0x232830),
+    ("Black", 0x000000),
+    ("Paper", 0xF2EDE4),
+    ("Sky", 0x87B5D9),
+    ("Forest", 0x1E3327),
+    ("Plum", 0x2A2138),
+];
+
+/// Is preset `i` the project's current background? The
+/// highlight check, factored out of the builder: an
+/// exact-equality match on `project.background`, the same
+/// discipline the swatch ring uses, so a colour reached
+/// by stepper or swatch lights its preset too — and a
+/// stepped-off colour lights none. An out-of-range index
+/// is never active.
+pub fn bg_preset_active(core: &EditorCore, i: usize) -> bool {
+    match BG_PRESETS.get(i) {
+        Some(&(_, rgb)) => core.project.background == rgb,
+        None => false,
+    }
+}
+
 /// One background RGB stepper press (Phase G): step channel
 /// `channel` (0 = R, 1 = G, 2 = B) of `project.background`
 /// by [`step_channel`]'s step (8, clamped 0..=255) in
@@ -802,7 +850,9 @@ fn weather_slider(
 /// size steppers with the preset row under them, a frame
 /// rate stepper and finer stage-size steppers beside them
 /// (Phase K), and background colour swatches with RGB
-/// channel steppers under the Background header.
+/// channel steppers under the Background header, with a
+/// named-preset row between the header and the steppers
+/// (Phase L).
 pub fn scene_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let weather = core.project.weather;
@@ -852,6 +902,32 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
             );
         }
         swatches = swatches.child(swatch_row);
+    }
+
+    // Background presets (Phase L): one row of six named
+    // colours under the Background header. The chips mirror
+    // the swatch idiom exactly — 26×26 slot, accent-filled
+    // behind the current colour, 22×22 colour core — with
+    // positional keys, and a press writes through the
+    // swatches' own `set_background`.
+    let mut bg_presets = row().key("scene-bg-presets").gap(4.0).center_y();
+    for (i, &(_, rgb)) in BG_PRESETS.iter().enumerate() {
+        let is_current = bg_preset_active(core, i);
+        bg_presets = bg_presets.child(
+            el()
+                .key(format!("scene-bg-preset-{}", i))
+                .size(26.0, 26.0)
+                .radius(8.0)
+                .fill(if is_current { accent } else { t.bg })
+                .center()
+                .on_press(move |s: &mut State| set_background(&mut s.core, rgb))
+                .child(
+                    el()
+                        .size(22.0, 22.0)
+                        .radius(6.0)
+                        .fill(hex_color(rgb).unwrap_or(t.bg)),
+                ),
+        );
     }
 
     // Stage-size presets (Phase F): one button per preset,
@@ -1009,6 +1085,7 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
                         .color(t.text),
                 ),
         )
+        .child(bg_presets)
         .child(bg_channel_row(0, "R", bg_r, t))
         .child(bg_channel_row(1, "G", bg_g, t))
         .child(bg_channel_row(2, "B", bg_b, t))
@@ -1547,5 +1624,68 @@ mod tests {
         // A bad axis never reaches the op.
         step_stage_axis(&mut core, 2, 1);
         assert_eq!(core.project.stage, [980.0, 700.0]);
+    }
+
+    #[test]
+    fn bg_presets_are_six_named_colours_and_midnight_is_the_default() {
+        assert_eq!(BG_PRESETS.len(), 6);
+        // Midnight leads and IS the engine default, so a
+        // fresh project lights the first preset.
+        assert_eq!(BG_PRESETS[0].0, "Midnight");
+        assert_eq!(BG_PRESETS[0].1, EditorCore::new().project.background);
+        assert_eq!(BG_PRESETS[0].1, 0x232830);
+        let mut rgbs: Vec<u32> = BG_PRESETS.iter().map(|p| p.1).collect();
+        rgbs.sort_unstable();
+        rgbs.dedup();
+        assert_eq!(rgbs.len(), 6, "preset colours must be unique");
+        let mut names: Vec<&str> = BG_PRESETS.iter().map(|p| p.0).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 6, "preset names must be unique");
+    }
+
+    #[test]
+    fn bg_preset_press_sets_the_background_through_the_panel_op() {
+        // The chip handler body is this module's
+        // `set_background` — the swatches' own op — so a
+        // press lands the colour on the field, reports the
+        // hex in the status line, and (panel discipline)
+        // takes no undo snapshot.
+        let mut core = EditorCore::new();
+        for &(name, rgb) in &BG_PRESETS {
+            set_background(&mut core, rgb);
+            assert_eq!(core.project.background, rgb, "preset {name}");
+            assert_eq!(core.status, format!("Background: #{:06X}.", rgb));
+            assert_eq!(core.undo_depth(), 0, "preset {name} must not snapshot");
+        }
+    }
+
+    #[test]
+    fn bg_preset_active_follows_the_current_background() {
+        let mut core = EditorCore::new();
+        // Fresh project: only Midnight (index 0) is lit.
+        assert!(bg_preset_active(&core, 0));
+        for i in 1..BG_PRESETS.len() {
+            assert!(!bg_preset_active(&core, i), "preset {i} lit on a fresh project");
+        }
+        // Jump to the last preset through the op: only it
+        // lights.
+        let last = BG_PRESETS.len() - 1;
+        set_background(&mut core, BG_PRESETS[last].1);
+        assert!(bg_preset_active(&core, last));
+        assert!(!bg_preset_active(&core, 0));
+        // A colour reached by the RGB steppers lights its
+        // preset too (exact-equality on the field): step
+        // from Plum 0x2A2138 down one R step lands off
+        // every preset, and stepping back restores it.
+        step_background_channel(&mut core, 0, -1);
+        for i in 0..BG_PRESETS.len() {
+            assert!(!bg_preset_active(&core, i), "preset {i} lit off-preset");
+        }
+        step_background_channel(&mut core, 0, 1);
+        assert!(bg_preset_active(&core, last));
+        // Out-of-range indices are never active.
+        assert!(!bg_preset_active(&core, BG_PRESETS.len()));
+        assert!(!bg_preset_active(&core, 99));
     }
 }

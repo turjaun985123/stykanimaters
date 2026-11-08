@@ -1736,7 +1736,7 @@ impl EditorCore {
         self.status = format!("{} fps.", self.project.fps as i32);
     }
 
-    /// Trim-friendly number formatting for the two
+    /// Trim-friendly number formatting for the
     /// settings setters below: whole numbers print with
     /// no decimal point ("24"), fractional values with
     /// one decimal ("29.9"). `adjust_fps`'s `as i32`
@@ -1795,6 +1795,42 @@ impl EditorCore {
             "Stage size set to {}×{}.",
             Self::setting_number(stage[0]),
             Self::setting_number(stage[1])
+        );
+    }
+
+    /// Set the head-ring scale directly (Phase L; the
+    /// field itself is `Project::head_ring_scale`, and
+    /// the ring every renderer draws is
+    /// `Project::head_ring_radius` — the base
+    /// `HEAD_RING_RADIUS` times this scale). Same
+    /// discipline as [`EditorCore::set_project_fps`]: a
+    /// non-finite value is a status-only refusal
+    /// ("Head ring size unchanged."); a real change
+    /// takes exactly one snapshot. One wording
+    /// difference, deliberate: a value that clamps to
+    /// the current scale still reports the set wording
+    /// ("Head ring size set to {x}×.") — the size IS
+    /// the requested size, only the snapshot is
+    /// skipped — so the set wording is written once
+    /// and used by both arms.
+    pub fn set_head_ring_scale(&mut self, scale: f32) {
+        if !scale.is_finite() {
+            self.status = "Head ring size unchanged.".into();
+            return;
+        }
+        let scale = scale.clamp(0.5, 2.0);
+        if scale == self.project.head_ring_scale {
+            self.status = format!(
+                "Head ring size set to {}×.",
+                Self::setting_number(scale)
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.head_ring_scale = scale;
+        self.status = format!(
+            "Head ring size set to {}×.",
+            Self::setting_number(scale)
         );
     }
 
@@ -4539,6 +4575,54 @@ mod tests {
         core.set_stage_size(960.0, 720.0);
         assert_eq!(core.project.stage, [960.0, 720.0]);
         assert_eq!(core.status, "Stage size unchanged.");
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn set_head_ring_scale_writes_and_snapshots_once() {
+        let mut core = EditorCore::new();
+        assert_eq!(core.project.head_ring_scale, 1.0, "default scale");
+        let depth = core.undo_depth();
+        core.set_head_ring_scale(1.5);
+        assert_eq!(core.project.head_ring_scale, 1.5);
+        assert_eq!(core.status, "Head ring size set to 1.5×.");
+        assert_eq!(core.undo_depth(), depth + 1);
+        core.undo();
+        assert_eq!(core.project.head_ring_scale, 1.0, "one undo restores the default");
+    }
+
+    #[test]
+    fn set_head_ring_scale_clamps_into_range() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        core.set_head_ring_scale(99.0);
+        assert_eq!(core.project.head_ring_scale, 2.0);
+        assert_eq!(core.status, "Head ring size set to 2×.");
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot for the clamped change");
+    }
+
+    #[test]
+    fn set_head_ring_scale_refuses_non_finite_without_snapshotting() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        core.set_head_ring_scale(f32::NAN);
+        assert_eq!(core.project.head_ring_scale, 1.0);
+        assert_eq!(core.status, "Head ring size unchanged.");
+        core.set_head_ring_scale(f32::INFINITY);
+        assert_eq!(core.project.head_ring_scale, 1.0);
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn set_head_ring_scale_refuses_the_current_scale() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        core.set_head_ring_scale(1.0);
+        assert_eq!(core.project.head_ring_scale, 1.0);
+        // The set wording is used even though nothing
+        // changed — the size IS the requested size; only
+        // the snapshot is skipped (see the setter's doc).
+        assert_eq!(core.status, "Head ring size set to 1×.");
         assert_eq!(core.undo_depth(), depth);
     }
 

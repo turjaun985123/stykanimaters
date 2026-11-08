@@ -101,6 +101,27 @@
 //!   the current speed (`speed_label`), and the press is
 //!   silent, exactly like `pb-loop`'s: no core call, no
 //!   status line, no undo snapshot.
+//! * **Loop jumps** (Phase L) — `pb-loop-start` /
+//!   `pb-loop-end` go to the loop range's start / end
+//!   frame (`loop_jump_targets` reads `EditorCore::
+//!   loop_range`, `editor.rs:61`). Plain text buttons in
+//!   the loop row, beside `pb-loop` / `pb-speed`, and
+//!   rendered ONLY while a range is set — with no range
+//!   there is nothing to jump to, so the buttons are
+//!   absent rather than inert (this file has no inert
+//!   button variant). Like the keyframe jumps they only
+//!   `goto` (`editor.rs:701`) — `playing` is never
+//!   touched, so jumping while paused stays paused and
+//!   jumping mid-playback keeps playing. The targets are
+//!   NOT clamped here: `set_loop_range` (`editor.rs:769`)
+//!   orders and clamps when the range is set, but frames
+//!   deleted afterwards can leave an end past the
+//!   timeline, and `goto`'s own bounds check then refuses
+//!   the press silently — the keyframe jumps' no-op
+//!   discipline at their edges. Not to be confused with
+//!   the `loop-start` / `loop-end` buttons further down,
+//!   which SET the range ends to the current frame; these
+//!   jump TO them.
 //!
 //! `State` fields: everything reads `s.core` live
 //! (`project.fps` `model.rs:683`, `loop_range`, `current`,
@@ -176,6 +197,24 @@ pub fn loop_range_text(range: Option<(usize, usize)>) -> String {
 /// Restart on a timeline with no range.
 pub fn play_range_start(loop_range: Option<(usize, usize)>) -> usize {
     loop_range.map(|(a, _)| a).unwrap_or(0)
+}
+
+/// The frames the **Loop start** / **Loop end** jump
+/// buttons go to: the loop range's ends exactly as stored,
+/// or `None` when no range is set (the buttons are then
+/// not rendered at all — see the module docs).
+///
+/// Deliberately NOT clamped to the timeline. A range is
+/// ordered and clamped when it is set (`set_loop_range`,
+/// `editor.rs:769`), but frames deleted afterwards can
+/// leave its end past the last frame; the handlers hand
+/// the stored frame straight to `EditorCore::goto`
+/// (`editor.rs:701`), whose own bounds check refuses it
+/// silently, leaving `current` and `playhead` where they
+/// were — the same silent no-op the keyframe jumps make
+/// at the ends of their key list.
+pub fn loop_jump_targets(core: &EditorCore) -> Option<(usize, usize)> {
+    core.loop_range
 }
 
 /// Every key frame in the project, sorted ascending with
@@ -419,7 +458,9 @@ fn section(label: String, t: &Theme) -> El {
 /// `pb-restart` / `pb-play-range`, the Phase G loop
 /// toggle is `pb-loop` and the Phase I keyframe jumps are
 /// `pb-prev-key` / `pb-next-key`; the Phase K speed cycle
-/// beside the loop toggle is `pb-speed`, so headless
+/// beside the loop toggle is `pb-speed`, and the Phase L
+/// loop jumps beside it are `pb-loop-start` / `pb-loop-end`
+/// (present only while a loop range is set), so headless
 /// `--tree` checks can find every control.
 pub fn playback_controls(s: &State, t: &Theme) -> El {
     let core = &s.core;
@@ -489,37 +530,51 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
     // end (see should_stop_at_end); the button itself only
     // flips the State flag — no core call, no undo snapshot.
     panel = panel.child(section("Loop playback".to_string(), t));
-    panel = panel.child(
-        row()
-            .gap(6.0)
-            .center_y()
-            .child(icon_btn(
-                "pb-loop",
-                "repeat",
-                loop_toggle_label(loop_playback),
-                loop_playback,
-                t,
-                |s| {
-                    s.loop_playback = !s.loop_playback;
-                },
-            ))
-            .child(icon_btn(
-                "pb-speed",
-                "gauge",
-                &speed_label(playback_speed),
-                playback_speed != 1.0,
-                t,
-                cycle_playback_speed,
-            ))
-            .child(section(
-                if loop_playback {
-                    "On — wraps at the end".to_string()
-                } else {
-                    "Off — stops at the end".to_string()
-                },
-                t,
-            )),
-    );
+    let mut loop_row = row()
+        .gap(6.0)
+        .center_y()
+        .child(icon_btn(
+            "pb-loop",
+            "repeat",
+            loop_toggle_label(loop_playback),
+            loop_playback,
+            t,
+            |s| {
+                s.loop_playback = !s.loop_playback;
+            },
+        ))
+        .child(icon_btn(
+            "pb-speed",
+            "gauge",
+            &speed_label(playback_speed),
+            playback_speed != 1.0,
+            t,
+            cycle_playback_speed,
+        ));
+    // The loop jumps exist only while a range is set:
+    // absent, not inert, when there is nothing to jump to.
+    if loop_range.is_some() {
+        loop_row = loop_row
+            .child(btn("pb-loop-start", "Loop start", false, t, |s| {
+                if let Some((a, _)) = loop_jump_targets(&s.core) {
+                    s.core.goto(a);
+                }
+            }))
+            .child(btn("pb-loop-end", "Loop end", false, t, |s| {
+                if let Some((_, b)) = loop_jump_targets(&s.core) {
+                    s.core.goto(b);
+                }
+            }));
+    }
+    loop_row = loop_row.child(section(
+        if loop_playback {
+            "On — wraps at the end".to_string()
+        } else {
+            "Off — stops at the end".to_string()
+        },
+        t,
+    ));
+    panel = panel.child(loop_row);
 
     // ---- Frame rate: stepper + current-rate readout.
     panel = panel.child(section(format!("Frame rate — now {}", fps_text(fps)), t));
@@ -1034,5 +1089,117 @@ mod tests {
         // written and no undo snapshot was taken.
         assert_eq!(s.core.status, status_before);
         assert_eq!(s.core.undo_depth(), depth_before);
+    }
+
+    #[test]
+    fn loop_jump_targets_follow_the_loop_range() {
+        let mut core = bare_core();
+        // No range: no targets (and the buttons are not
+        // rendered — the builder gates on the same value).
+        assert_eq!(loop_jump_targets(&core), None);
+        core.set_loop_range(1, 3);
+        assert_eq!(loop_jump_targets(&core), Some((1, 3)));
+        // Clearing the range takes the targets with it.
+        core.clear_loop_range();
+        assert_eq!(loop_jump_targets(&core), None);
+    }
+
+    #[test]
+    fn loop_jump_targets_are_not_clamped_to_the_timeline() {
+        let mut core = bare_core();
+        // A stale range, written directly as a timeline
+        // shrink would leave it (set_loop_range clamps at
+        // set time, so this state only arises afterwards):
+        // the helper hands the stored ends back untouched
+        // and leaves the refusing to goto.
+        core.loop_range = Some((1, 99));
+        assert_eq!(loop_jump_targets(&core), Some((1, 99)));
+    }
+
+    #[test]
+    fn loop_start_jump_lands_on_the_range_start_and_keeps_the_playing_state() {
+        // The pb-loop-start handler body, composed exactly
+        // as the button runs it (the keyframe-jump test's
+        // precedent in this module).
+        let mut core = bare_core();
+        core.set_loop_range(1, 3);
+        // Paused, parked past the range: the press lands
+        // on the start and stays paused — the jumps goto
+        // only, never start playback.
+        core.goto(4);
+        core.playing = false;
+        if let Some((a, _)) = loop_jump_targets(&core) {
+            core.goto(a);
+        }
+        assert_eq!(core.current, 1);
+        assert_eq!(core.playhead, 1.0);
+        assert!(!core.playing);
+        // Playing, parked before the range: the same press
+        // lands on the start and keeps playing.
+        core.goto(0);
+        core.playing = true;
+        if let Some((a, _)) = loop_jump_targets(&core) {
+            core.goto(a);
+        }
+        assert_eq!(core.current, 1);
+        assert!(core.playing, "jumping mid-playback keeps playing");
+    }
+
+    #[test]
+    fn loop_end_jump_lands_on_the_range_end_and_keeps_the_playing_state() {
+        // The pb-loop-end handler body, composed as above.
+        let mut core = bare_core();
+        core.set_loop_range(1, 3);
+        core.goto(0);
+        core.playing = false;
+        if let Some((_, b)) = loop_jump_targets(&core) {
+            core.goto(b);
+        }
+        assert_eq!(core.current, 3);
+        assert_eq!(core.playhead, 3.0);
+        assert!(!core.playing);
+        core.goto(2);
+        core.playing = true;
+        if let Some((_, b)) = loop_jump_targets(&core) {
+            core.goto(b);
+        }
+        assert_eq!(core.current, 3);
+        assert!(core.playing);
+    }
+
+    #[test]
+    fn loop_jump_handlers_are_noops_without_a_range() {
+        // With no range the buttons are absent, but the
+        // composed bodies must still be harmless if run:
+        // no target, no goto, position untouched.
+        let mut core = bare_core();
+        core.goto(2);
+        if let Some((a, _)) = loop_jump_targets(&core) {
+            core.goto(a);
+        }
+        if let Some((_, b)) = loop_jump_targets(&core) {
+            core.goto(b);
+        }
+        assert_eq!(core.current, 2);
+    }
+
+    #[test]
+    fn loop_end_jump_to_a_stale_end_refuses_silently() {
+        let mut core = bare_core();
+        // Stale end past the 5-frame timeline: goto's own
+        // bounds check refuses, so the press changes
+        // nothing — no clamp onto the last frame.
+        core.loop_range = Some((1, 99));
+        core.goto(4);
+        if let Some((_, b)) = loop_jump_targets(&core) {
+            core.goto(b);
+        }
+        assert_eq!(core.current, 4);
+        // The in-range start of the same stale range still
+        // jumps normally.
+        if let Some((a, _)) = loop_jump_targets(&core) {
+            core.goto(a);
+        }
+        assert_eq!(core.current, 1);
     }
 }

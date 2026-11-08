@@ -192,6 +192,7 @@ pub fn blank_project(name: &str) -> Project {
         sprites: Vec::new(),
         texts: Vec::new(),
         weather: None,
+        head_ring_scale: 1.0,
     }
 }
 
