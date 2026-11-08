@@ -988,8 +988,32 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         // (app bar + menu bar + workspace row).
         .child(rune_sec::design::divider(&t))
         .child(main_row)
-        .child(rune_sec::menus::menu_scrim(s))
-        .child(rune_sec::menus::menu_dropdown(s, &t));
+        // The menu layer's in-flow slots (UI mission
+        // Wave 8): two zero-size spacers, mounted in BOTH
+        // menu states. The builders used to BE these two
+        // slots — a plain `el()` while closed, an
+        // out-of-flow layer while open — so opening a menu
+        // removed two of the root column's six 12 pt gaps
+        // from the flow and the stage grew 24 pt until the
+        // menu closed. Now the spacers stay in flow
+        // permanently and the layers proper are appended
+        // below, only while a menu is open: the root's
+        // in-flow child list — hence its gap accounting
+        // and every rect it feeds, the stage's included —
+        // is identical open and closed. The spacers are
+        // exactly the `el()`s the closed builders returned,
+        // so the closed geometry is untouched.
+        .child(rune::el())
+        .child(rune::el());
+    // The open menu's layers proper: the dismissal scrim
+    // and the anchored dropdown, appended after the
+    // spacers so they still paint (and hit-test) above
+    // the whole shell, where they always sat.
+    if s.menus.open.is_some() {
+        root = root
+            .child(rune_sec::menus::menu_scrim(s))
+            .child(rune_sec::menus::menu_dropdown(s, &t));
+    }
     // The command palette as a root-level overlay (UI
     // mission Wave 3): the menu dropdown's idiom — the
     // `.anchored(...)` placement is the outermost call on

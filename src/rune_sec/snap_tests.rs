@@ -760,6 +760,72 @@ fn file_menu_opens_lists_items_and_scrim_closes() {
 }
 
 #[test]
+fn stage_rect_is_identical_with_a_menu_open() {
+    let mut rt = editor();
+    // Seed the Animate workspace through its chip, as the
+    // shell test above does (the persisted prefs are
+    // shared across the test process).
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+
+    // The closed pin: at this file's 1440×900 viewport
+    // the stage is exactly the rect the headless tree
+    // dump measures in the real binary — the centre
+    // column's share after margins, gaps, the fixed
+    // 300 / 340 side widths and the centre's own rows.
+    let (closed, _) = rt.presented("stage").expect("stage is presented");
+    for (want, got) in [328.0, 157.0, 744.0, 530.0].iter().zip(closed.iter()) {
+        assert!(
+            (want - got).abs() <= 1.0,
+            "closed stage rect pins [328, 157, 744, 530]: {closed:?}"
+        );
+    }
+
+    // Open the File menu (a settling frame for the
+    // anchored dropdown, round 2's discipline) and read
+    // the stage again: the rect must not move. Before
+    // the Wave 8 fix the scrim/dropdown builders WERE
+    // the root column's last two in-flow children while
+    // closed and absolute layers while open, so opening
+    // a menu freed two 12 pt root gaps and the stage
+    // grew 24 pt ([328, 157, 744, 554] in the dump) for
+    // as long as the menu was up; the shell now keeps
+    // zero-size spacers in those slots in both states
+    // and appends the layers only while open.
+    tap(&mut rt, "menu-file");
+    rt.frame(DT);
+    assert_eq!(rt.state.menus.open, Some(crate::rune_sec::menus::FILE));
+    assert!(
+        presented_keys(&rt).contains("menu-file-dropdown"),
+        "dropdown surface presented"
+    );
+    let (open, _) = rt
+        .presented("stage")
+        .expect("stage is presented with a menu open");
+    for (a, b) in closed.iter().zip(open.iter()) {
+        assert!(
+            (a - b).abs() <= 0.5,
+            "stage rect moved while a menu was open: closed {closed:?}, open {open:?}"
+        );
+    }
+
+    // And back: a scrim press closes the menu (the
+    // dropdown's presence fade is an anchored overlay —
+    // out of flow at every instant), and the stage is
+    // still exactly where it started.
+    tap(&mut rt, "menu-scrim");
+    assert_eq!(rt.state.menus.open, None, "scrim press closes the menu");
+    rt.frame(DT);
+    let (settled, _) = rt.presented("stage").expect("stage is presented");
+    for (a, b) in closed.iter().zip(settled.iter()) {
+        assert!(
+            (a - b).abs() <= 0.5,
+            "stage rect moved after the menu closed: closed {closed:?}, settled {settled:?}"
+        );
+    }
+}
+
+#[test]
 fn command_palette_ctrl_k_types_and_enter_runs_undo() {
     let mut rt = editor();
 

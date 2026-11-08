@@ -100,8 +100,12 @@
 //! // only while `show_right` is set — the View menu's
 //! // sidebar toggles flip them.
 //! // view(): mount `menus::menu_bar(s, &t)` as its own row
-//! // under the app bar, and append as the LAST root-column
-//! // children, in this order:
+//! // under the app bar; keep two zero-size `el()` spacers
+//! // as the LAST in-flow root-column children (the menu
+//! // layer's slots, mounted in both states so the root's
+//! // gap accounting never depends on the menu state —
+//! // UI mission Wave 8), and append, only while a menu
+//! // is open, in this order:
 //! //     menus::menu_scrim(s)
 //! //     menus::menu_dropdown(s, &t)
 //! // on_key: if Escape and `s.menus.open.is_some()`,
@@ -729,7 +733,10 @@ pub fn menu_bar(s: &State, t: &Theme) -> El {
 /// The dismissal scrim: a transparent full-window press
 /// target under the open dropdown (rune-kit's `scrim`
 /// pattern). Mount it as a root-column child immediately
-/// before [`menu_dropdown`]. Inert when no menu is open.
+/// before [`menu_dropdown`], and only while a menu is
+/// open — the shell keeps a zero-size in-flow spacer in
+/// this slot in both states (UI mission Wave 8; see
+/// [`menu_dropdown`]). Inert when no menu is open.
 pub fn menu_scrim(s: &State) -> El {
     if s.menus.open.is_none() {
         return el();
@@ -746,8 +753,16 @@ pub fn menu_scrim(s: &State) -> El {
 /// The open menu's dropdown surface, anchored under its
 /// trigger (below, start-aligned, 4 pt gap; the runtime
 /// flips/clamps it at the window edges). Mount it as the
-/// last root-column child, after [`menu_scrim`]. Inert
-/// when no menu is open. Phase N (charter §9) set the
+/// last root-column child, after [`menu_scrim`], and
+/// only while a menu is open: the shell keeps a
+/// zero-size in-flow spacer in this slot in both states,
+/// so the root column's gap accounting never depends on
+/// the menu state (UI mission Wave 8 — mounted in both
+/// states, this layer and the scrim used to trade their
+/// in-flow placeholders for absolute positioning on
+/// open, freeing two root gaps and growing the stage
+/// 24 pt for as long as a menu was up). Inert when no
+/// menu is open. Phase N (charter §9) set the
 /// surface to radius 12 / padding 6 — on this `col`, not
 /// `design::panel_col`, whose 12/8 padding/gap is the
 /// panel recipe — and gave it the P15 M2 entrance: a

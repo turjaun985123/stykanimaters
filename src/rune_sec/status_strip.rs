@@ -486,6 +486,46 @@
 //! segment; neither is in this change's brief,
 //! and the 1280×720 tree probe (audit C2) is the
 //! evidence that would justify either.
+//!
+//! ## UI mission Wave 8 — the strip takes the app theme
+//!
+//! The composer built its own theme —
+//! `tok::theme(true)`, upstream's DARK theme,
+//! unconditionally — so when the shell switched to
+//! the light appearance the strip kept painting
+//! upstream's dark colours: segment text at
+//! `oklch(0.955, …)` (≈ `#EFF0F2`) on the light
+//! `#EDF0F5` background, near-invisible (the Wave 7
+//! headless dumps show every strip text element at
+//! `#eff0f2` in the light tree, byte-identical to
+//! the dark tree). The strip was the last shell
+//! surface still constructing a private theme.
+//!
+//! The fix threads the shell's theme in: both
+//! wrappers resolve
+//! `app_theme::app_theme(!core.light_theme)` — the
+//! exact construction `main.rs::view` uses for the
+//! whole view — and [`build_strip`] takes it as a
+//! parameter. The role mapping is unchanged, now
+//! resolved from that theme and pinned at one seam
+//! ([`strip_colors`]): fixed segments and the loop
+//! glyph in `text`, the status tail in
+//! `text_secondary`, dividers in `separator`, and
+//! the rolling play segment in the brief accent
+//! ([`app_theme::accent`], the theme-aware successor
+//! to the hard-coded `tok::accent(0, true)`).
+//!
+//! In the dark appearance the strip therefore
+//! renders the brief palette the rest of the shell
+//! already uses — text `#F1F3F7`, secondary
+//! `#A1A9B7`, separator `#303846` @ α 0.55, accent
+//! `#6C8CFF` — in place of upstream's near-identical
+//! `#EFF0F2` / `#A2A5AA` / white @ α 0.055: the same
+//! roles, now from the single palette, so strip and
+//! shell can never drift apart again. In light the
+//! strip takes the light roles (`#171A21` /
+//! `#5B6577` / tinted hairline / `#4666D8`) and is
+//! legible on the light background.
 
 use std::time::{Duration, SystemTime};
 
@@ -493,6 +533,7 @@ use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
 
+use crate::rune_sec::app_theme;
 use crate::State;
 
 /// Timecode of a frame at a project frame rate, formatted
@@ -917,13 +958,48 @@ pub fn fit_hint(hint: &str, max_chars: usize) -> String {
     out
 }
 
+/// The strip's four paint colours, resolved from the
+/// shell's theme at one seam (UI mission Wave 8 — see
+/// the module docs): the role mapping the strip has
+/// always used, now taken from the caller's theme
+/// instead of a privately constructed dark one.
+/// Fixed segments and the loop glyph paint in
+/// `text`, the status tail in `text_secondary`, the
+/// dividers in `separator`, and the play segment —
+/// while playback is rolling — in `playing` (the
+/// brief accent). The seam exists so the mapping is
+/// testable: a built `El` is opaque to a unit test,
+/// but these are the exact values every builder
+/// below receives.
+#[derive(Clone, Copy)]
+struct StripColors {
+    text: Color,
+    tail: Color,
+    divider: Color,
+    playing: Color,
+}
+
+/// Resolve the strip's colours from a theme: primary
+/// segments take the theme's `text` role, the tail
+/// its `text_secondary`, the dividers its
+/// `separator`, and the rolling play segment the
+/// theme-aware brief accent ([`app_theme::accent`]).
+fn strip_colors(t: &Theme) -> StripColors {
+    StripColors {
+        text: t.text,
+        tail: t.text_secondary,
+        divider: t.separator,
+        playing: app_theme::accent(t),
+    }
+}
+
 /// One fixed strip segment: a single label-styled text,
 /// floored at its estimated content width so the row's
 /// shrink pass can never compress its box below the
 /// width its glyphs paint (see the module docs).
-fn segment(label: String, t: &Theme) -> El {
+fn segment(label: String, color: Color) -> El {
     let floor = est_text_width(&label);
-    text(label).font(type_::LABEL).color(t.text).min_w(floor)
+    text(label).font(type_::LABEL).color(color).min_w(floor)
 }
 
 /// The font of the strip's two wholly numeric segments —
@@ -947,9 +1023,9 @@ fn numeric_font() -> tok::TextStyle {
 /// the mono sibling of [`segment`], with identical
 /// floor discipline. Used for the timecode and speed
 /// segments only.
-fn segment_mono(label: String, t: &Theme) -> El {
+fn segment_mono(label: String, color: Color) -> El {
     let floor = est_text_width(&label);
-    text(label).font(numeric_font()).color(t.text).min_w(floor)
+    text(label).font(numeric_font()).color(color).min_w(floor)
 }
 
 /// One YIELDING strip segment (UI mission Wave 3):
@@ -979,7 +1055,7 @@ fn segment_yielding(label: String, color: Color) -> El {
 /// the label text, floored at the SAME
 /// [`est_text_width`] a plain [`segment`] would use.
 /// The glyph is painted in the theme's text colour —
-/// the same `t.text` as the label beside it (Phase N
+/// the same `color` as the label beside it (Phase N
 /// retired the hardcoded hex that used to duplicate
 /// that colour for the glyph).
 /// The floor stays computed from the text alone; the
@@ -989,14 +1065,14 @@ fn segment_yielding(label: String, color: Color) -> El {
 /// glyph may use this — the loop segment, per the
 /// width check in the module docs (the audio segment
 /// fails that check and stays text-only).
-fn segment_with_icon(label: String, icon: &str, t: &Theme) -> El {
+fn segment_with_icon(label: String, icon: &str, color: Color) -> El {
     let floor = est_text_width(&label);
     row()
         .gap(4.0)
         .center_y()
         .min_w(floor)
-        .child(crate::rune_sec::icons::icon_el(icon, 11.0, t.text))
-        .child(text(label).font(type_::LABEL).color(t.text))
+        .child(crate::rune_sec::icons::icon_el(icon, 11.0, color))
+        .child(text(label).font(type_::LABEL).color(color))
 }
 
 /// The project segment (UI mission Wave 3): a
@@ -1017,7 +1093,7 @@ fn segment_with_icon(label: String, icon: &str, t: &Theme) -> El {
 /// parts sit at their estimated widths and the
 /// row measures exactly the old floored segment's
 /// [`est_text_width`] of [`project_text`].
-fn project_segment(core: &EditorCore, t: &Theme) -> El {
+fn project_segment(core: &EditorCore, color: Color) -> El {
     let (name, suffix) = project_parts(core);
     let name_base = est_text_width(&name);
     let suffix_floor = est_text_width(&suffix);
@@ -1029,14 +1105,14 @@ fn project_segment(core: &EditorCore, t: &Theme) -> El {
         .child(
             text(name)
                 .font(type_::LABEL)
-                .color(t.text)
+                .color(color)
                 .w(name_base)
                 .truncate(),
         )
         .child(
             text(suffix)
                 .font(type_::LABEL)
-                .color(t.text)
+                .color(color)
                 .min_w(suffix_floor),
         )
 }
@@ -1046,8 +1122,8 @@ fn project_segment(core: &EditorCore, t: &Theme) -> El {
 /// nothing (the tail segment absorbs the shortage).
 /// Phase N (charter §12): a 1×10 tick in the theme's
 /// `separator` tone (was 1×12 in `control_track`).
-fn divider(t: &Theme) -> El {
-    el().size(1.0, 10.0).min_w(1.0).fill(t.separator)
+fn divider(color: Color) -> El {
+    el().size(1.0, 10.0).min_w(1.0).fill(color)
 }
 
 /// The status strip from the core alone: every segment
@@ -1064,8 +1140,12 @@ fn divider(t: &Theme) -> El {
 /// reduced view, as it does for the speed segment).
 /// The delegating wrapper over the shared composer;
 /// the shell itself calls [`status_strip_state`].
+/// The theme is the shell's, resolved from the
+/// core's appearance flag exactly as `main.rs::view`
+/// resolves it (UI mission Wave 8).
 pub fn status_strip(core: &EditorCore) -> El {
-    build_strip(core, None, None, None, None, None)
+    let t = app_theme::app_theme(!core.light_theme);
+    build_strip(core, &t, None, None, None, None, None)
 }
 
 /// The status strip: project name (with the dirty dot),
@@ -1085,15 +1165,21 @@ pub fn status_strip(core: &EditorCore) -> El {
 /// segment truncates, so the segments can never
 /// overlap however narrow the strip gets.
 /// Keyed `status-strip` so headless `--tree` checks can
-/// find it. Theme follows the shell's current convention
-/// (`main.rs` builds its view with `tok::theme(true)`).
+/// find it. Theme is the shell's current app theme —
+/// `app_theme(!core.light_theme)`, the exact
+/// construction `main.rs::view` builds the whole view
+/// with (UI mission Wave 8; the strip previously
+/// substituted a private dark theme and stayed
+/// dark-coloured in the light appearance).
 pub fn status_strip_state(s: &State) -> El {
     let autosave = autosave_segment(
         stykanimate_rs::shell::recovery_modified(),
         SystemTime::now(),
     );
+    let t = app_theme::app_theme(!s.core.light_theme);
     build_strip(
         &s.core,
+        &t,
         s.stroke_selected,
         s.particle_selected,
         speed_segment(s.playback_speed),
@@ -1120,42 +1206,45 @@ pub fn status_strip_state(s: &State) -> El {
 /// flexible member.
 fn build_strip(
     core: &EditorCore,
+    t: &Theme,
     stroke_selected: Option<usize>,
     particle_selected: Option<usize>,
     speed: Option<String>,
     fig3: Option<&'static str>,
     autosave: Option<String>,
 ) -> El {
-    let t = tok::theme(true);
+    let colors = strip_colors(t);
     let mut segments: Vec<El> = vec![
         // UI mission Wave 3: the project segment is
         // the two-part `project_segment` — the name
         // yields (truncates), the runtime + dirty-dot
         // suffix keeps its floor. Same text, same
         // width at rest.
-        project_segment(core, &t),
-        segment(frame_text(core), &t),
-        segment_mono(timecode(core.current, core.project.fps), &t),
+        project_segment(core, colors.text),
+        segment(frame_text(core), colors.text),
+        segment_mono(timecode(core.current, core.project.fps), colors.text),
         // UI mission Wave 3: the fps segment yields
         // third in the compression order — truncating,
         // based at its estimated width, no floor.
-        segment_yielding(format!("{} fps", fps_text(core.project.fps)), t.text),
-        segment(zoom_text(core), &t),
-        segment(selection_text(core), &t),
-        segment(undo_text(core), &t),
+        segment_yielding(format!("{} fps", fps_text(core.project.fps)), colors.text),
+        segment(zoom_text(core), colors.text),
+        segment(selection_text(core), colors.text),
+        segment(undo_text(core), colors.text),
         // The play segment lights up in the accent colour
         // while playback is rolling. UI mission Wave 3:
         // it is the compression order's first sacrifice
         // — built by `segment_yielding` (truncating,
         // based at its estimated width, no floor)
         // instead of the floored `segment` path. The
-        // accent colour while rolling is unchanged.
+        // accent colour while rolling is unchanged in
+        // role: the theme's brief accent (Wave 8 made
+        // it the app theme's, not upstream's).
         segment_yielding(
             play_text(core.playing).to_string(),
             if core.playing {
-                tok::accent(0, true)
+                colors.playing
             } else {
-                t.text
+                colors.text
             },
         ),
     ];
@@ -1170,7 +1259,7 @@ fn build_strip(
     // the speed readout is wholly numeric, so it takes
     // the mono style; the floor path is unchanged.
     if let Some(label) = speed {
-        segments.push(segment_mono(label, &t));
+        segments.push(segment_mono(label, colors.text));
     }
     // Phase M: the 3D-session segment follows the
     // speed segment in the conditional block — both
@@ -1182,7 +1271,7 @@ fn build_strip(
     // module docs' Phase M note on the pinned
     // floors).
     if let Some(label) = fig3 {
-        segments.push(segment(label.to_string(), &t));
+        segments.push(segment(label.to_string(), colors.text));
     }
     // Phase G conditional segments: after the original
     // fixed segments, before the tail, in audio / loop /
@@ -1201,9 +1290,9 @@ fn build_strip(
     let loop_label = loop_segment(core.loop_range);
     for label in extra_segments(core, stroke_selected, particle_selected) {
         if Some(&label) == loop_label.as_ref() {
-            segments.push(segment_with_icon(label, "repeat", &t));
+            segments.push(segment_with_icon(label, "repeat", colors.text));
         } else {
-            segments.push(segment(label, &t));
+            segments.push(segment(label, colors.text));
         }
     }
     // Phase J: the autosave segment closes the fixed
@@ -1213,7 +1302,7 @@ fn build_strip(
     // snapshot exists, leaving the strip byte-identical
     // to Phase I's.
     if let Some(label) = autosave {
-        segments.push(segment(label, &t));
+        segments.push(segment(label, colors.text));
     }
     // Chrome's line ended with the core's status
     // message; keep it, dimmed, as the tail segment —
@@ -1237,14 +1326,14 @@ fn build_strip(
     segments.push(
         text(fit_hint(&core.status, MAX_STATUS_CHARS))
             .font(type_::LABEL)
-            .color(t.text_secondary)
+            .color(colors.tail)
             .grow(1.0)
             .truncate(),
     );
     let mut bar = row().key("status-strip").w_full().gap(8.0).center_y();
     for (i, seg) in segments.into_iter().enumerate() {
         if i > 0 {
-            bar = bar.child(divider(&t));
+            bar = bar.child(divider(colors.divider));
         }
         bar = bar.child(seg);
     }
@@ -1763,11 +1852,12 @@ mod tests {
         // did, and with a label it builds with the
         // segment appended — neither path panics.
         let core = EditorCore::new();
-        let _ = build_strip(&core, None, None, None, None, None);
+        let t = app_theme::app_theme(true);
+        let _ = build_strip(&core, &t, None, None, None, None, None);
         let now = ref_now();
         let label = autosave_segment(Some(now - Duration::from_secs(300)), now);
         assert_eq!(label, Some("Autosaved 5m ago".to_string()));
-        let _ = build_strip(&core, None, None, None, None, label);
+        let _ = build_strip(&core, &t, None, None, None, None, label);
         // The builder floors the segment through
         // `segment()`, i.e. at `est_text_width` of its
         // own label — the same path as every other
@@ -1875,15 +1965,15 @@ mod tests {
         // the strip meets: fresh, dirty, and with a
         // name far longer than the default (the case
         // the name's truncation exists for).
-        let t = tok::theme(true);
+        let colors = strip_colors(&app_theme::app_theme(true));
         let mut core = EditorCore::new();
-        let _ = project_segment(&core, &t);
+        let _ = project_segment(&core, colors.text);
         core.add_frame();
-        let _ = project_segment(&core, &t);
+        let _ = project_segment(&core, colors.text);
         core.project.name = "A very long project name indeed".to_string();
-        let _ = project_segment(&core, &t);
-        let _ = segment_yielding(play_text(false).to_string(), t.text);
-        let _ = segment_yielding("12 fps".to_string(), t.text);
+        let _ = project_segment(&core, colors.text);
+        let _ = segment_yielding(play_text(false).to_string(), colors.text);
+        let _ = segment_yielding("12 fps".to_string(), colors.text);
         // The whole strip still builds through both
         // wrappers with the new segment constructions
         // in place.
@@ -2038,8 +2128,9 @@ mod tests {
         // floored through `segment()` at its own label's
         // `est_text_width` — 2 characters for `2×`.
         let core = EditorCore::new();
-        let _ = build_strip(&core, None, None, speed_segment(1.0), None, None);
-        let _ = build_strip(&core, None, None, speed_segment(2.0), None, None);
+        let t = app_theme::app_theme(true);
+        let _ = build_strip(&core, &t, None, None, speed_segment(1.0), None, None);
+        let _ = build_strip(&core, &t, None, None, speed_segment(2.0), None, None);
         assert_eq!(est_text_width("2×"), 2.0 * LABEL_CHAR_W);
         assert_eq!(est_text_width("0.25×"), 5.0 * LABEL_CHAR_W);
     }
@@ -2084,8 +2175,9 @@ mod tests {
         // its own label's `est_text_width` — 2
         // characters for `3D` (pinned above).
         let core = EditorCore::new();
-        let _ = build_strip(&core, None, None, None, fig3_segment(false), None);
-        let _ = build_strip(&core, None, None, None, fig3_segment(true), None);
+        let t = app_theme::app_theme(true);
+        let _ = build_strip(&core, &t, None, None, None, fig3_segment(false), None);
+        let _ = build_strip(&core, &t, None, None, None, fig3_segment(true), None);
     }
 
     #[test]
@@ -2143,11 +2235,73 @@ mod tests {
         // Both mono call sites construct. (The timecode
         // path is also exercised by every strip build
         // above; the speed path by the Phase L tests.)
-        let t = tok::theme(true);
-        let _ = segment_mono(timecode(150, 12.0), &t);
-        let _ = segment_mono(speed_segment(1.5).unwrap(), &t);
+        let colors = strip_colors(&app_theme::app_theme(true));
+        let _ = segment_mono(timecode(150, 12.0), colors.text);
+        let _ = segment_mono(speed_segment(1.5).unwrap(), colors.text);
         // The plain segment path still constructs too —
         // it stays LABEL for every other segment.
-        let _ = segment("Frame 1/5".to_string(), &t);
+        let _ = segment("Frame 1/5".to_string(), colors.text);
+    }
+
+    // ---- UI mission Wave 8 app-theme colours ----
+
+    #[test]
+    fn strip_colours_follow_the_app_theme() {
+        // UI mission Wave 8: the strip previously built
+        // its segments from a privately constructed
+        // `tok::theme(true)`, so in the light appearance
+        // its text painted upstream's dark near-white
+        // (≈ #EFF0F2) on the light background — the
+        // Wave 7 dumps show #eff0f2 in BOTH trees. The
+        // colours now resolve from the caller's app
+        // theme at the `strip_colors` seam (a built
+        // `El` is opaque, so the pin lands on the seam
+        // every builder receives — the `numeric_font`
+        // precedent above).
+        let dark = app_theme::app_theme(true);
+        let light = app_theme::app_theme(false);
+        let d = strip_colors(&dark);
+        let l = strip_colors(&light);
+        // The role mapping, in both appearances: fixed
+        // segments take `text`, the tail takes
+        // `text_secondary`, the dividers take
+        // `separator`, and the rolling play segment
+        // takes the theme's brief accent.
+        assert_eq!(d.text, dark.text);
+        assert_eq!(d.tail, dark.text_secondary);
+        assert_eq!(d.divider, dark.separator);
+        assert_eq!(d.playing, app_theme::accent(&dark));
+        assert_eq!(l.text, light.text);
+        assert_eq!(l.tail, light.text_secondary);
+        assert_eq!(l.divider, light.separator);
+        assert_eq!(l.playing, app_theme::accent(&light));
+        // Every role actually differs across the two
+        // appearances — the regression this test guards
+        // is a role silently pinned to one theme.
+        assert_ne!(d.text, l.text);
+        assert_ne!(d.tail, l.tail);
+        assert_ne!(d.divider, l.divider);
+        assert_ne!(d.playing, l.playing);
+        // The pinned values: dark is the brief palette
+        // the whole shell renders with, light its
+        // mirrored ink on the light background (never
+        // the near-white that was invisible there).
+        assert_eq!(d.text.hex(), "#f1f3f7ff");
+        assert_eq!(d.tail.hex(), "#a1a9b7ff");
+        assert_eq!(d.playing.hex(), "#6c8cffff");
+        assert_eq!(l.text.hex(), "#171a21ff");
+        assert_eq!(l.tail.hex(), "#5b6577ff");
+        assert_eq!(l.playing.hex(), "#4666d8ff");
+        // The whole strip builds under both themes,
+        // through the composer and through the
+        // core-only wrapper (which resolves the theme
+        // from the core's own appearance flag).
+        let core = EditorCore::new();
+        let _ = build_strip(&core, &dark, None, None, None, None, None);
+        let _ = build_strip(&core, &light, None, None, None, None, None);
+        let _ = status_strip(&core);
+        let mut light_core = EditorCore::new();
+        light_core.light_theme = true;
+        let _ = status_strip(&light_core);
     }
 }
