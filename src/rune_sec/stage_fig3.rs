@@ -14,9 +14,11 @@
 //!   ground plane, so the grid and the ground shadow sit at
 //!   `fig3_preview::ground_y_of(world)` — the figure's lowest
 //!   evaluated joint — never on y = 0 through its hips.
-//! - Colours and widths are `fig3_preview`'s constants
-//!   (`GRID_COLOR`, `BONE_WIDTH`, `JOINT_HALF`, …), so the
-//!   stage figure and the panel figure read as one figure.
+//! - Widths are `fig3_preview`'s constants (`BONE_WIDTH`,
+//!   `JOINT_HALF`, …) and colours arrive in the caller's
+//!   `fig3_preview::Fig3Palette` (UI mission I-7: built
+//!   from the shell theme, so the stage figure and the
+//!   panel figure read as one figure in both themes).
 //! - Every segment is cut to the stage rect through
 //!   `fig3_preview::clip_segment_to_viewport`: the Rune
 //!   canvas does not clip its drawing (Phase L's headless
@@ -85,10 +87,18 @@ fn behind(p: &fig3d::Proj) -> bool {
 /// - Every returned segment is clipped to the stage rect
 ///   `[0, stage_w] × [0, stage_h]`; segments wholly outside
 ///   are dropped.
+/// - `palette`: the drawing colours (grid / selection /
+///   shadow) — the same `fig3_preview::Fig3Palette` the
+///   panel preview receives, built from the shell theme
+///   by the caller (`Fig3Palette::from_theme`);
+///   `Fig3Palette::LEGACY` for theme-less callers.
 ///
-/// A pure function of the core: no shell state, no
-/// thread-locals.
-pub fn stage_fig3_prims(core: &EditorCore) -> Vec<StageFig3Prim> {
+/// A pure function of the core and the palette: no shell
+/// state, no thread-locals.
+pub fn stage_fig3_prims(
+    core: &EditorCore,
+    palette: fig3_preview::Fig3Palette,
+) -> Vec<StageFig3Prim> {
     let Some(state) = core.fig3.as_ref() else {
         return Vec::new();
     };
@@ -98,8 +108,8 @@ pub fn stage_fig3_prims(core: &EditorCore) -> Vec<StageFig3Prim> {
     let ground_y = fig3_preview::ground_y_of(&world);
 
     let mut prims = Vec::new();
-    push_grid(&mut prims, state, stage, ground_y);
-    push_figure(&mut prims, state, &world, stage, ground_y);
+    push_grid(&mut prims, state, stage, ground_y, palette);
+    push_figure(&mut prims, state, &world, stage, ground_y, palette);
 
     // The stage canvas does not clip its drawing to its own
     // rect (the Phase L grid bleed), so every segment is cut
@@ -131,6 +141,7 @@ fn push_grid(
     state: &Fig3State,
     stage: [f32; 2],
     ground_y: f32,
+    palette: fig3_preview::Fig3Palette,
 ) {
     let lines = fig3d::grid_line_points(fig3_preview::GRID_EXTENT, fig3_preview::GRID_STEP);
     let mut points = Vec::with_capacity(lines.len() * 2);
@@ -147,7 +158,7 @@ fn push_grid(
         prims.push(StageFig3Prim {
             a: a.xy,
             b: b.xy,
-            color: fig3_preview::GRID_COLOR,
+            color: palette.grid,
             width: fig3_preview::GRID_WIDTH,
         });
     }
@@ -163,6 +174,7 @@ fn push_figure(
     world: &[[f32; 3]],
     stage: [f32; 2],
     ground_y: f32,
+    palette: fig3_preview::Fig3Palette,
 ) {
     let fig = &state.figure;
     if world.is_empty() {
@@ -170,7 +182,7 @@ fn push_figure(
     }
     let projected = fig3d::project(world, &state.camera, stage);
 
-    push_shadow(prims, state, world, stage, ground_y);
+    push_shadow(prims, state, world, stage, ground_y, palette);
 
     // Bones: one segment per node that has a parent.
     for (i, node) in fig.nodes.iter().enumerate() {
@@ -195,7 +207,7 @@ fn push_figure(
             continue;
         }
         let color = if i == state.selected {
-            fig3_preview::SELECTED_COLOR
+            palette.selected
         } else {
             fig.color
         };
@@ -230,6 +242,7 @@ fn push_shadow(
     world: &[[f32; 3]],
     stage: [f32; 2],
     ground_y: f32,
+    palette: fig3_preview::Fig3Palette,
 ) {
     let fig = &state.figure;
     let Some(root) = fig.nodes.iter().position(|n| n.parent.is_none()) else {
@@ -255,7 +268,7 @@ fn push_shadow(
         prims.push(StageFig3Prim {
             a: ring[k],
             b: ring[(k + 1) % fig3_preview::SHADOW_SEGMENTS],
-            color: fig3_preview::SHADOW_COLOR,
+            color: palette.shadow,
             width: fig3_preview::SHADOW_WIDTH,
         });
     }
@@ -288,7 +301,7 @@ mod tests {
     fn no_session_yields_no_prims() {
         let core = EditorCore::new();
         assert!(core.fig3.is_none(), "a fresh core has no 3D session");
-        assert!(stage_fig3_prims(&core).is_empty());
+        assert!(stage_fig3_prims(&core, fig3_preview::Fig3Palette::LEGACY).is_empty());
     }
 
     #[test]
@@ -298,7 +311,7 @@ mod tests {
         let mut core = EditorCore::new();
         core.enter_3d();
         let stage = core.project.stage;
-        let prims = stage_fig3_prims(&core);
+        let prims = stage_fig3_prims(&core, fig3_preview::Fig3Palette::LEGACY);
         assert!(!prims.is_empty(), "a rest session draws something");
         for prim in &prims {
             assert!(inside_stage(prim.a, stage), "prim starts outside: {:?}", prim.a);
@@ -325,7 +338,7 @@ mod tests {
         core.project.stage = [200.0, 150.0];
         core.fig3 = Some(rest_state(0));
         let stage = core.project.stage;
-        let prims = stage_fig3_prims(&core);
+        let prims = stage_fig3_prims(&core, fig3_preview::Fig3Palette::LEGACY);
         let grid: Vec<&StageFig3Prim> = prims
             .iter()
             .filter(|p| p.color == fig3_preview::GRID_COLOR)
@@ -343,5 +356,27 @@ mod tests {
             }),
             "some segment is cut exactly onto the stage edge"
         );
+    }
+
+    #[test]
+    fn themed_palette_reaches_the_stage_prims() {
+        // I-7 at this layer: the palette the caller built
+        // from the theme is the palette the prims carry —
+        // grid and shadow in the themed colours, and no
+        // prim in a legacy dark literal (the figure's own
+        // colour, 0xE8E8EC, is none of them).
+        let mut core = EditorCore::new();
+        core.enter_3d();
+        let palette = fig3_preview::Fig3Palette::from_theme(
+            &crate::rune_sec::app_theme::app_theme(true),
+        );
+        let prims = stage_fig3_prims(&core, palette);
+        assert!(prims.iter().any(|p| p.color == palette.grid));
+        assert!(prims.iter().any(|p| p.color == palette.shadow));
+        assert!(prims.iter().all(|p| {
+            p.color != fig3_preview::GRID_COLOR
+                && p.color != fig3_preview::SELECTED_COLOR
+                && p.color != fig3_preview::SHADOW_COLOR
+        }));
     }
 }

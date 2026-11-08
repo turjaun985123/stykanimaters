@@ -138,7 +138,13 @@
 //!   missing segment control was navigation, not
 //!   length.)
 //!
-//! When nothing is selected the panel is one muted line.
+//! When nothing is selected the panel renders its
+//! header over the kit's empty state ("Select a segment
+//! on the stage to edit its geometry."; UI mission
+//! Wave 4, audit s08 I7 — the header-always form,
+//! replacing the bare line this panel used to be, and
+//! worded against the style panel's "…its style." so
+//! the two stacked cards no longer near-duplicate).
 //!
 //! Phase H icon pass: the header title leads with the
 //! `shapes` glyph (`icons::icon_el`, rendered only when
@@ -668,11 +674,26 @@ fn swatch(rgb: u32, selected: bool, t: &Theme) -> El {
 pub fn inspector_segment(s: &State, t: &Theme) -> El {
     let panel = design::panel_col("inspector-segment", t);
     let Some(st) = segment_state(&s.core) else {
-        return panel.child(
-            text("Select a segment on the stage to edit it.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        // No selection: the header still renders — the
+        // style panel's form (audit s08 I7) — over the
+        // kit empty state, and the message names THIS
+        // panel's job (geometry), so the two stacked
+        // segment panels no longer show near-duplicate
+        // bare lines.
+        return panel
+            .child(
+                row()
+                    .w_full()
+                    .gap(8.0)
+                    .center_y()
+                    .child(design::panel_title(Some("shapes"), "Segment", None, t)),
+            )
+            .child(design::divider(t))
+            .child(design::empty_state(
+                "bezier-curve",
+                "Select a segment on the stage to edit its geometry.",
+                t,
+            ));
     };
     // Panel header (Phase N): the kit title cluster —
     // the `shapes` glyph leads when the icon set has it
@@ -1323,6 +1344,8 @@ pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
 playback_speed: 1.0,
             was_playing: false,
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         };
         let _ = inspector_segment(&bare, &t);
         let selected = State {
@@ -1369,6 +1392,8 @@ pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
 playback_speed: 1.0,
             was_playing: false,
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         };
         let _ = inspector_segment(&selected, &t);
         let root = State {
@@ -1415,6 +1440,8 @@ pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
 playback_speed: 1.0,
             was_playing: false,
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         };
         let _ = inspector_segment(&root, &t);
     }

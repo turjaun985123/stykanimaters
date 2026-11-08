@@ -78,7 +78,7 @@
 //!   [`dispatch_delete_confirm`], which calls
 //!   `shell::delete_project_file` (Phase K, section 15 —
 //!   the shell helper refuses shell-owned filenames). On
-//!   success both caches are dropped wholesale
+//!   success all three caches are dropped wholesale
 //!   ([`HomePanelState::invalidate_caches`]): the scan
 //!   cache is keyed on the directory mtime and the meta
 //!   cache on per-file mtimes, and a deleted file must
@@ -89,6 +89,37 @@
 //!   of the project that is currently open removes only
 //!   the file: the in-memory project in the editor is
 //!   untouched and keeps editing as an unsaved copy.
+//! - **Rename (UI mission Wave 4, audit S06-4)** — each
+//!   row's `home-proj-rename-{i}` button arms the rename
+//!   session ([`State::home_rename`], modelled on the
+//!   clips/pose rename sessions): the row re-renders as
+//!   a rename line — the name field
+//!   (`home-proj-rename-field`, opened loaded with the
+//!   row's stored name) with `home-proj-rename-confirm`
+//!   / `home-proj-rename-cancel`. The confirm runs
+//!   [`confirm_rename`] → [`dispatch_rename`], which
+//!   calls `projects::rename_project` — a FILE rename
+//!   only: the name stored inside the project's JSON
+//!   updates on the next save, so the row keeps showing
+//!   the stored name and the success status says so.
+//!   On success the recents list is re-touched with the
+//!   new name and all three caches are invalidated; on
+//!   failure the rename stays armed with the typed text
+//!   intact. Arming a rename stands down a pending
+//!   delete confirm and any armed session discard, and
+//!   vice versa — one pending row action at a time.
+//! - **Session discards (UI mission Wave 4, audit S16
+//!   D2)** — this panel's session-replacing presses run
+//!   through the crate-level [`ConfirmAction`] gate
+//!   (see main.rs): a row's Open (`home-open-{i}`), the
+//!   reopen action (`home-reopen-last`), New
+//!   (`home-new`) and the recovery banner's Recover
+//!   (`recover`) arm on first press while the session
+//!   is dirty (`edits_since_autosave() > 0`) and
+//!   re-render as danger "Discard changes?" buttons
+//!   under the same keys; the second press runs the
+//!   action. The presses live in `open_row_pressed`,
+//!   `new_project_pressed` and `recover_banner_pressed`.
 //! - **Sort (Phase K)** — the `home-sort` toggle in the
 //!   search row switches the row order between the scan's
 //!   own order (the default: `projects::scan` sorts by
@@ -134,6 +165,45 @@
 //! rewrites a directory mtime cannot see — caching it would
 //! risk a stale banner. Instead the verdict is captured once,
 //! when the panel opens (see [`toggle_open`]).
+//!
+//! ## Thumbnails (UI mission Wave 4, audit S06-8)
+//!
+//! Each library row leads with a real frame-0 render of
+//! its project — the audit found the machinery proven but
+//! unwired (`projects::thumbnail` had zero callers), and
+//! this is the wiring. The discipline is the cost rule the
+//! audit set: a render is an export-grade rasterise
+//! (`export::render_frame_at` renders at stage size ×2
+//! supersample), so generation happens **at scan time
+//! only** — inside [`HomePanelState::projects`] when the
+//! scan cache refills ([`HomePanelState::fill_thumbnails`]),
+//! never in the row builder. The row builder only reads
+//! the finished handle through
+//! [`HomePanelState::thumbnail_for`], which serves it
+//! solely while the scan entry's mtime matches the mtime
+//! the render was made at — the meta cache's exact-mtime
+//! discipline, one level up. A file that will not load or
+//! render caches as `None` at that mtime: the row shows
+//! no thumb, generation is not retried until the file
+//! changes, and nothing is ever faked with a placeholder
+//! image.
+//!
+//! The recipe is the contact sheet's (`export::
+//! render_contact_sheet`): render frame 0, convert to
+//! RGBA, shrink with `image::imageops::resize` (Triangle)
+//! to [`THUMB_W_PX`] wide keeping the stage's aspect. The
+//! bytes become a Rune image through `ImageCache::rgba` on
+//! a short-lived cache created for the fill; the fill
+//! waits for the decode (`Image::wait`) before the cache
+//! drops, and the panel keeps the `Image` handle — the
+//! decoded pixels live in the handle, not the cache, so
+//! the thumbnail outlives it. The row displays the handle
+//! at [`THUMB_W_PT`] wide with its aspect-preserved
+//! height, clipped to a 6 pt radius. Deleting a project
+//! drops the thumbnail with the other caches
+//! ([`HomePanelState::invalidate_caches`]), and a scan
+//! that stops listing a file drops its handle in the
+//! fill.
 //!
 //! ## Recovery verdict timing
 //!
@@ -216,7 +286,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rune::tok::{self, type_, Theme};
-use rune::{col, row, text, text_input, El, TextEdit, Tx};
+use rune::{col, el, row, text, text_input, El, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Project;
 use stykanimate_rs::projects::{self, ProjectInfo};
@@ -224,10 +294,10 @@ use stykanimate_rs::shell;
 
 use crate::chrome_view::{btn, danger_btn};
 use crate::rune_sec::design;
-use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::icon_btn::{danger_icon_btn, icon_btn};
 use crate::rune_sec::icons::icon_el;
-use crate::rune_sec::project_tools::human_size;
-use crate::State;
+use crate::rune_sec::project_tools::{human_size, session_dirty};
+use crate::{ConfirmAction, State};
 
 /// View-state for this section: the search field, whether
 /// the panel is expanded, the recovery verdict captured at
@@ -266,6 +336,23 @@ pub struct HomePanelState {
     /// `scan_cache`; `Default` (empty map) keeps every
     /// existing construction of this state working.
     meta_cache: RefCell<HashMap<PathBuf, (SystemTime, usize, usize, u64)>>,
+    /// Per-file thumbnail cache (UI mission Wave 4):
+    /// path → `(mtime, Option<Image>)` — the frame-0
+    /// render of the file as it stood at that mtime,
+    /// generated at scan time by
+    /// [`HomePanelState::fill_thumbnails`] (never in the
+    /// row builder: a render is an export-grade
+    /// rasterise). `None` is a cached failure — the file
+    /// would not load or render at that mtime, the row
+    /// shows no thumb, and generation is not retried
+    /// until the file's mtime moves. Entries are served
+    /// only on an exact mtime match with the scan entry
+    /// being rendered ([`HomePanelState::thumbnail_for`])
+    /// — the meta cache's discipline, one level up.
+    /// Interior mutability for the same reason as the
+    /// other caches; `Default` (empty map) keeps every
+    /// existing construction of this state working.
+    thumb_cache: RefCell<HashMap<PathBuf, (SystemTime, Option<rune::Image>)>>,
     /// The project file whose deletion is armed and
     /// awaiting its confirm press (Phase K): the row for
     /// this path renders the confirm line instead of its
@@ -306,8 +393,67 @@ impl HomePanelState {
             }
         }
         let entries = projects::scan(&dir);
+        // Thumbnails are generated here — at scan/cache
+        // time, the one moment the library's contents are
+        // (re)read — and never in the row builder (see
+        // the module docs' thumbnail section).
+        self.fill_thumbnails(&entries);
         *self.scan_cache.borrow_mut() = Some((key, entries));
         Ref::map(self.scan_cache.borrow(), |c| &c.as_ref().unwrap().1)
+    }
+
+    /// Generate (or refresh) the frame-0 thumbnail of
+    /// every library entry in a fresh scan: one render
+    /// per file whose mtime has moved since its cached
+    /// render, keyed on the scan's own stat
+    /// (`ProjectInfo::modified`, so the value a render is
+    /// stored under is exactly the value
+    /// [`HomePanelState::thumbnail_for`] later checks the
+    /// row's entry against). Shell-owned and recovery
+    /// entries are skipped — they are never rows. Handles
+    /// for files the scan no longer lists are dropped, so
+    /// a deleted or renamed file's render cannot outlive
+    /// its listing. Called from [`HomePanelState::
+    /// projects`] on a scan refill only; the cost (a full
+    /// load + rasterise per changed file) is the scan's
+    /// cost class, paid once per file version.
+    fn fill_thumbnails(&self, entries: &[ProjectInfo]) {
+        let mut cache = self.thumb_cache.borrow_mut();
+        cache.retain(|path, _| entries.iter().any(|e| &e.path == path));
+        for info in entries {
+            if is_recovery_entry(info) || is_shell_owned_entry(info) {
+                continue;
+            }
+            // No stat from the scan: nothing honest to
+            // key a render on (and the light read would
+            // fail the same way) — no thumbnail.
+            let Some(mtime) = info.modified else {
+                continue;
+            };
+            if matches!(cache.get(&info.path), Some((at, _)) if *at == mtime) {
+                continue;
+            }
+            let image = render_thumbnail(&info.path);
+            cache.insert(info.path.clone(), (mtime, image));
+        }
+    }
+
+    /// The cached thumbnail for one row's scan entry, or
+    /// `None` when this file version has none: never
+    /// rendered (shell-owned rows are not built, and a
+    /// stale scan can name a file the fill skipped), a
+    /// cached render failure at this mtime, or an mtime
+    /// mismatch (the entry was scanned at a different
+    /// moment than the render — the next scan refill
+    /// regenerates). A pure cache read: this runs inside
+    /// the row builder, where rendering is forbidden by
+    /// the cost rule (see the module docs).
+    pub fn thumbnail_for(&self, info: &ProjectInfo) -> Option<rune::Image> {
+        let cache = self.thumb_cache.borrow();
+        match cache.get(&info.path) {
+            Some((at, image)) if Some(*at) == info.modified => image.clone(),
+            _ => None,
+        }
     }
 
     /// One project file's light metadata
@@ -339,18 +485,21 @@ impl HomePanelState {
         Some((figures, frames, size_bytes, modified))
     }
 
-    /// Drop both caches wholesale (Phase K): the next
-    /// render rescans the projects directory and re-reads
-    /// every row's light metadata from disk. Called after
-    /// a successful project delete — the caches are keyed
-    /// on mtimes (the directory's, then each file's), and
-    /// while a delete does move the directory mtime, the
-    /// per-file meta cache has no way to learn a file is
-    /// *gone*; dropping both is the only way to be sure a
+    /// Drop all three caches wholesale (Phase K; the
+    /// thumbnail cache joined in Wave 4): the next render
+    /// rescans the projects directory, re-reads every
+    /// row's light metadata from disk, and re-renders
+    /// thumbnails at that scan. Called after a successful
+    /// project delete — the caches are keyed on mtimes
+    /// (the directory's, then each file's), and while a
+    /// delete does move the directory mtime, the per-file
+    /// caches have no way to learn a file is *gone*;
+    /// dropping all three is the only way to be sure a
     /// deleted file never renders as a stale row.
     pub fn invalidate_caches(&self) {
         *self.scan_cache.borrow_mut() = None;
         self.meta_cache.borrow_mut().clear();
+        self.thumb_cache.borrow_mut().clear();
     }
 }
 
@@ -652,6 +801,82 @@ fn cached_meta(
     }
 }
 
+/// Thumbnail pixel width: the rows display at
+/// [`THUMB_W_PT`] points, so 112 px serves a 2x display
+/// at full density and a 1x display from the renderer's
+/// mips. The fixed small width is the audit's recipe
+/// (S06-8) and the contact sheet's shape: render big,
+/// shrink once, cache the small result.
+pub const THUMB_W_PX: u32 = 112;
+
+/// Thumbnail display width in a project row, points.
+/// The height follows the project's own stage aspect
+/// ([`thumb_el`]), so a 4:3 project shows a taller thumb
+/// than a 16:9 one — the shape on the card is the shape
+/// of the stage.
+pub const THUMB_W_PT: f32 = 56.0;
+
+/// Render one project file's frame 0 as a small Rune
+/// image — the scan-time half of the thumbnail feature
+/// (see the module docs). The file is fully loaded
+/// (`projects::load`), frame 0 is rasterised by the
+/// export renderer (`export::render_frame_at`, stage
+/// size ×2 supersample), converted to RGBA and shrunk
+/// with the Triangle filter to [`THUMB_W_PX`] wide —
+/// the contact sheet's exact recipe
+/// (`export::render_contact_sheet`). The bytes become a
+/// Rune image through `ImageCache::rgba` on a cache
+/// created for this fill; the decode is waited out
+/// (`Image::wait`) before that cache drops, and the
+/// returned handle owns the decoded pixels from then
+/// on, so the thumbnail outlives the cache.
+///
+/// `None` — cached by the caller as a failed render —
+/// when the file cannot be loaded, the project has no
+/// frames to render, the render comes back empty, or
+/// the image decode fails: a row without a thumbnail is
+/// the honest outcome for a file whose first frame
+/// cannot be drawn, never a placeholder.
+pub fn render_thumbnail(path: &Path) -> Option<rune::Image> {
+    let project = projects::load(path).ok()?;
+    if project.frames.is_empty() {
+        return None;
+    }
+    let frame = stykanimate_rs::export::render_frame_at(&project, 0.0);
+    let rgba = image::DynamicImage::ImageRgb8(frame).to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let thumb_h = ((THUMB_W_PX as f32 * h as f32 / w as f32).round() as u32).max(1);
+    let small = image::imageops::resize(
+        &rgba,
+        THUMB_W_PX,
+        thumb_h,
+        image::imageops::FilterType::Triangle,
+    );
+    let cache = rune::ImageCache::new(std::sync::Arc::new(|| {}));
+    let image = cache.rgba(THUMB_W_PX, thumb_h, small.into_raw());
+    image.wait().ok()?;
+    Some(image)
+}
+
+/// The row's thumbnail element: the cached image at
+/// [`THUMB_W_PT`] wide, its height taken from the
+/// image's own aspect (the stage's shape), clipped to a
+/// 6 pt radius. Built only when the row has a thumbnail
+/// ([`HomePanelState::thumbnail_for`]) — a row without
+/// one keeps the text-only anatomy exactly as before.
+fn thumb_el(image: &rune::Image) -> El {
+    let [w, h] = image.size().unwrap_or([THUMB_W_PX, THUMB_W_PX]);
+    let disp_h = THUMB_W_PT * h as f32 / w.max(1) as f32;
+    el()
+        .w(THUMB_W_PT)
+        .h(disp_h)
+        .radius(6.0)
+        .pixels(image.pixels())
+}
+
 /// The metadata line a row actually renders. When the
 /// light read ([`HomePanelState::metadata_for`]) produced
 /// figures/frames/size/modified for the row's file, those
@@ -811,8 +1036,8 @@ pub fn cancel_delete(panel: &mut HomePanelState) {
 /// ([`visible_projects`] filters them out), but the
 /// refusal is the backstop, and it lands here as the
 /// failure status with the confirm still armed and the
-/// row intact. On success the confirm clears, both
-/// caches are invalidated ([`HomePanelState::
+/// row intact. On success the confirm clears, all
+/// three caches are invalidated ([`HomePanelState::
 /// invalidate_caches`]) so the deleted row cannot
 /// reappear from a cached scan, and the status names
 /// the project. Only the file is removed: if it is the
@@ -837,6 +1062,140 @@ pub fn dispatch_delete_confirm(
         Err(e) => {
             core.status = format!("Delete failed: {e}");
         }
+    }
+}
+
+/// The Home library's rename session (UI mission
+/// Wave 4): which row's rename editor is open and the
+/// field's edit buffer. Homed on `State` (as
+/// `State::home_rename`), not in [`HomePanelState`] —
+/// the same reason `clips_rename` / `pose_rename` live
+/// on `State`: a `text_input`'s `on_edit` needs a
+/// `&mut TextEdit` path into `State`, so the session
+/// cannot ride inside the panel state the row builders
+/// only borrow. The struct itself is defined here, with
+/// the panel that drives it.
+#[derive(Clone, Debug, Default)]
+pub struct HomeRenameState {
+    /// The project file whose rename is armed: its row
+    /// renders the name field instead of its buttons.
+    /// `None` — the resting state — means no rename is
+    /// open. Set by a row's Rename button
+    /// ([`begin_rename`]); cleared by the cancel press,
+    /// by a successful rename, by opening a row, and by
+    /// any search edit — and arming a delete stands it
+    /// down in turn (one pending row action at a time:
+    /// both confirm lines carry index-free keys).
+    pub armed: Option<PathBuf>,
+    /// The in-progress name, loaded from the armed
+    /// project's stored name by [`begin_rename`].
+    pub edit: TextEdit,
+}
+
+impl HomeRenameState {
+    pub fn new() -> Self {
+        HomeRenameState {
+            armed: None,
+            edit: TextEdit::new(""),
+        }
+    }
+}
+
+/// True while `path` is the rename session's armed row
+/// ([`confirm_pending`]'s twin).
+pub fn rename_pending(rename: &HomeRenameState, path: &Path) -> bool {
+    rename.armed.as_deref() == Some(path)
+}
+
+/// Arm a row's rename (the Rename button's press):
+/// record the path and load the field with the
+/// project's current stored name, focused — the clips
+/// `begin_rename` shape. Nothing on disk changes until
+/// [`dispatch_rename`] runs.
+pub fn begin_rename(rename: &mut HomeRenameState, path: PathBuf, name: &str) {
+    let mut field = TextEdit::new(name.to_string());
+    field.focused = true;
+    rename.edit = field;
+    rename.armed = Some(path);
+}
+
+/// Stand a pending rename down (the rename line's
+/// Cancel press, and the clear that opening a row, a
+/// search edit, or arming a delete applies). The file
+/// is untouched, as it always is until a confirm.
+pub fn cancel_rename(rename: &mut HomeRenameState) {
+    rename.armed = None;
+}
+
+/// Carry out the armed rename: rename the armed row's
+/// file via `projects::rename_project` — the file-level
+/// rename that had no UI caller until now. The path
+/// comes from the session state, never from a row
+/// index, so a re-sorted or re-filtered list cannot
+/// redirect the rename onto another file
+/// ([`dispatch_delete_confirm`]'s discipline).
+///
+/// Reporting mirrors [`dispatch_duplicate`]: success
+/// and failure both land on the status line in the
+/// family's "{Verb} failed: {e}" / past-tense shapes.
+/// On success the session clears and all three caches
+/// are invalidated (the renamed file must re-scan under
+/// its new name); on failure the rename stays armed
+/// with the typed text intact, so the user can fix the
+/// name and press again. Returns whether the rename
+/// landed — the caller's cue for the one follow-up
+/// this fn deliberately does not perform: the recents
+/// re-touch lives in [`confirm_rename`], because
+/// `shell::touch_recent` writes the shared on-disk
+/// `./projects`, and this dispatch stays unit-testable
+/// against a temp dir (the suite's no-pollution rule —
+/// see the snap tests' note on `./projects`).
+///
+/// The backend caveat, stated in the success status
+/// itself: `rename_project` renames the FILE only — the
+/// name stored inside the project's JSON is unchanged
+/// until the project is next saved, so the row keeps
+/// showing the stored name; the status says exactly
+/// that rather than letting the row look unrenamed.
+pub fn dispatch_rename(
+    core: &mut EditorCore,
+    panel: &mut HomePanelState,
+    rename: &mut HomeRenameState,
+) -> bool {
+    let Some(path) = rename.armed.clone() else {
+        return false;
+    };
+    let new_name = rename.edit.text.trim().to_string();
+    match projects::rename_project(&path, &new_name) {
+        Ok(new_path) => {
+            rename.armed = None;
+            panel.invalidate_caches();
+            let file = new_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            core.status = format!(
+                "Renamed project file to {file}. The name stored inside the file updates when the project is saved."
+            );
+            true
+        }
+        Err(e) => {
+            core.status = format!("Rename failed: {e}");
+            false
+        }
+    }
+}
+
+/// The rename line's confirm press (and Enter in its
+/// field) at the `State` level: run [`dispatch_rename`]
+/// and, only on success, re-touch the recents list
+/// with the new name — recents are name-keyed, and the
+/// renamed file should head the list the File menu and
+/// the reopen action read.
+fn confirm_rename(s: &mut State) {
+    let new_name = s.home_rename.edit.text.trim().to_string();
+    if dispatch_rename(&mut s.core, &mut s.home_panel, &mut s.home_rename) {
+        shell::touch_recent(&new_name);
     }
 }
 
@@ -867,6 +1226,74 @@ pub fn dispatch_new(core: &mut EditorCore) {
     core.project = Project::new_demo();
     reset_session(core);
     core.status = "New project.".into();
+}
+
+// ---- Session-discard gates (UI mission Wave 4, audit
+// ---- S16 D2): the State-level press handlers for the
+// ---- session-replacing controls this panel owns. Each
+// ---- follows the ConfirmAction contract: while the
+// ---- session is dirty (project_tools::session_dirty)
+// ---- the first press arms and only the second — on
+// ---- the danger re-render of the same button — runs.
+
+/// One row's Open press, and the reopen quick action's:
+/// stand down the row-level pending actions, then run
+/// the open through the `OpenProject` arm. Opening is a
+/// session replace ([`dispatch_open`] swaps the project
+/// through the core's open flow), so a dirty session
+/// arms first — the audit's D2 names Home's opens
+/// alongside project-tools'.
+fn open_row_pressed(s: &mut State, path: &Path, name: &str) {
+    // Opening a row stands down any pending delete
+    // confirm (Phase K) and any pending rename: the
+    // armed row's rendering is about to be replaced.
+    cancel_delete(&mut s.home_panel);
+    cancel_rename(&mut s.home_rename);
+    if s.confirm_action != Some(ConfirmAction::OpenProject) && session_dirty(&s.core) {
+        s.confirm_action = Some(ConfirmAction::OpenProject);
+        s.core.status =
+            "Opening a project would discard unsaved changes — press Open again to confirm."
+                .into();
+        return;
+    }
+    s.confirm_action = None;
+    dispatch_open(&mut s.core, path, name);
+}
+
+/// The "New project" button's press: [`dispatch_new`]
+/// through the `NewProject` arm — Home's New replaces
+/// the session exactly as project-tools' does, so it
+/// carries the same gate.
+fn new_project_pressed(s: &mut State) {
+    if s.confirm_action != Some(ConfirmAction::NewProject) && session_dirty(&s.core) {
+        s.confirm_action = Some(ConfirmAction::NewProject);
+        s.core.status =
+            "New project would discard unsaved changes — press New again to confirm.".into();
+        return;
+    }
+    s.confirm_action = None;
+    dispatch_new(&mut s.core);
+}
+
+/// The recovery banner's Recover press:
+/// [`dispatch_recover`] through the `RecoverSnapshot`
+/// arm (audit S06-3 — both Recover buttons route
+/// through the arm/confirm pattern). The banner only
+/// renders while the S06-2 offer holds, so the gate is
+/// the arm alone; a confirming (or clean) press runs
+/// the recover and clears the offer, as the unguarded
+/// press did.
+fn recover_banner_pressed(s: &mut State) {
+    if s.confirm_action != Some(ConfirmAction::RecoverSnapshot) && session_dirty(&s.core) {
+        s.confirm_action = Some(ConfirmAction::RecoverSnapshot);
+        s.core.status =
+            "Recovering the snapshot would discard unsaved changes — press Recover again to confirm."
+                .into();
+        return;
+    }
+    s.confirm_action = None;
+    dispatch_recover(&mut s.core);
+    s.home_panel.recovery_offer = false;
 }
 
 /// Flip the panel open/closed (the "Home" toggle's
@@ -990,9 +1417,15 @@ fn initial_state_for(decision: StartupRecovery) -> HomePanelState {
 /// The recovery banner: shown only while
 /// [`HomePanelState::recovery_offer`] holds (the verdict
 /// captured at open time). Recover runs the real snapshot
-/// load and clears the offer.
-fn recovery_banner(t: &Theme) -> El {
+/// load and clears the offer — through the
+/// `RecoverSnapshot` arm while the session is dirty
+/// (UI mission Wave 4, audit S06-3): `armed` swaps the
+/// button for its danger re-render under the same key,
+/// and the confirming press is [`recover_banner_pressed`]
+/// again.
+fn recovery_banner(s: &State, t: &Theme) -> El {
     let accent = tok::accent(0, true);
+    let armed = s.confirm_action == Some(ConfirmAction::RecoverSnapshot);
     row()
         .key("home-recovery")
         .w_full()
@@ -1008,14 +1441,17 @@ fn recovery_banner(t: &Theme) -> El {
                 .color(t.text)
                 .grow(1.0),
         )
-        .child(btn("recover", "Recover", false, t, |s: &mut State| {
-            dispatch_recover(&mut s.core);
-            s.home_panel.recovery_offer = false;
-        }))
+        .child(if armed {
+            danger_btn("recover", "Discard changes?", t, recover_banner_pressed)
+        } else {
+            btn("recover", "Recover", false, t, recover_banner_pressed)
+        })
 }
 
-/// One project row: name + real metadata on the left,
-/// Open / Duplicate / Delete on the right. Keys carry the GPUI
+/// One project row: the scan-time thumbnail (Wave 4,
+/// when this file version has one), then name + real
+/// metadata on the left, Open / Duplicate / Delete on
+/// the right. Keys carry the GPUI
 /// tuple ids as strings (`home-open-{i}`, `home-dup-{i}`,
 /// `home-proj-del-{i}`),
 /// matching the `frame-{n}` key style `chrome_view` uses.
@@ -1029,8 +1465,9 @@ fn project_row(
     i: usize,
     t: &Theme,
     meta: Option<(usize, usize, u64, SystemTime)>,
+    thumb: Option<rune::Image>,
 ) -> El {
-    project_row_confirm(info, i, t, meta, false)
+    project_row_confirm(info, i, t, meta, false, thumb)
 }
 
 /// [`project_row`] with the Phase K delete state: while
@@ -1049,8 +1486,9 @@ fn project_row_confirm(
     t: &Theme,
     meta: Option<(usize, usize, u64, SystemTime)>,
     confirming: bool,
+    thumb: Option<rune::Image>,
 ) -> El {
-    project_row_marked(info, i, t, meta, confirming, false)
+    project_row_marked(info, i, t, meta, confirming, false, thumb, false, None, false)
 }
 
 /// [`project_row_confirm`] with the Phase N current
@@ -1061,6 +1499,17 @@ fn project_row_confirm(
 /// fill, and the armed confirm line renders on that
 /// same selected fill (P10's selected-for-danger read)
 /// with the family's [`danger_btn`] as its confirm.
+///
+/// UI mission Wave 4 adds the row's two pending states:
+/// `renaming` (this row's path is the rename session's
+/// armed path, [`rename_pending`]) renders the row
+/// instead as the rename line — the name field
+/// (`rename_edit`, the session's buffer, passed
+/// alongside because the row builders borrow no
+/// `State`) with its confirm/cancel — and `open_armed`
+/// (a session discard is armed on Open) re-renders the
+/// Open button as its danger form under the same key.
+#[allow(clippy::too_many_arguments)]
 fn project_row_marked(
     info: &ProjectInfo,
     i: usize,
@@ -1068,7 +1517,49 @@ fn project_row_marked(
     meta: Option<(usize, usize, u64, SystemTime)>,
     confirming: bool,
     selected: bool,
+    thumb: Option<rune::Image>,
+    renaming: bool,
+    rename_edit: Option<&TextEdit>,
+    open_armed: bool,
 ) -> El {
+    if renaming {
+        if let Some(edit) = rename_edit {
+            return design::list_row(&format!("home-row-{i}"), selected, t)
+                .w_full()
+                .child(
+                    text_input(edit, type_::BODY.lh(26.0))
+                        .key("home-proj-rename-field")
+                        .single_line()
+                        .grow(1.0)
+                        .color(t.text)
+                        .on_edit(|s: &mut State| &mut s.home_rename.edit)
+                        .on_submit(|s: &mut State, _tx: &mut Tx| {
+                            confirm_rename(s);
+                        }),
+                )
+                .child(btn(
+                    "home-proj-rename-confirm",
+                    "Rename",
+                    false,
+                    t,
+                    |s: &mut State| {
+                        confirm_rename(s);
+                    },
+                ))
+                .child(btn(
+                    "home-proj-rename-cancel",
+                    "Cancel",
+                    false,
+                    t,
+                    |s: &mut State| {
+                        cancel_rename(&mut s.home_rename);
+                    },
+                ));
+        }
+        // `renaming` without the buffer cannot be built
+        // honestly (the home_panel loop always pairs
+        // them); fall through to the ordinary row.
+    }
     if confirming {
         let name = info.name.clone();
         let confirm_name = info.name.clone();
@@ -1100,13 +1591,24 @@ fn project_row_marked(
     }
     let open_key = format!("home-open-{i}");
     let dup_key = format!("home-dup-{i}");
+    let rename_key = format!("home-proj-rename-{i}");
     let del_key = format!("home-proj-del-{i}");
     let path = info.path.clone();
     let dup_path = info.path.clone();
+    let rename_path = info.path.clone();
     let del_path = info.path.clone();
     let name = info.name.clone();
-    design::list_row(&format!("home-row-{i}"), selected, t)
-        .w_full()
+    let rename_name = info.name.clone();
+    // The thumbnail (Wave 4) leads the row when the
+    // scan-time render produced one for this file
+    // version; without one the row keeps its text-only
+    // anatomy. The confirm line above never carries
+    // one — it replaces the row's content wholesale.
+    let mut row_el = design::list_row(&format!("home-row-{i}"), selected, t).w_full();
+    if let Some(image) = &thumb {
+        row_el = row_el.child(thumb_el(image));
+    }
+    row_el
         .child(
             col()
                 .gap(2.0)
@@ -1119,18 +1621,41 @@ fn project_row_marked(
                         .color(t.text_secondary),
                 ),
         )
-        .child(icon_btn(&open_key, "folder-open", "Open", false, t, move |s: &mut State| {
-            // Opening a row stands down any pending
-            // delete confirm (Phase K): the armed row is
-            // never this one — an armed row renders its
-            // confirm line instead of an Open button.
-            cancel_delete(&mut s.home_panel);
-            dispatch_open(&mut s.core, &path, &name);
-        }))
+        .child(if open_armed {
+            danger_icon_btn(&open_key, "folder-open", "Discard changes?", false, t, move |s: &mut State| {
+                open_row_pressed(s, &path, &name);
+            })
+        } else {
+            icon_btn(&open_key, "folder-open", "Open", false, t, move |s: &mut State| {
+                // Opening a row stands down any pending
+                // delete confirm (Phase K): the armed row is
+                // never this one — an armed row renders its
+                // confirm line instead of an Open button.
+                // The press itself runs through the
+                // session-discard gate (Wave 4).
+                open_row_pressed(s, &path, &name);
+            })
+        })
         .child(btn(&dup_key, "Duplicate", false, t, move |s: &mut State| {
             dispatch_duplicate(&mut s.core, &dup_path);
         }))
+        .child(btn(&rename_key, "Rename", false, t, move |s: &mut State| {
+            // Arming a rename replaces this row's
+            // rendering, so it stands down the panel's
+            // other pending actions: a delete confirm
+            // (one index-free confirm line at a time)
+            // and any armed session discard.
+            cancel_delete(&mut s.home_panel);
+            s.confirm_action = None;
+            begin_rename(&mut s.home_rename, rename_path.clone(), &rename_name);
+        }))
         .child(btn(&del_key, "Delete", false, t, move |s: &mut State| {
+            // Arming a delete likewise stands down a
+            // pending rename and any armed session
+            // discard (the confirm_delete discipline,
+            // extended to the panel's newer sessions).
+            cancel_rename(&mut s.home_rename);
+            s.confirm_action = None;
             arm_delete(&mut s.home_panel, del_path.clone());
         }))
 }
@@ -1169,19 +1694,36 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
     if let Some(target) = reopen {
         let path = target.path.clone();
         let name = target.name.clone();
-        card = card.child(icon_btn(
-            "home-reopen-last",
-            "arrow-rotate-right",
-            &reopen_label(target),
-            true,
-            t,
-            move |s: &mut State| {
-                // Reopening is an open: it stands down
-                // any pending delete confirm (Phase K).
-                cancel_delete(&mut s.home_panel);
-                dispatch_open(&mut s.core, &path, &name);
-            },
-        ));
+        // Reopening is an open: it stands down any
+        // pending delete confirm (Phase K) and runs
+        // through the session-discard gate (Wave 4) —
+        // while that gate is armed on Open, the button
+        // re-renders as its danger form under the same
+        // key, with the plain label replaced by the
+        // discard it would confirm.
+        if s.confirm_action == Some(ConfirmAction::OpenProject) {
+            card = card.child(danger_icon_btn(
+                "home-reopen-last",
+                "arrow-rotate-right",
+                "Discard changes?",
+                true,
+                t,
+                move |s: &mut State| {
+                    open_row_pressed(s, &path, &name);
+                },
+            ));
+        } else {
+            card = card.child(icon_btn(
+                "home-reopen-last",
+                "arrow-rotate-right",
+                &reopen_label(target),
+                true,
+                t,
+                move |s: &mut State| {
+                    open_row_pressed(s, &path, &name);
+                },
+            ));
+        }
     }
     card = card.child(
         design::header_row("home-header")
@@ -1191,13 +1733,15 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
                 None,
                 t,
             ))
-            .child(icon_btn("home-new", "file", "New project", false, t, |s: &mut State| {
-                dispatch_new(&mut s.core);
-            })),
+            .child(if s.confirm_action == Some(ConfirmAction::NewProject) {
+                danger_icon_btn("home-new", "file", "Discard changes?", false, t, new_project_pressed)
+            } else {
+                icon_btn("home-new", "file", "New project", false, t, new_project_pressed)
+            }),
     );
     card = card.child(design::divider(t));
     if home.recovery_offer {
-        card = card.child(recovery_banner(t));
+        card = card.child(recovery_banner(s, t));
     }
     card = card.child(
         row()
@@ -1217,9 +1761,15 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
                     // Any search edit stands down a
                     // pending delete confirm (Phase K):
                     // the row list is about to change
-                    // under the armed row.
+                    // under the armed row. The rename
+                    // session and any armed session
+                    // discard stand down with it (Wave 4):
+                    // both are rendered against the list
+                    // the edit is about to change.
                     .on_input_change(|s: &mut State, _tx: &mut Tx| {
                         cancel_delete(&mut s.home_panel);
+                        cancel_rename(&mut s.home_rename);
+                        s.confirm_action = None;
                     }),
             )
             .child(design::section_label(
@@ -1275,8 +1825,32 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
                 metas.push((figures, frames));
             }
             let confirming = confirm_pending(home, &info.path);
+            let renaming = rename_pending(&s.home_rename, &info.path);
+            // The rename line's field buffer, paired
+            // with `renaming` (the row builder borrows
+            // no State, so the loop hands it over).
+            let rename_edit = if renaming {
+                Some(&s.home_rename.edit)
+            } else {
+                None
+            };
+            let open_armed = s.confirm_action == Some(ConfirmAction::OpenProject);
             let selected = is_current_project(info, current_path);
-            rows = rows.child(project_row_marked(info, i, t, meta, confirming, selected));
+            // A cache read only — the render itself
+            // happened at scan time (see `projects`).
+            let thumb = home.thumbnail_for(info);
+            rows = rows.child(project_row_marked(
+                info,
+                i,
+                t,
+                meta,
+                confirming,
+                selected,
+                thumb,
+                renaming,
+                rename_edit,
+                open_armed,
+            ));
         }
         card = card.child(rows);
         // Inside the non-empty branch on purpose: with
@@ -1712,10 +2286,10 @@ mod tests {
         // fallback must never cost the row itself.
         let t = tok::theme(true);
         let entry = info("Demo", "projects/demo.json");
-        let _ = project_row(&entry, 0, &t, None);
+        let _ = project_row(&entry, 0, &t, None, None);
         let stamp =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426);
-        let _ = project_row(&entry, 0, &t, Some((3, 12, 1_500, stamp)));
+        let _ = project_row(&entry, 0, &t, Some((3, 12, 1_500, stamp)), None);
     }
 
     #[test]
@@ -1761,8 +2335,8 @@ mod tests {
         // armed row's confirm line both construct.
         let t = tok::theme(true);
         let entry = info("Demo", "projects/demo.json");
-        let _ = project_row_confirm(&entry, 0, &t, None, false);
-        let _ = project_row_confirm(&entry, 0, &t, None, true);
+        let _ = project_row_confirm(&entry, 0, &t, None, false, None);
+        let _ = project_row_confirm(&entry, 0, &t, None, true, None);
     }
 
     #[test]
@@ -1797,9 +2371,15 @@ mod tests {
         // confirm line constructs on the marked shell.
         let t = tok::theme(true);
         let entry = info("Demo", "projects/demo.json");
-        let _ = project_row_marked(&entry, 0, &t, None, false, false);
-        let _ = project_row_marked(&entry, 0, &t, None, false, true);
-        let _ = project_row_marked(&entry, 0, &t, None, true, true);
+        let _ = project_row_marked(&entry, 0, &t, None, false, false, None, false, None, false);
+        let _ = project_row_marked(&entry, 0, &t, None, false, true, None, false, None, false);
+        let _ = project_row_marked(&entry, 0, &t, None, true, true, None, false, None, false);
+        // The Wave 4 states construct too: the rename
+        // line (with its field buffer) and the armed
+        // Open re-render.
+        let edit = TextEdit::new("Demo");
+        let _ = project_row_marked(&entry, 0, &t, None, false, false, None, true, Some(&edit), false);
+        let _ = project_row_marked(&entry, 0, &t, None, false, false, None, false, None, true);
     }
 
     #[test]
@@ -1854,6 +2434,148 @@ mod tests {
         let mut core = EditorCore::new();
         dispatch_duplicate(&mut core, Path::new("projects/does-not-exist.json"));
         assert!(core.status.starts_with("Duplicate failed:"), "{}", core.status);
+    }
+
+    #[test]
+    fn begin_and_cancel_rename_track_the_armed_row() {
+        let mut rename = HomeRenameState::new();
+        assert_eq!(rename.armed, None);
+        assert!(!rename_pending(&rename, Path::new("projects/demo.json")));
+        begin_rename(&mut rename, PathBuf::from("projects/demo.json"), "Demo");
+        assert!(rename_pending(&rename, Path::new("projects/demo.json")));
+        assert!(!rename_pending(&rename, Path::new("projects/other.json")));
+        // The field opens loaded with the stored name
+        // and focused (the clips begin_rename shape).
+        assert_eq!(rename.edit.text, "Demo");
+        assert!(rename.edit.focused);
+        cancel_rename(&mut rename);
+        assert_eq!(rename.armed, None);
+        // Cancelling with nothing armed is a no-op.
+        cancel_rename(&mut rename);
+        assert_eq!(rename.armed, None);
+    }
+
+    #[test]
+    fn dispatch_rename_with_nothing_armed_changes_nothing() {
+        let mut core = EditorCore::new();
+        core.status = "Sentinel.".into();
+        let mut panel = HomePanelState::default();
+        let mut rename = HomeRenameState::new();
+        assert!(!dispatch_rename(&mut core, &mut panel, &mut rename));
+        assert_eq!(core.status, "Sentinel.");
+    }
+
+    #[test]
+    fn dispatch_rename_renames_the_file_and_reports_the_caveat() {
+        // A real file in a real temp dir: the rename
+        // lands on disk under the new name's slug, the
+        // session disarms, the caches drop for the
+        // re-scan, and the status names the new file —
+        // plus the stored-name caveat, honestly.
+        let dir = temp_dir("rename");
+        let path = dir.join("demo.json");
+        std::fs::write(&path, project_json(1, 1)).unwrap();
+        let mut panel = HomePanelState::default();
+        *panel.scan_cache.borrow_mut() =
+            Some((None, vec![info("Demo", "projects/demo.json")]));
+        let mut rename = HomeRenameState::new();
+        begin_rename(&mut rename, path.clone(), "Demo");
+        rename.edit.replace_text("My Film".to_string());
+        let mut core = EditorCore::new();
+        assert!(dispatch_rename(&mut core, &mut panel, &mut rename));
+        assert!(!path.exists(), "the old file is gone");
+        assert!(dir.join("my-film.json").exists(), "renamed to the new slug");
+        assert_eq!(rename.armed, None, "success disarms");
+        assert!(panel.scan_cache.borrow().is_none(), "scan cache dropped");
+        assert_eq!(
+            core.status,
+            "Renamed project file to my-film.json. The name stored inside the file updates when the project is saved."
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dispatch_rename_refuses_a_taken_name_and_stays_armed() {
+        // The AlreadyExists refusal (projects.rs): the
+        // status carries it, both files stay put, and
+        // the rename stays armed with the typed text so
+        // the user can adjust and press again.
+        let dir = temp_dir("rename-taken");
+        let path = dir.join("demo.json");
+        let taken = dir.join("my-film.json");
+        std::fs::write(&path, project_json(1, 1)).unwrap();
+        std::fs::write(&taken, project_json(1, 1)).unwrap();
+        let mut panel = HomePanelState::default();
+        let mut rename = HomeRenameState::new();
+        begin_rename(&mut rename, path.clone(), "Demo");
+        rename.edit.replace_text("My Film".to_string());
+        let mut core = EditorCore::new();
+        assert!(!dispatch_rename(&mut core, &mut panel, &mut rename));
+        assert!(core.status.starts_with("Rename failed:"), "{}", core.status);
+        assert!(core.status.contains("already exists"), "{}", core.status);
+        assert!(rename_pending(&rename, &path), "failure keeps the rename armed");
+        assert_eq!(rename.edit.text, "My Film", "the typed name survives");
+        assert!(path.exists() && taken.exists(), "both files untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dispatch_rename_rejects_a_name_with_no_file_slug() {
+        // A whitespace-only name slugs to nothing:
+        // rename_project's InvalidInput refusal, in the
+        // family's failure shape.
+        let dir = temp_dir("rename-empty");
+        let path = dir.join("demo.json");
+        std::fs::write(&path, project_json(1, 1)).unwrap();
+        let mut panel = HomePanelState::default();
+        let mut rename = HomeRenameState::new();
+        begin_rename(&mut rename, path.clone(), "Demo");
+        rename.edit.replace_text("   ".to_string());
+        let mut core = EditorCore::new();
+        assert!(!dispatch_rename(&mut core, &mut panel, &mut rename));
+        assert!(core.status.starts_with("Rename failed:"), "{}", core.status);
+        assert!(path.exists(), "the file is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn home_new_arms_first_while_dirty_then_confirms() {
+        // UI mission Wave 4 (S16 D2): the gate handlers
+        // run on a full State (crate::init's, the
+        // command-palette tests' precedent).
+        let mut s = crate::init();
+        s.core.project.name = "Unsaved Work".into();
+        s.core.snapshot();
+        new_project_pressed(&mut s);
+        assert_eq!(s.confirm_action, Some(ConfirmAction::NewProject));
+        assert_eq!(s.core.project.name, "Unsaved Work", "first press only arms");
+        new_project_pressed(&mut s);
+        assert_eq!(s.confirm_action, None, "confirm clears the arm");
+        assert_eq!(s.core.status, "New project.", "second press runs the swap");
+    }
+
+    #[test]
+    fn home_open_arms_first_while_dirty() {
+        let mut s = crate::init();
+        let before = s.core.project.name.clone();
+        s.core.snapshot();
+        open_row_pressed(&mut s, Path::new("projects/demo.json"), "Demo");
+        assert_eq!(s.confirm_action, Some(ConfirmAction::OpenProject));
+        assert_eq!(s.core.project.name, before, "arming does not open anything");
+        assert!(s.core.status.contains("press Open again"), "{}", s.core.status);
+    }
+
+    #[test]
+    fn banner_recover_arms_first_while_dirty() {
+        let mut s = crate::init();
+        s.home_panel.recovery_offer = true;
+        s.core.snapshot();
+        recover_banner_pressed(&mut s);
+        assert_eq!(s.confirm_action, Some(ConfirmAction::RecoverSnapshot));
+        assert!(s.home_panel.recovery_offer, "arming keeps the banner up");
+        recover_banner_pressed(&mut s);
+        assert_eq!(s.confirm_action, None, "confirm clears the arm");
+        assert!(!s.home_panel.recovery_offer, "the confirming press clears the offer");
     }
 
     /// Pin a file's modification time (the std handle API,
@@ -2015,20 +2737,26 @@ mod tests {
     fn dispatch_delete_confirm_removes_a_real_file_and_clears_state() {
         // A real file in a real temp dir (the metadata
         // tests' precedent): the confirm press removes
-        // it, clears the armed path, drops BOTH caches —
-        // a stale row must never render — and reports
-        // the deletion by the project's display name.
+        // it, clears the armed path, drops all three
+        // caches — a stale row must never render — and
+        // reports the deletion by the project's display
+        // name.
         let dir = temp_dir("delete-confirm");
         let path = dir.join("demo.json");
         std::fs::write(&path, project_json(1, 1)).unwrap();
         let mut panel = HomePanelState::default();
-        // Seed both caches as earlier renders would have.
+        // Seed all three caches as earlier renders would
+        // have.
         *panel.scan_cache.borrow_mut() =
             Some((None, vec![info("Demo", "projects/demo.json")]));
         panel
             .meta_cache
             .borrow_mut()
             .insert(path.clone(), (SystemTime::UNIX_EPOCH, 1, 1, 0));
+        panel
+            .thumb_cache
+            .borrow_mut()
+            .insert(path.clone(), (SystemTime::UNIX_EPOCH, None));
         arm_delete(&mut panel, path.clone());
         let mut core = EditorCore::new();
         dispatch_delete_confirm(&mut core, &mut panel, "Demo");
@@ -2042,6 +2770,136 @@ mod tests {
         assert!(
             panel.meta_cache.borrow().is_empty(),
             "meta cache dropped"
+        );
+        assert!(
+            panel.thumb_cache.borrow().is_empty(),
+            "thumbnail cache dropped"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Write a real, renderable project file — the demo
+    /// project serialised, the shape `projects::load`
+    /// parses back — and return its path and the mtime
+    /// the filesystem reports for it (the value a scan
+    /// entry for this file would carry).
+    fn write_demo_project(dir: &Path, file: &str) -> (PathBuf, SystemTime) {
+        let path = dir.join(file);
+        let json = serde_json::to_string(&Project::new_demo()).unwrap();
+        std::fs::write(&path, json).unwrap();
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        (path, mtime)
+    }
+
+    /// A scan entry for `path` carrying the given mtime,
+    /// in the shape `projects::scan` would report it.
+    fn scan_entry(name: &str, path: &Path, mtime: Option<SystemTime>) -> ProjectInfo {
+        ProjectInfo {
+            name: name.into(),
+            path: path.to_path_buf(),
+            figures: 1,
+            frames: 5,
+            fps: 12.0,
+            modified: mtime,
+        }
+    }
+
+    #[test]
+    fn render_thumbnail_renders_frame_zero_at_the_fixed_width() {
+        // The generation half of the feature, end to end:
+        // a real project file renders to a real Rune
+        // image at the recipe's fixed width (the height
+        // keeps the demo stage's aspect — the exact value
+        // is the stage's business, only its positivity
+        // and the width are pinned here).
+        let dir = temp_dir("thumb-render");
+        let (path, _mtime) = write_demo_project(&dir, "demo.json");
+        let image = render_thumbnail(&path).expect("the demo project renders");
+        let [w, h] = image.size().expect("a waited image knows its size");
+        assert_eq!(w, THUMB_W_PX);
+        assert!(h >= 1, "the thumbnail has a real height");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_thumbnail_fails_honestly_for_missing_and_unparseable_files() {
+        // No file and no parse both yield no thumbnail —
+        // never a placeholder, never a panic.
+        let dir = temp_dir("thumb-fail");
+        assert!(render_thumbnail(&dir.join("gone.json")).is_none());
+        let junk = dir.join("junk.json");
+        std::fs::write(&junk, b"not json").unwrap();
+        assert!(render_thumbnail(&junk).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thumbnail_fill_and_serve_follow_the_scan_mtime() {
+        // The cache discipline, end to end: nothing is
+        // served before a fill; after a fill the render
+        // is served for the entry whose mtime it was made
+        // at; a refill at the same mtime keeps the same
+        // handle (no re-render); an entry whose mtime has
+        // moved — or which carries no stat at all — is
+        // served nothing.
+        let dir = temp_dir("thumb-cache");
+        let (path, mtime) = write_demo_project(&dir, "demo.json");
+        let entry = scan_entry("Demo", &path, Some(mtime));
+        let state = HomePanelState::default();
+        assert!(state.thumbnail_for(&entry).is_none());
+        state.fill_thumbnails(std::slice::from_ref(&entry));
+        let image = state
+            .thumbnail_for(&entry)
+            .expect("the fill's render is served");
+        assert_eq!(image.size().map(|s| s[0]), Some(THUMB_W_PX));
+        let id = image.id();
+        state.fill_thumbnails(std::slice::from_ref(&entry));
+        assert_eq!(
+            state.thumbnail_for(&entry).map(|im| im.id()),
+            Some(id),
+            "same mtime: the cached handle is kept, not re-rendered"
+        );
+        let moved = scan_entry(
+            "Demo",
+            &path,
+            Some(mtime + std::time::Duration::from_secs(60)),
+        );
+        assert!(state.thumbnail_for(&moved).is_none());
+        let nostat = scan_entry("Demo", &path, None);
+        assert!(state.thumbnail_for(&nostat).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thumbnail_fill_skips_shell_owned_and_caches_failures() {
+        // The recovery snapshot — a fully renderable
+        // project file — is never thumbnailed: it is not
+        // a library row. An unparseable file's failure is
+        // cached as `None` at its mtime, so the fill does
+        // not re-render it on every scan. And a scan that
+        // stops listing a file drops its handle.
+        let dir = temp_dir("thumb-skip");
+        let (recovery_path, mtime) = write_demo_project(&dir, shell::RECOVERY_FILE);
+        let recovery = scan_entry("Untitled", &recovery_path, Some(mtime));
+        let junk = dir.join("junk.json");
+        std::fs::write(&junk, b"not json").unwrap();
+        let junk_mtime = std::fs::metadata(&junk).unwrap().modified().unwrap();
+        let junk_entry = scan_entry("Junk", &junk, Some(junk_mtime));
+        let state = HomePanelState::default();
+        state.fill_thumbnails(&[recovery, junk_entry.clone()]);
+        assert!(
+            !state.thumb_cache.borrow().contains_key(&recovery_path),
+            "shell-owned files get no thumbnail entry"
+        );
+        assert!(
+            matches!(state.thumb_cache.borrow().get(&junk), Some((_, None))),
+            "the failed render is cached as None"
+        );
+        assert!(state.thumbnail_for(&junk_entry).is_none());
+        state.fill_thumbnails(&[]);
+        assert!(
+            state.thumb_cache.borrow().is_empty(),
+            "an unlisted file's handle is dropped by the fill"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

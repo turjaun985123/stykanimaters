@@ -25,10 +25,12 @@
 //!   at the current frame carrying the pan/zoom/angle already
 //!   in effect — exactly "set key here".
 //! * Clear key → `camera_clear_key` (editor.rs:544)
-//! * Key-list row → `goto` (editor.rs:681); its Clear button →
-//!   `goto(frame)` then `camera_clear_key()`, because the op
-//!   removes the key at the *current* frame only — see
-//!   [`clear_key_at`].
+//! * Key-list row → `goto` (editor.rs:681); its Delete button →
+//!   [`delete_camera_key_at`] at the row's own frame (UI
+//!   mission wave 4, audit s15 I-6: it used to compose
+//!   `goto(frame)` + `camera_clear_key()` — non-undoable, and
+//!   it dragged the playhead to the cleared frame; the
+//!   button's key, `cam-key-clear-{f}`, is unchanged).
 //! * Key-list Prev/Next → `goto` the nearest key frame
 //!   strictly before/after the current frame ([`prev_key_frame`]
 //!   / [`next_key_frame`] over `Project::camera`); with no
@@ -60,7 +62,12 @@
 //!   `remove_camera_key`. Distinct from Clear key above:
 //!   `camera_clear_key` never snapshots, so its clear
 //!   cannot be undone, and it only ever names the current
-//!   frame.
+//!   frame. UI mission wave 4 (audit s15 D2/I-6): the
+//!   labels now say so — Clear key reads "Clear key
+//!   (no undo)", and the key list's per-row button runs
+//!   this same undoable delete under the label "Delete",
+//!   so the panel's two removal verbs are Delete
+//!   (undoable, playhead stays) and Clear (not undoable).
 //! * Follow → `toggle_camera_follow` (editor.rs:1740); its
 //!   active state is `project.camera_follow ==
 //!   Some(selected_figure)` (model.rs:699), the same condition
@@ -261,23 +268,14 @@ pub fn key_rows(core: &EditorCore) -> Vec<CamKeyRow> {
     rows
 }
 
-/// Clear the camera key at `frame` (the key list's per-row
-/// Clear button), as a composition of two public ops:
-/// `camera_clear_key` removes the key at the *current* frame
-/// only (`remove_camera_key(self.current)`, editor.rs:544),
-/// so this goes to the key's frame first (`goto`,
-/// editor.rs:681) and then clears. Two honest consequences:
-/// the playhead ends on the cleared key's frame, and — since
-/// `camera_clear_key` never snapshots — the clear is not
-/// undoable (pre-existing engine behaviour, unchanged here).
-/// If `frame` lies past the end of the timeline (a stale key
-/// whose frames were deleted), `goto` no-ops and the clear
-/// lands on the current frame instead, where the op reports
-/// "No camera key on this frame." unless one exists there.
-pub fn clear_key_at(core: &mut EditorCore, frame: usize) {
-    core.goto(frame);
-    core.camera_clear_key();
-}
+// The key list's per-row removal used to live here as
+// `clear_key_at` — a `goto(frame)` + `camera_clear_key()`
+// composition (non-undoable, and it moved the playhead to
+// the cleared frame). UI mission wave 4 (audit s15 I-6)
+// retired it: the row button now calls
+// `delete_camera_key_at` directly, and no other caller
+// existed (grep-verified). The engine op itself survives
+// behind the key row's "Clear key (no undo)" button.
 
 // ----------------------------------------------------------------
 // Key navigation + copy/paste
@@ -467,16 +465,18 @@ pub fn hold_camera(core: &mut EditorCore) {
 // ----------------------------------------------------------------
 
 /// Delete the camera key at `frame` — the undoable delete,
-/// behind the panel's Delete key button (which passes the
-/// current frame).
+/// behind both of the panel's Delete buttons: the key-row
+/// Delete key (which passes the current frame) and each
+/// key-list row's Delete (which passes the row's frame;
+/// UI mission wave 4, audit s15 I-6).
 ///
-/// This is the third deletion path in the panel, and the
-/// only one that can be undone: `camera_clear_key`
-/// (editor.rs) removes the key at the *current* frame and
-/// never snapshots, so its clear is lost to undo, and
-/// [`clear_key_at`] composes `goto` + that op for the key
-/// list's per-row Clear, inheriting both limits (the
-/// playhead moves; no undo). This fn takes the frame
+/// This is the panel's only undoable removal path, and —
+/// since wave 4 retired the row's old `goto` +
+/// `camera_clear_key` composition — its only per-row one:
+/// `camera_clear_key` (editor.rs) survives solely behind
+/// the key row's "Clear key (no undo)" button, removing
+/// the key at the *current* frame without a snapshot, so
+/// its clear is lost to undo. This fn takes the frame
 /// directly, never moves the playhead, and is exactly one
 /// undo step.
 ///
@@ -784,11 +784,12 @@ fn angle_readout(core: &EditorCore, t: &Theme) -> El {
 /// current frame), then one row per key — a goto button
 /// labelled with the key's frame, zoom and angle on a kit
 /// list-row shell (selected-filled when the key is on the
-/// current frame), plus a per-row Clear button (the
-/// goto-then-clear composition
-/// in [`clear_key_at`]). With no keys, an explanatory empty
-/// line instead of rows; the nav/clipboard rows stay, since
-/// Paste is exactly how a first key can arrive.
+/// current frame), plus a per-row Delete button
+/// ([`delete_camera_key_at`] at the row's frame —
+/// undoable, and the playhead stays put). With no keys,
+/// an explanatory empty line instead of rows; the
+/// nav/clipboard rows stay, since Paste is exactly how a
+/// first key can arrive.
 fn key_list(core: &EditorCore, t: &Theme) -> El {
     let rows = key_rows(core);
     let mut list = col().key("cam-key-list").gap(4.0);
@@ -842,10 +843,12 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
                 ))
                 .child(btn(
                     &format!("cam-key-clear-{frame}"),
-                    "Clear",
+                    "Delete",
                     false,
                     t,
-                    move |s: &mut State| clear_key_at(&mut s.core, frame),
+                    move |s: &mut State| {
+                        delete_camera_key_at(&mut s.core, frame);
+                    },
                 )),
         );
     }
@@ -975,10 +978,11 @@ pub fn panel(s: &State, t: &Theme) -> El {
                 // against the 316 pt column — Delete key ended
                 // at x 1441.4, past the window edge entirely.
                 // Wrapping moves it onto a second line inside
-                // budget.
+                // budget. Wave 4's longer "Clear key (no undo)"
+                // label wraps the same way.
                 .flex_wrap()
                 .child(btn("cam-set-key", "Set key", false, t, set_key_here))
-                .child(btn("cam-clear-key", "Clear key", false, t, |s: &mut State| {
+                .child(btn("cam-clear-key", "Clear key (no undo)", false, t, |s: &mut State| {
                     s.core.camera_clear_key()
                 }))
                 .child(btn("cam-hold", "Hold camera", false, t, |s: &mut State| {
@@ -1250,23 +1254,6 @@ mod tests {
         assert!(!rows[1].is_current);
     }
 
-    #[test]
-    fn clear_key_at_goes_to_the_frame_then_clears() {
-        let mut core = EditorCore::new();
-        core.rotate_camera(15.0); // key at frame 0
-        core.goto(2);
-        core.rotate_camera(30.0); // key at frame 2
-        core.goto(4);
-        clear_key_at(&mut core, 0);
-        // The composition's goto is observable: the playhead
-        // ends on the cleared key's frame.
-        assert_eq!(core.current, 0);
-        assert_eq!(core.status, "Camera key removed.");
-        let rows = key_rows(&core);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].frame, 2);
-    }
-
     // ---- Key navigation + copy/paste ----
 
     /// Pin a key with fully specified stored values,
@@ -1516,6 +1503,8 @@ pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
 playback_speed: 1.0,
             was_playing: false,
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         };
         let _ = panel(&s, &t);
         let _ = overlay(&s.core);
@@ -1644,10 +1633,33 @@ playback_speed: 1.0,
     }
 
     #[test]
+    fn row_delete_at_a_non_current_frame_keeps_the_playhead() {
+        // The key-list row Delete button's shape (wave 4,
+        // audit s15 I-6): it passes the ROW's frame, which
+        // is usually not the playhead's — the playhead must
+        // not move (the retired clear_key_at dragged it to
+        // the cleared frame), and the delete is exactly one
+        // undo step, like the key-row Delete key.
+        let mut core = EditorCore::new();
+        pin_key(&mut core, 0, 100.0, 200.0, 1.5, 30.0);
+        pin_key(&mut core, 2, 999.0, 888.0, 3.0, 45.0);
+        core.goto(4);
+        let depth0 = core.undo_depth();
+        assert!(delete_camera_key_at(&mut core, 0));
+        assert_eq!(core.current, 4, "the playhead stays where it was");
+        assert_eq!(core.undo_depth(), depth0 + 1, "one row delete is one undo step");
+        assert_eq!(core.project.camera.len(), 1);
+        assert_eq!(core.project.camera[0].frame, 2);
+        // And the one undo step restores the deleted key.
+        core.undo();
+        assert_eq!(core.project.camera.len(), 2);
+    }
+
+    #[test]
     fn delete_camera_key_at_via_the_current_frame() {
         // The Delete key button's own shape: read the
         // current frame, then call — the playhead itself
-        // never moves (unlike clear_key_at's goto).
+        // never moves.
         let mut core = EditorCore::new();
         pin_key(&mut core, 0, 100.0, 200.0, 1.5, 30.0);
         pin_key(&mut core, 2, 999.0, 888.0, 3.0, 45.0);

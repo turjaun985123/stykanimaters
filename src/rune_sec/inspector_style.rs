@@ -770,8 +770,14 @@ pub fn recents_row(recents: &[u32], current: Option<u32>, t: &Theme) -> Option<E
 /// The segment style panel: a header naming the selected
 /// segment, then the taper stepper, cap segmented control,
 /// gradient swatches and opacity stepper. With no segment
-/// selected it renders the header plus a hint and no controls
-/// (the style ops would only answer "Select a joint first.").
+/// selected it renders the header plus the kit's empty
+/// state and no controls (the style ops would only
+/// answer "Select a joint first."). The empty state is
+/// the UI mission Wave 4 adoption (audit s08 I7): this
+/// panel's header-always form is the one the figure and
+/// segment panels now share, and its message names this
+/// panel's job ("…its style.") against the segment
+/// panel's "…its geometry.".
 pub fn style_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let mut panel = design::panel_col("inspector-style", t);
@@ -796,11 +802,16 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
         )
         .child(design::divider(t));
     let Some(style) = selected_style(core) else {
-        return panel.child(
-            text("Select a segment on the stage.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        // No selection: header + divider (already above)
+        // over the kit empty state (audit s08 I7), with
+        // the message naming THIS panel's job (style) —
+        // the segment panel directly below says
+        // "geometry" for its own.
+        return panel.child(design::empty_state(
+            "paintbrush",
+            "Select a segment on the stage to edit its style.",
+            t,
+        ));
     };
 
     // Taper: current value (engine wording) + one Step button

@@ -237,6 +237,20 @@
 //! use — leaving Copy + Paste at ≈162 pt. The two new keys
 //! are container rows only; every button key, label, guard
 //! and handler is byte-identical.
+//!
+//! UI mission wave 4 (audit S12-09 / S12-10): the preset
+//! row's bare text buttons become the kit's
+//! [`design::tangent_preset_chip`] — the graph panel's
+//! drawn-preview chip construction, lifted into the kit —
+//! under the same `key-preset-*` keys, labels and
+//! `apply_graph_ease_preset` handlers; presets are
+//! one-shot actions, so the chips never show active.
+//! And the two destructive clears (`key-clear-channel`,
+//! `key-clear-range`) wear the danger family in their
+//! live form (`danger_icon_btn`, the Phase N reds) —
+//! keys, labels, guards and handlers unchanged; the
+//! inert forms stay `icon_btn_inert`, the handler-free
+//! muted state, as before.
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, El};
@@ -246,7 +260,9 @@ use stykanimate_rs::graph_keys;
 
 use crate::chrome_view::{btn, btn_inert};
 use crate::rune_sec::design;
-use crate::rune_sec::icon_btn::{icon_btn, icon_btn_inert, icon_only_btn, icon_only_btn_inert};
+use crate::rune_sec::icon_btn::{
+    danger_icon_btn, icon_btn, icon_btn_inert, icon_only_btn, icon_only_btn_inert,
+};
 use crate::State;
 
 /// The graph channel this section acts on: the selected
@@ -443,8 +459,13 @@ pub fn interp_button_label(core: &EditorCore) -> String {
     }
 }
 
-/// The tangent preset buttons: every `TangentPreset` variant,
-/// in menu order, as (preset, button label, element-key suffix).
+/// The tangent presets: every `TangentPreset` variant,
+/// in menu order, as (preset, button label, element-key
+/// suffix). The row renders them through the kit's
+/// [`design::tangent_preset_chip`] (UI mission wave 4,
+/// audit S12-09) — the drawn-preview chip construction
+/// the graph panel's chips canonicalised — under these
+/// same `key-preset-*` keys and labels.
 pub fn preset_options() -> [(TangentPreset, &'static str, &'static str); 5] {
     [
         (TangentPreset::Smooth, "Smooth", "smooth"),
@@ -1114,8 +1135,9 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
     let interp_label = interp_button_label(core);
     let mut presets = row().key("keyframe-presets").gap(6.0).flex_wrap();
     for (preset, label, suffix) in preset_options() {
-        presets = presets.child(btn(
+        presets = presets.child(design::tangent_preset_chip(
             &format!("key-preset-{suffix}"),
+            preset,
             label,
             false,
             t,
@@ -1190,7 +1212,7 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                 .key("keyframe-clear-channel")
                 .gap(6.0)
                 .child(if clear_channel_enabled(core) {
-                    icon_btn(
+                    danger_icon_btn(
                         "key-clear-channel",
                         "xmark",
                         "Clear channel keys",
@@ -1207,7 +1229,7 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                 .key("keyframe-clear-range")
                 .gap(6.0)
                 .child(if clear_range_enabled(core) {
-                    icon_btn(
+                    danger_icon_btn(
                         "key-clear-range",
                         "eraser",
                         "Clear keys in loop range",
@@ -2428,6 +2450,8 @@ mod tests {
             loop_playback: true,
             playback_speed: 1.0,
             was_playing: false,
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         }
     }
 

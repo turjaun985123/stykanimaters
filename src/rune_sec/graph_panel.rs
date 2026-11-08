@@ -20,10 +20,17 @@
 //!
 //! ## Where the edits go
 //!
-//! Every control calls a real `EditorCore` graph op
-//! (`key_graph_angle`, `set_graph_key_interp`,
+//! Every control calls a real engine op: an `EditorCore`
+//! graph op (`key_graph_angle`,
 //! `apply_graph_ease_preset`, `smooth_graph_tangents`,
-//! `bake_graph_channels`, `clear_graph`). Three actions have
+//! `bake_graph_channels`, `clear_graph`) — or, for the
+//! interp segmented control since the UI mission
+//! (S12-08), the graph-keys library op it shares with
+//! MCP and the keyframe tools,
+//! `graph_keys::set_key_interp` (via
+//! [`set_drawn_interp`], falling back to the core's
+//! `set_graph_key_interp` when no channel is drawn).
+//! Three actions have
 //! NO dedicated core op — mirror-in-time, scale-values and
 //! reduce-keys exist only as `graph::` free functions — so
 //! their handlers follow the exact precedent the MCP tools
@@ -118,14 +125,40 @@
 //! ## Scoping, honestly
 //!
 //! The core's graph ops scope by SELECTION, not by this
-//! panel's drawn channel: presets apply to every channel of
-//! the selected figure, and `set_graph_key_interp` always
-//! targets the selected figure's `Angle(selected_node)`
-//! channel's key nearest the current frame (see that op's own
-//! docs). The panel's channel selector therefore drives the
-//! DRAWING and the mirror/scale/reduce actions, while the
-//! interp segmented control is labelled by the channel it
-//! really edits. Nothing here pretends otherwise.
+//! panel's drawn channel: presets apply to every channel
+//! of the selected figure. The interp segmented control
+//! used to scope that way too — it edited the selected
+//! figure's `Angle(selected_node)` key nearest the
+//! current frame, whatever curve was actually drawn, and
+//! was labelled by that hidden target. Since the UI
+//! mission (S12-08) the control edits the DRAWN channel:
+//! its highlight reads the drawn channel's key at the
+//! playhead and its press writes that same key, both
+//! through the graph-keys library ([`drawn_interp`] /
+//! [`set_drawn_interp`] over `graph_keys::key_interp_at`
+//! / `set_key_interp` — the ops MCP and the keyframe
+//! tools' interp cycle already use), and the row is
+//! labelled with the drawn channel's own label. Only
+//! when NO channel is drawn does the control fall back
+//! to the original angle-key path
+//! (`EditorCore::set_graph_key_interp`, read back by
+//! [`current_interp`]), and the label says so, exactly
+//! as it always did. Nothing here pretends otherwise.
+//!
+//! The tangent presets exist three times in the Graph
+//! workspace — this panel's preview chips
+//! ([`preset_chip`]), the keyframe tools' bare text
+//! buttons over their `preset_options` table, and the
+//! easing panel's preview+button rows over its own
+//! `TANGENT_PRESETS` list — with no shared construction
+//! anywhere (the kit has no tangent-preset builder;
+//! `inspector_style`'s `preset_chip` is a different
+//! thing, a stroke-`StylePreset` chip). All three call
+//! the same `apply_graph_ease_preset`. Converging them
+//! is the mission's S12-09 decision, not a local fix:
+//! it needs a kit-level builder plus edits in two other
+//! panels. Recorded here so the duplication is owned,
+//! not discovered again.
 //!
 //! ## Channel list (Phase G)
 //!
@@ -327,7 +360,7 @@ use stykanimate_rs::graph_keys::{channel_stats, ChannelStat};
 use stykanimate_rs::graph_panel::{preset_preview, GraphView};
 use stykanimate_rs::model::V2;
 
-use crate::chrome_view::btn;
+use crate::chrome_view::{btn, danger_btn};
 use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::icons::icon_el_rgb;
@@ -805,17 +838,84 @@ pub fn nearest_key(ch: &Channel, frame: f32) -> Option<usize> {
     best
 }
 
-/// The interp mode the segmented control should show as
-/// active: the mode of the key nearest the current frame on
-/// the selected figure's `Angle(selected_node)` channel —
-/// exactly the key `set_graph_key_interp` would edit. `None`
-/// (nothing highlighted) when there is no node, no channel or
-/// no key.
+/// The interp mode the segmented control shows as active
+/// when NO channel is drawn (the fallback read, UI mission
+/// S12-08): the mode of the key nearest the current frame
+/// on the selected figure's `Angle(selected_node)` channel
+/// — exactly the key `set_graph_key_interp` would edit.
+/// `None` (nothing highlighted) when there is no node, no
+/// channel or no key. While a channel IS drawn,
+/// [`drawn_interp`] is the read instead.
 pub fn current_interp(core: &EditorCore) -> Option<Interp> {
     let ni = core.selected_node?;
     let ch = channel_for(core, ChannelTarget::Angle(ni))?;
     let ki = nearest_key(ch, core.current as f32)?;
     Some(ch.keys[ki].interp)
+}
+
+/// Index of the key of `ch` that sits AT `frame` — the
+/// pick `graph_keys::key_interp_at` reads: the nearest
+/// key within half a frame, ties to the earlier key (only
+/// a strictly smaller distance replaces the incumbent).
+/// `None` when no key lies inside the window — a frame
+/// between keys two or more frames apart names no key.
+/// This is the write-side twin of the library's read, so
+/// the segmented control's press edits exactly the key
+/// its highlight reads (the keyframe tools' interp cycle
+/// keeps the same agreement by hand).
+pub fn key_index_at(ch: &Channel, frame: f32) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_dist = f32::INFINITY;
+    for (i, k) in ch.keys.iter().enumerate() {
+        let d = (k.frame - frame).abs();
+        if d <= 0.5 && d < best_dist {
+            best_dist = d;
+            best = Some(i);
+        }
+    }
+    best
+}
+
+/// The interp mode the segmented control shows as active
+/// while a channel is DRAWN (UI mission S12-08): the mode
+/// of the drawn channel's key at the current frame, read
+/// through the library's `graph_keys::key_interp_at` over
+/// [`effective_channel_index`] — the same resolution the
+/// canvas draws by, so the highlight can never name a
+/// key on a channel that is not on screen. `None`
+/// (nothing highlighted, and a press refuses with a
+/// status) when the channel is empty or no key sits at
+/// the playhead.
+pub fn drawn_interp(core: &EditorCore, sel: &GraphPanelState) -> Option<Interp> {
+    let idx = effective_channel_index(core, sel)?;
+    stykanimate_rs::graph_keys::key_interp_at(core, idx, core.current as f32)
+}
+
+/// The interp segmented control's press (UI mission
+/// S12-08): set the mode of the DRAWN channel's key at
+/// the current frame through the library's
+/// `graph_keys::set_key_interp` — the op MCP and the
+/// keyframe tools' Cycle already use — so the control
+/// edits the curve it sits under. The key is the one
+/// [`key_index_at`] names, exactly the key
+/// [`drawn_interp`]'s highlight reads; with no key at
+/// the playhead the press is a status-only refusal (no
+/// snapshot, nothing edited). When NO channel is drawn
+/// there is no curve to edit, and the press falls back
+/// to the panel's original path,
+/// `EditorCore::set_graph_key_interp` on the selected
+/// joint's angle channel, whose own refusals cover the
+/// no-joint / no-channel states.
+pub fn set_drawn_interp(core: &mut EditorCore, sel: &GraphPanelState, mode: Interp) {
+    let Some(idx) = effective_channel_index(core, sel) else {
+        core.set_graph_key_interp(mode);
+        return;
+    };
+    let Some(ki) = key_index_at(&core.project.channels[idx], core.current as f32) else {
+        core.status = format!("No key at frame {} to set interp on.", core.current + 1);
+        return;
+    };
+    stykanimate_rs::graph_keys::set_key_interp(core, idx, ki, mode);
 }
 
 /// The drawn curve as pixel points: `steps + 1` samples of
@@ -1028,11 +1128,11 @@ pub fn drag_key_to(ch: &mut Channel, idx: usize, frame: f32, value: f32) -> Opti
 }
 
 /// The panel's selected key on the drawn channel: the key
-/// nearest the current frame — the same pick the interp
-/// control documents for `set_graph_key_interp`
-/// ([`current_interp`] reads exactly it on its own channel;
-/// ties go to the earlier key, via [`nearest_key`]). This
-/// is the key whose tangent handles are drawn and grabbable.
+/// nearest the current frame (ties go to the earlier key,
+/// via [`nearest_key`]). This is the key whose tangent
+/// handles are drawn and grabbable. (Distinct from the
+/// interp control's at-the-playhead pick — see
+/// [`key_index_at`].)
 pub fn selected_key_index(core: &EditorCore, target: ChannelTarget) -> Option<usize> {
     let ch = channel_for(core, target)?;
     nearest_key(ch, core.current as f32)
@@ -1588,8 +1688,10 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     // press duplicates the drawn channel — twin-aware via
     // the effective index — onto the following figure.
     // Delete channel (Phase K) sits directly beside it,
-    // under the same condition, in the same plain-btn
-    // style: the press removes the drawn channel through
+    // under the same condition, in the chrome family's
+    // danger styling (UI mission S12-10: the press deletes
+    // a whole channel — it should look like it): the press
+    // removes the drawn channel through
     // delete_drawn_channel, which repairs the stored pick.
     // The Shift pair (Phase M) closes the block under the
     // same condition: icon buttons moving every key of the
@@ -1604,10 +1706,9 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
             t,
             |s: &mut State| duplicate_channel_to_next(&mut s.core, &s.graph_panel),
         ));
-        chan_list = chan_list.child(btn(
+        chan_list = chan_list.child(danger_btn(
             "graph-chan-delete",
             "Delete channel",
-            false,
             t,
             |s: &mut State| delete_drawn_channel(&mut s.core, &mut s.graph_panel),
         ));
@@ -1654,14 +1755,28 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         );
     }
 
-    // Interp segmented control. The op behind it edits the
-    // Angle(selected node) channel's key nearest the current
-    // frame, so the row is labelled with exactly that and its
-    // active state is read from exactly that key.
-    let interp_now = current_interp(core);
-    let interp_label = match core.selected_node {
-        Some(ni) => format!("Interp · angle {ni} key"),
-        None => "Interp · no joint selected".to_string(),
+    // Interp segmented control (UI mission S12-08). While
+    // a channel is drawn, the control edits THAT channel:
+    // the active state reads the drawn channel's key at
+    // the playhead (drawn_interp) and a press writes that
+    // same key through graph_keys::set_key_interp
+    // (set_drawn_interp) — so the row is labelled with
+    // the drawn channel's own label, never "angle {ni}"
+    // while it edits Root X. With nothing drawn, the
+    // control falls back to its original target — the
+    // selected joint's angle key (current_interp /
+    // EditorCore::set_graph_key_interp) — and the label
+    // says so, exactly as it always did.
+    let interp_now = match drawn_idx {
+        Some(_) => drawn_interp(core, &s.graph_panel),
+        None => current_interp(core),
+    };
+    let interp_label = match drawn_idx {
+        Some(_) => format!("Interp · {} key", channel_label(target)),
+        None => match core.selected_node {
+            Some(ni) => format!("Interp · angle {ni} key"),
+            None => "Interp · no joint selected".to_string(),
+        },
     };
     let interp_row = row()
         .key("graph-interp")
@@ -1669,13 +1784,13 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         .center_y()
         .child(design::section_label(&interp_label, t))
         .child(btn("graph-interp-hermite", "Hermite", interp_now == Some(Interp::Hermite), t, |s| {
-            s.core.set_graph_key_interp(Interp::Hermite)
+            set_drawn_interp(&mut s.core, &s.graph_panel, Interp::Hermite)
         }))
         .child(btn("graph-interp-linear", "Linear", interp_now == Some(Interp::Linear), t, |s| {
-            s.core.set_graph_key_interp(Interp::Linear)
+            set_drawn_interp(&mut s.core, &s.graph_panel, Interp::Linear)
         }))
         .child(btn("graph-interp-step", "Step", interp_now == Some(Interp::Step), t, |s| {
-            s.core.set_graph_key_interp(Interp::Step)
+            set_drawn_interp(&mut s.core, &s.graph_panel, Interp::Step)
         }));
 
     let presets = row()
@@ -1741,7 +1856,16 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
             let last = s.core.frame_count().saturating_sub(1);
             s.core.bake_graph_channels(0, last);
         }))
-        .child(btn("graph-clear", "Clear", false, t, |s| s.core.clear_graph()));
+        // Clear (UI mission S12-10): clear_graph wipes
+        // EVERY graph channel in the project, so the
+        // button wears the danger family and its label
+        // names the true scope — it used to read just
+        // "Clear" in the same plain style as "Bake",
+        // one panel away from "Clear channel keys",
+        // which clears a single channel.
+        .child(danger_btn("graph-clear", "Clear all channels", t, |s| {
+            s.core.clear_graph()
+        }));
 
     // The grabbed key, resolved against the CURRENT key
     // order for the highlight (the stored index is only a
@@ -1972,6 +2096,124 @@ mod tests {
         // follows the op's target key.
         core.goto(3);
         assert_eq!(current_interp(&core), Some(Interp::Hermite));
+    }
+
+    #[test]
+    fn drawn_interp_reads_the_drawn_channel_not_the_angle() {
+        // UI mission S12-08: with a Root X channel drawn,
+        // the segmented control's highlight is read from
+        // Root X's key at the playhead — even while a
+        // joint is selected whose angle channel carries a
+        // different mode at the same frame (the old
+        // control read the angle key in exactly this
+        // state, under a curve it did not describe).
+        let mut core = EditorCore::new();
+        core.selected_node = Some(0);
+        core.project.channels = vec![
+            channel(
+                ChannelTarget::RootX,
+                vec![Key::flat(0.0, 0.0).with_interp(Interp::Step)],
+            ),
+            channel(
+                ChannelTarget::Angle(0),
+                vec![Key::flat(0.0, 0.0).with_interp(Interp::Linear)],
+            ),
+        ];
+        let mut sel = GraphPanelState::default();
+        sel.selected_channel = Some(0);
+        core.goto(0);
+        assert_eq!(drawn_interp(&core, &sel), Some(Interp::Step));
+        // The legacy read still sees the angle key — the
+        // two reads genuinely name different keys.
+        assert_eq!(current_interp(&core), Some(Interp::Linear));
+        // Playhead parked away from Root X's only key:
+        // no key sits at the playhead, so nothing
+        // highlights on the drawn channel.
+        core.goto(2);
+        assert_eq!(drawn_interp(&core, &sel), None);
+    }
+
+    #[test]
+    fn set_drawn_interp_edits_the_drawn_channels_key() {
+        // UI mission S12-08: a press writes the drawn
+        // channel's key at the playhead through
+        // graph_keys::set_key_interp — one snapshot, the
+        // op's own status — and leaves the selected
+        // joint's angle key untouched.
+        let mut core = EditorCore::new();
+        core.selected_node = Some(0);
+        core.project.channels = vec![
+            channel(
+                ChannelTarget::RootX,
+                vec![Key::flat(0.0, 0.0).with_interp(Interp::Step)],
+            ),
+            channel(
+                ChannelTarget::Angle(0),
+                vec![Key::flat(0.0, 0.0).with_interp(Interp::Linear)],
+            ),
+        ];
+        let mut sel = GraphPanelState::default();
+        sel.selected_channel = Some(0);
+        core.goto(0);
+        let depth = core.undo_depth();
+        set_drawn_interp(&mut core, &sel, Interp::Hermite);
+        assert_eq!(
+            core.project.channels[0].keys[0].interp,
+            Interp::Hermite,
+            "the drawn channel's key takes the mode"
+        );
+        assert_eq!(
+            core.project.channels[1].keys[0].interp,
+            Interp::Linear,
+            "the angle key is not the target anymore"
+        );
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot via the op");
+    }
+
+    #[test]
+    fn set_drawn_interp_refuses_with_no_key_at_the_playhead() {
+        // Playhead parked away from every key of the
+        // drawn channel: the press writes a status and
+        // changes nothing — no snapshot, and no silent
+        // edit of a distant key.
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(0.0, 0.0).with_interp(Interp::Step)],
+        )];
+        let mut sel = GraphPanelState::default();
+        sel.selected_channel = Some(0);
+        core.goto(3);
+        let depth = core.undo_depth();
+        set_drawn_interp(&mut core, &sel, Interp::Linear);
+        assert_eq!(core.project.channels[0].keys[0].interp, Interp::Step);
+        assert_eq!(core.undo_depth(), depth, "a refusal takes no snapshot");
+        assert!(
+            core.status.contains("No key at frame 4"),
+            "the status names the refusal: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn set_drawn_interp_falls_back_when_no_channel_is_drawn() {
+        // The panel's target names Root Y and no Root Y
+        // channel exists, so nothing is drawn: the press
+        // takes the original path and edits the selected
+        // joint's angle key, exactly as
+        // EditorCore::set_graph_key_interp always did.
+        let mut core = EditorCore::new();
+        core.selected_node = Some(0);
+        core.project.channels = vec![channel(
+            ChannelTarget::Angle(0),
+            vec![Key::flat(0.0, 0.0).with_interp(Interp::Step)],
+        )];
+        let mut sel = GraphPanelState::default();
+        sel.target = Some(ChannelTarget::RootY);
+        assert_eq!(effective_channel_index(&core, &sel), None);
+        core.goto(0);
+        set_drawn_interp(&mut core, &sel, Interp::Linear);
+        assert_eq!(core.project.channels[0].keys[0].interp, Interp::Linear);
     }
 
     #[test]

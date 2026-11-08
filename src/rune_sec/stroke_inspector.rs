@@ -39,6 +39,24 @@
 //! selection change (or reports, via the status line, that
 //! no preset steps that way).
 //!
+//! The panel copy says all of this out loud (UI mission
+//! Wave 4, audit S08 item I5 — the integrator picked the
+//! fallback (b), relabelling, because the preferred (a)
+//! needs a per-parameter engine op that does not exist):
+//! the section heading is `Brush preset · {name}`, every
+//! parameter row is labelled `Preset size` / `Preset
+//! opacity` / `Preset scatter` / `Preset smoothing`, the
+//! nib row is `Preset nib` with its `Preset nib angle`
+//! readout, and a hint line under the tool line states
+//! that stepping a value or picking a nib selects another
+//! library preset. The numbers in the rows are the active
+//! preset's own values, shown beside −/+ buttons that
+//! step the *selection* — the labels no longer present
+//! them as editors of a working brush's values. (The
+//! selected-stroke Width / Opacity rows further up ARE
+//! real value editors — they rewrite a recorded stroke —
+//! and keep their plain labels.)
+//!
 //! ## Stroke list
 //!
 //! One row per stroke on the current frame
@@ -316,7 +334,8 @@
 //! chevron steppers (the F-STEP-CHEV variant) with
 //! only the value readout kitted. The nib segmented
 //! row takes the segmented gap (4). The two in-panel
-//! section headings — `Brush · {name}` and the stroke
+//! section headings — `Brush preset · {name}` (the
+//! `preset` wording is the Wave 4 I5(b) relabel) and the stroke
 //! list's `strokes-header` text — render through
 //! `design::section_label`. The stroke rows' 14×14
 //! colour chips are display readouts, not swatch
@@ -1321,7 +1340,10 @@ pub fn delete_frame_strokes_press(s: &mut State) -> usize {
 /// value as the kit's centred mono readout
 /// (`design::stepper_value`), and the + button — the
 /// pair steps that parameter through the preset
-/// library ([`step_param`]).
+/// library ([`step_param`]). Callers pass labels with
+/// the `Preset ` prefix (`Preset size`, …): the value
+/// is the active preset's, and the pair steps the
+/// preset selection, not the value (audit I5(b)).
 fn param_row(
     label: &str,
     value: String,
@@ -1616,7 +1638,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
     }
 
     panel = panel.child(design::section_label(
-        &format!("Brush · {}", brush.name),
+        &format!("Brush preset · {}", brush.name),
         t,
     ));
     panel = panel.child(
@@ -1624,9 +1646,21 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .font(type_::LABEL)
             .color(t.text_secondary),
     );
+    // Preset-semantics hint (UI mission Wave 4, audit
+    // I5(b)): the rows below look like value steppers
+    // but step the preset selection — the line says so
+    // before the user presses anything.
+    panel = panel.child(
+        text(
+            "Stepping a value or picking a nib selects another library preset \
+             — presets are bundles, so every value follows the preset.",
+        )
+        .font(type_::LABEL)
+        .color(t.text_secondary),
+    );
 
     panel = panel.child(param_row(
-        "Size",
+        "Preset size",
         width_text(brush.width),
         "brush-size-dec",
         "brush-size-inc",
@@ -1634,7 +1668,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
         t,
     ));
     panel = panel.child(param_row(
-        "Opacity",
+        "Preset opacity",
         opacity_text(brush.opacity),
         "brush-opacity-dec",
         "brush-opacity-inc",
@@ -1642,7 +1676,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
         t,
     ));
     panel = panel.child(param_row(
-        "Scatter",
+        "Preset scatter",
         scatter_text(brush.scatter),
         "brush-scatter-dec",
         "brush-scatter-inc",
@@ -1650,13 +1684,15 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
         t,
     ));
 
-    // Nib: segmented control of the three kinds; a chip
-    // press selects the first preset carrying that nib.
+    // Preset nib: segmented control of the three kinds;
+    // a chip press selects the first preset carrying
+    // that nib (a preset swap, like the steppers above —
+    // hence the "Preset" prefix on the row label).
     let mut nib_row = row()
         .key("brush-nib-row")
         .gap(4.0)
         .center_y()
-        .child(text("Nib").font(type_::LABEL).color(t.text));
+        .child(text("Preset nib").font(type_::LABEL).color(t.text));
     for nib in NIB_ORDER {
         nib_row = nib_row.child(btn(
             nib_key(nib),
@@ -1670,13 +1706,13 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
     }
     panel = panel.child(nib_row);
     panel = panel.child(
-        text(format!("Nib angle · {:.0}°", brush.nib_angle))
+        text(format!("Preset nib angle · {:.0}°", brush.nib_angle))
             .font(type_::LABEL)
             .color(t.text_secondary),
     );
 
     panel = panel.child(param_row(
-        "Smoothing",
+        "Preset smoothing",
         smoothing_text(brush.smoothing),
         "brush-smoothing-dec",
         "brush-smoothing-inc",
@@ -2396,6 +2432,8 @@ mod tests {
             last_status: String::new(),
             toast_now: 0.0,
             last_dark: true,
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         }
     }
 

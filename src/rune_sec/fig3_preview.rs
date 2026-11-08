@@ -39,6 +39,21 @@
 //! Grid first, then the ground shadow, then bones, then joint
 //! crosses — later prims draw over earlier ones.
 //!
+//! ## Colours — the palette (UI mission I-7)
+//!
+//! Grid, selection and shadow colours arrive in a
+//! [`Fig3Palette`] built by the caller from the shell's
+//! `&Theme` ([`Fig3Palette::from_theme`]), replacing the
+//! dark-theme literals this file used to bake in — in the
+//! light theme the old grid (`0x3A4356`) and pure-black
+//! shadow painted a dark grid and a black ring on a light
+//! stage. The prims still carry packed `0xRRGGBB` (the
+//! consumers' contract), so theme colours with alpha are
+//! composited over the theme background before packing —
+//! see [`Fig3Palette::from_theme`]. [`Fig3Palette::LEGACY`]
+//! (also the `Default`) keeps the pre-I-7 literals for
+//! callers with no theme in hand.
+//!
 //! ## Honest notes
 //!
 //! - Segments only, by design: joints are drawn as two 3 px
@@ -53,7 +68,11 @@
 
 use std::cell::Cell;
 
+use rune::tok::Theme;
+use rune::Color;
 use stykanimate_rs::fig3d::{self, Fig3State};
+
+use crate::rune_sec::app_theme;
 
 /// One segment in VIEWPORT coordinates (the space `fig3d::project`
 /// returns for the stage size it was given), ready to stroke.
@@ -73,8 +92,10 @@ pub const PREVIEW_W: f32 = 308.0;
 /// The 3D panel preview's nominal height in points.
 pub const PREVIEW_H: f32 = 220.0;
 
-/// Ground-grid colour: a muted blue-grey, visible on the dark
-/// stage without competing with the figure.
+/// Ground-grid colour of the LEGACY palette (see
+/// [`Fig3Palette`]): a muted blue-grey, visible on the dark
+/// stage without competing with the figure. Themed builds
+/// derive the grid from the theme's border colour instead.
 pub const GRID_COLOR: u32 = 0x3A4356;
 /// Grid stroke width.
 pub const GRID_WIDTH: f32 = 1.0;
@@ -84,12 +105,23 @@ pub const BONE_WIDTH: f32 = 2.5;
 pub const JOINT_WIDTH: f32 = 1.5;
 /// Half-length of a joint cross's arms, in pixels.
 pub const JOINT_HALF: f32 = 3.0;
-/// Selection accent — the shell's primary accent colour.
+/// Selection accent of the LEGACY palette — the pre-brief
+/// shell accent. Themed builds use the brief accent via
+/// `app_theme::accent` (`0x6C8CFF` dark).
 pub const SELECTED_COLOR: u32 = 0x6D8CFF;
-/// Ground-shadow colour and width.
+/// Ground-shadow colour of the LEGACY palette (pure black).
+/// Themed builds bake black at [`SHADOW_ALPHA`] over the
+/// theme background instead, so the light theme's shadow is
+/// a soft grey rather than a black ring.
 pub const SHADOW_COLOR: u32 = 0x000000;
 /// Ground-shadow stroke width.
 pub const SHADOW_WIDTH: f32 = 3.0;
+/// The alpha at which the ground shadow's black is laid
+/// over the theme background when [`Fig3Palette::from_theme`]
+/// bakes it into a packed colour: dark enough to read as a
+/// shadow on either theme, soft enough not to glare on the
+/// light one.
+pub const SHADOW_ALPHA: f32 = 0.35;
 /// Shadow ring radius in WORLD units, scaled by the projected
 /// point's `Proj.scale` (pixels per world unit).
 pub const SHADOW_RADIUS: f32 = 30.0;
@@ -102,6 +134,82 @@ pub const SHADOW_SQUASH: f32 = 0.35;
 pub const GRID_EXTENT: i32 = 5;
 /// Grid spacing in world units.
 pub const GRID_STEP: f32 = 50.0;
+
+/// The drawing colours for one prim build: ground grid,
+/// selected-joint accent and ground shadow, as packed
+/// `0xRRGGBB` (the prims' contract). Built from the shell
+/// theme by [`Fig3Palette::from_theme`] at the call sites;
+/// [`Fig3Palette::LEGACY`] is the pre-I-7 literal set.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fig3Palette {
+    /// Ground-grid colour.
+    pub grid: u32,
+    /// Selected joint's cross colour.
+    pub selected: u32,
+    /// Ground-shadow ring colour.
+    pub shadow: u32,
+}
+
+impl Fig3Palette {
+    /// The pre-I-7 literals ([`GRID_COLOR`],
+    /// [`SELECTED_COLOR`], [`SHADOW_COLOR`]) — the sensible
+    /// default for a caller with no theme in hand (tests,
+    /// headless probes). Also the `Default`.
+    pub const LEGACY: Fig3Palette = Fig3Palette {
+        grid: GRID_COLOR,
+        selected: SELECTED_COLOR,
+        shadow: SHADOW_COLOR,
+    };
+
+    /// Build the palette from the shell theme (UI mission
+    /// I-7):
+    ///
+    /// - **grid** — the theme's border colour
+    ///   (`t.card_border`), composited over `t.bg`. Dark:
+    ///   the brief border `#303846` (solid). Light: the
+    ///   tinted hairline over the light background lands at
+    ///   a pale blue-grey (≈ `#DEE0E6`), so the light theme
+    ///   gets a light grid instead of the old dark literal.
+    /// - **selected** — the brief accent for the theme's
+    ///   appearance, via `app_theme::accent` (`#6C8CFF`
+    ///   dark, `#4666D8` light).
+    /// - **shadow** — black at [`SHADOW_ALPHA`] composited
+    ///   over `t.bg`: the packed-prim contract has no alpha
+    ///   channel, so the translucency is baked against the
+    ///   theme's ground. Dark: a near-black a step softer
+    ///   than pure black; light: a soft mid-grey.
+    pub fn from_theme(t: &Theme) -> Fig3Palette {
+        Fig3Palette {
+            grid: pack(over(t.card_border, t.bg)),
+            selected: pack(app_theme::accent(t)),
+            shadow: pack(over(Color::BLACK.alpha(SHADOW_ALPHA), t.bg)),
+        }
+    }
+}
+
+impl Default for Fig3Palette {
+    fn default() -> Self {
+        Fig3Palette::LEGACY
+    }
+}
+
+/// Composite `fg` over an opaque `bg`, in linear light
+/// (Rune's `Color::mix` space): the result's RGB is
+/// `fg·a + bg·(1−a)` per channel. The result's alpha is
+/// meaningless to the caller — packing drops it.
+fn over(fg: Color, bg: Color) -> Color {
+    fg.mix(bg, 1.0 - fg.a)
+}
+
+/// Pack a Rune colour into `0xRRGGBB`, through its sRGB
+/// hex form so the value round-trips exactly through the
+/// consumers' `hex_color` (which parses sRGB hex back into
+/// a linear `Color`). Alpha is dropped: the prim contract
+/// is opaque, so callers composite first ([`over`]).
+fn pack(c: Color) -> u32 {
+    let hex = c.hex();
+    u32::from_str_radix(&hex[1..7], 16).unwrap_or(0)
+}
 
 thread_local! {
     /// Whether the ground grid shows in the 3D preview. Shell
@@ -163,10 +271,15 @@ pub fn ground_y_of(world: &[[f32; 3]]) -> f32 {
 /// - `viewport`: the preview's size in points, handed to
 ///   `fig3d::project` as its stage — returned coordinates are in
 ///   this space, origin top-left, Y down.
+/// - `palette`: the drawing colours (grid / selection /
+///   shadow), built from the shell theme by the caller —
+///   [`Fig3Palette::from_theme`]; [`Fig3Palette::LEGACY`]
+///   for theme-less callers.
 pub fn preview_prims(
     state: Option<&Fig3State>,
     show_grid: bool,
     viewport: [f32; 2],
+    palette: Fig3Palette,
 ) -> Vec<PreviewPrim> {
     let fallback_cam;
     let cam = match state {
@@ -185,11 +298,11 @@ pub fn preview_prims(
     let mut prims = Vec::new();
 
     if show_grid {
-        push_grid(&mut prims, cam, viewport, ground_y);
+        push_grid(&mut prims, cam, viewport, ground_y, palette);
     }
 
     if let (Some(s), Some(w)) = (state, world.as_deref()) {
-        push_figure(&mut prims, s, w, cam, viewport, ground_y);
+        push_figure(&mut prims, s, w, cam, viewport, ground_y, palette);
     }
 
     // The panel's canvas does not clip its drawing to its
@@ -285,6 +398,7 @@ fn push_grid(
     cam: &fig3d::Camera3,
     viewport: [f32; 2],
     ground_y: f32,
+    palette: Fig3Palette,
 ) {
     let lines = fig3d::grid_line_points(GRID_EXTENT, GRID_STEP);
     let mut points = Vec::with_capacity(lines.len() * 2);
@@ -301,7 +415,7 @@ fn push_grid(
         prims.push(PreviewPrim {
             a: a.xy,
             b: b.xy,
-            color: GRID_COLOR,
+            color: palette.grid,
             width: GRID_WIDTH,
         });
     }
@@ -317,6 +431,7 @@ fn push_figure(
     cam: &fig3d::Camera3,
     viewport: [f32; 2],
     ground_y: f32,
+    palette: Fig3Palette,
 ) {
     let fig = &state.figure;
     if world.is_empty() {
@@ -324,7 +439,7 @@ fn push_figure(
     }
     let projected = fig3d::project(world, cam, viewport);
 
-    push_shadow(prims, fig, world, cam, viewport, ground_y);
+    push_shadow(prims, fig, world, cam, viewport, ground_y, palette);
 
     // Bones: one segment per node that has a parent.
     for (i, node) in fig.nodes.iter().enumerate() {
@@ -349,7 +464,7 @@ fn push_figure(
             continue;
         }
         let color = if i == state.selected {
-            SELECTED_COLOR
+            palette.selected
         } else {
             fig.color
         };
@@ -383,6 +498,7 @@ fn push_shadow(
     cam: &fig3d::Camera3,
     viewport: [f32; 2],
     ground_y: f32,
+    palette: Fig3Palette,
 ) {
     let Some(root) = fig.nodes.iter().position(|n| n.parent.is_none()) else {
         return;
@@ -407,7 +523,7 @@ fn push_shadow(
         prims.push(PreviewPrim {
             a: ring[k],
             b: ring[(k + 1) % SHADOW_SEGMENTS],
-            color: SHADOW_COLOR,
+            color: palette.shadow,
             width: SHADOW_WIDTH,
         });
     }
@@ -444,7 +560,7 @@ mod tests {
         // endpoint of every figure prim (bones, joint crosses,
         // shadow ring) lands inside the preview viewport.
         let state = rest_state(0);
-        let prims = preview_prims(Some(&state), false, VP);
+        let prims = preview_prims(Some(&state), false, VP, Fig3Palette::LEGACY);
         assert!(!prims.is_empty(), "a rest figure draws something");
         for prim in &prims {
             assert!(inside(prim.a), "prim starts outside: {:?}", prim.a);
@@ -464,18 +580,18 @@ mod tests {
 
     #[test]
     fn grid_prims_exist_when_enabled_and_vanish_when_disabled() {
-        let on = preview_prims(None, true, VP);
+        let on = preview_prims(None, true, VP, Fig3Palette::LEGACY);
         assert!(!on.is_empty(), "the grid draws with no session");
         assert!(on
             .iter()
             .all(|p| p.color == GRID_COLOR && p.width == GRID_WIDTH));
-        let off = preview_prims(None, false, VP);
+        let off = preview_prims(None, false, VP, Fig3Palette::LEGACY);
         assert!(off.is_empty(), "no session + no grid = no prims");
     }
 
     #[test]
     fn none_state_yields_grid_only() {
-        let prims = preview_prims(None, true, VP);
+        let prims = preview_prims(None, true, VP, Fig3Palette::LEGACY);
         assert!(prims.iter().all(|p| p.color == GRID_COLOR));
         // With a session the grid comes first, then figure work.
         // The session's grid sits at the figure's feet rather
@@ -484,8 +600,8 @@ mod tests {
         // here is the order: a solid leading run of grid
         // prims, then exactly the figure-only prims.
         let state = rest_state(0);
-        let both = preview_prims(Some(&state), true, VP);
-        let fig_only = preview_prims(Some(&state), false, VP);
+        let both = preview_prims(Some(&state), true, VP, Fig3Palette::LEGACY);
+        let fig_only = preview_prims(Some(&state), false, VP, Fig3Palette::LEGACY);
         let grid_run = both.iter().take_while(|p| p.color == GRID_COLOR).count();
         assert!(grid_run > 0, "the grid leads the prim list");
         assert_eq!(both.len(), grid_run + fig_only.len());
@@ -494,7 +610,7 @@ mod tests {
     #[test]
     fn selected_joint_uses_the_accent_colour() {
         let state = rest_state(2);
-        let prims = preview_prims(Some(&state), false, VP);
+        let prims = preview_prims(Some(&state), false, VP, Fig3Palette::LEGACY);
         let accent: Vec<&PreviewPrim> =
             prims.iter().filter(|p| p.color == SELECTED_COLOR).collect();
         assert_eq!(accent.len(), 2, "exactly the selected joint's cross");
@@ -517,7 +633,7 @@ mod tests {
     #[test]
     fn bones_use_the_figure_colour_and_width() {
         let state = rest_state(0);
-        let prims = preview_prims(Some(&state), false, VP);
+        let prims = preview_prims(Some(&state), false, VP, Fig3Palette::LEGACY);
         let bones: Vec<&PreviewPrim> = prims
             .iter()
             .filter(|p| p.width == BONE_WIDTH)
@@ -535,7 +651,7 @@ mod tests {
     #[test]
     fn shadow_ring_sits_under_the_root() {
         let state = rest_state(0);
-        let prims = preview_prims(Some(&state), false, VP);
+        let prims = preview_prims(Some(&state), false, VP, Fig3Palette::LEGACY);
         let ring: Vec<&PreviewPrim> =
             prims.iter().filter(|p| p.color == SHADOW_COLOR).collect();
         assert_eq!(ring.len(), SHADOW_SEGMENTS);
@@ -569,7 +685,7 @@ mod tests {
             selected: 0,
             pose_b: None,
         };
-        let prims = preview_prims(Some(&state), false, VP);
+        let prims = preview_prims(Some(&state), false, VP, Fig3Palette::LEGACY);
         assert!(prims.is_empty());
     }
 
@@ -583,8 +699,8 @@ mod tests {
         let world = fig3d::evaluate3(&state.figure, &state.pose);
         let feet = world.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
         assert!(feet < 0.0, "the rest humanoid's feet are below the origin");
-        let bare = preview_prims(None, true, VP);
-        let with = preview_prims(Some(&state), true, VP);
+        let bare = preview_prims(None, true, VP, Fig3Palette::LEGACY);
+        let with = preview_prims(Some(&state), true, VP, Fig3Palette::LEGACY);
         // The whole grid sits lower on screen (Y down), so
         // its TOPMOST line is lower too. The topmost extent
         // is the statistic that survives viewport clipping:
@@ -611,8 +727,8 @@ mod tests {
         // grid endpoint now lands inside the viewport, with
         // and without a session.
         for prims in [
-            preview_prims(None, true, VP),
-            preview_prims(Some(&rest_state(0)), true, VP),
+            preview_prims(None, true, VP, Fig3Palette::LEGACY),
+            preview_prims(Some(&rest_state(0)), true, VP, Fig3Palette::LEGACY),
         ] {
             assert!(!prims.is_empty());
             for prim in &prims {
@@ -686,11 +802,91 @@ mod tests {
         // behaviour: a session with the grid on still leads
         // with grid prims, exactly as before the extraction.
         let state = rest_state(0);
-        let prims = preview_prims(Some(&state), true, VP);
+        let prims = preview_prims(Some(&state), true, VP, Fig3Palette::LEGACY);
         assert!(
             prims.iter().any(|p| p.color == GRID_COLOR),
             "the session preview still draws its ground grid"
         );
         assert_eq!(prims[0].color, GRID_COLOR, "the grid still leads");
+    }
+
+    #[test]
+    fn legacy_palette_is_the_pre_theme_literals() {
+        // The default stays the historic look, so a caller
+        // with no theme in hand reproduces the pre-I-7
+        // drawing exactly.
+        let p = Fig3Palette::LEGACY;
+        assert_eq!(p.grid, GRID_COLOR);
+        assert_eq!(p.selected, SELECTED_COLOR);
+        assert_eq!(p.shadow, SHADOW_COLOR);
+        assert_eq!(Fig3Palette::default(), Fig3Palette::LEGACY);
+    }
+
+    #[test]
+    fn dark_theme_palette_uses_the_brief_border_and_accent() {
+        let p = Fig3Palette::from_theme(&app_theme::app_theme(true));
+        // The dark card_border is the brief border, solid,
+        // so the grid packs to it exactly.
+        assert_eq!(p.grid, 0x303846);
+        // The brief accent, not the legacy 0x6D8CFF.
+        assert_eq!(p.selected, 0x6C8CFF);
+        // Black at SHADOW_ALPHA over the dark background: a
+        // near-black a step softer than the legacy pure
+        // black, not pure black itself.
+        assert_ne!(p.shadow, SHADOW_COLOR);
+        assert!(
+            p.shadow < 0x20_2020,
+            "dark shadow stays near-black: {:#08x}",
+            p.shadow
+        );
+    }
+
+    #[test]
+    fn light_theme_palette_is_light() {
+        let p = Fig3Palette::from_theme(&app_theme::app_theme(false));
+        // The light accent is the brief hue darkened for
+        // the white card (app_theme's pinned value).
+        assert_eq!(p.selected, 0x4666D8);
+        // The grid is a pale blue-grey now, not the dark
+        // legacy literal: every channel is bright.
+        assert_ne!(p.grid, GRID_COLOR);
+        for ch in [
+            (p.grid >> 16) & 0xFF,
+            (p.grid >> 8) & 0xFF,
+            p.grid & 0xFF,
+        ] {
+            assert!(ch > 0xB0, "light grid channel too dark: {:#08x}", p.grid);
+        }
+        // The shadow is a soft mid-grey: neither the legacy
+        // pure black nor as bright as the grid above it.
+        assert_ne!(p.shadow, SHADOW_COLOR);
+        let sr = (p.shadow >> 16) & 0xFF;
+        assert!(
+            (0x90..0xE0).contains(&sr),
+            "light shadow is not a soft grey: {:#08x}",
+            p.shadow
+        );
+    }
+
+    #[test]
+    fn themed_palette_flows_into_the_prims() {
+        // The I-7 proof at this layer: with a themed palette
+        // the grid, the selected joint's cross and the
+        // shadow ring all carry the palette's colours, and
+        // no prim carries a legacy literal any more (the
+        // humanoid's own colour, 0xE8E8EC, is none of them).
+        let palette = Fig3Palette::from_theme(&app_theme::app_theme(true));
+        let state = rest_state(2);
+        let prims = preview_prims(Some(&state), true, VP, palette);
+        assert!(prims.iter().any(|p| p.color == palette.grid));
+        let accent: Vec<&PreviewPrim> =
+            prims.iter().filter(|p| p.color == palette.selected).collect();
+        assert_eq!(accent.len(), 2, "exactly the selected joint's cross");
+        assert!(prims
+            .iter()
+            .any(|p| p.color == palette.shadow && p.width == SHADOW_WIDTH));
+        assert!(prims.iter().all(|p| {
+            p.color != GRID_COLOR && p.color != SELECTED_COLOR && p.color != SHADOW_COLOR
+        }));
     }
 }

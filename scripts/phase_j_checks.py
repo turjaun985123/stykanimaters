@@ -640,12 +640,18 @@ PHASE_K_OPS = [
 # the gate working (the Phase K rule, restated in the
 # header). Caller files verified at gate-writing time:
 # set_head_ring_scale — inspector_figure.rs;
-# clip_duration_secs — audio_panel.rs;
+# clip_duration_secs — was audio_panel.rs; the UI
+# mission's wave 4 replaced the panel's per-render
+# decode with its cached probe, so the op's remaining
+# production path is internal: clip_duration_frames
+# (same file) wraps it, and timeline_marks calls that.
+# It therefore moves to SAME_FILE_OPS below — still
+# census-watched, classified by where its caller
+# actually lives.
 # simplify_stroke_at — stroke_inspector.rs;
 # set_key_interp — keyframe_tools.rs.
 PHASE_L_OPS = [
     "set_head_ring_scale",
-    "clip_duration_secs",
     "simplify_stroke_at",
     "set_key_interp",
 ]
@@ -694,6 +700,9 @@ PHASE_M_OPS = [
 SAME_FILE_OPS = [
     "delete_camera_key_at",
     "swap_frames",
+    # UI mission wave 4: internal step of the wired
+    # clip_duration_frames (see PHASE_L_OPS note).
+    "clip_duration_secs",
 ]
 
 CENSUS_OPS = PHASE_J_OPS + PHASE_K_OPS + PHASE_L_OPS + PHASE_M_OPS

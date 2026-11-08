@@ -747,7 +747,12 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     // the overlay flag only in the Build3D workspace, and
     // a fig3 session must actually exist.
     if overlays.fig3_stage && core.fig3.is_some() {
-        let prims = crate::rune_sec::stage_fig3::stage_fig3_prims(core);
+        let prims = crate::rune_sec::stage_fig3::stage_fig3_prims(
+            core,
+            crate::rune_sec::fig3_preview::Fig3Palette::from_theme(
+                &crate::rune_sec::app_theme::app_theme(!core.light_theme),
+            ),
+        );
         for (a, b, color, width) in fig3_screen_segments(&rt, s, prims) {
             shape = shape.line(a, b, width, LineCap::Round, color);
         }

@@ -108,6 +108,47 @@
 //! longer display-only: the toolbar stepper steps the last
 //! clip's `AudioClip.gain` (`model.rs:505`), the field
 //! playback and mixdown honour.
+//!
+//! UI mission Wave 4 (audit S14) reworks the panel in
+//! four ways. (1) The operations toolbar is no longer one
+//! 17-control horizontal scroll strip mixing scopes
+//! (D1): the clip-scope controls sit in three labelled,
+//! wrapping groups — "Effects", "Clip", "Position &
+//! gain" — under the existing "Operations" header, and
+//! Mixdown moves into the "Whole project" row beside
+//! Normalise all, the Phase J rule for project-scope
+//! ops. Every key, label and handler is verbatim; the
+//! two new row keys (`audio-ops-clip`,
+//! `audio-ops-position`) are additive containers. (2)
+//! Clip health is visible (D2): each clip's file is
+//! probed (`probe_clip`) and a clip whose file is
+//! missing, not a WAV, or unreadable carries a warning
+//! glyph and a suffix on its row, plus a segment on the
+//! readout — a healthy silent clip carries none of it,
+//! so "silent", "missing" and "unsupported" are no
+//! longer indistinguishable. (3) The probe is cached
+//! (D4): decoded duration/peak live in
+//! `AudioPanelState::probe_cache`, keyed by path and
+//! stamped with the file's length + mtime (the
+//! `waveform_view` peaks-cache pattern), so a render
+//! stats each file but decodes only on change — during
+//! playback the panel no longer re-decodes every WAV
+//! every frame. No `read_wav` call remains in this
+//! file's view path. (4) The effects' fixed parameters
+//! are stated before the fact (D3): a caption under the
+//! Effects group (`effects_settings_line`) names the
+//! values the one-click ops apply. Real parameter
+//! steppers remain engine-blocked — the indexed ops in
+//! `audio_ops` take no parameter arguments (the values
+//! are constants there: `FADE_IN_SECS`/`FADE_OUT_SECS`,
+//! echo 0.18/0.35, lowpass 1200 Hz, pitch +2, compress
+//! 0.5/4.0) — so the panel labels honestly instead of
+//! inventing controls no op would honour (audit I-4 is
+//! the ops-side follow-up).
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, text_input, El, TextEdit, Tx};
@@ -117,8 +158,10 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::AudioClip;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::app_theme;
 use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
+use crate::rune_sec::icons::icon_el;
 use crate::State;
 
 /// Panel-owned state: the add-clip file-name entry (Rune
@@ -138,6 +181,15 @@ pub struct AudioPanelState {
     /// toolbar falls back to the last clip; see
     /// `effective_target`.
     pub selected: Option<usize>,
+    /// Wave 4 (audit D4): the decoded-probe cache —
+    /// path → (file length, mtime, probe) — behind a
+    /// `RefCell` because the view builds from `&State`
+    /// (the `home_panel` cache-field pattern). A render
+    /// stats each clip's file and serves the probe from
+    /// here while the stamp matches; the decoder runs
+    /// only when a file appears or changes. See
+    /// `probe_clip`.
+    pub probe_cache: RefCell<ProbeCache>,
 }
 
 impl AudioPanelState {
@@ -145,6 +197,7 @@ impl AudioPanelState {
         AudioPanelState {
             name: TextEdit::new(""),
             selected: None,
+            probe_cache: RefCell::new(HashMap::new()),
         }
     }
 }
@@ -317,16 +370,29 @@ pub fn clip_file_name(path: &str) -> &str {
 /// `None` when the project has no clips.
 ///
 /// Phase L appends the clip's duration (` · {d:.1}s`)
-/// when the engine's probe (`audio_ops::
-/// clip_duration_secs`) resolves for the target — the
-/// file reads back as a WAV. When it does not resolve
-/// (missing or unreadable file) the line is exactly the
-/// Phase I line: no duration segment, no placeholder.
+/// when the engine's probe resolves for the target —
+/// the file reads back as a WAV. When it does not
+/// resolve (missing or unreadable file) the line is
+/// exactly the Phase I line: no duration segment, no
+/// placeholder.
 ///
 /// Phase M appends ` · muted` (after the duration
 /// segment, when one is present) when the target clip
 /// is muted; an audible target's line is unchanged.
-pub fn clip_readout(core: &EditorCore, selected: Option<usize>) -> Option<String> {
+///
+/// Wave 4 (audit D2/D4): the duration now comes from
+/// the panel's cached probe (`probe_clip`) instead of
+/// a fresh decode per render, and a non-healthy target
+/// gains a closing health segment (` · missing file` /
+/// ` · unsupported format` / ` · unreadable file`) so
+/// the readout states WHY a clip has no duration. A
+/// `None` probe (no probe taken) renders the Phase I
+/// line, as before.
+pub fn clip_readout(
+    core: &EditorCore,
+    selected: Option<usize>,
+    probe: Option<&ClipProbe>,
+) -> Option<String> {
     let clips = &core.project.audio;
     let i = effective_target(selected, clips.len())?;
     let clip = &clips[i];
@@ -337,11 +403,14 @@ pub fn clip_readout(core: &EditorCore, selected: Option<usize>) -> Option<String
         clip.start_frame + 1,
         clip.gain
     );
-    if let Some(d) = audio_ops::clip_duration_secs(core, i) {
+    if let Some(d) = probe.and_then(|p| p.duration_secs) {
         line += &format!(" · {d:.1}s");
     }
     if clip.muted {
         line += " · muted";
+    }
+    if let Some(p) = probe {
+        line += &health_segment(p.health);
     }
     Some(line)
 }
@@ -385,14 +454,18 @@ pub fn clip_row_label(clip: &AudioClip) -> String {
     )
 }
 
-/// `" · {d:.1} s"` — the clip's duration — when its file
-/// reads back as WAV, `""` when it does not (the row then
-/// shows name + start only). Reads the filesystem, like
-/// `summary_line` does.
-pub fn clip_duration_suffix(clip: &AudioClip) -> String {
-    match audio_edit::read_wav(&clip.path) {
-        Ok(wav) => format!(" · {:.1} s", wav.duration_secs()),
-        Err(_) => String::new(),
+/// `" · {d:.1} s"` — the clip's duration — when its
+/// probe resolved one (the file read back as a WAV with
+/// frames), `""` when it did not (the row then shows
+/// name + start, plus the health suffix when the probe
+/// found a problem). Wave 4: probe-fed, no filesystem
+/// access of its own — the pre-Wave-4 form decoded the
+/// file with `audio_edit::read_wav` on every render
+/// (audit D4).
+pub fn probe_duration_suffix(probe: &ClipProbe) -> String {
+    match probe.duration_secs {
+        Some(d) => format!(" · {d:.1} s"),
+        None => String::new(),
     }
 }
 
@@ -408,19 +481,24 @@ pub fn format_summary(count: usize, total_secs: Option<f32>, gained: usize) -> S
     }
 }
 
-/// The summary line for a clip list: sums the durations of
-/// the clips whose files read back as WAV
-/// (`audio_edit::read_wav`, `audio_edit.rs:41`) and counts
-/// the non-unity gains. Unreadable files are skipped
-/// silently; when nothing reads back the line degrades to
-/// the bare count. (Reads the filesystem, like the GPUI
-/// panel's render-time summary did.)
-pub fn summary_line(clips: &[AudioClip]) -> String {
+/// The summary line for a clip list: sums the probed
+/// durations of the clips whose files read back as WAV
+/// and counts the non-unity gains. Clips without a
+/// probed duration (missing, unsupported, unreadable)
+/// are skipped; when nothing probed a duration the line
+/// degrades to the bare count. Wave 4: the durations
+/// come from the caller's probes (`probe_clip`, cached
+/// in `AudioPanelState`) — the pre-Wave-4 form decoded
+/// every file with `audio_edit::read_wav` on every
+/// render (audit D4). `probes` is index-aligned with
+/// `clips`; a short `probes` slice simply sums what it
+/// has.
+pub fn summary_line(clips: &[AudioClip], probes: &[ClipProbe]) -> String {
     let mut total_secs = 0.0f32;
     let mut any_readable = false;
-    for clip in clips {
-        if let Ok(wav) = audio_edit::read_wav(&clip.path) {
-            total_secs += wav.duration_secs();
+    for probe in probes {
+        if let Some(d) = probe.duration_secs {
+            total_secs += d;
             any_readable = true;
         }
     }
@@ -430,6 +508,195 @@ pub fn summary_line(clips: &[AudioClip]) -> String {
         if any_readable { Some(total_secs) } else { None },
         gained,
     )
+}
+
+// ---- Clip probes (Wave 4: audit D2 health + D4 cache) ----
+
+/// The probe cache in `AudioPanelState`: clip path →
+/// (file length, mtime, probe). Length + mtime together
+/// catch rewrites (an edit that keeps the exact byte
+/// length still moves the mtime) — the `waveform_view`
+/// peaks-cache key discipline.
+pub type ProbeCache = HashMap<String, (u64, SystemTime, ClipProbe)>;
+
+/// Cap on cached probes. A project carries a handful of
+/// clips; when an insert finds the map full it is
+/// cleared wholesale (the `waveform_view` discipline) —
+/// the worst case is one re-probe per clip.
+const PROBE_CACHE_CAP: usize = 32;
+
+/// What a clip's file probe found. The three non-healthy
+/// states are exactly the ones the pre-Wave-4 UI rendered
+/// identically to a healthy silent clip (audit D2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipHealth {
+    /// The file exists and read back as a WAV.
+    Healthy,
+    /// No file at the clip's path (the stat failed).
+    Missing,
+    /// The file exists but is not a WAV (`.mp3`, `.ogg`,
+    /// …): every probe in the app is WAV-only, so the
+    /// clip can play but shows no duration or waveform.
+    Unsupported,
+    /// The file exists and claims to be a WAV but the
+    /// decoder rejected it (corrupt, or not really WAV).
+    Unreadable,
+}
+
+/// One clip's probe result: its health, and — for a
+/// healthy clip — the decoded duration and peak. The
+/// duration follows the `audio_ops::clip_duration_secs`
+/// rule (`None` for a zero sample rate or zero frames),
+/// so the row/readout durations match the engine
+/// probe's exactly.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipProbe {
+    pub health: ClipHealth,
+    pub duration_secs: Option<f32>,
+    pub peak: Option<f32>,
+}
+
+impl ClipProbe {
+    /// The probe for a file that cannot even be statted:
+    /// missing, nothing decoded.
+    fn missing() -> Self {
+        ClipProbe {
+            health: ClipHealth::Missing,
+            duration_secs: None,
+            peak: None,
+        }
+    }
+}
+
+/// The short noun phrase naming a non-healthy state, or
+/// `None` for a healthy clip: "missing file" /
+/// "unsupported format" / "unreadable file". Shared by
+/// the row suffix and the readout segment so both
+/// surfaces use one vocabulary.
+pub fn health_word(health: ClipHealth) -> Option<&'static str> {
+    match health {
+        ClipHealth::Healthy => None,
+        ClipHealth::Missing => Some("missing file"),
+        ClipHealth::Unsupported => Some("unsupported format"),
+        ClipHealth::Unreadable => Some("unreadable file"),
+    }
+}
+
+/// `" (missing file)"` for a non-healthy clip, `""` for a
+/// healthy one — the row label's health marker, in the
+/// parenthetical style of the ` (muted)` marker.
+pub fn health_suffix(health: ClipHealth) -> String {
+    match health_word(health) {
+        Some(word) => format!(" ({word})"),
+        None => String::new(),
+    }
+}
+
+/// `" · missing file"` for a non-healthy clip, `""` for
+/// a healthy one — the readout's health segment, in its
+/// ` · ` segment style.
+pub fn health_segment(health: ClipHealth) -> String {
+    match health_word(health) {
+        Some(word) => format!(" · {word}"),
+        None => String::new(),
+    }
+}
+
+/// A file's cache stamp: (length, mtime) from a fresh
+/// stat. `None` when the file cannot be statted or its
+/// mtime read (usually: it does not exist).
+fn file_stamp(path: &str) -> Option<(u64, SystemTime)> {
+    let md = std::fs::metadata(path).ok()?;
+    Some((md.len(), md.modified().ok()?))
+}
+
+/// Whether a path names a WAV by extension
+/// (case-insensitive) — the only format the app's probes
+/// (`audio_edit::read_wav`) understand.
+fn is_wav_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+}
+
+/// Classify a clip whose file is known to exist (the
+/// caller statted it): non-WAV by extension is
+/// `Unsupported` without touching the decoder; a WAV
+/// the decoder accepts is `Healthy` with its duration
+/// and peak; one it rejects is `Unreadable`.
+fn classify_clip(clip: &AudioClip) -> ClipProbe {
+    if !is_wav_path(&clip.path) {
+        return ClipProbe {
+            health: ClipHealth::Unsupported,
+            duration_secs: None,
+            peak: None,
+        };
+    }
+    match audio_edit::read_wav(&clip.path) {
+        Ok(wav) => {
+            let duration_secs = if wav.sample_rate == 0 || wav.frames() == 0 {
+                None
+            } else {
+                Some(wav.frames() as f32 / wav.sample_rate as f32)
+            };
+            ClipProbe {
+                health: ClipHealth::Healthy,
+                duration_secs,
+                peak: Some(audio_edit::peak(&wav)),
+            }
+        }
+        Err(_) => ClipProbe {
+            health: ClipHealth::Unreadable,
+            duration_secs: None,
+            peak: None,
+        },
+    }
+}
+
+/// Probe one clip, serving from `cache` while the file
+/// is unchanged. Discipline (mirroring `waveform_view`'s
+/// peaks cache): stat first — a file that cannot be
+/// statted reports `Missing` and never reaches the
+/// cache or the decoder, so a file that appears later
+/// probes fresh; a stamp match serves the cached probe
+/// without decoding; otherwise the clip is classified
+/// (decoding at most once per file change) and the
+/// result cached under the fresh stamp. The one race —
+/// the file changing between the stat and the read —
+/// self-corrects on the next call, whose stat misses
+/// the stored stamp.
+pub fn probe_clip(cache: &RefCell<ProbeCache>, clip: &AudioClip) -> ClipProbe {
+    let Some(stamp) = file_stamp(&clip.path) else {
+        return ClipProbe::missing();
+    };
+    if let Some((len, mtime, probe)) = cache.borrow().get(&clip.path) {
+        if (*len, *mtime) == stamp {
+            return probe.clone();
+        }
+    }
+    let probe = classify_clip(clip);
+    let mut cache = cache.borrow_mut();
+    if cache.len() >= PROBE_CACHE_CAP && !cache.contains_key(&clip.path) {
+        cache.clear();
+    }
+    cache.insert(clip.path.clone(), (stamp.0, stamp.1, probe.clone()));
+    probe
+}
+
+/// The fixed settings the one-click effects apply,
+/// stated before the fact (audit D3): fade length, echo
+/// delay/feedback, lowpass cutoff, pitch shift and
+/// compressor threshold/ratio are constants inside the
+/// `audio_ops` ops — the panel cannot offer parameter
+/// controls the ops would not honour, so it names the
+/// values instead (audit I-4 parameterises the ops).
+/// Every number here is the op's own: fade 0.25 s in /
+/// 0.25 s out (`FADE_IN_SECS` / `FADE_OUT_SECS`), echo
+/// 0.18 s / 0.35, lowpass 1200 Hz, pitch +2 semitones,
+/// compress threshold 0.5 ratio 4.0.
+pub fn effects_settings_line() -> &'static str {
+    "Fixed settings — fade 0.25 s in/out · echo 0.18 s delay, 35% feedback · lowpass 1200 Hz · pitch +2 semitones · compress 0.5 threshold, 4:1 ratio"
 }
 
 // ---- Handlers ----
@@ -694,7 +961,13 @@ fn delete_row_clip(s: &mut State, i: usize) {
 /// `audio-normalise` button in its own `audio-project-ops`
 /// row under the toolbar (non-empty branch only). Phase M
 /// adds the `audio-mute` toggle to the operations toolbar,
-/// beside Fade / Reverse / Duplicate.
+/// beside Fade / Reverse / Duplicate. Wave 4 regroups the
+/// toolbar into labelled wrapping groups under "Operations"
+/// (Effects keeps the `audio-ops` row key; `audio-ops-clip`
+/// and `audio-ops-position` are new additive container
+/// keys), moves `mixdown` into the `audio-project-ops` row,
+/// and feeds the summary, rows and readout from the cached
+/// clip probes.
 pub fn audio_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let clips = &core.project.audio;
@@ -726,8 +999,17 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             t,
         ));
     } else {
+        // Wave 4 (audit D4): probe every clip once per
+        // render through the panel cache — a stat per
+        // clip, a decode only when a file changed — and
+        // let the summary, rows and readout all read the
+        // probes (`probes` is index-aligned with `clips`).
+        let probes: Vec<ClipProbe> = clips
+            .iter()
+            .map(|clip| probe_clip(&s.audio_panel.probe_cache, clip))
+            .collect();
         panel = panel.child(
-            text(summary_line(clips))
+            text(summary_line(clips, &probes))
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
@@ -742,6 +1024,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             // the kit selected fill (accent at 16%),
             // replacing the hand-rolled control-track fill.
             let is_selected = selected == Some(i);
+            let probe = &probes[i];
             let mut clip_row = design::list_row(&format!("audio-clip-{i}"), is_selected, t)
                 .w_full()
                 .on_press(move |s: &mut State| {
@@ -749,14 +1032,29 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 })
                 .child(
                     text(format!(
-                        "{}{}",
+                        "{}{}{}",
                         clip_row_label(clip),
-                        clip_duration_suffix(clip)
+                        probe_duration_suffix(probe),
+                        health_suffix(probe.health)
                     ))
                     .font(type_::BODY)
                     .color(t.text)
                     .grow(1.0),
-                )
+                );
+            // Wave 4 (audit D2): a non-healthy clip —
+            // missing, unsupported or unreadable file —
+            // carries the warning glyph beside its name;
+            // a healthy clip (silent ones included)
+            // carries nothing, so the three failure
+            // states no longer look like silence.
+            if probe.health != ClipHealth::Healthy {
+                clip_row = clip_row.child(icon_el(
+                    "triangle-exclamation",
+                    12.0,
+                    app_theme::warning_on(t),
+                ));
+            }
+            clip_row = clip_row
                 .child(icon_btn(
                     &format!("audio-norm-{i}"),
                     "volume-high",
@@ -802,7 +1100,8 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
         // Inside the non-empty branch on purpose: with no
         // clips the panel keeps its existing empty state
         // and no readout element is rendered at all.
-        if let Some(readout) = clip_readout(core, selected) {
+        let target_probe = effective_target(selected, clips.len()).map(|i| &probes[i]);
+        if let Some(readout) = clip_readout(core, selected, target_probe) {
             panel = panel.child(
                 text(readout)
                     .key("audio-readout")
@@ -835,11 +1134,27 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
     // audible "Mute" form; it renders live regardless,
     // like every toolbar button here.
     let (mute_icon, mute_label) = mute_toggle_parts(target_muted(clips, selected));
+    // Wave 4 (audit D1): the toolbar's groups. The
+    // pre-Wave-4 form was ONE `.scroll_x()` row of 17
+    // controls in a 316 pt column — most of it hidden
+    // behind horizontal scrolling with no affordance,
+    // four kinds of control undifferentiated, and
+    // whole-project Mixdown seated among clip-scope
+    // controls. Now the clip-scope controls sit in three
+    // labelled wrapping groups and Mixdown sits in the
+    // Whole project row below. Every key, label, glyph
+    // and handler is verbatim; only the row containers
+    // changed (`audio-ops` stays on the Effects row;
+    // `audio-ops-clip` / `audio-ops-position` are new
+    // additive container keys).
+    panel = panel.child(design::section_label("Effects", t));
     panel = panel.child(
         row()
             .key("audio-ops")
             .gap(6.0)
             .center_y()
+            .flex_wrap()
+            .w_full()
             // Phase N: the DSP buttons carry the glyphs
             // P13 assigns them (Tier A + Tier B tables) —
             // keys, labels and handlers verbatim.
@@ -854,7 +1169,24 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             // its glyph is the rising `chart-line`, not a
             // loudness mark (Phase H).
             .child(icon_btn("audio-fade", "chart-line", "Fade", false, t, fade_target))
-            .child(icon_btn("audio-reverse", "left-right", "Reverse", false, t, reverse_target))
+            .child(icon_btn("audio-reverse", "left-right", "Reverse", false, t, reverse_target)),
+    );
+    // Wave 4 (audit D3): the effects' fixed parameters,
+    // stated before the fact — the values were previously
+    // learnable only from the after-the-fact status line.
+    panel = panel.child(
+        text(effects_settings_line())
+            .font(type_::LABEL)
+            .color(t.text_secondary),
+    );
+    panel = panel.child(design::section_label("Clip", t));
+    panel = panel.child(
+        row()
+            .key("audio-ops-clip")
+            .gap(6.0)
+            .center_y()
+            .flex_wrap()
+            .w_full()
             .child(icon_btn("audio-mute", mute_icon, mute_label, false, t, mute_target))
             .child(icon_btn(
                 "audio-duplicate",
@@ -863,7 +1195,16 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 false,
                 t,
                 duplicate_target,
-            ))
+            )),
+    );
+    panel = panel.child(design::section_label("Position & gain", t));
+    panel = panel.child(
+        row()
+            .key("audio-ops-position")
+            .gap(6.0)
+            .center_y()
+            .flex_wrap()
+            .w_full()
             .child(btn("audio-gain-dn", "Gain -", false, t, |s| {
                 gain_step_target(s, -0.1);
             }))
@@ -871,10 +1212,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             // stepper value (centred mono, min-width 34);
             // the readout string itself is unchanged.
             // The − / + buttons keep their `btn` form and
-            // labels — the stepper lives inside this
-            // scrolling toolbar, where a growing label
-            // (the charter §6 panel-row form) has no width
-            // to grow into; the readout carries the name.
+            // labels; the readout carries the name.
             .child(design::stepper_value(
                 &target_gain_readout(clips, selected),
                 t,
@@ -887,12 +1225,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             }))
             .child(icon_btn("audio-move-later", "chevron-right", "Later", false, t, |s| {
                 move_target(s, 1);
-            }))
-            .child(icon_btn("mixdown", "layer-group", "Mixdown", false, t, |s| {
-                s.core.mixdown_audio()
-            }))
-            .scroll_x()
-            .w_full(),
+            })),
     );
 
     // Phase J: the project-wide normalise row. Every
@@ -918,7 +1251,20 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                     false,
                     t,
                     normalise_all,
-                )),
+                ))
+                // Wave 4 (audit D1): Mixdown joins this
+                // row — it is whole-project by nature (it
+                // renders every clip to one file), and the
+                // Phase J rule that seated Normalise all
+                // here applies to it equally; it sat in
+                // the clip-scope toolbar until now. Key,
+                // glyph, label and handler verbatim. Like
+                // Normalise all it now renders only while
+                // clips exist — a mixdown with no clips
+                // has nothing to render.
+                .child(icon_btn("mixdown", "layer-group", "Mixdown", false, t, |s| {
+                    s.core.mixdown_audio()
+                })),
         );
     }
 
@@ -972,6 +1318,13 @@ mod tests {
         }
     }
 
+    /// Wave 4: probe a core's clip through a throwaway
+    /// cache — the readout tests' stand-in for the panel
+    /// state's own `probe_cache`.
+    fn probe_at(core: &EditorCore, i: usize) -> ClipProbe {
+        probe_clip(&RefCell::new(ProbeCache::new()), &core.project.audio[i])
+    }
+
     #[test]
     fn panel_state_starts_with_an_empty_name() {
         assert_eq!(AudioPanelState::new().name.text, "");
@@ -980,6 +1333,10 @@ mod tests {
         // pressed, in both constructors.
         assert_eq!(AudioPanelState::new().selected, None);
         assert_eq!(AudioPanelState::default().selected, None);
+        // Wave 4: the probe cache starts empty in both
+        // constructors.
+        assert!(AudioPanelState::new().probe_cache.borrow().is_empty());
+        assert!(AudioPanelState::default().probe_cache.borrow().is_empty());
     }
 
     #[test]
@@ -1065,14 +1422,22 @@ mod tests {
         // and start frame (start_frame 29 shows as frame
         // 30, the rows' f{n} convention), the file name
         // trimmed on either separator, and the gain always
-        // shown at two decimals — unity included.
+        // shown at two decimals — unity included. Neither
+        // file exists, so Wave 4's health segment closes
+        // each line (" · missing file").
         assert_eq!(
-            clip_readout(&core, Some(1)),
-            Some("Clip 2: sting.wav · starts frame 30 · gain 0.50".to_string())
+            clip_readout(&core, Some(1), Some(&probe_at(&core, 1))),
+            Some("Clip 2: sting.wav · starts frame 30 · gain 0.50 · missing file".to_string())
         );
         assert_eq!(
-            clip_readout(&core, Some(0)),
-            Some("Clip 1: theme.wav · starts frame 1 · gain 1.00".to_string())
+            clip_readout(&core, Some(0), Some(&probe_at(&core, 0))),
+            Some("Clip 1: theme.wav · starts frame 1 · gain 1.00 · missing file".to_string())
+        );
+        // With NO probe taken the line is the Phase I
+        // line exactly — no duration, no health segment.
+        assert_eq!(
+            clip_readout(&core, Some(1), None),
+            Some("Clip 2: sting.wav · starts frame 30 · gain 0.50".to_string())
         );
     }
 
@@ -1083,17 +1448,19 @@ mod tests {
         core.project.audio.push(clip("a.wav", 0, 2.0));
         core.project.audio.push(clip("b.wav", 3, 0.25));
         // No selection: the readout names the LAST clip,
-        // the toolbar's own fallback.
+        // the toolbar's own fallback (and its probe —
+        // b.wav does not exist, so the health segment
+        // rides along).
         assert_eq!(
-            clip_readout(&core, None),
-            Some("Clip 2: b.wav · starts frame 4 · gain 0.25".to_string())
+            clip_readout(&core, None, Some(&probe_at(&core, 1))),
+            Some("Clip 2: b.wav · starts frame 4 · gain 0.25 · missing file".to_string())
         );
         // A stale selection (past the end after the
         // project shrank) falls back the same way, via
         // effective_target — it never names a dead index.
         assert_eq!(
-            clip_readout(&core, Some(9)),
-            Some("Clip 2: b.wav · starts frame 4 · gain 0.25".to_string())
+            clip_readout(&core, Some(9), Some(&probe_at(&core, 1))),
+            Some("Clip 2: b.wav · starts frame 4 · gain 0.25 · missing file".to_string())
         );
     }
 
@@ -1101,8 +1468,8 @@ mod tests {
     fn clip_readout_is_none_without_clips() {
         let mut core = EditorCore::new();
         core.project.audio.clear();
-        assert_eq!(clip_readout(&core, None), None);
-        assert_eq!(clip_readout(&core, Some(0)), None);
+        assert_eq!(clip_readout(&core, None, None), None);
+        assert_eq!(clip_readout(&core, Some(0), None), None);
     }
 
     #[test]
@@ -1126,9 +1493,10 @@ mod tests {
         core.project.audio.push(clip(&path.to_string_lossy(), 4, 0.5));
         // The probe resolves, so the line gains the
         // duration segment: start frame 4 shows as frame
-        // 5, and 44 100 samples at 44.1 kHz is 1.0 s.
+        // 5, and 44 100 samples at 44.1 kHz is 1.0 s. A
+        // healthy clip gains NO health segment.
         assert_eq!(
-            clip_readout(&core, Some(0)),
+            clip_readout(&core, Some(0), Some(&probe_at(&core, 0))),
             Some(format!(
                 "Clip 1: {} · starts frame 5 · gain 0.50 · 1.0s",
                 path.file_name().unwrap().to_string_lossy()
@@ -1138,16 +1506,18 @@ mod tests {
     }
 
     #[test]
-    fn clip_readout_omits_duration_for_a_missing_file() {
+    fn clip_readout_marks_a_missing_file_instead_of_a_duration() {
         let mut core = EditorCore::new();
         core.project.audio.clear();
         core.project.audio.push(clip("no/such/file.wav", 0, 1.0));
-        // The probe cannot resolve a path that does not
-        // exist, so the line is the Phase I line exactly —
-        // no duration segment, no placeholder.
+        // Wave 4 (audit D2): the probe cannot resolve a
+        // path that does not exist — where the Phase L
+        // line simply omitted the duration, the line now
+        // says WHY: the closing health segment names the
+        // missing file.
         assert_eq!(
-            clip_readout(&core, Some(0)),
-            Some("Clip 1: file.wav · starts frame 1 · gain 1.00".to_string())
+            clip_readout(&core, Some(0), Some(&probe_at(&core, 0))),
+            Some("Clip 1: file.wav · starts frame 1 · gain 1.00 · missing file".to_string())
         );
     }
 
@@ -1160,20 +1530,22 @@ mod tests {
         // The muted segment closes the line when the
         // target is muted (here the live selection names
         // the muted clip), while an audible target's line
-        // is the Phase I line byte-for-byte.
+        // is the Phase I line byte-for-byte. Neither file
+        // exists, so Wave 4's health segment follows the
+        // muted segment on both lines.
         assert_eq!(
-            clip_readout(&core, Some(1)),
-            Some("Clip 2: sting.wav · starts frame 30 · gain 0.50 · muted".to_string())
+            clip_readout(&core, Some(1), Some(&probe_at(&core, 1))),
+            Some("Clip 2: sting.wav · starts frame 30 · gain 0.50 · muted · missing file".to_string())
         );
         assert_eq!(
-            clip_readout(&core, Some(0)),
-            Some("Clip 1: theme.wav · starts frame 1 · gain 1.00".to_string())
+            clip_readout(&core, Some(0), Some(&probe_at(&core, 0))),
+            Some("Clip 1: theme.wav · starts frame 1 · gain 1.00 · missing file".to_string())
         );
         // The fallback names the last clip, so with no
         // selection the muted marker rides along.
         assert_eq!(
-            clip_readout(&core, None),
-            Some("Clip 2: sting.wav · starts frame 30 · gain 0.50 · muted".to_string())
+            clip_readout(&core, None, Some(&probe_at(&core, 1))),
+            Some("Clip 2: sting.wav · starts frame 30 · gain 0.50 · muted · missing file".to_string())
         );
     }
 
@@ -1195,8 +1567,10 @@ mod tests {
         let mut core = EditorCore::new();
         core.project.audio.clear();
         core.project.audio.push(muted_clip(&path.to_string_lossy(), 4, 0.5));
+        // Healthy file: duration, then muted, and NO
+        // health segment.
         assert_eq!(
-            clip_readout(&core, Some(0)),
+            clip_readout(&core, Some(0), Some(&probe_at(&core, 0))),
             Some(format!(
                 "Clip 1: {} · starts frame 5 · gain 0.50 · 1.0s · muted",
                 path.file_name().unwrap().to_string_lossy()
@@ -1266,12 +1640,15 @@ mod tests {
     }
 
     #[test]
-    fn duration_suffix_reads_readable_wavs_only() {
-        // Unreadable path: no suffix, the row shows name +
-        // start only.
-        assert_eq!(clip_duration_suffix(&clip("no/such/file.wav", 0, 1.0)), "");
+    fn duration_suffix_reads_the_probe() {
+        // Wave 4: the suffix is probe-fed. A missing file
+        // probes no duration — the row shows name + start
+        // (plus the health suffix, tested separately).
+        let cache = RefCell::new(ProbeCache::new());
+        let missing = probe_clip(&cache, &clip("no/such/file.wav", 0, 1.0));
+        assert_eq!(probe_duration_suffix(&missing), "");
         // One second of silence at 44.1 kHz, written with
-        // the engine's own WAV writer.
+        // the engine's own WAV writer, probes 1.0 s.
         let wav = audio_edit::WavData {
             sample_rate: 44_100,
             channels: 1,
@@ -1283,8 +1660,195 @@ mod tests {
         ));
         std::fs::write(&path, audio_edit::write_wav(&wav)).unwrap();
         let c = clip(&path.to_string_lossy(), 4, 1.0);
-        assert_eq!(clip_duration_suffix(&c), " · 1.0 s");
+        let healthy = probe_clip(&cache, &c);
+        assert_eq!(probe_duration_suffix(&healthy), " · 1.0 s");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn health_words_name_each_failure_state() {
+        // One vocabulary for both surfaces: the row's
+        // parenthetical suffix and the readout's segment.
+        assert_eq!(health_word(ClipHealth::Healthy), None);
+        assert_eq!(health_suffix(ClipHealth::Healthy), "");
+        assert_eq!(health_segment(ClipHealth::Healthy), "");
+        assert_eq!(health_suffix(ClipHealth::Missing), " (missing file)");
+        assert_eq!(health_segment(ClipHealth::Missing), " · missing file");
+        assert_eq!(
+            health_suffix(ClipHealth::Unsupported),
+            " (unsupported format)"
+        );
+        assert_eq!(
+            health_segment(ClipHealth::Unsupported),
+            " · unsupported format"
+        );
+        assert_eq!(
+            health_suffix(ClipHealth::Unreadable),
+            " (unreadable file)"
+        );
+        assert_eq!(
+            health_segment(ClipHealth::Unreadable),
+            " · unreadable file"
+        );
+    }
+
+    #[test]
+    fn probe_classifies_each_health_state() {
+        let cache = RefCell::new(ProbeCache::new());
+        let pid = std::process::id();
+        let dir = std::env::temp_dir();
+
+        // Missing: nothing at the path — no duration, no
+        // peak, and the health word is what the row and
+        // readout will show.
+        let missing = probe_clip(&cache, &clip("no/such/file.wav", 0, 1.0));
+        assert_eq!(missing.health, ClipHealth::Missing);
+        assert_eq!(missing.duration_secs, None);
+        assert_eq!(missing.peak, None);
+
+        // Unsupported: the file EXISTS but is not a WAV
+        // (the add flow accepts .mp3/.ogg; the probes are
+        // WAV-only), so it classifies by extension without
+        // decoding.
+        let mp3 = dir.join(format!("stykanimate-rune-audio-panel-probe-{pid}.mp3"));
+        std::fs::write(&mp3, b"not really an mp3").unwrap();
+        let unsupported = probe_clip(&cache, &clip(&mp3.to_string_lossy(), 0, 1.0));
+        assert_eq!(unsupported.health, ClipHealth::Unsupported);
+        assert_eq!(unsupported.duration_secs, None);
+        let _ = std::fs::remove_file(&mp3);
+
+        // Unreadable: a .wav path whose bytes the decoder
+        // rejects.
+        let bad = dir.join(format!("stykanimate-rune-audio-panel-probe-{pid}.wav"));
+        std::fs::write(&bad, b"this is not a wav file at all").unwrap();
+        let unreadable = probe_clip(&cache, &clip(&bad.to_string_lossy(), 0, 1.0));
+        assert_eq!(unreadable.health, ClipHealth::Unreadable);
+        assert_eq!(unreadable.duration_secs, None);
+        let _ = std::fs::remove_file(&bad);
+
+        // Healthy: a real WAV decodes — duration and peak
+        // ride along. Half-amplitude samples peak at 0.5
+        // (within the PCM16 round trip's tolerance).
+        let wav = audio_edit::WavData {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: vec![0.5; 44_100],
+        };
+        let good = dir.join(format!("stykanimate-rune-audio-panel-probe-good-{pid}.wav"));
+        std::fs::write(&good, audio_edit::write_wav(&wav)).unwrap();
+        let healthy = probe_clip(&cache, &clip(&good.to_string_lossy(), 0, 1.0));
+        assert_eq!(healthy.health, ClipHealth::Healthy);
+        assert_eq!(healthy.duration_secs, Some(1.0));
+        let peak = healthy.peak.expect("a healthy probe carries the peak");
+        assert!((peak - 0.5).abs() < 0.001, "peak {peak}");
+        // A healthy SILENT clip is Healthy with peak 0 —
+        // distinguishable from Missing, which is the
+        // audit D2 point.
+        let silence = audio_edit::WavData {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: vec![0.0; 44_100],
+        };
+        let silent_path =
+            dir.join(format!("stykanimate-rune-audio-panel-probe-silent-{pid}.wav"));
+        std::fs::write(&silent_path, audio_edit::write_wav(&silence)).unwrap();
+        let silent = probe_clip(&cache, &clip(&silent_path.to_string_lossy(), 0, 1.0));
+        assert_eq!(silent.health, ClipHealth::Healthy);
+        assert_eq!(silent.peak, Some(0.0));
+        assert_eq!(health_suffix(silent.health), "");
+        let _ = std::fs::remove_file(&good);
+        let _ = std::fs::remove_file(&silent_path);
+    }
+
+    #[test]
+    fn probe_cache_tracks_the_file_not_the_render() {
+        // The audit D4 contract: an unchanged file is
+        // served from the cache, a changed file is
+        // re-probed, and a missing file is never cached
+        // (it probes fresh when it appears).
+        let cache = RefCell::new(ProbeCache::new());
+        let pid = std::process::id();
+        let path = std::env::temp_dir()
+            .join(format!("stykanimate-rune-audio-panel-cache-{pid}.wav"));
+        let path_str = path.to_string_lossy().into_owned();
+        let c = clip(&path_str, 0, 1.0);
+
+        // Absent: Missing, and the cache stays empty —
+        // the miss is not memoised.
+        assert_eq!(probe_clip(&cache, &c).health, ClipHealth::Missing);
+        assert!(cache.borrow().is_empty(), "a miss is never cached");
+
+        // The file appears: the very next probe decodes
+        // it (1 s), and a repeat probe returns the cached
+        // value unchanged.
+        let one_sec = audio_edit::WavData {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: vec![0.0; 44_100],
+        };
+        std::fs::write(&path, audio_edit::write_wav(&one_sec)).unwrap();
+        let first = probe_clip(&cache, &c);
+        assert_eq!(first.duration_secs, Some(1.0));
+        assert_eq!(probe_clip(&cache, &c), first, "unchanged file, cached probe");
+
+        // The file is rewritten longer: the (len, mtime)
+        // stamp moves, so the probe re-decodes — 2 s now.
+        let two_secs = audio_edit::WavData {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: vec![0.0; 88_200],
+        };
+        std::fs::write(&path, audio_edit::write_wav(&two_secs)).unwrap();
+        assert_eq!(probe_clip(&cache, &c).duration_secs, Some(2.0));
+
+        // The file vanishes: Missing again (the stat runs
+        // before the cache lookup, so the stale entry
+        // never resurrects it).
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(probe_clip(&cache, &c).health, ClipHealth::Missing);
+    }
+
+    #[test]
+    fn effects_settings_line_states_the_ops_fixed_values() {
+        // The caption is the panel's honest answer to
+        // audit D3 until the ops take parameters (I-4):
+        // every value is the op constant in `audio_ops`.
+        let line = effects_settings_line();
+        assert!(line.contains("fade 0.25 s in/out"), "{line}");
+        assert!(line.contains("echo 0.18 s delay, 35% feedback"), "{line}");
+        assert!(line.contains("lowpass 1200 Hz"), "{line}");
+        assert!(line.contains("pitch +2 semitones"), "{line}");
+        assert!(line.contains("compress 0.5 threshold, 4:1 ratio"), "{line}");
+    }
+
+    #[test]
+    fn audio_panel_builds_with_unhealthy_clips() {
+        // Wave 4: rows for a missing file, an unsupported
+        // (.mp3) file and a healthy file build side by
+        // side — the warning-glyph branch and the health
+        // suffixes are exercised, and the readout targets
+        // the (missing) last clip.
+        let t = rune::tok::theme(true);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir();
+        let mp3 = dir.join(format!("stykanimate-rune-audio-panel-build-{pid}.mp3"));
+        std::fs::write(&mp3, b"junk").unwrap();
+        let wav = audio_edit::WavData {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: vec![0.0; 800],
+        };
+        let good = dir.join(format!("stykanimate-rune-audio-panel-build-{pid}.wav"));
+        std::fs::write(&good, audio_edit::write_wav(&wav)).unwrap();
+
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip(&good.to_string_lossy(), 0, 1.0));
+        core.project.audio.push(clip(&mp3.to_string_lossy(), 9, 1.0));
+        core.project.audio.push(clip("no/such/missing.wav", 30, 1.0));
+        let _ = audio_panel(&state_with(core), &t);
+        let _ = std::fs::remove_file(&mp3);
+        let _ = std::fs::remove_file(&good);
     }
 
     #[test]
@@ -1350,8 +1914,10 @@ mod tests {
             clip("no/such/file-a.wav", 0, 1.0),
             clip("no/such/file-b.wav", 9, 0.5),
         ];
-        assert_eq!(summary_line(&clips), "2 clips");
-        assert_eq!(summary_line(&[]), "0 clips");
+        let cache = RefCell::new(ProbeCache::new());
+        let probes: Vec<ClipProbe> = clips.iter().map(|c| probe_clip(&cache, c)).collect();
+        assert_eq!(summary_line(&clips, &probes), "2 clips");
+        assert_eq!(summary_line(&[], &[]), "0 clips");
     }
 
     #[test]
@@ -1372,8 +1938,10 @@ mod tests {
             clip(&path.to_string_lossy(), 0, 1.0),
             clip("no/such/file.wav", 30, 2.0),
         ];
+        let cache = RefCell::new(ProbeCache::new());
+        let probes: Vec<ClipProbe> = clips.iter().map(|c| probe_clip(&cache, c)).collect();
         assert_eq!(
-            summary_line(&clips),
+            summary_line(&clips, &probes),
             "2 clips · total 1.0 s · 1 with gain ≠ 1.0"
         );
         let _ = std::fs::remove_file(&path);
@@ -1474,6 +2042,8 @@ pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
 playback_speed: 1.0,
             was_playing: false,
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         }
     }
 

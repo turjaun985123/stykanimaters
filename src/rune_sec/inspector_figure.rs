@@ -131,7 +131,11 @@
 //!   at any scale.
 //!
 //! When the project has no figures — or the selection is
-//! stale — the panel is one muted line.
+//! stale — the panel renders its header over the kit's
+//! empty state ("No figures in the project."; UI mission
+//! Wave 4, audit s08 I7 — the header-always form the
+//! style panel already used, replacing the bare line
+//! this panel used to be).
 //!
 //! Phase N adoption: the root is the design kit's card
 //! (`panel_col`), the heading is the kit's `panel_title`
@@ -860,11 +864,24 @@ fn swatch(rgb: u32, selected: bool, t: &Theme) -> El {
 pub fn inspector_figure(s: &State, t: &Theme) -> El {
     let panel = design::panel_col("inspector-figure", t);
     let Some(st) = figure_state(&s.core) else {
-        return panel.child(
-            text("No figures in the project.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        // No figures (or a stale selection): the header
+        // still renders — the style panel's form (audit
+        // s08 I7) — over the kit empty state, so the card
+        // reads as a panel at rest, not a stray line.
+        return panel
+            .child(
+                row()
+                    .w_full()
+                    .gap(8.0)
+                    .center_y()
+                    .child(design::panel_title(None, "Figure", None, t)),
+            )
+            .child(design::divider(t))
+            .child(design::empty_state(
+                "shapes",
+                "No figures in the project.",
+                t,
+            ));
     };
     let mut panel = panel
         .child(
@@ -1140,6 +1157,8 @@ pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
 playback_speed: 1.0,
             was_playing: false,
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         };
         let _ = inspector_figure(&with_figures, &t);
         let mut bare_core = EditorCore::new();
@@ -1188,6 +1207,8 @@ pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
 playback_speed: 1.0,
             was_playing: false,
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         };
         let _ = inspector_figure(&bare, &t);
     }

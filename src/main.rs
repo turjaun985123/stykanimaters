@@ -48,6 +48,50 @@ thread_local! {
     static STAGE_EL_SIZE: std::cell::Cell<[f32; 2]> = const { std::cell::Cell::new([0.0, 0.0]) };
 }
 
+/// A destructive session action armed and awaiting its
+/// confirm press (UI mission Wave 4, audit S16 D2): the
+/// actions these variants name replace the live project —
+/// New, an Open (a project-tools row, a Home row, or the
+/// app bar's Load of the working file), Reload from disk,
+/// and Recover of the autosave snapshot — and each used
+/// to discard unsaved work the moment it was pressed,
+/// with no confirmation and no undo snapshot. Now, while
+/// the session is dirty, the first press only arms (the
+/// button re-renders as a danger-styled confirm); the
+/// second press on the armed button runs the action and
+/// clears the field. Any other press in the same panel —
+/// or arming a different action — stands the arm down,
+/// the `HomePanelState::confirm_delete` discipline
+/// carried to the session level.
+///
+/// "Dirty" is the shell's one truthful saved-state
+/// signal: `core.edits_since_autosave() > 0`, the same
+/// counter the app bar's modified dot and the Project
+/// section's autosave line read. It counts edits the
+/// recovery snapshot has not captured. Its known limit,
+/// inherited from the core: the counter is not reset by
+/// a project swap (New / Open / Load leave it alone), so
+/// shortly after a confirmed swap it can still read
+/// dirty until the next autosave (every 25 counted
+/// edits) catches up — an arm that asks once more, never
+/// a discard that happens silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmAction {
+    /// Replace the session with a blank/demo project
+    /// (project-tools New, Home's New project).
+    NewProject,
+    /// Open a different project over the session
+    /// (project-tools rows, Home rows / reopen, the app
+    /// bar's Load).
+    OpenProject,
+    /// Re-open the session's saved file, discarding the
+    /// in-memory state (project-tools Reload).
+    ReloadProject,
+    /// Replace the session with the recovery snapshot
+    /// (project-tools Recover, Home's recovery banner).
+    RecoverSnapshot,
+}
+
 pub struct State {
     pub core: EditorCore,
     /// Last `poll` timestamp (seconds since start), for the
@@ -148,6 +192,19 @@ pub struct State {
     /// Last persisted dark-theme value (LayoutPrefs.dark), so
     /// `poll` saves only on change.
     last_dark: bool,
+    /// Destructive session action armed and awaiting its
+    /// confirm press (UI mission Wave 4; see
+    /// [`ConfirmAction`]). `None` — the resting state —
+    /// means no discard is pending anywhere in the shell.
+    pub confirm_action: Option<ConfirmAction>,
+    /// Home library rename session (home_panel section,
+    /// UI mission Wave 4): the armed row's path and the
+    /// name field's edit buffer, homed here exactly as
+    /// `clips_rename` / `pose_rename` are (a `text_input`
+    /// `on_edit` needs a `&mut TextEdit` path into
+    /// `State`, so the session cannot live in a
+    /// thread-local).
+    pub home_rename: rune_sec::home_panel::HomeRenameState,
 }
 
 fn init() -> State {
@@ -206,6 +263,8 @@ fn init() -> State {
         last_status: status,
         toast_now: 0.0,
         last_dark: layout.dark,
+        confirm_action: None,
+        home_rename: rune_sec::home_panel::HomeRenameState::new(),
     }
 }
 

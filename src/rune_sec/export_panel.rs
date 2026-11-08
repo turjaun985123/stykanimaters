@@ -21,9 +21,11 @@
 //! full ops' wording. Only the project formats have no
 //! range variant, so they always export in full — the
 //! toggle line says so rather than pretending
-//! otherwise. MP4/WebM range exports are video-only (the
-//! full MP4 export muxes audio; the range path cannot), and
-//! the notes say that too.
+//! otherwise. MP4 range exports are video-only (the full
+//! MP4 export muxes audio; the range path cannot); WebM
+//! is video-only in every mode — the WebM path has no
+//! audio support at all (`export::export_webm` never
+//! muxes) — and the notes say both.
 //!
 //! Phase M adds one more note, deliberately conditional:
 //! when the range toggle is on and the project has a clip
@@ -31,8 +33,11 @@
 //! file present on disk), a warning under the toggle row
 //! (key `xc-range-audio-note`, decision in
 //! `range_audio_note_shown`) states that range video
-//! exports are silent — a range MP4/WebM otherwise loses
-//! the project's sound with nothing saying so.
+//! exports are silent and that audio lives only in a
+//! full-timeline MP4 — a range MP4 otherwise loses the
+//! project's sound with nothing saying so. (WebM never
+//! carries the sound, full or range; the WebM row's own
+//! note says that where the button is.)
 //!
 //! Two bundle buttons sit under the categories: "Export
 //! all images" (PNG + JPEG + SVG + spritesheet) and "Export
@@ -51,8 +56,15 @@
 //! recap.
 //!
 //! The recap line under the bundles shows the last export —
-//! bundle or single — as "Exported <name> → <destination>",
-//! or "<name> export failed" when the op reported failure.
+//! bundle or single — as "Exported <name> → <destination>".
+//! A range single names its frame range in the recap (and
+//! video-only for MP4/WebM) rather than claiming the plain
+//! full destination, and a failure keeps the op's own
+//! status wording, reason included, instead of dropping
+//! to a bare "<name> export failed". The line renders in
+//! the toast severity palette (glyph + colour from
+//! `recap_severity`), so the record that persists after
+//! the toast fades still says how the export went.
 //! Failure detection reads `core.status`: the export ops
 //! return `()` and report only through the status line, and
 //! every failure wording in `editor.rs` contains "failed"
@@ -67,10 +79,15 @@
 //! what is on disk — there are deliberately no open/reveal
 //! buttons, because the shell has no file opener to call.
 //! The scan is cached behind the roots' mtimes (the
-//! fx_browser/home pattern, see `recent_exports_cached`)
-//! and lists only the top level of each root, so the
-//! per-frame files inside `export/svg/` and `out/jpeg/`
-//! do not appear individually.
+//! fx_browser/home pattern, see `recent_exports_cached`).
+//! Sequences never flood it: the `frame-*.png` files a
+//! PNG export writes straight into a root collapse into
+//! one row ("export/frame-*.png · N files"), and the two
+//! sequence subdirectories — `export/svg/`, `out/jpeg/` —
+//! each appear as a single row carrying the directory's
+//! mtime and the files' total size, instead of the
+//! per-frame files inside them (or, as before, nothing
+//! at all).
 //!
 //! Panel state: the toggle position lives in
 //! `State::export_use_range` and the recap line in
@@ -119,7 +136,8 @@ use stykanimate_rs::editor::EditorCore;
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::icon_btn;
-use crate::rune_sec::icons::icon_el;
+use crate::rune_sec::icons::{icon_el, icon_el_rgb};
+use crate::rune_sec::toasts::{classify_status, Severity};
 use crate::State;
 
 /// The `xc-*` keys whose formats have a frame-range exporter
@@ -164,7 +182,7 @@ pub fn range_target(core: &EditorCore, use_range: bool) -> Option<(usize, usize)
 pub fn loop_note(core: &EditorCore) -> Option<String> {
     let (a, b) = range_target(core, true)?;
     Some(format!(
-        "Loop range: frames {}–{} — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (MP4/WebM range exports are video-only).",
+        "Loop range: frames {}–{} — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (MP4 range exports are video-only; WebM is video-only in every mode).",
         a + 1,
         b + 1
     ))
@@ -192,10 +210,49 @@ pub fn effective_text(core: &EditorCore, use_range: bool) -> String {
     }
 }
 
+/// A stage dimension or fps for the output line: whole
+/// values print without a decimal point ("640", "12"),
+/// fractional ones with one decimal ("29.9") — the
+/// status line's fps convention.
+fn fmt_measure(v: f32) -> String {
+    if v.fract() == 0.0 {
+        format!("{}", v as i64)
+    } else {
+        format!("{v:.1}")
+    }
+}
+
+/// The output summary under the toggle: what the next
+/// export will actually produce — the frame count the
+/// toggle state implies (the loop-range count when a
+/// range target applies, every frame otherwise), the
+/// stage dimensions every export renders at (there is no
+/// scale control anywhere in `export.rs`; output size IS
+/// `project.stage`), and the project fps. Driven by the
+/// same state `effective_text` reads, so the two lines
+/// can never disagree about the frame count.
+pub fn output_text(core: &EditorCore, use_range: bool) -> String {
+    let frames = match range_target(core, use_range) {
+        Some((a, b)) => b - a + 1,
+        None => core.project.frames.len(),
+    };
+    let [w, h] = core.project.stage;
+    format!(
+        "Output: {frames} frames · {}×{} · {} fps",
+        fmt_measure(w),
+        fmt_measure(h),
+        fmt_measure(core.project.fps)
+    )
+}
+
 /// The exact wording of the range-mode audio warning
-/// (element key `xc-range-audio-note`).
+/// (element key `xc-range-audio-note`). Audio lives only
+/// in a full-timeline MP4: the full `export::export_mp4`
+/// muxes it, `export_mp4_range` is video-only, and the
+/// WebM path never muxes in any mode — the wording names
+/// MP4 alone so it cannot imply a sounding WebM.
 pub const RANGE_AUDIO_NOTE: &str =
-    "Range video exports are silent — audio is only in full-timeline MP4/WebM.";
+    "Range video exports are silent — audio is only in a full-timeline MP4 export.";
 
 /// Whether the range-mode audio warning shows: the range
 /// toggle is on AND at least one clip would actually be
@@ -337,14 +394,78 @@ pub fn failed_recap(name: &str) -> String {
     format!("{name} export failed")
 }
 
-/// Record the outcome of a single-format export in the
-/// panel's recap line: `single_recap` on success,
-/// `failed_recap` when the op reported failure.
-fn note_single(s: &mut State, op: ExportOp) {
-    s.export_recap = if export_failed(&s.core) {
-        failed_recap(op.name())
+/// The recap for a failed export, keeping the reason the
+/// op put on the status line ("MP4 export failed: ffmpeg
+/// exited with …") instead of dropping it to the bare
+/// `failed_recap` shape — the recap is the record that
+/// persists after the status line and its toast move on,
+/// so it understates the failure if it keeps only the
+/// format name. The status is used verbatim when it is a
+/// failure wording (the `export_failed` convention);
+/// anything else falls back to `failed_recap`.
+pub fn failure_recap(status: &str, name: &str) -> String {
+    if status.to_lowercase().contains("failed") {
+        status.to_string()
     } else {
-        single_recap(op.name(), op.dest())
+        failed_recap(name)
+    }
+}
+
+/// The recap line for a successful range export: the
+/// frame range is part of the record (the plain
+/// destination alone would claim a full export), and the
+/// two video formats carry their video-only marker —
+/// a range MP4/WebM dropped the project's audio the full
+/// MP4 would have kept (WebM has none in any mode).
+pub fn single_recap_range(name: &str, dest: &str, range: (usize, usize), video_only: bool) -> String {
+    let (a, b) = range;
+    if video_only {
+        format!(
+            "Exported {name} (frames {}–{}, video only) → {dest}",
+            a + 1,
+            b + 1
+        )
+    } else {
+        format!("Exported {name} (frames {}–{}) → {dest}", a + 1, b + 1)
+    }
+}
+
+/// How much the recap line means it, classified from its
+/// own wording by the toast classifier: a recap that
+/// names a failure is an Error (a partially failed
+/// bundle's recap contains "failed:", so it reads Error
+/// too — the same decision `classify_status` already
+/// makes for the bundle's toast, pinned by test), and
+/// every success recap starts with "Exported ", the
+/// classifier's Success shape. The panel render colours
+/// the line and its glyph from this severity, so the
+/// persistent record carries the same signal the
+/// transient toast did.
+pub fn recap_severity(recap: &str) -> Severity {
+    classify_status(recap)
+}
+
+/// Record the outcome of a single-format export in the
+/// panel's recap line. `range` is the range the press
+/// actually exported (the action's `range_target`, read
+/// before the op ran): a range success recaps the frame
+/// range (and video-only for MP4/WebM) via
+/// `single_recap_range` instead of claiming the plain
+/// full destination, and a failure keeps the op's reason
+/// via `failure_recap`.
+fn note_single(s: &mut State, op: ExportOp, range: Option<(usize, usize)>) {
+    s.export_recap = if export_failed(&s.core) {
+        failure_recap(&s.core.status, op.name())
+    } else {
+        match range {
+            Some(range) => single_recap_range(
+                op.name(),
+                op.dest(),
+                range,
+                matches!(op, ExportOp::Mp4 | ExportOp::Webm),
+            ),
+            None => single_recap(op.name(), op.dest()),
+        }
     };
 }
 
@@ -416,7 +537,8 @@ fn run_bundle(s: &mut State, kind: BundleKind) {
 // mirror the full ops in `editor.rs`.
 
 fn export_png_action(s: &mut State) {
-    match range_target(&s.core, s.export_use_range) {
+    let range = range_target(&s.core, s.export_use_range);
+    match range {
         Some((a, b)) => {
             let dir = export_dir();
             match stykanimate_rs::export::export_png_sequence_range(&s.core.project, a, b, &dir) {
@@ -433,11 +555,12 @@ fn export_png_action(s: &mut State) {
         }
         None => s.core.export_png(),
     }
-    note_single(s, ExportOp::Png);
+    note_single(s, ExportOp::Png, range);
 }
 
 fn export_jpeg_action(s: &mut State) {
-    match range_target(&s.core, s.export_use_range) {
+    let range = range_target(&s.core, s.export_use_range);
+    match range {
         Some((a, b)) => {
             let dir = PathBuf::from("out").join("jpeg");
             match stykanimate_rs::export::export_jpeg_sequence_range(&s.core.project, a, b, &dir) {
@@ -453,7 +576,7 @@ fn export_jpeg_action(s: &mut State) {
         }
         None => s.core.export_jpeg_dir(),
     }
-    note_single(s, ExportOp::Jpeg);
+    note_single(s, ExportOp::Jpeg, range);
 }
 
 /// SVG with the range toggle (Phase J): the range variant
@@ -462,7 +585,8 @@ fn export_jpeg_action(s: &mut State) {
 /// reports in the full op's wording with the frame range
 /// named.
 fn export_svg_action(s: &mut State) {
-    match range_target(&s.core, s.export_use_range) {
+    let range = range_target(&s.core, s.export_use_range);
+    match range {
         Some((a, b)) => {
             let dir = export_dir().join("svg");
             let _ = std::fs::create_dir_all(&dir);
@@ -480,11 +604,12 @@ fn export_svg_action(s: &mut State) {
         }
         None => s.core.export_svg(),
     }
-    note_single(s, ExportOp::Svg);
+    note_single(s, ExportOp::Svg, range);
 }
 
 fn export_gif_action(s: &mut State) {
-    match range_target(&s.core, s.export_use_range) {
+    let range = range_target(&s.core, s.export_use_range);
+    match range {
         Some((a, b)) => {
             let dir = export_dir();
             let _ = std::fs::create_dir_all(&dir);
@@ -503,7 +628,7 @@ fn export_gif_action(s: &mut State) {
         }
         None => s.core.export_gif(),
     }
-    note_single(s, ExportOp::Gif);
+    note_single(s, ExportOp::Gif, range);
 }
 
 /// Spritesheet with the range toggle (Phase J): the range
@@ -512,7 +637,8 @@ fn export_gif_action(s: &mut State) {
 /// the contact-sheet action's voice — frame count, the
 /// range, the path.
 fn export_sheet_action(s: &mut State) {
-    match range_target(&s.core, s.export_use_range) {
+    let range = range_target(&s.core, s.export_use_range);
+    match range {
         Some((a, b)) => {
             let dir = export_dir();
             let _ = std::fs::create_dir_all(&dir);
@@ -531,7 +657,7 @@ fn export_sheet_action(s: &mut State) {
         }
         None => s.core.export_sheet(),
     }
-    note_single(s, ExportOp::Spritesheet);
+    note_single(s, ExportOp::Spritesheet, range);
 }
 
 /// The full contact-sheet export (Phase I, integrator
@@ -553,7 +679,8 @@ fn run_contact_full(core: &mut EditorCore) {
 }
 
 fn export_contact_action(s: &mut State) {
-    match range_target(&s.core, s.export_use_range) {
+    let range = range_target(&s.core, s.export_use_range);
+    match range {
         Some((a, b)) => {
             let dir = export_dir();
             let _ = std::fs::create_dir_all(&dir);
@@ -572,11 +699,12 @@ fn export_contact_action(s: &mut State) {
         }
         None => run_contact_full(&mut s.core),
     }
-    note_single(s, ExportOp::ContactSheet);
+    note_single(s, ExportOp::ContactSheet, range);
 }
 
 fn export_apng_action(s: &mut State) {
-    match range_target(&s.core, s.export_use_range) {
+    let range = range_target(&s.core, s.export_use_range);
+    match range {
         Some((a, b)) => {
             let dir = PathBuf::from("out");
             let _ = std::fs::create_dir_all(&dir);
@@ -594,11 +722,12 @@ fn export_apng_action(s: &mut State) {
         }
         None => s.core.export_apng_file(),
     }
-    note_single(s, ExportOp::Apng);
+    note_single(s, ExportOp::Apng, range);
 }
 
 fn export_mp4_action(s: &mut State) {
-    match range_target(&s.core, s.export_use_range) {
+    let range = range_target(&s.core, s.export_use_range);
+    match range {
         Some((a, b)) => {
             let dir = export_dir();
             let _ = std::fs::create_dir_all(&dir);
@@ -620,11 +749,12 @@ fn export_mp4_action(s: &mut State) {
         }
         None => s.core.export_mp4(),
     }
-    note_single(s, ExportOp::Mp4);
+    note_single(s, ExportOp::Mp4, range);
 }
 
 fn export_webm_action(s: &mut State) {
-    match range_target(&s.core, s.export_use_range) {
+    let range = range_target(&s.core, s.export_use_range);
+    match range {
         Some((a, b)) => {
             let dir = export_dir();
             let _ = std::fs::create_dir_all(&dir);
@@ -643,7 +773,7 @@ fn export_webm_action(s: &mut State) {
         }
         None => s.core.export_webm(),
     }
-    note_single(s, ExportOp::Webm);
+    note_single(s, ExportOp::Webm, range);
 }
 
 // ---- Recent exports history -------------------------------
@@ -660,29 +790,40 @@ pub const HISTORY_LIMIT: usize = 8;
 /// spritesheet, GIF, MP4, WebM, .piv v2–v4, .stk, .nodes,
 /// .stknds) and `out/` (JPEG sequences, APNG, .piv v5) —
 /// see `ExportOp::dest` and the range actions. The history
-/// scan reads exactly these two directories, nothing else.
+/// scan reads these two directories plus the sequence
+/// subdirectories inside them (see `scan_triples`).
 pub fn history_roots() -> Vec<PathBuf> {
     let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     vec![base.join("export"), base.join("out")]
 }
 
-/// One row of the Recent exports list: a file an export
-/// wrote, with its size in bytes and its modification
-/// time. The display name keeps the output root as a
-/// prefix ("export/animation.mp4", "out/animation.apng")
-/// because the two roots are both in play and a bare file
-/// name does not say which one the file came from.
+/// One row of the Recent exports list: something an
+/// export wrote, with its size in bytes and its
+/// modification time. The display name keeps the output
+/// root as a prefix ("export/animation.mp4",
+/// "out/animation.apng") because the two roots are both
+/// in play and a bare file name does not say which one
+/// the file came from. `count` is how many files the row
+/// stands for: 1 for a single file, N for a collapsed
+/// sequence (a root's `frame-*.png` files, or one of the
+/// sequence directories) — the row line names the count
+/// when it is more than one, and `size` is then the
+/// files' total.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExportRow {
     pub name: String,
     pub size: u64,
     pub mtime: SystemTime,
+    pub count: usize,
 }
 
-/// One raw scan result — (path, size in bytes, mtime) —
-/// the plain-data input the row model is built from, so
-/// the model builders stay pure and testable.
-pub type FileTriple = (PathBuf, u64, SystemTime);
+/// One raw scan result — (path, size in bytes, mtime,
+/// file count) — the plain-data input the row model is
+/// built from, so the model builders stay pure and
+/// testable. Plain files carry a count of 1; the scan's
+/// sequence-directory entries carry the directory's file
+/// count and total size (see `scan_sequence_dir`).
+pub type FileTriple = (PathBuf, u64, SystemTime, usize);
 
 /// The display name for a scanned file: the last two path
 /// components ("export/animation.mp4") when a parent
@@ -698,18 +839,80 @@ pub fn display_name(path: &Path) -> String {
     }
 }
 
+/// Is this path one of a sequence export's frame files —
+/// `frame-0001.png`, `frame-0012.jpg`, …? The sequence
+/// writers in `export.rs` name every frame
+/// `frame-{:04}` plus the format extension, so the test
+/// is the `frame-` prefix followed by a digit (a
+/// hand-named "frame-draft.png" in the same directory is
+/// not a sequence frame and keeps its own row).
+pub fn is_sequence_frame(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    match name.strip_prefix("frame-") {
+        Some(rest) => rest.chars().next().is_some_and(|c| c.is_ascii_digit()),
+        None => false,
+    }
+}
+
 /// Build the Recent exports rows from raw scan triples:
 /// newest first (name ascending breaks mtime ties, so the
 /// order is deterministic), capped at `HISTORY_LIMIT`.
+///
+/// Sequence frames written into the same directory
+/// collapse into ONE row first — a 30-frame PNG export
+/// writes 30 `frame-*.png` files straight into
+/// `./export/`, and listing them individually would fill
+/// every row of the history and push each meaningful
+/// export out of it. The collapsed row is named
+/// `frame-*.png` in that directory, carries the frames'
+/// total size, newest mtime and file count. A directory
+/// holding a single frame file is not a flood, so that
+/// file keeps a row under its own name.
 pub fn rows_from_triples(triples: &[FileTriple]) -> Vec<ExportRow> {
-    let mut rows: Vec<ExportRow> = triples
-        .iter()
-        .map(|(path, size, mtime)| ExportRow {
-            name: display_name(path),
-            size: *size,
-            mtime: *mtime,
-        })
-        .collect();
+    let mut rows: Vec<ExportRow> = Vec::new();
+    // Sequence-frame groups, keyed by parent directory:
+    // (dir, total size, newest mtime, file count, the one
+    // frame's own path while the group has a single file).
+    let mut groups: Vec<(PathBuf, u64, SystemTime, usize, PathBuf)> = Vec::new();
+    for (path, size, mtime, count) in triples {
+        if is_sequence_frame(path) {
+            let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+            match groups.iter_mut().find(|(d, ..)| *d == dir) {
+                Some((_, total, newest, n, _)) => {
+                    *total += size;
+                    *newest = (*newest).max(*mtime);
+                    *n += count;
+                }
+                None => groups.push((dir, *size, *mtime, *count, path.clone())),
+            }
+        } else {
+            rows.push(ExportRow {
+                name: display_name(path),
+                size: *size,
+                mtime: *mtime,
+                count: *count,
+            });
+        }
+    }
+    for (dir, total, newest, n, single) in groups {
+        if n > 1 {
+            rows.push(ExportRow {
+                name: display_name(&dir.join("frame-*.png")),
+                size: total,
+                mtime: newest,
+                count: n,
+            });
+        } else {
+            rows.push(ExportRow {
+                name: display_name(&single),
+                size: total,
+                mtime: newest,
+                count: 1,
+            });
+        }
+    }
     rows.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.name.cmp(&b.name)));
     rows.truncate(HISTORY_LIMIT);
     rows
@@ -749,24 +952,47 @@ pub fn age_label(now: SystemTime, mtime: SystemTime) -> String {
     }
 }
 
-/// One Recent exports line: name, size, age.
+/// One Recent exports line: name, size, age — with the
+/// file count named after the name for a collapsed
+/// sequence row ("export/frame-*.png · 30 files · …"),
+/// so the row says it stands for a sequence, not a file
+/// literally named with an asterisk.
 pub fn row_line(row: &ExportRow, now: SystemTime) -> String {
-    format!(
-        "{} · {} · {}",
-        row.name,
-        format_size(row.size),
-        age_label(now, row.mtime)
-    )
+    if row.count > 1 {
+        format!(
+            "{} · {} files · {} · {}",
+            row.name,
+            row.count,
+            format_size(row.size),
+            age_label(now, row.mtime)
+        )
+    } else {
+        format!(
+            "{} · {} · {}",
+            row.name,
+            format_size(row.size),
+            age_label(now, row.mtime)
+        )
+    }
 }
+
+/// The subdirectory names the sequence exports write
+/// into, relative to an output root: SVG frames land in
+/// `export/svg/`, JPEG frames in `out/jpeg/`. The history
+/// represents each as ONE row (see `scan_sequence_dir`)
+/// instead of entering it per frame — or ignoring it, as
+/// the scan did before, which made JPEG and SVG exports
+/// invisible in the history entirely.
+pub const SEQUENCE_SUBDIRS: [&str; 2] = ["svg", "jpeg"];
 
 /// The thin filesystem half of the history: read the top
 /// level of each root and collect a `FileTriple` for every
-/// regular file in it. Missing/unreadable roots and
-/// entries whose metadata fails are skipped — an absent
-/// export directory is the normal "nothing exported yet"
-/// state, not an error. Subdirectories (`export/svg/`,
-/// `out/jpeg/`) are not entered: their per-frame files are
-/// not listed individually (see the module docs).
+/// regular file in it, then collapse each root's sequence
+/// subdirectories (`SEQUENCE_SUBDIRS`) into one triple
+/// apiece. Missing/unreadable roots and entries whose
+/// metadata fails are skipped — an absent export
+/// directory is the normal "nothing exported yet" state,
+/// not an error. Other subdirectories are not entered.
 fn scan_triples(roots: &[PathBuf]) -> Vec<FileTriple> {
     let mut out = Vec::new();
     for root in roots {
@@ -783,10 +1009,52 @@ fn scan_triples(roots: &[PathBuf]) -> Vec<FileTriple> {
             let Ok(mtime) = md.modified() else {
                 continue;
             };
-            out.push((entry.path(), md.len(), mtime));
+            out.push((entry.path(), md.len(), mtime, 1));
+        }
+        for sub in SEQUENCE_SUBDIRS {
+            scan_sequence_dir(&root.join(sub), &mut out);
         }
     }
     out
+}
+
+/// Collapse one sequence directory (`export/svg/`,
+/// `out/jpeg/`) into a single triple: the directory's own
+/// path (the row model names it "export/svg" /
+/// "out/jpeg"), the total size of the regular files
+/// directly inside it, the DIRECTORY's mtime — writing a
+/// frame into it is what bumps it, so it is the
+/// sequence's honest "last exported" time, with the
+/// newest file's mtime as fallback — and the file count.
+/// An absent directory, or one holding no regular files,
+/// contributes nothing: no row for an export that never
+/// happened.
+fn scan_sequence_dir(dir: &Path, out: &mut Vec<FileTriple>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut total: u64 = 0;
+    let mut count: usize = 0;
+    let mut newest: Option<SystemTime> = None;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let Ok(md) = entry.metadata() else {
+            continue;
+        };
+        if !md.is_file() {
+            continue;
+        }
+        total += md.len();
+        count += 1;
+        if let Ok(mtime) = md.modified() {
+            newest = Some(newest.map_or(mtime, |n: SystemTime| n.max(mtime)));
+        }
+    }
+    if count == 0 {
+        return;
+    }
+    if let Some(mtime) = dir_mtime(dir).or(newest) {
+        out.push((dir.to_path_buf(), total, mtime, count));
+    }
 }
 
 /// A directory's modification time, swallowing every
@@ -834,21 +1102,36 @@ fn cached_history(
 
 /// The Recent exports rows, cached behind the two roots'
 /// mtimes (the Phase E fx_browser/home scan pattern):
-/// building the panel costs two `stat`s instead of two
+/// building the panel costs a few `stat`s instead of two
 /// directory scans, and any export that creates or deletes
 /// a file in a root bumps that root's mtime, so the next
-/// build rescans. The honest limit, the same class as the
-/// preset cache's documented contract: overwriting an
-/// existing file in place (re-exporting the same format
-/// to the same name) changes neither root's mtime, so
-/// that row's size/age can be one scan stale until some
-/// create/delete lands in a root. When neither root can
-/// be statted (no exports yet, usually) the cache is
-/// bypassed and the scan runs live — it returns empty,
+/// build rescans. The cache key also carries each root's
+/// sequence-subdirectory mtimes (`export/svg/`,
+/// `out/jpeg/`): writing a frame into one of those bumps
+/// the subdirectory's mtime but not its root's, and
+/// without it in the key a JPEG/SVG re-export would leave
+/// the collapsed row stale. The honest limit, the same
+/// class as the preset cache's documented contract:
+/// overwriting an existing file in place (re-exporting
+/// the same format to the same name) changes no
+/// directory's mtime, so that row's size/age can be one
+/// scan stale until some create/delete lands in a
+/// directory the key watches. When no directory in the
+/// key can be statted (no exports yet, usually) the cache
+/// is bypassed and the scan runs live — it returns empty,
 /// which the panel renders as "No exports yet".
 pub fn recent_exports_cached() -> Vec<ExportRow> {
     let roots = history_roots();
-    let keys: Vec<Option<SystemTime>> = roots.iter().map(|d| dir_mtime(d)).collect();
+    let keys: Vec<Option<SystemTime>> = roots
+        .iter()
+        .flat_map(|d| {
+            let mut v = vec![dir_mtime(d)];
+            for sub in SEQUENCE_SUBDIRS {
+                v.push(dir_mtime(&d.join(sub)));
+            }
+            v
+        })
+        .collect();
     if keys.iter().all(|k| k.is_none()) {
         return rows_from_triples(&scan_triples(&roots));
     }
@@ -891,7 +1174,7 @@ fn plain_row(
     let handler = move |s: &mut State| {
         op(&mut s.core);
         s.export_recap = if export_failed(&s.core) {
-            failed_recap(recap_name)
+            failure_recap(&s.core.status, recap_name)
         } else {
             single_recap(recap_name, recap_dest)
         };
@@ -1012,6 +1295,12 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             .font(type_::LABEL)
             .color(t.text_secondary),
     );
+    panel = panel.child(
+        text(output_text(core, use_range))
+            .key("xc-output")
+            .font(type_::LABEL)
+            .color(t.text_secondary),
+    );
 
     let images = col()
         .gap(6.0)
@@ -1112,7 +1401,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-webm",
             "video",
             "WebM",
-            "WebM video (VP9) — ./export/animation.webm",
+            "WebM video (VP9) — ./export/animation.webm (video-only — WebM never includes audio)",
             t,
             export_webm_action,
         ));
@@ -1215,12 +1504,25 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
     panel = panel.child(bundles);
 
     if !s.export_recap.is_empty() {
+        // The recap is the panel's persistent record of the
+        // last export, so it carries the severity the toast
+        // showed transiently: the toast palette's glyph at
+        // the leading edge and its colour on the text
+        // (success reads green, any failure — including a
+        // partially failed bundle — reads error red; see
+        // `recap_severity`). The row key is unchanged.
+        let sev = recap_severity(&s.export_recap);
         panel = panel.child(
-            row().key("xc-recap").child(
-                text(s.export_recap.clone())
-                    .font(type_::LABEL)
-                    .color(t.text_secondary),
-            ),
+            row()
+                .key("xc-recap")
+                .gap(8.0)
+                .center_y()
+                .child(icon_el_rgb(sev.icon(), 12.0, sev.icon_color()))
+                .child(
+                    text(s.export_recap.clone())
+                        .font(type_::LABEL)
+                        .color(sev.color()),
+                ),
         );
     }
 
@@ -1393,6 +1695,82 @@ mod tests {
     }
 
     #[test]
+    fn range_recap_names_the_frames_and_video_only() {
+        assert_eq!(
+            single_recap_range("PNG", "./export/", (1, 2), false),
+            "Exported PNG (frames 2–3) → ./export/"
+        );
+        assert_eq!(
+            single_recap_range("MP4", "./export/animation.mp4", (0, 4), true),
+            "Exported MP4 (frames 1–5, video only) → ./export/animation.mp4"
+        );
+    }
+
+    #[test]
+    fn failure_recap_keeps_the_ops_reason() {
+        // The status the op wrote is the recap — reason
+        // included — not the bare name-only shape.
+        assert_eq!(
+            failure_recap("MP4 export failed: ffmpeg exited with status 1", "MP4"),
+            "MP4 export failed: ffmpeg exited with status 1"
+        );
+        // A status that is not a failure wording never
+        // leaks into a failure recap.
+        assert_eq!(failure_recap("Exported 5 frames", "MP4"), "MP4 export failed");
+        assert_eq!(failure_recap("", "WebM"), "WebM export failed");
+    }
+
+    #[test]
+    fn recap_severity_follows_the_toast_classifier() {
+        assert_eq!(
+            recap_severity("Exported PNG → ./export/"),
+            Severity::Success
+        );
+        assert_eq!(
+            recap_severity("Exported MP4 (frames 1–5, video only) → ./export/animation.mp4"),
+            Severity::Success
+        );
+        assert_eq!(
+            recap_severity("MP4 export failed: ffmpeg exited with status 1"),
+            Severity::Error
+        );
+        // A partially failed bundle names its failures in
+        // the recap, so it reads Error — the same call
+        // `classify_status` makes for the bundle's toast
+        // (audit D11: acceptable, and pinned here so it
+        // stays a decision, not an accident).
+        assert_eq!(
+            recap_severity("Exported WebM → ./export/animation.webm; failed: MP4"),
+            Severity::Error
+        );
+        assert_eq!(
+            recap_severity("Exported nothing; failed: MP4, WebM"),
+            Severity::Error
+        );
+    }
+
+    #[test]
+    fn output_text_states_frames_dimensions_and_fps() {
+        let mut core = EditorCore::new();
+        let n = core.project.frames.len();
+        let [w, h] = core.project.stage;
+        let expected = format!(
+            "Output: {n} frames · {}×{} · {} fps",
+            fmt_measure(w),
+            fmt_measure(h),
+            fmt_measure(core.project.fps)
+        );
+        assert_eq!(output_text(&core, false), expected);
+        // Toggle on but no loop range: the fallback is the
+        // full count, exactly as `effective_text` admits.
+        assert_eq!(output_text(&core, true), expected);
+        // With a loop range the count is the range's.
+        core.loop_range = Some((0, 1));
+        assert!(output_text(&core, true).starts_with("Output: 2 frames · "));
+        assert_eq!(output_text(&core, false), expected, "toggle off ignores the range");
+    }
+
+    #[test]
     fn export_failed_reads_the_core_status_convention() {
         let mut core = EditorCore::new();
         core.status = "Exported 5 PNG frames to ./export".into();
@@ -1475,10 +1853,10 @@ mod tests {
     #[test]
     fn rows_from_triples_sorts_newest_first_with_name_tie_break() {
         let triples = vec![
-            (PathBuf::from("/x/export/old.gif"), 10, at(100)),
-            (PathBuf::from("/x/export/b.png"), 10, at(300)),
-            (PathBuf::from("/x/out/a.apng"), 10, at(300)),
-            (PathBuf::from("/x/export/new.mp4"), 10, at(500)),
+            (PathBuf::from("/x/export/old.gif"), 10, at(100), 1),
+            (PathBuf::from("/x/export/b.png"), 10, at(300), 1),
+            (PathBuf::from("/x/out/a.apng"), 10, at(300), 1),
+            (PathBuf::from("/x/export/new.mp4"), 10, at(500), 1),
         ];
         let rows = rows_from_triples(&triples);
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
@@ -1494,7 +1872,14 @@ mod tests {
     #[test]
     fn rows_from_triples_caps_at_the_history_limit() {
         let triples: Vec<FileTriple> = (0..12)
-            .map(|i| (PathBuf::from(format!("/x/export/f{i}.png")), 1, at(1000 + i)))
+            .map(|i| {
+                (
+                    PathBuf::from(format!("/x/export/f{i}.png")),
+                    1,
+                    at(1000 + i),
+                    1,
+                )
+            })
             .collect();
         let rows = rows_from_triples(&triples);
         assert_eq!(rows.len(), HISTORY_LIMIT);
@@ -1511,11 +1896,85 @@ mod tests {
     }
 
     #[test]
+    fn sequence_frame_names_match_the_writers_pattern() {
+        assert!(is_sequence_frame(Path::new("/x/export/frame-0001.png")));
+        assert!(is_sequence_frame(Path::new("/x/out/jpeg/frame-0012.jpg")));
+        assert!(is_sequence_frame(Path::new("frame-0003.svg")));
+        // Not sequence frames: the bare word, a hand-named
+        // draft, and ordinary exports keep their own rows.
+        assert!(!is_sequence_frame(Path::new("/x/export/frame.png")));
+        assert!(!is_sequence_frame(Path::new("/x/export/frame-draft.png")));
+        assert!(!is_sequence_frame(Path::new("/x/export/animation.mp4")));
+        assert!(!is_sequence_frame(Path::new("/x/export/spritesheet.png")));
+    }
+
+    #[test]
+    fn sequence_frames_collapse_into_one_row_per_directory() {
+        let triples = vec![
+            (PathBuf::from("/x/export/frame-0001.png"), 100, at(100), 1),
+            (PathBuf::from("/x/export/frame-0002.png"), 200, at(300), 1),
+            (PathBuf::from("/x/export/frame-0003.png"), 300, at(200), 1),
+            (PathBuf::from("/x/export/animation.gif"), 50, at(400), 1),
+        ];
+        let rows = rows_from_triples(&triples);
+        assert_eq!(rows.len(), 2, "three frames + the GIF: {rows:?}");
+        // Newest first: the GIF, then the collapsed row
+        // carrying the total size, the newest frame's
+        // mtime and the frame count.
+        assert_eq!(rows[0].name, "export/animation.gif");
+        assert_eq!(rows[1].name, "export/frame-*.png");
+        assert_eq!(rows[1].size, 600);
+        assert_eq!(rows[1].mtime, at(300));
+        assert_eq!(rows[1].count, 3);
+        // The row line names the count, so the asterisk
+        // name cannot be mistaken for a literal file.
+        assert_eq!(
+            row_line(&rows[1], at(300)),
+            "export/frame-*.png · 3 files · 600 B · just now"
+        );
+    }
+
+    #[test]
+    fn a_lone_frame_file_keeps_its_own_name() {
+        // One frame is not a flood; collapsing it would
+        // also misname the only file it stands for.
+        let triples = vec![(PathBuf::from("/x/export/frame-0001.png"), 100, at(100), 1)];
+        let rows = rows_from_triples(&triples);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "export/frame-0001.png");
+        assert_eq!(rows[0].count, 1);
+    }
+
+    #[test]
+    fn sequence_directories_arrive_as_single_counted_rows() {
+        // The scan's directory triples (path = the
+        // directory itself, count = its file count) pass
+        // through the row model untouched and render with
+        // their counts — this is how JPEG and SVG exports
+        // appear in the history at all.
+        let triples = vec![
+            (PathBuf::from("/x/out/jpeg"), 4096, at(500), 24),
+            (PathBuf::from("/x/export/svg"), 2048, at(600), 12),
+        ];
+        let rows = rows_from_triples(&triples);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "export/svg");
+        assert_eq!(rows[0].count, 12);
+        assert_eq!(rows[1].name, "out/jpeg");
+        assert_eq!(rows[1].count, 24);
+        assert_eq!(
+            row_line(&rows[1], at(500 + 60)),
+            "out/jpeg · 24 files · 4.0 KB · 1 min ago"
+        );
+    }
+
+    #[test]
     fn row_line_combines_name_size_and_age() {
         let row = ExportRow {
             name: "export/animation.mp4".into(),
             size: 1536,
             mtime: at(1000),
+            count: 1,
         };
         assert_eq!(
             row_line(&row, at(1000 + 2 * 60 * 60)),
@@ -1583,9 +2042,13 @@ mod tests {
 
     #[test]
     fn range_audio_note_wording_is_exact() {
+        // The wording names MP4 alone: full WebM is as
+        // silent as range WebM (`export::export_webm`
+        // never muxes), so the old "MP4/WebM" phrasing
+        // claimed audio the engine never writes.
         assert_eq!(
             RANGE_AUDIO_NOTE,
-            "Range video exports are silent — audio is only in full-timeline MP4/WebM."
+            "Range video exports are silent — audio is only in a full-timeline MP4 export."
         );
     }
 

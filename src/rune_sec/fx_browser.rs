@@ -130,6 +130,19 @@
 //! muted empty lines stay as they are — no glyph is
 //! assigned to either state in any plan.
 //!
+//! UI mission Wave 4 supersedes that last clause
+//! (audit S13-3): Squad 13 assigned the glyphs, and
+//! both lines are now kit [`design::empty_state`]s —
+//! "No presets saved yet" under `floppy-disk`, "No
+//! effects match the filter" under `magnifying-glass`
+//! — with their text byte-identical, the particles
+//! panel's treatment. The same wave adds the S13-13
+//! overflow guard: kind and preset rows carry
+//! `.flex_wrap()` at the card width (see [`PER_ROW`]),
+//! so a row whose buttons outgrow the 316 pt budget
+//! wraps instead of crossing the card edge. Keys,
+//! labels and handlers are unchanged throughout.
+//!
 //! Integrator wiring for the state: add
 //! `pub fx_browser: rune_sec::fx_browser::FxBrowserState`
 //! to `State`, initialise it with
@@ -153,7 +166,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
-use rune::{row, text, text_input, El, TextEdit};
+use rune::{row, text_input, El, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::vfx::ClipKind;
 
@@ -165,7 +178,13 @@ use crate::State;
 
 /// Kind buttons per row inside a category (the Particles
 /// group has nine kinds; rows of three keep the panel
-/// narrow).
+/// narrow). Rows also carry `.flex_wrap()` at the card's
+/// content width (UI mission Wave 4, audit S13-13): the
+/// chunking alone cannot bound a row — counted labels
+/// ("Shock ring · 12") widen every button, and preset
+/// names are unbounded filenames — so a row that outgrows
+/// the 316 pt budget wraps its last button onto a second
+/// line instead of painting past the card edge.
 pub const PER_ROW: usize = 3;
 
 /// One browser entry: a clip kind, the category it is
@@ -577,16 +596,23 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
     // query (empty categories hide with their headings).
     let visible = visible_categories(&query);
     if visible.is_empty() {
-        panel = panel.child(
-            text("No effects match the filter")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        // Kit empty state with the audit's glyph
+        // (S13-3): the search that found nothing is a
+        // magnifying glass. Text unchanged.
+        panel = panel.child(design::empty_state(
+            "magnifying-glass",
+            "No effects match the filter",
+            t,
+        ));
     }
     for (cat, entries) in &visible {
         panel = panel.child(section_with_icon(category_icon(cat), cat, t));
         for chunk in entries.chunks(PER_ROW) {
-            let mut kinds_row = row().gap(6.0);
+            // Wrapped at the card width (S13-13): with
+            // counted labels the three buttons can sum
+            // past the 316 pt budget; the row wraps
+            // instead of crossing the card edge.
+            let mut kinds_row = row().gap(6.0).w_full().flex_wrap();
             for entry in chunk {
                 let kind = entry.kind;
                 // Phase K: the counted label — bare
@@ -618,14 +644,21 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
     panel = panel.child(section("Presets", t));
     let preset_names = preset_names_cached(core);
     if preset_names.is_empty() {
-        panel = panel.child(
-            text("No presets saved yet")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        // Kit empty state with the audit's glyph
+        // (S13-3): saved presets live on disk, so the
+        // empty store is a floppy disk. Text unchanged.
+        panel = panel.child(design::empty_state(
+            "floppy-disk",
+            "No presets saved yet",
+            t,
+        ));
     } else {
         for chunk in preset_names.chunks(PER_ROW) {
-            let mut preset_row = row().gap(6.0);
+            // Wrapped at the card width (S13-13), like
+            // the kind rows: preset names are filenames
+            // and unbounded, so three apply buttons can
+            // sum past the 316 pt budget.
+            let mut preset_row = row().gap(6.0).w_full().flex_wrap();
             for name in chunk {
                 let apply_name = name.clone();
                 preset_row = preset_row.child(btn(

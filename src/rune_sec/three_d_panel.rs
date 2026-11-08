@@ -720,12 +720,13 @@ fn preview_drag(s: &mut State, d: &mut Drag) {
 /// appears, through its fallback camera, so the empty
 /// viewport still shows the floor the figure will
 /// stand on.
-pub fn preview_shape(core: &EditorCore) -> Shape {
+pub fn preview_shape(core: &EditorCore, palette: fig3_preview::Fig3Palette) -> Shape {
     let mut shape = Shape::new();
     let prims = fig3_preview::preview_prims(
         core.fig3.as_ref(),
         fig3_preview::grid_visible(),
         [fig3_preview::PREVIEW_W, fig3_preview::PREVIEW_H],
+        palette,
     );
     for prim in prims {
         if let Some(c) = hex_color(prim.color) {
@@ -741,7 +742,10 @@ pub fn preview_shape(core: &EditorCore) -> Shape {
 /// the orbit drag attached. Mounted at the top of the
 /// panel by [`three_d_panel`].
 pub fn preview_el(s: &State, t: &Theme) -> El {
-    canvas(preview_shape(&s.core))
+    canvas(preview_shape(
+        &s.core,
+        fig3_preview::Fig3Palette::from_theme(t),
+    ))
         .key(PREVIEW_KEY)
         .size(fig3_preview::PREVIEW_W, fig3_preview::PREVIEW_H)
         .fill(t.control_off)

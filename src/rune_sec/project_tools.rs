@@ -39,13 +39,13 @@
 //! | `proj-set-name` | "Set name" button (`icon_btn`, "check" icon) | [`apply_name`] → [`apply_project_name`]: trims, writes `Project::name` directly (no core rename op or setter exists — editor.rs has no `rename*` fn; the file-level rename is Home's `projects::rename_project`) | ok |
 //! | `proj-current-file` | "Current file: …" muted line under the name field (conditional — present only when the line resolves) | renders [`current_file_line`]: the `shell::last_opened_project` display name, shown only when it exactly matches `Project::name` | ok — Phase I §31; the match guard is the Phase G §32 lesson (recents store names, not the open file, so a mismatch would lie). `home_panel::current_project_path` was NOT used: it is the selector cursor, which `cycle-project` moves without opening |
 //! | `proj-current-meta` | "{size} · modified {time}" muted line under `proj-current-file` (conditional — present only when the §31 match holds AND the file resolves and stats) | renders [`current_file_meta`]: the §31 match (via [`current_file_path`]) gates it, the path resolves over `core.project_files` by the crate's slug rule ([`resolve_project_file`]), size via [`human_size`], time via [`modified_label`] | ok — Phase J §27; gated on the §31 decision itself, so the two lines can never disagree about which file the session is on |
-//! | `proj-reload` | "Reload from disk" button (`icon_btn`, "rotate-right" icon — Phase N; p13: rotate-right, not Redo's arrow-rotate-right) | [`reload_pressed`] → [`reload_target`] (the §27 gate as an owned path) → [`reload_from_disk`]: no target → status "No saved file to reload.", open never called; target → the open rows' exact discipline (point `project_index` at the file, `EditorCore::open_project_file` — it takes no path argument and returns `()`, editor.rs:3787 — [`clear_stale_solo`], [`sync_name_edit`]), with the success status overridden to name the discard | ok — Phase K §27; see the reload note below |
-//! | `new-proj` | "New" button (`icon_btn`, "file" icon) | [`new_pressed`] → [`new_project`] + [`sync_name_edit`]: installs [`blank_project`]`("Untitled")` — field-for-field the MCP `new_project` tool's defaults and reset set (mcp_tools.rs `tool_new_project`) — clears solo, stops playback, no snapshot/confirm | ok |
+//! | `proj-reload` | "Reload from disk" button (`icon_btn`, "rotate-right" icon — Phase N; p13: rotate-right, not Redo's arrow-rotate-right) | [`reload_pressed`] → [`reload_target`] (the §27 gate as an owned path) → [`reload_from_disk`]: no target → status "No saved file to reload.", open never called; target → the open rows' exact discipline (point `project_index` at the file, `EditorCore::open_project_file` — it takes no path argument and returns `()`, editor.rs:3787 — [`clear_stale_solo`], [`sync_name_edit`]), with the success status overridden to name the discard | ok — Phase K §27; see the reload note below. UI mission Wave 4 (S16 D2): with a target and a dirty session the first press arms instead (`ConfirmAction::ReloadProject`; the button re-renders as the danger "Discard changes?") |
+//! | `new-proj` | "New" button (`icon_btn`, "file" icon) | [`new_pressed`] → [`new_project`] + [`sync_name_edit`]: installs [`blank_project`]`("Untitled")` — field-for-field the MCP `new_project` tool's defaults and reset set (mcp_tools.rs `tool_new_project`) — clears solo, stops playback, no snapshot | ok — UI mission Wave 4 (S16 D2): a dirty session arms first (`ConfirmAction::NewProject`, danger "Discard changes?" re-render); clean, the press runs at once |
 //! | `save-proj` | "Save project" button (`icon_btn`, "floppy-disk" icon) | [`save_named_pressed`] → `EditorCore::save_named_project` (slugifies the name, writes `./projects/<slug>.json`, refreshes `project_files`, sets status), then — only on success — `shell::write_recovery` + `shell::touch_recent` to keep snapshot/recents in step | fixed in Phase H — the Phase G caveat is closed: the op returns `bool` and [`after_save`] gates the recovery/recents sync on it, so a failed save no longer plants a phantom recent |
-//! | `recover` | "Recover" button (`icon_btn`, "arrow-rotate-left" icon) | [`recover_pressed`] → [`recover_snapshot`] (`shell::read_recovery` = `./projects/.recovery.json`, shell.rs) → [`apply_recovered_project`] + [`sync_name_edit`] | fixed in Phase G — the reset now also clears solo and stops playback (see the fn) |
+//! | `recover` | "Recover" button (`icon_btn`, "arrow-rotate-left" icon) | [`recover_pressed`] → [`recover_snapshot`] (`shell::read_recovery` = `./projects/.recovery.json`, shell.rs) → [`apply_recovered_project`] + [`sync_name_edit`] | fixed in Phase G — the reset now also clears solo and stops playback (see the fn). UI mission Wave 4: offered only while the snapshot is newer than the last save (S06-2 — otherwise `icon_btn_inert` under the same key), and a dirty session arms first (S06-3 / S16 D2, `ConfirmAction::RecoverSnapshot`) |
 //! | `proj-list` | selector list (col) | — container, no handler | ok |
-//! | `open-proj-{i}` | "Open" button per row (plain text `btn` — list rows stay text; no icon), accent-styled when `i == core.project_index` | [`open_row_pressed`] → sets `project_index`, `EditorCore::open_project_file` (editor.rs:3636: reads the file; resets current/playhead/figure/node; sets status), [`clear_stale_solo`], [`sync_name_edit`] | fixed in Phase G — stale-solo guard added; the highlight tracks the core's cycle cursor (the palette's `cycle-project` moves it without opening), exactly as [`ProjectRow`] documents |
-//! | *(empty-list text, unkeyed)* | "No saved projects in ./projects/ yet." | — display only; wording is `cycle_project_file`'s own status string (editor.rs), verbatim | ok |
+//! | `open-proj-{i}` | "Open" button per row (plain text `btn` — list rows stay text; no icon), accent-styled when `i == core.project_index` | [`open_row_pressed`] → sets `project_index`, `EditorCore::open_project_file` (editor.rs:3636: reads the file; resets current/playhead/figure/node; sets status), [`clear_stale_solo`], [`sync_name_edit`] | fixed in Phase G — stale-solo guard added; the highlight tracks the core's cycle cursor (the palette's `cycle-project` moves it without opening), exactly as [`ProjectRow`] documents. UI mission Wave 4 (S16 D2): a dirty session arms first (`ConfirmAction::OpenProject`; every row's button re-renders as the danger "Discard changes?", and the confirming press opens the row it sits on) |
+//! | *(empty state, unkeyed)* | kit `design::empty_state` (folder-open glyph) shown when the selector list is empty — UI mission Wave 4 (audit S06-7) | — display only; the message wording is `cycle_project_file`'s own status string (editor.rs), verbatim | ok |
 //!
 //! Reload note (Phase K §27): reloading re-opens the saved
 //! file and throws the session's unsaved work away — the
@@ -75,10 +75,10 @@ use rune::{col, el, row, text, text_input, El, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{Easing, FigureDef, FigureInstance, Frame, Project};
 
-use crate::chrome_view::btn;
+use crate::chrome_view::{btn, danger_btn};
 use crate::rune_sec::design;
-use crate::rune_sec::icon_btn::icon_btn;
-use crate::State;
+use crate::rune_sec::icon_btn::{danger_icon_btn, icon_btn, icon_btn_inert};
+use crate::{ConfirmAction, State};
 
 // ---------------------------------------------------------------------
 // Pure helpers
@@ -434,9 +434,12 @@ pub fn apply_project_name(core: &mut EditorCore, raw: &str) -> bool {
 /// New project, mirroring the MCP `new_project` tool's
 /// semantics exactly (the core's own New behaviour): the
 /// project is replaced in place and the selection/playback
-/// fields reset — with **no confirmation prompt and no undo
-/// snapshot**, so unsaved work is dropped the moment this is
-/// pressed, exactly as the tool drops it. Undo history is left
+/// fields reset, with **no undo snapshot** — this fn is
+/// the raw swap, and it drops unsaved work the moment it
+/// runs, exactly as the tool drops it. The section's
+/// button no longer calls it unguarded: [`new_pressed`]
+/// arms a confirm first while the session is dirty (UI
+/// mission Wave 4, audit S16 D2). Undo history is left
 /// untouched, as the tool leaves it.
 pub fn new_project(core: &mut EditorCore) {
     core.project = blank_project("Untitled");
@@ -601,14 +604,42 @@ pub fn sync_name_edit(s: &mut State) {
     }
 }
 
+/// True while the session holds work the recovery
+/// snapshot has not captured — the shell's one truthful
+/// saved-state signal, `edits_since_autosave() > 0` (see
+/// [`ConfirmAction`]'s docs for the rationale and the
+/// counter's limits). Defined here and shared by the
+/// Home panel and the app bar, so every discard gate in
+/// the shell reads the same counter the same way.
+pub fn session_dirty(core: &EditorCore) -> bool {
+    core.edits_since_autosave() > 0
+}
+
 /// "Set name" (and Enter in the field): apply the field's text.
 fn apply_name(s: &mut State) {
+    // A press elsewhere in the panel stands down any
+    // armed discard (the confirm_delete discipline).
+    s.confirm_action = None;
     let raw = s.name_edit.text.clone();
     apply_project_name(&mut s.core, &raw);
 }
 
 /// "New": [`new_project`], then re-sync the name field.
+///
+/// UI mission Wave 4 (audit S16 D2): while the session
+/// is dirty the first press only arms — the button
+/// re-renders as a danger confirm (see
+/// [`project_section`]) and the status names the
+/// discard; the second press runs the swap. Clean, the
+/// press runs immediately, as before.
 fn new_pressed(s: &mut State) {
+    if s.confirm_action != Some(ConfirmAction::NewProject) && session_dirty(&s.core) {
+        s.confirm_action = Some(ConfirmAction::NewProject);
+        s.core.status =
+            "New project would discard unsaved changes — press New again to confirm.".into();
+        return;
+    }
+    s.confirm_action = None;
     new_project(&mut s.core);
     sync_name_edit(s);
 }
@@ -649,6 +680,9 @@ pub fn after_save(saved: bool) -> AfterSave {
 /// op's status ("Project save failed: …") is the last word
 /// and recents stays untouched.
 fn save_named_pressed(s: &mut State) {
+    // Saving is the alternative to discarding: the press
+    // stands down any armed discard in this panel.
+    s.confirm_action = None;
     let saved = s.core.save_named_project();
     if after_save(saved) == AfterSave::SyncRecoveryAndRecents {
         let _ = stykanimate_rs::shell::write_recovery(&s.core.project);
@@ -680,7 +714,23 @@ pub fn clear_stale_solo(core: &mut EditorCore) {
 /// row and open that file (`open_project_file` reads
 /// `project_index`), clear any solo the opened project made
 /// stale, then re-sync the name field.
+///
+/// UI mission Wave 4 (audit S16 D2): gated like
+/// [`new_pressed`] — while the session is dirty, a press
+/// on any row's Open arms instead of opening (the arm is
+/// the action, not the row: the confirming press may be
+/// a different row's Open, and it opens *that* row — the
+/// user pressed a "Discard changes?" button naming the
+/// file they are about to open either way).
 fn open_row_pressed(s: &mut State, i: usize) {
+    if s.confirm_action != Some(ConfirmAction::OpenProject) && session_dirty(&s.core) {
+        s.confirm_action = Some(ConfirmAction::OpenProject);
+        s.core.status =
+            "Opening a project would discard unsaved changes — press Open again to confirm."
+                .into();
+        return;
+    }
+    s.confirm_action = None;
     s.core.project_index = i;
     s.core.open_project_file();
     clear_stale_solo(&mut s.core);
@@ -688,7 +738,23 @@ fn open_row_pressed(s: &mut State, i: usize) {
 }
 
 /// "Recover": [`recover_snapshot`], then re-sync the name field.
+///
+/// UI mission Wave 4 (audit S16 D2 + S06-3): gated like
+/// [`new_pressed`] — recovering replaces the session, so
+/// a dirty session arms first. The button itself is
+/// only live while a snapshot newer than the last save
+/// exists (audit S06-2, gated at build in
+/// [`project_section`]), so this handler never runs in
+/// the no-snapshot case.
 fn recover_pressed(s: &mut State) {
+    if s.confirm_action != Some(ConfirmAction::RecoverSnapshot) && session_dirty(&s.core) {
+        s.confirm_action = Some(ConfirmAction::RecoverSnapshot);
+        s.core.status =
+            "Recovering the snapshot would discard unsaved changes — press Recover again to confirm."
+                .into();
+        return;
+    }
+    s.confirm_action = None;
     recover_snapshot(&mut s.core);
     sync_name_edit(s);
 }
@@ -699,8 +765,24 @@ fn recover_pressed(s: &mut State) {
 /// and the discard-naming success status), then re-sync
 /// the name field — the rows' post-open discipline, as
 /// with every switch this section performs.
+///
+/// UI mission Wave 4 (audit S16 D2): gated like
+/// [`new_pressed`] when a target exists — the discard is
+/// real, so a dirty session arms first. With no target
+/// there is nothing to discard into, so the refusal
+/// status answers immediately, armed or not.
 fn reload_pressed(s: &mut State) {
     let target = reload_target(&s.core);
+    if target.is_some()
+        && s.confirm_action != Some(ConfirmAction::ReloadProject)
+        && session_dirty(&s.core)
+    {
+        s.confirm_action = Some(ConfirmAction::ReloadProject);
+        s.core.status =
+            "Reloading would discard unsaved changes — press Reload again to confirm.".into();
+        return;
+    }
+    s.confirm_action = None;
     reload_from_disk(&mut s.core, target.as_deref());
     sync_name_edit(s);
 }
@@ -796,31 +878,69 @@ pub fn project_section(s: &State, t: &Theme) -> El {
     // (the status explains there is no saved file to
     // reload), and a button that vanishes exactly when it
     // would have something to say teaches nothing.
+    // The discard arm (UI mission Wave 4): while an
+    // action is armed, its button re-renders in place —
+    // same key, same icon — as the danger family member
+    // labelled "Discard changes?", and the confirming
+    // press is the same handler (it sees the arm and
+    // runs). See the handlers' docs.
+    let armed = s.confirm_action;
     section = section.child(
         row()
             .w_full()
             .gap(8.0)
             .center_y()
-            .child(icon_btn("proj-reload", "rotate-right", "Reload from disk", false, t, reload_pressed)),
+            .child(if armed == Some(ConfirmAction::ReloadProject) {
+                danger_icon_btn("proj-reload", "rotate-right", "Discard changes?", false, t, reload_pressed)
+            } else {
+                icon_btn("proj-reload", "rotate-right", "Reload from disk", false, t, reload_pressed)
+            }),
     );
 
+    // Recover's offer gate (audit S06-2): the button is
+    // live only while the recovery snapshot holds work
+    // newer than the last named save — the Home banner's
+    // verdict (`shell::recovery_is_newer_than_last_project`,
+    // read at panel build, as the audit prescribes).
+    // Otherwise it renders inert under the same key: a
+    // snapshot that is absent, or no newer than the last
+    // save, has nothing to offer this session, and the
+    // header's autosave line already says which. The
+    // reload escape hatch survives the gate: the
+    // snapshot a reload discards *to* is by construction
+    // newer than the file that was reloaded.
+    let recover_live = stykanimate_rs::shell::recovery_is_newer_than_last_project();
     section = section.child(
         row()
             .w_full()
             .gap(8.0)
             .center_y()
-            .child(icon_btn("new-proj", "file", "New", false, t, new_pressed))
+            .child(if armed == Some(ConfirmAction::NewProject) {
+                danger_icon_btn("new-proj", "file", "Discard changes?", false, t, new_pressed)
+            } else {
+                icon_btn("new-proj", "file", "New", false, t, new_pressed)
+            })
             .child(icon_btn("save-proj", "floppy-disk", "Save project", false, t, save_named_pressed))
-            .child(icon_btn("recover", "arrow-rotate-left", "Recover", false, t, recover_pressed)),
+            .child(if !recover_live {
+                icon_btn_inert("recover", "arrow-rotate-left", "Recover", t)
+            } else if armed == Some(ConfirmAction::RecoverSnapshot) {
+                danger_icon_btn("recover", "arrow-rotate-left", "Discard changes?", false, t, recover_pressed)
+            } else {
+                icon_btn("recover", "arrow-rotate-left", "Recover", false, t, recover_pressed)
+            }),
     );
 
     if rows.is_empty() {
-        // The core's own wording (cycle_project_file).
-        section = section.child(
-            text("No saved projects in ./projects/ yet.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        // The kit empty state (UI mission Wave 4, audit
+        // S06-7): the message is the core's own wording
+        // (cycle_project_file), byte-identical — only the
+        // presentation moves to the kit, matching Home's
+        // empty library.
+        section = section.child(design::empty_state(
+            "folder-open",
+            "No saved projects in ./projects/ yet.",
+            t,
+        ));
     } else {
         let mut list = col().key("proj-list").w_full().gap(4.0);
         for (i, row_data) in rows.iter().enumerate() {
@@ -835,13 +955,22 @@ pub fn project_section(s: &State, t: &Theme) -> El {
                             .color(t.text)
                             .grow(1.0),
                     )
-                    .child(btn(
-                        &open_row_key(i),
-                        "Open",
-                        row_data.selected,
-                        t,
-                        move |s: &mut State| open_row_pressed(s, i),
-                    )),
+                    .child(if armed == Some(ConfirmAction::OpenProject) {
+                        danger_btn(
+                            &open_row_key(i),
+                            "Discard changes?",
+                            t,
+                            move |s: &mut State| open_row_pressed(s, i),
+                        )
+                    } else {
+                        btn(
+                            &open_row_key(i),
+                            "Open",
+                            row_data.selected,
+                            t,
+                            move |s: &mut State| open_row_pressed(s, i),
+                        )
+                    }),
             );
         }
         section = section.child(list);
@@ -902,6 +1031,8 @@ pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
 playback_speed: 1.0,
             was_playing: false,
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         }
     }
 
@@ -970,6 +1101,82 @@ playback_speed: 1.0,
         assert_eq!(core.selected_figure, 0);
         assert!(core.selected_node.is_none());
         assert_eq!(core.status, "New project.");
+    }
+
+    #[test]
+    fn new_pressed_arms_first_while_dirty_then_confirms() {
+        // UI mission Wave 4 (S16 D2): one snapshot-counted
+        // edit makes the session dirty; the first New
+        // press only arms, the second runs the swap.
+        let mut core = EditorCore::new();
+        core.project.name = "Unsaved Work".into();
+        core.snapshot();
+        let mut s = test_state(core);
+        assert!(session_dirty(&s.core), "one counted edit is dirty");
+        new_pressed(&mut s);
+        assert_eq!(s.confirm_action, Some(ConfirmAction::NewProject));
+        assert_eq!(s.core.project.name, "Unsaved Work", "first press only arms");
+        assert!(s.core.status.contains("press New again"), "{}", s.core.status);
+        new_pressed(&mut s);
+        assert_eq!(s.confirm_action, None, "confirm clears the arm");
+        assert_eq!(s.core.project.name, "Untitled", "second press runs the swap");
+    }
+
+    #[test]
+    fn new_pressed_runs_immediately_while_clean() {
+        let mut s = test_state(EditorCore::new());
+        assert!(!session_dirty(&s.core), "a fresh core is clean");
+        new_pressed(&mut s);
+        assert_eq!(s.confirm_action, None);
+        assert_eq!(s.core.status, "New project.");
+    }
+
+    #[test]
+    fn open_row_arms_first_while_dirty() {
+        let mut core = EditorCore::new();
+        core.project_files = vec![
+            PathBuf::from("./projects/alpha.json"),
+            PathBuf::from("./projects/beta.json"),
+        ];
+        core.snapshot();
+        let mut s = test_state(core);
+        open_row_pressed(&mut s, 1);
+        assert_eq!(s.confirm_action, Some(ConfirmAction::OpenProject));
+        assert_eq!(s.core.project_index, 0, "arming does not move the index");
+        // The confirming press runs the open path (its
+        // disk outcome is the core's business) and
+        // clears the arm either way.
+        open_row_pressed(&mut s, 1);
+        assert_eq!(s.confirm_action, None);
+        assert_eq!(s.core.project_index, 1, "confirm opens the pressed row");
+    }
+
+    #[test]
+    fn recover_arms_first_while_dirty() {
+        let mut core = EditorCore::new();
+        core.project.name = "Unsaved Work".into();
+        core.snapshot();
+        let mut s = test_state(core);
+        recover_pressed(&mut s);
+        assert_eq!(s.confirm_action, Some(ConfirmAction::RecoverSnapshot));
+        assert_eq!(s.core.project.name, "Unsaved Work", "first press only arms");
+        recover_pressed(&mut s);
+        assert_eq!(s.confirm_action, None, "second press runs and clears");
+    }
+
+    #[test]
+    fn a_press_elsewhere_in_the_panel_stands_the_arm_down() {
+        let mut core = EditorCore::new();
+        core.snapshot();
+        let mut s = test_state(core);
+        new_pressed(&mut s);
+        assert_eq!(s.confirm_action, Some(ConfirmAction::NewProject));
+        // "Set name" is another press in the same panel:
+        // it stands the arm down without running New.
+        s.name_edit.replace_text("Renamed".to_string());
+        apply_name(&mut s);
+        assert_eq!(s.confirm_action, None);
+        assert_eq!(s.core.project.name, "Renamed");
     }
 
     #[test]

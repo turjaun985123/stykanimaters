@@ -1149,6 +1149,8 @@ loop_playback: true,
 playback_speed: 1.0,
             was_playing: false,
             clips_rename: ClipRenameState::new(),
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         };
         let _ = clips_panel(&state, &t);
         // Populated + selected: exercises the rows and the
@@ -1283,6 +1285,8 @@ loop_playback: true,
 playback_speed: 1.0,
             was_playing: false,
             clips_rename: ClipRenameState::new(),
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         };
         state.core.make_clip_from_figure();
         // Entry state (no session): the Edit clip entry row.
@@ -1403,6 +1407,8 @@ loop_playback: true,
 playback_speed: 1.0,
             was_playing: false,
             clips_rename: ClipRenameState::new(),
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         };
         state.core.make_clip_from_figure();
         let old = state.core.project.clips[0].name.clone();
@@ -1590,6 +1596,8 @@ loop_playback: true,
 playback_speed: 1.0,
             was_playing: false,
             clips_rename: ClipRenameState::new(),
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         };
         for name in ["Alpha", "Bravo", "Charlie"] {
             let mut clip = clip_with_frames(2);

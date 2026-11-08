@@ -38,8 +38,9 @@ use rune::{el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::rune_sec::i18n_wire;
-use crate::rune_sec::icon_btn::{icon_btn, icon_btn_inert};
-use crate::State;
+use crate::rune_sec::icon_btn::{danger_icon_btn, icon_btn, icon_btn_inert};
+use crate::rune_sec::project_tools::session_dirty;
+use crate::{ConfirmAction, State};
 
 /// One chrome button: a padded, rounded label with hover/press
 /// fills; `active` renders it in the accent colour (toggle
@@ -222,6 +223,32 @@ fn dirty_dot(core: &EditorCore) -> Option<El> {
     }
 }
 
+/// The app bar Load button's press (UI mission Wave 4,
+/// audit S16 D2): Load replaces the whole session with
+/// the working file's contents (`core.load()`), so it
+/// runs through the crate-level [`ConfirmAction`] gate
+/// as an `OpenProject` action — while the session is
+/// dirty ([`session_dirty`]) the first press only arms
+/// and the button re-renders as its danger form (see
+/// [`app_bar`]); the confirming press — or any press
+/// while clean — runs the load exactly as before and
+/// clears the arm. The armed label is deliberately not
+/// routed through the i18n table: the table has no
+/// discard-confirmation string, and inventing a key
+/// would break the census the i18n checks pin — the
+/// panels' confirm labels are plain literals for the
+/// same reason.
+pub fn load_pressed(s: &mut State) {
+    if s.confirm_action != Some(ConfirmAction::OpenProject) && session_dirty(&s.core) {
+        s.confirm_action = Some(ConfirmAction::OpenProject);
+        s.core.status =
+            "Loading would discard unsaved changes — press Load again to confirm.".into();
+        return;
+    }
+    s.confirm_action = None;
+    s.core.load();
+}
+
 /// Top bar: project name, then Save / Load / Undo / Redo —
 /// each wired to its core op. Labels come from the i18n table
 /// (keys `save`, `load`, `undo`, `redo`) in the core's current
@@ -229,6 +256,14 @@ fn dirty_dot(core: &EditorCore) -> Option<El> {
 /// used to sit here were removed — they duplicated the
 /// figures panel's add-figure button and the onion panel's
 /// onion-toggle.)
+///
+/// UI mission Wave 4 (audit S16 D2): Load is a session
+/// replace, so its press is gated — see [`load_pressed`].
+/// While an `OpenProject` discard is armed (from here or
+/// from any other gated Open site), the Load button
+/// renders as [`danger_icon_btn`] "Discard changes?"
+/// under the same `load` key; the confirming press is
+/// [`load_pressed`] again.
 ///
 /// UI mission Wave 3 (audit S04 D2/D4): the File/Edit menus
 /// no longer re-mount these four commands, so this bar is
@@ -292,9 +327,11 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
         .child(icon_btn("save", "floppy-disk", &i18n_wire::tr(core, "save"), false, t, |s| {
             s.core.save()
         }))
-        .child(icon_btn("load", "folder-open", &i18n_wire::tr(core, "load"), false, t, |s| {
-            s.core.load()
-        }))
+        .child(if s.confirm_action == Some(ConfirmAction::OpenProject) {
+            danger_icon_btn("load", "folder-open", "Discard changes?", false, t, load_pressed)
+        } else {
+            icon_btn("load", "folder-open", &i18n_wire::tr(core, "load"), false, t, load_pressed)
+        })
         .child(undo_btn)
         .child(redo_btn)
 }
@@ -544,6 +581,42 @@ mod tests {
         assert!(s.core.undo_depth() > 0, "one edit deepens the undo stack");
         assert_eq!(s.core.redo_depth(), 0, "redo stays empty until an undo");
         let _ = app_bar(&s, &t);
+    }
+
+    /// UI mission Wave 4 (audit S16 D2): the app-bar
+    /// Load press arms while the session is dirty and
+    /// only the confirming press reaches `core.load()`
+    /// (whose own status — a load report or its
+    /// no-file refusal — replaces the arm prompt). A
+    /// clean session's press runs immediately.
+    #[test]
+    fn load_pressed_arms_first_while_dirty_then_confirms() {
+        let mut s = crate::init();
+        s.core.snapshot();
+        load_pressed(&mut s);
+        assert_eq!(s.confirm_action, Some(ConfirmAction::OpenProject));
+        assert!(
+            s.core.status.contains("press Load again"),
+            "arming explains itself: {}",
+            s.core.status
+        );
+        load_pressed(&mut s);
+        assert_eq!(s.confirm_action, None, "the confirming press clears the arm");
+        assert!(
+            s.core.status.starts_with("Load"),
+            "the second press ran the load: {}",
+            s.core.status
+        );
+        // And while clean, a press is the load itself,
+        // with no arm in between.
+        let mut s = crate::init();
+        load_pressed(&mut s);
+        assert_eq!(s.confirm_action, None);
+        assert!(
+            s.core.status.starts_with("Load"),
+            "clean press loads immediately: {}",
+            s.core.status
+        );
     }
 
     #[test]

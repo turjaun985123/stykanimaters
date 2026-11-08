@@ -251,6 +251,42 @@
 //! `design::section_label`, and the filter's
 //! no-match line is a kit `empty_state`. Keys,
 //! labels and handlers are byte-identical throughout.
+//!
+//! UI mission Wave 4 (audit S07-8a): the library
+//! **Del** button — the app's only irreversible
+//! delete (a `remove_file`, not an undo step) —
+//! renders through `danger_icon_btn`: same call
+//! shape, key, glyph and handler as the `icon_btn`
+//! it replaces, danger fills instead of the plain
+//! ones, so it no longer carries the same visual
+//! weight as the Rename beside it. No two-step
+//! confirm was added: neither library state struct
+//! holds an armed/pending field, and this panel
+//! has no confirm idiom to reuse. The same wave
+//! closes the clipboard family's dialect split:
+//! **Copy pose** (`copy`), **Paste pose**
+//! (`clipboard` — the catalogue carries no `paste`
+//! glyph) and **Apply pose to all frames** (`check`,
+//! the library Apply buttons' glyph) now render
+//! through `icon_btn` / `icon_btn_inert` like the
+//! library controls below them, instead of the
+//! glyph-less `btn` / `btn_inert`. Keys, labels,
+//! gating and handlers are byte-identical; the row
+//! already wraps (Wave 1), so the glyphs' width is
+//! absorbed by the wrap.
+//!
+//! UI mission Wave 4 batch 2 (audit S07-12): the
+//! library section no longer vanishes when the
+//! library is empty — the header (`pose-lib-header`,
+//! label + count) renders always, and an empty
+//! library shows the kit `empty_state` ("shapes",
+//! "No saved poses yet — Save pose stores the
+//! current pose here.") under it, so the panel
+//! itself teaches that Save pose is what fills the
+//! list; the filter and entries render only when
+//! entries exist. The filter's search glyph drops
+//! 14 → 13 pt, the kit's search size (the figures
+//! filter's glyph). Keys and handlers unchanged.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -264,7 +300,7 @@ use stykanimate_rs::model::Pose;
 
 use crate::chrome_view::{btn, btn_inert};
 use crate::rune_sec::design;
-use crate::rune_sec::icon_btn::{icon_btn, icon_btn_inert};
+use crate::rune_sec::icon_btn::{danger_icon_btn, icon_btn, icon_btn_inert};
 use crate::rune_sec::icons::icon_el;
 use crate::State;
 
@@ -1227,29 +1263,35 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                 .gap(4.0)
                 .flex_wrap()
                 .child(if has_pose {
-                    btn("pose-copy", "Copy pose", false, t, |s| {
+                    icon_btn("pose-copy", "copy", "Copy pose", false, t, |s| {
                         copy_pose(&mut s.core, &mut s.pose_clipboard)
                     })
                 } else {
-                    btn_inert("pose-copy", "Copy pose", t)
+                    icon_btn_inert("pose-copy", "copy", "Copy pose", t)
                 })
                 .child(if can_paste {
-                    btn("pose-paste", "Paste pose", false, t, |s| {
+                    icon_btn("pose-paste", "clipboard", "Paste pose", false, t, |s| {
                         paste_pose(&mut s.core, &s.pose_clipboard)
                     })
                 } else {
-                    btn_inert("pose-paste", "Paste pose", t)
+                    icon_btn_inert("pose-paste", "clipboard", "Paste pose", t)
                 })
                 .child(if can_paste {
-                    btn(
+                    icon_btn(
                         "pose-apply-all",
+                        "check",
                         "Apply pose to all frames",
                         false,
                         t,
                         |s| apply_pose_to_all_frames(&mut s.core, &s.pose_clipboard),
                     )
                 } else {
-                    btn_inert("pose-apply-all", "Apply pose to all frames", t)
+                    icon_btn_inert(
+                        "pose-apply-all",
+                        "check",
+                        "Apply pose to all frames",
+                        t,
+                    )
                 }),
         )
         .child(
@@ -1279,22 +1321,33 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
             icon_btn_inert("pose-save-lib", "floppy-disk", "Save pose", t)
         }));
     let saved = saved_pose_names();
-    if !saved.is_empty() {
-        let query = s.pose_library.filter.text.clone();
-        let visible = visible_pose_entries(&saved, &query);
-        body = body
+    let query = s.pose_library.filter.text.clone();
+    let visible = visible_pose_entries(&saved, &query);
+    // The section header renders ALWAYS (UI mission
+    // Wave 4 batch 2, audit S07-12a): the whole
+    // section used to vanish with an empty library,
+    // so a new user never learned the library exists
+    // or that Save pose (above) is what populates it.
+    body = body.child(
+        row()
+            .key("pose-lib-header")
+            .gap(8.0)
+            .center_y()
+            .child(design::section_label("Pose library", t))
             .child(
-                row()
-                    .key("pose-lib-header")
-                    .gap(8.0)
-                    .center_y()
-                    .child(design::section_label("Pose library", t))
-                    .child(
-                        text(pose_count_line(visible.len(), saved.len(), &query))
-                            .font(type_::LABEL)
-                            .color(t.text_secondary),
-                    ),
-            )
+                text(pose_count_line(visible.len(), saved.len(), &query))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            ),
+    );
+    if saved.is_empty() {
+        body = body.child(design::empty_state(
+            "shapes",
+            "No saved poses yet — Save pose stores the current pose here.",
+            t,
+        ));
+    } else {
+        body = body
             // Filter field (Phase I), mirroring the
             // figures filter: typing is the only writer,
             // and the list below filters on the text
@@ -1304,7 +1357,7 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                     .key("pose-lib-filter-row")
                     .gap(8.0)
                     .center_y()
-                    .child(icon_el("magnifying-glass", 14.0, t.text_secondary))
+                    .child(icon_el("magnifying-glass", 13.0, t.text_secondary))
                     .child(
                         text_input(&s.pose_library.filter, type_::BODY.lh(26.0))
                             .key("pose-lib-filter")
@@ -1360,7 +1413,7 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                             t,
                             move |s: &mut State| start_rename(s, i),
                         ))
-                        .child(icon_btn(
+                        .child(danger_icon_btn(
                             &format!("pose-lib-del-{i}"),
                             "trash-can",
                             "Del",

@@ -72,9 +72,27 @@
 //!   wrapped. [`text_muted`] was reviewed in the same
 //!   pass and is KEPT: it is the kit's muted-text role
 //!   (see its own docs).
+//!
+//! ## UI mission wave 4 — the tangent preset chip
+//!
+//! * [`tangent_preset_chip`] lifts the graph panel's
+//!   private `preset_chip` (audit S12-09: the canonical
+//!   of the three co-mounted tangent-preset copies)
+//!   into the kit: the preset's real preview curve over
+//!   its name, one pressable card. The keyframe tools'
+//!   bare text buttons (`key-preset-*`) and the easing
+//!   panel's preview-plus-button rows (`ease-graph-*`)
+//!   now build through it, keeping their own keys,
+//!   labels and handlers. **The graph panel keeps its
+//!   private copy this wave** — its chip and this one
+//!   are the same construction by design, and merging
+//!   them is a later, graph-owned step; do not "fix"
+//!   the duplication from a consumer side.
 
 use rune::tok::{self, type_, Theme};
-use rune::{col, el, row, text, Color, El};
+use rune::{canvas, col, el, row, text, Color, El, Shape};
+use stykanimate_rs::graph::TangentPreset;
+use stykanimate_rs::graph_panel::preset_preview;
 
 use crate::rune_sec::icons;
 use crate::State;
@@ -492,6 +510,107 @@ pub fn swatch(
     }
 }
 
+/// Width of a tangent-preset chip's preview box — the
+/// graph panel chip's box, carried into the kit with
+/// the construction (see [`tangent_preset_chip`]).
+pub const TANGENT_PREVIEW_W: f32 = 52.0;
+/// Height of a tangent-preset chip's preview box.
+pub const TANGENT_PREVIEW_H: f32 = 30.0;
+/// Samples along a tangent-preset chip's preview curve
+/// (the graph panel chip's count).
+const TANGENT_PREVIEW_SAMPLES: usize = 24;
+
+/// A tangent preset's preview curve as pixel points in
+/// a `w` × `h` box: [`preset_preview`]'s normalised
+/// 0.0..=1.0 samples with y flipped (value 1.0 at the
+/// TOP, screen convention), x spread evenly edge to
+/// edge. The graph panel's `preview_points` maps the
+/// same way; the two agree point for point.
+fn tangent_preview_points(
+    preset: TangentPreset,
+    w: f32,
+    h: f32,
+    samples: usize,
+) -> Vec<[f32; 2]> {
+    let values = preset_preview(preset, samples);
+    let n = values.len();
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let fx = if n > 1 {
+                i as f32 / (n - 1) as f32
+            } else {
+                0.0
+            };
+            [fx * w, h * (1.0 - v)]
+        })
+        .collect()
+}
+
+/// One tangent-preset chip: the preset's real preview
+/// curve (a tiny canvas, sampled from the engine's own
+/// [`preset_preview`]) over its name, the whole card
+/// pressable under the caller's `key`, with the
+/// caller's handler attached untouched (the graph
+/// chip's metrics: padding 4, gap 2,
+/// [`CONTROL_RADIUS`]).
+///
+/// This is the graph panel's private `preset_chip`
+/// lifted into the kit (UI mission wave 4, audit
+/// S12-09 — the graph chips are the canonical surface:
+/// the only copy whose presentation carries the drawn
+/// preview). The keyframe tools and the easing panel
+/// adopt it for their preset rows, keeping their own
+/// key families (`key-preset-*`, `ease-graph-*`),
+/// labels and `apply_graph_ease_preset` handlers —
+/// only the construction converges.
+///
+/// `active` is the generalisation the graph original
+/// does not need (presets there are actions, not
+/// state, so its chips never highlight): an active
+/// chip takes the button family's accent treatment —
+/// accent fill in every state, curve and label in
+/// white — exactly as `chrome_view::btn` and the
+/// easing picker's cells render their active state.
+/// An inactive chip is the graph chip verbatim: card
+/// fill, `control_track` / `control_off` hover/press,
+/// curve and label in `t.text`.
+pub fn tangent_preset_chip(
+    key: &str,
+    preset: TangentPreset,
+    label: &str,
+    active: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    let ink = if active { Color::WHITE } else { t.text };
+    let shape = Shape::new().stroke(
+        tangent_preview_points(
+            preset,
+            TANGENT_PREVIEW_W,
+            TANGENT_PREVIEW_H,
+            TANGENT_PREVIEW_SAMPLES,
+        ),
+        1.5,
+        ink,
+    );
+    let chip = col()
+        .key(key)
+        .padding(4.0)
+        .gap(2.0)
+        .radius(CONTROL_RADIUS)
+        .center()
+        .on_press(f)
+        .child(canvas(shape).size(TANGENT_PREVIEW_W, TANGENT_PREVIEW_H))
+        .child(text(label).font(type_::LABEL).color(ink));
+    if active {
+        chip.fill(accent()).hover(accent()).press(accent())
+    } else {
+        chip.fill(t.card).hover(t.control_track).press(t.control_off)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +696,60 @@ mod tests {
             let _ = slider_track(f32::NAN, &t);
             let _ = swatch("sw", Color::WHITE, true, &t, |_| {});
             let _ = swatch("sw", Color::BLACK, false, &t, |_| {});
+            let _ = tangent_preset_chip(
+                "tp",
+                TangentPreset::EaseInOut,
+                "Ease in-out",
+                true,
+                &t,
+                |_| {},
+            );
+            let _ = tangent_preset_chip(
+                "tp",
+                TangentPreset::Linear,
+                "Linear",
+                false,
+                &t,
+                |_| {},
+            );
+        }
+    }
+
+    #[test]
+    fn tangent_preview_points_span_the_box_edge_to_edge() {
+        // The chip's curve is the graph panel's mapping:
+        // x runs 0..=w across the samples, y is the
+        // flipped normalised value — a preset running
+        // 0→1 starts at the box's bottom-left and ends
+        // at its top-right.
+        for preset in [
+            TangentPreset::Smooth,
+            TangentPreset::EaseIn,
+            TangentPreset::EaseOut,
+            TangentPreset::EaseInOut,
+            TangentPreset::Linear,
+        ] {
+            let pts = tangent_preview_points(
+                preset,
+                TANGENT_PREVIEW_W,
+                TANGENT_PREVIEW_H,
+                TANGENT_PREVIEW_SAMPLES,
+            );
+            assert_eq!(pts.len(), TANGENT_PREVIEW_SAMPLES);
+            let first = pts.first().expect("samples exist");
+            let last = pts.last().expect("samples exist");
+            assert_eq!(first[0], 0.0);
+            assert!(
+                (first[1] - TANGENT_PREVIEW_H).abs() < 0.05,
+                "{preset:?}: starts at y {:?}, not the box bottom",
+                first[1]
+            );
+            assert_eq!(last[0], TANGENT_PREVIEW_W);
+            assert!(
+                last[1].abs() < 0.05,
+                "{preset:?}: ends at y {:?}, not the box top",
+                last[1]
+            );
         }
     }
 }

@@ -163,6 +163,16 @@
 //! retired. The strip's geometry, keys and seek
 //! behaviour are unchanged, as are every handler,
 //! readout and status line.
+//!
+//! UI mission Wave 4 (audit S13-1 / S13-3):
+//! [`ClipRowData`] carries the entry's `hidden` flag,
+//! and a hidden clip's lane row is identifiable at
+//! list level — colour dot dimmed by [`bar_alpha`],
+//! name in the secondary colour, an `eye-slash`
+//! marker before the selection dot. The lane's
+//! no-clips line is the kit [`design::empty_state`]
+//! under `wand-magic-sparkles`, text byte-identical.
+//! Keys, handlers and strip geometry are unchanged.
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, ScrollSpec, Shape, Tx};
@@ -176,6 +186,7 @@ use crate::chrome_view::btn;
 use crate::rune_sec::design;
 use crate::rune_sec::fx_browser::kind_label;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
+use crate::rune_sec::icons::icon_el;
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -254,6 +265,15 @@ pub struct ClipRowData {
     pub color: u32,
     /// Gradient end colour, if any.
     pub color2: Option<u32>,
+    /// Whether the clip's hidden flag is set (UI mission
+    /// Wave 4, audit S13-1): threaded from
+    /// `FxClipEntry::hidden` so the lane row can dim and
+    /// mark the clip at list level — before this field
+    /// existed, a hidden clip's row rendered identically
+    /// to a live one and the state was readable only in
+    /// the strip's dimmed bar and the selected clip's
+    /// inspector readout.
+    pub hidden: bool,
     /// Whether this row is the inspector's clip.
     pub selected: bool,
 }
@@ -285,6 +305,7 @@ pub fn clip_rows(core: &EditorCore, selected: Option<usize>) -> Vec<ClipRowData>
                 duration: info.duration,
                 color: entry.clip.color,
                 color2: entry.clip.color2,
+                hidden: entry.hidden,
                 selected: selected == Some(info.index),
             }
         })
@@ -1121,6 +1142,14 @@ pub fn strip_view(s: &State, t: &Theme) -> El {
 /// colour dot, kind name, covered frame range, anchor —
 /// with the selected row highlighted. A row press selects
 /// the clip for the inspector (`State::fx_selected`).
+/// A hidden clip's row is readable at list level (UI
+/// mission Wave 4, audit S13-1): its colour dot dims by
+/// the strip's own [`bar_alpha`] rule, its name drops to
+/// the secondary colour, and an `eye-slash` marker sits
+/// before the selection dot (a same-size spacer on live
+/// rows keeps the trailing edge aligned). The empty
+/// lane is the kit [`design::empty_state`] under
+/// `wand-magic-sparkles` (audit S13-3), text unchanged.
 pub fn fx_lane(s: &State, t: &Theme) -> El {
     let rows = clip_rows(
         &s.core,
@@ -1129,15 +1158,19 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
     let accent = tok::accent(0, true);
     let mut list = col().key("fx-clips").gap(4.0);
     if rows.is_empty() {
-        list = list.child(
-            text("No FX clips in this project.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        list = list.child(design::empty_state(
+            "wand-magic-sparkles",
+            "No FX clips in this project.",
+            t,
+        ));
     }
     for data in rows {
         let i = data.index;
+        // A hidden clip's dot dims by the strip's bar
+        // rule (×1.0 for a live clip — the colour is
+        // untouched).
         let dot_fill = hex_color(data.color).unwrap_or(Color::WHITE);
+        let dot_fill = dot_fill.alpha(dot_fill.a * bar_alpha(data.hidden));
         list = list.child(
             row()
                 .key(format!("fx-clip-{i}"))
@@ -1166,7 +1199,11 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
                         .radius(5.0)
                         .fill(dot_fill),
                 )
-                .child(text(data.name).font(type_::LABEL).color(t.text))
+                .child(
+                    text(data.name)
+                        .font(type_::LABEL)
+                        .color(if data.hidden { t.text_secondary } else { t.text }),
+                )
                 .child(
                     text(data.window)
                         .font(type_::LABEL)
@@ -1178,6 +1215,11 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 )
+                .child(if data.hidden {
+                    icon_el("eye-slash", 12.0, t.text_secondary)
+                } else {
+                    el().size(12.0, 12.0)
+                })
                 .child(if data.selected {
                     el().size(8.0, 8.0).radius(4.0).fill(accent)
                 } else {
@@ -1628,6 +1670,23 @@ mod tests {
         // Empty project rows nothing; stale selection selects nothing.
         assert!(clip_rows(&core_with(vec![]), Some(0)).is_empty());
         assert!(clip_rows(&core, Some(9)).iter().all(|r| !r.selected));
+    }
+
+    #[test]
+    fn clip_rows_carry_the_hidden_flag() {
+        // S13-1: the lane row data must say whether the
+        // clip is hidden, per clip, so the row can dim
+        // and mark it without a selection round-trip.
+        let mut hidden = entry(20.0, 6.0, ClipKind::ShockRing, 0x5DB2FF);
+        hidden.hidden = true;
+        let core = core_with(vec![
+            entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D),
+            hidden,
+        ]);
+        let rows = clip_rows(&core, None);
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].hidden, "a live clip's row reads live");
+        assert!(rows[1].hidden, "the hidden clip's row carries the flag");
     }
 
     #[test]
@@ -2123,6 +2182,8 @@ mod tests {
             last_status: String::new(),
             toast_now: 0.0,
             last_dark: true,
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
         }
     }
 

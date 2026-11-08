@@ -52,6 +52,17 @@
 //! its shell aligned to the button family's state table and
 //! press feedback. Keys, handlers and status behaviour are
 //! unchanged.
+//!
+//! UI mission wave 4 (audit S12-09): the Graph keys group
+//! renders through the kit's [`design::tangent_preset_chip`]
+//! — the graph panel's drawn-preview chip, lifted into the
+//! kit — instead of this panel's own preview-plus-button
+//! rows, so the three co-mounted tangent-preset surfaces
+//! share one construction. The `ease-graph-*` keys, labels,
+//! one-shot handlers and never-active rule are unchanged;
+//! [`tangent_curve`] remains for the group's data tests
+//! (and states the curve the chip draws, via the same
+//! `graph_panel::preset_preview`).
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, El, Shape};
@@ -384,23 +395,30 @@ pub fn easing_panel(s: &State, t: &Theme) -> El {
     }
 
     // ---- Graph keys: apply_graph_ease_preset, one-shot.
+    // UI mission wave 4 (audit S12-09): the group's rows
+    // converge on the kit's drawn-preview chip — the
+    // graph panel's chip construction, lifted into
+    // `design::tangent_preset_chip` — keeping the
+    // `ease-graph-*` keys, the labels and the handlers;
+    // one-shot actions, so never active. The frame and
+    // project groups above keep their preview-plus-
+    // button rows: those presets ARE state (the current
+    // easing highlights), a different control.
     panel = panel.child(design::section_label("Graph keys — selected figure", t));
     for p in TANGENT_PRESETS {
-        panel = panel.child(preset_row(
-            preview(&tangent_curve(p, CURVE_SAMPLES), accent, t),
-            btn(
-                match p {
-                    TangentPreset::Smooth => "ease-graph-smooth",
-                    TangentPreset::EaseIn => "ease-graph-ease-in",
-                    TangentPreset::EaseOut => "ease-graph-ease-out",
-                    TangentPreset::EaseInOut => "ease-graph-ease-in-out",
-                    TangentPreset::Linear => "ease-graph-linear",
-                },
-                tangent_label(p),
-                false,
-                t,
-                move |s| s.core.apply_graph_ease_preset(p),
-            ),
+        panel = panel.child(design::tangent_preset_chip(
+            match p {
+                TangentPreset::Smooth => "ease-graph-smooth",
+                TangentPreset::EaseIn => "ease-graph-ease-in",
+                TangentPreset::EaseOut => "ease-graph-ease-out",
+                TangentPreset::EaseInOut => "ease-graph-ease-in-out",
+                TangentPreset::Linear => "ease-graph-linear",
+            },
+            p,
+            tangent_label(p),
+            false,
+            t,
+            move |s| s.core.apply_graph_ease_preset(p),
         ));
     }
 
