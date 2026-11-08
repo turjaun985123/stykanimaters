@@ -1,7 +1,7 @@
 //! Home / projects panel (Phase D, section 21/40 of the Rune
 //! rebuild): the saved-project library — a search field, one
 //! row per project in `./projects` (name, figures, frames,
-//! fps, modified), an Open and a Duplicate button per row, a
+//! duration, fps, modified), an Open and a Duplicate button per row, a
 //! recovery banner when the recovery snapshot is newer than
 //! the last named save, and a New project button. Declared
 //! under `crate::rune_sec` — bin-crate code, not part of the
@@ -68,6 +68,28 @@
 //!   mtime cache with the counts, so it costs no extra
 //!   disk read, and the scan-only fallback line keeps
 //!   its old shape (the scan never stats for a length).
+//! - **Row duration (UI mission Wave 9)** — both forms of
+//!   the metadata line now carry the project's runtime
+//!   between the frame count and the fps:
+//!   [`duration_segment`] computes it as frames ÷ fps at
+//!   one frame-period per frame, from numbers already in
+//!   hand (the light read's or the scan's frame count,
+//!   the scan's fps) — no new disk read, no new parse.
+//!   It is a library-level estimate: the model's
+//!   per-frame duration multipliers are not part of
+//!   either data source (`ProjectInfo` has no summed
+//!   durations, and the light read counts arrays only),
+//!   so they are not folded in. An fps that is zero,
+//!   negative or non-finite yields no segment at all —
+//!   the line keeps its previous shape rather than
+//!   printing a duration it cannot honestly compute.
+//!   The line's rendering was already the kit's
+//!   secondary treatment (`LABEL` in `text_secondary`,
+//!   the same pairing the kit's own list-row meta uses),
+//!   and the sort default was already the scan's
+//!   newest-first order with the `home-sort` toggle as
+//!   its control — both audited under Wave 9, neither
+//!   needed a change.
 //! - **Delete (Phase K)** — each row's `home-proj-del-{i}`
 //!   button only *arms* a deletion: it records the row's
 //!   path in [`HomePanelState::confirm_delete`] and the
@@ -705,6 +727,52 @@ pub fn format_fps(fps: f32) -> String {
     }
 }
 
+/// A project's runtime as the row's duration segment
+/// (UI mission Wave 9): `frames` frame-periods at `fps`,
+/// i.e. frames ÷ fps seconds, computed from the counts
+/// both metadata lines already hold — the scan's or the
+/// light read's frame count and the scan's fps. Nothing
+/// is read or parsed for it. Under a minute the label
+/// is decimal seconds with a trailing `.0` dropped
+/// (`"0.5s"`, `"10s"`); from a minute up it is `m:ss`
+/// of the rounded total (`"1:05"`). Per-frame duration
+/// multipliers are *not* folded in: neither data source
+/// carries them (see the module docs), so this is the
+/// one-frame-period-per-frame runtime.
+///
+/// `None` — the segment is omitted, never faked — when
+/// the fps cannot divide honestly: zero, negative or
+/// non-finite. A zero frame count at a usable fps is a
+/// real `Some("0s")`: an empty project lasts no time.
+pub fn duration_segment(frames: usize, fps: f32) -> Option<String> {
+    if !fps.is_finite() || fps <= 0.0 {
+        return None;
+    }
+    let secs = frames as f32 / fps;
+    if secs < 60.0 {
+        if (secs - secs.round()).abs() < 0.001 {
+            Some(format!("{}s", secs.round() as u64))
+        } else {
+            Some(format!("{secs:.1}s"))
+        }
+    } else {
+        let total = secs.round() as u64;
+        Some(format!("{}:{:02}", total / 60, total % 60))
+    }
+}
+
+/// [`duration_segment`] as a ` · `-prefixed interpolation
+/// for the metadata lines: the segment with its
+/// separator when it exists, empty when it does not —
+/// so a line built with it keeps its previous shape
+/// byte-for-byte at an unusable fps.
+fn duration_suffix(frames: usize, fps: f32) -> String {
+    match duration_segment(frames, fps) {
+        Some(segment) => format!(" · {segment}"),
+        None => String::new(),
+    }
+}
+
 /// `"<n> figure(s)"` with correct singular.
 fn count_label(n: usize, singular: &str, plural: &str) -> String {
     if n == 1 {
@@ -886,9 +954,12 @@ fn thumb_el(image: &rune::Image) -> El {
 /// rendered by project_tools' [`human_size`] — the same
 /// formatter the Project section's own meta line uses.
 /// Fps is not part of the light read's tuple, so it still
-/// comes from the scan. When the light read failed (the
-/// file vanished or stopped parsing between the scan and
-/// this render) the line is exactly the scan's
+/// comes from the scan; the duration segment (Wave 9,
+/// [`duration_segment`]) is computed from that same fps
+/// and whichever frame count the line is showing, so it
+/// costs no read of its own. When the light read failed
+/// (the file vanished or stopped parsing between the scan
+/// and this render) the line is exactly the scan's
 /// [`meta_line`] — no size segment (the scan never stats
 /// for a length) and the row is unchanged rather than
 /// blank.
@@ -898,9 +969,10 @@ pub fn row_meta_line(
 ) -> String {
     match meta {
         Some((figures, frames, size_bytes, modified)) => format!(
-            "{} · {} · {} fps · {} · modified {}",
+            "{} · {}{} · {} fps · {} · modified {}",
             count_label(figures, "figure", "figures"),
             count_label(frames, "frame", "frames"),
+            duration_suffix(frames, info.fps),
             format_fps(info.fps),
             human_size(size_bytes),
             format_modified(Some(modified))
@@ -937,12 +1009,15 @@ pub fn totals_line(entries_meta: &[(usize, usize)], project_count: usize) -> Str
 }
 
 /// One row's metadata line: real scan data only
-/// (`ProjectInfo` figures/frames/fps/modified).
+/// (`ProjectInfo` figures/frames/fps/modified), plus
+/// the duration (Wave 9) computed from the scan's own
+/// frames and fps — still nothing but scan data.
 pub fn meta_line(info: &ProjectInfo) -> String {
     format!(
-        "{} · {} · {} fps · modified {}",
+        "{} · {}{} · {} fps · modified {}",
         count_label(info.figures, "figure", "figures"),
         count_label(info.frames, "frame", "frames"),
+        duration_suffix(info.frames, info.fps),
         format_fps(info.fps),
         format_modified(info.modified)
     )
@@ -2108,6 +2183,56 @@ mod tests {
     }
 
     #[test]
+    fn duration_segment_formats_frames_over_fps() {
+        // Sub-minute runtimes are decimal seconds; a
+        // whole second drops its trailing ".0".
+        assert_eq!(duration_segment(5, 12.0).as_deref(), Some("0.4s"));
+        assert_eq!(duration_segment(12, 24.0).as_deref(), Some("0.5s"));
+        assert_eq!(duration_segment(1, 3.0).as_deref(), Some("0.3s"));
+        assert_eq!(duration_segment(30, 12.0).as_deref(), Some("2.5s"));
+        assert_eq!(duration_segment(120, 12.0).as_deref(), Some("10s"));
+        assert_eq!(duration_segment(719, 12.0).as_deref(), Some("59.9s"));
+        // An empty project at a usable fps honestly
+        // lasts no time.
+        assert_eq!(duration_segment(0, 12.0).as_deref(), Some("0s"));
+        // From a minute up the label is m:ss of the
+        // rounded total.
+        assert_eq!(duration_segment(720, 12.0).as_deref(), Some("1:00"));
+        assert_eq!(duration_segment(780, 12.0).as_deref(), Some("1:05"));
+        assert_eq!(duration_segment(43_200, 12.0).as_deref(), Some("60:00"));
+    }
+
+    #[test]
+    fn duration_segment_omits_an_unusable_fps() {
+        // Zero, negative and non-finite rates cannot
+        // divide honestly: no segment, never a guess.
+        assert_eq!(duration_segment(10, 0.0), None);
+        assert_eq!(duration_segment(10, -12.0), None);
+        assert_eq!(duration_segment(10, f32::NAN), None);
+        assert_eq!(duration_segment(10, f32::INFINITY), None);
+    }
+
+    #[test]
+    fn meta_lines_keep_their_old_shape_at_an_unusable_fps() {
+        // At fps 0 the duration segment vanishes and
+        // both lines are byte-identical to their
+        // pre-Wave-9 shapes — the omission is total,
+        // not a placeholder.
+        let mut entry = info("Demo", "projects/demo.json");
+        entry.fps = 0.0;
+        assert_eq!(
+            meta_line(&entry),
+            "1 figure · 5 frames · 0 fps · modified unknown"
+        );
+        let stamp =
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426);
+        assert_eq!(
+            row_meta_line(&entry, Some((3, 12, 1_500, stamp))),
+            "3 figures · 12 frames · 0 fps · 1.5 KB · modified 2026-11-08 05:57"
+        );
+    }
+
+    #[test]
     fn format_modified_known_timestamps() {
         let at = |secs: u64| {
             Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs))
@@ -2129,7 +2254,7 @@ mod tests {
             Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_117_426));
         assert_eq!(
             meta_line(&entry),
-            "3 figures · 12 frames · 24 fps · modified 2026-11-08 05:57"
+            "3 figures · 12 frames · 0.5s · 24 fps · modified 2026-11-08 05:57"
         );
         let mut single = info("Demo", "projects/demo.json");
         single.frames = 1;
@@ -2265,17 +2390,21 @@ mod tests {
         // win; fps still comes from the scan (it is not
         // part of the light tuple). The size segment sits
         // between fps and modified, formatted by
-        // `human_size` (1_500 bytes → "1.5 KB").
+        // `human_size` (1_500 bytes → "1.5 KB"), and the
+        // duration (12 frames at the scan's 24 fps →
+        // "0.5s") sits between frames and fps.
         assert_eq!(
             row_meta_line(&entry, Some((3, 12, 1_500, stamp))),
-            "3 figures · 12 frames · 24 fps · 1.5 KB · modified 2026-11-08 05:57"
+            "3 figures · 12 frames · 0.5s · 24 fps · 1.5 KB · modified 2026-11-08 05:57"
         );
         // No light read: the line is the scan's, unchanged
-        // — the old shape exactly, with no size segment.
+        // — the old shape exactly, with no size segment
+        // (its duration comes from the scan's own numbers:
+        // 9 frames at 24 fps → "0.4s").
         assert_eq!(row_meta_line(&entry, None), meta_line(&entry));
         assert_eq!(
             row_meta_line(&entry, None),
-            "9 figures · 9 frames · 24 fps · modified unknown"
+            "9 figures · 9 frames · 0.4s · 24 fps · modified unknown"
         );
     }
 

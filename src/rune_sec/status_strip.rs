@@ -19,8 +19,12 @@
 //!   rounded exactly as the playback panel's readout
 //!   (`rune_sec::playback_controls::format_timecode`)
 //! - fps — `core.project.fps`, formatted as in chrome
-//! - zoom — `core.camera_here().2` (`editor.rs:530`), the
-//!   camera key zoom at the current frame
+//! - zoom — the EFFECTIVE zoom: `core.camera_here().2`
+//!   (`editor.rs:530`), the camera key zoom at the
+//!   current frame, multiplied by the shell view zoom
+//!   (`crate::stage_view::view_nav().zoom`) — the same
+//!   number the stage overlay's readout shows (UI
+//!   mission Wave 9; see [`zoom_text`])
 //! - selection — `core.selected_figure` /
 //!   `core.selected_node` (`editor.rs:34-35`) with the
 //!   figure's `FigureInstance::name` (`model.rs:404`)
@@ -687,10 +691,39 @@ pub fn frame_text(core: &EditorCore) -> String {
     format!("Frame {}/{}", core.current + 1, core.frame_count())
 }
 
-/// Zoom segment from the camera key at the current frame:
-/// `Zoom {pct}%`, rounded the way chrome's line rounds it.
+/// Zoom segment: `Zoom {pct}%` for the EFFECTIVE zoom —
+/// the camera key zoom at the current frame multiplied
+/// by the shell view zoom, the number that matches what
+/// the stage actually shows. UI mission Wave 5 made the
+/// wheel a view zoom and the stage overlay's readout
+/// effective (`camera_panel::view_zoom_pct`) but left
+/// this segment reading the authored camera alone, so
+/// the two displays disagreed whenever the view was
+/// zoomed; Wave 9 closes that: the expression below is
+/// the overlay's own, term for term and in the same
+/// order, so the percentages agree bit for bit (pinned
+/// by `zoom_text_agrees_with_the_overlay_readout`).
+/// At the identity view the multiplier is exactly 1.0
+/// and the segment reads the authored camera zoom,
+/// unchanged from before.
+///
+/// Width: the label keeps its old width class —
+/// `Zoom {pct}%` is at most 9 characters (est. 72 pt,
+/// the Phase K pinned floor) for every percentage up
+/// to 999, which covers every view zoom (≤ 8×) at the
+/// default camera and the camera steppers' range
+/// (0.3–4.0, `editor.rs`) up to a 2.49× view. Only the
+/// extreme corner — camera 4.0 × view 8.0 = 3200% —
+/// grows it one character (`Zoom 3200%`, est. 80 pt);
+/// the segment is floored from its live label
+/// ([`segment`]), so those points come out of the
+/// tail absorber, never out of a neighbour, and the
+/// Phase K default-state pins do not move: at the
+/// default (identity) view the label is still exactly
+/// `Zoom 100%`.
 pub fn zoom_text(core: &EditorCore) -> String {
-    let pct = (core.camera_here().2 * 100.0).round() as i64;
+    let pct =
+        (core.camera_here().2 * crate::stage_view::view_nav().zoom * 100.0).round() as i64;
     format!("Zoom {pct}%")
 }
 
@@ -1419,6 +1452,40 @@ mod tests {
     #[test]
     fn zoom_text_defaults_to_100_percent() {
         let core = EditorCore::new();
+        assert_eq!(zoom_text(&core), "Zoom 100%");
+    }
+
+    #[test]
+    fn zoom_text_agrees_with_the_overlay_readout() {
+        // UI mission Wave 9: the strip's zoom segment and
+        // the stage overlay's readout
+        // (`camera_panel::view_zoom_pct`) are the same
+        // effective percentage. `zoom_text` replicates
+        // the overlay's expression (the speed_label
+        // precedent in this module: replicate, then pin
+        // the pair together so a change to either side
+        // breaks here instead of letting the two
+        // displays drift apart).
+        let core = EditorCore::new();
+        // Identity view: effective == authored (100%).
+        crate::stage_view::reset_view_nav();
+        assert_eq!(zoom_text(&core), "Zoom 100%");
+        assert_eq!(crate::rune_sec::camera_panel::view_zoom_pct(&core), 100);
+        // View zoomed to 150%: both displays move together.
+        crate::stage_view::set_view_nav(crate::stage_view::ViewNav {
+            zoom: 1.5,
+            pan: [0.0, 0.0],
+        });
+        assert_eq!(zoom_text(&core), "Zoom 150%");
+        assert_eq!(crate::rune_sec::camera_panel::view_zoom_pct(&core), 150);
+        // View zoomed out to 50%, then back to identity.
+        crate::stage_view::set_view_nav(crate::stage_view::ViewNav {
+            zoom: 0.5,
+            pan: [0.0, 0.0],
+        });
+        assert_eq!(zoom_text(&core), "Zoom 50%");
+        assert_eq!(crate::rune_sec::camera_panel::view_zoom_pct(&core), 50);
+        crate::stage_view::reset_view_nav();
         assert_eq!(zoom_text(&core), "Zoom 100%");
     }
 

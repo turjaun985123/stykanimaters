@@ -47,6 +47,7 @@ use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
 
+use crate::rune_sec::app_theme;
 use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{danger_icon_btn, icon_btn, icon_btn_inert};
 use crate::rune_sec::project_tools::session_dirty;
@@ -224,17 +225,29 @@ pub fn toggle_play(s: &mut State) {
 /// autosave has not captured yet. Not the recovery file's
 /// mtime: that is the autosave segment's separate signal,
 /// and the two must not be conflated.
-fn dirty_dot(core: &EditorCore) -> Option<El> {
+///
+/// UI mission Wave 9: the fill is the app palette's
+/// accent for the CURRENT theme ([`dirty_dot_fill`]),
+/// not Rune's `tok::accent(0, true)` — that call
+/// hard-codes the dark appearance, so in the light theme
+/// the dot painted the dark accent while the rest of the
+/// shell wore the light one (the same defect class Wave 8
+/// fixed in the status strip).
+fn dirty_dot(core: &EditorCore, t: &Theme) -> Option<El> {
     if core.edits_since_autosave() > 0 {
-        Some(
-            el()
-                .size(8.0, 8.0)
-                .radius(4.0)
-                .fill(tok::accent(0, true)),
-        )
+        Some(el().size(8.0, 8.0).radius(4.0).fill(dirty_dot_fill(t)))
     } else {
         None
     }
+}
+
+/// The dot's colour seam (the `strip_colors` pattern
+/// from Wave 8): a named, unit-testable binding from
+/// the theme to the one colour the dot paints, so the
+/// test below can pin it without reading an element
+/// tree (which unit tests cannot do).
+fn dirty_dot_fill(t: &Theme) -> Color {
+    app_theme::accent(t)
 }
 
 /// The app bar Load button's press (UI mission Wave 4,
@@ -312,7 +325,7 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
                 .font(type_::TITLE)
                 .color(t.text),
         );
-    if let Some(dot) = dirty_dot(core) {
+    if let Some(dot) = dirty_dot(core, t) {
         name_row = name_row.child(dot);
     }
     // Undo/Redo, depth-gated (see this fn's docs): the
@@ -567,12 +580,33 @@ mod tests {
     #[test]
     fn dirty_dot_follows_the_autosave_edit_counter() {
         let mut core = EditorCore::new();
-        assert!(dirty_dot(&core).is_none(), "a fresh core reads clean");
+        for dark in [true, false] {
+            let t = app_theme::app_theme(dark);
+            assert!(dirty_dot(&core, &t).is_none(), "a fresh core reads clean");
+        }
         core.snapshot();
-        assert!(
-            dirty_dot(&core).is_some(),
-            "one snapshot-counted edit lights the dot"
-        );
+        for dark in [true, false] {
+            let t = app_theme::app_theme(dark);
+            assert!(
+                dirty_dot(&core, &t).is_some(),
+                "one snapshot-counted edit lights the dot (dark={dark})"
+            );
+        }
+    }
+
+    /// UI mission Wave 9: the dot paints the app palette's
+    /// accent for the theme in hand — `#6C8CFF` in dark,
+    /// the darkened `#4666D8` in light — through the
+    /// `dirty_dot_fill` seam, never Rune's hard-coded
+    /// dark accent.
+    #[test]
+    fn dirty_dot_fill_is_the_theme_accent() {
+        let dark = app_theme::app_theme(true);
+        let light = app_theme::app_theme(false);
+        assert_eq!(dirty_dot_fill(&dark).hex(), "#6c8cffff");
+        assert_eq!(dirty_dot_fill(&light).hex(), "#4666d8ff");
+        assert_eq!(dirty_dot_fill(&dark), app_theme::accent(&dark));
+        assert_eq!(dirty_dot_fill(&light), app_theme::accent(&light));
     }
 
     /// UI mission Wave 3 (audit S04 D2): the app bar

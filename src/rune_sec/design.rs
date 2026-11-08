@@ -111,9 +111,24 @@
 //!   The display-only members ([`kbd`],
 //!   [`panel_title`], [`empty_state`], …) are not
 //!   controls and stay unwired.
+//!
+//! ## UI mission wave 9 — the vertical splitter
+//!
+//! * [`v_splitter`] is the kit's drag handle for a
+//!   resizable panel boundary: the horizontal
+//!   [`divider`] turned upright, given a grip and a
+//!   drag. It extends the wave 6 tooltip convention to
+//!   the kit's one drag builder — its label wires as
+//!   help text — and it is the kit's one ADAPTING
+//!   builder: where [`toggle_row`] / [`swatch`] attach
+//!   their handlers untouched (a press needs no
+//!   translation), a drag arrives as the shell-level
+//!   `Drag`, and the splitter's contract is precisely
+//!   to hide that behind a pointer-x delta (see its
+//!   own docs for the exact semantics).
 
 use rune::tok::{self, type_, Theme};
-use rune::{canvas, col, el, row, text, Color, El, Shape};
+use rune::{canvas, col, el, row, text, Color, Drag, El, Phase, Shape, Tx};
 use stykanimate_rs::graph::TangentPreset;
 use stykanimate_rs::graph_panel::preset_preview;
 
@@ -500,6 +515,148 @@ pub fn slider_track(frac: f32, t: &Theme) -> El {
         )
 }
 
+/// Splitter hit-strip width: the 1 pt hairline centred
+/// in a grabbable strip (see [`v_splitter`]). Callers
+/// mount the splitter in their row layout, so this is
+/// the width a wiring layout must budget for it.
+pub const SPLITTER_W: f32 = 10.0;
+/// Width of a splitter's hairline — the same 1 pt as
+/// the horizontal [`divider`].
+pub const SPLITTER_LINE_W: f32 = 1.0;
+/// A splitter's grip glyph size: small enough to sit
+/// inside [`SPLITTER_W`] with air either side. Named
+/// exception to the icon size scale (Wave 9, E3's size
+/// census): 8 pt is a kit-internal metric for a grip
+/// mark, not a content icon — snapping it to ICON_SM
+/// (12) would break the splitter geometry the tests
+/// pin (`SPLITTER_GRIP < SPLITTER_W`).
+const SPLITTER_GRIP: f32 = 8.0;
+/// Vertical air between a splitter's hairline halves
+/// and its grip glyph (tok S1).
+const SPLITTER_GAP: f32 = 4.0;
+
+/// One growing half of a splitter's hairline: a 1 pt
+/// `separator` segment that stretches to fill whatever
+/// height the grip leaves it (see [`v_splitter`]).
+fn splitter_line(t: &Theme) -> El {
+    el().w(SPLITTER_LINE_W).grow(1.0).fill(t.separator)
+}
+
+/// Translate a splitter drag into pointer-x deltas for
+/// the caller's callback (see [`v_splitter`] for the
+/// contract). The press position anchors in
+/// `Drag::data` — the shell sliders' established slot
+/// for press state — and each delivered delta re-
+/// anchors, so the increments always sum to the
+/// pointer's total travel. A non-finite delta (a NaN
+/// out of some drag maths) is dropped rather than
+/// delivered, the [`clamp_frac`] discipline.
+fn splitter_drag(s: &mut State, d: &mut Drag, tx: &mut Tx, f: &impl Fn(&mut State, f32)) {
+    match d.phase {
+        Phase::Down => {
+            d.data = d.x;
+        }
+        Phase::Move => {
+            let dx = d.x - d.data;
+            if dx.is_finite() && dx != 0.0 {
+                f(s, dx);
+                d.data = d.x;
+            }
+            tx.instant();
+        }
+        Phase::Up => {
+            if !d.cancelled() {
+                let dx = d.x - d.data;
+                if dx.is_finite() && dx != 0.0 {
+                    f(s, dx);
+                }
+            }
+        }
+    }
+}
+
+/// A vertical splitter: the drag handle for a
+/// resizable panel boundary (UI mission wave 9). The
+/// horizontal [`divider`] turned upright — a 1 pt
+/// `separator` hairline spanning the full height of
+/// the row it is mounted in, broken at the middle by
+/// a `grip-vertical` glyph in the [`text_muted`] role
+/// — carried on a [`SPLITTER_W`]-wide hit strip whose
+/// hover/press feedback is the theme's `t.hover` /
+/// `t.press` overlays, the state treatment
+/// [`list_row`] and [`swatch`] use. If the grip glyph
+/// ever leaves the curated icon set the builder
+/// degrades to one unbroken hairline rather than a
+/// blank slot (the [`panel_title`] omission idiom).
+///
+/// Mount it between two panels in a `row`: the root
+/// is `w(SPLITTER_W)` / `h_full()`, so the caller's
+/// layout budgets exactly [`SPLITTER_W`] of width for
+/// it. The builder holds no state and mounts nothing
+/// until a caller places it — adding it to the kit
+/// changes no existing tree.
+///
+/// The callback contract — the kit's one adapting
+/// builder, because a press handler needs no
+/// translation but a drag arrives as the shell-level
+/// `Drag` (position inside the element), which is
+/// exactly what a width adjustment does not want:
+///
+/// * `f(state, dx)` receives the pointer's horizontal
+///   movement in points SINCE THE PREVIOUS delivered
+///   event — incremental deltas that sum to the total
+///   travel, delivered verbatim and unclamped
+///   (clamping the resulting width is the caller's
+///   business, as what a press does is elsewhere).
+/// * A press anchors silently; moves deliver, and a
+///   non-cancelled release delivers the final
+///   increment. A zero or non-finite movement delivers
+///   nothing.
+/// * **Known limit, recorded not faked:** a cancelled
+///   drag does NOT rewind increments already
+///   delivered, the way the shell's absolute-value
+///   sliders restore their press value — an
+///   incremental callback has no press value to
+///   restore to. Callers needing a transactional drag
+///   must accumulate the deltas in their own state and
+///   commit them on a signal only they own.
+///
+/// Tooltip: `label` wires as the element's help text
+/// (the kit's wave 6 convention). Rune exposes no
+/// cursor-setting surface for an element, so the
+/// east–west resize affordance is carried by the
+/// grip glyph, the state overlays and this text —
+/// pass a label that names the gesture, e.g.
+/// "Drag to resize the sidebar".
+pub fn v_splitter(
+    key: &str,
+    label: &str,
+    t: &Theme,
+    f: impl Fn(&mut State, f32) + 'static,
+) -> El {
+    let mut bar = col()
+        .key(key)
+        .help(label)
+        .w(SPLITTER_W)
+        .h_full()
+        .items_center()
+        .gap(SPLITTER_GAP)
+        .hover(t.hover)
+        .press(t.press)
+        .on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| {
+            splitter_drag(s, d, tx, &f);
+        });
+    if icons::has_icon("grip-vertical") {
+        bar = bar
+            .child(splitter_line(t))
+            .child(icons::icon_el("grip-vertical", SPLITTER_GRIP, text_muted(t)))
+            .child(splitter_line(t));
+    } else {
+        bar = bar.child(splitter_line(t));
+    }
+    bar
+}
+
 /// One colour swatch construction for the whole shell
 /// (charter amendment, P3/P18): a 24×24 pressable
 /// carrying the caller's `key` and handler, radius
@@ -729,6 +886,7 @@ mod tests {
             let _ = slider_track(0.5, &t);
             let _ = slider_track(1.0, &t);
             let _ = slider_track(f32::NAN, &t);
+            let _ = v_splitter("vs", "Drag to resize", &t, |_, _| {});
             let _ = swatch("sw", Color::WHITE, true, &t, |_| {});
             let _ = swatch("sw", Color::BLACK, false, &t, |_| {});
             let _ = tangent_preset_chip(
@@ -748,6 +906,19 @@ mod tests {
                 |_| {},
             );
         }
+    }
+
+    #[test]
+    fn v_splitter_geometry_is_a_hairline_in_a_grabbable_strip() {
+        // The wiring layout budgets SPLITTER_W for the
+        // strip; the hairline inside it is the divider's
+        // 1 pt, and the grip glyph must fit the strip
+        // with air either side rather than spilling
+        // over the panels it separates.
+        assert_eq!(SPLITTER_LINE_W, 1.0);
+        assert!(SPLITTER_LINE_W < SPLITTER_W);
+        assert!(SPLITTER_GRIP < SPLITTER_W);
+        assert!(SPLITTER_GAP > 0.0);
     }
 
     #[test]

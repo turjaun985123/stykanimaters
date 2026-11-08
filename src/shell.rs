@@ -17,9 +17,10 @@
 //!
 //! A third, smaller store holds the window layout
 //! preferences at `.layout.json` (last workspace, theme,
-//! timeline collapse, sidebar visibility) so the app shell
-//! can restore them on startup. New fields are added with
-//! serde defaults so older `.layout.json` files keep loading.
+//! timeline collapse, sidebar visibility, column widths)
+//! so the app shell can restore them on startup. New
+//! fields are added with serde defaults so older
+//! `.layout.json` files keep loading.
 
 use crate::model::Project;
 use serde::{Deserialize, Serialize};
@@ -246,13 +247,41 @@ fn default_true() -> bool {
     true
 }
 
+/// Serde default for [`LayoutPrefs::col_left_w`]: the left
+/// column's long-standing fixed width, so files written
+/// before the field existed load unchanged.
+fn default_col_left_w() -> f32 {
+    300.0
+}
+
+/// Serde default for [`LayoutPrefs::col_right_w`]: the
+/// right column's long-standing fixed width, like
+/// [`default_col_left_w`].
+fn default_col_right_w() -> f32 {
+    340.0
+}
+
+/// Clamp a persisted column width into `[min, max]` on
+/// load: a hand-edited or corrupt `.layout.json` must
+/// never squeeze the stage away or push a column off
+/// screen. A non-finite value falls back to the field's
+/// default rather than propagating into the layout.
+fn clamp_col_width(w: f32, default: f32, min: f32, max: f32) -> f32 {
+    if w.is_finite() {
+        w.clamp(min, max)
+    } else {
+        default
+    }
+}
+
 /// Window layout preferences persisted across runs: which
 /// workspace was active, whether the dark theme was on, the
 /// timeline / sidebar arrangement of the context-first
-/// shell, and whether live MCP control starts with the
-/// editor. Stored as JSON at `.layout.json` in the projects
-/// dir. The newer fields carry serde defaults so a
-/// `.layout.json` written by an older build still loads.
+/// shell, whether live MCP control starts with the editor,
+/// and the side-column widths. Stored as JSON at
+/// `.layout.json` in the projects dir. The newer fields
+/// carry serde defaults so a `.layout.json` written by an
+/// older build still loads.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LayoutPrefs {
     /// Name of the active workspace (e.g. `"Animate"`).
@@ -282,12 +311,27 @@ pub struct LayoutPrefs {
     /// start is never remembered as on).
     #[serde(default = "default_true")]
     pub live_mcp: bool,
+    /// Width in points of the left column (figures /
+    /// library), persisted so the shell's column
+    /// arrangement survives a restart. Files written
+    /// before the field existed load at the long-standing
+    /// fixed width (300). Clamped to 220..=420 on load
+    /// (see [`load_layout_in`]).
+    #[serde(default = "default_col_left_w")]
+    pub col_left_w: f32,
+    /// Width in points of the right column (inspector),
+    /// the companion to [`LayoutPrefs::col_left_w`]:
+    /// defaults to the long-standing fixed width (340)
+    /// and is clamped to 260..=480 on load.
+    #[serde(default = "default_col_right_w")]
+    pub col_right_w: f32,
 }
 
 impl Default for LayoutPrefs {
     /// The first-run layout: the Animate workspace, dark
     /// theme, timeline expanded, sidebar visible, live MCP
-    /// control on (see [`LayoutPrefs::live_mcp`]).
+    /// control on (see [`LayoutPrefs::live_mcp`]), side
+    /// columns at their long-standing fixed widths.
     fn default() -> Self {
         LayoutPrefs {
             workspace: "Animate".to_string(),
@@ -296,6 +340,8 @@ impl Default for LayoutPrefs {
             sidebar_visible: true,
             palette_recents: Vec::new(),
             live_mcp: true,
+            col_left_w: 300.0,
+            col_right_w: 340.0,
         }
     }
 }
@@ -308,11 +354,22 @@ pub fn load_layout() -> LayoutPrefs {
 }
 
 /// [`load_layout`] with an explicit base directory.
+///
+/// The persisted column widths are clamped to their sane
+/// ranges here, on load — the one place every reader
+/// (startup, palette recents, the settings toggles'
+/// load-modify-save) passes through — so a hand-edited
+/// or corrupt width is never honoured as written.
 pub fn load_layout_in(dir: &Path) -> LayoutPrefs {
     let Ok(text) = std::fs::read_to_string(dir.join(LAYOUT_FILE)) else {
         return LayoutPrefs::default();
     };
-    serde_json::from_str(&text).unwrap_or_default()
+    let mut prefs: LayoutPrefs = serde_json::from_str(&text).unwrap_or_default();
+    prefs.col_left_w =
+        clamp_col_width(prefs.col_left_w, default_col_left_w(), 220.0, 420.0);
+    prefs.col_right_w =
+        clamp_col_width(prefs.col_right_w, default_col_right_w(), 260.0, 480.0);
+    prefs
 }
 
 /// Save the layout preferences to `./projects/.layout.json`.
@@ -625,6 +682,11 @@ mod tests {
         // Live MCP defaults ON for a pre-field file (the
         // serde default is `default_true`, like the sidebar).
         assert!(prefs.live_mcp);
+        // Column widths likewise default to the
+        // long-standing fixed widths (300 / 340) for a
+        // pre-field file.
+        assert_eq!(prefs.col_left_w, 300.0);
+        assert_eq!(prefs.col_right_w, 340.0);
         assert_eq!(
             prefs,
             LayoutPrefs {
@@ -646,6 +708,8 @@ mod tests {
             sidebar_visible: false,
             palette_recents: Vec::new(),
             live_mcp: false,
+            col_left_w: 276.0,
+            col_right_w: 316.0,
         };
         save_layout_in(&dir, &prefs);
         // The non-default values are really on disk, not
@@ -654,7 +718,48 @@ mod tests {
         assert!(text.contains("\"timeline_collapsed\": true"), "{text}");
         assert!(text.contains("\"sidebar_visible\": false"), "{text}");
         assert!(text.contains("\"live_mcp\": false"), "{text}");
+        assert!(text.contains("\"col_left_w\": 276.0"), "{text}");
+        assert!(text.contains("\"col_right_w\": 316.0"), "{text}");
         assert_eq!(load_layout_in(&dir), prefs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_column_widths_are_clamped_on_load() {
+        let dir = temp_dir("layout-col-clamp");
+        // Out-of-range persisted widths (hand-edited or
+        // corrupt) are pulled back to the sane range by
+        // the load: left 220..=420, right 260..=480.
+        std::fs::write(
+            dir.join(LAYOUT_FILE),
+            "{\"workspace\":\"Draw\",\"dark\":true,\
+             \"col_left_w\":999.0,\"col_right_w\":10.0}",
+        )
+        .unwrap();
+        let prefs = load_layout_in(&dir);
+        assert_eq!(prefs.col_left_w, 420.0);
+        assert_eq!(prefs.col_right_w, 260.0);
+        // The other direction clamps the other way.
+        std::fs::write(
+            dir.join(LAYOUT_FILE),
+            "{\"workspace\":\"Draw\",\"dark\":true,\
+             \"col_left_w\":100.0,\"col_right_w\":900.0}",
+        )
+        .unwrap();
+        let prefs = load_layout_in(&dir);
+        assert_eq!(prefs.col_left_w, 220.0);
+        assert_eq!(prefs.col_right_w, 480.0);
+        // In-range widths — including the boundaries
+        // themselves — pass through untouched.
+        std::fs::write(
+            dir.join(LAYOUT_FILE),
+            "{\"workspace\":\"Draw\",\"dark\":true,\
+             \"col_left_w\":220.0,\"col_right_w\":480.0}",
+        )
+        .unwrap();
+        let prefs = load_layout_in(&dir);
+        assert_eq!(prefs.col_left_w, 220.0);
+        assert_eq!(prefs.col_right_w, 480.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -670,6 +775,8 @@ mod tests {
             sidebar_visible: false,
             palette_recents: Vec::new(),
             live_mcp: false,
+            col_left_w: 252.0,
+            col_right_w: 388.0,
         };
         save_layout_in(&dir, &prefs);
 
@@ -693,6 +800,8 @@ mod tests {
         assert!(after.timeline_collapsed);
         assert!(!after.sidebar_visible);
         assert!(!after.live_mcp);
+        assert_eq!(after.col_left_w, 252.0);
+        assert_eq!(after.col_right_w, 388.0);
         assert_eq!(
             after,
             LayoutPrefs {

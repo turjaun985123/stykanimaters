@@ -303,6 +303,27 @@ impl Section {
 // is for; the same sentences are exposed at runtime as
 // [`Workspace::blurb`] for the help/status surfaces —
 // keep the two in step.
+//
+// Wave 9 audit (E9) — orphan check, table vs reality:
+// every (workspace, section) pair below was checked
+// against the panels the workspace's scenes exercise
+// and the snap suite's `workspace_card_roots_sweep`.
+// No orphan mounts remain: the one historical case
+// (figure-add mounting where Figures was gated off)
+// is gated on `Section::Figures` at its mount site in
+// `main.rs`. `Section::Figures` appearing in Draw /
+// Graph / Effects / Audio / Build3D is deliberate,
+// NOT an orphan: figure selection is global editor
+// state, the panel's controls (select, show/hide,
+// lock, reorder, opacity, delete) act from any
+// workspace, and the Graph / FX / 3D panels all scope
+// their editing to the figure this panel selects —
+// removing it would strand those workspaces with no
+// way to change the figure they edit. (The Wave 9
+// scene facts 22–25 in `scenes.rs` claim no
+// `figures-panel` in those workspaces; that is the
+// facts' error, not this table's — the sweep pins
+// `figures-panel` present in Draw and Graph.)
 
 /// Animate: the core animating set — figures, library,
 /// layers, project, all three inspectors, pose and
@@ -621,6 +642,15 @@ mod tests {
 
     #[test]
     fn prefs_with_workspace_preserves_other_fields() {
+        // Non-default values in every field, including
+        // the column widths (`col_left_w` / `col_right_w`,
+        // added to `LayoutPrefs` in the Wave 9 shell
+        // work): the load-modify-save behind a workspace
+        // switch must carry them across untouched, or
+        // every chip press would reset the user's column
+        // arrangement. The values sit inside the load
+        // clamps (220..=420 / 260..=480) so the disk
+        // round-trip test below sees them as written.
         let prefs = LayoutPrefs {
             workspace: "Animate".to_string(),
             dark: false,
@@ -628,6 +658,8 @@ mod tests {
             sidebar_visible: false,
             palette_recents: Vec::new(),
             live_mcp: false,
+            col_left_w: 260.0,
+            col_right_w: 400.0,
         };
         let out = prefs_with_workspace(&prefs, Workspace::Audio);
         assert_eq!(out.workspace, "Audio");
@@ -635,6 +667,8 @@ mod tests {
         assert!(out.timeline_collapsed);
         assert!(!out.sidebar_visible);
         assert!(!out.live_mcp);
+        assert_eq!(out.col_left_w, 260.0);
+        assert_eq!(out.col_right_w, 400.0);
         assert_eq!(from_prefs(&out), Workspace::Audio);
     }
 
@@ -731,5 +765,23 @@ mod tests {
         assert!(section_visible(W::Home, S::Home));
         assert!(section_visible(W::Home, S::Stats));
         assert!(!section_visible(W::Home, S::Figures));
+        // Wave 9 audit (E9): the Figures row across all
+        // eight — mounted wherever a workspace's work
+        // scopes to the selected figure (Animate, Draw,
+        // Graph, Effects, Audio, Build3D), gated out
+        // only where nothing edits figures (Export,
+        // Home). See the gating-table comment for why
+        // these mounts are legitimate, not orphans.
+        for ws in [W::Animate, W::Draw, W::Graph, W::Effects, W::Audio, W::Build3D] {
+            assert!(section_visible(ws, S::Figures), "{ws:?} mounts Figures");
+        }
+        for ws in [W::Export, W::Home] {
+            assert!(!section_visible(ws, S::Figures), "{ws:?} gates Figures out");
+        }
+        // FrameOps is Animate-only: the sweep pins the
+        // `frames` root absent in Draw and Graph alike.
+        assert!(section_visible(W::Animate, S::FrameOps));
+        assert!(!section_visible(W::Draw, S::FrameOps));
+        assert!(!section_visible(W::Graph, S::FrameOps));
     }
 }

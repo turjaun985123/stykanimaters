@@ -678,6 +678,34 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     }
 }
 
+/// UI mission Wave 9 (splitter prep): the side-column widths
+/// the main row lays out with, in points — left first, right
+/// second. The Phase J layout fixed them at 300 / 340 with the
+/// centre taking the rest; they resolve through this one
+/// function so the drag splitter has exactly one place
+/// to read them from.
+///
+/// WAVE9-SPLITTER integration point: `State` holds no prefs —
+/// the shell reaches `LayoutPrefs` through
+/// `stykanimate_rs::shell::load_layout()` (the route `init`,
+/// the theme writer in `poll` and the settings handlers
+/// already use), so the widths read the persisted
+/// `col_left_w` / `col_right_w` fields through it. Those
+/// fields serde-default to the Phase J constants (300 /
+/// 340) — which is also what a prefs file written before
+/// they existed yields — and `load_layout` clamps them into
+/// their sane ranges, so whenever the prefs hold their
+/// defaults this returns exactly (300, 340) and the default
+/// geometry, stage [328, 157, 744, 530] at 1440×900, stays
+/// byte-identical. (The read re-loads the small prefs file
+/// on each view pass; if the integrator prefers a State
+/// mirror seeded in `init`, this body is the only place
+/// that changes.)
+fn column_widths() -> (f32, f32) {
+    let prefs = stykanimate_rs::shell::load_layout();
+    (prefs.col_left_w, prefs.col_right_w)
+}
+
 fn view(s: &State, cx: &mut Cx<State>) -> El {
     let t = rune_sec::app_theme::app_theme(!s.core.light_theme);
     let core = &s.core;
@@ -939,7 +967,9 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     // them (menus section); the centre always mounts.
     //
     // Phase J layout fix: the side viewports keep their fixed
-    // widths (300 / 340) and the centre takes the rest. They
+    // widths (300 / 340 — resolved through `column_widths`
+    // since UI mission Wave 9) and the centre takes the
+    // rest. They
     // used to also carry `.grow(1.0)`, which flattened all
     // three columns to equal thirds (~461 pt each at 1440
     // wide): the centre — stage, timeline and status strip —
@@ -952,25 +982,62 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     // viewports clip their content to it (Rune's `scroll`
     // contract — a bounded ancestor, `min_h(0.0)` on the
     // viewport); only the width split was wrong.
+    // WAVE9-SPLITTER: the widths resolve through
+    // `column_widths()` (the integration point documented
+    // there — LayoutPrefs-backed, the 300 / 340 defaults
+    // whenever the prefs hold them). The splitter
+    // HANDLES (design::v_splitter, Wave 9) mount in this
+    // row: the left handle in the gap between the left
+    // column and the centre, the right handle in the gap
+    // between the centre and the right column — each
+    // mounted only while its column is shown. The row gap
+    // drops to 1 pt so every junction still totals the
+    // pre-splitter 12 pt (1 + SPLITTER_W 10 + 1) and the
+    // default geometry stays byte-identical; a drag
+    // writes the clamped width straight back into
+    // LayoutPrefs (the load clamps in shell.rs are the
+    // same bounds), and `column_widths()` re-reads the
+    // prefs on the next view pass, so the resize is live.
+    let (left_w, right_w) = column_widths();
     let mut main_row = row()
         .key("main-row")
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .gap(12.0);
+        .gap(1.0);
     if s.show_left {
         main_row = main_row.child(
             left.scroll(ScrollSpec { stick_bottom: false })
-                .w(300.0)
+                .w(left_w)
                 .min_h(0.0),
         );
+        main_row = main_row.child(rune_sec::design::v_splitter(
+            "split-left",
+            "Drag to resize the left panel column",
+            &t,
+            |_s, dx| {
+                let mut prefs = stykanimate_rs::shell::load_layout();
+                prefs.col_left_w = (prefs.col_left_w + dx).clamp(220.0, 420.0);
+                stykanimate_rs::shell::save_layout(&prefs);
+            },
+        ));
     }
     main_row = main_row.child(centre);
     if s.show_right {
+        main_row = main_row.child(rune_sec::design::v_splitter(
+            "split-right",
+            "Drag to resize the right panel column",
+            &t,
+            |_s, dx| {
+                let mut prefs = stykanimate_rs::shell::load_layout();
+                prefs.col_right_w = (prefs.col_right_w - dx).clamp(260.0, 480.0);
+                stykanimate_rs::shell::save_layout(&prefs);
+            },
+        ));
         main_row = main_row.child(
             right
                 .scroll(ScrollSpec { stick_bottom: false })
-                .w(340.0)
+                .w(right_w)
                 .min_h(0.0),
         );
     }

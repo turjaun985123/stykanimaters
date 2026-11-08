@@ -733,12 +733,16 @@ fn speed_row(s: &State, t: &Theme) -> El {
 
 /// The section as mounted in the shell column: the
 /// "Settings" toggle (accent-filled while open), and — when
-/// `s.settings.open` — the settings card under it: Theme,
-/// Language grid, Stage W / H steppers, the default
-/// easing cycle, the stage-guides toggle with its two
-/// child toggles, the Reset layout button, the Playback
-/// block (loop toggle, speed chips + playback-audio
-/// readout), and the startup-workspace picker.
+/// `s.settings.open` — the settings card under it, in
+/// display order: the Live MCP toggle first (Wave 9 — the
+/// card's most consequential switch, previously ~1064 pt
+/// deep at the bottom of the scroll), Theme, Stage W / H
+/// steppers, the default easing cycle, the stage-guides
+/// toggle with its two child toggles, the Reset layout
+/// button, the Playback block (loop toggle, speed chips +
+/// playback-audio readout), the startup-workspace picker,
+/// and the Language grid last (Wave 9 — set-once, and the
+/// card's tallest section).
 pub fn settings_popover(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let open = s.settings.open;
@@ -790,6 +794,34 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
             )
             .child(design::divider(t));
 
+        // Live MCP control — FIRST section of the card
+        // (Wave 9): it is the card's most consequential
+        // switch (it opens the editor to local programs),
+        // and it used to sit at the very bottom of the
+        // scrolling card (~1064 pt deep), below every
+        // set-once preference. A kit `toggle_row` like the
+        // guides / loop rows below (the pill carries the
+        // state), mounted directly — `settings-live-mcp`
+        // is the one new key this section adds. The row's
+        // state reads the bridge itself — `live_mcp::
+        // is_enabled`, never a mirrored bool — and the
+        // press runs through toggle_live_mcp (start/stop +
+        // persist + status). Under it, the note line: the
+        // endpoint for the user's MCP client and the
+        // plain-words no-password warning.
+        card = card
+            .child(design::section_label("Live MCP", t))
+            .child(design::toggle_row(
+                "settings-live-mcp",
+                "Live MCP control",
+                crate::live_mcp::is_enabled(),
+                t,
+                |s: &mut State| {
+                    toggle_live_mcp(s);
+                },
+            ))
+            .child(note_line(t, &live_mcp_note()));
+
         // Theme: each button sets its own value outright.
         // The glyphs mirror the labels (Phase H): `moon`
         // names the dark state the Dark button sets, `sun`
@@ -820,21 +852,6 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
                     },
                 )),
         );
-
-        // Language: the full table as a button grid, the
-        // current language highlighted.
-        let mut grid = col().key("settings-lang-grid").gap(4.0);
-        for (i, chunk) in language_entries().chunks(LANG_COLUMNS).enumerate() {
-            let mut lang_row = row()
-                .key(format!("settings-lang-row-{i}"))
-                .gap(6.0)
-                .flex_wrap();
-            for entry in chunk {
-                lang_row = lang_row.child(language_button(entry.clone(), core.lang, t));
-            }
-            grid = grid.child(lang_row);
-        }
-        card = card.child(design::section_label("Language", t)).child(grid);
 
         // Stage size: one stepper row per axis.
         card = card
@@ -983,29 +1000,6 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
                     .color(t.text_secondary),
             );
 
-        // Live MCP control: a kit `toggle_row` like the
-        // guides / loop rows above (the pill carries the
-        // state), mounted directly — `settings-live-mcp`
-        // is the one new key this section adds. The row's
-        // state reads the bridge itself — `live_mcp::
-        // is_enabled`, never a mirrored bool — and the
-        // press runs through toggle_live_mcp (start/stop +
-        // persist + status). Under it, the note line: the
-        // endpoint for the user's MCP client and the
-        // plain-words no-password warning.
-        card = card
-            .child(design::section_label("Live MCP", t))
-            .child(design::toggle_row(
-                "settings-live-mcp",
-                "Live MCP control",
-                crate::live_mcp::is_enabled(),
-                t,
-                |s: &mut State| {
-                    toggle_live_mcp(s);
-                },
-            ))
-            .child(note_line(t, &live_mcp_note()));
-
         // Startup workspace: the eight workspaces as a
         // button grid (the language grid's layout), the
         // current one highlighted. Picking one switches
@@ -1029,6 +1023,28 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
                 t,
                 "Applies now and is the workspace opened at startup.",
             ));
+
+        // Language — LAST section of the card (Wave 9):
+        // the full table as a button grid, the current
+        // language highlighted. It is a set-once
+        // preference and by far the card's tallest section
+        // (28 buttons); it used to sit second, pushing
+        // every daily control — stage size, guides,
+        // playback — hundreds of points down the scroll.
+        // Moved whole: same grid keys, same buttons, same
+        // handler ([`language_button`] → [`set_language`]).
+        let mut grid = col().key("settings-lang-grid").gap(4.0);
+        for (i, chunk) in language_entries().chunks(LANG_COLUMNS).enumerate() {
+            let mut lang_row = row()
+                .key(format!("settings-lang-row-{i}"))
+                .gap(6.0)
+                .flex_wrap();
+            for entry in chunk {
+                lang_row = lang_row.child(language_button(entry.clone(), core.lang, t));
+            }
+            grid = grid.child(lang_row);
+        }
+        card = card.child(design::section_label("Language", t)).child(grid);
 
         panel = panel.child(card);
     }
