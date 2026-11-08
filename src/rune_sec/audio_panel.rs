@@ -430,7 +430,12 @@ fn trim_silence_target(s: &mut State) {
 /// `audio_split_at_silences_last`.
 fn split_silences_target(s: &mut State) {
     match live_target(s) {
-        Some(i) => s.core.audio_split_silences_at(i),
+        // The indexed op reports how many clips the
+        // split produced; the panel surface discards it
+        // (the op writes its own status line).
+        Some(i) => {
+            s.core.audio_split_silences_at(i);
+        }
         None => s.core.audio_split_at_silences_last(),
     }
 }
