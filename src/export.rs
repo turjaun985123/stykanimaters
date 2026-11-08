@@ -836,12 +836,15 @@ pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
 /// or tween-sampled, exactly as in a full export). An empty or
 /// inverted range is an error; errors if ffmpeg is missing.
 ///
-/// VIDEO ONLY: unlike [`export_mp4`], this never muxes the
-/// project's audio — muxing a sub-range's audio needs offset
-/// math the mux path (`mux_plan`/`mux_audio`) does not support,
-/// so the range export is silent even when the project has
-/// audible clips. Use the full-range `export_mp4` when the
-/// project's audio matters.
+/// AUDIO: the segments of the project's audio that intersect
+/// the range are muxed in, trimmed and offset to the range —
+/// see [`range_mux_plan`] / [`mux_audio_range`]. Muted clips
+/// never sound, exactly as in the full export, and a clip whose
+/// length cannot be probed (the engine's only duration probe
+/// reads WAV, the same rule playback planning applies) cannot
+/// be scheduled into a sub-range and is left out. When no
+/// audible clip intersects the range the export is the plain
+/// video-only encode it always was, unchanged.
 pub fn export_mp4_range(
     project: &Project,
     from: usize,
@@ -850,13 +853,31 @@ pub fn export_mp4_range(
 ) -> std::io::Result<()> {
     let (from, to) = clamp_frame_range(project, from, to)?;
     let times = sample_times_range(project, from, to);
+    let (win_start, win_len) = range_window(project, from, times.len());
+    let plan = range_mux_plan(project, win_start, win_len);
+    if matches!(plan, RangeMuxPlan::None) {
+        ffmpeg_encode_times(
+            project,
+            &times,
+            path,
+            &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        )?;
+        return Ok(());
+    }
+    let silent = unique_temp("silent").with_extension("mp4");
     ffmpeg_encode_times(
         project,
         &times,
-        path,
-        &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        &silent,
+        &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
     )?;
-    Ok(())
+    let muxed = mux_audio_range(&plan, &silent, path)?;
+    let _ = std::fs::remove_file(&silent);
+    if muxed {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("audio mux failed"))
+    }
 }
 
 /// Encode rendered frames with ffmpeg using the given video args.
@@ -934,9 +955,7 @@ pub fn export_webm(project: &Project, path: &Path) -> std::io::Result<usize> {
 /// an error; errors if ffmpeg is missing.
 ///
 /// VIDEO ONLY, like [`export_webm`] itself: no audio is muxed —
-/// the WebM export path has no audio support (muxing a
-/// sub-range's audio would additionally need offset math the
-/// mux path does not support).
+/// the WebM export path has no audio support at any range.
 pub fn export_webm_range(
     project: &Project,
     from: usize,
@@ -1157,6 +1176,297 @@ pub fn mux_audio(project: &Project, video: &Path, out: &Path) -> std::io::Result
     }
 }
 
+/// The part of one clip that falls inside an export window,
+/// all in seconds: where to start reading the clip's file,
+/// where the segment lands in the exported video, and how
+/// much of it plays.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ClipWindow {
+    file_offset_secs: f32,
+    placement_secs: f32,
+    len_secs: f32,
+}
+
+/// Intersect a clip's timeline span
+/// `[clip_start_secs, clip_start_secs + clip_dur_secs)` with an
+/// export window `[win_start_secs, win_start_secs + win_len_secs)`.
+/// `None` when the two do not overlap (a clip ending exactly at
+/// the window's start, or starting exactly at its end, plays
+/// nothing). Because both edges of the intersection clamp
+/// against the same two spans, exactly one of
+/// `file_offset_secs` / `placement_secs` is ever non-zero: a
+/// clip cut by the window's start is seeked into, a clip
+/// starting inside the window is shifted — never both.
+fn clip_window(
+    clip_start_secs: f32,
+    clip_dur_secs: f32,
+    win_start_secs: f32,
+    win_len_secs: f32,
+) -> Option<ClipWindow> {
+    let seg_start = clip_start_secs.max(win_start_secs);
+    let seg_end = (clip_start_secs + clip_dur_secs).min(win_start_secs + win_len_secs);
+    let len_secs = seg_end - seg_start;
+    if len_secs <= 0.0 {
+        return None;
+    }
+    Some(ClipWindow {
+        file_offset_secs: seg_start - clip_start_secs,
+        placement_secs: seg_start - win_start_secs,
+        len_secs,
+    })
+}
+
+/// The timeline window a range export covers, as
+/// `(start_secs, len_secs)`: the offset of the range's first
+/// frame within the full timeline, and the exported video's
+/// own length (`sample_count` frames at the project fps). The
+/// start is counted in the same frame units
+/// [`sample_times_range`] samples from — raw per-frame
+/// durations under tween playback, duration-rounded
+/// repetitions otherwise — so the window names exactly the
+/// span of the timeline the range's frames were sampled from,
+/// on the same `start_frame / fps` clock the mux paths place
+/// clips on.
+fn range_window(project: &Project, from: usize, sample_count: usize) -> (f32, f32) {
+    let fps = project.fps.max(1.0);
+    let start_units: f32 = if project.tween_playback {
+        project.frames[..from].iter().map(|f| f.duration).sum()
+    } else {
+        project.frames[..from]
+            .iter()
+            .map(|f| (f.duration.round() as usize).max(1) as f32)
+            .sum()
+    };
+    (start_units / fps, sample_count as f32 / fps)
+}
+
+/// How long the file at `path` runs, in seconds, probed the
+/// only way the engine probes durations: decoding it as WAV
+/// (`audio_edit::read_wav`, the loader behind
+/// `audio_ops::clip_duration_secs`). `None` for a missing,
+/// unreadable or non-WAV file, and for one that decodes to no
+/// sample frames — such a clip's end cannot be scheduled
+/// inside a sub-range, the same exclusion playback planning
+/// applies in `audio::playback_plan`.
+fn probe_duration_secs(path: &str) -> Option<f32> {
+    let data = crate::audio_edit::read_wav(path).ok()?;
+    if data.sample_rate == 0 || data.frames() == 0 {
+        return None;
+    }
+    Some(data.frames() as f32 / data.sample_rate as f32)
+}
+
+/// One clip's contribution to a range export: its file, the
+/// window segment to take from it ([`ClipWindow`] flattened
+/// in), and its gain.
+#[derive(Clone, Debug, PartialEq)]
+struct RangeSegment {
+    path: String,
+    file_offset_secs: f32,
+    placement_secs: f32,
+    len_secs: f32,
+    gain: f32,
+}
+
+/// What a range export should do with the project's audio,
+/// decided purely from the clip list, probed durations and
+/// the export window. The range counterpart of [`MuxPlan`].
+#[derive(Clone, Debug, PartialEq)]
+enum RangeMuxPlan {
+    /// No audible clip intersects the window: video only.
+    None,
+    /// Exactly one segment: mux it directly when its gain is
+    /// unity, through a one-clip mix otherwise (see
+    /// [`mux_audio_range`]).
+    Single(RangeSegment),
+    /// Two or more segments: mix the trimmed segments into
+    /// one WAV first. Sorted by placement in the window.
+    Mixed(Vec<RangeSegment>),
+}
+
+/// Decide the mux plan for the window
+/// `[win_start_secs, win_start_secs + win_len_secs)` of a
+/// project: muted clips are skipped (the exclusion the full
+/// mux and the playback plan both apply), each surviving
+/// clip's length is probed ([`probe_duration_secs`]) and its
+/// span — `start_frame / fps`, the placement convention of
+/// [`mux_plan`] — is intersected with the window by
+/// [`clip_window`]. Clips that miss the window, or whose
+/// length cannot be probed, contribute nothing.
+fn range_mux_plan(project: &Project, win_start_secs: f32, win_len_secs: f32) -> RangeMuxPlan {
+    let fps = project.fps.max(1.0);
+    let mut segments: Vec<RangeSegment> = project
+        .audio
+        .iter()
+        .filter(|clip| !clip.muted)
+        .filter_map(|clip| {
+            let dur = probe_duration_secs(&clip.path)?;
+            let w = clip_window(
+                clip.start_frame as f32 / fps,
+                dur,
+                win_start_secs,
+                win_len_secs,
+            )?;
+            Some(RangeSegment {
+                path: clip.path.clone(),
+                file_offset_secs: w.file_offset_secs,
+                placement_secs: w.placement_secs,
+                len_secs: w.len_secs,
+                gain: clip.gain,
+            })
+        })
+        .collect();
+    segments.sort_by(|a, b| {
+        a.placement_secs
+            .partial_cmp(&b.placement_secs)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    match segments.len() {
+        0 => RangeMuxPlan::None,
+        1 => RangeMuxPlan::Single(segments.into_iter().next().unwrap()),
+        _ => RangeMuxPlan::Mixed(segments),
+    }
+}
+
+/// The ffmpeg argument list muxing one window segment onto
+/// the silent range `video`, in the shape of the
+/// full-timeline direct path in [`mux_audio`]: the video is
+/// stream-copied, the audio re-encoded to AAC, `-shortest`
+/// guards the tail. The segment's trim is expressed with
+/// input options on the audio input — an input `-t` bounds
+/// how much of the file is read, and the offset is either an
+/// input `-ss` seek (the clip began before the window) or an
+/// `-itsoffset` shift (the clip begins inside it);
+/// [`clip_window`] guarantees at most one of the two is
+/// non-zero, so they are never combined.
+fn range_direct_args(video: &Path, seg: &RangeSegment, out: &Path) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-i".into(),
+        video.to_str().unwrap_or("").into(),
+    ];
+    if seg.file_offset_secs > 0.0 {
+        args.push("-ss".into());
+        args.push(format!("{:.3}", seg.file_offset_secs));
+    } else if seg.placement_secs > 0.0 {
+        args.push("-itsoffset".into());
+        args.push(format!("{:.3}", seg.placement_secs));
+    }
+    args.push("-t".into());
+    args.push(format!("{:.3}", seg.len_secs));
+    args.push("-i".into());
+    args.push(seg.path.clone());
+    args.extend(
+        ["-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-shortest"]
+            .iter()
+            .map(|a| a.to_string()),
+    );
+    args.push(out.to_str().unwrap_or("").into());
+    args
+}
+
+/// Run the direct range mux of one segment (see
+/// [`range_direct_args`]). The segment's gain is NOT applied
+/// here — ffmpeg's direct path cannot scale a file's volume,
+/// which is why [`mux_audio_range`] routes gained clips
+/// through the mix and uses this only as the unity-gain path
+/// and the mix-failure fallback.
+fn run_range_direct(video: &Path, seg: &RangeSegment, out: &Path) -> std::io::Result<bool> {
+    let status = std::process::Command::new("ffmpeg")
+        .args(range_direct_args(video, seg, out))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    Ok(status.success())
+}
+
+/// Cut `[start_secs, start_secs + len_secs)` out of a decoded
+/// WAV, frame-accurately at the data's own sample rate. Both
+/// edges clamp to the data, so a segment running past the
+/// file's end (or starting past it) yields a shorter — or
+/// empty — WAV rather than an error.
+fn trim_wav(
+    data: &crate::audio_edit::WavData,
+    start_secs: f32,
+    len_secs: f32,
+) -> crate::audio_edit::WavData {
+    let rate = data.sample_rate as f32;
+    let channels = data.channels.max(1) as usize;
+    let total = data.frames();
+    let start = ((start_secs.max(0.0) * rate).round() as usize).min(total);
+    let end = (((start_secs.max(0.0) + len_secs.max(0.0)) * rate).round() as usize)
+        .min(total)
+        .max(start);
+    crate::audio_edit::WavData {
+        sample_rate: data.sample_rate,
+        channels: data.channels,
+        samples: data.samples[start * channels..end * channels].to_vec(),
+    }
+}
+
+/// Render the plan's segments into one mixed WAV: each
+/// segment's source file is decoded, trimmed to its window
+/// segment ([`trim_wav`]) and written to a temporary WAV,
+/// then the temporaries are mixed with `audio_edit::mix` at
+/// their placements and gains — the mix engine takes whole
+/// files from their beginnings, so the head trim has to
+/// happen before it. The temp files are removed either way.
+fn mix_range_segments(segments: &[RangeSegment]) -> Result<crate::audio_edit::WavData, String> {
+    let mut temps: Vec<std::path::PathBuf> = Vec::new();
+    let result = (|| {
+        let mut mix_clips = Vec::with_capacity(segments.len());
+        for seg in segments {
+            let data = crate::audio_edit::read_wav(&seg.path)?;
+            let trimmed = trim_wav(&data, seg.file_offset_secs, seg.len_secs);
+            let tmp = unique_temp("rangemix").with_extension("wav");
+            std::fs::write(&tmp, crate::audio_edit::write_wav(&trimmed))
+                .map_err(|e| e.to_string())?;
+            temps.push(tmp.clone());
+            mix_clips.push(crate::audio_edit::MixClip {
+                path: tmp.to_string_lossy().into_owned(),
+                start_secs: seg.placement_secs,
+                gain: seg.gain,
+                fade_in: 0.0,
+                fade_out: 0.0,
+            });
+        }
+        crate::audio_edit::mix(&mix_clips)
+    })();
+    for tmp in &temps {
+        let _ = std::fs::remove_file(tmp);
+    }
+    result
+}
+
+/// Mux a range plan's audio into an already-encoded silent
+/// range MP4, following the full-timeline [`mux_audio`]
+/// split: exactly one segment at unity gain goes to ffmpeg
+/// directly ([`run_range_direct`]); two or more segments —
+/// or a single segment whose gain is not 1.0, which the
+/// direct path cannot scale — are trimmed and mixed into
+/// one WAV first and muxed with [`mux_mixed_wav`] (the mixed
+/// WAV starts at the window's zero, each segment's placement
+/// baked in). If the mix cannot be rendered the earliest
+/// segment is muxed directly instead, gain unapplied,
+/// mirroring the full path's mix-failure fallback. A `None`
+/// plan muxes nothing and returns `Ok(false)`.
+fn mux_audio_range(plan: &RangeMuxPlan, video: &Path, out: &Path) -> std::io::Result<bool> {
+    let segments: &[RangeSegment] = match plan {
+        RangeMuxPlan::None => return Ok(false),
+        RangeMuxPlan::Single(seg) => std::slice::from_ref(seg),
+        RangeMuxPlan::Mixed(segs) => segs,
+    };
+    if let RangeMuxPlan::Single(seg) = plan {
+        if seg.gain == 1.0 {
+            return run_range_direct(video, seg, out);
+        }
+    }
+    match mix_range_segments(segments) {
+        Ok(mixed) => mux_mixed_wav(video, &mixed, out),
+        Err(_) => run_range_direct(video, &segments[0], out),
+    }
+}
+
 #[cfg(test)]
 mod mux_tests {
     use super::{mux_plan, MuxPlan};
@@ -1319,6 +1629,365 @@ mod mux_tests {
         );
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
+    }
+}
+
+#[cfg(test)]
+mod range_mux_tests {
+    use super::{
+        clip_window, probe_duration_secs, range_direct_args, range_mux_plan, range_window,
+        trim_wav, ClipWindow, RangeMuxPlan, RangeSegment,
+    };
+    use crate::model::{AudioClip, Project};
+    use std::path::Path;
+
+    /// Write a REAL silent WAV of `secs` seconds at `rate`
+    /// Hz (the range plan decodes files to probe them, so an
+    /// empty placeholder will not do) and return its path.
+    fn temp_wav(tag: &str, secs: f32, rate: u32) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "styk-range-{tag}-{}.wav",
+            std::process::id()
+        ));
+        let data = crate::audio_edit::WavData {
+            sample_rate: rate,
+            channels: 1,
+            samples: vec![0.0; (secs * rate as f32).round() as usize],
+        };
+        std::fs::write(&path, crate::audio_edit::write_wav(&data)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// A demo project at 10 fps carrying exactly the given
+    /// `(path, start_frame, gain)` audio clips.
+    fn project_with(clips: Vec<(&str, usize, f32)>) -> Project {
+        let mut project = Project::new_demo();
+        project.fps = 10.0;
+        project.audio = clips
+            .into_iter()
+            .map(|(path, start_frame, gain)| AudioClip {
+                path: path.to_string(),
+                start_frame,
+                gain,
+                muted: false,
+            })
+            .collect();
+        project
+    }
+
+    // ---- clip_window: the intersection maths ----
+
+    #[test]
+    fn window_clip_fully_inside_plays_whole_at_its_offset() {
+        // Clip [2s, 5s) inside window [1s, 6s): no seek, the
+        // segment lands 1s into the export, full 3s of it.
+        assert_eq!(
+            clip_window(2.0, 3.0, 1.0, 5.0),
+            Some(ClipWindow {
+                file_offset_secs: 0.0,
+                placement_secs: 1.0,
+                len_secs: 3.0,
+            })
+        );
+    }
+
+    #[test]
+    fn window_clip_cut_by_the_start_is_seeked_not_shifted() {
+        // Clip [0s, 4s), window starts at 1.5s: read from
+        // 1.5s into the file, play from the export's zero,
+        // and only the 2.5s inside the window plays.
+        assert_eq!(
+            clip_window(0.0, 4.0, 1.5, 5.0),
+            Some(ClipWindow {
+                file_offset_secs: 1.5,
+                placement_secs: 0.0,
+                len_secs: 2.5,
+            })
+        );
+    }
+
+    #[test]
+    fn window_clip_spanning_the_window_fills_it_exactly() {
+        assert_eq!(
+            clip_window(0.0, 10.0, 2.0, 3.0),
+            Some(ClipWindow {
+                file_offset_secs: 2.0,
+                placement_secs: 0.0,
+                len_secs: 3.0,
+            })
+        );
+    }
+
+    #[test]
+    fn window_clip_cut_by_the_end_is_trimmed() {
+        // Clip [4s, 9s), window [1s, 6s): starts inside (3s
+        // in), tail trimmed to the window's end.
+        assert_eq!(
+            clip_window(4.0, 5.0, 1.0, 5.0),
+            Some(ClipWindow {
+                file_offset_secs: 0.0,
+                placement_secs: 3.0,
+                len_secs: 2.0,
+            })
+        );
+    }
+
+    #[test]
+    fn window_touching_clips_play_nothing() {
+        // Ends exactly at the window's start.
+        assert_eq!(clip_window(0.0, 2.0, 2.0, 3.0), None);
+        // Starts exactly at the window's end.
+        assert_eq!(clip_window(5.0, 2.0, 2.0, 3.0), None);
+        // Entirely before / after the window.
+        assert_eq!(clip_window(0.0, 1.0, 2.0, 3.0), None);
+        assert_eq!(clip_window(9.0, 1.0, 2.0, 3.0), None);
+        // A zero-length window intersects nothing.
+        assert_eq!(clip_window(0.0, 4.0, 1.0, 0.0), None);
+    }
+
+    // ---- range_window: where the range sits in the timeline ----
+
+    #[test]
+    fn range_window_counts_expanded_repetitions_without_tween() {
+        let mut project = Project::new_demo();
+        project.fps = 10.0;
+        project.tween_playback = false;
+        project.frames[0].duration = 2.0;
+        project.frames[1].duration = 0.4; // rounds to 0, min one rep
+        // Frames before `from` occupy 2 + 1 expanded samples.
+        let (start, len) = range_window(&project, 2, 25);
+        assert_eq!(start, 0.3);
+        assert_eq!(len, 2.5);
+        // The first frame's window starts at zero.
+        assert_eq!(range_window(&project, 0, 25).0, 0.0);
+    }
+
+    #[test]
+    fn range_window_sums_raw_durations_with_tween() {
+        let mut project = Project::new_demo();
+        project.fps = 10.0;
+        project.tween_playback = true;
+        project.frames[0].duration = 2.0;
+        project.frames[1].duration = 0.4;
+        // Tween sampling walks the raw durations: 2.0 + 0.4
+        // frame units = 0.24s at 10 fps.
+        let (start, len) = range_window(&project, 2, 25);
+        assert!((start - 0.24).abs() < 1e-6, "start {start}");
+        assert_eq!(len, 2.5);
+    }
+
+    // ---- probe_duration_secs ----
+
+    #[test]
+    fn probe_reads_a_real_wavs_duration() {
+        let real = temp_wav("probe", 1.5, 8000);
+        assert_eq!(probe_duration_secs(&real), Some(1.5));
+        let _ = std::fs::remove_file(&real);
+        assert_eq!(probe_duration_secs("/nonexistent/styk-range-gone.wav"), None);
+    }
+
+    #[test]
+    fn probe_rejects_non_wav_and_empty_files() {
+        let junk = std::env::temp_dir().join(format!(
+            "styk-range-junk-{}.mp3",
+            std::process::id()
+        ));
+        std::fs::write(&junk, b"this is not audio").unwrap();
+        assert_eq!(probe_duration_secs(&junk.to_string_lossy()), None);
+        let _ = std::fs::remove_file(&junk);
+        // A valid header decoding to no samples is no duration.
+        let empty = temp_wav("empty", 0.0, 8000);
+        assert_eq!(probe_duration_secs(&empty), None);
+        let _ = std::fs::remove_file(&empty);
+    }
+
+    // ---- range_mux_plan ----
+
+    /// Window [1s, 3s) at the helper project's 10 fps.
+    const WIN: (f32, f32) = (1.0, 2.0);
+
+    #[test]
+    fn plan_single_clip_starting_inside_the_window() {
+        // Starts at frame 20 (2s), runs 3s: placed 1s into
+        // the export, trimmed to the window's end at 3s.
+        let real = temp_wav("single", 3.0, 8000);
+        let project = project_with(vec![(real.as_str(), 20, 1.0)]);
+        assert_eq!(
+            range_mux_plan(&project, WIN.0, WIN.1),
+            RangeMuxPlan::Single(RangeSegment {
+                path: real.clone(),
+                file_offset_secs: 0.0,
+                placement_secs: 1.0,
+                len_secs: 1.0,
+                gain: 1.0,
+            })
+        );
+        let _ = std::fs::remove_file(&real);
+    }
+
+    #[test]
+    fn plan_single_clip_cut_by_the_window_start() {
+        // Starts at frame 0, runs 1.5s: only [1s, 1.5s) of
+        // the file sounds, from the export's zero.
+        let real = temp_wav("cut", 1.5, 8000);
+        let project = project_with(vec![(real.as_str(), 0, 1.0)]);
+        assert_eq!(
+            range_mux_plan(&project, WIN.0, WIN.1),
+            RangeMuxPlan::Single(RangeSegment {
+                path: real.clone(),
+                file_offset_secs: 1.0,
+                placement_secs: 0.0,
+                len_secs: 0.5,
+                gain: 1.0,
+            })
+        );
+        let _ = std::fs::remove_file(&real);
+    }
+
+    #[test]
+    fn plan_mixes_intersecting_clips_sorted_by_placement() {
+        let a = temp_wav("mix-a", 1.5, 8000); // [0s, 1.5s)
+        let b = temp_wav("mix-b", 3.0, 8000); // [2s, 5s)
+        // Given in reverse placement order on purpose.
+        let project = project_with(vec![(b.as_str(), 20, 0.5), (a.as_str(), 0, 2.0)]);
+        assert_eq!(
+            range_mux_plan(&project, WIN.0, WIN.1),
+            RangeMuxPlan::Mixed(vec![
+                RangeSegment {
+                    path: a.clone(),
+                    file_offset_secs: 1.0,
+                    placement_secs: 0.0,
+                    len_secs: 0.5,
+                    gain: 2.0,
+                },
+                RangeSegment {
+                    path: b.clone(),
+                    file_offset_secs: 0.0,
+                    placement_secs: 1.0,
+                    len_secs: 1.0,
+                    gain: 0.5,
+                },
+            ])
+        );
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn plan_is_none_when_nothing_audible_intersects() {
+        let before = temp_wav("before", 0.5, 8000); // ends at 0.5s
+        let after = temp_wav("after", 1.0, 8000); // starts at frame 50 (5s)
+        let project = project_with(vec![(before.as_str(), 0, 1.0), (after.as_str(), 50, 1.0)]);
+        assert_eq!(range_mux_plan(&project, WIN.0, WIN.1), RangeMuxPlan::None);
+        // A missing file inside the window plans nothing.
+        let project = project_with(vec![("/nonexistent/styk-range-gone.wav", 15, 1.0)]);
+        assert_eq!(range_mux_plan(&project, WIN.0, WIN.1), RangeMuxPlan::None);
+        let _ = std::fs::remove_file(&before);
+        let _ = std::fs::remove_file(&after);
+    }
+
+    #[test]
+    fn plan_excludes_muted_and_unprobeable_clips() {
+        let muted = temp_wav("muted", 3.0, 8000);
+        let junk_path = std::env::temp_dir().join(format!(
+            "styk-range-plan-junk-{}.mp3",
+            std::process::id()
+        ));
+        std::fs::write(&junk_path, b"not audio").unwrap();
+        let junk = junk_path.to_string_lossy().into_owned();
+        let mut project = project_with(vec![(muted.as_str(), 10, 1.0), (junk.as_str(), 10, 1.0)]);
+        project.audio[0].muted = true;
+        // The muted clip is excluded by the mute filter, the
+        // MP3-named file by the WAV-only duration probe.
+        assert_eq!(range_mux_plan(&project, WIN.0, WIN.1), RangeMuxPlan::None);
+        let _ = std::fs::remove_file(&muted);
+        let _ = std::fs::remove_file(&junk_path);
+    }
+
+    // ---- range_direct_args: the ffmpeg invocation ----
+
+    fn segment(file_offset_secs: f32, placement_secs: f32, len_secs: f32) -> RangeSegment {
+        RangeSegment {
+            path: "clip.wav".into(),
+            file_offset_secs,
+            placement_secs,
+            len_secs,
+            gain: 1.0,
+        }
+    }
+
+    #[test]
+    fn direct_args_seek_a_clip_cut_by_the_window_start() {
+        let args = range_direct_args(Path::new("silent.mp4"), &segment(1.0, 0.0, 0.5), Path::new("out.mp4"));
+        let joined = args.join(" ");
+        assert!(joined.contains("-ss 1.000"), "{joined}");
+        assert!(!joined.contains("-itsoffset"), "{joined}");
+        assert!(joined.contains("-t 0.500"), "{joined}");
+        // The seek is an input option: it precedes the
+        // audio input it belongs to.
+        let ss = args.iter().position(|a| a == "-ss").unwrap();
+        let input = args.iter().position(|a| a == "clip.wav").unwrap();
+        assert!(ss < input, "{joined}");
+        // Same tail as the full-timeline direct path.
+        assert!(joined.contains("-map 1:a"), "{joined}");
+        assert!(joined.contains("-c:a aac"), "{joined}");
+        assert!(joined.contains("-shortest"), "{joined}");
+        assert_eq!(args.last().map(String::as_str), Some("out.mp4"));
+    }
+
+    #[test]
+    fn direct_args_shift_a_clip_starting_inside_the_window() {
+        let args = range_direct_args(Path::new("silent.mp4"), &segment(0.0, 1.0, 1.0), Path::new("out.mp4"));
+        let joined = args.join(" ");
+        assert!(joined.contains("-itsoffset 1.000"), "{joined}");
+        assert!(!joined.contains("-ss"), "{joined}");
+        assert!(joined.contains("-t 1.000"), "{joined}");
+    }
+
+    #[test]
+    fn direct_args_have_no_offset_when_the_clip_aligns() {
+        let args = range_direct_args(Path::new("silent.mp4"), &segment(0.0, 0.0, 2.0), Path::new("out.mp4"));
+        let joined = args.join(" ");
+        assert!(!joined.contains("-ss"), "{joined}");
+        assert!(!joined.contains("-itsoffset"), "{joined}");
+        assert!(joined.contains("-t 2.000"), "{joined}");
+    }
+
+    // ---- trim_wav: the mix path's head/tail cut ----
+
+    /// Stereo WAV at 10 Hz whose sample frames are numbered
+    /// (frame f holds f in both channels), 20 frames = 2s.
+    fn numbered_wav() -> crate::audio_edit::WavData {
+        let mut samples = Vec::new();
+        for f in 0..20 {
+            samples.push(f as f32);
+            samples.push(f as f32);
+        }
+        crate::audio_edit::WavData {
+            sample_rate: 10,
+            channels: 2,
+            samples,
+        }
+    }
+
+    #[test]
+    fn trim_cuts_whole_frames_from_both_ends() {
+        let trimmed = trim_wav(&numbered_wav(), 0.5, 1.0);
+        assert_eq!(trimmed.frames(), 10);
+        assert_eq!(trimmed.samples[0], 5.0);
+        assert_eq!(*trimmed.samples.last().unwrap(), 14.0);
+        // Rate and channel count travel with the cut.
+        assert_eq!(trimmed.sample_rate, 10);
+        assert_eq!(trimmed.channels, 2);
+    }
+
+    #[test]
+    fn trim_clamps_to_the_data() {
+        let trimmed = trim_wav(&numbered_wav(), 0.8, 5.0);
+        assert_eq!(trimmed.frames(), 12); // frames 8..20
+        assert_eq!(trimmed.samples[0], 8.0);
+        // A start past the end cuts everything, not an error.
+        assert_eq!(trim_wav(&numbered_wav(), 3.0, 1.0).frames(), 0);
     }
 }
 

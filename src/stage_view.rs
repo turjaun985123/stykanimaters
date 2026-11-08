@@ -210,6 +210,20 @@ pub fn view_zoom_by(factor: f32) {
     });
 }
 
+/// The effective zoom factor the stage is actually
+/// displayed at: the authored camera zoom at the current
+/// frame multiplied by the shell view zoom. This is the
+/// single definition every readout must share — the camera
+/// overlay's label already shows this product
+/// (`camera_panel::view_zoom_pct` rounds it to a whole
+/// percentage), while a camera-only figure understates the
+/// magnification whenever the view is zoomed (the status
+/// strip's pre-Wave-9 readout). Read-only: it writes
+/// neither the view state nor the camera track.
+pub fn view_zoom_factor(core: &EditorCore) -> f32 {
+    core.camera_here().2 * view_nav().zoom
+}
+
 /// The stage element size the most recent [`stage_shape`] call
 /// drew at (zero before the first frame).
 pub fn last_stage_size() -> [f32; 2] {
@@ -1266,6 +1280,23 @@ mod tests {
         assert_eq!(view_nav().zoom, VIEW_ZOOM_MIN);
         reset_view_nav();
         assert_eq!(view_nav(), ViewNav::IDENTITY);
+    }
+
+    #[test]
+    fn view_zoom_factor_is_camera_times_view() {
+        // The read-only accessor the status strip reads
+        // (Wave 9): at the identity view it is exactly the
+        // authored camera zoom; a view zoom multiplies it;
+        // reading it authors nothing on either side.
+        let core = EditorCore::new();
+        set_view_nav(ViewNav::IDENTITY);
+        let cam = core.camera_here().2;
+        assert_eq!(view_zoom_factor(&core), cam);
+        view_zoom_by(2.0);
+        assert_eq!(view_zoom_factor(&core), cam * 2.0);
+        assert_eq!(core.camera_here().2, cam, "the accessor must not author camera keys");
+        reset_view_nav();
+        assert_eq!(view_zoom_factor(&core), cam);
     }
 
     #[test]

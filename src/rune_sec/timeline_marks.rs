@@ -356,8 +356,57 @@
 //! row's button gap is 8, the card's spacing, rather
 //! than the chips' [`CHIP_GAP`]. Every geometry
 //! constant, handler, label and key is unchanged; the
-//! card is always returned, even when it holds the
-//! scroll row alone.
+//! card is always returned. Wave 9 (audit D8/T9): on a
+//! zero-frame project the scroll row's rows would all
+//! be empty, so the card holds the kit
+//! [`design::empty_state`] in the scroll row's place
+//! instead — the one state in which the timeline has
+//! something to say before it has frames to show.
+//!
+//! ## Label widths (measured, Wave 9)
+//!
+//! Both number-bearing rows were re-audited against
+//! Rune's *measured* advances, read off a production
+//! headless tree dump rather than estimated: at
+//! `type_::LABEL` (12 pt) the digit `1` paints 5.0 pt
+//! wide and the wide digits (`0`, `2`) 7.5 pt; the
+//! ruler's `0:00` at its 10 pt style paints 22.5 pt in
+//! its 30 pt slot, which prices the wide digits at
+//! 6.25 pt and the colon at 3.75 pt at that size.
+//!
+//! - **Ruler labels fit.** `59:59` — the widest label
+//!   under 100 minutes — prices at 4 × 6.25 + 3.75 =
+//!   28.75 pt, inside the [`CHIP_W`] slot with 1.25 pt
+//!   to spare. `100:00` prices at 35 pt and does not
+//!   fit, but the label cell truncates by construction,
+//!   so it ellipsises rather than spilling — and it is
+//!   reached only past 100 minutes of timeline (72,000
+//!   frames at 12 fps). The current one-label-per-
+//!   second density stands; no change was made.
+//! - **Plain chip numbers fit.** Four wide digits
+//!   price at exactly 30.0 pt (`9999`), the chip's own
+//!   width; five price over it, past frame 9999.
+//! - **Suffixed chip labels do not fit, and no font
+//!   split can fix them.** `12 ×0.25`'s digits and dot
+//!   alone price at 5.0 + 7.5 + 7.5 + ≈4 + 7.5 + 7.5
+//!   ≈ 39 pt — over the chip before the space and the
+//!   `×` are counted at all. The audit's T6 split
+//!   (number in LABEL, suffix in MONO_CAPTION) prices
+//!   *worse*: MONO_CAPTION is the same 12 pt
+//!   (`crates/rune/src/tok.rs:142`) and a mono advance
+//!   (≈ 0.6 em, 7.2 pt) is wider than the proportional
+//!   digits it would replace — the suffix alone would
+//!   price at 6 × 7.2 = 43.2 pt. `type_` offers no
+//!   smaller numeric style, and shrinking the suffix
+//!   to a local style still leaves the two-part label
+//!   over 30 pt at any size ≥ 6 pt (at 9 pt: number
+//!   12.5 + suffix ≈ 27 ≈ 39.5 pt total). The remedies
+//!   that remain — a wider chip pitch or a different
+//!   label format — are contract changes (the pitch is
+//!   shared by the ruler, markers and clips lane; the
+//!   format is pinned by [`chip_label`]'s tests), so
+//!   they are recorded here as integrator decisions,
+//!   not landed as an unproven restyle.
 
 use std::cell::Cell;
 
@@ -1119,18 +1168,39 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // The loop row hangs under the scrolled timeline,
     // outside the viewport, so its buttons stay put
     // however far the chips scroll. The card is returned
-    // even when it holds the scroll row alone (an empty
-    // project): the centre column's slot no longer
+    // in every state: the centre column's slot no longer
     // alternates between a bare row and a stack column.
     let mut card = col()
         .gap(2.0)
         .fill(t.card)
         .border(1.0, t.card_border)
         .radius(design::PANEL_RADIUS)
-        .padding(8.0)
-        .child(timeline);
-    if let Some(loop_row) = loop_row(s, t) {
-        card = card.child(loop_row);
+        .padding(8.0);
+    if core.frame_count() == 0 {
+        // Wave 9 (audit D8/T9): on an empty project the
+        // scroll row's rows are all empty loops over zero
+        // frames — the card would say nothing at all — so
+        // the card holds the kit empty state in the scroll
+        // row's place. The message names the one real next
+        // action in words: the transport's `+ Frame` adds
+        // the first frame. This panel has no
+        // frame-creating handler of its own to offer as a
+        // button, and the kit empty state carries no
+        // action slot, so a button here would be fake.
+        // No key is added or removed: the empty state is
+        // unkeyed, and every timeline key lives on the
+        // scroll row's children, which render exactly as
+        // before whenever a frame exists.
+        card = card.child(design::empty_state(
+            "film",
+            "No frames yet — add one to start animating.",
+            t,
+        ));
+    } else {
+        card = card.child(timeline);
+        if let Some(loop_row) = loop_row(s, t) {
+            card = card.child(loop_row);
+        }
     }
     card
 }
@@ -2239,6 +2309,28 @@ playback_speed: 1.0,
         assert!(loop_row(&state, &t).is_some());
         state.core.set_loop_range(1, 3);
         assert!(loop_row(&state, &t).is_some());
+        let _ = timeline_marks(&state, &t);
+    }
+
+    #[test]
+    fn timeline_card_builds_empty_and_populated() {
+        // Wave 9 (audit D8/T9): on an empty project the
+        // card takes the empty-state branch in place of
+        // the scroll row; with frames it takes the scroll
+        // row branch. `El` has no public tree-walk (see
+        // the marker tests), so this is the builder-smoke
+        // idiom over both branches — the branch condition
+        // itself is the `frame_count() == 0` the loop-row
+        // test above pins, and the non-empty branch is
+        // the one every other smoke test in this module
+        // already exercises.
+        let t = rune::tok::theme(true);
+        let mut state = demo_state();
+        state.core.project.frames.clear();
+        assert_eq!(state.core.frame_count(), 0);
+        let _ = timeline_marks(&state, &t);
+        let state = demo_state();
+        assert!(state.core.frame_count() > 0);
         let _ = timeline_marks(&state, &t);
     }
 

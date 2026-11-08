@@ -21,8 +21,9 @@
 //! full ops' wording. Only the project formats have no
 //! range variant, so they always export in full — the
 //! toggle line says so rather than pretending
-//! otherwise. MP4 range exports are video-only (the full
-//! MP4 export muxes audio; the range path cannot); WebM
+//! otherwise. MP4 range exports mux the audio of WAV
+//! clips that intersect the range (Wave 9, `export::
+//! export_mp4_range`); WebM
 //! is video-only in every mode — the WebM path has no
 //! audio support at all (`export::export_webm` never
 //! muxes) — and the notes say both.
@@ -30,12 +31,14 @@
 //! Phase M adds one more note, deliberately conditional:
 //! when the range toggle is on and the project has a clip
 //! that would actually be heard in a full export (unmuted,
-//! file present on disk), a warning under the toggle row
+//! file present on disk), a note under the toggle row
 //! (key `xc-range-audio-note`, decision in
-//! `range_audio_note_shown`) states that range video
-//! exports are silent and that audio lives only in a
-//! full-timeline MP4 — a range MP4 otherwise loses the
-//! project's sound with nothing saying so. (WebM never
+//! `range_audio_note_shown`) states what range mode does
+//! with the sound: a range MP4 keeps the audio of WAV
+//! clips inside the range, non-WAV clips are left out of
+//! a range MP4, and a range WebM is silent — so the
+//! partial coverage is said out loud instead of the
+//! project's sound quietly changing shape. (WebM never
 //! carries the sound, full or range; the WebM row's own
 //! note says that where the button is.)
 //!
@@ -58,7 +61,7 @@
 //! The recap line under the bundles shows the last export —
 //! bundle or single — as "Exported <name> → <destination>".
 //! A range single names its frame range in the recap (and
-//! video-only for MP4/WebM) rather than claiming the plain
+//! video-only for WebM) rather than claiming the plain
 //! full destination, and a failure keeps the op's own
 //! status wording, reason included, instead of dropping
 //! to a bare "<name> export failed". The line renders in
@@ -124,6 +127,41 @@
 //! are retired — every category group is now a plain
 //! column headed by `design::section_label`, the icon
 //! variant keeping its local glyph + label row.
+//!
+//! Wave 9 (UI mission, polish pass) fixes three proven
+//! defects without touching a key, label or handler:
+//! (1) Grouping: the spritesheet and contact sheet are
+//! single-image outputs, and the images bundle already
+//! treats the spritesheet as an image — yet both rows
+//! sat under "Animation", beside the two true animated
+//! formats (GIF, APNG). Both rows now sit under
+//! "Images", so each group has one definition: still
+//! images, animated images, video, project files. The
+//! contact sheet is still not a bundle member (bundles
+//! are a behaviour contract, not a grouping one — see
+//! the plan docs above). (2) Range honesty: the two
+//! sheet notes claimed "All frames" / "Every frame",
+//! which is false whenever the loop-range toggle is
+//! active; they now read "Frames …", true in both
+//! modes. (3) Containment: every guidance note and
+//! free-text line in the panel was a plain unwrapped
+//! `text()` — Rune text does not wrap unless `.wrap()`
+//! is set, so any line wider than the 316 pt card
+//! content spilled past its edge (the Wave 2
+//! `empty_state` class; cf. the audio panel's caption,
+//! 144 chars ≈ 880 pt). At kit LABEL metrics
+//! (≈6 pt/char) the MP4 note measures ≈612 pt, the
+//! bundle notes ≈850–970 pt, and the loop-range note
+//! is longer still — all spilled on every render. Row
+//! notes now `.wrap().grow(1.0)` beside their button
+//! (the status-strip tail idiom), and the free-text
+//! lines (loop note, effective line, range audio
+//! warning, recent-export rows) take the kit prose
+//! treatment `.wrap().w_full()`; the recap line wraps
+//! and grows beside its severity glyph, so a long
+//! failure reason wraps instead of spilling. Lines
+//! that provably fit (the 42-char subtitle, the
+//! bounded output line) are unchanged.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -178,11 +216,12 @@ pub fn range_target(core: &EditorCore, use_range: bool) -> Option<(usize, usize)
 /// The muted note shown when a loop range is set — the same
 /// facts the GPUI centre printed (frames are 1-based in the
 /// UI), updated for this panel: here the range exports are
-/// one toggle away, and video range exports are silent.
+/// one toggle away, and a range MP4 keeps the audio of WAV
+/// clips inside the range while WebM stays silent.
 pub fn loop_note(core: &EditorCore) -> Option<String> {
     let (a, b) = range_target(core, true)?;
     Some(format!(
-        "Loop range: frames {}–{} — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (MP4 range exports are video-only; WebM is video-only in every mode).",
+        "Loop range: frames {}–{} — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (a range MP4 includes audio from WAV clips inside the range; WebM is video-only in every mode).",
         a + 1,
         b + 1
     ))
@@ -245,16 +284,19 @@ pub fn output_text(core: &EditorCore, use_range: bool) -> String {
     )
 }
 
-/// The exact wording of the range-mode audio warning
-/// (element key `xc-range-audio-note`). Audio lives only
-/// in a full-timeline MP4: the full `export::export_mp4`
-/// muxes it, `export_mp4_range` is video-only, and the
-/// WebM path never muxes in any mode — the wording names
-/// MP4 alone so it cannot imply a sounding WebM.
+/// The exact wording of the range-mode audio note
+/// (element key `xc-range-audio-note`). Since Wave 9 a
+/// range MP4 muxes the audio of WAV clips that intersect
+/// the range (`export::export_mp4_range`); what it still
+/// cannot carry is a non-WAV clip (the engine has no
+/// duration probe for one, so its span cannot be cut to
+/// the range), and the WebM path never muxes in any
+/// mode — the wording names both limits so it cannot
+/// imply a fully sounding range export either.
 pub const RANGE_AUDIO_NOTE: &str =
-    "Range video exports are silent — audio is only in a full-timeline MP4 export.";
+    "Range MP4 exports include audio from WAV clips inside the range — non-WAV clips are left out, and range WebM exports are silent.";
 
-/// Whether the range-mode audio warning shows: the range
+/// Whether the range-mode audio note shows: the range
 /// toggle is on AND at least one clip would actually be
 /// heard in a full export — unmuted (`AudioClip::muted`)
 /// and its file present on disk. The audibility half
@@ -264,7 +306,7 @@ pub const RANGE_AUDIO_NOTE: &str =
 /// probes files with `read_wav`; no dedicated existence
 /// helper exists in the panel/waveform code, so the check
 /// here is the plain `Path::exists` on the clip path —
-/// the warning's question is only "is there a file the
+/// the note's question is only "is there a file the
 /// full export would use", not "does it decode". Pure
 /// apart from that one stat per clip.
 pub fn range_audio_note_shown(core: &EditorCore, use_range: bool) -> bool {
@@ -413,10 +455,11 @@ pub fn failure_recap(status: &str, name: &str) -> String {
 
 /// The recap line for a successful range export: the
 /// frame range is part of the record (the plain
-/// destination alone would claim a full export), and the
-/// two video formats carry their video-only marker —
-/// a range MP4/WebM dropped the project's audio the full
-/// MP4 would have kept (WebM has none in any mode).
+/// destination alone would claim a full export), and a
+/// range WebM carries its video-only marker — WebM drops
+/// the project's audio in every mode. A range MP4 no
+/// longer takes the marker: since Wave 9 it muxes the
+/// WAV clips inside its range.
 pub fn single_recap_range(name: &str, dest: &str, range: (usize, usize), video_only: bool) -> String {
     let (a, b) = range;
     if video_only {
@@ -449,7 +492,7 @@ pub fn recap_severity(recap: &str) -> Severity {
 /// panel's recap line. `range` is the range the press
 /// actually exported (the action's `range_target`, read
 /// before the op ran): a range success recaps the frame
-/// range (and video-only for MP4/WebM) via
+/// range (and video-only for WebM) via
 /// `single_recap_range` instead of claiming the plain
 /// full destination, and a failure keeps the op's reason
 /// via `failure_recap`.
@@ -462,7 +505,7 @@ fn note_single(s: &mut State, op: ExportOp, range: Option<(usize, usize)>) {
                 op.name(),
                 op.dest(),
                 range,
-                matches!(op, ExportOp::Mp4 | ExportOp::Webm),
+                matches!(op, ExportOp::Webm),
             ),
             None => single_recap(op.name(), op.dest()),
         }
@@ -732,13 +775,13 @@ fn export_mp4_action(s: &mut State) {
             let dir = export_dir();
             let _ = std::fs::create_dir_all(&dir);
             let path = dir.join("animation.mp4");
-            // Video only: unlike the full op, the range path
-            // never muxes the project's audio (see
-            // `export::export_mp4_range` docs).
+            // Since Wave 9 the range path muxes the audio
+            // of WAV clips intersecting the range, like the
+            // full op (see `export::export_mp4_range` docs).
             match stykanimate_rs::export::export_mp4_range(&s.core.project, a, b, &path) {
                 Ok(()) => {
                     s.core.status = format!(
-                        "Exported MP4 (frames {}–{}, video only) to {}",
+                        "Exported MP4 (frames {}–{}) to {}",
                         a + 1,
                         b + 1,
                         path.display()
@@ -1186,7 +1229,13 @@ fn plain_row(
             Some(icon) => icon_btn(key, icon, label, false, t, handler),
             None => btn(key, label, false, t, handler),
         })
-        .child(text(note).font(type_::LABEL).color(t.text_secondary))
+        .child(
+            text(note)
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .wrap()
+                .grow(1.0),
+        )
 }
 
 /// One format row for a range-capable format: the button
@@ -1207,7 +1256,13 @@ fn range_row(
         .gap(8.0)
         .center_y()
         .child(icon_btn(key, icon, label, false, t, action))
-        .child(text(note).font(type_::LABEL).color(t.text_secondary))
+        .child(
+            text(note)
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .wrap()
+                .grow(1.0),
+        )
 }
 
 /// One bundle row: an `xc-bundle-*` `icon_btn` (the
@@ -1230,7 +1285,13 @@ fn bundle_row(
         .child(icon_btn(key, icon, label, false, t, move |s: &mut State| {
             run_bundle(s, kind)
         }))
-        .child(text(note).font(type_::LABEL).color(t.text_secondary))
+        .child(
+            text(note)
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .wrap()
+                .grow(1.0),
+        )
 }
 
 /// The export panel: header, the loop-range note (when a
@@ -1268,7 +1329,13 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             .color(t.text_secondary),
     );
     if let Some(note) = loop_note(core) {
-        panel = panel.child(text(note).font(type_::LABEL).color(t.text_secondary));
+        panel = panel.child(
+            text(note)
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .wrap()
+                .w_full(),
+        );
     }
     let toggle = row()
         .key("xc-range-toggle")
@@ -1287,13 +1354,17 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             text(RANGE_AUDIO_NOTE)
                 .key("xc-range-audio-note")
                 .font(type_::LABEL)
-                .color(t.text_secondary),
+                .color(t.text_secondary)
+                .wrap()
+                .w_full(),
         );
     }
     panel = panel.child(
         text(effective_text(core, use_range))
             .font(type_::LABEL)
-            .color(t.text_secondary),
+            .color(t.text_secondary)
+            .wrap()
+            .w_full(),
     );
     panel = panel.child(
         text(output_text(core, use_range))
@@ -1334,6 +1405,22 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "One SVG per frame in ./export/svg/",
             t,
             export_svg_action,
+        ))
+        .child(range_row(
+            "xc-sheet",
+            "table-cells-large",
+            "Spritesheet",
+            "Frames on one sheet — ./export/spritesheet.png",
+            t,
+            export_sheet_action,
+        ))
+        .child(range_row(
+            "xc-contact",
+            "table-cells-large",
+            "Contact sheet",
+            "Frames as one tile sheet — ./export/contact-sheet.png",
+            t,
+            export_contact_action,
         ));
     panel = panel.child(images);
 
@@ -1346,22 +1433,6 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
                 .child(icon_el("film", 12.0, t.text_secondary))
                 .child(design::section_label("Animation", t)),
         )
-        .child(range_row(
-            "xc-sheet",
-            "table-cells-large",
-            "Spritesheet",
-            "All frames on one sheet — ./export/spritesheet.png",
-            t,
-            export_sheet_action,
-        ))
-        .child(range_row(
-            "xc-contact",
-            "table-cells-large",
-            "Contact sheet",
-            "Every frame as one tile sheet — ./export/contact-sheet.png",
-            t,
-            export_contact_action,
-        ))
         .child(range_row(
             "xc-gif",
             "film",
@@ -1393,7 +1464,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-mp4",
             "video",
             "MP4",
-            "MP4 video via ffmpeg — ./export/animation.mp4 (full export includes audio; range export is video-only)",
+            "MP4 video via ffmpeg — ./export/animation.mp4 (full export includes audio; range export includes audio from WAV clips inside the range)",
             t,
             export_mp4_action,
         ))
@@ -1521,7 +1592,9 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
                 .child(
                     text(s.export_recap.clone())
                         .font(type_::LABEL)
-                        .color(sev.color(t)),
+                        .color(sev.color(t))
+                        .wrap()
+                        .grow(1.0),
                 ),
         );
     }
@@ -1552,7 +1625,9 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             recent = recent.child(
                 text(row_line(r, now))
                     .font(type_::LABEL)
-                    .color(t.text_secondary),
+                    .color(t.text_secondary)
+                    .wrap()
+                    .w_full(),
             );
         }
     }
@@ -1701,8 +1776,14 @@ mod tests {
             "Exported PNG (frames 2–3) → ./export/"
         );
         assert_eq!(
-            single_recap_range("MP4", "./export/animation.mp4", (0, 4), true),
-            "Exported MP4 (frames 1–5, video only) → ./export/animation.mp4"
+            single_recap_range("WebM", "./export/animation.webm", (0, 4), true),
+            "Exported WebM (frames 1–5, video only) → ./export/animation.webm"
+        );
+        // A range MP4 no longer takes the marker (Wave 9:
+        // it muxes the WAV clips inside its range).
+        assert_eq!(
+            single_recap_range("MP4", "./export/animation.mp4", (0, 4), false),
+            "Exported MP4 (frames 1–5) → ./export/animation.mp4"
         );
     }
 
@@ -1727,7 +1808,7 @@ mod tests {
             Severity::Success
         );
         assert_eq!(
-            recap_severity("Exported MP4 (frames 1–5, video only) → ./export/animation.mp4"),
+            recap_severity("Exported WebM (frames 1–5, video only) → ./export/animation.webm"),
             Severity::Success
         );
         assert_eq!(
@@ -2042,13 +2123,15 @@ mod tests {
 
     #[test]
     fn range_audio_note_wording_is_exact() {
-        // The wording names MP4 alone: full WebM is as
-        // silent as range WebM (`export::export_webm`
-        // never muxes), so the old "MP4/WebM" phrasing
-        // claimed audio the engine never writes.
+        // The wording names the Wave 9 truth exactly: a
+        // range MP4 keeps WAV audio inside the range,
+        // non-WAV clips are left out, and WebM is silent
+        // in every mode (`export::export_webm` never
+        // muxes) — neither "range exports are silent" nor
+        // an unqualified "includes audio" would be true.
         assert_eq!(
             RANGE_AUDIO_NOTE,
-            "Range video exports are silent — audio is only in a full-timeline MP4 export."
+            "Range MP4 exports include audio from WAV clips inside the range — non-WAV clips are left out, and range WebM exports are silent."
         );
     }
 

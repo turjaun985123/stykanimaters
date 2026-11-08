@@ -62,11 +62,53 @@
 //! standalone toggle button (its active fill is the state
 //! display), not a labelled row with a separate switch,
 //! so the kit's `toggle_row` does not apply to it.
+//!
+//! ## Inert states (Wave 9 audit, D6)
+//!
+//! Every control here was live in every state, including
+//! states where a press cannot change anything the stage
+//! draws. Two such states, both proven against
+//! `stage_view::onion_skins`:
+//!
+//! * **Fewer than 2 frames.** `onion_skins` needs a frame
+//!   beside the current one: the past loop requires
+//!   `core.current > 0` and the future loop breaks at
+//!   `frame >= core.frame_count()`. With 0 or 1 frames it
+//!   returns an empty list for *every* toggle/depth
+//!   combination, so the toggle and all four steppers can
+//!   only no-op. The whole set renders through
+//!   `chrome_view::btn_inert` (same keys, same boxes, no
+//!   handler) while `core.frame_count() < 2`; the stored
+//!   values are untouched and the controls go live again
+//!   when a second frame exists.
+//! * **A stepper at its end.** `step_depth` clamps, so `−`
+//!   at 0 and `+` at [`MAX_ONION_DEPTH`] write back the
+//!   identical value — a press is a pure no-op with live
+//!   hover/press feedback. That one button renders inert
+//!   (the `btn_inert` doctrine: an op that would no-op
+//!   from the current state and has nothing to say). The
+//!   test is `step_depth(cur, delta) == cur`, so an
+//!   out-of-range stored value keeps both buttons live:
+//!   either press pulls it back into range, which is a
+//!   real change.
+//!
+//! Labels vs renderer, re-verified in the same audit: the
+//! steppers' ±1 steps and 0..=3 range are exactly the
+//! renderer's loops (past: frame `current-1`, then
+//! `2..=prev`; future: `1..=next`), the alpha falloff is
+//! the renderer's two steps (0x4D at distance 1, 0x26 at
+//! distance ≥ 2 — this panel has no opacity control and
+//! claims none), and the legend's colour claim is the
+//! renderer's (past = each figure's own colour, future =
+//! the shared 0x7BE495). Row widths are tree-measured:
+//! the stepper cluster is 115 pt fixed (28.5 + 34 + 28.5
+//! + 3×8 gaps) with the label growing, and the legend
+//! measures 223 pt — both inside the 316 pt card content.
 
 use rune::tok::{type_, Theme};
 use rune::{el, row, text, Color, El};
 
-use crate::chrome_view::btn;
+use crate::chrome_view::{btn, btn_inert};
 use crate::rune_sec::design;
 use crate::stage_view::hex_color;
 use crate::State;
@@ -109,6 +151,44 @@ pub fn step_depth(cur: u8, delta: i32) -> u8 {
     (cur as i32 + delta).clamp(0, MAX_ONION_DEPTH as i32) as u8
 }
 
+/// Whether the stage can draw any onion skin at all in a
+/// project of `frame_count` frames. `onion_skins` draws a
+/// skin from a frame beside the current one, so a project
+/// with fewer than 2 frames has no neighbour on either
+/// side and the renderer returns an empty list whatever
+/// the toggle and depths say (see the module docs).
+pub fn controls_live(frame_count: usize) -> bool {
+    frame_count >= 2
+}
+
+/// Whether stepping `cur` by `delta` would write back the
+/// identical value — a press that cannot change anything.
+/// False for an out-of-range stored value: either press
+/// pulls it back inside the range, which is a real change.
+pub fn step_is_noop(cur: u8, delta: i32) -> bool {
+    step_depth(cur, delta) == cur
+}
+
+/// One depth-stepper button: the live `btn` while the
+/// section is live and the step would change the depth,
+/// the handler-free `btn_inert` (same key, same box) when
+/// it can only no-op.
+fn step_btn(
+    key: &str,
+    label: &str,
+    cur: u8,
+    delta: i32,
+    live: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    if live && !step_is_noop(cur, delta) {
+        btn(key, label, false, t, f)
+    } else {
+        btn_inert(key, label, t)
+    }
+}
+
 /// The legend line under the controls. Wording is pinned by
 /// test: past skins keep each figure's own colour, future
 /// skins are the shared green (see the module docs).
@@ -123,6 +203,12 @@ pub fn legend_text() -> &'static str {
 /// future-frame green.
 pub fn onion_controls(s: &State, t: &Theme) -> El {
     let core = &s.core;
+    // Inert gate (Wave 9, module docs): under 2 frames no
+    // control in this card can change anything the stage
+    // draws, so every button renders inert; the stored
+    // toggle and depths survive and go live again with a
+    // second frame.
+    let live = controls_live(core.frame_count());
     let future_green = hex_color(FUTURE_ONION_RGB).unwrap_or(Color::WHITE);
     design::panel_col("onion-controls", t)
         .child(
@@ -133,9 +219,13 @@ pub fn onion_controls(s: &State, t: &Theme) -> El {
                 .child(design::panel_title(None, "Onion skin", None, t)),
         )
         .child(design::divider(t))
-        .child(btn("onion-toggle", "Onion", core.onion, t, |s| {
-            s.core.onion = !s.core.onion;
-        }))
+        .child(if live {
+            btn("onion-toggle", "Onion", core.onion, t, |s| {
+                s.core.onion = !s.core.onion;
+            })
+        } else {
+            btn_inert("onion-toggle", "Onion", t)
+        })
         .child(
             row()
                 .gap(8.0)
@@ -146,14 +236,14 @@ pub fn onion_controls(s: &State, t: &Theme) -> El {
                         .color(t.text_secondary)
                         .grow(1.0),
                 )
-                .child(btn("onion-prev-dn", "−", false, t, |s| {
+                .child(step_btn("onion-prev-dn", "−", s.onion_ui.prev, -1, live, t, |s| {
                     s.onion_ui.prev = step_depth(s.onion_ui.prev, -1);
                 }))
                 .child(design::stepper_value(
                     &step_depth(s.onion_ui.prev, 0).to_string(),
                     t,
                 ))
-                .child(btn("onion-prev-up", "+", false, t, |s| {
+                .child(step_btn("onion-prev-up", "+", s.onion_ui.prev, 1, live, t, |s| {
                     s.onion_ui.prev = step_depth(s.onion_ui.prev, 1);
                 })),
         )
@@ -167,14 +257,14 @@ pub fn onion_controls(s: &State, t: &Theme) -> El {
                         .color(t.text_secondary)
                         .grow(1.0),
                 )
-                .child(btn("onion-next-dn", "−", false, t, |s| {
+                .child(step_btn("onion-next-dn", "−", s.onion_ui.next, -1, live, t, |s| {
                     s.onion_ui.next = step_depth(s.onion_ui.next, -1);
                 }))
                 .child(design::stepper_value(
                     &step_depth(s.onion_ui.next, 0).to_string(),
                     t,
                 ))
-                .child(btn("onion-next-up", "+", false, t, |s| {
+                .child(step_btn("onion-next-up", "+", s.onion_ui.next, 1, live, t, |s| {
                     s.onion_ui.next = step_depth(s.onion_ui.next, 1);
                 })),
         )
@@ -254,5 +344,58 @@ mod tests {
         // 0x7BE495; if either side changes, this pin fails and
         // the two must be reconciled.
         assert_eq!(FUTURE_ONION_RGB, 0x7BE495);
+    }
+
+    // ---- Wave 9 inert states ----
+
+    #[test]
+    fn controls_live_needs_a_neighbour_frame() {
+        // onion_skins draws only from a frame beside the
+        // current one: 0 or 1 frames can never produce a
+        // skin, 2 is the first count that can.
+        assert!(!controls_live(0));
+        assert!(!controls_live(1));
+        assert!(controls_live(2));
+        assert!(controls_live(5));
+    }
+
+    #[test]
+    fn step_is_noop_only_at_the_ends() {
+        // The clamped ends: a press writes back the same
+        // value, so the button must read inert.
+        assert!(step_is_noop(0, -1));
+        assert!(step_is_noop(3, 1));
+        assert!(step_is_noop(MAX_ONION_DEPTH, 1));
+        // Everywhere else a press changes the depth.
+        assert!(!step_is_noop(0, 1));
+        assert!(!step_is_noop(1, -1));
+        assert!(!step_is_noop(1, 1));
+        assert!(!step_is_noop(2, -1));
+        assert!(!step_is_noop(2, 1));
+        assert!(!step_is_noop(3, -1));
+        // Out-of-range stored values are NOT no-ops in
+        // either direction: the press pulls the value back
+        // into range (step_depth(9, ±1) == 3 != 9), so both
+        // buttons stay live until the value is repaired.
+        assert!(!step_is_noop(9, -1));
+        assert!(!step_is_noop(9, 1));
+    }
+
+    #[test]
+    fn panel_builds_live_and_inert() {
+        // Both render paths build: the default state (a
+        // multi-frame demo project, live buttons) and a
+        // one-frame project (every button inert). The
+        // builder only reads frame_count / onion / depths,
+        // so truncating the demo's frames is safe here.
+        let t = crate::rune_sec::app_theme::app_theme(true);
+        let s = crate::init();
+        assert!(controls_live(s.core.frame_count()));
+        let _ = onion_controls(&s, &t);
+        let mut s = crate::init();
+        s.core.project.frames.truncate(1);
+        assert_eq!(s.core.frame_count(), 1);
+        assert!(!controls_live(s.core.frame_count()));
+        let _ = onion_controls(&s, &t);
     }
 }

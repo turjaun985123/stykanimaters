@@ -2,11 +2,15 @@
 //! (Phase D, section 8/40 — frame ops).
 //!
 //! Inbetween, single-frame shift, reverse, motion-path
-//! smoothing, the single-frame and range clipboards, the loop
-//! range, and per-frame duration steppers — every control wired
+//! smoothing, the single-frame and range clipboards, and
+//! per-frame duration steppers — every control wired
 //! to the real `EditorCore` op the GPUI app's "Frames" tool
 //! group (and Edit cluster) called, with the same semantics and,
-//! where one existed, the same element key.
+//! where one existed, the same element key. The loop range is
+//! only READ here (Reverse's range rule and the section
+//! readout); loop EDITING lives in the timeline section, its
+//! single home since UI-mission Wave 5 — no loop-editing
+//! control may be added to this section.
 //!
 //! Range model: the core's only range state is
 //! `EditorCore::loop_range` (`editor.rs:61`). The op arguments

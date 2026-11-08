@@ -86,8 +86,10 @@
 //!   Restart / Play range the jumps only `goto` — they
 //!   never touch `playing`, so stepping while paused stays
 //!   paused and stepping mid-playback keeps playing. At
-//!   either end of the key list the press is a silent
-//!   no-op, like the transport's other edges.
+//!   either end of the key list the press used to be a
+//!   silent no-op; Wave 9 renders the button inert
+//!   whenever no key exists on its side of the playhead
+//!   (see the Wave 9 bullet below).
 //! * **Frame duration** — the `dur-dn` / `dur-up` steppers
 //!   call `EditorCore::adjust_frame_duration`
 //!   (`editor.rs:1675`) with the GPUI factors 0.5 / 2.0
@@ -113,11 +115,12 @@
 //!   `pb-loop-end` go to the loop range's start / end
 //!   frame (`loop_jump_targets` reads `EditorCore::
 //!   loop_range`, `editor.rs:61`). Plain text buttons in
-//!   the loop row, beside `pb-loop` / `pb-speed`, and
-//!   rendered ONLY while a range is set — with no range
-//!   there is nothing to jump to, so the buttons are
-//!   absent rather than inert (this file has no inert
-//!   button variant). Like the keyframe jumps they only
+//!   the loop row, beside `pb-loop` (the speed cycle sat
+//!   here too until Wave 9 moved it to the transport
+//!   row), and rendered ONLY while a range is set — with
+//!   no range there is nothing to jump to, so the
+//!   buttons are absent rather than inert. Like the
+//!   keyframe jumps they only
 //!   `goto` (`editor.rs:701`) — `playing` is never
 //!   touched, so jumping while paused stays paused and
 //!   jumping mid-playback keeps playing. The targets are
@@ -125,8 +128,11 @@
 //!   orders and clamps when the range is set, but frames
 //!   deleted afterwards can leave an end past the
 //!   timeline, and `goto`'s own bounds check then refuses
-//!   the press silently — the keyframe jumps' no-op
-//!   discipline at their edges. Wave 5 relabelled the
+//!   the press — the handler keeps that refusal as the
+//!   backstop, and Wave 9 renders such a button inert
+//!   (see `loop_jump_inert`), so the refusal is what the
+//!   control announces in advance rather than what a
+//!   press silently meets. Wave 5 relabelled the
 //!   buttons "Go to start" / "Go to end" (keys
 //!   unchanged): they jump TO the range's ends, and
 //!   since the same wave removed this panel's old
@@ -148,6 +154,30 @@
 //!   tween toggle and fps steppers stay on the button
 //!   family by ruling — state buttons with labels, not
 //!   kit switch-rows.
+//! * **Honest inert states + transport grouping** (UI
+//!   mission Wave 9) — the panel applies the Wave 3
+//!   undo/redo rule (`btn_inert` / the live form, key and
+//!   label unchanged) to every control whose press can
+//!   provably no-op from the current state with no
+//!   visual difference: the keyframe jumps when no key
+//!   exists on their side of the playhead (a project
+//!   with no keys left both permanently dead yet
+//!   live-looking), a loop jump whose stored target has
+//!   gone stale past the timeline, the fps steppers at
+//!   the 1/60 clamp bounds, and the duration steppers at
+//!   the 0.25/8.0 bounds or with no current frame. The
+//!   inert rules ([`fps_stepper_inert`],
+//!   [`duration_stepper_inert`], [`loop_jump_inert`])
+//!   mirror the core ops' own clamp/refusal arithmetic,
+//!   so a button is inert exactly when its press cannot
+//!   change anything. Grouping: the speed cycle moved
+//!   from the Loop row into the Transport row, so the
+//!   panel reads play / step / speed under "Transport"
+//!   and the Loop row carries only loop business (the
+//!   toggle, its jumps and its state caption). Keys,
+//!   handlers, labels and active rules are unchanged
+//!   throughout — `pb-speed` still calls
+//!   `cycle_playback_speed`, the jumps still `goto`.
 //!
 //! `State` fields: everything reads `s.core` live
 //! (`project.fps` `model.rs:683`, `loop_range`, `current`,
@@ -161,7 +191,7 @@
 use rune::tok::{self, type_, Theme};
 use rune::{row, text, El};
 
-use crate::chrome_view::btn;
+use crate::chrome_view::{btn, btn_inert};
 use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::timeline_marks::graph_key_frame;
@@ -194,6 +224,31 @@ fn preset_label(preset: f32) -> String {
 /// chip.
 pub fn is_active_preset(fps: f32, preset: f32) -> bool {
     (fps - preset).abs() < 0.01
+}
+
+/// The frame-rate bounds `adjust_fps` clamps to
+/// (`editor.rs`, `adjust_fps`: `(fps + delta).clamp(1.0,
+/// 60.0)`), named here so the stepper-inert rule below
+/// and the core can be checked against each other.
+pub const FPS_FLOOR: f32 = 1.0;
+pub const FPS_CEILING: f32 = 60.0;
+
+/// Which fps steppers a press cannot move from `fps`,
+/// as `(down_inert, up_inert)` (Wave 9). The rule mirrors
+/// `adjust_fps`'s own arithmetic exactly — a stepper is
+/// inert iff its clamped result equals the current rate —
+/// so it stays truthful for any stored rate, including
+/// one outside the clamp range in a loaded project
+/// (where either press would slam the rate to a bound,
+/// i.e. change it, and both steppers stay live). At the
+/// bounds inside the range the press provably changes
+/// nothing, so the button renders through `btn_inert`
+/// instead of looking live — the Wave 3 undo/redo rule.
+pub fn fps_stepper_inert(fps: f32) -> (bool, bool) {
+    (
+        (fps - 1.0).clamp(FPS_FLOOR, FPS_CEILING) == fps,
+        (fps + 1.0).clamp(FPS_FLOOR, FPS_CEILING) == fps,
+    )
 }
 
 /// The current rate as the chrome status line writes it:
@@ -239,12 +294,32 @@ pub fn play_range_start(loop_range: Option<(usize, usize)>) -> usize {
 /// `editor.rs:769`), but frames deleted afterwards can
 /// leave its end past the last frame; the handlers hand
 /// the stored frame straight to `EditorCore::goto`
-/// (`editor.rs:701`), whose own bounds check refuses it
-/// silently, leaving `current` and `playhead` where they
-/// were — the same silent no-op the keyframe jumps make
-/// at the ends of their key list.
+/// (`editor.rs:701`), whose own bounds check refuses it,
+/// leaving `current` and `playhead` where they were.
+/// That refusal is the backstop: since Wave 9 the
+/// builder renders a button whose target is stale
+/// inert ([`loop_jump_inert`]), so the refusal is
+/// announced by the control instead of met silently.
 pub fn loop_jump_targets(core: &EditorCore) -> Option<(usize, usize)> {
     core.loop_range
+}
+
+/// Which loop jumps a press cannot move, as
+/// `(start_inert, end_inert)` (Wave 9): a jump is inert
+/// iff its stored target sits at or past the timeline's
+/// frame count — exactly the targets `EditorCore::goto`
+/// refuses (`frame < frames.len()`), so every press on
+/// such a button would no-op with no visual difference
+/// (proven by `loop_end_jump_to_a_stale_end_refuses_
+/// silently` below). With no range the buttons are not
+/// rendered at all; the `(true, true)` for `None` is
+/// never consulted by the builder, it only keeps this
+/// helper total.
+pub fn loop_jump_inert(range: Option<(usize, usize)>, frame_count: usize) -> (bool, bool) {
+    match range {
+        None => (true, true),
+        Some((a, b)) => (a >= frame_count, b >= frame_count),
+    }
 }
 
 /// Every key frame in the project, sorted ascending with
@@ -431,6 +506,33 @@ fn start_playback_at(core: &mut EditorCore, frame: usize) {
     core.playing = true;
 }
 
+/// The duration bounds `adjust_frame_duration` clamps
+/// to (`editor.rs`, `adjust_frame_duration`: `duration
+/// * factor` clamped to `0.25..=8.0`), named here so the
+/// stepper-inert rule below and the core can be checked
+/// against each other.
+pub const DURATION_FLOOR: f32 = 0.25;
+pub const DURATION_CEILING: f32 = 8.0;
+
+/// Which duration steppers a press cannot move, as
+/// `(down_inert, up_inert)` (Wave 9). Like
+/// [`fps_stepper_inert`] the rule mirrors the core op's
+/// own arithmetic — a stepper is inert iff its clamped
+/// result equals the current duration. `None` (no
+/// current frame — an empty project) inerts both: there
+/// is nothing to scale, and the op indexes
+/// `frames[current]` unconditionally, so a live button
+/// there would be worse than silent.
+pub fn duration_stepper_inert(duration: Option<f32>) -> (bool, bool) {
+    match duration {
+        None => (true, true),
+        Some(d) => (
+            (d * 0.5).clamp(DURATION_FLOOR, DURATION_CEILING) == d,
+            (d * 2.0).clamp(DURATION_FLOOR, DURATION_CEILING) == d,
+        ),
+    }
+}
+
 /// Readout for the current frame's duration multiplier, in
 /// the same `{:.2}x` shape the core's own status message
 /// uses (`adjust_frame_duration`, `editor.rs:1675`).
@@ -494,7 +596,7 @@ fn numeric_font() -> tok::TextStyle {
 /// `pb-restart` / `pb-play-range`, the Phase G loop
 /// toggle is `pb-loop` and the Phase I keyframe jumps are
 /// `pb-prev-key` / `pb-next-key`; the Phase K speed cycle
-/// beside the loop toggle is `pb-speed`, and the Phase L
+/// in the transport row is `pb-speed`, and the Phase L
 /// loop jumps beside it are `pb-loop-start` / `pb-loop-end`
 /// (present only while a loop range is set), so headless
 /// `--tree` checks can find every control.
@@ -510,6 +612,16 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
         .frames
         .get(core.current)
         .map(|f| f.duration);
+    let frame_count = core.frame_count();
+    // The keyframe jumps' targets from the current frame
+    // (Wave 9): the handlers recompute them live, exactly
+    // as before — computing them here too decides whether
+    // each jump button can act at all from this frame, so
+    // a jump with nowhere to go renders inert (the Wave 3
+    // undo/redo rule) instead of failing silently.
+    let jump_keys = key_frames(core);
+    let prev_target = prev_key(core.current, &jump_keys);
+    let next_target = next_key(core.current, &jump_keys);
 
     let mut panel = design::panel_col("playback-controls", t)
         .child(
@@ -521,8 +633,38 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
         )
         .child(design::divider(t));
 
-    // ---- Transport basics: restart from the top, or play
-    // from the loop range's start (frame 0 without a range).
+    // ---- Transport: the play actions (restart from the
+    // top, or play from the loop range's start — frame 0
+    // without a range), the keyframe steps, and the speed
+    // cycle (Wave 9: moved here from the Loop row — speed
+    // is a transport control, and the codebase already
+    // calls this "the transport row's `pb-speed` button"
+    // (menus section); the Loop header did not describe
+    // it). A keyframe step with no key on its side of the
+    // playhead renders inert: its press could only no-op,
+    // with no visual difference (Wave 9, the Wave 3
+    // undo/redo rule — key, label and the live handler
+    // are unchanged in the live form).
+    let prev_key_btn = if prev_target.is_some() {
+        btn("pb-prev-key", "Prev key", false, t, |s| {
+            let keys = key_frames(&s.core);
+            if let Some(f) = prev_key(s.core.current, &keys) {
+                s.core.goto(f);
+            }
+        })
+    } else {
+        btn_inert("pb-prev-key", "Prev key", t)
+    };
+    let next_key_btn = if next_target.is_some() {
+        btn("pb-next-key", "Next key", false, t, |s| {
+            let keys = key_frames(&s.core);
+            if let Some(f) = next_key(s.core.current, &keys) {
+                s.core.goto(f);
+            }
+        })
+    } else {
+        btn_inert("pb-next-key", "Next key", t)
+    };
     panel = panel.child(design::section_label("Transport", t));
     panel = panel.child(
         row()
@@ -550,18 +692,16 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
                     start_playback_at(&mut s.core, start);
                 },
             ))
-            .child(btn("pb-prev-key", "Prev key", false, t, |s| {
-                let keys = key_frames(&s.core);
-                if let Some(f) = prev_key(s.core.current, &keys) {
-                    s.core.goto(f);
-                }
-            }))
-            .child(btn("pb-next-key", "Next key", false, t, |s| {
-                let keys = key_frames(&s.core);
-                if let Some(f) = next_key(s.core.current, &keys) {
-                    s.core.goto(f);
-                }
-            })),
+            .child(prev_key_btn)
+            .child(next_key_btn)
+            .child(icon_btn(
+                "pb-speed",
+                "gauge",
+                &speed_label(playback_speed),
+                playback_speed != 1.0,
+                t,
+                cycle_playback_speed,
+            )),
     );
 
     // ---- Loop playback: shell-level on/off for the wrap
@@ -582,29 +722,37 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
             |s| {
                 s.loop_playback = !s.loop_playback;
             },
-        ))
-        .child(icon_btn(
-            "pb-speed",
-            "gauge",
-            &speed_label(playback_speed),
-            playback_speed != 1.0,
-            t,
-            cycle_playback_speed,
         ));
     // The loop jumps exist only while a range is set:
-    // absent, not inert, when there is nothing to jump to.
-    if loop_range.is_some() {
-        loop_row = loop_row
-            .child(btn("pb-loop-start", "Go to start", false, t, |s| {
+    // absent when there is nothing to jump to. Wave 9:
+    // a jump whose stored end has gone stale (at or past
+    // the frame count after frame deletions) renders
+    // inert rather than live — `goto` would refuse every
+    // press on it (see `loop_jump_inert`), so a live
+    // rendering would promise a jump that cannot happen.
+    // Key, label and the live handler are unchanged in
+    // the live form.
+    if let Some(range) = loop_range {
+        let (start_inert, end_inert) = loop_jump_inert(Some(range), frame_count);
+        let start_btn = if start_inert {
+            btn_inert("pb-loop-start", "Go to start", t)
+        } else {
+            btn("pb-loop-start", "Go to start", false, t, |s| {
                 if let Some((a, _)) = loop_jump_targets(&s.core) {
                     s.core.goto(a);
                 }
-            }))
-            .child(btn("pb-loop-end", "Go to end", false, t, |s| {
+            })
+        };
+        let end_btn = if end_inert {
+            btn_inert("pb-loop-end", "Go to end", t)
+        } else {
+            btn("pb-loop-end", "Go to end", false, t, |s| {
                 if let Some((_, b)) = loop_jump_targets(&s.core) {
                     s.core.goto(b);
                 }
-            }));
+            })
+        };
+        loop_row = loop_row.child(start_btn).child(end_btn);
     }
     loop_row = loop_row.child(design::section_label(
         if loop_playback {
@@ -621,13 +769,28 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
         &format!("Frame rate — now {}", fps_text(fps)),
         t,
     ));
+    // Wave 9: a stepper at the rate's clamp bound renders
+    // inert — its press would clamp back to the same rate
+    // (see `fps_stepper_inert`); key, label and the live
+    // handler are unchanged in the live form.
+    let (fps_dn_inert, fps_up_inert) = fps_stepper_inert(fps);
+    let fps_dn_btn = if fps_dn_inert {
+        btn_inert("fps-dn", "FPS −", t)
+    } else {
+        btn("fps-dn", "FPS −", false, t, |s| {
+            s.core.adjust_fps(-1.0);
+        })
+    };
+    let fps_up_btn = if fps_up_inert {
+        btn_inert("fps-up", "FPS +", t)
+    } else {
+        btn("fps-up", "FPS +", false, t, |s| {
+            s.core.adjust_fps(1.0);
+        })
+    };
     let mut rate_row = row().gap(6.0).center_y();
-    rate_row = rate_row.child(btn("fps-dn", "FPS −", false, t, |s| {
-        s.core.adjust_fps(-1.0);
-    }));
-    rate_row = rate_row.child(btn("fps-up", "FPS +", false, t, |s| {
-        s.core.adjust_fps(1.0);
-    }));
+    rate_row = rate_row.child(fps_dn_btn);
+    rate_row = rate_row.child(fps_up_btn);
     panel = panel.child(rate_row);
 
     // ---- Frame rate: one chip per GPUI preset, applied as a
@@ -676,14 +839,19 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
     // on the jumps above MOVES to it). Loop-range
     // editing now lives in one home, the timeline's loop
     // row; this panel keeps only its distinct actions —
-    // the loop toggle, the speed cycle and the jumps
-    // below, relabelled "Go to start" / "Go to end" so
+    // the loop toggle, the speed cycle (in the Transport
+    // row since Wave 9) and the jumps below, relabelled
+    // "Go to start" / "Go to end" so
     // no label promises a set it does not perform.
     // [`loop_range_text`] stays as a helper for the
     // integrator.
 
     // ---- Current-frame duration stepper (0.5x / 2x, the
-    // GPUI factors; the op clamps 0.25..=8.0).
+    // GPUI factors; the op clamps 0.25..=8.0). Wave 9: a
+    // stepper at the duration's clamp bound — or with no
+    // current frame at all — renders inert (see
+    // `duration_stepper_inert`); key, label and the live
+    // handler are unchanged in the live form.
     panel = panel.child(design::section_label(
         &match cur_duration {
             Some(d) => format!(
@@ -695,22 +863,33 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
         },
         t,
     ));
+    let (dur_dn_inert, dur_up_inert) = duration_stepper_inert(cur_duration);
+    let dur_dn_btn = if dur_dn_inert {
+        btn_inert("dur-dn", "Dur −", t)
+    } else {
+        btn("dur-dn", "Dur −", false, t, |s| {
+            s.core.adjust_frame_duration(0.5);
+        })
+    };
+    let dur_up_btn = if dur_up_inert {
+        btn_inert("dur-up", "Dur +", t)
+    } else {
+        btn("dur-up", "Dur +", false, t, |s| {
+            s.core.adjust_frame_duration(2.0);
+        })
+    };
     panel = panel.child(
         row()
             .gap(6.0)
             .center_y()
-            .child(btn("dur-dn", "Dur −", false, t, |s| {
-                s.core.adjust_frame_duration(0.5);
-            }))
-            .child(btn("dur-up", "Dur +", false, t, |s| {
-                s.core.adjust_frame_duration(2.0);
-            })),
+            .child(dur_dn_btn)
+            .child(dur_up_btn),
     );
 
     // ---- Timecode readout (read-only).
     panel = panel.child(design::section_label("Time", t));
     panel = panel.child(
-        text(timecode_label(core.current, core.frame_count(), fps))
+        text(timecode_label(core.current, frame_count, fps))
             .key("timecode")
             .font(numeric_font())
             .color(t.text),
@@ -1226,5 +1405,62 @@ mod tests {
             core.goto(a);
         }
         assert_eq!(core.current, 1);
+    }
+
+    // ---- Wave 9 inert rules ----
+
+    #[test]
+    fn fps_stepper_inert_only_at_the_clamp_bounds() {
+        // Mid-range: both steppers can move the rate.
+        assert_eq!(fps_stepper_inert(12.0), (false, false));
+        assert_eq!(fps_stepper_inert(29.97), (false, false));
+        // At the floor only the down stepper is spent;
+        // at the ceiling only the up stepper.
+        assert_eq!(fps_stepper_inert(FPS_FLOOR), (true, false));
+        assert_eq!(fps_stepper_inert(FPS_CEILING), (false, true));
+        // Just inside the ceiling the up stepper still
+        // lands on it — a real change, so it stays live.
+        assert_eq!(fps_stepper_inert(59.5), (false, false));
+        // A stored rate above the ceiling (a loaded
+        // project): either press clamps DOWN to the
+        // ceiling, which changes the rate, so neither
+        // stepper may render inert.
+        assert_eq!(fps_stepper_inert(120.0), (false, false));
+    }
+
+    #[test]
+    fn duration_stepper_inert_only_where_the_press_cannot_move() {
+        // No current frame: nothing to scale, both inert.
+        assert_eq!(duration_stepper_inert(None), (true, true));
+        // Mid-range: both factors change the duration.
+        assert_eq!(duration_stepper_inert(Some(1.0)), (false, false));
+        // Halving 0.5 lands on 0.25 — a change, so the
+        // down stepper stays live just above the floor;
+        // at the floor itself it cannot move.
+        assert_eq!(duration_stepper_inert(Some(0.5)), (false, false));
+        assert_eq!(duration_stepper_inert(Some(DURATION_FLOOR)), (true, false));
+        // Doubling 5.0 clamps to 8.0 — a change; at the
+        // ceiling the up stepper cannot move.
+        assert_eq!(duration_stepper_inert(Some(5.0)), (false, false));
+        assert_eq!(duration_stepper_inert(Some(DURATION_CEILING)), (false, true));
+    }
+
+    #[test]
+    fn loop_jump_inert_only_for_stale_targets() {
+        // No range: the buttons are absent; the helper's
+        // total answer is both-inert.
+        assert_eq!(loop_jump_inert(None, 5), (true, true));
+        // Both ends on the timeline: both live, including
+        // a range ending exactly on the last frame.
+        assert_eq!(loop_jump_inert(Some((1, 3)), 5), (false, false));
+        assert_eq!(loop_jump_inert(Some((0, 4)), 5), (false, false));
+        // A stale end inerts only its own button — the
+        // in-range start of the same range stays live,
+        // mirroring loop_end_jump_to_a_stale_end above.
+        assert_eq!(loop_jump_inert(Some((1, 99)), 5), (false, true));
+        // A range wholly past the timeline inerts both.
+        assert_eq!(loop_jump_inert(Some((99, 120)), 5), (true, true));
+        // An empty timeline refuses every target.
+        assert_eq!(loop_jump_inert(Some((0, 0)), 0), (true, true));
     }
 }

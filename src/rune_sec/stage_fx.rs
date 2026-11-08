@@ -104,6 +104,34 @@
 //!    will this effect appear?", not "where is the joint
 //!    right now?". The full contract is documented on the
 //!    function itself.
+//! 9. **Stage-rect clipping (Wave 9).** The rasterizer's
+//!    frame IS the stage, so geometry outside the stage
+//!    rect renders nothing in exports; the Rune canvas
+//!    does not clip its drawing (the fig3 layer's
+//!    documented lesson, `stage_fig3.rs`), so this layer
+//!    clips for itself. Trail `Line`s are cut to the
+//!    stage rect with the fig3 layer's own
+//!    `clip_segment_to_viewport`, and `Disc`s whose
+//!    circle misses the rect entirely are culled — both
+//!    exact: the rasterizer draws precisely the in-frame
+//!    part of a segment and zero pixels of a missed disc.
+//!    One residual is NOT fixable in this layer: a disc
+//!    STRADDLING the edge still paints its whole disc
+//!    past the boundary, because the prim vocabulary has
+//!    no clipped-disc shape and the consumer
+//!    (`stage_view::particle_prim`) owns the
+//!    disc-to-polygon conversion. The overshoot is
+//!    bounded by the disc's radius — small for FX motes
+//!    (≤ ~15 units), largest for Fog banks (radius
+//!    ≤ 100 at alpha ≤ 0.10) and the Storm lightning disc
+//!    (radius ≤ 300 at alpha ≤ 0.05). Weather centres
+//!    wrap onto the stage torus (`vfx::wrap`), so the
+//!    cull never fires for weather today; it is enforced
+//!    here anyway so the boundary contract belongs to
+//!    this layer, not to the evaluator's current wrap.
+//!    Gizmo prims are exempt by design: a selection
+//!    marker must stay findable at an off-stage anchor,
+//!    like the stage's own joint handles.
 
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{FxClipEntry, ParticleEvent};
@@ -139,6 +167,19 @@ fn pack_rgb(c: [u8; 3]) -> u32 {
     ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32
 }
 
+/// Whether a disc of `radius` centred at `pos` paints any
+/// point of the stage rect `[0, 0, stage]` — the test the
+/// rasterizer's pixel pass applies implicitly (module
+/// delta 9): a disc whose circle misses the frame blends
+/// zero pixels there, so this layer culls exactly those
+/// discs and keeps every one that touches, straddling
+/// discs included.
+fn disc_touches_stage(pos: [f32; 2], radius: f32, stage: [f32; 2]) -> bool {
+    let dx = pos[0] - pos[0].clamp(0.0, stage[0]);
+    let dy = pos[1] - pos[1].clamp(0.0, stage[1]);
+    dx * dx + dy * dy <= radius * radius
+}
+
 /// Weather particles for the frame the stage is showing, in
 /// stage coordinates. Empty when the project has no weather
 /// or its amount rounds to zero.
@@ -150,14 +191,20 @@ fn pack_rgb(c: [u8; 3]) -> u32 {
 /// exports one for one: `amount` rounded, clamped to
 /// 0..=200 (Storm: `amount * 1.8`, clamped to 0..=360, plus
 /// its lightning disc on frames whose index mod 47 is 0
-/// or 1).
+/// or 1). The stage-boundary cull of module delta 9 is
+/// applied on the way out; with the current evaluator,
+/// whose centres wrap onto the stage torus, it never
+/// fires — the contract is enforced here rather than
+/// inherited from that wrap.
 pub fn weather_geometry(core: &EditorCore) -> Vec<ParticlePrim> {
     let Some(weather) = &core.project.weather else {
         return Vec::new();
     };
     let frame_f = core.display_frame();
-    weather_particles(weather, frame_f, core.project.stage, core.project.fps)
+    let stage = core.project.stage;
+    weather_particles(weather, frame_f, stage, core.project.fps)
         .into_iter()
+        .filter(|p| disc_touches_stage(p.0, p.1, stage))
         .map(|(pos, radius, color, alpha)| ParticlePrim::Disc {
             pos,
             radius,
@@ -188,6 +235,13 @@ pub fn weather_geometry(core: &EditorCore) -> Vec<ParticlePrim> {
 /// `(duration * 0.5).clamp(2.0, 12.0)`, export.rs:467).
 /// All lines are returned before all discs, matching the
 /// rasterizer's segment-pass-then-particle-pass order.
+///
+/// Boundary (module delta 9): trail lines are cut to the
+/// stage rect with the fig3 layer's
+/// `clip_segment_to_viewport`, and discs whose circle
+/// misses the rect entirely are culled — the stage canvas
+/// does not clip, and in exports both kinds of geometry
+/// simply have no pixels outside the frame.
 pub fn fx_geometry(core: &EditorCore) -> Vec<ParticlePrim> {
     let frame_f = core.display_frame();
     let project = &core.project;
@@ -226,6 +280,19 @@ pub fn fx_geometry(core: &EditorCore) -> Vec<ParticlePrim> {
                 8,
                 span,
             ) {
+                // Cut to the stage rect (module delta 9):
+                // the rasterizer draws only the in-frame
+                // part of the segment, the canvas draws
+                // whatever it is given, whole.
+                let Some((a, b)) =
+                    crate::rune_sec::fig3_preview::clip_segment_to_viewport(
+                        a,
+                        b,
+                        project.stage,
+                    )
+                else {
+                    continue;
+                };
                 lines.push(ParticlePrim::Line {
                     a,
                     b,
@@ -235,6 +302,11 @@ pub fn fx_geometry(core: &EditorCore) -> Vec<ParticlePrim> {
             }
         }
         for (p, r, c, a) in clip_particles(&entry.clip, frame_f, anchor) {
+            // Cull discs the rasterizer would blend zero
+            // pixels of (module delta 9).
+            if !disc_touches_stage(p, r, project.stage) {
+                continue;
+            }
             discs.push(ParticlePrim::Disc {
                 pos: p,
                 radius: r,
@@ -623,6 +695,132 @@ mod tests {
         core.project.fx_clips.push(burst_entry(0.0, 4.0));
         core.goto(2);
         assert_eq!(fx_geometry(&core), fx_geometry(&core));
+    }
+
+    // ---- Wave 9: stage-boundary clipping (module delta 9) ----
+
+    #[test]
+    fn disc_touch_test_is_the_rasterizers_frame_test() {
+        let stage = [960.0, 540.0];
+        // Centre inside: always touches, even at radius 0.
+        assert!(disc_touches_stage([480.0, 270.0], 0.0, stage));
+        // Straddling an edge: centre outside by less than
+        // the radius still paints in-frame pixels.
+        assert!(disc_touches_stage([-4.0, 270.0], 5.0, stage));
+        assert!(disc_touches_stage([480.0, 545.0], 5.0, stage));
+        // Fully outside: past an edge by more than the
+        // radius blends nothing.
+        assert!(!disc_touches_stage([-6.0, 270.0], 5.0, stage));
+        assert!(!disc_touches_stage([480.0, -6.0], 5.0, stage));
+        // Corner distance is measured to the corner point:
+        // (-3, -4) is exactly 5 from (0, 0).
+        assert!(disc_touches_stage([-3.0, -4.0], 5.0, stage));
+        assert!(!disc_touches_stage([-3.0, -4.0], 4.9, stage));
+    }
+
+    #[test]
+    fn weather_discs_all_touch_the_stage_and_none_are_culled() {
+        // Weather centres wrap onto the stage torus, so
+        // the delta-9 cull must be a no-op for every kind:
+        // the geometry count equals the evaluator's raw
+        // count, fog banks and the storm lightning disc
+        // included, and every disc satisfies the frame
+        // test. (Frame 0 is a lightning frame: 0 mod 47.)
+        for (name, kind) in [
+            ("Rain", WeatherKind::Rain),
+            ("Snow", WeatherKind::Snow),
+            ("Fireflies", WeatherKind::Fireflies),
+            ("Fog", WeatherKind::Fog),
+            ("Storm", WeatherKind::Storm),
+        ] {
+            let core = core_with_weather(kind, 120.0, 10.0);
+            let stage = core.project.stage;
+            let raw = weather_particles(
+                core.project.weather.as_ref().unwrap(),
+                0.0,
+                stage,
+                core.project.fps,
+            );
+            let prims = weather_geometry(&core);
+            assert_eq!(prims.len(), raw.len(), "{name}: cull changed the count");
+            assert!(!prims.is_empty(), "{name} should emit");
+            for prim in &prims {
+                let ParticlePrim::Disc { pos, radius, .. } = prim else {
+                    panic!("{name} must be discs, got {prim:?}");
+                };
+                assert!(
+                    disc_touches_stage(*pos, *radius, stage),
+                    "{name} disc escaped the stage: {pos:?} r={radius}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fx_discs_fully_outside_the_stage_are_culled() {
+        // Park the figure far off-stage: every burst mote
+        // (reach <= 120 plus sag, radius <= 3.2) then sits
+        // fully outside the stage rect, where the
+        // rasterizer blends zero pixels — the stage layer
+        // must emit nothing. The control is
+        // `fx_inside_its_window_emits_the_burst`: the same
+        // entry anchored on-stage emits 26 motes.
+        let mut core = EditorCore::new();
+        for frame in &mut core.project.frames {
+            frame.poses[0].root = [-2000.0, -2000.0];
+        }
+        core.project.fx_clips.push(burst_entry(0.0, 4.0));
+        assert!(fx_geometry(&core).is_empty());
+    }
+
+    #[test]
+    fn fx_trail_lines_are_clipped_to_the_stage_rect() {
+        // The figure marches right in 400-unit steps (the
+        // export tests' marching idiom, scaled up), so at
+        // frame 4 its root sits at x=1800 — far past the
+        // 960-wide stage. The Trail clip's path lines must
+        // be cut at the stage boundary: the on-stage part
+        // survives, and no endpoint may lie outside the
+        // rect (before delta 9 the raw node path was
+        // emitted whole and painted across the letterbox).
+        let mut core = EditorCore::new();
+        for (i, frame) in core.project.frames.iter_mut().enumerate() {
+            frame.poses[0].root = [200.0 + 400.0 * i as f32, 300.0];
+        }
+        core.project.fx_clips.push(FxClipEntry {
+            clip: ParticleClip {
+                start: 0.0,
+                duration: 10.0,
+                kind: ClipKind::Trail,
+                color: 0xFFC65D,
+                color2: None,
+                seed: 777,
+                angle: 0.0,
+                length: 0.0,
+            },
+            figure: 0,
+            node: 0,
+            hidden: false,
+        });
+        core.goto(4);
+        let stage = core.project.stage;
+        let prims = fx_geometry(&core);
+        let lines: Vec<&ParticlePrim> = prims
+            .iter()
+            .filter(|p| matches!(p, ParticlePrim::Line { .. }))
+            .collect();
+        assert!(!lines.is_empty(), "the on-stage part of the path survives");
+        for prim in lines {
+            let ParticlePrim::Line { a, b, .. } = prim else {
+                unreachable!();
+            };
+            for p in [a, b] {
+                assert!(
+                    p[0] >= 0.0 && p[0] <= stage[0] && p[1] >= 0.0 && p[1] <= stage[1],
+                    "trail endpoint escaped the stage: {p:?}"
+                );
+            }
+        }
     }
 
     fn free_event(x: f32, y: f32) -> ParticleEvent {

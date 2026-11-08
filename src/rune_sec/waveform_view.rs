@@ -251,8 +251,17 @@ use crate::State;
 /// Height the caption row takes under the strip in
 /// selected-clip mode (Phase I, section 17): the canvas
 /// gives up this much of its height so canvas + caption
-/// together keep the strip's usual footprint.
-const CAPTION_STRIP_H: f32 = 18.0;
+/// together keep the strip's usual footprint. The
+/// reservation is exactly the caption column's own
+/// height — its 2 pt gap plus one LABEL line, which
+/// Rune resolves at size × 1.25 = 15 pt for the 12 pt
+/// LABEL (`TextStyle::line_px`) — pinned by the
+/// `caption_strip_reservation_matches_the_label_line`
+/// test. (Phase I reserved 18 pt against an assumed
+/// 16 pt line; the captioned strip actually totalled
+/// one point SHORT of the bare strip until UI mission
+/// Wave 9 re-proved the arithmetic from the constants.)
+const CAPTION_STRIP_H: f32 = 17.0;
 /// Span bracket geometry (Phase K, section 21), in
 /// element points: the top rule's y, the edge ticks'
 /// length downward from it, and the stroke width all
@@ -1168,6 +1177,17 @@ fn waveform_seek(s: &mut State, d: &Drag) {
 /// Every other input — healthy selection, stale
 /// selection, no selection — returns exactly the tree
 /// it returned before.
+/// UI mission Wave 9 pins the height accounting the
+/// phases above assumed: the bare return now sizes
+/// its canvas (`.h(el_size[1])` — an unsized canvas
+/// leaf lays out 0 pt high in Rune's layout, text
+/// being the only measured leaf), and
+/// [`CAPTION_STRIP_H`] is the caption column's true
+/// height (2 pt gap + one 15 pt LABEL line), so all
+/// three returns occupy exactly `el_size[1]` —
+/// before, the captioned columns totalled one point
+/// less and the bare canvas had no layout height
+/// at all.
 pub fn waveform_el_state(s: &State, el_size: [f32; 2], t: &Theme) -> El {
     let clip_count = s.core.project.audio.len();
     let selected_peaks: Vec<f32> = match s.audio_panel.selected {
@@ -1240,8 +1260,18 @@ pub fn waveform_el_state(s: &State, el_size: [f32; 2], t: &Theme) -> El {
                 );
         }
     }
+    // The bare canvas carries its height explicitly
+    // (UI mission Wave 9): Rune's layout measures text
+    // leaves only, so a canvas with no `.h(..)` — this
+    // return, alone of the builder's three — laid out
+    // 0 pt high and let its shape paint its natural
+    // 56 pt past the card's bottom edge, while both
+    // captioned returns above size theirs. Same key,
+    // same gesture; the box is now the `el_size` the
+    // shape is built for.
     canvas(waveform_shape_project(&s.core, s.audio_panel.selected, el_size, t))
         .key("waveform")
+        .h(el_size[1])
         .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| waveform_seek(s, d))
 }
 
@@ -1565,6 +1595,23 @@ mod tests {
         );
         // A healthy clip grows no health caption.
         assert_eq!(clip_health_caption(0, ClipHealth::Healthy), None);
+    }
+
+    #[test]
+    fn caption_strip_reservation_matches_the_label_line() {
+        // UI mission Wave 9: the caption column under
+        // the canvas is the column's 2 pt gap plus one
+        // LABEL line, and Rune resolves a text style's
+        // line height as size x 1.25 when none is set
+        // (`TextStyle::line_px`) — 15 pt for the 12 pt
+        // LABEL. CAPTION_STRIP_H must equal that sum
+        // exactly: the canvas gives up CAPTION_STRIP_H
+        // and the column adds the gap and the line back,
+        // so any drift makes a captioned strip's total
+        // height differ from the bare strip's `el_size`
+        // height by the same amount.
+        assert_eq!(type_::LABEL.line_px(), 15.0);
+        assert_eq!(CAPTION_STRIP_H, 2.0 + type_::LABEL.line_px());
     }
 
     #[test]
