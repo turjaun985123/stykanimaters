@@ -743,13 +743,13 @@ its dispatch, not its rendering.
 
 | Remainder | Closing section(s) | Status | CI |
 |---|---|---|---|
-| Playback audio **scrub-follow** open since Phase F (Phase G §2 closed the wrap case only) | §1 audio_play (`playhead_seeked` + `sync_playback_audio_on_seek`; backward seeks already restarted via the wrap path) + integrator poll wiring | wired | _integrator_ |
-| Stage draws segments **straight** — bends visible only in exports (Phase G §19) | §9 stage_view bend arcs (`segment_pieces` mirrors export's `bend_mid` construction; zero-bend prim-identical) | wired | _integrator_ |
-| **MCP parity** for the indexed DSP ops missing (Phase H §37 landed the ops, no tools) | §2 mcp_tools (six tools; registry 71 → 77, total 82 → 88) | wired | _integrator_ |
-| `icon_btn` has **no inert variant** — local wrappers (`pibtn`, `ictl`) and lost tints (frame_ops, keyframe_tools) | §11 icon_btn inert variants + §24 ictl deleted + §25/§26 tints restored; §23 pose_tools delegates except its active-tinted variant branch (documented partial) | wired | _integrator_ |
-| Icon gaps: **fig-scale-dn text**, **mirror buttons on "copy"** ("compress" absent from the FA set) | §10 icon_data batch 2 (102 → 110) + §22 scale-dn + §§23/24 mirror glyphs | wired | _integrator_ |
-| **Contact sheet** is whole-timeline only — the range family had one hole left | §8 export range pair + integrator's `xc-contact` row (the pair had no caller until the wiring — grep-verified) | wired | _integrator_ |
-| Palette cannot jump **workspaces** or reach several shell toggles | §27 command_palette (+13 commands, 84 → 97) | wired | _integrator_ |
-| **headless.yml never dispatched** — `--snap` on software Vulkan unproven since Phase E | Integrator dispatch during Phase I integration | wired | _integrator_ |
+| Playback audio **scrub-follow** open since Phase F (Phase G §2 closed the wrap case only) | §1 audio_play (`playhead_seeked` + `sync_playback_audio_on_seek`; backward seeks already restarted via the wrap path) + integrator poll wiring | wired | 42467099217 |
+| Stage draws segments **straight** — bends visible only in exports (Phase G §19) | §9 stage_view bend arcs (`segment_pieces` mirrors export's `bend_mid` construction; zero-bend prim-identical) | wired | 42467099217 |
+| **MCP parity** for the indexed DSP ops missing (Phase H §37 landed the ops, no tools) | §2 mcp_tools (six tools; registry 71 → 77, total 82 → 88) | wired | 42467099217 |
+| `icon_btn` has **no inert variant** — local wrappers (`pibtn`, `ictl`) and lost tints (frame_ops, keyframe_tools) | §11 icon_btn inert variants + §24 ictl deleted + §25/§26 tints restored; §23 pose_tools delegates except its active-tinted variant branch (documented partial) | wired | 42467099217 |
+| Icon gaps: **fig-scale-dn text**, **mirror buttons on "copy"** ("compress" absent from the FA set) | §10 icon_data batch 2 (102 → 110) + §22 scale-dn + §§23/24 mirror glyphs | wired | 42467099217 |
+| **Contact sheet** is whole-timeline only — the range family had one hole left | §8 export range pair + integrator's `xc-contact` row (the pair had no caller until the wiring — grep-verified) | wired | 42467099217 |
+| Palette cannot jump **workspaces** or reach several shell toggles | §27 command_palette (+13 commands, 84 → 97) | wired | 42467099217 |
+| **headless.yml never dispatched** — `--snap` on software Vulkan unproven since Phase E | Integrator dispatch during Phase I integration (run 42467268661 on the green tree) | **proven**: all 6 probes exit 0 on llvmpipe — 4 `--tree` scene dumps + 2 `--snap` PNGs; the default snap renders the full Phase I shell (icons, fig-measure, status runtime all visible in pixels) | 42467268661 |
 | Two "New project" results disagree (panel blank vs Home demo) | Not a Phase I section — user's product call | open — unchanged | — |
-| Rune `fill_path` hole rendering not pixel-verified; Phase F–I pixels + sound unverified on a real screen | Needs the user's screenshot + Play test | open — unchanged | — |
+| Rune `fill_path` hole rendering not pixel-verified; Phase F–I pixels + sound unverified on a real screen | Needs the user's screenshot + Play test | narrowed — the headless snap (run 42467268661) renders the shell and its solid icons correctly in pixels; sound and a real-screen screenshot are still the user's to confirm | — |

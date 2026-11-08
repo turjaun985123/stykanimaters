@@ -73,21 +73,21 @@ mirror and 3D mirror (§§23/24, `arrow-right-arrow-left`).
 | 22 | src/rune_sec/inspector_figure.rs | `fig-measure` readout + fig-scale-dn's icon |
 | 23 | src/rune_sec/pose_tools.rs | pibtn delegates to `icon_btn_inert` where it can (see §5), mirror glyph, pose-library filter with the figures count discipline |
 | 24 | src/rune_sec/three_d_panel.rs | ictl deleted — live `icon_btn` / dim `icon_btn_inert`; mirror glyph |
-| 25 | src/rune_sec/frame_ops.rs | Inert tint restored for render-checkable guards (paste ×2, delete-range, shift-by-range) |
+| 25 | src/rune_sec/frame_ops.rs | Inert tint restored for all six icon buttons (copy-frame, paste-frame, range copy/paste/delete, insert-N) — each guard a pure fn with a truth-table test |
 | 26 | src/rune_sec/keyframe_tools.rs | Inert tint restored for the seven stamp buttons via an `nudge_plan`-equivalent dry run (predicates mirror the refusal ladder rung for rung) |
 | 27 | src/rune_sec/command_palette.rs | +13 commands: 8 workspace jumps + guides/frustum/safe-frame/left-panel/right-panel toggles — 84 → 97 (counted in the `COMMANDS` table; the file's own header agrees. An onion entry already existed, and no solo-clear was added) |
 | 28 | src/rune_sec/status_strip.rs | Runtime inside the project segment (`Project::total_frames`, the mixer's own clock) |
-| 29 | src/rune_sec/stats_view.rs | Media block: 13 rows over seven groups incl. audio span in frames (durations are not in the model — spans are what the data supports) |
+| 29 | src/rune_sec/stats_view.rs | Media block: 4 rows (audio clips with their start-frame span — clip lengths live in the sound files, not the model; FX clips with summed duration; texts; strokes) |
 | 30 | src/rune_sec/help_panel.rs | 24 → 30 rows — every claim verified against the tree (two briefed items corrected: no Alt+1..8 row existed; loop is transport/palette, not a key) |
 | 31 | src/rune_sec/project_tools.rs | "Current file" line — `current_file_line` renders the `shell::last_opened_project` name, shown only on an exact match with `Project::name` (the match guard is the point: recents store names, not the open file) |
 | 32 | src/rune_sec/draw_tools.rs | `draw-stats` readout (fields verified: `points: Vec<V2>`, `frame: i32`, `spray: Option<SprayMark>`) |
 | 33 | src/rune_sec/stroke_inspector.rs | `stroke-measure` line (frame via the file's own `stroke_frame_of`) |
 | 34 | src/rune_sec/scene_panel.rs | `scene-stage-readout` with gcd-reduced aspect (decimal fallback past 40) |
 | 35 | src/rune_sec/layers_panel.rs | Show all (the figures footer's body, shared) + Solo selected via `toggle_solo` |
-| 36 | src/rune_sec/text_tool.rs | Content previews capped at `PREVIEW_CHARS` = 18 chars (rows showed full text on one unwrapped line) |
+| 36 | src/rune_sec/text_tool.rs | Row previews now use the new stricter `text_preview` (14 chars, newlines flattened to spaces) for the load-button label and the Loaded line; the older 18-char `preview()` helper remains in place |
 | 37 | src/rune_sec/library_panel.rs | File-stem matching added to the existing search + the missing count line (an integrator flag claimed "pen"→"pencil"; the tree already used "pencil" — nothing to change) |
 | 38 | src/rune_sec/settings_popover.rs | Playback block: Loop toggle (inverse label idiom) + audio state line |
-| 39 | src/rune_sec/snap_tests.rs | Round 6: 19 → 23 tests (palette jump, key jumps, marker seek) — see §5 for the pose test's honest limit |
+| 39 | src/rune_sec/snap_tests.rs | Round 6: 19 → 23 tests (palette jump, key jumps, marker seek, inert pose-paste) — see §5 |
 | 40 | docs/ | This document + QA_RUNE §11 (rewritten by the integrator — see the provenance note) |
 
 ## 4. Cross-section contracts
@@ -114,13 +114,13 @@ mirror and 3D mirror (§§23/24, `arrow-right-arrow-left`).
   their inert form (`accent.alpha(0.35)`), which
   `icon_btn_inert` does not model, so `pibtn` keeps that
   one branch locally and delegates the rest.
-- §39's pose test found its own limit honestly: the
-  migrated inert Apply renders through the plain-btn
-  shell in pose_tools' fallback, so a tap still fires
-  the op's refusal status — the test pins presence +
-  refusal, not silence. The handler-free guarantee holds
-  for the shared builders themselves (§§24–26 use them
-  directly).
+- §39's pose test pins the inert contract end to end:
+  `pose-paste` in its inert form (pose_tools' `pbtn`,
+  no press handler attached) is present, and a tap
+  changes nothing — status, undo depth, frame, joint
+  positions and the empty clipboard all unchanged
+  (green in CI run 42467099217). The shared builders
+  (§§24–26) are handler-free by construction.
 
 ## 6. Inventory snapshot
 
@@ -146,6 +146,14 @@ Integrator's post-wiring run of
 - Rune `fill_path` hole rendering is still not
   pixel-verified; Phase F–I pixels and sound still await
   the user's screenshot + Play test on a real screen.
-- `headless.yml` (--snap on software Vulkan) was
-  dispatched for the first time during this phase's
-  integration; its result is recorded in QA_RUNE §11.
+- `headless.yml` is **proven now**: run 42467268661 on
+  the green tree — all 6 probes exit 0 on llvmpipe
+  (software Vulkan), 4 `--tree` dumps + 2 `--snap`
+  PNGs. The default snap renders the full shell in
+  pixels (icons, the Phase I measure/runtime lines,
+  the inert Paste pose all read correctly). Two layout
+  overlaps are visible in that render and are recorded
+  here as new remainders: the Keyframes header's
+  "No joint selected" note overlaps its Delete button,
+  and at the snap's 2400×1350 the right column's
+  bottom rows crowd the status strip's tail.
