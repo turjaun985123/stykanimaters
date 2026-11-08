@@ -91,9 +91,10 @@
 //! its fixed width.
 
 use rune::tok::{self, type_, Theme};
-use rune::{col, el, oklch, row, text, Color, El, Transition};
+use rune::{col, el, row, text, Color, El, Transition};
 use stykanimate_rs::editor::EditorCore;
 
+use crate::rune_sec::app_theme;
 use crate::rune_sec::i18n_wire;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::rune_sec::icons::icon_el_rgb;
@@ -127,18 +128,35 @@ pub enum Severity {
     Error,
 }
 
+/// Pack a theme colour into the `0xRRGGBB` form the
+/// icon renderer takes (the `fig3_preview` precedent:
+/// via the colour's `#RRGGBBAA` hex string).
+fn pack(c: Color) -> u32 {
+    let hex = c.hex();
+    u32::from_str_radix(&hex[1..7], 16).unwrap_or(0)
+}
+
 impl Severity {
-    /// The severity's colour: bright OKLCH hues chosen to
-    /// read on the dark card at small size. (The shell is
-    /// dark-only today — `tok::theme(true)` — so these are
-    /// tuned for dark.) [`Severity::icon_color`] is this
-    /// colour's hex twin for the glyph renderer.
-    pub fn color(self) -> Color {
+    /// The severity's colour on a card surface, from the
+    /// shell's one semantic palette ([`app_theme`]): Info
+    /// is the theme accent; Success / Warn / Error are the
+    /// brief's semantic tints in their `*_on` form — the
+    /// brief value itself in dark, darkened to ≈ 5:1 on
+    /// the white card in light. The consumers are the
+    /// toast card's 3 pt leading bar and the export
+    /// recap's text: in dark the `*_on` values ARE the
+    /// base [`app_theme::success`] / [`app_theme::warning`]
+    /// / [`app_theme::error_ink`] values, and in light the
+    /// bar and the text darken together rather than
+    /// splitting one severity into two tints.
+    /// [`Severity::icon_color`] is this colour's hex twin
+    /// for the glyph renderer.
+    pub fn color(self, t: &Theme) -> Color {
         match self {
-            Severity::Info => oklch(0.70, 0.14, 250.0),
-            Severity::Success => oklch(0.72, 0.15, 155.0),
-            Severity::Warn => oklch(0.78, 0.15, 75.0),
-            Severity::Error => oklch(0.68, 0.20, 25.0),
+            Severity::Info => app_theme::accent(t),
+            Severity::Success => app_theme::success_on(t),
+            Severity::Warn => app_theme::warning_on(t),
+            Severity::Error => app_theme::error_on(t),
         }
     }
 
@@ -160,16 +178,11 @@ impl Severity {
     }
 
     /// The glyph's hex colour, in the `0xRRGGBB` form the
-    /// icon renderer takes: the sRGB approximation of
-    /// [`Severity::color`]'s oklch hue, so the glyph carries
-    /// the same severity tint the dot had.
-    pub fn icon_color(self) -> u32 {
-        match self {
-            Severity::Info => 0x5C9BF5,
-            Severity::Success => 0x35B56B,
-            Severity::Warn => 0xE8A33D,
-            Severity::Error => 0xE5484D,
-        }
+    /// icon renderer takes: [`Severity::color`] packed, so
+    /// the glyph carries exactly the severity tint the bar
+    /// and the recap text carry, in either theme.
+    pub fn icon_color(self, t: &Theme) -> u32 {
+        pack(self.color(t))
     }
 }
 
@@ -481,7 +494,7 @@ fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, und
         .child(icon_el_rgb(
             toast.severity.icon(),
             13.0,
-            toast.severity.icon_color(),
+            toast.severity.icon_color(t),
         ))
         .child(
             text(toast.text.clone())
@@ -535,7 +548,7 @@ fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, und
             el()
                 .w(3.0)
                 .radius(1.5)
-                .fill(toast.severity.color()),
+                .fill(toast.severity.color(t)),
         )
         .child(content)
 }

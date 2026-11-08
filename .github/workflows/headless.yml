@@ -172,12 +172,29 @@ jobs:
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
           mkdir -p headless-out
           missing=0
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light; do
             probe 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
               > "headless-out/tree-$scene.log" 2>&1
             echo $? > "headless-out/tree-$scene.exit"
             [ -f "headless-out/tree-$scene.json" ] || missing=1
           done
+          # Wave 7 size variants: window size is a CLI axis,
+          # not a scene property, so the 1280x720 pairings are
+          # explicit probes (default dark, default light, and
+          # three-d — the deepest reachable status-strip state
+          # at that width).
+          probe 60 "$BIN" --tree "headless-out/tree-default-1280.json" --scene default --size 1280x720 \
+            > "headless-out/tree-default-1280.log" 2>&1
+          echo $? > "headless-out/tree-default-1280.exit"
+          [ -f "headless-out/tree-default-1280.json" ] || missing=1
+          probe 60 "$BIN" --tree "headless-out/tree-default-light-1280.json" --scene default-light --size 1280x720 \
+            > "headless-out/tree-default-light-1280.log" 2>&1
+          echo $? > "headless-out/tree-default-light-1280.exit"
+          [ -f "headless-out/tree-default-light-1280.json" ] || missing=1
+          probe 60 "$BIN" --tree "headless-out/tree-three-d-1280.json" --scene three-d --size 1280x720 \
+            > "headless-out/tree-three-d-1280.log" 2>&1
+          echo $? > "headless-out/tree-three-d-1280.exit"
+          [ -f "headless-out/tree-three-d-1280.json" ] || missing=1
           exit $missing
 
       # Q1, attempt 2: only the scenes attempt 1 missed, under a
@@ -283,6 +300,19 @@ jobs:
           probe 120 "$BIN" --snap headless-out/snap-fx-split-mid.png --scene fx-split-mid --at 0 \
             > headless-out/snap-fx-split-mid.log 2>&1
           echo $? > headless-out/snap-fx-split-mid.exit
+          # Wave 7: light-theme snaps and the 1280x720 pair.
+          probe 120 "$BIN" --snap headless-out/snap-default-light.png --scene default-light --at 0 \
+            > headless-out/snap-default-light.log 2>&1
+          echo $? > headless-out/snap-default-light.exit
+          probe 120 "$BIN" --snap headless-out/snap-settings-open-light.png --scene settings-open-light --at 0 \
+            > headless-out/snap-settings-open-light.log 2>&1
+          echo $? > headless-out/snap-settings-open-light.exit
+          probe 120 "$BIN" --snap headless-out/snap-default-1280.png --scene default --at 0 --size 1280x720 \
+            > headless-out/snap-default-1280.log 2>&1
+          echo $? > headless-out/snap-default-1280.exit
+          probe 120 "$BIN" --snap headless-out/snap-default-light-1280.png --scene default-light --at 0 --size 1280x720 \
+            > headless-out/snap-default-light-1280.log 2>&1
+          echo $? > headless-out/snap-default-light-1280.exit
           if [ ! -f headless-out/snap-default.png ]; then
             probe 120 xvfb-run -a "$BIN" --snap headless-out/snap-default.png --scene default --at 0 \
               > headless-out/snap-default-xvfb.log 2>&1

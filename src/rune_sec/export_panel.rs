@@ -1517,11 +1517,11 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
                 .key("xc-recap")
                 .gap(8.0)
                 .center_y()
-                .child(icon_el_rgb(sev.icon(), 12.0, sev.icon_color()))
+                .child(icon_el_rgb(sev.icon(), 12.0, sev.icon_color(t)))
                 .child(
                     text(s.export_recap.clone())
                         .font(type_::LABEL)
-                        .color(sev.color()),
+                        .color(sev.color(t)),
                 ),
         );
     }

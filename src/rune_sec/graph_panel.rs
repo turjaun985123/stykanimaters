@@ -222,8 +222,8 @@
 //! Two decorative glyphs, both the catalogue's
 //! `chart-line`, drawn via [`icon_el`]: one leads the
 //! panel header (14 pt), one leads every channel-list
-//! row (12 pt), each in the muted palette hex
-//! [`GLYPH_MUTED`]. They are pure decoration — no key,
+//! row (12 pt), each in the muted palette tone
+//! [`glyph_muted`]. They are pure decoration — no key,
 //! no press, no state — so row keys (`graph-chan-{i}`),
 //! labels and handlers are byte-identical to before.
 //!
@@ -364,6 +364,7 @@ use stykanimate_rs::graph_panel::{preset_preview, GraphView};
 use stykanimate_rs::model::V2;
 
 use crate::chrome_view::{btn, danger_btn};
+use crate::rune_sec::app_theme;
 use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::icon_btn;
 use crate::rune_sec::icons::icon_el_rgb;
@@ -376,12 +377,27 @@ pub const GRAPH_H: f32 = 170.0;
 /// exists (the `Cx::layout_size` read settles after one frame,
 /// exactly as the stage's does).
 const FALLBACK_SIZE: [f32; 2] = [720.0, GRAPH_H];
-/// Muted hex for the decorative `chart-line` glyphs
+/// The decorative `chart-line` glyphs' muted tone
 /// (channel-list rows; the panel header's glyph moved
-/// to the kit title in Phase N) — the shell palette's
-/// muted-text token (#707B8C) in the `0xRRGGBB` form
-/// [`icon_el`] takes.
-const GLYPH_MUTED: u32 = 0x707B8C;
+/// to the kit title in Phase N), in the `0xRRGGBB` form
+/// [`icon_el_rgb`] takes: the shell's muted-text role
+/// ([`app_theme::muted_text`]) packed at the use site —
+/// `#737D8C` in dark, `text_secondary` mixed toward
+/// `bg` in light. (Before Wave 7 this was a private
+/// literal, `0x707B8C`: a pre-Wave-2 palette leftover
+/// that never quite matched the token it claimed to
+/// be.)
+fn glyph_muted(t: &Theme) -> u32 {
+    pack(app_theme::muted_text(t))
+}
+
+/// Pack a theme colour into the `0xRRGGBB` form the
+/// icon renderer takes (the `fig3_preview` precedent:
+/// via the colour's `#RRGGBBAA` hex string).
+fn pack(c: Color) -> u32 {
+    let hex = c.hex();
+    u32::from_str_radix(&hex[1..7], 16).unwrap_or(0)
+}
 /// Key-reduction tolerance, in channel value units (degrees
 /// for angle channels, stage units for root/length): interior
 /// keys whose removal moves the curve by at most this much are
@@ -1672,7 +1688,7 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                 .on_press(move |s: &mut State| {
                     select_channel(&mut s.core, &mut s.graph_panel, i);
                 })
-                .child(icon_el_rgb("chart-line", 12.0, GLYPH_MUTED))
+                .child(icon_el_rgb("chart-line", 12.0, glyph_muted(t)))
                 .child(text(label).font(type_::LABEL).color(t.text).grow(1.0))
                 .child(
                     text(if count == 1 {

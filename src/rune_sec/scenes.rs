@@ -96,6 +96,42 @@
 //! get `--snap` pixel proofs; `draw-open` gives the
 //! Draw workspace — the adoption wave's densest — its
 //! first scene at all.
+//!
+//! The UI mission Wave 7 scenes close the audits'
+//! theme/size coverage gap (S19 §6, S03 C2) as far as
+//! the scene mechanism reaches — and the boundary is
+//! worth recording exactly:
+//!
+//! - **Theme is state, so it is a scene.** The shell's
+//!   theme lives in the pub `EditorCore.light_theme`
+//!   field (`editor.rs:63`), and the settings card's
+//!   Theme buttons set it through
+//!   `settings_popover::set_theme` — so a scene flips
+//!   it through that very call. `default-light` and
+//!   `settings-open-light` are the two light scenes.
+//!   (In the running app `init()` seeds the field from
+//!   the layout prefs and `poll` persists flips back;
+//!   a scene runs after `init`, so its flip is what
+//!   the snap renders, and the headless probe wipes
+//!   `./projects` per run, so nothing leaks between
+//!   probes.)
+//! - **Window size is NOT state, so it cannot be a
+//!   scene.** A scene fn receives only `&mut State`
+//!   (tooling.rs:25, quoted above); the headless
+//!   runtime takes its viewport from the `--size WxH`
+//!   CLI flag, falling back to the AppSpec size —
+//!   `let size = args.size.unwrap_or(app.spec.size)`
+//!   (`crates/rune/src/tooling/headless.rs:81`; the
+//!   flag itself is `args.rs:139`) — and the spec size
+//!   is fixed at (1440, 900) in `main.rs`'s AppSpec
+//!   literal. No scene can reach it. The 1280×720
+//!   variants the audits ask for are therefore PROBE
+//!   PAIRINGS, not scenes: `--scene default --size
+//!   1280x720` (dark, minimum window) and `--scene
+//!   default-light --size 1280x720` (the combined
+//!   case). Wiring those invocations into the
+//!   headless workflow is an integrator step; the
+//!   scene half of each pairing exists in this table.
 
 use crate::State;
 
@@ -437,6 +473,44 @@ fn scene_draw_open(s: &mut State) {
     );
 }
 
+/// `"default-light"` — the default shell (the demo
+/// project exactly as `scene_default` leaves it) in
+/// the LIGHT theme, so a `--snap` gives the light
+/// shell its first pixel proof and a `--tree` dump
+/// proves the theme changes paint, not structure
+/// (fact 19). The flip is
+/// `settings_popover::set_theme` — the exact call
+/// the settings card's Light button makes — writing
+/// the core's real `light_theme` field; every themed
+/// surface downstream reads that field through
+/// `app_theme(!core.light_theme)` in `main.rs::view`.
+/// Nothing else is touched: no workspace switch, no
+/// selection, no prefs write (the scene runs after
+/// `init` seeded the field from the prefs, and its
+/// write is the one the snap renders).
+fn scene_default_light(s: &mut State) {
+    crate::rune_sec::settings_popover::set_theme(&mut s.core, true);
+}
+
+/// `"settings-open-light"` — the settings card
+/// expanded (as in `settings-open`) in the LIGHT
+/// theme: the shell's longest card is also its most
+/// token-dense surface (theme pills, the language
+/// grid, stage steppers, speed chips), so its light
+/// rendering is the strictest single-snap check the
+/// light theme gets (fact 20). Both halves go
+/// through the shell's own paths, in the order a
+/// user would reach them: the Theme flip through
+/// `settings_popover::set_theme` (the Light
+/// button's call), then the card flip through
+/// `settings_popover::toggle_open` (the
+/// settings-toggle button's handler) — from the
+/// fresh state (card closed) the toggle lands open.
+fn scene_settings_open_light(s: &mut State) {
+    crate::rune_sec::settings_popover::set_theme(&mut s.core, true);
+    crate::rune_sec::settings_popover::toggle_open(s);
+}
+
 /// The scene table for `AppSpec::scenes`, in `--list-scenes`
 /// display order. Element type is Rune's own, verbatim:
 /// `(&'static str, fn(&mut State))` (tooling.rs:25).
@@ -457,6 +531,8 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("menu-open", scene_menu_open),
         ("settings-open", scene_settings_open),
         ("draw-open", scene_draw_open),
+        ("default-light", scene_default_light),
+        ("settings-open-light", scene_settings_open_light),
     ]
 }
 
@@ -587,6 +663,25 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    fact 8's shape with the pair swapped: the Draw
 ///    gating mounted the drawing set and left the frame
 ///    tools out.
+/// 19. Under `--scene default-light` (UI mission
+///    Wave 7): the element inventory is IDENTICAL to
+///    the default tree's (facts 1–6, key for key) —
+///    the theme is a paint property of the same
+///    elements, never structure, so any key drift
+///    against `default` means a view started
+///    branching on the theme. The light rendering
+///    itself is a `--snap` fact, not a tree fact:
+///    the snap's background pixels sit in the light
+///    range (the light `bg` is `#EDF0F5`) where the
+///    default snap's sit in the dark range.
+/// 20. Under `--scene settings-open-light` (UI
+///    mission Wave 7): an element keyed
+///    `settings-card` exists — fact 17's key proof,
+///    under the light theme — and the rest of the
+///    inventory matches `--scene settings-open`'s.
+///    The card's light rendering (pills, language
+///    grid, chips on the light card surface) is a
+///    `--snap` fact.
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -607,6 +702,8 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene menu-open: an element keyed \"menu-file-dropdown\" exists, an element keyed \"menu-scrim\" exists and an element keyed \"export\" exists (the File dropdown, its scrim and its contents — see fact 16)",
         "under --scene settings-open: an element keyed \"settings-card\" exists (the expanded settings card; the \"settings\" shell exists under every scene — see fact 17)",
         "under --scene draw-open: an element keyed \"stroke-inspector\" exists and no element is keyed \"frames\" (the Draw set, with FrameOps gated out — see fact 18)",
+        "under --scene default-light: the element inventory is identical to the default tree's (theme is paint, not structure — see fact 19)",
+        "under --scene settings-open-light: an element keyed \"settings-card\" exists and the inventory matches settings-open's (see fact 20)",
 
     ]
 }
@@ -614,25 +711,27 @@ pub fn layout_assertions() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        scene_draw_open, scene_export_open, scene_fx_selected, scene_fx_split_mid,
-        scene_graph_duplicates, scene_loop_range, scene_menu_open, scene_palette_open,
-        scene_settings_open, scene_three_d, scene_three_d_stage, scenes,
+        scene_default_light, scene_draw_open, scene_export_open, scene_fx_selected,
+        scene_fx_split_mid, scene_graph_duplicates, scene_loop_range, scene_menu_open,
+        scene_palette_open, scene_settings_open, scene_settings_open_light,
+        scene_three_d, scene_three_d_stage, scenes,
     };
     use crate::init;
     use crate::rune_sec::workspaces::Workspace;
 
-    /// The scene table is the headless contract: fifteen
-    /// scenes, each name unique (a duplicate would shadow
-    /// the later entry in `with_scene`'s lookup), with the
-    /// Phase J scenes in their display positions, the two
-    /// Phase K scenes appended after them, the two Phase L
-    /// scenes appended after those, the Phase M scene
-    /// appended after them, and the four Phase N scenes
-    /// appended last.
+    /// The scene table is the headless contract:
+    /// seventeen scenes, each name unique (a duplicate
+    /// would shadow the later entry in `with_scene`'s
+    /// lookup), with the Phase J scenes in their display
+    /// positions, the two Phase K scenes appended after
+    /// them, the two Phase L scenes appended after those,
+    /// the Phase M scene appended after them, the four
+    /// Phase N scenes appended after those, and the two
+    /// UI-mission Wave 7 light scenes appended last.
     #[test]
-    fn scene_table_has_fifteen_uniquely_named_scenes() {
+    fn scene_table_has_seventeen_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 15, "fifteen scenes are registered");
+        assert_eq!(table.len(), 17, "seventeen scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -649,6 +748,8 @@ mod tests {
         assert_eq!(table[12].0, "menu-open");
         assert_eq!(table[13].0, "settings-open");
         assert_eq!(table[14].0, "draw-open");
+        assert_eq!(table[15].0, "default-light");
+        assert_eq!(table[16].0, "settings-open-light");
     }
 
     /// The export scene reaches the Export workspace through
@@ -913,5 +1014,43 @@ mod tests {
         let mut s = init();
         scene_draw_open(&mut s);
         assert_eq!(s.workspace, Workspace::Draw);
+    }
+
+    /// The default-light scene flips ONLY the theme,
+    /// through the settings card's own setter: after
+    /// it, the core's `light_theme` is set (whatever
+    /// `init` seeded from the layout prefs), and the
+    /// rest of the landing state is untouched — the
+    /// workspace stays whatever `init` produced it
+    /// as (the layout prefs may restore one; the
+    /// scene must not move it), frame 0, nothing
+    /// playing, the palette and settings card closed.
+    /// This is the state behind layout fact 19 (the
+    /// light tree's inventory equals the default's).
+    #[test]
+    fn default_light_scene_flips_only_the_theme() {
+        let mut s = init();
+        let workspace_before = s.workspace;
+        scene_default_light(&mut s);
+        assert!(s.core.light_theme, "the light theme is set");
+        assert_eq!(s.workspace, workspace_before, "the workspace is unmoved");
+        assert_eq!(s.core.current, 0, "the playhead stays on frame 0");
+        assert!(!s.core.playing, "playback stays stopped");
+        assert!(!s.palette.open, "the palette stays closed");
+        assert!(!s.settings.open, "the settings card stays closed");
+    }
+
+    /// The settings-open-light scene reaches the
+    /// settings card's own open state in the light
+    /// theme: both flips land — `light_theme` set and
+    /// `settings.open` set — the state behind layout
+    /// fact 20 (the card mounted, in light).
+    #[test]
+    fn settings_open_light_scene_opens_the_card_in_light() {
+        let mut s = init();
+        assert!(!s.settings.open, "the settings card starts closed");
+        scene_settings_open_light(&mut s);
+        assert!(s.core.light_theme, "the light theme is set");
+        assert!(s.settings.open, "the settings card is expanded");
     }
 }
