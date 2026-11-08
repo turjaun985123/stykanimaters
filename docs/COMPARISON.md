@@ -12,11 +12,11 @@ comparison + addenda documents.
 |---|---|---|
 | Version | 1.2.5 | 0.1.0 |
 | Runtime | Electron + WebGPU app, Python codec backend | One native binary: Rust + GPUI 0.2.2 |
-| Application code | 103,549 lines JS in 535 modules under `src/` (excluding `src/locales`) | 52,096 lines Rust: 32 core modules + 2 binaries + a dedicated UI library |
+| Application code | 103,549 lines JS in 535 modules under `src/` (excluding `src/locales`) | 56,059 lines Rust: 32 core modules + 2 binaries + a dedicated UI library |
 | UI code | Inside the JS total | `src/ui/`: **39 components, 5,900+ lines**, all presentation-only builders over plain data |
 | Generated code | 179,460-line compiled locale bundle (`locale-packs.mjs`) | none |
 | Backend/codecs | 12,987 lines Python (`codecs/` + `backend/`) | included in the Rust total (`pivot.rs`, `nodes.rs`, `nodes_anim.rs` ≈ 8,400 lines) |
-| Tests | 876 files in `tests/` (fixtures + suites) | 779 tests CI-verified green at Wave 12 (`0139fa0`), including byte-determinism integration tests for frame renders, GIF, SVG, spritesheet, PNG-sequence, contact-sheet, APNG and JPEG-sequence exports + a cross-format fixture corpus with manifest |
+| Tests | 876 files in `tests/` (fixtures + suites) | 866 tests CI-verified green at Wave 13 (`4adfc85`), including byte-determinism integration tests for frame renders (incl. a rich storm + FX + spray project), GIF, SVG, spritesheet, PNG-sequence, contact-sheet, APNG and JPEG-sequence exports + a cross-format fixture corpus with manifest (now incl. a text-bearing v5 file written by the original's own writer) |
 | UI languages | 27 | 28 (the same 27 + Bengali), 62 keys |
 | Licence | GPL-3.0-or-later | GPL-3.0-or-later |
 
@@ -42,7 +42,7 @@ comparison + addenda documents.
 | Touch | Full touch UI | Recogniser + pinch engine wired through a single `touch::feed` adapter. Real multi-touch is **impossible on this platform**: GPUI 0.2.2's Linux input has no touch events at all (proven from the vendored crate source, `docs/TOUCH.md`), so a touchscreen arrives as one emulated mouse pointer | Original deeper (platform-blocked) |
 | Home / library / projects | Full | Home panel with project statistics grid + per-figure keyframe sparkline, recents, recovery snapshots, autosave every 25 edits, figure library | Near-equal |
 | App shell + UI | Native dialogs, full shell | Native open/save dialogs via zenity/kdialog with the folder flow as fallback, recovery, stage-size controls — and component-built chrome: app bar, labelled tool groups, 11 toggleable panels, dopesheet + timeline ruler + scrubber, export centre with category tabs, segmented weather control, inspector gauges, toast stack, HUD strip. The GUI has been seen running on a real Linux desktop (user screenshot, 2026-11-08); the *redesigned* chrome has not yet been screenshot-verified | Near-equal |
-| AI-agent control (MCP) | None | **Full MCP server: 62 tools** — build, pose, draw (incl. polygon/star shape tools), decorate, manage FX clips (all 27 kinds) and FX presets, mirror poses, smooth, bake and preset graph tangents, set clip loop modes, run 3D sessions, author movieclips, set per-frame bends, project statistics, bulk frame durations, render (incl. contact sheets), import/export (incl. .piv v2/v4, .nodes, .stknds, MP4/WebM frame ranges), frame inspection as base64 PNG | Port only |
+| AI-agent control (MCP) | None | **Full MCP server: 65 tools** — build, pose, draw (incl. polygon/star shape tools), decorate, manage FX clips (all 27 kinds) and FX presets, mirror poses, smooth, bake and preset graph tangents, set clip loop modes, run 3D sessions, author movieclips, set per-frame bends, project statistics, bulk frame durations, render (incl. contact sheets), import/export (incl. .piv v2/v4, .nodes, .stknds, MP4/WebM frame ranges), frame inspection as base64 PNG | Port only |
 | Localisation | 27 languages, human-maintained | 28 languages (same set + Bengali), machine-produced strings; the 12 newest keys are now genuinely translated in all 28 languages (a few values are established loanwords, e.g. "Easing") | Port wider, original more polished |
 
 ## Formats — the port's strongest area
@@ -50,7 +50,7 @@ comparison + addenda documents.
 | Format | Original | Port import | Port export |
 |---|---|---|---|
 | .piv v2 / v3 / v4 | native | Yes | Yes — v2, v3 and v4 (v2/v4 with documented losses: media segments written as plain segments; v4 also drops camera keys, joins and bends) |
-| .piv v5 | native | Yes — full grammar incl. image/text side tables | Yes — incl. per-frame lengths (from graph Length channels), image side tables and per-frame bends (from `Frame.bends`); the original's own decoder consumes our files exactly, media fixture included. Text side tables are the one unwritable piece: the model carries a bitmap font, not glyph outlines |
+| .piv v5 | native | Yes — full grammar incl. image/text side tables | Yes — incl. per-frame lengths (from graph Length channels), image side tables, per-frame bends (from `Frame.bends`) and — since Wave 13 — text side tables: the bitmap font's lit pixels are written as square glyph outlines in the format's own encoding and text is recovered on import (machine cross-verified with the original's codecs). The glyphs are blocky bitmap shapes, not font outlines |
 | .stk | native | Yes | Yes |
 | Stick Nodes .nodes | native | Yes — 57-field record grammar, verified against their decoder + real corpus fixture | Yes — figure export (documented losses: thickness rounded to i32; node names, taper/cap/opacity and media dropped — gradient end colour round-trips both ways since Wave 10) |
 | Stick Nodes .nodemc / .stknds | native | Yes — modelled subset (sprites/texts as keyframed tracks, joins baked at import) | Yes — .stknds writer (plain posed figures; camera zoom/x/y/rotation round-trips since Wave 11; joins, clip library, sounds and FX dropped) |
@@ -101,9 +101,10 @@ original has a working counterpart in the port. What remains:
    sounds and FX (camera zoom/x/y/rotation round-trips since
    Wave 11; only bindings and procedural wobble stay unmodelled,
    as upstream).
-4. **.piv v5 text side tables** cannot be written from the port's
-   model (bitmap font, no glyph outlines) — a model change, not a
-   writer change, would be needed.
+4. **.piv v5 text fidelity** — text tables are written and
+   recovered since Wave 13, but the glyphs are the port's bitmap
+   shapes; real font-outline fidelity would need a vector font
+   in the model.
 5. **Real multi-touch** is blocked by GPUI 0.2.2 itself (no touch
    events in its Linux input layer). The recogniser, pinch camera
    and feed adapter are built and tested; they wait on a GPUI
@@ -151,6 +152,13 @@ presets, audio pitch shift + compressor, graph tangent
 presets, MP4/WebM frame-range exports, a 3D pose library and
 a full two-bone 3D IK solver (after the missing matrix→Euler
 extraction was built), MCP at 62 tools, and determinism proof
-for APNG + JPEG exports. The suite's
-last fully verified state is 779 tests green in GitHub Actions
+for APNG + JPEG exports. Wave 13 then closed both remaining
+named limits: spray strokes render as dots end to end (model,
+editor, rasterizer, SVG, canvas), and .piv v5 text side tables
+are written from the bitmap font and recovered on import,
+cross-verified with the original's codecs; it also added clip
+colour gradients, per-clip audio gain, split-at-silences,
+graph time-mirroring, MCP at 65 tools, and APNG/JPEG frame
+ranges. The suite's
+last fully verified state is 866 tests green in GitHub Actions
 CI; per the repo's AGENTS.md, CI is the only build environment.

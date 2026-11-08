@@ -469,7 +469,7 @@ Nothing in this section is CI-verified yet; statuses move to
 the per-wave tables above once the run is green, and
 docs/COMPARISON.md is refreshed after that run.
 
-## Wave 13 (in progress, 2026-11-08)
+## Wave 13 (delivered 2026-11-08, CI run 42445415171 green on 4adfc85, 866 tests)
 
 Twenty code agents, aimed at the loose ends earlier waves
 left documented — the spray render wiring, backend features
