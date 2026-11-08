@@ -442,7 +442,8 @@ pub fn display_commands(query: &str, recent: &[&'static str]) -> (Vec<usize>, us
         }
     }
     rows.truncate(MAX_RESULTS);
-    (rows, recent_rows.min(rows.len()))
+    let recent_rows = recent_rows.min(rows.len());
+    (rows, recent_rows)
 }
 
 /// How many rows the palette currently lists for `s`

@@ -231,9 +231,9 @@ pub fn duplicate_clip(core: &mut EditorCore, clip_idx: usize) -> Option<usize> {
         core.status = "No such clip.".into();
         return None;
     };
-    core.snapshot();
     let mut copy = clip.clone();
     copy.name = format!("{} copy", copy.name);
+    core.snapshot();
     core.project.clips.push(copy);
     let new_index = core.project.clips.len() - 1;
     core.status = format!(
