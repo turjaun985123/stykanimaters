@@ -40,6 +40,11 @@
 //! is set explicitly. `delete_figure` (editor.rs) wires the
 //! removal helper with a one-line call — see
 //! [`remap_figures_after_remove`].
+//!
+//! Reordering is covered by [`remap_figures_after_move`] and
+//! its per-index core [`remap_index_after_move`]: a move
+//! drops nothing, so every reference simply travels with
+//! its figure to the figure's new index.
 
 use crate::editor::EditorCore;
 use crate::model::{Pose, Project};
@@ -130,6 +135,79 @@ pub fn remap_figures_after_remove(project: &mut Project, removed: usize) {
         Some(f) if f == removed => project.camera_follow = None,
         Some(f) if f > removed => project.camera_follow = Some(f - 1),
         _ => {}
+    }
+}
+
+/// The figure index a stored reference takes after the
+/// figure at `from` is moved to `to` — the permutation a
+/// remove-at-`from`, insert-at-`to` reorder applies to the
+/// figures vec. A reference to the moved figure becomes
+/// `to`; references strictly between `from` and `to` shift
+/// by one toward `from` (those figures slide into the
+/// vacated slot); every other reference is unchanged. An
+/// adjacent swap is this same permutation with
+/// `to == from ± 1`, so callers that swap neighbours use it
+/// too. This is the same mapping `layers::remapped_index`
+/// applies inside `layers::move_figure`, kept here so the
+/// session state below and the project pass share one
+/// definition.
+///
+/// Editor session state that stores a figure index —
+/// `EditorCore::solo`, and a selection an op does not set
+/// explicitly — is remapped by applying this fn to the
+/// stored value; it takes plain indices because that state
+/// lives on `EditorCore`, not on `Project`.
+pub fn remap_index_after_move(index: usize, from: usize, to: usize) -> usize {
+    if index == from {
+        to
+    } else if from < to && index > from && index <= to {
+        index - 1
+    } else if to < from && index >= to && index < from {
+        index + 1
+    } else {
+        index
+    }
+}
+
+/// Remap every stored figure index in `project` after the
+/// figure at `from` was moved to `to` (the caller performs
+/// the reorder itself — figures vec plus the parallel
+/// per-frame pose/bend rows — this pass only fixes the
+/// references). Unlike removal, nothing is dropped: every
+/// anchor keeps its figure, just at the figure's new index,
+/// via [`remap_index_after_move`]. `from == to` and indices
+/// outside the figures vec are no-ops, mirroring the move
+/// itself being refused there.
+///
+/// Integrator note: `EditorCore::move_figure` (editor.rs),
+/// which currently swaps the figures/poses and remaps
+/// nothing, gains the full remap with one call after its
+/// swap — `crate::figure_ops::remap_figures_after_move(&mut
+/// self.project, fi, target);` — plus the session fix-up
+/// `if let Some(s) = self.solo { self.solo =
+/// Some(crate::figure_ops::remap_index_after_move(s, fi,
+/// target)); }` (its `selected_figure` is already assigned
+/// `target` directly). `layers::move_figure` already
+/// applies the same permutation internally, so
+/// `move_figure_full` needs no change.
+pub fn remap_figures_after_move(project: &mut Project, from: usize, to: usize) {
+    let n = project.figures.len();
+    if from == to || from >= n || to >= n {
+        return;
+    }
+    for e in &mut project.particles {
+        if let Some(f) = e.figure {
+            e.figure = Some(remap_index_after_move(f, from, to));
+        }
+    }
+    for entry in &mut project.fx_clips {
+        entry.figure = remap_index_after_move(entry.figure, from, to);
+    }
+    for ch in &mut project.channels {
+        ch.figure = remap_index_after_move(ch.figure, from, to);
+    }
+    if let Some(f) = project.camera_follow {
+        project.camera_follow = Some(remap_index_after_move(f, from, to));
     }
 }
 
@@ -417,5 +495,150 @@ mod tests {
         assert_eq!(core.project.particles[1].figure, Some(0));
         assert_eq!(core.project.particles[2].figure, None);
         assert_eq!(core.solo, Some(2));
+    }
+
+    #[test]
+    fn remap_index_after_move_matches_the_move_permutation() {
+        // Move 1 -> 3 in a five-figure project: the moved
+        // figure lands at 3, figures 2 and 3 slide down one.
+        let fwd: Vec<usize> = (0..5).map(|i| remap_index_after_move(i, 1, 3)).collect();
+        assert_eq!(fwd, vec![0, 3, 1, 2, 4]);
+        // The inverse move undoes it exactly.
+        let back: Vec<usize> = fwd
+            .iter()
+            .map(|&i| remap_index_after_move(i, 3, 1))
+            .collect();
+        assert_eq!(back, vec![0, 1, 2, 3, 4]);
+        // Adjacent swap: only the two neighbours exchange.
+        let swap: Vec<usize> = (0..4).map(|i| remap_index_after_move(i, 2, 3)).collect();
+        assert_eq!(swap, vec![0, 1, 3, 2]);
+        // from == to is the identity, and a reference outside
+        // the moved span is untouched either way.
+        assert_eq!(remap_index_after_move(2, 2, 2), 2);
+        assert_eq!(remap_index_after_move(9, 1, 3), 9);
+        assert_eq!(remap_index_after_move(0, 1, 3), 0);
+    }
+
+    /// A four-figure project whose figures carry distinct
+    /// names, with every census field referencing figures
+    /// across the whole range (plus one unanchored particle),
+    /// and frames whose poses are distinct per figure so any
+    /// accidental frame write shows up in a snapshot compare.
+    fn named_project() -> Project {
+        let mut project = Project::new_demo();
+        let proto = project.figures[0].clone();
+        project.figures = ["alpha", "bravo", "charlie", "delta"]
+            .iter()
+            .map(|name| {
+                let mut fig = proto.clone();
+                fig.name = (*name).into();
+                fig
+            })
+            .collect();
+        for (fr, frame) in project.frames.iter_mut().enumerate() {
+            frame.poses = (0..4)
+                .map(|i| Pose {
+                    root: [i as f32 * 10.0, fr as f32],
+                    angles: vec![i as f32 + 0.5],
+                })
+                .collect();
+        }
+        project.particles = vec![
+            particle(Some(0)),
+            particle(Some(1)),
+            particle(Some(2)),
+            particle(Some(3)),
+            particle(None),
+        ];
+        project.fx_clips = vec![fx_entry(3), fx_entry(0), fx_entry(2), fx_entry(1)];
+        project.channels = vec![channel(1), channel(3), channel(0), channel(2)];
+        project.camera_follow = Some(2);
+        project
+    }
+
+    /// The NAME each stored reference resolves to, in field
+    /// order — identity, not indices, so a test can prove a
+    /// reference still names the same figure after a move.
+    fn ref_names(
+        project: &Project,
+    ) -> (
+        Vec<Option<String>>,
+        Vec<String>,
+        Vec<String>,
+        Option<String>,
+    ) {
+        let name = |f: usize| project.figures[f].name.clone();
+        (
+            project
+                .particles
+                .iter()
+                .map(|e| e.figure.map(&name))
+                .collect(),
+            project.fx_clips.iter().map(|e| name(e.figure)).collect(),
+            project.channels.iter().map(|c| name(c.figure)).collect(),
+            project.camera_follow.map(&name),
+        )
+    }
+
+    /// (root, angles) of every pose in every frame.
+    fn frame_snapshot(project: &Project) -> Vec<Vec<([f32; 2], Vec<f32>)>> {
+        project
+            .frames
+            .iter()
+            .map(|f| f.poses.iter().map(|p| (p.root, p.angles.clone())).collect())
+            .collect()
+    }
+
+    #[test]
+    fn remap_after_move_keeps_every_reference_on_its_figure() {
+        // first->last, last->first, middle->middle, and both
+        // directions of an adjacent swap.
+        for (from, to) in [(0, 3), (3, 0), (1, 2), (2, 1), (2, 3)] {
+            let mut project = named_project();
+            let before = ref_names(&project);
+            let frames_before = frame_snapshot(&project);
+            // The caller's half of a move: reorder the
+            // figures vec; the helper fixes the references.
+            let fig = project.figures.remove(from);
+            project.figures.insert(to, fig);
+            remap_figures_after_move(&mut project, from, to);
+            assert_eq!(
+                ref_names(&project),
+                before,
+                "move {from} -> {to} must keep every reference on its figure"
+            );
+            assert_eq!(
+                frame_snapshot(&project),
+                frames_before,
+                "the remap pass must not touch frame data"
+            );
+        }
+        // The simulation itself: moving 0 -> 3 rotates the
+        // vec, it does not swap the ends.
+        let mut project = named_project();
+        let fig = project.figures.remove(0);
+        project.figures.insert(3, fig);
+        let order: Vec<&str> = project.figures.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(order, vec!["bravo", "charlie", "delta", "alpha"]);
+    }
+
+    #[test]
+    fn remap_after_move_no_ops_leave_references_untouched() {
+        let raw_refs = |p: &Project| {
+            (
+                p.particles.iter().map(|e| e.figure).collect::<Vec<_>>(),
+                p.fx_clips.iter().map(|e| e.figure).collect::<Vec<_>>(),
+                p.channels.iter().map(|c| c.figure).collect::<Vec<_>>(),
+                p.camera_follow,
+            )
+        };
+        // from == to, target out of range, source out of
+        // range: the raw indices must be byte-identical.
+        for (from, to) in [(1, 1), (0, 9), (9, 0), (4, 4)] {
+            let mut project = named_project();
+            let before = raw_refs(&project);
+            remap_figures_after_move(&mut project, from, to);
+            assert_eq!(raw_refs(&project), before, "move {from} -> {to} is a no-op");
+        }
     }
 }

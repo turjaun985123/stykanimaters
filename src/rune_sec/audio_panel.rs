@@ -6,9 +6,23 @@
 //! The panel is the Rune form of the GPUI app's `audio_panel`:
 //! a summary line, one row per clip (name, start frame,
 //! per-clip gain, per-clip ops incl. Delete), an operations
-//! toolbar acting on the LAST clip (effects, Fade, Reverse,
-//! a gain stepper, Earlier/Later move, Mixdown), and an
-//! add-clip row with a file-name entry.
+//! toolbar, and an add-clip row with a file-name entry.
+//!
+//! Phase G (this section) gives the panel a per-clip
+//! SELECTION: pressing a clip row selects it
+//! (`AudioPanelState::selected`, the `fx_clips` row pattern),
+//! and the operations toolbar — Fade, Reverse, the gain
+//! stepper, Earlier/Later, Normalise — aims at the selected
+//! clip through the indexed `audio_ops` variants
+//! (`audio_fade_at`, `audio_reverse_at`,
+//! `audio_clip_gain_step_at`, `audio_move_at`). With no live
+//! selection the toolbar falls back to the LAST clip, the
+//! pre-Phase-G behaviour, and the line under "Operations"
+//! says which clip is targeted. (The row Delete and the
+//! other per-row ops were always index-based; the remaining
+//! toolbar effects — Echo, Lowpass, Trim silence, Split
+//! silences, Pitch, Compress — still act on the last clip:
+//! no indexed variants of those `editor.rs` ops exist.)
 //!
 //! Every control calls a real `EditorCore` op (evidence in
 //! the handler comments). Phase E closed the gaps Phase D
@@ -43,12 +57,19 @@ pub struct AudioPanelState {
     /// "let `EditorCore::add_audio_clip` pick the first
     /// audio file in `./audio/`", exactly its own behaviour.
     pub name: TextEdit,
+    /// Phase G: the clip row the user last pressed, if any
+    /// — the operations toolbar's target. `None` (or a
+    /// stale index after the project shrank) means the
+    /// toolbar falls back to the last clip; see
+    /// `effective_target`.
+    pub selected: Option<usize>,
 }
 
 impl AudioPanelState {
     pub fn new() -> Self {
         AudioPanelState {
             name: TextEdit::new(""),
+            selected: None,
         }
     }
 }
@@ -104,6 +125,92 @@ pub fn gain_readout(clips: &[AudioClip]) -> String {
     }
 }
 
+/// Phase G: whether `selected` still names a clip — the
+/// selection is LIVE only while its index is in range. A
+/// selection left over from a longer project (the project
+/// shrank under it) is stale and behaves as no selection.
+pub fn selection_is_live(selected: Option<usize>, clip_count: usize) -> bool {
+    selected.is_some_and(|i| i < clip_count)
+}
+
+/// Phase G: the clip index the operations toolbar acts
+/// on: the selected clip when the selection is live,
+/// otherwise the LAST clip (the pre-Phase-G behaviour).
+/// `None` only when the project has no clips at all.
+pub fn effective_target(selected: Option<usize>, clip_count: usize) -> Option<usize> {
+    if selection_is_live(selected, clip_count) {
+        selected
+    } else {
+        clip_count.checked_sub(1)
+    }
+}
+
+/// The gain the toolbar stepper acts on now: the
+/// effective target's gain (see `effective_target`), or
+/// `None` when the project has no clips.
+pub fn target_gain(clips: &[AudioClip], selected: Option<usize>) -> Option<f32> {
+    effective_target(selected, clips.len()).map(|i| clips[i].gain)
+}
+
+/// The gain stepper's readout for the current target:
+/// `"Gain 1.10"` for the target clip's gain, `"Gain —"`
+/// when there are no clips.
+pub fn target_gain_readout(clips: &[AudioClip], selected: Option<usize>) -> String {
+    match target_gain(clips, selected) {
+        Some(gain) => format!("Gain {gain:.2}"),
+        None => "Gain —".to_string(),
+    }
+}
+
+/// The line under "Operations" naming the toolbar's
+/// target: the clip's name when a live selection aims
+/// the toolbar, an explicit "last clip" wording when the
+/// fallback is in effect, and a no-clips wording when
+/// there is nothing to aim at.
+pub fn target_line(clips: &[AudioClip], selected: Option<usize>) -> String {
+    let count = clips.len();
+    match effective_target(selected, count) {
+        None => "Target: none — no audio clips".to_string(),
+        Some(i) if selection_is_live(selected, count) => format!(
+            "Target: {} (clip {} of {})",
+            clip_display_name(&clips[i].path),
+            i + 1,
+            count
+        ),
+        Some(i) => format!(
+            "Target: last clip — {} (clip {} of {})",
+            clip_display_name(&clips[i].path),
+            i + 1,
+            count
+        ),
+    }
+}
+
+/// Repair a selection after clip `deleted` was removed
+/// and `len_after` clips remain (the `fx_clips`
+/// `selection_after_delete` rule, mirrored): before the
+/// gap keeps its index, after the gap shifts down one,
+/// the deleted clip itself lands on the clip that slid
+/// into its slot (or the new last clip), and an empty
+/// list clears the selection.
+pub fn selection_after_delete(
+    selected: Option<usize>,
+    deleted: usize,
+    len_after: usize,
+) -> Option<usize> {
+    let sel = selected?;
+    if len_after == 0 {
+        return None;
+    }
+    if sel < deleted {
+        Some(sel)
+    } else if sel > deleted {
+        Some(sel - 1)
+    } else {
+        Some(deleted.min(len_after - 1))
+    }
+}
+
 /// One clip row's label: `{name} · f{start+1}` plus the
 /// gain suffix when non-unity (the GPUI row format).
 pub fn clip_row_label(clip: &AudioClip) -> String {
@@ -113,6 +220,17 @@ pub fn clip_row_label(clip: &AudioClip) -> String {
         clip.start_frame + 1,
         gain_suffix(clip.gain)
     )
+}
+
+/// `" · {d:.1} s"` — the clip's duration — when its file
+/// reads back as WAV, `""` when it does not (the row then
+/// shows name + start only). Reads the filesystem, like
+/// `summary_line` does.
+pub fn clip_duration_suffix(clip: &AudioClip) -> String {
+    match audio_edit::read_wav(&clip.path) {
+        Ok(wav) => format!(" · {:.1} s", wav.duration_secs()),
+        Err(_) => String::new(),
+    }
 }
 
 /// The summary line's wording. `total_secs` is `Some` when
@@ -188,14 +306,81 @@ fn submit_audio_name(s: &mut State, _tx: &mut Tx) {
     add_clip(s);
 }
 
-/// `EditorCore::audio_normalize` on the last clip (the op
-/// is index-based, `editor.rs:2641`); no-op when the
-/// project has no clips — the last-clip effect buttons
-/// below report that case through their own status text.
-fn normalize_last(s: &mut State) {
-    if let Some(i) = s.core.project.audio.len().checked_sub(1) {
+/// The panel selection as a live clip index: `Some`
+/// only while `AudioPanelState::selected` names an
+/// existing clip (see `selection_is_live`).
+fn live_target(s: &State) -> Option<usize> {
+    let count = s.core.project.audio.len();
+    if selection_is_live(s.audio_panel.selected, count) {
+        s.audio_panel.selected
+    } else {
+        None
+    }
+}
+
+/// `EditorCore::audio_normalize` on the toolbar's target
+/// clip (the op is index-based, `editor.rs:2743`): the
+/// selected clip when the selection is live, the last
+/// clip otherwise (Phase G; previously always the last).
+/// No-op when the project has no clips.
+fn normalize_target(s: &mut State) {
+    if let Some(i) = effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
         s.core.audio_normalize(i);
     }
+}
+
+/// Fade the target clip: the indexed op when a clip is
+/// selected, the `_last` op otherwise (which also covers
+/// the no-clips status line). DEPENDENCY (Phase G): calls
+/// `EditorCore::audio_fade_at` from the parallel
+/// `audio_ops` section — until that lands this file does
+/// not compile, by design.
+fn fade_target(s: &mut State) {
+    match live_target(s) {
+        Some(i) => s.core.audio_fade_at(i),
+        None => s.core.audio_fade_last(),
+    }
+}
+
+/// Reverse the target clip; same dispatch as
+/// `fade_target`. Calls `EditorCore::audio_reverse_at`
+/// (Phase G `audio_ops` dependency, as above).
+fn reverse_target(s: &mut State) {
+    match live_target(s) {
+        Some(i) => s.core.audio_reverse_at(i),
+        None => s.core.audio_reverse_last(),
+    }
+}
+
+/// Step the target clip's gain by `delta`; same dispatch
+/// as `fade_target`. Calls
+/// `EditorCore::audio_clip_gain_step_at` (Phase G
+/// `audio_ops` dependency, as above).
+fn gain_step_target(s: &mut State, delta: f32) {
+    match live_target(s) {
+        Some(i) => s.core.audio_clip_gain_step_at(i, delta),
+        None => s.core.audio_clip_gain_step(delta),
+    }
+}
+
+/// Move the target clip by `delta_frames`; same dispatch
+/// as `fade_target`. Calls `EditorCore::audio_move_at`
+/// (Phase G `audio_ops` dependency, as above).
+fn move_target(s: &mut State, delta_frames: i32) {
+    match live_target(s) {
+        Some(i) => s.core.audio_move_at(i, delta_frames),
+        None => s.core.audio_move_last(delta_frames),
+    }
+}
+
+/// A clip row's Delete: the (already index-based)
+/// `EditorCore::delete_audio_clip`, then the selection is
+/// repaired so it keeps naming the same clip where it can
+/// (see `selection_after_delete`).
+fn delete_row_clip(s: &mut State, i: usize) {
+    s.core.delete_audio_clip(i);
+    let len_after = s.core.project.audio.len();
+    s.audio_panel.selected = selection_after_delete(s.audio_panel.selected, i, len_after);
 }
 
 // ---- View ----
@@ -203,14 +388,18 @@ fn normalize_last(s: &mut State) {
 /// The audio panel: header + summary, clip rows with the
 /// per-clip ops the engine defines by index (Normalise,
 /// Split at the current frame, Crossfade into the next
-/// clip, Delete), the last-clip operations toolbar, and
-/// the add-clip row. Element keys reuse the GPUI control
-/// ids where they existed; the Phase E keys (`audio-fade`,
-/// `audio-reverse`, `audio-gain-*`, `audio-move-*`,
-/// `audio-del-{i}`) are new.
+/// clip, Delete), the operations toolbar (Phase G: aimed
+/// at the selected clip row, falling back to the last
+/// clip), and the add-clip row. Element keys reuse the
+/// GPUI control ids where they existed; the Phase E keys
+/// (`audio-fade`, `audio-reverse`, `audio-gain-*`,
+/// `audio-move-*`, `audio-del-{i}`) are new; Phase G adds
+/// no keys — row selection rides the existing
+/// `audio-clip-{i}` row keys.
 pub fn audio_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let clips = &core.project.audio;
+    let selected = s.audio_panel.selected;
 
     let mut panel = col()
         .key("audio-panel")
@@ -243,16 +432,39 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
         );
         panel = panel.child(text("Clips").font(type_::LABEL).color(t.text_secondary));
         for (i, clip) in clips.iter().enumerate() {
+            // Phase G: a row press selects the clip for the
+            // operations toolbar (the `fx_clips` lane
+            // pattern — the row carries the fill, the inner
+            // buttons stay the press targets inside their
+            // own boxes); the selected row is filled with
+            // the control-track colour.
+            let is_selected = selected == Some(i);
             let mut clip_row = row()
                 .key(format!("audio-clip-{i}"))
                 .w_full()
                 .center_y()
                 .gap(6.0)
+                .px(8.0)
+                .py(5.0)
+                .radius(6.0)
+                .fill(if is_selected { t.control_track } else { t.card })
+                .hover(if is_selected {
+                    t.control_track
+                } else {
+                    t.control_off
+                })
+                .on_press(move |s: &mut State| {
+                    s.audio_panel.selected = Some(i);
+                })
                 .child(
-                    text(clip_row_label(clip))
-                        .font(type_::BODY)
-                        .color(t.text)
-                        .grow(1.0),
+                    text(format!(
+                        "{}{}",
+                        clip_row_label(clip),
+                        clip_duration_suffix(clip)
+                    ))
+                    .font(type_::BODY)
+                    .color(t.text)
+                    .grow(1.0),
                 )
                 .child(btn(&format!("audio-norm-{i}"), "Norm", false, t, move |s| {
                     s.core.audio_normalize(i)
@@ -281,27 +493,34 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 "Delete",
                 false,
                 t,
-                move |s| { s.core.delete_audio_clip(i); },
+                move |s| delete_row_clip(s, i),
             ));
             panel = panel.child(clip_row);
         }
     }
 
-    // Operations on the LAST clip — the engine's `_last`
-    // effect ops, plus index-based Normalise aimed at the
-    // last clip and the whole-project Mixdown. Phase E
-    // added the materialising ops from `audio_ops.rs`:
-    // Fade and Reverse (DSP on the last clip), the gain
-    // stepper (`audio_clip_gain_step`, ±0.1 per press, with
-    // the live `gain_readout` between the steppers), and
-    // Earlier/Later (`audio_move_last`, one slot per press).
+    // Operations toolbar. Phase G aims Fade, Reverse,
+    // the gain stepper, Earlier/Later and Normalise at
+    // the SELECTED clip (the indexed `audio_ops` variants,
+    // dispatched by the `*_target` handlers), falling back
+    // to the last clip when nothing is selected — the
+    // target line under the header says which. The
+    // remaining effects (Echo, Lowpass, Trim silence,
+    // Split silences, Pitch, Compress) are still the
+    // engine's `_last` ops: no indexed variants exist.
+    // Mixdown is whole-project.
     panel = panel.child(text("Operations").font(type_::LABEL).color(t.text_secondary));
+    panel = panel.child(
+        text(target_line(clips, selected))
+            .font(type_::LABEL)
+            .color(t.text_secondary),
+    );
     panel = panel.child(
         row()
             .key("audio-ops")
             .gap(6.0)
             .center_y()
-            .child(btn("audio-norm-last", "Normalise", false, t, normalize_last))
+            .child(btn("audio-norm-last", "Normalise", false, t, normalize_target))
             .child(btn("audio-echo", "Echo", false, t, |s| {
                 s.core.audio_echo_last()
             }))
@@ -320,28 +539,24 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             .child(btn("audio-comp", "Compress", false, t, |s| {
                 s.core.audio_compress_last()
             }))
-            .child(btn("audio-fade", "Fade", false, t, |s| {
-                s.core.audio_fade_last();
-            }))
-            .child(btn("audio-reverse", "Reverse", false, t, |s| {
-                s.core.audio_reverse_last();
-            }))
+            .child(btn("audio-fade", "Fade", false, t, fade_target))
+            .child(btn("audio-reverse", "Reverse", false, t, reverse_target))
             .child(btn("audio-gain-dn", "Gain -", false, t, |s| {
-                s.core.audio_clip_gain_step(-0.1);
+                gain_step_target(s, -0.1);
             }))
             .child(
-                text(gain_readout(clips))
+                text(target_gain_readout(clips, selected))
                     .font(type_::LABEL)
                     .color(t.text_secondary),
             )
             .child(btn("audio-gain-up", "Gain +", false, t, |s| {
-                s.core.audio_clip_gain_step(0.1);
+                gain_step_target(s, 0.1);
             }))
             .child(btn("audio-move-earlier", "Earlier", false, t, |s| {
-                s.core.audio_move_last(-1);
+                move_target(s, -1);
             }))
             .child(btn("audio-move-later", "Later", false, t, |s| {
-                s.core.audio_move_last(1);
+                move_target(s, 1);
             }))
             .child(btn("mixdown", "Mixdown", false, t, |s| {
                 s.core.mixdown_audio()
@@ -394,6 +609,122 @@ mod tests {
     fn panel_state_starts_with_an_empty_name() {
         assert_eq!(AudioPanelState::new().name.text, "");
         assert_eq!(AudioPanelState::default().name.text, "");
+        // Phase G: nothing is selected until a row is
+        // pressed, in both constructors.
+        assert_eq!(AudioPanelState::new().selected, None);
+        assert_eq!(AudioPanelState::default().selected, None);
+    }
+
+    #[test]
+    fn effective_target_prefers_a_live_selection() {
+        // Valid selections name themselves.
+        assert_eq!(effective_target(Some(0), 3), Some(0));
+        assert_eq!(effective_target(Some(1), 3), Some(1));
+        assert_eq!(effective_target(Some(2), 3), Some(2));
+    }
+
+    #[test]
+    fn effective_target_falls_back_to_the_last_clip() {
+        // Nothing selected: the last clip (pre-Phase-G
+        // behaviour).
+        assert_eq!(effective_target(None, 3), Some(2));
+        assert_eq!(effective_target(None, 1), Some(0));
+        // A stale selection (the project shrank under it)
+        // behaves as no selection.
+        assert_eq!(effective_target(Some(3), 3), Some(2));
+        assert_eq!(effective_target(Some(9), 1), Some(0));
+    }
+
+    #[test]
+    fn effective_target_is_none_for_an_empty_project() {
+        assert_eq!(effective_target(None, 0), None);
+        assert_eq!(effective_target(Some(0), 0), None);
+        assert_eq!(effective_target(Some(4), 0), None);
+    }
+
+    #[test]
+    fn selection_is_live_only_while_in_range() {
+        assert!(!selection_is_live(None, 3));
+        assert!(selection_is_live(Some(0), 3));
+        assert!(selection_is_live(Some(2), 3));
+        assert!(!selection_is_live(Some(3), 3));
+        assert!(!selection_is_live(Some(0), 0));
+    }
+
+    #[test]
+    fn target_line_names_the_pick_the_fallback_and_the_void() {
+        let clips = vec![clip("a/theme.wav", 0, 1.0), clip("a/sting.wav", 9, 1.0)];
+        // A live selection is named directly.
+        assert_eq!(
+            target_line(&clips, Some(0)),
+            "Target: theme.wav (clip 1 of 2)"
+        );
+        assert_eq!(
+            target_line(&clips, Some(1)),
+            "Target: sting.wav (clip 2 of 2)"
+        );
+        // No selection — and a stale one — say "last clip".
+        assert_eq!(
+            target_line(&clips, None),
+            "Target: last clip — sting.wav (clip 2 of 2)"
+        );
+        assert_eq!(
+            target_line(&clips, Some(7)),
+            "Target: last clip — sting.wav (clip 2 of 2)"
+        );
+        assert_eq!(target_line(&[], None), "Target: none — no audio clips");
+        assert_eq!(target_line(&[], Some(0)), "Target: none — no audio clips");
+    }
+
+    #[test]
+    fn target_gain_readout_follows_the_target() {
+        let clips = vec![clip("a.wav", 0, 2.0), clip("b.wav", 3, 0.5)];
+        assert_eq!(target_gain(&clips, Some(0)), Some(2.0));
+        assert_eq!(target_gain_readout(&clips, Some(0)), "Gain 2.00");
+        // Fallback (none / stale) reads the LAST clip,
+        // exactly the old `gain_readout` values.
+        assert_eq!(target_gain_readout(&clips, None), "Gain 0.50");
+        assert_eq!(target_gain_readout(&clips, Some(9)), "Gain 0.50");
+        assert_eq!(target_gain_readout(&[], None), "Gain —");
+        assert_eq!(target_gain(&[], Some(0)), None);
+    }
+
+    #[test]
+    fn selection_after_delete_repairs_each_position() {
+        // Nothing selected stays nothing.
+        assert_eq!(selection_after_delete(None, 0, 3), None);
+        // Empty list clears the selection.
+        assert_eq!(selection_after_delete(Some(0), 0, 0), None);
+        // Before the gap: untouched.
+        assert_eq!(selection_after_delete(Some(0), 2, 4), Some(0));
+        // After the gap: shifts down one.
+        assert_eq!(selection_after_delete(Some(3), 1, 4), Some(2));
+        // The deleted clip itself: the clip that slid in,
+        // or the new last clip when the tail was deleted.
+        assert_eq!(selection_after_delete(Some(1), 1, 4), Some(1));
+        assert_eq!(selection_after_delete(Some(4), 4, 4), Some(3));
+    }
+
+    #[test]
+    fn duration_suffix_reads_readable_wavs_only() {
+        // Unreadable path: no suffix, the row shows name +
+        // start only.
+        assert_eq!(clip_duration_suffix(&clip("no/such/file.wav", 0, 1.0)), "");
+        // One second of silence at 44.1 kHz, written with
+        // the engine's own WAV writer.
+        let wav = audio_edit::WavData {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: vec![0.0; 44_100],
+        };
+        let path = std::env::temp_dir().join(format!(
+            "stykanimate-rune-audio-panel-dur-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, audio_edit::write_wav(&wav)).unwrap();
+        let c = clip(&path.to_string_lossy(), 4, 1.0);
+        assert_eq!(clip_duration_suffix(&c), " · 1.0 s");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -558,6 +889,14 @@ mod tests {
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
             draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
             was_playing: false,
         }
     }
@@ -580,5 +919,23 @@ mod tests {
         core.project.audio.push(clip("fake/theme.wav", 0, 1.25));
         core.project.audio.push(clip("fake/sting.wav", 9, 1.0));
         let _ = audio_panel(&state_with(core), &t);
+    }
+
+    #[test]
+    fn audio_panel_builds_with_a_selected_row() {
+        // Phase G: with a live selection the panel builds
+        // the highlighted row + the selected target line;
+        // with a STALE selection it builds the fallback
+        // (last-clip) form instead of panicking.
+        let t = rune::tok::theme(true);
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip("fake/theme.wav", 0, 1.25));
+        core.project.audio.push(clip("fake/sting.wav", 9, 1.0));
+        let mut s = state_with(core);
+        s.audio_panel.selected = Some(0);
+        let _ = audio_panel(&s, &t);
+        s.audio_panel.selected = Some(9);
+        let _ = audio_panel(&s, &t);
     }
 }

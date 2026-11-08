@@ -27,6 +27,17 @@
 //!   the Phase E accessors over the private stacks
 //!   (see [`undo_text`])
 //! - play state — `core.playing` (`editor.rs:38`)
+//! - audio state (Phase G, conditional) —
+//!   `core.playback_audio_active()` (`audio_play.rs:211`),
+//!   shown only while the playback player is live
+//! - loop range (Phase G, conditional) —
+//!   `core.loop_range` (`editor.rs:61`), shown only
+//!   while a loop is set
+//! - stroke / particle-event selection (Phase G,
+//!   conditional) — the shell's `State::stroke_selected`
+//!   / `State::particle_selected` (`main.rs`), visible
+//!   only through [`status_strip_state`]: that state
+//!   lives on `State`, not on the core
 //! - last status message — `core.status` (`editor.rs:42`),
 //!   the trailing segment chrome's line ended with, kept so
 //!   Save/Load feedback stays visible
@@ -78,10 +89,38 @@
 //!
 //! All nine segments remain, in the same order, with
 //! the same text sources.
+//!
+//! ## Phase G conditional segments
+//!
+//! Phase G adds information without breaking the
+//! discipline above: four more *fixed* segments, each
+//! present only while its condition holds, appended
+//! after the play segment and before the tail — audio
+//! state ([`audio_segment`]), loop range
+//! ([`loop_segment`]), stroke selection
+//! ([`stroke_segment`]) and particle-event selection
+//! ([`particle_segment`]), composed by
+//! [`extra_segments`]. Each is built by the same
+//! [`segment`] helper, so each is floored at its own
+//! label's [`est_text_width`]; even the worst case
+//! (all four present at their longest plausible
+//! labels) adds ≈ 42 characters of floored width, and
+//! the tail remains the single flexible absorber, so
+//! the no-overlap argument is unchanged. The original
+//! nine keep their order and their text sources.
+//!
+//! The audio and loop segments read core state only,
+//! so both builders show them. The two selection
+//! segments read shell state the core-only builder
+//! cannot see: [`status_strip`] delegates with no
+//! selections, and the shell calls
+//! [`status_strip_state`], which passes them through.
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, El};
 use stykanimate_rs::editor::EditorCore;
+
+use crate::State;
 
 /// Timecode of a frame at a project frame rate, formatted
 /// `m:ss.f` (minutes unpadded, seconds zero-padded, one
@@ -203,6 +242,72 @@ pub fn play_text(playing: bool) -> &'static str {
     }
 }
 
+/// Audio segment (Phase G): `Audio on` while the
+/// shell's playback player is live — the caller reads
+/// `core.playback_audio_active()` (`audio_play.rs:211`),
+/// the ffplay-process liveness the Phase F glue
+/// exposes. `None` while inactive: silence is the
+/// common case, and a permanent "Audio off" segment
+/// would spend floored width on nothing.
+pub fn audio_segment(active: bool) -> Option<String> {
+    if active {
+        Some("Audio on".to_string())
+    } else {
+        None
+    }
+}
+
+/// Loop segment (Phase G): `Loop {a}–{b}` for the
+/// core's loop range (`core.loop_range`,
+/// `editor.rs:61`) — the 0-based inclusive frame
+/// indices `set_loop_range` stores, displayed 1-based
+/// (`a + 1`, `b + 1`), the same convention as
+/// [`frame_text`] and the timeline chips, joined by
+/// an en dash. `None` while no loop is set.
+pub fn loop_segment(range: Option<(usize, usize)>) -> Option<String> {
+    range.map(|(a, b)| format!("Loop {}–{}", a + 1, b + 1))
+}
+
+/// Stroke-selection segment (Phase G): `Stroke {i + 1}`
+/// while the shell has a stroke selected
+/// (`State::stroke_selected`), the index displayed
+/// 1-based like every other position in the strip.
+/// `None` with no selection.
+pub fn stroke_segment(selected: Option<usize>) -> Option<String> {
+    selected.map(|i| format!("Stroke {}", i + 1))
+}
+
+/// Particle-event-selection segment (Phase G):
+/// `Particle {i + 1}` while the shell has a particle
+/// event selected (`State::particle_selected`),
+/// displayed 1-based. `None` with no selection.
+pub fn particle_segment(selected: Option<usize>) -> Option<String> {
+    selected.map(|i| format!("Particle {}", i + 1))
+}
+
+/// The Phase G conditional segment labels, in strip
+/// order (audio, loop, stroke, particle), each present
+/// only while its condition holds. Pure composition of
+/// the four helpers above over the live core plus the
+/// shell's two selection fields; the builder turns
+/// each label into a floored fixed segment through the
+/// same [`segment`] path as the original nine.
+pub fn extra_segments(
+    core: &EditorCore,
+    stroke_selected: Option<usize>,
+    particle_selected: Option<usize>,
+) -> Vec<String> {
+    [
+        audio_segment(core.playback_audio_active()),
+        loop_segment(core.loop_range),
+        stroke_segment(stroke_selected),
+        particle_segment(particle_selected),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Conservative per-character advance (points) assumed
 /// for the strip's label font: `type_::LABEL` is 12 pt
 /// at weight 500 (`crates/rune/src/tok.rs:139`), where a
@@ -296,20 +401,48 @@ fn divider(t: &Theme) -> El {
     el().size(1.0, 12.0).min_w(1.0).fill(t.control_track)
 }
 
+/// The status strip from the core alone: every segment
+/// the core can describe, including the Phase G audio
+/// and loop segments, but without the shell's stroke /
+/// particle-event selection segments (that state lives
+/// on `State`, not on the core). The delegating wrapper
+/// over the shared composer; the shell itself calls
+/// [`status_strip_state`].
+pub fn status_strip(core: &EditorCore) -> El {
+    build_strip(core, None, None)
+}
+
 /// The status strip: project name (with the dirty dot),
 /// frame position, timecode, fps, zoom, selection, undo
-/// depth, play state and the core's current status
-/// message, divided by hairlines. The fixed segments
-/// are width-floored and the status tail is the single
+/// depth, play state, the Phase G conditional segments
+/// (audio, loop range, stroke selection, particle-event
+/// selection) and the core's current status message,
+/// divided by hairlines. The fixed segments are
+/// width-floored and the status tail is the single
 /// flexible, eliding segment, so the segments can never
 /// overlap however narrow the strip gets (see the
 /// module docs' width-discipline section).
 /// Keyed `status-strip` so headless `--tree` checks can
 /// find it. Theme follows the shell's current convention
 /// (`main.rs` builds its view with `tok::theme(true)`).
-pub fn status_strip(core: &EditorCore) -> El {
+pub fn status_strip_state(s: &State) -> El {
+    build_strip(&s.core, s.stroke_selected, s.particle_selected)
+}
+
+/// Shared composer behind [`status_strip`] and
+/// [`status_strip_state`]. The Phase G segments are
+/// appended after the play segment and before the tail,
+/// each only while its condition holds, each floored
+/// through the same [`segment`] / [`est_text_width`]
+/// path as the original nine; the tail stays the row's
+/// single flexible member.
+fn build_strip(
+    core: &EditorCore,
+    stroke_selected: Option<usize>,
+    particle_selected: Option<usize>,
+) -> El {
     let t = tok::theme(true);
-    let segments: Vec<El> = vec![
+    let mut segments: Vec<El> = vec![
         segment(project_text(core), &t),
         segment(frame_text(core), &t),
         segment(timecode(core.current, core.project.fps), &t),
@@ -328,26 +461,39 @@ pub fn status_strip(core: &EditorCore) -> El {
                 t.text
             })
             .min_w(est_text_width(play_text(core.playing))),
-        // Chrome's line ended with the core's status
-        // message; keep it, dimmed, as the tail segment —
-        // and make it the row's single flexible member.
-        // `grow(1)` gives it whatever width the fixed
-        // segments leave; `.truncate()` puts it in
-        // Rune's one-line mode (flex_shrink 1, minimum
-        // width 0 — `crates/rune/src/el/text.rs`,
-        // `one_line`), so under shortage its box, alone,
-        // gives way and the painted line is elided with
-        // "…" to that box at real font metrics. The
-        // string is pre-capped by `fit_hint` as a
-        // backstop. Fixed segments sit on their floors
-        // and cannot be compressed, so no segment's
-        // glyphs can ever reach a neighbour's box.
+    ];
+    // Phase G conditional segments: after the original
+    // fixed segments, before the tail, in audio / loop /
+    // stroke / particle order. Each is built by the same
+    // `segment()` helper, so each is floored at its own
+    // label's estimated width exactly like the original
+    // fixed segments; each appears only while its
+    // condition holds, so the strip's usual width is
+    // unchanged.
+    for label in extra_segments(core, stroke_selected, particle_selected) {
+        segments.push(segment(label, &t));
+    }
+    // Chrome's line ended with the core's status
+    // message; keep it, dimmed, as the tail segment —
+    // and make it the row's single flexible member.
+    // `grow(1)` gives it whatever width the fixed
+    // segments leave; `.truncate()` puts it in
+    // Rune's one-line mode (flex_shrink 1, minimum
+    // width 0 — `crates/rune/src/el/text.rs`,
+    // `one_line`), so under shortage its box, alone,
+    // gives way and the painted line is elided with
+    // "…" to that box at real font metrics. The
+    // string is pre-capped by `fit_hint` as a
+    // backstop. Fixed segments sit on their floors
+    // and cannot be compressed, so no segment's
+    // glyphs can ever reach a neighbour's box.
+    segments.push(
         text(fit_hint(&core.status, MAX_STATUS_CHARS))
             .font(type_::LABEL)
             .color(t.text_secondary)
             .grow(1.0)
             .truncate(),
-    ];
+    );
     let mut bar = row().key("status-strip").w_full().gap(8.0).center_y();
     for (i, seg) in segments.into_iter().enumerate() {
         if i > 0 {
@@ -589,6 +735,101 @@ mod tests {
         assert_eq!(
             fit_hint(&core.status, MAX_STATUS_CHARS).chars().count(),
             MAX_STATUS_CHARS
+        );
+    }
+
+    // ---- Phase G conditional segments ----
+
+    #[test]
+    fn audio_segment_only_while_active() {
+        assert_eq!(audio_segment(true), Some("Audio on".to_string()));
+        assert_eq!(audio_segment(false), None);
+    }
+
+    #[test]
+    fn loop_segment_is_one_based_with_an_en_dash() {
+        assert_eq!(loop_segment(None), None);
+        assert_eq!(loop_segment(Some((0, 4))), Some("Loop 1–5".to_string()));
+        // A single-frame loop names the same frame twice.
+        assert_eq!(loop_segment(Some((2, 2))), Some("Loop 3–3".to_string()));
+    }
+
+    #[test]
+    fn stroke_segment_is_one_based() {
+        assert_eq!(stroke_segment(None), None);
+        assert_eq!(stroke_segment(Some(0)), Some("Stroke 1".to_string()));
+        assert_eq!(stroke_segment(Some(41)), Some("Stroke 42".to_string()));
+    }
+
+    #[test]
+    fn particle_segment_is_one_based() {
+        assert_eq!(particle_segment(None), None);
+        assert_eq!(particle_segment(Some(0)), Some("Particle 1".to_string()));
+        assert_eq!(
+            particle_segment(Some(998)),
+            Some("Particle 999".to_string())
+        );
+    }
+
+    #[test]
+    fn extra_segments_empty_on_a_fresh_core() {
+        // No audio playing, no loop set, no selections:
+        // the Phase G block contributes nothing and the
+        // strip is exactly the Phase F nine plus tail.
+        let core = EditorCore::new();
+        assert!(!core.playback_audio_active());
+        assert_eq!(core.loop_range, None);
+        assert!(extra_segments(&core, None, None).is_empty());
+    }
+
+    #[test]
+    fn extra_segments_come_in_strip_order() {
+        // Audio is inactive on a fresh core (it cannot
+        // be started without a player), so the order is
+        // proven over the three remaining conditions:
+        // loop, then stroke, then particle.
+        let mut core = EditorCore::new();
+        core.loop_range = Some((0, 4));
+        assert_eq!(
+            extra_segments(&core, Some(2), Some(0)),
+            vec![
+                "Loop 1–5".to_string(),
+                "Stroke 3".to_string(),
+                "Particle 1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extra_segment_floors_use_the_same_est_text_width_path() {
+        // The builder floors every extra through
+        // `segment()`, i.e. at `est_text_width` of its
+        // own label. The longest plausible particle
+        // label must therefore floor at exactly
+        // `est_text_width` of that label — the same
+        // path, so an extra can never be compressed
+        // below its painted width either.
+        let label = particle_segment(Some(998)).unwrap();
+        assert_eq!(label, "Particle 999");
+        assert_eq!(est_text_width(&label), est_text_width("Particle 999"));
+        assert_eq!(est_text_width(&label), 12.0 * LABEL_CHAR_W);
+        // The widest loop label shape floors the same
+        // way: 13 characters including the en dash.
+        let label = loop_segment(Some((998, 999))).unwrap();
+        assert_eq!(label, "Loop 999–1000");
+        assert_eq!(est_text_width(&label), 13.0 * LABEL_CHAR_W);
+    }
+
+    #[test]
+    fn strip_builds_with_core_extras_present() {
+        // The core-only wrapper shows the core-readable
+        // extras (here a loop range) without panicking.
+        let mut core = EditorCore::new();
+        core.loop_range = Some((1, 3));
+        let _ = status_strip(&core);
+        assert_eq!(
+            extra_segments(&core, None, None),
+            vec!["Loop 2–4".to_string()]
         );
     }
 }

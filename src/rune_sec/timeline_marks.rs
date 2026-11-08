@@ -24,9 +24,39 @@
 //!
 //! `timeline` on the outer row and `frame-{n}` (1-based) on
 //! every chip, exactly as `chrome_view::timeline_row` — the
-//! headless tests find the chips by those keys. One key is
+//! headless tests find the chips by those keys. Two keys are
 //! added: `timeline-chips` on the inner content row that
-//! carries the drag handler (see below).
+//! carries the drag handler (see below), and
+//! `timeline-markers` on the marker row under the chips.
+//!
+//! ## Marker row
+//!
+//! Under the chips sits a slim row of marker cells, one per
+//! chip, aligned chip-for-chip (same [`CHIP_W`] /
+//! [`CHIP_GAP`] geometry, inside the same scrolled column,
+//! so the two rows scroll together). A cell shows `◆` when
+//! its frame carries a camera key (`Project::camera`,
+//! `CameraKey.frame` — an exact frame number) and `●` when
+//! any graph channel has a key on it; both glyphs when both,
+//! blank when neither. The cells are **not** pressable — the
+//! chips above already own presses and drags.
+//!
+//! Graph keys live at fractional times (`graph::Key.frame:
+//! f32`), so "on a frame" needs the engine's own mapping:
+//! the graph panel's seek (`graph_panel::seek_frame`) rounds
+//! with `f32::round` — nearest frame, halves away from
+//! zero. [`graph_key_frame`] mirrors that rounding exactly.
+//! One deliberate difference: seek *clamps* its result into
+//! the timeline because a click must land somewhere, while
+//! a marker asserts a key is **on** the frame — so a key
+//! whose rounded frame falls outside the timeline marks
+//! nothing rather than piling onto an end frame.
+//!
+//! Cost: the row is computed once per render by
+//! [`markers_for_project`] — one pass over the camera keys
+//! and one over every channel's keys — never per-cell
+//! searches ([`frame_markers`] exists for single-frame
+//! callers and tests).
 //!
 //! ## Press / drag semantics (exact)
 //!
@@ -102,7 +132,7 @@
 //! still scrolls.
 
 use rune::tok::{self, type_, Theme};
-use rune::{el, row, text, Color, Drag, El, Phase, Tx};
+use rune::{col, el, row, text, Color, Drag, El, Phase, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::rune_sec::frame_ops::{selected_range, FrameOpsState};
@@ -306,6 +336,71 @@ pub fn in_sel(range_sel: Option<(usize, usize)>, i: usize) -> bool {
     }
 }
 
+/// Height of one marker cell in points: a slim strip under
+/// its chip, just tall enough for one line of glyphs.
+pub const MARKER_H: f32 = 14.0;
+
+/// The timeline frame a graph key at fractional time `t`
+/// belongs to: `t` rounded with `f32::round` (nearest frame,
+/// halves away from zero) — the graph panel's own seek
+/// convention (`graph_panel::seek_frame`). `None` when
+/// there are no frames, `t` is not finite, or the rounded
+/// frame falls outside the timeline (see the module docs
+/// for why out-of-timeline keys are skipped, not clamped).
+pub fn graph_key_frame(t: f32, count: usize) -> Option<usize> {
+    if count == 0 || !t.is_finite() {
+        return None;
+    }
+    let f = t.round();
+    if f < 0.0 || f >= count as f32 {
+        return None;
+    }
+    Some(f as usize)
+}
+
+/// Does `frame` carry a camera key, and does it carry a
+/// graph key — `(camera, graph)`? A camera key matches by
+/// its exact stored frame; a graph key matches by
+/// [`graph_key_frame`]'s rounding, over every channel. A
+/// frame index past the timeline end carries neither.
+pub fn frame_markers(core: &EditorCore, frame: usize) -> (bool, bool) {
+    let count = core.frame_count();
+    if frame >= count {
+        return (false, false);
+    }
+    let camera = core.project.camera.iter().any(|k| k.frame == frame);
+    let graph = core
+        .project
+        .channels
+        .iter()
+        .flat_map(|ch| ch.keys.iter())
+        .any(|k| graph_key_frame(k.frame, count) == Some(frame));
+    (camera, graph)
+}
+
+/// [`frame_markers`] for the whole timeline in one pass:
+/// one sweep over the camera keys and one over every
+/// channel's keys, marking into a per-frame vector. This is
+/// what the marker row renders from — the per-cell cost is
+/// a vector read, however many keys the project carries.
+pub fn markers_for_project(core: &EditorCore) -> Vec<(bool, bool)> {
+    let count = core.frame_count();
+    let mut out = vec![(false, false); count];
+    for key in &core.project.camera {
+        if key.frame < count {
+            out[key.frame].0 = true;
+        }
+    }
+    for channel in &core.project.channels {
+        for key in &channel.keys {
+            if let Some(f) = graph_key_frame(key.frame, count) {
+                out[f].1 = true;
+            }
+        }
+    }
+    out
+}
+
 /// The row's drag gesture (see the module docs for the exact
 /// semantics). `d.data` records which gesture the press
 /// started: the selection anchor across phases as a fallback
@@ -374,14 +469,17 @@ fn timeline_drag(s: &mut State, d: &mut Drag) {
 }
 
 /// The replacement timeline: one numbered chip per frame in a
-/// horizontally scrolling row. Current frame accent-filled;
-/// loop-range frames tinted toward the accent; selected
-/// frames outlined (white on the current frame, accent
-/// elsewhere, so the outline survives the accent fill).
+/// horizontally scrolling row, with the marker row (camera
+/// `◆` / graph `●`, see the module docs) directly under the
+/// chips. Current frame accent-filled; loop-range frames
+/// tinted toward the accent; selected frames outlined (white
+/// on the current frame, accent elsewhere, so the outline
+/// survives the accent fill).
 pub fn timeline_marks(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let accent = tok::accent(0, true);
     let loop_fill = t.card.mix(accent, 0.35);
+    let markers = markers_for_project(core);
     let mut chips = row()
         .key("timeline-chips")
         .gap(CHIP_GAP)
@@ -414,9 +512,28 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
         }
         chips = chips.child(chip);
     }
+    // The marker row: one cell per chip, same geometry, no
+    // handlers — pure display (see the module docs). The
+    // camera diamond takes the accent so it reads apart
+    // from the graph dot at a glance.
+    let mut marker_row = row().key("timeline-markers").gap(CHIP_GAP);
+    for &(camera, graph) in &markers {
+        let mut cell = row().size(CHIP_W, MARKER_H).center().gap(2.0);
+        if camera {
+            cell = cell.child(text("◆").font(type_::LABEL).color(accent));
+        }
+        if graph {
+            cell = cell.child(text("●").font(type_::LABEL).color(t.text_secondary));
+        }
+        marker_row = marker_row.child(cell);
+    }
+    // Both rows live in one column inside the scroll
+    // viewport, so they translate together and the markers
+    // stay under their chips at any scroll offset.
+    let content = col().gap(2.0).child(chips).child(marker_row);
     row()
         .key("timeline")
-        .child(chips)
+        .child(content)
         .scroll_x()
         .w_full()
 }
@@ -430,6 +547,8 @@ pub fn timeline_selection(core: &EditorCore, ops: &FrameOpsState) -> Option<(usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stykanimate_rs::graph::{Channel, ChannelTarget, Key};
+    use stykanimate_rs::model::CameraKey;
 
     // ---- frame_at_x ----
 
@@ -644,6 +763,98 @@ mod tests {
         assert_eq!(core.loop_range, Some((2, 2)));
     }
 
+    // ---- frame markers (the demo project has 5 frames;
+    // expectations below are computed by hand from the
+    // fixture keys, with `f32::round` — halves away from
+    // zero — as the graph convention) ----
+
+    /// The marker fixture: a camera key on frame 2 only
+    /// (plus one hand-pushed at frame 99, past the end),
+    /// and two graph channels whose keys sit at fractional
+    /// times:
+    ///
+    /// - channel A (RootX): 0.4 → frame 0, 2.5 → frame 3,
+    ///   3.6 → frame 4
+    /// - channel B (Angle 1): 2.49 → frame 2, 9.2 → rounds
+    ///   to 9 (past the end, marks nothing), −1.2 → rounds
+    ///   to −1 (before the start, marks nothing)
+    fn marked_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.set_camera_key(2, 480.0, 360.0, 1.5);
+        core.project.camera.push(CameraKey {
+            frame: 99,
+            x: 0.0,
+            y: 0.0,
+            zoom: 1.0,
+            angle: 0.0,
+        });
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(0.4, 10.0), Key::flat(2.5, 20.0), Key::flat(3.6, 30.0)],
+        });
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![Key::flat(2.49, 5.0), Key::flat(9.2, 6.0), Key::flat(-1.2, 7.0)],
+        });
+        core
+    }
+
+    #[test]
+    fn markers_for_project_empty_project_is_all_false() {
+        // The demo project carries no camera keys and no
+        // channels, so all five frames are unmarked.
+        let core = EditorCore::new();
+        assert_eq!(core.frame_count(), 5);
+        assert_eq!(markers_for_project(&core), vec![(false, false); 5]);
+        assert_eq!(frame_markers(&core, 0), (false, false));
+        assert_eq!(frame_markers(&core, 4), (false, false));
+    }
+
+    #[test]
+    fn markers_for_project_maps_camera_and_graph_keys() {
+        let core = marked_core();
+        assert_eq!(
+            markers_for_project(&core),
+            vec![
+                (false, true),  // 0: graph 0.4
+                (false, false), // 1: nothing
+                (true, true),   // 2: camera + graph 2.49
+                (false, true),  // 3: graph 2.5 rounds up
+                (false, true),  // 4: graph 3.6
+            ]
+        );
+        // The single-frame helper agrees, and a frame past
+        // the end reports neither marker even though a
+        // camera key is stored there.
+        assert_eq!(frame_markers(&core, 2), (true, true));
+        assert_eq!(frame_markers(&core, 1), (false, false));
+        assert_eq!(frame_markers(&core, 3), (false, true));
+        assert_eq!(frame_markers(&core, 99), (false, false));
+    }
+
+    #[test]
+    fn graph_key_frame_rounds_like_the_graph_seek() {
+        assert_eq!(graph_key_frame(0.4, 5), Some(0));
+        assert_eq!(graph_key_frame(0.5, 5), Some(1)); // halves away from zero
+        assert_eq!(graph_key_frame(2.49, 5), Some(2));
+        assert_eq!(graph_key_frame(2.5, 5), Some(3));
+        assert_eq!(graph_key_frame(4.4, 5), Some(4));
+        // Rounds onto or past the end: skipped, not clamped
+        // onto the last frame.
+        assert_eq!(graph_key_frame(4.5, 5), None);
+        assert_eq!(graph_key_frame(9.2, 5), None);
+        // −0.4 rounds to −0.0, which is frame 0; −0.6 rounds
+        // to −1, before the start.
+        assert_eq!(graph_key_frame(-0.4, 5), Some(0));
+        assert_eq!(graph_key_frame(-0.6, 5), None);
+        // No frames, or a non-finite time, maps nowhere.
+        assert_eq!(graph_key_frame(1.0, 0), None);
+        assert_eq!(graph_key_frame(f32::NAN, 5), None);
+        assert_eq!(graph_key_frame(f32::INFINITY, 5), None);
+    }
+
     // ---- builder smoke test (the drag handler itself is
     // untestable from here: `Drag` has crate-private fields,
     // so only the real runtime can construct one — the
@@ -683,6 +894,14 @@ mod tests {
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
             draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
             was_playing: false,
         }
     }
@@ -699,5 +918,13 @@ mod tests {
         let _ = timeline_marks(&state, &t);
         // The selection the Frames section will read back.
         assert_eq!(timeline_selection(&state.core, &state.frame_ops), Some((1, 3)));
+        // The marker row builds with both glyph kinds live.
+        state.core.project.set_camera_key(1, 480.0, 360.0, 1.0);
+        state.core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(2.5, 1.0)],
+        });
+        let _ = timeline_marks(&state, &t);
     }
 }

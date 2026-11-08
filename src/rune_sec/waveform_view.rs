@@ -2,8 +2,14 @@
 //! section 16 of the GPUI→Rune migration): one canvas drawing
 //! the last audio clip's waveform, with a playhead line at the
 //! current frame. Bin-crate code — not part of the engine
-//! library — and deliberately free of `crate::` references so it
-//! can be mounted wherever the shell declares it.
+//! library. The original builders here were deliberately free
+//! of `crate::` references so they could be mounted wherever
+//! the shell declared them; Phase G (section 10) adds the
+//! first `crate::State`-taking builder
+//! ([`waveform_el_state`], click-to-seek), following the same
+//! pattern as every other section file. The core-only
+//! builders ([`waveform_el`], [`waveform_shape`]) are
+//! unchanged.
 //!
 //! ## Data source (no decoding is invented here)
 //!
@@ -44,15 +50,42 @@
 //! strip's `AudioStripData::playhead` computation: the current
 //! frame mapped into the clip's span
 //! `start_frame .. start_frame + duration_secs * fps`.
+//!
+//! ## Two x mappings (Phase G, section 10)
+//!
+//! The strip's waveform itself is drawn on the **clip
+//! mapping**: the last clip's peaks fill the whole strip
+//! width whatever the clip's start frame or length, so x is
+//! the clip's own time. [`waveform_shape`]'s playhead follows
+//! that mapping ([`playhead_fraction`]) and is drawn only
+//! while the current frame is inside the clip's span.
+//!
+//! The interactive builder ([`waveform_el_state`]) instead
+//! treats the strip as a miniature **project timeline**:
+//! [`playhead_x`] maps a project frame to x with frame 0 at
+//! the left edge and the last frame at the right edge, and
+//! [`frame_at_x`] is its round-to-nearest inverse. The new
+//! builder draws its playhead with `playhead_x` and seeks
+//! with `frame_at_x`, so marker and press always agree: a
+//! press lands on the frame whose marker would stand there.
+//! The price of that agreement is that the new builder's
+//! playhead generally does NOT line up with a feature in the
+//! waveform unless the clip spans the whole project — the
+//! waveform is clip-time, the interaction is project-time.
+//! That divergence is deliberate (it is what makes the strip
+//! seekable) and is confined to the new builder; the old
+//! builder's rendering is untouched.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use rune::{canvas, Color, El, LineCap, Shape};
+use rune::{canvas, Color, Drag, El, LineCap, Phase, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::AudioClip;
+
+use crate::State;
 
 /// Waveform accent (the 2.0 palette's `C_ACCENT`).
 const WAVE_HEX: u32 = 0x6D8CFF;
@@ -137,6 +170,42 @@ pub fn playhead_fraction(
     } else {
         None
     }
+}
+
+/// The x position, in element points, of project frame
+/// `frame` on a strip of `width` points spanning `count`
+/// frames (the project mapping — see the module docs):
+/// frame 0 stands at the left edge (x = 0) and the last
+/// frame at the right edge (x = `width`), evenly spaced
+/// between. Out-of-range frames clamp to the last frame's
+/// position. Degenerate inputs — no frames, a single frame,
+/// or a non-positive/non-finite width — read as 0.0: a
+/// one-frame project has its only frame at the left edge,
+/// and a strip with no width has nowhere else to stand.
+pub fn playhead_x(frame: usize, count: usize, width: f32) -> f32 {
+    if count <= 1 || width <= 0.0 || !width.is_finite() {
+        return 0.0;
+    }
+    let f = frame.min(count - 1) as f32;
+    (f / (count - 1) as f32 * width).clamp(0.0, width)
+}
+
+/// The project frame at strip position `x` — the
+/// round-to-nearest inverse of [`playhead_x`]: x is clamped
+/// into the strip, scaled onto the `count - 1` intervals
+/// between `count` frames, and rounded, so pressing the
+/// right half of the gap between two frame markers seeks
+/// the later frame. Every degenerate input (no frames, a
+/// single frame, non-positive width, non-finite x) reads as
+/// frame 0, which is always a valid `goto` target when the
+/// project has any frames at all — and `EditorCore::goto`
+/// ignores the call entirely when it has none.
+pub fn frame_at_x(x: f32, width: f32, frame_count: usize) -> usize {
+    if frame_count <= 1 || width <= 0.0 || !width.is_finite() || !x.is_finite() {
+        return 0;
+    }
+    let t = (x / width).clamp(0.0, 1.0);
+    (t * (frame_count - 1) as f32).round() as usize
 }
 
 /// Cache key for one probe: everything that can change its
@@ -266,8 +335,19 @@ pub fn clip_peaks(clip: &AudioClip, buckets: usize) -> Option<(Vec<f32>, f32)> {
 /// amplitude (round caps would overshoot by half the bar
 /// width). With no clips — or an unreadable clip file — the
 /// shape is just the centre line, so the strip reads as an
-/// empty audio lane rather than a hole in the layout.
+/// empty audio lane rather than a hole in the layout. The
+/// playhead follows the clip mapping ([`playhead_fraction`]).
 pub fn waveform_shape(core: &EditorCore, el_size: [f32; 2]) -> Shape {
+    waveform_bars(core, el_size, true)
+}
+
+/// The strip without a project-mapped playhead: centre line
+/// plus the last clip's bars, and — only when `clip_playhead`
+/// — the original clip-mapped playhead. [`waveform_shape`]
+/// passes `true`; [`waveform_shape_project`] passes `false`
+/// and appends its own marker, so the two playhead mappings
+/// never draw on the same strip.
+fn waveform_bars(core: &EditorCore, el_size: [f32; 2], clip_playhead: bool) -> Shape {
     let (w, h) = (el_size[0], el_size[1]);
     let mut shape = Shape::new();
     if w <= 0.0 || h <= 0.0 {
@@ -300,8 +380,28 @@ pub fn waveform_shape(core: &EditorCore, el_size: [f32; 2]) -> Shape {
         let (top, bottom) = bar_span(min, clip.gain, mid, mid);
         shape = shape.line([x, top], [x, bottom], bar_w, LineCap::Butt, accent);
     }
-    if let Some(frac) = playhead_fraction(clip, duration_secs, core.project.fps, core.current) {
-        let x = frac * w;
+    if clip_playhead {
+        if let Some(frac) = playhead_fraction(clip, duration_secs, core.project.fps, core.current) {
+            let x = frac * w;
+            let playhead = hex_color(PLAYHEAD_HEX).unwrap_or(Color::WHITE);
+            shape = shape.line([x, 0.0], [x, h], 2.0, LineCap::Butt, playhead);
+        }
+    }
+    shape
+}
+
+/// The strip for [`waveform_el_state`]: the same centre line
+/// and bars as [`waveform_shape`], but the playhead is the
+/// project-mapped marker ([`playhead_x`] of the current
+/// frame), drawn whenever the project has frames — including
+/// over the empty lane of a project with no (readable) clip,
+/// since the strip still seeks there. Drawn last, over the
+/// bars, in the same amber as the clip-mapped marker.
+fn waveform_shape_project(core: &EditorCore, el_size: [f32; 2]) -> Shape {
+    let mut shape = waveform_bars(core, el_size, false);
+    let (w, h) = (el_size[0], el_size[1]);
+    if w > 0.0 && h > 0.0 && core.frame_count() > 0 {
+        let x = playhead_x(core.current, core.frame_count(), w);
         let playhead = hex_color(PLAYHEAD_HEX).unwrap_or(Color::WHITE);
         shape = shape.line([x, 0.0], [x, h], 2.0, LineCap::Butt, playhead);
     }
@@ -313,6 +413,49 @@ pub fn waveform_shape(core: &EditorCore, el_size: [f32; 2]) -> Shape {
 /// find it), sized by the caller like the stage canvas.
 pub fn waveform_el(core: &EditorCore, el_size: [f32; 2]) -> El {
     canvas(waveform_shape(core, el_size)).key("waveform")
+}
+
+/// The seek gesture for [`waveform_el_state`]: pressing —
+/// and, holding, dragging — on the strip goes to the frame
+/// under the pointer (click-to-seek plus scrub, one gesture).
+/// Navigation only: `EditorCore::goto` moves the playhead
+/// without a snapshot and posts no status, so a scrub leaves
+/// the undo stack and the status line exactly as they were
+/// (the timeline chips' click semantics). The frame comes
+/// from [`frame_at_x`] over the element's own laid-out width
+/// (`Drag::w`, the same local geometry the drag reports), so
+/// the seek follows the strip as actually drawn; a gesture
+/// on a zero-width element is ignored. `Phase::Up` does
+/// nothing — the last Down/Move position stands — and a
+/// cancelled gesture has nothing to restore, for the same
+/// reason: goto never mutated anything but the playhead.
+fn waveform_seek(s: &mut State, d: &Drag) {
+    match d.phase {
+        Phase::Down | Phase::Move => {
+            if d.w > 0.0 {
+                let frame = frame_at_x(d.x, d.w, s.core.frame_count());
+                s.core.goto(frame);
+            }
+        }
+        Phase::Up => {}
+    }
+}
+
+/// The interactive waveform strip: the same canvas and the
+/// same `waveform` key as [`waveform_el`], but drawn by
+/// [`waveform_shape_project`] (project-mapped playhead) and
+/// carrying the seek gesture ([`waveform_seek`]). This is
+/// the builder the shell mounts; `waveform_el` remains for
+/// core-only callers. Element-local drag points are in the
+/// element's drawn points (Rune's `Drag` contract), matching
+/// the points the shape was built in as long as the caller
+/// lays the canvas out at the `el_size` it passes — the
+/// current mount passes `[308.0, 56.0]` and the right column
+/// gives the canvas that width.
+pub fn waveform_el_state(s: &State, el_size: [f32; 2]) -> El {
+    canvas(waveform_shape_project(&s.core, el_size))
+        .key("waveform")
+        .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| waveform_seek(s, d))
 }
 
 #[cfg(test)]
@@ -512,5 +655,83 @@ mod tests {
         let probed = clip_peaks(&c, 64).expect("probe once the file exists");
         assert_eq!(probed.0.len(), 64);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- Project mapping: playhead_x / frame_at_x (Phase G) ----
+
+    #[test]
+    fn playhead_x_first_middle_last() {
+        // 11 frames over 300 pt: one frame every 30 pt, first
+        // frame on the left edge, last on the right edge.
+        assert_eq!(playhead_x(0, 11, 300.0), 0.0);
+        assert_eq!(playhead_x(5, 11, 300.0), 150.0);
+        assert_eq!(playhead_x(10, 11, 300.0), 300.0);
+        // A second geometry, hand-computed the same way:
+        // 5 frames over 100 pt, frame 2 is the middle.
+        assert_eq!(playhead_x(0, 5, 100.0), 0.0);
+        assert_eq!(playhead_x(2, 5, 100.0), 50.0);
+        assert_eq!(playhead_x(4, 5, 100.0), 100.0);
+    }
+
+    #[test]
+    fn playhead_x_degenerate_and_clamped() {
+        // Past-the-end frames clamp to the last frame's spot.
+        assert_eq!(playhead_x(99, 11, 300.0), 300.0);
+        // No frames / one frame / no width: the left edge.
+        assert_eq!(playhead_x(0, 0, 300.0), 0.0);
+        assert_eq!(playhead_x(0, 1, 300.0), 0.0);
+        assert_eq!(playhead_x(5, 11, 0.0), 0.0);
+        assert_eq!(playhead_x(5, 11, -30.0), 0.0);
+    }
+
+    #[test]
+    fn frame_at_x_rounds_to_nearest() {
+        // 11 frames over 300 pt: markers every 30 pt, and the
+        // switch point between two frames is the gap's middle.
+        assert_eq!(frame_at_x(0.0, 300.0, 11), 0);
+        assert_eq!(frame_at_x(14.0, 300.0, 11), 0);
+        assert_eq!(frame_at_x(16.0, 300.0, 11), 1);
+        assert_eq!(frame_at_x(44.0, 300.0, 11), 1);
+        assert_eq!(frame_at_x(45.0, 300.0, 11), 2);
+        assert_eq!(frame_at_x(150.0, 300.0, 11), 5);
+        assert_eq!(frame_at_x(284.0, 300.0, 11), 9);
+        assert_eq!(frame_at_x(286.0, 300.0, 11), 10);
+        assert_eq!(frame_at_x(300.0, 300.0, 11), 10);
+        // 5 frames over 100 pt: markers every 25 pt.
+        assert_eq!(frame_at_x(50.0, 100.0, 5), 2);
+        assert_eq!(frame_at_x(37.0, 100.0, 5), 1);
+        assert_eq!(frame_at_x(38.0, 100.0, 5), 2);
+    }
+
+    #[test]
+    fn frame_at_x_edges() {
+        // Outside the strip clamps to the end frames.
+        assert_eq!(frame_at_x(-20.0, 300.0, 11), 0);
+        assert_eq!(frame_at_x(999.0, 300.0, 11), 10);
+        // Zero / negative width and degenerate frame counts
+        // read as frame 0, never out of range.
+        assert_eq!(frame_at_x(150.0, 0.0, 11), 0);
+        assert_eq!(frame_at_x(150.0, -5.0, 11), 0);
+        assert_eq!(frame_at_x(150.0, 300.0, 0), 0);
+        assert_eq!(frame_at_x(0.0, 300.0, 1), 0);
+        assert_eq!(frame_at_x(300.0, 300.0, 1), 0);
+        // Non-finite positions read as frame 0.
+        assert_eq!(frame_at_x(f32::NAN, 300.0, 11), 0);
+        assert_eq!(frame_at_x(f32::INFINITY, 300.0, 11), 0);
+    }
+
+    #[test]
+    fn frame_at_x_inverts_playhead_x() {
+        // Pressing exactly on a frame's marker seeks that
+        // frame — the property that makes the new builder's
+        // playhead and its seek agree.
+        for f in 0..=10 {
+            let x = playhead_x(f, 11, 300.0);
+            assert_eq!(frame_at_x(x, 300.0, 11), f, "frame {f} at x {x}");
+        }
+        for f in 0..=4 {
+            let x = playhead_x(f, 5, 100.0);
+            assert_eq!(frame_at_x(x, 100.0, 5), f, "frame {f} at x {x}");
+        }
     }
 }

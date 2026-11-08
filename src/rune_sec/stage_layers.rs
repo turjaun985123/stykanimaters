@@ -139,6 +139,71 @@
 //!   prims, so the glow sits under the stroke it marks and
 //!   the stroke itself stays crisp on top.
 //!
+//! ## Picking (Phase G, section 5)
+//!
+//! [`stroke_at_point`] is the inverse of the draw pass:
+//! given a point in **stage coordinates** (the shell
+//! converts the pointer through `stage_view::to_stage`
+//! before calling), it returns the project-wide index —
+//! the same indexing as [`highlight_geometry`] and
+//! `EditorCore::delete_stroke_at` — of the nearest stroke
+//! on the authored frame whose geometry passes within
+//! `tolerance` stage units of the point, or `None`. The
+//! frame rule is the base layer's: strokes with
+//! `stroke.frame != authored_frame(core)` are never
+//! pickable, so a click can only select what the stage is
+//! drawing. Per-kind measured geometry (documented
+//! choice, following the base layer's spray → filled →
+//! plain precedence):
+//!
+//! * **Spray**: the stroke's *base polyline* — the scatter
+//!   dots do not count. Dots spread up to `mark.radius`
+//!   stage units off the path; measuring them would make
+//!   the pickable area a fuzzy disc cloud that spills
+//!   past the visible line of the stroke and steals
+//!   clicks meant for strokes underneath.
+//! * **Filled** (≥ 3 points): the polygon's *outline*,
+//!   closed (the last-to-first segment counts) — the
+//!   interior does not count, because the base layer's
+//!   `Filled` prim is the one place this layer already
+//!   differs from the exports (no renderer fills), and a
+//!   click "on" a shape the exports only outline should
+//!   select by that outline. Under 3 points the base
+//!   layer falls back to the plain rule, and so does
+//!   picking.
+//! * **Plain**: the open polyline through the points.
+//!
+//! A single-point stroke is measured by its distance to
+//! that point (its geometry degenerates to the point), so
+//! it stays selectable even though the base layer draws
+//! nothing for it; an empty-points stroke has no geometry
+//! and is never pickable. Distance to a polyline is the
+//! minimum of [`point_segment_distance`] over its
+//! segments. Ties are deterministic: strictly nearer
+//! wins, and equal distances keep the **lowest index**
+//! (the iteration is in project order and only a strictly
+//! smaller distance replaces the current best — the same
+//! discipline as `EditorCore::hit_test`,
+//! `src/editor.rs:272`).
+//!
+//! **Tolerance for the shell**: pass [`PICK_TOLERANCE`]
+//! (13.0 stage units). That is the radius the core's own
+//! joint hit-test accepts (`EditorCore::hit_test`,
+//! `src/editor.rs:272`), in the same stage space, so a
+//! click that would grab a joint also grabs a stroke
+//! equally far away. Cross-check against the view: the
+//! default stage is 960×720 (`src/model.rs:753`) and
+//! `ViewTransform::scale` is `fit * zoom`
+//! (`src/stage_view.rs`), so at zoom 1 the 13 units are
+//! ~13 screen points when the stage element is ~960
+//! points wide (fewer on a narrower element, more when
+//! zoomed) — a workable pointer target either way, and
+//! being stage-constant it matches `hit_test` exactly. A
+//! shell that wants a pixel-constant target can pass
+//! `13.0 / vt.scale` instead; the helper takes the
+//! tolerance as a parameter precisely so that choice
+//! stays in the shell.
+//!
 //! ## Draw order (integrator)
 //!
 //! The GPUI canvas painted this layer **under the figures**
@@ -153,6 +218,7 @@
 //! stage's.)
 
 use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::model::Stroke;
 use stykanimate_rs::paint;
 
 /// One drawable piece of the current frame's stroke layer,
@@ -356,6 +422,89 @@ pub fn highlight_geometry(core: &EditorCore, project_index: usize) -> Vec<Stroke
         }];
     }
     Vec::new()
+}
+
+/// The pick radius, in stage units, the shell should
+/// pass to [`stroke_at_point`] for a plain stage click.
+/// See the module docs ("Picking") for the grounding:
+/// the core's own joint hit-test radius, in the same
+/// stage space.
+pub const PICK_TOLERANCE: f32 = 13.0;
+
+/// Euclidean distance from point `p` to the segment
+/// `a`–`b`, with the projection clamped to the segment
+/// (so the nearest point may be an endpoint). A
+/// zero-length segment measures the distance to `a`.
+/// Pure; the picking pass is built on this alone.
+pub fn point_segment_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let len2 = ab[0] * ab[0] + ab[1] * ab[1];
+    let nearest = if len2 > 0.0 {
+        let t = (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / len2).clamp(0.0, 1.0);
+        [a[0] + t * ab[0], a[1] + t * ab[1]]
+    } else {
+        a
+    };
+    let d = [p[0] - nearest[0], p[1] - nearest[1]];
+    (d[0] * d[0] + d[1] * d[1]).sqrt()
+}
+
+/// The distance from `point` to the geometry picking
+/// measures for `stroke` (module docs, "Picking"): the
+/// base polyline for spray and plain strokes, the closed
+/// outline for filled strokes with at least 3 points,
+/// the lone point itself for a single-point stroke.
+/// `None` when the stroke has no points at all.
+fn stroke_pick_distance(stroke: &Stroke, point: [f32; 2]) -> Option<f32> {
+    let pts = &stroke.points;
+    match pts.len() {
+        0 => None,
+        // Degenerate segment: distance to the point.
+        1 => Some(point_segment_distance(point, pts[0], pts[0])),
+        _ => {
+            // Filled shapes pick by their closed outline;
+            // spray counts by its base polyline even if a
+            // fill is also stored (the base layer's spray
+            // precedence), and a fill under 3 points falls
+            // back to the open polyline like the base layer.
+            let closed = stroke.spray.is_none() && stroke.fill.is_some() && pts.len() >= 3;
+            let mut best = f32::INFINITY;
+            for seg in pts.windows(2) {
+                best = best.min(point_segment_distance(point, seg[0], seg[1]));
+            }
+            if closed {
+                best = best.min(point_segment_distance(point, pts[pts.len() - 1], pts[0]));
+            }
+            Some(best)
+        }
+    }
+}
+
+/// Pick the stroke at a stage-space point: the
+/// project-wide index (the `delete_stroke_at` /
+/// [`highlight_geometry`] indexing) of the nearest
+/// stroke on the authored frame whose measured geometry
+/// passes within `tolerance` stage units of `point`, or
+/// `None` when nothing is that close. See the module
+/// docs ("Picking") for the frame rule, the per-kind
+/// geometry and the deterministic tie-break (nearer
+/// wins; equal distances keep the lowest index). Pure:
+/// same project state and point, same answer.
+pub fn stroke_at_point(core: &EditorCore, point: [f32; 2], tolerance: f32) -> Option<usize> {
+    let authored = authored_frame(core);
+    let mut best: Option<(usize, f32)> = None;
+    for (index, stroke) in core.project.strokes.iter().enumerate() {
+        if stroke.frame != authored {
+            continue;
+        }
+        let Some(d) = stroke_pick_distance(stroke, point) else {
+            continue;
+        };
+        if d <= tolerance && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((index, d));
+        }
+    }
+    best.map(|(index, _)| index)
 }
 
 #[cfg(test)]
@@ -714,5 +863,162 @@ mod tests {
     fn highlight_sub_two_point_plain_stroke_is_empty() {
         let core = core_with(vec![plain(0, &[[5.0, 5.0]], 0x111111, 4.0)]);
         assert!(highlight_geometry(&core, 0).is_empty());
+    }
+
+    #[test]
+    fn point_segment_distance_axis_aligned_cases() {
+        let a = [0.0, 0.0];
+        let b = [10.0, 0.0];
+        // On the segment, at an endpoint, perpendicular
+        // above its middle — all hand-computed.
+        assert_eq!(point_segment_distance([5.0, 0.0], a, b), 0.0);
+        assert_eq!(point_segment_distance([10.0, 0.0], a, b), 0.0);
+        assert_eq!(point_segment_distance([5.0, 3.0], a, b), 3.0);
+        assert_eq!(point_segment_distance([5.0, -3.0], a, b), 3.0);
+    }
+
+    #[test]
+    fn point_segment_distance_clamps_to_the_endpoints() {
+        let a = [0.0, 0.0];
+        let b = [10.0, 0.0];
+        // Past b: nearest is b itself; 3-4-5 triangle.
+        assert_eq!(point_segment_distance([13.0, 4.0], a, b), 5.0);
+        // Before a: nearest is a itself; 3-4-5 again.
+        assert_eq!(point_segment_distance([-3.0, -4.0], a, b), 5.0);
+    }
+
+    #[test]
+    fn point_segment_distance_zero_length_segment() {
+        // A degenerate segment measures the point itself.
+        assert_eq!(point_segment_distance([2.0, 6.0], [2.0, 2.0], [2.0, 2.0]), 4.0);
+        assert_eq!(point_segment_distance([5.0, 6.0], [2.0, 2.0], [2.0, 2.0]), 5.0);
+    }
+
+    #[test]
+    fn point_segment_distance_diagonal_projection() {
+        // Segment (0,0)-(2,2), point (0,2): the projection
+        // falls at t = 0.5, nearest (1,1), distance sqrt(2).
+        let d = point_segment_distance([0.0, 2.0], [0.0, 0.0], [2.0, 2.0]);
+        assert!((d - std::f32::consts::SQRT_2).abs() < 1e-6, "got {d}");
+    }
+
+    #[test]
+    fn pick_empty_project_is_none() {
+        let core = core_with(Vec::new());
+        assert_eq!(stroke_at_point(&core, [0.0, 0.0], PICK_TOLERANCE), None);
+    }
+
+    #[test]
+    fn pick_pointless_stroke_is_none() {
+        // A stroke with no points has no geometry at all.
+        let core = core_with(vec![plain(0, &[], 0x111111, 4.0)]);
+        assert_eq!(stroke_at_point(&core, [0.0, 0.0], PICK_TOLERANCE), None);
+    }
+
+    #[test]
+    fn pick_respects_the_tolerance_boundary() {
+        // Stroke along y = 0; clicks straight above it at
+        // hand-computed distances.
+        let core = core_with(vec![plain(0, &[[0.0, 0.0], [100.0, 0.0]], 0x111111, 4.0)]);
+        // Exactly at the tolerance counts (the hit_test
+        // convention: <=).
+        assert_eq!(stroke_at_point(&core, [50.0, 13.0], 13.0), Some(0));
+        assert_eq!(stroke_at_point(&core, [50.0, 10.0], PICK_TOLERANCE), Some(0));
+        // Just outside a smaller / the same tolerance.
+        assert_eq!(stroke_at_point(&core, [50.0, 10.0], 9.0), None);
+        assert_eq!(stroke_at_point(&core, [50.0, 13.5], 13.0), None);
+    }
+
+    #[test]
+    fn pick_only_sees_the_display_frame() {
+        // Same frame rule as highlight_geometry: a stroke
+        // on another frame is not pickable, even dead-on.
+        let core = core_with(vec![plain(1, &[[0.0, 0.0], [100.0, 0.0]], 0x111111, 4.0)]);
+        assert_eq!(stroke_at_point(&core, [50.0, 0.0], PICK_TOLERANCE), None);
+        let mut core = core;
+        core.goto(1);
+        assert_eq!(stroke_at_point(&core, [50.0, 0.0], PICK_TOLERANCE), Some(0));
+    }
+
+    #[test]
+    fn pick_returns_the_project_wide_index() {
+        // Index 0 sits on frame 1 (not displayed); the
+        // pickable stroke keeps its project-wide index 1 —
+        // the index delete_stroke_at would take.
+        let core = core_with(vec![
+            plain(1, &[[0.0, 0.0], [100.0, 0.0]], 0x111111, 4.0),
+            plain(0, &[[0.0, 0.0], [100.0, 0.0]], 0x222222, 4.0),
+        ]);
+        assert_eq!(stroke_at_point(&core, [50.0, 2.0], PICK_TOLERANCE), Some(1));
+    }
+
+    #[test]
+    fn pick_nearer_stroke_wins_over_lower_index() {
+        // Index 0 runs along y = 10, index 1 along y = 0;
+        // the click at y = 3 is 7 from index 0, 3 from
+        // index 1 — nearer beats earlier.
+        let core = core_with(vec![
+            plain(0, &[[0.0, 10.0], [100.0, 10.0]], 0x111111, 4.0),
+            plain(0, &[[0.0, 0.0], [100.0, 0.0]], 0x222222, 4.0),
+        ]);
+        assert_eq!(stroke_at_point(&core, [50.0, 3.0], PICK_TOLERANCE), Some(1));
+    }
+
+    #[test]
+    fn pick_equal_distance_keeps_the_lowest_index() {
+        // The click at y = 5 is exactly 5 from both
+        // strokes; the tie resolves deterministically to
+        // the lowest project-wide index.
+        let core = core_with(vec![
+            plain(0, &[[0.0, 10.0], [100.0, 10.0]], 0x111111, 4.0),
+            plain(0, &[[0.0, 0.0], [100.0, 0.0]], 0x222222, 4.0),
+        ]);
+        assert_eq!(stroke_at_point(&core, [50.0, 5.0], PICK_TOLERANCE), Some(0));
+    }
+
+    #[test]
+    fn pick_filled_shape_is_by_its_outline_not_its_interior() {
+        // A square stored unclosed: (0,0) (40,0) (40,40)
+        // (0,40); the left edge exists only as the closing
+        // segment.
+        let pts = [[0.0, 0.0], [40.0, 0.0], [40.0, 40.0], [0.0, 40.0]];
+        let mut s = plain(0, &pts, 0x445566, 3.0);
+        s.fill = Some(0x112233);
+        let core = core_with(vec![s]);
+        // The centre is 20 from every edge: not a pick,
+        // even though it is inside the filled area.
+        assert_eq!(stroke_at_point(&core, [20.0, 20.0], 5.0), None);
+        // Just outside the bottom edge: a pick.
+        assert_eq!(stroke_at_point(&core, [20.0, -4.0], 5.0), Some(0));
+        // Just outside the left edge: a pick only if the
+        // closing segment counts.
+        assert_eq!(stroke_at_point(&core, [-4.0, 20.0], 5.0), Some(0));
+    }
+
+    #[test]
+    fn pick_spray_counts_by_its_base_polyline_not_its_dots() {
+        // Spray radius 30: dots land up to 30 units off
+        // the path, but picking measures the path itself.
+        let mut s = plain(0, &[[0.0, 0.0], [100.0, 0.0]], 0xE8862E, 6.0);
+        s.spray = Some(SprayMark {
+            seed: 1,
+            radius: 30.0,
+            opacity: 1.0,
+        });
+        let core = core_with(vec![s]);
+        // 25 above the path: inside the spray cloud,
+        // outside the pick tolerance — no pick.
+        assert_eq!(stroke_at_point(&core, [50.0, 25.0], PICK_TOLERANCE), None);
+        // 10 above the path: a pick.
+        assert_eq!(stroke_at_point(&core, [50.0, 10.0], PICK_TOLERANCE), Some(0));
+    }
+
+    #[test]
+    fn pick_single_point_stroke_is_by_that_point() {
+        // Draws nothing in the base layer, but its lone
+        // point is real geometry: 10 away picks, 14 misses.
+        let core = core_with(vec![plain(0, &[[30.0, 30.0]], 0x111111, 4.0)]);
+        assert_eq!(stroke_at_point(&core, [30.0, 40.0], PICK_TOLERANCE), Some(0));
+        assert_eq!(stroke_at_point(&core, [30.0, 44.0], PICK_TOLERANCE), None);
     }
 }

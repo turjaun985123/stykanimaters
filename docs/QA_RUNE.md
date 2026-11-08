@@ -643,3 +643,50 @@ duplicate/rename (§30), 3D readouts (§31), export history
 easing picker (§35), action toasts (§36), menu hints (§9),
 Runtime tests round 3 (§39).
 
+## 9. Phase G addendum — gap closure map
+
+Appended 2026-11-08, mid-wave (sections still landing;
+statuses are a snapshot — the integrator updates the CI
+column after the green run). Phase G's charter and the
+40-section table: `docs/PHASE_G.md`.
+
+**The remainders that open this phase are Phase F's own.**
+Phase F went green (run `42461893898`, 1,416 tests) and
+named its leftovers in its completion note: two stage
+helpers landed tested but undrawn for want of a selection
+state, one remap case its census found but did not fix, a
+`blurb()` with no consumer, the audio player's documented
+loop limit, and the one hand-audit still owed. This map
+tracks exactly those, plus the two structural limits Phase
+F's sections exposed along the way (last-clip-only audio
+ops, the single guides flag).
+
+| Phase F remainder | Closing section(s) | Status | CI |
+|---|---|---|---|
+| Stroke highlight geometry landed tested but **not drawn** — no stroke selection state existed for it to read (§8 stage-fidelity row) | §5 stage_layers stroke picking (writes `State::stroke_selected`, groundwork in `src/main.rs:99`) + §6 stage_view selection drawing + §7 stroke_inspector selection UI | written *(brief)* | _integrator_ |
+| FX gizmo geometry landed tested but **not drawn** — no panel listed or selected `Project::particles` events (§8 stage-fidelity row) | §4 `particle_ops.rs` (new lib module; registration is the integrator's step) + §6 stage_view selection drawing + §8 particles_panel (new; writes `State::particle_selected`, groundwork in `src/main.rs:103`) | written *(brief)* | _integrator_ |
+| `move_figure` (reorder) remaps nothing — particles, FX-clip entries, graph channels and `camera_follow` keep stale indices after a swap (`src/editor.rs:1655`; found by Phase F §37's census, not fixed there) | §1 figure_ops reorder remap (the `editor.rs` call is integrator wiring) + §18 layers jump reorder on the same path | written *(brief)* | _integrator_ |
+| `Workspace::blurb()` has no consumer (Phase F §10 shipped the text only) | §11 workspaces blurb consumer (blurb line shown with the workspace row) | written *(brief)* | _integrator_ |
+| Playback audio loop limit: the audio pass does not restart when the visual playhead wraps (documented in `src/audio_play.rs`; scrub-follow listed there too and **stays open** — not claimed by Phase G) | §2 audio_play loop-wrap restart (the `poll()` wrap-sync call is integrator wiring) | written *(brief)* | _integrator_ |
+| Audio ops act on the **last clip only** — the panel surface drove the `_last` wrappers in `src/audio_ops.rs` | §3 audio_ops indexed clips (the `_at(index)` family: `audio_fade_at` `:83`, `audio_reverse_at` `:133`, `audio_set_gain_at` `:188`, `delete_audio_clip_at` `:245`, `audio_move_at` `:267`) + §9 audio_panel per-clip selection | written *(brief)* | _integrator_ |
+| project_tools hand-audit still owed (§8 hand-audit row: the one file with no Phase F section) | §12 project_tools hand-audit | written *(brief)* | _integrator_ |
+| `--snap` on GPU-less CI unproven (§8 row, unchanged there) | Not a Phase G section; `headless.yml` is still `workflow_dispatch`-only (`.github/workflows/headless.yml:48`, `:77–78`) and has never been run | open — unchanged | — |
+
+Phase G depth work with no Phase F remainder behind it
+(new surface, recorded so the inventory growth is
+explained): settings guide toggles + startup workspace
+(§13), camera follow picker (§14), timeline key markers
+(§15), graph channel list (§16), figures filter (§17),
+bend steppers (§19), style copy/paste (§20), figure scale
+(§21), pose library delete/rename/mirror (§22), key-all +
+copy-to-frame (§23), insert N frames (§24), onion depths
+(§25, over the `State::onion_ui` groundwork), loop toggle
+(§26), status strip segments (§27), toast dismissal
+(§28), palette Phase G commands (§29), help shortcut
+audit (§30), menu guide items (§31), home reopen-last
+(§32), stats totals (§33), FX clip strip (§34), movieclip
+delete/reorder (§35), 3D pose library UI (§36), scene
+custom background (§37), text instance edit (§38),
+waveform playhead + seek (§10), Runtime tests round 4
+(§39).
+

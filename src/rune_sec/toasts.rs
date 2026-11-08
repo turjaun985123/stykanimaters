@@ -15,6 +15,13 @@
 //! [`toasts_view`] takes the whole shell `State`, not just
 //! the toast model.
 //!
+//! Phase G adds dismissal: every live toast carries a
+//! small "×" button (`toast-dismiss-{index}`) that removes
+//! exactly that toast, and when two or more toasts are live
+//! the stack ends with a "Clear all" button
+//! (`toast-clear-all`) that removes every live toast at
+//! once ([`ToastsState::dismiss_all`]).
+//!
 //! Why hand-rolled instead of rune-kit's `Toast` /
 //! `ToastRegion` (read at `crates/rune-kit/src/toast.rs` in the
 //! pinned Rune tree):
@@ -32,8 +39,8 @@
 //! - Kit `Toast` is a rich notification (title + description +
 //!   action buttons + a close button wired to app-state
 //!   handlers); these toasts are single-line status echoes
-//!   whose only action is the newest toast's Undo button and
-//!   whose only dismissal besides it is time.
+//!   whose only actions are the newest toast's Undo button,
+//!   a per-toast dismiss "×", and a stack-wide "Clear all".
 //! - What IS borrowed: `ToastRegion`'s proven placement —
 //!   pinned 32 pt from the right, 48 pt from the bottom, 12 pt
 //!   apart, 320 pt wide cards, 8 pt radius, 12 pt padding.
@@ -71,6 +78,11 @@ pub const MAX_TOASTS: usize = 4;
 /// is strictly greater than this (`age > TOAST_TTL`); at
 /// exactly `TOAST_TTL` it is still shown.
 pub const TOAST_TTL: f32 = 5.0;
+
+/// Minimum live toasts for the stack to offer "Clear all":
+/// with fewer than two live toasts, the per-toast "×" is
+/// dismissal enough.
+pub const CLEAR_ALL_MIN: usize = 2;
 
 /// The last slice of a toast's life over which it fades out.
 const FADE_OUT: f32 = 1.0;
@@ -210,6 +222,16 @@ impl ToastsState {
         }
     }
 
+    /// Remove every toast alive at `now` — the "Clear all"
+    /// action. Expired toasts stay stored, exactly as they
+    /// do between `expire` calls: collecting them is
+    /// `expire`'s job (the poll hook runs it), and `live`
+    /// already hides them from the view, so after this call
+    /// nothing live remains.
+    pub fn dismiss_all(&mut self, now: f32) {
+        self.items.retain(|t| t.expired(now));
+    }
+
     /// The items index of the newest toast alive at `now` —
     /// the one that carries the Undo action — or `None` when
     /// nothing is live.
@@ -225,6 +247,14 @@ pub fn undo_available(core: &EditorCore) -> bool {
     core.undo_depth() > 0
 }
 
+/// True when a stack with `live_count` live toasts offers
+/// the "Clear all" button: at least [`CLEAR_ALL_MIN`] live
+/// toasts. Pure so the threshold is testable without a
+/// shell `State`.
+fn clear_all_offered(live_count: usize) -> bool {
+    live_count >= CLEAR_ALL_MIN
+}
+
 /// The floating toast column: pinned to the bottom-right of
 /// its parent (32 pt right, 48 pt bottom — the rune-kit
 /// `ToastRegion` placement), newest toast nearest the
@@ -235,6 +265,10 @@ pub fn undo_available(core: &EditorCore) -> bool {
 /// carries the Undo action (see [`toast_row`]); the
 /// predicate is read at render time, so the button appears
 /// and disappears with the core's undo stack.
+///
+/// Every live toast carries a dismiss "×"; when at least
+/// [`CLEAR_ALL_MIN`] toasts are live, a "Clear all" button
+/// closes the stack and removes them all at once.
 pub fn toasts_view(s: &State, now: f32) -> El {
     let t = tok::theme(true);
     let mut column = col()
@@ -264,6 +298,11 @@ pub fn toasts_view(s: &State, now: f32) -> El {
             &undo_label,
         ));
     }
+    if clear_all_offered(s.toasts.live_count(now)) {
+        column = column.child(btn("toast-clear-all", "Clear all", false, &t, move |s: &mut State| {
+            s.toasts.dismiss_all(now);
+        }));
+    }
     column
 }
 
@@ -271,11 +310,13 @@ pub fn toasts_view(s: &State, now: f32) -> El {
 /// theme card surface, fading over its last second. `index`
 /// is the toast's items index — it keys the card (stable for
 /// the toast's whole life, unlike a live position) and the
-/// Undo action dismisses by it. When `action` holds — this
+/// row's buttons dismiss by it. When `action` holds — this
 /// is the newest live toast and the core can undo — the card
 /// also carries the Undo button: pressing it undoes once and
 /// dismisses this toast (the undo's own status change feeds
 /// a fresh toast through the poll hook, as for any op).
+/// Every card ends with a dismiss "×" (`toast-dismiss-{index}`)
+/// that removes exactly this toast and nothing else.
 fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, undo_label: &str) -> El {
     let mut card = row()
         .key(format!("toast-{index}"))
@@ -307,6 +348,10 @@ fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, und
             s.toasts.dismiss(index);
         }));
     }
+    let dismiss_key = format!("toast-dismiss-{index}");
+    card = card.child(btn(&dismiss_key, "×", false, t, move |s: &mut State| {
+        s.toasts.dismiss(index);
+    }));
     card
 }
 
@@ -526,6 +571,65 @@ mod tests {
         assert_eq!(s.newest_live_index(6.0), Some(1));
         assert_eq!(s.newest_live_index(100.0), None);
         assert_eq!(ToastsState::new().newest_live_index(0.0), None);
+    }
+
+    #[test]
+    fn dismiss_all_removes_every_live_toast() {
+        let mut s = state_with(&["one", "two", "three", "four"], 0.0);
+        assert_eq!(s.live_count(1.0), 4);
+        s.dismiss_all(1.0);
+        assert_eq!(s.live_count(1.0), 0, "no toast stays live after Clear all");
+        assert!(s.is_empty(), "all four were live, so nothing remains stored");
+        assert_eq!(s.newest_live_index(1.0), None);
+    }
+
+    #[test]
+    fn dismiss_all_keeps_expired_entries_stored() {
+        let mut s = ToastsState::new();
+        s.items.push(Toast::new("stale", Severity::Info, 0.0));
+        s.items.push(Toast::new("fresh", Severity::Info, 9.0));
+        // At t=10 "stale" is expired (age 10 > TTL) and
+        // "fresh" is live (age 1). Clear all removes the
+        // live one; the expired one stays stored, exactly
+        // as it would between expire() calls.
+        s.dismiss_all(10.0);
+        assert_eq!(s.live_count(10.0), 0);
+        assert_eq!(s.items.len(), 1);
+        assert_eq!(s.items[0].text, "stale");
+        // And the poll hook's expire() still collects it.
+        s.expire(10.0);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn dismiss_all_on_empty_is_a_noop() {
+        let mut s = ToastsState::new();
+        s.dismiss_all(0.0);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn clear_all_is_offered_only_from_two_live_toasts() {
+        assert!(!clear_all_offered(0));
+        assert!(!clear_all_offered(1));
+        assert!(clear_all_offered(2));
+        assert!(clear_all_offered(3));
+        assert!(clear_all_offered(MAX_TOASTS));
+    }
+
+    #[test]
+    fn view_builds_with_dismiss_buttons_and_clear_all() {
+        // One live toast: the row builds with its dismiss
+        // "×" and no Clear all. Three live toasts: the
+        // Clear all branch builds too. (Presence in the
+        // element tree is the Runtime tests' job, as with
+        // the Undo smoke build above.)
+        let mut s = crate::init();
+        s.toasts.push("one", Severity::Info, 0.0);
+        let _ = toasts_view(&s, 0.5);
+        s.toasts.push("two", Severity::Info, 0.0);
+        s.toasts.push("three", Severity::Warn, 0.0);
+        let _ = toasts_view(&s, 0.5);
     }
 
     #[test]

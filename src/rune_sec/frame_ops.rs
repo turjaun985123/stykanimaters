@@ -36,10 +36,21 @@
 //! module, add `pub frame_ops: FrameOpsState` to `State`
 //! (initialised with `FrameOpsState::default()`), and add
 //! `.child(frame_ops::frames_section(s, &t))` to the view.
+//!
+//! The "Insert" row (Phase G) inserts N blank frames after
+//! the current frame as ONE undo step. "Blank" means exactly
+//! what one press of the core's `add_frame` creates — a frame
+//! carrying the current frame's poses and duration, with
+//! easing reset to `None` and bends emptied — repeated N
+//! times; see [`insert_frames_after_current`] for why the
+//! batch result is content-identical to N single presses and
+//! differs only in undo granularity and in leaving `current`
+//! on the original frame.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::model::Frame;
 
 use crate::State;
 
@@ -56,9 +67,19 @@ pub const DUR_DOWN_FACTOR: f32 = 0.5;
 /// See [`DUR_DOWN_FACTOR`].
 pub const DUR_UP_FACTOR: f32 = 2.0;
 
+/// Smallest Insert-N count: inserting zero frames would be a
+/// no-op that still spent an undo step.
+pub const INSERT_COUNT_MIN: usize = 1;
+/// Largest Insert-N count. A whole minute of frames at the
+/// demo's 12 fps is 720; 60 is a generous single gesture that
+/// still keeps one accidental press recoverable in one undo.
+pub const INSERT_COUNT_MAX: usize = 60;
+/// Insert-N count a fresh [`FrameOpsState`] starts with.
+pub const INSERT_COUNT_DEFAULT: usize = 4;
+
 /// UI-side frame-ops state (see the module docs). Stored on the
 /// shell's `State` as `frame_ops`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameOpsState {
     /// Timeline range selection as `(anchor, focus)` — the
     /// frame where a shift-click selection started and the
@@ -78,6 +99,24 @@ pub struct FrameOpsState {
     /// [`FrameOpsState::frame_copied`] for the private
     /// `frame_clipboard` (`editor.rs:56`).
     pub range_copied: bool,
+    /// How many blank frames the Insert button will add
+    /// (Phase G). Kept inside
+    /// [`INSERT_COUNT_MIN`]..=[`INSERT_COUNT_MAX`] by
+    /// [`step_insert_count`]; defaults to
+    /// [`INSERT_COUNT_DEFAULT`]. Not part of the project —
+    /// a view-side preference like the range selection.
+    pub insert_count: usize,
+}
+
+impl Default for FrameOpsState {
+    fn default() -> Self {
+        FrameOpsState {
+            range_sel: None,
+            frame_copied: false,
+            range_copied: false,
+            insert_count: INSERT_COUNT_DEFAULT,
+        }
+    }
 }
 
 /// The selected range as ordered, inclusive `(lo, hi)`,
@@ -217,6 +256,97 @@ pub fn set_duration_here(core: &mut EditorCore, value: f32) {
     );
 }
 
+/// Clamp an Insert-N count to
+/// [`INSERT_COUNT_MIN`]..=[`INSERT_COUNT_MAX`]. The single
+/// authority for the range: the stepper, the batch insert and
+/// the readout all pass through it.
+pub fn clamp_insert_count(count: usize) -> usize {
+    count.clamp(INSERT_COUNT_MIN, INSERT_COUNT_MAX)
+}
+
+/// One stepper step on the Insert-N count: the stored value is
+/// clamped first (so a stale out-of-range value heals), then
+/// stepped by `delta` (±1 from the buttons) and clamped again,
+/// so stepping at a bound stays at the bound.
+pub fn step_insert_count(count: usize, delta: i32) -> usize {
+    let stepped = clamp_insert_count(count) as i64 + delta as i64;
+    stepped.clamp(INSERT_COUNT_MIN as i64, INSERT_COUNT_MAX as i64) as usize
+}
+
+/// The Insert button can act only when there is a current
+/// frame to insert after.
+pub fn can_insert_frames(core: &EditorCore) -> bool {
+    core.project.frames.get(core.current).is_some()
+}
+
+/// Insert `count` blank frames directly after the current
+/// frame, as ONE undo step, leaving `current` on the original
+/// frame. Returns how many frames were inserted (0 when there
+/// is no current frame; the status line says why and no
+/// snapshot is taken). `count` is clamped through
+/// [`clamp_insert_count`].
+///
+/// What "blank" means, from `EditorCore::add_frame`
+/// (editor.rs): a frame whose `poses` and `duration` are
+/// cloned from the then-current frame, with `easing: None` and
+/// `bends: Vec::new()` — NOT a whole-frame clone. Pressing
+/// +Frame N times chains: each press snapshots, inserts that
+/// frame after the old current and advances `current` onto
+/// it, so press k+1 clones press k's frame — which carries
+/// the same poses and duration as the original. Every press
+/// therefore inserts a frame identical to the one built here,
+/// so building the template once and splicing N copies in
+/// yields a project content-identical to the N presses; the
+/// only differences are the intended ones (one snapshot
+/// instead of N, `current` unmoved instead of advanced, one
+/// summary status instead of N).
+///
+/// Everything that must grow with the timeline, enumerated
+/// from the model: `Project::frames` (model.rs:688) is the
+/// ONLY per-frame vector on `Project`. Inside each
+/// `model::Frame`, `poses` (model.rs:519, parallel to
+/// `Project::figures`) is cloned per inserted frame,
+/// `duration` (model.rs:522) is copied, and `easing`
+/// (model.rs:526) / `bends` (model.rs:531) take the reset
+/// values `add_frame` itself writes — so one inserted `Frame`
+/// value carries the complete per-frame payload and the
+/// splice grows all of it at once. Nothing else on `Project`
+/// is indexed by frame position: `camera` (model.rs:690),
+/// `particles` (model.rs:701), `audio` (model.rs:705),
+/// `fx_clips` (model.rs:709), `channels` (model.rs:714),
+/// `sprites` (model.rs:716) and `texts` (model.rs:718) are
+/// sparse collections whose entries carry their own absolute
+/// frame numbers, and `add_frame` leaves every one of them
+/// untouched — so the batch does too, matching single-press
+/// behaviour exactly (known core behaviour included: a
+/// camera key after the insertion point keeps its absolute
+/// frame number under both).
+pub fn insert_frames_after_current(core: &mut EditorCore, count: usize) -> usize {
+    let n = clamp_insert_count(count);
+    let Some(source) = core.project.frames.get(core.current) else {
+        core.status = "No frame to insert after.".into();
+        return 0;
+    };
+    // Exactly the Frame value add_frame constructs: poses and
+    // duration cloned from the current frame, easing reset to
+    // None, bends emptied (see the docs above).
+    let blank = Frame {
+        poses: source.poses.clone(),
+        duration: source.duration,
+        easing: None,
+        bends: Vec::new(),
+    };
+    let at = core.current + 1;
+    let after = core.current;
+    core.snapshot();
+    let blanks: Vec<Frame> = (0..n).map(|_| blank.clone()).collect();
+    // Collecting the Splice forces the replacement to complete;
+    // the replaced range is empty, so nothing is removed.
+    let _removed: Vec<Frame> = core.project.frames.splice(at..at, blanks).collect();
+    core.status = format!("Inserted {n} frames after frame {}.", after + 1);
+    n
+}
+
 /// Which range the range ops will act on, for the section's
 /// readout: the selection wins, then the loop range; `None`
 /// when neither exists (range ops then fall back per their own
@@ -278,7 +408,9 @@ fn fbtn(
 /// path, the clipboards, the loop endpoints, then the duration
 /// steppers with their readout — over a second row, "This
 /// frame", carrying the current frame's duration multiplier
-/// with ×0.5 / ×2 / Reset 1.0 controls (Phase F).
+/// with ×0.5 / ×2 / Reset 1.0 controls (Phase F), and a third
+/// row, "Insert", carrying the Insert-N count stepper and the
+/// batch insert button (Phase G).
 pub fn frames_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let ops = &s.frame_ops;
@@ -420,7 +552,63 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             },
         ));
 
-    col().w_full().gap(6.0).child(section).child(this_frame)
+    // "Insert" row: the count stepper keeps
+    // FrameOpsState.insert_count inside 1..=60 (plain presses,
+    // no hold-repeat); the Insert button runs the batch insert
+    // as one undo step (see insert_frames_after_current).
+    let insert_row = row()
+        .key("frames-insert")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(
+            text("Insert")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(fbtn(
+            "fop-ins-n-dn",
+            "-",
+            false,
+            ops.insert_count <= INSERT_COUNT_MIN,
+            t,
+            |s| {
+                s.frame_ops.insert_count = step_insert_count(s.frame_ops.insert_count, -1);
+            },
+        ))
+        .child(
+            text(format!("{} frames", clamp_insert_count(ops.insert_count)))
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(fbtn(
+            "fop-ins-n-up",
+            "+",
+            false,
+            ops.insert_count >= INSERT_COUNT_MAX,
+            t,
+            |s| {
+                s.frame_ops.insert_count = step_insert_count(s.frame_ops.insert_count, 1);
+            },
+        ))
+        .child(fbtn(
+            "fop-ins-n",
+            "Insert frames",
+            false,
+            !can_insert_frames(core),
+            t,
+            |s| {
+                let count = s.frame_ops.insert_count;
+                insert_frames_after_current(&mut s.core, count);
+            },
+        ));
+
+    col()
+        .w_full()
+        .gap(6.0)
+        .child(section)
+        .child(this_frame)
+        .child(insert_row)
 }
 
 #[cfg(test)]
@@ -440,6 +628,10 @@ mod tests {
         assert_eq!(ops.range_sel, None);
         assert!(!ops.frame_copied);
         assert!(!ops.range_copied);
+        assert_eq!(
+            ops.insert_count, INSERT_COUNT_DEFAULT,
+            "the Insert-N stepper starts at the documented default"
+        );
     }
 
     #[test]
@@ -649,5 +841,122 @@ mod tests {
         let before = core.frame_count();
         assert!(core.paste_range(core.current));
         assert_eq!(core.frame_count(), before + 3);
+    }
+
+    #[test]
+    fn insert_count_clamps_to_one_through_sixty() {
+        assert_eq!(clamp_insert_count(0), INSERT_COUNT_MIN, "zero clamps up");
+        assert_eq!(clamp_insert_count(1), 1);
+        assert_eq!(clamp_insert_count(INSERT_COUNT_DEFAULT), 4);
+        assert_eq!(clamp_insert_count(60), 60);
+        assert_eq!(clamp_insert_count(61), INSERT_COUNT_MAX, "above clamps down");
+        assert_eq!(clamp_insert_count(usize::MAX), INSERT_COUNT_MAX);
+    }
+
+    #[test]
+    fn insert_count_stepper_steps_by_one_and_sticks_at_the_bounds() {
+        assert_eq!(step_insert_count(4, -1), 3);
+        assert_eq!(step_insert_count(4, 1), 5);
+        assert_eq!(step_insert_count(INSERT_COUNT_MIN, -1), INSERT_COUNT_MIN);
+        assert_eq!(step_insert_count(INSERT_COUNT_MAX, 1), INSERT_COUNT_MAX);
+        // A stale out-of-range stored value heals on the next step.
+        assert_eq!(step_insert_count(0, -1), INSERT_COUNT_MIN);
+        assert_eq!(step_insert_count(999, 1), INSERT_COUNT_MAX);
+    }
+
+    #[test]
+    fn batch_insert_content_matches_repeated_add_frame() {
+        // Two identical cores; the source frame is given a
+        // distinctive duration, easing and bends so the test
+        // proves WHICH parts add_frame copies (poses +
+        // duration) and which it resets (easing, bends).
+        let mut batch = EditorCore::new();
+        let mut singles = EditorCore::new();
+        for core in [&mut batch, &mut singles] {
+            core.goto(1);
+            core.project.frames[1].duration = 2.5;
+            core.project.frames[1].easing = Some(stykanimate_rs::model::Easing::EaseIn);
+            core.project.frames[1].bends = vec![vec![0.25, -0.5]];
+        }
+        assert_eq!(insert_frames_after_current(&mut batch, 4), 4);
+        for _ in 0..4 {
+            singles.add_frame();
+        }
+        assert_eq!(batch.frame_count(), singles.frame_count());
+        assert_eq!(
+            serde_json::to_string(&batch.project).unwrap(),
+            serde_json::to_string(&singles.project).unwrap(),
+            "batch content = N single adds, exactly"
+        );
+        // The inserted frames sit directly after the original
+        // current frame, carrying its poses + duration with
+        // easing/bends reset, as add_frame constructs them.
+        for f in &batch.project.frames[2..6] {
+            assert_eq!(f.duration, 2.5);
+            assert_eq!(f.easing, None);
+            assert!(f.bends.is_empty());
+        }
+        // The accepted differences: current stays on the
+        // original frame (single adds advance onto each new
+        // frame) and the status is the batch summary.
+        assert_eq!(batch.current, 1);
+        assert_eq!(singles.current, 5);
+        assert_eq!(batch.status, "Inserted 4 frames after frame 2.");
+    }
+
+    #[test]
+    fn batch_insert_is_exactly_one_undo_step() {
+        let mut core = EditorCore::new();
+        let before = serde_json::to_string(&core.project).unwrap();
+        let depth_before = core.undo_depth();
+        assert_eq!(insert_frames_after_current(&mut core, 6), 6);
+        assert_eq!(core.undo_depth(), depth_before + 1, "one snapshot for the batch");
+        core.undo();
+        assert_eq!(
+            serde_json::to_string(&core.project).unwrap(),
+            before,
+            "a single undo removes the whole batch"
+        );
+        // Contrast: the same six frames via single adds cost
+        // six undo steps.
+        let mut singles = EditorCore::new();
+        let d = singles.undo_depth();
+        for _ in 0..6 {
+            singles.add_frame();
+        }
+        assert_eq!(singles.undo_depth(), d + 6);
+    }
+
+    #[test]
+    fn batch_insert_at_the_last_frame_appends() {
+        let mut core = EditorCore::new();
+        let last = core.frame_count() - 1;
+        core.goto(last);
+        assert_eq!(insert_frames_after_current(&mut core, 3), 3);
+        assert_eq!(core.frame_count(), last + 1 + 3);
+        assert_eq!(core.current, last, "current stays on the original last frame");
+        assert_eq!(
+            core.status,
+            format!("Inserted 3 frames after frame {}.", last + 1)
+        );
+    }
+
+    #[test]
+    fn batch_insert_clamps_its_count_like_the_stepper() {
+        let mut core = EditorCore::new();
+        let before = core.frame_count();
+        assert_eq!(insert_frames_after_current(&mut core, 10_000), INSERT_COUNT_MAX);
+        assert_eq!(core.frame_count(), before + INSERT_COUNT_MAX);
+    }
+
+    #[test]
+    fn batch_insert_without_a_current_frame_refuses_without_a_snapshot() {
+        let mut core = EditorCore::new();
+        core.project.frames.clear();
+        assert!(!can_insert_frames(&core));
+        let depth = core.undo_depth();
+        assert_eq!(insert_frames_after_current(&mut core, 4), 0);
+        assert_eq!(core.undo_depth(), depth, "a refused insert spends no undo step");
+        assert_eq!(core.status, "No frame to insert after.");
     }
 }

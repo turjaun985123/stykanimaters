@@ -33,6 +33,25 @@
 //! Search is a later section; the rows are static data
 //! ([`shortcut_rows`], [`section_rows`], [`group_rows`]) so a
 //! search field can filter them without changing this panel.
+//!
+//! Phase G (section 30/40) audit, 2026-11-08: every binding
+//! below was re-enumerated from source — `main.rs` `on_key`
+//! read in full, `command_palette::palette_handle_key` and
+//! `palette_field_key`, plus a tree-wide grep for
+//! `KeyEvent` / `is_command` consumers (only those two
+//! handlers exist; `menus.rs` mentions keys only in doc
+//! comments for its shortcut hints, and `graph_panel`'s
+//! `Key::` is graph keyframe data, not keyboard input).
+//! The audit added the palette-open rows (`Down`, `Up`,
+//! `Enter`) and the `Escape` row (the palette handler
+//! closes the palette; `on_key` closes an open menu), and
+//! recorded the `text_focused` guard in the group
+//! descriptions: `on_key` consults the palette handler
+//! first, then returns early while any text field holds
+//! focus — so every shell binding except Ctrl+K pauses
+//! while typing. Field-local Enter (rename and name fields
+//! applying on submit) stays excluded, like the other
+//! text-authoring keys above.
 
 use rune::tok::{type_, Family, Theme};
 use rune::{col, el, row, text, El};
@@ -61,6 +80,10 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             ("Ctrl+Shift+Z", "Redo"),
             ("Ctrl+Y", "Redo"),
             ("Ctrl+K", "Open the command palette"),
+            ("Down", "Next result in the command palette (palette open)"),
+            ("Up", "Previous result in the command palette (palette open)"),
+            ("Enter", "Run the selected command (command palette open)"),
+            ("Escape", "Close the open menu or command palette"),
             ("Delete", "Delete the selected segment"),
         ],
         "Workspaces" => vec![
@@ -106,10 +129,22 @@ pub fn section_note(section: &str) -> Option<&'static str> {
 /// rows, in display order.
 pub fn group_rows() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("Shortcuts", "General editing keys that work anywhere in the shell"),
-        ("Workspaces", "Workspace switching keys"),
-        ("Posing", "Keys that change how stage drags behave and what the stage shows"),
-        ("Timeline", "Playback and frame keys"),
+        (
+            "Shortcuts",
+            "General editing keys — all but Ctrl+K pause while typing in a text field",
+        ),
+        (
+            "Workspaces",
+            "Workspace switching keys — paused while typing in a text field",
+        ),
+        (
+            "Posing",
+            "Keys that change how stage drags behave and what the stage shows — paused while typing in a text field",
+        ),
+        (
+            "Timeline",
+            "Playback and frame keys — paused while typing in a text field",
+        ),
         ("Drawing", "Freehand drawing keys"),
     ]
 }
@@ -208,11 +243,12 @@ mod tests {
     use super::{group_rows, section_note, section_rows, shortcut_rows};
 
     #[test]
-    fn shortcut_rows_has_exactly_20_rows() {
-        // 5 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline;
+    fn shortcut_rows_has_exactly_24_rows() {
+        // 9 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline;
         // Drawing contributes none (see the module docs for
-        // which GPUI-era rows were dropped and why).
-        assert_eq!(shortcut_rows().len(), 20);
+        // which GPUI-era rows were dropped and why). Phase G
+        // added the four palette/menu rows to Shortcuts.
+        assert_eq!(shortcut_rows().len(), 24);
     }
 
     #[test]
@@ -263,6 +299,54 @@ mod tests {
             ("Alt+8", "Switch to the Home workspace"),
         ];
         assert_eq!(section_rows("Workspaces"), expected);
+    }
+
+    #[test]
+    fn phase_g_audit_rows_are_listed() {
+        // The bindings the Phase G audit found in
+        // `command_palette::palette_handle_key` (consulted
+        // by `on_key` before anything else) and in
+        // `on_key`'s menu branch — all real, none listed
+        // before Phase G.
+        let rows = shortcut_rows();
+        assert!(rows.contains(&(
+            "Down",
+            "Next result in the command palette (palette open)"
+        )));
+        assert!(rows.contains(&(
+            "Up",
+            "Previous result in the command palette (palette open)"
+        )));
+        assert!(rows.contains(&(
+            "Enter",
+            "Run the selected command (command palette open)"
+        )));
+        assert!(rows.contains(&("Escape", "Close the open menu or command palette")));
+    }
+
+    #[test]
+    fn group_descriptions_state_the_typing_guard() {
+        // `on_key` returns early while a text field holds
+        // focus, after the palette handler has had first
+        // claim — so every group whose keys are shell
+        // bindings must say they pause while typing, and
+        // Shortcuts must name the one exception the routing
+        // order creates (Ctrl+K reaches the palette handler
+        // before the guard). Drawing has no keys to guard.
+        for (name, description) in group_rows() {
+            if name == "Drawing" {
+                continue;
+            }
+            assert!(
+                description.contains("typing"),
+                "{name} description must state the typing guard: {description}"
+            );
+        }
+        let shortcuts = group_rows()[0].1;
+        assert!(
+            shortcuts.contains("Ctrl+K"),
+            "Shortcuts must name the Ctrl+K exception: {shortcuts}"
+        );
     }
 
     #[test]

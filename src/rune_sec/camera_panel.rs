@@ -43,10 +43,27 @@
 //!   values: exactly one `snapshot()` (editor.rs:202), then
 //!   `Project::set_camera_key`, then the angle fix-up the op
 //!   itself applies — one paste is exactly one undo step.
-//! * Follow → `toggle_camera_follow` (editor.rs:1699); its
+//! * Follow → `toggle_camera_follow` (editor.rs:1740); its
 //!   active state is `project.camera_follow ==
 //!   Some(selected_figure)` (model.rs:699), the same condition
 //!   the op itself toggles on.
+//! * Follow block (Phase G, section 14) → a readout
+//!   ([`follow_label`], a pure read) plus explicit set/cycle/
+//!   clear buttons beside the toggle: `cam-follow-selected`
+//!   → [`follow_selected`], `cam-follow-prev` / `-next` →
+//!   [`follow_cycle`], `cam-follow-clear` → [`follow_clear`].
+//!   **Write discipline: none of these snapshot**, and that
+//!   is deliberate. `camera_follow` is project data, not a
+//!   camera key: the engine's own `toggle_camera_follow`
+//!   writes it snapshot-free, exactly like its sibling
+//!   project toggle `toggle_tween_playback`, while the ops
+//!   in this panel that DO snapshot (`rotate_camera`, the
+//!   dial, paste) are the ones writing camera *keys*. The
+//!   block mirrors the toggle it sits beside. A stale follow
+//!   index (a figure deleted out from under it — Phase F's
+//!   remap normally clears it, this is belt-and-braces) is
+//!   read as "off (missing)", never panicked on, and Clear
+//!   still clears it.
 //!
 //! Engine facts this panel lives with (verified, not worked
 //! around silently): `camera_clear_key` does NOT snapshot, so
@@ -343,6 +360,96 @@ pub fn paste_key_here(core: &mut EditorCore) {
 }
 
 // ----------------------------------------------------------------
+// Follow block
+// ----------------------------------------------------------------
+
+/// The follow readout text: which figure the camera follows,
+/// by 1-based position and name (`"Following: Figure 2 —
+/// Styk"`), `"Following: off"` when follow is unset, and
+/// `"Following: off (missing)"` when the stored index names
+/// a figure that no longer exists — a stale index is a
+/// display state, never a panic. Pure read; the value is
+/// consumed by `Project::camera_at` (model.rs:861), which
+/// centres the camera on that figure's root (zoom still
+/// comes from the keys).
+pub fn follow_label(core: &EditorCore) -> String {
+    match core.project.camera_follow {
+        None => "Following: off".into(),
+        Some(fi) => match core.project.figures.get(fi) {
+            Some(f) => format!("Following: Figure {} — {}", fi + 1, f.name),
+            None => "Following: off (missing)".into(),
+        },
+    }
+}
+
+/// The figure index one step from `current` in direction
+/// `dir` (any non-zero value is taken by its sign), cycling
+/// over `count` figures with wrap. Pure — the arithmetic
+/// half of [`follow_cycle`]. From no follow (or a stale
+/// index, which counts as no follow), Next enters at the
+/// first figure and Prev at the last, so cycling from "off"
+/// always lands somewhere when figures exist. `None` only
+/// when the project has no figures at all.
+pub fn cycle_follow(current: Option<usize>, count: usize, dir: i32) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let step: i64 = if dir < 0 { -1 } else { 1 };
+    let next = match current {
+        Some(fi) if fi < count => (fi as i64 + step).rem_euclid(count as i64),
+        _ if step > 0 => 0,
+        _ => count as i64 - 1,
+    };
+    Some(next as usize)
+}
+
+/// Follow-selected button: follow the core's selected
+/// figure. A direct field write + status, mirroring
+/// `toggle_camera_follow`'s discipline (see the module
+/// docs): no snapshot. With no valid selection — an empty
+/// project, or a selection index past the figure list —
+/// status-only refusal and the stored follow is untouched.
+pub fn follow_selected(core: &mut EditorCore) {
+    let fi = core.selected_figure;
+    match core.project.figures.get(fi) {
+        Some(f) => {
+            let name = f.name.clone();
+            core.project.camera_follow = Some(fi);
+            core.status = format!("Camera follows {name}.");
+        }
+        None => core.status = "No figure selected to follow.".into(),
+    }
+}
+
+/// Follow-clear button: stop following. Sets the field to
+/// `None` unconditionally (so it also repairs a stale
+/// index) with `toggle_camera_follow`'s own off wording;
+/// no snapshot, per the module docs.
+pub fn follow_clear(core: &mut EditorCore) {
+    core.project.camera_follow = None;
+    core.status = "Camera follow off.".into();
+}
+
+/// Follow Prev/Next buttons: cycle the followed figure by
+/// one step (wrapping) via [`cycle_follow`], for when the
+/// selection is not the figure the user means. Lands on a
+/// figure whenever figures exist — including from off or a
+/// stale index, which the write then replaces — and reports
+/// with the toggle's wording. In an empty project,
+/// status-only: nothing to follow. No snapshot (module
+/// docs).
+pub fn follow_cycle(core: &mut EditorCore, dir: i32) {
+    let count = core.project.figures.len();
+    match cycle_follow(core.project.camera_follow, count, dir) {
+        Some(fi) => {
+            core.project.camera_follow = Some(fi);
+            core.status = format!("Camera follows {}.", core.project.figures[fi].name);
+        }
+        None => core.status = "No figures to follow.".into(),
+    }
+}
+
+// ----------------------------------------------------------------
 // Rotation dial
 // ----------------------------------------------------------------
 
@@ -605,10 +712,68 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
     list
 }
 
+/// The follow block at the foot of the panel: a "Follow"
+/// header, the [`follow_label`] readout (keyed
+/// `cam-follow-label`, the way the zoom readout is keyed),
+/// then the explicit controls — the Phase D toggle
+/// (`cam-follow`, key and behaviour unchanged), Follow
+/// selected (`cam-follow-selected`) — and the cycle/clear
+/// row (`cam-follow-prev` / `cam-follow-next` /
+/// `cam-follow-clear`) for reaching a follow target the
+/// selection does not name, or clearing a stale one.
+fn follow_block(core: &EditorCore, t: &Theme) -> El {
+    col()
+        .key("cam-follow-block")
+        .gap(4.0)
+        .child(
+            text("Follow")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(
+            el()
+                .key("cam-follow-label")
+                .child(text(follow_label(core)).font(type_::LABEL).color(t.text)),
+        )
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(btn(
+                    "cam-follow",
+                    "Follow",
+                    follow_active(core),
+                    t,
+                    |s: &mut State| s.core.toggle_camera_follow(),
+                ))
+                .child(btn(
+                    "cam-follow-selected",
+                    "Selected",
+                    false,
+                    t,
+                    |s: &mut State| follow_selected(&mut s.core),
+                )),
+        )
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(btn("cam-follow-prev", "Prev", false, t, |s: &mut State| {
+                    follow_cycle(&mut s.core, -1)
+                }))
+                .child(btn("cam-follow-next", "Next", false, t, |s: &mut State| {
+                    follow_cycle(&mut s.core, 1)
+                }))
+                .child(btn("cam-follow-clear", "Clear", false, t, |s: &mut State| {
+                    follow_clear(&mut s.core)
+                })),
+        )
+}
+
 /// The full camera panel: a "Camera" header, the view row
 /// (Fit / Centre / 1:1), the zoom stepper row, the rotation
 /// stepper row, the rotation dial, the key row (Set key /
-/// Clear key), the camera-key list and the follow toggle.
+/// Clear key), the camera-key list and the follow block.
 pub fn panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     col()
@@ -666,18 +831,7 @@ pub fn panel(s: &State, t: &Theme) -> El {
                 })),
         )
         .child(key_list(core, t))
-        .child(
-            row()
-                .gap(6.0)
-                .center_y()
-                .child(btn(
-                    "cam-follow",
-                    "Follow",
-                    follow_active(core),
-                    t,
-                    |s: &mut State| s.core.toggle_camera_follow(),
-                )),
-        )
+        .child(follow_block(core, t))
 }
 
 /// The compact stage-overlay cluster: Fit / Centre / 1:1 and
@@ -774,6 +928,116 @@ mod tests {
         assert!(!follow_active(&core));
         core.toggle_camera_follow();
         assert!(follow_active(&core));
+    }
+
+    // ---- Follow block ----
+
+    /// Grow the one-figure demo project to `n` figures,
+    /// field-level (no snapshots — undo-depth measurements
+    /// in these tests stay attributable to the op under
+    /// test). Extra figures are named "Extra 2", "Extra 3",
+    /// … after the demo's "Styk".
+    fn with_figures(core: &mut EditorCore, n: usize) {
+        while core.project.figures.len() < n {
+            let mut f = core.project.figures[0].clone();
+            f.name = format!("Extra {}", core.project.figures.len() + 1);
+            core.project.figures.push(f);
+        }
+    }
+
+    #[test]
+    fn follow_label_reports_off_valid_and_stale() {
+        let mut core = EditorCore::new();
+        assert_eq!(follow_label(&core), "Following: off");
+        with_figures(&mut core, 2);
+        core.project.figures[1].name = "Beta".into();
+        core.project.camera_follow = Some(1);
+        assert_eq!(follow_label(&core), "Following: Figure 2 — Beta");
+        core.project.camera_follow = Some(0);
+        assert_eq!(follow_label(&core), "Following: Figure 1 — Styk");
+        // Stale: the index names a figure that is not there
+        // — a display state, not a panic.
+        core.project.camera_follow = Some(99);
+        assert_eq!(follow_label(&core), "Following: off (missing)");
+    }
+
+    #[test]
+    fn cycle_follow_wraps_and_enters_from_off() {
+        // Empty project: nowhere to land, either way.
+        assert_eq!(cycle_follow(None, 0, 1), None);
+        assert_eq!(cycle_follow(Some(0), 0, -1), None);
+        // From off, Next enters at the first figure and
+        // Prev at the last.
+        assert_eq!(cycle_follow(None, 3, 1), Some(0));
+        assert_eq!(cycle_follow(None, 3, -1), Some(2));
+        // Plain steps, wrapping at both ends.
+        assert_eq!(cycle_follow(Some(0), 3, 1), Some(1));
+        assert_eq!(cycle_follow(Some(2), 3, 1), Some(0));
+        assert_eq!(cycle_follow(Some(0), 3, -1), Some(2));
+        assert_eq!(cycle_follow(Some(2), 3, -1), Some(1));
+        // A stale index counts as off; a lone figure cycles
+        // onto itself.
+        assert_eq!(cycle_follow(Some(9), 3, 1), Some(0));
+        assert_eq!(cycle_follow(Some(9), 3, -1), Some(2));
+        assert_eq!(cycle_follow(Some(0), 1, 1), Some(0));
+        assert_eq!(cycle_follow(Some(0), 1, -1), Some(0));
+    }
+
+    #[test]
+    fn follow_selected_sets_the_selection_without_a_snapshot() {
+        let mut core = EditorCore::new();
+        with_figures(&mut core, 2);
+        core.selected_figure = 1;
+        let depth0 = core.undo_depth();
+        follow_selected(&mut core);
+        assert_eq!(core.project.camera_follow, Some(1));
+        assert_eq!(core.status, "Camera follows Extra 2.");
+        // Project-data discipline (module docs): the write
+        // is snapshot-free, like `toggle_camera_follow`.
+        assert_eq!(core.undo_depth(), depth0);
+    }
+
+    #[test]
+    fn follow_selected_refuses_without_a_valid_selection() {
+        let mut core = EditorCore::new();
+        // Selection index past the figure list.
+        core.selected_figure = 99;
+        follow_selected(&mut core);
+        assert_eq!(core.status, "No figure selected to follow.");
+        assert_eq!(core.project.camera_follow, None);
+        // Empty project: the same refusal, and cycling
+        // agrees there is nothing to follow.
+        core.project.figures.clear();
+        core.selected_figure = 0;
+        follow_selected(&mut core);
+        assert_eq!(core.status, "No figure selected to follow.");
+        follow_cycle(&mut core, 1);
+        assert_eq!(core.status, "No figures to follow.");
+        assert_eq!(core.project.camera_follow, None);
+    }
+
+    #[test]
+    fn follow_cycle_and_clear_drive_the_field() {
+        let mut core = EditorCore::new();
+        with_figures(&mut core, 2);
+        // From off, Next lands on the first figure; cycling
+        // wraps past the last one back to it.
+        follow_cycle(&mut core, 1);
+        assert_eq!(core.project.camera_follow, Some(0));
+        follow_cycle(&mut core, 1);
+        assert_eq!(core.project.camera_follow, Some(1));
+        assert_eq!(core.status, "Camera follows Extra 2.");
+        follow_cycle(&mut core, 1);
+        assert_eq!(core.project.camera_follow, Some(0));
+        follow_cycle(&mut core, -1);
+        assert_eq!(core.project.camera_follow, Some(1));
+        follow_clear(&mut core);
+        assert_eq!(core.project.camera_follow, None);
+        assert_eq!(core.status, "Camera follow off.");
+        // Clear also repairs a stale index.
+        core.project.camera_follow = Some(99);
+        follow_clear(&mut core);
+        assert_eq!(core.project.camera_follow, None);
     }
 
     #[test]
@@ -1069,6 +1333,14 @@ mod tests {
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
             draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
             was_playing: false,
         };
         let _ = panel(&s, &t);

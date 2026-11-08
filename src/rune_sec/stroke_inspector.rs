@@ -81,11 +81,44 @@
 //! An empty stroke list takes no snapshot at all: the
 //! press only reports that there are no strokes.
 //!
-//! No new `State` fields: everything reads `s.core` (active
-//! brush, `brush_index`, `project.strokes`, `current`) and
-//! writes go through the `brush_index` field write, the
-//! frame-clear op, `delete_stroke_at` or the bulk
-//! composition above.
+//! ## Stroke selection (Phase G, section 7)
+//!
+//! A selection row under the bulk row steps a
+//! **project-wide** stroke selection: `State.stroke_selected`
+//! (declared in main.rs) holds an index into
+//! `Project.strokes` — the same index space
+//! `delete_stroke_at` and the stage's
+//! `stage_layers::highlight_geometry` use, and the space
+//! the stage section reads when it draws the highlight.
+//! The per-frame list further down is only a view onto
+//! that space (its rows carry
+//! [`StrokeRow::project_index`]); the selection ignores
+//! the frame filter, so Prev / Next walk every stroke in
+//! the project, wrapping at both ends, and the readout
+//! names the selected stroke's own frame
+//! ([`stroke_frame_of`]) so the user can jump there with
+//! **Go to frame** (`EditorCore::goto` — the core's
+//! navigation op: no snapshot, no status of its own).
+//!
+//! Selection is shell view state: stepping and clearing
+//! write nothing but `s.stroke_selected` — no snapshot,
+//! no core mutation — so they add no undo steps and no
+//! status toasts. A stale selection (index ≥ the stroke
+//! count, e.g. after a bulk delete elsewhere) is treated
+//! as unset everywhere: the readout falls back to "No
+//! stroke selected" and stepping re-enters at the first
+//! (+1) or last (−1) stroke ([`step_selection`]). On an
+//! empty project the row reads "No strokes" and every
+//! button is inert apart from the status line.
+//!
+//! `State` access: the brush and stroke data read
+//! `s.core` (active brush, `brush_index`,
+//! `project.strokes`, `current`) and writes go through
+//! the `brush_index` field write, the frame-clear op,
+//! `delete_stroke_at` or the bulk composition above;
+//! the selection row additionally reads and writes
+//! `s.stroke_selected`, declared in main.rs — no field
+//! is declared in this file.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El};
@@ -438,6 +471,129 @@ pub fn delete_stroke(core: &mut EditorCore, project_index: usize) {
     core.delete_stroke_at(project_index);
 }
 
+/// Total strokes in the project, across all frames — the
+/// size of the selection's index space. (The frame list
+/// above counts only the current frame; the selection
+/// deliberately does not.)
+pub fn stroke_total(core: &EditorCore) -> usize {
+    core.project.strokes.len()
+}
+
+/// The frame the stroke at project-wide `index` was
+/// recorded on (`Stroke.frame`, model.rs:482), or `None`
+/// when `index` is outside `Project.strokes`. This is
+/// the mapping the selection readout and **Go to frame**
+/// need: the selection lives in the project-wide space,
+/// but a stroke is viewed on its own frame.
+pub fn stroke_frame_of(core: &EditorCore, index: usize) -> Option<usize> {
+    core.project.strokes.get(index).map(|s| s.frame)
+}
+
+/// Step a project-wide stroke selection by `dir`
+/// (+1 = next, −1 = previous) over `total` strokes,
+/// wrapping at both ends. A missing **or stale**
+/// selection (`cur >= total`, e.g. after strokes were
+/// deleted elsewhere) is treated as unset: +1 enters at
+/// the first stroke, −1 at the last. `total == 0` never
+/// selects anything; `dir == 0` holds a valid selection
+/// and drops an unset or stale one.
+pub fn step_selection(cur: Option<usize>, total: usize, dir: i32) -> Option<usize> {
+    if total == 0 {
+        return None;
+    }
+    let valid = cur.filter(|&i| i < total);
+    match dir.signum() {
+        1 => Some(match valid {
+            Some(i) => (i + 1) % total,
+            None => 0,
+        }),
+        -1 => Some(match valid {
+            Some(i) => (i + total - 1) % total,
+            None => total - 1,
+        }),
+        _ => valid,
+    }
+}
+
+/// The selection row's readout. With a valid selection:
+/// `Stroke {i+1} of {n} · frame {f+1}` — the stroke's
+/// 1-based position in the project-wide space, the
+/// project total, and the 1-based frame it lives on.
+/// A missing or stale selection reads as no selection;
+/// an empty project reads "No strokes".
+pub fn selection_readout(core: &EditorCore, selected: Option<usize>) -> String {
+    let total = core.project.strokes.len();
+    if total == 0 {
+        return "No strokes".to_string();
+    }
+    match selected.filter(|&i| i < total) {
+        Some(i) => {
+            // `i < total`, so the stroke — and its frame —
+            // exist; the fallback is unreachable.
+            let frame = stroke_frame_of(core, i).unwrap_or(0);
+            format!("Stroke {} of {} · frame {}", i + 1, total, frame + 1)
+        }
+        None => format!(
+            "No stroke selected · {} stroke{}",
+            total,
+            if total == 1 { "" } else { "s" }
+        ),
+    }
+}
+
+/// Prev / Next press: step `s.stroke_selected` through
+/// the project-wide stroke space ([`step_selection`]).
+/// View state only — no snapshot, no status, no core
+/// write. On an empty project the press only reports
+/// that there are no strokes (and drops any stale
+/// selection).
+pub fn step_stroke_selection(s: &mut State, dir: i32) {
+    let total = s.core.project.strokes.len();
+    if total == 0 {
+        s.stroke_selected = None;
+        s.core.status = "No strokes to select.".into();
+        return;
+    }
+    s.stroke_selected = step_selection(s.stroke_selected, total, dir);
+}
+
+/// Clear press: drop the selection. View state only,
+/// like stepping; on an empty project the press only
+/// reports that there are no strokes.
+pub fn clear_stroke_selection(s: &mut State) {
+    if s.core.project.strokes.is_empty() {
+        s.core.status = "No strokes to select.".into();
+        return;
+    }
+    s.stroke_selected = None;
+}
+
+/// Go to frame press: navigate to the selected stroke's
+/// frame via `EditorCore::goto` — navigation, the one
+/// core write the selection row performs (no snapshot:
+/// `goto` is the same op the timeline chips call).
+/// Returns whether it navigated; with no (or a stale)
+/// selection, or on an empty project, the press only
+/// reports why via the status line.
+pub fn goto_selected_stroke_frame(s: &mut State) -> bool {
+    let total = s.core.project.strokes.len();
+    if total == 0 {
+        s.core.status = "No strokes to select.".into();
+        return false;
+    }
+    match s.stroke_selected.filter(|&i| i < total) {
+        Some(i) => {
+            let frame = stroke_frame_of(&s.core, i).unwrap_or(0);
+            s.core.goto(frame);
+            true
+        }
+        None => {
+            s.core.status = "No stroke selected.".into();
+            false
+        }
+    }
+}
+
 /// The bulk Recolour's target colour: the selected
 /// node's own colour when a node is selected and
 /// carries one, else the selected figure's colour —
@@ -538,11 +694,13 @@ fn param_row(
         }))
 }
 
-/// The stroke inspector panel: the active brush's parameter
-/// set (steppers + nib segmented control, all stepping the
-/// preset selection — see the module docs), then the
-/// current frame's stroke list with per-row Delete buttons
-/// and the frame Clear button.
+/// The stroke inspector panel: the bulk stroke row and
+/// the project-wide selection row, then the active
+/// brush's parameter set (steppers + nib segmented
+/// control, all stepping the preset selection — see the
+/// module docs), then the current frame's stroke list
+/// with per-row Delete buttons and the frame Clear
+/// button.
 pub fn stroke_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let brush = core.active_brush();
@@ -569,6 +727,37 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             }))
             .child(btn("stroke-delete-all", "Delete all", false, t, |s| {
                 delete_all_strokes(&mut s.core);
+            })),
+    );
+
+    // Stroke selection (Phase G): project-wide stepping
+    // through `Project.strokes` — the stage draws the
+    // highlight for `s.stroke_selected`. View state
+    // only (see the module docs); always rendered, and
+    // on an empty project the readout says "No strokes"
+    // and the buttons only report via the status line.
+    panel = panel.child(
+        row()
+            .key("stroke-sel-row")
+            .gap(8.0)
+            .center_y()
+            .child(
+                text(selection_readout(core, s.stroke_selected))
+                    .font(type_::LABEL)
+                    .color(t.text)
+                    .grow(1.0),
+            )
+            .child(btn("stroke-sel-prev", "Prev", false, t, |s| {
+                step_stroke_selection(s, -1);
+            }))
+            .child(btn("stroke-sel-next", "Next", false, t, |s| {
+                step_stroke_selection(s, 1);
+            }))
+            .child(btn("stroke-sel-goto", "Go to frame", false, t, |s| {
+                goto_selected_stroke_frame(s);
+            }))
+            .child(btn("stroke-sel-clear", "Clear", false, t, |s| {
+                clear_stroke_selection(s);
             })),
     );
 
@@ -1052,5 +1241,251 @@ mod tests {
             depth,
             "an empty press must not add an undo step"
         );
+    }
+
+    #[test]
+    fn step_selection_wraps_and_enters_from_unset() {
+        // Empty project: nothing to select, either way —
+        // not even from a (necessarily stale) Some.
+        assert_eq!(step_selection(None, 0, 1), None);
+        assert_eq!(step_selection(None, 0, -1), None);
+        assert_eq!(step_selection(Some(0), 0, 1), None);
+        // Single stroke: entering lands on it, and
+        // stepping wraps back onto it from both sides.
+        assert_eq!(step_selection(None, 1, 1), Some(0));
+        assert_eq!(step_selection(None, 1, -1), Some(0));
+        assert_eq!(step_selection(Some(0), 1, 1), Some(0));
+        assert_eq!(step_selection(Some(0), 1, -1), Some(0));
+        // Walking five strokes, entering from unset at
+        // both ends and wrapping past both ends.
+        assert_eq!(step_selection(None, 5, 1), Some(0));
+        assert_eq!(step_selection(None, 5, -1), Some(4));
+        assert_eq!(step_selection(Some(2), 5, 1), Some(3));
+        assert_eq!(step_selection(Some(2), 5, -1), Some(1));
+        assert_eq!(step_selection(Some(4), 5, 1), Some(0), "next wraps");
+        assert_eq!(step_selection(Some(0), 5, -1), Some(4), "prev wraps");
+        // A stale selection is treated as unset: +1
+        // re-enters at the first stroke, −1 at the last —
+        // it never steps relative to the stale index.
+        assert_eq!(step_selection(Some(5), 5, 1), Some(0));
+        assert_eq!(step_selection(Some(5), 5, -1), Some(4));
+        assert_eq!(step_selection(Some(99), 5, 1), Some(0));
+        assert_eq!(step_selection(Some(99), 5, -1), Some(4));
+        // No direction: a valid selection holds; an
+        // unset or stale one stays unset.
+        assert_eq!(step_selection(Some(2), 5, 0), Some(2));
+        assert_eq!(step_selection(None, 5, 0), None);
+        assert_eq!(step_selection(Some(9), 5, 0), None);
+    }
+
+    #[test]
+    fn stroke_frame_of_maps_project_indices_to_frames() {
+        let mut core = EditorCore::new();
+        for frame in [0, 2, 0, 1, 2] {
+            core.project.strokes.push(plain_stroke(frame, 2));
+        }
+        // The project-wide index space interleaves frames;
+        // each index maps to its own stroke's frame.
+        assert_eq!(stroke_frame_of(&core, 0), Some(0));
+        assert_eq!(stroke_frame_of(&core, 1), Some(2));
+        assert_eq!(stroke_frame_of(&core, 2), Some(0));
+        assert_eq!(stroke_frame_of(&core, 3), Some(1));
+        assert_eq!(stroke_frame_of(&core, 4), Some(2));
+        assert_eq!(stroke_frame_of(&core, 5), None);
+        assert_eq!(stroke_total(&core), 5);
+    }
+
+    #[test]
+    fn selection_readout_names_position_total_and_frame() {
+        let mut core = EditorCore::new();
+        core.project.strokes.clear();
+        assert_eq!(selection_readout(&core, None), "No strokes");
+        assert_eq!(selection_readout(&core, Some(0)), "No strokes");
+        for frame in [0, 2, 0] {
+            core.project.strokes.push(plain_stroke(frame, 2));
+        }
+        assert_eq!(
+            selection_readout(&core, None),
+            "No stroke selected · 3 strokes"
+        );
+        // Index 1 is the stroke recorded on frame 2,
+        // shown 1-based as frame 3.
+        assert_eq!(
+            selection_readout(&core, Some(1)),
+            "Stroke 2 of 3 · frame 3"
+        );
+        assert_eq!(
+            selection_readout(&core, Some(0)),
+            "Stroke 1 of 3 · frame 1"
+        );
+        // A stale selection reads as no selection.
+        assert_eq!(
+            selection_readout(&core, Some(3)),
+            "No stroke selected · 3 strokes"
+        );
+    }
+
+    #[test]
+    fn selection_readout_uses_the_singular_for_one_stroke() {
+        let mut core = EditorCore::new();
+        core.project.strokes.push(plain_stroke(0, 2));
+        assert_eq!(
+            selection_readout(&core, None),
+            "No stroke selected · 1 stroke"
+        );
+        assert_eq!(
+            selection_readout(&core, Some(0)),
+            "Stroke 1 of 1 · frame 1"
+        );
+    }
+
+    /// A core whose project carries strokes on frames
+    /// 0, 2, 0 (project indices 0, 1, 2). The demo
+    /// project has 5 frames, so frame 2 is a real
+    /// `goto` target.
+    fn core_with_strokes() -> EditorCore {
+        let mut core = EditorCore::new();
+        for frame in [0, 2, 0] {
+            core.project.strokes.push(plain_stroke(frame, 2));
+        }
+        core
+    }
+
+    /// A shell `State` over the given core with the
+    /// given stroke selection — field-for-field the
+    /// literal the other sections' State tests use,
+    /// with the Phase G fields included.
+    fn state_with(core: EditorCore, sel: Option<usize>) -> State {
+        State {
+            core,
+            last_poll: None,
+            wheel_zoom: 0.0,
+            figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
+            figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
+            library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
+            graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
+            audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            menus: crate::rune_sec::menus::MenusState::default(),
+            palette: crate::rune_sec::command_palette::PaletteState::new(),
+            settings: crate::rune_sec::settings_popover::SettingsState::default(),
+            toasts: crate::rune_sec::toasts::ToastsState::new(),
+            text_tool: crate::rune_sec::text_tool::TextToolState::new(),
+            name_edit: rune::TextEdit::new(""),
+            export_use_range: false,
+            fx_selected: None,
+            pose_clipboard: None,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            guides: false,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            stroke_selected: sel,
+            particle_selected: None,
+            guides_frustum: true,
+            guides_safe: true,
+            onion_ui: Default::default(),
+            last_frame: 0,
+            pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+            loop_playback: true,
+            was_playing: false,
+            last_status: String::new(),
+            toast_now: 0.0,
+            last_dark: true,
+        }
+    }
+
+    #[test]
+    fn selection_presses_step_wrap_and_clear_as_view_state_only() {
+        let mut s = state_with(core_with_strokes(), None);
+        let depth = s.core.undo_depth();
+        let status = s.core.status.clone();
+        // Stepping enters at the first stroke, walks the
+        // project-wide space (frames are irrelevant to
+        // the order) and wraps at both ends.
+        step_stroke_selection(&mut s, 1);
+        assert_eq!(s.stroke_selected, Some(0));
+        step_stroke_selection(&mut s, 1);
+        assert_eq!(s.stroke_selected, Some(1));
+        step_stroke_selection(&mut s, 1);
+        assert_eq!(s.stroke_selected, Some(2));
+        step_stroke_selection(&mut s, 1);
+        assert_eq!(s.stroke_selected, Some(0), "next wraps to the first");
+        step_stroke_selection(&mut s, -1);
+        assert_eq!(s.stroke_selected, Some(2), "prev wraps to the last");
+        // View state only: no undo step was added and the
+        // status line was never touched (no toast spam).
+        assert_eq!(s.core.undo_depth(), depth);
+        assert_eq!(s.core.status, status);
+        // A stale selection re-enters instead of stepping
+        // relative to the dead index.
+        s.stroke_selected = Some(9);
+        step_stroke_selection(&mut s, 1);
+        assert_eq!(s.stroke_selected, Some(0));
+        // Clear drops the selection, still silently.
+        clear_stroke_selection(&mut s);
+        assert_eq!(s.stroke_selected, None);
+        assert_eq!(s.core.status, status);
+        assert_eq!(s.core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn goto_press_navigates_to_the_selected_strokes_frame() {
+        // Index 1 lives on frame 2, index 2 on frame 0.
+        let mut s = state_with(core_with_strokes(), Some(1));
+        assert!(goto_selected_stroke_frame(&mut s));
+        assert_eq!(s.core.current, 2);
+        s.stroke_selected = Some(2);
+        assert!(goto_selected_stroke_frame(&mut s));
+        assert_eq!(s.core.current, 0);
+        // No selection: the press refuses with a status
+        // and does not navigate.
+        let mut s = state_with(core_with_strokes(), None);
+        assert!(!goto_selected_stroke_frame(&mut s));
+        assert_eq!(s.core.status, "No stroke selected.");
+        assert_eq!(s.core.current, 0);
+        // A stale selection refuses the same way.
+        let mut s = state_with(core_with_strokes(), Some(7));
+        assert!(!goto_selected_stroke_frame(&mut s));
+        assert_eq!(s.core.status, "No stroke selected.");
+    }
+
+    #[test]
+    fn selection_presses_on_an_empty_project_only_report() {
+        let core = EditorCore::new();
+        assert!(core.project.strokes.is_empty());
+        // Even a stale selection is dropped, never
+        // stepped, and nothing panics.
+        let mut s = state_with(core, Some(4));
+        step_stroke_selection(&mut s, 1);
+        assert_eq!(s.stroke_selected, None);
+        assert_eq!(s.core.status, "No strokes to select.");
+        step_stroke_selection(&mut s, -1);
+        assert_eq!(s.stroke_selected, None);
+        assert_eq!(s.core.status, "No strokes to select.");
+        clear_stroke_selection(&mut s);
+        assert_eq!(s.core.status, "No strokes to select.");
+        assert!(!goto_selected_stroke_frame(&mut s));
+        assert_eq!(s.core.status, "No strokes to select.");
+        assert_eq!(s.stroke_selected, None);
+    }
+
+    #[test]
+    fn stroke_panel_builds_with_and_without_strokes() {
+        let t = rune::tok::theme(true);
+        // Empty project: the selection row renders its
+        // "No strokes" readout alongside everything else.
+        let s = state_with(EditorCore::new(), None);
+        let _ = stroke_panel(&s, &t);
+        // Strokes present, one selected: the row renders
+        // the position/frame readout.
+        let s = state_with(core_with_strokes(), Some(1));
+        let _ = stroke_panel(&s, &t);
     }
 }

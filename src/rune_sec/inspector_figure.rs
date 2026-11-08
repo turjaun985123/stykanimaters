@@ -63,6 +63,23 @@
 //!   `poll()` — `project_tools::sync_name_edit`'s pattern,
 //!   plus a selection-change trigger. Keys `fig-name` /
 //!   `fig-rename`.
+//! * Scale 90% / 110% → [`scale_selected_figure`] — the
+//!   whole-figure resize this panel adds in Phase G. There
+//!   is no scale op in the core, so it composes the
+//!   single-node editor's own `adjust_length`
+//!   (editor.rs:489) over every node: one `snapshot()` for
+//!   the whole operation (the helper's doc has the full
+//!   reasoning), the op's own clamp [4.0, 220.0] per length.
+//!   Keys `fig-scale-dn` / `fig-scale-up`. What scaling
+//!   does NOT touch, by design or by model: the root
+//!   position and all pose angles (lengths only — see the
+//!   helper); segment thickness (stroke widths are
+//!   `NodeDef.thickness`, a separate field with its own
+//!   stepper elsewhere); node style (cap / colour2 /
+//!   opacity); and the head ring — its radius is stored
+//!   nowhere: both renderers draw a constant 17 units for
+//!   nodes flagged `head` (stage_view.rs, export.rs), so
+//!   a scaled figure keeps the same head size.
 //!
 //! When the project has no figures — or the selection is
 //! stale — the panel is one muted line.
@@ -220,6 +237,63 @@ pub fn rename_selected_figure(core: &mut EditorCore, raw: &str) -> bool {
     true
 }
 
+/// Scale every segment length of the selected figure by
+/// `factor` (0.9 shrinks, 1.1 grows) as ONE undo step;
+/// returns true when the lengths were written.
+///
+/// There is no whole-figure scale op in the core, so this
+/// composes the single-node editor's own op,
+/// `adjust_length` (editor.rs:489), once per node: select
+/// the node, pass the delta `len * factor − len`, and the
+/// op's own write — parented nodes only, clamped to
+/// [4.0, 220.0] — does the rest. A length that would pass
+/// a clamp simply lands on it; the scale still succeeds.
+/// `adjust_length` never snapshots, so the one
+/// `snapshot()` below (the keyframe_tools / pose_tools
+/// multi-write pattern: guard, snapshot once, write,
+/// status) is the scale's only undo entry. The node
+/// selection is restored afterwards.
+///
+/// Only lengths change. The root position, every pose
+/// angle and each node's `rest_angle` are deliberately
+/// left alone: joint positions are derived from lengths
+/// and angles by forward kinematics (`model::evaluate`),
+/// so growing the lengths around an unmoved root grows
+/// the figure in place — the least-surprise resize.
+/// Touching the root or the angles would translate or
+/// re-pose the figure as a side effect of a resize.
+///
+/// Refusals (no figure, a root-only figure, a
+/// non-positive or non-finite factor) are status-only and
+/// take no snapshot, like every other refusal in this
+/// panel.
+pub fn scale_selected_figure(core: &mut EditorCore, factor: f32) -> bool {
+    if !factor.is_finite() || factor <= 0.0 {
+        core.status = "Invalid scale factor.".into();
+        return false;
+    }
+    let fi = core.selected_figure;
+    let Some(fig) = core.project.figures.get(fi) else {
+        core.status = "No such figure.".into();
+        return false;
+    };
+    if !fig.def.nodes.iter().any(|n| n.parent.is_some()) {
+        core.status = format!("Figure {} has no segments to scale.", fi + 1);
+        return false;
+    }
+    core.snapshot();
+    let saved_node = core.selected_node;
+    let count = core.project.figures[fi].def.nodes.len();
+    for ni in 0..count {
+        let len = core.project.figures[fi].def.nodes[ni].length;
+        core.selected_node = Some(ni);
+        core.adjust_length(len * factor - len);
+    }
+    core.selected_node = saved_node;
+    core.status = format!("Figure {} scaled to {:.0}%.", fi + 1, factor * 100.0);
+    true
+}
+
 /// Keep the rename field showing the selected figure's
 /// current name — `project_tools::sync_name_edit`'s
 /// focus-guarded pattern, plus a selection-change trigger:
@@ -324,6 +398,29 @@ fn opacity_stepper_row(st: &InspectorFigureState, t: &Theme) -> El {
         }))
 }
 
+/// The scale row: label and the 90% / 110% buttons that
+/// resize the whole selected figure through
+/// [`scale_selected_figure`] (which reads the selection at
+/// press time, like the colour swatches do).
+fn scale_stepper_row(t: &Theme) -> El {
+    row()
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(
+            text("Scale")
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
+        .child(btn("fig-scale-dn", "90%", false, t, |s: &mut State| {
+            scale_selected_figure(&mut s.core, 0.9);
+        }))
+        .child(btn("fig-scale-up", "110%", false, t, |s: &mut State| {
+            scale_selected_figure(&mut s.core, 1.1);
+        }))
+}
+
 /// The Delete figure button: chrome-button shape in the
 /// error colour (the 2.0 palette's `C_ERROR`).
 fn danger_btn(key: &str, label: &str, f: impl Fn(&mut State) + 'static) -> El {
@@ -415,6 +512,7 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
         panel = panel.child(swatches);
     }
     panel = panel.child(opacity_stepper_row(&st, t));
+    panel = panel.child(scale_stepper_row(t));
     panel.child(
         row()
             .w_full()
@@ -631,6 +729,14 @@ mod tests {
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
             draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
             was_playing: false,
         };
         let _ = inspector_figure(&with_figures, &t);
@@ -669,8 +775,163 @@ mod tests {
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
             draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
             was_playing: false,
         };
         let _ = inspector_figure(&bare, &t);
+    }
+
+    /// Every node's length in figure `fi`, in node order.
+    fn lengths(core: &EditorCore, fi: usize) -> Vec<f32> {
+        core.project.figures[fi]
+            .def
+            .nodes
+            .iter()
+            .map(|n| n.length)
+            .collect()
+    }
+
+    #[test]
+    fn scale_multiplies_every_parented_length_and_nothing_else() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        let parents: Vec<Option<usize>> = core.project.figures[fi]
+            .def
+            .nodes
+            .iter()
+            .map(|n| n.parent)
+            .collect();
+        let before = lengths(&core, fi);
+        // Roots and angles of every frame's pose for this
+        // figure — the scale must not touch any of them.
+        let roots_before: Vec<_> = core
+            .project
+            .frames
+            .iter()
+            .map(|f| f.poses[fi].root)
+            .collect();
+        let angles_before: Vec<Vec<f32>> = core
+            .project
+            .frames
+            .iter()
+            .map(|f| f.poses[fi].angles.clone())
+            .collect();
+        let rest_before: Vec<f32> = core.project.figures[fi]
+            .def
+            .nodes
+            .iter()
+            .map(|n| n.rest_angle)
+            .collect();
+
+        assert!(scale_selected_figure(&mut core, 1.1));
+
+        let after = lengths(&core, fi);
+        for (i, (old, new)) in before.iter().zip(after.iter()).enumerate() {
+            if parents[i].is_some() {
+                if old * 1.1 > 220.0 {
+                    assert_eq!(*new, 220.0, "node {i} should clamp at the max");
+                } else {
+                    assert!(
+                        (new - old * 1.1).abs() < 0.01,
+                        "node {i}: {old} scaled by 1.1 should be {}, got {new}",
+                        old * 1.1
+                    );
+                }
+            } else {
+                assert_eq!(*new, *old, "root node {i} has no length to scale");
+            }
+        }
+        for (f, frame) in core.project.frames.iter().enumerate() {
+            assert_eq!(frame.poses[fi].root, roots_before[f], "frame {f} root moved");
+            assert_eq!(
+                frame.poses[fi].angles, angles_before[f],
+                "frame {f} angles changed"
+            );
+        }
+        let rest_after: Vec<f32> = core.project.figures[fi]
+            .def
+            .nodes
+            .iter()
+            .map(|n| n.rest_angle)
+            .collect();
+        assert_eq!(rest_after, rest_before, "rest angles changed");
+        assert!(
+            core.status.contains("scaled to 110%"),
+            "status should report the scale: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn scale_is_exactly_one_undo_step() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        let before = lengths(&core, fi);
+        let depth = core.undo_depth();
+        assert!(scale_selected_figure(&mut core, 1.1));
+        assert_eq!(
+            core.undo_depth(),
+            depth + 1,
+            "the whole scale must be one snapshot, not one per node"
+        );
+        core.undo();
+        assert_eq!(
+            lengths(&core, fi),
+            before,
+            "a single undo must restore every length"
+        );
+    }
+
+    #[test]
+    fn scale_clamps_at_the_single_node_limits() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        let parented: Vec<usize> = core.project.figures[fi]
+            .def
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.parent.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!parented.is_empty(), "the demo figure has segments");
+        let ni = parented[0];
+        // 210 × 1.1 = 231 — past adjust_length's 220 max.
+        core.project.figures[fi].def.nodes[ni].length = 210.0;
+        assert!(scale_selected_figure(&mut core, 1.1));
+        assert_eq!(
+            core.project.figures[fi].def.nodes[ni].length, 220.0,
+            "must land on the clamp, not beyond it"
+        );
+        // 4 × 0.9 = 3.6 — below adjust_length's 4 min.
+        core.project.figures[fi].def.nodes[ni].length = 4.0;
+        assert!(scale_selected_figure(&mut core, 0.9));
+        assert_eq!(
+            core.project.figures[fi].def.nodes[ni].length, 4.0,
+            "must land on the clamp, not below it"
+        );
+    }
+
+    #[test]
+    fn scale_refuses_without_a_figure_and_takes_no_snapshot() {
+        let mut core = EditorCore::new();
+        core.project.figures.clear();
+        let depth = core.undo_depth();
+        assert!(!scale_selected_figure(&mut core, 1.1));
+        assert_eq!(core.undo_depth(), depth, "refusal must be snapshot-free");
+        assert_eq!(core.status, "No such figure.");
+
+        let mut core = EditorCore::new();
+        core.selected_figure = 999;
+        assert!(!scale_selected_figure(&mut core, 0.9));
+        assert_eq!(core.undo_depth(), 0, "refusal must be snapshot-free");
+        assert_eq!(core.status, "No such figure.");
     }
 }

@@ -84,6 +84,24 @@
 //!   line reports how many keys were removed. The channel
 //!   itself stays — figure/target pairing intact — so the
 //!   joint remains a paste target.
+//! * "Key all here" → also a composition: no core op keys
+//!   every channel. `key_all_here_core` reads each
+//!   channel's current value with `Channel::value_at`
+//!   (graph.rs) and inserts it with `Channel::add_key` —
+//!   the engine's own insert-or-replace helper, the same
+//!   one `key_graph_angle` authors keys with — under ONE
+//!   `snapshot()` for the whole project, so the move is a
+//!   single undo step however many channels exist. A
+//!   project with no channels is a status-only no-op.
+//! * "Copy key +10" → a stamp, planned by the nudge's own
+//!   `nudge_plan` with `COPY_KEY_OFFSET_FRAMES` as the
+//!   delta, so the stamp honours the nudge collision rule
+//!   exactly (nothing within 0.5 frames of the landing
+//!   spot; refusals land before any snapshot). Where the
+//!   nudge MOVES the playhead key, `copy_key_in_channel`
+//!   clones it — value, tangents and interp mode — onto
+//!   the target frame and leaves the source in place: the
+//!   "hold this pose for 10 frames" move.
 //!
 //! The keyed-frame indicator is a read-only graph query over
 //! `core.project.channels` — the same channel
@@ -279,10 +297,13 @@ pub fn paste_keys_here(s: &mut State) {
 
 /// What nudging the key at the playhead by `delta` frames
 /// does — the read-only plan the nudge helpers share.
-/// Computed without touching any keys: the core wrapper
-/// must know the nudge will land before it may snapshot
-/// (this file's rule — no snapshot for a no-op), and the
-/// collision rule lives here, in one place.
+/// The copy-to-frame stamp plans through the same type
+/// (its `Moved` reads "a stamp lands `from` → `to`"), so
+/// both ops share one collision rule. Computed without
+/// touching any keys: the core wrapper must know the
+/// nudge will land before it may snapshot (this file's
+/// rule — no snapshot for a no-op), and the collision
+/// rule lives here, in one place.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NudgeOutcome {
     /// A key moves (or would move) `from` one frame `to`
@@ -321,7 +342,9 @@ pub fn key_index_near(keys: &[Key], frame: f32) -> Option<usize> {
 /// where to, or why not. Pure — shared by
 /// [`nudge_key_in_channel`] (which applies the plan) and
 /// [`nudge_key_here_core`] (which snapshots only when the
-/// plan says `Moved`).
+/// plan says `Moved`), and by the copy-to-frame stamp
+/// ([`copy_key_in_channel`] / [`copy_key_to_frame_core`]),
+/// which plans with the stamp offset as its delta.
 pub fn nudge_plan(keys: &[Key], frame: f32, delta: i32) -> NudgeOutcome {
     let Some(idx) = key_index_near(keys, frame) else {
         return NudgeOutcome::NoKeyHere;
@@ -457,6 +480,137 @@ pub fn clear_channel_keys_here(s: &mut State) {
     clear_channel_keys_core(&mut s.core);
 }
 
+/// Key one bare channel at `frame` with the value the
+/// channel itself evaluates to there: `Channel::value_at`
+/// is read first, then `Channel::add_key` — the engine's
+/// own insert helper, the same one `key_graph_angle`
+/// authors keys with — inserts a fresh flat-tangent key,
+/// replacing any key already at that frame rather than
+/// duplicating it. Because the keyed value IS the
+/// evaluated value, keying never moves the channel's
+/// curve at the keyed frame.
+pub fn key_channel_here(ch: &mut Channel, frame: f32) {
+    let value = ch.value_at(frame);
+    ch.add_key(frame, value);
+}
+
+/// Key EVERY channel in the project at the current frame,
+/// each holding its own current evaluated value — the
+/// standard "key everything here" move. Returns how many
+/// channels were keyed. The whole operation is ONE undo
+/// step: a single `snapshot()` covers every channel,
+/// however many exist (the clear-channel composition,
+/// widened to the project). No selection is required —
+/// keying everything is the point. A project with no
+/// channels is a status-only no-op: 0 returned, no
+/// snapshot, matching this section's discipline.
+pub fn key_all_here_core(core: &mut EditorCore) -> usize {
+    let n = core.project.channels.len();
+    if n == 0 {
+        core.status = "No graph channels to key.".into();
+        return 0;
+    }
+    let frame = core.current as f32;
+    core.snapshot();
+    for ch in &mut core.project.channels {
+        key_channel_here(ch, frame);
+    }
+    core.status = format!("Keyed {n} channels at frame {}.", core.current + 1);
+    n
+}
+
+/// `State` wrapper for [`key_all_here_core`].
+pub fn key_all_here(s: &mut State) {
+    key_all_here_core(&mut s.core);
+}
+
+/// Frames ahead of the playhead key that
+/// [`copy_key_to_frame_core`] stamps its copy at — the
+/// "hold this pose for 10 frames" span.
+pub const COPY_KEY_OFFSET_FRAMES: i32 = 10;
+
+/// Stamp a copy of the key at `frame` onto `frame +
+/// offset` in a bare channel. The plan is [`nudge_plan`]
+/// with the stamp offset as its delta, so the stamp
+/// honours exactly the nudge collision rule — no key
+/// within 0.5 frames of the landing spot — and a refused
+/// stamp leaves the channel untouched. A landed stamp is
+/// the WHOLE key cloned (value, tangents and interp mode
+/// travel; only the frame changes), inserted at its
+/// sorted position; unlike [`nudge_key_in_channel`],
+/// which moves the key, the source key stays where it
+/// was, so the channel ends up holding the pose at both
+/// frames. The plan's guarantee (nothing within 0.5
+/// frames of the target) is also why a plain insert is
+/// safe here: no replace-at-target path can ever fire.
+pub fn copy_key_in_channel(ch: &mut Channel, frame: f32, offset: i32) -> NudgeOutcome {
+    let plan = nudge_plan(&ch.keys, frame, offset);
+    if let NudgeOutcome::Moved { to, .. } = plan {
+        let idx = key_index_near(&ch.keys, frame).expect("a Moved plan found the key");
+        let mut stamped = ch.keys[idx];
+        stamped.frame = to;
+        let pos = ch.keys.partition_point(|k| k.frame < to);
+        ch.keys.insert(pos, stamped);
+    }
+    plan
+}
+
+/// Stamp a copy of the selected channel's key at the
+/// current frame onto the frame
+/// [`COPY_KEY_OFFSET_FRAMES`] later, as one undo step —
+/// the "hold this pose for 10 frames" move. Returns
+/// whether a stamp landed. Refusals mirror the nudge's
+/// exactly, because both plan through [`nudge_plan`]: no
+/// key at the playhead (`NoKeyHere`) and a key within 0.5
+/// frames of the landing spot (`Blocked`) are status-only
+/// and never snapshot.
+pub fn copy_key_to_frame_core(core: &mut EditorCore) -> bool {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a joint first, then Copy key.".into();
+        return false;
+    };
+    let fi = core.selected_figure;
+    let Some(ci) = selected_angle_channel_index(core) else {
+        core.status = format!("No graph keys for figure {} joint {} to copy.", fi + 1, ni);
+        return false;
+    };
+    let frame = core.current as f32;
+    match nudge_plan(&core.project.channels[ci].keys, frame, COPY_KEY_OFFSET_FRAMES) {
+        NudgeOutcome::Moved { from, to } => {
+            core.snapshot();
+            let applied =
+                copy_key_in_channel(&mut core.project.channels[ci], frame, COPY_KEY_OFFSET_FRAMES);
+            debug_assert_eq!(applied, NudgeOutcome::Moved { from, to });
+            core.status = format!(
+                "Copied graph key from frame {} to frame {}.",
+                from + 1.0,
+                to + 1.0
+            );
+            true
+        }
+        NudgeOutcome::NoKeyHere => {
+            core.status = format!("No key at frame {} to copy.", core.current + 1);
+            false
+        }
+        NudgeOutcome::Blocked { at } => {
+            core.status = format!("Frame {} already has a key on this channel.", at + 1.0);
+            false
+        }
+        NudgeOutcome::BeforeStart { from } => {
+            // Unreachable for a +10 stamp — its targets
+            // only ever move later — but the match stays
+            // exhaustive if the offset ever changes sign.
+            core.status = format!("Key at frame {} cannot move earlier.", from + 1.0);
+            false
+        }
+    }
+}
+
+/// `State` wrapper for [`copy_key_to_frame_core`].
+pub fn copy_key_to_frame(s: &mut State) {
+    copy_key_to_frame_core(&mut s.core);
+}
+
 /// One clipboard button, in the chrome's metrics
 /// (`chrome_view::btn`). When `enabled` is false the button
 /// renders muted (off fill, secondary text) and carries NO
@@ -485,12 +639,15 @@ fn kbtn(
 /// The keyframe tools section: header, selection target,
 /// keyed-frame indicator, the key/delete/auto buttons, the
 /// copy/paste-keys clipboard row (with Clear channel
-/// keys), the nudge row, and the five tangent
-/// preset buttons (scoped by the op to the selected
-/// figure). Buttons highlight with real state: Delete is
-/// accent-filled exactly when a key sits at this frame;
-/// Copy is muted until a channel exists to copy from, and
-/// Paste is muted while the key clipboard is empty.
+/// keys), the nudge row, the key-all / copy-key stamp row,
+/// and the five tangent preset buttons (scoped by the op
+/// to the selected figure). Buttons highlight with real
+/// state: Delete is accent-filled exactly when a key sits
+/// at this frame; Copy is muted until a channel exists to
+/// copy from, and Paste is muted while the key clipboard
+/// is empty. The stamp row mutes the same way: Key all
+/// needs at least one channel in the project, Copy key
+/// +10 needs the selected joint's channel.
 pub fn keyframe_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let keyed = selected_angle_channel(core).is_some_and(|ch| keyed_here(&ch.keys, core.current));
@@ -566,12 +723,32 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                     nudge_key_here(s, 1)
                 })),
         )
+        .child(
+            row()
+                .key("keyframe-stamp")
+                .gap(6.0)
+                .child(kbtn(
+                    "key-all-here",
+                    "Key all here",
+                    !core.project.channels.is_empty(),
+                    t,
+                    |s| key_all_here(s),
+                ))
+                .child(kbtn(
+                    "key-copy-to-frame",
+                    "Copy key +10",
+                    selected_angle_channel_index(core).is_some(),
+                    t,
+                    |s| copy_key_to_frame(s),
+                )),
+        )
         .child(presets)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stykanimate_rs::graph::Interp;
 
     #[test]
     fn keyed_here_matches_whole_frames_within_half_a_frame() {
@@ -928,5 +1105,265 @@ mod tests {
         core.selected_node = None;
         assert_eq!(clear_channel_keys_core(&mut core), 0);
         assert!(core.status.contains("Select a joint"));
+    }
+
+    #[test]
+    fn key_channel_here_inserts_the_channels_own_evaluated_value() {
+        let mut ch = Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(0.0, 0.0), Key::flat(10.0, 100.0)],
+        };
+        // The expectation is the engine's own evaluation,
+        // read before keying — not hand-computed curve math.
+        let expected = ch.value_at(5.0);
+        key_channel_here(&mut ch, 5.0);
+        assert_eq!(ch.keys.len(), 3);
+        let keyed = ch.keys[1];
+        assert_eq!(keyed.frame, 5.0);
+        assert_eq!(keyed.value, expected, "the key stores the evaluated value");
+        assert_eq!(
+            ch.value_at(5.0),
+            expected,
+            "keying does not move the curve at the keyed frame"
+        );
+        // Keying a frame that already holds a key replaces
+        // it (add_key semantics) instead of duplicating it.
+        key_channel_here(&mut ch, 5.0);
+        assert_eq!(ch.keys.len(), 3, "still one key at frame 5");
+    }
+
+    /// A core carrying three channels over figure 0 — an
+    /// angle channel keyed at frames 0/4, a root channel
+    /// already keyed at the target frame 2, and a
+    /// step-interpolated length channel keyed at 0/4 — with
+    /// the playhead on frame 2: the key-all fixture. The
+    /// three targets evaluate differently at frame 2
+    /// (Hermite midpoint, stored key, held step), which is
+    /// what makes the fixture a real evaluation test.
+    fn core_with_three_channels() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![Key::flat(0.0, 10.0), Key::flat(4.0, 50.0)],
+        });
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![
+                Key::flat(0.0, 100.0),
+                Key::flat(2.0, 130.0),
+                Key::flat(10.0, 200.0),
+            ],
+        });
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Length(2),
+            keys: vec![
+                Key::flat(0.0, 7.0).with_interp(Interp::Step),
+                Key::flat(4.0, 42.0),
+            ],
+        });
+        core.current = 2;
+        core
+    }
+
+    #[test]
+    fn key_all_here_keys_every_channel_at_its_evaluated_value_as_one_undo_step() {
+        let mut core = core_with_three_channels();
+        // Expectations come from the engine's own
+        // evaluation, read before the op runs — never
+        // hardcoded curve math.
+        let frame = core.current as f32;
+        let expected: Vec<f32> = core
+            .project
+            .channels
+            .iter()
+            .map(|ch| ch.value_at(frame))
+            .collect();
+        let counts_before: Vec<usize> =
+            core.project.channels.iter().map(|ch| ch.keys.len()).collect();
+        let edits_before = core.edits_since_autosave();
+
+        assert_eq!(key_all_here_core(&mut core), 3);
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before + 1,
+            "exactly one snapshot for the whole operation"
+        );
+        assert_eq!(core.status, "Keyed 3 channels at frame 3.");
+
+        for (i, ch) in core.project.channels.iter().enumerate() {
+            let keyed: Vec<&Key> = ch
+                .keys
+                .iter()
+                .filter(|k| (k.frame - frame).abs() <= 0.5)
+                .collect();
+            assert_eq!(keyed.len(), 1, "channel {i} holds one key at the frame");
+            assert_eq!(
+                keyed[0].value, expected[i],
+                "channel {i} keyed its evaluated value"
+            );
+            assert_eq!(
+                ch.value_at(frame),
+                expected[i],
+                "channel {i}'s curve is unmoved at the keyed frame"
+            );
+        }
+        // The angle and length channels gained a key; the
+        // root channel's existing key at frame 2 was
+        // replaced, not duplicated.
+        assert_eq!(core.project.channels[0].keys.len(), counts_before[0] + 1);
+        assert_eq!(core.project.channels[1].keys.len(), counts_before[1]);
+        assert_eq!(core.project.channels[2].keys.len(), counts_before[2] + 1);
+
+        // One undo restores every channel at once.
+        core.undo();
+        let counts_after: Vec<usize> =
+            core.project.channels.iter().map(|ch| ch.keys.len()).collect();
+        assert_eq!(counts_after, counts_before, "undo reverts the whole key-all");
+    }
+
+    #[test]
+    fn key_all_here_noops_without_channels_and_never_snapshots() {
+        let mut core = EditorCore::new();
+        core.project.channels.clear();
+        let edits_before = core.edits_since_autosave();
+        assert_eq!(key_all_here_core(&mut core), 0);
+        assert!(
+            core.status.contains("No graph channels"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before,
+            "no snapshot for the no-op"
+        );
+    }
+
+    #[test]
+    fn copy_key_in_channel_stamps_a_whole_key_copy_and_keeps_the_source() {
+        let mut shaped = Key::flat(2.0, 30.0).with_interp(Interp::Step);
+        shaped.in_tan = 1.5;
+        shaped.out_tan = -2.0;
+        let mut ch = Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![Key::flat(0.0, 10.0), shaped],
+        };
+        let out = copy_key_in_channel(&mut ch, 2.0, COPY_KEY_OFFSET_FRAMES);
+        assert_eq!(out, NudgeOutcome::Moved { from: 2.0, to: 12.0 });
+        assert_eq!(ch.keys.len(), 3, "the source stays; the stamp is added");
+        assert_eq!(ch.keys[1], shaped, "the source key is untouched");
+        let stamped = ch.keys[2];
+        assert_eq!(stamped.frame, 12.0);
+        assert_eq!(
+            (stamped.value, stamped.in_tan, stamped.out_tan),
+            (30.0, 1.5, -2.0),
+            "value and tangents travel with the copy"
+        );
+        assert_eq!(stamped.interp, Interp::Step, "interp mode travels too");
+        // A refused stamp changes nothing at all: the
+        // stamp's own landing spot now blocks a repeat.
+        let before = ch.keys.clone();
+        assert_eq!(
+            copy_key_in_channel(&mut ch, 2.0, COPY_KEY_OFFSET_FRAMES),
+            NudgeOutcome::Blocked { at: 12.0 }
+        );
+        assert_eq!(ch.keys, before, "the occupant survived the refused stamp");
+    }
+
+    #[test]
+    fn copy_key_to_frame_core_stamps_ten_frames_on_as_one_undo_step() {
+        let mut core = core_with_angle_keys(); // keys at 0 (10) and 2 (30)
+        core.current = 0;
+        let edits_before = core.edits_since_autosave();
+        assert!(copy_key_to_frame_core(&mut core));
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before + 1,
+            "exactly one snapshot"
+        );
+        assert!(
+            core.status.contains("Copied graph key from frame 1 to frame 11"),
+            "status reports the stamp: {}",
+            core.status
+        );
+        let ch = selected_angle_channel(&core).unwrap();
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![0.0, 2.0, 10.0], "source keys kept, stamp added");
+        assert_eq!(ch.keys[2].value, 10.0, "the stamp copies the playhead key");
+        core.undo();
+        assert_eq!(
+            selected_angle_channel(&core).unwrap().keys.len(),
+            2,
+            "undo removes the stamp"
+        );
+    }
+
+    #[test]
+    fn copy_key_to_frame_core_refuses_a_collision_without_snapshotting() {
+        let mut core = core_with_angle_keys();
+        core.project.channels[0].keys.push(Key::flat(10.0, 99.0));
+        core.project.channels[0].sort_keys();
+        core.current = 0;
+        let edits_before = core.edits_since_autosave();
+        assert!(!copy_key_to_frame_core(&mut core));
+        assert!(
+            core.status.contains("Frame 11 already has a key"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before,
+            "a refused stamp never snapshots"
+        );
+        let ch = selected_angle_channel(&core).unwrap();
+        assert_eq!(ch.keys.len(), 3, "nothing stamped and nothing destroyed");
+
+        // A key 0.4 frames past the landing spot occupies
+        // it too — the refusal window is the same 0.5-frame
+        // window the nudge uses.
+        let mut core = core_with_angle_keys();
+        core.project.channels[0].keys.push(Key::flat(10.4, 99.0));
+        core.project.channels[0].sort_keys();
+        core.current = 0;
+        assert!(!copy_key_to_frame_core(&mut core));
+        assert!(
+            core.status.contains("already has a key"),
+            "status: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn copy_key_to_frame_core_noops_without_a_key_here() {
+        let mut core = core_with_angle_keys();
+        // Playhead on a frame with no key (keys sit at 0/2).
+        core.current = 4;
+        let edits_before = core.edits_since_autosave();
+        assert!(!copy_key_to_frame_core(&mut core));
+        assert!(
+            core.status.contains("No key at frame 5 to copy"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before,
+            "no snapshot for the refusal"
+        );
+        // No channel on the selected joint.
+        let mut bare = EditorCore::new();
+        bare.selected_node = Some(1);
+        assert!(!copy_key_to_frame_core(&mut bare));
+        assert!(bare.status.contains("No graph keys"));
+        // No joint selected at all.
+        bare.selected_node = None;
+        assert!(!copy_key_to_frame_core(&mut bare));
+        assert!(bare.status.contains("Select a joint"));
     }
 }

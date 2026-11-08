@@ -27,6 +27,44 @@
 //!   cycle control on purpose: the engine has NO
 //!   `set_node_taper`, and adding one is an engine change,
 //!   not a panel change.
+//! * Copy / Paste buttons (Phase G) → the panel-local style
+//!   clipboard ([`capture_style`] / [`apply_style`], held in
+//!   a `thread_local` like `camera_panel`'s key clipboard).
+//!   The clipboard holds exactly the fields this panel can
+//!   write through a direct core setter — cap
+//!   (`set_node_cap`), gradient end (`set_node_color2`),
+//!   colour (`set_node_color`) and opacity
+//!   (`set_node_opacity`) — and paste applies them through
+//!   those same setters in panel order (cap, gradient,
+//!   colour, opacity).
+//!
+//!   The captured colour is the node's *effective* colour
+//!   ([`selected_color`]): `set_node_color` always writes
+//!   `Some(rgb)`, so the inherit-from-figure state (`None`)
+//!   is itself not copyable — a paste makes the captured
+//!   colour explicit on the target node.
+//!
+//!   Excluded, honestly: taper and thickness. Taper IS a
+//!   `NodeStyle` field, but with no `set_node_taper` this
+//!   panel can only cycle it, so an arbitrary captured
+//!   taper could not be written back. Thickness is not a
+//!   `NodeStyle` field at all (it is `NodeDef.thickness`)
+//!   and this panel has no thickness control: the segment
+//!   inspector owns it through the delta-only
+//!   `adjust_thickness`, which cannot set an exact value
+//!   either.
+//!
+//!   Undo: paste takes NO snapshot of its own and adds
+//!   none; it inherits the setters' mixed semantics —
+//!   `set_node_color` does not snapshot, while
+//!   `set_node_cap`, `set_node_color2` and
+//!   `set_node_opacity` each snapshot once — so one paste
+//!   lands as THREE undo steps, not one, and undoing once
+//!   after a paste reverts only the last setter's field
+//!   (opacity). That is the honest consequence of reusing
+//!   the panel's own ops unchanged; making paste a single
+//!   atomic undo step would need an engine change, not a
+//!   panel change.
 //!
 //! History: Phase D shipped cap and gradient as single
 //! press targets advancing `cycle_node_cap` /
@@ -38,6 +76,8 @@
 //! Deliberately absent: shade steps (fig3d's
 //! `segment_shades` is a computed depth shading over a 3D
 //! pose, not a stored per-segment style an op can set).
+
+use std::cell::RefCell;
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Color, El};
@@ -213,6 +253,111 @@ pub fn step_color_channel(core: &mut EditorCore, channel: usize, dir: i32) {
         _ => return,
     };
     core.set_node_color(rgb_join(r, g, b));
+}
+
+/// A copied segment style: exactly the fields this panel
+/// can write through a direct `EditorCore` setter (see the
+/// module docs for what is excluded and why — taper and
+/// thickness). `color` is the source node's *effective*
+/// colour; paste writes it back as an explicit `Some`.
+/// `opacity` replays through `set_node_opacity`, so the
+/// setter's 0.05..=1.0 clamp applies on paste just as it
+/// does to the panel's own stepper.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StyleClipboard {
+    pub color: u32,
+    pub color2: Option<u32>,
+    pub cap: CapKind,
+    pub opacity: f32,
+}
+
+thread_local! {
+    /// The panel's style clipboard. Panel-local by
+    /// necessity: the style panel has no state struct, so —
+    /// like `camera_panel`'s key clipboard and
+    /// `clips_panel`'s selection — the one piece of
+    /// panel-owned state lives in a `thread_local`. It
+    /// survives workspace switches and panel remounts for
+    /// the life of the process, which is what a clipboard
+    /// should do; it is not persisted.
+    static STYLE_CLIPBOARD: RefCell<Option<StyleClipboard>> =
+        RefCell::new(None);
+}
+
+/// The clipboard's current contents, if a style was copied.
+pub fn clipboard_style() -> Option<StyleClipboard> {
+    STYLE_CLIPBOARD.with(|c| *c.borrow())
+}
+
+/// Store `clip` as the clipboard's contents.
+fn store_clipboard(clip: Option<StyleClipboard>) {
+    STYLE_CLIPBOARD.with(|c| *c.borrow_mut() = clip);
+}
+
+/// Capture the selected node's full writable style (the
+/// copy button's source value). Pure read of the same
+/// fields the panel's controls read — `None` when no node
+/// is selected.
+pub fn capture_style(core: &EditorCore) -> Option<StyleClipboard> {
+    let style = selected_style(core)?;
+    Some(StyleClipboard {
+        color: selected_color(core)?,
+        color2: style.color2,
+        cap: style.cap,
+        opacity: style.opacity,
+    })
+}
+
+/// Apply `clip` to the selected node through the panel's
+/// own setters, in panel order (cap, gradient, colour,
+/// opacity). Returns `false` — changing nothing, not even
+/// a setter's status line — when no node is selected, so
+/// the caller owns the refusal wording. Takes no snapshot
+/// of its own: the setters' snapshot semantics (three of
+/// the four snapshot, `set_node_color` does not) are the
+/// paste's undo semantics — see the module docs.
+pub fn apply_style(core: &mut EditorCore, clip: &StyleClipboard) -> bool {
+    if selected_style(core).is_none() {
+        return false;
+    }
+    core.set_node_cap(clip.cap);
+    core.set_node_color2(clip.color2);
+    core.set_node_color(clip.color);
+    core.set_node_opacity(clip.opacity);
+    true
+}
+
+/// Copy button: capture the selected node's style into the
+/// clipboard. With no selection, status-only (the setters'
+/// own refusal wording) and any earlier copy is left
+/// untouched.
+pub fn copy_style(core: &mut EditorCore) {
+    match capture_style(core) {
+        Some(clip) => {
+            store_clipboard(Some(clip));
+            core.status = "Style copied.".into();
+        }
+        None => core.status = "Select a joint first.".into(),
+    }
+}
+
+/// Paste button: apply the clipboard's style to the
+/// selected node via [`apply_style`]. Refusals (empty
+/// clipboard, no selection) are status-only and change no
+/// project state. On success the status is exactly
+/// "Style pasted." — written after the setters, whose own
+/// status lines the paste supersedes.
+pub fn paste_style(core: &mut EditorCore) -> bool {
+    let Some(clip) = clipboard_style() else {
+        core.status = "Copy a style first.".into();
+        return false;
+    };
+    if !apply_style(core, &clip) {
+        core.status = "Select a joint first.".into();
+        return false;
+    }
+    core.status = "Style pasted.".into();
+    true
 }
 
 /// One RGB channel stepper row: channel letter, the
@@ -419,6 +564,23 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
             }))
             .child(btn("style-opacity-up", "+", false, t, |s| {
                 step_opacity(&mut s.core, 1)
+            })),
+    );
+
+    // Copy / Paste: the panel-local style clipboard (see
+    // the module docs for what is — and is not — captured,
+    // and for the undo consequence of a paste).
+    panel = panel.child(
+        row()
+            .key("style-copy-paste-row")
+            .gap(8.0)
+            .center_y()
+            .child(text("Style").font(type_::LABEL).color(t.text))
+            .child(btn("style-copy", "Copy", false, t, |s| {
+                copy_style(&mut s.core)
+            }))
+            .child(btn("style-paste", "Paste", false, t, |s| {
+                paste_style(&mut s.core);
             })),
     );
 
@@ -641,5 +803,127 @@ mod tests {
         assert_eq!(opacity_text(0.55), "55%");
         assert_eq!(opacity_text(0.05), "5%");
         assert_eq!(opacity_text(0.0), "0%");
+    }
+
+    #[test]
+    fn capture_style_is_none_without_a_selection() {
+        let mut core = EditorCore::new();
+        core.selected_node = None;
+        assert!(capture_style(&core).is_none());
+        // The copy button agrees: status-only refusal, and
+        // the clipboard stays empty.
+        copy_style(&mut core);
+        assert_eq!(core.status, "Select a joint first.");
+        assert!(clipboard_style().is_none());
+    }
+
+    #[test]
+    fn capture_style_reads_every_writable_field() {
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        core.set_node_color(0x12_3456);
+        // A non-swatch gradient colour: the clipboard must
+        // carry the full value, not a swatch state.
+        core.set_node_color2(Some(0x34_5678));
+        core.set_node_cap(CapKind::Point);
+        core.set_node_opacity(0.55);
+        let clip = capture_style(&core).expect("node 1 is selected");
+        assert_eq!(
+            clip,
+            StyleClipboard {
+                color: 0x12_3456,
+                color2: Some(0x34_5678),
+                cap: CapKind::Point,
+                opacity: 0.55,
+            }
+        );
+    }
+
+    #[test]
+    fn copy_then_paste_round_trips_between_two_nodes() {
+        // The clipboard is a per-thread `thread_local` and
+        // each test runs on its own thread, so it starts
+        // empty here.
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+
+        // Source node 1: a distinctive writable style.
+        core.selected_node = Some(1);
+        core.set_node_color(0x12_3456);
+        core.set_node_color2(Some(0x34_5678));
+        core.set_node_cap(CapKind::Point);
+        core.set_node_opacity(0.55);
+        copy_style(&mut core);
+        assert_eq!(core.status, "Style copied.");
+        assert!(clipboard_style().is_some());
+
+        // Target node 2: a different style, plus values in
+        // the two EXCLUDED fields (taper, thickness) written
+        // directly — the paste must leave both untouched.
+        core.selected_node = Some(2);
+        core.set_node_color(0xFF_0000);
+        core.set_node_color2(None);
+        core.set_node_cap(CapKind::Square);
+        core.set_node_opacity(0.9);
+        core.project.figures[0].def.nodes[2].style.taper = 0.3;
+        core.project.figures[0].def.nodes[2].thickness = 9.0;
+
+        assert!(paste_style(&mut core));
+        assert_eq!(core.status, "Style pasted.");
+
+        // Every captured field landed on the target.
+        let target = &core.project.figures[0].def.nodes[2];
+        assert_eq!(target.color, Some(0x12_3456));
+        assert_eq!(target.style.color2, Some(0x34_5678));
+        assert_eq!(target.style.cap, CapKind::Point);
+        assert_eq!(target.style.opacity, 0.55);
+        // Excluded fields are exactly as they were.
+        assert_eq!(target.style.taper, 0.3);
+        assert_eq!(target.thickness, 9.0);
+        // The source node kept its style.
+        let source = &core.project.figures[0].def.nodes[1];
+        assert_eq!(source.color, Some(0x12_3456));
+        assert_eq!(source.style.cap, CapKind::Point);
+        assert_eq!(source.style.opacity, 0.55);
+    }
+
+    #[test]
+    fn paste_with_an_empty_clipboard_changes_nothing() {
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        core.set_node_color(0x12_3456);
+        let style_before = selected_style(&core).unwrap();
+        let depth_before = core.undo_depth();
+
+        assert!(!paste_style(&mut core));
+        assert_eq!(core.status, "Copy a style first.");
+        // No field moved and no snapshot was taken.
+        assert_eq!(selected_style(&core).unwrap(), style_before);
+        assert_eq!(
+            core.project.figures[0].def.nodes[1].color,
+            Some(0x12_3456)
+        );
+        assert_eq!(core.undo_depth(), depth_before);
+    }
+
+    #[test]
+    fn apply_style_without_a_selection_changes_nothing() {
+        let mut core = EditorCore::new();
+        core.selected_node = None;
+        let clip = StyleClipboard {
+            color: 0x12_3456,
+            color2: Some(0x34_5678),
+            cap: CapKind::Point,
+            opacity: 0.55,
+        };
+        let status_before = core.status.clone();
+        let depth_before = core.undo_depth();
+        assert!(!apply_style(&mut core, &clip));
+        // Not even a setter ran: status and undo history
+        // are exactly as they were.
+        assert_eq!(core.status, status_before);
+        assert_eq!(core.undo_depth(), depth_before);
     }
 }

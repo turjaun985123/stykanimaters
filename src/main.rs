@@ -93,9 +93,37 @@ pub struct State {
     pub fx_browser: rune_sec::fx_browser::FxBrowserState,
     /// Draw stamp parameters (draw_tools section, Phase F).
     pub draw_tools: rune_sec::draw_tools::DrawToolsState,
+    /// Selected stroke, project-wide index — the same index
+    /// `delete_stroke_at` and the stage highlight geometry
+    /// use (Phase G selection wiring).
+    pub stroke_selected: Option<usize>,
+    /// Selected particle event, index into
+    /// `project.particles` — the index the stage FX gizmo
+    /// geometry uses (Phase G selection wiring).
+    pub particle_selected: Option<usize>,
+    /// Camera-frustum guide overlay on/off (Phase G guide
+    /// split; drawn only when `guides` is also on).
+    pub guides_frustum: bool,
+    /// Safe-frame guide overlay on/off (Phase G guide split;
+    /// drawn only when `guides` is also on).
+    pub guides_safe: bool,
+    /// Onion-skin depths (onion_controls section, Phase G).
+    pub onion_ui: rune_sec::onion_controls::OnionControlsState,
+    /// Loop-playback toggle (playback_controls section,
+    /// Phase G): when true the playhead wraps at the end
+    /// (the engine's `advance_play` behaviour); when false
+    /// `poll` stops on the last frame instead.
+    pub loop_playback: bool,
+    /// Pose-library rename session (pose_tools section,
+    /// Phase G).
+    pub pose_rename: rune_sec::pose_tools::PoseRenameState,
     /// Previous `core.playing` as seen by `poll`, so playback
     /// audio starts/stops on the flip (Phase F audio glue).
     was_playing: bool,
+    /// Frame the playhead sat on at the previous `poll`
+    /// tick — the wrap detector for playback audio
+    /// (Phase G audio loop restart).
+    last_frame: usize,
     /// Last status line fed to the toast stack.
     last_status: String,
     /// Shell clock (seconds) as of the last `poll`, for the
@@ -148,7 +176,15 @@ fn init() -> State {
         clips_rename: rune_sec::clips_panel::ClipRenameState::new(),
         fx_browser: Default::default(),
         draw_tools: Default::default(),
+        stroke_selected: None,
+        particle_selected: None,
+        guides_frustum: true,
+        guides_safe: true,
+        onion_ui: Default::default(),
+        loop_playback: true,
+        pose_rename: rune_sec::pose_tools::PoseRenameState::new(),
         was_playing: false,
+        last_frame: 0,
         last_status: status,
         toast_now: 0.0,
         last_dark: layout.dark,
@@ -173,8 +209,18 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
                 core.begin_draw(p);
             } else if core.camera_mode {
                 core.begin_camera_drag(p);
-            } else {
-                core.begin_drag(p);
+            } else if !core.begin_drag(p) {
+                // The press hit no joint (begin_drag only
+                // starts on a joint and reports the miss):
+                // pick the nearest stroke instead — the
+                // selection the stage highlight draws and
+                // the stroke panel steps (Phase G). A clean
+                // miss clears the selection.
+                s.stroke_selected = rune_sec::stage_layers::stroke_at_point(
+                    core,
+                    p,
+                    rune_sec::stage_layers::PICK_TOLERANCE,
+                );
             }
         }
         Phase::Move => {
@@ -228,6 +274,12 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     s.last_poll = Some(t);
     rune_sec::project_tools::sync_name_edit(s);
     rune_sec::inspector_figure::sync_figure_name_edit(s);
+    // Autosave cadence (Phase G wiring): the core counts
+    // snapshot edits and writes the recovery snapshot every
+    // 25; nothing called the check before, so the counter
+    // grew for a whole session and recovery was only ever
+    // written by explicit actions.
+    s.core.maybe_autosave();
     let now = t as f32;
     s.toast_now = now;
     let mut redraw = false;
@@ -263,11 +315,37 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
         }
     }
     if !s.core.playing {
+        // Keep the wrap detector honest while paused: seeks
+        // and steps move `current` without playing, and the
+        // next Play press must not read them as a wrap.
+        s.last_frame = s.core.current;
         return redraw;
     }
+    // Loop off (Phase G): stop on the last frame instead
+    // of letting `advance_play` wrap. The sound is stopped
+    // here, not left to the flip hook's next tick — after
+    // a stop, nothing schedules another prompt wake.
+    if rune_sec::playback_controls::should_stop_at_end(
+        s.core.playing,
+        s.loop_playback,
+        s.core.loop_range,
+        s.core.current,
+        s.core.frame_count(),
+    ) {
+        s.core.playing = false;
+        s.was_playing = false;
+        s.core.stop_playback_audio();
+        s.last_frame = s.core.current;
+        return true;
+    }
+    let prev_frame = s.last_frame;
     if dt > 0.0 {
         s.core.advance_play(dt);
     }
+    // A wrapped playhead restarts the audio pass from the
+    // top (Phase G); a no-op while audio is inactive.
+    s.core.sync_playback_audio_on_wrap(prev_frame, s.core.current);
+    s.last_frame = s.core.current;
     let fps = s.core.project.fps.max(1.0);
     tx.wake_after(Duration::from_secs_f32(1.0 / fps));
     true
@@ -296,6 +374,8 @@ fn text_focused(s: &State) -> bool {
         || s.clips_rename.field.focused
         || s.library_panel.rename.focused
         || s.fx_browser.query.focused
+        || s.figures_panel.filter.focused
+        || s.pose_rename.field.focused
 }
 
 /// App shortcuts. The command palette gets first claim
@@ -475,11 +555,14 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     if vis(Sec::FxClips) {
         right = right.child(rune_sec::fx_clips::fx_section(s, &t));
     }
+    if vis(Sec::Particles) {
+        right = right.child(rune_sec::particles_panel::particles_panel(s, &t));
+    }
     if vis(Sec::Audio) {
         right = right.child(rune_sec::audio_panel::audio_panel(s, &t));
     }
     if vis(Sec::Waveform) {
-        right = right.child(rune_sec::waveform_view::waveform_el(core, [308.0, 56.0]));
+        right = right.child(rune_sec::waveform_view::waveform_el_state(s, [308.0, 56.0]));
     }
     if vis(Sec::Clips) {
         right = right.child(rune_sec::clips_panel::clips_panel(s, &t));
@@ -502,7 +585,19 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
     centre = centre
         .child(
-            canvas(stage_shape(core, stage_size, s.guides))
+            canvas(stage_shape(
+                core,
+                stage_size,
+                crate::stage_view::StageOverlays {
+                    guides: s.guides,
+                    guides_frustum: s.guides_frustum,
+                    guides_safe: s.guides_safe,
+                    stroke_selected: s.stroke_selected,
+                    particle_selected: s.particle_selected,
+                    onion_prev: s.onion_ui.prev,
+                    onion_next: s.onion_ui.next,
+                },
+            ))
                 .key("stage")
                 .grow(1.0)
                 .w_full()
@@ -521,7 +616,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         )
         .child(chrome_view::transport_row(s, &t))
         .child(rune_sec::timeline_marks::timeline_marks(s, &t))
-        .child(rune_sec::status_strip::status_strip(core));
+        .child(rune_sec::status_strip::status_strip_state(s));
 
     // The side columns mount only while the View toggles show
     // them (menus section); the centre always mounts.

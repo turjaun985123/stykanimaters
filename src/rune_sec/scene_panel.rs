@@ -50,6 +50,26 @@
 //! not spam the status line or the toasts fed from it. The
 //! steppers stay for fine control.
 //!
+//! Custom background colour (Phase G): the 16 swatches stay
+//! the quick path; three RGB stepper rows under the
+//! Background header fine-tune `project.background` one
+//! channel at a time, for colours no swatch has. The
+//! channel arithmetic is NOT re-implemented here — it is
+//! imported from `inspector_style` (`rgb_split` / `rgb_join`
+//! / `step_channel`, the segment style panel's helpers:
+//! step 8, clamped 0..=255), so both panels step colours
+//! identically, from one source of truth. The write itself
+//! keeps this panel's own discipline: the stepped colour
+//! goes through [`set_background`], the same direct field
+//! write + status string the swatches use, and — per the
+//! snapshot note below — no undo snapshot (the stage-preset
+//! write, `set_stage_preset`, snapshots nothing either;
+//! nothing in this module does). Stepping off a swatch
+//! colour simply leaves every swatch unhighlighted while
+//! the header shows the raw hex; stepping back onto a
+//! swatch colour lights it again, because the highlight is
+//! an exact-equality check on the field.
+//!
 //! No undo snapshots, on purpose: weather writes were never
 //! snapshotted. The GPUI listeners wrote `project.weather`
 //! directly (the wiring note above), and in this engine a
@@ -64,6 +84,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::vfx::{Weather, WeatherKind};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::inspector_style::{rgb_join, rgb_split, step_channel};
 use crate::stage_view::hex_color;
 use crate::State;
 
@@ -427,6 +448,27 @@ pub fn set_background(core: &mut EditorCore, rgb: u32) {
     core.status = format!("Background: #{:06X}.", core.project.background);
 }
 
+/// One background RGB stepper press (Phase G): step channel
+/// `channel` (0 = R, 1 = G, 2 = B) of `project.background`
+/// by [`step_channel`]'s step (8, clamped 0..=255) in
+/// direction `dir` (−1 / +1) and write the composed colour
+/// back through [`set_background`] — the swatches' own
+/// direct field write, so a stepped colour and a swatch
+/// colour land identically, status string included, and
+/// with this module's usual zero undo snapshots. A bad
+/// channel index is a no-op (the `inspector_style`
+/// stepper's discipline).
+pub fn step_background_channel(core: &mut EditorCore, channel: usize, dir: i32) {
+    let (r, g, b) = rgb_split(core.project.background);
+    let (r, g, b) = match channel {
+        0 => (step_channel(r, dir), g, b),
+        1 => (r, step_channel(g, dir), b),
+        2 => (r, g, step_channel(b, dir)),
+        _ => return,
+    };
+    set_background(core, rgb_join(r, g, b));
+}
+
 /// One stepper row: label, − button, value, + button (the
 /// GPUI weather panel's row shape). Keys carry the GPUI ids.
 fn stepper_row(
@@ -445,6 +487,33 @@ fn stepper_row(
         .child(btn(dn_key, "−", false, t, dn))
         .child(text(value).font(type_::LABEL).color(t.text))
         .child(btn(up_key, "+", false, t, up))
+}
+
+/// One background RGB channel stepper row (Phase G): channel
+/// letter, the channel's current value, and − / + buttons
+/// stepping it via [`step_background_channel`] — the
+/// `inspector_style` channel row's shape, with scene keys:
+/// row `scene-bg-<letter>`, buttons `scene-bg-<letter>-dn`
+/// / `scene-bg-<letter>-up`.
+fn bg_channel_row(channel: usize, label: &str, value: u8, t: &Theme) -> El {
+    let lower = label.to_lowercase();
+    row()
+        .key(format!("scene-bg-{lower}"))
+        .gap(8.0)
+        .center_y()
+        .child(text(label).font(type_::LABEL).color(t.text))
+        .child(
+            text(value.to_string())
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
+        .child(btn(&format!("scene-bg-{lower}-dn"), "−", false, t, move |s| {
+            step_background_channel(&mut s.core, channel, -1)
+        }))
+        .child(btn(&format!("scene-bg-{lower}-up"), "+", false, t, move |s| {
+            step_background_channel(&mut s.core, channel, 1)
+        }))
 }
 
 /// Slider track width/height and knob diameter (the
@@ -516,11 +585,13 @@ fn weather_slider(
 /// The Scene panel: weather (kind picker + cycle + density
 /// and wind steppers with drag sliders under them), stage
 /// size steppers with the preset row under them, and
-/// background colour swatches.
+/// background colour swatches with RGB channel steppers
+/// under the Background header.
 pub fn scene_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let weather = core.project.weather;
     let active = kind_index(weather);
+    let (bg_r, bg_g, bg_b) = rgb_split(core.project.background);
 
     // Kind picker: one button per segment, the current kind
     // accent-filled (keys preserve the GPUI segmented ids
@@ -690,15 +761,26 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
         )
         .child(
             row()
+                .key("scene-bg-header")
                 .gap(8.0)
                 .center_y()
                 .child(text("Background").font(type_::LABEL).color(t.text_secondary))
+                .child(
+                    el()
+                        .key("scene-bg-preview")
+                        .size(18.0, 18.0)
+                        .radius(4.0)
+                        .fill(hex_color(core.project.background).unwrap_or(t.bg)),
+                )
                 .child(
                     text(format!("#{:06X}", core.project.background))
                         .font(type_::LABEL)
                         .color(t.text),
                 ),
         )
+        .child(bg_channel_row(0, "R", bg_r, t))
+        .child(bg_channel_row(1, "G", bg_g, t))
+        .child(bg_channel_row(2, "B", bg_b, t))
         .child(swatches)
 }
 
@@ -893,6 +975,81 @@ mod tests {
         assert_eq!(core.status, "Background: #87B5D6.");
         // The default swatch is the engine's own default colour.
         assert_eq!(BACKGROUND_SWATCHES[0].1, EditorCore::new().project.background);
+    }
+
+    #[test]
+    fn background_stepper_writes_the_stepped_colour_to_the_project() {
+        // Start from the engine default 0x232830 (35, 40, 48):
+        // one press steps exactly one channel by 8 and the
+        // result lands on `project.background`, reported with
+        // the swatch handler's own status string.
+        let mut core = EditorCore::new();
+        assert_eq!(core.project.background, 0x232830);
+        step_background_channel(&mut core, 0, 1);
+        assert_eq!(core.project.background, 0x2B2830);
+        assert_eq!(core.status, "Background: #2B2830.");
+        step_background_channel(&mut core, 1, -1);
+        assert_eq!(core.project.background, 0x2B2030);
+        step_background_channel(&mut core, 2, 1);
+        assert_eq!(core.project.background, 0x2B2038);
+        assert_eq!(core.status, "Background: #2B2038.");
+    }
+
+    #[test]
+    fn background_stepper_clamps_at_black_and_white() {
+        let mut core = EditorCore::new();
+        core.project.background = 0x020202;
+        for channel in 0..3 {
+            step_background_channel(&mut core, channel, -1);
+        }
+        assert_eq!(core.project.background, 0x000000);
+        // Further presses stay pinned at the clamp.
+        step_background_channel(&mut core, 0, -1);
+        assert_eq!(core.project.background, 0x000000);
+        core.project.background = 0xFDFDFD;
+        for channel in 0..3 {
+            step_background_channel(&mut core, channel, 1);
+        }
+        assert_eq!(core.project.background, 0xFFFFFF);
+        step_background_channel(&mut core, 2, 1);
+        assert_eq!(core.project.background, 0xFFFFFF);
+    }
+
+    #[test]
+    fn background_stepper_lands_on_and_leaves_swatch_colours() {
+        // One press per channel from 0x080808 lands exactly
+        // on the Black swatch — the panel's exact-equality
+        // highlight would light it.
+        let mut core = EditorCore::new();
+        core.project.background = 0x080808;
+        for channel in 0..3 {
+            step_background_channel(&mut core, channel, -1);
+        }
+        assert_eq!(core.project.background, 0x000000);
+        let hit = BACKGROUND_SWATCHES
+            .iter()
+            .find(|&&(_, rgb)| rgb == core.project.background);
+        assert_eq!(hit.map(|&(name, _)| name), Some("Black"));
+        // One press back up leaves every swatch: off-preset,
+        // no highlight, the header's raw hex is the readout.
+        step_background_channel(&mut core, 0, 1);
+        assert_eq!(core.project.background, 0x080000);
+        assert!(
+            !BACKGROUND_SWATCHES
+                .iter()
+                .any(|&(_, rgb)| rgb == core.project.background),
+            "0x080000 is not a swatch colour"
+        );
+    }
+
+    #[test]
+    fn background_stepper_ignores_a_bad_channel() {
+        let mut core = EditorCore::new();
+        let before = core.project.background;
+        core.status = "untouched".into();
+        step_background_channel(&mut core, 3, 1);
+        assert_eq!(core.project.background, before);
+        assert_eq!(core.status, "untouched");
     }
 
     #[test]

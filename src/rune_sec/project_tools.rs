@@ -23,6 +23,33 @@
 //! live in the app bar (`chrome_view::app_bar`) and are NOT
 //! duplicated here; this section covers the *named* projects in
 //! `./projects/`.
+//!
+//! ## Per-key audit map (Phase G, section 12)
+//!
+//! Every element key [`project_section`] emits, what handles
+//! it, and what that handler actually does — each row checked
+//! against the core source, not against the label's promise:
+//!
+//! | key | control | handler → action | verdict |
+//! |---|---|---|---|
+//! | `project-tools` | section root (col) | — container, no handler | ok |
+//! | *(title row, unkeyed)* | "Project" title + autosave text | renders `autosave_line(core.edits_since_autosave())` (editor.rs:1599) | ok — counter is the core's; see the autosave note on [`autosave_line`] |
+//! | `proj-name-field` | name-field wrapper (el) | — container, no handler | ok |
+//! | `proj-name` | text input | `on_edit` → `&mut State::name_edit`; `on_submit` → [`apply_name`] | ok — Enter and "Set name" share one path |
+//! | `proj-set-name` | "Set name" button | [`apply_name`] → [`apply_project_name`]: trims, writes `Project::name` directly (no core rename op or setter exists — editor.rs has no `rename*` fn; the file-level rename is Home's `projects::rename_project`) | ok |
+//! | `new-proj` | "New" button | [`new_pressed`] → [`new_project`] + [`sync_name_edit`]: installs [`blank_project`]`("Untitled")` — field-for-field the MCP `new_project` tool's defaults and reset set (mcp_tools.rs `tool_new_project`) — clears solo, stops playback, no snapshot/confirm | ok |
+//! | `save-proj` | "Save project" button | [`save_named_pressed`] → `EditorCore::save_named_project` (editor.rs:3599: slugifies the name, writes `./projects/<slug>.json`, refreshes `project_files`, sets status), then `shell::write_recovery` + `shell::touch_recent` to keep snapshot/recents in step | ok — caveat: on a failed save the recovery/recents sync still runs (the op returns `()`, so this file cannot tell); integrator item |
+//! | `recover` | "Recover" button | [`recover_pressed`] → [`recover_snapshot`] (`shell::read_recovery` = `./projects/.recovery.json`, shell.rs) → [`apply_recovered_project`] + [`sync_name_edit`] | fixed in Phase G — the reset now also clears solo and stops playback (see the fn) |
+//! | `proj-list` | selector list (col) | — container, no handler | ok |
+//! | `open-proj-{i}` | "Open" button per row, accent-styled when `i == core.project_index` | [`open_row_pressed`] → sets `project_index`, `EditorCore::open_project_file` (editor.rs:3636: reads the file; resets current/playhead/figure/node; sets status), [`clear_stale_solo`], [`sync_name_edit`] | fixed in Phase G — stale-solo guard added; the highlight tracks the core's cycle cursor (the palette's `cycle-project` moves it without opening), exactly as [`ProjectRow`] documents |
+//! | *(empty-list text, unkeyed)* | "No saved projects in ./projects/ yet." | — display only; wording is `cycle_project_file`'s own status string (editor.rs), verbatim | ok |
+//!
+//! Name-field sync is not duplicated work: the handlers above
+//! call [`sync_name_edit`] for an immediate refresh after their
+//! own switches, and the integrator's per-tick `poll()` call
+//! covers switches made elsewhere (app-bar Load, Home open,
+//! MCP rename). The fn is a no-op unless the text differs, so
+//! the overlap costs one string compare.
 
 use std::path::Path;
 
@@ -94,6 +121,14 @@ pub fn project_rows(core: &EditorCore) -> Vec<ProjectRow> {
         .collect()
 }
 
+/// The selector row's "Open" button key for row `i`
+/// (`open-proj-{i}`). One definition, used by the builder, so
+/// the audit map in the module docs and the emitted keys
+/// cannot drift apart on the dynamic pattern.
+pub fn open_row_key(i: usize) -> String {
+    format!("open-proj-{i}")
+}
+
 /// A blank project with the codebase's established New-project
 /// defaults: 960×720 stage, 12 fps, the dark stage background,
 /// one rest-posed humanoid ("Styk") and a single frame. These
@@ -143,10 +178,21 @@ pub fn blank_project(name: &str) -> Project {
 }
 
 /// The autosave status line: how many snapshot-counted edits
-/// have accumulated since the last recovery snapshot was
-/// written (`EditorCore::edits_since_autosave`). Display only —
-/// autosave itself is driven by the core's edit cadence
-/// (`maybe_autosave`), not by this section.
+/// have accumulated since the last autosave
+/// (`EditorCore::edits_since_autosave` — edits minus the count
+/// at the last successful `maybe_autosave`). Display only.
+///
+/// Phase G audit note, so the line is not over-read: the
+/// counter is the core's and this section renders it
+/// faithfully, but (a) nothing in the shell currently calls
+/// `maybe_autosave` — the integrator wiring its doc comment
+/// promises ("the app layer decides when to check") is still
+/// owed, so in practice the count grows until restart; and
+/// (b) a recovery write that bypasses `maybe_autosave` —
+/// "Save project" writes one via `shell::write_recovery` —
+/// does not reset the counter (the core keeps it private and
+/// exposes no "note a manual write" API), so right after a
+/// save the line can overstate how stale the snapshot is.
 pub fn autosave_line(edits_since_autosave: u64) -> String {
     match edits_since_autosave {
         0 => "Recovery snapshot up to date.".to_string(),
@@ -198,13 +244,20 @@ pub fn new_project(core: &mut EditorCore) {
 
 /// Apply a recovered project: the state reset the GPUI app's
 /// Recover button performed after `shell::read_recovery`
-/// returned a snapshot (app.rs, pre-removal).
+/// returned a snapshot (app.rs, pre-removal) — plus, since the
+/// Phase G audit, the solo/playback clearing this file's own
+/// [`new_project`] already did for the same kind of swap:
+/// `layers::visible_figures` hides EVERY figure when `solo`
+/// names an index the swapped-in project does not have, so a
+/// stale solo would blank the stage with no explanation.
 pub fn apply_recovered_project(core: &mut EditorCore, project: Project) {
     core.project = project;
     core.current = 0;
     core.playhead = 0.0;
     core.selected_figure = 0;
     core.selected_node = None;
+    core.solo = None;
+    core.playing = false;
     core.status = "Recovered the snapshot from ./projects/.recovery.json.".into();
 }
 
@@ -296,12 +349,34 @@ fn save_named_pressed(s: &mut State) {
     stykanimate_rs::shell::touch_recent(&s.core.project.name);
 }
 
+/// Drop a solo index the current project does not have
+/// (Phase G audit). `open_project_file` leaves `solo`
+/// untouched, and `layers::visible_figures` hides EVERY
+/// figure when the solo index names none of them — opening a
+/// smaller project while soloing a late figure would blank
+/// the stage with no explanation. (The core's dialog-open op
+/// clears solo outright; the shared fix belongs in
+/// `open_project_file` itself — integrator item. This guard
+/// is the panel-local equivalent: it fires only when the
+/// solo is actually stale, so it is a no-op when the open
+/// failed and the project never changed, and it keeps a
+/// solo that still names a figure in the opened project.)
+pub fn clear_stale_solo(core: &mut EditorCore) {
+    if let Some(solo) = core.solo {
+        if solo >= core.project.figures.len() {
+            core.solo = None;
+        }
+    }
+}
+
 /// One selector row's "Open": point the core's index at the
 /// row and open that file (`open_project_file` reads
-/// `project_index`), then re-sync the name field.
+/// `project_index`), clear any solo the opened project made
+/// stale, then re-sync the name field.
 fn open_row_pressed(s: &mut State, i: usize) {
     s.core.project_index = i;
     s.core.open_project_file();
+    clear_stale_solo(&mut s.core);
     sync_name_edit(s);
 }
 
@@ -397,7 +472,7 @@ pub fn project_section(s: &State, t: &Theme) -> El {
                             .grow(1.0),
                     )
                     .child(btn(
-                        &format!("open-proj-{i}"),
+                        &open_row_key(i),
                         "Open",
                         row_data.selected,
                         t,
@@ -452,6 +527,14 @@ mod tests {
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
             draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
             was_playing: false,
         }
     }
@@ -527,13 +610,43 @@ mod tests {
     fn recovered_project_resets_view_state() {
         let mut core = EditorCore::new();
         core.current = 2;
+        core.solo = Some(0);
+        core.playing = true;
         let mut snapshot = Project::new_demo();
         snapshot.name = "Recovered Work".into();
         apply_recovered_project(&mut core, snapshot);
         assert_eq!(core.project.name, "Recovered Work");
         assert_eq!(core.current, 0);
         assert_eq!(core.playhead, 0.0);
+        // Phase G: the swap also clears solo and stops
+        // playback, like new_project in this file — a stale
+        // solo would hide every figure in the snapshot.
+        assert!(core.solo.is_none());
+        assert!(!core.playing);
         assert!(core.status.contains("Recovered the snapshot"));
+    }
+
+    #[test]
+    fn stale_solo_is_cleared_and_valid_solo_kept() {
+        let mut core = EditorCore::new();
+        // The demo project has one figure: index 0 is the
+        // only solo that can still name a figure.
+        assert_eq!(core.project.figures.len(), 1);
+        core.solo = Some(9);
+        clear_stale_solo(&mut core);
+        assert!(core.solo.is_none(), "stale solo cleared");
+        core.solo = Some(0);
+        clear_stale_solo(&mut core);
+        assert_eq!(core.solo, Some(0), "valid solo kept");
+        core.solo = None;
+        clear_stale_solo(&mut core);
+        assert!(core.solo.is_none(), "no solo stays no solo");
+    }
+
+    #[test]
+    fn open_row_key_matches_the_audited_pattern() {
+        assert_eq!(open_row_key(0), "open-proj-0");
+        assert_eq!(open_row_key(12), "open-proj-12");
     }
 
     #[test]

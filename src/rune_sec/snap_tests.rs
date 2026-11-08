@@ -68,6 +68,27 @@
 //! test process), and structural unmounts are given a
 //! bounded settle loop before an absence assert, the
 //! same courtesy the dropdown's presence fade needed.
+//!
+//! Round 4 (Phase G, section 39) adds four tests over the
+//! Phase G surfaces: stroke selection (Draw workspace),
+//! the split guide toggles in the settings card, the
+//! workspace blurb line, and the particles panel's Add
+//! button. Extra facts they rest on:
+//! * The demo project has NO strokes and NO particle
+//!   events (`Project::new_demo` builds both vecs empty),
+//!   so the stroke test asserts the selection row's
+//!   empty-project behaviour — the press proven landed by
+//!   the handler's own status line — while the particles
+//!   test starts from an empty list and a real first Add.
+//! * The guide children (`settings-guides-frustum`,
+//!   `settings-guides-safe`) write flags of their own
+//!   (`State.guides_frustum` / `guides_safe`), independent
+//!   of the parent `guides` flag round 3 exercised.
+//! * The particles panel's section gating is the
+//!   integrator's step (expected: the Effects workspace);
+//!   the test navigates by the `ws-effects` chip and
+//!   asserts on state, so it exercises the panel as soon
+//!   as it is mounted there.
 
 use std::collections::BTreeSet;
 
@@ -703,4 +724,230 @@ fn playback_advances_and_pauses() {
         rt.state.core.current, stopped,
         "paused frame counter is frozen"
     );
+}
+
+// ----------------------------------------------------------------
+// Round 4 (Phase G, section 39): stroke selection, the
+// split guide toggles, the workspace blurb line, and the
+// particles panel.
+// ----------------------------------------------------------------
+
+#[test]
+fn stroke_selection_row_reports_empty_project() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // The demo project has no strokes: `Project::new_demo`
+    // builds `strokes` empty, and nothing in this test adds
+    // one. The selection row's contract on an empty project
+    // (the stroke section's module docs) is that Next and
+    // Clear only report via the status line and the
+    // selection stays None — that is the behaviour true of
+    // this shell state, and it is what is asserted. (With
+    // strokes present, Next from None selects index 0 and
+    // steps with wraparound; the section's own unit tests
+    // prove that stepping over synthetic states.)
+    assert!(rt.state.core.project.strokes.is_empty());
+    assert_eq!(rt.state.stroke_selected, None);
+
+    // The StrokeInspector section is gated to Draw (the
+    // gating table round 3's test exercised).
+    tap(&mut rt, "ws-draw");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Draw);
+    // The row renders always, empty project or not. Settle
+    // (bounded) through the freshly mounted panel's
+    // presence fade before pressing inside it — round 3's
+    // guides lesson.
+    for _ in 0..90 {
+        rt.frame(DT);
+        if let Some((_, opacity)) = rt.presented("stroke-sel-next") {
+            if opacity > 0.99 {
+                break;
+            }
+        }
+    }
+    assert!(
+        presented_keys(&rt).contains("stroke-sel-row"),
+        "Draw mounts the stroke selection row"
+    );
+
+    // Next on an empty project: no selection appears, and
+    // the handler's own status line proves the press
+    // landed (a missed press would leave the status
+    // untouched).
+    tap(&mut rt, "stroke-sel-next");
+    assert_eq!(
+        rt.state.stroke_selected, None,
+        "no strokes -> Next selects nothing"
+    );
+    assert_eq!(
+        rt.state.core.status, "No strokes to select.",
+        "the empty-project press reports via the status line"
+    );
+
+    // Clear behaves the same on an empty project.
+    tap(&mut rt, "stroke-sel-clear");
+    assert_eq!(rt.state.stroke_selected, None);
+    assert_eq!(rt.state.core.status, "No strokes to select.");
+
+    // Restore the shared prefs' workspace, as rounds 2–3 do.
+    tap(&mut rt, "ws-animate");
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+}
+
+#[test]
+fn guide_split_toggles_flip_independently() {
+    let mut rt = editor();
+
+    // Open the settings card exactly as round 3's guides
+    // test did, and settle (bounded) until a guide child
+    // button is fully presented before pressing it — the
+    // card's children presence-fade in.
+    tap(&mut rt, "settings-toggle");
+    assert!(rt.state.settings.open, "Settings toggle opens the card");
+    for _ in 0..90 {
+        rt.frame(DT);
+        if let Some((_, opacity)) = rt.presented("settings-guides-safe") {
+            if opacity > 0.99 {
+                break;
+            }
+        }
+    }
+    assert!(
+        presented_keys(&rt).contains("settings-guides-frustum"),
+        "the guide children row is presented"
+    );
+
+    // The two children write flags of their own
+    // (`State.guides_safe` / `guides_frustum`), independent
+    // of the parent Guides flag: flipping either child
+    // moves only its own flag. Value-agnostic flip
+    // assertions, like round 3's theme and guides tests —
+    // whatever the flags start at, each tap inverts its
+    // own and leaves the other two alone.
+    let guides0 = rt.state.guides;
+    let safe0 = rt.state.guides_safe;
+    let frustum0 = rt.state.guides_frustum;
+
+    tap(&mut rt, "settings-guides-safe");
+    assert_eq!(
+        rt.state.guides_safe, !safe0,
+        "Safe frames tap flips guides_safe"
+    );
+    assert_eq!(rt.state.guides, guides0, "Guides itself is untouched");
+    assert_eq!(
+        rt.state.guides_frustum, frustum0,
+        "Camera frame is untouched"
+    );
+
+    tap(&mut rt, "settings-guides-frustum");
+    assert_eq!(
+        rt.state.guides_frustum, !frustum0,
+        "Camera frame tap flips guides_frustum"
+    );
+    assert_eq!(rt.state.guides, guides0, "Guides itself is still untouched");
+    assert_eq!(
+        rt.state.guides_safe, !safe0,
+        "Safe frames keeps its flipped value"
+    );
+
+    // Restore both flags to where the test found them.
+    tap(&mut rt, "settings-guides-safe");
+    tap(&mut rt, "settings-guides-frustum");
+    assert_eq!(rt.state.guides_safe, safe0, "Safe frames restored");
+    assert_eq!(rt.state.guides_frustum, frustum0, "Camera frame restored");
+    assert_eq!(rt.state.guides, guides0);
+}
+
+#[test]
+fn workspace_blurb_line_names_the_active_workspace() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // The line under the chips (key `ws-blurb`) shows the
+    // ACTIVE workspace's one-sentence summary — the
+    // workspaces section's `blurb_line`, i.e. the active
+    // workspace's own `blurb()`. The startup workspace
+    // comes from the shared prefs, so force Animate
+    // through its chip first (round 3's seeding
+    // discipline) — which also leaves the prefs naming
+    // Animate, as they started.
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // The element is presented and its text is the Animate
+    // blurb verbatim — the section's `blurb()` is the
+    // source of truth for the wording, so no string is
+    // duplicated here.
+    let blurb = rt
+        .elements()
+        .iter()
+        .find(|e| e.key.as_deref() == Some("ws-blurb"))
+        .expect("blurb line is presented")
+        .text
+        .clone()
+        .expect("blurb line carries text");
+    assert!(!blurb.is_empty(), "blurb text is non-empty");
+    assert_eq!(
+        blurb,
+        Workspace::Animate.blurb(),
+        "the line shows the active workspace's blurb"
+    );
+}
+
+#[test]
+fn particles_panel_add_selects_the_new_event() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // The demo project starts with no particle events
+    // (`Project::new_demo` builds `particles` empty) and
+    // no event selected.
+    assert!(rt.state.core.project.particles.is_empty());
+    assert_eq!(rt.state.particle_selected, None);
+
+    // The particles panel is gated to Effects (the
+    // integrator's Section for it); navigate by the chip
+    // like every workspace-dependent test here.
+    tap(&mut rt, "ws-effects");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Effects);
+    assert!(
+        presented_keys(&rt).contains("particles"),
+        "Effects mounts the particles panel"
+    );
+    // Settle (bounded) through the freshly mounted panel's
+    // presence fade before pressing inside it — round 3's
+    // guides lesson.
+    for _ in 0..90 {
+        rt.frame(DT);
+        if let Some((_, opacity)) = rt.presented("particles-add") {
+            if opacity > 0.99 {
+                break;
+            }
+        }
+    }
+
+    // Add: the panel's `add_event` appends one event and
+    // selects it (its landing frame/point details are the
+    // section's own unit tests' business; here the real
+    // button proves the panel is wired to the project and
+    // the shell's selection state).
+    tap(&mut rt, "particles-add");
+    assert_eq!(
+        rt.state.core.project.particles.len(),
+        1,
+        "Add appends one particle event"
+    );
+    assert_eq!(
+        rt.state.particle_selected,
+        Some(0),
+        "the new event is selected"
+    );
+
+    // Restore the shared prefs' workspace, as rounds 2–3 do.
+    tap(&mut rt, "ws-animate");
+    assert_eq!(rt.state.workspace, Workspace::Animate);
 }

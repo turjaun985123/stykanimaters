@@ -2,7 +2,9 @@
 //! (Phase D, section 22 — menus; Phase E upgrade: View ▸
 //! sidebar toggles and Help ▸ Command palette; Phase F:
 //! right-aligned shortcut hints on the items that have
-//! real shell key bindings, and View ▸ Stage guides).
+//! real shell key bindings, and View ▸ Stage guides;
+//! Phase G: View ▸ Camera frame / Safe frames, the two
+//! child toggles under Stage guides).
 //! Declared from `main.rs` by the integrator; bin-crate
 //! code, not part of the engine library.
 //!
@@ -152,7 +154,8 @@ fn closing(f: impl Fn(&mut State) + 'static) -> impl Fn(&mut State) + 'static {
 ///
 /// Everything else in these menus — Save, Load, Export
 /// PNG, Copy/Paste frame, Fit view, Centre on selection,
-/// the sidebar toggles, Stage guides, Shortcuts — has NO
+/// the sidebar toggles, Stage guides, Camera frame, Safe
+/// frames, Shortcuts — has NO
 /// shell key binding and gets no hint: an invented hint
 /// would be a lie on screen. The spellings match the
 /// help panel's shortcut table (`help_panel.rs`). Pinned
@@ -324,7 +327,19 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
             // Settings card's toggle) — this item calls
             // that same fn rather than growing a second
             // toggle, and renders active while the flag is
-            // set. The two sidebar toggles are Phase E:
+            // set. Camera frame / Safe frames (Phase G) are
+            // Stage guides' two child toggles, built the
+            // same way directly under it: their flags are
+            // `State::guides_frustum` / `State::guides_safe`
+            // (both default on; the stage draws those
+            // overlays only while Guides is also on), their
+            // writers are the settings section's
+            // `toggle_guides_frustum` / `toggle_guides_safe`
+            // (the Settings card's child rows call the same
+            // fns), and each item renders active while its
+            // flag is set. Neither child has a shell key
+            // binding, so neither gets a shortcut hint (see
+            // `shortcut_hint`). The two sidebar toggles are Phase E:
             // they flip the shell's own layout fields
             // (`State::show_left` / `show_right`,
             // integrator-owned, default visible) and render
@@ -338,6 +353,24 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
                 .child(item("view-guides", "Stage guides", s.guides, t, |s| {
                     crate::rune_sec::settings_popover::toggle_guides(s);
                 }))
+                .child(item(
+                    "view-guides-frustum",
+                    "Camera frame",
+                    s.guides_frustum,
+                    t,
+                    |s| {
+                        crate::rune_sec::settings_popover::toggle_guides_frustum(s);
+                    },
+                ))
+                .child(item(
+                    "view-guides-safe",
+                    "Safe frames",
+                    s.guides_safe,
+                    t,
+                    |s| {
+                        crate::rune_sec::settings_popover::toggle_guides_safe(s);
+                    },
+                ))
                 .child(separator("menu-view-sep", t))
                 .child(item("view-fit", "Fit view", false, t, |s| {
                     s.core.frame_all_figures()
@@ -453,6 +486,8 @@ mod tests {
             "copy-frame",
             "paste-frame",
             "view-guides",
+            "view-guides-frustum",
+            "view-guides-safe",
             "view-fit",
             "view-centre",
             "view-toggle-left",
@@ -479,6 +514,36 @@ mod tests {
         crate::rune_sec::settings_popover::toggle_guides(&mut s);
         assert!(s.guides);
         s.menus.open = Some(VIEW);
+        let _ = menu_dropdown(&s, &t);
+    }
+
+    #[test]
+    fn view_dropdown_builds_in_all_guides_flag_states() {
+        // Phase G: the View dropdown carries Stage guides'
+        // two child items (Camera frame / Safe frames),
+        // which read `guides_frustum` / `guides_safe` for
+        // their active state. Both flags default to on
+        // (integrator seed in `init`), unlike `guides`
+        // itself. Build the dropdown in the default state,
+        // with each child flipped off via the settings
+        // section's toggles (the same fns the menu items
+        // call), and with Guides itself on — construction
+        // must not panic in any combination.
+        let t = rune::tok::theme(true);
+        let mut s = crate::init();
+        assert!(!s.guides, "stage guides default to off");
+        assert!(s.guides_frustum, "camera frame defaults to on");
+        assert!(s.guides_safe, "safe frames default to on");
+        s.menus.open = Some(VIEW);
+        let _ = menu_dropdown(&s, &t);
+        crate::rune_sec::settings_popover::toggle_guides_frustum(&mut s);
+        assert!(!s.guides_frustum);
+        let _ = menu_dropdown(&s, &t);
+        crate::rune_sec::settings_popover::toggle_guides_safe(&mut s);
+        assert!(!s.guides_safe);
+        let _ = menu_dropdown(&s, &t);
+        crate::rune_sec::settings_popover::toggle_guides(&mut s);
+        assert!(s.guides);
         let _ = menu_dropdown(&s, &t);
     }
 

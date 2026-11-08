@@ -127,6 +127,54 @@
 //! interp segmented control is labelled by the channel it
 //! really edits. Nothing here pretends otherwise.
 //!
+//! ## Channel list (Phase G)
+//!
+//! Below the header sits a LIST of every channel in the
+//! project ([`channel_rows`]: index, "F{n} {target}", key
+//! count; rows keyed `graph-chan-{i}` with the channel's
+//! index in `project.channels`). A list, not the prev/next
+//! cycling some panels use: this panel's idiom is already
+//! direct-pick (the chip selector), a project's channel
+//! count is small, and a list shows figure, target and key
+//! count for every channel at a glance — cycling would hide
+//! all but one and cost a press per step of travel.
+//!
+//! The chip selector above the canvas stays: it offers the
+//! SELECTED figure's targets, including the keyless pinned
+//! roots a user may be about to key. The list is the
+//! complementary browser — only channels that actually
+//! exist, across ALL figures. Both write the SAME state
+//! ([`select_channel`] sets `GraphPanelState::target`, plus
+//! `EditorCore::select_figure` when the channel's figure is
+//! not the selected one), so key drags, tangent drags,
+//! click-seek and the transform actions operate on exactly
+//! the channel a row names, through the existing
+//! `(selected figure, target)` plumbing — no parallel state.
+//! Switching figures through a row press behaves like any
+//! figure switch in the app (`select_figure` clears the
+//! node selection and is not an undo step); pressing a row
+//! for the already-selected figure leaves the node
+//! selection untouched.
+//!
+//! One honesty note: the target state names a
+//! `(figure, target)` pair, and the engine itself treats a
+//! second channel with the same pair as a shadowed
+//! duplicate ("the later one in the slice wins" —
+//! graph.rs's module docs), while `channel_index` resolves
+//! the FIRST match. If such duplicates exist, both rows are
+//! listed (with their own key counts) but both select the
+//! same effective channel. Project data written by the
+//! editor's own ops never creates duplicates
+//! (`graph::channel_mut` reuses the existing channel).
+//!
+//! The empty state names the verified way a first channel
+//! appears: `EditorCore::key_graph_angle` creates one via
+//! `graph::channel_mut` — it is this panel's "Key angle"
+//! action and the keyframe tools' "Key angle here" alike.
+//! (Pasting keys requires an existing channel, baking
+//! consumes channels, and file imports may also carry
+//! channels in.)
+//!
 //! ## State the shell must provide
 //!
 //! `State` needs one field (integrator wires it):
@@ -134,7 +182,7 @@
 //! — see [`GraphPanelState`].
 
 use rune::tok::{self, type_, Theme};
-use rune::{canvas, col, row, text, Color, Cx, Drag, El, LineCap, Phase, Shape, Tx};
+use rune::{canvas, col, row, text, Color, Cx, Drag, El, LineCap, Phase, ScrollSpec, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::graph::{Channel, ChannelTarget, Interp, Key, TangentPreset};
 use stykanimate_rs::graph_panel::{preset_preview, GraphView};
@@ -325,6 +373,75 @@ pub fn channel_index(core: &EditorCore, target: ChannelTarget) -> Option<usize> 
 /// The selected figure's channel for `target`, if one exists.
 pub fn channel_for<'a>(core: &'a EditorCore, target: ChannelTarget) -> Option<&'a Channel> {
     channel_index(core, target).map(|i| &core.project.channels[i])
+}
+
+/// The channel list's rows: EVERY channel in the project, in
+/// project order, as `(index, label, key count)` — the index
+/// is the channel's position in `core.project.channels` (the
+/// row key's `graph-chan-{i}` and the value a row press hands
+/// to [`select_channel`]); the label is "F{n} {target}" with
+/// the 1-based figure number the panel header and the core's
+/// status lines use, and the target named by the panel's own
+/// [`channel_label`] (graph.rs has no display-name fn of its
+/// own — its legend labels are lower-case and private). Pure
+/// projection of project data: selection-independent, so the
+/// list is identical whichever figure is selected.
+pub fn channel_rows(core: &EditorCore) -> Vec<(usize, String, usize)> {
+    core.project
+        .channels
+        .iter()
+        .enumerate()
+        .map(|(i, ch)| {
+            (
+                i,
+                format!("F{} {}", ch.figure + 1, channel_label(ch.target)),
+                ch.keys.len(),
+            )
+        })
+        .collect()
+}
+
+/// The panel target a channel list row selects: the target
+/// of the channel at `index` in `core.project.channels`, or
+/// `None` when the index names no channel. This is the exact
+/// value a row press writes into `GraphPanelState::target`
+/// (via [`select_channel`]) — the state every existing edit
+/// path already reads.
+pub fn target_for_channel(core: &EditorCore, index: usize) -> Option<ChannelTarget> {
+    core.project.channels.get(index).map(|ch| ch.target)
+}
+
+/// A channel list row press, factored out of the view for
+/// testability: point the panel at the channel at `index` in
+/// `core.project.channels`. The channel's figure becomes the
+/// selected figure first (through `EditorCore::select_figure`
+/// — the app's own figure switch — but only when it differs,
+/// so a same-figure pick never clears the user's node
+/// selection), then `st.target` takes the channel's target.
+/// From there the existing plumbing resolves the pick to
+/// exactly this channel ([`effective_target`] accepts it —
+/// a real channel of the selected figure is always a
+/// selector entry — and [`channel_index`] finds it), so the
+/// canvas edits that follow operate on the listed channel.
+/// No snapshot: selection is view state everywhere in this
+/// app, and `select_figure` doesn't snapshot either. Returns
+/// false — nothing changed — when `index` names no channel,
+/// or when the channel's figure cannot be selected (a stale
+/// figure index in hand-edited project data;
+/// `select_figure` bounds-checks and refuses).
+pub fn select_channel(core: &mut EditorCore, st: &mut GraphPanelState, index: usize) -> bool {
+    let Some(ch) = core.project.channels.get(index) else {
+        return false;
+    };
+    let (figure, target) = (ch.figure, ch.target);
+    if figure != core.selected_figure {
+        core.select_figure(figure);
+        if core.selected_figure != figure {
+            return false;
+        }
+    }
+    st.target = Some(target);
+    true
 }
 
 /// Index of the key nearest `frame` — the same pick
@@ -999,6 +1116,56 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         ));
     }
 
+    // Channel list (Phase G): every channel in the project,
+    // one pressable row per channel — "F{n} {target}" plus
+    // its key count — writing the same target state as the
+    // chips via select_channel (which also selects the
+    // channel's figure when it differs). The active row is
+    // the channel the panel actually draws: the first
+    // (selected figure, target) match, per channel_index —
+    // the same resolution every edit path uses. With no
+    // channels at all, the list is the empty-state line
+    // naming how the first channel appears (Key angle —
+    // key_graph_angle creates it; see the module docs).
+    let drawn_idx = channel_index(core, target);
+    let mut chan_list = col().key("graph-channel-list").gap(4.0);
+    let rows = channel_rows(core);
+    if rows.is_empty() {
+        chan_list = chan_list.child(
+            text("No graph channels yet — select a joint on the stage, then Key angle starts the first one.")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    }
+    for (i, label, count) in rows {
+        let active = drawn_idx == Some(i);
+        chan_list = chan_list.child(
+            row()
+                .key(format!("graph-chan-{i}"))
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .px(8.0)
+                .py(5.0)
+                .radius(6.0)
+                .fill(if active { t.control_track } else { t.card })
+                .hover(if active { t.control_track } else { t.control_off })
+                .on_press(move |s: &mut State| {
+                    select_channel(&mut s.core, &mut s.graph_panel, i);
+                })
+                .child(text(label).font(type_::LABEL).color(t.text).grow(1.0))
+                .child(
+                    text(if count == 1 {
+                        "1 key".to_string()
+                    } else {
+                        format!("{count} keys")
+                    })
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+                ),
+        );
+    }
+
     // Interp segmented control. The op behind it edits the
     // Angle(selected node) channel's key nearest the current
     // frame, so the row is labelled with exactly that and its
@@ -1089,6 +1256,7 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                 )
                 .child(text(readout).font(type_::LABEL).color(t.text_secondary)),
         )
+        .child(chan_list.scroll(ScrollSpec { stick_bottom: false }).min_h(0.0))
         .child(selector.scroll_x().w_full())
         .child(
             canvas(graph_shape(
@@ -1764,5 +1932,122 @@ mod tests {
             approx(core.project.channels[0].keys[1].out_tan, -25.0),
             "cancel restored the pre-drag tangent"
         );
+    }
+
+    /// A two-figure core whose project carries four channels
+    /// across both figures — the channel-list fixture. Figure
+    /// 0 stays selected; figure 1 exists for real (via the
+    /// core's own add op) so `select_figure` can reach it.
+    fn core_with_project_channels() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.add_figure();
+        core.select_figure(0);
+        core.project.channels = vec![
+            channel(
+                ChannelTarget::RootX,
+                vec![
+                    Key::flat(0.0, 0.0),
+                    Key::flat(2.0, 10.0),
+                    Key::flat(4.0, 0.0),
+                ],
+            ),
+            channel(ChannelTarget::Angle(2), vec![Key::flat(1.0, 30.0)]),
+            Channel {
+                figure: 1,
+                target: ChannelTarget::RootY,
+                keys: vec![],
+            },
+            Channel {
+                figure: 1,
+                target: ChannelTarget::Length(4),
+                keys: vec![Key::flat(0.0, 90.0), Key::flat(3.0, 95.0)],
+            },
+        ];
+        core
+    }
+
+    #[test]
+    fn channel_rows_list_every_channel_with_label_and_count() {
+        let core = core_with_project_channels();
+        // Project order, 1-based figure numbers, the panel's
+        // own target labels, exact key counts — including
+        // figure 1's channels while figure 0 is selected
+        // (the list is project-wide, not selection-scoped),
+        // and an empty channel still lists with 0 keys.
+        assert_eq!(
+            channel_rows(&core),
+            vec![
+                (0, "F1 Root X".to_string(), 3),
+                (1, "F1 Angle 2".to_string(), 1),
+                (2, "F2 Root Y".to_string(), 0),
+                (3, "F2 Length 4".to_string(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn channel_rows_empty_project_is_empty() {
+        // The demo core has no channels: no rows (the builder
+        // shows the empty-state line instead).
+        let core = EditorCore::new();
+        assert!(channel_rows(&core).is_empty());
+    }
+
+    #[test]
+    fn target_for_channel_maps_row_index_to_target() {
+        let core = core_with_project_channels();
+        assert_eq!(target_for_channel(&core, 0), Some(ChannelTarget::RootX));
+        assert_eq!(target_for_channel(&core, 1), Some(ChannelTarget::Angle(2)));
+        assert_eq!(target_for_channel(&core, 3), Some(ChannelTarget::Length(4)));
+        assert_eq!(target_for_channel(&core, 4), None);
+        assert_eq!(target_for_channel(&core, 99), None);
+    }
+
+    #[test]
+    fn select_channel_points_the_existing_plumbing_at_the_row() {
+        let mut core = core_with_project_channels();
+        let mut st = GraphPanelState::default();
+        // Row 3 is figure 1's Length(4) channel: the press
+        // selects figure 1 AND writes the same target state
+        // the chips write.
+        assert!(select_channel(&mut core, &mut st, 3));
+        assert_eq!(core.selected_figure, 1);
+        assert_eq!(st.target, Some(ChannelTarget::Length(4)));
+        // The existing resolution now lands on exactly the
+        // listed channel — this is the channel the canvas
+        // draws and the transforms edit.
+        let target = effective_target(&core, st.target);
+        assert_eq!(target, ChannelTarget::Length(4));
+        assert_eq!(channel_index(&core, target), Some(3));
+        // Proof by edit: scaling the effective target moves
+        // the listed channel's keys (90 -> 180) and leaves
+        // the other figure's channel alone.
+        apply_scale(&mut core, target, 2.0);
+        assert_eq!(core.project.channels[3].keys[0].value, 180.0);
+        assert_eq!(core.project.channels[0].keys[1].value, 10.0);
+    }
+
+    #[test]
+    fn select_channel_same_figure_keeps_the_node_selection() {
+        let mut core = core_with_project_channels();
+        core.selected_node = Some(2);
+        let mut st = GraphPanelState::default();
+        // Row 1 is figure 0's own Angle(2): no figure switch,
+        // so the node selection survives (select_figure,
+        // which would clear it, is never called).
+        assert!(select_channel(&mut core, &mut st, 1));
+        assert_eq!(core.selected_figure, 0);
+        assert_eq!(core.selected_node, Some(2));
+        assert_eq!(st.target, Some(ChannelTarget::Angle(2)));
+        assert_eq!(channel_index(&core, ChannelTarget::Angle(2)), Some(1));
+    }
+
+    #[test]
+    fn select_channel_out_of_range_changes_nothing() {
+        let mut core = core_with_project_channels();
+        let mut st = GraphPanelState::default();
+        assert!(!select_channel(&mut core, &mut st, 99));
+        assert_eq!(core.selected_figure, 0);
+        assert_eq!(st.target, None);
     }
 }

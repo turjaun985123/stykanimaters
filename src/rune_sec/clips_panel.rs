@@ -48,6 +48,35 @@
 //!   (trimmed; blank falls back to the current name) and
 //!   treats a rename to the same name as a no-op with no
 //!   snapshot.
+//! * Per-row "Del" -> `delete_clip` in this module
+//!   (Phase G). Same field-write discipline ("No such
+//!   clip.", no snapshot, when out of range; otherwise
+//!   exactly one snapshot). Removing a clip shifts every
+//!   later index, so the same write remaps the other
+//!   stored clip indices: figures (`FigureInstance::clip`
+//!   — a figure whose clip is deleted falls back to its
+//!   timeline poses; references past the gap shift down)
+//!   and the clip-edit session's clip, which follows its
+//!   clip and ends when that clip is deleted. The panel
+//!   selection and an open rename target are repaired by
+//!   the `delete_clip_at` dispatch (`selection_after_delete`,
+//!   mirroring the FX panel's helper of the same name;
+//!   `target_after_delete` for the rename target, which
+//!   closes when its clip is the one deleted).
+//! * Per-row "Up" / "Dn" -> `move_clip` in this module
+//!   (Phase G): a `Vec::swap` with the neighbour plus the
+//!   same index remap (`target_after_swap`), so figures
+//!   keep playing the clip they were playing and the
+//!   session / selection / rename target follow the moved
+//!   clip. Moving past either end is a status-only
+//!   refusal, no snapshot. On what order MEANS here: no
+//!   consumer plays clips in list order —
+//!   `Project::apply_clips` (model.rs) resolves each
+//!   figure's own stored index — so reordering is list
+//!   organisation; its one playback-adjacent effect is
+//!   that `EditorCore::insert_clip_figure` always inserts
+//!   the FIRST clip, so moving a clip to the top changes
+//!   what "Insert clip" adds.
 //! * The clip-edit session section (Phase E) -> the core's
 //!   Wave-7 session ops: "Edit clip" enters the session for
 //!   the panel-selected clip via `EditorCore::enter_clip`
@@ -82,7 +111,7 @@ use std::cell::RefCell;
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, text_input, El, TextEdit, Tx};
-use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::editor::{ClipEditSession, EditorCore};
 use stykanimate_rs::model::{ClipDef, ClipLoop, FigureInstance};
 
 use crate::chrome_view::btn;
@@ -266,6 +295,180 @@ pub fn rename_clip(core: &mut EditorCore, clip_idx: usize, field_text: &str) -> 
     true
 }
 
+/// Selection after clip `deleted` was removed, with
+/// `len_after` clips remaining: a selection before the gap
+/// is untouched, one after it shifts down by one, and the
+/// deleted clip's own selection lands on the clip that
+/// slid into its slot (or the new last clip, or `None`
+/// when the list is now empty). Mirrors the FX panel's
+/// helper of the same name (`fx_clips.rs`) exactly — the
+/// two panels repair selection the same way.
+pub fn selection_after_delete(
+    selected: Option<usize>,
+    deleted: usize,
+    len_after: usize,
+) -> Option<usize> {
+    let sel = selected?;
+    if len_after == 0 {
+        return None;
+    }
+    if sel < deleted {
+        Some(sel)
+    } else if sel > deleted {
+        Some(sel - 1)
+    } else {
+        Some(deleted.min(len_after - 1))
+    }
+}
+
+/// Where a tracked clip index (the rename target, the
+/// clip-edit session's clip, a figure's `clip` reference)
+/// lands when clip `deleted` is removed: before the gap it
+/// is untouched, after it it shifts down by one, and the
+/// deleted clip itself maps to `None` — tracking ends,
+/// because the clip it named is gone. (The panel selection
+/// deliberately differs: it lands on the slid-in clip
+/// instead — see `selection_after_delete`.)
+pub fn target_after_delete(target: Option<usize>, deleted: usize) -> Option<usize> {
+    let t = target?;
+    if t < deleted {
+        Some(t)
+    } else if t > deleted {
+        Some(t - 1)
+    } else {
+        None
+    }
+}
+
+/// Where a tracked clip index lands when clips `a` and
+/// `b` trade places: the two swap, every other index is
+/// untouched.
+pub fn target_after_swap(target: Option<usize>, a: usize, b: usize) -> Option<usize> {
+    target.map(|t| {
+        if t == a {
+            b
+        } else if t == b {
+            a
+        } else {
+            t
+        }
+    })
+}
+
+/// Delete clip `clip_idx` (the per-row "Del" button's
+/// dispatch). No core op exists for this, so it is a field
+/// write with the same discipline as `duplicate_clip`: an
+/// out-of-range index only sets the status line ("No such
+/// clip.", no snapshot); otherwise exactly one
+/// `snapshot()`, the removal, and a status line. Because
+/// removal shifts every later clip index, the same write
+/// remaps the project's other stored clip indices through
+/// `target_after_delete`: figure `clip` references (a
+/// figure whose clip is deleted falls back to its
+/// timeline poses) and the clip-edit session's clip (the
+/// session follows its clip and ends when that clip is
+/// deleted). The panel selection and the rename target
+/// live outside the core; `delete_clip_at` repairs them.
+/// Returns true when a clip was actually removed.
+pub fn delete_clip(core: &mut EditorCore, clip_idx: usize) -> bool {
+    let Some(name) = core.project.clips.get(clip_idx).map(|c| c.name.clone()) else {
+        core.status = "No such clip.".into();
+        return false;
+    };
+    core.snapshot();
+    core.project.clips.remove(clip_idx);
+    for fig in &mut core.project.figures {
+        fig.clip = target_after_delete(fig.clip, clip_idx);
+    }
+    if let Some(session) = core.clip_edit {
+        core.clip_edit = target_after_delete(Some(session.clip), clip_idx)
+            .map(|clip| ClipEditSession { clip, ..session });
+    }
+    core.status = format!("Clip {} ({name}) deleted.", clip_idx + 1);
+    true
+}
+
+/// Move clip `clip_idx` one slot toward the top (`up`) or
+/// the bottom of the list (the per-row "Up" / "Dn"
+/// buttons' dispatch). Field-write discipline as
+/// `delete_clip`: an out-of-range index, or a clip already
+/// at the end it would move past, only sets the status
+/// line (no snapshot); otherwise exactly one `snapshot()`,
+/// a `Vec::swap` with the neighbour, and a status line.
+/// Stored clip indices are remapped through
+/// `target_after_swap` in the same write, so figures keep
+/// playing the clip they were playing and the clip-edit
+/// session follows its clip. Returns true when the swap
+/// happened.
+pub fn move_clip(core: &mut EditorCore, clip_idx: usize, up: bool) -> bool {
+    if clip_idx >= core.project.clips.len() {
+        core.status = "No such clip.".into();
+        return false;
+    }
+    let other = if up {
+        if clip_idx == 0 {
+            core.status = format!("Clip {} is already first.", clip_idx + 1);
+            return false;
+        }
+        clip_idx - 1
+    } else if clip_idx + 1 >= core.project.clips.len() {
+        core.status = format!("Clip {} is already last.", clip_idx + 1);
+        return false;
+    } else {
+        clip_idx + 1
+    };
+    core.snapshot();
+    core.project.clips.swap(clip_idx, other);
+    for fig in &mut core.project.figures {
+        fig.clip = target_after_swap(fig.clip, clip_idx, other);
+    }
+    if let Some(session) = core.clip_edit {
+        if let Some(clip) = target_after_swap(Some(session.clip), clip_idx, other) {
+            core.clip_edit = Some(ClipEditSession { clip, ..session });
+        }
+    }
+    let name = core.project.clips[other].name.clone();
+    core.status = format!(
+        "Clip {} ({name}) moved {}.",
+        other + 1,
+        if up { "up" } else { "down" }
+    );
+    true
+}
+
+/// Delete clip `clip_idx` from the panel (the "Del"
+/// button's handler): `delete_clip` on the core, then the
+/// panel-local repairs the core cannot do — the
+/// thread-local selection via `selection_after_delete`
+/// and an open rename target via `target_after_delete`
+/// (a rename whose clip was deleted closes, because its
+/// target maps to `None`).
+pub fn delete_clip_at(s: &mut State, clip_idx: usize) {
+    if !delete_clip(&mut s.core, clip_idx) {
+        return;
+    }
+    let len_after = s.core.project.clips.len();
+    update_panel_state(|p| {
+        p.selected = selection_after_delete(p.selected, clip_idx, len_after);
+    });
+    s.clips_rename.target = target_after_delete(s.clips_rename.target, clip_idx);
+}
+
+/// Move clip `clip_idx` one slot from the panel (the
+/// "Up" / "Dn" buttons' handler): `move_clip` on the
+/// core, then the panel selection and an open rename
+/// target follow the moved clip via `target_after_swap`.
+pub fn move_clip_at(s: &mut State, clip_idx: usize, up: bool) {
+    if !move_clip(&mut s.core, clip_idx, up) {
+        return;
+    }
+    let other = if up { clip_idx - 1 } else { clip_idx + 1 };
+    update_panel_state(|p| {
+        p.selected = target_after_swap(p.selected, clip_idx, other);
+    });
+    s.clips_rename.target = target_after_swap(s.clips_rename.target, clip_idx, other);
+}
+
 /// Load clip `clip_idx`'s name into the rename field and
 /// aim the field at it (the per-row "Rename" button's
 /// dispatch). The fresh field claims keyboard focus (the
@@ -444,6 +647,33 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
             move |s: &mut State| {
                 update_panel_state(|p| p.select(index));
                 begin_rename(s, index);
+            },
+        ))
+        .child(btn(
+            &format!("clip-up-{index}"),
+            "Up",
+            false,
+            t,
+            move |s: &mut State| {
+                move_clip_at(s, index, true);
+            },
+        ))
+        .child(btn(
+            &format!("clip-dn-{index}"),
+            "Dn",
+            false,
+            t,
+            move |s: &mut State| {
+                move_clip_at(s, index, false);
+            },
+        ))
+        .child(btn(
+            &format!("clip-del-{index}"),
+            "Del",
+            false,
+            t,
+            move |s: &mut State| {
+                delete_clip_at(s, index);
             },
         ))
 }
@@ -625,8 +855,8 @@ fn clip_edit_section(s: &State, t: &Theme) -> El {
 }
 
 /// The movieclips panel: header + count, the Make/Insert
-/// actions, the clip list (each row with Dup and Rename
-/// buttons), the rename editor row while a rename is in
+/// actions, the clip list (each row with Dup, Rename, Up,
+/// Dn and Del buttons), the rename editor row while a rename is in
 /// progress, the selected clip's loop-mode segmented
 /// control, and the clip-edit session section
 /// (`clip_edit_section`: enter/frame-step/add/delete/exit over
@@ -820,6 +1050,14 @@ mod tests {
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
             draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
             was_playing: false,
             clips_rename: ClipRenameState::new(),
         };
@@ -944,6 +1182,14 @@ mod tests {
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
             draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
             was_playing: false,
             clips_rename: ClipRenameState::new(),
         };
@@ -1054,6 +1300,14 @@ mod tests {
             inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
             draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
             was_playing: false,
             clips_rename: ClipRenameState::new(),
         };
@@ -1081,6 +1335,187 @@ mod tests {
         apply_rename(&mut state);
         assert_eq!(state.clips_rename.target, None);
         assert_eq!(state.core.project.clips[0].name, "Hero walk");
+        update_panel_state(|p| *p = ClipsPanelState::default());
+    }
+
+    fn core_with_three_clips() -> EditorCore {
+        let mut core = EditorCore::new();
+        for name in ["Alpha", "Bravo", "Charlie"] {
+            let mut clip = clip_with_frames(2);
+            clip.name = name.to_string();
+            core.project.clips.push(clip);
+        }
+        core
+    }
+
+    fn clip_names(core: &EditorCore) -> Vec<&str> {
+        core.project.clips.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    #[test]
+    fn selection_after_delete_repairs_each_position() {
+        // No selection stays no selection.
+        assert_eq!(selection_after_delete(None, 0, 3), None);
+        // Deleting the only clip clears the selection.
+        assert_eq!(selection_after_delete(Some(0), 0, 0), None);
+        // A selection before the gap is untouched.
+        assert_eq!(selection_after_delete(Some(0), 2, 4), Some(0));
+        // A selection after the gap shifts down by one.
+        assert_eq!(selection_after_delete(Some(3), 1, 4), Some(2));
+        // The deleted clip's own selection lands on the clip
+        // that slid into its slot…
+        assert_eq!(selection_after_delete(Some(1), 1, 4), Some(1));
+        // …or on the new last clip when it was the last one.
+        assert_eq!(selection_after_delete(Some(2), 2, 2), Some(1));
+        assert_eq!(selection_after_delete(Some(0), 0, 2), Some(0));
+    }
+
+    #[test]
+    fn target_tracking_tables_for_delete_and_swap() {
+        // Delete: before untouched, at -> None, after -> -1.
+        assert_eq!(target_after_delete(None, 1), None);
+        assert_eq!(target_after_delete(Some(0), 1), Some(0));
+        assert_eq!(target_after_delete(Some(1), 1), None);
+        assert_eq!(target_after_delete(Some(2), 1), Some(1));
+        // Swap: the pair trades, everything else untouched.
+        assert_eq!(target_after_swap(None, 0, 1), None);
+        assert_eq!(target_after_swap(Some(0), 0, 1), Some(1));
+        assert_eq!(target_after_swap(Some(1), 0, 1), Some(0));
+        assert_eq!(target_after_swap(Some(2), 0, 1), Some(2));
+    }
+
+    #[test]
+    fn delete_clip_remaps_figures_in_one_undo_step() {
+        // A figure past the gap keeps its clip, shifted.
+        let mut core = core_with_three_clips();
+        core.project.figures[0].clip = Some(2); // Charlie
+        let depth = core.undo_depth();
+        assert!(delete_clip(&mut core, 0));
+        assert_eq!(clip_names(&core), ["Bravo", "Charlie"]);
+        assert_eq!(core.project.figures[0].clip, Some(1));
+        assert_eq!(core.project.clips[1].name, "Charlie");
+        assert_eq!(core.status, "Clip 1 (Alpha) deleted.");
+        // Exactly one snapshot: one undo restores all three.
+        assert_eq!(core.undo_depth(), depth + 1);
+        core.undo();
+        assert_eq!(clip_names(&core), ["Alpha", "Bravo", "Charlie"]);
+
+        // A figure whose clip is deleted falls back to its
+        // timeline poses (no clip reference left).
+        let mut core = core_with_three_clips();
+        core.project.figures[0].clip = Some(1); // Bravo
+        assert!(delete_clip(&mut core, 1));
+        assert_eq!(clip_names(&core), ["Alpha", "Charlie"]);
+        assert_eq!(core.project.figures[0].clip, None);
+
+        // Out of range: status-only refusal, no snapshot.
+        let mut core = core_with_three_clips();
+        let depth = core.undo_depth();
+        assert!(!delete_clip(&mut core, 9));
+        assert_eq!(core.status, "No such clip.");
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.project.clips.len(), 3);
+    }
+
+    #[test]
+    fn move_clip_swaps_neighbours_and_figures_follow() {
+        let mut core = core_with_three_clips();
+        core.project.figures[0].clip = Some(0); // Alpha
+        let depth = core.undo_depth();
+        assert!(move_clip(&mut core, 0, false));
+        assert_eq!(clip_names(&core), ["Bravo", "Alpha", "Charlie"]);
+        // The figure still plays Alpha, now at index 1.
+        assert_eq!(core.project.figures[0].clip, Some(1));
+        assert_eq!(core.status, "Clip 2 (Alpha) moved down.");
+        assert_eq!(core.undo_depth(), depth + 1);
+        // Moving back up restores the order and the reference.
+        assert!(move_clip(&mut core, 1, true));
+        assert_eq!(clip_names(&core), ["Alpha", "Bravo", "Charlie"]);
+        assert_eq!(core.project.figures[0].clip, Some(0));
+        // A middle swap works from the other side too.
+        assert!(move_clip(&mut core, 2, true));
+        assert_eq!(clip_names(&core), ["Alpha", "Charlie", "Bravo"]);
+    }
+
+    #[test]
+    fn move_clip_ends_refuse_without_a_snapshot() {
+        let mut core = core_with_three_clips();
+        let depth = core.undo_depth();
+        assert!(!move_clip(&mut core, 0, true));
+        assert_eq!(core.status, "Clip 1 is already first.");
+        assert!(!move_clip(&mut core, 2, false));
+        assert_eq!(core.status, "Clip 3 is already last.");
+        assert!(!move_clip(&mut core, 9, true));
+        assert_eq!(core.status, "No such clip.");
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(clip_names(&core), ["Alpha", "Bravo", "Charlie"]);
+    }
+
+    #[test]
+    fn rename_target_and_selection_track_swap_and_delete() {
+        let mut state = State {
+            core: EditorCore::new(),
+            last_poll: None,
+            wheel_zoom: 0.0,
+            figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
+            figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
+            library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
+            graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
+            audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            menus: crate::rune_sec::menus::MenusState::default(),
+            palette: crate::rune_sec::command_palette::PaletteState::new(),
+            settings: crate::rune_sec::settings_popover::SettingsState::default(),
+            toasts: crate::rune_sec::toasts::ToastsState::new(),
+            text_tool: crate::rune_sec::text_tool::TextToolState::new(),
+            name_edit: rune::TextEdit::new(""),
+            export_use_range: false,
+            fx_selected: None,
+            pose_clipboard: None,
+            last_status: String::new(),
+            toast_now: 0.0,
+            last_dark: true,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            guides: false,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
+            was_playing: false,
+            clips_rename: ClipRenameState::new(),
+        };
+        for name in ["Alpha", "Bravo", "Charlie"] {
+            let mut clip = clip_with_frames(2);
+            clip.name = name.to_string();
+            state.core.project.clips.push(clip);
+        }
+        // Renaming Alpha (index 0), with Alpha selected.
+        state.clips_rename.target = Some(0);
+        update_panel_state(|p| p.select(0));
+        // Move Alpha down: the rename target and the
+        // selection follow the clip to its new slot.
+        move_clip_at(&mut state, 0, false);
+        assert_eq!(state.clips_rename.target, Some(1));
+        assert_eq!(panel_state().selected, Some(1));
+        // Delete Alpha (now at 1): the rename session ends
+        // (its clip is gone); the selection lands on the
+        // clip that slid into the slot.
+        delete_clip_at(&mut state, 1);
+        assert_eq!(state.clips_rename.target, None);
+        assert_eq!(panel_state().selected, Some(1));
+        assert_eq!(clip_names(&state.core), ["Bravo", "Charlie"]);
         update_panel_state(|p| *p = ClipsPanelState::default());
     }
 }

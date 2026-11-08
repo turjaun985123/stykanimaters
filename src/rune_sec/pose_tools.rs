@@ -17,6 +17,28 @@
 //! but the shell state — the same reason `State::wheel_zoom`
 //! exists for the camera gesture.
 //!
+//! Phase G adds a second field for the pose-library rename
+//! session (see [`PoseRenameState`]):
+//!
+//! ```ignore
+//! pub pose_rename: rune_sec::pose_tools::PoseRenameState,
+//! ```
+//!
+//! initialised with `PoseRenameState::new()` in `init()`,
+//! plus one line in `main.rs`'s `text_focused()`:
+//!
+//! ```ignore
+//! || s.pose_rename.field.focused
+//! ```
+//!
+//! The field cannot live in this file's thread-local cache:
+//! `text_input`'s `on_edit` needs a `&mut TextEdit` path into
+//! `State` (rune's el/text.rs `on_edit` signature), the same
+//! wall the movieclips rename hit (clips_panel's module
+//! docs). Every full `State { … }` literal in the shell's
+//! test modules needs the new field too, exactly as the
+//! Phase F fields were patched in.
+//!
 //! Control → behaviour map (every control is real; there is
 //! no placeholder in this section):
 //!
@@ -76,19 +98,55 @@
 //!   an mtime-keyed thread-local cache (the fx_browser /
 //!   home_panel pattern): a save bumps the directory mtime,
 //!   so a new entry appears on the very next build.
+//! - **Pose library Mirror-apply buttons** (Phase G) →
+//!   load a saved entry, mirror the loaded *value* with
+//!   [`mirror_pose`] (negate every angle, root untouched —
+//!   the exact mutation `EditorCore::mirror_selected_pose`
+//!   performs, editor.rs:1450-1452), then write through the
+//!   same [`write_current_pose`] path: exactly one undo
+//!   step. Calling the core op *after* an apply would
+//!   snapshot a second time (editor.rs:1448), so the mirror
+//!   is composed on the value, before the write. The core
+//!   op's own caveat carries over: bends, lengths and graph
+//!   channels live outside `Pose` and are not mirrored, so
+//!   the result is an exact mirror of the angle data, and
+//!   of the rendered figure for bilaterally symmetric rigs.
+//! - **Pose library Delete buttons** (Phase G) → remove
+//!   the entry's file with `std::fs::remove_file`. A file
+//!   operation, NOT an undo step — the same discipline as
+//!   Save. A failed removal leaves the file (and so the
+//!   listing) untouched and reports the error; a
+//!   successful one moves the directory mtime, which is
+//!   what refreshes the name cache, exactly as after a
+//!   Save.
+//! - **Pose library Rename buttons** (Phase G) → a small
+//!   session ([`PoseRenameState`], the library panel's
+//!   Phase F rename shape) edits an entry's display name:
+//!   the new entry file (new slug, envelope name updated)
+//!   is written FIRST and the old file removed second —
+//!   the library panel's file-first discipline; the
+//!   listing here is a directory scan, so it follows the
+//!   disk on the next build. Refusals are decided before
+//!   any disk write: blank name, a name another entry
+//!   already owns (by name OR by slug — two display names
+//!   that slug alike share one file), or a target file
+//!   that exists but the scan could not read as a pose.
 //!
 //! Buttons whose op would no-op on the current state render
 //! muted (secondary text, no press handler — inert, not fake):
 //! mirror/copy/reset need a pose on this frame, paste needs a
 //! copied pose *and* a target pose, copy-to needs both poses,
 //! bake needs at least one graph channel and one frame.
+//! Library apply and mirror-apply need a pose to land on;
+//! library delete/rename act on files, not on the frame, so
+//! they are always live.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, El};
+use rune::{col, el, row, text, text_input, El, TextEdit, Tx};
 use serde::{Deserialize, Serialize};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Pose;
@@ -482,6 +540,30 @@ pub fn save_current_pose(core: &mut EditorCore) {
     }
 }
 
+/// Mirror a pose value: negate every angle, root
+/// untouched. This is the exact mutation
+/// `EditorCore::mirror_selected_pose` performs on the
+/// current frame's pose (editor.rs:1450-1452), lifted
+/// onto a value so it can be composed BEFORE a write:
+/// the core op snapshots when it runs (editor.rs:1448),
+/// so applying a pose and then calling the op would cost
+/// two undo steps, while mirroring the loaded value and
+/// writing once costs exactly one. The core op's stated
+/// caveat carries over unchanged: per-node bends, segment
+/// lengths and graph channels live outside `Pose` and are
+/// not mirrored — the result is exact for the angle data
+/// itself, and for the rendered figure on bilaterally
+/// symmetric rigs (mirroring twice returns the original
+/// exactly; the editor's own test pins the same
+/// properties, editor.rs:5602).
+pub fn mirror_pose(pose: &Pose) -> Pose {
+    let mut mirrored = pose.clone();
+    for a in &mut mirrored.angles {
+        *a = -*a;
+    }
+    mirrored
+}
+
 /// Load the library pose `name` and write it over the
 /// selected figure's current-frame pose, through the same
 /// path Paste pose uses ([`write_current_pose`]: one
@@ -492,7 +574,29 @@ pub fn apply_library_pose(core: &mut EditorCore, name: &str) {
     apply_library_pose_in(core, &pose_library_dir(), name)
 }
 
+/// Load the library pose `name`, mirror the loaded value
+/// (see [`mirror_pose`]), and write it over the selected
+/// figure's current-frame pose — the same write path,
+/// guards, and exactly-one-undo-step contract as a plain
+/// apply.
+pub fn apply_library_pose_mirrored(core: &mut EditorCore, name: &str) {
+    apply_library_pose_mirrored_in(core, &pose_library_dir(), name)
+}
+
 fn apply_library_pose_in(core: &mut EditorCore, dir: &Path, name: &str) {
+    apply_library_pose_in_mode(core, dir, name, false)
+}
+
+fn apply_library_pose_mirrored_in(core: &mut EditorCore, dir: &Path, name: &str) {
+    apply_library_pose_in_mode(core, dir, name, true)
+}
+
+fn apply_library_pose_in_mode(
+    core: &mut EditorCore,
+    dir: &Path,
+    name: &str,
+    mirrored: bool,
+) {
     let Some(cur) = selected_pose(core) else {
         core.status = no_pose_status(core);
         return;
@@ -515,9 +619,318 @@ fn apply_library_pose_in(core: &mut EditorCore, dir: &Path, name: &str) {
         );
         return;
     }
+    let pose = if mirrored { mirror_pose(&pose) } else { pose };
     let (fi, fr) = (core.selected_figure + 1, core.current + 1);
     write_current_pose(core, pose);
-    core.status = format!("Pose '{name}' applied to figure {fi} on frame {fr}.");
+    core.status = if mirrored {
+        format!("Pose '{name}' applied mirrored to figure {fi} on frame {fr}.")
+    } else {
+        format!("Pose '{name}' applied to figure {fi} on frame {fr}.")
+    };
+}
+
+/// Delete the library pose `name`'s file from the 2D
+/// pose library (`./library/poses`). See
+/// [`delete_library_pose_in`].
+pub fn delete_library_pose(core: &mut EditorCore, name: &str) {
+    delete_library_pose_in(core, &pose_library_dir(), name);
+}
+
+/// Delete the library pose `name`'s file from directory
+/// `dir`. A filesystem operation, NOT an undo step — the
+/// discipline Save established (a file operation is not
+/// a project edit; there is nothing in the project to
+/// restore). Returns whether the file was removed. On
+/// failure the file is still there, so the scanned
+/// listing is unchanged, and the error is reported. On
+/// success the directory's mtime moves, which refreshes
+/// the saved-name cache on the next build — the same
+/// invalidation a Save relies on.
+fn delete_library_pose_in(core: &mut EditorCore, dir: &Path, name: &str) -> bool {
+    let path = dir.join(pose_file_name(name));
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            core.status = format!("Pose '{name}' deleted from the library.");
+            true
+        }
+        Err(e) => {
+            core.status =
+                format!("Delete pose failed: '{name}' could not be removed ({e}).");
+            false
+        }
+    }
+}
+
+/// What renaming library pose `old` to the typed text
+/// `raw_new` would do, decided purely from the scanned
+/// entry names — the filesystem half lives in
+/// [`rename_library_pose_in`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum RenamePlan {
+    /// The trimmed input is blank.
+    Empty,
+    /// The trimmed input IS the current name.
+    SameName,
+    /// Another entry already owns this name — or slugs
+    /// to the same file, which for this library is the
+    /// same collision (entries are addressed by slug).
+    /// Carries the conflicting entry's name.
+    Taken(String),
+    /// Rename to the carried (trimmed) name.
+    Ready(String),
+}
+
+/// The entry in `names` that blocks taking `new_name`,
+/// if any: a DIFFERENT entry that either IS `new_name`
+/// or slugs to the same file — two display names that
+/// slug alike share one file, so the second would
+/// silently overwrite the first's pose. The entry named
+/// `except` (the one being renamed) never blocks itself.
+fn name_conflict(names: &[String], new_name: &str, except: &str) -> Option<String> {
+    let slug = pose_slug(new_name);
+    names
+        .iter()
+        .find(|n| {
+            n.as_str() != except && (n.as_str() == new_name || pose_slug(n) == slug)
+        })
+        .cloned()
+}
+
+/// True when a DIFFERENT entry in `names` blocks taking
+/// `new_name` (see [`name_conflict`]).
+pub fn pose_name_taken(names: &[String], new_name: &str, except: &str) -> bool {
+    name_conflict(names, new_name, except).is_some()
+}
+
+/// Decide the [`RenamePlan`] for renaming `old` to the
+/// typed text `raw_new`, against the scanned entry
+/// `names` (which include `old`).
+pub fn rename_plan(names: &[String], old: &str, raw_new: &str) -> RenamePlan {
+    let new_name = raw_new.trim();
+    if new_name.is_empty() {
+        return RenamePlan::Empty;
+    }
+    if new_name == old {
+        return RenamePlan::SameName;
+    }
+    if let Some(conflict) = name_conflict(names, new_name, old) {
+        return RenamePlan::Taken(conflict);
+    }
+    RenamePlan::Ready(new_name.to_string())
+}
+
+/// Rename the library pose `old` in directory `dir` to
+/// the display name typed by the user (`raw_new`).
+///
+/// The new entry file — `<slug(new)>.json` holding the
+/// loaded pose under the new envelope name — is written
+/// FIRST and the old file removed second, mirroring the
+/// library panel's rename discipline (file first, then
+/// the listing); here the listing is a directory scan,
+/// so it follows the disk by itself on the next build
+/// (the write/removal moves the directory mtime, which
+/// also refreshes the name cache). Every refusal is
+/// decided BEFORE any disk write ([`rename_plan`], plus
+/// the existing-target-file guard below), so a refused
+/// rename changes nothing on disk. A filesystem
+/// operation, NOT an undo step, like Save and Delete.
+///
+/// Returns whether the rename session is settled:
+/// `true` when the editor should close (renamed, the
+/// trimmed name already IS `old`'s, or `old` no longer
+/// exists in the scan); `false` when the user should
+/// keep editing, with the reason on `core.status`.
+fn rename_library_pose_in(
+    core: &mut EditorCore,
+    dir: &Path,
+    old: &str,
+    raw_new: &str,
+) -> bool {
+    let names = scan_pose_library_in(dir);
+    if !names.iter().any(|n| n.as_str() == old) {
+        // The entry vanished (deleted since the session
+        // opened): nothing left to rename or settle
+        // against.
+        return true;
+    }
+    let new_name = match rename_plan(&names, old, raw_new) {
+        RenamePlan::Empty => {
+            core.status = "Type a new name for the pose first.".to_string();
+            return false;
+        }
+        RenamePlan::SameName => {
+            core.status = format!("Pose '{old}' already has that name.");
+            return true;
+        }
+        RenamePlan::Taken(conflict) => {
+            core.status =
+                format!("A pose named '{conflict}' already uses that name.");
+            return false;
+        }
+        RenamePlan::Ready(name) => name,
+    };
+    let old_path = dir.join(pose_file_name(old));
+    let new_path = dir.join(pose_file_name(&new_name));
+    if new_path != old_path && new_path.exists() {
+        // A file the scan could not read as a pose entry
+        // (e.g. corrupt JSON) still owns that slug —
+        // writing over it would silently destroy it
+        // (the library panel's rename refuses the same
+        // case).
+        core.status = format!(
+            "A file named '{}' already exists in the pose library folder.",
+            pose_file_name(&new_name)
+        );
+        return false;
+    }
+    let pose = match load_pose_library_in(dir, old) {
+        Ok(p) => p,
+        Err(e) => {
+            core.status =
+                format!("Rename pose failed: '{old}' could not be loaded ({e}).");
+            return false;
+        }
+    };
+    if let Err(e) = save_pose_library_in(dir, &pose, &new_name) {
+        core.status = format!("Rename pose failed: {e}");
+        return false;
+    }
+    if new_path != old_path {
+        if let Err(e) = std::fs::remove_file(&old_path) {
+            // The rename itself landed — the new file is
+            // written and loads under the new name — but
+            // the stale old file remains and will list as
+            // a second entry until it is deleted. Say
+            // exactly that; the session is settled.
+            core.status = format!(
+                "Pose '{old}' renamed to '{new_name}', but the old file could not be removed ({e})."
+            );
+            return true;
+        }
+    }
+    core.status = format!("Pose '{old}' renamed to '{new_name}'.");
+    true
+}
+
+/// Rename-session state for the pose library: which
+/// listed entry is being renamed and the name being
+/// typed. Unlike this panel's name cache this cannot
+/// live in a thread-local: a `rune::TextEdit` is not
+/// `Copy`, and `text_input`'s `on_edit` needs a
+/// `&mut TextEdit` path into the shell `State` (the
+/// wall clips_panel's rename hit — its module docs tell
+/// the same story). The integrator homes this in
+/// `State` beside `pose_clipboard`; the exact lines are
+/// in this file's module docs.
+pub struct PoseRenameState {
+    /// Index into the sorted [`saved_pose_names`] list
+    /// of the entry being renamed, or `None` while no
+    /// rename is open. By the time Apply runs this is
+    /// only the open/closed flag — the entry itself is
+    /// resolved through [`PoseRenameState::name`], so a
+    /// listing that shifted mid-session (a delete above
+    /// the target) cannot rename the wrong pose.
+    pub target: Option<usize>,
+    /// The display name captured when the session
+    /// opened — the rename's source of truth.
+    pub name: String,
+    /// The in-progress name, loaded from the entry by
+    /// [`start_rename`].
+    pub field: TextEdit,
+}
+
+impl PoseRenameState {
+    pub fn new() -> Self {
+        PoseRenameState {
+            target: None,
+            name: String::new(),
+            field: TextEdit::new(""),
+        }
+    }
+}
+
+/// Open the rename editor for saved-pose row `i` (the
+/// per-row Rename button's handler): load the entry's
+/// current name into the field and mark the row as
+/// being renamed. The fresh `TextEdit`'s `focused` flag
+/// claims keyboard focus on the next commit, so the
+/// integrator's `text_focused` must include the field —
+/// see the module docs. Out-of-range rows open nothing.
+pub fn start_rename(s: &mut State, i: usize) {
+    let saved = saved_pose_names();
+    let Some(name) = saved.get(i).cloned() else {
+        return;
+    };
+    s.pose_rename.field = TextEdit::new(name.clone());
+    s.pose_rename.field.focused = true;
+    s.pose_rename.target = Some(i);
+    s.pose_rename.name = name;
+}
+
+/// Apply the open rename (the Apply button's handler
+/// and the field's submit handler): run the rename with
+/// the field's text, and close the session only when it
+/// settles — a refused rename stays open, status line
+/// explaining why, so the name can be corrected.
+pub fn apply_rename(s: &mut State) {
+    if s.pose_rename.target.is_none() {
+        return;
+    }
+    let old = s.pose_rename.name.clone();
+    let raw = s.pose_rename.field.text.clone();
+    if rename_library_pose_in(&mut s.core, &pose_library_dir(), &old, &raw) {
+        s.pose_rename.target = None;
+        s.pose_rename.name.clear();
+        s.pose_rename.field = TextEdit::default();
+    }
+}
+
+/// Abandon the open rename (the Cancel button's
+/// handler): close the session and drop the typed text.
+/// Nothing on disk was touched — renames only happen in
+/// [`apply_rename`]. Also used to settle the session of
+/// an entry that was just deleted.
+pub fn cancel_rename(s: &mut State) {
+    s.pose_rename.target = None;
+    s.pose_rename.name.clear();
+    s.pose_rename.field = TextEdit::default();
+}
+
+/// The rename editor row rendered under the library row
+/// being renamed: the name field plus Apply and Cancel.
+/// Only one rename session can be open, so the keys are
+/// unindexed — the row's identity comes from its
+/// position under the renamed entry (the library
+/// panel's convention).
+fn rename_editor_row(s: &State, t: &Theme) -> El {
+    row()
+        .key("pose-rename-row")
+        .gap(4.0)
+        .center_y()
+        .child(
+            text_input(&s.pose_rename.field, type_::BODY.lh(26.0))
+                .key("pose-rename")
+                .single_line()
+                .grow(1.0)
+                .color(t.text)
+                .placeholder("New name", t.text_secondary)
+                .on_edit(|s: &mut State| &mut s.pose_rename.field)
+                .on_submit(|s: &mut State, _tx: &mut Tx| apply_rename(s)),
+        )
+        .child(pbtn(
+            "pose-rename-apply".to_string(),
+            "Apply",
+            true,
+            t,
+            |s| apply_rename(s),
+        ))
+        .child(pbtn(
+            "pose-rename-cancel".to_string(),
+            "Cancel",
+            true,
+            t,
+            |s| cancel_rename(s),
+        ))
 }
 
 /// One pose-tools button, in the chrome's metrics
@@ -633,19 +1046,76 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
-        let mut lrow = row().gap(4.0);
         for (i, name) in saved.iter().enumerate() {
-            let label = name.clone();
-            let entry_name = name.clone();
-            lrow = lrow.child(pbtn(
-                format!("pose-lib-apply-{i}"),
-                &label,
-                has_pose,
-                t,
-                move |s: &mut State| apply_library_pose(&mut s.core, &entry_name),
-            ));
+            let apply_name = name.clone();
+            let mirror_name = name.clone();
+            let del_name = name.clone();
+            let mut entry = col()
+                .key(format!("pose-lib-row-{i}"))
+                .gap(4.0)
+                .child(
+                    row()
+                        .gap(4.0)
+                        .center_y()
+                        .child(text(name.as_str()).font(type_::LABEL).color(t.text))
+                        .child(el().grow(1.0))
+                        .child(pbtn(
+                            format!("pose-lib-rename-{i}"),
+                            "Rename",
+                            true,
+                            t,
+                            move |s: &mut State| start_rename(s, i),
+                        ))
+                        .child(pbtn(
+                            format!("pose-lib-del-{i}"),
+                            "Del",
+                            true,
+                            t,
+                            move |s: &mut State| {
+                                // Deleting the entry being
+                                // renamed settles its
+                                // session first (the
+                                // library panel's
+                                // discipline).
+                                if s.pose_rename.name == del_name {
+                                    cancel_rename(s);
+                                }
+                                delete_library_pose(&mut s.core, &del_name);
+                            },
+                        )),
+                )
+                .child(
+                    row()
+                        .gap(4.0)
+                        .child(pbtn(
+                            format!("pose-lib-apply-{i}"),
+                            "Apply",
+                            has_pose,
+                            t,
+                            move |s: &mut State| {
+                                apply_library_pose(&mut s.core, &apply_name)
+                            },
+                        ))
+                        .child(pbtn(
+                            format!("pose-lib-apply-mirror-{i}"),
+                            "Apply mirrored",
+                            has_pose,
+                            t,
+                            move |s: &mut State| {
+                                apply_library_pose_mirrored(
+                                    &mut s.core,
+                                    &mirror_name,
+                                )
+                            },
+                        )),
+                );
+            if s.pose_rename.target.is_some()
+                && s.pose_rename.name.as_str() == name.as_str()
+            {
+                entry = entry.child(rename_editor_row(s, t));
+            }
+            body = body.child(entry);
         }
-        body = body.child(lrow.scroll_x().w_full());
     }
     let targets = pose_targets(core);
     if !targets.is_empty() {
@@ -910,6 +1380,241 @@ mod tests {
             vec!["A".to_string()]
         );
         assert_eq!(reads.get(), 2);
+    }
+
+    // ---- Pose library Phase G: mirror / delete / rename ----
+
+    #[test]
+    fn mirror_pose_negates_every_angle_and_keeps_the_root() {
+        // Expectations derived from the engine op's own
+        // test (editor.rs mirror_pose_negates_angles_and_
+        // is_its_own_inverse): root unmoved, every angle
+        // negated, twice = the exact original.
+        let pose = Pose {
+            root: [12.0, -4.0],
+            angles: vec![10.0, -25.0, 45.0, 130.5],
+        };
+        let mirrored = mirror_pose(&pose);
+        assert_eq!(mirrored.root, pose.root);
+        assert_eq!(mirrored.angles, vec![-10.0, 25.0, -45.0, -130.5]);
+        assert_eq!(mirror_pose(&mirrored).angles, pose.angles);
+        assert_eq!(mirror_pose(&mirrored).root, pose.root);
+    }
+
+    #[test]
+    fn mirror_apply_matches_the_engine_mirror_op() {
+        let dir = temp_library("mirror-apply");
+        let saver = core();
+        let plain = selected_pose(&saver).unwrap().clone();
+        save_pose_library_in(&dir, &plain, "Styk").unwrap();
+        // The engine op's result on a fresh core...
+        let mut expected = core();
+        expected.mirror_selected_pose();
+        let expected = selected_pose(&expected).unwrap().clone();
+        // ...is exactly what mirror-apply produces.
+        let mut c = core();
+        apply_library_pose_mirrored_in(&mut c, &dir, "Styk");
+        let got = selected_pose(&c).unwrap();
+        assert_eq!(got.angles, expected.angles);
+        assert_eq!(got.root, expected.root);
+        assert!(
+            c.status.contains("applied mirrored"),
+            "unexpected status: {}",
+            c.status
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mirror_apply_is_exactly_one_undo_step() {
+        let dir = temp_library("mirror-undo");
+        let mut c = core();
+        let orig = selected_pose(&c).unwrap().clone();
+        save_pose_library_in(&dir, &orig, "Styk").unwrap();
+        apply_library_pose_mirrored_in(&mut c, &dir, "Styk");
+        // The demo pose is asymmetric (the paste undo
+        // test relies on the same fact), so the mirrored
+        // apply visibly changed it...
+        assert_ne!(selected_pose(&c).unwrap().angles, orig.angles);
+        // ...and ONE undo restores it — no second hidden
+        // snapshot from a composed mirror op.
+        c.undo();
+        assert_eq!(selected_pose(&c).unwrap().angles, orig.angles);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mirror_apply_refuses_a_mismatched_rig() {
+        let dir = temp_library("mirror-mismatch");
+        let mut c = core();
+        let mut short = selected_pose(&c).unwrap().clone();
+        short.angles.clear();
+        save_pose_library_in(&dir, &short, "Short").unwrap();
+        let before = selected_pose(&c).unwrap().clone();
+        apply_library_pose_mirrored_in(&mut c, &dir, "Short");
+        assert_eq!(selected_pose(&c).unwrap().angles, before.angles);
+        assert!(
+            c.status.contains("Apply pose failed"),
+            "unexpected status: {}",
+            c.status
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_library_pose_removes_the_file_and_the_listing() {
+        let dir = temp_library("delete");
+        let mut c = core();
+        let pose = selected_pose(&c).unwrap().clone();
+        save_pose_library_in(&dir, &pose, "Styk").unwrap();
+        save_pose_library_in(&dir, &pose, "Wave").unwrap();
+        assert!(delete_library_pose_in(&mut c, &dir, "Styk"));
+        assert!(
+            c.status.contains("deleted"),
+            "unexpected status: {}",
+            c.status
+        );
+        assert_eq!(scan_pose_library_in(&dir), vec!["Wave".to_string()]);
+        assert!(!dir.join("styk.json").exists());
+        assert!(dir.join("wave.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_missing_pose_reports_and_changes_nothing() {
+        let dir = temp_library("delete-missing");
+        let mut c = core();
+        let pose = selected_pose(&c).unwrap().clone();
+        save_pose_library_in(&dir, &pose, "Styk").unwrap();
+        // remove_file on a name that was never saved is
+        // the failure path: status reports it and the
+        // listing (a fresh scan) is untouched.
+        assert!(!delete_library_pose_in(&mut c, &dir, "Ghost"));
+        assert!(
+            c.status.contains("Delete pose failed"),
+            "unexpected status: {}",
+            c.status
+        );
+        assert_eq!(scan_pose_library_in(&dir), vec!["Styk".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_plan_decides_every_branch() {
+        let names = vec!["Styk".to_string(), "Wave Pose".to_string()];
+        assert_eq!(rename_plan(&names, "Styk", "   "), RenamePlan::Empty);
+        assert_eq!(
+            rename_plan(&names, "Styk", " Styk "),
+            RenamePlan::SameName
+        );
+        // Exact-name collision with another entry.
+        assert_eq!(
+            rename_plan(&names, "Styk", "Wave Pose"),
+            RenamePlan::Taken("Wave Pose".to_string())
+        );
+        // Slug collision: "wave pose" is a different
+        // display name but the SAME file as "Wave Pose".
+        assert_eq!(
+            rename_plan(&names, "Styk", "wave pose"),
+            RenamePlan::Taken("Wave Pose".to_string())
+        );
+        // The entry's own slug is not a collision.
+        assert_eq!(
+            rename_plan(&names, "Wave Pose", "wave pose"),
+            RenamePlan::Ready("wave pose".to_string())
+        );
+        // Ready carries the trimmed name.
+        assert_eq!(
+            rename_plan(&names, "Styk", "  Hero Pose "),
+            RenamePlan::Ready("Hero Pose".to_string())
+        );
+        assert!(pose_name_taken(&names, "Wave Pose", "Styk"));
+        assert!(!pose_name_taken(&names, "Wave Pose", "Wave Pose"));
+        assert!(!pose_name_taken(&names, "Hero", "Styk"));
+    }
+
+    #[test]
+    fn rename_moves_the_file_and_updates_the_envelope() {
+        let dir = temp_library("rename");
+        let mut c = core();
+        let pose = selected_pose(&c).unwrap().clone();
+        save_pose_library_in(&dir, &pose, "Styk").unwrap();
+        assert!(rename_library_pose_in(&mut c, &dir, "Styk", "Hero Pose"));
+        assert!(
+            c.status.contains("renamed to"),
+            "unexpected status: {}",
+            c.status
+        );
+        // The scan reads envelope names, so this also
+        // proves the new file's envelope was updated.
+        assert_eq!(
+            scan_pose_library_in(&dir),
+            vec!["Hero Pose".to_string()]
+        );
+        assert!(dir.join("hero-pose.json").exists());
+        assert!(!dir.join("styk.json").exists());
+        let back = load_pose_library_in(&dir, "Hero Pose").unwrap();
+        assert_eq!(back.angles, pose.angles);
+        assert_eq!(back.root, pose.root);
+        assert!(load_pose_library_in(&dir, "Styk").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_refusals_touch_nothing() {
+        let dir = temp_library("rename-refuse");
+        let mut c = core();
+        let pose = selected_pose(&c).unwrap().clone();
+        save_pose_library_in(&dir, &pose, "Styk").unwrap();
+        save_pose_library_in(&dir, &pose, "Wave Pose").unwrap();
+        // Blank input keeps the session open.
+        assert!(!rename_library_pose_in(&mut c, &dir, "Styk", "  "));
+        assert!(
+            c.status.contains("Type a new name"),
+            "unexpected status: {}",
+            c.status
+        );
+        // Taken, exactly and by slug.
+        assert!(!rename_library_pose_in(&mut c, &dir, "Styk", "Wave Pose"));
+        assert!(!rename_library_pose_in(&mut c, &dir, "Styk", "wave pose"));
+        // Same name settles (session closes) as a no-op.
+        assert!(rename_library_pose_in(&mut c, &dir, "Styk", "Styk"));
+        assert!(
+            c.status.contains("already has that name"),
+            "unexpected status: {}",
+            c.status
+        );
+        // Nothing moved through any of it.
+        assert_eq!(
+            scan_pose_library_in(&dir),
+            vec!["Styk".to_string(), "Wave Pose".to_string()]
+        );
+        assert_eq!(
+            load_pose_library_in(&dir, "Styk").unwrap().angles,
+            pose.angles
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_refuses_an_unreadable_target_file() {
+        let dir = temp_library("rename-target");
+        let mut c = core();
+        let pose = selected_pose(&c).unwrap().clone();
+        save_pose_library_in(&dir, &pose, "Styk").unwrap();
+        // A corrupt file already owns the "hero" slug;
+        // the scan skips it (it is not a pose entry), but
+        // the rename must not silently overwrite it.
+        std::fs::write(dir.join("hero.json"), "not a pose").unwrap();
+        assert!(!rename_library_pose_in(&mut c, &dir, "Styk", "Hero"));
+        assert!(
+            c.status.contains("already exists"),
+            "unexpected status: {}",
+            c.status
+        );
+        assert_eq!(scan_pose_library_in(&dir), vec!["Styk".to_string()]);
+        assert!(dir.join("styk.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

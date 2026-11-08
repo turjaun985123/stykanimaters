@@ -1,7 +1,9 @@
 //! Settings popover (Phase D, section 24 of the GPUI→Rune
-//! migration; guides toggle added in Phase E, section 21):
-//! theme, language, stage size, the project default easing
-//! and stage guides, behind one "Settings" toggle. Declared
+//! migration; guides toggle added in Phase E, section 21;
+//! Phase G, section 13: guide split toggles + startup
+//! workspace picker): theme, language, stage size, the
+//! project default easing, stage guides and the startup
+//! workspace, behind one "Settings" toggle. Declared
 //! under `rune_sec` from `main.rs` only — bin-crate code, not
 //! part of the engine library.
 //!
@@ -71,6 +73,28 @@
 //!   only writer. Phase D omitted this toggle because no
 //!   guides existed to flip; Phase E adds the geometry, so
 //!   the toggle now controls something real.
+//! * **Guide split toggles (Phase G)** — two child toggles
+//!   under Guides, indented and dimmed as its children:
+//!   "Camera frame" flips `State.guides_frustum` and
+//!   "Safe frames" flips `State.guides_safe` (both shell
+//!   fields, default `true`, seeded by the integrator).
+//!   They are independent flags: the stage composes them
+//!   with `guides` (the frame overlays draw only while
+//!   Guides is also on), so the buttons stay enabled when
+//!   Guides is off — Rune buttons have no disabled state
+//!   and none is faked here; the card's note under the
+//!   row states the composition.
+//! * **Startup workspace (Phase G)** — a compact picker
+//!   (eight buttons, the language grid's 4-wide layout)
+//!   naming the workspace the shell opens in. Picking one
+//!   calls `workspaces::select_workspace` — the exact fn
+//!   the workspace chip row and the Alt+1..8 keys run —
+//!   which sets `State.workspace` AND persists the choice
+//!   as `LayoutPrefs.workspace` (load-modify-save via
+//!   `prefs_with_workspace` + `shell::save_layout`), so
+//!   the pick is both the current workspace and the
+//!   startup default `workspaces::from_prefs` seeds the
+//!   next launch from. No new persistence path exists.
 //!
 //! ## Persistence
 //!
@@ -79,10 +103,14 @@
 //! (`shell.rs`; `dark = !core.light_theme`, default dark),
 //! while language, stage size and default easing all live
 //! on the core/project and persist with the project file
-//! itself. Integrator follow-ups (in `main.rs`, not here):
-//! seed `core.light_theme` from `shell::load_layout().dark`
-//! at startup and save it back on change; today the Rune
-//! shell neither loads nor saves `LayoutPrefs` at all.
+//! itself. The startup-workspace picker reuses the
+//! EXISTING `LayoutPrefs.workspace` through
+//! `workspaces::select_workspace` (above). Integrator
+//! follow-ups (in `main.rs`, not here): seed
+//! `core.light_theme` from `shell::load_layout().dark`
+//! at startup and save it back on change; the theme flip
+//! specifically is still neither loaded nor saved by the
+//! Rune shell (the workspace field is — see above).
 //!
 //! ## Integrator wiring (main.rs)
 //!
@@ -109,6 +137,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::i18n::Lang;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::workspaces::{select_workspace, Workspace};
 use crate::State;
 
 /// View-state for this section: whether the settings card is
@@ -234,6 +263,85 @@ pub fn toggle_guides(s: &mut State) {
     s.guides = !s.guides;
 }
 
+/// Flip the camera-frame guide flag (`State.guides_frustum`,
+/// seeded `true` by the integrator) — the child toggle of
+/// Guides for the camera frustum overlay. Same shape as
+/// [`toggle_guides`]: a pure shell-state flip; the stage
+/// composes it with `guides` when drawing (the overlay
+/// shows only while Guides is also on), so this fn touches
+/// nothing else.
+pub fn toggle_guides_frustum(s: &mut State) {
+    s.guides_frustum = !s.guides_frustum;
+}
+
+/// Flip the safe-frames guide flag (`State.guides_safe`,
+/// seeded `true` by the integrator) — the child toggle of
+/// Guides for the action/title-safe frame overlay. Same
+/// contract as [`toggle_guides_frustum`].
+pub fn toggle_guides_safe(s: &mut State) {
+    s.guides_safe = !s.guides_safe;
+}
+
+// ---- Startup workspace ----
+
+/// Workspace buttons per row in the picker grid (the
+/// language grid's width — eight workspaces land as two
+/// rows of four).
+pub const WORKSPACE_COLUMNS: usize = 4;
+
+/// One pickable workspace row of the picker: element key,
+/// button label and the value it applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceEntry {
+    pub key: String,
+    pub label: &'static str,
+    pub ws: Workspace,
+}
+
+/// The persisted name a workspace is stored under in
+/// `LayoutPrefs.workspace` — `Workspace::name`
+/// (`workspaces.rs`), exposed here so the picker's
+/// round-trip contract (name → prefs → `from_prefs` →
+/// same workspace) is testable from this file.
+pub fn persisted_workspace_name(ws: Workspace) -> &'static str {
+    ws.name()
+}
+
+/// A workspace button's element key:
+/// `settings-ws-{name}` over the lowercased persisted
+/// name (`settings-ws-animate` … `settings-ws-3d` —
+/// Build3D persists as `"3D"`, hence the `3d` suffix).
+pub fn workspace_key(ws: Workspace) -> String {
+    format!("settings-ws-{}", ws.name().to_lowercase())
+}
+
+/// All eight workspaces, in picker order, derived from
+/// `Workspace::all()` / `Workspace::label()`
+/// (`workspaces.rs`) — the same source the chip row
+/// reads, so the picker can never drift from it.
+pub fn workspace_entries() -> Vec<WorkspaceEntry> {
+    Workspace::all()
+        .into_iter()
+        .map(|ws| WorkspaceEntry {
+            key: workspace_key(ws),
+            label: ws.label(),
+            ws,
+        })
+        .collect()
+}
+
+/// Apply a picked workspace: switch the shell's current
+/// workspace AND persist it as the startup default,
+/// through `workspaces::select_workspace` — the exact fn
+/// the workspace chip row and the Alt+1..8 keys run
+/// (sets `State.workspace`, then load-modify-saves
+/// `LayoutPrefs` with the new name, preserving every
+/// other prefs field). This card adds no second
+/// persistence path.
+pub fn set_startup_workspace(s: &mut State, ws: Workspace) {
+    select_workspace(s, ws);
+}
+
 // ---- View ----
 
 /// Flip the settings card open/closed (the toggle button's
@@ -260,6 +368,17 @@ fn language_button(entry: LangEntry, current: Lang, t: &Theme) -> El {
     let lang = entry.lang;
     btn(&key, entry.label, lang == current, t, move |s: &mut State| {
         set_language(&mut s.core, lang);
+    })
+}
+
+/// One workspace button: applies its workspace via
+/// [`set_startup_workspace`] (switch + persist);
+/// highlighted when it is the shell's current workspace.
+fn workspace_button(entry: WorkspaceEntry, current: Workspace, t: &Theme) -> El {
+    let key = entry.key.clone();
+    let ws = entry.ws;
+    btn(&key, entry.label, ws == current, t, move |s: &mut State| {
+        set_startup_workspace(s, ws);
     })
 }
 
@@ -298,7 +417,8 @@ fn stage_axis_row(s: &State, t: &Theme, axis: usize, heading: &str) -> El {
 /// "Settings" toggle (accent-filled while open), and — when
 /// `s.settings.open` — the settings card under it: Theme,
 /// Language grid, Stage W / H steppers, the default
-/// easing cycle, and the stage-guides toggle.
+/// easing cycle, the stage-guides toggle with its two
+/// child toggles, and the startup-workspace picker.
 pub fn settings_popover(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let open = s.settings.open;
@@ -370,21 +490,79 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
         // Stage guides: the shell flag (State.guides),
         // highlighted while on. The stage overlay draws the
         // grid; nothing in the engine reads the flag.
+        card = card.child(
+            row().key("settings-guides-row").gap(6.0).child(btn(
+                "settings-guides",
+                "Guides",
+                s.guides,
+                t,
+                |s: &mut State| {
+                    toggle_guides(s);
+                },
+            )),
+        );
+
+        // Guide children: the camera-frame and safe-frames
+        // overlays, each with its own flag (State.guides_
+        // frustum / guides_safe). Indented and dimmed as
+        // children of Guides; they stay enabled while
+        // Guides is off (the flags are independent state)
+        // — the note under the row states that the stage
+        // only draws them while Guides is on.
         card = card
             .child(
-                row().key("settings-guides-row").gap(6.0).child(btn(
-                    "settings-guides",
-                    "Guides",
-                    s.guides,
-                    t,
-                    |s: &mut State| {
-                        toggle_guides(s);
-                    },
-                )),
+                row()
+                    .key("settings-guides-children")
+                    .gap(6.0)
+                    .pl(14.0)
+                    .opacity(0.85)
+                    .child(btn(
+                        "settings-guides-frustum",
+                        "Camera frame",
+                        s.guides_frustum,
+                        t,
+                        |s: &mut State| {
+                            toggle_guides_frustum(s);
+                        },
+                    ))
+                    .child(btn(
+                        "settings-guides-safe",
+                        "Safe frames",
+                        s.guides_safe,
+                        t,
+                        |s: &mut State| {
+                            toggle_guides_safe(s);
+                        },
+                    )),
             )
             .child(section_label(
                 t,
-                "Stage guides: thirds grid + centre cross.",
+                "Stage guides: thirds grid + centre cross. \
+                 Camera frame and safe frames show only while Guides is on.",
+            ));
+
+        // Startup workspace: the eight workspaces as a
+        // button grid (the language grid's layout), the
+        // current one highlighted. Picking one switches
+        // now and persists as the startup default via
+        // select_workspace — see the module docs.
+        let mut ws_grid = col().key("settings-ws-grid").gap(4.0);
+        for (i, chunk) in workspace_entries()
+            .chunks(WORKSPACE_COLUMNS)
+            .enumerate()
+        {
+            let mut ws_row = row().key(format!("settings-ws-row-{i}")).gap(6.0);
+            for entry in chunk {
+                ws_row = ws_row.child(workspace_button(entry.clone(), s.workspace, t));
+            }
+            ws_grid = ws_grid.child(ws_row);
+        }
+        card = card
+            .child(section_label(t, "Startup workspace"))
+            .child(ws_grid)
+            .child(section_label(
+                t,
+                "Applies now and is the workspace opened at startup.",
             ));
 
         panel = panel.child(card);
@@ -538,6 +716,14 @@ mod tests {
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
             draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
             was_playing: false,
         };
         assert!(!state.guides);
@@ -550,5 +736,136 @@ mod tests {
         let _ = settings_popover(&state, &t);
         toggle_guides(&mut state);
         assert!(!state.guides);
+    }
+
+    /// A full shell State with every current field, for
+    /// the Phase G tests (the guides test above keeps its
+    /// own inline literal).
+    fn shell_state() -> State {
+        State {
+            core: EditorCore::new(),
+            last_poll: None,
+            wheel_zoom: 0.0,
+            figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
+            figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
+            library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
+            graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
+            audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            menus: crate::rune_sec::menus::MenusState::default(),
+            palette: crate::rune_sec::command_palette::PaletteState::new(),
+            settings: SettingsState::default(),
+            toasts: crate::rune_sec::toasts::ToastsState::new(),
+            text_tool: crate::rune_sec::text_tool::TextToolState::new(),
+            name_edit: rune::TextEdit::new(""),
+            export_use_range: false,
+            fx_selected: None,
+            pose_clipboard: None,
+            guides: false,
+            last_status: String::new(),
+            toast_now: 0.0,
+            last_dark: true,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            stroke_selected: None,
+            particle_selected: None,
+            guides_frustum: true,
+            guides_safe: true,
+            onion_ui: Default::default(),
+            last_frame: 0,
+            pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+            loop_playback: true,
+            was_playing: false,
+        }
+    }
+
+    #[test]
+    fn guide_child_toggles_flip_only_their_own_flag() {
+        let t = rune::tok::theme(true);
+        let mut state = shell_state();
+        // Integrator seeds: parent off, both children on.
+        assert!(!state.guides && state.guides_frustum && state.guides_safe);
+
+        // Frustum flips alone — parent and sibling unmoved.
+        toggle_guides_frustum(&mut state);
+        assert!(!state.guides && !state.guides_frustum && state.guides_safe);
+        toggle_guides_frustum(&mut state);
+        assert!(!state.guides && state.guides_frustum && state.guides_safe);
+
+        // Safe flips alone.
+        toggle_guides_safe(&mut state);
+        assert!(!state.guides && state.guides_frustum && !state.guides_safe);
+        toggle_guides_safe(&mut state);
+        assert!(!state.guides && state.guides_frustum && state.guides_safe);
+
+        // The parent toggle never touches the children
+        // (independent flags; the stage composes them).
+        toggle_guides(&mut state);
+        assert!(state.guides && state.guides_frustum && state.guides_safe);
+
+        // The open card builds in mixed states (the child
+        // toggles render regardless of the parent's state).
+        state.settings.open = true;
+        toggle_guides_frustum(&mut state);
+        let _ = settings_popover(&state, &t);
+        toggle_guides(&mut state);
+        toggle_guides_safe(&mut state);
+        let _ = settings_popover(&state, &t);
+    }
+
+    #[test]
+    fn workspace_entries_cover_all_eight_workspaces() {
+        let entries = workspace_entries();
+        assert_eq!(entries.len(), 8);
+        assert_eq!(entries.len(), Workspace::all().len());
+        // Same order and values as Workspace::all().
+        for (entry, ws) in entries.iter().zip(Workspace::all()) {
+            assert_eq!(entry.ws, ws);
+            assert_eq!(entry.label, ws.label());
+            assert_eq!(entry.key, workspace_key(ws));
+        }
+        // Keys unique (headless --tree lookups depend on it).
+        let mut keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), 8);
+        // Build3D persists as "3D": label "3D", key suffix 3d.
+        let three_d = entries
+            .iter()
+            .find(|e| e.ws == Workspace::Build3D)
+            .unwrap();
+        assert_eq!(three_d.label, "3D");
+        assert_eq!(three_d.key, "settings-ws-3d");
+        assert_eq!(WORKSPACE_COLUMNS, 4);
+    }
+
+    #[test]
+    fn workspace_names_round_trip_through_prefs() {
+        use crate::rune_sec::workspaces::{from_prefs, prefs_with_workspace};
+        use stykanimate_rs::shell::LayoutPrefs;
+
+        // Every variant: workspace → persisted name →
+        // prefs → from_prefs → the same workspace (the
+        // exact load path the next launch seeds from).
+        // Pure: prefs_with_workspace touches no disk, so
+        // set_startup_workspace itself (which saves) is
+        // not called here.
+        for ws in Workspace::all() {
+            let prefs = prefs_with_workspace(&LayoutPrefs::default(), ws);
+            assert_eq!(prefs.workspace, persisted_workspace_name(ws));
+            assert_eq!(from_prefs(&prefs), ws);
+        }
+        // The GPUI-era special case: Build3D's persisted
+        // name is "3D", not its variant name.
+        assert_eq!(persisted_workspace_name(Workspace::Build3D), "3D");
+        assert_eq!(persisted_workspace_name(Workspace::Animate), "Animate");
     }
 }

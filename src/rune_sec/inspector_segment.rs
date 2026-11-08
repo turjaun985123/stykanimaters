@@ -34,6 +34,40 @@
 //!   degrees); the Angle readout normalises for display
 //!   and shows one decimal via `format_deg` — the same
 //!   formatter the Rotate row's value uses.
+//! * Bend −5°/−1°/+1°/+5° → `bend_selected` (this
+//!   module) — keys `seg-bend-m5` / `seg-bend-m1` /
+//!   `seg-bend-p1` / `seg-bend-p5`, the fine-grained
+//!   sibling of Cycle bend below. Bends live in
+//!   `Frame.bends[fi][ni]` (model.rs:531), stored in
+//!   **radians** in a SPARSE table parallel to `poses`:
+//!   a missing figure row or a short node row reads as
+//!   0.0 (straight), so the write grows the table first,
+//!   exactly as `cycle_bend` grows it (editor.rs:1164).
+//!   The model defines no hard clamp; the only range the
+//!   engine itself ever writes is `cycle_bend`'s cycle,
+//!   whose extremes are ±0.7 rad (≈40.1°), so the
+//!   steppers clamp to ±`BEND_LIMIT_RAD` — an imported
+//!   off-range bend is pulled to the limit on the first
+//!   press, the same snap-toward-the-model spirit as the
+//!   cycle snapping off-cycle values to a step. Bends
+//!   are RENDER-ONLY: they never move a joint
+//!   (`model::evaluate` and `positions_f` never see
+//!   them); renderers fetch the interpolated
+//!   `Project::bends_at` and arc the drawn segment
+//!   through `model::bend_mid`. And unlike the pose
+//!   angle, NO graph channel can override a bend —
+//!   `ChannelTarget` (graph.rs:33) has only RootX /
+//!   RootY / Angle / Length, so the stored bend is
+//!   always the rendered bend. The origin has no parent
+//!   segment and cannot bend (`cycle_bend` refuses it),
+//!   so the row is omitted for the root, like the Length
+//!   row. Steps are 1°/5° for the same reason the Rotate
+//!   steps are: the panel speaks degrees for bends
+//!   everywhere (the Bend readout, `cycle_bend`'s own
+//!   status), while `bend_selected` takes the delta in
+//!   the storage unit, radians — mirroring
+//!   `rotate_selected`, whose degrees ARE the storage
+//!   unit for angles.
 //! * Cycle bend → `cycle_bend()` (editor.rs:1106) — key
 //!   `cycle-bend`. There is no ± bend op in the core; bend
 //!   steps 0 → +0.35 → +0.7 → −0.35 → −0.7 rad per frame.
@@ -163,6 +197,76 @@ pub fn rotate_selected(core: &mut EditorCore, delta_deg: f32) {
         "Segment {} angle {} on frame {}.",
         ni,
         format_deg(new),
+        core.current + 1
+    );
+}
+
+/// The bend limit, in radians: the extreme of
+/// `cycle_bend`'s cycle (editor.rs:1143, steps
+/// 0 / ±0.35 / ±0.7). The model stores bends unclamped,
+/// but ±0.7 rad (≈40.1°) is the largest magnitude the
+/// engine itself ever writes, so the steppers clamp
+/// there — see the module docs.
+pub const BEND_LIMIT_RAD: f32 = 0.7;
+
+/// Bend the selected node's segment at the current frame
+/// by `delta_rad` radians — the storage unit of
+/// `Frame.bends` (see the module docs for the storage,
+/// the clamp and why bends, unlike angles, have no graph
+/// override). Same discipline as `rotate_selected`:
+/// validate → ONE `snapshot()` → write → status, so one
+/// press is exactly one undo step; refusals are
+/// status-only. The bend table is sparse, so the write
+/// grows it first, in `cycle_bend`'s own pattern
+/// (editor.rs:1164): outer vec to the figure, inner vec
+/// to the figure's node count, zero-filled.
+pub fn bend_selected(core: &mut EditorCore, delta_rad: f32) {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a segment first, then bend it.".into();
+        return;
+    };
+    if ni == 0 {
+        // Mirrors cycle_bend's refusal (editor.rs:1135):
+        // the origin has no parent segment to arc.
+        core.status = "The origin has no segment to bend.".into();
+        return;
+    }
+    let fi = core.selected_figure;
+    let nodes = match core.project.figures.get(fi) {
+        Some(fig) if ni < fig.def.nodes.len() => fig.def.nodes.len(),
+        _ => {
+            core.status = format!(
+                "Figure {} has no segment {} to bend.",
+                fi + 1,
+                ni
+            );
+            return;
+        }
+    };
+    if core.current >= core.project.frames.len() {
+        core.status = format!("No frame {} to bend on.", core.current + 1);
+        return;
+    }
+    let cur = core.project.frames[core.current]
+        .bends
+        .get(fi)
+        .and_then(|b| b.get(ni))
+        .copied()
+        .unwrap_or(0.0);
+    let new = (cur + delta_rad).clamp(-BEND_LIMIT_RAD, BEND_LIMIT_RAD);
+    core.snapshot();
+    let frame = &mut core.project.frames[core.current];
+    if frame.bends.len() <= fi {
+        frame.bends.resize(fi + 1, Vec::new());
+    }
+    if frame.bends[fi].len() < nodes {
+        frame.bends[fi].resize(nodes, 0.0);
+    }
+    frame.bends[fi][ni] = new;
+    core.status = format!(
+        "Segment {} bend {} on frame {}.",
+        ni,
+        format_deg(new.to_degrees()),
         core.current + 1
     );
 }
@@ -339,7 +443,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
         .child(readout_row("Length", format!("{:.0}", st.length), t))
         .child(readout_row("Thickness", format!("{:.0}", st.thickness), t))
         .child(readout_row("Angle", format_deg(st.angle_deg), t))
-        .child(readout_row("Bend", format!("{:.0}°", st.bend_deg), t))
+        .child(readout_row("Bend", format_deg(st.bend_deg), t))
         .child(readout_row("Shape", st.shape_label.clone(), t));
     // The origin has no segment to lengthen (the op no-ops);
     // the GPUI inspector omitted the row there too.
@@ -388,7 +492,41 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 .child(btn("seg-rot-p5", "+5°", false, t, |s| {
                     rotate_selected(&mut s.core, 5.0)
                 })),
-        )
+        );
+    // The Bend stepper row, mirroring Rotate — omitted
+    // for the origin, which has no segment to bend (the
+    // Length row precedent; `bend_selected` refuses the
+    // root exactly as `cycle_bend` does). Buttons speak
+    // degrees like every other bend surface in the panel;
+    // `bend_selected` takes radians, the storage unit.
+    if !st.is_root {
+        panel = panel.child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(8.0)
+                .child(
+                    text("Bend")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .grow(1.0),
+                )
+                .child(text(format_deg(st.bend_deg)).font(type_::LABEL).color(t.text))
+                .child(btn("seg-bend-m5", "−5°", false, t, |s| {
+                    bend_selected(&mut s.core, (-5.0f32).to_radians())
+                }))
+                .child(btn("seg-bend-m1", "−1°", false, t, |s| {
+                    bend_selected(&mut s.core, (-1.0f32).to_radians())
+                }))
+                .child(btn("seg-bend-p1", "+1°", false, t, |s| {
+                    bend_selected(&mut s.core, (1.0f32).to_radians())
+                }))
+                .child(btn("seg-bend-p5", "+5°", false, t, |s| {
+                    bend_selected(&mut s.core, (5.0f32).to_radians())
+                })),
+        );
+    }
+    panel = panel
         .child(
             row()
                 .w_full()
@@ -584,6 +722,98 @@ mod tests {
     }
 
     #[test]
+    fn bend_selected_steps_the_stored_bend_exactly() {
+        // The demo project's frames carry no bend table at
+        // all; the first press must grow it (sparse storage)
+        // and land exactly the delta, in radians.
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        let frame = core.current;
+        assert!(core.project.frames[frame].bends.is_empty());
+        let step = (5.0f32).to_radians();
+        bend_selected(&mut core, step);
+        assert_eq!(core.project.frames[frame].bends[fi][1], step);
+        // Neighbours grew to zero, not to the step.
+        assert_eq!(core.project.frames[frame].bends[fi][0], 0.0);
+        assert_eq!(core.project.frames[frame].bends[fi][2], 0.0);
+        // Steps accumulate on the stored value.
+        bend_selected(&mut core, (-1.0f32).to_radians());
+        bend_selected(&mut core, (-1.0f32).to_radians());
+        let got = core.project.frames[frame].bends[fi][1];
+        assert!(
+            (got - (3.0f32).to_radians()).abs() < 1e-6,
+            "bend {got}, want 3° in radians"
+        );
+        // And the panel's readout sees the same value.
+        let st = segment_state(&core).unwrap();
+        assert!((st.bend_deg - 3.0).abs() < 0.01, "readout {}", st.bend_deg);
+    }
+
+    #[test]
+    fn bend_selected_is_one_undo_step_per_press() {
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        let frame = core.current;
+        let depth = core.undo_depth();
+        bend_selected(&mut core, (1.0f32).to_radians());
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot per press");
+        core.undo();
+        assert!(
+            core.project.bends_at(frame as f32, fi).is_empty(),
+            "undo restores the pre-press (bend-free) frame"
+        );
+    }
+
+    #[test]
+    fn bend_selected_clamps_at_the_range_ends() {
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        let frame = core.current;
+        let nodes = core.project.figures[fi].def.nodes.len();
+        core.project.frames[frame].bends = vec![vec![0.0; nodes]];
+        // At the limit, a further step stays at the limit.
+        core.project.frames[frame].bends[fi][1] = BEND_LIMIT_RAD;
+        bend_selected(&mut core, (5.0f32).to_radians());
+        assert_eq!(core.project.frames[frame].bends[fi][1], BEND_LIMIT_RAD);
+        core.project.frames[frame].bends[fi][1] = -BEND_LIMIT_RAD;
+        bend_selected(&mut core, (-5.0f32).to_radians());
+        assert_eq!(core.project.frames[frame].bends[fi][1], -BEND_LIMIT_RAD);
+        // Crossing the limit lands exactly on it.
+        core.project.frames[frame].bends[fi][1] = BEND_LIMIT_RAD - 0.01;
+        bend_selected(&mut core, (5.0f32).to_radians());
+        assert_eq!(core.project.frames[frame].bends[fi][1], BEND_LIMIT_RAD);
+    }
+
+    #[test]
+    fn bend_selected_without_selection_is_status_only() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        bend_selected(&mut core, (5.0f32).to_radians());
+        assert_eq!(core.undo_depth(), depth, "no snapshot without a selection");
+        assert!(
+            core.status.contains("Select a segment"),
+            "refusal explains itself: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn bend_selected_refuses_the_root_snapshot_free() {
+        // The origin has no parent segment to arc — the
+        // same refusal cycle_bend makes (editor.rs:1135).
+        let mut core = core_with_selection(Some(0));
+        let depth = core.undo_depth();
+        bend_selected(&mut core, (5.0f32).to_radians());
+        assert_eq!(core.undo_depth(), depth, "no snapshot for the root");
+        assert!(
+            core.status.contains("origin has no segment"),
+            "refusal explains itself: {}",
+            core.status
+        );
+        assert!(core.project.frames[core.current].bends.is_empty());
+    }
+
+    #[test]
     fn panel_builds_with_and_without_selection() {
         let t = rune::tok::theme(true);
         let bare = State {
@@ -619,6 +849,14 @@ mod tests {
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
             draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
             was_playing: false,
         };
         let _ = inspector_segment(&bare, &t);
@@ -655,6 +893,14 @@ mod tests {
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
             draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
             was_playing: false,
         };
         let _ = inspector_segment(&selected, &t);
@@ -691,6 +937,14 @@ mod tests {
             clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
             fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
             draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+loop_playback: true,
             was_playing: false,
         };
         let _ = inspector_segment(&root, &t);

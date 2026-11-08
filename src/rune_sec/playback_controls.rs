@@ -40,14 +40,17 @@
 //!   Audio start is NOT called here: the shell's poll hooks
 //!   playback start (Phase F audio glue); these buttons
 //!   only set the state it observes.
-//! * **No loop toggle** (Phase F, checked in `editor.rs`)
-//!   — `advance_play` (`editor.rs:698`) wraps
-//!   unconditionally: at the timeline end, or at the loop
-//!   range's end when one is set. No loop on/off field or
-//!   op exists for a switch to honour, so this panel
-//!   deliberately ships none rather than a dead control;
-//!   the loop-range buttons below are the loop control
-//!   the engine actually has.
+//! * **Loop toggle** (Phase G) — `pb-loop` flips the
+//!   shell-level `State::loop_playback` flag (integrator-
+//!   owned, initialised `true` = the behaviour every earlier
+//!   phase shipped). The core still has no loop field:
+//!   `advance_play` (`editor.rs:710`) wraps unconditionally
+//!   — at the timeline end, or inside `loop_range` when one
+//!   is set — so "off" is enforced by the shell's poll,
+//!   which consults `should_stop_at_end` before each advance
+//!   and pauses instead of letting the playhead wrap. The
+//!   button itself touches no core state and takes no undo
+//!   snapshot.
 //! * **Frame duration** — the `dur-dn` / `dur-up` steppers
 //!   call `EditorCore::adjust_frame_duration`
 //!   (`editor.rs:1675`) with the GPUI factors 0.5 / 2.0
@@ -60,9 +63,11 @@
 //!   `model.rs:855`, and is deliberately not what this chip
 //!   showed).
 //!
-//! No new `State` fields: everything reads `s.core` live
+//! `State` fields: everything reads `s.core` live
 //! (`project.fps` `model.rs:683`, `loop_range`, `current`,
-//! `project.frames[..].duration`).
+//! `project.frames[..].duration`) except the loop toggle,
+//! which reads/writes the shell-level `State::loop_playback`
+//! (integrator-owned, initialised `true`).
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -127,6 +132,71 @@ pub fn loop_range_text(range: Option<(usize, usize)>) -> String {
 /// Restart on a timeline with no range.
 pub fn play_range_start(loop_range: Option<(usize, usize)>) -> usize {
     loop_range.map(|(a, _)| a).unwrap_or(0)
+}
+
+/// Button label for the loop toggle — the state is in the
+/// label itself ("Loop: on" / "Loop: off"), so the control
+/// reads correctly at a glance in either state.
+pub fn loop_toggle_label(loop_playback: bool) -> &'static str {
+    if loop_playback {
+        "Loop: on"
+    } else {
+        "Loop: off"
+    }
+}
+
+/// Should the shell's poll stop playback at the end instead
+/// of letting `EditorCore::advance_play` wrap the playhead?
+///
+/// **Integrator contract (poll, `main.rs`).** Call this on
+/// every poll tick at the point where poll currently calls
+/// `advance_play` — after the `!core.playing` early return,
+/// before the advance. When it returns `true`, set
+/// `core.playing = false` and skip `advance_play` for that
+/// tick entirely. The stop has to be decided from the
+/// *pre-advance* state: `advance_play` wraps the fractional
+/// playhead itself (`editor.rs:710`) and reports nothing,
+/// so after an advance there is no way to tell a wrap
+/// happened. The existing audio flip hook at the top of
+/// poll observes the cleared `playing` flag on the next
+/// tick and stops playback audio through the Phase F path,
+/// like any other pause.
+///
+/// The check is frame-granular: it reads `current`, not the
+/// fractional playhead, so the final frame is left on
+/// screen and playback halts at the first tick that finds
+/// it current — the last frame is not guaranteed its full
+/// duration of display time.
+///
+/// The "end" is the end playback would actually wrap at.
+/// `advance_play` loops inside `loop_range` when one is set
+/// (the playhead wraps at the range's end and never reaches
+/// the project end), so with a range the effective last
+/// frame is the range's end — clamped to the timeline
+/// exactly as `advance_play` clamps it (`editor.rs:719`) —
+/// and without one it is `frame_count - 1`. `current` at
+/// *or past* that frame stops: a playhead parked beyond a
+/// range's end (e.g. after a `goto` outside the range)
+/// stops too, rather than being yanked back into the range
+/// by the wrap.
+///
+/// `false` whenever playback is paused, looping is on, or
+/// the project has no frames.
+pub fn should_stop_at_end(
+    playing: bool,
+    loop_playback: bool,
+    loop_range: Option<(usize, usize)>,
+    current: usize,
+    frame_count: usize,
+) -> bool {
+    if !playing || loop_playback || frame_count == 0 {
+        return false;
+    }
+    let last = match loop_range {
+        Some((_, b)) => b.min(frame_count - 1),
+        None => frame_count - 1,
+    };
+    current >= last
 }
 
 /// Go to `frame` and make sure playback is running — the
@@ -194,13 +264,15 @@ fn section(label: String, t: &Theme) -> El {
 /// the old GPUI control ids where one existed (`fps-dn`,
 /// `fps-up`, `tween`, `loop-start`, `loop-end`, `loop-clear`,
 /// `dur-dn`, `dur-up`); the Phase F transport buttons are
-/// `pb-restart` / `pb-play-range`, so headless `--tree`
-/// checks can find every control.
+/// `pb-restart` / `pb-play-range` and the Phase G loop
+/// toggle is `pb-loop`, so headless `--tree` checks can
+/// find every control.
 pub fn playback_controls(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let fps = core.project.fps;
     let tween_on = core.project.tween_playback;
     let loop_range = core.loop_range;
+    let loop_playback = s.loop_playback;
     let cur_duration = core
         .project
         .frames
@@ -234,6 +306,34 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
                     let start = play_range_start(s.core.loop_range);
                     start_playback_at(&mut s.core, start);
                 },
+            )),
+    );
+
+    // ---- Loop playback: shell-level on/off for the wrap
+    // advance_play always performs. Off = poll pauses at the
+    // end (see should_stop_at_end); the button itself only
+    // flips the State flag — no core call, no undo snapshot.
+    panel = panel.child(section("Loop playback".to_string(), t));
+    panel = panel.child(
+        row()
+            .gap(6.0)
+            .center_y()
+            .child(btn(
+                "pb-loop",
+                loop_toggle_label(loop_playback),
+                loop_playback,
+                t,
+                |s| {
+                    s.loop_playback = !s.loop_playback;
+                },
+            ))
+            .child(section(
+                if loop_playback {
+                    "On — wraps at the end".to_string()
+                } else {
+                    "Off — stops at the end".to_string()
+                },
+                t,
             )),
     );
 
@@ -483,5 +583,73 @@ mod tests {
         start_playback_at(&mut core, 0);
         assert!(core.playing);
         assert_eq!(core.current, 0);
+    }
+
+    #[test]
+    fn loop_toggle_label_states_the_state() {
+        assert_eq!(loop_toggle_label(true), "Loop: on");
+        assert_eq!(loop_toggle_label(false), "Loop: off");
+    }
+
+    #[test]
+    fn stop_at_end_never_fires_with_loop_on() {
+        // At the project end, at a range end, single frame:
+        // looping on always wraps, never stops.
+        assert!(!should_stop_at_end(true, true, None, 4, 5));
+        assert!(!should_stop_at_end(true, true, Some((1, 3)), 3, 5));
+        assert!(!should_stop_at_end(true, true, None, 0, 1));
+    }
+
+    #[test]
+    fn stop_at_end_never_fires_while_paused() {
+        assert!(!should_stop_at_end(false, false, None, 4, 5));
+        assert!(!should_stop_at_end(false, false, Some((1, 3)), 3, 5));
+        assert!(!should_stop_at_end(false, false, None, 0, 1));
+    }
+
+    #[test]
+    fn stop_at_end_only_on_the_last_frame() {
+        // 5-frame project, no range: frames 0..3 keep going,
+        // frame 4 (the last) stops.
+        for current in 0..4 {
+            assert!(
+                !should_stop_at_end(true, false, None, current, 5),
+                "frame {current} is mid-project"
+            );
+        }
+        assert!(should_stop_at_end(true, false, None, 4, 5));
+    }
+
+    #[test]
+    fn stop_at_end_single_frame_project_stops_at_once() {
+        // Frame 0 is also the last frame.
+        assert!(should_stop_at_end(true, false, None, 0, 1));
+    }
+
+    #[test]
+    fn stop_at_end_empty_project_never_stops() {
+        assert!(!should_stop_at_end(true, false, None, 0, 0));
+    }
+
+    #[test]
+    fn stop_at_end_uses_the_range_end_when_a_range_is_set() {
+        // advance_play wraps inside (1, 3): frame 3 is the
+        // end even though the project has a frame 4.
+        assert!(!should_stop_at_end(true, false, Some((1, 3)), 2, 5));
+        assert!(should_stop_at_end(true, false, Some((1, 3)), 3, 5));
+        // Before the range, playback still plays into it.
+        assert!(!should_stop_at_end(true, false, Some((2, 4)), 0, 5));
+        // Parked past the range end: stops instead of being
+        // wrapped back into the range.
+        assert!(should_stop_at_end(true, false, Some((1, 3)), 4, 5));
+    }
+
+    #[test]
+    fn stop_at_end_clamps_a_stale_range_end() {
+        // Range end past the timeline (frames deleted since
+        // it was set): advance_play clamps to the last frame
+        // (editor.rs:719), so the stop check does too.
+        assert!(!should_stop_at_end(true, false, Some((1, 99)), 3, 5));
+        assert!(should_stop_at_end(true, false, Some((1, 99)), 4, 5));
     }
 }

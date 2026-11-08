@@ -29,6 +29,14 @@
 //! rasterizer's own convention), and draws the full stage stack:
 //! guides (optional), onion skins, drawing strokes, figures,
 //! FX particles, text labels, weather — the export order.
+//! Phase G adds the shell's selection overlays on top of that
+//! stack, threaded through [`StageOverlays`]: the selected
+//! stroke's accent highlight (in the stroke slot, under the
+//! base strokes) and the selected particle event's anchor
+//! gizmo (topmost), per-side onion depths in place of the
+//! core's single `onion_frames` count, and independent
+//! frustum / safe-frame guide toggles under the master
+//! `guides` flag.
 
 use rune::{Color, LineCap, Shape};
 use stykanimate_rs::editor::EditorCore;
@@ -100,11 +108,20 @@ pub fn ngon(centre: [f32; 2], r: f32, n: usize) -> Vec<[f32; 2]> {
 }
 
 /// Onion-skin segment sets around the current frame, mirroring
-/// the GPUI stage exactly: previous frames keep each figure's own
-/// colour (alpha `0x4D` for the nearest, `0x26` for older), next
-/// frames share one green tint (`0x7BE495`) with the same falloff.
-/// Returns `(segments, colour, alpha)` entries in draw order.
-fn onion_skins(core: &EditorCore) -> Vec<(Vec<(V2, V2)>, u32, f32)> {
+/// the GPUI stage's colours and falloff: previous frames keep
+/// each figure's own colour (alpha `0x4D` for the nearest,
+/// `0x26` for older), next frames share one green tint
+/// (`0x7BE495`) with the same falloff. Returns `(segments,
+/// colour, alpha)` entries in draw order.
+///
+/// The depths are per-side shell state (Phase G,
+/// `State::onion_ui`), not the core's single `onion_frames`
+/// count: `prev` frames behind and `next` frames ahead are
+/// drawn, and a count of 0 draws nothing on that side. The
+/// falloff is a function of the step distance only (step 1 is
+/// always `0x4D`, steps ≥ 2 always `0x26`), so widening one
+/// side never changes the other side's skins.
+fn onion_skins(core: &EditorCore, prev: u8, next: u8) -> Vec<(Vec<(V2, V2)>, u32, f32)> {
     let mut out = Vec::new();
     if !core.onion {
         return out;
@@ -119,14 +136,14 @@ fn onion_skins(core: &EditorCore) -> Vec<(Vec<(V2, V2)>, u32, f32)> {
             .filter_map(|(i, node)| node.parent.map(|p| (pos[p], pos[i])))
             .collect()
     };
-    if core.current > 0 {
+    if prev > 0 && core.current > 0 {
         for fi in 0..project.figures.len() {
             if project.figures[fi].hidden {
                 continue;
             }
             out.push((segs_at(core.current - 1, fi), project.figures[fi].color, 0x4D as f32 / 255.0));
         }
-        for back in 2..=(core.onion_frames as usize) {
+        for back in 2..=(prev as usize) {
             if core.current < back {
                 break;
             }
@@ -138,7 +155,7 @@ fn onion_skins(core: &EditorCore) -> Vec<(Vec<(V2, V2)>, u32, f32)> {
             }
         }
     }
-    for ahead in 1..=(core.onion_frames as usize) {
+    for ahead in 1..=(next as usize) {
         let frame = core.current + ahead;
         if frame >= core.frame_count() {
             break;
@@ -214,6 +231,139 @@ fn point_at(a: V2, b: V2, t: f32) -> V2 {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
 }
 
+/// The shell's selection accent, `0xRRGGBB` — the 2.0 primary
+/// accent, and the same value `stage_fx::GIZMO_COLOR` pins for
+/// the particle gizmo, so both Phase G selection markers read
+/// as one selection language on the stage.
+pub const SELECTION_ACCENT: u32 = 0x6D8CFF;
+
+/// Alpha the selected stroke's highlight underlay is drawn at
+/// (and the factor its spray dots' carried opacities are
+/// multiplied by). The highlight prims are widened copies of
+/// the stroke drawn *under* the base stroke (see
+/// [`recolor_prims`]); half-strength accent lets the glow read
+/// as a halo without hiding the stroke's own colour where the
+/// two overlap at the edges. `stage_layers` deliberately
+/// leaves this value to the drawing side.
+const HIGHLIGHT_ALPHA: f32 = 0.5;
+
+/// Shell-side overlay choices for [`stage_shape`] (Phase G):
+/// everything the stage draws that lives in the shell's
+/// `State` rather than in the engine core — the guide toggles,
+/// the two selection indices, and the per-side onion depths.
+/// Bundled into one `Copy` value so the call site names each
+/// choice once and future overlays don't grow the signature
+/// again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StageOverlays {
+    /// Master guides switch: the thirds grid, and the gate
+    /// for both sub-toggles below (frustum/safe frames never
+    /// draw while this is off, whatever they say).
+    pub guides: bool,
+    /// Camera-frustum outline under `guides`.
+    pub guides_frustum: bool,
+    /// Action/title-safe frames under `guides`.
+    pub guides_safe: bool,
+    /// Selected stroke, project-wide index into
+    /// `core.project.strokes` (the `delete_stroke_at` /
+    /// `highlight_geometry` indexing); `None` — or a stale
+    /// index — draws no highlight.
+    pub stroke_selected: Option<usize>,
+    /// Selected particle event, index into
+    /// `core.project.particles` (the `gizmo_geometry`
+    /// indexing); `None` — or a stale index — draws no gizmo.
+    pub particle_selected: Option<usize>,
+    /// Onion skins behind the current frame (0 = none).
+    pub onion_prev: u8,
+    /// Onion skins ahead of the current frame (0 = none).
+    pub onion_next: u8,
+}
+
+impl Default for StageOverlays {
+    /// Matches the shell's own initial state: guides off,
+    /// both sub-toggles on, nothing selected, and 1/1 onion
+    /// depths — the depths the core's historical single
+    /// `onion_frames` count defaulted to, so a default
+    /// overlays value reproduces the pre-Phase-G stage.
+    fn default() -> Self {
+        StageOverlays {
+            guides: false,
+            guides_frustum: true,
+            guides_safe: true,
+            stroke_selected: None,
+            particle_selected: None,
+            onion_prev: 1,
+            onion_next: 1,
+        }
+    }
+}
+
+/// Recolour every prim in a highlight list to `rgb`, replacing
+/// only the colour each prim carries — points, width, radius
+/// and (for spray dots) the per-dot opacity pass through
+/// untouched, so the recoloured list draws exactly where the
+/// original did. `stage_layers::highlight_geometry` returns
+/// prims in the stroke's own colours and leaves the accent
+/// decision to this side; this is that decision, kept pure so
+/// it can be pinned by tests.
+fn recolor_prims(
+    prims: Vec<crate::rune_sec::stage_layers::StrokePrim>,
+    rgb: u32,
+) -> Vec<crate::rune_sec::stage_layers::StrokePrim> {
+    use crate::rune_sec::stage_layers::StrokePrim;
+    prims
+        .into_iter()
+        .map(|prim| match prim {
+            StrokePrim::Polyline { pts, width, .. } => StrokePrim::Polyline { pts, width, color: rgb },
+            StrokePrim::Filled { pts, .. } => StrokePrim::Filled { pts, color: rgb },
+            StrokePrim::Dots { pts, radius, opacity, .. } => {
+                StrokePrim::Dots { pts, radius, color: rgb, opacity }
+            }
+        })
+        .collect()
+}
+
+/// Convert one recoloured highlight prim into the shape being
+/// built: the base stroke layer's conversions (see
+/// [`stage_shape`]) at [`HIGHLIGHT_ALPHA`] — polylines and
+/// fills take the alpha on the colour (their prims carry no
+/// alpha field), spray dots multiply it into the opacity each
+/// dot already carries, per `stage_layers`' contract.
+fn highlight_prim(
+    shape: Shape,
+    rt: &crate::rune_sec::stage_camera::RotTransform,
+    s: f32,
+    prim: crate::rune_sec::stage_layers::StrokePrim,
+) -> Shape {
+    use crate::rune_sec::stage_layers::StrokePrim;
+    match prim {
+        StrokePrim::Polyline { pts, width, color } => {
+            let screen: Vec<[f32; 2]> = pts.iter().map(|p| rt.to_screen(*p)).collect();
+            shape.stroke_with(
+                screen,
+                false,
+                (width * s).max(1.0),
+                LineCap::Round,
+                hex_color(color).unwrap_or(Color::WHITE).alpha(HIGHLIGHT_ALPHA),
+            )
+        }
+        StrokePrim::Filled { pts, color } => {
+            let screen: Vec<[f32; 2]> = pts.iter().map(|p| rt.to_screen(*p)).collect();
+            shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE).alpha(HIGHLIGHT_ALPHA))
+        }
+        StrokePrim::Dots { pts, radius, color, opacity } => {
+            let c = hex_color(color)
+                .unwrap_or(Color::WHITE)
+                .alpha(opacity * HIGHLIGHT_ALPHA);
+            let mut shape = shape;
+            for p in pts {
+                shape = shape.fill(ngon(rt.to_screen(p), (radius * s).max(0.8), 8), c);
+            }
+            shape
+        }
+    }
+}
+
 /// The whole stage as one vector `Shape` in canvas-element
 /// points: onion skins (under), then every visible figure at the
 /// display frame — segments in per-node colour at real thickness
@@ -224,7 +374,19 @@ fn point_at(a: V2, b: V2, t: f32) -> V2 {
 /// `draw_data`/`paint_stage` decisions (opacity fades toward the
 /// background; solo/hidden figures skipped via
 /// `layers::visible_figures`).
-pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], guides: bool) -> Shape {
+///
+/// `overlays` carries the shell-side choices (see
+/// [`StageOverlays`]): the guide toggles gate the guide passes
+/// below, the onion depths size the skins, and the selection
+/// indices add two Phase G markers — the selected stroke's
+/// accent highlight in the stroke slot, *under* the base
+/// strokes so the stroke stays crisp on top of its own glow
+/// (the draw order `stage_layers` prescribes), and the
+/// selected particle event's anchor gizmo *last*, over even
+/// the weather: a locator marker that weather or text could
+/// cover would fail at its only job, and like the joint
+/// handles it is small, translucent and selection-only.
+pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays) -> Shape {
     let project = &core.project;
     let display = core.display_frame();
     let cam = project.camera_at(display);
@@ -233,7 +395,7 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], guides: bool) -> Shape 
     let s = vt.scale;
     let mut shape = Shape::new();
 
-    if guides {
+    if overlays.guides {
         let guide_color = Color::WHITE.alpha(0.22);
         for prim in crate::rune_sec::stage_camera::guides_geometry(project.stage) {
             let crate::rune_sec::stage_camera::GuidePrim::Line { a, b } = prim;
@@ -241,21 +403,41 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], guides: bool) -> Shape 
         }
         // Camera frustum + safe frames (Phase F stage_camera):
         // what an export frames, and the action/title-safe
-        // insets, in the same ink as the thirds grid.
-        for prim in crate::rune_sec::stage_camera::frustum_geometry(core) {
-            let crate::rune_sec::stage_camera::GuidePrim::Line { a, b } = prim;
-            shape = shape.line(rt.to_screen(a), rt.to_screen(b), 1.0, LineCap::Round, guide_color);
+        // insets, in the same ink as the thirds grid. Phase G
+        // splits them into independent sub-toggles, both still
+        // gated by the master `guides` switch above.
+        if overlays.guides_frustum {
+            for prim in crate::rune_sec::stage_camera::frustum_geometry(core) {
+                let crate::rune_sec::stage_camera::GuidePrim::Line { a, b } = prim;
+                shape = shape.line(rt.to_screen(a), rt.to_screen(b), 1.0, LineCap::Round, guide_color);
+            }
         }
-        for prim in crate::rune_sec::stage_camera::safe_frame_geometry(project.stage) {
-            let crate::rune_sec::stage_camera::GuidePrim::Line { a, b } = prim;
-            shape = shape.line(rt.to_screen(a), rt.to_screen(b), 1.0, LineCap::Round, guide_color);
+        if overlays.guides_safe {
+            for prim in crate::rune_sec::stage_camera::safe_frame_geometry(project.stage) {
+                let crate::rune_sec::stage_camera::GuidePrim::Line { a, b } = prim;
+                shape = shape.line(rt.to_screen(a), rt.to_screen(b), 1.0, LineCap::Round, guide_color);
+            }
         }
     }
 
-    for (segs, color_hex, alpha) in onion_skins(core) {
+    for (segs, color_hex, alpha) in onion_skins(core, overlays.onion_prev, overlays.onion_next) {
         let color = hex_color(color_hex).unwrap_or(Color::WHITE).alpha(alpha);
         for (a, b) in segs {
             shape = shape.line(rt.to_screen(a), rt.to_screen(b), 5.0 * s, LineCap::Round, color);
+        }
+    }
+
+    // Selected stroke's highlight (Phase G): the widened
+    // prims from `highlight_geometry`, recoloured to the
+    // selection accent, drawn in the stroke layer's slot
+    // BEFORE the base strokes so the glow sits under the
+    // stroke it marks. The helper returns an empty vec for a
+    // stale index or a stroke on another frame, so this draws
+    // nothing then — no index is ever dereferenced here.
+    if let Some(idx) = overlays.stroke_selected {
+        let prims = crate::rune_sec::stage_layers::highlight_geometry(core, idx);
+        for prim in recolor_prims(prims, SELECTION_ACCENT) {
+            shape = highlight_prim(shape, &rt, s, prim);
         }
     }
 
@@ -403,6 +585,18 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], guides: bool) -> Shape 
     for prim in crate::rune_sec::stage_fx::weather_geometry(core) {
         shape = particle_prim(shape, &rt, s, prim);
     }
+    // Selected particle event's anchor gizmo (Phase G), drawn
+    // last — over figures, FX, text and weather — so the
+    // marker is always findable (see the `stage_shape` docs).
+    // The prims arrive already in the accent at the gizmo's
+    // own alpha, so they convert through the ordinary particle
+    // path; a stale index yields an empty vec and draws
+    // nothing.
+    if let Some(idx) = overlays.particle_selected {
+        for prim in crate::rune_sec::stage_fx::gizmo_geometry(core, idx) {
+            shape = particle_prim(shape, &rt, s, prim);
+        }
+    }
     shape
 }
 
@@ -519,5 +713,114 @@ mod tests {
         assert_eq!(point_at(a, b, 0.0), a);
         assert_eq!(point_at(a, b, 1.0), b);
         assert_eq!(point_at(a, b, 0.5), [5.0, 10.0]);
+    }
+
+    #[test]
+    fn selection_accent_is_the_gizmo_accent() {
+        // Both Phase G selection markers share one accent —
+        // the value stage_fx pins for the particle gizmo.
+        assert_eq!(SELECTION_ACCENT, 0x6D8CFF);
+        assert_eq!(SELECTION_ACCENT, crate::rune_sec::stage_fx::GIZMO_COLOR);
+    }
+
+    #[test]
+    fn overlays_default_matches_the_shells_initial_state() {
+        let o = StageOverlays::default();
+        assert!(!o.guides);
+        assert!(o.guides_frustum && o.guides_safe);
+        assert_eq!(o.stroke_selected, None);
+        assert_eq!(o.particle_selected, None);
+        // 1/1: the depths the core's old single count
+        // defaulted to, so the default stage is unchanged.
+        assert_eq!((o.onion_prev, o.onion_next), (1, 1));
+    }
+
+    #[test]
+    fn recolor_prims_replaces_only_the_colour() {
+        use crate::rune_sec::stage_layers::StrokePrim;
+        let prims = vec![
+            StrokePrim::Polyline { pts: vec![[1.0, 2.0], [3.0, 4.0]], width: 7.0, color: 0x111111 },
+            StrokePrim::Filled { pts: vec![[0.0, 0.0], [5.0, 0.0], [5.0, 5.0]], color: 0x222222 },
+            StrokePrim::Dots { pts: vec![[9.0, 9.0]], radius: 3.0, color: 0x333333, opacity: 0.4 },
+        ];
+        let out = recolor_prims(prims, SELECTION_ACCENT);
+        assert_eq!(
+            out,
+            vec![
+                StrokePrim::Polyline {
+                    pts: vec![[1.0, 2.0], [3.0, 4.0]],
+                    width: 7.0,
+                    color: SELECTION_ACCENT,
+                },
+                StrokePrim::Filled {
+                    pts: vec![[0.0, 0.0], [5.0, 0.0], [5.0, 5.0]],
+                    color: SELECTION_ACCENT,
+                },
+                // The dots' opacity is NOT scaled here: the
+                // HIGHLIGHT_ALPHA factor applies at conversion
+                // time (highlight_prim), not in the recolour.
+                StrokePrim::Dots {
+                    pts: vec![[9.0, 9.0]],
+                    radius: 3.0,
+                    color: SELECTION_ACCENT,
+                    opacity: 0.4,
+                },
+            ]
+        );
+        // An empty highlight (stale selection) stays empty.
+        assert!(recolor_prims(Vec::new(), SELECTION_ACCENT).is_empty());
+    }
+
+    /// Demo-project core (1 figure, 5 frames) parked
+    /// mid-timeline with onion skins on.
+    fn onion_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.onion = true;
+        core.current = 2;
+        core
+    }
+
+    #[test]
+    fn onion_depths_draw_each_side_independently() {
+        let core = onion_core();
+        let near = 0x4D as f32 / 255.0;
+        let far = 0x26 as f32 / 255.0;
+        let alphas = |prev: u8, next: u8| -> Vec<f32> {
+            onion_skins(&core, prev, next).iter().map(|e| e.2).collect()
+        };
+        // Symmetric 1/1: one skin each side, both nearest.
+        assert_eq!(alphas(1, 1), vec![near, near]);
+        // Deeper past only: nearest + one older, no future.
+        assert_eq!(alphas(2, 0), vec![near, far]);
+        // Deeper future only: no past, nearest + one older.
+        assert_eq!(alphas(0, 2), vec![near, far]);
+        // Both deep: draw order is past (nearest→older),
+        // then future — with the falloff following distance.
+        assert_eq!(alphas(2, 2), vec![near, far, near, far]);
+        // Zero on both sides draws nothing at all.
+        assert!(onion_skins(&core, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn onion_skins_keep_their_colours_and_switch() {
+        let mut core = onion_core();
+        let skins = onion_skins(&core, 1, 1);
+        assert_eq!(skins.len(), 2);
+        // Past keeps the demo figure's own colour; the
+        // future skin is the shared green.
+        assert_eq!(skins[0].1, 0xE8E8EC);
+        assert_eq!(skins[1].1, 0x7BE495);
+        // Every skin carries real segments.
+        assert!(skins.iter().all(|e| !e.0.is_empty()));
+        // The master switch still wins over the depths.
+        core.onion = false;
+        assert!(onion_skins(&core, 3, 3).is_empty());
+        // At the first frame there is no past to draw, however
+        // deep the prev count is.
+        core.onion = true;
+        core.current = 0;
+        let skins = onion_skins(&core, 3, 1);
+        assert_eq!(skins.len(), 1);
+        assert_eq!(skins[0].1, 0x7BE495);
     }
 }

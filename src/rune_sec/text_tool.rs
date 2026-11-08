@@ -48,11 +48,51 @@
 //! row click loads the instance's content back into the
 //! field above for re-stamping (a pure `TextToolState`
 //! copy; the project is untouched).
+//!
+//! ## Phase G (§38): instance editing round 2
+//!
+//! `TextInstance` (model.rs:636) has exactly four fields
+//! — `content`, `size`, `color`, `keys` — and **no
+//! position field**: an instance's position lives in its
+//! transform keys, `InstanceKey { frame, x, y, scale,
+//! angle }` (model.rs:617), sampled by
+//! `InstanceKey::sample` and drawn at `(key.x, key.y)`
+//! in stage units (`media.rs:180`; the shell's
+//! `stage_text` does the same). Moving an instance
+//! therefore means shifting **every** key by the same
+//! delta, which preserves the track's shape, timing,
+//! scales and angles.
+//!
+//! On top of §27's list this section adds:
+//!
+//! - **Duplicate** per row (`text-dup-{i}`): a verbatim
+//!   clone shifted by [`DUP_OFFSET`] on both axes,
+//!   inserted directly after the original.
+//! - A **nudge pad** (`text-nudge-l`/`r`/`u`/`d`) for
+//!   the *loaded* instance — the one the last row click
+//!   loaded, remembered in [`TextToolState::loaded`] —
+//!   shifting every key by [`NUDGE_STEP`] stage units
+//!   per press. Rune buttons carry no shift modifier,
+//!   so one step size is all a press can mean.
+//! - **Size steppers** for the loaded instance
+//!   (`text-isize-dn`/`text-isize-up` — not the brief's
+//!   `text-size-dn`/`up`: `text-size-up` already keys
+//!   the segment stepper below, and duplicate keys
+//!   shadow in tree order): the same [`SIZE_STEP`]
+//!   step and `SIZE_MIN..=SIZE_MAX` clamp the segment
+//!   stepper and `load_instance` use.
+//!
+//! Discipline is §27's throughout: bounds check first,
+//! exactly one `snapshot()` per applied press (this
+//! file has no drag to coalesce; its other stepper,
+//! `step_from_button`, likewise snapshots once per
+//! press), and a stale index is a status-only refusal
+//! that snapshots nothing.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, text_input, El, TextEdit as FieldEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::model::SegmentMedia;
+use stykanimate_rs::model::{InstanceKey, SegmentMedia, TextInstance};
 use stykanimate_rs::text_edit::{TextEdit as SegTextEdit, DEFAULT_TEXT_SIZE};
 
 use crate::chrome_view::btn;
@@ -64,6 +104,14 @@ pub const SIZE_MIN: f32 = 4.0;
 pub const SIZE_MAX: f32 = 160.0;
 /// Glyph-height change per stepper press (stage units).
 pub const SIZE_STEP: f32 = 4.0;
+/// Stage-unit offset a duplicated text instance is
+/// shifted by on both axes: large enough that the copy
+/// is plainly a second instance next to the original,
+/// small enough to stay beside it.
+pub const DUP_OFFSET: f32 = 12.0;
+/// Stage units one nudge-pad press moves the loaded
+/// instance (on one axis).
+pub const NUDGE_STEP: f32 = 4.0;
 
 /// View state for the text tool: the Rune field's edit
 /// model plus the pending glyph height used by the next
@@ -75,6 +123,13 @@ pub struct TextToolState {
     /// Pending glyph height in stage units; starts at the
     /// engine's own default size.
     pub size: f32,
+    /// Index into `Project.texts` of the instance the
+    /// last list-row click loaded, if any. The nudge pad
+    /// and the instance size steppers act on it; row
+    /// inserts and removals adjust it so it keeps naming
+    /// the same instance (`loaded_after_removal`,
+    /// `loaded_after_insertion`).
+    pub loaded: Option<usize>,
 }
 
 impl Default for TextToolState {
@@ -82,6 +137,7 @@ impl Default for TextToolState {
         TextToolState {
             field: FieldEdit::default(),
             size: DEFAULT_TEXT_SIZE,
+            loaded: None,
         }
     }
 }
@@ -192,6 +248,110 @@ pub fn delete_text_instance(core: &mut EditorCore, index: usize) {
     core.status = "Text deleted.".into();
 }
 
+/// Shift transform `keys` by `(dx, dy)` stage units.
+/// Frame, scale and angle of every key are untouched, so
+/// a track's shape and timing survive the move. Pure.
+pub fn offset_keys(keys: &mut [InstanceKey], dx: f32, dy: f32) {
+    for key in keys {
+        key.x += dx;
+        key.y += dy;
+    }
+}
+
+/// Shift every transform key of `inst` by `(dx, dy)`
+/// stage units. An instance's position lives entirely in
+/// its keys (see the module docs), so this is what
+/// "move the instance" means. Pure.
+pub fn offset_instance_position(inst: &mut TextInstance, dx: f32, dy: f32) {
+    offset_keys(&mut inst.keys, dx, dy);
+}
+
+/// The clone a Duplicate press inserts: `inst` copied
+/// verbatim (content, size, colour, key frames, scales
+/// and angles), then shifted by [`DUP_OFFSET`] on both
+/// axes so the copy lands visible-but-close — offset
+/// enough to see it is a second instance, small enough
+/// to stay next to the original it was cloned from.
+/// Pure.
+pub fn duplicated_instance(inst: &TextInstance) -> TextInstance {
+    let mut copy = inst.clone();
+    offset_instance_position(&mut copy, DUP_OFFSET, DUP_OFFSET);
+    copy
+}
+
+/// Duplicate the text instance at `index`: insert
+/// [`duplicated_instance`]'s clone directly after the
+/// original, under exactly one `snapshot()` (§27's
+/// mutation idiom, like [`delete_text_instance`]).
+/// Returns whether a copy was inserted; an out-of-range
+/// index is a status-only refusal that snapshots
+/// nothing.
+pub fn duplicate_text_instance(core: &mut EditorCore, index: usize) -> bool {
+    let Some(inst) = core.project.texts.get(index) else {
+        core.status = "No such text.".into();
+        return false;
+    };
+    let copy = duplicated_instance(inst);
+    core.snapshot();
+    core.project.texts.insert(index + 1, copy);
+    core.status = "Text duplicated.".into();
+    true
+}
+
+/// Nudge the text instance at `index` by `(dx, dy)`
+/// stage units: every transform key shifts by the same
+/// delta ([`offset_instance_position`]). One press is
+/// one `snapshot()`, so repeated presses accumulate in
+/// position and in undo steps alike — the same
+/// once-per-press discipline as this file's steppers.
+/// Returns whether the instance moved. Status-only
+/// refusals (nothing snapshotted): a stale index, or an
+/// instance with no keys — it has no position to move.
+pub fn nudge_text_instance(core: &mut EditorCore, index: usize, dx: f32, dy: f32) -> bool {
+    let Some(inst) = core.project.texts.get(index) else {
+        core.status = "No such text.".into();
+        return false;
+    };
+    if inst.keys.is_empty() {
+        core.status = "Text has no position to move.".into();
+        return false;
+    }
+    core.snapshot();
+    if let Some(inst) = core.project.texts.get_mut(index) {
+        offset_instance_position(inst, dx, dy);
+    }
+    core.status = "Text nudged.".into();
+    true
+}
+
+/// Resize the text instance at `index` by one stepper
+/// step in `dir` (−1/+1): the shared [`step_size`]
+/// math, so the step is [`SIZE_STEP`] and the clamp is
+/// the `SIZE_MIN..=SIZE_MAX` range `load_instance`
+/// clamps loaded sizes to. One `snapshot()` when the
+/// size actually changes; at a clamp bound the press
+/// reports the size but snapshots nothing (mirroring
+/// `step_from_button`, which also declines to snapshot
+/// an unchanged size), and a stale index refuses the
+/// same way. Returns whether the size changed.
+pub fn resize_text_instance(core: &mut EditorCore, index: usize, dir: i32) -> bool {
+    let Some(inst) = core.project.texts.get(index) else {
+        core.status = "No such text.".into();
+        return false;
+    };
+    let next = step_size(inst.size, dir);
+    if next == inst.size {
+        core.status = format!("Text size {next:.0}.");
+        return false;
+    }
+    core.snapshot();
+    if let Some(inst) = core.project.texts.get_mut(index) {
+        inst.size = next;
+    }
+    core.status = format!("Text size {next:.0}.");
+    true
+}
+
 /// The full (untruncated) content of the text instance at
 /// `index` — what a list-row click loads into the tool's
 /// field.
@@ -208,6 +368,9 @@ pub fn instance_content(core: &EditorCore, index: usize) -> Option<String> {
 /// `TextToolState` — the project is not touched, nothing
 /// is snapshotted, and the size is clamped to the
 /// stepper's range like every other size the tool holds.
+/// It also records the index in `TextToolState::loaded`,
+/// which is what the nudge pad and the instance size
+/// steppers act on.
 fn load_instance(s: &mut State, index: usize) {
     let Some(inst) = s.core.project.texts.get(index) else {
         return;
@@ -216,6 +379,87 @@ fn load_instance(s: &mut State, index: usize) {
     let size = inst.size;
     s.text_tool.field.replace_text(content);
     s.text_tool.size = size.clamp(SIZE_MIN, SIZE_MAX);
+    s.text_tool.loaded = Some(index);
+}
+
+/// Where a remembered `loaded` index points after the
+/// instance at `removed` is deleted: the loaded instance
+/// itself is gone (`None`); an instance after the gap
+/// shifts down one; one before it is unmoved. Pure.
+pub fn loaded_after_removal(loaded: Option<usize>, removed: usize) -> Option<usize> {
+    match loaded {
+        Some(l) if l == removed => None,
+        Some(l) if l > removed => Some(l - 1),
+        other => other,
+    }
+}
+
+/// Where a remembered `loaded` index points after a new
+/// instance is inserted at `inserted_at`: an instance at
+/// or after the gap shifts up one. Pure.
+pub fn loaded_after_insertion(loaded: Option<usize>, inserted_at: usize) -> Option<usize> {
+    match loaded {
+        Some(l) if l >= inserted_at => Some(l + 1),
+        other => other,
+    }
+}
+
+/// Delete-button handler: [`delete_text_instance`] plus
+/// keeping `TextToolState::loaded` naming the same
+/// instance afterwards.
+fn delete_instance_row(s: &mut State, index: usize) {
+    if index < s.core.project.texts.len() {
+        s.text_tool.loaded = loaded_after_removal(s.text_tool.loaded, index);
+    }
+    delete_text_instance(&mut s.core, index);
+}
+
+/// Duplicate-button handler: [`duplicate_text_instance`]
+/// plus the `loaded` fix-up for the insertion it makes
+/// at `index + 1`.
+fn duplicate_instance_row(s: &mut State, index: usize) {
+    if duplicate_text_instance(&mut s.core, index) {
+        s.text_tool.loaded = loaded_after_insertion(s.text_tool.loaded, index + 1);
+    }
+}
+
+/// The loaded instance's index, or a status-only refusal
+/// when no row click has loaded one. The core ops
+/// bounds-check the index itself, so a stale `loaded`
+/// refuses there instead.
+fn loaded_index(s: &mut State) -> Option<usize> {
+    match s.text_tool.loaded {
+        Some(i) => Some(i),
+        None => {
+            s.core.status = "Load a text first.".into();
+            None
+        }
+    }
+}
+
+/// Nudge-pad handler: move the loaded instance by
+/// `(dx, dy)`. The buttons pass one [`NUDGE_STEP`] on a
+/// single axis (stage coordinates are y-down, so Up is
+/// a negative `dy`); no shift modifier exists on Rune
+/// buttons, so one step size is all a press can mean.
+fn nudge_loaded(s: &mut State, dx: f32, dy: f32) {
+    let Some(i) = loaded_index(s) else {
+        return;
+    };
+    nudge_text_instance(&mut s.core, i, dx, dy);
+}
+
+/// Instance size-stepper handler: resize the loaded
+/// instance, and keep the tool's pending size in step
+/// with it, the way [`load_instance`] set it.
+fn resize_loaded(s: &mut State, dir: i32) {
+    let Some(i) = loaded_index(s) else {
+        return;
+    };
+    resize_text_instance(&mut s.core, i, dir);
+    if let Some(inst) = s.core.project.texts.get(i) {
+        s.text_tool.size = inst.size;
+    }
 }
 
 /// Glyph height of the selected node's text segment, if
@@ -347,8 +591,9 @@ fn step_from_button(s: &mut State, dir: i32) {
 }
 
 /// The Text section: field + Add text, the size stepper,
-/// the selected figure's existing text segments, and the
-/// project's free-standing text instances.
+/// the selected figure's existing text segments, the
+/// project's free-standing text instances, and the
+/// loaded instance's nudge pad + size steppers.
 pub fn text_tool(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let rows = text_segments(core);
@@ -357,8 +602,9 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
     // Free-standing text instances: one row per instance —
     // a load button carrying the content preview (clicking
     // loads it into the field above for re-stamping), its
-    // key count and glyph height, and a Delete button.
-    // Both buttons carry the instance's real vec index.
+    // key count and glyph height, a Delete button and a
+    // Duplicate button. All buttons carry the instance's
+    // real vec index.
     let instances = text_instances(core);
     let mut texts_list = col().key("text-instances").gap(2.0);
     texts_list = texts_list.child(
@@ -395,11 +641,78 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                         .color(t.text_secondary),
                     )
                     .child(btn(&format!("text-del-{i}"), "Delete", false, t, move |s: &mut State| {
-                        delete_text_instance(&mut s.core, i)
+                        delete_instance_row(s, i)
+                    }))
+                    .child(btn(&format!("text-dup-{i}"), "Duplicate", false, t, move |s: &mut State| {
+                        duplicate_instance_row(s, i)
                     })),
             );
         }
     }
+
+    // The loaded instance's edit area: a nudge pad and
+    // size steppers acting on `TextToolState::loaded` —
+    // the instance the last row click loaded. Rendered
+    // either way; with nothing loaded the handlers refuse
+    // with a status line, and with a stale index the core
+    // ops refuse the same way.
+    let loaded_row = instances
+        .iter()
+        .find(|r| Some(r.index) == s.text_tool.loaded);
+    let loaded_label = match loaded_row {
+        Some(r) => format!("Loaded: {}", r.preview),
+        None => "No text loaded — click a text above to load it.".to_string(),
+    };
+    let loaded_size = match loaded_row {
+        Some(r) => format!("{:.0}", r.size),
+        None => "—".to_string(),
+    };
+    let instance_edit = col()
+        .key("text-instance-edit")
+        .w_full()
+        .gap(2.0)
+        .child(
+            text(loaded_label)
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(
+            row()
+                .key("text-nudge-pad")
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(btn("text-nudge-l", "←", false, t, |s| {
+                    nudge_loaded(s, -NUDGE_STEP, 0.0)
+                }))
+                .child(btn("text-nudge-u", "↑", false, t, |s| {
+                    nudge_loaded(s, 0.0, -NUDGE_STEP)
+                }))
+                .child(btn("text-nudge-d", "↓", false, t, |s| {
+                    nudge_loaded(s, 0.0, NUDGE_STEP)
+                }))
+                .child(btn("text-nudge-r", "→", false, t, |s| {
+                    nudge_loaded(s, NUDGE_STEP, 0.0)
+                })),
+        )
+        .child(
+            row()
+                .key("text-instance-size")
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(btn("text-isize-dn", "Size −", false, t, |s| {
+                    resize_loaded(s, -1)
+                }))
+                .child(
+                    text(loaded_size)
+                        .font(type_::LABEL)
+                        .color(t.text),
+                )
+                .child(btn("text-isize-up", "Size +", false, t, |s| {
+                    resize_loaded(s, 1)
+                })),
+        );
 
     let mut list = col().key("text-list").gap(2.0);
     if rows.is_empty() {
@@ -466,6 +779,7 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
         )
         .child(list)
         .child(texts_list)
+        .child(instance_edit)
 }
 
 #[cfg(test)]
@@ -690,5 +1004,215 @@ mod tests {
         add_text_to_core(&mut core, "Hi", 52.0);
         assert_eq!(selected_text_size(&core), Some(52.0));
         assert_eq!(display_size(&core, 36.0), 52.0, "real size wins");
+    }
+
+    /// Instance fixture with real key positions: `keys`
+    /// are `(frame, x, y)` triples; scale and angle are
+    /// fixed non-trivial values so tests can prove a
+    /// duplicate copies them verbatim.
+    fn push_instance_pos(
+        core: &mut EditorCore,
+        content: &str,
+        size: f32,
+        keys: &[(f32, f32, f32)],
+    ) {
+        core.project.texts.push(TextInstance {
+            content: content.into(),
+            size,
+            color: 0xFF_204060,
+            keys: keys
+                .iter()
+                .map(|&(frame, x, y)| InstanceKey {
+                    frame,
+                    x,
+                    y,
+                    scale: 1.5,
+                    angle: 30.0,
+                })
+                .collect(),
+        });
+    }
+
+    fn key_positions(core: &EditorCore, index: usize) -> Vec<(f32, f32)> {
+        core.project.texts[index]
+            .keys
+            .iter()
+            .map(|k| (k.x, k.y))
+            .collect()
+    }
+
+    #[test]
+    fn duplicated_instance_shifts_every_key_and_copies_the_rest() {
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "Label", 36.0, &[(0.0, 10.0, 20.0), (4.0, 50.0, 60.0)]);
+        let copy = duplicated_instance(&core.project.texts[0]);
+        assert_eq!(copy.content, "Label");
+        assert_eq!(copy.size, 36.0);
+        assert_eq!(copy.color, 0xFF_204060);
+        assert_eq!(copy.keys.len(), 2);
+        assert_eq!(
+            (copy.keys[0].x, copy.keys[0].y),
+            (10.0 + DUP_OFFSET, 20.0 + DUP_OFFSET),
+            "first key shifted by the duplicate offset"
+        );
+        assert_eq!(
+            (copy.keys[1].x, copy.keys[1].y),
+            (50.0 + DUP_OFFSET, 60.0 + DUP_OFFSET),
+            "every key shifts, not just the first"
+        );
+        assert_eq!(copy.keys[1].frame, 4.0, "timing copied verbatim");
+        assert_eq!(copy.keys[1].scale, 1.5, "scale copied verbatim");
+        assert_eq!(copy.keys[1].angle, 30.0, "angle copied verbatim");
+        assert_eq!(
+            key_positions(&core, 0),
+            vec![(10.0, 20.0), (50.0, 60.0)],
+            "the original is not moved"
+        );
+    }
+
+    #[test]
+    fn duplicate_text_instance_inserts_offset_clone_after_original() {
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "A", 20.0, &[(0.0, 10.0, 20.0)]);
+        push_instance_pos(&mut core, "B", 20.0, &[(0.0, 90.0, 90.0)]);
+        let depth_before = core.undo_depth();
+        assert!(duplicate_text_instance(&mut core, 0));
+        assert_eq!(core.status, "Text duplicated.");
+        assert_eq!(core.undo_depth(), depth_before + 1, "one snapshot per duplicate");
+        let contents: Vec<&str> = core
+            .project
+            .texts
+            .iter()
+            .map(|t| t.content.as_str())
+            .collect();
+        assert_eq!(contents, ["A", "A", "B"], "the copy lands right after its original");
+        assert_eq!(key_positions(&core, 0), vec![(10.0, 20.0)], "original unmoved");
+        assert_eq!(
+            key_positions(&core, 1),
+            vec![(10.0 + DUP_OFFSET, 20.0 + DUP_OFFSET)],
+            "copy offset from the original"
+        );
+        assert_eq!(key_positions(&core, 2), vec![(90.0, 90.0)], "later instances unmoved");
+        core.undo();
+        assert_eq!(core.project.texts.len(), 2, "one undo removes the duplicate");
+    }
+
+    #[test]
+    fn duplicate_text_instance_out_of_range_is_status_only_noop() {
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "A", 20.0, &[(0.0, 10.0, 20.0)]);
+        let depth_before = core.undo_depth();
+        assert!(!duplicate_text_instance(&mut core, 7));
+        assert_eq!(core.status, "No such text.");
+        assert_eq!(core.project.texts.len(), 1, "nothing was inserted");
+        assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
+    }
+
+    #[test]
+    fn nudge_text_instance_accumulates_deltas_across_presses() {
+        let mut core = EditorCore::new();
+        push_instance_pos(
+            &mut core,
+            "A",
+            20.0,
+            &[(0.0, 100.0, 100.0), (2.0, 120.0, 90.0)],
+        );
+        let depth_before = core.undo_depth();
+        assert!(nudge_text_instance(&mut core, 0, NUDGE_STEP, 0.0));
+        assert!(nudge_text_instance(&mut core, 0, NUDGE_STEP, 0.0));
+        assert!(nudge_text_instance(&mut core, 0, 0.0, -NUDGE_STEP));
+        assert_eq!(core.status, "Text nudged.");
+        assert_eq!(
+            key_positions(&core, 0),
+            vec![(108.0, 96.0), (128.0, 86.0)],
+            "two +x presses and one −y press accumulate on every key"
+        );
+        assert_eq!(
+            core.undo_depth(),
+            depth_before + 3,
+            "one snapshot per press — presses do not coalesce"
+        );
+        let key = core.project.texts[0].keys[1];
+        assert_eq!(key.frame, 2.0, "a nudge never changes timing");
+        assert_eq!(key.scale, 1.5, "a nudge never changes scale");
+        assert_eq!(key.angle, 30.0, "a nudge never changes angle");
+    }
+
+    #[test]
+    fn nudge_text_instance_out_of_range_is_status_only_noop() {
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "A", 20.0, &[(0.0, 10.0, 20.0)]);
+        let depth_before = core.undo_depth();
+        assert!(!nudge_text_instance(&mut core, 7, NUDGE_STEP, 0.0));
+        assert_eq!(core.status, "No such text.");
+        assert_eq!(key_positions(&core, 0), vec![(10.0, 20.0)], "nothing moved");
+        assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
+    }
+
+    #[test]
+    fn nudge_text_instance_without_keys_is_status_only_noop() {
+        let mut core = EditorCore::new();
+        push_instance(&mut core, "Keyless", 20.0, 0);
+        assert!(core.project.texts[0].keys.is_empty());
+        let depth_before = core.undo_depth();
+        assert!(!nudge_text_instance(&mut core, 0, NUDGE_STEP, 0.0));
+        assert_eq!(core.status, "Text has no position to move.");
+        assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
+    }
+
+    #[test]
+    fn resize_text_instance_steps_like_the_segment_stepper() {
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "A", 28.0, &[(0.0, 10.0, 20.0)]);
+        let depth_before = core.undo_depth();
+        assert!(resize_text_instance(&mut core, 0, 1));
+        assert_eq!(core.project.texts[0].size, 28.0 + SIZE_STEP);
+        assert_eq!(core.status, "Text size 32.");
+        assert_eq!(core.undo_depth(), depth_before + 1, "one snapshot per resize");
+        assert!(resize_text_instance(&mut core, 0, -1));
+        assert_eq!(core.project.texts[0].size, 28.0);
+        core.undo();
+        assert_eq!(core.project.texts[0].size, 32.0, "one undo steps the size back once");
+    }
+
+    #[test]
+    fn resize_text_instance_clamps_without_snapshotting_at_the_bounds() {
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "A", SIZE_MAX, &[(0.0, 10.0, 20.0)]);
+        let depth_before = core.undo_depth();
+        assert!(!resize_text_instance(&mut core, 0, 1), "already at the max");
+        assert_eq!(core.project.texts[0].size, SIZE_MAX);
+        assert_eq!(core.status, "Text size 160.");
+        core.project.texts[0].size = SIZE_MIN;
+        assert!(!resize_text_instance(&mut core, 0, -1), "already at the min");
+        assert_eq!(core.project.texts[0].size, SIZE_MIN);
+        assert_eq!(
+            core.undo_depth(),
+            depth_before,
+            "a press that changes nothing snapshots nothing"
+        );
+    }
+
+    #[test]
+    fn resize_text_instance_out_of_range_is_status_only_noop() {
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "A", 28.0, &[(0.0, 10.0, 20.0)]);
+        let depth_before = core.undo_depth();
+        assert!(!resize_text_instance(&mut core, 7, 1));
+        assert_eq!(core.status, "No such text.");
+        assert_eq!(core.project.texts[0].size, 28.0, "nothing was resized");
+        assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
+    }
+
+    #[test]
+    fn loaded_index_fixups_follow_removals_and_insertions() {
+        assert_eq!(loaded_after_removal(None, 0), None);
+        assert_eq!(loaded_after_removal(Some(2), 2), None, "the loaded instance itself was deleted");
+        assert_eq!(loaded_after_removal(Some(3), 1), Some(2), "after the gap shifts down");
+        assert_eq!(loaded_after_removal(Some(0), 1), Some(0), "before the gap is unmoved");
+        assert_eq!(loaded_after_insertion(None, 1), None);
+        assert_eq!(loaded_after_insertion(Some(0), 1), Some(0), "before the gap is unmoved");
+        assert_eq!(loaded_after_insertion(Some(1), 1), Some(2), "at the gap shifts up");
+        assert_eq!(loaded_after_insertion(Some(3), 1), Some(4), "after the gap shifts up");
     }
 }

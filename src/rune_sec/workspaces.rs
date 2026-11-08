@@ -46,8 +46,8 @@
 //! exactly as the GPUI app kept Transport/Home visible in
 //! several of its workspaces.
 
-use rune::tok::Theme;
-use rune::{row, El};
+use rune::tok::{type_, Theme};
+use rune::{col, row, text, El};
 use stykanimate_rs::shell::{load_layout, save_layout, LayoutPrefs};
 
 use crate::chrome_view::btn;
@@ -108,6 +108,7 @@ pub enum Section {
     TextTool,
     FxBrowser,
     FxClips,
+    Particles,
     Audio,
     Waveform,
     Clips,
@@ -173,10 +174,12 @@ impl Workspace {
 
     /// One sentence saying what this workspace is for —
     /// the same summaries that head the gating-table
-    /// lists below, exposed for surfaces that describe
-    /// the workspaces without mounting them (the help
-    /// panel, the status strip). Keep each to a single
-    /// sentence ending in a period.
+    /// lists below. Shown under the chip row by
+    /// [`workspace_row`] (via [`blurb_line`]) and also
+    /// exposed for surfaces that describe the workspaces
+    /// without mounting them (the help panel, the status
+    /// strip). Keep each to a single sentence ending in
+    /// a period.
     pub fn blurb(self) -> &'static str {
         match self {
             Workspace::Animate => {
@@ -250,10 +253,10 @@ pub fn select_workspace(s: &mut State, ws: Workspace) {
 }
 
 impl Section {
-    /// All 28 gated sections (coverage tests iterate
+    /// All 29 gated sections (coverage tests iterate
     /// this; the integrator's view maps each mounted
     /// panel to one variant).
-    pub fn all() -> [Section; 28] {
+    pub fn all() -> [Section; 29] {
         [
             Section::Figures,
             Section::Library,
@@ -276,6 +279,7 @@ impl Section {
             Section::TextTool,
             Section::FxBrowser,
             Section::FxClips,
+            Section::Particles,
             Section::Audio,
             Section::Waveform,
             Section::Clips,
@@ -346,6 +350,7 @@ const GRAPH_SECTIONS: &[Section] = &[
 const EFFECTS_SECTIONS: &[Section] = &[
     Section::FxBrowser,
     Section::FxClips,
+    Section::Particles,
     Section::Scene,
     Section::Figures,
 ];
@@ -402,6 +407,14 @@ pub fn section_visible(ws: Workspace, section: Section) -> bool {
     sections_of(ws).contains(&section)
 }
 
+/// The line [`workspace_row`] shows under the chips:
+/// the active workspace's own [`Workspace::blurb`].
+/// Factored out of the builder so the row's text source
+/// is unit-testable without mounting the shell.
+pub fn blurb_line(ws: Workspace) -> &'static str {
+    ws.blurb()
+}
+
 /// The workspace row: one chip per workspace, keyed
 /// `ws-*`, the active workspace rendered active. A press
 /// runs [`select_workspace`] (switch + persist). Mount
@@ -418,11 +431,24 @@ pub fn section_visible(ws: Workspace, section: Section) -> bool {
 /// has no muted/secondary span — so the middle-dot
 /// suffix in the same label is the least noisy rendering
 /// available.
+///
+/// Under the chips, a single muted line (key `ws-blurb`)
+/// shows the ACTIVE workspace's [`Workspace::blurb`] —
+/// that method's consumer. The root element keeps the
+/// `workspace-row` key it has always carried; it is now
+/// a column (chips row, keyed `workspace-chips`, over
+/// the blurb line) instead of the bare chips row, which
+/// is transparent to the mount site in `main.rs` (it
+/// mounts the returned element as one child). The blurb
+/// line `.truncate()`s — Rune's one-line mode, the same
+/// overflow handling the status strip's tail segment
+/// uses — so a narrow window elides it with "…" instead
+/// of letting it wrap or push the layout wider.
 pub fn workspace_row(s: &State, t: &Theme) -> El {
-    let mut bar = row().key("workspace-row").gap(4.0).center_y();
+    let mut chips = row().key("workspace-chips").gap(4.0).center_y();
     for (i, ws) in Workspace::all().into_iter().enumerate() {
         let chip_label = format!("{} · Alt+{}", ws.label(), i + 1);
-        bar = bar.child(btn(
+        chips = chips.child(btn(
             ws.key(),
             &chip_label,
             s.workspace == ws,
@@ -432,7 +458,17 @@ pub fn workspace_row(s: &State, t: &Theme) -> El {
             },
         ));
     }
-    bar
+    col()
+        .key("workspace-row")
+        .gap(2.0)
+        .child(chips)
+        .child(
+            text(blurb_line(s.workspace))
+                .key("ws-blurb")
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .truncate(),
+        )
 }
 
 #[cfg(test)]
@@ -479,6 +515,59 @@ mod tests {
                 assert_ne!(b, other.blurb(), "blurbs must be unique");
             }
         }
+    }
+
+    #[test]
+    fn blurb_line_is_the_workspaces_own_blurb() {
+        // The helper the chip row renders must be the
+        // workspace's blurb itself — non-empty for every
+        // variant, so the line under the chips can never
+        // come up blank.
+        for ws in Workspace::all() {
+            assert_eq!(blurb_line(ws), ws.blurb());
+            assert!(!blurb_line(ws).is_empty(), "{ws:?} blurb line is empty");
+        }
+    }
+
+    #[test]
+    fn blurb_strings_are_pinned() {
+        // The exact sentences shown under the chip row.
+        // Pinning them means a wording edit is a
+        // deliberate test change, never a silent one —
+        // and an emptied blurb fails here even if the
+        // non-empty checks above are ever relaxed.
+        assert_eq!(
+            blurb_line(Workspace::Animate),
+            "Pose figures and build the animation frame by frame, with the inspectors, camera, playback and frame tools."
+        );
+        assert_eq!(
+            blurb_line(Workspace::Draw),
+            "Draw freehand strokes, shapes and text over the figures."
+        );
+        assert_eq!(
+            blurb_line(Workspace::Graph),
+            "Edit the motion curves and easing of the selected figure's keys."
+        );
+        assert_eq!(
+            blurb_line(Workspace::Effects),
+            "Add and edit particle and visual-effects clips anchored to the scene."
+        );
+        assert_eq!(
+            blurb_line(Workspace::Audio),
+            "Place sound clips and line them up against the animation."
+        );
+        assert_eq!(
+            blurb_line(Workspace::Build3D),
+            "Pose the 3D figure and frame it with the camera."
+        );
+        assert_eq!(
+            blurb_line(Workspace::Export),
+            "Render and export the project to images, video and other formats."
+        );
+        assert_eq!(
+            blurb_line(Workspace::Home),
+            "Open, create and manage projects, and check project stats."
+        );
     }
 
     #[test]

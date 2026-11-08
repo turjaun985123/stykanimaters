@@ -31,6 +31,30 @@
 //!   a typed query filters exactly as before and ignores
 //!   the recents entirely. Recents are session-only — the
 //!   list starts empty on every launch.
+//! * Phase G added four commands over capabilities that
+//!   landed as callable core-level functions, each running
+//!   the same code path as its panel button:
+//!   `restart-playback` (the playback panel's `pb-restart`
+//!   body), `particle-add-event`
+//!   (`EditorCore::particle_add_event` at the current
+//!   frame, stage centre — the particles panel's own add
+//!   arguments), `cam-follow-clear`
+//!   (`camera_panel::follow_clear`, used directly as the
+//!   `run` value) and `key-all-channels`
+//!   (`keyframe_tools::key_all_here_core`). Two Phase G
+//!   candidates were deliberately NOT added: toggling
+//!   loop playback and stepping the stroke selection both
+//!   write *shell* state (`State::loop_playback`,
+//!   `State::stroke_selected`) that this table's
+//!   `fn(&mut EditorCore)` dispatch cannot reach — a
+//!   command here that computed a value with nowhere to
+//!   store it would do nothing, which is worse than no
+//!   command. They become addable if the table's `run`
+//!   type ever migrates to `fn(&mut State)`. The longer
+//!   table (81 entries) needs no change to the recents /
+//!   display logic: [`filter_commands`] and
+//!   [`display_commands`] are length-agnostic and still
+//!   cap every listing at [`MAX_RESULTS`].
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -223,6 +247,43 @@ fn cmd_delete_last_audio_clip(c: &mut EditorCore) {
     }
 }
 
+/// Phase G: Restart playback. The playback panel's
+/// `pb-restart` button calls its private helper
+/// `start_playback_at(core, 0)` (playback_controls.rs),
+/// whose whole body is `goto(frame)` then `playing = true`
+/// — `goto` also resets the fractional playhead, so a
+/// restart mid-tween starts cleanly on frame 0. The helper
+/// is not public, so this shim drives exactly those two
+/// core writes, nothing more.
+fn cmd_restart_playback(c: &mut EditorCore) {
+    c.goto(0);
+    c.playing = true;
+}
+
+/// Phase G: add a particle event at the current frame, at
+/// the stage centre — the exact arguments the particles
+/// panel's own Add button passes to
+/// `EditorCore::particle_add_event` (particles_panel.rs).
+/// The panel handler also selects the new event in shell
+/// state afterwards; the palette has no shell state to
+/// select in, so the core op is the whole command.
+fn cmd_add_particle_event(c: &mut EditorCore) {
+    let [w, h] = c.project.stage;
+    let frame = c.current;
+    let _ = c.particle_add_event(frame, w / 2.0, h / 2.0);
+}
+
+/// Phase G: key every graph channel at the current frame.
+/// `keyframe_tools::key_all_here_core` is the core half
+/// of the keyframe panel's "key all" button (its `State`
+/// wrapper `key_all_here` calls exactly this); it owns
+/// the single snapshot, the per-channel keying and the
+/// status line, including the no-channels refusal. The
+/// returned channel count is the panel's business.
+fn cmd_key_all_channels(c: &mut EditorCore) {
+    let _ = crate::rune_sec::keyframe_tools::key_all_here_core(c);
+}
+
 /// The command inventory. Order matters: it is the display
 /// order for an empty query and the tie-break order for equal
 /// fuzzy scores.
@@ -232,6 +293,7 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "prev", title: "Previous frame", group: "Transport", run: cmd_prev_frame },
     Command { key: "next", title: "Next frame", group: "Transport", run: cmd_next_frame },
     Command { key: "first-frame", title: "Go to first frame", group: "Transport", run: cmd_first_frame },
+    Command { key: "restart-playback", title: "Restart playback", group: "Transport", run: cmd_restart_playback },
     // -- Frames ---------------------------------------------------
     Command { key: "add-frame", title: "Add frame", group: "Frames", run: EditorCore::add_frame },
     Command { key: "dup-frame", title: "Duplicate frame", group: "Frames", run: EditorCore::duplicate_frame },
@@ -277,8 +339,10 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "cam-centre", title: "Centre on selection", group: "Camera", run: EditorCore::centre_on_selection },
     Command { key: "cam-clear-key", title: "Clear camera key", group: "Camera", run: EditorCore::camera_clear_key },
     Command { key: "cam-follow", title: "Toggle camera follow", group: "Camera", run: EditorCore::toggle_camera_follow },
+    Command { key: "cam-follow-clear", title: "Camera follow: clear", group: "Camera", run: crate::rune_sec::camera_panel::follow_clear },
     // -- Graph ----------------------------------------------------
     Command { key: "key-graph-angle", title: "Key graph angle", group: "Graph", run: EditorCore::key_graph_angle },
+    Command { key: "key-all-channels", title: "Key all channels here", group: "Graph", run: cmd_key_all_channels },
     Command { key: "clear-graph", title: "Clear graph curves", group: "Graph", run: EditorCore::clear_graph },
     // -- View -----------------------------------------------------
     Command { key: "onion", title: "Toggle onion skin", group: "View", run: cmd_toggle_onion },
@@ -295,6 +359,7 @@ pub static COMMANDS: &[Command] = &[
     // -- Effects --------------------------------------------------
     Command { key: "particle-burst", title: "Add particle: Burst", group: "Effects", run: cmd_particle_burst },
     Command { key: "particle-sparkle", title: "Add particle: Sparkle", group: "Effects", run: cmd_particle_sparkle },
+    Command { key: "particle-add-event", title: "Add particle event", group: "Effects", run: cmd_add_particle_event },
     Command { key: "fx-clip-confetti", title: "Add FX clip: Confetti", group: "Effects", run: cmd_fx_confetti },
     Command { key: "fx-clip-lightning", title: "Add FX clip: Lightning", group: "Effects", run: cmd_fx_lightning },
     Command { key: "clear-particles", title: "Clear particles and FX", group: "Effects", run: EditorCore::clear_particles },
@@ -751,7 +816,10 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(total, keys.len(), "duplicate command keys");
-        assert!(total >= 77, "palette should cover 77+ commands, has {total}");
+        // 77 commands through Phase F, +4 in Phase G
+        // (restart-playback, particle-add-event,
+        // cam-follow-clear, key-all-channels).
+        assert_eq!(total, 81, "palette should cover 81 commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }
@@ -841,6 +909,78 @@ mod tests {
         (COMMANDS[idx_of("delete-audio-clip")].run)(&mut core);
         assert_eq!(core.project.audio.len(), 1);
         assert_eq!(core.project.audio[0].path, "a.wav");
+    }
+
+    #[test]
+    fn phase_g_commands_are_present_and_wired() {
+        use stykanimate_rs::graph::{Channel, ChannelTarget, Key};
+        // All four Phase G keys resolve (idx_of panics if not).
+        for key in [
+            "restart-playback",
+            "particle-add-event",
+            "cam-follow-clear",
+            "key-all-channels",
+        ] {
+            idx_of(key);
+        }
+        // Restart: from the last frame, stopped, the command
+        // lands on frame 0 playing — the playback panel's
+        // pb-restart body (`goto(0)` + `playing = true`).
+        let mut core = EditorCore::new();
+        let n = core.frame_count();
+        assert!(n > 1, "demo project needs 2+ frames for this test");
+        core.goto(n - 1);
+        core.playing = false;
+        (COMMANDS[idx_of("restart-playback")].run)(&mut core);
+        assert_eq!(core.current, 0);
+        assert!(core.playing);
+        // Particle event: exactly one new event, on the
+        // current frame, at the stage centre — the
+        // particles panel's own add arguments.
+        let mut core = EditorCore::new();
+        let frame = core.current;
+        let [w, h] = core.project.stage;
+        let before = core.project.particles.len();
+        (COMMANDS[idx_of("particle-add-event")].run)(&mut core);
+        assert_eq!(core.project.particles.len(), before + 1);
+        let ev = &core.project.particles[before];
+        assert_eq!(ev.frame, frame);
+        assert!((ev.x - w / 2.0).abs() < 1e-4, "event x {} != centre {}", ev.x, w / 2.0);
+        assert!((ev.y - h / 2.0).abs() < 1e-4, "event y {} != centre {}", ev.y, h / 2.0);
+        // Camera follow clear: the field goes to None with
+        // camera_panel::follow_clear's own status wording.
+        let mut core = EditorCore::new();
+        core.project.camera_follow = Some(0);
+        (COMMANDS[idx_of("cam-follow-clear")].run)(&mut core);
+        assert_eq!(core.project.camera_follow, None);
+        assert_eq!(core.status, "Camera follow off.");
+        // Key all channels: with no channels the helper is
+        // a status-only refusal; with one channel the
+        // current frame gains a key holding the evaluated
+        // value, as one undo step.
+        let mut core = EditorCore::new();
+        core.project.channels.clear();
+        (COMMANDS[idx_of("key-all-channels")].run)(&mut core);
+        assert_eq!(core.status, "No graph channels to key.");
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![Key::flat(0.0, 10.0), Key::flat(2.0, 30.0)],
+        });
+        if core.frame_count() > 1 {
+            core.goto(1);
+        }
+        let at = core.current as f32;
+        (COMMANDS[idx_of("key-all-channels")].run)(&mut core);
+        assert_eq!(
+            core.status,
+            format!("Keyed 1 channels at frame {}.", core.current + 1)
+        );
+        let keys = &core.project.channels[0].keys;
+        assert!(
+            keys.iter().any(|k| (k.frame - at).abs() < 1e-6),
+            "no key at frame {at}: {keys:?}"
+        );
     }
 
     // -- fuzzy_score -------------------------------------------

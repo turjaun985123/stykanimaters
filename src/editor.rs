@@ -1663,6 +1663,19 @@ impl EditorCore {
         self.project.figures.swap(fi, target);
         for frame in &mut self.project.frames {
             frame.poses.swap(fi, target);
+            // Bend rows are per-figure like pose rows;
+            // swap them where both rows exist (the table
+            // is sparse — a missing row reads as 0.0).
+            if fi < frame.bends.len() && target < frame.bends.len() {
+                frame.bends.swap(fi, target);
+            }
+        }
+        // Figure-indexed references ride the swap
+        // (Phase G): particle anchors, FX clips, graph
+        // channels and the camera-follow target.
+        crate::figure_ops::remap_figures_after_move(&mut self.project, fi, target);
+        if let Some(s) = self.solo {
+            self.solo = Some(crate::figure_ops::remap_index_after_move(s, fi, target));
         }
         self.selected_figure = target;
         self.status = "Figure order changed.".into();
@@ -3648,6 +3661,10 @@ impl EditorCore {
                 self.playhead = 0.0;
                 self.selected_figure = 0;
                 self.selected_node = None;
+                // Mirror the dialog-open op: a solo index
+                // from the previous project must not hide
+                // every figure in the newly opened one.
+                self.solo = None;
                 self.status = format!("Opened {}", path.display());
             }
             Err(e) => self.status = format!("Open failed: {e}"),

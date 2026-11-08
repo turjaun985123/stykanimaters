@@ -28,6 +28,7 @@ pub mod model;
 pub mod nodes;
 pub mod nodes_anim;
 pub mod paint;
+pub mod particle_ops;
 pub mod pivot;
 pub mod projects;
 pub mod shell;

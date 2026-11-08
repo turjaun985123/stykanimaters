@@ -943,6 +943,27 @@ mod tests {
     }
 
     #[test]
+    fn apply_pose_reports_a_missing_library_entry() {
+        let mut core = EditorCore::new();
+        core.enter_3d();
+        // Pose the figure so "pose untouched" is observable.
+        assert!(select_joint(&mut core, 3));
+        core.fig3_rotate(2, 25.0);
+        let before = core.fig3.as_ref().unwrap().pose.clone();
+        // A name that was never saved (the scan can race a
+        // file deleted outside the app): the load fails, the
+        // handler reports it, and the session pose is left
+        // exactly as it was — no partial apply, no panic.
+        assert!(!apply_pose(&mut core, "Audit Missing Pose Qqzzx"));
+        assert!(
+            core.status.contains("failed to load"),
+            "unexpected status: {}",
+            core.status
+        );
+        assert_eq!(core.fig3.as_ref().unwrap().pose, before);
+    }
+
+    #[test]
     fn mirror_pose_flips_and_restores() {
         let mut core = EditorCore::new();
         assert!(!apply_mirror_pose(&mut core));

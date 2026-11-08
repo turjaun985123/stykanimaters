@@ -20,13 +20,18 @@
 //!
 //! ## What this module adds
 //!
-//! The three `EditorCore` methods the Rune shell needs —
+//! The `EditorCore` methods the Rune shell needs —
 //! [`EditorCore::start_playback_audio`],
-//! [`EditorCore::stop_playback_audio`] and
+//! [`EditorCore::stop_playback_audio`],
+//! [`EditorCore::sync_playback_audio_on_wrap`] and
 //! [`EditorCore::playback_audio_active`] — delegating to that
 //! same player and mix. Start uses the GPUI shell's exact
 //! playhead convention: `current` frame over `fps` (floored at
 //! 1), so the audio starts at the frame the user sees selected.
+//! The sync method closes the loop-wrap limit (Phase G): when
+//! the shell's per-tick frame tracking shows the playhead
+//! wrapped while playing, it restarts the audio from the
+//! playhead, so each visual loop gets its own audio pass.
 //!
 //! ## Where the player lives, and why
 //!
@@ -44,12 +49,29 @@
 //! ## Honest limits (inherited, not new)
 //!
 //! The player does not synchronise against a sample clock
-//! (`audio.rs` documents this): if the visual playhead loops,
-//! the audio does not loop with it — it plays the audible span
-//! once from the start position and ends. Seeking or scrubbing
-//! while playing does not move the audio. The GPUI shell had
-//! exactly these limits; closing them needs a clock-synced
-//! player, which is a different piece of work.
+//! (`audio.rs` documents this), so within one pass the audio
+//! and the picture can drift apart by however much their
+//! clocks disagree.
+//!
+//! The loop limit is closed for the wrap case:
+//! [`EditorCore::sync_playback_audio_on_wrap`] restarts the
+//! audio whenever the visual playhead wraps — at the end of
+//! the timeline, or at the end of a loop range (the restart
+//! starts from the wrapped-to frame, so a range that begins
+//! mid-timeline restarts its audio at the range start, which
+//! is where the picture is). Two things remain open, plainly:
+//!
+//! - **No scrub-follow.** Seeking or scrubbing while playing
+//!   does not re-sync the audio; only pressing Play and the
+//!   loop wrap restart it. A seek leaves the audio playing
+//!   its original course until it ends or playback stops.
+//! - **A wrap inside a single tick can be missed.** The
+//!   detection compares whole frames between ticks; a tick
+//!   that advanced the playhead by a full loop or more and
+//!   landed on a frame at or after the previous one is
+//!   indistinguishable from ordinary forward motion. At the
+//!   shell's per-frame tick rate this needs a stall of a
+//!   whole loop's duration, but it is not impossible.
 
 use std::cell::RefCell;
 
@@ -69,6 +91,37 @@ thread_local! {
 /// (`audio::clip_offset_secs`).
 fn playhead_secs(core: &EditorCore) -> f32 {
     core.current as f32 / core.project.fps.max(1.0)
+}
+
+/// Did the playhead wrap between two poll ticks? Pure decision
+/// behind [`EditorCore::sync_playback_audio_on_wrap`].
+///
+/// The core's wrap semantics (`advance_play` in `editor.rs`):
+/// the fractional playhead advances monotonically and is folded
+/// back by the timeline length — or, with a loop range set, by
+/// the range's span — so the integer `current` frame it lands
+/// on *decreases* exactly when a wrap happened: from the last
+/// frame (or the range end) back to frame 0 (or the range
+/// start). A decrease while playing is therefore the wrap
+/// signal, and nothing else in normal playback produces one —
+/// forward motion never lowers `current`, and a paused playhead
+/// does not move at all.
+///
+/// The guards keep stale or degenerate inputs from reading as
+/// a wrap: both ticks must be playing (a frame drop across a
+/// pause is a seek the user made while stopped, and Play
+/// already restarts the audio for it), and the timeline needs
+/// at least two frames — with zero frames `advance_play` never
+/// runs, and with one frame `current` is always 0, so no
+/// decrease can occur.
+fn playhead_wrapped(
+    was_playing: bool,
+    now_playing: bool,
+    prev_frame: usize,
+    cur_frame: usize,
+    frame_count: usize,
+) -> bool {
+    was_playing && now_playing && frame_count > 1 && cur_frame < prev_frame
 }
 
 impl EditorCore {
@@ -102,6 +155,52 @@ impl EditorCore {
     /// call when nothing is playing.
     pub fn stop_playback_audio(&mut self) {
         PLAYER.with(|player| player.borrow_mut().stop());
+    }
+
+    /// Re-sync the audio after a loop wrap: if the playhead
+    /// wrapped between the shell's previous poll tick
+    /// (`prev_frame`) and this one (`cur_frame`) while playing
+    /// — the decision lives in `playhead_wrapped` — and sound
+    /// is actually running, restart it from the top of the
+    /// wrapped-to position via stop + start.
+    ///
+    /// The restart reuses [`EditorCore::start_playback_audio`],
+    /// so it inherits that method's behaviour exactly: it
+    /// starts at the current frame (frame 0 after a full loop,
+    /// the range start after a loop-range wrap), succeeds
+    /// silently when nothing is audible there, and reports a
+    /// player launch failure on `core.status`.
+    ///
+    /// When there was no wrap, or no audio is active (nothing
+    /// audible, or the player already exited), this is a
+    /// no-op and writes nothing to the status line. The shell
+    /// calls it every poll tick with the frame it saw last
+    /// tick and `self.current`; the per-tick cost when nothing
+    /// wraps is the comparison plus one process-liveness
+    /// check.
+    ///
+    /// Both of the helper's playing flags are this core's
+    /// current `playing`: the call happens inside the same
+    /// tick that advanced the playhead, so the state that
+    /// produced the motion and the state now are one. The
+    /// two-flag guard still earns its keep at this level —
+    /// on a stopped tick `playing` is false and nothing is
+    /// considered, and a seek made while stopped is followed
+    /// by Play's own fresh start, so a redundant restart on
+    /// the first playing tick after one would start from the
+    /// same current frame anyway.
+    pub fn sync_playback_audio_on_wrap(&mut self, prev_frame: usize, cur_frame: usize) {
+        let wrapped = playhead_wrapped(
+            self.playing,
+            self.playing,
+            prev_frame,
+            cur_frame,
+            self.project.frames.len(),
+        );
+        if wrapped && self.playback_audio_active() {
+            self.stop_playback_audio();
+            self.start_playback_audio();
+        }
     }
 
     /// True while the player's `ffplay` process is still
@@ -255,5 +354,71 @@ mod tests {
         core.stop_playback_audio();
         assert!(!core.playback_audio_active());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn wrapped_detects_the_end_of_timeline_wrap() {
+        // Last frame → frame 0, the `advance_play` no-range
+        // fold (playhead crossing the frame count).
+        assert!(playhead_wrapped(true, true, 9, 0, 10));
+        assert!(playhead_wrapped(true, true, 1, 0, 2));
+        // A loop-range fold lands on the range start, not
+        // necessarily 0 — still a decrease, still a wrap.
+        assert!(playhead_wrapped(true, true, 7, 3, 10));
+    }
+
+    #[test]
+    fn wrapped_ignores_ordinary_forward_motion() {
+        assert!(!playhead_wrapped(true, true, 3, 4, 10));
+        // Holding on the same frame (a long-duration frame the
+        // playhead has not crossed yet) is not a wrap.
+        assert!(!playhead_wrapped(true, true, 4, 4, 10));
+        assert!(!playhead_wrapped(true, true, 0, 0, 10));
+        assert!(!playhead_wrapped(true, true, 0, 9, 10));
+    }
+
+    #[test]
+    fn wrapped_requires_playing_on_both_ticks() {
+        // Paused now: the playhead did not move this tick, so
+        // any decrease is a seek made while stopped — Play
+        // restarts the audio for those, not the wrap sync.
+        assert!(!playhead_wrapped(true, false, 9, 0, 10));
+        // Not playing last tick either (the pass just started;
+        // start_playback_audio already fired for it).
+        assert!(!playhead_wrapped(false, true, 9, 0, 10));
+        assert!(!playhead_wrapped(false, false, 9, 0, 10));
+    }
+
+    #[test]
+    fn wrapped_needs_at_least_two_frames() {
+        // One frame: `current` is always 0, no decrease can
+        // occur — and stale indices must not read as one.
+        assert!(!playhead_wrapped(true, true, 0, 0, 1));
+        assert!(!playhead_wrapped(true, true, 3, 0, 1));
+        // Zero frames: advance_play returns before moving.
+        assert!(!playhead_wrapped(true, true, 0, 0, 0));
+        assert!(!playhead_wrapped(true, true, 3, 0, 0));
+    }
+
+    #[test]
+    fn sync_without_audio_is_a_silent_no_op() {
+        // No clips → the player is never active, so even a
+        // textbook wrap shape must leave everything untouched.
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.playing = true;
+        let last = core.frame_count() - 1;
+        assert!(last > 0, "demo project should have several frames");
+        core.current = 0;
+        core.status = "Sentinel.".into();
+        core.sync_playback_audio_on_wrap(last, core.current);
+        assert_eq!(core.status, "Sentinel.");
+        assert!(!core.playback_audio_active());
+        // Ordinary advance and a paused wrap shape alike.
+        core.sync_playback_audio_on_wrap(0, 1);
+        core.playing = false;
+        core.sync_playback_audio_on_wrap(last, 0);
+        assert_eq!(core.status, "Sentinel.");
+        assert!(!core.playback_audio_active());
     }
 }

@@ -39,9 +39,22 @@
 //! preview, so it draws every figure in its own colour
 //! regardless of hidden/solo state (the row's name dimming
 //! and eye toggle already carry visibility).
+//!
+//! Phase G (section 17/40) adds a name filter: a `TextEdit`
+//! in [`FiguresPanelState::filter`] (key `figures-filter`,
+//! directly under the header) narrows the list through the
+//! pure [`visible_figures`] helper — case-insensitive
+//! substring on the figure name, query trimmed. Filtering
+//! is view-only: rows are still built from the real figure
+//! index end-to-end, so every row control and thumbnail
+//! acts on the figure it shows. With a filter active the
+//! header count reads "{shown} of {total} figures" (see
+//! [`count_line`]); with none it is the bare total, exactly
+//! as before. A filter that hides everything shows a
+//! "No figures match" line instead of rows.
 
 use rune::tok::{self, type_, Theme};
-use rune::{canvas, col, el, row, text, Color, El, LineCap, Shape};
+use rune::{canvas, col, el, row, text, text_input, Color, El, LineCap, Shape, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::V2;
 
@@ -49,14 +62,22 @@ use crate::stage_view::{hex_color, ngon};
 use crate::State;
 
 /// View-local state for the figures panel. The engine tracks
-/// everything about the figures themselves; the only thing the
-/// shell owns is whether the panel body is collapsed.
+/// everything about the figures themselves; the shell owns
+/// only the panel's collapse flag and the name-filter text.
+/// The derived `Default` covers both (`TextEdit` defaults
+/// to empty), so `main.rs`'s `Default::default()` init is
+/// unchanged.
 #[derive(Clone, Debug, Default)]
 pub struct FiguresPanelState {
     /// When true, only the header renders (rows and the bulk
     /// footer are omitted). Toggled by the header's Hide/Show
     /// control — a pure view-state change, no engine op.
     pub collapsed: bool,
+    /// Name-filter box contents (Rune core text edit). The
+    /// row list filters through [`visible_figures`] on this
+    /// text every render; typing is the only writer.
+    /// Filtering never touches the project.
+    pub filter: TextEdit,
 }
 
 /// Display-ready data for one figure row, derived from the
@@ -102,6 +123,49 @@ pub fn figure_rows(core: &EditorCore) -> Vec<FigureRow> {
             opacity_pct: opacity_pct(fig.opacity),
         })
         .collect()
+}
+
+/// True when the filter `query` actually narrows the list:
+/// non-empty once trimmed. A whitespace-only query is no
+/// filter at all.
+pub fn filter_active(query: &str) -> bool {
+    !query.trim().is_empty()
+}
+
+/// True when a figure `name` matches the filter `query`:
+/// case-insensitive substring; an empty (or whitespace-
+/// only) query matches everything. Mirrors
+/// `library_panel::name_matches`, the shell's other search.
+pub fn figure_name_matches(name: &str, query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    q.is_empty() || name.to_lowercase().contains(&q)
+}
+
+/// The real indices of the figures the filter `query`
+/// leaves visible, in project order. An empty query yields
+/// every index. The result indexes `core.project.figures`
+/// directly — row controls built from these indices act on
+/// the figure the row shows, filtered or not.
+pub fn visible_figures(core: &EditorCore, query: &str) -> Vec<usize> {
+    core.project
+        .figures
+        .iter()
+        .enumerate()
+        .filter(|(_, fig)| figure_name_matches(&fig.name, query))
+        .map(|(fi, _)| fi)
+        .collect()
+}
+
+/// The header count line: with a filter active,
+/// "{shown} of {total} figures"; with no filter, the bare
+/// total — byte-identical to the count the header showed
+/// before the filter existed.
+pub fn count_line(shown: usize, total: usize, query: &str) -> String {
+    if filter_active(query) {
+        format!("{shown} of {total} figures")
+    } else {
+        format!("{total}")
+    }
 }
 
 /// Edge length (points) of a figure row's thumbnail canvas.
@@ -451,12 +515,16 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
 }
 
 /// The figures panel: header (title, count, collapse toggle,
-/// "+ Figure"), one row per figure, and the bulk visibility
-/// footer (All / None / Invert). When
-/// `s.figures_panel.collapsed` is set, only the header renders.
+/// "+ Figure"), the name-filter field, one row per visible
+/// figure, and the bulk visibility footer (All / None /
+/// Invert). When `s.figures_panel.collapsed` is set, only
+/// the header renders.
 pub fn figures_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let collapsed = s.figures_panel.collapsed;
+    let query = s.figures_panel.filter.text.clone();
+    let visible = visible_figures(core, &query);
+    let total = core.project.figures.len();
     let mut panel = col()
         .key("figures-panel")
         .w_full()
@@ -469,7 +537,7 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
                 .center_y()
                 .child(text("Figures").font(type_::LABEL).color(t.text))
                 .child(
-                    text(format!("{}", core.project.figures.len()))
+                    text(count_line(visible.len(), total, &query))
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 )
@@ -488,8 +556,38 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
     if collapsed {
         return panel;
     }
-    for r in figure_rows(core) {
-        panel = panel.child(figure_row(&r, core, t));
+    // Filter field (Phase G), mirroring the library search:
+    // typing is the only writer, and the list below filters
+    // on the text every render. View-only — no engine op.
+    panel = panel.child(
+        row()
+            .key("figures-filter-row")
+            .w_full()
+            .gap(8.0)
+            .center_y()
+            .child(
+                text_input(&s.figures_panel.filter, type_::BODY.lh(26.0))
+                    .key("figures-filter")
+                    .single_line()
+                    .grow(1.0)
+                    .color(t.text)
+                    .placeholder("Filter figures", t.text_secondary)
+                    .on_edit(|s: &mut State| &mut s.figures_panel.filter),
+            ),
+    );
+    // Rows for the visible figures only, built from the
+    // full row list by real index, so every control and
+    // thumbnail still addresses its own figure.
+    let rows = figure_rows(core);
+    for fi in &visible {
+        panel = panel.child(figure_row(&rows[*fi], core, t));
+    }
+    if visible.is_empty() && total > 0 {
+        panel = panel.child(
+            text(format!("No figures match \"{}\".", query.trim()))
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
     }
     // Bulk visibility footer: the layers ops own the `hidden`
     // flags; each handler also clears solo so the bulk result
@@ -526,6 +624,79 @@ mod tests {
     #[test]
     fn panel_state_defaults_to_expanded() {
         assert!(!FiguresPanelState::default().collapsed);
+    }
+
+    #[test]
+    fn panel_state_default_filter_is_empty() {
+        let st = FiguresPanelState::default();
+        assert!(st.filter.text.is_empty());
+        assert!(!st.filter.focused);
+    }
+
+    /// A core carrying the given names on its first figures:
+    /// topped up with `add_figure` when the demo project
+    /// seeds fewer (the call the other tests here use), and
+    /// any extra seeded figures are renamed "Zzz" so they
+    /// cannot match the queries under test.
+    fn named_core(names: &[&str]) -> EditorCore {
+        let mut core = EditorCore::new();
+        while core.project.figures.len() < names.len() {
+            core.project.add_figure("Zzz", 0xFF0000, [200.0, 200.0]);
+        }
+        for (i, fig) in core.project.figures.iter_mut().enumerate() {
+            fig.name = names.get(i).copied().unwrap_or("Zzz").to_string();
+        }
+        core
+    }
+
+    #[test]
+    fn visible_figures_empty_query_lists_everything_in_order() {
+        let core = named_core(&["Alpha", "Beta", "Gamma"]);
+        let all: Vec<usize> = (0..core.project.figures.len()).collect();
+        assert!(!all.is_empty());
+        assert_eq!(visible_figures(&core, ""), all);
+        // A whitespace-only query is no filter either.
+        assert_eq!(visible_figures(&core, "   "), all);
+    }
+
+    #[test]
+    fn visible_figures_matches_case_insensitive_substrings() {
+        let core = named_core(&["Alpha", "beta", "Alphabet", "Gamma"]);
+        // Substring match, case-insensitive on both sides.
+        assert_eq!(visible_figures(&core, "alpha"), vec![0, 2]);
+        assert_eq!(visible_figures(&core, "ALPHA"), vec![0, 2]);
+        assert_eq!(visible_figures(&core, "Beta"), vec![1]);
+        // The returned indices are the real project slots.
+        let vis = visible_figures(&core, "alpha");
+        assert_eq!(core.project.figures[vis[0]].name, "Alpha");
+        assert_eq!(core.project.figures[vis[1]].name, "Alphabet");
+    }
+
+    #[test]
+    fn visible_figures_trims_the_query() {
+        let core = named_core(&["Alpha", "Beta"]);
+        assert_eq!(visible_figures(&core, "  beta  "), vec![1]);
+    }
+
+    #[test]
+    fn visible_figures_no_match_is_empty() {
+        let core = named_core(&["Alpha", "Beta"]);
+        assert!(visible_figures(&core, "qqq").is_empty());
+    }
+
+    #[test]
+    fn count_line_is_the_bare_total_without_a_filter() {
+        // Byte-identical to the pre-filter header count.
+        assert_eq!(count_line(3, 3, ""), "3");
+        assert_eq!(count_line(3, 3, "   "), "3");
+        assert_eq!(count_line(0, 0, ""), "0");
+    }
+
+    #[test]
+    fn count_line_shows_shown_of_total_with_a_filter() {
+        assert_eq!(count_line(2, 5, "alpha"), "2 of 5 figures");
+        assert_eq!(count_line(0, 5, "qqq"), "0 of 5 figures");
+        assert_eq!(count_line(5, 5, "a"), "5 of 5 figures");
     }
 
     #[test]

@@ -16,6 +16,17 @@
 //!   core's list is cwd-absolute), then
 //!   `EditorCore::open_project_file` (editor.rs:3534), then
 //!   `shell::touch_recent` (shell.rs:89).
+//! - **Reopen last** — [`reopen_target`] resolves
+//!   `shell::last_opened_project` (shell.rs:127 — the
+//!   *display name* at the front of the recents list;
+//!   recents store names, not paths) against the same
+//!   cached scan the rows use. When the named project is
+//!   still in the library and is not the file the core's
+//!   selector currently points at, an accent
+//!   `home-reopen-last` button ("Reopen {name}") sits at
+//!   the top of the card and opens it through
+//!   [`dispatch_open`] — the identical path a row's Open
+//!   button takes, no parallel open logic.
 //! - **Duplicate** — `projects::duplicate_project`
 //!   (projects.rs:119), status line reports the new file.
 //! - **Recover** — `shell::read_recovery` (shell.rs:62) into
@@ -240,6 +251,74 @@ pub fn visible_projects(entries: &[ProjectInfo], query: &str) -> Vec<ProjectInfo
         .cloned()
         .collect();
     projects::filter_projects(&library, query)
+}
+
+/// The file the core's selector currently points at:
+/// `project_files[project_index]`, the entry
+/// `EditorCore::open_project_file` would open — and the
+/// entry [`dispatch_open`] points at the file it opened,
+/// so after an open this is the open project's file.
+/// `None` when the core lists no project files.
+pub fn current_project_path(core: &EditorCore) -> Option<&Path> {
+    core.project_files
+        .get(core.project_index)
+        .map(|p| p.as_path())
+}
+
+/// The "Reopen last project" target: the library entry
+/// for the most recently opened project, when there is
+/// one worth offering.
+///
+/// `last` is the display name
+/// `shell::last_opened_project` returns (shell.rs:127 —
+/// recents store display names, not paths), so the target
+/// is resolved by exact name match against `projects` —
+/// pass the library list (the scan as [`visible_projects`]
+/// filters it, *without* the search query: the quick
+/// action does not follow the row filter). Shell-owned
+/// and recovery entries are skipped even in a raw scan:
+/// the snapshot can carry the same stored name as a real
+/// project ("Untitled" is the common case), and reopening
+/// must land on the real file.
+///
+/// Returns `None` — no button, no error — when there is
+/// no last project, when its file is no longer in the
+/// library (deleted or renamed since), or when it is the
+/// currently open one: `current_path` matches the target
+/// by *file name*, the panel's established matching rule
+/// ([`project_file_index`]), because the scan reports
+/// `./projects/…` relative paths while the core's list is
+/// cwd-absolute.
+pub fn reopen_target<'a>(
+    projects: &'a [ProjectInfo],
+    last: Option<&str>,
+    current_path: Option<&Path>,
+) -> Option<&'a ProjectInfo> {
+    let last = last?;
+    if last.is_empty() {
+        return None;
+    }
+    let target = projects
+        .iter()
+        .find(|info| {
+            info.name == last && !is_recovery_entry(info) && !is_shell_owned_entry(info)
+        })?;
+    if let Some(current) = current_path {
+        let same_file = match (target.path.file_name(), current.file_name()) {
+            (Some(a), Some(b)) => a == b,
+            _ => target.path == current,
+        };
+        if same_file {
+            return None;
+        }
+    }
+    Some(target)
+}
+
+/// The reopen button's label: the resolved display name
+/// from the scan, never the raw file stem.
+pub fn reopen_label(target: &ProjectInfo) -> String {
+    format!("Reopen {}", target.name)
 }
 
 /// Whole-number fps prints bare (`12`), fractional keeps
@@ -586,8 +665,9 @@ fn project_row(info: &ProjectInfo, i: usize, t: &Theme) -> El {
 
 /// The section as mounted in the shell column: a "Home"
 /// toggle (accent-filled while open, the GPUI `home` id),
-/// and — when open — the library card: recovery banner,
-/// search field, New project, and the project rows.
+/// and — when open — the library card: the reopen-last
+/// quick action (when offered), recovery banner, search
+/// field, New project, and the project rows.
 pub fn home_panel(s: &State, t: &Theme) -> El {
     let home = &s.home_panel;
     let mut panel = col().key("home-panel").gap(6.0);
@@ -599,6 +679,16 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
     }
     let entries = home.projects();
     let shown = visible_projects(&entries, &home.search.text);
+    // The reopen quick action resolves against the same
+    // cached scan, through the library filter but *not*
+    // the search query (see `reopen_target`).
+    let library = visible_projects(&entries, "");
+    let last_opened = shell::last_opened_project();
+    let reopen = reopen_target(
+        &library,
+        last_opened.as_deref(),
+        current_project_path(&s.core),
+    );
     let mut card = col()
         .key("home-card")
         .w_full()
@@ -606,6 +696,19 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
         .padding(12.0)
         .radius(10.0)
         .fill(t.card);
+    if let Some(target) = reopen {
+        let path = target.path.clone();
+        let name = target.name.clone();
+        card = card.child(btn(
+            "home-reopen-last",
+            &reopen_label(target),
+            true,
+            t,
+            move |s: &mut State| {
+                dispatch_open(&mut s.core, &path, &name);
+            },
+        ));
+    }
     card = card.child(
         row()
             .key("home-header")
@@ -801,6 +904,104 @@ mod tests {
         // unchanged by the wider filter.
         assert!(is_recovery_entry(&entries[2]));
         assert_eq!(visible_projects(&entries, "Untitled").len(), 0);
+    }
+
+    #[test]
+    fn reopen_target_is_none_without_a_last_project() {
+        let entries = vec![
+            info("Alpha", "projects/alpha.json"),
+            info("Beta", "projects/beta.json"),
+        ];
+        // No recents recorded yet — or an empty name —
+        // offers nothing and errors nowhere.
+        assert!(reopen_target(&entries, None, None).is_none());
+        assert!(reopen_target(&entries, Some(""), None).is_none());
+        assert!(reopen_target(&[], Some("Alpha"), None).is_none());
+    }
+
+    #[test]
+    fn reopen_target_hides_the_currently_open_project() {
+        let entries = vec![
+            info("Alpha", "projects/alpha.json"),
+            info("Beta", "projects/beta.json"),
+        ];
+        // The core's list is cwd-absolute, the scan's paths
+        // relative: the match is by file name, so pointing
+        // the selector at beta.json hides the button.
+        assert!(reopen_target(
+            &entries,
+            Some("Beta"),
+            Some(Path::new("/home/user/projects/beta.json")),
+        )
+        .is_none());
+        // Pointing it at a *different* file keeps the offer.
+        let target = reopen_target(
+            &entries,
+            Some("Beta"),
+            Some(Path::new("/home/user/projects/alpha.json")),
+        )
+        .unwrap();
+        assert_eq!(target.name, "Beta");
+    }
+
+    #[test]
+    fn reopen_target_is_none_when_the_file_is_gone() {
+        let entries = vec![
+            info("Alpha", "projects/alpha.json"),
+            info("Beta", "projects/beta.json"),
+        ];
+        // The recents front names a project whose file was
+        // deleted or renamed since: no button, no error.
+        assert!(reopen_target(&entries, Some("Gamma"), None).is_none());
+        // Display names match exactly — recents store the
+        // name verbatim, so a case variant is a different
+        // (missing) project, not a fuzzy hit.
+        assert!(reopen_target(&entries, Some("beta"), None).is_none());
+    }
+
+    #[test]
+    fn reopen_target_resolves_the_last_project_from_the_scan() {
+        let entries = vec![
+            info("Alpha", "projects/alpha.json"),
+            info("Beta", "projects/beta.json"),
+        ];
+        let target = reopen_target(&entries, Some("Beta"), None).unwrap();
+        assert_eq!(target.name, "Beta");
+        assert_eq!(target.path, PathBuf::from("projects/beta.json"));
+        assert_eq!(reopen_label(target), "Reopen Beta");
+    }
+
+    #[test]
+    fn reopen_target_skips_the_recovery_snapshot_twin() {
+        // The recovery snapshot parses as a project and can
+        // carry the same stored name as the real file —
+        // scan order puts the (newer) snapshot first. The
+        // reopen must land on the real library file.
+        let entries = vec![
+            info("Untitled", "projects/.recovery.json"),
+            info("Untitled", "projects/untitled.json"),
+        ];
+        let target = reopen_target(&entries, Some("Untitled"), None).unwrap();
+        assert_eq!(target.path, PathBuf::from("projects/untitled.json"));
+        // With *only* the snapshot present there is nothing
+        // to reopen — the banner owns that entry.
+        assert!(reopen_target(&entries[..1], Some("Untitled"), None).is_none());
+    }
+
+    #[test]
+    fn current_project_path_follows_the_core_selector() {
+        let mut core = EditorCore::new();
+        core.project_files = vec![
+            PathBuf::from("/abs/projects/alpha.json"),
+            PathBuf::from("/abs/projects/beta.json"),
+        ];
+        core.project_index = 1;
+        assert_eq!(
+            current_project_path(&core),
+            Some(Path::new("/abs/projects/beta.json"))
+        );
+        core.project_files.clear();
+        assert_eq!(current_project_path(&core), None);
     }
 
     #[test]
