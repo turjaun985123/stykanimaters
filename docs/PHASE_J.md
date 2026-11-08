@@ -206,10 +206,19 @@ source counts read palette **103**, MCP registry
 
 ## 7. Honest remainders after Phase J
 
-- The two overlaps are fixed structurally (§§9/10),
-  but their **pixel proof is pending**: the integrator
-  re-dispatches `headless.yml` on the green tree and
-  compares the snap — result: _integrator_.
+- The two overlaps are fixed (§§9/10) and now
+  **pixel-proven**: `headless.yml` re-dispatched on
+  the green tree (run 42468895995, all 6 probes exit
+  0) — the tree dump measures the columns at exactly
+  300 / 744 / 340, the status strip ending 12 pt
+  before the right column starts, and the Keyframes
+  note row fully above the actions row; the rendered
+  snap shows the wide stage, the ruler's "0:00" label
+  and the strip contained in the centre column. One
+  trade-off the narrower left column introduced: the
+  Figures header's "Recolour figure" button label
+  clipped at 300 pt wide — shortened to "Recolour"
+  at integration (key and behaviour unchanged).
 - Two "New project" results still disagree (panel
   blank vs Home demo) — the user's product call,
   untouched again.

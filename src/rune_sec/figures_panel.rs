@@ -67,7 +67,7 @@
 //! a state a single static glyph would carry honestly.
 //!
 //! Phase I (section 20/40) adds one header control: a
-//! "Recolour figure" button (key `fig-recolor`, `paintbrush`
+//! "Recolour" button (key `fig-recolor`, `paintbrush`
 //! glyph via `icon_btn`) that paints the WHOLE selected
 //! figure with the colour its selected joint resolves to,
 //! through `EditorCore::recolor_figure` (figure_ops.rs —
@@ -401,7 +401,7 @@ fn delete_row(core: &mut EditorCore, fi: usize) {
     core.delete_figure();
 }
 
-/// The recolour source for the header's "Recolour figure"
+/// The recolour source for the header's "Recolour"
 /// button: the selected figure's index paired with the
 /// colour its selected joint resolves to, or `None` when
 /// there is no usable selection — no figure at the selected
@@ -618,7 +618,7 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
                 .child(icon_btn(
                     "fig-recolor",
                     "paintbrush",
-                    "Recolour figure",
+                    "Recolour",
                     false,
                     t,
                     |s: &mut State| recolor_row(&mut s.core),
