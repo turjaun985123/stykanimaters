@@ -70,6 +70,14 @@
 //! hex-literal copy. (The text-only family members —
 //! `btn`, `btn_inert`, `btn_muted_live`, `danger_btn` —
 //! live in chrome_view.rs; this file owns the icon forms.)
+//!
+//! UI MISSION WAVE 2 ADDITIONS: [`chip_btn_inert`], the
+//! chip's inert twin — the one family member the S17
+//! state matrix found missing, which panels had been
+//! faking with live chips that refuse — and the named
+//! icon size scale ([`ICON_SM`] / [`ICON_MD`] /
+//! [`ICON_LG`] / [`ICON_XL`]) the adoption waves
+//! converge direct `icon_el` call sites onto.
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, Color, El};
@@ -99,6 +107,32 @@ pub const ICON_LABEL_GAP: f32 = 6.0;
 /// deliberately do NOT scale — there is no press to feed
 /// back.
 pub const PRESS_SCALE: f32 = 0.97;
+
+/// The kit's icon size scale (UI mission wave 2, from
+/// the S17 census of sizes the kit itself already
+/// uses): direct `icon_el` call sites in panels had
+/// drifted across 11/12/13/14/16/20 pt with no named
+/// scale — one search glyph alone at four sizes. New
+/// call sites pick a step here instead of a bare
+/// literal; existing sites converge in the adoption
+/// waves. (`glyph_size_for`'s cap still applies inside
+/// the square buttons.)
+///
+/// Small: compact/inline glyphs — the [`chip_btn`]
+/// glyph step ([`CHIP_GLYPH_SIZE`]), inline row icons.
+pub const ICON_SM: f32 = 12.0;
+
+/// Medium: the standard button/panel glyph —
+/// [`ICON_SIZE`], also `design::panel_title`'s 13 pt.
+pub const ICON_MD: f32 = 13.0;
+
+/// Large: hero glyphs — the command palette's 16 pt
+/// row glyphs are the measured use.
+pub const ICON_LG: f32 = 16.0;
+
+/// Extra large: display glyphs — `design::empty_state`'s
+/// 20 pt is the measured use.
+pub const ICON_XL: f32 = 20.0;
 
 /// Whether `icon` names a glyph the icon catalogue can
 /// draw — the fallback decision for both builders, factored
@@ -396,6 +430,45 @@ pub fn chip_btn(
     root.child(text(label).font(type_::LABEL).color(ink))
 }
 
+/// The inert twin of [`chip_btn`] (UI mission wave 2,
+/// audit S17 item I-7): identical compact metrics —
+/// padding px 6 / py 3, radius 5, the shared
+/// [`CHIP_ICON_LABEL_GAP`] and [`CHIP_GLYPH_SIZE`], so
+/// its computed width and height match the live chip
+/// for the same icon and label — but resting on
+/// [`fill_color_inert`], glyph and label in
+/// [`glyph_color_muted`], and NO press, hover,
+/// press-fill or press-scale handler at all.
+///
+/// The chip was the one button family without an
+/// inert form (S17 state matrix), so a gated compact
+/// toggle had to fake its disabled state with a live
+/// chip whose handler refuses — the exact pattern the
+/// family's other inert twins exist to retire. Render
+/// this instead when the chip's op would no-op from
+/// the current state.
+///
+/// The icon follows [`chip_btn`]'s rule: `None` — or
+/// a name the catalogue doesn't know — renders the
+/// text-only chip (same key, same label, just no
+/// glyph).
+pub fn chip_btn_inert(key: &str, icon: Option<&str>, label: &str, t: &Theme) -> El {
+    let ink = glyph_color_muted(t);
+    let mut root = row()
+        .key(key)
+        .px(6.0)
+        .py(3.0)
+        .radius(5.0)
+        .fill(fill_color_inert(t))
+        .center_y();
+    if let Some(name) = icon.filter(|&name| use_icon(name)) {
+        root = root
+            .gap(CHIP_ICON_LABEL_GAP)
+            .child(icons::icon_el(name, CHIP_GLYPH_SIZE, ink));
+    }
+    root.child(text(label).font(type_::LABEL).color(ink))
+}
+
 /// The danger button with a leading glyph (Phase N, plan
 /// P05): [`icon_btn`]'s construction — same box (px 10 /
 /// py 5, radius 6), same gap, the family glyph at the
@@ -600,6 +673,40 @@ mod tests {
         // one step below the family size, a tighter gap.
         assert_eq!(CHIP_GLYPH_SIZE, 12.0);
         assert_eq!(CHIP_ICON_LABEL_GAP, 4.0);
+    }
+
+    #[test]
+    fn chip_btn_inert_constructs_across_icon_branches() {
+        // Same construction-only limits as chip_btn's
+        // test: None → text chip, known icon → glyph
+        // chip, unknown icon → the degraded text chip.
+        // Metric parity with the live chip is structural
+        // (same padding 6 × 3, radius 5, gap and glyph
+        // size calls), as with the other inert twins.
+        let t = rune::tok::theme(true);
+        let _ = chip_btn_inert("k-chip-inert-text", None, "Round", &t);
+        let _ = chip_btn_inert("k-chip-inert-icon", Some("play"), "Play", &t);
+        let _ = chip_btn_inert("k-chip-inert-degraded", Some("nope-not-real"), "Play", &t);
+        // The muted ink is the family inert ink, not the
+        // live chip's resting ink at either active value.
+        assert_eq!(glyph_color_muted(&t), t.text_secondary);
+        assert_ne!(glyph_color_muted(&t), glyph_color(false, &t));
+    }
+
+    #[test]
+    fn icon_size_scale_matches_the_kits_measured_sizes() {
+        // The scale names the sizes the kit already
+        // uses (S17 census): SM is the chip glyph step,
+        // MD is the family glyph size; LG/XL are the
+        // palette and empty-state sizes. Pinning the
+        // equalities keeps a future ICON_SIZE or
+        // CHIP_GLYPH_SIZE change from silently
+        // desynchronising the scale.
+        assert_eq!(ICON_SM, CHIP_GLYPH_SIZE);
+        assert_eq!(ICON_MD, ICON_SIZE);
+        assert_eq!(ICON_LG, 16.0);
+        assert_eq!(ICON_XL, 20.0);
+        assert!(ICON_SM < ICON_MD && ICON_MD < ICON_LG && ICON_LG < ICON_XL);
     }
 
     #[test]

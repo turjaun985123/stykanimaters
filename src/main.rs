@@ -27,7 +27,6 @@ mod snap_tests;
 
 use std::time::Duration;
 
-use rune::tok::{self};
 use rune::{
     canvas, col, row, AppSpec, Cx, Drag, El, Key, KeyEvent, Phase, PointerEvent, ScrollSpec,
     TextEdit, Tx, WheelEvent,
@@ -556,7 +555,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
 }
 
 fn view(s: &State, cx: &mut Cx<State>) -> El {
-    let t = tok::theme(!s.core.light_theme);
+    let t = rune_sec::app_theme::app_theme(!s.core.light_theme);
     let core = &s.core;
     // The canvas size from the last committed layout (the read
     // settles on the first layout); before any layout exists,
@@ -685,7 +684,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                         )),
                 )
                 .child(rune_sec::design::divider(&t))
-                .child(rune_sec::waveform_view::waveform_el_state(s, [308.0, 56.0])),
+                .child(rune_sec::waveform_view::waveform_el_state(s, [308.0, 56.0], &t)),
         );
     }
     if vis(Sec::Clips) {

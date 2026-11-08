@@ -848,7 +848,9 @@ CHARTER_FNS = [
     "kbd",
     "empty_state",
     "list_row",
-    "toggle",
+    # "toggle" retired by the UI mission (wave 2): zero
+    # consumers tree-wide, toggle_row is the used form.
+    # Recorded in design.rs's module doc.
     "toggle_row",
     "stepper_value",
     "slider_track",

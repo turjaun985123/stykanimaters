@@ -14,10 +14,10 @@
 //! * **Keys come from callers.** No builder invents a
 //!   key; the ones that take `key` put exactly that key
 //!   on the pressable/root element and nothing else.
-//! * **Handlers move verbatim.** Only [`toggle`],
-//!   [`toggle_row`] and [`swatch`] take a handler, and
-//!   they attach it untouched to the root — what a press
-//!   does is the caller's business, exactly as with
+//! * **Handlers move verbatim.** Only [`toggle_row`]
+//!   and [`swatch`] take a handler, and they attach it
+//!   untouched to the root — what a press does is the
+//!   caller's business, exactly as with
 //!   `chrome_view::btn`.
 //! * **Restyle roots, never nest wrappers** (P19): a
 //!   panel's card IS its existing root element passed
@@ -51,6 +51,27 @@
 //!   and smoke-test that every builder constructs on
 //!   both of its branches — layout truth comes from the
 //!   shell's Runtime/headless checks, as elsewhere.
+//!
+//! ## UI mission wave 2 — kit states & one retirement
+//!
+//! * [`list_row`] / [`row_shell`] gained a press
+//!   overlay, [`swatch`] gained hover/press overlays,
+//!   and [`toggle_row`] gained hover/press feedback
+//!   (audit S17 items I-3/I-4/I-5) — all from the
+//!   theme's overlay tokens (`t.hover` / `t.press`), so
+//!   the kit's state language stays one derivation.
+//! * [`kbd_on_accent`] is the shortcut chip for accent
+//!   fills, where the plain [`kbd`] measures ~1.18:1
+//!   (audit S18); its ink matches the menus' on-accent
+//!   hint treatment (white at 75% alpha).
+//! * **Retired: the bare `toggle` builder.** It had
+//!   zero production callers — every settings/onion
+//!   toggle in the shell is a labelled [`toggle_row`],
+//!   which remains the kit's one toggle form, over the
+//!   same [`toggle_pill`] visual the retired builder
+//!   wrapped. [`text_muted`] was reviewed in the same
+//!   pass and is KEPT: it is the kit's muted-text role
+//!   (see its own docs).
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Color, El};
@@ -89,6 +110,14 @@ pub fn selected_fill() -> Color {
 /// `text_secondary` at 0.6 alpha, for text that should
 /// sit below even the secondary tone. Derived from the
 /// theme — never a new hex literal.
+///
+/// This is the kit's muted-text role (UI mission
+/// wave 2, kept on review): the colour for text that
+/// must read as present-but-quiet — hints, retired
+/// values, secondary annotations — as distinct from
+/// `section_label`'s secondary tone. New muted text in
+/// kit consumers should take this role rather than
+/// re-deriving the alpha locally.
 pub fn text_muted(t: &Theme) -> Color {
     t.text_secondary.alpha(0.6)
 }
@@ -183,6 +212,34 @@ pub fn kbd(label: &str, t: &Theme) -> El {
         )
 }
 
+/// [`kbd`] for accent fills (UI mission wave 2, audit
+/// S17/S18): the command palette's selected row fills
+/// with the accent at 0.85, where the plain chip —
+/// `control_off` fill, `text_secondary` ink — measures
+/// ~1.18:1 and is effectively unreadable. This variant
+/// keeps the chip (same padding, radius and mono
+/// caption) and takes its colours from the treatment
+/// the menus already use for hints on their active
+/// (accent) row: white ink at 75% alpha (menus.rs
+/// `hint_el`), here over a white fill at 16% alpha so
+/// the chip still reads as a chip on the accent. The
+/// colours are white-derived, not theme-derived, so
+/// `t` is accepted only for signature parity with
+/// [`kbd`] — call sites can swap the two freely.
+pub fn kbd_on_accent(label: &str, t: &Theme) -> El {
+    let _ = t;
+    el()
+        .px(5.0)
+        .py(1.0)
+        .radius(4.0)
+        .fill(Color::WHITE.alpha(0.16))
+        .child(
+            text(label)
+                .font(type_::MONO_CAPTION.mono())
+                .color(Color::WHITE.alpha(0.75)),
+        )
+}
+
 /// A panel's empty state: a centred 20 pt glyph over a
 /// LABEL message, both in `text_secondary`, with 12 pt
 /// of vertical air (charter §10). An unknown icon name
@@ -194,7 +251,21 @@ pub fn empty_state(icon: &str, message: &str, t: &Theme) -> El {
     if icons::has_icon(icon) {
         body = body.child(icons::icon_el(icon, 20.0, t.text_secondary));
     }
-    body.child(text(message).font(type_::LABEL).color(t.text_secondary))
+    // The message WRAPS at the card's content width
+    // (UI mission wave 2): a centred unwrapped line
+    // wider than its card spills past BOTH edges — the
+    // clips empty state measured 442pt in a 316pt card
+    // (+63 past the edge, every Animate tree) and the
+    // particles one +17.8. `.wrap().w_full()` is the
+    // shell's proven prose treatment (settings'
+    // note_line); short messages are unaffected.
+    body.child(
+        text(message)
+            .font(type_::LABEL)
+            .color(t.text_secondary)
+            .wrap()
+            .w_full(),
+    )
 }
 
 /// The shared list-row styling (charter §5): min
@@ -202,7 +273,12 @@ pub fn empty_state(icon: &str, message: &str, t: &Theme) -> El {
 /// Selected rows fill with [`selected_fill`]; unselected
 /// rows rest transparent on the card and paint the
 /// `t.hover` overlay while hovered (see the module docs
-/// on overlays). No handler — callers chain `.on_press`
+/// on overlays). Both branches paint the `t.press`
+/// overlay while pressed (UI mission wave 2, audit S17
+/// item I-3) — the press treatment the kit's button
+/// families already have, in the theme's overlay token
+/// so the row's fill (or the card under it) still shows
+/// through. No handler — callers chain `.on_press`
 /// or children onto the returned element.
 fn row_base(selected: bool, t: &Theme) -> El {
     let base = row()
@@ -210,7 +286,8 @@ fn row_base(selected: bool, t: &Theme) -> El {
         .px(8.0)
         .radius(ROW_RADIUS)
         .center_y()
-        .gap(PANEL_GAP);
+        .gap(PANEL_GAP)
+        .press(t.press);
     if selected {
         base.fill(selected_fill())
     } else {
@@ -247,6 +324,17 @@ const TOGGLE_INSET: f32 = (TOGGLE_H - TOGGLE_KNOB) / 2.0;
 /// end. The knob is an absolutely-positioned child —
 /// the same construction the shell's sliders use — so
 /// its travel is exact, not spacer arithmetic.
+///
+/// The track carries the `t.hover` overlay (UI mission
+/// wave 2, audit S17 item I-5), so the switch itself —
+/// not just its row — answers the pointer. Known
+/// limit, recorded not faked: the knob does NOT slide
+/// between its two stops; it teleports, because
+/// nothing in the pinned Rune rev animates a layout
+/// offset, and this kit does not fake motion. If knob
+/// motion is ever added, it must ride the shell's
+/// spring pairs (`tok::motion::pair::SNAP` /
+/// `SETTLE`) and no other curve.
 fn toggle_pill(on: bool, t: &Theme) -> El {
     let knob_x = if on {
         TOGGLE_W - TOGGLE_INSET - TOGGLE_KNOB
@@ -257,6 +345,7 @@ fn toggle_pill(on: bool, t: &Theme) -> El {
         .size(TOGGLE_W, TOGGLE_H)
         .radius(999.0)
         .fill(if on { accent() } else { t.control_off })
+        .hover(t.hover)
         .child(
             el()
                 .size(TOGGLE_KNOB, TOGGLE_KNOB)
@@ -266,20 +355,16 @@ fn toggle_pill(on: bool, t: &Theme) -> El {
         )
 }
 
-/// The kit toggle (charter §7): the pill itself is the
-/// pressable root — the caller's `key` and handler `f`
-/// sit on the track element, so an existing control's
-/// key stays exactly where its press lands.
-pub fn toggle(key: &str, on: bool, t: &Theme, f: impl Fn(&mut State) + 'static) -> El {
-    toggle_pill(on, t).key(key).on_press(f)
-}
-
 /// A labelled toggle row: min height 28, pressable
 /// root carrying the caller's `key` and handler — a
 /// press anywhere on the row flips the setting. The
 /// LABEL text in `t.text` grows; the pill at the right
-/// is the same visual as [`toggle`]'s and is NOT
-/// separately pressable.
+/// is the [`toggle_pill`] visual and is NOT separately
+/// pressable. The row itself paints the `t.hover` /
+/// `t.press` overlays (UI mission wave 2, audit S17
+/// item I-5), matching [`list_row`]'s state treatment
+/// — before this, the kit's one toggle form gave no
+/// interaction feedback at all.
 pub fn toggle_row(
     key: &str,
     label: &str,
@@ -292,6 +377,8 @@ pub fn toggle_row(
         .min_h(28.0)
         .center_y()
         .gap(PANEL_GAP)
+        .hover(t.hover)
+        .press(t.press)
         .on_press(f)
         .child(text(label).font(type_::LABEL).color(t.text).grow(1.0))
         .child(toggle_pill(on, t))
@@ -377,7 +464,12 @@ pub fn slider_track(frac: f32, t: &Theme) -> El {
 /// [`CONTROL_RADIUS`], filled with `color`. Selected
 /// swatches get a 2 pt accent border; unselected ones
 /// get a 1 pt `card_border` hairline so pale colours
-/// stay visible against the panel card.
+/// stay visible against the panel card. Hover and
+/// press paint the theme's `t.hover` / `t.press`
+/// OVERLAYS (UI mission wave 2, audit S17 item I-4),
+/// so the swatch's own colour stays visible under the
+/// feedback — before this, a press gave no signal at
+/// all until the border changed after the fact.
 pub fn swatch(
     key: &str,
     color: Color,
@@ -390,6 +482,8 @@ pub fn swatch(
         .size(24.0, 24.0)
         .radius(CONTROL_RADIUS)
         .fill(color)
+        .hover(t.hover)
+        .press(t.press)
         .on_press(f);
     if selected {
         base.border(2.0, accent())
@@ -467,14 +561,13 @@ mod tests {
             let _ = divider(&t);
             let _ = divider_keyed("d-sep", &t);
             let _ = kbd("Ctrl+K", &t);
+            let _ = kbd_on_accent("Ctrl+K", &t);
             let _ = empty_state("play", "Nothing here", &t);
             let _ = empty_state("no-such-icon", "Nothing here", &t);
             let _ = list_row("row", true, &t);
             let _ = list_row("row", false, &t);
             let _ = row_shell(true, &t);
             let _ = row_shell(false, &t);
-            let _ = toggle("tog", true, &t, |_| {});
-            let _ = toggle("tog", false, &t, |_| {});
             let _ = toggle_row("tog-row", "Loop", true, &t, |_| {});
             let _ = toggle_row("tog-row", "Loop", false, &t, |_| {});
             let _ = stepper_value("42", &t);

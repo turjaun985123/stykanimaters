@@ -735,6 +735,11 @@ pub fn particles_panel(s: &State, t: &Theme) -> El {
     let accent = tok::accent(0, true);
     let mut list = col().key("particles-list").gap(4.0);
     if rows.is_empty() {
+        // As one line this message measures ~351 pt
+        // against the right column's 316 pt content
+        // width; the kit empty state wraps its message
+        // at the card width (wave 2), so it stays
+        // inside the card.
         list = list.child(design::empty_state(
             "star",
             "No particle events yet — they arrive with imports, or add one.",

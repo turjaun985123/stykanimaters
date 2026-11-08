@@ -125,6 +125,16 @@
 //! byte-identical. Keys, handlers and status strings are
 //! untouched — row keys stay 1-based (`clip-row-{n}`),
 //! the standing exception the gate preserves.
+//!
+//! UI mission (residual overflow): this message (79
+//! chars, ≈442 pt at LABEL) is wider than either side
+//! column, so as an unwrapped centred line it crossed
+//! the card's right edge and past the window (mission
+//! overflow scan: right edge 1475, +63 pt, in every
+//! Animate tree). Fixed at the root in wave 2:
+//! `design::empty_state` now wraps its message at the
+//! card width, so this panel uses the kit builder
+//! unchanged and the message stays inside the card.
 
 use std::cell::RefCell;
 
@@ -136,6 +146,7 @@ use stykanimate_rs::model::{ClipDef, ClipLoop, FigureInstance};
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
+use crate::rune_sec::icons;
 use crate::State;
 
 /// Panel-local state for the movieclips panel (see the module

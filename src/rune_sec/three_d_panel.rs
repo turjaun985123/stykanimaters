@@ -1082,6 +1082,13 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
+                // UI-mission overflow repair (audit s15 D1,
+                // p05 O-7): label + three bake controls
+                // measure 325.5 pt against the 316 pt
+                // column, leaving Bake to 2D +9.5 past the
+                // card edge. Wrapping packs them onto two
+                // lines inside budget.
+                .flex_wrap()
                 .child(design::section_label("Bake", t))
                 .child(if dim {
                     crate::chrome_view::btn_muted_live(

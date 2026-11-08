@@ -181,27 +181,41 @@
 //! all-clip boundary ticks stay as Phase L left them,
 //! muted or not. [`clip_is_muted`] is the one read of
 //! the flag both paths share.
+//!
+//! ## Theme wiring (UI mission, Wave 2 — s02 §3.1, s14 D7)
+//!
+//! Until this section the strip was the shell's one
+//! theme-blind surface: four file-local hex constants
+//! (the frozen GPUI-era palette) coloured the bars, the
+//! centre line, the playhead and the caption, and
+//! [`waveform_el_state`] did not take a theme at all —
+//! in the light theme the caption drew dark-theme grey
+//! on a white card, the weakest text contrast in the
+//! shell. The builder now takes `&Theme` (the shell's
+//! mount passes the same theme every panel receives)
+//! and every colour derives from the token architecture:
+//! the bars, bracket and boundary ticks take the theme
+//! accent ([`crate::rune_sec::app_theme::accent`]),
+//! the centre line takes the theme's border token
+//! (`Theme::card_border`), the playhead takes the
+//! warning amber ([`playhead_color`]) and the
+//! caption takes `Theme::text_secondary`. No geometry
+//! moved: same bars, same alphas, same line widths —
+//! only the colours' provenance changed.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use rune::tok::type_;
+use rune::tok::{type_, Theme};
 use rune::{canvas, col, text, Color, Drag, El, LineCap, Phase, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::AudioClip;
 
+use crate::rune_sec::app_theme;
 use crate::State;
 
-/// Waveform accent (the 2.0 palette's `C_ACCENT`).
-const WAVE_HEX: u32 = 0x6D8CFF;
-/// Centre line / border tone (the 2.0 palette's border).
-const CENTRE_HEX: u32 = 0x303744;
-/// Playhead tone (the stage's selected-joint amber).
-const PLAYHEAD_HEX: u32 = 0xFFC65D;
-/// Caption tone (the 2.0 palette's secondary text).
-const CAPTION_HEX: u32 = 0xA2AAB8;
 /// Height the caption row takes under the strip in
 /// selected-clip mode (Phase I, section 17): the canvas
 /// gives up this much of its height so canvas + caption
@@ -230,13 +244,6 @@ const ALL_TICKS_ALPHA: f32 = 0.35;
 /// the two constants mean different things and are
 /// free to drift apart.)
 const MUTED_BAR_ALPHA: f32 = 0.35;
-
-/// Convert a `0xRRGGBB` colour to a Rune colour (the same
-/// helper `stage_view` carries; duplicated so this section
-/// file is self-contained).
-fn hex_color(rgb: u32) -> Option<Color> {
-    rune::color::hex(&format!("#{:06x}", rgb & 0xFF_FFFF))
-}
 
 /// Reduce a peak slice to exactly `columns` `(min, max)` pairs
 /// by integer partition: column `i` covers
@@ -645,14 +652,14 @@ fn strip_buckets(columns: usize) -> usize {
 /// than a hole in the layout. No playhead here:
 /// [`waveform_shape_project`] appends the one
 /// project-mapped marker.
-fn waveform_bars(core: &EditorCore, el_size: [f32; 2]) -> Shape {
+fn waveform_bars(core: &EditorCore, el_size: [f32; 2], t: &Theme) -> Shape {
     let (w, h) = (el_size[0], el_size[1]);
     let mut shape = Shape::new();
     if w <= 0.0 || h <= 0.0 {
         return shape;
     }
     let mid = h / 2.0;
-    let centre = hex_color(CENTRE_HEX).unwrap_or(Color::WHITE);
+    let centre = t.card_border;
     shape = shape.line([0.0, mid], [w, mid], 1.0, LineCap::Butt, centre);
 
     let Some(clip) = core.project.audio.last() else {
@@ -666,20 +673,24 @@ fn waveform_bars(core: &EditorCore, el_size: [f32; 2]) -> Shape {
     // last clip, selected or not, and Phase M dims only
     // the selected clip's marks (its clip-mode bars and
     // its span bracket) — hence `false` here, always.
-    draw_peak_bars(shape, &peaks, clip.gain, false, w, h)
+    draw_peak_bars(shape, &peaks, clip.gain, false, t, w, h)
 }
 
 /// The bar colours `(outer, inner)` for one clip's
-/// peaks: the accent at half alpha around the opaque
-/// accent — the pair [`draw_peak_bars`] has drawn since
-/// Phase D. A muted clip keeps both hues at
+/// peaks: the theme accent
+/// ([`app_theme::accent`]) at half
+/// alpha around the opaque accent — the pair
+/// [`draw_peak_bars`] has drawn since Phase D (the hue
+/// itself moved from a file-local hex literal to the
+/// theme's accent in UI mission Wave 2). A muted clip
+/// keeps both hues at
 /// [`MUTED_BAR_ALPHA`] of those alphas (Phase M,
 /// section 16): `Color::alpha` SETS the component, so
 /// the multiplication happens here, in the open, where
 /// a test can pin it — the bars' geometry is untouched
 /// either way.
-fn bar_colors(muted: bool) -> (Color, Color) {
-    let accent = hex_color(WAVE_HEX).unwrap_or(Color::WHITE);
+fn bar_colors(t: &Theme, muted: bool) -> (Color, Color) {
+    let accent = app_theme::accent(t);
     if muted {
         (
             accent.alpha(0.5 * MUTED_BAR_ALPHA),
@@ -698,12 +709,20 @@ fn bar_colors(muted: bool) -> (Color, Color) {
 /// identically; only the peaks' source differs. `muted`
 /// dims the bar colours through [`bar_colors`] without
 /// touching a single bar's geometry.
-fn draw_peak_bars(shape: Shape, peaks: &[f32], gain: f32, muted: bool, w: f32, h: f32) -> Shape {
+fn draw_peak_bars(
+    shape: Shape,
+    peaks: &[f32],
+    gain: f32,
+    muted: bool,
+    t: &Theme,
+    w: f32,
+    h: f32,
+) -> Shape {
     let mut shape = shape;
     let mid = h / 2.0;
     let columns = strip_columns(w);
     let cols = reduce_columns(peaks, columns);
-    let (outer, accent) = bar_colors(muted);
+    let (outer, accent) = bar_colors(t, muted);
     let pitch = w / columns as f32;
     let bar_w = (pitch - 1.0).max(1.0);
     for (i, &(min, max)) in cols.iter().enumerate() {
@@ -731,6 +750,7 @@ fn waveform_bars_clip(
     index: usize,
     peaks: &[f32],
     el_size: [f32; 2],
+    t: &Theme,
 ) -> Shape {
     let (w, h) = (el_size[0], el_size[1]);
     let mut shape = Shape::new();
@@ -738,7 +758,7 @@ fn waveform_bars_clip(
         return shape;
     }
     let mid = h / 2.0;
-    let centre = hex_color(CENTRE_HEX).unwrap_or(Color::WHITE);
+    let centre = t.card_border;
     shape = shape.line([0.0, mid], [w, mid], 1.0, LineCap::Butt, centre);
     let Some(clip) = core.project.audio.get(index) else {
         return shape;
@@ -746,10 +766,11 @@ fn waveform_bars_clip(
     // A muted selected clip draws its bars dimmed
     // (Phase M, section 16) — the flag rides along with
     // the gain, straight from the clip itself.
-    draw_peak_bars(shape, peaks, clip.gain, clip.muted, w, h)
+    draw_peak_bars(shape, peaks, clip.gain, clip.muted, t, w, h)
 }
 
-/// The span bracket's colour: the selection accent at
+/// The span bracket's colour: the theme accent
+/// ([`app_theme::accent`], the bars' own hue) at
 /// 0.75 — or at [`MUTED_BAR_ALPHA`] of that when the
 /// bracketed clip is muted (Phase M, section 16), the
 /// same dimming the clip-mode bars get, applied the
@@ -757,8 +778,8 @@ fn waveform_bars_clip(
 /// `Color::alpha`, which does not multiply). Factored
 /// out of [`with_span_bracket`] so a test can pin the
 /// arithmetic.
-fn bracket_color(muted: bool) -> Color {
-    let accent = hex_color(WAVE_HEX).unwrap_or(Color::WHITE);
+fn bracket_color(t: &Theme, muted: bool) -> Color {
+    let accent = app_theme::accent(t);
     if muted {
         accent.alpha(0.75 * MUTED_BAR_ALPHA)
     } else {
@@ -770,8 +791,8 @@ fn bracket_color(muted: bool) -> Color {
 /// shape (Phase K, section 21): a rule at
 /// [`SPAN_BRACKET_Y`] across the span's x edges with a
 /// [`SPAN_TICK_H`]-long tick down at each edge, in the
-/// selection accent ([`WAVE_HEX`], the strip's own
-/// accent) at reduced alpha. The span resolves through
+/// theme accent ([`bracket_color`]) at reduced alpha.
+/// The span resolves through
 /// [`clip_span`] at the strip's own bucket count — the
 /// same cached probe, keyed the same way, that the seek
 /// uses — and the edges come from [`span_bracket`],
@@ -788,6 +809,7 @@ fn with_span_bracket(
     core: &EditorCore,
     selected: Option<usize>,
     el_size: [f32; 2],
+    t: &Theme,
 ) -> Shape {
     let mut shape = shape;
     let (w, h) = (el_size[0], el_size[1]);
@@ -808,7 +830,7 @@ fn with_span_bracket(
     // the muted read still goes through the shared
     // helper, never the field directly.
     let muted = selected.map(|i| clip_is_muted(core, i)).unwrap_or(false);
-    let bracket = bracket_color(muted);
+    let bracket = bracket_color(t, muted);
     let y = SPAN_BRACKET_Y;
     let tick = y + SPAN_TICK_H;
     shape = shape.line([left, y], [right, y], SPAN_BRACKET_W, LineCap::Butt, bracket);
@@ -829,7 +851,7 @@ fn with_span_bracket(
 /// module docs). No resolvable spans — no clips, or
 /// every clip's file unreadable — leaves the shape
 /// untouched.
-fn with_all_clip_ticks(shape: Shape, core: &EditorCore, el_size: [f32; 2]) -> Shape {
+fn with_all_clip_ticks(shape: Shape, core: &EditorCore, el_size: [f32; 2], t: &Theme) -> Shape {
     let mut shape = shape;
     let (w, h) = (el_size[0], el_size[1]);
     if w <= 0.0 || h <= 0.0 {
@@ -840,7 +862,7 @@ fn with_all_clip_ticks(shape: Shape, core: &EditorCore, el_size: [f32; 2]) -> Sh
     if edges.is_empty() {
         return shape;
     }
-    let tick_color = hex_color(WAVE_HEX).unwrap_or(Color::WHITE).alpha(ALL_TICKS_ALPHA);
+    let tick_color = app_theme::accent(t).alpha(ALL_TICKS_ALPHA);
     let y = SPAN_BRACKET_Y;
     let tick = y + SPAN_TICK_H;
     for x in edges {
@@ -860,34 +882,48 @@ fn waveform_shape_project(
     core: &EditorCore,
     selected: Option<usize>,
     el_size: [f32; 2],
+    t: &Theme,
 ) -> Shape {
     with_playhead(
         with_span_bracket(
-            with_all_clip_ticks(waveform_bars(core, el_size), core, el_size),
+            with_all_clip_ticks(waveform_bars(core, el_size, t), core, el_size, t),
             core,
             selected,
             el_size,
+            t,
         ),
         core,
         el_size,
+        t,
     )
+}
+
+/// The playhead's colour: the warning amber
+/// ([`app_theme::warning_on`] — the brief's warning
+/// tint in dark, darkened for the white card in
+/// light). Factored out so the colour has a named
+/// home in this file (UI mission Wave 2; before that
+/// the playhead drew a file-local amber literal, the
+/// stage's selected-joint tone).
+fn playhead_color(t: &Theme) -> Color {
+    app_theme::warning_on(t)
 }
 
 /// Append the project-mapped playhead to a bars shape:
 /// [`playhead_x`] of the current frame, drawn whenever the
 /// project has frames — including over the empty lane of a
 /// project with no (readable) clip, since the strip still
-/// seeks there. Drawn last, over the bars, in the stage's
-/// selected-joint amber. Shared by the project shape and
-/// the selected-clip shape (Phase I, section 17): the
-/// playhead is project-mapped in both modes, deliberately
-/// (see the module docs).
-fn with_playhead(shape: Shape, core: &EditorCore, el_size: [f32; 2]) -> Shape {
+/// seeks there. Drawn last, over the bars, in the
+/// warning amber ([`playhead_color`]). Shared by the
+/// project shape and the selected-clip shape (Phase I,
+/// section 17): the playhead is project-mapped in both
+/// modes, deliberately (see the module docs).
+fn with_playhead(shape: Shape, core: &EditorCore, el_size: [f32; 2], t: &Theme) -> Shape {
     let mut shape = shape;
     let (w, h) = (el_size[0], el_size[1]);
     if w > 0.0 && h > 0.0 && core.frame_count() > 0 {
         let x = playhead_x(core.current, core.frame_count(), w);
-        let playhead = hex_color(PLAYHEAD_HEX).unwrap_or(Color::WHITE);
+        let playhead = playhead_color(t);
         shape = shape.line([x, 0.0], [x, h], 2.0, LineCap::Butt, playhead);
     }
     shape
@@ -905,16 +941,19 @@ fn waveform_shape_clip(
     index: usize,
     peaks: &[f32],
     el_size: [f32; 2],
+    t: &Theme,
 ) -> Shape {
     with_playhead(
         with_span_bracket(
-            waveform_bars_clip(core, index, peaks, el_size),
+            waveform_bars_clip(core, index, peaks, el_size, t),
             core,
             Some(index),
             el_size,
+            t,
         ),
         core,
         el_size,
+        t,
     )
 }
 
@@ -1064,7 +1103,14 @@ fn waveform_seek(s: &mut State, d: &Drag) {
 /// caption suffix in clip mode, a dimmer span bracket
 /// in both modes — colours and one string only, no
 /// element, geometry or gesture changes.
-pub fn waveform_el_state(s: &State, el_size: [f32; 2]) -> El {
+/// UI mission Wave 2 (s02 §3.1 / s14 D7) threads the
+/// shell's `&Theme` through this builder and the shape
+/// builders under it: every colour the strip draws now
+/// derives from the token architecture (see the module
+/// docs' "Theme wiring" section) instead of file-local
+/// hex constants. The element tree, geometry and
+/// gesture are exactly what they were.
+pub fn waveform_el_state(s: &State, el_size: [f32; 2], t: &Theme) -> El {
     let clip_count = s.core.project.audio.len();
     let selected_peaks: Vec<f32> = match s.audio_panel.selected {
         Some(i) if i < clip_count => stykanimate_rs::audio_ops::clip_peaks(
@@ -1089,6 +1135,7 @@ pub fn waveform_el_state(s: &State, el_size: [f32; 2]) -> El {
                     i,
                     &selected_peaks,
                     [el_size[0], canvas_h],
+                    t,
                 ))
                 .key("waveform")
                 .h(canvas_h)
@@ -1098,10 +1145,10 @@ pub fn waveform_el_state(s: &State, el_size: [f32; 2]) -> El {
                 text(caption)
                     .key("waveform-caption")
                     .font(type_::LABEL)
-                    .color(hex_color(CAPTION_HEX).unwrap_or(Color::WHITE)),
+                    .color(t.text_secondary),
             );
     }
-    canvas(waveform_shape_project(&s.core, s.audio_panel.selected, el_size))
+    canvas(waveform_shape_project(&s.core, s.audio_panel.selected, el_size, t))
         .key("waveform")
         .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| waveform_seek(s, d))
 }
@@ -1453,15 +1500,16 @@ mod tests {
 
     #[test]
     fn bar_colors_dim_when_muted() {
+        let t = rune::tok::theme(true);
         // Unmuted is the pair the strip has always drawn:
         // outer at half alpha, inner opaque.
-        let (outer, inner) = bar_colors(false);
+        let (outer, inner) = bar_colors(&t, false);
         assert_eq!(outer.a, 0.5);
         assert_eq!(inner.a, 1.0);
         // Muted: the SAME hues at MUTED_BAR_ALPHA of those
         // alphas — the multiplication Color::alpha does
         // not do, pinned here.
-        let (m_outer, m_inner) = bar_colors(true);
+        let (m_outer, m_inner) = bar_colors(&t, true);
         assert_eq!(m_outer.a, 0.5 * MUTED_BAR_ALPHA);
         assert_eq!(m_inner.a, MUTED_BAR_ALPHA);
         assert_eq!((m_outer.r, m_outer.g, m_outer.b), (outer.r, outer.g, outer.b));
@@ -1470,12 +1518,13 @@ mod tests {
 
     #[test]
     fn bracket_color_dims_when_muted() {
+        let t = rune::tok::theme(true);
         // Unmuted: the Phase K bracket weight.
-        assert_eq!(bracket_color(false).a, 0.75);
+        assert_eq!(bracket_color(&t, false).a, 0.75);
         // Muted: the same factor as the bars.
-        assert_eq!(bracket_color(true).a, 0.75 * MUTED_BAR_ALPHA);
+        assert_eq!(bracket_color(&t, true).a, 0.75 * MUTED_BAR_ALPHA);
         // Same hue, only quieter.
-        let (a, b) = (bracket_color(false), bracket_color(true));
+        let (a, b) = (bracket_color(&t, false), bracket_color(&t, true));
         assert_eq!((a.r, a.g, a.b), (b.r, b.g, b.b));
     }
 
@@ -1497,8 +1546,9 @@ mod tests {
         });
         s.audio_panel.selected = Some(0);
         assert!(clip_is_muted(&s.core, 0));
-        let _clip_mode = waveform_el_state(&s, [308.0, 56.0]);
-        let _project_shape = waveform_shape_project(&s.core, Some(0), [308.0, 56.0]);
+        let t = rune::tok::theme(true);
+        let _clip_mode = waveform_el_state(&s, [308.0, 56.0], &t);
+        let _project_shape = waveform_shape_project(&s.core, Some(0), [308.0, 56.0], &t);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1680,16 +1730,17 @@ mod tests {
             waveform_mode(s.audio_panel.selected, 1, &peaks),
             WaveformMode::Clip(0)
         );
-        let _clip_mode = waveform_el_state(&s, [308.0, 56.0]);
+        let t = rune::tok::theme(true);
+        let _clip_mode = waveform_el_state(&s, [308.0, 56.0], &t);
         // The project shape takes the same bracket path:
         // built directly with the resolving selection,
         // because the builder's own mode gate routes a
         // readable selection to clip mode (above).
-        let _project_shape = waveform_shape_project(&s.core, Some(0), [308.0, 56.0]);
+        let _project_shape = waveform_shape_project(&s.core, Some(0), [308.0, 56.0], &t);
         // Project mode through the builder: no selection,
         // the bare canvas, no bracket.
         s.audio_panel.selected = None;
-        let _project_mode = waveform_el_state(&s, [308.0, 56.0]);
+        let _project_mode = waveform_el_state(&s, [308.0, 56.0], &t);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1740,7 +1791,8 @@ mod tests {
         // The project shape builds with the ticks drawn
         // (bars, ticks, no selection so no bracket,
         // playhead) — a smoke pass over the drawing path.
-        let _shape = waveform_shape_project(&core, None, [240.0, 56.0]);
+        let t = rune::tok::theme(true);
+        let _shape = waveform_shape_project(&core, None, [240.0, 56.0], &t);
         let _ = std::fs::remove_file(&path_a);
         let _ = std::fs::remove_file(&path_b);
     }

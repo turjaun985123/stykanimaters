@@ -11,6 +11,7 @@
 //! test-only and `main.rs` mounts it under `#[cfg(test)]`
 //! with an explicit `#[path]`.
 
+pub mod app_theme;
 pub mod audio_panel;
 pub mod camera_panel;
 pub mod clips_panel;
