@@ -1644,6 +1644,23 @@ fn prev_next_key_jumps_between_camera_keys() {
         rt.frame(DT);
     }
     scroll_into_view(&mut rt, "pb-next-key");
+    // TEMP DIAGNOSTIC (Phase N foundation CI): dump what
+    // covers the tap point.
+    {
+        let pt = rt.find("pb-next-key").unwrap();
+        eprintln!("DIAG pb-next-key centre: {pt:?}");
+        eprintln!("DIAG toasts empty: {}", rt.state.toasts.is_empty());
+        for e in rt.elements() {
+            let r = e.rect;
+            if pt.0 >= r[0] && pt.0 <= r[0] + r[2] && pt.1 >= r[1] && pt.1 <= r[1] + r[3] {
+                eprintln!(
+                    "DIAG at point: key={:?} text={:?} rect={r:?}",
+                    e.key, e.text
+                );
+            }
+        }
+        eprintln!("DIAG current={} keys={:?}", rt.state.core.current, key_frames(&rt.state.core));
+    }
     tap(&mut rt, "pb-next-key");
     assert_eq!(
         rt.state.core.current, 1,
