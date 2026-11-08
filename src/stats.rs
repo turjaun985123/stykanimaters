@@ -303,6 +303,7 @@ mod tests {
             width: 2.0,
             widths: Vec::new(),
             fill: None,
+            spray: None,
         });
         let s = project_stats(&p);
         assert_eq!(s.figures, 2);
