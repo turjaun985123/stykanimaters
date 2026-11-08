@@ -3594,7 +3594,6 @@ fn stage_and_shell_furniture_survive() {
         "main-row",
         "centre",
         "stage",
-        "stage-overlay-row",
         "transport",
         "status-strip",
     ] {

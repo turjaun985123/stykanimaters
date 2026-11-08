@@ -533,7 +533,7 @@ pub fn range_label(core: &EditorCore, ops: &FrameOpsState) -> Option<String> {
 
 /// The "Frames" toolbar section: the main row in GPUI
 /// tool-group order — Inbetween / Shift / Reverse / Swap /
-/// Smooth path, the clipboards, the loop endpoints, then the duration
+/// Smooth path, the clipboards, then the duration
 /// steppers with their readout (the row wraps inside the
 /// side column — see the `flex_wrap` note in the builder) — over a second row, "This
 /// frame", carrying the current frame's duration multiplier
@@ -544,7 +544,6 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let ops = &s.frame_ops;
     let n = core.frame_count();
-    let loop_on = core.loop_range.is_some();
 
     let mut section = row()
         .w_full()
@@ -732,44 +731,6 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             )
         } else {
             crate::rune_sec::icon_btn::icon_btn_inert("range-del", "trash-can", "Delete range", t)
-        })
-        .child({
-            // fbtn's precedence was active first: an ON
-            // loop endpoint renders as btn's active state
-            // even though its mute condition (an empty
-            // timeline) cannot hold while a loop exists.
-            let press = |s: &mut State| {
-                let cur = s.core.current;
-                let (_, b) = s.core.loop_range.unwrap_or((cur, cur));
-                s.core.set_loop_range(cur, b);
-            };
-            if n == 0 && !loop_on {
-                btn_muted_live("loop-start", "Loop start", false, t, press)
-            } else {
-                btn("loop-start", "Loop start", loop_on, t, press)
-            }
-        })
-        .child({
-            let press = |s: &mut State| {
-                let cur = s.core.current;
-                let (a, _) = s.core.loop_range.unwrap_or((cur, cur));
-                s.core.set_loop_range(a, cur);
-            };
-            if n == 0 && !loop_on {
-                btn_muted_live("loop-end", "Loop end", false, t, press)
-            } else {
-                btn("loop-end", "Loop end", loop_on, t, press)
-            }
-        })
-        .child({
-            let press = |s: &mut State| {
-                s.core.clear_loop_range();
-            };
-            if loop_on {
-                btn("loop-clear", "Loop clear", false, t, press)
-            } else {
-                btn_muted_live("loop-clear", "Loop clear", false, t, press)
-            }
         })
         .child(design::section_label("Dur", t))
         .child({

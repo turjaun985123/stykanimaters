@@ -37,6 +37,15 @@
 //! core's single `onion_frames` count, and independent
 //! frustum / safe-frame guide toggles under the master
 //! `guides` flag.
+//! UI mission Wave 5 adds two things to the stack: a permanent
+//! stage frame (the stage rect filled with the project
+//! background and outlined in the theme's border token, drawn
+//! first — audit S10 D1) and the shell view-navigation layer
+//! (a zoom/pan composed over the camera transform, folded in
+//! by [`display_transform`] / [`drag_transform`] — audit
+//! S10 D4; see the "View navigation" section below).
+
+use std::cell::Cell;
 
 use rune::{Color, LineCap, Shape};
 use stykanimate_rs::editor::EditorCore;
@@ -91,6 +100,235 @@ pub fn to_stage(vt: &ViewTransform, local: [f32; 2]) -> V2 {
         vt.cam[0] + (local[0] - vt.size[0] / 2.0) / vt.scale,
         vt.cam[1] + (local[1] - vt.size[1] / 2.0) / vt.scale,
     ]
+}
+
+// ----------------------------------------------------------------
+// View navigation (UI mission Wave 5, audit S10 D4)
+// ----------------------------------------------------------------
+
+/// Shell-only viewport navigation: a zoom multiplier and a pan
+/// offset (in canvas element points) composed OVER the authored
+/// camera transform, so a detail can be inspected without
+/// editing the film. Until this layer existed, every zoom input
+/// (the mouse wheel, the camera overlay's steppers) called
+/// `EditorCore::camera_zoom_by`, which upserts a camera key and
+/// takes an undo snapshot — scrolling the wheel rewrote the
+/// animation's camera track.
+///
+/// The layer is a pure reparameterisation of the transform the
+/// stage already uses, not a second transform. A screen-space
+/// similarity (uniform `zoom` about the element centre, then a
+/// `pan` translation) folds exactly into the camera parameters
+/// of the same `RotTransform`:
+///
+/// * `zoom' = zoom · view.zoom`
+/// * `cam'  = cam − R(θ) · view.pan / (view.zoom · scale)`
+///
+/// where `R(θ)` is the camera-rotation matrix and `scale` the
+/// base transform's `fit · zoom`. Uniform scaling commutes with
+/// rotation, and the pan (a screen-space vector) is un-rotated
+/// into stage space by the transform's own matrix, so
+/// [`display_transform`] (drawing) and [`drag_transform`]
+/// (pointer conversion) remain exact inverses of each other —
+/// the property drag correctness rests on — at any view state.
+/// At the identity view the fold returns the base transform
+/// unchanged, bit for bit.
+///
+/// The state lives in a `thread_local`: the shell's pattern for
+/// view-state with no `State` field (the camera panel's
+/// clipboard, the clips panel's selection, `main.rs`'s
+/// `STAGE_EL_SIZE`). It is session-only — never persisted,
+/// never written into the project — and no engine op sees it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewNav {
+    /// View zoom multiplier over the authored camera zoom.
+    pub zoom: f32,
+    /// View pan in canvas element points: the displayed image
+    /// shifts by exactly this vector.
+    pub pan: [f32; 2],
+}
+
+impl ViewNav {
+    /// The identity view: the camera's own framing, exactly.
+    pub const IDENTITY: ViewNav = ViewNav { zoom: 1.0, pan: [0.0, 0.0] };
+
+    /// Whether this view shows the camera's own framing.
+    fn is_identity(self) -> bool {
+        self.zoom == 1.0 && self.pan == [0.0, 0.0]
+    }
+}
+
+/// View zoom bounds: wide enough to inspect one joint or to
+/// take in the whole stage with margin, narrow enough that a
+/// runaway wheel gesture cannot lose the picture entirely (the
+/// overlay's Fit always restores the camera's framing).
+pub const VIEW_ZOOM_MIN: f32 = 0.1;
+/// See [`VIEW_ZOOM_MIN`].
+pub const VIEW_ZOOM_MAX: f32 = 8.0;
+
+thread_local! {
+    static VIEW_NAV: Cell<ViewNav> = const { Cell::new(ViewNav::IDENTITY) };
+    /// The stage element size the most recent [`stage_shape`]
+    /// call drew at. The camera overlay's Centre action needs
+    /// an element size to aim the view with, and the overlay
+    /// builder itself receives no layout — the same idea as
+    /// `main.rs`'s `STAGE_EL_SIZE`, kept where the drawing
+    /// happens.
+    static LAST_STAGE_SIZE: Cell<[f32; 2]> = const { Cell::new([0.0, 0.0]) };
+}
+
+/// The current shell view navigation state.
+pub fn view_nav() -> ViewNav {
+    VIEW_NAV.with(|c| c.get())
+}
+
+/// Replace the view navigation state (the zoom is clamped to
+/// [`VIEW_ZOOM_MIN`]..=[`VIEW_ZOOM_MAX`]).
+pub fn set_view_nav(nav: ViewNav) {
+    let nav = ViewNav {
+        zoom: nav.zoom.clamp(VIEW_ZOOM_MIN, VIEW_ZOOM_MAX),
+        pan: nav.pan,
+    };
+    VIEW_NAV.with(|c| c.set(nav));
+}
+
+/// Restore the camera's own framing (the identity view).
+pub fn reset_view_nav() {
+    set_view_nav(ViewNav::IDENTITY);
+}
+
+/// Multiply the view zoom by `factor` about the element centre
+/// (the pan is untouched, so the camera centre stays centred).
+/// The camera overlay steppers' zoom; the wheel uses
+/// [`view_zoom_at`] instead, which keeps the pointed-at stage
+/// point under the cursor.
+pub fn view_zoom_by(factor: f32) {
+    let nav = view_nav();
+    set_view_nav(ViewNav {
+        zoom: nav.zoom * factor,
+        pan: nav.pan,
+    });
+}
+
+/// The stage element size the most recent [`stage_shape`] call
+/// drew at (zero before the first frame).
+pub fn last_stage_size() -> [f32; 2] {
+    LAST_STAGE_SIZE.with(|c| c.get())
+}
+
+/// Fold the shell view navigation into a base camera transform
+/// (see the section docs above for the algebra). An identity
+/// view returns `base` unchanged.
+pub fn with_view_nav(
+    base: crate::rune_sec::stage_camera::RotTransform,
+) -> crate::rune_sec::stage_camera::RotTransform {
+    let nav = view_nav();
+    if nav.is_identity() {
+        return base;
+    }
+    let theta = base.angle_deg;
+    let (sin, cos) = theta.to_radians().sin_cos();
+    // R(θ) · pan: the stage_camera rotation matrix (its
+    // `rotate_about`, for a free vector) applied to the pan.
+    let rp = [
+        nav.pan[0] * cos - nav.pan[1] * sin,
+        nav.pan[0] * sin + nav.pan[1] * cos,
+    ];
+    let denom = nav.zoom * base.vt.scale;
+    let vt = ViewTransform {
+        scale: base.vt.scale * nav.zoom,
+        cam: [
+            base.vt.cam[0] - rp[0] / denom,
+            base.vt.cam[1] - rp[1] / denom,
+        ],
+        size: base.vt.size,
+    };
+    crate::rune_sec::stage_camera::RotTransform::new(vt, theta)
+}
+
+/// The transform the stage DRAWS with: the camera at the
+/// display frame (as `RotTransform::for_display`) with the
+/// shell view navigation folded in.
+pub fn display_transform(
+    core: &EditorCore,
+    el_size: [f32; 2],
+) -> crate::rune_sec::stage_camera::RotTransform {
+    with_view_nav(crate::rune_sec::stage_camera::RotTransform::for_display(
+        core, el_size,
+    ))
+}
+
+/// The transform stage POINTER conversion uses: the camera at
+/// the current frame (as `RotTransform::for_drag`) with the
+/// shell view navigation folded in. Drawing and dragging fold
+/// the same view state into the same transform family, so a
+/// drag still lands on the grabbed joint at any view zoom.
+pub fn drag_transform(
+    core: &EditorCore,
+    el_size: [f32; 2],
+) -> crate::rune_sec::stage_camera::RotTransform {
+    with_view_nav(crate::rune_sec::stage_camera::RotTransform::for_drag(
+        core, el_size,
+    ))
+}
+
+/// Wheel zoom: multiply the view zoom by `factor`, keeping the
+/// stage point under `cursor` (element points) under the
+/// cursor — zoom-to-cursor, so inspecting a detail does not
+/// also slide it away. With no laid-out element size there is
+/// no cursor geometry to honour, so the zoom falls back to the
+/// element centre (pan unchanged).
+pub fn view_zoom_at(core: &EditorCore, el_size: [f32; 2], cursor: [f32; 2], factor: f32) {
+    let nav = view_nav();
+    let new_zoom = (nav.zoom * factor).clamp(VIEW_ZOOM_MIN, VIEW_ZOOM_MAX);
+    if new_zoom == nav.zoom || el_size[0] <= 0.0 || el_size[1] <= 0.0 {
+        set_view_nav(ViewNav {
+            zoom: new_zoom,
+            pan: nav.pan,
+        });
+        return;
+    }
+    // The stage point under the cursor, through the composed
+    // transform the user is actually looking at (display
+    // frame), and where the base camera transform puts that
+    // point on screen: the new pan must satisfy
+    //   centre + new_zoom * (base(anchor) − centre) + pan = cursor.
+    let anchor = display_transform(core, el_size).to_stage(cursor);
+    let base = crate::rune_sec::stage_camera::RotTransform::for_display(core, el_size);
+    let b = base.to_screen(anchor);
+    let centre = [el_size[0] / 2.0, el_size[1] / 2.0];
+    set_view_nav(ViewNav {
+        zoom: new_zoom,
+        pan: [
+            cursor[0] - centre[0] - new_zoom * (b[0] - centre[0]),
+            cursor[1] - centre[1] - new_zoom * (b[1] - centre[1]),
+        ],
+    });
+}
+
+/// Pan the view so `stage_point` sits at the element centre
+/// (the camera overlay's Centre action: centre the VIEW on the
+/// selected figure's root, where `centre_on_selection` would
+/// aim the authored CAMERA). Returns `false` — view untouched —
+/// when no stage has been laid out yet, so the caller can fall
+/// back to clearing the pan.
+pub fn view_centre_on(core: &EditorCore, stage_point: [f32; 2]) -> bool {
+    let size = last_stage_size();
+    if size[0] <= 0.0 || size[1] <= 0.0 {
+        return false;
+    }
+    let base = crate::rune_sec::stage_camera::RotTransform::for_display(core, size);
+    let b = base.to_screen(stage_point);
+    let centre = [size[0] / 2.0, size[1] / 2.0];
+    let nav = view_nav();
+    set_view_nav(ViewNav {
+        zoom: nav.zoom,
+        pan: [
+            nav.zoom * (centre[0] - b[0]),
+            nav.zoom * (centre[1] - b[1]),
+        ],
+    });
+    true
 }
 
 /// Points of a regular `n`-gon of radius `r` around `centre`
@@ -528,13 +766,54 @@ fn fig3_screen_segments(
 /// the FX: the 3D session's figure on the stage, drawn
 /// when `overlays.fig3_stage` is set and a session exists.
 pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays) -> Shape {
+    // The overlay Centre action aims the view with the size
+    // the stage was last drawn at (see `last_stage_size`).
+    LAST_STAGE_SIZE.with(|c| c.set(el_size));
     let project = &core.project;
     let display = core.display_frame();
-    let cam = project.camera_at(display);
-    let vt = view_transform(el_size, project.stage, cam);
-    let rt = crate::rune_sec::stage_camera::RotTransform::for_display(core, el_size);
-    let s = vt.scale;
+    // The display transform: the camera at the display frame
+    // with the shell view navigation folded in (identity view
+    // = the camera's own transform, bit for bit).
+    let rt = display_transform(core, el_size);
+    let s = rt.vt.scale;
     let mut shape = Shape::new();
+
+    // The stage frame (UI mission Wave 5, audit S10 D1),
+    // drawn first, under every pass: the stage rect filled
+    // with the project background and outlined with the
+    // theme's border token. The canvas element itself now
+    // wears the chrome card colour (see `main.rs`), so the
+    // letterbox reads as surround and the frame shows exactly
+    // what an export will contain, in every workspace, with
+    // guides on or off. Until now the whole element wore the
+    // project background and the only stage outline was the
+    // guides border — which defaults off — so stage area and
+    // letterbox were one flat colour and off-stage content
+    // looked identical to on-stage content. (The guides' own
+    // border overdrawing this frame when guides are on is the
+    // pre-existing rest-state overlap, not a second frame.)
+    if project.stage[0] > 0.0 && project.stage[1] > 0.0 {
+        let theme = crate::rune_sec::app_theme::app_theme(!core.light_theme);
+        let (w, h) = (project.stage[0], project.stage[1]);
+        let corners = [
+            rt.to_screen([0.0, 0.0]),
+            rt.to_screen([w, 0.0]),
+            rt.to_screen([w, h]),
+            rt.to_screen([0.0, h]),
+        ];
+        shape = shape.fill(
+            corners.to_vec(),
+            hex_color(project.background).unwrap_or(theme.card),
+        );
+        for (a, b) in [
+            (corners[0], corners[1]),
+            (corners[1], corners[2]),
+            (corners[2], corners[3]),
+            (corners[3], corners[0]),
+        ] {
+            shape = shape.line(a, b, 1.0, LineCap::Round, theme.card_border);
+        }
+    }
 
     if overlays.guides {
         let guide_color = Color::WHITE.alpha(0.22);
@@ -887,6 +1166,99 @@ mod tests {
         assert!(vt.scale > 0.0);
         let vt = view_transform([800.0, 600.0], [0.0, 0.0], cam());
         assert!(vt.scale > 0.0);
+    }
+
+    // ---- View navigation (UI mission Wave 5, audit S10 D4) ----
+
+    #[test]
+    fn view_nav_identity_returns_the_base_transform_unchanged() {
+        set_view_nav(ViewNav::IDENTITY);
+        let core = EditorCore::new();
+        let base = crate::rune_sec::stage_camera::RotTransform::for_display(&core, [800.0, 600.0]);
+        assert_eq!(with_view_nav(base), base);
+        assert_eq!(display_transform(&core, [800.0, 600.0]), base);
+        let drag_base = crate::rune_sec::stage_camera::RotTransform::for_drag(&core, [800.0, 600.0]);
+        assert_eq!(drag_transform(&core, [800.0, 600.0]), drag_base);
+    }
+
+    #[test]
+    fn view_nav_fold_keeps_the_screen_stage_roundtrip_exact() {
+        // Rotation included: the fold must invert exactly
+        // under a turned camera, not only at angle 0.
+        let base = crate::rune_sec::stage_camera::RotTransform::from_parts(
+            [800.0, 600.0],
+            [960.0, 720.0],
+            (400.0, 300.0, 2.0),
+            30.0,
+        );
+        set_view_nav(ViewNav {
+            zoom: 2.0,
+            pan: [13.0, -7.0],
+        });
+        let folded = with_view_nav(base);
+        for p in [[0.0, 0.0], [960.0, 720.0], [123.4, 567.8], [400.0, 300.0]] {
+            let back = folded.to_stage(folded.to_screen(p));
+            assert!(
+                (back[0] - p[0]).abs() < 1e-3 && (back[1] - p[1]).abs() < 1e-3,
+                "folded roundtrip drift for {p:?}: {back:?}"
+            );
+        }
+        reset_view_nav();
+    }
+
+    #[test]
+    fn view_nav_zooms_about_the_centre_and_pans_in_element_points() {
+        let base = crate::rune_sec::stage_camera::RotTransform::from_parts(
+            [800.0, 600.0],
+            [960.0, 720.0],
+            (400.0, 300.0, 2.0),
+            0.0,
+        );
+        set_view_nav(ViewNav {
+            zoom: 2.0,
+            pan: [13.0, -7.0],
+        });
+        let folded = with_view_nav(base);
+        // The camera centre sits at the element centre under
+        // the base transform; the fold keeps it there, shifted
+        // by exactly the pan.
+        assert_eq!(folded.to_screen([400.0, 300.0]), [413.0, 293.0]);
+        // A point 100 element points right of centre doubles
+        // its offset under the 2x view zoom, plus the pan.
+        let right = base.to_stage([500.0, 300.0]);
+        let mapped = folded.to_screen(right);
+        assert!(
+            (mapped[0] - 613.0).abs() < 1e-3 && (mapped[1] - 293.0).abs() < 1e-3,
+            "expected [613, 293], got {mapped:?}"
+        );
+        reset_view_nav();
+    }
+
+    #[test]
+    fn view_zoom_at_keeps_the_cursor_anchor_put() {
+        let core = EditorCore::new();
+        set_view_nav(ViewNav::IDENTITY);
+        let cursor = [600.0, 300.0];
+        let before = display_transform(&core, [800.0, 600.0]).to_stage(cursor);
+        view_zoom_at(&core, [800.0, 600.0], cursor, 2.0);
+        assert_eq!(view_nav().zoom, 2.0);
+        let after = display_transform(&core, [800.0, 600.0]).to_stage(cursor);
+        assert!(
+            (after[0] - before[0]).abs() < 1e-3 && (after[1] - before[1]).abs() < 1e-3,
+            "cursor anchor drifted: {before:?} -> {after:?}"
+        );
+        reset_view_nav();
+    }
+
+    #[test]
+    fn view_zoom_by_clamps_and_reset_restores_identity() {
+        set_view_nav(ViewNav::IDENTITY);
+        view_zoom_by(100.0);
+        assert_eq!(view_nav().zoom, VIEW_ZOOM_MAX);
+        view_zoom_by(0.0001);
+        assert_eq!(view_nav().zoom, VIEW_ZOOM_MIN);
+        reset_view_nav();
+        assert_eq!(view_nav(), ViewNav::IDENTITY);
     }
 
     #[test]

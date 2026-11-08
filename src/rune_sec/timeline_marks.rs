@@ -213,26 +213,31 @@
 //! endpoints' roles (the stepped endpoint becomes the far
 //! end), exactly the handover an edge drag across the
 //! range performs. Clear calls `clear_loop_range`, the
-//! core's own op (it also posts "Loop range cleared.") —
-//! the same op, under the same `loop-clear` key, as the
-//! transport's and the Frames section's Loop clear
-//! buttons: one action, one key, three homes. Like the
-//! edge drag, the row takes no snapshots: `loop_range` is
-//! runtime state the core never undoes.
+//! core's own op (it also posts "Loop range cleared.").
+//! UI mission Wave 5 (audit D3/T4, integrator-approved
+//! recorded key change): this row is now the single
+//! timeline home of loop-range editing — the Playback
+//! panel's duplicate `loop-start` / `loop-end` /
+//! `loop-clear` mounts were removed (its jump buttons
+//! remain, relabelled "Go to start" / "Go to end"), so
+//! within this wave's files `loop-clear` is mounted
+//! here alone; the Frames section's own mounts of the
+//! three keys remain (that file is outside this wave).
+//! Like the edge drag, the row takes no snapshots:
+//! `loop_range` is runtime state the core never
+//! undoes.
 //!
-//! ## Clips lane (Phase M)
+//! ## Clips lane (Phase M, moved in Wave 5)
 //!
-//! Under the scrolled timeline, in the same
-//! outside-the-viewport stack as the loop row (and above
-//! it — the lane summarises the timeline's content, the
-//! loop row carries controls), sits a clips lane
-//! (`timeline-clips`): one slim bar per audio or FX clip,
-//! so the timeline itself shows where the project's
-//! clips sit without opening the Audio or Effects
-//! panels. The lane renders **only when at least one
-//! clip exists** — a clip-free project gets no lane
-//! element at all, so its timeline is exactly what it
-//! was before the lane existed.
+//! The scrolled column's last row — under the marker
+//! row, inside the scroll viewport — is a clips lane
+//! (`timeline-clips`): one slim bar per audio or FX
+//! clip, so the timeline itself shows where the
+//! project's clips sit without opening the Audio or
+//! Effects panels. The lane renders **only when at
+//! least one clip exists** — a clip-free project gets
+//! no lane element at all, so its timeline is exactly
+//! what it was before the lane existed.
 //!
 //! Bars use the chips' own geometry: [`span_rect`] maps
 //! a span's fractional frame range through the same
@@ -257,16 +262,35 @@
 //! duration. A probed length is floored at one frame
 //! for the same reason: a span must show.
 //!
-//! Like the loop row, the lane does not scroll with the
-//! chips (it is not part of the scrolled column), so on
-//! a timeline scrolled far right the lane still reads
-//! from the timeline's first frame.
+//! Wave 5 (audit D1/T1) moved the lane inside the
+//! scrolled column: it used to hang under the scroll
+//! row in the card, drawn from the timeline's first
+//! frame while the chips above it scrolled, so on a
+//! scrolled timeline every bar sat under the wrong
+//! frames. As the column's last row it shares the one
+//! scroll offset, so a bar always sits under the
+//! frames it summarises. The lane is a passive canvas
+//! — it has no handlers, and sitting below the marker
+//! row it shifts no existing row's content
+//! coordinates, so both drag gestures read exactly
+//! what they read before the move.
+//!
+//! Wave 5 (audit D2/T2) also stacks the bars: the
+//! lane is a stack of sub-lane rows, audio above FX
+//! (the kind split), and within one kind a span that
+//! overlaps a span already on a sub-lane drops to the
+//! next sub-lane instead of painting over it — no bar
+//! can hide another. [`CLIPS_H`] is one sub-lane
+//! row's height; the lane grows by one row plus
+//! [`CLIP_ROW_GAP`] per stacked row
+//! ([`clips_lane_height`]). [`clip_lane_rows`] is the
+//! assignment; muted/hidden dimming is unchanged.
 //!
 //! ## Timeline card (Phase N)
 //!
 //! The whole stack — the scrolled ruler / chips /
-//! markers column, then the clips lane, then the loop
-//! row, in that order — sits in one card (charter §13):
+//! markers / clips column, then the loop row, in that
+//! order — sits in one card (charter §13):
 //! fill `t.card`, border 1.0 `t.card_border`, radius
 //! [`design::PANEL_RADIUS`], padding 8. The card is
 //! **unkeyed** (a `timeline-card` key was considered
@@ -528,8 +552,10 @@ fn step_loop(s: &mut State, edge: Edge, dir: i32) {
 }
 
 /// What the loop row's Clear button does: the core's own
-/// `clear_loop_range` — the shell's one way of clearing a
-/// loop, shared with the transport and Frames buttons.
+/// `clear_loop_range`. Wave 5 made this row the single
+/// timeline home of loop-range editing (the Playback
+/// panel's duplicate mounts were removed; the Frames
+/// section keeps its own mounts).
 fn clear_loop_here(s: &mut State) {
     s.core.clear_loop_range();
 }
@@ -944,7 +970,24 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // viewport, so they translate together: the ruler stays
     // above its chips and the markers stay under theirs at
     // any scroll offset.
-    let content = col().gap(2.0).child(ruler).child(chips).child(marker_row);
+    let mut content = col().gap(2.0).child(ruler).child(chips).child(marker_row);
+    // UI mission Wave 5 (audit D1/T1): the clips lane is
+    // the scrolled column's last row, so it shares the
+    // chips' one scroll offset — a clip bar always sits
+    // under the frames it summarises, however far the
+    // timeline is scrolled. It used to hang under the
+    // scroll row in the card, drawn from the timeline's
+    // first frame while the chips above it scrolled, so
+    // on a scrolled timeline every bar sat under the
+    // wrong frames. The lane is a passive canvas (no
+    // handlers), and adding it below the marker row puts
+    // no padded element into the scroll chain and shifts
+    // no existing row's content coordinates — the ruler,
+    // chips and marker rows keep the exact geometry their
+    // drag handlers read.
+    if let Some(clips) = clips_lane(core) {
+        content = content.child(clips);
+    }
     let timeline = row().key("timeline").child(content).scroll_x().w_full();
     // Phase N (charter §13, see the module docs' Timeline
     // card section): the whole stack sits in one unkeyed
@@ -953,15 +996,12 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // OUTSIDE the scroll row, so no padded element enters
     // the chain between the scroll row and its content
     // column and every drag keeps its content coordinates.
-    // The clips lane and the loop row hang under the
-    // scrolled timeline, outside the viewport, so the lane
-    // never scrolls away and the loop buttons stay put
-    // however far the chips scroll — lane first (it
-    // summarises the timeline's content), then the loop
-    // row's controls. The card is returned even when it
-    // holds the scroll row alone (an empty project): the
-    // centre column's slot no longer alternates between a
-    // bare row and a stack column.
+    // The loop row hangs under the scrolled timeline,
+    // outside the viewport, so its buttons stay put
+    // however far the chips scroll. The card is returned
+    // even when it holds the scroll row alone (an empty
+    // project): the centre column's slot no longer
+    // alternates between a bare row and a stack column.
     let mut card = col()
         .gap(2.0)
         .fill(t.card)
@@ -969,9 +1009,6 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
         .radius(design::PANEL_RADIUS)
         .padding(8.0)
         .child(timeline);
-    if let Some(clips) = clips_lane(core) {
-        card = card.child(clips);
-    }
     if let Some(loop_row) = loop_row(s, t) {
         card = card.child(loop_row);
     }
@@ -1018,14 +1055,34 @@ fn loop_row(s: &State, t: &Theme) -> Option<El> {
     Some(r)
 }
 
-/// Height of the clips lane in points: a slim strip in
-/// the marker row's spirit ([`MARKER_H`] is 14), just
-/// tall enough for one bar.
+/// Height of ONE sub-lane row of the clips lane in
+/// points: a slim strip in the marker row's spirit
+/// ([`MARKER_H`] is 14), just tall enough for one bar.
+/// The lane stacks these rows (audio rows above FX
+/// rows, overlapping same-kind spans on separate rows)
+/// and is [`clips_lane_height`] tall overall.
 pub const CLIPS_H: f32 = 10.0;
 
-/// Height of one clip bar inside the lane: the lane
-/// minus a point of breathing room above and below.
+/// Height of one clip bar inside its sub-lane row: the
+/// row minus a point of breathing room above and
+/// below.
 pub const CLIP_BAR_H: f32 = 8.0;
+
+/// Vertical gap between two stacked sub-lane rows of
+/// the clips lane.
+pub const CLIP_ROW_GAP: f32 = 2.0;
+
+/// Total height of the clips lane for `row_count`
+/// stacked sub-lane rows: one row always reserves the
+/// classic single-lane height ([`CLIPS_H`]), and each
+/// further row adds its height plus [`CLIP_ROW_GAP`].
+pub fn clips_lane_height(row_count: usize) -> f32 {
+    if row_count == 0 {
+        CLIPS_H
+    } else {
+        row_count as f32 * CLIPS_H + (row_count - 1) as f32 * CLIP_ROW_GAP
+    }
+}
 
 /// The clips lane's audio colour: the 2.0 palette's
 /// primary accent.
@@ -1146,12 +1203,71 @@ pub fn span_rgb(kind: SpanKind) -> u32 {
     }
 }
 
+/// Which sub-lane row each span paints on (Wave 5, audit
+/// D2/T2): audio rows sit above FX rows, and within one
+/// kind, spans are first-fit onto rows in span order — a
+/// span takes the first row of its kind whose last span
+/// ends at or before it starts (judged on the drawn
+/// [`span_rect`]s, so spans merely touching at an edge
+/// still share a row). `None` for a span that draws
+/// nothing (zero width): it takes no row. Row indices
+/// are global: the first FX row is numbered after ALL
+/// audio rows, never interleaved, so the kind split
+/// holds structurally even when no spans overlap.
+pub fn clip_lane_rows(spans: &[ClipSpan], frame_count: usize) -> Vec<Option<usize>> {
+    let mut rows: Vec<Option<usize>> = vec![None; spans.len()];
+    // Per kind, the end x of the last span placed on each
+    // of that kind's rows. Audio is placed first so the
+    // FX rows can be numbered after ALL audio rows.
+    let mut audio_ends: Vec<f32> = Vec::new();
+    let mut fx_ends: Vec<f32> = Vec::new();
+    for want_fx in [false, true] {
+        let base = audio_ends.len();
+        let ends = if want_fx { &mut fx_ends } else { &mut audio_ends };
+        for (i, span) in spans.iter().enumerate() {
+            if matches!(span.kind, SpanKind::Fx) != want_fx {
+                continue;
+            }
+            let [x, w] = span_rect(span, frame_count);
+            if w <= 0.0 {
+                continue;
+            }
+            let end = x + w;
+            let local = match ends.iter().position(|&e| e <= x) {
+                Some(j) => {
+                    ends[j] = end;
+                    j
+                }
+                None => {
+                    ends.push(end);
+                    ends.len() - 1
+                }
+            };
+            rows[i] = Some(if want_fx { base + local } else { local });
+        }
+    }
+    rows
+}
+
+/// How many sub-lane rows the lane needs for `spans`:
+/// the highest assigned row plus one, or 0 when no span
+/// draws (an empty lane still reserves one row's
+/// height — see [`clips_lane_height`]).
+pub fn clip_lane_row_count(spans: &[ClipSpan], frame_count: usize) -> usize {
+    clip_lane_rows(spans, frame_count)
+        .into_iter()
+        .flatten()
+        .max()
+        .map_or(0, |m| m + 1)
+}
+
 /// The clips lane's drawing as one `Shape` in a nominal
-/// `timeline_width × CLIPS_H` space (the fx strip's
-/// canvas idiom): one bar per span at [`span_rect`]'s
-/// rect, skipped when zero-width. A bar is a round-cap
-/// line of [`CLIP_BAR_H`] — a capsule exactly the
-/// span's width — except a span narrower than the bar
+/// `timeline_width × clips_lane_height` space (the fx
+/// strip's canvas idiom): one bar per span at
+/// [`span_rect`]'s rect, on its [`clip_lane_rows`]
+/// sub-lane row, skipped when zero-width. A bar is a
+/// round-cap line of [`CLIP_BAR_H`] — a capsule exactly
+/// the span's width — except a span narrower than the bar
 /// is tall, which draws as an octagon dot at its centre
 /// (the stage's polygon-circle idiom), so a very short
 /// clip still marks its place. Muted/hidden spans draw
@@ -1162,13 +1278,18 @@ pub fn clips_shape(spans: &[ClipSpan], frame_count: usize) -> Shape {
     if total <= 0.0 {
         return shape;
     }
-    let cy = CLIPS_H / 2.0;
+    let rows = clip_lane_rows(spans, frame_count);
+    let row_count = rows.iter().flatten().max().map_or(0, |m| m + 1);
     let r = CLIP_BAR_H / 2.0;
-    for span in spans {
+    for (span, row) in spans.iter().zip(rows.iter()) {
         let [x, w] = span_rect(span, frame_count);
+        let Some(row) = row else {
+            continue;
+        };
         if w <= 0.0 {
             continue;
         }
+        let cy = *row as f32 * (CLIPS_H + CLIP_ROW_GAP) + CLIPS_H / 2.0;
         let base = hex_color(span_rgb(span.kind)).unwrap_or(Color::WHITE);
         let color = if span.muted_or_hidden {
             base.alpha(CLIP_DIM_ALPHA)
@@ -1188,25 +1309,29 @@ pub fn clips_shape(spans: &[ClipSpan], frame_count: usize) -> Shape {
             shape = shape.fill(dot, color);
         }
     }
-    shape.view_box(total, CLIPS_H)
+    shape.view_box(total, clips_lane_height(row_count))
 }
 
-/// The clips lane under the timeline (Phase M, see the
-/// module docs): a content-width canvas keyed
-/// `timeline-clips` carrying [`clips_shape`]. `None`
-/// when the project has no audio and no FX clips — the
-/// lane exists only when it has something to show.
+/// The clips lane, the scrolled column's last row in the
+/// timeline (Phase M; moved inside the scroll viewport
+/// in Wave 5, see the module docs): a content-width
+/// canvas keyed `timeline-clips` carrying
+/// [`clips_shape`], as tall as its stacked sub-lane rows
+/// need. `None` when the project has no audio and no FX
+/// clips — the lane exists only when it has something
+/// to show.
 fn clips_lane(core: &EditorCore) -> Option<El> {
     let spans = clip_spans(core);
     if spans.is_empty() {
         return None;
     }
+    let h = clips_lane_height(clip_lane_row_count(&spans, core.frame_count()));
     let shape = clips_shape(&spans, core.frame_count());
     Some(
         canvas(shape)
             .key("timeline-clips")
             .w(timeline_width(core.frame_count()))
-            .h(CLIPS_H),
+            .h(h),
     )
 }
 
@@ -2111,5 +2236,60 @@ playback_speed: 1.0,
         assert!(!shape.is_empty());
         // No frames at all: an empty shape, no panic.
         assert!(clips_shape(&clip_spans(&state.core), 0).is_empty());
+    }
+
+    fn span(kind: SpanKind, from: f32, to: f32) -> ClipSpan {
+        ClipSpan {
+            kind,
+            from_frame: from,
+            to_frame: to,
+            muted_or_hidden: false,
+        }
+    }
+
+    #[test]
+    fn clip_lane_rows_split_kinds_and_stack_overlaps() {
+        // Non-overlapping mixed kinds: the kind split
+        // alone puts FX below audio (audit D2/T2) — the
+        // audio span takes row 0, the FX span row 1.
+        let spans = vec![span(SpanKind::Audio, 0.0, 2.0), span(SpanKind::Fx, 3.0, 5.0)];
+        assert_eq!(clip_lane_rows(&spans, 8), vec![Some(0), Some(1)]);
+        // Two overlapping audio spans stack onto two
+        // audio rows; a third starting after the first
+        // ends reuses row 0 (touching at an edge counts
+        // as free — judged on the drawn rects).
+        let spans = vec![
+            span(SpanKind::Audio, 0.0, 4.0),
+            span(SpanKind::Audio, 2.0, 6.0),
+            span(SpanKind::Audio, 4.0, 6.0),
+        ];
+        assert_eq!(clip_lane_rows(&spans, 8), vec![Some(0), Some(1), Some(0)]);
+        assert_eq!(clip_lane_row_count(&spans, 8), 2);
+        // FX rows start after ALL audio rows: one audio
+        // row plus two stacked FX rows is rows 0, 1, 2 —
+        // never interleaved with the audio band.
+        let spans = vec![
+            span(SpanKind::Fx, 0.0, 4.0),
+            span(SpanKind::Audio, 0.0, 2.0),
+            span(SpanKind::Fx, 2.0, 6.0),
+        ];
+        assert_eq!(clip_lane_rows(&spans, 8), vec![Some(1), Some(0), Some(2)]);
+        assert_eq!(clip_lane_row_count(&spans, 8), 3);
+        // A zero-width span (wholly past the end) takes
+        // no row and forces no height.
+        let spans = vec![span(SpanKind::Audio, 9.0, 12.0)];
+        assert_eq!(clip_lane_rows(&spans, 5), vec![None]);
+        assert_eq!(clip_lane_row_count(&spans, 5), 0);
+    }
+
+    #[test]
+    fn clips_lane_height_grows_by_row_plus_gap() {
+        // Zero or one row: the classic single-lane
+        // height, so a non-overlapping project keeps the
+        // exact lane geometry it had before stacking.
+        assert_eq!(clips_lane_height(0), CLIPS_H);
+        assert_eq!(clips_lane_height(1), CLIPS_H);
+        assert_eq!(clips_lane_height(2), 2.0 * CLIPS_H + CLIP_ROW_GAP);
+        assert_eq!(clips_lane_height(3), 3.0 * CLIPS_H + 2.0 * CLIP_ROW_GAP);
     }
 }

@@ -97,10 +97,12 @@ pub struct State {
     /// Last `poll` timestamp (seconds since start), for the
     /// playback delta. View never reads it.
     last_poll: Option<f64>,
-    /// Sub-step wheel-zoom accumulation: `camera_zoom_by`
-    /// snapshots once per call, so precise (trackpad) deltas are
-    /// gathered here until they make a full 1.1× step instead of
-    /// flooding the undo stack with micro-zooms.
+    /// Sub-step wheel-zoom accumulation: precise (trackpad)
+    /// deltas are gathered here until they make a full 1.1×
+    /// step, so one smooth gesture becomes a few view zooms
+    /// instead of a stream of micro-zooms. The steps drive the
+    /// shell view layer (`stage_view::view_zoom_at`), never the
+    /// authored camera (UI mission Wave 5, audit S10 D4).
     wheel_zoom: f32,
     // ---- Phase D section view-state (one field per section
     // that declared one; all engine state stays in `core`).
@@ -270,15 +272,17 @@ fn init() -> State {
 
 /// Canvas drag → posing/camera/draw ops. The element-local
 /// point converts to stage coordinates through the same
-/// `ViewTransform` the drawing uses (built here from the drag's
-/// own `w`/`h` and the camera at the current frame — the GPUI
-/// stage's `view_transform`/`to_stage` pairing). The mode
+/// transform the drawing uses (built here from the drag's
+/// own `w`/`h` and the camera at the current frame, with the
+/// shell view navigation folded in — `stage_view::
+/// drag_transform` — so a drag lands on the grabbed joint at
+/// any view zoom). The mode
 /// branches mirror the core's own mode fields, as the GPUI
 /// canvas did: draw mode paints, camera mode pans, otherwise
 /// the press hit-tests and drags a joint.
 fn stage_drag(s: &mut State, d: &mut Drag) {
     let core = &mut s.core;
-    let rt = rune_sec::stage_camera::RotTransform::for_drag(core, [d.w, d.h]);
+    let rt = stage_view::drag_transform(core, [d.w, d.h]);
     let p = rt.to_stage([d.x, d.y]);
     match d.phase {
         Phase::Down => {
@@ -319,8 +323,9 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
 
 /// Canvas right-press → selection only (Phase K
 /// integrator wiring for stage_view §9): convert the
-/// element-local point through the same `RotTransform`
-/// the drag path uses — built from the stage size `view`
+/// element-local point through the same transform
+/// the drag path uses (`stage_view::drag_transform`, view
+/// navigation included) — built from the stage size `view`
 /// last laid out (see `STAGE_EL_SIZE`; before any layout
 /// the project stage size stands in, the same fallback
 /// `view` itself uses) — then hand over to
@@ -334,12 +339,17 @@ fn stage_secondary(s: &mut State, e: PointerEvent) {
     } else {
         s.core.project.stage
     };
-    let rt = rune_sec::stage_camera::RotTransform::for_drag(&s.core, size);
+    let rt = stage_view::drag_transform(&s.core, size);
     let p = rt.to_stage([e.x, e.y]);
     stage_view::secondary_select(&mut s.core, p);
 }
 
-/// Canvas wheel → camera zoom (`EditorCore::camera_zoom_by`).
+/// Canvas wheel → VIEW zoom (UI mission Wave 5, audit
+/// S10 D4): the steps drive the shell view layer
+/// (`stage_view::view_zoom_at`, zoom-to-cursor), never the
+/// authored camera — this handler used to call
+/// `EditorCore::camera_zoom_by`, so inspecting a detail
+/// upserted a camera key and an undo snapshot per step.
 /// Notched wheels step once per event; precise deltas
 /// accumulate in `State::wheel_zoom` (see its docs). Returning
 /// true captures the rest of the gesture.
@@ -350,7 +360,13 @@ fn stage_wheel(s: &mut State, e: WheelEvent) -> bool {
     s.wheel_zoom += if e.precise { -e.dy * 0.02 } else { -e.dy.signum() };
     let steps = s.wheel_zoom.trunc();
     if steps != 0.0 {
-        s.core.camera_zoom_by(1.1f32.powf(steps).clamp(0.4, 2.5));
+        let size = STAGE_EL_SIZE.with(|c| c.get());
+        stage_view::view_zoom_at(
+            &s.core,
+            size,
+            [e.x, e.y],
+            1.1f32.powf(steps).clamp(0.4, 2.5),
+        );
         s.wheel_zoom -= steps;
     }
     true
@@ -621,7 +637,12 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     // draw at stage size (fit 1:1).
     let stage_size = cx.layout_size("stage").unwrap_or(core.project.stage);
     STAGE_EL_SIZE.with(|c| c.set(stage_size));
-    let stage_fill = stage_view::hex_color(core.project.background).unwrap_or(t.card);
+    // The stage ELEMENT wears the chrome card colour: the
+    // stage rect itself is filled with the project background
+    // and framed inside `stage_shape` (UI mission Wave 5,
+    // audit S10 D1), so the letterbox around the stage reads
+    // as surround instead of extending the stage visually.
+    let stage_fill = t.card;
 
     // Workspace gating (Phase E): a panel mounts only in the
     // workspaces whose table lists it; a column left empty by
@@ -767,8 +788,9 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         right = right.child(rune_sec::stats_view::stats_panel(s, &t));
     }
 
-    // Centre column: stage, camera overlay strip,
-    // transport, timeline, status strip. The command
+    // Centre column: stage (with the toasts and the camera
+    // overlay pill pinned inside it), transport, timeline,
+    // status strip. The command
     // palette is NOT a centre child (UI mission Wave 3,
     // audit S19 §2): mounted in flow, its ~521 pt card
     // plus the column's fixed furniture (~230 pt) exceed
@@ -845,14 +867,20 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .child(
                     rune_sec::toasts::toasts_view(s, s.toast_now)
                         .pin(None, Some(12.0), Some(12.0), None),
+                )
+                // The camera overlay pill, pinned to the
+                // stage's bottom-right corner with the same
+                // `.pin` discipline (UI mission Wave 5, audit
+                // S10 D5): it used to sit in a full-width row
+                // under the canvas, costing the stage its
+                // height; pinned here it floats over the
+                // canvas corner — presses land on the pill,
+                // as on the toasts' buttons — and the
+                // reclaimed row height returns to the stage.
+                .child(
+                    rune_sec::camera_panel::overlay(core)
+                        .pin(None, None, Some(12.0), Some(12.0)),
                 ),
-        )
-        .child(
-            row()
-                .key("stage-overlay-row")
-                .w_full()
-                .child(row().grow(1.0))
-                .child(rune_sec::camera_panel::overlay(core)),
         )
         .child(chrome_view::transport_row(s, &t))
         .child(rune_sec::timeline_marks::timeline_marks(s, &t))

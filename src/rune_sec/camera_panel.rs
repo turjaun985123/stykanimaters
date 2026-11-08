@@ -997,14 +997,96 @@ pub fn panel(s: &State, t: &Theme) -> El {
         .child(follow_block(core, t))
 }
 
+/// The overlay readout's effective zoom percentage: the
+/// authored camera zoom multiplied by the shell view zoom —
+/// the number that matches what the stage actually shows
+/// (UI mission Wave 5). At the identity view this is exactly
+/// [`zoom_pct`].
+pub fn view_zoom_pct(core: &EditorCore) -> i64 {
+    (core.camera_here().2 * crate::stage_view::view_nav().zoom * 100.0).round() as i64
+}
+
+/// The overlay's zoom readout: the EFFECTIVE zoom
+/// ([`view_zoom_pct`]), under the same `cam-zoom-label` key
+/// the panel's [`zoom_readout`] carries — the panel keeps
+/// the camera-only readout, since its steppers author
+/// camera keys.
+fn view_zoom_readout(core: &EditorCore, t: &Theme) -> El {
+    design::stepper_value(&format!("{}%", view_zoom_pct(core)), t).key("cam-zoom-label")
+}
+
+/// Overlay 1:1 handler: set the VIEW zoom so the effective
+/// zoom is exactly 100% — the view-layer form of
+/// [`zoom_actual`], which the Camera panel keeps for the
+/// authored camera. No camera key is written and no undo
+/// snapshot is taken.
+fn view_actual(s: &mut State) {
+    let cam_zoom = s.core.camera_here().2;
+    if cam_zoom > 0.0 {
+        let nav = crate::stage_view::view_nav();
+        crate::stage_view::set_view_nav(crate::stage_view::ViewNav {
+            zoom: 1.0 / cam_zoom,
+            pan: nav.pan,
+        });
+    }
+}
+
+/// Overlay Centre handler: centre the VIEW on the selected
+/// figure's root — the same target `centre_on_selection`
+/// aims the authored camera at, reached here by panning
+/// the view layer instead, so no camera key is written.
+/// When no stage size has been stashed yet there is nothing
+/// to aim with, so it falls back to clearing the view pan
+/// (re-centring on the camera centre).
+fn view_centre(s: &mut State) {
+    let root = s
+        .core
+        .project
+        .poses_at(s.core.current as f32)
+        .get(s.core.selected_figure)
+        .map(|pose| pose.root);
+    match root {
+        Some(root) => {
+            if !crate::stage_view::view_centre_on(&s.core, root) {
+                let nav = crate::stage_view::view_nav();
+                crate::stage_view::set_view_nav(crate::stage_view::ViewNav {
+                    zoom: nav.zoom,
+                    pan: [0.0, 0.0],
+                });
+            }
+        }
+        None => {
+            s.core.status = "No figures to centre on.".into();
+        }
+    }
+}
+
 /// The compact stage-overlay cluster: Fit / Centre / 1:1 and
-/// the zoom steppers around the % readout, on one row. The
-/// integrator positions it over the stage (the audit's
-/// `.absolute`/`.pin` out-of-flow placement); this builder
-/// only supplies the cluster itself. Takes just the core —
+/// the zoom steppers around the % readout, on one row.
+/// `main.rs` pins it inside the stage's bottom-right corner
+/// (UI mission Wave 5, audit S10 D5 — it used to sit in a
+/// full-width row under the canvas); this builder only
+/// supplies the cluster itself. Takes just the core —
 /// readouts and active states need nothing else — and uses
 /// the dark theme, as the shell's `view` does
 /// (`tok::theme(true)` in `main.rs`).
+///
+/// Wave 5 also makes the pill pure VIEWPORT NAVIGATION
+/// (audit S10 D4): every control drives the shell view layer
+/// (`stage_view`'s view navigation — a zoom/pan composed
+/// over the camera transform) and none of them writes a
+/// camera key. Fit restores the camera's own framing (it
+/// used to frame the figures by upserting a key — the
+/// audit's misleading label), Centre centres the VIEW on
+/// the selected figure's root, 1:1 makes the EFFECTIVE zoom
+/// 100%, the steppers zoom the view, and the readout shows
+/// the effective zoom (camera × view). The authoring
+/// versions — frame figures, centre on selection, camera
+/// 1:1, camera zoom steppers, camera-only readout — all
+/// remain in the Camera panel section above, unchanged.
+/// Keys are verbatim: `camera-overlay`, `view-fit`,
+/// `view-centre`, `view-actual`, `cam-zoom-out`,
+/// `cam-zoom-in`, `cam-zoom-label`.
 ///
 /// Phase N: the root row is the charter §14 floating card
 /// pill — card fill, hairline border, radius 999, px 10 /
@@ -1025,18 +1107,16 @@ pub fn overlay(core: &EditorCore) -> El {
         .px(10.0)
         .py(4.0)
         .child(btn("view-fit", "Fit", false, &t, |s: &mut State| {
-            s.core.frame_all_figures()
+            crate::stage_view::reset_view_nav()
         }))
-        .child(btn("view-centre", "Centre", false, &t, |s: &mut State| {
-            s.core.centre_on_selection()
-        }))
-        .child(btn("view-actual", "1:1", false, &t, zoom_actual))
+        .child(btn("view-centre", "Centre", false, &t, view_centre))
+        .child(btn("view-actual", "1:1", false, &t, view_actual))
         .child(btn("cam-zoom-out", "-", false, &t, |s: &mut State| {
-            s.core.camera_zoom_by(1.0 / ZOOM_STEP)
+            crate::stage_view::view_zoom_by(1.0 / ZOOM_STEP)
         }))
-        .child(zoom_readout(core, &t))
+        .child(view_zoom_readout(core, &t))
         .child(btn("cam-zoom-in", "+", false, &t, |s: &mut State| {
-            s.core.camera_zoom_by(ZOOM_STEP)
+            crate::stage_view::view_zoom_by(ZOOM_STEP)
         }))
 }
 

@@ -21,15 +21,23 @@
 //! * **Tween play** — `EditorCore::toggle_tween_playback`
 //!   (`editor.rs:1691`), flipping `Project.tween_playback`
 //!   (`model.rs:694`); shown active from that field.
-//! * **Loop range** — `loop-start` / `loop-end` move one end
-//!   of `EditorCore::loop_range` (`editor.rs:61`) to the
-//!   current frame via `EditorCore::set_loop_range`
-//!   (`editor.rs:738`, orders + clamps; the other end is kept,
-//!   or the current frame when no range exists — the GPUI
-//!   handlers at old `app.rs:3933` / `:3939` verbatim);
-//!   `loop-clear` calls `EditorCore::clear_loop_range`
-//!   (`editor.rs:752`). Playback wraps inside the range in
-//!   `advance_play` (`editor.rs:687`).
+//! * **Loop range** — REMOVED in UI mission Wave 5
+//!   (audit D3/T4, integrator-approved recorded key
+//!   change). This panel used to mount `loop-start` /
+//!   `loop-end` / `loop-clear`, duplicating the keys
+//!   the timeline's loop row mounts, with "Loop start" /
+//!   "Loop end" labels that SET a range end here while
+//!   the same words on the jump buttons below MOVED to
+//!   it. Loop-range editing now lives in one home —
+//!   the timeline's loop row (`timeline_marks`), where
+//!   the range is drawn; the Frames section keeps its
+//!   own mounts (outside this wave). What remains here
+//!   is playback's distinct business: the loop toggle,
+//!   the speed cycle and the jumps to the range's ends.
+//!   Playback still wraps inside the range in
+//!   `advance_play` (`editor.rs:687`), and
+//!   [`loop_range_text`] is kept as a helper for the
+//!   integrator.
 //! * **Restart / Play range** (Phase F) — `pb-restart`
 //!   goes to frame 0 and plays; `pb-play-range` goes to the
 //!   loop range's start and plays (frame 0 when no range
@@ -118,10 +126,14 @@
 //!   deleted afterwards can leave an end past the
 //!   timeline, and `goto`'s own bounds check then refuses
 //!   the press silently — the keyframe jumps' no-op
-//!   discipline at their edges. Not to be confused with
-//!   the `loop-start` / `loop-end` buttons further down,
-//!   which SET the range ends to the current frame; these
-//!   jump TO them.
+//!   discipline at their edges. Wave 5 relabelled the
+//!   buttons "Go to start" / "Go to end" (keys
+//!   unchanged): they jump TO the range's ends, and
+//!   since the same wave removed this panel's old
+//!   `loop-start` / `loop-end` buttons — which SET the
+//!   ends under near-identical labels — nothing in the
+//!   panel can be misread as setting the range any
+//!   more.
 //! * **Card adoption** (Phase N) — the panel root is the
 //!   kit card (`design::panel_col`, key `playback-
 //!   controls` unchanged) with a `design::panel_title`
@@ -196,9 +208,12 @@ pub fn fps_text(fps: f32) -> String {
     }
 }
 
-/// Readout for the loop-range row: the inclusive range in
+/// Readout text for a loop range: the inclusive range in
 /// 1-based frame numbers, or the whole-timeline note when no
-/// range is set.
+/// range is set. Kept for the integrator: this panel's own
+/// loop-range row (its only caller) was removed in Wave 5
+/// when loop-range editing consolidated into the
+/// timeline's loop row.
 pub fn loop_range_text(range: Option<(usize, usize)>) -> String {
     match range {
         Some((a, b)) => format!("Looping frames {}–{}", a + 1, b + 1),
@@ -214,7 +229,7 @@ pub fn play_range_start(loop_range: Option<(usize, usize)>) -> usize {
     loop_range.map(|(a, _)| a).unwrap_or(0)
 }
 
-/// The frames the **Loop start** / **Loop end** jump
+/// The frames the **Go to start** / **Go to end** jump
 /// buttons go to: the loop range's ends exactly as stored,
 /// or `None` when no range is set (the buttons are then
 /// not rendered at all — see the module docs).
@@ -472,8 +487,10 @@ fn numeric_font() -> tok::TextStyle {
 /// show/hide state) is the caller's business; this builds the
 /// full panel for the current core state. Element keys carry
 /// the old GPUI control ids where one existed (`fps-dn`,
-/// `fps-up`, `tween`, `loop-start`, `loop-end`, `loop-clear`,
-/// `dur-dn`, `dur-up`); the Phase F transport buttons are
+/// `fps-up`, `tween`, `dur-dn`, `dur-up` — the GPUI
+/// `loop-start` / `loop-end` / `loop-clear` mounts were
+/// removed in Wave 5; loop-range editing lives in the
+/// timeline's loop row now); the Phase F transport buttons are
 /// `pb-restart` / `pb-play-range`, the Phase G loop
 /// toggle is `pb-loop` and the Phase I keyframe jumps are
 /// `pb-prev-key` / `pb-next-key`; the Phase K speed cycle
@@ -578,12 +595,12 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
     // absent, not inert, when there is nothing to jump to.
     if loop_range.is_some() {
         loop_row = loop_row
-            .child(btn("pb-loop-start", "Loop start", false, t, |s| {
+            .child(btn("pb-loop-start", "Go to start", false, t, |s| {
                 if let Some((a, _)) = loop_jump_targets(&s.core) {
                     s.core.goto(a);
                 }
             }))
-            .child(btn("pb-loop-end", "Loop end", false, t, |s| {
+            .child(btn("pb-loop-end", "Go to end", false, t, |s| {
                 if let Some((_, b)) = loop_jump_targets(&s.core) {
                     s.core.goto(b);
                 }
@@ -649,39 +666,21 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
             )),
     );
 
-    // ---- Loop range: move either end to the current frame
-    // (GPUI handlers verbatim), or clear.
-    panel = panel.child(design::section_label(&loop_range_text(loop_range), t));
-    panel = panel.child(
-        row()
-            .gap(6.0)
-            .center_y()
-            .child(btn(
-                "loop-start",
-                "Loop start",
-                loop_range.is_some(),
-                t,
-                |s| {
-                    let cur = s.core.current;
-                    let (_, b) = s.core.loop_range.unwrap_or((cur, cur));
-                    s.core.set_loop_range(cur, b);
-                },
-            ))
-            .child(btn(
-                "loop-end",
-                "Loop end",
-                loop_range.is_some(),
-                t,
-                |s| {
-                    let cur = s.core.current;
-                    let (a, _) = s.core.loop_range.unwrap_or((cur, cur));
-                    s.core.set_loop_range(a, cur);
-                },
-            ))
-            .child(btn("loop-clear", "Loop clear", false, t, |s| {
-                s.core.clear_loop_range();
-            })),
-    );
+    // ---- Loop range: REMOVED in UI mission Wave 5
+    // (audit D3/T4, integrator-approved recorded key
+    // change). This panel used to mount `loop-start` /
+    // `loop-end` / `loop-clear` — the same keys the
+    // timeline's loop row mounts — so one key named two
+    // different actions in one tree ("Loop start" here
+    // SET a range end to the current frame; "Loop start"
+    // on the jumps above MOVES to it). Loop-range
+    // editing now lives in one home, the timeline's loop
+    // row; this panel keeps only its distinct actions —
+    // the loop toggle, the speed cycle and the jumps
+    // below, relabelled "Go to start" / "Go to end" so
+    // no label promises a set it does not perform.
+    // [`loop_range_text`] stays as a helper for the
+    // integrator.
 
     // ---- Current-frame duration stepper (0.5x / 2x, the
     // GPUI factors; the op clamps 0.25..=8.0).
