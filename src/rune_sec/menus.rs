@@ -8,7 +8,8 @@
 //! Font Awesome glyphs on the high-value items — see
 //! [`menu_icon`] — with keys, labels, active behaviour
 //! and handlers unchanged; Phase J: File ▸ Open recent
-//! entries under Load — see [`recent_items`]; Phase K:
+//! entries (under Load until Wave 3's dedup — they head
+//! the menu now) — see [`recent_items`]; Phase K:
 //! the File ▸ Save item's Ctrl+S hint, shown only once
 //! the binding really landed in `on_key` — see
 //! [`shortcut_hint`] — and View ▸ Playback speed, an
@@ -30,6 +31,28 @@
 //! `kbd` chips, and the separators as keyed kit
 //! dividers — keys, handlers and offer conditions
 //! unchanged throughout.
+//! UI mission Wave 3 (audit S04 D4): the File and Edit
+//! menus no longer re-mount Save / Load / Undo / Redo —
+//! the app bar's buttons are those four keys' single
+//! mount now, so an open menu never presents a key
+//! twice. The app bar gates its Undo/Redo on the core's
+//! stack depths (D2), which is also why the Edit menu
+//! carries no inert undo/redo rows of its own: these
+//! menus have never had an inert item form (state-gated
+//! items are offered only while they can run — the
+//! Phase L/M discipline), and the commands' one
+//! remaining mount is honest about when it can run.
+//! The keyboard bindings (Ctrl+S / Ctrl+Z /
+//! Ctrl+Shift+Z) still route in `main.rs::on_key` to
+//! the same ops, so [`shortcut_hint`] and [`menu_icon`]
+//! keep their entries for the four keys: the maps
+//! describe the commands, whose home is the app bar
+//! now. Every other entry, hint and handler is
+//! unchanged; the one separator consequence is
+//! recorded at the Edit arm (menu-edit-sep removed
+//! with the group it divided) and the File arm
+//! (menu-file-sep now sits between recents and
+//! Export, where the division actually is).
 //! Declared from `main.rs` by the integrator; bin-crate
 //! code, not part of the engine library.
 //!
@@ -666,7 +689,7 @@ fn file_recent_items(
     if resolved.is_empty() {
         return Vec::new();
     }
-    let mut items = vec![separator("menu-file-sep", t)];
+    let mut items = Vec::new();
     for (i, (name, path)) in resolved.into_iter().enumerate() {
         let key = format!("file-recent-{i}");
         let label = name.clone();
@@ -752,9 +775,14 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
         );
     match open {
         FILE => {
-            list = list
-                .child(item("save", "Save", false, t, |s| s.core.save()))
-                .child(item("load", "Load", false, t, |s| s.core.load()));
+            // Save / Load are NOT mounted here (UI
+            // mission Wave 3, audit S04 D4): the app
+            // bar's buttons carry the `save` / `load`
+            // keys, and mounting them again in this
+            // dropdown put each key in the presented
+            // tree twice while the menu was open. The
+            // Ctrl+S binding still routes to `core.save()`
+            // from `main.rs::on_key`, unchanged.
             // Open recent (Phase J): up to five entries
             // from the shell's recents list, resolved
             // against the Home library scan (see
@@ -765,8 +793,19 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
             let recents = stykanimate_rs::shell::recents();
             if !recents.is_empty() {
                 let files = recent_file_pairs(s);
-                for entry in file_recent_items(&recents, &files, t) {
+                let entries = file_recent_items(&recents, &files, t);
+                let has_entries = !entries.is_empty();
+                for entry in entries {
                     list = list.child(entry);
+                }
+                // The separator divides the recents from
+                // Export PNG (integrator, wave 3): it used
+                // to head the recents block from inside
+                // `file_recent_items`, back when Save/Load
+                // sat above it; with those gone it belongs
+                // here, and only when recents rendered.
+                if has_entries {
+                    list = list.child(separator("menu-file-sep", t));
                 }
             }
             list = list.child(item("export", "Export PNG", false, t, |s| {
@@ -779,10 +818,24 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
             // action to wire it to.
         }
         EDIT => {
+            // Undo / Redo are NOT mounted here (UI
+            // mission Wave 3, audit S04 D4): the app
+            // bar's buttons carry the `undo` / `redo`
+            // keys — depth-gated inert there while their
+            // stacks are empty (D2) — and mounting them
+            // again in this dropdown put each key in
+            // the presented tree twice while the menu
+            // was open. Ctrl+Z / Ctrl+Shift+Z still
+            // route to the same ops from
+            // `main.rs::on_key`, unchanged. The
+            // separator that divided Undo/Redo from the
+            // frame-clipboard group is REMOVED with them
+            // (integrator, wave 3): a divider heading a
+            // dropdown divides nothing. `menu-edit-sep`
+            // leaves the key census as a recorded
+            // consequence of the dedup, and the snap test
+            // now pins its absence.
             list = list
-                .child(item("undo", "Undo", false, t, |s| s.core.undo()))
-                .child(item("redo", "Redo", false, t, |s| s.core.redo()))
-                .child(separator("menu-edit-sep", t))
                 .child(item("copy-frame", "Copy frame", false, t, |s| {
                     s.core.copy_frame()
                 }))
@@ -1123,8 +1176,10 @@ mod tests {
 
     #[test]
     fn all_dropdowns_build_with_hinted_items_and_guides_states() {
-        // Phase F: hinted items (Edit ▸ Undo/Redo, View ▸
-        // Onion skin, Help ▸ Command palette) and the
+        // Phase F: hinted items (View ▸ Onion skin,
+        // Help ▸ Command palette — Edit ▸ Undo/Redo
+        // carried hints too until UI mission Wave 3
+        // unmounted them for the app bar) and the
         // View ▸ Stage guides item build without
         // panicking, with the guides flag off and on.
         let t = rune::tok::theme(true);

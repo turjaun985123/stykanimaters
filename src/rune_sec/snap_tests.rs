@@ -3272,13 +3272,14 @@ fn edit_menu_dropdown_renders_after_restyle() {
         keys.contains("menu-edit-dropdown"),
         "Edit dropdown surface presented"
     );
-    // The separator is the element the charter's
-    // divider replaces; it survives as the kit's
-    // keyed divider under its own key — the restyle's
-    // proof inside this dropdown.
+    // UI mission wave 3: the Edit menu no longer
+    // re-mounts Undo/Redo (the app bar is their single
+    // mount), and the separator that divided them from
+    // the frame-clipboard group went with them — a
+    // divider heading a dropdown divides nothing.
     assert!(
-        keys.contains("menu-edit-sep"),
-        "the kit divider keeps its key inside the Edit dropdown"
+        !keys.contains("menu-edit-sep"),
+        "no leading separator in the Edit dropdown after the dedup"
     );
     assert!(keys.contains("menu-scrim"), "dismissal scrim presented");
 

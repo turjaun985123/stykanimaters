@@ -38,7 +38,7 @@ use rune::{el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::rune_sec::i18n_wire;
-use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::icon_btn::{icon_btn, icon_btn_inert};
 use crate::State;
 
 /// One chrome button: a padded, rounded label with hover/press
@@ -230,6 +230,18 @@ fn dirty_dot(core: &EditorCore) -> Option<El> {
 /// figures panel's add-figure button and the onion panel's
 /// onion-toggle.)
 ///
+/// UI mission Wave 3 (audit S04 D2/D4): the File/Edit menus
+/// no longer re-mount these four commands, so this bar is
+/// their single mount — and Undo/Redo render honestly: each
+/// goes through its `icon_btn_inert` twin while its stack
+/// is empty (`core.undo()` / `core.redo()` on an empty
+/// stack are silent no-ops, so a live-looking button would
+/// lie), and the live `icon_btn` once the core's own depth
+/// counters (`undo_depth()` / `redo_depth()`) say it can
+/// run. Key, glyph, label and the live handler are
+/// unchanged in both forms — the layers panel's
+/// live/inert idiom.
+///
 /// Phase N (charter §15): the name (TITLE, as before) now
 /// rides in a growing cluster with [`dirty_dot`] — the
 /// accent dot appears after the name while the project is
@@ -254,6 +266,23 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
     if let Some(dot) = dirty_dot(core) {
         name_row = name_row.child(dot);
     }
+    // Undo/Redo, depth-gated (see this fn's docs): the
+    // inert twin drops the handler, so an empty-stack
+    // press cannot even reach the core's silent no-op.
+    let undo_btn = if core.undo_depth() == 0 {
+        icon_btn_inert("undo", "arrow-rotate-left", &i18n_wire::tr(core, "undo"), t)
+    } else {
+        icon_btn("undo", "arrow-rotate-left", &i18n_wire::tr(core, "undo"), false, t, |s| {
+            s.core.undo()
+        })
+    };
+    let redo_btn = if core.redo_depth() == 0 {
+        icon_btn_inert("redo", "arrow-rotate-right", &i18n_wire::tr(core, "redo"), t)
+    } else {
+        icon_btn("redo", "arrow-rotate-right", &i18n_wire::tr(core, "redo"), false, t, |s| {
+            s.core.redo()
+        })
+    };
     row()
         .key("app-bar")
         .w_full()
@@ -266,12 +295,8 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
         .child(icon_btn("load", "folder-open", &i18n_wire::tr(core, "load"), false, t, |s| {
             s.core.load()
         }))
-        .child(icon_btn("undo", "arrow-rotate-left", &i18n_wire::tr(core, "undo"), false, t, |s| {
-            s.core.undo()
-        }))
-        .child(icon_btn("redo", "arrow-rotate-right", &i18n_wire::tr(core, "redo"), false, t, |s| {
-            s.core.redo()
-        }))
+        .child(undo_btn)
+        .child(redo_btn)
 }
 
 /// Transport + frame ops row: Prev / Play-Pause / Next (frame
@@ -497,6 +522,28 @@ mod tests {
             dirty_dot(&core).is_some(),
             "one snapshot-counted edit lights the dot"
         );
+    }
+
+    /// UI mission Wave 3 (audit S04 D2): the app bar
+    /// constructs in both Undo/Redo gating states — a
+    /// fresh core (both stacks empty, both buttons
+    /// inert) and after one snapshot-counted edit (Undo
+    /// live, Redo still inert). Element trees are not
+    /// readable from unit tests, so construction is the
+    /// assertable level here; which form renders is the
+    /// depth comparison in `app_bar` itself, and the
+    /// presented-tree proof belongs to the Runtime suite.
+    #[test]
+    fn app_bar_builds_with_empty_and_nonempty_undo_stacks() {
+        let t = tok::theme(true);
+        let mut s = crate::init();
+        assert_eq!(s.core.undo_depth(), 0, "fresh core: nothing to undo");
+        assert_eq!(s.core.redo_depth(), 0, "fresh core: nothing to redo");
+        let _ = app_bar(&s, &t);
+        s.core.snapshot();
+        assert!(s.core.undo_depth() > 0, "one edit deepens the undo stack");
+        assert_eq!(s.core.redo_depth(), 0, "redo stays empty until an undo");
+        let _ = app_bar(&s, &t);
     }
 
     #[test]

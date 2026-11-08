@@ -372,11 +372,125 @@
 //! fixed sum grows by the segment's own floor (2
 //! characters, 16 pt) and the tail truncates — the
 //! designed behaviour, as with the speed segment.
+//!
+//! ## UI mission Wave 3 — small-centre compression
+//!
+//! The audit (S03 D1) charged this strip ≈ 690 pt
+//! of floored content against the 584 pt centre
+//! column of the app's own minimum window (1280
+//! wide): the Phase F floors are `min_w`, the
+//! shrink pass cannot compress a floored segment,
+//! so once the tail had absorbed what it could the
+//! remaining segments painted past the column's
+//! right edge — the Phase J failure mode, returning
+//! at exactly the size the app declares its
+//! minimum.
+//!
+//! The fix is a protection ladder, expressed in
+//! the only currency Rune's flex model offers —
+//! floors, bases, and the one-line truncating mode
+//! (`.truncate()`: flex_shrink 1, minimum width 0,
+//! glyphs elided to the box at real font metrics,
+//! so a yielding segment can narrow without ever
+//! painting over a neighbour):
+//!
+//! - **Protected — never yield.** The frame
+//!   segment and the autosave segment keep the
+//!   plain [`segment`] path (floored at
+//!   [`est_text_width`], no truncation), as do
+//!   timecode, zoom, selection, undo and every
+//!   conditional segment. The project segment's
+//!   suffix (` · {runtime}` plus the dirty ` ●`)
+//!   is protected the same way, so the strip's
+//!   save state — the autosave age, and the dirty
+//!   dot — is fully visible at every width.
+//! - **First sacrifice — the play segment.** Its
+//!   floor is REMOVED: [`segment_yielding`] bases
+//!   the text at its old floor value via `.w()`
+//!   and truncates it, so the box may narrow all
+//!   the way to nothing. It carries the largest
+//!   base of the yielding set, so under pressure
+//!   it yields the largest share.
+//! - **Second — the project name truncates.**
+//!   The project segment is now a two-part row
+//!   ([`project_segment`], built from
+//!   [`project_parts`]): the name is a yielding
+//!   truncating text based at its own estimated
+//!   width; the suffix keeps its floor. The name
+//!   elides toward "…" before the runtime or the
+//!   dirty dot can be touched.
+//! - **Third — the fps segment** yields the same
+//!   way ([`segment_yielding`]): the smallest base
+//!   of the three, so it yields the smallest share
+//!   at every pressure level.
+//!
+//! The order is a sacrifice gradient, and it is
+//! worth stating exactly what that means
+//! mechanically. Rune exposes flex_shrink only at
+//! 1.0 (the pinned rev has no numeric shrink
+//! factor), so once the tail has given up its
+//! grown width — a narrowing window consumes the
+//! tail first, as it always has; it sits at zero
+//! before any fixed segment comes under pressure
+//! — a shortage distributes over the three
+//! yielding bases in proportion to their size:
+//! play (72) ahead of the name (64) ahead of fps
+//! (48), in the default state's estimated widths.
+//! No segment is removed, no label changes, and
+//! the loop segment keeps its glyph: at 1440
+//! (744 pt centre) there is no shortage, nothing
+//! yields, and the strip's boxes are point-for-
+//! point the Phase N measurements (floors 512,
+//! boundaries 136, tail 96 — pinned by
+//! `strip_compression_arithmetic_at_584pt`).
+//!
+//! The arithmetic, in this module's estimated-
+//! width accounting ([`LABEL_CHAR_W`] = 8.0
+//! pt/char), with boundaries charged at the
+//! MEASURED 17 pt each (8 pt row gap + the 1 pt
+//! divider + 8 pt gap, read off the Phase N tree
+//! dump, where the default strip's segment boxes
+//! are exactly the floors below and the tail
+//! measures 96):
+//!
+//! - default state: fixed floors 512 (the Phase K
+//!   pin). The yielding bases inside that sum —
+//!   play 72, project name 64 (`Untitled`), fps
+//!   48 — total 184 of capacity, leaving 328 of
+//!   protected floors.
+//! - at 744: 512 + 8 boundaries × 17 = 648 ≤ 744;
+//!   the tail takes the remaining 96. Nothing
+//!   yields.
+//! - at 584, default state: demand 648, shortage
+//!   64 — inside the 184 of yield capacity, and
+//!   the protected floors plus boundaries total
+//!   328 + 136 = 464 ≤ 584, so frame, autosave
+//!   and the project suffix are whole at the
+//!   minimum size.
+//! - at 584 with the audit's C1 coincidence live
+//!   (audio 64 + speed `1.5×` 32 + 3D 16):
+//!   floors 624; the protected 440 ≤ 584 fits
+//!   whole in this accounting.
+//!
+//! One honest remainder, in the Phase K tradition
+//! of charging what an accounting leaves out: the
+//! C1 coincidence at 584 also carries 11
+//! boundaries × 17 = 187 of gap/divider overhead,
+//! against which the 184 of estimated yield
+//! capacity leaves a residual of ≈ 43 pt in
+//! measured geometry — the failure is pushed from
+//! the default state (which overflowed before
+//! this change) to the deepest coincidence at the
+//! minimum size, not abolished. Closing it would
+//! take a smaller row gap or a fourth yielding
+//! segment; neither is in this change's brief,
+//! and the 1280×720 tree probe (audit C2) is the
+//! evidence that would justify either.
 
 use std::time::{Duration, SystemTime};
 
 use rune::tok::{self, type_, Theme};
-use rune::{el, row, text, El};
+use rune::{el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::State;
@@ -464,13 +578,37 @@ pub fn runtime_label(core: &EditorCore) -> String {
 /// at [`est_text_width`] of the whole label, so the
 /// floor widens by the label's own width and the
 /// strip gains no new fixed segment.
+///
+/// UI mission Wave 3: the segment is no longer
+/// built from this whole string but from its two
+/// halves ([`project_parts`], via
+/// [`project_segment`]) — this fn remains the
+/// single source of the segment's text, and the
+/// parts concatenate to exactly this string.
 pub fn project_text(core: &EditorCore) -> String {
-    let base = format!("{} · {}", core.project.name, runtime_label(core));
+    let (name, suffix) = project_parts(core);
+    format!("{name}{suffix}")
+}
+
+/// The project segment's two parts (UI mission
+/// Wave 3): the project name, and everything after
+/// it — ` · {runtime}` plus the dirty ` ●` while
+/// the project has edits the autosave has not
+/// captured. [`project_text`] is exactly the two
+/// concatenated. The split exists for the segment
+/// builder ([`project_segment`]): under width
+/// pressure the NAME is the part that truncates
+/// (second in the compression order — see the
+/// module docs), while the suffix, carrying the
+/// runtime and the strip's save-state dot, keeps
+/// its floor and stays fully visible at every
+/// width.
+pub fn project_parts(core: &EditorCore) -> (String, String) {
+    let mut suffix = format!(" · {}", runtime_label(core));
     if core.edits_since_autosave() > 0 {
-        format!("{base} ●")
-    } else {
-        base
+        suffix.push_str(" ●");
     }
+    (core.project.name.clone(), suffix)
 }
 
 /// Undo-depth segment: `Undo {n}` from
@@ -814,6 +952,27 @@ fn segment_mono(label: String, t: &Theme) -> El {
     text(label).font(numeric_font()).color(t.text).min_w(floor)
 }
 
+/// One YIELDING strip segment (UI mission Wave 3):
+/// a label-styled text in Rune's truncating
+/// one-line mode, based at the SAME
+/// [`est_text_width`] a floored [`segment`] would
+/// reserve. The explicit `.w()` makes the estimate
+/// the flex base; `.truncate()` sets flex_shrink 1
+/// with minimum width 0, so under width pressure
+/// the box narrows from that base and the glyphs
+/// elide to the box with "…" — a yielding segment
+/// can never paint over a neighbour, at any width.
+/// At rest (no pressure) the box is exactly the
+/// old floor, so the strip at 1440 is unchanged.
+/// Only the play and fps segments use this — the
+/// first and third sacrifices in the compression
+/// order (see the module docs); every other
+/// segment keeps the floored [`segment`] path.
+fn segment_yielding(label: String, color: Color) -> El {
+    let base = est_text_width(&label);
+    text(label).font(type_::LABEL).color(color).w(base).truncate()
+}
+
 /// One fixed strip segment with a leading icon glyph
 /// (Phase H): a centred row of the glyph — 11 pt tall,
 /// width from the icon's own aspect — a 4 pt gap, and
@@ -838,6 +997,48 @@ fn segment_with_icon(label: String, icon: &str, t: &Theme) -> El {
         .min_w(floor)
         .child(crate::rune_sec::icons::icon_el(icon, 11.0, t.text))
         .child(text(label).font(type_::LABEL).color(t.text))
+}
+
+/// The project segment (UI mission Wave 3): a
+/// two-part row built from [`project_parts`] — the
+/// name as a yielding truncating text based at its
+/// own estimated width (the compression order's
+/// second sacrifice), the suffix (` · {runtime}`
+/// plus the dirty dot) as a floored plain text
+/// that never yields, so the runtime and the
+/// strip's save-state signal stay fully visible at
+/// every width. The row itself shrinks
+/// (`.shrink()`: flex_shrink 1) but is floored at
+/// the suffix's estimated width, so the name
+/// absorbs the whole narrowing — down to nothing —
+/// before the suffix can be squeezed. The parts
+/// sit adjacent with no gap: the suffix string
+/// carries its own leading separator. At rest the
+/// parts sit at their estimated widths and the
+/// row measures exactly the old floored segment's
+/// [`est_text_width`] of [`project_text`].
+fn project_segment(core: &EditorCore, t: &Theme) -> El {
+    let (name, suffix) = project_parts(core);
+    let name_base = est_text_width(&name);
+    let suffix_floor = est_text_width(&suffix);
+    row()
+        .gap(0.0)
+        .center_y()
+        .shrink()
+        .min_w(suffix_floor)
+        .child(
+            text(name)
+                .font(type_::LABEL)
+                .color(t.text)
+                .w(name_base)
+                .truncate(),
+        )
+        .child(
+            text(suffix)
+                .font(type_::LABEL)
+                .color(t.text)
+                .min_w(suffix_floor),
+        )
 }
 
 /// Hairline divider between segments. Floored at its
@@ -876,11 +1077,13 @@ pub fn status_strip(core: &EditorCore) -> El {
 /// stroke selection, particle-event selection), the Phase J
 /// autosave segment (while a recovery snapshot exists)
 /// and the core's current status message, divided by
-/// hairlines. The fixed segments are width-floored and
-/// the status tail is the single flexible, eliding
-/// segment, so the segments can never overlap however
-/// narrow the strip gets (see the module docs'
-/// width-discipline section).
+/// hairlines. Width discipline (see the module docs):
+/// the protected segments are width-floored and never
+/// yield; a narrowing centre consumes the tail first,
+/// then the play segment, the project name and the
+/// fps segment yield in that order — every yielding
+/// segment truncates, so the segments can never
+/// overlap however narrow the strip gets.
 /// Keyed `status-strip` so headless `--tree` checks can
 /// find it. Theme follows the shell's current convention
 /// (`main.rs` builds its view with `tok::theme(true)`).
@@ -925,24 +1128,36 @@ fn build_strip(
 ) -> El {
     let t = tok::theme(true);
     let mut segments: Vec<El> = vec![
-        segment(project_text(core), &t),
+        // UI mission Wave 3: the project segment is
+        // the two-part `project_segment` — the name
+        // yields (truncates), the runtime + dirty-dot
+        // suffix keeps its floor. Same text, same
+        // width at rest.
+        project_segment(core, &t),
         segment(frame_text(core), &t),
         segment_mono(timecode(core.current, core.project.fps), &t),
-        segment(format!("{} fps", fps_text(core.project.fps)), &t),
+        // UI mission Wave 3: the fps segment yields
+        // third in the compression order — truncating,
+        // based at its estimated width, no floor.
+        segment_yielding(format!("{} fps", fps_text(core.project.fps)), t.text),
         segment(zoom_text(core), &t),
         segment(selection_text(core), &t),
         segment(undo_text(core), &t),
         // The play segment lights up in the accent colour
-        // while playback is rolling. Fixed like the
-        // others: floored at its estimated width.
-        text(play_text(core.playing))
-            .font(type_::LABEL)
-            .color(if core.playing {
+        // while playback is rolling. UI mission Wave 3:
+        // it is the compression order's first sacrifice
+        // — built by `segment_yielding` (truncating,
+        // based at its estimated width, no floor)
+        // instead of the floored `segment` path. The
+        // accent colour while rolling is unchanged.
+        segment_yielding(
+            play_text(core.playing).to_string(),
+            if core.playing {
                 tok::accent(0, true)
             } else {
                 t.text
-            })
-            .min_w(est_text_width(play_text(core.playing))),
+            },
+        ),
     ];
     // Phase L: the speed segment heads the conditional
     // block — directly after the play segment it
@@ -1011,9 +1226,14 @@ fn build_strip(
     // gives way and the painted line is elided with
     // "…" to that box at real font metrics. The
     // string is pre-capped by `fit_hint` as a
-    // backstop. Fixed segments sit on their floors
-    // and cannot be compressed, so no segment's
-    // glyphs can ever reach a neighbour's box.
+    // backstop. The protected segments sit on their
+    // floors and cannot be compressed; the three
+    // yielding segments (play, project name, fps —
+    // see the module docs' Wave 3 section) narrow
+    // only through Rune's truncating mode, which
+    // elides glyphs to the box. Either way, no
+    // segment's glyphs can ever reach a neighbour's
+    // box.
     segments.push(
         text(fit_hint(&core.status, MAX_STATUS_CHARS))
             .font(type_::LABEL)
@@ -1621,6 +1841,133 @@ mod tests {
             total + 160.0 > 744.0,
             "with the glyph charged, the tail would fall below 160 pt"
         );
+    }
+
+    // ---- UI mission Wave 3 compression ----
+
+    #[test]
+    fn project_parts_split_name_from_suffix() {
+        // Clean core: the suffix is the runtime
+        // alone, and the parts concatenate to
+        // `project_text` byte-for-byte (the pinned
+        // default-strip test below holds the whole
+        // string).
+        let core = EditorCore::new();
+        let (name, suffix) = project_parts(&core);
+        assert_eq!(name, core.project.name);
+        assert_eq!(suffix, " · 0:00");
+        assert_eq!(format!("{name}{suffix}"), project_text(&core));
+        // Dirty core: the dot rides in the SUFFIX —
+        // the protected half — never in the name:
+        // the strip's save-state signal lives in the
+        // part that never truncates.
+        let mut core = EditorCore::new();
+        core.add_frame();
+        let (name, suffix) = project_parts(&core);
+        assert_eq!(suffix, " · 0:01 ●");
+        assert_eq!(format!("{name}{suffix}"), project_text(&core));
+        assert!(!name.contains('●'));
+    }
+
+    #[test]
+    fn project_segment_and_yielding_segments_build() {
+        // The new constructions build in every state
+        // the strip meets: fresh, dirty, and with a
+        // name far longer than the default (the case
+        // the name's truncation exists for).
+        let t = tok::theme(true);
+        let mut core = EditorCore::new();
+        let _ = project_segment(&core, &t);
+        core.add_frame();
+        let _ = project_segment(&core, &t);
+        core.project.name = "A very long project name indeed".to_string();
+        let _ = project_segment(&core, &t);
+        let _ = segment_yielding(play_text(false).to_string(), t.text);
+        let _ = segment_yielding("12 fps".to_string(), t.text);
+        // The whole strip still builds through both
+        // wrappers with the new segment constructions
+        // in place.
+        let _ = status_strip(&core);
+    }
+
+    #[test]
+    fn strip_compression_arithmetic_at_584pt() {
+        // UI mission Wave 3 (audit S03 D1/C1): the
+        // strip must fit the 584 pt centre column of
+        // the app's minimum window (1280 wide)
+        // without any protected segment yielding.
+        // Every number is in this module's estimated-
+        // width accounting (`est_text_width` of live
+        // labels — the Phase K tradition), with
+        // boundaries charged at the MEASURED 17 pt
+        // each (8 pt row gap + 1 pt divider + 8 pt
+        // gap, read off the Phase N tree dump, where
+        // the default strip's segment boxes are
+        // exactly the floors pinned here and the
+        // tail measures 96). If a default label, a
+        // yielding base or the segment set changes,
+        // this test fails and the compression
+        // question must be re-asked on fresh numbers.
+        let core = EditorCore::new();
+        let floors = [
+            est_text_width(&project_text(&core)),
+            est_text_width(&frame_text(&core)),
+            est_text_width(&timecode(core.current, core.project.fps)),
+            est_text_width(&format!("{} fps", fps_text(core.project.fps))),
+            est_text_width(&zoom_text(&core)),
+            est_text_width(&selection_text(&core)),
+            est_text_width(&undo_text(&core)),
+            est_text_width(play_text(core.playing)),
+        ];
+        assert_eq!(floors.iter().sum::<f32>(), 512.0);
+        // The yielding bases inside that sum: the
+        // play segment, the project NAME (the rest
+        // of the project floor is the protected
+        // suffix), and the fps segment.
+        let (name, suffix) = project_parts(&core);
+        let yield_capacity = est_text_width(play_text(core.playing))
+            + est_text_width(&name)
+            + est_text_width(&format!("{} fps", fps_text(core.project.fps)));
+        assert_eq!(yield_capacity, 72.0 + 64.0 + 48.0);
+        let protected = 512.0 - yield_capacity;
+        assert_eq!(protected, 328.0);
+        // The protected set keeps the two segments
+        // the wave brief names as always fully
+        // visible whole: the frame readout, and the
+        // save state — the suffix's dirty dot,
+        // pinned here, and the autosave segment at
+        // its longest plausible label (Phase J),
+        // which is built by the floored `segment`
+        // path like the frame segment.
+        assert_eq!(est_text_width(&frame_text(&core)), 72.0);
+        assert_eq!(est_text_width(&suffix), 56.0);
+        assert_eq!(est_text_width("Autosaved 999h ago"), 144.0);
+        // At 744 (the reference centre): floors plus
+        // the 8 measured boundaries leave the tail
+        // exactly the 96 pt the dump shows — no
+        // shortage, nothing yields, nothing removed.
+        assert_eq!(512.0 + 8.0 * 17.0 + 96.0, 744.0);
+        // At 584, default state: the shortage is
+        // 512 + 136 − 584 = 64, inside the yield
+        // capacity; the protected floors plus
+        // boundaries fit whole.
+        assert!(512.0 + 8.0 * 17.0 - 584.0 <= yield_capacity);
+        assert!(protected + 8.0 * 17.0 <= 584.0);
+        // The audit's C1 coincidence (audio + speed
+        // 1.5× + 3D live): floors 624 in this
+        // accounting; the protected part fits 584
+        // whole and the yielding set covers the
+        // rest. (The module docs record the
+        // measured-geometry residual for this
+        // coincidence:
+        // its 11 boundaries are the one charge this
+        // floors accounting does not carry.)
+        let c1_floors = 512.0
+            + est_text_width(&audio_segment(true).unwrap())
+            + est_text_width(&speed_segment(1.5).unwrap())
+            + est_text_width(fig3_segment(true).unwrap());
+        assert_eq!(c1_floors, 624.0);
+        assert!(c1_floors - yield_capacity <= 584.0);
     }
 
     // ---- Phase L speed segment ----

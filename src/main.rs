@@ -28,8 +28,8 @@ mod snap_tests;
 use std::time::Duration;
 
 use rune::{
-    canvas, col, row, AppSpec, Cx, Drag, El, Key, KeyEvent, Phase, PointerEvent, ScrollSpec,
-    TextEdit, Tx, WheelEvent,
+    canvas, col, row, Align, AppSpec, Cx, Drag, El, Key, KeyEvent, Phase, PointerEvent, ScrollSpec,
+    Side, TextEdit, Tx, WheelEvent,
 };
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Pose;
@@ -566,9 +566,10 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
 
     // Workspace gating (Phase E): a panel mounts only in the
     // workspaces whose table lists it; a column left empty by
-    // gating isn't mounted at all. Figure-add, settings and
-    // help are deliberately ungated (the workspaces module
-    // documents why).
+    // gating isn't mounted at all. Settings and help are
+    // deliberately ungated (the workspaces module documents
+    // why). Figure-add used to be ungated too; Wave 3 of the
+    // UI mission gates it on the Figures section (below).
     use rune_sec::workspaces::Section as Sec;
     let ws = s.workspace;
     let vis = |sec: Sec| rune_sec::workspaces::section_visible(ws, sec);
@@ -583,8 +584,15 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
     if vis(Sec::Figures) {
         left = left.child(rune_sec::figures_panel::figures_panel(s, &t));
+        // Figure-add is the Figures area's own chrome, so it
+        // mounts under exactly the same gate as the figures
+        // panel (UI mission Wave 3, audit S05 D1): it used to
+        // mount unconditionally and orphan into Home and
+        // Export — a figure-creation panel in the two
+        // workspaces where the Figures panel it belongs to
+        // is gated off.
+        left = left.child(rune_sec::figure_add::figure_add_panel(s, &t));
     }
-    left = left.child(rune_sec::figure_add::figure_add_panel(s, &t));
     if vis(Sec::Library) {
         left = left.child(rune_sec::library_panel::library_panel(s, &t));
     }
@@ -700,41 +708,85 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         right = right.child(rune_sec::stats_view::stats_panel(s, &t));
     }
 
-    // Centre column: (palette), stage, camera overlay strip,
-    // transport, timeline, status strip.
+    // Centre column: stage, camera overlay strip,
+    // transport, timeline, status strip. The command
+    // palette is NOT a centre child (UI mission Wave 3,
+    // audit S19 §2): mounted in flow, its ~521 pt card
+    // plus the column's fixed furniture (~230 pt) exceed
+    // the centre's height, and the stage — the column's
+    // only flexible child — is what gives, collapsing to
+    // height 0 while the tail overflows past the window
+    // bottom. It now mounts at the root as an anchored
+    // overlay (see the root column below), so opening it
+    // cannot change the stage's size in any workspace.
     let mut centre = col().key("centre").gap(12.0).grow(1.0).min_w(0.0);
-    if s.palette.open {
-        centre = centre.child(rune_sec::command_palette::palette_view(s, &t));
-    }
     centre = centre
         .child(
-            canvas(stage_shape(
-                core,
-                stage_size,
-                crate::stage_view::StageOverlays {
-                    guides: s.guides,
-                    guides_frustum: s.guides_frustum,
-                    guides_safe: s.guides_safe,
-                    stroke_selected: s.stroke_selected,
-                    particle_selected: s.particle_selected,
-                    fx_selected: s.fx_selected,
-                    fig3_stage: s.workspace == rune_sec::workspaces::Workspace::Build3D
-                        && core.fig3.is_some(),
-                    onion_prev: s.onion_ui.prev,
-                    onion_next: s.onion_ui.next,
-                },
-            ))
-                .key("stage")
+            // The stage wrapper: a positioning parent that
+            // takes exactly the layout slot the canvas used
+            // to take in the centre column (grow / full
+            // width / shrinkable), and the canvas — the
+            // wrapper's only in-flow child, growing to fill
+            // it — keeps the laid-out box it always had, so
+            // every number derived from the stage's size is
+            // unchanged. The wrapper exists so the toast
+            // stack can dock INSIDE the stage's box: the
+            // toasts column is out of flow (`.pin` sets
+            // taffy position-absolute, the same mechanism
+            // the menu scrim's `.absolute` uses), pinned to
+            // the stage's top-right corner, so a toast
+            // appearing or expiring overlays the canvas and
+            // can never resize the stage or shift any other
+            // element. The `.pin(...)` here is the outermost
+            // placement call on the returned element (the
+            // menu dropdown's `.anchored(...)` discipline):
+            // it replaces the window-corner pin `toasts_view`
+            // carries for a root mount with stage-corner
+            // insets; the stack's keys, contents, timing and
+            // dismissal behaviour are untouched.
+            col()
+                .key("stage-wrap")
                 .grow(1.0)
                 .w_full()
                 .min_h(0.0)
-                .fill(stage_fill)
-                .radius(12.0)
-                .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| stage_drag(s, d))
-                .on_secondary_press_local(|s: &mut State, e: PointerEvent, _tx: &mut Tx| {
-                    stage_secondary(s, e)
-                })
-                .on_wheel(|s: &mut State, e: WheelEvent, _tx: &mut Tx| stage_wheel(s, e)),
+                .child(
+                    canvas(stage_shape(
+                        core,
+                        stage_size,
+                        crate::stage_view::StageOverlays {
+                            guides: s.guides,
+                            guides_frustum: s.guides_frustum,
+                            guides_safe: s.guides_safe,
+                            stroke_selected: s.stroke_selected,
+                            particle_selected: s.particle_selected,
+                            fx_selected: s.fx_selected,
+                            fig3_stage: s.workspace
+                                == rune_sec::workspaces::Workspace::Build3D
+                                && core.fig3.is_some(),
+                            onion_prev: s.onion_ui.prev,
+                            onion_next: s.onion_ui.next,
+                        },
+                    ))
+                    .key("stage")
+                    .grow(1.0)
+                    .w_full()
+                    .min_h(0.0)
+                    .fill(stage_fill)
+                    .radius(12.0)
+                    .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| stage_drag(s, d))
+                    .on_secondary_press_local(
+                        |s: &mut State, e: PointerEvent, _tx: &mut Tx| {
+                            stage_secondary(s, e)
+                        },
+                    )
+                    .on_wheel(|s: &mut State, e: WheelEvent, _tx: &mut Tx| {
+                        stage_wheel(s, e)
+                    }),
+                )
+                .child(
+                    rune_sec::toasts::toasts_view(s, s.toast_now)
+                        .pin(None, Some(12.0), Some(12.0), None),
+                ),
         )
         .child(
             row()
@@ -787,7 +839,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         );
     }
 
-    col()
+    let mut root = col()
         .w_full()
         .h_full()
         .fill(t.bg)
@@ -800,9 +852,30 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         // (app bar + menu bar + workspace row).
         .child(rune_sec::design::divider(&t))
         .child(main_row)
-        .child(rune_sec::toasts::toasts_view(s, s.toast_now))
         .child(rune_sec::menus::menu_scrim(s))
-        .child(rune_sec::menus::menu_dropdown(s, &t))
+        .child(rune_sec::menus::menu_dropdown(s, &t));
+    // The command palette as a root-level overlay (UI
+    // mission Wave 3): the menu dropdown's idiom — the
+    // `.anchored(...)` placement is the outermost call on
+    // the returned element, hanging the card below the
+    // workspace row, centred on the window, out of flow
+    // (anchored elements are position-absolute and follow
+    // their anchor's rect every frame). It floats over
+    // the top of the centre column; nothing in the centre
+    // moves when it opens or closes. No scrim: Ctrl+K /
+    // Esc handling is unchanged, and the palette never
+    // had one.
+    if s.palette.open {
+        root = root.child(
+            rune_sec::command_palette::palette_view(s, &t).anchored(
+                "workspace-row",
+                Side::Bottom,
+                Align::Center,
+                8.0,
+            ),
+        );
+    }
+    root
 }
 
 fn main() {

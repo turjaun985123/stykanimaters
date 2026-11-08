@@ -50,8 +50,8 @@ use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
 use stykanimate_rs::shell::{load_layout, save_layout, LayoutPrefs};
 
-use crate::chrome_view::btn;
 use crate::rune_sec::design;
+use crate::rune_sec::icon_btn::icon_btn;
 use crate::State;
 
 /// One of the eight workspaces. The active workspace
@@ -445,6 +445,16 @@ pub fn blurb_line(ws: Workspace) -> &'static str {
 /// overflow handling the status strip's tail segment
 /// uses — so a narrow window elides it with "…" instead
 /// of letting it wrap or push the layout wider.
+///
+/// UI mission Wave 3: the chips were the shell's last
+/// text-only chip row; each now leads with the
+/// `border-all` grid glyph through `icon_btn` — the
+/// app-grid mark the shell's curated icon set carries
+/// for a grid of destinations. Key (`ws-*`), label text
+/// (shortcut suffix included), the active state and the
+/// press handler are exactly the ones the plain `btn`
+/// carried; `icon_btn` itself falls back to that same
+/// `btn` if the glyph ever leaves the curated set.
 pub fn workspace_row(s: &State, t: &Theme) -> El {
     let mut chips = row()
         .key("workspace-chips")
@@ -452,8 +462,9 @@ pub fn workspace_row(s: &State, t: &Theme) -> El {
         .center_y();
     for (i, ws) in Workspace::all().into_iter().enumerate() {
         let chip_label = format!("{} · Alt+{}", ws.label(), i + 1);
-        chips = chips.child(btn(
+        chips = chips.child(icon_btn(
             ws.key(),
+            "border-all",
             &chip_label,
             s.workspace == ws,
             t,
