@@ -3,10 +3,11 @@ name = "stykanimate-rs"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "StykAnimate ported to Rust with GPUI: a stick figure animation editor (document model, FK/IK posing, timeline, playback, PNG export)."
+description = "StykAnimate ported to Rust (Rune UI): a stick figure animation editor (document model, FK/IK posing, timeline, playback, PNG export)."
 
 [dependencies]
-gpui = "=0.2.2"
+rune = { git = "https://github.com/anomalyco/rune", rev = "87caf2a3a2d9e3fb6172f5a62997748dbf25748e" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "87caf2a3a2d9e3fb6172f5a62997748dbf25748e" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png", "gif", "jpeg"] }
@@ -15,9 +16,3 @@ png = "0.17"
 
 [profile.dev]
 opt-level = 1
-
-# xattr 0.2.3 (a transitive GPUI dependency) references libc::ENOATTR,
-# which newer libc removed on Linux. Vendored copy with the constant
-# mapped to ENODATA on Linux; everything else is byte-identical.
-[patch.crates-io]
-xattr = { path = "vendor/xattr" }
