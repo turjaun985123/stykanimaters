@@ -312,12 +312,29 @@ count was never padded.
   and the mission's visual proof is the headless snap/tree suite,
   pixel-read per wave (ACCEPTANCE.md crit. 7).
 
-### 6.4 Wave 9 — IN PROGRESS
+### 6.4 Wave 9 — integrated 2026-11-08
 
 A 50-agent improvement wave ordered by the user on 2026-11-08
-(22:27 +06), after the mission close. At the time of writing its
-edits are in the working tree, uncommitted (22 modified files);
-a gate run over the in-flight tree passes 6/6, reading 818 total
-unique keys, 111 palette commands and 22 scenes (gate checks
-1/5) — those are in-flight figures, not close figures, and no CI
-verdict is claimed for Wave 9 until it is integrated and pushed.
+(22:27 +06), after the mission close: five squads of ten (shell,
+panels, timeline/stage/export, engine/formats, QA/tooling),
+one owner per file, all fifty reports collected (five agents
+lost to a startup rate-limit burst were re-dispatched).
+Integrated by the session integrator and pushed as five
+commits on top of the acceptance commit. Final gate: 7/7
+(the wave added check 7, the literal & empty-state guard),
+reading **827 total unique keys** (zero lost vs the mission
+close; new keys are the two splitters, `save-copy-proj` and
+`draw-stamp-params-3`), **112 palette commands**, **131 MCP
+tools** (91 registry + 8 io + 32 built-ins in `mcp.rs`),
+**23 headless scenes**, **96 i18n keys × 28 languages**,
+help at 56 rows. Real defects the wave found and fixed
+include clip rows overflowing their card by up to ~188 pt
+(invisible for eight waves because no scene populated the
+clips list — a `clips-populated` scene now covers them),
+the Export panel's rows overflowing (the workspace was
+never tree-dumped; it is in the headless loops now), the
+waveform strip laying out 0 pt high in project mode, and
+range MP4 exports gaining frame-accurate WAV audio. The
+CI and headless verdicts for the wave's tree are recorded
+in §3's table when they land; nothing here claims them
+early.

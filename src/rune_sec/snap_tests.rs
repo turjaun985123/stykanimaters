@@ -1212,18 +1212,14 @@ fn stroke_selection_row_reports_empty_project() {
     tap(&mut rt, "ws-draw");
     rt.frame(DT);
     assert_eq!(rt.state.workspace, Workspace::Draw);
-    // The row renders always, empty project or not. Settle
-    // (bounded) through the freshly mounted panel's
-    // presence fade before pressing inside it — round 3's
-    // guides lesson.
-    for _ in 0..90 {
-        rt.frame(DT);
-        if let Some((_, opacity)) = rt.presented("stroke-sel-next") {
-            if opacity > 0.99 {
-                break;
-            }
-        }
-    }
+    // The row renders always, empty project or not.
+    // Bring it into the right column's viewport and
+    // settle through the freshly mounted panel's
+    // presence fade before pressing inside it — the
+    // draw panel grew in Wave 9 (labelled stamp
+    // groups), which can leave the row below the fold,
+    // where a press cannot land.
+    scroll_into_view(&mut rt, "stroke-sel-next");
     assert!(
         presented_keys(&rt).contains("stroke-sel-row"),
         "Draw mounts the stroke selection row"
@@ -3417,6 +3413,14 @@ fn workspace_scenes_mount_their_signature_panels() {
 
         let mut rt = editor();
         scene(&mut rt.state);
+        // The scene fn is a direct state write, outside
+        // the runtime's dispatch — mark the tree changed
+        // so the next frame re-runs the view (the suite's
+        // own discipline after direct writes; without it
+        // the runtime keeps presenting the seeded
+        // workspace's panels and the scene's panels never
+        // mount).
+        rt.invalidate();
         assert_eq!(
             rt.state.workspace, ws,
             "scene {name:?} lands on its workspace"
