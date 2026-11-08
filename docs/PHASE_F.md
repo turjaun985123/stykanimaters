@@ -1,5 +1,21 @@
 # PHASE_F.md — Rune Phase F: proven on screen, now polish and depth
 
+**COMPLETED 2026-11-08.** Integrated in `1fd7741` plus three
+CI fix rounds (`fa1a4ef` two borrow errors, `3eedbff` a
+sign-convention test fix, `c1d76cf` a presence-fade settle in
+the guides Runtime test). **CI run `42461893898` GREEN:
+1,416 tests passed (742 lib + 664 bin + 10 integration), 0
+failed.** Final inventory: **475 element keys** (402 static +
+73 dynamic patterns); tree **81,944 lines of Rust** in src.
+Two honest remainders against the table below: the §2 stroke
+highlight and §3 FX gizmo landed as tested geometry helpers
+without a live draw call — the shell has no stroke /
+particle-event *selection* state for them to read, so wiring
+waits on that state existing; and playback audio (§16) is
+wired into `poll()` but hearing it is user-verified only —
+CI has no speakers. Everything else in the table landed as
+written.
+
 Snapshot: 2026-11-08, ~07:56 UTC, written **while the wave is
 still landing** — other sections are being edited concurrently,
 so every count in this file is a moving snapshot, not a final
