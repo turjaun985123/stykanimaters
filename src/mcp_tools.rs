@@ -1413,6 +1413,81 @@ fn tool_mirror_figure(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
     }))
 }
 
+// ---------------------------------------------------------------------
+// Phase K parity tools: the graph channel pair and the FX
+// kind setter — panel capabilities (the graph panel's
+// duplicate button, the FX panel's kind cycling) that had
+// no MCP surface. The graph pair follows the Phase J
+// bool-op convention: a pre-check turns a bad index into
+// a clean Err, and the op's false becomes Err(core.status).
+// ---------------------------------------------------------------------
+
+/// Index of graph channel `idx`, or a clean error when the
+/// project has no channel there (the pre-check the graph
+/// channel tools share; mirrors check_fx_index so an
+/// out-of-range index is a clean Err, not just a status
+/// line).
+fn check_graph_channel(core: &EditorCore, idx: usize) -> Result<usize, String> {
+    if idx >= core.project.channels.len() {
+        Err(format!("no graph channel at index {idx}"))
+    } else {
+        Ok(idx)
+    }
+}
+
+fn tool_duplicate_graph_channel(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let idx = check_graph_channel(core, req_usize(args, "channel")?)?;
+    let to_figure = req_usize(args, "to_figure")?;
+    if !crate::graph_keys::duplicate_channel_to_figure(core, idx, to_figure) {
+        // The op refused (the channel's own figure, a
+        // target figure that already has a channel for the
+        // same target, a node the target rig lacks, or no
+        // such figure) and explained via the status line.
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_delete_graph_channel(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = check_graph_channel(core, req_usize(args, "channel")?)?;
+    if !crate::graph_keys::delete_channel(core, idx) {
+        // The op refused and explained via the status line.
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_fx_set_kind(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = check_fx_index(core, req_usize(args, "index")?)?;
+    // The file's one clip-kind parser — the same names
+    // add_fx_clip accepts, all 27 kinds; its error names
+    // the bad value.
+    let kind = parse_clip_kind(req_str(args, "kind")?)?;
+    // Unlike its colour siblings the op returns no bool:
+    // the pre-check above is the guard, and the op reports
+    // the change through the status line.
+    core.fx_set_kind(idx, kind);
+    Ok(json!({
+        "ok": true,
+        "fx_index": idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
 /// Parse the graph `target` argument shared by graph_key and the
 /// channel transform tools: "root_x"/"root_y" (or "rootx"/"rooty"),
 /// "angle:N" / "length:N" strings, or an object {"angle": node} /
@@ -2636,6 +2711,18 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_fx_set_color,
         },
         Tool {
+            name: "fx_set_kind",
+            description: "Set an FX clip's particle kind by name: burst, sparkle, smoke, beam, aura, trail, confetti, shock_ring, ember, fountain, orbit, lightning, bubbles, leaves, meteor, petals, splash, spiral, fireworks, aurora, comet, galaxy, prism, vortex, glitter, wave or shard (the names add_fx_clip accepts). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "kind": { "type": "string", "description": "Particle kind name" }
+                }),
+                &["index", "kind"],
+            ),
+            handler: tool_fx_set_kind,
+        },
+        Tool {
             name: "fx_set_color2",
             description: "Set an FX clip's gradient end colour (0xRRGGBB; particles blend colour -> color2). Omit 'color2' (or pass null) to clear the gradient back to a solid colour. One undo step.",
             schema: obj_schema(
@@ -2939,6 +3026,29 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_graph_paste_keys,
         },
         Tool {
+            name: "duplicate_graph_channel",
+            description: "Duplicate a graph channel — addressed by its index in the project's channel list — onto another figure: the clone keeps every key and is appended to the channel list. Errors when the target figure already has a channel for the same target (the clone would be shadowed), is the channel's own figure, or lacks the node an angle/length target names. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "channel": { "type": "integer", "description": "Index into the project's graph channel list" },
+                    "to_figure": { "type": "integer" }
+                }),
+                &["channel", "to_figure"],
+            ),
+            handler: tool_duplicate_graph_channel,
+        },
+        Tool {
+            name: "delete_graph_channel",
+            description: "Delete a graph channel by its index in the project's channel list. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "channel": { "type": "integer", "description": "Index into the project's graph channel list" }
+                }),
+                &["channel"],
+            ),
+            handler: tool_delete_graph_channel,
+        },
+        Tool {
             name: "layers",
             description: "Apply layer state to a figure: locked, hidden, opacity (0.05-1.0), and solo (true solos this figure in the editor, false clears its solo).",
             schema: obj_schema(
@@ -3213,11 +3323,11 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 81);
+        assert_eq!(tools.len(), 84);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 81, "tool names must be unique");
+        assert_eq!(names.len(), 84, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
@@ -4295,6 +4405,165 @@ mod tests {
     }
 
     #[test]
+    fn phase_k_parity_tools_registered_with_right_shapes() {
+        let tools = tools();
+        // duplicate_graph_channel needs the channel index
+        // and the figure to clone onto.
+        let t = tools
+            .iter()
+            .find(|t| t.name == "duplicate_graph_channel")
+            .expect("duplicate_graph_channel registered");
+        assert_eq!(t.schema["required"], json!(["channel", "to_figure"]));
+        assert_eq!(t.schema["properties"]["channel"]["type"], "integer");
+        assert_eq!(t.schema["properties"]["to_figure"]["type"], "integer");
+        // delete_graph_channel needs just the channel index.
+        let t = tools
+            .iter()
+            .find(|t| t.name == "delete_graph_channel")
+            .expect("delete_graph_channel registered");
+        assert_eq!(t.schema["required"], json!(["channel"]));
+        assert_eq!(t.schema["properties"]["channel"]["type"], "integer");
+        // fx_set_kind needs the clip index and a kind name.
+        let t = tools
+            .iter()
+            .find(|t| t.name == "fx_set_kind")
+            .expect("fx_set_kind registered");
+        assert_eq!(t.schema["required"], json!(["index", "kind"]));
+        assert_eq!(t.schema["properties"]["index"]["type"], "integer");
+        assert_eq!(t.schema["properties"]["kind"]["type"], "string");
+    }
+
+    #[test]
+    fn phase_k_indexed_tools_validate_before_the_op() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        // The demo project has no graph channels and no FX
+        // clips: index 0 is out of range for all three
+        // tools, with the pre-check wordings, and a missing
+        // index is a clean error too.
+        let err = call(
+            &mut core,
+            &tools,
+            "duplicate_graph_channel",
+            json!({ "channel": 0, "to_figure": 0 }),
+        )
+        .unwrap_err();
+        assert_eq!(err, "no graph channel at index 0");
+        assert!(
+            call(&mut core, &tools, "duplicate_graph_channel", json!({ "to_figure": 0 }))
+                .is_err()
+        );
+        let err = call(&mut core, &tools, "delete_graph_channel", json!({ "channel": 0 }))
+            .unwrap_err();
+        assert_eq!(err, "no graph channel at index 0");
+        assert!(call(&mut core, &tools, "delete_graph_channel", json!({})).is_err());
+        let err = call(
+            &mut core,
+            &tools,
+            "fx_set_kind",
+            json!({ "index": 0, "kind": "burst" }),
+        )
+        .unwrap_err();
+        assert_eq!(err, "no FX clip at index 0");
+        assert!(core.project.channels.is_empty());
+        assert!(core.project.fx_clips.is_empty());
+    }
+
+    #[test]
+    fn phase_k_duplicate_and_delete_graph_channel() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        // Two figures, one RootX channel with two keys on
+        // figure 0 — built through the handlers, the state
+        // the panel would leave behind.
+        call(&mut core, &tools, "add_figure", json!({ "kind": "humanoid" })).unwrap();
+        assert_eq!(core.project.figures.len(), 2);
+        call(&mut core, &tools, "graph_key", json!({
+            "figure": 0, "target": "root_x", "frame": 0.0, "value": 120.0
+        }))
+        .unwrap();
+        call(&mut core, &tools, "graph_key", json!({
+            "figure": 0, "target": "root_x", "frame": 2.0, "value": 200.0
+        }))
+        .unwrap();
+        assert_eq!(core.project.channels.len(), 1);
+
+        // The duplicate lands as a second channel bound to
+        // figure 1, keys carried over verbatim.
+        let r = call(&mut core, &tools, "duplicate_graph_channel", json!({
+            "channel": 0, "to_figure": 1
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["channel"], 0);
+        assert!(r["status"].is_string());
+        assert_eq!(r["project"]["figures"], 2);
+        assert_eq!(core.project.channels.len(), 2);
+        let clone = &core.project.channels[1];
+        assert_eq!(clone.figure, 1);
+        assert_eq!(clone.target, crate::graph::ChannelTarget::RootX);
+        assert_eq!(clone.keys.len(), 2);
+        assert_eq!(clone.keys[0].value, 120.0);
+        assert_eq!(clone.keys[1].value, 200.0);
+
+        // A second duplicate onto figure 1 refuses (the op:
+        // figure 1 already has a RootX channel, so the
+        // clone would be shadowed), as does duplicating
+        // onto the channel's own figure; both surface as
+        // errors and nothing is appended.
+        assert!(call(&mut core, &tools, "duplicate_graph_channel", json!({
+            "channel": 0, "to_figure": 1
+        }))
+        .is_err());
+        assert!(call(&mut core, &tools, "duplicate_graph_channel", json!({
+            "channel": 0, "to_figure": 0
+        }))
+        .is_err());
+        assert_eq!(core.project.channels.len(), 2);
+
+        // Delete removes the clone; the original stays.
+        let r = call(&mut core, &tools, "delete_graph_channel", json!({ "channel": 1 }))
+            .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["channel"], 1);
+        assert_eq!(core.project.channels.len(), 1);
+        assert_eq!(core.project.channels[0].figure, 0);
+    }
+
+    #[test]
+    fn phase_k_fx_set_kind_changes_kind_and_rejects_bad_names() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        // One burst clip on the demo figure.
+        call(&mut core, &tools, "add_fx_clip", json!({
+            "figure": 0, "node": 0, "kind": "burst", "start": 0.0, "duration": 5.0
+        }))
+        .unwrap();
+        assert_eq!(core.project.fx_clips[0].clip.kind, ClipKind::Burst);
+
+        let r = call(&mut core, &tools, "fx_set_kind", json!({
+            "index": 0, "kind": "sparkle"
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["fx_index"], 0);
+        assert_eq!(core.project.fx_clips[0].clip.kind, ClipKind::Sparkle);
+        // The op's status names the kind in snake case.
+        assert!(r["status"].as_str().unwrap().contains("sparkle"));
+
+        // A kind name the parser does not know is a clean
+        // error naming the bad value; the clip is untouched.
+        let err = call(&mut core, &tools, "fx_set_kind", json!({
+            "index": 0, "kind": "laser"
+        }))
+        .unwrap_err();
+        assert!(err.contains("laser"), "error names the bad kind: {err}");
+        assert_eq!(core.project.fx_clips[0].clip.kind, ClipKind::Sparkle);
+        // A missing kind is a clean error too.
+        assert!(call(&mut core, &tools, "fx_set_kind", json!({ "index": 0 })).is_err());
+    }
+
+    #[test]
     fn phase_f_parity_tools() {
         let tools = tools();
         let mut core = EditorCore::new();
@@ -4541,6 +4810,11 @@ mod tests {
             ("graph_copy_keys", json!({ "figure": 0, "target": "root_x" })), // no channel yet
             ("graph_paste_keys", json!({ "figure": 0, "target": "root_x", "keys": [], "at_frame": 0.0 })),
             ("graph_paste_keys", json!({ "figure": 0, "target": "root_x", "at_frame": 0.0 })), // keys required
+            ("duplicate_graph_channel", json!({ "channel": 0, "to_figure": 0 })), // no channels yet
+            ("duplicate_graph_channel", json!({ "to_figure": 0 })), // channel required
+            ("delete_graph_channel", json!({ "channel": 0 })), // no channels yet
+            ("fx_set_kind", json!({ "index": 0, "kind": "burst" })), // no clips yet
+            ("fx_set_kind", json!({ "index": 0, "kind": "laser" })), // unknown kind (and no clips yet)
         ];
         for (name, args) in cases {
             let r = call(&mut core, &tools, name, args.clone());

@@ -161,6 +161,36 @@ pub fn recovery_modified() -> Option<SystemTime> {
     file_mtime(&default_dir().join(RECOVERY_FILE))
 }
 
+/// Delete a project file from disk — the one destructive
+/// helper in this module, written for its single caller:
+/// the Home panel's two-step delete (Phase K), which asks
+/// for confirmation first and then calls this with the
+/// row's path.
+///
+/// The shell's own files are refused by name: a path whose
+/// file name is [`LAYOUT_FILE`], [`RECOVERY_FILE`] or
+/// [`RECENTS_FILE`] returns an `InvalidInput` error
+/// without touching the disk. The recovery snapshot is the
+/// user's safety net, and the panel must never be able to
+/// delete it (or the layout prefs, or the recents list)
+/// through this path — the panel only ever lists named
+/// project saves, so a refusal here means a bug or a
+/// hand-crafted path, never a real project. Any other
+/// path is handed to `std::fs::remove_file` and its result
+/// propagated untouched, so a missing file surfaces as an
+/// honest `NotFound` for the caller to report.
+pub fn delete_project_file(path: &Path) -> io::Result<()> {
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        if name == LAYOUT_FILE || name == RECOVERY_FILE || name == RECENTS_FILE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing to delete a shell-owned file",
+            ));
+        }
+    }
+    std::fs::remove_file(path)
+}
+
 /// The pure decision behind
 /// [`recovery_is_newer_than_last_project_in`]: no recovery
 /// snapshot → `false`; a snapshot with no last-saved project
@@ -564,6 +594,41 @@ mod tests {
         assert!(text.contains("\"timeline_collapsed\": true"), "{text}");
         assert!(text.contains("\"sidebar_visible\": false"), "{text}");
         assert_eq!(load_layout_in(&dir), prefs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_project_file_removes_a_real_project_file() {
+        let dir = temp_dir("delete-project");
+        let path = dir.join("my-film.json");
+        std::fs::write(&path, "{}").unwrap();
+        assert!(path.exists());
+        delete_project_file(&path).unwrap();
+        assert!(!path.exists(), "the file is gone after deletion");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_project_file_refuses_every_shell_owned_name() {
+        let dir = temp_dir("delete-shell-owned");
+        for name in [LAYOUT_FILE, RECOVERY_FILE, RECENTS_FILE] {
+            let path = dir.join(name);
+            std::fs::write(&path, "{}").unwrap();
+            let err = delete_project_file(&path)
+                .expect_err("a shell-owned file must be refused");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{name}");
+            assert!(path.exists(), "{name} must remain on disk");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_project_file_missing_path_is_not_found_not_a_panic() {
+        let dir = temp_dir("delete-missing");
+        let path = dir.join("never-saved.json");
+        let err = delete_project_file(&path)
+            .expect_err("a missing file must be an error");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

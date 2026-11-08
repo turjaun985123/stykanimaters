@@ -40,6 +40,11 @@
 //!   node: Option<usize>, .. }` (model.rs:602): `None`
 //!   figure = a free stage point at the event's stored
 //!   `x`/`y`.
+//! * to playhead — `EditorCore::particle_set_frame(
+//!   index, core.current)` (Phase K)
+//! * anchor to joint — `EditorCore::particle_set_anchor(
+//!   index, Some(figure), Some(node))`, the pair resolved
+//!   by [`anchor_target`] (Phase K)
 //!
 //! `particle_set_position` exists in the same op file and
 //! the model supports it (the event carries `x`/`y`), but
@@ -50,6 +55,20 @@
 //! of `State::particle_selected`): add selects the new
 //! event, duplicate selects the copy, delete repairs the
 //! selection with [`selection_after_delete`].
+//!
+//! Phase K adds two actions to the detail block's final
+//! action row area, beside Duplicate/Delete: "To
+//! playhead" (the selected event jumps to `core.current`)
+//! and "Anchor to joint" (the event anchors to the
+//! selected figure AND joint). The joint button is
+//! rendered only while a joint is selected: anchoring to
+//! a figure alone is the existing "Anchor to figure"
+//! button's job, and this panel renders state-dependent
+//! controls by presence — the detail block itself appears
+//! only with a selection — rather than by an inert
+//! constructor (`icon_btn_inert` is not among this file's
+//! imports, so the button is omitted, not greyed, when
+//! no joint is selected).
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, El};
@@ -150,6 +169,23 @@ pub fn anchor_detail(event: &ParticleEvent) -> String {
 /// the detail block on the wrong event).
 pub fn selected_event(core: &EditorCore, selected: Option<usize>) -> Option<usize> {
     selected.filter(|&i| i < core.project.particles.len())
+}
+
+/// The anchor target for the detail block's "Anchor to
+/// joint" action (Phase K): the core's selected figure
+/// and joint as `(figure, Some(node))`, or `None` when
+/// no joint is selected. A joint selection is the
+/// action's whole precondition — anchoring to a figure
+/// alone is the neighbouring "Anchor to figure" action's
+/// job — so a core with only a figure selected yields
+/// `None` here, and the button is not rendered at all
+/// (see `detail_block`). The pair is passed through
+/// verbatim; whether the figure still exists is the
+/// handler's check, mirroring `anchor_to_figure`'s
+/// stale-selection guard.
+pub fn anchor_target(core: &EditorCore) -> Option<(usize, Option<usize>)> {
+    core.selected_node
+        .map(|node| (core.selected_figure, Some(node)))
 }
 
 /// One list row's data, built from the project's particle
@@ -328,6 +364,24 @@ fn step_frame(s: &mut State, delta: i32) {
     }
 }
 
+/// Move the selected event to the playhead frame
+/// (`core.current`) via `EditorCore::particle_set_frame`
+/// (Phase K) — the one-press form of the frame stepper,
+/// for landing an event exactly where playback is
+/// parked. A press when the event already sits on the
+/// playhead calls nothing, the same no-move discipline
+/// [`step_frame`] keeps (the op would only take a
+/// snapshot).
+fn move_to_playhead(s: &mut State) {
+    let Some(i) = selected_event(&s.core, s.particle_selected) else {
+        return;
+    };
+    let frame = s.core.current;
+    if s.core.project.particles[i].frame != frame {
+        s.core.particle_set_frame(i, frame);
+    }
+}
+
 /// Step the selected event's kind by `dir` through
 /// [`cycle_kind`] via `EditorCore::particle_set_kind`.
 /// Cycling always lands on a different kind (three kinds,
@@ -370,6 +424,30 @@ fn anchor_to_figure(s: &mut State) {
     s.core.particle_set_anchor(i, Some(figure), node);
 }
 
+/// Anchor the selected event to the core's selected
+/// figure AND joint via `EditorCore::particle_set_anchor`
+/// (Phase K), the pair resolved by [`anchor_target`].
+/// Without a selected joint there is nothing more
+/// precise than `anchor_to_figure` to do, so the press
+/// does nothing — the button is only rendered while a
+/// joint is selected, making this a guard, not a path.
+/// A core figure selection past the project's figure
+/// list anchors nothing and says so, the same
+/// stale-selection discipline as `anchor_to_figure`.
+fn anchor_to_joint(s: &mut State) {
+    let Some(i) = selected_event(&s.core, s.particle_selected) else {
+        return;
+    };
+    let Some((figure, node)) = anchor_target(&s.core) else {
+        return;
+    };
+    if figure >= s.core.project.figures.len() {
+        s.core.status = "Select a figure first, then anchor the particle event.".into();
+        return;
+    }
+    s.core.particle_set_anchor(i, Some(figure), node);
+}
+
 /// Clear the selected event's anchor via
 /// `EditorCore::particle_set_anchor` with `None`/`None`:
 /// the event becomes a free stage point at its stored
@@ -388,8 +466,10 @@ fn anchor_clear(s: &mut State) {
 /// The detail block for the selected event: kind and
 /// anchor summary, a kind stepper and colour swatches
 /// (Phase I), a frame stepper, the anchor buttons
-/// (anchor to the selected figure / clear anchor), and
-/// duplicate and delete. With events present but no
+/// (anchor to the selected figure / clear anchor),
+/// duplicate and delete, and a final action row (to
+/// playhead, plus anchor to joint while a joint is
+/// selected — Phase K). With events present but no
 /// valid selection it renders a guidance line instead
 /// of dead buttons.
 fn detail_block(s: &State, t: &Theme) -> El {
@@ -422,6 +502,31 @@ fn detail_block(s: &State, t: &Theme) -> El {
                         .fill(crate::stage_view::hex_color(rgb).unwrap_or(t.bg)),
                 ),
         );
+    }
+    // Final action row (Phase K, built mutably like the
+    // swatches above): "To playhead" is always present;
+    // "Anchor to joint" joins it only while a joint is
+    // selected — its precondition (see anchor_target).
+    // Without a joint the button is omitted entirely,
+    // this panel's presence-based pattern for
+    // state-dependent controls.
+    let mut place_row = row().gap(8.0).center_y().child(icon_btn(
+        "particles-to-playhead",
+        "crosshairs",
+        "To playhead",
+        false,
+        t,
+        |s| move_to_playhead(s),
+    ));
+    if anchor_target(&s.core).is_some() {
+        place_row = place_row.child(icon_btn(
+            "particles-anchor-node",
+            "crosshairs",
+            "Anchor to joint",
+            false,
+            t,
+            |s| anchor_to_joint(s),
+        ));
     }
     col()
         .key("particles-detail")
@@ -559,6 +664,12 @@ fn detail_block(s: &State, t: &Theme) -> El {
                     |s| delete_selected(s),
                 )),
         )
+        // Final action row (built above, beside
+        // Duplicate/Delete): to playhead (EditorCore::
+        // particle_set_frame at core.current) and, while
+        // a joint is selected, anchor to joint
+        // (EditorCore::particle_set_anchor).
+        .child(place_row)
 }
 
 /// The particle events panel: header + count, an add
@@ -730,6 +841,7 @@ mod tests {
             pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
             pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
             loop_playback: true,
+            playback_speed: 1.0,
             was_playing: false,
         }
     }
@@ -1095,6 +1207,102 @@ mod tests {
         // A stale selection builds the guidance block,
         // not a detail block on the wrong event.
         state.particle_selected = Some(9);
+        let _ = particles_panel(&state, &t);
+    }
+
+    #[test]
+    fn anchor_target_needs_a_selected_joint() {
+        let mut core = core_with(vec![]);
+        // A figure selection alone is not a target: the
+        // joint is the action's precondition.
+        core.selected_figure = 0;
+        core.selected_node = None;
+        assert_eq!(anchor_target(&core), None);
+        // A joint selection yields the pair verbatim —
+        // the selected figure and Some(node).
+        core.selected_node = Some(2);
+        assert_eq!(anchor_target(&core), Some((0, Some(2))));
+        // The figure half follows the core's selection.
+        core.selected_figure = 1;
+        core.selected_node = Some(0);
+        assert_eq!(anchor_target(&core), Some((1, Some(0))));
+    }
+
+    #[test]
+    fn move_to_playhead_lands_the_event_on_the_current_frame() {
+        let mut state = demo_state();
+        state.core.project.particles = vec![event(0, None, None)];
+        state.particle_selected = Some(0);
+        state.core.current = 3;
+        let depth = state.core.undo_depth();
+        move_to_playhead(&mut state);
+        assert_eq!(state.core.project.particles[0].frame, 3);
+        assert_eq!(
+            state.core.project.particles[0].frame, state.core.current,
+            "the event sits on the playhead"
+        );
+        assert_eq!(state.core.undo_depth(), depth + 1, "exactly one snapshot");
+        assert_eq!(state.core.status, "Particle event 1 moved to frame 4.");
+        // Already on the playhead: a second press moves
+        // nothing and takes no further snapshot.
+        move_to_playhead(&mut state);
+        assert_eq!(state.core.project.particles[0].frame, 3);
+        assert_eq!(state.core.undo_depth(), depth + 1);
+        // No selection: nothing moves, no panic.
+        state.particle_selected = None;
+        state.core.current = 1;
+        move_to_playhead(&mut state);
+        assert_eq!(state.core.project.particles[0].frame, 3);
+    }
+
+    #[test]
+    fn anchor_to_joint_writes_the_selected_figure_and_node() {
+        let mut state = demo_state();
+        state.core.project.particles = vec![event(0, None, None)];
+        state.particle_selected = Some(0);
+        // No joint selected: the press is a clean no-op
+        // (the button is not rendered in this state).
+        state.core.selected_node = None;
+        let depth = state.core.undo_depth();
+        anchor_to_joint(&mut state);
+        assert_eq!(state.core.project.particles[0].figure, None);
+        assert_eq!(state.core.project.particles[0].node, None);
+        assert_eq!(state.core.undo_depth(), depth, "no snapshot");
+        // A joint selected on the selected figure: the
+        // press anchors figure + node in one snapshot.
+        let figure = state.core.selected_figure;
+        state.core.selected_node = Some(2);
+        anchor_to_joint(&mut state);
+        assert_eq!(state.core.project.particles[0].figure, Some(figure));
+        assert_eq!(state.core.project.particles[0].node, Some(2));
+        assert_eq!(state.core.undo_depth(), depth + 1, "exactly one snapshot");
+        assert_eq!(
+            state.core.status,
+            format!(
+                "Particle event 1 anchored to fig {} node 2.",
+                figure + 1
+            )
+        );
+        // No event selected: nothing changes, no panic.
+        state.particle_selected = None;
+        state.core.selected_node = Some(1);
+        anchor_to_joint(&mut state);
+        assert_eq!(state.core.project.particles[0].node, Some(2));
+    }
+
+    #[test]
+    fn panel_builds_with_and_without_a_joint_selected() {
+        let t = rune::tok::theme(true);
+        let mut state = demo_state();
+        state.core.project.particles = vec![event(0, None, None)];
+        state.particle_selected = Some(0);
+        // No joint: the detail block builds without the
+        // anchor-to-joint button.
+        state.core.selected_node = None;
+        let _ = particles_panel(&state, &t);
+        // A joint selected: the button joins the final
+        // action row and the panel still builds.
+        state.core.selected_node = Some(0);
         let _ = particles_panel(&state, &t);
     }
 }

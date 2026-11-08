@@ -293,8 +293,11 @@ pub fn measure_line(m: &FigureMeasure) -> String {
 /// draws `17.0 * scale`; figures_panel.rs keeps the same
 /// value as its `HEAD_RING_R` for thumbnails). The ring
 /// is part of the figure as drawn, so the placement
-/// bounding box grows by it around head joints.
-pub const HEAD_RING_R: f32 = 17.0;
+/// bounding box grows by it around head joints. The
+/// value itself has a single source — the model's
+/// `HEAD_RING_RADIUS` — re-exported here under this
+/// panel's established name (Phase K).
+pub use stykanimate_rs::model::HEAD_RING_RADIUS as HEAD_RING_R;
 
 /// The selected figure's bounding box at the display
 /// frame as `[min_x, min_y, max_x, max_y]`, in stage
@@ -1037,6 +1040,7 @@ last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
 pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
+playback_speed: 1.0,
             was_playing: false,
         };
         let _ = inspector_figure(&with_figures, &t);
@@ -1084,6 +1088,7 @@ last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
 pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
+playback_speed: 1.0,
             was_playing: false,
         };
         let _ = inspector_figure(&bare, &t);

@@ -84,6 +84,21 @@
 //! off every preset still says what it is, aspect included,
 //! instead of the user reading two bare stepper values.
 //!
+//! Frame rate + fine stage steppers (Phase K): a "Frame
+//! rate" row (`scene-fps-row`) steps `project.fps` by 1
+//! through the editor op `set_project_fps`, and a second
+//! stage-size block (`scene-stage-size-row`) steps each
+//! axis by 20 through `set_stage_size` — finer steps than
+//! the ±40 `adjust_stage` rows above them, which stay as
+//! they were. Unlike this module's own writes, these two
+//! rows delegate to editor ops (§12), so the write, the
+//! clamping ([1, 60] fps, [64, 4096] per axis) and the
+//! status wording are the ops' — the panel only computes
+//! the stepped value ([`fps_after`] / [`stage_axis_after`],
+//! mirroring the ops' clamps so the arithmetic is testable
+//! here) and hands it over. The readout grows the rate as
+//! a suffix: `960×720 · 4:3 · 12 fps`.
+//!
 //! No undo snapshots, on purpose: weather writes were never
 //! snapshotted. The GPUI listeners wrote `project.weather`
 //! directly (the wiring note above), and in this engine a
@@ -458,34 +473,103 @@ fn gcd(a: i64, b: i64) -> i64 {
     a
 }
 
-/// The stage readout (Phase I): `"{w}×{h} · {aspect}"` for
-/// the project's current stage size — for example
-/// `960×720 · 4:3`. Width and height are the field's values
-/// **rounded** to whole units (every preset and stepper
-/// step is whole, so rounding only ever tidies a loaded
-/// file's fractions; truncating would misreport 959.6 as
-/// 959). The aspect is the ratio reduced by the gcd when
-/// both reduced sides are small integers (≤ 40: `16:9`,
-/// `4:3`, `9:16`, `1:1`, …). A size whose reduced ratio
-/// still has a side over 40 has no honest small-integer
-/// name, so it falls back to ONE decimal form: the width
-/// over the height at two decimals, `"{:.2}:1"` — a
-/// 1000×333 stage reads `1000×333 · 3.00:1`. Pure: reads
-/// the project field, writes nothing.
+/// A frame rate as the shell writes it everywhere (the
+/// status strip's `fps_text`, the stats panel's
+/// `format_fps` — each panel keeps its own copy of this
+/// two-liner): whole rates as a plain integer (`12`), a
+/// fractional rate at one decimal (`23.5`).
+pub fn fps_label(fps: f32) -> String {
+    if fps.fract() == 0.0 {
+        format!("{}", fps as i64)
+    } else {
+        format!("{fps:.1}")
+    }
+}
+
+/// The stage readout (Phase I; rate suffix Phase K):
+/// `"{w}×{h} · {aspect} · {fps} fps"` for the project's
+/// current stage size and frame rate — for example
+/// `960×720 · 4:3 · 12 fps`. Width and height are the
+/// field's values **rounded** to whole units (every preset
+/// and stepper step is whole, so rounding only ever tidies
+/// a loaded file's fractions; truncating would misreport
+/// 959.6 as 959). The aspect is the ratio reduced by the
+/// gcd when both reduced sides are small integers (≤ 40:
+/// `16:9`, `4:3`, `9:16`, `1:1`, …). A size whose reduced
+/// ratio still has a side over 40 has no honest
+/// small-integer name, so it falls back to ONE decimal
+/// form: the width over the height at two decimals,
+/// `"{:.2}:1"` — a 1000×333 stage reads
+/// `1000×333 · 3.00:1 · 12 fps`. Pure: reads the project
+/// fields, writes nothing.
 pub fn stage_readout(core: &EditorCore) -> String {
     let w = core.project.stage[0].round() as i64;
     let h = core.project.stage[1].round() as i64;
+    let fps = fps_label(core.project.fps);
     let g = gcd(w, h);
     let (rw, rh) = if g > 0 { (w / g, h / g) } else { (w, h) };
     if g > 0 && (1..=40).contains(&rw) && (1..=40).contains(&rh) {
-        format!("{w}×{h} · {rw}:{rh}")
+        format!("{w}×{h} · {rw}:{rh} · {fps} fps")
     } else {
         // Degenerate or irreducible sizes: the decimal
         // form, with the divisor guarded so a zero height
         // from a hand-edited file cannot divide by zero.
         let ratio = w as f32 / h.max(1) as f32;
-        format!("{w}×{h} · {ratio:.2}:1")
+        format!("{w}×{h} · {ratio:.2}:1 · {fps} fps")
     }
+}
+
+/// The frame rate one stepper press asks for (Phase K):
+/// the current rate stepped by `dir` (±1) whole frames,
+/// clamped to the `set_project_fps` op's range [1, 60] —
+/// the op clamps again on write, so this mirroring only
+/// keeps the panel's arithmetic (and its tests) honest
+/// about where a press at the edge lands. Pure.
+pub fn fps_after(core: &EditorCore, dir: i32) -> f32 {
+    (core.project.fps + dir as f32).clamp(1.0, 60.0)
+}
+
+/// One frame-rate stepper press (Phase K): hand the
+/// stepped rate to the editor op `set_project_fps`, which
+/// owns the write (and its status line) — see
+/// [`fps_after`] for the value pressed.
+pub fn step_fps(core: &mut EditorCore, dir: i32) {
+    core.set_project_fps(fps_after(core, dir));
+}
+
+/// One stage axis' stepper step (Phase K): finer than the
+/// ±40 of the `adjust_stage` rows, for nudging a size the
+/// presets do not name.
+pub const STAGE_AXIS_STEP: f32 = 20.0;
+
+/// The stage size one axis stepper press asks for
+/// (Phase K): axis `axis` (0 = width, 1 = height) stepped
+/// by `dir` (±1) × [`STAGE_AXIS_STEP`], the other axis
+/// carried over untouched, the stepped axis clamped to
+/// the `set_stage_size` op's range [64, 4096] — the op
+/// clamps again on write, as with [`fps_after`]. A bad
+/// axis index returns the size unchanged (the
+/// `step_background_channel` bad-channel discipline).
+/// Pure.
+pub fn stage_axis_after(core: &EditorCore, axis: usize, dir: i32) -> (f32, f32) {
+    let mut stage = core.project.stage;
+    if axis < stage.len() {
+        stage[axis] = (stage[axis] + dir as f32 * STAGE_AXIS_STEP).clamp(64.0, 4096.0);
+    }
+    (stage[0], stage[1])
+}
+
+/// One stage-axis stepper press (Phase K): hand the
+/// stepped size to the editor op `set_stage_size`, which
+/// owns the write (and its status line) — see
+/// [`stage_axis_after`] for the value pressed. A bad axis
+/// index is a no-op: the op is not called at all.
+pub fn step_stage_axis(core: &mut EditorCore, axis: usize, dir: i32) {
+    if axis > 1 {
+        return;
+    }
+    let (w, h) = stage_axis_after(core, axis, dir);
+    core.set_stage_size(w, h);
 }
 
 /// Stage background presets: (name, `0xRRGGBB`). The first is
@@ -590,6 +674,63 @@ fn bg_channel_row(channel: usize, label: &str, value: u8, t: &Theme) -> El {
         }))
 }
 
+/// The frame-rate stepper row (Phase K): the
+/// `bg_channel_row` shape — label, current value, − / +
+/// buttons — keyed `scene-fps-row`, buttons
+/// `scene-fps-dn` / `scene-fps-up`, each press stepping
+/// the project rate by 1 via [`step_fps`].
+fn fps_row(core: &EditorCore, t: &Theme) -> El {
+    row()
+        .key("scene-fps-row")
+        .gap(8.0)
+        .center_y()
+        .child(text("Frame rate").font(type_::LABEL).color(t.text))
+        .child(
+            text(fps_label(core.project.fps))
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
+        .child(btn("scene-fps-dn", "−", false, t, |s| {
+            step_fps(&mut s.core, -1)
+        }))
+        .child(btn("scene-fps-up", "+", false, t, |s| {
+            step_fps(&mut s.core, 1)
+        }))
+}
+
+/// One fine stage-axis stepper row (Phase K): the
+/// `bg_channel_row` shape again — label, current value,
+/// − / + buttons stepping one axis by
+/// [`STAGE_AXIS_STEP`] via [`step_stage_axis`]. Buttons
+/// `scene-stage-w-dn` / `scene-stage-w-up` for the width,
+/// `scene-stage-h-dn` / `scene-stage-h-up` for the
+/// height; the two rows sit in the block keyed
+/// `scene-stage-size-row`.
+fn stage_axis_row(axis: usize, label: &str, value: f32, t: &Theme) -> El {
+    let (dn_key, up_key) = if axis == 0 {
+        ("scene-stage-w-dn", "scene-stage-w-up")
+    } else {
+        ("scene-stage-h-dn", "scene-stage-h-up")
+    };
+    row()
+        .gap(8.0)
+        .center_y()
+        .child(text(label).font(type_::LABEL).color(t.text))
+        .child(
+            text(format!("{}", value as i32))
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
+        .child(btn(dn_key, "−", false, t, move |s| {
+            step_stage_axis(&mut s.core, axis, -1)
+        }))
+        .child(btn(up_key, "+", false, t, move |s| {
+            step_stage_axis(&mut s.core, axis, 1)
+        }))
+}
+
 /// Slider track width/height and knob diameter (the
 /// settings example's proportions, slightly wider).
 const SLIDER_W: f32 = 200.0;
@@ -658,9 +799,10 @@ fn weather_slider(
 
 /// The Scene panel: weather (kind picker + cycle + density
 /// and wind steppers with drag sliders under them), stage
-/// size steppers with the preset row under them, and
-/// background colour swatches with RGB channel steppers
-/// under the Background header.
+/// size steppers with the preset row under them, a frame
+/// rate stepper and finer stage-size steppers beside them
+/// (Phase K), and background colour swatches with RGB
+/// channel steppers under the Background header.
 pub fn scene_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let weather = core.project.weather;
@@ -807,6 +949,7 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
                     .color(t.text),
                 ),
         )
+        .child(fps_row(core, t))
         .child(stepper_row(
             "Width",
             format!("{}", core.project.stage[0] as i32),
@@ -825,6 +968,13 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
             |s: &mut State| adjust_stage(&mut s.core, 0.0, -40.0),
             |s: &mut State| adjust_stage(&mut s.core, 0.0, 40.0),
         ))
+        .child(
+            col()
+                .key("scene-stage-size-row")
+                .gap(4.0)
+                .child(stage_axis_row(0, "Width", core.project.stage[0], t))
+                .child(stage_axis_row(1, "Height", core.project.stage[1], t)),
+        )
         .child(
             text("Stage size").font(type_::LABEL).color(t.text_secondary),
         )
@@ -1221,16 +1371,24 @@ mod tests {
     #[test]
     fn stage_readout_names_every_preset_size() {
         // The briefed examples, one per aspect family.
-        assert_eq!(stage_readout(&core_with_stage(960.0, 720.0)), "960×720 · 4:3");
+        // Every fixture core carries the default rate, so
+        // each line ends with its Phase K suffix.
+        assert_eq!(
+            stage_readout(&core_with_stage(960.0, 720.0)),
+            "960×720 · 4:3 · 12 fps"
+        );
         assert_eq!(
             stage_readout(&core_with_stage(1920.0, 1080.0)),
-            "1920×1080 · 16:9"
+            "1920×1080 · 16:9 · 12 fps"
         );
         assert_eq!(
             stage_readout(&core_with_stage(1080.0, 1920.0)),
-            "1080×1920 · 9:16"
+            "1080×1920 · 9:16 · 12 fps"
         );
-        assert_eq!(stage_readout(&core_with_stage(720.0, 720.0)), "720×720 · 1:1");
+        assert_eq!(
+            stage_readout(&core_with_stage(720.0, 720.0)),
+            "720×720 · 1:1 · 12 fps"
+        );
         // Every preset in the table reduces to small integers,
         // so none of them may hit the decimal fallback.
         for &(_, w, h) in &STAGE_PRESETS {
@@ -1252,11 +1410,11 @@ mod tests {
         // preset press moves the readout with the field —
         // the line is a readout, not a label for the row.
         let mut core = EditorCore::new();
-        assert_eq!(stage_readout(&core), "960×720 · 4:3");
+        assert_eq!(stage_readout(&core), "960×720 · 4:3 · 12 fps");
         set_stage_preset(&mut core, 640.0, 480.0);
-        assert_eq!(stage_readout(&core), "640×480 · 4:3");
+        assert_eq!(stage_readout(&core), "640×480 · 4:3 · 12 fps");
         adjust_stage(&mut core, 40.0, 0.0);
-        assert_eq!(stage_readout(&core), "680×480 · 17:12");
+        assert_eq!(stage_readout(&core), "680×480 · 17:12 · 12 fps");
     }
 
     #[test]
@@ -1265,11 +1423,11 @@ mod tests {
         // whole unit: 959.6 is a 960 stage, not a 959 one.
         assert_eq!(
             stage_readout(&core_with_stage(959.6, 719.6)),
-            "960×720 · 4:3"
+            "960×720 · 4:3 · 12 fps"
         );
         assert_eq!(
             stage_readout(&core_with_stage(1919.5, 1080.4)),
-            "1920×1080 · 16:9"
+            "1920×1080 · 16:9 · 12 fps"
         );
     }
 
@@ -1280,13 +1438,114 @@ mod tests {
         // 1000/333 = 3.003… → 3.00:1.
         assert_eq!(
             stage_readout(&core_with_stage(1000.0, 333.0)),
-            "1000×333 · 3.00:1"
+            "1000×333 · 3.00:1 · 12 fps"
         );
         // A wide irreducible size: 3999/2000 is in lowest
         // terms too (3999 = 3 × 31 × 43), 3999/2000 = 1.9995.
         assert_eq!(
             stage_readout(&core_with_stage(3999.0, 2000.0)),
-            "3999×2000 · 2.00:1"
+            "3999×2000 · 2.00:1 · 12 fps"
         );
+    }
+
+    fn core_with_fps(w: f32, h: f32, fps: f32) -> EditorCore {
+        let mut core = core_with_stage(w, h);
+        core.project.fps = fps;
+        core
+    }
+
+    #[test]
+    fn stage_readout_appends_the_frame_rate() {
+        // The briefed Phase K case: size, aspect, rate.
+        assert_eq!(
+            stage_readout(&core_with_fps(960.0, 720.0, 12.0)),
+            "960×720 · 4:3 · 12 fps"
+        );
+        // A stepped rate moves the suffix with the field.
+        assert_eq!(
+            stage_readout(&core_with_fps(960.0, 720.0, 30.0)),
+            "960×720 · 4:3 · 30 fps"
+        );
+        // A fractional rate keeps one decimal (fps_label's
+        // rule, the shell's convention).
+        assert_eq!(
+            stage_readout(&core_with_fps(960.0, 720.0, 23.5)),
+            "960×720 · 4:3 · 23.5 fps"
+        );
+    }
+
+    #[test]
+    fn fps_label_writes_whole_rates_as_integers() {
+        assert_eq!(fps_label(12.0), "12");
+        assert_eq!(fps_label(60.0), "60");
+        assert_eq!(fps_label(23.5), "23.5");
+        assert_eq!(fps_label(29.97), "30.0");
+    }
+
+    #[test]
+    fn fps_after_steps_by_one_and_clamps_to_the_op_range() {
+        let core = EditorCore::new();
+        assert_eq!(core.project.fps, 12.0, "the engine default rate");
+        assert_eq!(fps_after(&core, 1), 13.0);
+        assert_eq!(fps_after(&core, -1), 11.0);
+        // At the clamps a press stays in [1, 60] — the
+        // range the op enforces again on write.
+        assert_eq!(fps_after(&core_with_fps(960.0, 720.0, 60.0), 1), 60.0);
+        assert_eq!(fps_after(&core_with_fps(960.0, 720.0, 1.0), -1), 1.0);
+        assert_eq!(fps_after(&core_with_fps(960.0, 720.0, 59.5), 1), 60.0);
+    }
+
+    #[test]
+    fn stage_axis_after_steps_one_axis_by_twenty() {
+        let core = core_with_stage(960.0, 720.0);
+        // Width presses move only the width…
+        assert_eq!(stage_axis_after(&core, 0, 1), (980.0, 720.0));
+        assert_eq!(stage_axis_after(&core, 0, -1), (940.0, 720.0));
+        // …and height presses only the height.
+        assert_eq!(stage_axis_after(&core, 1, 1), (960.0, 740.0));
+        assert_eq!(stage_axis_after(&core, 1, -1), (960.0, 700.0));
+        // A bad axis changes nothing.
+        assert_eq!(stage_axis_after(&core, 2, 1), (960.0, 720.0));
+    }
+
+    #[test]
+    fn stage_axis_after_clamps_to_the_op_range() {
+        // [64, 4096] per axis — the range the op enforces
+        // again on write.
+        assert_eq!(
+            stage_axis_after(&core_with_stage(4090.0, 720.0), 0, 1),
+            (4096.0, 720.0)
+        );
+        assert_eq!(
+            stage_axis_after(&core_with_stage(70.0, 720.0), 0, -1),
+            (64.0, 720.0)
+        );
+        assert_eq!(
+            stage_axis_after(&core_with_stage(960.0, 4096.0), 1, 1),
+            (960.0, 4096.0)
+        );
+        assert_eq!(
+            stage_axis_after(&core_with_stage(960.0, 64.0), 1, -1),
+            (960.0, 64.0)
+        );
+    }
+
+    #[test]
+    fn steppers_write_through_the_editor_ops() {
+        // The press handlers hand the stepped value to
+        // §12's ops; the project fields carry the result.
+        let mut core = EditorCore::new();
+        step_fps(&mut core, 1);
+        assert_eq!(core.project.fps, 13.0);
+        step_fps(&mut core, -1);
+        step_fps(&mut core, -1);
+        assert_eq!(core.project.fps, 11.0);
+        step_stage_axis(&mut core, 0, 1);
+        assert_eq!(core.project.stage, [980.0, 720.0]);
+        step_stage_axis(&mut core, 1, -1);
+        assert_eq!(core.project.stage, [980.0, 700.0]);
+        // A bad axis never reaches the op.
+        step_stage_axis(&mut core, 2, 1);
+        assert_eq!(core.project.stage, [980.0, 700.0]);
     }
 }

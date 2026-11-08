@@ -25,8 +25,9 @@
 //! [`EditorCore::stop_playback_audio`],
 //! [`EditorCore::sync_playback_audio_on_wrap`],
 //! [`EditorCore::sync_playback_audio_on_seek`],
-//! [`EditorCore::sync_playback_audio_on_drift`] and
-//! [`EditorCore::playback_audio_active`] — delegating to that
+//! [`EditorCore::sync_playback_audio_on_drift`],
+//! [`EditorCore::playback_audio_active`] and
+//! [`EditorCore::note_playback_speed`] — delegating to that
 //! same player and mix. Start uses the GPUI shell's exact
 //! playhead convention: `current` frame over `fps` (floored at
 //! 1), so the audio starts at the frame the user sees selected.
@@ -44,7 +45,11 @@
 //! and when the shell's fractional playhead has wandered
 //! further from the clock's prediction than
 //! [`DRIFT_TOLERANCE_FRAMES`], the mix restarts at the
-//! playhead, re-basing the clock.
+//! playhead, re-basing the clock. The prediction itself
+//! walks the timeline at each frame's real duration and
+//! at the speed the shell notes on every playing tick
+//! (Phase K), so slow frames and fast playback are
+//! predicted as the picture actually moves.
 //!
 //! ## Where the player lives, and why
 //!
@@ -68,25 +73,35 @@
 //! [`DRIFT_TOLERANCE_FRAMES`] (2.5 frames), at which point
 //! [`EditorCore::sync_playback_audio_on_drift`] restarts the
 //! mix at the playhead. The correction is a restart, not a
-//! nudge — a listener may hear the seam — and two things
-//! about it are approximate by construction:
+//! nudge — a listener may hear the seam. The prediction
+//! behind it is no longer the naive one: since Phase K it
+//! walks the timeline the way `advance_play` moves through
+//! it ([`expected_frame_walk`]) — each frame costs its real
+//! duration (`duration / fps` seconds, the duration floored
+//! at 0.05 exactly as `advance_play` floors it) scaled by
+//! the noted playback speed, and the walk folds at the
+//! loop-range end or the timeline end exactly as
+//! `advance_play` folds — so a long slow frame no longer
+//! trips the tolerance on its own, and the prediction
+//! stays comparable to the playhead even in the gap
+//! between a wrap and the wrap sync's restart. Two
+//! approximations remain, both small against the 2.5-frame
+//! tolerance:
 //!
-//! - **The clock's prediction ignores per-frame durations.**
-//!   The expected frame advances at the project's `fps`,
-//!   while `advance_play` divides by the current frame's
-//!   duration multiplier, so during a frame whose duration
-//!   is not 1.0 the playhead legitimately moves at a
-//!   different rate from real time while the audio does
-//!   not wait. A long slow frame can therefore trip the
-//!   tolerance on its own; the restart then re-bases both
-//!   clocks at the frame the user is looking at, which is
-//!   the least-wrong anchor available.
-//! - **The prediction is not folded.** The expected frame
-//!   counts up from the start of the current pass without
-//!   wrapping; the wrap and seek syncs restart (and so
-//!   re-base the clock) on the same discontinuities that
-//!   fold the playhead, so within a pass the two stay
-//!   comparable.
+//! - **Boundary slicing vs per-tick charging.** The walk
+//!   slices the elapsed time at frame boundaries, while
+//!   `advance_play` charges each poll tick's whole `dt` at
+//!   the rate of the frame current when the tick began.
+//!   The two agree everywhere except on ticks that
+//!   straddle a boundary, and there only by a fraction of
+//!   a frame.
+//! - **The walk's crossing cap.** The walk takes at most
+//!   2 × frame count + 2 frame crossings, so after an
+//!   absurd gap (a stall spanning many full loops) the
+//!   prediction saturates short of the playhead. The
+//!   drift then reads as exceeded and the sync re-bases
+//!   at the playhead — the safe answer to a gap that
+//!   large.
 //!
 //! The loop limit is closed for the wrap case:
 //! [`EditorCore::sync_playback_audio_on_wrap`] restarts the
@@ -139,6 +154,56 @@ thread_local! {
     /// it is process state, not project state, and does not
     /// belong in the core's snapshot model.
     static CLOCK: RefCell<Option<(Instant, f32)>> = const { RefCell::new(None) };
+
+    /// The playback speed the shell last noted through
+    /// [`EditorCore::note_playback_speed`] (Phase K), already
+    /// sanitised by that call. It lives beside the clock
+    /// because the drift prediction consumes it together
+    /// with the clock: the picture advances at
+    /// `dt * speed`, so the sound's expected position must
+    /// be predicted at the same rate. Unlike the clock it
+    /// is *not* cleared by stop or re-based by start — the
+    /// speed is the shell's setting, not a property of one
+    /// pass, and the shell re-notes it on every playing
+    /// tick before the syncs run.
+    static SPEED: RefCell<f32> = const { RefCell::new(1.0) };
+}
+
+/// The slowest playback speed the drift prediction will
+/// honour: half a twentieth of normal rate. The floor keeps
+/// a noted 0 (or a denormal) from freezing the prediction
+/// entirely; it is a sanity bound, not a product limit —
+/// the shell's own speed control lives far inside it.
+pub const PLAYBACK_SPEED_MIN: f32 = 0.05;
+
+/// The fastest playback speed the drift prediction will
+/// honour: eight times normal rate, a generous fast-forward
+/// bound on the same sanity-only terms as
+/// [`PLAYBACK_SPEED_MIN`].
+pub const PLAYBACK_SPEED_MAX: f32 = 8.0;
+
+/// The contract [`EditorCore::note_playback_speed`] stores
+/// by: a finite, positive speed is clamped into
+/// [`PLAYBACK_SPEED_MIN`]..=[`PLAYBACK_SPEED_MAX`]; anything
+/// else — zero, negative, NaN, infinite — means "no sane
+/// speed was noted" and falls back to 1.0, normal rate,
+/// rather than to a clamp bound (a noted 0 clamped to the
+/// floor would make the prediction crawl at a twentieth of
+/// the picture's rate, which is a worse lie than normal
+/// rate for input that meant nothing).
+fn sanitise_playback_speed(speed: f32) -> f32 {
+    if speed.is_finite() && speed > 0.0 {
+        speed.clamp(PLAYBACK_SPEED_MIN, PLAYBACK_SPEED_MAX)
+    } else {
+        1.0
+    }
+}
+
+/// The playback speed the drift prediction should use: the
+/// last noted (and sanitised) value, 1.0 until the shell's
+/// first note.
+fn playback_speed() -> f32 {
+    SPEED.with(|speed| *speed.borrow())
 }
 
 /// The playhead position `start_playback_audio` starts from, in
@@ -233,15 +298,153 @@ pub fn drift_exceeded(expected: f32, actual: f32) -> bool {
 }
 
 /// Where the playback clock predicts the playhead should be
-/// `elapsed_secs` after a pass started at `start_frame`: the
-/// start frame plus elapsed time at the project rate, the
-/// rate floored at 1 fps exactly as `playhead_secs` floors
-/// it. The prediction is deliberately not folded by the
-/// timeline length or a loop range — restarts re-base the
-/// clock on those discontinuities (see the module docs), so
-/// within one pass a plain count-up is the honest shape.
-fn expected_frame(start_frame: f32, elapsed_secs: f32, fps: f32) -> f32 {
+/// `elapsed_secs` after a pass started at `start_frame`, on
+/// a timeline where every frame lasts exactly one frame
+/// period at speed 1.0: the start frame plus elapsed time
+/// at the project rate, the rate floored at 1 fps exactly
+/// as `playhead_secs` floors it. This is the uniform special
+/// case [`expected_frame_walk`] reduces to when all
+/// durations are 1.0 and the speed is 1.0 (before any
+/// folding); the drift sync predicts with the walk, and
+/// this plain form is kept as the reference the walk is
+/// pinned against.
+pub fn expected_frame(start_frame: f32, elapsed_secs: f32, fps: f32) -> f32 {
     start_frame + elapsed_secs * fps.max(1.0)
+}
+
+/// Where the playback clock predicts the playhead should be
+/// `elapsed_secs` after a pass started at the fractional
+/// `start_frame`, walking the real timeline: each frame
+/// occupies `duration / fps` seconds (its duration
+/// multiplier over the rate, the rate floored at 1 fps),
+/// the elapsed time is spent at `speed` (poll advances the
+/// picture with `advance_play(dt * speed)`, so `speed`
+/// seconds of timeline pass per wall second), and the
+/// position folds at the loop range's end — or the
+/// timeline's, with no range — stepping back by the span,
+/// clamped and folded exactly as `advance_play` clamps and
+/// folds (range end to the last frame, range start to the
+/// end, fold when the playhead reaches the end of the last
+/// frame in the window). Durations are floored at 0.05,
+/// `advance_play`'s own floor, so a zero or negative
+/// duration still costs time instead of none.
+///
+/// `durations` carries one entry per frame, so its length
+/// is the frame count; an empty slice means no timeline,
+/// and the start frame comes back unchanged. A
+/// non-positive or NaN elapsed budget moves nothing
+/// either — the folded start comes back, folding being
+/// what `advance_play` does to a standing playhead, not
+/// motion.
+///
+/// One difference from `advance_play` is deliberate: the
+/// walk slices the elapsed time at frame boundaries,
+/// charging each frame only for the time spent inside it,
+/// where `advance_play` charges a whole tick's `dt` at the
+/// rate of the frame current when the tick began. Over the
+/// many ticks between two clock readings the two agree to
+/// within a fraction of a frame (see the module docs).
+///
+/// The walk takes at most `2 * frame count + 2` frame
+/// crossings — two full traversals plus the partial frames
+/// at each end — so an absurd elapsed can never make it
+/// spin; on saturation it stops where it is, and the
+/// caller's drift reading simply exceeds tolerance and
+/// re-bases (the safe answer to a gap that large).
+pub fn expected_frame_walk(
+    start_frame: f32,
+    elapsed_secs: f32,
+    speed: f32,
+    fps: f32,
+    durations: &[f32],
+    loop_range: Option<(usize, usize)>,
+) -> f32 {
+    let n = durations.len();
+    if n == 0 {
+        return start_frame;
+    }
+    let fps = fps.max(1.0);
+    // The fold window, clamped exactly as `advance_play`
+    // clamps it; with no range the window is the whole
+    // timeline (start 0, end n, span n — the same numbers
+    // `advance_play`'s no-range fold uses).
+    let (lo, end) = match loop_range {
+        Some((a, b)) => {
+            let b = b.min(n - 1);
+            let a = a.min(b);
+            (a as f32, (b + 1) as f32)
+        }
+        None => (0.0, n as f32),
+    };
+    let span = end - lo;
+    let mut pos = start_frame;
+    // A stale range can leave a start past the end; fold it
+    // as `advance_play`'s fold would before walking — that
+    // fold runs even for a zero `dt`, so it runs here even
+    // when no time turns out to have passed. (A start
+    // *below* `lo` is left alone — `advance_play` plays
+    // forward into the range from there too.)
+    while pos >= end {
+        pos -= span;
+    }
+    // The wall-clock budget in timeline seconds: at speed
+    // `s`, `s` seconds of timeline pass per wall second.
+    let mut budget = elapsed_secs * sanitise_playback_speed(speed);
+    if !(budget > 0.0) {
+        return pos;
+    }
+    let max_crossings = 2 * n + 2;
+    let mut crossings = 0usize;
+    while budget > 0.0 {
+        // The frame the position sits in — `advance_play`'s
+        // own clamp of the `current` it derives.
+        let idx = (pos.floor() as usize).min(n - 1);
+        let frame_secs = durations[idx].max(0.05) / fps;
+        // The budget left inside this frame: the part of it
+        // not yet crossed, at this frame's real length.
+        let rest = (1.0 - (pos - pos.floor())) * frame_secs;
+        if budget < rest {
+            // The budget runs out inside this frame.
+            pos += budget / frame_secs;
+            budget = 0.0;
+        } else {
+            budget -= rest;
+            pos = pos.floor() + 1.0;
+            while pos >= end {
+                pos -= span;
+            }
+            crossings += 1;
+            if crossings >= max_crossings {
+                break;
+            }
+        }
+    }
+    pos
+}
+
+/// The drift sync's prediction for one recorded clock:
+/// [`expected_frame_walk`] over the core's real frame
+/// durations, its loop range and the noted playback speed,
+/// for the time since the clock's start. The durations are
+/// collected per call — the sync runs at most once per
+/// frame-changed poll tick, and a project's frame count
+/// makes the copy trivial next to the process-liveness
+/// check beside it.
+fn predicted_frame(core: &EditorCore, started: Instant, start_frame: f32) -> f32 {
+    let durations: Vec<f32> = core
+        .project
+        .frames
+        .iter()
+        .map(|frame| frame.duration)
+        .collect();
+    expected_frame_walk(
+        start_frame,
+        started.elapsed().as_secs_f32(),
+        playback_speed(),
+        core.project.fps,
+        &durations,
+        core.loop_range,
+    )
 }
 
 /// The drift restart decision, pure: restart only while
@@ -310,6 +513,28 @@ impl EditorCore {
     pub fn stop_playback_audio(&mut self) {
         PLAYER.with(|player| player.borrow_mut().stop());
         CLOCK.with(|clock| *clock.borrow_mut() = None);
+    }
+
+    /// Note the shell's current playback speed multiplier
+    /// (Phase K): 1.0 is normal rate, 2.0 double, 0.5 half.
+    /// The shell calls this on every playing tick with the
+    /// same speed it scales `advance_play`'s `dt` by, and
+    /// the drift sync's prediction
+    /// ([`expected_frame_walk`], via `predicted_frame`)
+    /// spends the clock's elapsed time at the noted rate —
+    /// without it, a pass at any speed but 1.0 would read
+    /// as permanent drift and restart on every tolerance.
+    ///
+    /// The value is stored sanitised (see
+    /// `sanitise_playback_speed`): a finite positive speed
+    /// is clamped into
+    /// [`PLAYBACK_SPEED_MIN`]..=[`PLAYBACK_SPEED_MAX`];
+    /// zero, negative, NaN or infinite input falls back to
+    /// 1.0. The note survives stops and starts — it is the
+    /// shell's setting, not one pass's state — and until
+    /// the first note the prediction runs at 1.0.
+    pub fn note_playback_speed(&self, speed: f32) {
+        SPEED.with(|stored| *stored.borrow_mut() = sanitise_playback_speed(speed));
     }
 
     /// Re-sync the audio after a loop wrap: if the playhead
@@ -402,9 +627,11 @@ impl EditorCore {
     /// further from the playback clock's prediction than
     /// [`DRIFT_TOLERANCE_FRAMES`] while playing and sound is
     /// actually running — the decision lives in
-    /// `drift_restart_needed`, over the pure `expected_frame`
-    /// and `drift_exceeded` — restart the mix at the playhead
-    /// via stop + start.
+    /// `drift_restart_needed`, over `drift_exceeded` and the
+    /// prediction from `predicted_frame` (the duration- and
+    /// speed-aware [`expected_frame_walk`] over the recorded
+    /// clock) — restart the mix at the playhead via stop +
+    /// start.
     ///
     /// The restart reuses [`EditorCore::start_playback_audio`],
     /// so it inherits that method's behaviour exactly: it
@@ -425,9 +652,7 @@ impl EditorCore {
     /// process-liveness check.
     pub fn sync_playback_audio_on_drift(&mut self) {
         let clock = CLOCK.with(|clock| *clock.borrow());
-        let expected = clock.map(|(started, start_frame)| {
-            expected_frame(start_frame, started.elapsed().as_secs_f32(), self.project.fps)
-        });
+        let expected = clock.map(|(started, start_frame)| predicted_frame(self, started, start_frame));
         if drift_restart_needed(self.playing, self.playback_audio_active(), expected, self.playhead)
         {
             self.stop_playback_audio();
@@ -797,5 +1022,170 @@ mod tests {
         core.sync_playback_audio_on_seek(0, 3);
         assert_eq!(core.status, "Sentinel.");
         assert!(!core.playback_audio_active());
+    }
+
+    #[test]
+    fn walk_reduces_to_the_uniform_formula_when_durations_are_all_one() {
+        // The Phase K pin: with every duration 1.0 and speed
+        // 1.0, the walk is the old `expected_frame` count-up
+        // (fps 8 and these times are exact in binary, so the
+        // equality is exact, not approximate). 20 frames, so
+        // nothing here reaches the fold.
+        let durations = [1.0; 20];
+        assert_eq!(
+            expected_frame_walk(2.0, 1.0, 1.0, 8.0, &durations, None),
+            expected_frame(2.0, 1.0, 8.0)
+        );
+        assert_eq!(expected_frame_walk(2.0, 1.0, 1.0, 8.0, &durations, None), 10.0);
+        // A fractional start spends the rest of its frame
+        // first, then whole frames, then a part frame.
+        assert_eq!(
+            expected_frame_walk(2.5, 0.5, 1.0, 8.0, &durations, None),
+            expected_frame(2.5, 0.5, 8.0)
+        );
+        assert_eq!(expected_frame_walk(2.5, 0.5, 1.0, 8.0, &durations, None), 6.5);
+        // Zero elapsed is the start, at any speed.
+        assert_eq!(expected_frame_walk(4.0, 0.0, 2.0, 8.0, &durations, None), 4.0);
+    }
+
+    #[test]
+    fn walk_stays_within_tolerance_through_a_duration_four_frame() {
+        // The Phase J false trip, closed: frame 1 lasts four
+        // frame periods (0.5 s at fps 8; a normal frame is
+        // 0.125 s). After 0.6875 s the true playhead — the
+        // continuous walk — is half-way through frame 2,
+        // while the old uniform prediction has raced ahead
+        // to 5.5: a drift of 3.0 frames, past the tolerance,
+        // with nothing actually wrong.
+        let durations = [1.0, 4.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let walked = expected_frame_walk(0.0, 0.6875, 1.0, 8.0, &durations, None);
+        assert!((walked - 2.5).abs() < 1e-4, "walked: {walked}");
+        let true_playhead = 2.5;
+        assert!(
+            !drift_exceeded(walked, true_playhead),
+            "the walk must stay within tolerance through the slow frame"
+        );
+        // …and the old formula really would have tripped on
+        // the same pass — the contrast is the point.
+        let uniform = expected_frame(0.0, 0.6875, 8.0);
+        assert_eq!(uniform, 5.5);
+        assert!(drift_exceeded(uniform, true_playhead));
+    }
+
+    #[test]
+    fn walk_wraps_inside_a_loop_range() {
+        // Range (2, 4) on 8 frames: the fold window ends at
+        // 5 and spans 3, exactly `advance_play`'s. From the
+        // range's last frame, 0.3125 s at fps 8 crosses it,
+        // folds back to the range start, crosses frame 2 and
+        // lands half-way through frame 3 — folded, where the
+        // playhead itself would be, not counted up to 6.5.
+        let durations = [1.0; 8];
+        let walked = expected_frame_walk(4.0, 0.3125, 1.0, 8.0, &durations, Some((2, 4)));
+        assert!((walked - 3.5).abs() < 1e-4, "walked: {walked}");
+        assert!((2.0..5.0).contains(&walked));
+        // A stale range is clamped as `advance_play` clamps
+        // it: (2, 99) on 8 frames behaves as (2, 7) — the
+        // window ends at 8, so this walk does not fold at all
+        // and matches the plain timeline walk.
+        assert_eq!(
+            expected_frame_walk(4.0, 0.3125, 1.0, 8.0, &durations, Some((2, 99))),
+            expected_frame_walk(4.0, 0.3125, 1.0, 8.0, &durations, None)
+        );
+    }
+
+    #[test]
+    fn walk_speed_scales_the_advance() {
+        // Speed multiplies the timeline time the elapsed
+        // wall time buys: at 2.0 the prediction advances
+        // twice as far, at 0.5 half as far.
+        let durations = [1.0; 32];
+        let normal = expected_frame_walk(0.0, 1.0, 1.0, 8.0, &durations, None);
+        let double = expected_frame_walk(0.0, 1.0, 2.0, 8.0, &durations, None);
+        let half = expected_frame_walk(0.0, 1.0, 0.5, 8.0, &durations, None);
+        assert_eq!(normal, 8.0);
+        assert_eq!(double, 16.0);
+        assert_eq!(double, 2.0 * normal);
+        assert_eq!(half, 4.0);
+    }
+
+    #[test]
+    fn walk_crossing_cap_bounds_an_absurd_elapsed() {
+        // One frame, an hour of elapsed at 30 fps: over a
+        // hundred thousand crossings unfolded. The walk caps
+        // at 2 * 1 + 2 crossings and returns folded, inside
+        // the single frame — promptly, by construction.
+        let walked = expected_frame_walk(0.0, 3600.0, 1.0, 30.0, &[1.0], None);
+        assert_eq!(walked, 0.0);
+        // Three frames, a similar absurdity: the result is
+        // still a folded position inside the timeline.
+        let walked = expected_frame_walk(0.0, 1000.0, 1.0, 10.0, &[1.0, 1.0, 1.0], None);
+        assert!((0.0..3.0).contains(&walked), "walked: {walked}");
+    }
+
+    #[test]
+    fn walk_without_frames_or_elapsed_time_stays_at_the_start() {
+        // No timeline: nothing to walk, the start comes back
+        // (advance_play returns before moving, too).
+        assert_eq!(expected_frame_walk(3.0, 5.0, 1.0, 12.0, &[], None), 3.0);
+        // Time that did not pass — or negative, or NaN —
+        // moves nothing.
+        let durations = [1.0; 6];
+        assert_eq!(expected_frame_walk(2.0, -1.0, 1.0, 12.0, &durations, None), 2.0);
+        assert_eq!(expected_frame_walk(2.0, f32::NAN, 1.0, 12.0, &durations, None), 2.0);
+    }
+
+    #[test]
+    fn noted_speed_is_sanitised_and_defaults_to_normal() {
+        // A fresh test thread has never noted a speed.
+        assert_eq!(playback_speed(), 1.0);
+        let core = EditorCore::new();
+        core.note_playback_speed(2.0);
+        assert_eq!(playback_speed(), 2.0);
+        // Finite and positive, but outside the sanity
+        // bounds: clamped to them, not rejected.
+        core.note_playback_speed(100.0);
+        assert_eq!(playback_speed(), PLAYBACK_SPEED_MAX);
+        core.note_playback_speed(0.01);
+        assert_eq!(playback_speed(), PLAYBACK_SPEED_MIN);
+        // Not a sane speed at all: normal rate, not a bound.
+        core.note_playback_speed(0.0);
+        assert_eq!(playback_speed(), 1.0);
+        core.note_playback_speed(-3.0);
+        assert_eq!(playback_speed(), 1.0);
+        core.note_playback_speed(f32::NAN);
+        assert_eq!(playback_speed(), 1.0);
+        core.note_playback_speed(f32::INFINITY);
+        assert_eq!(playback_speed(), 1.0);
+    }
+
+    #[test]
+    fn drift_prediction_walks_the_projects_real_durations_and_speed() {
+        // The sync's own prediction path, end to end except
+        // the restart: a project at fps 8 whose second frame
+        // lasts four periods. 687 ms after a start at frame
+        // 0 the prediction sits at ≈2.5 (0.125 s for frame 0,
+        // 0.5 s for the slow frame, the remainder half-way
+        // through frame 2) — the tolerances here are for the
+        // milliseconds of real time between planting the
+        // clock and reading it.
+        let mut core = EditorCore::new();
+        core.project.fps = 8.0;
+        for frame in &mut core.project.frames {
+            frame.duration = 1.0;
+        }
+        assert!(core.project.frames.len() > 2, "demo project needs the slow frame");
+        core.project.frames[1].duration = 4.0;
+        core.loop_range = None;
+        let started = Instant::now() - std::time::Duration::from_millis(687);
+        let predicted = predicted_frame(&core, started, 0.0);
+        assert!((predicted - 2.5).abs() < 0.05, "predicted: {predicted}");
+        // Noting double speed halves the wall time to the
+        // same prediction: 343 ms at 2.0 buys the same
+        // timeline time as 687 ms at 1.0.
+        core.note_playback_speed(2.0);
+        let started = Instant::now() - std::time::Duration::from_millis(343);
+        let predicted = predicted_frame(&core, started, 0.0);
+        assert!((predicted - 2.5).abs() < 0.05, "predicted at 2x: {predicted}");
     }
 }

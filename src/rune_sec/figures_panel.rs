@@ -207,10 +207,11 @@ const THUMB_MARGIN: f32 = 4.0;
 /// rings — one hairline weight for the whole miniature.
 const THUMB_WIDTH: f32 = 1.5;
 
-/// Head-ring radius in stage units: the stage's own radius
-/// (`stage_shape` draws head rings at 17 stage units), so
-/// the miniature keeps the stage's proportions.
-const HEAD_RING_R: f32 = 17.0;
+/// Head-ring radius in stage units, re-exported under the
+/// panel's long-standing name: the single source is the
+/// model's `HEAD_RING_RADIUS`, so the miniature keeps the
+/// stage's proportions by construction.
+pub use stykanimate_rs::model::HEAD_RING_RADIUS as HEAD_RING_R;
 
 /// Sides of the thumbnail head-ring polygon (the stage uses
 /// 24 at full size; 16 is smooth at 44 points).

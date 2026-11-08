@@ -330,7 +330,7 @@ const HIGHLIGHT_ALPHA: f32 = 0.5;
 /// Shell-side overlay choices for [`stage_shape`] (Phase G):
 /// everything the stage draws that lives in the shell's
 /// `State` rather than in the engine core — the guide toggles,
-/// the two selection indices, and the per-side onion depths.
+/// the three selection indices, and the per-side onion depths.
 /// Bundled into one `Copy` value so the call site names each
 /// choice once and future overlays don't grow the signature
 /// again.
@@ -353,6 +353,11 @@ pub struct StageOverlays {
     /// `core.project.particles` (the `gizmo_geometry`
     /// indexing); `None` — or a stale index — draws no gizmo.
     pub particle_selected: Option<usize>,
+    /// Selected FX clip, index into `core.project.fx_clips`
+    /// (the `fx_clip_gizmo_geometry` indexing — a different
+    /// list from `particle_selected`'s events); `None` — or
+    /// a stale index — draws no gizmo.
+    pub fx_selected: Option<usize>,
     /// Onion skins behind the current frame (0 = none).
     pub onion_prev: u8,
     /// Onion skins ahead of the current frame (0 = none).
@@ -372,6 +377,7 @@ impl Default for StageOverlays {
             guides_safe: true,
             stroke_selected: None,
             particle_selected: None,
+            fx_selected: None,
             onion_prev: 1,
             onion_next: 1,
         }
@@ -469,6 +475,10 @@ fn highlight_prim(
 /// the weather: a locator marker that weather or text could
 /// cover would fail at its only job, and like the joint
 /// handles it is small, translucent and selection-only.
+/// Phase K adds a third marker in the same last slot: the
+/// selected FX clip's gizmo, drawn after the particle
+/// gizmo — it locates the clip being edited, so it follows
+/// the particle gizmo's rules exactly.
 pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays) -> Shape {
     let project = &core.project;
     let display = core.display_frame();
@@ -649,11 +659,14 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         }
         // Head rings for every figure (both prior renderers draw
         // them; a figure without its head ring is a broken
-        // drawing, not a scope choice).
+        // drawing, not a scope choice). The radius is the
+        // model's `HEAD_RING_RADIUS` (Phase K): one constant
+        // shared by the stage, the rasterizer and the SVG
+        // exporter, where the literal 17.0 used to be copied.
         for (i, node) in fig.def.nodes.iter().enumerate() {
             if node.head {
                 shape = shape.stroke_with(
-                    ngon(rt.to_screen(pos[i]), 17.0 * s, 24),
+                    ngon(rt.to_screen(pos[i]), model::HEAD_RING_RADIUS * s, 24),
                     true,
                     5.0 * s,
                     LineCap::Round,
@@ -699,7 +712,61 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
             shape = particle_prim(shape, &rt, s, prim);
         }
     }
+    // Selected FX clip's gizmo (Phase K), after the particle
+    // gizmo in the same last slot: the marker for the clip
+    // being edited, drawn over the weather for the same
+    // reason the particle gizmo is. The prims arrive in the
+    // accent at their own alpha, so they convert through the
+    // particle gizmo's own path; a stale index yields an
+    // empty vec and draws nothing.
+    if let Some(idx) = overlays.fx_selected {
+        for prim in crate::rune_sec::stage_fx::fx_clip_gizmo_geometry(core, idx) {
+            shape = particle_prim(shape, &rt, s, prim);
+        }
+    }
     shape
+}
+
+/// Right-press selection on the stage (Phase K): select the
+/// figure and joint under stage point `p` WITHOUT starting
+/// a drag — the selection half of `EditorCore::begin_drag`,
+/// with the same guards and the same writes, no more, no
+/// less:
+///
+/// - While `core.playing`, a left-press grab refuses, so
+///   this does too: nothing changes, `false`.
+/// - A miss (`hit_test` finds no joint within its radius)
+///   changes nothing — in particular the current selection
+///   is never cleared — and returns `false`.
+/// - A hit on a locked figure selects nothing and sets the
+///   one status `begin_drag` sets on this path, `false`.
+/// - Otherwise the writes are `begin_drag`'s selection
+///   writes exactly: `select_figure(fi)` (which also clears
+///   `selected_node`), then `selected_node = Some(ni)`.
+///   Returns `true`.
+///
+/// Deliberately absent, because they belong to the drag
+/// and not to selection: `begin_drag`'s snapshot (an undo
+/// checkpoint for an edit this press never makes) and its
+/// `dragging` state / `drag_to` (the pose does not move).
+/// The shell wires this to the stage canvas's
+/// `on_secondary_press_local`, converting the element-local
+/// point through `RotTransform::for_drag` exactly as
+/// `stage_drag` converts a drag's point.
+pub fn secondary_select(core: &mut EditorCore, p: V2) -> bool {
+    if core.playing {
+        return false;
+    }
+    let Some((fi, ni)) = core.hit_test(p) else {
+        return false;
+    };
+    if core.project.figures[fi].locked {
+        core.status = "Figure is locked — unlock it in the layers list.".into();
+        return false;
+    }
+    core.select_figure(fi);
+    core.selected_node = Some(ni);
+    true
 }
 
 #[cfg(test)]
@@ -835,6 +902,90 @@ mod tests {
         // 1/1: the depths the core's old single count
         // defaulted to, so the default stage is unchanged.
         assert_eq!((o.onion_prev, o.onion_next), (1, 1));
+    }
+
+    #[test]
+    fn overlays_default_has_no_fx_clip_selected() {
+        // Phase K: the FX gizmo is selection-only, and the
+        // default overlays select nothing — the pre-Phase-K
+        // stage is unchanged.
+        assert_eq!(StageOverlays::default().fx_selected, None);
+    }
+
+    #[test]
+    fn stage_shape_builds_with_an_fx_selection() {
+        // The demo project has no FX clips, so the selected
+        // index is stale: the gizmo fn yields no prims and
+        // the stage builds exactly as without the overlay.
+        let core = EditorCore::new();
+        let overlays = StageOverlays { fx_selected: Some(0), ..StageOverlays::default() };
+        let _shape = stage_shape(&core, [800.0, 600.0], overlays);
+    }
+
+    #[test]
+    fn secondary_select_hit_selects_figure_and_joint() {
+        let mut core = EditorCore::new();
+        // A second figure, so the press proves it moves the
+        // selection ACROSS figures, not just within one.
+        core.add_figure();
+        core.select_figure(0);
+        assert_eq!(core.selected_figure, 0);
+        assert_eq!(core.selected_node, None);
+        // Press exactly on figure 1's root joint: that joint
+        // sits at distance zero, so it is what `hit_test`
+        // resolves, and it is what must end up selected.
+        let p = core.positions(core.current, 1)[0];
+        let (fi, ni) = core.hit_test(p).expect("a joint at the pressed point");
+        assert_eq!(fi, 1, "the press lands on the added figure");
+        let depth = core.undo_depth();
+        assert!(secondary_select(&mut core, p));
+        assert_eq!(core.selected_figure, fi);
+        assert_eq!(core.selected_node, Some(ni));
+        // Selection is not an edit: unlike `begin_drag`,
+        // no undo step was taken for it.
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn secondary_select_miss_changes_nothing() {
+        let mut core = EditorCore::new();
+        core.selected_node = Some(0);
+        let before = (
+            core.selected_figure,
+            core.selected_node,
+            core.status.clone(),
+            core.undo_depth(),
+        );
+        assert!(!secondary_select(&mut core, [-10_000.0, -10_000.0]));
+        // Never clears: figure, joint, status and undo
+        // depth are all exactly as before the miss.
+        assert_eq!(
+            (core.selected_figure, core.selected_node, core.status.clone(), core.undo_depth()),
+            before
+        );
+    }
+
+    #[test]
+    fn secondary_select_locked_figure_sets_begin_drags_status_only() {
+        let mut core = EditorCore::new();
+        core.project.figures[0].locked = true;
+        let p = core.positions(core.current, 0)[0];
+        assert!(!secondary_select(&mut core, p));
+        // The one status `begin_drag` sets on this path,
+        // byte-identical — and no selection was made.
+        assert_eq!(core.status, "Figure is locked — unlock it in the layers list.");
+        assert_eq!(core.selected_node, None);
+    }
+
+    #[test]
+    fn secondary_select_while_playing_is_a_no_op() {
+        // `begin_drag` refuses while playing; the
+        // right-press mirrors it.
+        let mut core = EditorCore::new();
+        core.playing = true;
+        let p = core.positions(core.current, 0)[0];
+        assert!(!secondary_select(&mut core, p));
+        assert_eq!(core.selected_node, None);
     }
 
     #[test]

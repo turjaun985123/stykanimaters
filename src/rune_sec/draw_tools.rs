@@ -91,6 +91,27 @@
 //!   strokes drawn afterwards; strokes already on the canvas
 //!   are never re-smoothed by a selection change (the Smooth
 //!   button is the post-hoc path).
+//! * **Brush width readout (Phase K).** Width has exactly
+//!   the same shape as smoothing: a field of the brush
+//!   *preset* (`paint::Brush::width`, paint.rs:307 — "base
+//!   stroke width"), not writable core state — the core
+//!   stores only `brush_index`, and `active_brush`
+//!   (editor.rs:2797) returns a copy out of the freshly
+//!   built library, so a width stepper would write into a
+//!   throwaway copy and change nothing. The panel shows
+//!   the active preset's width as a readout
+//!   ([`width_readout`], key `draw-width-readout`) directly
+//!   under the smoothing one; changing width means
+//!   choosing another preset in the brush row. The value
+//!   is real, not decorative: `begin_draw` seeds each new
+//!   stroke's `width` and per-point `widths` from the
+//!   active brush (editor.rs:2539), and the eraser's
+//!   radius is twice it (editor.rs:2805). Every preset in
+//!   the library carries a positive whole-number width —
+//!   2.0 (Pencil, paint.rs:346) up to 20.0 (Broad Brush,
+//!   paint.rs:430) — so [`width_label`]'s fractional and
+//!   fallback arms exist only so a future preset can
+//!   never make the readout print nonsense.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -203,6 +224,41 @@ pub fn smoothing_label(v: f32) -> String {
 /// [`smoothing_label`] of [`active_brush_smoothing`].
 pub fn smoothing_readout(core: &EditorCore) -> String {
     smoothing_label(active_brush_smoothing(core) as f32)
+}
+
+/// The active brush preset's base stroke width, in stage
+/// units (`paint::Brush::width` via
+/// `EditorCore::active_brush`). Read-only by construction
+/// — see the module docs for why no setter exists.
+pub fn active_brush_width(core: &EditorCore) -> f32 {
+    core.active_brush().width
+}
+
+/// Format a brush width as the readout's text: whole
+/// numbers print without decimals ("Width: 3 px") and a
+/// fractional width keeps one decimal ("Width: 2.5 px").
+/// Every preset in `paint::brush_library` carries a
+/// positive whole-number width today, so the fractional
+/// arm serves a future finer preset; the fallback —
+/// "Width: —" for a non-finite or non-positive input —
+/// exists so the readout can never print NaN or a
+/// nonsense size. Neither arm is reachable from the
+/// library as it stands.
+pub fn width_label(w: f32) -> String {
+    if !w.is_finite() || w <= 0.0 {
+        return "Width: —".to_string();
+    }
+    if w.fract() == 0.0 {
+        format!("Width: {w:.0} px")
+    } else {
+        format!("Width: {w:.1} px")
+    }
+}
+
+/// The width readout line for the core's active brush:
+/// [`width_label`] of [`active_brush_width`].
+pub fn width_readout(core: &EditorCore) -> String {
+    width_label(active_brush_width(core))
 }
 
 /// The centred drag box the shape buttons stamp into, as
@@ -535,7 +591,7 @@ pub fn drawing_stats_line(stats: &DrawingStats) -> String {
 /// tools (mode, eraser, brush cycle, mirror, simplify, smooth,
 /// clear), the brush library (one button per preset, the
 /// active one highlighted) with the active preset's smoothing
-/// readout under it, the shape tools (Line / Rect /
+/// and width readouts under it, the shape tools (Line / Rect /
 /// Ellipse stamps plus the Polygon / Star / Arrow stamps), and
 /// the stamp parameter steppers (Sides / Size / Rotation).
 /// Active states read from the core's own fields
@@ -671,6 +727,12 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .child(
             text(smoothing_readout(core))
                 .key("draw-smooth-readout")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(
+            text(width_readout(core))
+                .key("draw-width-readout")
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         )
@@ -1107,11 +1169,78 @@ mod tests {
                 smoothing_readout(&state.core),
                 smoothing_label(active_brush_smoothing(&state.core) as f32)
             );
+            assert_eq!(
+                width_readout(&state.core),
+                width_label(active_brush_width(&state.core))
+            );
             let _panel = draw_tools(&state, &t);
         }
         state.core.toggle_draw_tool();
         assert!(state.core.draw_tool_is_eraser());
         let _panel = draw_tools(&state, &t);
+    }
+
+    // ---- Brush width readout (Phase K) ----
+
+    #[test]
+    fn width_label_formats_whole_and_fractional_widths() {
+        // Whole numbers print without decimals.
+        assert_eq!(width_label(3.0), "Width: 3 px");
+        assert_eq!(width_label(20.0), "Width: 20 px");
+        // A fractional width keeps one decimal. No preset
+        // in the library is fractional today — this arm is
+        // for a future finer preset.
+        assert_eq!(width_label(2.5), "Width: 2.5 px");
+        assert_eq!(width_label(0.5), "Width: 0.5 px");
+        // A non-finite or non-positive width can never
+        // come out of brush_library(), and the label
+        // refuses to print one if it ever did.
+        assert_eq!(width_label(0.0), "Width: —");
+        assert_eq!(width_label(-4.0), "Width: —");
+        assert_eq!(width_label(f32::NAN), "Width: —");
+        assert_eq!(width_label(f32::INFINITY), "Width: —");
+    }
+
+    #[test]
+    fn active_brush_width_follows_the_selected_preset() {
+        let mut core = EditorCore::new();
+        // The default Pen preset (paint.rs:337) is 4.0 wide.
+        assert_eq!(active_brush_width(&core), 4.0);
+        assert_eq!(width_readout(&core), "Width: 4 px");
+        // Widths verified against the library table in
+        // paint.rs: Pencil (index 1, paint.rs:346) is the
+        // narrowest at 2.0, Paint Brush (index 5,
+        // paint.rs:382) is 12.0, and Broad Brush (index 8,
+        // paint.rs:430) is the widest at 20.0.
+        select_brush(&mut core, 1);
+        assert_eq!(active_brush_width(&core), 2.0);
+        assert_eq!(width_readout(&core), "Width: 2 px");
+        select_brush(&mut core, 5);
+        assert_eq!(active_brush_width(&core), 12.0);
+        assert_eq!(width_readout(&core), "Width: 12 px");
+        select_brush(&mut core, 8);
+        assert_eq!(active_brush_width(&core), 20.0);
+        assert_eq!(width_readout(&core), "Width: 20 px");
+    }
+
+    #[test]
+    fn every_library_preset_has_a_positive_whole_width() {
+        // The readout's contract with the library: every
+        // preset's width is finite, positive and whole, so
+        // the label's fractional and fallback arms stay
+        // unreachable from real presets (those arms are
+        // pinned directly by the formatting test above).
+        let lib = stykanimate_rs::paint::brush_library();
+        assert_eq!(lib.len(), brush_names().len());
+        for b in &lib {
+            assert!(
+                b.width.is_finite() && b.width > 0.0,
+                "{} width is positive",
+                b.name
+            );
+            assert_eq!(b.width.fract(), 0.0, "{} width is whole", b.name);
+            assert_eq!(width_label(b.width), format!("Width: {:.0} px", b.width));
+        }
     }
 
     #[test]

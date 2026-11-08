@@ -46,10 +46,23 @@
 //! project frame rate rounded to an integer, with a
 //! minimum rate of one frame per second — carries that
 //! frame's `m:ss` time in muted small text; every other
-//! slot carries a short, thin tick mark. The ruler is
-//! display-only: it has no press or drag handler, so it
-//! cannot intercept the chips' gesture or the marker
-//! presses below.
+//! slot carries a short, thin tick mark.
+//!
+//! Phase K gives the ruler a drag of its own: pressing or
+//! dragging along it seeks — `core.goto` on the frame
+//! under the pointer ([`ruler_frame_at_x`]), on both the
+//! down and the move phase, so a press lands on its frame
+//! at once and a drag scrubs. The handler sits on the
+//! ruler row itself, a sibling of the chips row inside
+//! the same scrolled column, so its drag points are the
+//! same content coordinates the chips' drag reads — the
+//! ruler can never be mistaken for the chips' gesture (a
+//! separate element owns it), and it writes nothing but
+//! the playhead: no range selection, no loop edges, and
+//! `goto` never touches the play state (the marker-press
+//! precedent). Like the chips row, a horizontal drag on
+//! the ruler seeks instead of scrolling the viewport;
+//! the wheel still scrolls.
 //!
 //! ## Marker row
 //!
@@ -420,6 +433,24 @@ pub fn ruler_ticks(frame_count: usize, fps: f32) -> Vec<Option<String>> {
     (0..frame_count).map(|frame| ruler_label(frame, fps)).collect()
 }
 
+/// The frame a ruler drag at content x `x` seeks to: the
+/// ruler's slots use the chips' own pitch — one
+/// [`CHIP_W`] slot plus one [`CHIP_GAP`] per frame, laid
+/// out from x = 0 (see the builder) — so the frame is
+/// `floor(x / (CHIP_W + CHIP_GAP))`, clamped to the last
+/// frame (a captured drag keeps reporting past the row's
+/// end). Unlike [`frame_at_x`] this never fails: an
+/// empty timeline, a negative x and a non-finite x all
+/// read as frame 0, which the core's `goto` then simply
+/// ignores or lands on.
+pub fn ruler_frame_at_x(x: f32, frame_count: usize) -> usize {
+    if frame_count == 0 || !x.is_finite() || x <= 0.0 {
+        return 0;
+    }
+    let idx = (x / (CHIP_W + CHIP_GAP)).floor() as usize;
+    idx.min(frame_count - 1)
+}
+
 /// The timeline frame a graph key at fractional time `t`
 /// belongs to: `t` rounded with `f32::round` (nearest frame,
 /// halves away from zero) — the graph panel's own seek
@@ -503,6 +534,26 @@ fn goto_marker(s: &mut State, frame: usize) {
     s.core.goto(frame);
 }
 
+/// The ruler's drag gesture (Phase K, see the module
+/// docs): a seek, nothing more. Down and Move both go to
+/// the frame under the pointer — Down so a plain press
+/// lands at once, Move so a drag scrubs — and Up does
+/// nothing (the release frame is already current from
+/// the last Move). The conversion is exactly the chips'
+/// drag's: `d.x` read directly as a content coordinate,
+/// because this handler sits on the ruler row inside the
+/// same scrolled column. Play state, the range selection
+/// and the loop range are never written here.
+fn ruler_drag(s: &mut State, d: &mut Drag) {
+    match d.phase {
+        Phase::Down | Phase::Move => {
+            let frame = ruler_frame_at_x(d.x, s.core.frame_count());
+            s.core.goto(frame);
+        }
+        Phase::Up => {}
+    }
+}
+
 /// The row's drag gesture (see the module docs for the exact
 /// semantics). `d.data` records which gesture the press
 /// started: the selection anchor across phases as a fallback
@@ -583,12 +634,18 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     let accent = tok::accent(0, true);
     let loop_fill = t.card.mix(accent, 0.35);
     let markers = markers_for_project(core);
-    // The time ruler: one fixed-width slot per frame in the
-    // chips' own geometry — a muted time label at whole
-    // seconds, a short tick elsewhere — and no handler of
-    // any kind, so a press over the ruler can never be
-    // mistaken for a chip or marker gesture.
-    let mut ruler = row().key("timeline-ruler").gap(CHIP_GAP);
+    // The time ruler: one fixed-width slot per frame in
+    // the chips' own geometry — a muted time label at
+    // whole seconds, a short tick elsewhere — carrying
+    // its own drag-to-seek (Phase K): the handler sits on
+    // this row, so its points are content coordinates
+    // exactly as the chips' drag reads them, and the two
+    // gestures can never be confused — different elements
+    // own them.
+    let mut ruler = row()
+        .key("timeline-ruler")
+        .gap(CHIP_GAP)
+        .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| ruler_drag(s, d));
     for label in ruler_ticks(core.frame_count(), core.project.fps) {
         let mut cell = row().size(CHIP_W, RULER_H).center();
         cell = match label {
@@ -1057,6 +1114,93 @@ mod tests {
         );
     }
 
+    // ---- ruler drag-to-seek (Phase K): the slot pitch is
+    // CHIP_W + CHIP_GAP = 34, the chips' own geometry ----
+
+    #[test]
+    fn ruler_frame_at_x_maps_slots_at_the_chip_pitch() {
+        // Slot 0 spans [0, 34): its chip and the gap after
+        // it both seek to frame 0.
+        assert_eq!(ruler_frame_at_x(0.0, 5), 0);
+        assert_eq!(ruler_frame_at_x(29.9, 5), 0);
+        assert_eq!(ruler_frame_at_x(33.9, 5), 0);
+        // Exactly one pitch is the first point of slot 1.
+        assert_eq!(ruler_frame_at_x(34.0, 5), 1);
+        assert_eq!(ruler_frame_at_x(49.0, 5), 1);
+        assert_eq!(ruler_frame_at_x(68.0, 5), 2);
+        // The last frame's own slot still reads as itself.
+        assert_eq!(ruler_frame_at_x(4.0 * 34.0, 5), 4);
+    }
+
+    #[test]
+    fn ruler_frame_at_x_clamps_and_guards_bad_input() {
+        // A captured drag far past the row's end clamps to
+        // the last frame instead of running off the
+        // timeline.
+        assert_eq!(ruler_frame_at_x(10_000.0, 5), 4);
+        assert_eq!(ruler_frame_at_x(135.9, 5), 3);
+        // Negative and non-finite x read as frame 0.
+        assert_eq!(ruler_frame_at_x(-1.0, 5), 0);
+        assert_eq!(ruler_frame_at_x(-40.0, 5), 0);
+        assert_eq!(ruler_frame_at_x(f32::NAN, 5), 0);
+        assert_eq!(ruler_frame_at_x(f32::INFINITY, 5), 0);
+        assert_eq!(ruler_frame_at_x(f32::NEG_INFINITY, 5), 0);
+        // No frames: frame 0 is the only answer (and the
+        // core's `goto` ignores it there).
+        assert_eq!(ruler_frame_at_x(0.0, 0), 0);
+        assert_eq!(ruler_frame_at_x(100.0, 0), 0);
+    }
+
+    #[test]
+    fn ruler_seek_moves_the_playhead_and_touches_nothing_else() {
+        // `Drag` cannot be constructed outside the runtime
+        // (see the builder smoke test below), so this runs
+        // the handler's exact call sequence — convert with
+        // `ruler_frame_at_x`, then `core.goto` — on a real
+        // shell state, the same idiom the edge-drag test
+        // uses for the chips' gesture.
+        let mut state = demo_state();
+        state.core.set_loop_range(1, 3);
+        state.frame_ops.range_sel = Some((3, 1));
+        state.core.playing = true;
+        // A press/drag landing in slot 3 (x in [102, 136))
+        // seeks there — and writes nothing else: the play
+        // state, the range selection and the loop range
+        // all stand exactly as they were.
+        let frame = ruler_frame_at_x(110.0, state.core.frame_count());
+        state.core.goto(frame);
+        assert_eq!(state.core.current, 3);
+        assert!(state.core.playing);
+        assert_eq!(state.frame_ops.range_sel, Some((3, 1)));
+        assert_eq!(state.core.loop_range, Some((1, 3)));
+        // Paused, the same seek moves the playhead and
+        // stays paused — a ruler press never starts
+        // playback.
+        state.core.playing = false;
+        let frame = ruler_frame_at_x(40.0, state.core.frame_count());
+        state.core.goto(frame);
+        assert_eq!(state.core.current, 1);
+        assert!(!state.core.playing);
+    }
+
+    #[test]
+    fn timeline_marks_builds_with_the_ruler_drag_attached() {
+        // The builder smoke idiom: with the drag handler on
+        // the ruler row, the whole timeline column still
+        // builds — for the plain demo, and for a timeline
+        // long enough that the ruler carries several
+        // second labels (25 frames at 12 fps: labels on
+        // frames 0, 12 and 24).
+        let t = rune::tok::theme(true);
+        let mut state = demo_state();
+        let _ = timeline_marks(&state, &t);
+        for _ in 0..20 {
+            state.core.add_frame();
+        }
+        assert_eq!(state.core.frame_count(), 25);
+        let _ = timeline_marks(&state, &t);
+    }
+
     // ---- clickable markers (Phase I): the keys the row
     // renders and the seek a press performs ----
 
@@ -1155,6 +1299,7 @@ last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
 pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
+playback_speed: 1.0,
             was_playing: false,
         }
     }

@@ -3,7 +3,9 @@
 //! evaluated segments as round-capped thick lines and the head as a
 //! ring, with 2x supersampling for anti-aliasing.
 
-use crate::model::{dist, evaluate, CapKind, ParticleKind, Project, Shape, V2};
+use crate::model::{
+    dist, evaluate, CapKind, HEAD_RING_RADIUS, ParticleKind, Project, Shape, V2,
+};
 use image::{ImageBuffer, Rgb};
 use std::path::Path;
 
@@ -291,7 +293,11 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
             (oy * zoom + project.stage[1] / 2.0) * ss as f32,
         ]
     };
-    let head_r = 17.0f32 * zoom * ss as f32;
+    // The head ring's radius is the model's single
+    // `HEAD_RING_RADIUS` constant (Phase K) — the same
+    // value the stage and the figure thumbnails use, so
+    // exports can never drift from the editor's ring.
+    let head_r = HEAD_RING_RADIUS * zoom * ss as f32;
 
     // Collect drawables: segments (a, b, color, half-width), head
     // rings (centre, color, half-width), shape circles and polygons.

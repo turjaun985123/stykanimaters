@@ -121,6 +121,20 @@
 //! the selection stays on the first half with no
 //! repair; on refusal the op sets the status line
 //! and the panel adds nothing.
+//!
+//! Phase K adds a playhead row beside the split row:
+//! To playhead moves the selected clip so its start
+//! lands on the playhead frame ([`move_delta`] over
+//! `EditorCore::fx_move_clip`), and End at playhead
+//! resizes it so the playhead frame is the last one
+//! it covers ([`end_delta`] over
+//! `EditorCore::fx_resize_clip`) — the two landings
+//! the ±1 steppers take many presses to reach. Both
+//! ops edit the clip in place, so the selection
+//! index never moves and needs no repair; both
+//! handlers validate the selection the way
+//! [`split_selected`] does and otherwise add
+//! nothing of their own.
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, ScrollSpec, Shape, Tx};
@@ -773,6 +787,81 @@ fn split_selected(s: &mut State) {
     s.core.fx_split_clip(i, at);
 }
 
+/// The shift that lands a clip starting at `start`
+/// on the playhead frame `current`: `current -
+/// start`, signed (negative moves the clip earlier).
+/// Pure helper for the To playhead button
+/// ([`move_selected_to_playhead`]), split out so the
+/// arithmetic is testable without a `State`. The
+/// delta is exact as an `f32`; the move op beneath
+/// it speaks whole frames (`fx_move_clip` takes an
+/// `i32`), so the handler rounds to the nearest
+/// whole frame — for the whole-frame starts clips
+/// are created with, the landing is exact, and only
+/// a fractional start (a split's second half, at
+/// x.5) lands within half a frame of the playhead.
+pub fn move_delta(start: f32, current: usize) -> f32 {
+    current as f32 - start
+}
+
+/// The duration delta that makes a clip starting at
+/// `start` with length `duration` END on the
+/// playhead frame `current`: the playhead frame is
+/// the last frame the clip covers, so the target
+/// end is `current + 1` and the delta is
+/// `(current + 1) - (start + duration)`, signed
+/// (negative shortens the clip). Pure helper for
+/// the End at playhead button
+/// ([`end_selected_at_playhead`]). The resize
+/// beneath it clamps the resulting duration to
+/// >= 0.1, so a playhead parked before the clip's
+/// start shrinks the clip to that floor rather
+/// than collapsing it — the op's behaviour, not
+/// the panel's.
+pub fn end_delta(start: f32, duration: f32, current: usize) -> f32 {
+    (current as f32 + 1.0) - (start + duration)
+}
+
+/// Move the selected clip so its start lands on
+/// the playhead frame via `EditorCore::fx_move_clip`
+/// (Phase K): the delta comes from [`move_delta`]
+/// over the clip's CURRENT start, rounded to the
+/// whole frames the op takes. The op edits the
+/// start in place (the backend clamps it at frame
+/// 0), so the clip keeps its index and the
+/// selection needs no repair; the op's status line
+/// reports the landing frame. With no valid
+/// selection the handler returns before any op
+/// call, exactly like [`split_selected`].
+fn move_selected_to_playhead(s: &mut State) {
+    let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
+        return;
+    };
+    let start = s.core.project.fx_clips[i].clip.start;
+    let delta = move_delta(start, s.core.current).round() as i32;
+    s.core.fx_move_clip(i, delta);
+}
+
+/// Resize the selected clip so it ends on the
+/// playhead frame via `EditorCore::fx_resize_clip`
+/// (Phase K): the delta comes from [`end_delta`]
+/// over the clip's CURRENT start and duration and
+/// is passed through untouched — the op applies it
+/// and the backend clamps the duration to >= 0.1,
+/// so a playhead before the clip's start leaves
+/// the floor length, never nothing. The op edits
+/// in place, so the selection needs no repair;
+/// with no valid selection the handler returns
+/// before any op call.
+fn end_selected_at_playhead(s: &mut State) {
+    let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
+        return;
+    };
+    let clip = s.core.project.fx_clips[i].clip;
+    let delta = end_delta(clip.start, clip.duration, s.core.current);
+    s.core.fx_resize_clip(i, delta);
+}
+
 /// The strip's press gesture: a press (drag Down) on a
 /// clip's bar selects that clip in `State::fx_selected`
 /// — the selection the lane rows and inspector already
@@ -1207,6 +1296,25 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                 .center_y()
                 .child(icon_btn("fx-split", "scissors", "Split at playhead", false, t, |s| {
                     split_selected(s)
+                })),
+        )
+        // Playhead row (Phase K): land the clip's
+        // start on the playhead frame, or its end
+        // on the playhead frame, in one press each
+        // — the two landings the Earlier/Later and
+        // duration steppers take many presses to
+        // reach (see move_selected_to_playhead /
+        // end_selected_at_playhead).
+        .child(
+            row()
+                .key("fx-playhead-row")
+                .gap(8.0)
+                .center_y()
+                .child(icon_btn("fx-to-playhead", "crosshairs", "To playhead", false, t, |s| {
+                    move_selected_to_playhead(s)
+                }))
+                .child(icon_btn("fx-end-playhead", "crosshairs", "End at playhead", false, t, |s| {
+                    end_selected_at_playhead(s)
                 })),
         )
         // Nudge row: fine start moves (±1/±10 frames)
@@ -1845,6 +1953,7 @@ mod tests {
             pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
             pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
             loop_playback: true,
+            playback_speed: 1.0,
             was_playing: false,
             last_status: String::new(),
             toast_now: 0.0,
@@ -1932,5 +2041,89 @@ mod tests {
         split_selected(&mut state);
         assert_eq!(state.core.project.fx_clips.len(), 1);
         assert_eq!(state.core.project.fx_clips[0].clip.duration, 10.0);
+    }
+
+    // --------------------------------------------------
+    // Phase K: playhead landing buttons
+    // --------------------------------------------------
+
+    #[test]
+    fn move_delta_is_the_signed_distance_to_the_playhead() {
+        assert_eq!(move_delta(4.0, 9), 5.0);
+        assert_eq!(move_delta(9.0, 4), -5.0);
+        // Zero delta: the clip already starts on the
+        // playhead frame.
+        assert_eq!(move_delta(9.0, 9), 0.0);
+        // A fractional start (a split's second half)
+        // keeps its fraction in the exact delta; the
+        // whole-frame rounding happens in the
+        // handler, where the op's contract lives.
+        assert_eq!(move_delta(4.5, 9), 4.5);
+    }
+
+    #[test]
+    fn end_delta_is_the_signed_distance_to_the_playheads_end() {
+        // Clip [4, 14), playhead on frame 9: the end
+        // must travel from 14 back to 10 (the
+        // playhead frame is the last covered one) —
+        // four frames shorter.
+        assert_eq!(end_delta(4.0, 10.0, 9), -4.0);
+        // Playhead past the end: the clip grows to
+        // reach it.
+        assert_eq!(end_delta(4.0, 10.0, 20), 7.0);
+        // Zero delta: start 4 + duration 6 ends at
+        // 10, so frame 9 is already the last
+        // covered frame.
+        assert_eq!(end_delta(4.0, 6.0, 9), 0.0);
+    }
+
+    #[test]
+    fn move_selected_to_playhead_lands_the_start_and_keeps_the_selection() {
+        // Clip spans [4, 14); the playhead is on
+        // frame 9.
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, Some(0));
+        state.core.current = 9;
+        move_selected_to_playhead(&mut state);
+        let clip = state.core.project.fx_clips[0].clip;
+        assert_eq!(clip.start, 9.0);
+        assert_eq!(clip.duration, 10.0, "a move never resizes");
+        assert_eq!(state.core.project.fx_clips.len(), 1, "a move never splits");
+        // The op edits in place: same index, same
+        // selection, no repair.
+        assert_eq!(state.fx_selected, Some(0));
+    }
+
+    #[test]
+    fn end_selected_at_playhead_lands_the_end_on_the_playhead_frame() {
+        // Clip spans [4, 14); the playhead is on
+        // frame 9, which must become the last
+        // covered frame: the clip ends at 10, so
+        // the duration is 6.0.
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, Some(0));
+        state.core.current = 9;
+        end_selected_at_playhead(&mut state);
+        let clip = state.core.project.fx_clips[0].clip;
+        assert_eq!(clip.start, 4.0, "a resize never moves the start");
+        assert_eq!(clip.duration, 6.0);
+        assert_eq!(state.fx_selected, Some(0));
+    }
+
+    #[test]
+    fn playhead_buttons_without_a_selection_change_nothing() {
+        // No selection: both handlers return before
+        // any op call — no snapshot (undo depth
+        // unchanged), no edit.
+        let core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, None);
+        state.core.current = 9;
+        let depth = state.core.undo_depth();
+        move_selected_to_playhead(&mut state);
+        end_selected_at_playhead(&mut state);
+        assert_eq!(state.core.undo_depth(), depth);
+        let clip = state.core.project.fx_clips[0].clip;
+        assert_eq!(clip.start, 4.0);
+        assert_eq!(clip.duration, 10.0);
     }
 }

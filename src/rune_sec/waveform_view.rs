@@ -120,6 +120,26 @@
 //! clip's length is unknown (unreadable or zero-length
 //! file), the drag falls back to the project mapping
 //! unchanged.
+//!
+//! ## Span bracket (Phase K, section 21)
+//!
+//! When a clip is selected and its span is known
+//! ([`clip_span`] — the same cached probe the seek
+//! resolves through), both shapes also draw the span as
+//! a bracket over the strip: a rule at the top
+//! ([`SPAN_BRACKET_Y`]) across the span's x edges
+//! ([`span_bracket`]) with a short tick at each edge, in
+//! the selection accent at reduced alpha, under the
+//! playhead. The bracket is drawn in project coordinates
+//! — where the clip sits in the project — even in clip
+//! mode, because the playhead it keeps company with is
+//! also project-mapped; that is the deliberate asymmetry
+//! with the clip-mode seek above, which IS clip-mapped.
+//! In clip mode the bracket draws anyway, over the
+//! selected clip's own strip (it frames the mode); with
+//! no selection, a stale selection, or an unknown span
+//! it does not, and the shapes are exactly what they
+//! were before this section.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -146,6 +166,14 @@ const CAPTION_HEX: u32 = 0xA2AAB8;
 /// gives up this much of its height so canvas + caption
 /// together keep the strip's usual footprint.
 const CAPTION_STRIP_H: f32 = 18.0;
+/// Span bracket geometry (Phase K, section 21), in
+/// element points: the top rule's y, the edge ticks'
+/// length downward from it, and the stroke width all
+/// three bracket strokes share (between the centre
+/// line's 1.0 and the playhead's 2.0).
+const SPAN_BRACKET_Y: f32 = 2.0;
+const SPAN_TICK_H: f32 = 6.0;
+const SPAN_BRACKET_W: f32 = 1.5;
 
 /// Convert a `0xRRGGBB` colour to a Rune colour (the same
 /// helper `stage_view` carries; duplicated so this section
@@ -299,6 +327,38 @@ pub fn clip_len_frames(duration_secs: f32, fps: f32) -> usize {
         return 0;
     }
     (duration_secs * fps).round() as usize
+}
+
+/// The x edges `(left, right)`, in element points, of a
+/// clip span's bracket on a strip `width` points wide
+/// over a project of `frame_count` frames (Phase K,
+/// section 21): each frame owns an equal cell of the
+/// strip, so the left edge is `start / frame_count *
+/// width` and the right edge is `(start + len) /
+/// frame_count * width`, both clamped into the strip —
+/// a span running past the project's end (a start near
+/// the end plus a long file) ends flush at the right
+/// edge, and one starting past the end collapses onto
+/// it. `None` when there is nothing to bracket: no
+/// frames, a zero-length span, or a strip with no usable
+/// width (non-positive or non-finite).
+///
+/// The bracket is drawn in project coordinates — where
+/// the clip sits in the project — even in clip mode,
+/// because the playhead it accompanies is also
+/// project-mapped; that is the deliberate asymmetry
+/// with [`clip_seek_frame`], whose clip-mode drag is
+/// mapped in clip coordinates instead.
+pub fn span_bracket(span: (usize, usize), frame_count: usize, width: f32) -> Option<(f32, f32)> {
+    let (start, len) = span;
+    if frame_count == 0 || len == 0 || width <= 0.0 || !width.is_finite() {
+        return None;
+    }
+    let count = frame_count as f32;
+    let left = (start as f32 / count * width).clamp(0.0, width);
+    let end = start.saturating_add(len);
+    let right = (end as f32 / count * width).clamp(0.0, width);
+    Some((left, right))
 }
 
 /// Cache key for one probe: everything that can change its
@@ -573,11 +633,64 @@ fn waveform_bars_clip(
     draw_peak_bars(shape, peaks, clip.gain, w, h)
 }
 
+/// Append the selected clip's span bracket to a bars
+/// shape (Phase K, section 21): a rule at
+/// [`SPAN_BRACKET_Y`] across the span's x edges with a
+/// [`SPAN_TICK_H`]-long tick down at each edge, in the
+/// selection accent ([`WAVE_HEX`], the strip's own
+/// accent) at reduced alpha. The span resolves through
+/// [`clip_span`] at the strip's own bucket count — the
+/// same cached probe, keyed the same way, that the seek
+/// uses — and the edges come from [`span_bracket`],
+/// project-mapped in both modes (see its docs for the
+/// deliberate asymmetry with the clip-mode seek). The
+/// caller appends the playhead after this, so the marker
+/// stays on top. No resolvable span — no selection, a
+/// stale selection, an unreadable or zero-length clip
+/// file — leaves the shape untouched, so both modes'
+/// strips are exactly what they were before this
+/// section wherever the bracket does not apply.
+fn with_span_bracket(
+    shape: Shape,
+    core: &EditorCore,
+    selected: Option<usize>,
+    el_size: [f32; 2],
+) -> Shape {
+    let mut shape = shape;
+    let (w, h) = (el_size[0], el_size[1]);
+    if w <= 0.0 || h <= 0.0 {
+        return shape;
+    }
+    let buckets = strip_buckets(strip_columns(w));
+    let Some(span) = clip_span(core, selected, buckets) else {
+        return shape;
+    };
+    let Some((left, right)) = span_bracket(span, core.frame_count(), w) else {
+        return shape;
+    };
+    let bracket = hex_color(WAVE_HEX).unwrap_or(Color::WHITE).alpha(0.75);
+    let y = SPAN_BRACKET_Y;
+    let tick = y + SPAN_TICK_H;
+    shape = shape.line([left, y], [right, y], SPAN_BRACKET_W, LineCap::Butt, bracket);
+    shape = shape.line([left, y], [left, tick], SPAN_BRACKET_W, LineCap::Butt, bracket);
+    shape = shape.line([right, y], [right, tick], SPAN_BRACKET_W, LineCap::Butt, bracket);
+    shape
+}
+
 /// The strip for [`waveform_el_state`]: the centre line and
-/// bars of [`waveform_bars`], plus the project-mapped
-/// playhead ([`with_playhead`]).
-fn waveform_shape_project(core: &EditorCore, el_size: [f32; 2]) -> Shape {
-    with_playhead(waveform_bars(core, el_size), core, el_size)
+/// bars of [`waveform_bars`], plus the selected clip's
+/// span bracket ([`with_span_bracket`], Phase K) and the
+/// project-mapped playhead ([`with_playhead`]).
+fn waveform_shape_project(
+    core: &EditorCore,
+    selected: Option<usize>,
+    el_size: [f32; 2],
+) -> Shape {
+    with_playhead(
+        with_span_bracket(waveform_bars(core, el_size), core, selected, el_size),
+        core,
+        el_size,
+    )
 }
 
 /// Append the project-mapped playhead to a bars shape:
@@ -602,7 +715,11 @@ fn with_playhead(shape: Shape, core: &EditorCore, el_size: [f32; 2]) -> Shape {
 
 /// The selected-clip strip (Phase I, section 17):
 /// [`waveform_bars_clip`] plus the same project-mapped
-/// playhead as the project strip ([`with_playhead`]).
+/// playhead as the project strip ([`with_playhead`]) and
+/// the same span bracket ([`with_span_bracket`],
+/// Phase K), here over the very clip the strip shows —
+/// drawn even though the span is the strip's whole
+/// subject, so it frames the mode visually.
 fn waveform_shape_clip(
     core: &EditorCore,
     index: usize,
@@ -610,7 +727,12 @@ fn waveform_shape_clip(
     el_size: [f32; 2],
 ) -> Shape {
     with_playhead(
-        waveform_bars_clip(core, index, peaks, el_size),
+        with_span_bracket(
+            waveform_bars_clip(core, index, peaks, el_size),
+            core,
+            Some(index),
+            el_size,
+        ),
         core,
         el_size,
     )
@@ -714,6 +836,10 @@ fn waveform_seek(s: &mut State, d: &Drag) {
 /// project mode and — since Phase J (section 31) —
 /// clip-span-mapped in clip mode when the selected
 /// clip's length is known (see [`waveform_seek`]).
+/// Phase K (section 21) adds the selected clip's span
+/// bracket to both shapes (see the module docs): no new
+/// element, no height or hit-area change — the canvas
+/// and the caption are exactly what they were.
 pub fn waveform_el_state(s: &State, el_size: [f32; 2]) -> El {
     let clip_count = s.core.project.audio.len();
     let selected_peaks: Vec<f32> = match s.audio_panel.selected {
@@ -747,7 +873,7 @@ pub fn waveform_el_state(s: &State, el_size: [f32; 2]) -> El {
                     .color(hex_color(CAPTION_HEX).unwrap_or(Color::WHITE)),
             );
     }
-    canvas(waveform_shape_project(&s.core, el_size))
+    canvas(waveform_shape_project(&s.core, s.audio_panel.selected, el_size))
         .key("waveform")
         .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| waveform_seek(s, d))
 }
@@ -1161,6 +1287,82 @@ mod tests {
             gain: 1.0,
         });
         assert_eq!(clip_span(&core, Some(1), 96), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- Span bracket (Phase K, section 21) ----
+
+    #[test]
+    fn span_bracket_edges() {
+        // 16 frames over 256 pt: one frame cell is 16 pt,
+        // so every edge below is exact.
+        // A span at the project's start.
+        assert_eq!(span_bracket((0, 4), 16, 256.0), Some((0.0, 64.0)));
+        // A span in the middle.
+        assert_eq!(span_bracket((4, 4), 16, 256.0), Some((64.0, 128.0)));
+        // A span ending flush with the project's last frame.
+        assert_eq!(span_bracket((12, 4), 16, 256.0), Some((192.0, 256.0)));
+        // The whole project, edge to edge.
+        assert_eq!(span_bracket((0, 16), 16, 256.0), Some((0.0, 256.0)));
+        // A span running past the end (a start near the end
+        // plus a long file): the right edge clamps to the
+        // strip's right edge, never beyond it.
+        assert_eq!(span_bracket((14, 8), 16, 256.0), Some((224.0, 256.0)));
+        // A span starting past the end collapses onto the
+        // right edge rather than drawing outside the strip.
+        assert_eq!(span_bracket((20, 4), 16, 256.0), Some((256.0, 256.0)));
+    }
+
+    #[test]
+    fn span_bracket_degenerate_inputs() {
+        // No frames: no project to bracket against.
+        assert_eq!(span_bracket((0, 4), 0, 256.0), None);
+        // A zero-length span has no extent to bracket.
+        assert_eq!(span_bracket((3, 0), 16, 256.0), None);
+        // No usable strip width: zero, negative, non-finite.
+        assert_eq!(span_bracket((0, 4), 16, 0.0), None);
+        assert_eq!(span_bracket((0, 4), 16, -8.0), None);
+        assert_eq!(span_bracket((0, 4), 16, f32::NAN), None);
+        assert_eq!(span_bracket((0, 4), 16, f32::INFINITY), None);
+    }
+
+    #[test]
+    fn waveform_builds_in_both_modes_with_a_selected_clip() {
+        // One second of sine on disk at frame 3, selected:
+        // the span resolves through the cached probe, and
+        // the strip builds in clip mode (the bracket drawn
+        // over the clip's own strip) and, with the
+        // selection cleared, in project mode too.
+        let path = temp_wav_path("bracket-build");
+        std::fs::write(&path, write_wav(&sine_wav())).unwrap();
+        let mut s = crate::init();
+        s.core.project.audio.push(AudioClip {
+            path: path.to_string_lossy().into_owned(),
+            start_frame: 3,
+            gain: 1.0,
+        });
+        s.audio_panel.selected = Some(0);
+        // The span the bracket draws: 1 s at the demo
+        // project's 12 fps, from frame 3.
+        let buckets = strip_buckets(strip_columns(308.0));
+        assert_eq!(clip_span(&s.core, Some(0), buckets), Some((3, 12)));
+        // The mode gate agrees this is clip mode, and the
+        // builder builds it, bracket included.
+        let peaks = stykanimate_rs::audio_ops::clip_peaks(&s.core, 0, buckets);
+        assert_eq!(
+            waveform_mode(s.audio_panel.selected, 1, &peaks),
+            WaveformMode::Clip(0)
+        );
+        let _clip_mode = waveform_el_state(&s, [308.0, 56.0]);
+        // The project shape takes the same bracket path:
+        // built directly with the resolving selection,
+        // because the builder's own mode gate routes a
+        // readable selection to clip mode (above).
+        let _project_shape = waveform_shape_project(&s.core, Some(0), [308.0, 56.0]);
+        // Project mode through the builder: no selection,
+        // the bare canvas, no bracket.
+        s.audio_panel.selected = None;
+        let _project_mode = waveform_el_state(&s, [308.0, 56.0]);
         let _ = std::fs::remove_file(&path);
     }
 }

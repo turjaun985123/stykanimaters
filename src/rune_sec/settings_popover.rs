@@ -4,10 +4,11 @@
 //! workspace picker; Phase H, section 32: Font Awesome
 //! glyphs — gear card header, sun/moon theme pair, eye
 //! visibility toggles; Phase I, section 38: the Playback
-//! block — loop toggle + playback-audio readout): theme,
+//! block — loop toggle + playback-audio readout;
+//! Phase K, section 32: the Reset layout button): theme,
 //! language, stage size, the project default easing,
-//! stage guides, playback and the startup workspace,
-//! behind one "Settings" toggle. Declared
+//! stage guides, playback, the startup workspace and a
+//! layout reset, behind one "Settings" toggle. Declared
 //! under `rune_sec` from `main.rs` only — bin-crate code, not
 //! part of the engine library.
 //!
@@ -118,6 +119,23 @@
 //!   the pick is both the current workspace and the
 //!   startup default `workspaces::from_prefs` seeds the
 //!   next launch from. No new persistence path exists.
+//! * **Reset layout (Phase K)** — one button driving the
+//!   shell's layout back to its defaults: the Animate
+//!   workspace through `workspaces::select_workspace`
+//!   (so the reset is also the persisted startup
+//!   default), both side panels shown (`State.show_left`
+//!   / `show_right`, integrator-seeded `true`), and the
+//!   three guide flags set on outright (`State.guides`,
+//!   `guides_frustum`, `guides_safe`) — set directly,
+//!   never flipped through the toggle fns, which would
+//!   drive a flag already at its default away from it.
+//!   The reset's scope is layout only, by design: it
+//!   does NOT touch the theme — the dark/light state is
+//!   persisted outside `State` as `LayoutPrefs.dark`
+//!   and `main`'s poll owns the write-back from
+//!   `core.light_theme`, so resetting it from here
+//!   would fight that machinery — nor playback state,
+//!   nor any project data.
 //! * **Icons (Phase H)** — pure presentation, no behaviour
 //!   change: the open card gains a header row (a `gear`
 //!   `icon_el` beside the "Settings" title, the shell's
@@ -322,6 +340,47 @@ pub fn toggle_guides_safe(s: &mut State) {
     s.guides_safe = !s.guides_safe;
 }
 
+// ---- Layout reset ----
+
+/// Drive the shell's layout back to its defaults in one
+/// press (Phase K): the Animate workspace through
+/// `select_workspace` — so the reset is also the
+/// persisted startup default, via the one persistence
+/// path — both side panels shown (`State.show_left` /
+/// `State.show_right`, integrator-seeded `true`), and
+/// every guide flag on (`State.guides`,
+/// `State.guides_frustum`, `State.guides_safe`, seeded
+/// `false` / `true` / `true`).
+///
+/// The guide fields are SET, never flipped through the
+/// toggle fns above: a toggle would drive a flag that
+/// already sits at its default away from it, so a reset
+/// built from flips could end half-inverted.
+///
+/// Deliberately NOT touched:
+/// * **Theme** — the dark/light state is persisted
+///   outside `State` (`LayoutPrefs.dark`), and `main`'s
+///   poll owns the write-back from `core.light_theme`;
+///   resetting it from here would fight that machinery,
+///   and a layout reset has no business changing the
+///   user's theme anyway. (The module docs carry the
+///   same exclusion.)
+/// * **Playback state** — `State.loop_playback`, the
+///   playhead, whether playback is running: transport
+///   state, not layout.
+/// * **Project data** — nothing on `EditorCore` or
+///   `Project` is written; `select_workspace` itself
+///   touches only `State.workspace` and the layout
+///   prefs.
+pub fn reset_layout(s: &mut State) {
+    select_workspace(s, Workspace::Animate);
+    s.show_left = true;
+    s.show_right = true;
+    s.guides = true;
+    s.guides_frustum = true;
+    s.guides_safe = true;
+}
+
 // ---- Playback ----
 
 /// Flip the loop-playback flag on the shell state
@@ -490,9 +549,9 @@ fn stage_axis_row(s: &State, t: &Theme, axis: usize, heading: &str) -> El {
 /// `s.settings.open` — the settings card under it: Theme,
 /// Language grid, Stage W / H steppers, the default
 /// easing cycle, the stage-guides toggle with its two
-/// child toggles, the Playback block (loop toggle +
-/// playback-audio readout), and the startup-workspace
-/// picker.
+/// child toggles, the Reset layout button, the Playback
+/// block (loop toggle + playback-audio readout), and
+/// the startup-workspace picker.
 pub fn settings_popover(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let open = s.settings.open;
@@ -647,6 +706,27 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
                 "Stage guides: thirds grid + centre cross. \
                  Camera frame and safe frames show only while Guides is on.",
             ));
+
+        // Layout reset (Phase K): one press back to the
+        // layout defaults — the Animate workspace
+        // (persisted through select_workspace), both side
+        // panels shown, every guide flag on. An action,
+        // not a state toggle, so it renders unhighlighted;
+        // theme, playback state and the project are
+        // deliberately outside its scope (reset_layout's
+        // docs carry the full contract).
+        card = card.child(
+            row().key("settings-reset-row").gap(6.0).child(icon_btn(
+                "settings-reset-layout",
+                "arrow-rotate-left",
+                "Reset layout",
+                false,
+                t,
+                |s: &mut State| {
+                    reset_layout(s);
+                },
+            )),
+        );
 
         // Playback (Phase I): the loop toggle is a second
         // home for the transport's pb-loop switch — same
@@ -862,6 +942,7 @@ last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
 pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
+playback_speed: 1.0,
             was_playing: false,
         };
         assert!(!state.guides);
@@ -922,6 +1003,7 @@ loop_playback: true,
             pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
             pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
             loop_playback: true,
+            playback_speed: 1.0,
             was_playing: false,
         }
     }
@@ -1025,6 +1107,63 @@ loop_playback: true,
         state.settings.open = true;
         let _ = settings_popover(&state, &t);
         toggle_loop_playback(&mut state);
+        let _ = settings_popover(&state, &t);
+    }
+
+    #[test]
+    fn reset_layout_restores_every_layout_default() {
+        use crate::rune_sec::workspaces::from_prefs;
+
+        let t = rune::tok::theme(true);
+        let mut state = shell_state();
+        // The project facts the reset must not move.
+        let name_before = state.core.project.name.clone();
+        let frames_before = state.core.project.frames.len();
+
+        // Scramble every field the reset covers, through
+        // the shell's own paths where they exist: the
+        // picker fn moves the workspace (and persists
+        // Export); direct writes hide the panels and kill
+        // the guides.
+        set_startup_workspace(&mut state, Workspace::Export);
+        state.show_left = false;
+        state.show_right = false;
+        state.guides = false;
+        state.guides_frustum = false;
+        state.guides_safe = false;
+        // Two fields outside the reset's scope, stood away
+        // from their seeds: the theme and the loop flag.
+        state.core.light_theme = true;
+        state.loop_playback = false;
+        assert_eq!(state.workspace, Workspace::Export);
+        assert!(!state.show_left && !state.show_right);
+        assert!(!state.guides && !state.guides_frustum && !state.guides_safe);
+
+        reset_layout(&mut state);
+
+        // Every covered field back at its default.
+        assert_eq!(state.workspace, Workspace::Animate);
+        assert!(state.show_left && state.show_right);
+        assert!(state.guides && state.guides_frustum && state.guides_safe);
+        // The reset persisted: the layout prefs the next
+        // launch seeds from name Animate. (The prefs file
+        // is shared across the suite — the snap tests'
+        // workspace test lives with the same file and
+        // likewise leaves it naming Animate.)
+        let prefs = stykanimate_rs::shell::load_layout();
+        assert_eq!(prefs.workspace, "Animate");
+        assert_eq!(from_prefs(&prefs), Workspace::Animate);
+        // Out of scope, untouched: theme and playback.
+        assert!(state.core.light_theme);
+        assert!(!state.loop_playback);
+        // Project data untouched.
+        assert_eq!(state.core.project.name, name_before);
+        assert_eq!(state.core.project.frames.len(), frames_before);
+
+        // The open card builds in the reset state (the
+        // Reset layout row renders between the guides
+        // note and the Playback block).
+        state.settings.open = true;
         let _ = settings_popover(&state, &t);
     }
 

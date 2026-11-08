@@ -97,6 +97,18 @@
 //! kind names are the content. No keys change — the
 //! glyphs are unkeyed children of existing rows.
 //!
+//! Phase K adds per-kind usage counts to the kind
+//! buttons: a button whose kind the project already
+//! holds reads "{label} · {n}" ([`kind_button_label`]
+//! over [`kind_usage`]), so the user can see which
+//! kinds are already in use, and how often, without
+//! leaving the browser. At zero usage the label is
+//! byte-identical to before. The counts are display
+//! only — the filter still matches the entry's base
+//! name / label / category, never the counted string —
+//! and the Recent row keeps the bare labels (it is a
+//! shortcut row, not part of the grid).
+//!
 //! Integrator wiring for the state: add
 //! `pub fx_browser: rune_sec::fx_browser::FxBrowserState`
 //! to `State`, initialise it with
@@ -197,6 +209,36 @@ pub fn kind_label(name: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => spaced,
+    }
+}
+
+/// How many clips of `kind` the project already holds:
+/// a straight count over `project.fx_clips`, comparing
+/// each entry's `clip.kind` (`FxClipEntry.clip` is the
+/// engine's `vfx::ParticleClip`, whose `kind` field is
+/// the clip's kind). A pure read — the builder calls it
+/// once per visible kind button per build. Phase K.
+pub fn kind_usage(core: &EditorCore, kind: ClipKind) -> usize {
+    core.project
+        .fx_clips
+        .iter()
+        .filter(|e| e.clip.kind == kind)
+        .count()
+}
+
+/// The grid kind button's label (Phase K): the kind's
+/// humanised label alone while the project holds none
+/// of it — byte-identical to the pre-Phase-K label —
+/// and "{label} · {n}" once it holds `n` clips of the
+/// kind ("Sparkle · 3"), so the browser itself shows
+/// which kinds are in use. Display only: filtering
+/// ([`kind_matches`]) matches the entry's base name /
+/// label / category and never this counted string.
+pub fn kind_button_label(core: &EditorCore, entry: &FxKindEntry) -> String {
+    let label = kind_label(entry.name);
+    match kind_usage(core, entry.kind) {
+        0 => label,
+        n => format!("{label} · {n}"),
     }
 }
 
@@ -523,7 +565,11 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
                 let kind = entry.kind;
                 kinds_row = kinds_row.child(btn(
                     entry.key,
-                    &kind_label(entry.name),
+                    // Phase K: the counted label — bare
+                    // at zero usage, "{label} · {n}" once
+                    // the project holds the kind. Key and
+                    // press behaviour are unchanged.
+                    &kind_button_label(core, entry),
                     false,
                     t,
                     move |s| {
@@ -711,6 +757,116 @@ mod tests {
         assert_eq!(kind_label("shock_ring"), "Shock ring");
         assert_eq!(kind_label("fireworks"), "Fireworks");
         assert_eq!(kind_label(""), "");
+    }
+
+    // ---- Usage counts on the kind buttons (Phase K) ----
+
+    /// A core whose project holds one clip per kind in
+    /// `kinds`, planted the way the sibling panels' tests
+    /// plant clips (fx_clips' `entry` fixture): straight
+    /// into `project.fx_clips` as full `FxClipEntry`s.
+    fn core_with_kinds(kinds: &[ClipKind]) -> EditorCore {
+        let mut core = EditorCore::new();
+        for &kind in kinds {
+            core.project.fx_clips.push(stykanimate_rs::model::FxClipEntry {
+                clip: stykanimate_rs::vfx::ParticleClip {
+                    start: 0.0,
+                    duration: 16.0,
+                    kind,
+                    color: 0xFFFFFF,
+                    color2: None,
+                    seed: 1,
+                    angle: 0.0,
+                    length: 130.0,
+                },
+                figure: 0,
+                node: 0,
+            });
+        }
+        core
+    }
+
+    #[test]
+    fn kind_usage_counts_the_projects_clips_of_each_kind() {
+        let core = core_with_kinds(&[
+            ClipKind::Sparkle,
+            ClipKind::Burst,
+            ClipKind::Sparkle,
+            ClipKind::Sparkle,
+        ]);
+        assert_eq!(kind_usage(&core, ClipKind::Sparkle), 3);
+        assert_eq!(kind_usage(&core, ClipKind::Burst), 1);
+        // Kinds the project does not use count zero.
+        assert_eq!(kind_usage(&core, ClipKind::Beam), 0);
+        assert_eq!(kind_usage(&core, ClipKind::Wave), 0);
+        // An empty project uses nothing.
+        let empty = EditorCore::new();
+        assert_eq!(kind_usage(&empty, ClipKind::Sparkle), 0);
+    }
+
+    #[test]
+    fn kind_button_label_is_the_bare_label_at_zero_usage() {
+        // With nothing planted, every button's label is
+        // exactly the humanised label it had before
+        // Phase K — byte-identical, no suffix.
+        let core = EditorCore::new();
+        for entry in FX_KINDS {
+            assert_eq!(kind_button_label(&core, entry), kind_label(entry.name));
+        }
+        assert_eq!(
+            kind_button_label(&core, entry_of(ClipKind::Sparkle)),
+            "Sparkle"
+        );
+    }
+
+    #[test]
+    fn kind_button_label_appends_the_count_once_the_kind_is_used() {
+        let core = core_with_kinds(&[
+            ClipKind::Sparkle,
+            ClipKind::Sparkle,
+            ClipKind::Sparkle,
+            ClipKind::Burst,
+        ]);
+        assert_eq!(
+            kind_button_label(&core, entry_of(ClipKind::Sparkle)),
+            "Sparkle · 3"
+        );
+        assert_eq!(
+            kind_button_label(&core, entry_of(ClipKind::Burst)),
+            "Burst · 1"
+        );
+        // Unused kinds in the same project stay bare.
+        assert_eq!(
+            kind_button_label(&core, entry_of(ClipKind::Beam)),
+            "Beam"
+        );
+    }
+
+    #[test]
+    fn filter_still_finds_a_kind_by_name_when_it_is_in_use() {
+        // Regression: the counted button label must not
+        // leak into filtering. Sparkle is in use (×3, so
+        // its button reads "Sparkle · 3"), and the filter
+        // still finds it by its base name and label…
+        let core = core_with_kinds(&[
+            ClipKind::Sparkle,
+            ClipKind::Sparkle,
+            ClipKind::Sparkle,
+        ]);
+        assert_eq!(kind_usage(&core, ClipKind::Sparkle), 3);
+        let sparkle = entry_of(ClipKind::Sparkle);
+        assert!(kind_matches(sparkle, "sparkle"));
+        assert!(kind_matches(sparkle, "Sparkle"));
+        let visible = visible_categories("sparkle");
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].0, "Magic");
+        assert_eq!(visible[0].1.len(), 1);
+        assert_eq!(visible[0].1[0].kind, ClipKind::Sparkle);
+        // …while the count suffix itself is not a match
+        // source: no name, label or category contains it,
+        // so filtering by it finds nothing.
+        assert!(!kind_matches(sparkle, "· 3"));
+        assert!(visible_categories("· 3").is_empty());
     }
 
     // ---- Filter + recents (Phase F) ----

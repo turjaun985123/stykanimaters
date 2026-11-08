@@ -1,6 +1,6 @@
 //! Project tools section (Rune Phase D, section 34) — project
-//! name field, New / Save-to-projects / Recover, and the saved
-//! project selector. Bin-crate code, declared from `main.rs`
+//! name field, New / Save-to-projects / Reload / Recover, and
+//! the saved project selector. Bin-crate code, declared from `main.rs`
 //! only; every control delegates to a real engine op or mirrors
 //! a listener the GPUI app had, verbatim where one existed.
 //!
@@ -39,12 +39,26 @@
 //! | `proj-set-name` | "Set name" button (`icon_btn`, "check" icon) | [`apply_name`] → [`apply_project_name`]: trims, writes `Project::name` directly (no core rename op or setter exists — editor.rs has no `rename*` fn; the file-level rename is Home's `projects::rename_project`) | ok |
 //! | `proj-current-file` | "Current file: …" muted line under the name field (conditional — present only when the line resolves) | renders [`current_file_line`]: the `shell::last_opened_project` display name, shown only when it exactly matches `Project::name` | ok — Phase I §31; the match guard is the Phase G §32 lesson (recents store names, not the open file, so a mismatch would lie). `home_panel::current_project_path` was NOT used: it is the selector cursor, which `cycle-project` moves without opening |
 //! | `proj-current-meta` | "{size} · modified {time}" muted line under `proj-current-file` (conditional — present only when the §31 match holds AND the file resolves and stats) | renders [`current_file_meta`]: the §31 match (via [`current_file_path`]) gates it, the path resolves over `core.project_files` by the crate's slug rule ([`resolve_project_file`]), size via [`human_size`], time via [`modified_label`] | ok — Phase J §27; gated on the §31 decision itself, so the two lines can never disagree about which file the session is on |
+//! | `proj-reload` | "Reload from disk" button (plain text `btn` — the selector rows' idiom, not an `icon_btn`) | [`reload_pressed`] → [`reload_target`] (the §27 gate as an owned path) → [`reload_from_disk`]: no target → status "No saved file to reload.", open never called; target → the open rows' exact discipline (point `project_index` at the file, `EditorCore::open_project_file` — it takes no path argument and returns `()`, editor.rs:3787 — [`clear_stale_solo`], [`sync_name_edit`]), with the success status overridden to name the discard | ok — Phase K §27; see the reload note below |
 //! | `new-proj` | "New" button (`icon_btn`, "file" icon) | [`new_pressed`] → [`new_project`] + [`sync_name_edit`]: installs [`blank_project`]`("Untitled")` — field-for-field the MCP `new_project` tool's defaults and reset set (mcp_tools.rs `tool_new_project`) — clears solo, stops playback, no snapshot/confirm | ok |
 //! | `save-proj` | "Save project" button (`icon_btn`, "floppy-disk" icon) | [`save_named_pressed`] → `EditorCore::save_named_project` (slugifies the name, writes `./projects/<slug>.json`, refreshes `project_files`, sets status), then — only on success — `shell::write_recovery` + `shell::touch_recent` to keep snapshot/recents in step | fixed in Phase H — the Phase G caveat is closed: the op returns `bool` and [`after_save`] gates the recovery/recents sync on it, so a failed save no longer plants a phantom recent |
 //! | `recover` | "Recover" button (`icon_btn`, "arrow-rotate-left" icon) | [`recover_pressed`] → [`recover_snapshot`] (`shell::read_recovery` = `./projects/.recovery.json`, shell.rs) → [`apply_recovered_project`] + [`sync_name_edit`] | fixed in Phase G — the reset now also clears solo and stops playback (see the fn) |
 //! | `proj-list` | selector list (col) | — container, no handler | ok |
 //! | `open-proj-{i}` | "Open" button per row (plain text `btn` — list rows stay text; no icon), accent-styled when `i == core.project_index` | [`open_row_pressed`] → sets `project_index`, `EditorCore::open_project_file` (editor.rs:3636: reads the file; resets current/playhead/figure/node; sets status), [`clear_stale_solo`], [`sync_name_edit`] | fixed in Phase G — stale-solo guard added; the highlight tracks the core's cycle cursor (the palette's `cycle-project` moves it without opening), exactly as [`ProjectRow`] documents |
 //! | *(empty-list text, unkeyed)* | "No saved projects in ./projects/ yet." | — display only; wording is `cycle_project_file`'s own status string (editor.rs), verbatim | ok |
+//!
+//! Reload note (Phase K §27): reloading re-opens the saved
+//! file and throws the session's unsaved work away — the
+//! success status says so outright ("Reloaded {name} from
+//! disk — unsaved changes discarded."), because a silent
+//! discard is the one unforgivable version of this button.
+//! The discard is not quite total, and the limit is worth
+//! knowing: opening a file never touches the recovery
+//! snapshot, so the state being discarded still exists in
+//! `./projects/.recovery.json` — the Recover button can
+//! bring it back — until the next autosave overwrites the
+//! snapshot (`poll()`'s `maybe_autosave` cadence, every 25
+//! counted edits; a named save also rewrites it).
 //!
 //! Name-field sync is not duplicated work: the handlers above
 //! call [`sync_name_edit`] for an immediate refresh after their
@@ -368,6 +382,29 @@ pub fn current_file_meta(core: &EditorCore) -> Option<String> {
     Some(meta_text(metadata.len(), modified, SystemTime::now()))
 }
 
+/// The file "Reload from disk" would re-open: the §27 gate
+/// ([`current_file_path`] — the shell's last-opened record
+/// must name this project, and the name must resolve over
+/// the core's file list) as an owned path, so the caller
+/// can hold it across the `&mut` open call. `None` is the
+/// refusal case: no saved file backs this session (never
+/// saved, saved under another name, or the file has left
+/// the list), and there is nothing honest to reload.
+///
+/// Like [`current_file_meta`], this wrapper reads the
+/// shell's recents from disk, so it is not itself
+/// unit-tested (the §31 precedent); the decision it wraps
+/// is [`current_file_path`], which is — see its tests and
+/// the reload-gate test below.
+pub fn reload_target(core: &EditorCore) -> Option<PathBuf> {
+    current_file_path(
+        stykanimate_rs::shell::last_opened_project(),
+        &core.project.name,
+        &core.project_files,
+    )
+    .cloned()
+}
+
 // ---------------------------------------------------------------------
 // Core-level actions (handlers below are thin State wrappers)
 // ---------------------------------------------------------------------
@@ -441,6 +478,74 @@ pub fn recover_snapshot(core: &mut EditorCore) -> bool {
             core.status = "No recovery snapshot found in ./projects/.".into();
             false
         }
+    }
+}
+
+/// Reload the project from its saved file, discarding the
+/// session's unsaved work (Phase K §27). `target` is the
+/// [`reload_target`] decision; taking it as a parameter —
+/// rather than re-reading the shell record here — is what
+/// makes the refusal path testable without a disk.
+///
+/// The open itself is the selector rows' mechanism,
+/// unchanged: `open_project_file` (editor.rs:3787) takes
+/// no path argument and returns `()` — it opens
+/// `project_files[project_index]` — so the target is
+/// first located in the core's list and the index pointed
+/// at it, exactly as [`open_row_pressed`] does. A target
+/// outside the list cannot be opened that way and is
+/// refused with the same status as no target: as far as
+/// this session is concerned there is no saved file at
+/// that path to reload. No snapshot is taken on any path —
+/// neither the rows' open nor this reload creates an undo
+/// step for a project swap.
+///
+/// Post-open discipline mirrors the rows': the stale-solo
+/// guard runs ([`clear_stale_solo`] — the op also clears
+/// solo itself on success; the guard covers the failure
+/// path, where the project never changed), and the
+/// caller re-syncs the name field. The one deliberate
+/// difference is the final status. The op reports only
+/// through the status line — "Opened {path}" on success,
+/// "Open failed: {e}" on failure — so success is read off
+/// that wording immediately after the call, before
+/// anything else can write status (the solo guard writes
+/// none). On success the status is replaced with one that
+/// names the discard: the reload has just thrown the
+/// session's unsaved work away, and the user is told so,
+/// not left to discover it. On failure the op's own
+/// "Open failed: …" stands — nothing was discarded, and
+/// the status must not claim otherwise. Opening never
+/// touches the recovery snapshot, so even after a
+/// successful reload the discarded state survives in
+/// `./projects/.recovery.json` until the next autosave
+/// (see the module docs' reload note).
+///
+/// Returns whether the reload landed.
+pub fn reload_from_disk(core: &mut EditorCore, target: Option<&Path>) -> bool {
+    let Some(target) = target else {
+        core.status = "No saved file to reload.".into();
+        return false;
+    };
+    let Some(index) = core
+        .project_files
+        .iter()
+        .position(|path| path.as_path() == target)
+    else {
+        core.status = "No saved file to reload.".into();
+        return false;
+    };
+    core.project_index = index;
+    core.open_project_file();
+    clear_stale_solo(core);
+    if core.status.starts_with("Opened ") {
+        core.status = format!(
+            "Reloaded {} from disk — unsaved changes discarded.",
+            core.project.name
+        );
+        true
+    } else {
+        false
     }
 }
 
@@ -586,6 +691,18 @@ fn recover_pressed(s: &mut State) {
     sync_name_edit(s);
 }
 
+/// "Reload from disk": resolve the target from the shell
+/// record ([`reload_target`]), run the reload
+/// ([`reload_from_disk`] owns the refusal status, the open
+/// and the discard-naming success status), then re-sync
+/// the name field — the rows' post-open discipline, as
+/// with every switch this section performs.
+fn reload_pressed(s: &mut State) {
+    let target = reload_target(&s.core);
+    reload_from_disk(&mut s.core, target.as_deref());
+    sync_name_edit(s);
+}
+
 // ---------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------
@@ -593,8 +710,9 @@ fn recover_pressed(s: &mut State) {
 /// The Project section: name field + Set name, the
 /// current-file line and its metadata line when the
 /// shell's last-opened record names this project,
-/// New / Save project / Recover, the autosave line, and
-/// one Open row per saved project in the core's file list.
+/// Reload from disk, New / Save project / Recover, the
+/// autosave line, and one Open row per saved project in
+/// the core's file list.
 pub fn project_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let rows = project_rows(core);
@@ -671,6 +789,21 @@ pub fn project_section(s: &State, t: &Theme) -> El {
                 .color(t.text_secondary),
         );
     }
+
+    // Reload from disk sits beside the current-file lines
+    // it acts on. It renders unconditionally — unlike the
+    // lines above, which are conditional on the §31 match —
+    // because the no-target case is a real press outcome
+    // (the status explains there is no saved file to
+    // reload), and a button that vanishes exactly when it
+    // would have something to say teaches nothing.
+    section = section.child(
+        row()
+            .w_full()
+            .gap(8.0)
+            .center_y()
+            .child(btn("proj-reload", "Reload from disk", false, t, reload_pressed)),
+    );
 
     section = section.child(
         row()
@@ -768,6 +901,7 @@ last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
 pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
+playback_speed: 1.0,
             was_playing: false,
         }
     }
@@ -1090,5 +1224,128 @@ loop_playback: true,
         s.name_edit.focused = false;
         sync_name_edit(&mut s);
         assert_eq!(s.name_edit.text, "Other Project");
+    }
+
+    /// A scratch path for the reload tests, unique to this
+    /// test within the process (the reload action reads real
+    /// files — that is its job — so its success and failure
+    /// paths are exercised against real temp files, never
+    /// against `./projects/`).
+    fn reload_scratch(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "stykanimate-rs-proj-reload-{}-{tag}.json",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn reload_gate_resolves_the_current_file_as_an_owned_path() {
+        // The gate reload_target evaluates, in the §27 test
+        // pattern: the factored decision (current_file_path)
+        // plus the clone that makes the path owned. The
+        // wrapper itself reads the shell's recents from disk
+        // and — like current_file_meta, the §31 precedent —
+        // is not unit-tested directly; everything it decides
+        // is decided here.
+        let files = vec![
+            PathBuf::from("./projects/alpha.json"),
+            PathBuf::from("./projects/my-film.json"),
+        ];
+        // Name matches a listed file: the reload has a target.
+        assert_eq!(
+            current_file_path(Some("My Film".to_string()), "My Film", &files).cloned(),
+            Some(files[1].clone())
+        );
+        // Name absent from the list (deleted, renamed, never
+        // saved): no target.
+        assert_eq!(
+            current_file_path(Some("Ghost".to_string()), "Ghost", &files).cloned(),
+            None
+        );
+        // No last-opened record at all: no target.
+        assert_eq!(current_file_path(None, "My Film", &files).cloned(), None);
+        // A differing record: no target (the §31 guard).
+        assert_eq!(
+            current_file_path(Some("Other Film".to_string()), "Untitled", &files)
+                .cloned(),
+            None
+        );
+    }
+
+    #[test]
+    fn reload_without_a_target_is_refused_and_changes_nothing() {
+        let mut core = EditorCore::new();
+        core.project.name = "Unsaved Work".into();
+        let depth = core.undo_depth();
+        assert!(!reload_from_disk(&mut core, None));
+        // The refusal names itself, and that is all that
+        // happens: open_project_file is never called, the
+        // project is untouched, no snapshot is taken.
+        assert_eq!(core.status, "No saved file to reload.");
+        assert_eq!(core.project.name, "Unsaved Work");
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn reload_with_a_target_outside_the_list_is_refused() {
+        // open_project_file opens by index into the core's
+        // list, so a path the list does not hold cannot be
+        // reloaded — the same refusal as no target, and the
+        // open is never attempted.
+        let mut core = EditorCore::new();
+        core.project.name = "Unsaved Work".into();
+        core.project_files = vec![PathBuf::from("./projects/alpha.json")];
+        let elsewhere = PathBuf::from("./projects/elsewhere.json");
+        assert!(!reload_from_disk(&mut core, Some(elsewhere.as_path())));
+        assert_eq!(core.status, "No saved file to reload.");
+        assert_eq!(core.project.name, "Unsaved Work");
+    }
+
+    #[test]
+    fn reload_reads_the_saved_file_and_names_the_discard() {
+        // A real saved file: a demo project under the name
+        // "Disk Film", serialised exactly as a named save
+        // writes it.
+        let path = reload_scratch("disk-film");
+        let mut saved = Project::new_demo();
+        saved.name = "Disk Film".into();
+        std::fs::write(&path, serde_json::to_string(&saved).expect("serialise"))
+            .expect("write scratch project");
+
+        // The session has since diverged: an unsaved rename
+        // the reload must throw away.
+        let mut core = EditorCore::new();
+        core.project_files = vec![path.clone()];
+        core.project.name = "Unsaved Rename".into();
+
+        assert!(reload_from_disk(&mut core, Some(path.as_path())));
+        // The core's index was pointed at the file (the open
+        // op's mechanism), the saved project is now open,
+        // and the status names the discard outright.
+        assert_eq!(core.project_index, 0);
+        assert_eq!(core.project.name, "Disk Film");
+        assert_eq!(
+            core.status,
+            "Reloaded Disk Film from disk — unsaved changes discarded."
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reload_of_an_unreadable_file_keeps_the_ops_failure_status() {
+        // A listed file whose contents are not a project:
+        // the open fails, so nothing was discarded and the
+        // status must not claim a reload — the op's own
+        // failure wording stands.
+        let path = reload_scratch("corrupt");
+        std::fs::write(&path, "this is not project json").expect("write scratch file");
+        let mut core = EditorCore::new();
+        core.project_files = vec![path.clone()];
+        core.project.name = "Unsaved Rename".into();
+
+        assert!(!reload_from_disk(&mut core, Some(path.as_path())));
+        assert_eq!(core.project.name, "Unsaved Rename");
+        assert!(core.status.starts_with("Open failed:"), "{}", core.status);
+        let _ = std::fs::remove_file(&path);
     }
 }

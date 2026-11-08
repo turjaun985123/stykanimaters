@@ -92,9 +92,21 @@
 //!    deliberate un-render-like choices (live anchor
 //!    resolution, no frame gating) are documented on the
 //!    function itself.
+//! 8. **FX clip gizmo:** `fx_clip_gizmo_geometry` is the
+//!    same marker for a `project.fx_clips` entry — same
+//!    crosshair, same ring, same colour, built by the same
+//!    helper. Its one deliberate difference from the event
+//!    gizmo is *when* it evaluates the anchor: at the
+//!    clip's start frame, not the display frame. The
+//!    marker sits at the pose where the effect FIRES (its
+//!    start frame), so it is visible from any playhead
+//!    position — that is deliberate: it answers "where
+//!    will this effect appear?", not "where is the joint
+//!    right now?". The full contract is documented on the
+//!    function itself.
 
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::model::ParticleEvent;
+use stykanimate_rs::model::{FxClipEntry, ParticleEvent};
 use stykanimate_rs::vfx::{clip_particles, weather_particles, ClipKind};
 
 /// One drawable particle primitive in stage coordinates.
@@ -301,7 +313,20 @@ pub fn gizmo_geometry(core: &EditorCore, clip_index: usize) -> Vec<ParticlePrim>
     let Some(ev) = core.project.particles.get(clip_index) else {
         return Vec::new();
     };
-    let anchor = event_anchor(core, ev);
+    gizmo_prims_at(event_anchor(core, ev))
+}
+
+/// The gizmo marker itself, centred on `anchor`: a
+/// crosshair (two `Line` prims through the anchor,
+/// half-arm [`GIZMO_ARM`]) plus a ring of
+/// [`GIZMO_RING_DOTS`] `Disc` prims on a circle of radius
+/// [`GIZMO_RING_R`] around it, all in [`GIZMO_COLOR`] at
+/// alpha [`GIZMO_ALPHA`]. Lines before discs, the order
+/// `fx_geometry` returns. Shared by both gizmo builders
+/// so the event marker and the FX clip marker can never
+/// drift apart visually — they are siblings by
+/// construction, not by convention.
+fn gizmo_prims_at(anchor: [f32; 2]) -> Vec<ParticlePrim> {
     let [ax, ay] = anchor;
     let mut prims = Vec::with_capacity(2 + GIZMO_RING_DOTS);
     prims.push(ParticlePrim::Line {
@@ -326,6 +351,72 @@ pub fn gizmo_geometry(core: &EditorCore, clip_index: usize) -> Vec<ParticlePrim>
         });
     }
     prims
+}
+
+/// Where an FX clip entry fires from: the entry node's
+/// world position via `EditorCore::positions_f` — the
+/// same evaluation path [`event_anchor`] uses — but at
+/// the clip's start frame rather than the display frame.
+/// The start is rounded to the nearest authored frame and
+/// clamped into the timeline exactly the way the editor
+/// clamps its playhead (`min(frames.len() - 1)`,
+/// saturating at zero), so an out-of-timeline start still
+/// resolves to the nearest real pose instead of
+/// extrapolating one. (`FxClipEntry.node` is a plain
+/// `usize` in the model — node 0 is the root joint — and
+/// an out-of-range node is clamped to the figure's last
+/// joint, so a stale node id marks the figure's end
+/// rather than losing the marker.) `None` when the anchor
+/// cannot be evaluated at all: the entry's figure is out
+/// of range — checked *before* the call, because
+/// `positions_f` indexes the figure directly — or the
+/// figure evaluates to no joints.
+fn fx_clip_anchor(core: &EditorCore, entry: &FxClipEntry) -> Option<[f32; 2]> {
+    if entry.figure >= core.project.figures.len() {
+        return None;
+    }
+    let last = core.project.frames.len().saturating_sub(1) as f32;
+    let start = entry.clip.start.round().clamp(0.0, last);
+    let pos = core.positions_f(start, entry.figure);
+    if pos.is_empty() {
+        return None;
+    }
+    Some(pos[entry.node.min(pos.len() - 1)])
+}
+
+/// Anchor gizmo for the `project.fx_clips` entry at
+/// `clip_index`: the identical marker [`gizmo_geometry`]
+/// draws for a particle event — crosshair plus dot ring
+/// in [`GIZMO_COLOR`] — centred on the joint the clip is
+/// anchored to. Stage space, unscaled; the consumer
+/// applies its view transform. An out-of-range
+/// `clip_index`, an out-of-range figure, or an anchor
+/// that cannot be evaluated returns an empty vec.
+///
+/// This is an **editor gizmo, not a render layer**, like
+/// its sibling — but where the event gizmo resolves its
+/// anchor *live* (at the display frame), the clip gizmo
+/// evaluates at the clip's **start frame**: the marker
+/// sits at the pose where the effect FIRES, so it is
+/// visible from any playhead position. That is
+/// deliberate — it answers "where will this effect
+/// appear?", which is the question a selection marker
+/// for a timed effect has to answer; scrubbing to the
+/// clip and reading its live anchor from `fx_geometry`'s
+/// motes remains the frame-accurate view. Two further
+/// choices mirror the event gizmo's documented logic: a
+/// hidden figure's anchor still resolves (a hidden
+/// anchor is precisely when the marker is needed), and
+/// the anchor goes through `positions_f`, so graph
+/// channels apply exactly as the stage draws the figure.
+pub fn fx_clip_gizmo_geometry(core: &EditorCore, clip_index: usize) -> Vec<ParticlePrim> {
+    let Some(entry) = core.project.fx_clips.get(clip_index) else {
+        return Vec::new();
+    };
+    let Some(anchor) = fx_clip_anchor(core, entry) else {
+        return Vec::new();
+    };
+    gizmo_prims_at(anchor)
 }
 
 #[cfg(test)]
@@ -562,5 +653,74 @@ mod tests {
         ev.node = Some(3);
         core.project.particles.push(ev);
         assert_gizmo_at(&gizmo_geometry(&core, 0), [70.0, 80.0]);
+    }
+
+    #[test]
+    fn fx_gizmo_missing_index_is_empty() {
+        let core = EditorCore::new();
+        assert!(fx_clip_gizmo_geometry(&core, 0).is_empty());
+        let mut core = EditorCore::new();
+        core.project.fx_clips.push(burst_entry(0.0, 4.0));
+        assert!(fx_clip_gizmo_geometry(&core, 1).is_empty());
+        assert!(!fx_clip_gizmo_geometry(&core, 0).is_empty());
+    }
+
+    #[test]
+    fn fx_gizmo_bad_figure_is_empty() {
+        // The guard matters beyond tidiness: positions_f
+        // indexes the figure directly, so an out-of-range
+        // figure must be refused before the call, never
+        // reached.
+        let mut core = EditorCore::new();
+        let mut bad = burst_entry(0.0, 4.0);
+        bad.figure = 99;
+        core.project.fx_clips.push(bad);
+        assert!(fx_clip_gizmo_geometry(&core, 0).is_empty());
+    }
+
+    #[test]
+    fn fx_gizmo_marks_the_anchor_at_the_clips_start_frame() {
+        // The playhead sits on frame 0, but the clip fires
+        // at frame 2: the marker belongs to the pose where
+        // the effect fires, evaluated at the start frame
+        // through the same positions_f path the production
+        // geometry uses — not to wherever the joint is now.
+        let mut core = EditorCore::new();
+        core.project.fx_clips.push(burst_entry(2.0, 4.0));
+        assert_eq!(core.display_frame(), 0.0);
+        let anchor = core.positions_f(2.0, 0)[1];
+        assert_gizmo_at(&fx_clip_gizmo_geometry(&core, 0), anchor);
+    }
+
+    #[test]
+    fn fx_gizmo_start_past_the_timeline_clamps_to_the_last_frame() {
+        let mut core = EditorCore::new();
+        core.project.fx_clips.push(burst_entry(100.0, 4.0));
+        let last = (core.project.frames.len() - 1) as f32;
+        let anchor = core.positions_f(last, 0)[1];
+        assert_gizmo_at(&fx_clip_gizmo_geometry(&core, 0), anchor);
+    }
+
+    #[test]
+    fn fx_gizmo_node_zero_anchors_at_the_root_joint() {
+        // FxClipEntry.node is a plain index (no Option in
+        // the model); node 0 is the figure's root joint.
+        let mut core = EditorCore::new();
+        let mut entry = burst_entry(1.0, 4.0);
+        entry.node = 0;
+        core.project.fx_clips.push(entry);
+        let anchor = core.positions_f(1.0, 0)[0];
+        assert_gizmo_at(&fx_clip_gizmo_geometry(&core, 0), anchor);
+    }
+
+    #[test]
+    fn fx_gizmo_out_of_range_node_clamps_to_the_last_joint() {
+        let mut core = EditorCore::new();
+        let mut entry = burst_entry(0.0, 4.0);
+        entry.node = 999;
+        core.project.fx_clips.push(entry);
+        let pos = core.positions_f(0.0, 0);
+        let anchor = pos[pos.len() - 1];
+        assert_gizmo_at(&fx_clip_gizmo_geometry(&core, 0), anchor);
     }
 }

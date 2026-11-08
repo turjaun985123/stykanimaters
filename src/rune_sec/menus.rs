@@ -8,7 +8,13 @@
 //! Font Awesome glyphs on the high-value items — see
 //! [`menu_icon`] — with keys, labels, active behaviour
 //! and handlers unchanged; Phase J: File ▸ Open recent
-//! entries under Load — see [`recent_items`]).
+//! entries under Load — see [`recent_items`]; Phase K:
+//! the File ▸ Save item's Ctrl+S hint, shown only once
+//! the binding really landed in `on_key` — see
+//! [`shortcut_hint`] — and View ▸ Playback speed, an
+//! action item cycling the shell's playback-speed
+//! factor through the playback section's
+//! `cycle_playback_speed`).
 //! Declared from `main.rs` by the integrator; bin-crate
 //! code, not part of the engine library.
 //!
@@ -148,6 +154,12 @@ fn closing(f: impl Fn(&mut State) + 'static) -> impl Fn(&mut State) + 'static {
 /// (`main.rs::on_key`, which runs
 /// `command_palette::palette_handle_key` first):
 ///
+/// - `save` — Ctrl+S (`on_key`'s `is_command('s')` arm
+///   runs `core.save()` — the Save item's own op, no
+///   second save path; the binding landed in Phase K,
+///   and the hint was added in the same phase, not
+///   before it existed);
+///
 /// - `undo` — Ctrl+Z (`on_key`: `is_command('z')` without
 ///   shift runs `core.undo()`);
 /// - `redo` — Ctrl+Shift+Z (the same arm with shift;
@@ -158,16 +170,17 @@ fn closing(f: impl Fn(&mut State) + 'static) -> impl Fn(&mut State) + 'static {
 /// - `menu-palette` — Ctrl+K (`palette_handle_key`:
 ///   `is_command('k')` opens the palette while closed).
 ///
-/// Everything else in these menus — Save, Load, Export
+/// Everything else in these menus — Load, Export
 /// PNG, Copy/Paste frame, Fit view, Centre on selection,
 /// the sidebar toggles, Stage guides, Camera frame, Safe
-/// frames, Shortcuts — has NO
+/// frames, Playback speed, Shortcuts — has NO
 /// shell key binding and gets no hint: an invented hint
 /// would be a lie on screen. The spellings match the
 /// help panel's shortcut table (`help_panel.rs`). Pinned
 /// by the `shortcut_hints_name_only_real_bindings` test.
 fn shortcut_hint(key: &str) -> Option<&'static str> {
     match key {
+        "save" => Some("Ctrl+S"),
         "undo" => Some("Ctrl+Z"),
         "redo" => Some("Ctrl+Shift+Z"),
         "onion" => Some("O"),
@@ -224,7 +237,8 @@ fn hinted_item(
 /// keyed by the item's element key — or `None` when the
 /// item stays plain text. Only the high-value items are
 /// mapped: the File actions, Edit's undo/redo and frame
-/// clipboard, View's visibility toggles and sidebar
+/// clipboard, View's visibility toggles, its Playback
+/// speed action and sidebar
 /// switches, and Help's two entries. Fit view / Centre on
 /// selection stay unmapped (no glyph reads as clearly,
 /// and an unclear icon is worse than none). The File ▸
@@ -263,6 +277,10 @@ fn menu_icon(key: &str) -> Option<&'static str> {
         "view-guides" => Some("eye"),
         "view-guides-frustum" => Some("crosshairs"),
         "view-guides-safe" => Some("crosshairs"),
+        // View ▸ Playback speed (Phase K): the gauge —
+        // a dial reads as speed at a glance, and the
+        // glyph is in the curated set (`icon_data`).
+        "view-speed" => Some("gauge"),
         "view-toggle-left" => Some("list"),
         "view-toggle-right" => Some("list"),
         // Help: palette search, shortcuts question.
@@ -588,7 +606,18 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
             // integrator-owned, default visible) and render
             // active while their column is shown — the same
             // field-flip pattern as Onion, one level up
-            // (shell state, not core).
+            // (shell state, not core). Playback speed
+            // (Phase K) sits directly under the guides
+            // children, before the separator: an ACTION
+            // item, not a toggle — each press cycles the
+            // shell's `State::playback_speed` factor
+            // (0.25× … 2×) through the playback section's
+            // `cycle_playback_speed`, the exact fn the
+            // transport row's `pb-speed` button calls, so
+            // it renders inactive like Fit view and carries
+            // no shortcut hint (the shell binds no key to
+            // it — see `shortcut_hint`). Its gauge glyph
+            // comes from `menu_icon`.
             list = list
                 .child(item("onion", "Onion skin", core.onion, t, |s| {
                     s.core.onion = !s.core.onion;
@@ -614,6 +643,9 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
                         crate::rune_sec::settings_popover::toggle_guides_safe(s);
                     },
                 ))
+                .child(item("view-speed", "Playback speed", false, t, |s| {
+                    crate::rune_sec::playback_controls::cycle_playback_speed(s);
+                }))
                 .child(separator("menu-view-sep", t))
                 .child(item("view-fit", "Fit view", false, t, |s| {
                     s.core.frame_all_figures()
@@ -711,8 +743,13 @@ mod tests {
     fn shortcut_hints_name_only_real_bindings() {
         // The verified list, from `main.rs::on_key` and
         // `command_palette::palette_handle_key` (see the
-        // `shortcut_hint` docs): exactly four menu items
-        // have shell key bindings.
+        // `shortcut_hint` docs): exactly five menu items
+        // have shell key bindings. Save joined the list
+        // in Phase K, when `on_key` gained its real
+        // Ctrl+S arm (`is_command('s')` → `core.save()`,
+        // the Save item's own op) — the hint names the
+        // binding only because the binding exists.
+        assert_eq!(shortcut_hint("save"), Some("Ctrl+S"));
         assert_eq!(shortcut_hint("undo"), Some("Ctrl+Z"));
         assert_eq!(shortcut_hint("redo"), Some("Ctrl+Shift+Z"));
         assert_eq!(shortcut_hint("onion"), Some("O"));
@@ -723,7 +760,6 @@ mod tests {
         // entry to `shortcut_hint` and to this list in
         // the same change.
         for key in [
-            "save",
             "load",
             "export",
             "copy-frame",
@@ -731,6 +767,7 @@ mod tests {
             "view-guides",
             "view-guides-frustum",
             "view-guides-safe",
+            "view-speed",
             "view-fit",
             "view-centre",
             "view-toggle-left",
@@ -761,6 +798,7 @@ mod tests {
             ("view-guides", "eye"),
             ("view-guides-frustum", "crosshairs"),
             ("view-guides-safe", "crosshairs"),
+            ("view-speed", "gauge"),
             ("view-toggle-left", "list"),
             ("view-toggle-right", "list"),
             ("menu-palette", "magnifying-glass"),
@@ -853,6 +891,40 @@ mod tests {
         let _ = menu_dropdown(&s, &t);
         s.menus.open = Some(HELP);
         let _ = menu_dropdown(&s, &t);
+    }
+
+    #[test]
+    fn view_menu_carries_the_playback_speed_item() {
+        // Phase K: View ▸ Playback speed (`view-speed`)
+        // sits under the guides children in the VIEW arm
+        // of `menu_dropdown`. Rune's `El` has no public
+        // tree-walk, so — in the Phase J menu-structure
+        // tests' style — this file pins the item through
+        // the pure maps that decide its whole rendering
+        // (`item` dispatches on exactly these two) and
+        // exercises the VIEW builder that constructs it;
+        // presented-tree proof is the Runtime suite's
+        // pattern (snap_tests), not a unit test's.
+        assert_eq!(menu_icon("view-speed"), Some("gauge"));
+        assert!(crate::rune_sec::icons::has_icon("gauge"));
+        assert!(crate::rune_sec::icon_data::ICON_NAMES.contains(&"gauge"));
+        // No shell key cycles the speed, so no hint — a
+        // hint here would be a lie on screen.
+        assert_eq!(shortcut_hint("view-speed"), None);
+        // The builder constructs the item in the shell's
+        // default state…
+        let t = rune::tok::theme(true);
+        let mut s = crate::init();
+        assert_eq!(s.playback_speed, 1.0, "speed factor defaults to normal");
+        s.menus.open = Some(VIEW);
+        let _ = menu_dropdown(&s, &t);
+        // …and the fn its press calls really cycles the
+        // factor: one call moves normal speed to the next
+        // step of the playback section's table (1.0 →
+        // 1.5), the cross-section contract this item is
+        // wired against.
+        crate::rune_sec::playback_controls::cycle_playback_speed(&mut s);
+        assert_eq!(s.playback_speed, 1.5);
     }
 
     /// (name, path) pairs in the shape `recent_items`

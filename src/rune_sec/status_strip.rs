@@ -161,7 +161,9 @@
 //! the floor cannot absorb it safely, so the segment
 //! stays text-only. The stroke and particle segments
 //! stay text-only too: a selection index has no
-//! honest glyph.
+//! honest glyph. Phase K re-ran this refusal at the
+//! Phase J strip width — see the Phase K section
+//! below; the refusal stands.
 //!
 //! ## Phase I — runtime inside the project segment
 //!
@@ -232,6 +234,56 @@
 //! NOT part of [`extra_segments`]: that composition
 //! is pure core-plus-selections, and its emptiness
 //! on a fresh core is pinned by test.
+//!
+//! ## Phase K — the audio glyph, recomputed at 744 pt
+//!
+//! Phase H refused the audio segment a glyph on
+//! width maths from the squeezed layout, where the
+//! centre column measured ≈ 461 pt. Phase J fixed
+//! the layout — side columns fixed at 300 / 340 pt,
+//! the centre takes the rest — and the Phase J
+//! headless tree dump measures the strip itself at
+//! 744 pt wide (bounds [328, 845, 744, 15] at the
+//! 1440-wide window). The refusal was therefore
+//! re-run at the new width, charging the glyph's
+//! painted width against the strip (the additive
+//! accounting, not Phase H's per-segment absorption):
+//!
+//! - the default state's fixed floors, each
+//!   [`est_text_width`] of a fresh core's live label:
+//!   project `Untitled · 0:00` 120, frame `Frame 1/5`
+//!   72, timecode `0:00.0` 48, fps `12 fps` 48, zoom
+//!   `Zoom 100%` 72, selection `Styk` 32, undo
+//!   `Undo 0` 48, play `❚❚ Paused` 72 — 512 pt in all;
+//! - the audio segment's own floor, `Audio on`: 64 pt;
+//! - the `volume-high` glyph at the loop segment's
+//!   size (11 pt, [`segment_with_icon`]): its view
+//!   box is 640 wide, so it paints 11 × 640 / 512 =
+//!   13.75 pt, plus the 4 pt icon/label gap —
+//!   17.75 pt charged;
+//! - total with the glyph: 512 + 64 + 17.75 =
+//!   **593.75 pt**.
+//!
+//! The tail absorber must keep at least 160 pt of
+//! the 744: 593.75 + 160 = 753.75 > 744 — **the
+//! glyph still does not fit**, short by 9.75 pt.
+//! Without the glyph the same state totals 576 pt
+//! and passes (576 + 160 = 736 ≤ 744, 8 pt to
+//! spare): the current strip is comfortable at the
+//! new width, but the glyph alone tips it over.
+//! (This accounting charges segment floors only;
+//! the row's dividers and 8 pt gaps, uncharged here,
+//! would widen the shortfall further.) Phase H's
+//! per-segment budget independently agrees — it is
+//! width-independent: (64 − 17.75) / 8 ≈ 5.8 pt/char
+//! against a ≈ 6 pt typical advance. So the audio
+//! segment stays text-only and nothing in the
+//! rendering changes. The arithmetic is pinned by
+//! `audio_glyph_width_recomputation_at_744pt` in
+//! the tests: any future change to a default label,
+//! the icon size or the strip's width fails that
+//! test and re-opens the question loudly instead
+//! of letting the refusal ride on stale numbers.
 
 use std::time::{Duration, SystemTime};
 
@@ -1283,5 +1335,71 @@ mod tests {
         // below its painted width either.
         assert_eq!(est_text_width("Autosaved 5m ago"), 16.0 * LABEL_CHAR_W);
         assert_eq!(est_text_width("Autosaved just now"), 18.0 * LABEL_CHAR_W);
+    }
+
+    // ---- Phase K audio-glyph width recomputation ----
+
+    #[test]
+    fn audio_glyph_width_recomputation_at_744pt() {
+        // Phase K: Phase H refused the audio segment a
+        // `volume-high` glyph on width maths from the
+        // ≈ 461 pt column; Phase J widened the strip to
+        // 744 pt (headless tree dump: status-strip
+        // bounds [328, 845, 744, 15]), so the question
+        // was re-run with the glyph's painted width
+        // charged against the strip. Every number of
+        // that computation is pinned here (see the
+        // module docs): if a default label, the icon
+        // size or the strip width ever changes, this
+        // test fails and the question must be re-asked
+        // on fresh numbers, not inherited silently.
+        let core = EditorCore::new();
+        // The default state's fixed floors — no stroke
+        // or particle selection, no loop — each through
+        // the file's own `est_text_width` of the live
+        // label a fresh demo core produces.
+        let floors = [
+            est_text_width(&project_text(&core)),
+            est_text_width(&frame_text(&core)),
+            est_text_width(&timecode(core.current, core.project.fps)),
+            est_text_width(&format!("{} fps", fps_text(core.project.fps))),
+            est_text_width(&zoom_text(&core)),
+            est_text_width(&selection_text(&core)),
+            est_text_width(&undo_text(&core)),
+            est_text_width(play_text(core.playing)),
+        ];
+        assert_eq!(
+            floors,
+            [120.0, 72.0, 48.0, 48.0, 72.0, 32.0, 48.0, 72.0],
+            "project / frame / timecode / fps / zoom / selection / undo / play"
+        );
+        // The audio segment's own floor.
+        let audio_floor = est_text_width(&audio_segment(true).unwrap());
+        assert_eq!(audio_floor, 64.0);
+        // The glyph at the loop segment's construction
+        // (`segment_with_icon`: 11 pt tall, 4 pt gap),
+        // its width through the icon table's own
+        // aspect — `volume-high`'s view box is 640
+        // wide against the 512 height.
+        let glyph_w = crate::rune_sec::icons::icon_width("volume-high", 11.0)
+            .expect("volume-high is in the curated icon set");
+        assert_eq!(glyph_w, 13.75);
+        let glyph_total = glyph_w + 4.0;
+        // The verdict: the strip minus a 160 pt
+        // minimum for the tail absorber. Without the
+        // glyph the default state fits with 8 pt to
+        // spare; with the glyph charged it overflows
+        // by 9.75 pt — so the audio segment stays
+        // text-only (the module docs carry the full
+        // argument).
+        let base: f32 = floors.iter().sum::<f32>() + audio_floor;
+        assert_eq!(base, 576.0);
+        assert!(base + 160.0 <= 744.0, "the glyph-less strip fits");
+        let total = base + glyph_total;
+        assert_eq!(total, 593.75);
+        assert!(
+            total + 160.0 > 744.0,
+            "with the glyph charged, the tail would fall below 160 pt"
+        );
     }
 }

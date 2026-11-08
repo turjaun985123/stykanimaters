@@ -89,6 +89,37 @@
 //! palette's `mirror-figure` command, both over
 //! `EditorCore::mirror_figure_all_frames`.
 //! The panel now holds 34 rows.
+//!
+//! Phase K (section 39/40) refresh, 2026-11-08: six more
+//! Features rows, each verified against the tree the
+//! same way — the named control exists and is where the
+//! row says it is. Playback speed is the transport's
+//! `pb-speed` gauge button over `cycle_playback_speed`
+//! (`SPEEDS` 0.25×–2×, `playback_controls`). Clear keys
+//! in loop range is `keyframe_tools`' `key-clear-range`
+//! button over `graph_keys::delete_keys_in_range` — the
+//! conditional section: its channel resolution landed,
+//! and the button exists in live and inert forms.
+//! Delete graph channel is the Graph panel's
+//! `graph-chan-delete` button over
+//! `graph_keys::delete_channel`. Frame rate & stage
+//! size are the Scene panel's `scene-fps` steppers and
+//! `scene-stage-size-row` width / height steppers.
+//! Quick save is real: `main.rs`' `is_command('s')`
+//! branch runs the app-bar Save button's own op. Delete
+//! project file is the Home rows' two-step
+//! `home-proj-del-{i}` → confirm, over
+//! `shell::delete_project_file`. Two candidates were
+//! DROPPED under the rule: **Right-press selects** —
+//! `stage_view`' `secondary_select` helper exists and
+//! is tested, but no element anywhere attaches a
+//! secondary-press handler (the stage canvas in
+//! `main.rs` carries only `on_drag`), so a user cannot
+//! reach it and the row would have been false; and
+//! **Reload from disk** — no `proj-reload` control or
+//! reload op exists anywhere in the tree (section 27
+//! did not land), so there is no place to name.
+//! The panel now holds 40 rows.
 
 use rune::tok::{type_, Family, Theme};
 use rune::{col, el, row, text, El};
@@ -155,12 +186,24 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
                 "Transport Loop button or the command palette",
             ),
             (
+                "Playback speed",
+                "Transport gauge button cycles 0.25×, 0.5×, 1×, 1.5×, 2×",
+            ),
+            (
                 "Keyframe jump",
                 "Prev key / Next key transport buttons — or click a timeline marker (◆ camera, ● graph)",
             ),
             (
                 "Timeline ruler",
                 "Second labels above the frame chips",
+            ),
+            (
+                "Clear keys in loop range",
+                "Keyframes — eraser button clears the selected joint's keys inside the loop range",
+            ),
+            (
+                "Delete graph channel",
+                "Graph panel — Delete channel button removes the drawn channel",
             ),
             (
                 "Stroke selection",
@@ -185,6 +228,18 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             (
                 "Mirror whole figure",
                 "Pose tools or command palette — Mirror figure (all frames)",
+            ),
+            (
+                "Frame rate & stage size",
+                "Scene panel — Frame rate stepper and Stage size width / height steppers",
+            ),
+            (
+                "Quick save",
+                "Ctrl+S — the app-bar Save button's save, on the keyboard",
+            ),
+            (
+                "Delete project file",
+                "Home workspace — Delete on a project row, then confirm",
             ),
             (
                 "Range export",
@@ -346,14 +401,14 @@ mod tests {
     use super::{group_rows, section_note, section_rows, shortcut_rows};
 
     #[test]
-    fn shortcut_rows_has_exactly_34_rows() {
+    fn shortcut_rows_has_exactly_40_rows() {
         // 9 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
-        // + 10 Features; Drawing contributes none (see the
+        // + 16 Features; Drawing contributes none (see the
         // module docs for which GPUI-era rows were dropped
         // and why). Phase G added the four palette/menu rows
         // to Shortcuts; Phase I added the Features section;
-        // Phase J added four rows to it.
-        assert_eq!(shortcut_rows().len(), 34);
+        // Phase J added four rows to it; Phase K six more.
+        assert_eq!(shortcut_rows().len(), 40);
     }
 
     #[test]
@@ -404,8 +459,9 @@ mod tests {
         )));
         // The Features rows live in their own section, in
         // this order, and nowhere else. (The count covers
-        // the Phase J rows too — see the Phase J test.)
-        assert_eq!(section_rows("Features").len(), 10);
+        // the Phase J and Phase K rows too — see those
+        // tests.)
+        assert_eq!(section_rows("Features").len(), 16);
     }
 
     #[test]
@@ -438,15 +494,79 @@ mod tests {
             "Export panel — SVG and Spritesheet now take the loop range too"
         )));
         // The ruler sits with the timeline rows, directly
-        // after Keyframe jump; the section holds all ten
-        // feature rows and no eleventh has crept in.
+        // after Keyframe jump; the section holds all
+        // sixteen feature rows (ten at Phase J, six more
+        // in Phase K) and no seventeenth has crept in.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 10);
+        assert_eq!(features.len(), 16);
         let jump = features
             .iter()
             .position(|(label, _)| *label == "Keyframe jump")
             .expect("Keyframe jump row");
         assert_eq!(features[jump + 1].0, "Timeline ruler");
+    }
+
+    #[test]
+    fn phase_k_feature_rows_are_listed() {
+        // The Phase K features, each verified against the
+        // tree before listing (see the module docs):
+        // Playback speed — the `pb-speed` gauge button and
+        // `cycle_playback_speed` in `playback_controls`
+        // (SPEEDS 0.25×–2×); Clear keys in loop range —
+        // the `key-clear-range` button in
+        // `keyframe_tools`, live and inert forms, over
+        // `graph_keys::delete_keys_in_range`; Delete graph
+        // channel — the `graph-chan-delete` button in
+        // `graph_panel` over `graph_keys::delete_channel`;
+        // Frame rate & stage size — the `scene-fps`
+        // steppers and the `scene-stage-size-row` Width /
+        // Height steppers in `scene_panel`; Quick save —
+        // the `is_command('s')` branch in `main.rs` running
+        // the app-bar Save op; Delete project file — the
+        // two-step `home-proj-del-{i}` → confirm rows in
+        // `home_panel` over `shell::delete_project_file`.
+        // Two candidates are deliberately NOT here:
+        // Right-press selects (the `secondary_select`
+        // helper in `stage_view` is wired to no element —
+        // not user-reachable) and Reload from disk (no
+        // `proj-reload` exists anywhere in the tree).
+        let rows = shortcut_rows();
+        assert!(rows.contains(&(
+            "Playback speed",
+            "Transport gauge button cycles 0.25×, 0.5×, 1×, 1.5×, 2×"
+        )));
+        assert!(rows.contains(&(
+            "Clear keys in loop range",
+            "Keyframes — eraser button clears the selected joint's keys inside the loop range"
+        )));
+        assert!(rows.contains(&(
+            "Delete graph channel",
+            "Graph panel — Delete channel button removes the drawn channel"
+        )));
+        assert!(rows.contains(&(
+            "Frame rate & stage size",
+            "Scene panel — Frame rate stepper and Stage size width / height steppers"
+        )));
+        assert!(rows.contains(&(
+            "Quick save",
+            "Ctrl+S — the app-bar Save button's save, on the keyboard"
+        )));
+        assert!(rows.contains(&(
+            "Delete project file",
+            "Home workspace — Delete on a project row, then confirm"
+        )));
+        // Placement: Playback speed sits with the
+        // transport rows directly after Loop playback;
+        // the two dropped candidates appear nowhere.
+        let features = section_rows("Features");
+        assert_eq!(features.len(), 16);
+        let loop_row = features
+            .iter()
+            .position(|(label, _)| *label == "Loop playback")
+            .expect("Loop playback row");
+        assert_eq!(features[loop_row + 1].0, "Playback speed");
+        assert!(!rows.iter().any(|(label, _)| *label == "Right-press selects"));
+        assert!(!rows.iter().any(|(label, _)| *label == "Reload from disk"));
     }
 
     #[test]

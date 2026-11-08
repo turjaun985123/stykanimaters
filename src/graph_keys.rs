@@ -46,6 +46,22 @@
 //! silently inert), or when an angle/length target names a
 //! node the destination figure's rig does not have.
 //!
+//! ## Deleting channels and clearing key ranges
+//!
+//! [`delete_channel`] removes a whole channel from the
+//! project — the counterpart [`copy_keys`] and
+//! [`duplicate_channel_to_figure`] never had.
+//! [`delete_keys_in_range`] clears the keys of one channel
+//! whose frames fall inside a range, leaving the channel
+//! itself (possibly empty) and every out-of-range key in
+//! place; [`keys_in_range`] is its read-only counting half,
+//! so a caller can ask "how much would this clear?" before
+//! committing. Both mutating ops follow the house
+//! discipline: a refusal (no such channel, nothing in the
+//! range) sets the status line and takes **no snapshot**;
+//! a success snapshots exactly once. Range ends are
+//! inclusive, and range statuses display the ends 1-based.
+//!
 //! ## Channel statistics
 //!
 //! [`channel_stats`] is the read-only companion: one
@@ -221,6 +237,113 @@ pub fn duplicate_channel_to_figure(
         key_count
     );
     true
+}
+
+/// Display text for a frame position, mirroring the FX
+/// ops' private `frame_label` (in `fx_ops.rs`): whole
+/// frames render without a fraction (`4`), fractional ones
+/// with one decimal (`4.5`). That helper is private to its
+/// module, so the formatting is duplicated here and the two
+/// must be kept in step — the same arrangement
+/// [`target_label`] has with the graph panel. Range
+/// statuses pass `frame + 1.0`, so the ends display
+/// 1-based, the FX ops' convention.
+fn frame_label(frame: f32) -> String {
+    if frame.fract() == 0.0 {
+        format!("{}", frame as i64)
+    } else {
+        format!("{frame:.1}")
+    }
+}
+
+/// Delete the channel at `channel_index` (an index into
+/// `core.project.channels`) from the project, keys and all.
+/// On success exactly one snapshot is taken, the channel is
+/// removed and the status line names what went — its
+/// 1-based channel number, its target's label and its key
+/// count; returns `true`.
+///
+/// Returns `false` — no snapshot, project untouched — when
+/// no channel sits at `channel_index`.
+pub fn delete_channel(core: &mut EditorCore, channel_index: usize) -> bool {
+    let Some(channel) = core.project.channels.get(channel_index) else {
+        core.status = format!("No graph channel {} to delete.", channel_index + 1);
+        return false;
+    };
+    let label = target_label(channel.target);
+    let key_count = channel.keys.len();
+    core.snapshot();
+    core.project.channels.remove(channel_index);
+    core.status = format!(
+        "Deleted graph channel {} ({}, {} key(s)).",
+        channel_index + 1,
+        label,
+        key_count
+    );
+    true
+}
+
+/// How many keys of the (`figure`, `target`) channel have
+/// a frame inside `[from, to]`, both ends inclusive. The
+/// channel is resolved exactly like the core's own graph
+/// ops resolve one — the first matching channel — so with
+/// duplicate channels only the first is counted. No channel
+/// for the pair reads as 0. Pure and read-only: no
+/// snapshot, no status write, no mutation.
+pub fn keys_in_range(
+    core: &EditorCore,
+    figure: usize,
+    target: ChannelTarget,
+    from: f32,
+    to: f32,
+) -> usize {
+    let Some(index) = channel_index_of(core, figure, target) else {
+        return 0;
+    };
+    core.project.channels[index]
+        .keys
+        .iter()
+        .filter(|k| (from..=to).contains(&k.frame))
+        .count()
+}
+
+/// Clear every key of the (`figure`, `target`) channel
+/// whose frame lies inside `[from, to]`, both ends
+/// inclusive, and return how many keys were removed. Keys
+/// outside the range are untouched, and the channel itself
+/// is left in place even when the clear empties it — an
+/// empty channel is a valid state (see [`channel_stats`]).
+/// On success exactly one snapshot is taken and the status
+/// line reports the count and the range, its ends displayed
+/// 1-based via [`frame_label`].
+///
+/// Returns 0 — no snapshot, project untouched — when the
+/// project has no channel for the pair, or when the channel
+/// holds no keys in the range; the status line reports the
+/// range either way, so a UI binding never fails silently.
+pub fn delete_keys_in_range(
+    core: &mut EditorCore,
+    figure: usize,
+    target: ChannelTarget,
+    from: f32,
+    to: f32,
+) -> usize {
+    let range = format!("{}–{}", frame_label(from + 1.0), frame_label(to + 1.0));
+    let Some(index) = channel_index_of(core, figure, target) else {
+        core.status = format!("No keys to clear in frames {range}.");
+        return 0;
+    };
+    let count = keys_in_range(core, figure, target, from, to);
+    if count == 0 {
+        core.status = format!("No keys to clear in frames {range}.");
+        return 0;
+    }
+    core.snapshot();
+    core.project.channels[index]
+        .keys
+        .retain(|k| !(from..=to).contains(&k.frame));
+    core.status = format!("Cleared {count} key(s) in frames {range}.");
+    count
 }
 
 /// Human label for a channel target, in UI casing: "Root X",
@@ -766,5 +889,219 @@ mod tests {
         let core = EditorCore::new();
         assert!(core.project.channels.is_empty(), "demo premise");
         assert!(channel_stats(&core).is_empty());
+    }
+
+    #[test]
+    fn delete_channel_removes_it_and_reports_what_went() {
+        let mut core = core_with_channels();
+        let undo_before = core.undo_depth();
+
+        assert!(delete_channel(&mut core, 0));
+        assert_eq!(core.undo_depth(), undo_before + 1, "exactly one snapshot");
+        assert_eq!(core.project.channels.len(), 1, "one channel remains");
+        let remaining = &core.project.channels[0];
+        assert_eq!(remaining.target, ChannelTarget::RootY, "the RootY channel survives");
+        assert!(
+            core.status.contains("Deleted graph channel 1 (Root X, 3 key(s))."),
+            "status names the channel, its target and its key count: {}",
+            core.status
+        );
+
+        // And it is a single undo step: undoing restores the
+        // channel with its keys intact.
+        core.undo();
+        assert_eq!(core.project.channels.len(), 2, "undo restores the channel");
+        assert_eq!(core.project.channels[0].keys.len(), 3);
+        assert!(approx(core.project.channels[0].keys[0].frame, 10.0));
+    }
+
+    #[test]
+    fn delete_channel_among_duplicates_removes_the_named_one() {
+        let mut core = core_with_channels();
+        // A second RootX channel for figure 0, told apart by
+        // its single key — deletion is by index, so each twin
+        // can be removed without touching the other.
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(3.0, 42.0)],
+        });
+
+        assert!(delete_channel(&mut core, 2), "remove the appended twin");
+        assert_eq!(core.project.channels.len(), 2);
+        assert_eq!(
+            core.project.channels[0].keys.len(),
+            3,
+            "the original RootX channel is untouched"
+        );
+        assert!(
+            core.status.contains("Deleted graph channel 3 (Root X, 1 key(s))."),
+            "status: {}",
+            core.status
+        );
+
+        // Deleting index 0 now removes the original; the
+        // RootY channel shifts down but is unharmed.
+        assert!(delete_channel(&mut core, 0));
+        assert_eq!(core.project.channels.len(), 1);
+        assert_eq!(core.project.channels[0].target, ChannelTarget::RootY);
+    }
+
+    #[test]
+    fn delete_channel_refuses_out_of_range_without_snapshot() {
+        let mut core = core_with_channels();
+        let undo_before = core.undo_depth();
+        let channels_before = core.project.channels.clone();
+
+        assert!(!delete_channel(&mut core, 99), "no such channel");
+        assert!(
+            core.status.contains("No graph channel 100 to delete."),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.undo_depth(), undo_before, "refusal took no snapshot");
+        assert_eq!(core.project.channels, channels_before, "project untouched");
+    }
+
+    #[test]
+    fn keys_in_range_counts_inclusively_and_stays_read_only() {
+        let mut core = core_with_channels();
+        let edits_before = core.edits_since_autosave();
+        let status_before = core.status.clone();
+        // Channel 0 (RootX) holds keys at frames 10, 14, 20.
+        let count = |core: &EditorCore, from: f32, to: f32| {
+            keys_in_range(core, 0, ChannelTarget::RootX, from, to)
+        };
+        assert_eq!(count(&core, 10.0, 20.0), 3, "the whole span");
+        assert_eq!(count(&core, 10.0, 14.0), 2, "both ends inclusive");
+        assert_eq!(count(&core, 14.0, 14.0), 1, "a single-frame range on a key");
+        assert_eq!(count(&core, 11.0, 19.0), 1, "only the middle key");
+        assert_eq!(count(&core, 0.0, 9.0), 0, "before every key");
+        assert_eq!(count(&core, 21.0, 30.0), 0, "after every key");
+        // No channel for the pair reads as 0.
+        assert_eq!(keys_in_range(&core, 0, ChannelTarget::Angle(1), 0.0, 100.0), 0);
+        assert_eq!(keys_in_range(&core, 3, ChannelTarget::RootX, 0.0, 100.0), 0);
+        // Pure read: no snapshot, no status write.
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before,
+            "keys_in_range takes no snapshot"
+        );
+        assert_eq!(core.status, status_before, "keys_in_range writes no status");
+
+        // With a duplicate channel present, only the FIRST
+        // match is counted — the core's resolution rule.
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(12.0, 1.0), Key::flat(13.0, 2.0)],
+        });
+        assert_eq!(count(&core, 10.0, 20.0), 3, "the shadowed twin is not counted");
+    }
+
+    #[test]
+    fn delete_keys_in_range_clears_only_the_range() {
+        let mut core = core_with_channels();
+        let undo_before = core.undo_depth();
+
+        // Keys at 10/14/20; clearing 14..=20 removes two and
+        // leaves the frame-10 key exactly as it was.
+        assert_eq!(
+            delete_keys_in_range(&mut core, 0, ChannelTarget::RootX, 14.0, 20.0),
+            2
+        );
+        assert_eq!(core.undo_depth(), undo_before + 1, "exactly one snapshot");
+        let ch = &core.project.channels[0];
+        assert_eq!(ch.keys.len(), 1, "only the out-of-range key survives");
+        assert!(approx(ch.keys[0].frame, 10.0));
+        assert!(approx(ch.keys[0].value, 100.0), "survivor's value untouched");
+        assert!(
+            approx(ch.keys[0].in_tan, 1.5) && approx(ch.keys[0].out_tan, -2.0),
+            "survivor's tangents untouched"
+        );
+        assert_eq!(ch.keys[0].interp, Interp::Linear, "survivor's interp untouched");
+        assert!(
+            core.status.contains("Cleared 2 key(s) in frames 15–21."),
+            "status reports the count and the range, ends shown 1-based: {}",
+            core.status
+        );
+
+        // Undoing restores all three keys.
+        core.undo();
+        assert_eq!(core.project.channels[0].keys.len(), 3, "undo restores the clear");
+    }
+
+    #[test]
+    fn delete_keys_in_range_edges_are_inclusive() {
+        let mut core = core_with_channels();
+        // A range whose ends sit exactly on keys clears
+        // those keys — and only those.
+        assert_eq!(
+            delete_keys_in_range(&mut core, 0, ChannelTarget::RootX, 10.0, 10.0),
+            1,
+            "the key on the range's single frame goes"
+        );
+        let frames: Vec<f32> = core.project.channels[0]
+            .keys
+            .iter()
+            .map(|k| k.frame)
+            .collect();
+        assert_eq!(frames.len(), 2);
+        assert!(approx(frames[0], 14.0) && approx(frames[1], 20.0));
+    }
+
+    #[test]
+    fn delete_keys_in_range_may_leave_the_channel_empty() {
+        let mut core = core_with_channels();
+        assert_eq!(
+            delete_keys_in_range(&mut core, 0, ChannelTarget::RootX, 0.0, 100.0),
+            3,
+            "every key is in range"
+        );
+        assert_eq!(
+            core.project.channels.len(),
+            2,
+            "the channel itself is NOT deleted"
+        );
+        assert!(
+            core.project.channels[0].keys.is_empty(),
+            "it is left empty, which is a valid state"
+        );
+        assert!(
+            core.status.contains("Cleared 3 key(s) in frames 1–101."),
+            "status: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn delete_keys_in_range_refuses_without_snapshot_when_nothing_matches() {
+        let mut core = core_with_channels();
+        let undo_before = core.undo_depth();
+        let channels_before = core.project.channels.clone();
+
+        // A range holding no keys of an existing channel.
+        assert_eq!(
+            delete_keys_in_range(&mut core, 0, ChannelTarget::RootX, 30.0, 40.0),
+            0
+        );
+        assert!(
+            core.status.contains("No keys to clear in frames 31–41."),
+            "status: {}",
+            core.status
+        );
+        // No channel for the pair at all — same refusal.
+        assert_eq!(
+            delete_keys_in_range(&mut core, 0, ChannelTarget::Angle(1), 30.0, 40.0),
+            0
+        );
+        assert!(
+            core.status.contains("No keys to clear in frames 31–41."),
+            "status: {}",
+            core.status
+        );
+
+        assert_eq!(core.undo_depth(), undo_before, "no refusal took a snapshot");
+        assert_eq!(core.project.channels, channels_before, "project untouched");
     }
 }

@@ -29,13 +29,25 @@ use std::time::Duration;
 
 use rune::tok::{self};
 use rune::{
-    canvas, col, row, AppSpec, Cx, Drag, El, Key, KeyEvent, Phase, ScrollSpec, TextEdit, Tx,
-    WheelEvent,
+    canvas, col, row, AppSpec, Cx, Drag, El, Key, KeyEvent, Phase, PointerEvent, ScrollSpec,
+    TextEdit, Tx, WheelEvent,
 };
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Pose;
 
 use stage_view::stage_shape;
+
+thread_local! {
+    /// The stage canvas's last laid-out size, written by
+    /// `view` on every build and read by the secondary-press
+    /// handler (Phase K integrator wiring): a right-press
+    /// handler receives only element-local points, with no
+    /// element size and no `Cx`, so the size the drawing
+    /// used is handed over through here — the same
+    /// thread-local hand-off pattern other sections use
+    /// (clips selection, camera clipboard).
+    static STAGE_EL_SIZE: std::cell::Cell<[f32; 2]> = const { std::cell::Cell::new([0.0, 0.0]) };
+}
 
 pub struct State {
     pub core: EditorCore,
@@ -114,6 +126,10 @@ pub struct State {
     /// (the engine's `advance_play` behaviour); when false
     /// `poll` stops on the last frame instead.
     pub loop_playback: bool,
+    /// Playback speed multiplier (Phase K groundwork):
+    /// poll scales the advance step by this; the transport
+    /// row's speed button cycles it. 1.0 = project fps.
+    pub playback_speed: f32,
     /// Pose-library rename session (pose_tools section,
     /// Phase G).
     pub pose_rename: rune_sec::pose_tools::PoseRenameState,
@@ -183,6 +199,7 @@ fn init() -> State {
         guides_safe: true,
         onion_ui: Default::default(),
         loop_playback: true,
+        playback_speed: 1.0,
         pose_rename: rune_sec::pose_tools::PoseRenameState::new(),
         pose_library: rune_sec::pose_tools::PoseLibraryState::new(),
         was_playing: false,
@@ -240,6 +257,28 @@ fn stage_drag(s: &mut State, d: &mut Drag) {
             }
         }
     }
+}
+
+/// Canvas right-press → selection only (Phase K
+/// integrator wiring for stage_view §9): convert the
+/// element-local point through the same `RotTransform`
+/// the drag path uses — built from the stage size `view`
+/// last laid out (see `STAGE_EL_SIZE`; before any layout
+/// the project stage size stands in, the same fallback
+/// `view` itself uses) — then hand over to
+/// `stage_view::secondary_select`, which mirrors
+/// `begin_drag`'s selection writes without starting a
+/// drag or taking a snapshot.
+fn stage_secondary(s: &mut State, e: PointerEvent) {
+    let size = STAGE_EL_SIZE.with(|c| c.get());
+    let size = if size[0] > 0.0 && size[1] > 0.0 {
+        size
+    } else {
+        s.core.project.stage
+    };
+    let rt = rune_sec::stage_camera::RotTransform::for_drag(&s.core, size);
+    let p = rt.to_stage([e.x, e.y]);
+    stage_view::secondary_select(&mut s.core, p);
 }
 
 /// Canvas wheel → camera zoom (`EditorCore::camera_zoom_by`).
@@ -341,8 +380,16 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
         return true;
     }
     let prev_frame = s.last_frame;
+    // Playback speed (Phase K): the audio side is told the
+    // current rate on every playing tick, so its drift
+    // prediction tracks the same clock the picture runs on
+    // (§1's contract in audio_play).
+    s.core.note_playback_speed(s.playback_speed);
     if dt > 0.0 {
-        s.core.advance_play(dt);
+        // The playhead advances by the speed-scaled elapsed
+        // time: at 2.0 a tick moves the playhead twice as
+        // far, at 0.5 half as far.
+        s.core.advance_play(dt * s.playback_speed);
     }
     // A wrapped playhead restarts the audio pass from the
     // top (Phase G); a no-op while audio is inactive.
@@ -395,7 +442,9 @@ fn text_focused(s: &State) -> bool {
 /// (Ctrl+K opens it; arrows/Enter/Escape drive it while
 /// open). While a text field is focused, everything else is
 /// left to the field. Then: Ctrl+Z undo, Ctrl+Shift+Z /
-/// Ctrl+Y redo, Escape closes an open menu, Space play/pause,
+/// Ctrl+Y redo, Ctrl+S quick-save (the app-bar Save
+/// button's press, nothing more), Escape closes an open
+/// menu, Space play/pause,
 /// Left/Right frame step, Delete removes the selected stroke
 /// if one is selected, else the selected particle event,
 /// else the selected segment (`delete_segment` no-ops safely
@@ -431,6 +480,13 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     }
     if ev.is_command('y') {
         s.core.redo();
+        return true;
+    }
+    if ev.is_command('s') {
+        // Quick-save (Phase K): exactly the app-bar Save
+        // button's press — the core's plain save op, with
+        // no second save path invented for the keyboard.
+        s.core.save();
         return true;
     }
     match &ev.key {
@@ -495,6 +551,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     // settles on the first layout); before any layout exists,
     // draw at stage size (fit 1:1).
     let stage_size = cx.layout_size("stage").unwrap_or(core.project.stage);
+    STAGE_EL_SIZE.with(|c| c.set(stage_size));
     let stage_fill = stage_view::hex_color(core.project.background).unwrap_or(t.card);
 
     // Workspace gating (Phase E): a panel mounts only in the
@@ -623,6 +680,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                     guides_safe: s.guides_safe,
                     stroke_selected: s.stroke_selected,
                     particle_selected: s.particle_selected,
+                    fx_selected: s.fx_selected,
                     onion_prev: s.onion_ui.prev,
                     onion_next: s.onion_ui.next,
                 },
@@ -634,6 +692,9 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .fill(stage_fill)
                 .radius(8.0)
                 .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| stage_drag(s, d))
+                .on_secondary_press_local(|s: &mut State, e: PointerEvent, _tx: &mut Tx| {
+                    stage_secondary(s, e)
+                })
                 .on_wheel(|s: &mut State, e: WheelEvent, _tx: &mut Tx| stage_wheel(s, e)),
         )
         .child(

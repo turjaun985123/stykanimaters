@@ -117,6 +117,25 @@
 //!   their own readout rows (see
 //!   `InspectorSegmentState`), so this adds the topology
 //!   the header's bare "Segment N" does not show.
+//! * Joint navigation → `select_parent` /
+//!   `select_first_child` (this module; Phase K) —
+//!   keys `seg-nav-parent` / `seg-nav-child` in a row
+//!   under the readout lines: the Index line's topology
+//!   as buttons. Parent moves the selection to the
+//!   node's parent; Child to its FIRST child (the
+//!   lowest-index node naming it as parent — see
+//!   `parent_of` / `first_child_of`). Selection is not
+//!   an undoable edit — shell selection changes are
+//!   bare `selected_node` field writes (home_panel
+//!   clears the field the same way) — so the presses
+//!   take no snapshot and set no status, and at the
+//!   root (no parent) or a leaf (no child) a press is
+//!   a silent no-op. (The audit behind this addition:
+//!   length steppers already exist above —
+//!   `insp-len-dn` / `insp-len-up` over
+//!   `adjust_length`, editor.rs:489 — so the panel's
+//!   missing segment control was navigation, not
+//!   length.)
 //!
 //! When nothing is selected the panel is one muted line.
 //!
@@ -133,7 +152,7 @@
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::model::Shape;
+use stykanimate_rs::model::{NodeDef, Shape};
 
 use crate::chrome_view::btn;
 use crate::rune_sec::icon_btn::icon_btn;
@@ -513,6 +532,58 @@ pub fn format_topology(node: usize, parent: Option<usize>, children: usize) -> S
     format!("Node {node} · {parent_part} · {child_part}")
 }
 
+/// The parent of node `ni` in a figure definition, or
+/// `None` for the origin — and for an out-of-range
+/// index, so a stale selection navigates nowhere
+/// instead of panicking. The pure walk behind the
+/// panel's Parent joint button: the same `parent`
+/// field the Index line (`segment_topology`) reads.
+pub fn parent_of(nodes: &[NodeDef], ni: usize) -> Option<usize> {
+    nodes.get(ni)?.parent
+}
+
+/// The first child of node `ni`: the lowest-index node
+/// whose parent is `ni`, or `None` for a leaf (and for
+/// an out-of-range index). "First" is definition
+/// order — the order the Index line's child count
+/// enumerates, and the order a reader meets the
+/// children in the definition.
+pub fn first_child_of(nodes: &[NodeDef], ni: usize) -> Option<usize> {
+    nodes.get(ni)?;
+    nodes.iter().position(|n| n.parent == Some(ni))
+}
+
+/// Move the selection to the selected node's parent
+/// (the Parent joint button). Selection is not an
+/// undoable edit — shell selection changes are bare
+/// `selected_node` field writes — so this takes no
+/// snapshot and sets no status; at the origin, or with
+/// no (valid) selection, the press is a silent no-op.
+pub fn select_parent(core: &mut EditorCore) {
+    let target = core.selected_node.and_then(|ni| {
+        let fig = core.project.figures.get(core.selected_figure)?;
+        parent_of(&fig.def.nodes, ni)
+    });
+    if let Some(p) = target {
+        core.selected_node = Some(p);
+    }
+}
+
+/// Move the selection to the selected node's first
+/// child (the Child joint button) — the downward twin
+/// of [`select_parent`], with the same discipline: no
+/// snapshot, no status, and a leaf press is a silent
+/// no-op.
+pub fn select_first_child(core: &mut EditorCore) {
+    let target = core.selected_node.and_then(|ni| {
+        let fig = core.project.figures.get(core.selected_figure)?;
+        first_child_of(&fig.def.nodes, ni)
+    });
+    if let Some(c) = target {
+        core.selected_node = Some(c);
+    }
+}
+
 /// One read-only label/value row.
 fn readout_row(label: &str, value: String, t: &Theme) -> El {
     row()
@@ -659,6 +730,24 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 .color(t.text_secondary),
         );
     }
+    // Joint navigation (Phase K): walk the selection up
+    // to the parent joint or down to the first child —
+    // the Index line's topology as buttons. Always live
+    // while a node is selected; at the root or a leaf
+    // the press is a silent no-op (see `select_parent`).
+    panel = panel.child(
+        row()
+            .key("seg-nav-row")
+            .w_full()
+            .gap(8.0)
+            .center_y()
+            .child(btn("seg-nav-parent", "Parent joint", false, t, |s| {
+                select_parent(&mut s.core)
+            }))
+            .child(btn("seg-nav-child", "Child joint", false, t, |s| {
+                select_first_child(&mut s.core)
+            })),
+    );
     panel = panel
         .child(readout_row("Length", format!("{:.0}", st.length), t))
         .child(readout_row("Thickness", format!("{:.0}", st.thickness), t))
@@ -1226,6 +1315,7 @@ last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
 pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
+playback_speed: 1.0,
             was_playing: false,
         };
         let _ = inspector_segment(&bare, &t);
@@ -1271,6 +1361,7 @@ last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
 pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
+playback_speed: 1.0,
             was_playing: false,
         };
         let _ = inspector_segment(&selected, &t);
@@ -1316,8 +1407,132 @@ last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
 pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
+playback_speed: 1.0,
             was_playing: false,
         };
         let _ = inspector_segment(&root, &t);
+    }
+
+    /// A minimal node definition for the navigation
+    /// fixtures: only `parent` varies (the field set
+    /// mirrors the model constructors, model.rs:181).
+    fn nav_node(parent: Option<usize>) -> NodeDef {
+        NodeDef {
+            name: "n".into(),
+            parent,
+            length: 10.0,
+            rest_angle: 0.0,
+            head: false,
+            bend: 1.0,
+            thickness: 5.0,
+            color: None,
+            ik_end: false,
+            shape: Shape::Line,
+            style: stykanimate_rs::model::NodeStyle::default(),
+            media: None,
+        }
+    }
+
+    #[test]
+    fn parent_of_walks_a_chain_and_stops_at_the_root() {
+        // A straight chain 0 <- 1 <- 2 <- 3.
+        let nodes = vec![
+            nav_node(None),
+            nav_node(Some(0)),
+            nav_node(Some(1)),
+            nav_node(Some(2)),
+        ];
+        assert_eq!(parent_of(&nodes, 3), Some(2));
+        assert_eq!(parent_of(&nodes, 2), Some(1));
+        assert_eq!(parent_of(&nodes, 1), Some(0));
+        assert_eq!(parent_of(&nodes, 0), None, "the root has no parent");
+        assert_eq!(parent_of(&nodes, 99), None, "out of range reads as none");
+        assert_eq!(first_child_of(&nodes, 0), Some(1));
+        assert_eq!(first_child_of(&nodes, 2), Some(3));
+        assert_eq!(first_child_of(&nodes, 3), None, "the chain's end is a leaf");
+        assert_eq!(first_child_of(&nodes, 99), None);
+    }
+
+    #[test]
+    fn first_child_of_picks_the_lowest_index_child() {
+        // A branching fixture: the root has three
+        // children (1, 2, 3); node 2 has one child (4).
+        let nodes = vec![
+            nav_node(None),
+            nav_node(Some(0)),
+            nav_node(Some(0)),
+            nav_node(Some(0)),
+            nav_node(Some(2)),
+        ];
+        assert_eq!(
+            first_child_of(&nodes, 0),
+            Some(1),
+            "first means lowest index, not any child"
+        );
+        assert_eq!(first_child_of(&nodes, 2), Some(4));
+        assert_eq!(first_child_of(&nodes, 1), None, "a leaf has no child");
+        assert_eq!(first_child_of(&nodes, 3), None);
+        assert_eq!(parent_of(&nodes, 4), Some(2));
+    }
+
+    #[test]
+    fn select_parent_moves_up_and_stops_at_the_root() {
+        // The demo humanoid (model.rs humanoid): node 4
+        // (forearm L) hangs off 3 (upper-arm L), off 1
+        // (chest), off 0 (hips, the root).
+        let mut core = core_with_selection(Some(4));
+        let status = core.status.clone();
+        let depth = core.undo_depth();
+        select_parent(&mut core);
+        assert_eq!(core.selected_node, Some(3));
+        select_parent(&mut core);
+        assert_eq!(core.selected_node, Some(1));
+        select_parent(&mut core);
+        assert_eq!(core.selected_node, Some(0));
+        select_parent(&mut core);
+        assert_eq!(core.selected_node, Some(0), "the root press is a no-op");
+        // Selection is not an undoable edit: no snapshot
+        // was taken and no status was set, across all
+        // four presses.
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.status, status);
+    }
+
+    #[test]
+    fn select_first_child_moves_down_and_stops_at_a_leaf() {
+        // Node 0's children are 1, 7 and 9 — the first
+        // is 1 (chest); node 1's children are 2, 3 and
+        // 5 — the first is 2 (head), a leaf.
+        let mut core = core_with_selection(Some(0));
+        let status = core.status.clone();
+        let depth = core.undo_depth();
+        select_first_child(&mut core);
+        assert_eq!(core.selected_node, Some(1));
+        select_first_child(&mut core);
+        assert_eq!(core.selected_node, Some(2));
+        select_first_child(&mut core);
+        assert_eq!(core.selected_node, Some(2), "the leaf press is a no-op");
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.status, status);
+    }
+
+    #[test]
+    fn navigation_without_a_valid_selection_changes_nothing() {
+        let mut core = core_with_selection(None);
+        let status = core.status.clone();
+        let depth = core.undo_depth();
+        select_parent(&mut core);
+        select_first_child(&mut core);
+        assert_eq!(core.selected_node, None);
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.status, status);
+
+        // A stale index navigates nowhere either (the
+        // panel is not even rendered for it — this pins
+        // the handler's own discipline).
+        let mut stale = core_with_selection(Some(999));
+        select_parent(&mut stale);
+        select_first_child(&mut stale);
+        assert_eq!(stale.selected_node, Some(999));
     }
 }

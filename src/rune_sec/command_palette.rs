@@ -100,6 +100,25 @@
 //!   selected; the two delete shims clear the selection
 //!   they consumed, and `duplicate-particle` selects
 //!   the copy it made.
+//! * Phase K (section 17) audited a proposed "fuzzy
+//!   fallback": a substring tier first, then subsequence
+//!   matches appended by span. The audit found the
+//!   premise does not match this tree — there is no
+//!   substring filter to fall back FROM. [`fuzzy_score`]
+//!   has matched by case-insensitive subsequence, with
+//!   quality scoring, since Phase D, over title, key
+//!   AND group alike; the listing's contract is that it
+//!   is score-ranked (`results_are_capped_and_score_ordered`).
+//!   The proposed tiering would also have dropped the
+//!   group field from the fuzzy tier, silently breaking
+//!   queries that work today ("vew" reaches the View
+//!   toggles through their group alone). So no behaviour
+//!   changed; the section pinned the two facts instead
+//!   (`exprt_finds_go_export_by_subsequence`,
+//!   `group_field_matches_by_subsequence_too`). There is
+//!   likewise no separate group-query code path: a
+//!   "group query" is an ordinary query whose text
+//!   scores against the group field.
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -1869,6 +1888,50 @@ mod tests {
         // 'a' then 'f' scattered across "Add frame".
         let got = filter_commands("af");
         assert!(got.iter().any(|&i| COMMANDS[i].key == "add-frame"));
+    }
+
+    #[test]
+    fn exprt_finds_go_export_by_subsequence() {
+        // Phase K (section 17): the briefed "fuzzy
+        // fallback" case. "exprt" is NOT a contiguous
+        // substring of the command's key or title, so
+        // only the subsequence matcher can find it — and
+        // it already does (fuzzy_score, Phase D).
+        let cmd = COMMANDS
+            .iter()
+            .find(|c| c.key == "go-export")
+            .expect("go-export is in the table");
+        assert!(!cmd.key.contains("exprt"));
+        assert!(!cmd.title.to_lowercase().contains("exprt"));
+        let got = filter_commands("exprt");
+        assert!(
+            got.iter().any(|&i| COMMANDS[i].key == "go-export"),
+            "exprt should find go-export by subsequence: {got:?}"
+        );
+    }
+
+    #[test]
+    fn group_field_matches_by_subsequence_too() {
+        // The five View toggles are reachable by "vew"
+        // ONLY through their group field ("View": v, e,
+        // w in order) — no key or title holds v…e…w.
+        // Pinned at Phase K (section 17): any future
+        // search restructure that drops the group field
+        // from matching must break this test loudly
+        // rather than silently narrowing the palette.
+        let got = filter_commands("vew");
+        for key in [
+            "toggle-guides",
+            "toggle-frustum",
+            "toggle-safe-frame",
+            "toggle-left-panel",
+            "toggle-right-panel",
+        ] {
+            assert!(
+                got.iter().any(|&i| COMMANDS[i].key == key),
+                "vew should reach {key} via its group: {got:?}"
+            );
+        }
     }
 
     // -- selection helpers ---------------------------------------

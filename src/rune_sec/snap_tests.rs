@@ -221,6 +221,61 @@
 //!   asserts the real contract (root unmoved, angles
 //!   negated, a witness joint reflected) rather than
 //!   the stage-centre reading.
+//!
+//! Round 8 (Phase K, section 37) adds four tests over
+//! the Phase J behaviours rounds 1–7 asserted only at
+//! unit level or in the headless tree dump: the column
+//! split as a layout pin, the figure inspector's
+//! Centre button, Pose tools' Mirror-all button, and
+//! the FX inspector's Split button. Facts they rest
+//! on, verified against the tree:
+//! * The stage's 744-pt width is the Phase J column
+//!   split measured at this file's own viewport: the
+//!   window's 1440 minus margins and gaps and the two
+//!   fixed side widths (300 / 340) the split gave the
+//!   columns. The sidebar visibility flags are
+//!   unpersisted shell state (`init` defaults both
+//!   shown — round 3's own note), so a fresh Runtime
+//!   always lays out the full split; the pin is a
+//!   plain presented-rect assert, no settling.
+//! * `fig-centre` calls the figure section's
+//!   `centre_selected_figure`, which shifts ONLY the
+//!   current frame's root (through `nudge_path_point`)
+//!   by the delta its own `figure_bbox` helper
+//!   computes — so the test reads the before/after
+//!   bbox through that same helper (an exact-name
+//!   import, like round 6's `key_frames`) and asserts
+//!   the centre lands on the stage centre while frame
+//!   1's root stays untouched. The premise is the
+//!   demo's own geometry: root [480, 470] against a
+//!   [960, 720] stage, so the bbox centre starts well
+//!   below the stage centre on y.
+//! * No test in this file writes core state during
+//!   setup — every round drives real controls and
+//!   reads `state.core` only for assertions — and
+//!   Mirror-all needs no write either: `new_demo`'s
+//!   wave pose carries non-zero angles by
+//!   construction (angles[5] is −118° on frame 0), so
+//!   the test asserts that premise, then the button's
+//!   effect: every angle on every frame negated
+//!   exactly (round 7's contract, driven here through
+//!   the Pose tools button instead of the palette),
+//!   every root byte-identical.
+//! * The FX split is driven end to end through the
+//!   panels a user uses. Adding a clip needs a
+//!   selected joint (`add_fx_clip` refuses without
+//!   one), selected by a stage press at the root
+//!   joint's drawn point — round 1's aiming idiom,
+//!   press only, no move. The browser's kind button
+//!   (`fxclip-burst`) adds the clip at the current
+//!   frame with the add path's fixed 16-frame
+//!   duration; the FX lane's row (`fx-clip-0`) selects
+//!   it (the browser add does NOT select); a timeline
+//!   chip parks the playhead mid-clip; and `fx-split`
+//!   — rendered only inside the inspector's
+//!   selected-clip detail — cuts at the playhead
+//!   frame's centre (frame 2 → 2.5), the first clip
+//!   keeping [0, 2.5) and the new one taking the rest.
 
 use std::collections::BTreeSet;
 
@@ -1975,4 +2030,282 @@ fn palette_mirror_figure_command_exists_and_runs() {
         (joint_after[0] - joint_before[0]).abs() > 1.0,
         "the witness joint actually moved: {joint_before:?} -> {joint_after:?}"
     );
+}
+
+// ----------------------------------------------------------------
+// Round 8 (Phase K, section 37): the Phase J column
+// split as a layout pin, the figure inspector's Centre
+// button, Pose tools' Mirror-all button, and the FX
+// inspector's Split button — each driven through the
+// real shell, none set up by writing core state.
+// ----------------------------------------------------------------
+
+#[test]
+fn stage_width_pins_the_phase_j_column_split() {
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+
+    // Both side columns are presented: their visibility
+    // flags are unpersisted shell state and `init`
+    // defaults them shown (round 3's note), so a fresh
+    // shell always lays out the full three-column
+    // split this pin measures.
+    rt.presented("side-left").expect("left column is presented");
+    rt.presented("side-right")
+        .expect("right column is presented");
+
+    // The pin: at this file's 1440×900 viewport the
+    // centre — and with it the stage — is exactly what
+    // the window leaves after margins, gaps and the
+    // two FIXED side widths (300 / 340): 744 points,
+    // the number the Phase J headless tree dump
+    // measured in the real binary. Before the fix all
+    // three columns grew to equal thirds and the stage
+    // was squeezed to ~461; a future layout change
+    // that moves this number must reopen the fix
+    // deliberately, here first.
+    let (stage, _) = rt.presented("stage").expect("stage is presented");
+    assert!(
+        (stage[2] - 744.0).abs() <= 1.0,
+        "stage width pins the Phase J column split at 744: {stage:?}"
+    );
+}
+
+#[test]
+fn fig_centre_button_centres_the_figure_on_the_stage() {
+    use crate::rune_sec::inspector_figure::figure_bbox;
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // The before picture, through the section's own
+    // bbox helper (evaluated joints at the display
+    // frame, head-flagged points grown by the ring
+    // radius): the demo figure stands on frame 0 with
+    // its root at [480, 470] against a [960, 720]
+    // stage, so its bbox centre starts meaningfully
+    // below the stage centre on y. Assert the premise
+    // rather than assume it.
+    let stage = rt.state.core.project.stage;
+    let centre = [stage[0] / 2.0, stage[1] / 2.0];
+    let before = figure_bbox(&rt.state.core).expect("the demo figure has a bbox");
+    let before_c = [
+        (before[0] + before[2]) / 2.0,
+        (before[1] + before[3]) / 2.0,
+    ];
+    assert!(
+        (before_c[1] - centre[1]).abs() > 20.0,
+        "premise: the demo figure starts off-centre: \
+         bbox centre {before_c:?}, stage centre {centre:?}"
+    );
+    let root_f1_before = rt.state.core.project.frames[1].poses[0].root;
+
+    // The figure inspector sits in the right column —
+    // scroll the Centre button into view and press it.
+    scroll_into_view(&mut rt, "fig-centre");
+    tap(&mut rt, "fig-centre");
+    assert!(
+        rt.state.core.status.contains("centred"),
+        "the op reported the centring: {}",
+        rt.state.core.status
+    );
+
+    // The bbox centre now sits on the stage centre:
+    // the op computes its delta from this same helper,
+    // so anything beyond float noise is a real miss.
+    let after = figure_bbox(&rt.state.core).expect("the figure still has a bbox");
+    let after_c = [(after[0] + after[2]) / 2.0, (after[1] + after[3]) / 2.0];
+    assert!(
+        (after_c[0] - centre[0]).abs() <= 1.0 && (after_c[1] - centre[1]).abs() <= 1.0,
+        "the bbox centre lands on the stage centre: {after_c:?} vs {centre:?}"
+    );
+    // And the placement is current-frame only (the
+    // section's contract): frame 1's root is exactly
+    // where the demo put it.
+    assert_eq!(
+        rt.state.core.project.frames[1].poses[0].root, root_f1_before,
+        "centring moves only the current frame's root"
+    );
+}
+
+#[test]
+fn pose_mirror_all_button_negates_every_angle_and_keeps_roots() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // Setup writes no core state (this file never has
+    // — see the round's header note): the demo pose
+    // itself carries non-zero angles, its wave raising
+    // an arm (−118° at angles[5] on frame 0), so the
+    // negation below has something real to bite on.
+    // Record every frame's angles and roots, and
+    // assert the non-zero premise rather than assume
+    // it.
+    let fi = rt.state.core.selected_figure;
+    let before_angles: Vec<Vec<f32>> = rt
+        .state
+        .core
+        .project
+        .frames
+        .iter()
+        .map(|fr| fr.poses[fi].angles.clone())
+        .collect();
+    let before_roots: Vec<[f32; 2]> = rt
+        .state
+        .core
+        .project
+        .frames
+        .iter()
+        .map(|fr| fr.poses[fi].root)
+        .collect();
+    assert!(
+        before_angles.iter().flatten().any(|a| *a != 0.0),
+        "premise: the demo pose has non-zero angles to negate"
+    );
+
+    // Pose tools are an Animate panel in the right
+    // column, below the fold — scroll and press. (The
+    // button is live here: its gate is a pose existing
+    // for the selected figure, which the demo has on
+    // every frame.)
+    scroll_into_view(&mut rt, "pose-mirror-all");
+    tap(&mut rt, "pose-mirror-all");
+    assert!(
+        rt.state.core.status.contains("mirrored on all"),
+        "the op reported the mirror: {}",
+        rt.state.core.status
+    );
+
+    // The op's contract (round 7, there through the
+    // palette): every stored angle on every frame is
+    // the exact negation of before, and no frame's
+    // root moved at all.
+    for (f, frame) in rt.state.core.project.frames.iter().enumerate() {
+        assert_eq!(
+            frame.poses[fi].angles.len(),
+            before_angles[f].len(),
+            "frame {f}: the angle count is unchanged"
+        );
+        for (a, b) in frame.poses[fi].angles.iter().zip(&before_angles[f]) {
+            assert_eq!(*a, -*b, "frame {f}: every angle is negated");
+        }
+        assert_eq!(
+            frame.poses[fi].root, before_roots[f],
+            "frame {f}: the root does not move"
+        );
+    }
+}
+
+#[test]
+fn fx_split_button_cuts_the_selected_clip_at_the_playhead() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+    assert!(
+        rt.state.core.project.fx_clips.is_empty(),
+        "premise: the demo project has no FX clips"
+    );
+
+    // Adding an FX clip needs a selected joint (the
+    // core's add path refuses without one). Select the
+    // root joint the way round 1's drag test aims: a
+    // press on the stage at the joint's drawn point —
+    // press only, no move, so the pose stays put.
+    let (rect, _) = rt.presented("stage").expect("stage is presented");
+    let [sx, sy, sw, sh] = rect;
+    let root = rt.state.core.positions(rt.state.core.current, 0)[0];
+    let vt = view_transform(
+        [sw, sh],
+        rt.state.core.project.stage,
+        rt.state.core.camera_here(),
+    );
+    let local = to_screen(&vt, root);
+    rt.pointer_down(sx + local[0], sy + local[1]);
+    rt.frame(DT);
+    assert_eq!(
+        rt.state.core.selected_node,
+        Some(0),
+        "the stage press selected the root joint"
+    );
+    rt.pointer_up(sx + local[0], sy + local[1]);
+    rt.frame(DT);
+
+    // To Effects, and add a Burst clip through the
+    // browser's own kind button: the clip starts at
+    // the current frame (0) with the add path's fixed
+    // 16-frame duration.
+    tap(&mut rt, "ws-effects");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Effects);
+    scroll_into_view(&mut rt, "fxclip-burst");
+    tap(&mut rt, "fxclip-burst");
+    assert_eq!(
+        rt.state.core.project.fx_clips.len(),
+        1,
+        "the browser press added one FX clip"
+    );
+    {
+        let clip = &rt.state.core.project.fx_clips[0].clip;
+        assert_eq!(clip.start, 0.0, "the clip starts at the current frame");
+        assert_eq!(clip.duration, 16.0, "the add path's fixed duration");
+    }
+
+    // Select the clip through its lane row (the
+    // browser add does not select), park the playhead
+    // mid-clip — frame 2 of [0, 16) — with a timeline
+    // chip, then press the inspector's Split button,
+    // which renders only inside the selected clip's
+    // detail block.
+    scroll_into_view(&mut rt, "fx-clip-0");
+    tap(&mut rt, "fx-clip-0");
+    assert_eq!(
+        rt.state.fx_selected,
+        Some(0),
+        "the lane row selects the clip"
+    );
+    tap(&mut rt, "frame-3");
+    assert_eq!(rt.state.core.current, 2, "the playhead sits mid-clip");
+    scroll_into_view(&mut rt, "fx-split");
+    tap(&mut rt, "fx-split");
+
+    // The cut lands at the playhead frame's centre
+    // (frame 2 → 2.5): the first clip keeps [0, 2.5),
+    // the new second clip takes [2.5, 16), and the
+    // selection still names the first clip (the
+    // panel's documented post-split rule).
+    let clips = &rt.state.core.project.fx_clips;
+    assert_eq!(clips.len(), 2, "the split added a second clip");
+    assert!(
+        (clips[0].clip.duration - 2.5).abs() < 0.001,
+        "the first clip shrank to the cut: {}",
+        clips[0].clip.duration
+    );
+    assert!(
+        (clips[1].clip.start - 2.5).abs() < 0.001
+            && (clips[1].clip.duration - 13.5).abs() < 0.001,
+        "the second clip takes the remainder: start {}, duration {}",
+        clips[1].clip.start,
+        clips[1].clip.duration
+    );
+    assert_eq!(
+        rt.state.fx_selected,
+        Some(0),
+        "the selection still names the first clip"
+    );
+
+    // Restore Animate for the shared prefs, as rounds
+    // 2–7 do.
+    tap(&mut rt, "ws-animate");
+    assert_eq!(rt.state.workspace, Workspace::Animate);
 }

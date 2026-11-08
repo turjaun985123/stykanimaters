@@ -91,12 +91,25 @@
 //!   duration-weighted total is `Project::total_time`,
 //!   `model.rs:855`, and is deliberately not what this chip
 //!   showed).
+//! * **Playback speed** (Phase K) — `pb-speed` cycles the
+//!   shell-level `State::playback_speed` through `SPEEDS`
+//!   (0.25×–2×) via `cycle_playback_speed`. Like the loop
+//!   toggle it is shell state, not core state: the button
+//!   only rewrites the field — poll scales each tick's
+//!   advance by it and reports it to the audio clock, so
+//!   picture and sound speed up together. The label IS
+//!   the current speed (`speed_label`), and the press is
+//!   silent, exactly like `pb-loop`'s: no core call, no
+//!   status line, no undo snapshot.
 //!
 //! `State` fields: everything reads `s.core` live
 //! (`project.fps` `model.rs:683`, `loop_range`, `current`,
 //! `project.frames[..].duration`) except the loop toggle,
 //! which reads/writes the shell-level `State::loop_playback`
-//! (integrator-owned, initialised `true`).
+//! (integrator-owned, initialised `true`), and the speed
+//! cycle, which reads/writes the shell-level
+//! `State::playback_speed` (integrator-owned, initialised
+//! `1.0`).
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -227,6 +240,63 @@ pub fn loop_toggle_label(loop_playback: bool) -> &'static str {
     }
 }
 
+/// The playback-speed cycle's steps, ascending (Phase K):
+/// quarter speed to double speed around the `1.0` normal.
+/// The shell's `State::playback_speed` is initialised to
+/// the middle entry; nothing clamps the field itself —
+/// `next_speed` maps ANY value (including off-table ones
+/// a future control might write) onto this table.
+pub const SPEEDS: [f32; 5] = [0.25, 0.5, 1.0, 1.5, 2.0];
+
+/// The speed one `pb-speed` press moves to from
+/// `current`: the next `SPEEDS` entry strictly greater
+/// than `current`, wrapping to the first entry when none
+/// is greater. A `current` not in the table goes to the
+/// next higher entry (or wraps, when it sits above the
+/// maximum). Total: `NaN` — which no comparison orders —
+/// returns `1.0`, normal speed, rather than falling
+/// through to the wrap.
+pub fn next_speed(current: f32) -> f32 {
+    if current.is_nan() {
+        return 1.0;
+    }
+    for step in SPEEDS {
+        if step > current {
+            return step;
+        }
+    }
+    SPEEDS[0]
+}
+
+/// Button label for the speed cycle — the value is in the
+/// label itself ("Speed 0.25×" … "Speed 2×"), so the
+/// control reads correctly at a glance at any step, like
+/// the loop toggle's. Whole speeds render without a
+/// fraction ("1×", "2×"); the rest keep exactly the
+/// digits they need ("0.25×", "0.5×", "1.5×").
+pub fn speed_label(speed: f32) -> String {
+    let digits = format!("{speed:.2}");
+    let trimmed = digits.trim_end_matches('0').trim_end_matches('.');
+    format!("Speed {trimmed}×")
+}
+
+/// One `pb-speed` press (Phase K): advance
+/// `State::playback_speed` to the next step of the cycle.
+/// The signature is a cross-section contract — the View
+/// menu's speed item (menus section) calls this exact
+/// function.
+///
+/// Silent by design, mirroring `pb-loop`'s handler: that
+/// toggle flips its shell flag without touching the core,
+/// and this cycle does the same — no core call, no status
+/// line, no undo snapshot. The button's own label already
+/// shows the new speed on the next render, and poll does
+/// the rest (it scales the advance and tells the audio
+/// clock the new rate).
+pub fn cycle_playback_speed(s: &mut State) {
+    s.playback_speed = next_speed(s.playback_speed);
+}
+
 /// Should the shell's poll stop playback at the end instead
 /// of letting `EditorCore::advance_play` wrap the playhead?
 ///
@@ -348,14 +418,16 @@ fn section(label: String, t: &Theme) -> El {
 /// `dur-dn`, `dur-up`); the Phase F transport buttons are
 /// `pb-restart` / `pb-play-range`, the Phase G loop
 /// toggle is `pb-loop` and the Phase I keyframe jumps are
-/// `pb-prev-key` / `pb-next-key`, so headless `--tree`
-/// checks can find every control.
+/// `pb-prev-key` / `pb-next-key`; the Phase K speed cycle
+/// beside the loop toggle is `pb-speed`, so headless
+/// `--tree` checks can find every control.
 pub fn playback_controls(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let fps = core.project.fps;
     let tween_on = core.project.tween_playback;
     let loop_range = core.loop_range;
     let loop_playback = s.loop_playback;
+    let playback_speed = s.playback_speed;
     let cur_duration = core
         .project
         .frames
@@ -430,6 +502,14 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
                 |s| {
                     s.loop_playback = !s.loop_playback;
                 },
+            ))
+            .child(icon_btn(
+                "pb-speed",
+                "gauge",
+                &speed_label(playback_speed),
+                playback_speed != 1.0,
+                t,
+                cycle_playback_speed,
             ))
             .child(section(
                 if loop_playback {
@@ -885,5 +965,74 @@ mod tests {
             core.goto(f);
         }
         assert_eq!(core.current, 1);
+    }
+
+    #[test]
+    fn speeds_are_the_five_steps_ascending_around_normal() {
+        assert_eq!(SPEEDS, [0.25, 0.5, 1.0, 1.5, 2.0]);
+        assert!(SPEEDS.windows(2).all(|w| w[0] < w[1]));
+        assert!(SPEEDS.contains(&1.0), "normal speed is a step");
+    }
+
+    #[test]
+    fn next_speed_walks_the_whole_table_and_wraps() {
+        // The full cycle, one press at a time, from normal.
+        let mut cur = 1.0;
+        for want in [1.5, 2.0, 0.25, 0.5, 1.0] {
+            cur = next_speed(cur);
+            assert_eq!(cur, want);
+        }
+        // Every entry's own successor, pinned directly.
+        assert_eq!(next_speed(0.25), 0.5);
+        assert_eq!(next_speed(0.5), 1.0);
+        assert_eq!(next_speed(1.5), 2.0);
+        assert_eq!(next_speed(2.0), 0.25, "the top wraps to the first entry");
+    }
+
+    #[test]
+    fn next_speed_off_table_goes_to_the_next_higher_entry() {
+        assert_eq!(next_speed(0.75), 1.0);
+        assert_eq!(next_speed(1.2), 1.5);
+        assert_eq!(next_speed(0.1), 0.25, "below the table: the first entry");
+        assert_eq!(next_speed(0.0), 0.25);
+        assert_eq!(next_speed(3.0), 0.25, "above the maximum: wraps");
+        assert_eq!(next_speed(f32::INFINITY), 0.25, "infinity wraps too");
+    }
+
+    #[test]
+    fn next_speed_nan_is_normal_speed() {
+        // NaN orders against nothing; the contract sends
+        // it to 1.0 rather than the wrap entry.
+        assert_eq!(next_speed(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn speed_label_renders_all_five_steps() {
+        assert_eq!(speed_label(0.25), "Speed 0.25×");
+        assert_eq!(speed_label(0.5), "Speed 0.5×");
+        assert_eq!(speed_label(1.0), "Speed 1×");
+        assert_eq!(speed_label(1.5), "Speed 1.5×");
+        assert_eq!(speed_label(2.0), "Speed 2×");
+    }
+
+    #[test]
+    fn cycle_playback_speed_advances_the_field_and_stays_silent() {
+        // The handler itself, run against a real shell
+        // State (crate::init — the fixture snap_tests uses;
+        // the groundwork initialises playback_speed to 1.0).
+        let mut s = crate::init();
+        assert_eq!(s.playback_speed, 1.0);
+        let status_before = s.core.status.clone();
+        let depth_before = s.core.undo_depth();
+        cycle_playback_speed(&mut s);
+        assert_eq!(s.playback_speed, 1.5);
+        cycle_playback_speed(&mut s);
+        assert_eq!(s.playback_speed, 2.0);
+        cycle_playback_speed(&mut s);
+        assert_eq!(s.playback_speed, 0.25, "the cycle wraps through the handler");
+        // Silence, mirroring pb-loop: no status line was
+        // written and no undo snapshot was taken.
+        assert_eq!(s.core.status, status_before);
+        assert_eq!(s.core.undo_depth(), depth_before);
     }
 }

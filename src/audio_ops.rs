@@ -446,6 +446,36 @@ impl EditorCore {
         self.delete_audio_clip_at(index);
     }
 
+    /// Phase K: duplicate audio clip `index` (0-based):
+    /// the copy is inserted immediately after the original
+    /// as a field-for-field clone — same path, same gain,
+    /// and the SAME start frame. Keeping the start frame
+    /// is the DAW convention: the copy lands exactly on
+    /// top of the original, and the user then separates
+    /// the two with [`Self::audio_move_at`] (the panel's
+    /// Earlier/Later buttons). Unlike the particle
+    /// family's duplicate, an audio clip carries no seed
+    /// or identity field, so nothing about the clone
+    /// needs freshening — `AudioClip`'s `Clone` carries
+    /// every field by construction. One snapshot. Returns
+    /// the copy's index, so the caller can select what it
+    /// just made; an out-of-range index only sets the
+    /// status and returns `None`.
+    pub fn audio_duplicate_clip_at(&mut self, index: usize) -> Option<usize> {
+        let Some(clip) = self.project.audio.get(index).cloned() else {
+            self.status = format!("Audio duplicate failed: no clip {}.", index + 1);
+            return None;
+        };
+        self.snapshot();
+        self.project.audio.insert(index + 1, clip);
+        self.status = format!(
+            "Audio clip {} duplicated as clip {}.",
+            index + 1,
+            index + 2
+        );
+        Some(index + 1)
+    }
+
     /// Phase G: move audio clip `index` (0-based) by
     /// `delta_frames` on the timeline (negative = earlier).
     /// The start frame clamps at 0. One snapshot; an
@@ -1140,6 +1170,69 @@ mod tests {
         assert_eq!(via_name.status, "Audio delete failed: no clip 8.");
         assert_eq!(via_name.status, via_at.status);
         assert_eq!(project_json(&via_name), project_json(&via_at));
+    }
+
+    #[test]
+    fn duplicate_at_clones_the_chosen_clip_right_after_it() {
+        // A non-unity gain on the source proves the clone
+        // carries every field, not just the path.
+        let mut source = clip("b.wav", 4);
+        source.gain = 0.5;
+        let mut core = core_with(vec![clip("a.wav", 0), source, clip("c.wav", 8)]);
+        let edits = core.edits_since_autosave();
+        let made = core.audio_duplicate_clip_at(1);
+        assert_eq!(made, Some(2), "the copy's index is returned");
+        assert_eq!(core.project.audio.len(), 4);
+        // The copy sits immediately after the original,
+        // field for field — same start frame included.
+        let copy = &core.project.audio[2];
+        assert_eq!(copy.path, "b.wav");
+        assert_eq!(copy.start_frame, 4);
+        assert_eq!(copy.gain, 0.5);
+        // The original and its other neighbours are
+        // untouched, in their places.
+        assert_eq!(paths(&core), vec!["a.wav", "b.wav", "b.wav", "c.wav"]);
+        assert_eq!(core.project.audio[1].gain, 0.5);
+        assert_eq!(core.project.audio[3].start_frame, 8);
+        assert_eq!(core.status, "Audio clip 2 duplicated as clip 3.");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        // The one snapshot is a real undo step.
+        core.undo();
+        assert_eq!(paths(&core), vec!["a.wav", "b.wav", "c.wav"]);
+    }
+
+    #[test]
+    fn duplicate_at_out_of_range_is_status_only() {
+        let mut core = core_with(vec![clip("a.wav", 0), clip("b.wav", 4)]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        assert_eq!(core.audio_duplicate_clip_at(2), None);
+        assert_eq!(core.status, "Audio duplicate failed: no clip 3.");
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+        // Same refusal voice on an empty project.
+        let mut empty = EditorCore::new();
+        assert_eq!(empty.audio_duplicate_clip_at(0), None);
+        assert_eq!(empty.status, "Audio duplicate failed: no clip 1.");
+    }
+
+    #[test]
+    fn duplicate_of_duplicate_works() {
+        // Duplicating the copy is an ordinary duplicate:
+        // each call adds one clone and one snapshot.
+        let mut core = core_with(vec![clip("a.wav", 3)]);
+        let edits = core.edits_since_autosave();
+        assert_eq!(core.audio_duplicate_clip_at(0), Some(1));
+        assert_eq!(core.status, "Audio clip 1 duplicated as clip 2.");
+        assert_eq!(core.audio_duplicate_clip_at(1), Some(2));
+        assert_eq!(core.status, "Audio clip 2 duplicated as clip 3.");
+        assert_eq!(core.project.audio.len(), 3);
+        for c in &core.project.audio {
+            assert_eq!(c.path, "a.wav");
+            assert_eq!(c.start_frame, 3);
+            assert_eq!(c.gain, 1.0);
+        }
+        assert_eq!(core.edits_since_autosave(), edits + 2, "one snapshot per duplicate");
     }
 
     #[test]

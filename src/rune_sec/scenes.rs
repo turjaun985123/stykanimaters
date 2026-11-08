@@ -40,6 +40,20 @@
 //! the pub `particle_selected` field exactly as the panel's
 //! own add handler writes it. No scene invents state the
 //! editor cannot reach.
+//!
+//! The Phase K scenes keep that discipline with ONE named
+//! exception: `graph-duplicates` plants its two `Channel`
+//! values by writing the pub `project.channels` field
+//! directly, because no core op creates a channel with
+//! chosen keys (the graph panel's key op keys the CURRENT
+//! value at the playhead) — the graph panel's own tests
+//! construct `Channel` values exactly this way, and the
+//! planted data is ordinary project data the panel then
+//! reads through its normal paths. `fx-split-mid` adds its
+//! clip through `EditorCore::add_fx_clip` — the FX
+//! browser's op, called the way the browser calls it —
+//! after selecting a node the way the `selected` scene
+//! does, since the op refuses without one.
 
 use crate::State;
 
@@ -143,6 +157,106 @@ fn scene_fx_selected(s: &mut State) {
     }
 }
 
+/// `"graph-duplicates"` — the Graph workspace with TWO
+/// graph channels planted for figure 0 with the SAME
+/// target (`ChannelTarget::RootX`), so a `--tree` dump can
+/// prove the graph panel's channel list shows both rows
+/// (`graph-chan-0` and `graph-chan-1`) and the Phase J
+/// index-based selection has a duplicate pair to bite on.
+/// The twins are told apart by their keys — the first has
+/// one key at value 1.0, the second two keys at values 2.0
+/// and 4.0 — the graph panel's own duplicate fixture
+/// (its test module's `core_with_duplicate_channels`)
+/// built the same way. Figure 0 is left selected, since
+/// channel resolution scopes to the selected figure. The
+/// plant is a direct write of the pub `project.channels`
+/// field (see the module docs for why no op can do this);
+/// on a figure-less project the scene stops after the
+/// workspace switch rather than planting channels for a
+/// figure that does not exist.
+fn scene_graph_duplicates(s: &mut State) {
+    use stykanimate_rs::graph::{Channel, ChannelTarget, Key};
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Graph,
+    );
+    if s.core.project.figures.is_empty() {
+        return;
+    }
+    s.core.select_figure(0);
+    s.core.project.channels.push(Channel {
+        figure: 0,
+        target: ChannelTarget::RootX,
+        keys: vec![Key::flat(0.0, 1.0)],
+    });
+    s.core.project.channels.push(Channel {
+        figure: 0,
+        target: ChannelTarget::RootX,
+        keys: vec![Key::flat(0.0, 2.0), Key::flat(3.0, 4.0)],
+    });
+}
+
+/// `"fx-split-mid"` — the Effects workspace with one FX
+/// clip added, selected, and the playhead parked strictly
+/// inside the clip's span, so a `--tree` dump shows the
+/// FX inspector's detail block (its Split at playhead
+/// button, `fx-split`, mounts only with a selection) and a
+/// `--snap` shows the clip mid-flight at the playhead.
+/// The clip goes through `EditorCore::add_fx_clip` — the
+/// FX browser's op, called with the browser's own first
+/// kind — after a node is selected exactly as the
+/// `selected` scene selects one, because the op refuses
+/// ("Select a joint first") without a selected node. The
+/// selection is taken (the pub `fx_selected` field) only
+/// when the list actually grew by one, the same guard the
+/// `fx-selected` scene uses for particles. The park frame
+/// is read back from the clip itself: `start + duration/2`
+/// (rounded down) — the op's default clip is 16 frames,
+/// far longer than the 5-frame demo timeline, so on the
+/// demo the target clamps to the LAST frame, which is
+/// still strictly inside the clip; on a project whose
+/// timeline covers the midpoint the playhead lands
+/// exactly mid-clip. (Had the clip been shorter than 2
+/// frames, the scene would first lengthen it through
+/// `fx_resize_clip`, the panel's own resize op, rather
+/// than write a duration by hand.)
+fn scene_fx_split_mid(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Effects,
+    );
+    if s.core.project.figures.is_empty() {
+        return;
+    }
+    s.core.select_figure(0);
+    let nodes = &s.core.project.figures[0].def.nodes;
+    if nodes.is_empty() {
+        return;
+    }
+    let head = nodes.iter().position(|n| n.name == "head");
+    s.core.selected_node = Some(head.unwrap_or_else(|| 1.min(nodes.len() - 1)));
+    let len_before = s.core.project.fx_clips.len();
+    s.core.add_fx_clip(stykanimate_rs::vfx::ClipKind::Burst);
+    if s.core.project.fx_clips.len() != len_before + 1 {
+        return;
+    }
+    s.fx_selected = Some(len_before);
+    // Read the clip's span back and lengthen it through
+    // the resize op if it is too short to park inside.
+    let duration = s.core.project.fx_clips[len_before].clip.duration;
+    if duration < 2.0 {
+        s.core.fx_resize_clip(len_before, 2.0 - duration);
+    }
+    let clip = &s.core.project.fx_clips[len_before].clip;
+    let (start, duration) = (clip.start, clip.duration);
+    let mid = start + (duration / 2.0).floor();
+    let last_frame = s.core.frame_count().saturating_sub(1);
+    let target = (mid as usize).min(last_frame);
+    if (target as f32) > start {
+        s.core.goto(target);
+    }
+}
+
 /// The scene table for `AppSpec::scenes`, in `--list-scenes`
 /// display order. Element type is Rune's own, verbatim:
 /// `(&'static str, fn(&mut State))` (tooling.rs:25).
@@ -154,6 +268,8 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("playing", scene_playing),
         ("export-open", scene_export_open),
         ("fx-selected", scene_fx_selected),
+        ("graph-duplicates", scene_graph_duplicates),
+        ("fx-split-mid", scene_fx_split_mid),
     ]
 }
 
@@ -204,6 +320,22 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    selection landed. (The stage's FX gizmo for the
 ///    selected event is canvas-drawn, so it is a `--snap`
 ///    fact, not a tree fact.)
+/// 10. Under `--scene graph-duplicates` (Phase K): an
+///    element keyed `graph-chan-1` exists — the SECOND of
+///    the two planted channel rows in the graph panel's
+///    channel list (`graph-chan-{i}` keys are the channel's
+///    project index). A tree holding only `graph-chan-0`
+///    means the duplicate plant or the list's
+///    every-channel listing regressed.
+/// 11. Under `--scene fx-split-mid` (Phase K): an element
+///    keyed `fx-split` exists — the FX inspector's Split
+///    at playhead button, which the inspector builds only
+///    inside its detail block, and the detail block only
+///    for a valid clip selection; the button's presence is
+///    what proves the scene's selection stuck. (The parked
+///    playhead itself is timeline state: the `frame-N`
+///    chips' active styling is drawn, not keyed, so the
+///    park is a `--snap` fact.)
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -215,23 +347,29 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "facts above are identical under --scene default/frame-3/selected/playing",
         "under --scene export-open: an element keyed \"export-panel\" exists and no element is keyed \"figures-panel\"",
         "under --scene fx-selected: an element keyed \"particles\" exists and \"particles-detail\" contains an element keyed \"particles-kind-prev\"",
+        "under --scene graph-duplicates: an element keyed \"graph-chan-1\" exists (the second planted channel row)",
+        "under --scene fx-split-mid: an element keyed \"fx-split\" exists (the Split at playhead button, mounted only with a clip selection)",
     ]
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{scene_export_open, scene_fx_selected, scenes};
+    use super::{
+        scene_export_open, scene_fx_selected, scene_fx_split_mid, scene_graph_duplicates,
+        scenes,
+    };
     use crate::init;
     use crate::rune_sec::workspaces::Workspace;
 
-    /// The scene table is the headless contract: six scenes,
-    /// each name unique (a duplicate would shadow the later
-    /// entry in `with_scene`'s lookup), with the two Phase J
-    /// scenes in their display positions at the end.
+    /// The scene table is the headless contract: eight
+    /// scenes, each name unique (a duplicate would shadow
+    /// the later entry in `with_scene`'s lookup), with the
+    /// Phase J scenes in their display positions and the
+    /// two Phase K scenes appended after them.
     #[test]
-    fn scene_table_has_six_uniquely_named_scenes() {
+    fn scene_table_has_eight_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 6, "six scenes are registered");
+        assert_eq!(table.len(), 8, "eight scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -239,6 +377,8 @@ mod tests {
         assert_eq!(names.len(), total, "scene names are unique");
         assert_eq!(table[4].0, "export-open");
         assert_eq!(table[5].0, "fx-selected");
+        assert_eq!(table[6].0, "graph-duplicates");
+        assert_eq!(table[7].0, "fx-split-mid");
     }
 
     /// The export scene reaches the Export workspace through
@@ -279,6 +419,82 @@ mod tests {
         assert_eq!(
             s.core.project.particles[len_before].frame, frame,
             "the event sits at the scene's starting frame"
+        );
+    }
+
+    /// The graph scene lands on the Graph workspace with
+    /// figure 0 selected and exactly two channels planted —
+    /// both for figure 0, both on the RootX target, told
+    /// apart by their keys — the duplicate pair the graph
+    /// panel's list and index selection are exercised
+    /// against. (The workspace switch persists to the
+    /// layout prefs, the shared-prefs discipline the other
+    /// scene tests already live with.)
+    #[test]
+    fn graph_duplicates_scene_plants_two_rootx_channels() {
+        use stykanimate_rs::graph::ChannelTarget;
+        let mut s = init();
+        let len_before = s.core.project.channels.len();
+        scene_graph_duplicates(&mut s);
+        assert_eq!(s.workspace, Workspace::Graph);
+        assert_eq!(s.core.selected_figure, 0, "figure 0 is left selected");
+        let channels = &s.core.project.channels;
+        assert_eq!(
+            channels.len(),
+            len_before + 2,
+            "exactly two channels were planted"
+        );
+        let first = &channels[len_before];
+        let second = &channels[len_before + 1];
+        for ch in [first, second] {
+            assert_eq!(ch.figure, 0, "both channels belong to figure 0");
+            assert_eq!(
+                ch.target,
+                ChannelTarget::RootX,
+                "both channels share the RootX target"
+            );
+        }
+        assert_ne!(
+            first.keys, second.keys,
+            "the twins are distinguishable by their keys"
+        );
+    }
+
+    /// The fx-split scene lands on the Effects workspace
+    /// with the added clip selected and the playhead parked
+    /// strictly inside the clip's span — on the 5-frame
+    /// demo that is the last frame, inside the default
+    /// clip's 16-frame span, and past the frame the scene
+    /// started on.
+    #[test]
+    fn fx_split_mid_scene_selects_the_clip_and_parks_inside_it() {
+        let mut s = init();
+        let start_frame = s.core.current;
+        let len_before = s.core.project.fx_clips.len();
+        scene_fx_split_mid(&mut s);
+        assert_eq!(s.workspace, Workspace::Effects);
+        assert_eq!(
+            s.core.project.fx_clips.len(),
+            len_before + 1,
+            "exactly one clip was added"
+        );
+        assert_eq!(
+            s.fx_selected,
+            Some(len_before),
+            "the new clip is the selection"
+        );
+        let clip = &s.core.project.fx_clips[len_before].clip;
+        let now = s.core.current as f32;
+        assert!(
+            now > clip.start && now < clip.start + clip.duration,
+            "playhead {now} is strictly inside the clip's span \
+             ({}, {})",
+            clip.start,
+            clip.start + clip.duration
+        );
+        assert!(
+            s.core.current > start_frame,
+            "the playhead actually moved off the starting frame"
         );
     }
 }

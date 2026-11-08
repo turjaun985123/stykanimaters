@@ -408,6 +408,24 @@ fn normalise_all(s: &mut State) {
     s.core.normalise_all_clips(0.9);
 }
 
+/// Phase K (integrator wiring for audio_ops \§35):
+/// duplicate the toolbar's target clip — the selected
+/// clip when the selection is live, the last clip
+/// otherwise (the `effective_target` discipline every
+/// other per-clip op here uses). The op inserts the copy
+/// directly after the original at the same start frame
+/// under one snapshot; on success the copy becomes the
+/// selection so the user can move it with Earlier/Later.
+/// On the op's refusal (`None`) it has already set the
+/// status and nothing changes here.
+fn duplicate_target(s: &mut State) {
+    if let Some(i) = effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
+        if let Some(new_index) = s.core.audio_duplicate_clip_at(i) {
+            s.audio_panel.selected = Some(new_index);
+        }
+    }
+}
+
 /// Fade the target clip: the indexed op when a clip is
 /// selected, the `_last` op otherwise (which also covers
 /// the no-clips status line). DEPENDENCY (Phase G): calls
@@ -712,6 +730,14 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             // loudness mark (Phase H).
             .child(icon_btn("audio-fade", "chart-line", "Fade", false, t, fade_target))
             .child(btn("audio-reverse", "Reverse", false, t, reverse_target))
+            .child(icon_btn(
+                "audio-duplicate",
+                "copy",
+                "Duplicate",
+                false,
+                t,
+                duplicate_target,
+            ))
             .child(btn("audio-gain-dn", "Gain -", false, t, |s| {
                 gain_step_target(s, -0.1);
             }))
@@ -1162,6 +1188,7 @@ last_frame: 0,
 pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
 pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
 loop_playback: true,
+playback_speed: 1.0,
             was_playing: false,
         }
     }

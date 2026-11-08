@@ -121,6 +121,36 @@
 //! Row previews need no fix-up after an update —
 //! [`text_instances`] rebuilds them from the live
 //! content on every render.
+//!
+//! ## Phase K (§30): rotating the loaded instance
+//!
+//! The loaded instance gains a rotate row
+//! (`text-rotate-row`): **Rotate −15°** / **Rotate
+//! +15°** (`text-rot-l` / `text-rot-r`), one press
+//! turning every transform key's `angle` by
+//! [`ROTATE_STEP_RAD`] (π/12). Rotation is a key
+//! transform like §38's nudge — an instance's angle
+//! lives in its keys, not in a field of its own — so
+//! [`rotate_text_instance`] adds the same delta to
+//! **every** key: keys that shared an angle still
+//! share it afterwards, and the track's timing,
+//! positions and scales are untouched. The snapshot
+//! discipline is §27's throughout: bounds check first,
+//! exactly one `snapshot()` per press, a stale index
+//! a status-only refusal.
+//!
+//! One deliberate divergence from §38's nudge: an
+//! instance with **no keys still rotates**. The
+//! nudge refuses a keyless instance ("Text has no
+//! position to move.") because a move with no keys
+//! has nothing to act on; rotation instead mirrors
+//! §38's **duplicate**, which clones a keyless
+//! instance under one snapshot without refusing —
+//! the per-key loop is simply a no-op over an empty
+//! track. So a keyless rotate snapshots once, reports
+//! "Text {n} rotated." and returns true, keeping the
+//! press a real (if empty) undo step rather than a
+//! silent dead button.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, text_input, El, TextEdit as FieldEdit, Tx};
@@ -145,6 +175,13 @@ pub const DUP_OFFSET: f32 = 12.0;
 /// Stage units one nudge-pad press moves the loaded
 /// instance (on one axis).
 pub const NUDGE_STEP: f32 = 4.0;
+/// Radians one rotate-button press turns the loaded
+/// instance: π/12 — 15°, coarse enough to reach a
+/// slant in a few presses, fine enough to correct
+/// one. Rune buttons carry no shift modifier, so one
+/// step size is all a press can mean (the nudge pad's
+/// same limit).
+pub const ROTATE_STEP_RAD: f32 = std::f32::consts::PI / 12.0;
 
 /// View state for the text tool: the Rune field's edit
 /// model plus the pending glyph height used by the next
@@ -323,6 +360,17 @@ pub fn offset_instance_position(inst: &mut TextInstance, dx: f32, dy: f32) {
     offset_keys(&mut inst.keys, dx, dy);
 }
 
+/// Add `delta_rad` to the angle of every transform
+/// key. Frame, position and scale of every key are
+/// untouched, and because the delta is uniform, keys
+/// that shared an angle still share it — the track
+/// turns as one rigid rotation. Pure.
+pub fn rotate_keys(keys: &mut [InstanceKey], delta_rad: f32) {
+    for key in keys {
+        key.angle += delta_rad;
+    }
+}
+
 /// The clone a Duplicate press inserts: `inst` copied
 /// verbatim (content, size, colour, key frames, scales
 /// and angles), then shifted by [`DUP_OFFSET`] on both
@@ -441,6 +489,37 @@ pub fn update_text_instance(core: &mut EditorCore, index: usize, content: &str) 
     true
 }
 
+/// Rotate the text instance at `index` by `delta_rad`
+/// radians (Phase K §30): every transform key's angle
+/// gains the same delta ([`rotate_keys`]), so the
+/// instance turns uniformly and its timing, positions
+/// and scales survive. No editor op exists for text
+/// instances, so — like this file's other instance
+/// mutations — the panel writes the project field
+/// directly under exactly one `snapshot()`, making a
+/// press a single undo step. A stale index refuses
+/// exactly as [`update_text_instance`] does
+/// ("No such text.", nothing snapshotted). An
+/// instance with no keys still counts as rotated —
+/// one snapshot, the success status, `true` —
+/// mirroring [`duplicate_text_instance`], which
+/// clones a keyless instance the same way rather
+/// than refusing (see the module docs for why the
+/// nudge's keyless refusal is not followed here).
+/// Returns whether the instance was rotated.
+pub fn rotate_text_instance(core: &mut EditorCore, index: usize, delta_rad: f32) -> bool {
+    let Some(_inst) = core.project.texts.get(index) else {
+        core.status = "No such text.".into();
+        return false;
+    };
+    core.snapshot();
+    if let Some(inst) = core.project.texts.get_mut(index) {
+        rotate_keys(&mut inst.keys, delta_rad);
+    }
+    core.status = format!("Text {} rotated.", index + 1);
+    true
+}
+
 /// The full (untruncated) content of the text instance at
 /// `index` — what a list-row click loads into the tool's
 /// field.
@@ -538,6 +617,19 @@ fn update_loaded(s: &mut State) {
     };
     let content = s.text_tool.field.text.clone();
     update_text_instance(&mut s.core, i, &content);
+}
+
+/// Rotate-button handler (Phase K §30): turn the
+/// loaded instance by `delta_rad` via
+/// [`rotate_text_instance`]. The two buttons pass
+/// ∓/± [`ROTATE_STEP_RAD`]; resolution and refusal
+/// are [`loaded_index`]'s and the op's, exactly like
+/// the nudge pad's presses.
+fn rotate_loaded(s: &mut State, delta_rad: f32) {
+    let Some(i) = loaded_index(s) else {
+        return;
+    };
+    rotate_text_instance(&mut s.core, i, delta_rad);
 }
 
 /// Nudge-pad handler: move the loaded instance by
@@ -696,7 +788,8 @@ fn step_from_button(s: &mut State, dir: i32) {
 /// The Text section: field + Add text, the size stepper,
 /// the selected figure's existing text segments, the
 /// project's free-standing text instances, and the
-/// loaded instance's nudge pad + size steppers.
+/// loaded instance's nudge pad, rotate row and size
+/// steppers.
 pub fn text_tool(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let rows = text_segments(core);
@@ -754,8 +847,9 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
     }
 
     // The loaded instance's edit area: the Update text
-    // write-back button (Phase J §24), a nudge pad and
-    // size steppers acting on `TextToolState::loaded` —
+    // write-back button (Phase J §24), a nudge pad, a
+    // rotate row (Phase K §30) and size steppers acting
+    // on `TextToolState::loaded` —
     // the instance the last row click loaded. Rendered
     // either way; with nothing loaded the handlers refuse
     // with a status line, and with a stale index the core
@@ -812,6 +906,19 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                 }))
                 .child(btn("text-nudge-r", "→", false, t, |s| {
                     nudge_loaded(s, NUDGE_STEP, 0.0)
+                })),
+        )
+        .child(
+            row()
+                .key("text-rotate-row")
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(btn("text-rot-l", "Rotate −15°", false, t, |s| {
+                    rotate_loaded(s, -ROTATE_STEP_RAD)
+                }))
+                .child(btn("text-rot-r", "Rotate +15°", false, t, |s| {
+                    rotate_loaded(s, ROTATE_STEP_RAD)
                 })),
         )
         .child(
@@ -1473,6 +1580,177 @@ mod tests {
         assert_eq!(core.project.texts.len(), 1, "no instance was created");
         assert_eq!(core.project.texts[0].content, "A", "nothing was written");
         assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
+    }
+
+    /// Instance fixture with distinct per-key angles:
+    /// `keys` are `(frame, x, y, angle)` tuples, so a
+    /// test can prove a rotate adds its delta to every
+    /// key's own angle, not just the first key's.
+    fn push_instance_angled(
+        core: &mut EditorCore,
+        content: &str,
+        keys: &[(f32, f32, f32, f32)],
+    ) {
+        core.project.texts.push(TextInstance {
+            content: content.into(),
+            size: 24.0,
+            color: 0xFF_102030,
+            keys: keys
+                .iter()
+                .map(|&(frame, x, y, angle)| InstanceKey {
+                    frame,
+                    x,
+                    y,
+                    scale: 1.25,
+                    angle,
+                })
+                .collect(),
+        });
+    }
+
+    fn key_angles(core: &EditorCore, index: usize) -> Vec<f32> {
+        core.project.texts[index]
+            .keys
+            .iter()
+            .map(|k| k.angle)
+            .collect()
+    }
+
+    #[test]
+    fn rotate_text_instance_turns_every_key_and_touches_nothing_else() {
+        let mut core = EditorCore::new();
+        // Angles and delta are exact binary fractions,
+        // so the sums compare exactly.
+        push_instance_angled(
+            &mut core,
+            "Tilted",
+            &[(0.0, 10.0, 20.0, 0.0), (2.0, 30.0, 40.0, 0.25), (5.0, 50.0, 60.0, -0.5)],
+        );
+        let depth_before = core.undo_depth();
+        assert!(rotate_text_instance(&mut core, 0, 0.125));
+        assert_eq!(core.status, "Text 1 rotated.");
+        assert_eq!(
+            key_angles(&core, 0),
+            vec![0.125, 0.375, -0.375],
+            "every key's angle gains the delta, not just the first"
+        );
+        let inst = &core.project.texts[0];
+        assert_eq!(inst.content, "Tilted", "content untouched");
+        assert_eq!(inst.size, 24.0, "size untouched");
+        assert_eq!(inst.color, 0xFF_102030, "colour untouched");
+        assert_eq!(
+            key_positions(&core, 0),
+            vec![(10.0, 20.0), (30.0, 40.0), (50.0, 60.0)],
+            "every key's position untouched"
+        );
+        for (i, key) in inst.keys.iter().enumerate() {
+            assert_eq!(key.frame, [0.0, 2.0, 5.0][i], "key timing untouched");
+            assert_eq!(key.scale, 1.25, "key scale untouched");
+        }
+        assert_eq!(
+            core.undo_depth(),
+            depth_before + 1,
+            "exactly one snapshot for the rotate"
+        );
+    }
+
+    #[test]
+    fn rotate_text_instance_keeps_equal_angles_equal() {
+        let mut core = EditorCore::new();
+        // The position fixture gives every key angle
+        // 30.0: a uniform rotation keeps them equal.
+        push_instance_pos(
+            &mut core,
+            "Level",
+            20.0,
+            &[(0.0, 10.0, 20.0), (4.0, 50.0, 60.0)],
+        );
+        assert!(rotate_text_instance(&mut core, 0, ROTATE_STEP_RAD));
+        let angles = key_angles(&core, 0);
+        assert_eq!(angles[0], angles[1], "equal angles stay equal under one delta");
+        assert_eq!(angles[0], 30.0 + ROTATE_STEP_RAD);
+        // And back: the opposite step restores the
+        // original angle exactly (same addition reversed
+        // is not guaranteed in floats, so compare the
+        // pair's equality, which the uniform delta does
+        // guarantee).
+        assert!(rotate_text_instance(&mut core, 0, -ROTATE_STEP_RAD));
+        let back = key_angles(&core, 0);
+        assert_eq!(back[0], back[1], "still equal after rotating back");
+    }
+
+    #[test]
+    fn rotate_text_instance_is_one_undo_step() {
+        let mut core = EditorCore::new();
+        push_instance_angled(
+            &mut core,
+            "Undo me",
+            &[(0.0, 10.0, 20.0, 0.25), (3.0, 40.0, 50.0, -0.25)],
+        );
+        assert!(rotate_text_instance(&mut core, 0, 0.5));
+        assert_eq!(key_angles(&core, 0), vec![0.75, 0.25]);
+        core.undo();
+        assert_eq!(
+            key_angles(&core, 0),
+            vec![0.25, -0.25],
+            "one undo restores every key's angle at once"
+        );
+    }
+
+    #[test]
+    fn rotate_text_instance_numbers_the_status_by_the_instance() {
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "A", 20.0, &[(0.0, 10.0, 20.0)]);
+        push_instance_pos(&mut core, "B", 20.0, &[(0.0, 90.0, 90.0)]);
+        assert!(rotate_text_instance(&mut core, 1, ROTATE_STEP_RAD));
+        assert_eq!(core.status, "Text 2 rotated.");
+        assert_eq!(key_angles(&core, 0), vec![30.0], "the other instance is untouched");
+        assert_eq!(key_angles(&core, 1), vec![30.0 + ROTATE_STEP_RAD]);
+    }
+
+    #[test]
+    fn rotate_text_instance_out_of_range_is_status_only_noop() {
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "A", 20.0, &[(0.0, 10.0, 20.0)]);
+        let depth_before = core.undo_depth();
+        assert!(!rotate_text_instance(&mut core, 7, ROTATE_STEP_RAD));
+        assert_eq!(core.status, "No such text.");
+        assert_eq!(key_angles(&core, 0), vec![30.0], "nothing was rotated");
+        assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
+    }
+
+    #[test]
+    fn rotate_text_instance_without_keys_still_rotates() {
+        // The documented decision (module docs, Phase K
+        // §30): rotation mirrors duplicate, not the
+        // nudge — a keyless instance is cloned by
+        // duplicate under one snapshot without refusing,
+        // so a keyless rotate likewise snapshots once,
+        // reports success and returns true; the per-key
+        // loop is a no-op over the empty track.
+        let mut core = EditorCore::new();
+        push_instance(&mut core, "Keyless", 20.0, 0);
+        assert!(core.project.texts[0].keys.is_empty());
+        let depth_before = core.undo_depth();
+        assert!(rotate_text_instance(&mut core, 0, ROTATE_STEP_RAD));
+        assert_eq!(core.status, "Text 1 rotated.");
+        assert!(core.project.texts[0].keys.is_empty(), "still no keys, nothing invented");
+        assert_eq!(
+            core.undo_depth(),
+            depth_before + 1,
+            "one snapshot, like a keyless duplicate"
+        );
+        core.undo();
+        assert_eq!(core.project.texts.len(), 1, "the undo step is the empty rotate");
+    }
+
+    #[test]
+    fn rotate_step_is_fifteen_degrees() {
+        assert_eq!(ROTATE_STEP_RAD, std::f32::consts::PI / 12.0);
+        assert!(
+            (ROTATE_STEP_RAD.to_degrees() - 15.0).abs() < 0.001,
+            "the step the two buttons are labelled with"
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase J pre-commit gate for StykAnimate-RS (integrator checks).
+"""Phase J+K pre-commit gate for StykAnimate-RS (integrator checks).
 
 Run from the repo root:
 
@@ -40,8 +40,9 @@ What each check guards (and the Phase I failure behind it):
    census catches a missing field BEFORE CI does, and
    names the exact literals that lack it.
 
-4. CALLER CENSUS — each Phase J lib op must have at least
-   one production (non-test, non-defining-file) call site.
+4. CALLER CENSUS — each Phase J+K lib op must have at
+   least one production (non-test, non-defining-file)
+   call site.
    This is the Phase I section 8 failure: the contact-
    sheet range export pair landed in export.rs with NO
    caller anywhere — finished-looking work that no user
@@ -56,6 +57,34 @@ What each check guards (and the Phase I failure behind it):
    and elsewhere a palette count was claimed as 98/100
    when the table held 97. Docs must match these numbers
    or the mismatch must be explained in the docs.
+
+Phase K additions (same gate, wider net — the failure
+modes above did not change, only the surface did):
+
+- The caller census now also watches the Phase K lib
+  ops (PHASE_K_OPS below), AND one Phase J op it never
+  watched: `duplicate_channel_to_figure` landed in
+  Phase J (graph_keys.rs) but was missing from the
+  Phase J list, so its wiring was never verified by
+  this gate. It is in the census now. Two Phase K
+  entries are expected to read UNWIRED until the
+  integrator wires them at integration
+  (`audio_duplicate_clip_at` — the audio_panel button;
+  `note_playback_speed` — the main.rs poll call): the
+  flag mid-phase is the gate working, not a script bug,
+  and neither is special-cased.
+- The count claims stay read-from-source (no expected
+  number is hard-coded anywhere in this script); the
+  Phase K expectations the docs must match are palette
+  103, MCP registry 84, icons 110, scenes 8. The scene
+  count comes from the same live extraction of
+  scenes.rs, so it reports 8 as soon as the two new
+  scenes land.
+- The State census covers Phase K's new
+  `playback_speed` field automatically: the field list
+  is parsed live from src/main.rs, so any field added
+  to the struct is censused against every literal with
+  no script change.
 
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
@@ -432,7 +461,7 @@ def check_state_literals(fields: list[str]) -> tuple[bool, list[str]]:
 
 
 # ----------------------------------------------------------------
-# Check 4 — caller census for the Phase J lib ops
+# Check 4 — caller census for the Phase J+K lib ops
 # ----------------------------------------------------------------
 
 PHASE_J_OPS = [
@@ -445,6 +474,27 @@ PHASE_J_OPS = [
     "sync_playback_audio_on_drift",
 ]
 
+# Phase K additions. `duplicate_channel_to_figure` is a
+# Phase J op (graph_keys.rs) that the Phase J list above
+# never included — the gate did not watch it; it is
+# censused from Phase K on. `audio_duplicate_clip_at`
+# and `note_playback_speed` are wired by the integrator
+# at integration (audio_panel button / main.rs poll), so
+# on a pre-integration tree they correctly read UNWIRED.
+PHASE_K_OPS = [
+    "delete_channel",
+    "delete_keys_in_range",
+    "duplicate_channel_to_figure",
+    "set_project_fps",
+    "set_stage_size",
+    "delete_project_file",
+    "audio_duplicate_clip_at",
+    "fx_clip_gizmo_geometry",
+    "note_playback_speed",
+]
+
+CENSUS_OPS = PHASE_J_OPS + PHASE_K_OPS
+
 
 def check_callers() -> tuple[bool, list[str]]:
     lines: list[str] = []
@@ -455,7 +505,7 @@ def check_callers() -> tuple[bool, list[str]]:
         with open(full, encoding="utf-8") as fh:
             blanked_by_file[rel] = blank_code(fh.read())
     ok = True
-    for name in PHASE_J_OPS:
+    for name in CENSUS_OPS:
         def_re = re.compile(rf"fn\s+{name}\s*\(")
         defining = [rel for rel, b in blanked_by_file.items() if def_re.search(b)]
         call_re = re.compile(rf"\b{name}\b")
@@ -569,7 +619,7 @@ def main() -> int:
         if not ok:
             failures += 1
 
-    print("Phase J pre-commit checks")
+    print("Phase J+K pre-commit checks")
     print(f"Repo: {ROOT}")
     print(f"Key-diff base ref: {base}")
     print()
@@ -589,7 +639,7 @@ def main() -> int:
     report("3. STATE LITERAL CENSUS", ok, lines)
 
     ok, lines = check_callers()
-    report("4. CALLER CENSUS (Phase J lib ops)", ok, lines)
+    report("4. CALLER CENSUS (Phase J+K lib ops)", ok, lines)
 
     claims = count_claims()
     claim_lines = [f"{label}: {n}  ({how})" for label, n, how in claims]

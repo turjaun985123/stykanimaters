@@ -1736,6 +1736,68 @@ impl EditorCore {
         self.status = format!("{} fps.", self.project.fps as i32);
     }
 
+    /// Trim-friendly number formatting for the two
+    /// settings setters below: whole numbers print with
+    /// no decimal point ("24"), fractional values with
+    /// one decimal ("29.9"). `adjust_fps`'s `as i32`
+    /// truncation is fine for a stepper that moves in
+    /// whole steps, but a setter handed 29.97 must not
+    /// report "29".
+    fn setting_number(v: f32) -> String {
+        if v == v.trunc() {
+            format!("{}", v as i64)
+        } else {
+            format!("{v:.1}")
+        }
+    }
+
+    /// Set the project's frame rate directly (the
+    /// settings panel's fps stepper, Phase K). Unlike
+    /// the steppers above, a discrete settings choice IS
+    /// an undoable edit here: a real change takes
+    /// exactly one snapshot. A non-finite value, or one
+    /// that clamps to the current rate, changes nothing
+    /// and takes none.
+    pub fn set_project_fps(&mut self, fps: f32) {
+        if !fps.is_finite() {
+            self.status = "Frame rate unchanged.".into();
+            return;
+        }
+        let fps = fps.clamp(1.0, 60.0);
+        if fps == self.project.fps {
+            self.status = "Frame rate unchanged.".into();
+            return;
+        }
+        self.snapshot();
+        self.project.fps = fps;
+        self.status = format!("Frame rate set to {} fps.", Self::setting_number(fps));
+    }
+
+    /// Set the stage size directly (the scene panel's
+    /// custom-size steppers, Phase K). Same discipline
+    /// as [`EditorCore::set_project_fps`]: non-finite on
+    /// either axis, or a size that clamps to the current
+    /// one, is a status-only refusal; a real change
+    /// takes exactly one snapshot.
+    pub fn set_stage_size(&mut self, w: f32, h: f32) {
+        if !w.is_finite() || !h.is_finite() {
+            self.status = "Stage size unchanged.".into();
+            return;
+        }
+        let stage = [w.clamp(64.0, 4096.0), h.clamp(64.0, 4096.0)];
+        if stage == self.project.stage {
+            self.status = "Stage size unchanged.".into();
+            return;
+        }
+        self.snapshot();
+        self.project.stage = stage;
+        self.status = format!(
+            "Stage size set to {}×{}.",
+            Self::setting_number(stage[0]),
+            Self::setting_number(stage[1])
+        );
+    }
+
     pub fn cycle_easing(&mut self) {
         self.project.easing = self.project.easing.next();
         self.status = format!("Easing: {}.", self.project.easing.label());
@@ -4389,6 +4451,94 @@ mod tests {
         assert!(core.status.starts_with("Easing: "));
         // Mirrors cycle_easing: project-settings tweaks are
         // not undoable edits, so the undo stack is untouched.
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn set_project_fps_writes_and_snapshots_once() {
+        let mut core = EditorCore::new();
+        assert_eq!(core.project.fps, 12.0, "demo rate");
+        let depth = core.undo_depth();
+        core.set_project_fps(24.0);
+        assert_eq!(core.project.fps, 24.0);
+        assert_eq!(core.status, "Frame rate set to 24 fps.");
+        assert_eq!(core.undo_depth(), depth + 1);
+    }
+
+    #[test]
+    fn set_project_fps_clamps_into_range() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        core.set_project_fps(0.0);
+        assert_eq!(core.project.fps, 1.0);
+        assert_eq!(core.status, "Frame rate set to 1 fps.");
+        core.set_project_fps(500.0);
+        assert_eq!(core.project.fps, 60.0);
+        assert_eq!(core.undo_depth(), depth + 2, "one snapshot per real change");
+    }
+
+    #[test]
+    fn set_project_fps_refuses_non_finite_without_snapshotting() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        core.set_project_fps(f32::NAN);
+        assert_eq!(core.project.fps, 12.0);
+        assert_eq!(core.status, "Frame rate unchanged.");
+        core.set_project_fps(f32::INFINITY);
+        assert_eq!(core.project.fps, 12.0);
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn set_project_fps_refuses_the_current_rate() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        core.set_project_fps(12.0);
+        assert_eq!(core.project.fps, 12.0);
+        assert_eq!(core.status, "Frame rate unchanged.");
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn set_stage_size_writes_and_snapshots_once() {
+        let mut core = EditorCore::new();
+        assert_eq!(core.project.stage, [960.0, 720.0], "demo stage");
+        let depth = core.undo_depth();
+        core.set_stage_size(1280.0, 960.0);
+        assert_eq!(core.project.stage, [1280.0, 960.0]);
+        assert_eq!(core.status, "Stage size set to 1280×960.");
+        assert_eq!(core.undo_depth(), depth + 1);
+    }
+
+    #[test]
+    fn set_stage_size_clamps_each_axis() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        core.set_stage_size(5000.0, 10.0);
+        assert_eq!(core.project.stage, [4096.0, 64.0]);
+        assert_eq!(core.status, "Stage size set to 4096×64.");
+        assert_eq!(core.undo_depth(), depth + 1);
+    }
+
+    #[test]
+    fn set_stage_size_refuses_non_finite_without_snapshotting() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        core.set_stage_size(f32::NAN, 720.0);
+        assert_eq!(core.project.stage, [960.0, 720.0]);
+        assert_eq!(core.status, "Stage size unchanged.");
+        core.set_stage_size(960.0, f32::INFINITY);
+        assert_eq!(core.project.stage, [960.0, 720.0]);
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn set_stage_size_refuses_the_current_size() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        core.set_stage_size(960.0, 720.0);
+        assert_eq!(core.project.stage, [960.0, 720.0]);
+        assert_eq!(core.status, "Stage size unchanged.");
         assert_eq!(core.undo_depth(), depth);
     }
 

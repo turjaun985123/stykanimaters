@@ -12,7 +12,7 @@
 //! left unrotated by accident.
 
 use crate::export::{camera_rotate_offset, particles_at};
-use crate::model::{evaluate, CapKind, Project, Shape, V2};
+use crate::model::{evaluate, CapKind, HEAD_RING_RADIUS, Project, Shape, V2};
 use std::path::Path;
 
 fn hex(c: u32) -> String {
@@ -174,7 +174,7 @@ pub fn export_svg(project: &Project, dir: &Path) -> std::io::Result<usize> {
                     let c = view(pos[i]);
                     svg += &format!(
                         "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{:.1}\"/>\n",
-                        c[0], c[1], 17.0 * zoom, color, w
+                        c[0], c[1], HEAD_RING_RADIUS * zoom, color, w
                     );
                 }
                 match node.shape {

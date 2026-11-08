@@ -62,6 +62,34 @@
 //!   against the file on disk whenever its mtime moves,
 //!   even when the projects *directory* (the scan cache's
 //!   key) has not changed.
+//! - **Delete (Phase K)** — each row's `home-proj-del-{i}`
+//!   button only *arms* a deletion: it records the row's
+//!   path in [`HomePanelState::confirm_delete`] and the
+//!   row re-renders as a confirm line ("Delete {name}?"
+//!   with `home-proj-del-confirm` /
+//!   `home-proj-del-cancel`). Nothing touches the disk
+//!   until the confirm press runs
+//!   [`dispatch_delete_confirm`], which calls
+//!   `shell::delete_project_file` (Phase K, section 15 —
+//!   the shell helper refuses shell-owned filenames). On
+//!   success both caches are dropped wholesale
+//!   ([`HomePanelState::invalidate_caches`]): the scan
+//!   cache is keyed on the directory mtime and the meta
+//!   cache on per-file mtimes, and a deleted file must
+//!   never render as a stale row from either. On failure
+//!   the confirm stays armed and the status line carries
+//!   the error. Opening another row or editing the
+//!   search clears a pending confirm. Deleting the file
+//!   of the project that is currently open removes only
+//!   the file: the in-memory project in the editor is
+//!   untouched and keeps editing as an unsaved copy.
+//! - **Sort (Phase K)** — the `home-sort` toggle in the
+//!   search row switches the row order between the scan's
+//!   own order (the default: `projects::scan` sorts by
+//!   modification time, newest first — projects.rs:62)
+//!   and name order ([`sort_entries`]: stable,
+//!   case-insensitive). The toggle's label names the
+//!   order in effect: "Sort: recent" / "Sort: A–Z".
 //!
 //! ## The scan cache (the Wave 15 lesson)
 //!
@@ -140,7 +168,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rune::tok::{self, type_, Theme};
-use rune::{col, row, text, text_input, El, TextEdit};
+use rune::{col, row, text, text_input, El, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Project;
 use stykanimate_rs::projects::{self, ProjectInfo};
@@ -186,6 +214,21 @@ pub struct HomePanelState {
     /// `scan_cache`; `Default` (empty map) keeps every
     /// existing construction of this state working.
     meta_cache: RefCell<HashMap<PathBuf, (SystemTime, usize, usize)>>,
+    /// The project file whose deletion is armed and
+    /// awaiting its confirm press (Phase K): the row for
+    /// this path renders the confirm line instead of its
+    /// Open / Duplicate / Delete buttons. `None` — the
+    /// `Default` — means no deletion is pending. Set by a
+    /// row's Delete button ([`arm_delete`]); cleared by
+    /// the cancel press, by a successful delete, by
+    /// opening another row, and by any search edit.
+    pub confirm_delete: Option<PathBuf>,
+    /// Row order (Phase K): `false` (the `Default`) keeps
+    /// the scan's order — most recently modified first
+    /// (projects.rs:62); `true` sorts the rows by name
+    /// via [`sort_entries`]. Flipped by the `home-sort`
+    /// toggle in the search row.
+    pub sort_by_name: bool,
 }
 
 impl HomePanelState {
@@ -236,6 +279,20 @@ impl HomePanelState {
             .borrow_mut()
             .insert(path.to_path_buf(), (modified, figures, frames));
         Some((figures, frames, modified))
+    }
+
+    /// Drop both caches wholesale (Phase K): the next
+    /// render rescans the projects directory and re-reads
+    /// every row's light metadata from disk. Called after
+    /// a successful project delete — the caches are keyed
+    /// on mtimes (the directory's, then each file's), and
+    /// while a delete does move the directory mtime, the
+    /// per-file meta cache has no way to learn a file is
+    /// *gone*; dropping both is the only way to be sure a
+    /// deleted file never renders as a stale row.
+    pub fn invalidate_caches(&self) {
+        *self.scan_cache.borrow_mut() = None;
+        self.meta_cache.borrow_mut().clear();
     }
 }
 
@@ -308,6 +365,39 @@ pub fn visible_projects(entries: &[ProjectInfo], query: &str) -> Vec<ProjectInfo
         .cloned()
         .collect();
     projects::filter_projects(&library, query)
+}
+
+/// The row order the panel renders (Phase K): with
+/// `by_name` false the entries pass through untouched —
+/// the scan's order, most recently modified first
+/// (projects.rs:62). With `by_name` true they are sorted
+/// by display name, case-insensitively; the sort is
+/// stable, so entries whose names fold to the same
+/// string keep their scan (recency) order relative to
+/// each other. Applied to the [`visible_projects`]
+/// projection only — the reopen quick action keeps
+/// resolving against the scan order, as before.
+pub fn sort_entries(entries: Vec<ProjectInfo>, by_name: bool) -> Vec<ProjectInfo> {
+    if !by_name {
+        return entries;
+    }
+    let mut entries = entries;
+    entries.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+    });
+    entries
+}
+
+/// Whether the row for `path` is the one whose deletion
+/// is armed (Phase K): the row builder renders that row
+/// as the confirm line. The comparison is by exact path
+/// — the scan's path, the same value the Delete button
+/// armed — so a re-render under a different search or
+/// sort can never move the confirm onto another row.
+pub fn confirm_pending(panel: &HomePanelState, path: &Path) -> bool {
+    panel.confirm_delete.as_deref() == Some(path)
 }
 
 /// The file the core's selector currently points at:
@@ -571,6 +661,65 @@ pub fn dispatch_duplicate(core: &mut EditorCore, path: &Path) {
     };
 }
 
+/// Arm a project file's deletion (Phase K): the row's
+/// Delete button records the path and nothing else — no
+/// file is touched until [`dispatch_delete_confirm`].
+/// Arming a second row replaces the first: only one
+/// confirm line can exist at a time (its buttons carry
+/// index-free keys).
+pub fn arm_delete(panel: &mut HomePanelState, path: PathBuf) {
+    panel.confirm_delete = Some(path);
+}
+
+/// Stand a pending deletion down (Phase K): the confirm
+/// line's "Keep" press, and the clear every other
+/// navigation applies (opening another row, editing the
+/// search). The armed file is untouched, as it always is
+/// until a confirm.
+pub fn cancel_delete(panel: &mut HomePanelState) {
+    panel.confirm_delete = None;
+}
+
+/// Carry out the armed deletion (Phase K): the confirm
+/// line's "Delete file" press. The path comes from the
+/// panel state — the row that armed it — never from a
+/// row index, so a re-sorted or re-filtered list cannot
+/// redirect the delete onto another file. The removal
+/// itself is the shell's `delete_project_file`
+/// (shell.rs, Phase K section 15), which refuses
+/// shell-owned filenames: a row should never name one
+/// ([`visible_projects`] filters them out), but the
+/// refusal is the backstop, and it lands here as the
+/// failure status with the confirm still armed and the
+/// row intact. On success the confirm clears, both
+/// caches are invalidated ([`HomePanelState::
+/// invalidate_caches`]) so the deleted row cannot
+/// reappear from a cached scan, and the status names
+/// the project. Only the file is removed: if it is the
+/// currently open project, the editor's in-memory copy
+/// is left exactly as it is. With nothing armed the
+/// press cannot happen (the confirm line is the only
+/// caller), and the function simply returns.
+pub fn dispatch_delete_confirm(
+    core: &mut EditorCore,
+    panel: &mut HomePanelState,
+    name: &str,
+) {
+    let Some(path) = panel.confirm_delete.clone() else {
+        return;
+    };
+    match shell::delete_project_file(&path) {
+        Ok(()) => {
+            panel.confirm_delete = None;
+            panel.invalidate_caches();
+            core.status = format!("Deleted project file {name}.");
+        }
+        Err(e) => {
+            core.status = format!("Delete failed: {e}");
+        }
+    }
+}
+
 /// Recover the snapshot from `./projects/.recovery.json`
 /// (`shell::read_recovery`, shell.rs:62) as the current
 /// project, with the standard session reset. The GPUI
@@ -751,8 +900,9 @@ fn recovery_banner(t: &Theme) -> El {
 }
 
 /// One project row: name + real metadata on the left,
-/// Open / Duplicate on the right. Keys carry the GPUI
-/// tuple ids as strings (`home-open-{i}`, `home-dup-{i}`),
+/// Open / Duplicate / Delete on the right. Keys carry the GPUI
+/// tuple ids as strings (`home-open-{i}`, `home-dup-{i}`,
+/// `home-proj-del-{i}`),
 /// matching the `frame-{n}` key style `chrome_view` uses.
 /// The metadata line under the name is keyed
 /// `home-proj-meta-{i}` and renders [`row_meta_line`]:
@@ -765,10 +915,69 @@ fn project_row(
     t: &Theme,
     meta: Option<(usize, usize, SystemTime)>,
 ) -> El {
+    project_row_confirm(info, i, t, meta, false)
+}
+
+/// [`project_row`] with the Phase K delete state: while
+/// `confirming` holds (this row's path is the armed one,
+/// [`confirm_pending`]) the row renders *instead* as the
+/// confirm line — "Delete {name}?" with a "Delete file"
+/// confirm (`home-proj-del-confirm`) and a "Keep" cancel
+/// (`home-proj-del-cancel`) — under the same
+/// `home-row-{i}` key and row chrome, so the list does
+/// not jump. Otherwise it is the ordinary row, plus its
+/// Delete button (`home-proj-del-{i}`), which only arms
+/// the deletion ([`arm_delete`]).
+fn project_row_confirm(
+    info: &ProjectInfo,
+    i: usize,
+    t: &Theme,
+    meta: Option<(usize, usize, SystemTime)>,
+    confirming: bool,
+) -> El {
+    if confirming {
+        let name = info.name.clone();
+        let confirm_name = info.name.clone();
+        return row()
+            .key(format!("home-row-{i}"))
+            .w_full()
+            .gap(8.0)
+            .center_y()
+            .px(10.0)
+            .py(6.0)
+            .radius(8.0)
+            .fill(t.bg)
+            .child(
+                text(format!("Delete {name}?"))
+                    .font(type_::TITLE)
+                    .color(t.text)
+                    .grow(1.0),
+            )
+            .child(btn(
+                "home-proj-del-confirm",
+                "Delete file",
+                false,
+                t,
+                move |s: &mut State| {
+                    dispatch_delete_confirm(&mut s.core, &mut s.home_panel, &confirm_name);
+                },
+            ))
+            .child(btn(
+                "home-proj-del-cancel",
+                "Keep",
+                false,
+                t,
+                |s: &mut State| {
+                    cancel_delete(&mut s.home_panel);
+                },
+            ));
+    }
     let open_key = format!("home-open-{i}");
     let dup_key = format!("home-dup-{i}");
+    let del_key = format!("home-proj-del-{i}");
     let path = info.path.clone();
     let dup_path = info.path.clone();
+    let del_path = info.path.clone();
     let name = info.name.clone();
     row()
         .key(format!("home-row-{i}"))
@@ -792,10 +1001,18 @@ fn project_row(
                 ),
         )
         .child(icon_btn(&open_key, "folder-open", "Open", false, t, move |s: &mut State| {
+            // Opening a row stands down any pending
+            // delete confirm (Phase K): the armed row is
+            // never this one — an armed row renders its
+            // confirm line instead of an Open button.
+            cancel_delete(&mut s.home_panel);
             dispatch_open(&mut s.core, &path, &name);
         }))
         .child(btn(&dup_key, "Duplicate", false, t, move |s: &mut State| {
             dispatch_duplicate(&mut s.core, &dup_path);
+        }))
+        .child(btn(&del_key, "Delete", false, t, move |s: &mut State| {
+            arm_delete(&mut s.home_panel, del_path);
         }))
 }
 
@@ -814,7 +1031,10 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
         return panel;
     }
     let entries = home.projects();
-    let shown = visible_projects(&entries, &home.search.text);
+    let shown = sort_entries(
+        visible_projects(&entries, &home.search.text),
+        home.sort_by_name,
+    );
     // The reopen quick action resolves against the same
     // cached scan, through the library filter but *not*
     // the search query (see `reopen_target`).
@@ -842,6 +1062,9 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
             true,
             t,
             move |s: &mut State| {
+                // Reopening is an open: it stands down
+                // any pending delete confirm (Phase K).
+                cancel_delete(&mut s.home_panel);
                 dispatch_open(&mut s.core, &path, &name);
             },
         ));
@@ -879,7 +1102,14 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
                     .grow(1.0)
                     .color(t.text)
                     .placeholder("Search projects", t.text_secondary)
-                    .on_edit(|s: &mut State| &mut s.home_panel.search),
+                    .on_edit(|s: &mut State| &mut s.home_panel.search)
+                    // Any search edit stands down a
+                    // pending delete confirm (Phase K):
+                    // the row list is about to change
+                    // under the armed row.
+                    .on_input_change(|s: &mut State, _tx: &mut Tx| {
+                        cancel_delete(&mut s.home_panel);
+                    }),
             )
             .child(section_label(
                 t,
@@ -888,6 +1118,19 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
                     shown.len(),
                     if shown.len() == 1 { "project" } else { "projects" }
                 ),
+            ))
+            .child(btn(
+                "home-sort",
+                if home.sort_by_name {
+                    "Sort: A–Z"
+                } else {
+                    "Sort: recent"
+                },
+                home.sort_by_name,
+                t,
+                |s: &mut State| {
+                    s.home_panel.sort_by_name = !s.home_panel.sort_by_name;
+                },
             )),
     );
     if shown.is_empty() {
@@ -903,7 +1146,8 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
         let mut rows = col().key("home-rows").gap(6.0);
         for (i, info) in shown.iter().enumerate() {
             let meta = home.metadata_for(&info.path);
-            rows = rows.child(project_row(info, i, t, meta));
+            let confirming = confirm_pending(home, &info.path);
+            rows = rows.child(project_row_confirm(info, i, t, meta, confirming));
         }
         card = card.child(rows);
     }
@@ -1318,6 +1562,17 @@ mod tests {
     }
 
     #[test]
+    fn project_row_confirm_builds_the_row_and_the_confirm_line() {
+        // Builder smoke test for the Phase K shapes: the
+        // ordinary row (with its Delete button) and the
+        // armed row's confirm line both construct.
+        let t = tok::theme(true);
+        let entry = info("Demo", "projects/demo.json");
+        let _ = project_row_confirm(&entry, 0, &t, None, false);
+        let _ = project_row_confirm(&entry, 0, &t, None, true);
+    }
+
+    #[test]
     fn project_file_index_matches_by_file_name() {
         let files = vec![
             PathBuf::from("/abs/projects/alpha.json"),
@@ -1447,6 +1702,140 @@ mod tests {
         let state = initial_state_in(&dir);
         assert!(state.open);
         assert!(state.recovery_offer);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn state_defaults_no_delete_armed_and_scan_order_sort() {
+        // The Phase K fields ride on `Default`: no
+        // deletion pending, rows in scan order.
+        let state = HomePanelState::default();
+        assert_eq!(state.confirm_delete, None);
+        assert!(!state.sort_by_name);
+    }
+
+    #[test]
+    fn sort_entries_default_order_passes_through_untouched() {
+        // by_name = false: the scan's order is the
+        // panel's order, exactly as given — even when
+        // the input is not name-sorted.
+        let entries = vec![
+            info("Zulu", "projects/zulu.json"),
+            info("Alpha", "projects/alpha.json"),
+            info("Mike", "projects/mike.json"),
+        ];
+        let out = sort_entries(entries, false);
+        assert_eq!(
+            out.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["Zulu", "Alpha", "Mike"]
+        );
+    }
+
+    #[test]
+    fn sort_entries_by_name_is_case_insensitive_and_stable() {
+        let entries = vec![
+            info("beta", "projects/beta.json"),
+            info("Alpha", "projects/alpha.json"),
+            info("BETA", "projects/beta-two.json"),
+            info("apple", "projects/apple.json"),
+        ];
+        let out = sort_entries(entries, true);
+        assert_eq!(
+            out.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["Alpha", "apple", "beta", "BETA"]
+        );
+        // Stability: the two entries whose names fold to
+        // "beta" keep their input (scan) order — the
+        // earlier "beta" still precedes "BETA".
+        assert_eq!(out[2].path, PathBuf::from("projects/beta.json"));
+        assert_eq!(out[3].path, PathBuf::from("projects/beta-two.json"));
+    }
+
+    #[test]
+    fn delete_arm_replaces_and_cancel_clears() {
+        // The confirm state machine at the helper level:
+        // arming records the path, arming again replaces
+        // it (one confirm line at a time), cancel clears.
+        let mut panel = HomePanelState::default();
+        assert!(!confirm_pending(&panel, Path::new("projects/alpha.json")));
+        arm_delete(&mut panel, PathBuf::from("projects/alpha.json"));
+        assert!(confirm_pending(&panel, Path::new("projects/alpha.json")));
+        assert!(!confirm_pending(&panel, Path::new("projects/beta.json")));
+        arm_delete(&mut panel, PathBuf::from("projects/beta.json"));
+        assert!(confirm_pending(&panel, Path::new("projects/beta.json")));
+        assert!(!confirm_pending(&panel, Path::new("projects/alpha.json")));
+        cancel_delete(&mut panel);
+        assert_eq!(panel.confirm_delete, None);
+        // Cancelling with nothing armed is a no-op.
+        cancel_delete(&mut panel);
+        assert_eq!(panel.confirm_delete, None);
+    }
+
+    #[test]
+    fn delete_confirm_with_nothing_armed_changes_nothing() {
+        let mut core = EditorCore::new();
+        core.status = "Sentinel.".into();
+        let mut panel = HomePanelState::default();
+        dispatch_delete_confirm(&mut core, &mut panel, "Demo");
+        assert_eq!(core.status, "Sentinel.");
+        assert_eq!(panel.confirm_delete, None);
+    }
+
+    #[test]
+    fn dispatch_delete_confirm_removes_a_real_file_and_clears_state() {
+        // A real file in a real temp dir (the metadata
+        // tests' precedent): the confirm press removes
+        // it, clears the armed path, drops BOTH caches —
+        // a stale row must never render — and reports
+        // the deletion by the project's display name.
+        let dir = temp_dir("delete-confirm");
+        let path = dir.join("demo.json");
+        std::fs::write(&path, project_json(1, 1)).unwrap();
+        let mut panel = HomePanelState::default();
+        // Seed both caches as earlier renders would have.
+        *panel.scan_cache.borrow_mut() =
+            Some((None, vec![info("Demo", "projects/demo.json")]));
+        panel
+            .meta_cache
+            .borrow_mut()
+            .insert(path.clone(), (SystemTime::UNIX_EPOCH, 1, 1));
+        arm_delete(&mut panel, path.clone());
+        let mut core = EditorCore::new();
+        dispatch_delete_confirm(&mut core, &mut panel, "Demo");
+        assert!(!path.exists(), "the file is gone");
+        assert_eq!(panel.confirm_delete, None);
+        assert_eq!(core.status, "Deleted project file Demo.");
+        assert!(
+            panel.scan_cache.borrow().is_none(),
+            "scan cache dropped"
+        );
+        assert!(
+            panel.meta_cache.borrow().is_empty(),
+            "meta cache dropped"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dispatch_delete_confirm_refuses_a_shell_owned_name() {
+        // The shell helper refuses shell-owned filenames:
+        // a confirm over `.recovery.json` deletes
+        // nothing, the confirm stays armed (the row state
+        // survives) and the status carries the failure.
+        let dir = temp_dir("delete-refused");
+        let path = dir.join(shell::RECOVERY_FILE);
+        std::fs::write(&path, b"{}").unwrap();
+        let mut panel = HomePanelState::default();
+        arm_delete(&mut panel, path.clone());
+        let mut core = EditorCore::new();
+        dispatch_delete_confirm(&mut core, &mut panel, "Untitled");
+        assert!(path.exists(), "the snapshot is untouched");
+        assert_eq!(panel.confirm_delete, Some(path));
+        assert!(
+            core.status.starts_with("Delete failed:"),
+            "{}",
+            core.status
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

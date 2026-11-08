@@ -161,11 +161,42 @@
 //! when its stroke was removed, shifted when its
 //! stroke survived.
 //!
+//! ## Selected stroke width (Phase K, section 24)
+//!
+//! Until this phase a recorded stroke's `width` was
+//! fixed at draw time: the brush steppers above choose
+//! the preset a *future* stroke is drawn with, and no
+//! op rewrote an existing stroke's width. A row under
+//! the measure line (key `stroke-width-row`, rendered
+//! only while a valid selection exists) closes that:
+//! [`set_selected_stroke_width`] steps the selected
+//! stroke's width by [`STROKE_WIDTH_STEP`] (0.5),
+//! clamped to [0.5, 40.0] by the pure [`width_after`].
+//! The composition is the Phase F bulk discipline —
+//! one `core.snapshot()`, then a direct
+//! `project.strokes` write — so a press is exactly
+//! one undo step. A non-empty `widths` taper scales
+//! by the same ratio (new / old), so the stroke keeps
+//! its shape and only grows or shrinks; the scaling
+//! is skipped when the old width is zero, negative or
+//! non-finite, where a ratio would be meaningless or
+//! destructive, and the base width is still written.
+//! A non-finite stored width is recovered from
+//! [`DEFAULT_STROKE_WIDTH`] (4.0 — the default brush's
+//! width, the first `brush_library` entry, which is
+//! what a fresh stroke is recorded with) before the
+//! step applies. With no selection, or a stale one,
+//! the press is a silent no-op — no snapshot, no
+//! status — like the readout helpers: the row is not
+//! even rendered then, so a press can only go stale
+//! if the project changed under it.
+//!
 //! `State` access: the brush and stroke data read
 //! `s.core` (active brush, `brush_index`,
 //! `project.strokes`, `current`) and writes go through
 //! the `brush_index` field write, the frame-clear op,
-//! `delete_stroke_at` or the bulk composition above;
+//! `delete_stroke_at`, the width op below or the bulk
+//! composition above;
 //! the selection row additionally reads and writes
 //! `s.stroke_selected`, declared in main.rs — no field
 //! is declared in this file.
@@ -676,6 +707,96 @@ pub fn measure_readout(core: &EditorCore, selected: Option<usize>) -> Option<Str
     ))
 }
 
+/// One width-stepper press moves a stroke's width by
+/// this much. Half a stage unit is fine enough to tune
+/// a line and coarse enough that a few presses cross
+/// the brush library's whole range (2.0–24.0).
+pub const STROKE_WIDTH_STEP: f32 = 0.5;
+
+/// The narrowest width the stepper writes: a stroke
+/// never quite vanishes, and the value matches the
+/// lower clamp the draw path's own thinnest recorded
+/// widths stay above.
+pub const MIN_STROKE_WIDTH: f32 = 0.5;
+
+/// The widest width the stepper writes — above the
+/// broadest brush preset (24.0), so an existing stroke
+/// can always be made heavier than any brush draws it,
+/// without runaway values from a corrupt file.
+pub const MAX_STROKE_WIDTH: f32 = 40.0;
+
+/// The width a non-finite stored width is recovered
+/// to before a step applies: the default brush's
+/// width (4.0, the first `paint::brush_library`
+/// entry — "the editor's default", paint.rs), which
+/// is what `begin_draw` records a fresh stroke with.
+pub const DEFAULT_STROKE_WIDTH: f32 = 4.0;
+
+/// The width after one stepper press in direction
+/// `dir` (−1 / +1; larger magnitudes step further):
+/// `current` moved by `dir` × [`STROKE_WIDTH_STEP`]
+/// and clamped to [[`MIN_STROKE_WIDTH`],
+/// [`MAX_STROKE_WIDTH`]]. A non-finite `current`
+/// (a corrupt or hand-edited project file) is first
+/// recovered to [`DEFAULT_STROKE_WIDTH`], so the
+/// press always lands on a real, usable width. Pure.
+pub fn width_after(current: f32, dir: i32) -> f32 {
+    let base = if current.is_finite() {
+        current
+    } else {
+        DEFAULT_STROKE_WIDTH
+    };
+    (base + dir as f32 * STROKE_WIDTH_STEP).clamp(MIN_STROKE_WIDTH, MAX_STROKE_WIDTH)
+}
+
+/// The selected stroke's current width, or `None`
+/// with no (or a stale) selection — the width row's
+/// render condition and value source, in the same
+/// guard shape as [`measure_readout`].
+pub fn selected_stroke_width(core: &EditorCore, selected: Option<usize>) -> Option<f32> {
+    let i = selected.filter(|&i| i < core.project.strokes.len())?;
+    Some(core.project.strokes[i].width)
+}
+
+/// Width stepper press: step the selected stroke's
+/// recorded `width` by [`width_after`]. The write is
+/// panel-composed in the Phase F bulk discipline —
+/// exactly one `core.snapshot()`, then a direct
+/// `project.strokes` write — so the press is one undo
+/// step. A non-empty per-point `widths` taper scales
+/// by the same ratio (new / old), preserving the
+/// taper's shape; the scaling is skipped when the old
+/// width is not a positive finite number (zero,
+/// negative or non-finite), where the ratio would
+/// divide by zero or poison every entry — the base
+/// width is still written. With no selection, or a
+/// stale one, the press is a silent no-op: `false`,
+/// no snapshot, no status. On success the status
+/// names the stroke and its new width, in the
+/// measure line's voice: `Stroke {n} width {w}.`
+pub fn set_selected_stroke_width(
+    core: &mut EditorCore,
+    selected: Option<usize>,
+    dir: i32,
+) -> bool {
+    let Some(i) = selected.filter(|&i| i < core.project.strokes.len()) else {
+        return false;
+    };
+    let old = core.project.strokes[i].width;
+    let new = width_after(old, dir);
+    core.snapshot();
+    let stroke = &mut core.project.strokes[i];
+    stroke.width = new;
+    if old.is_finite() && old > 0.0 && !stroke.widths.is_empty() {
+        let scale = new / old;
+        for w in &mut stroke.widths {
+            *w *= scale;
+        }
+    }
+    core.status = format!("Stroke {} width {:.1}.", i + 1, new);
+    true
+}
+
 /// Prev / Next press: step `s.stroke_selected` through
 /// the project-wide stroke space ([`step_selection`]).
 /// View state only — no snapshot, no status, no core
@@ -1090,6 +1211,48 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .key("stroke-measure")
                 .font(type_::LABEL)
                 .color(t.text_secondary),
+        );
+    }
+
+    // Selected stroke width (Phase K): steppers under
+    // the measure line, rendered under the same valid-
+    // selection condition — the recorded width can now
+    // be changed after drawing, not only chosen before
+    // it. Each press is one undo step (see
+    // `set_selected_stroke_width`).
+    if let Some(w) = selected_stroke_width(core, s.stroke_selected) {
+        panel = panel.child(
+            row()
+                .key("stroke-width-row")
+                .gap(8.0)
+                .center_y()
+                .child(text("Width").font(type_::LABEL).color(t.text))
+                .child(
+                    text(format!("{w:.1}"))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .grow(1.0),
+                )
+                .child(icon_only_btn(
+                    "stroke-width-dn",
+                    "chevron-down",
+                    26.0, false,
+                    t,
+                    |s| {
+                        let sel = s.stroke_selected;
+                        set_selected_stroke_width(&mut s.core, sel, -1);
+                    },
+                ))
+                .child(icon_only_btn(
+                    "stroke-width-up",
+                    "chevron-up",
+                    26.0, false,
+                    t,
+                    |s| {
+                        let sel = s.stroke_selected;
+                        set_selected_stroke_width(&mut s.core, sel, 1);
+                    },
+                )),
         );
     }
 
@@ -1869,6 +2032,7 @@ mod tests {
             pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
             pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
             loop_playback: true,
+            playback_speed: 1.0,
             was_playing: false,
             last_status: String::new(),
             toast_now: 0.0,
@@ -2034,6 +2198,104 @@ mod tests {
         // No selection or a stale one: no line at all.
         assert_eq!(measure_readout(&core, None), None);
         assert_eq!(measure_readout(&core, Some(1)), None);
+    }
+
+    #[test]
+    fn width_after_steps_by_half_and_clamps() {
+        // Mid-range: exactly one step of 0.5 each way,
+        // and a magnitude-2 dir steps twice.
+        assert_eq!(width_after(4.0, 1), 4.5);
+        assert_eq!(width_after(4.0, -1), 3.5);
+        assert_eq!(width_after(3.0, 2), 4.0);
+        // Both clamps hold at and beyond the edges.
+        assert_eq!(width_after(0.5, -1), 0.5);
+        assert_eq!(width_after(0.4, -1), 0.5);
+        assert_eq!(width_after(40.0, 1), 40.0);
+        assert_eq!(width_after(39.9, 1), 40.0);
+    }
+
+    #[test]
+    fn width_after_recovers_a_non_finite_width_from_the_default() {
+        // A corrupt stored width steps from the default
+        // brush width (4.0), never from the corrupt value.
+        assert_eq!(width_after(f32::NAN, 1), 4.5);
+        assert_eq!(width_after(f32::NAN, -1), 3.5);
+        assert_eq!(width_after(f32::INFINITY, 1), 4.5);
+        assert_eq!(width_after(f32::NEG_INFINITY, -1), 3.5);
+    }
+
+    #[test]
+    fn set_selected_stroke_width_writes_and_scales_the_taper() {
+        let mut core = EditorCore::new();
+        let mut s = plain_stroke(0, 3);
+        s.widths = vec![2.0, 4.0, 6.0];
+        core.project.strokes.push(s);
+        let depth = core.undo_depth();
+        assert!(set_selected_stroke_width(&mut core, Some(0), 1));
+        let stroke = &core.project.strokes[0];
+        assert_eq!(stroke.width, 4.5);
+        // Scale is 4.5 / 4.0 = 1.125: the taper keeps
+        // its shape, grown by the same ratio.
+        assert_eq!(stroke.widths, vec![2.25, 4.5, 6.75]);
+        assert_eq!(core.undo_depth(), depth + 1, "exactly one snapshot");
+        assert_eq!(core.status, "Stroke 1 width 4.5.");
+    }
+
+    #[test]
+    fn set_selected_stroke_width_uniform_stroke_keeps_empty_widths() {
+        let mut core = EditorCore::new();
+        // plain_stroke is the uniform form: width 4.0,
+        // no per-point widths — the empty vec must stay
+        // empty, not be fabricated into a taper.
+        core.project.strokes.push(plain_stroke(0, 2));
+        let depth = core.undo_depth();
+        assert!(set_selected_stroke_width(&mut core, Some(0), -1));
+        let stroke = &core.project.strokes[0];
+        assert_eq!(stroke.width, 3.5);
+        assert!(stroke.widths.is_empty());
+        assert_eq!(core.undo_depth(), depth + 1);
+        assert_eq!(core.status, "Stroke 1 width 3.5.");
+    }
+
+    #[test]
+    fn set_selected_stroke_width_zero_old_width_leaves_the_taper_untouched() {
+        let mut core = EditorCore::new();
+        let mut s = plain_stroke(0, 2);
+        s.width = 0.0;
+        s.widths = vec![1.0, 2.0];
+        core.project.strokes.push(s);
+        assert!(set_selected_stroke_width(&mut core, Some(0), 1));
+        let stroke = &core.project.strokes[0];
+        // The base width still steps (0.0 + 0.5, at the
+        // clamp floor), but no ratio is taken from a
+        // zero old width — the taper is left as stored.
+        assert_eq!(stroke.width, 0.5);
+        assert_eq!(stroke.widths, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn set_selected_stroke_width_without_a_selection_is_a_silent_no_op() {
+        let mut core = core_with_strokes();
+        let depth = core.undo_depth();
+        let status_before = core.status.clone();
+        // No selection, and a stale one past the end:
+        // both refuse silently — no write, no snapshot,
+        // no status.
+        assert!(!set_selected_stroke_width(&mut core, None, 1));
+        assert!(!set_selected_stroke_width(&mut core, Some(99), -1));
+        assert_eq!(core.undo_depth(), depth, "no snapshot taken");
+        assert_eq!(core.status, status_before, "no status written");
+        assert_eq!(core.project.strokes[0].width, 4.0, "width untouched");
+    }
+
+    #[test]
+    fn selected_stroke_width_reads_only_a_valid_selection() {
+        let mut core = core_with_strokes();
+        assert_eq!(selected_stroke_width(&core, None), None);
+        assert_eq!(selected_stroke_width(&core, Some(0)), Some(4.0));
+        assert_eq!(selected_stroke_width(&core, Some(99)), None);
+        core.project.strokes.clear();
+        assert_eq!(selected_stroke_width(&core, Some(0)), None);
     }
 
     #[test]

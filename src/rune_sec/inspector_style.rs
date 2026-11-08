@@ -12,6 +12,17 @@
 //! * Gradient swatches → `set_node_color2` (same addition):
 //!   each swatch sets exactly its own gradient end colour —
 //!   None (off), white or #222222.
+//! * Gradient RGB steppers (Phase K) → `set_node_color2`
+//!   again: three channel rows under the swatches give the
+//!   gradient end the fine control the primary colour's
+//!   steppers have always had — rendered only while an end
+//!   colour is set (the swatches' Off state has nothing to
+//!   step). Each press steps one channel by [`RGB_STEP`]
+//!   off the node's CURRENT end colour and writes the
+//!   composed colour back through the same op a swatch
+//!   press uses, snapshot behaviour included (unlike
+//!   `set_node_color`, `set_node_color2` snapshots —
+//!   editor.rs:1978).
 //! * Opacity stepper → `set_node_opacity` (same addition):
 //!   − / + in 0.05 steps over the model's 0.0..=1.0 range,
 //!   with a % readout.
@@ -80,10 +91,14 @@
 //!   no duplicates, capped at [`RECENT_COLORS_CAP`]) of
 //!   the colours this panel's own handlers have applied
 //!   to the selected node. Recorded by [`note_recent_color`]
-//!   from exactly three sites: a gradient swatch press
-//!   (its end colour, when not Off), a preset application
-//!   ([`apply_preset`]) and a paste ([`paste_style`]). The
-//!   RGB steppers deliberately do NOT record — each press
+//!   from exactly four sites: a gradient swatch press
+//!   (its end colour, when not Off), a gradient stepper
+//!   press (Phase K — its stepped end colour, recorded
+//!   like a swatch press: the press applies a finished
+//!   gradient end through `set_node_color2`), a preset
+//!   application ([`apply_preset`]) and a paste
+//!   ([`paste_style`]). The primary-colour RGB steppers
+//!   deliberately do NOT record — each press
 //!   is an intermediate value on the way to a colour, and
 //!   recording them would flood the row with near-misses.
 //!   The row renders only when the list is non-empty (a
@@ -307,6 +322,48 @@ pub fn step_color_channel(core: &mut EditorCore, channel: usize, dir: i32) {
     core.set_node_color(rgb_join(r, g, b));
 }
 
+/// Whether the gradient stepper block renders: the
+/// selected node must carry a gradient end colour
+/// (`color2` set). The swatches' Off state (no end
+/// colour) has nothing to step, so the block is absent
+/// entirely rather than rendered inert.
+pub fn gradient_steppers_visible(core: &EditorCore) -> bool {
+    matches!(selected_style(core), Some(style) if style.color2.is_some())
+}
+
+/// One gradient RGB channel stepper press against the
+/// core (Phase K): the exact twin of
+/// [`step_color_channel`] for the gradient end — read the
+/// selected node's current `color2` (via
+/// [`selected_style`], the panel's style resolution),
+/// step channel `channel` (0 = R, 1 = G, 2 = B) by
+/// [`RGB_STEP`], and write the composed colour back
+/// through `set_node_color2` — the op the gradient
+/// swatches press, with that op's own snapshot behaviour.
+/// The stepped colour is recorded via
+/// [`note_recent_color`], like a swatch press: the press
+/// applies a finished gradient end colour. No selection,
+/// no gradient end, or a bad channel index → no-op (and
+/// nothing recorded).
+pub fn step_gradient_channel(core: &mut EditorCore, channel: usize, dir: i32) {
+    let Some(style) = selected_style(core) else {
+        return;
+    };
+    let Some(rgb) = style.color2 else {
+        return;
+    };
+    let (r, g, b) = rgb_split(rgb);
+    let (r, g, b) = match channel {
+        0 => (step_channel(r, dir), g, b),
+        1 => (r, step_channel(g, dir), b),
+        2 => (r, g, step_channel(b, dir)),
+        _ => return,
+    };
+    let stepped = rgb_join(r, g, b);
+    core.set_node_color2(Some(stepped));
+    note_recent_color(stepped);
+}
+
 /// A copied segment style: exactly the fields this panel
 /// can write through a direct `EditorCore` setter (see the
 /// module docs for what is excluded and why — taper and
@@ -485,11 +542,12 @@ pub fn recent_colors() -> Vec<u32> {
 /// Record `color` as the panel's most recent colour. The
 /// recording sites are the handlers that apply a colour
 /// to the selected node — the gradient swatch press, a
-/// preset application, a paste, and a recent chip press
-/// itself (which re-notes its colour, moving it to the
-/// front). The RGB steppers deliberately never call
-/// this: their steps are intermediate values, not chosen
-/// colours (see the module docs).
+/// gradient stepper press, a preset application, a paste,
+/// and a recent chip press itself (which re-notes its
+/// colour, moving it to the front). The primary-colour
+/// RGB steppers deliberately never call this: their steps
+/// are intermediate values, not chosen colours (see the
+/// module docs).
 pub fn note_recent_color(color: u32) {
     RECENT_COLORS.with(|c| {
         let mut slot = c.borrow_mut();
@@ -533,6 +591,50 @@ fn channel_row(channel: usize, label: &str, value: u8, t: &Theme) -> El {
         }))
         .child(btn(&format!("style-{lower}-up"), "+", false, t, move |s| {
             step_color_channel(&mut s.core, channel, 1)
+        }))
+}
+
+/// One gradient RGB channel stepper row (Phase K):
+/// [`channel_row`]'s construction with a `g` key infix —
+/// the full "Gradient R" / "Gradient G" / "Gradient B"
+/// label, the same channel-coloured square and value
+/// readout, and − / + buttons stepping the gradient end
+/// by [`RGB_STEP`] via [`step_gradient_channel`]. Keys
+/// are `style-g<letter>-dn` / `style-g<letter>-up` in a
+/// row keyed `style-g<letter>-row` — the primary rows'
+/// `style-<letter>-…` pattern with the infix.
+fn gradient_channel_row(channel: usize, label: &str, value: u8, t: &Theme) -> El {
+    let stem = match channel {
+        0 => "gr",
+        1 => "gg",
+        _ => "gb",
+    };
+    let swatch_rgb = match channel {
+        0 => rgb_join(value, 0, 0),
+        1 => rgb_join(0, value, 0),
+        _ => rgb_join(0, 0, value),
+    };
+    let swatch = el()
+        .size(12.0, 12.0)
+        .radius(3.0)
+        .fill(hex_color(swatch_rgb).unwrap_or(Color::WHITE));
+    row()
+        .key(format!("style-{stem}-row"))
+        .gap(8.0)
+        .center_y()
+        .child(text(label).font(type_::LABEL).color(t.text))
+        .child(swatch)
+        .child(
+            text(value.to_string())
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
+        .child(btn(&format!("style-{stem}-dn"), "−", false, t, move |s| {
+            step_gradient_channel(&mut s.core, channel, -1)
+        }))
+        .child(btn(&format!("style-{stem}-up"), "+", false, t, move |s| {
+            step_gradient_channel(&mut s.core, channel, 1)
         }))
 }
 
@@ -763,6 +865,20 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
                     .color(t.text_secondary),
             ),
     );
+
+    // Gradient steppers (Phase K): one stepper row per RGB
+    // channel over the gradient end colour, mirroring the
+    // Colour steppers below — rendered only while an end
+    // colour is set (the swatch's Off state has nothing to
+    // step, so the block is absent rather than inert).
+    if gradient_steppers_visible(core) {
+        if let Some(rgb) = style.color2 {
+            let (r, g, b) = rgb_split(rgb);
+            panel = panel.child(gradient_channel_row(0, "Gradient R", r, t));
+            panel = panel.child(gradient_channel_row(1, "Gradient G", g, t));
+            panel = panel.child(gradient_channel_row(2, "Gradient B", b, t));
+        }
+    }
 
     // Colour: hex readout + a live preview square, then one
     // stepper row per RGB channel stepping the node's own
@@ -1479,5 +1595,83 @@ mod tests {
         // current colour to frame.
         assert!(recents_row(&[0x11_1111], None, &t).is_some());
         assert!(recents_row(&[0x11_1111, 0x22_2222], Some(0x22_2222), &t).is_some());
+    }
+
+    #[test]
+    fn gradient_stepper_drives_the_real_op_and_records() {
+        // The gradient stepper buttons' press path, driven
+        // without the UI: `step_gradient_channel` steps one
+        // channel of the node's gradient end through
+        // `set_node_color2` and records the stepped colour.
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        core.set_node_color(0x11_2233);
+        // Give the node a gradient end through the real op
+        // (a direct core write records nothing — only this
+        // panel's handlers do).
+        core.set_node_color2(Some(0x64_320A));
+        assert!(recent_colors().is_empty());
+        // R +1: 100 → 108, other channels untouched, and
+        // the stepped colour is recorded like a swatch
+        // press.
+        step_gradient_channel(&mut core, 0, 1);
+        assert_eq!(selected_style(&core).unwrap().color2, Some(0x6C_320A));
+        assert_eq!(recent_colors(), vec![0x6C_320A]);
+        // G −1: 50 → 42, recorded ahead of the R step.
+        step_gradient_channel(&mut core, 1, -1);
+        assert_eq!(selected_style(&core).unwrap().color2, Some(0x6C_2A0A));
+        assert_eq!(recent_colors(), vec![0x6C_2A0A, 0x6C_320A]);
+        // B clamps at 0 (10 − 8 − 8 would go negative) —
+        // the clamp itself is `step_channel`'s; this pins
+        // that the wiring composes it into the written
+        // colour.
+        step_gradient_channel(&mut core, 2, -1);
+        step_gradient_channel(&mut core, 2, -1);
+        assert_eq!(selected_style(&core).unwrap().color2, Some(0x6C_2A00));
+        // A bad channel index is a no-op.
+        step_gradient_channel(&mut core, 3, 1);
+        assert_eq!(selected_style(&core).unwrap().color2, Some(0x6C_2A00));
+        // The gradient writes never touched the node's own
+        // (primary) colour.
+        assert_eq!(
+            core.project.figures[0].def.nodes[1].color,
+            Some(0x11_2233)
+        );
+    }
+
+    #[test]
+    fn gradient_stepper_is_a_no_op_without_a_gradient_end() {
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        // The demo node starts with no gradient end: a
+        // press applies nothing and records nothing.
+        assert_eq!(selected_style(&core).unwrap().color2, None);
+        step_gradient_channel(&mut core, 0, 1);
+        assert_eq!(selected_style(&core).unwrap().color2, None);
+        assert!(recent_colors().is_empty());
+        // No selection at all: still a quiet no-op.
+        core.selected_node = None;
+        step_gradient_channel(&mut core, 0, 1);
+        assert!(recent_colors().is_empty());
+    }
+
+    #[test]
+    fn gradient_steppers_visible_follows_the_gradient_end() {
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        // No selection → hidden.
+        core.selected_node = None;
+        assert!(!gradient_steppers_visible(&core));
+        // Selected, but the gradient is Off → hidden.
+        core.selected_node = Some(1);
+        assert!(!gradient_steppers_visible(&core));
+        // An end colour set → visible.
+        core.set_node_color2(Some(0x22_2222));
+        assert!(gradient_steppers_visible(&core));
+        // Back to Off → hidden again.
+        core.set_node_color2(None);
+        assert!(!gradient_steppers_visible(&core));
     }
 }

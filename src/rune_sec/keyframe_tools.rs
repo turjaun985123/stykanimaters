@@ -149,6 +149,23 @@
 //! a joint IS selected the section keeps the original
 //! bare target line in the same slot, so the
 //! selected-state layout is unchanged.
+//!
+//! Phase K (section 31/40) adds one more icon control
+//! in the same live/inert discipline: "Clear keys in
+//! loop range" (`key-clear-range`, `eraser` glyph), in
+//! its own row under the clipboard row. It clears the
+//! selected joint's angle keys whose frames fall inside
+//! the loop range, through the library's
+//! `graph_keys::delete_keys_in_range` — the op owns the
+//! single snapshot and the status line. The channel is
+//! resolved exactly as every other op in this section
+//! resolves it: the panel computes the pair itself,
+//! `(selected_figure, Angle(selected_node))` (see
+//! [`selected_angle_channel`]); nothing is delegated to
+//! a core method. The guard is [`clear_range_enabled`]:
+//! a loop range is set AND the resolved channel holds
+//! at least one key inside it (counted read-only by
+//! `graph_keys::keys_in_range`).
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El};
@@ -245,6 +262,32 @@ pub fn key_all_enabled(core: &EditorCore) -> bool {
 /// button renders inert (`icon_btn_inert`).
 pub fn clear_channel_enabled(core: &EditorCore) -> bool {
     selected_angle_channel(core).is_some_and(|ch| !ch.keys.is_empty())
+}
+
+/// Whether Clear keys in loop range would remove
+/// anything — the render-time twin of
+/// [`clear_keys_in_range_core`]'s refusal set: a joint
+/// is selected, a loop range is set, and the selected
+/// figure's `Angle(selected_node)` channel holds at
+/// least one key inside the range, counted by the
+/// library's read-only `graph_keys::keys_in_range` over
+/// the same `(figure, target)` pair every op in this
+/// section resolves. When this is false the button
+/// renders inert (`icon_btn_inert`). Pure: reads only.
+pub fn clear_range_enabled(core: &EditorCore) -> bool {
+    let Some(ni) = core.selected_node else {
+        return false;
+    };
+    let Some((a, b)) = core.loop_range else {
+        return false;
+    };
+    graph_keys::keys_in_range(
+        core,
+        core.selected_figure,
+        ChannelTarget::Angle(ni),
+        a as f32,
+        b as f32,
+    ) > 0
 }
 
 /// The tangent preset buttons: every `TangentPreset` variant,
@@ -581,6 +624,41 @@ pub fn clear_channel_keys_here(s: &mut State) {
     clear_channel_keys_core(&mut s.core);
 }
 
+/// Clear the selected angle channel's keys whose frames
+/// lie inside the loop range; returns how many keys were
+/// removed. The removal itself is the library's
+/// `graph_keys::delete_keys_in_range` over this
+/// section's own `(selected_figure, Angle(selected_node))`
+/// resolution — it takes the single snapshot and sets
+/// the status line. The two refusals the library cannot
+/// phrase — no joint selected, no loop range set — are
+/// answered here, status-only with NO snapshot, matching
+/// this section's discipline; the button renders inert
+/// in exactly those states (see [`clear_range_enabled`]),
+/// so a press can never reach them.
+pub fn clear_keys_in_range_core(core: &mut EditorCore) -> usize {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a joint first, then Clear keys in range.".into();
+        return 0;
+    };
+    let Some((a, b)) = core.loop_range else {
+        core.status = "Set a loop range first, then Clear keys in range.".into();
+        return 0;
+    };
+    graph_keys::delete_keys_in_range(
+        core,
+        core.selected_figure,
+        ChannelTarget::Angle(ni),
+        a as f32,
+        b as f32,
+    )
+}
+
+/// `State` wrapper for [`clear_keys_in_range_core`].
+pub fn clear_keys_in_range_here(s: &mut State) {
+    clear_keys_in_range_core(&mut s.core);
+}
+
 /// Key one bare channel at `frame` with the value the
 /// channel itself evaluates to there: `Channel::value_at`
 /// is read first, then `Channel::add_key` — the engine's
@@ -793,17 +871,19 @@ pub fn no_joint_note_row(core: &EditorCore, t: &Theme) -> Option<El> {
 /// The keyframe tools section: header, selection target,
 /// keyed-frame indicator, the key/delete/auto buttons, the
 /// copy/paste-keys clipboard row (with Clear channel
-/// keys), the nudge row, the key-all / copy-key stamp row,
+/// keys), the clear-range row, the nudge row, the
+/// key-all / copy-key stamp row,
 /// and the five tangent preset buttons (scoped by the op
 /// to the selected figure). Buttons highlight with real
 /// state: Delete is accent-filled exactly when a key sits
 /// at this frame; Copy is muted until a channel exists to
 /// copy from, and Paste is muted while the key clipboard
-/// is empty. The five icon controls (Clear channel keys,
-/// the nudge pair, Key all here, Copy key +10) render
+/// is empty. The icon controls (Clear channel keys,
+/// Clear keys in loop range, the nudge pair, Key all
+/// here, Copy key +10) render
 /// inert — muted, handler-free — exactly when their op
 /// would refuse, via the `*_enabled` predicates above
-/// (Phase I); the plain text buttons stay wired in every
+/// (Phases I and K); the plain text buttons stay wired in every
 /// state and land on their ops' status-only refusals.
 /// The target slot under the header is state-dependent
 /// (Phase J): with a joint selected it is the original
@@ -889,6 +969,23 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                     )
                 } else {
                     icon_btn_inert("key-clear-channel", "xmark", "Clear channel keys", t)
+                }),
+        )
+        .child(
+            row()
+                .key("keyframe-clear-range")
+                .gap(6.0)
+                .child(if clear_range_enabled(core) {
+                    icon_btn(
+                        "key-clear-range",
+                        "eraser",
+                        "Clear keys in loop range",
+                        false,
+                        t,
+                        |s| clear_keys_in_range_here(s),
+                    )
+                } else {
+                    icon_btn_inert("key-clear-range", "eraser", "Clear keys in loop range", t)
                 }),
         )
         .child(
@@ -1593,6 +1690,114 @@ mod tests {
         assert!(!clear_channel_enabled(&bare));
     }
 
+    /// A core whose figure 0 / joint 1 angle channel holds
+    /// flat keys at frames 0, 2 and 4, joint 1 selected —
+    /// the clear-range fixture: the keys straddle the loop
+    /// ranges the guard and handler tests set.
+    fn core_with_spread_angle_keys() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![
+                Key::flat(0.0, 10.0),
+                Key::flat(2.0, 30.0),
+                Key::flat(4.0, 50.0),
+            ],
+        });
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        core
+    }
+
+    #[test]
+    fn clear_range_enabled_needs_a_loop_range_with_keys_inside() {
+        // No loop range set: inert, however many keys the
+        // channel holds.
+        let core = core_with_spread_angle_keys();
+        assert!(!clear_range_enabled(&core));
+        // A loop range holding the frame-2 key: live.
+        let mut core = core_with_spread_angle_keys();
+        core.loop_range = Some((1, 3));
+        assert!(clear_range_enabled(&core));
+        // A loop range over a keyless stretch — the keys
+        // sit only OUTSIDE it, at 0, 2 and 4: inert.
+        let mut core = core_with_spread_angle_keys();
+        core.loop_range = Some((1, 1));
+        assert!(!clear_range_enabled(&core));
+        // The range is inclusive: a key on its edge counts.
+        let mut core = core_with_spread_angle_keys();
+        core.loop_range = Some((2, 2));
+        assert!(clear_range_enabled(&core));
+        // No joint selected: the channel cannot be
+        // resolved, so inert even with range and keys.
+        let mut core = core_with_spread_angle_keys();
+        core.loop_range = Some((1, 3));
+        core.selected_node = None;
+        assert!(!clear_range_enabled(&core));
+        // A joint with no channel on it: inert.
+        let mut bare = EditorCore::new();
+        bare.selected_node = Some(1);
+        bare.loop_range = Some((0, 4));
+        assert!(!clear_range_enabled(&bare));
+    }
+
+    #[test]
+    fn clear_keys_in_range_core_removes_only_the_in_range_keys_of_the_selected_channel() {
+        let mut core = core_with_spread_angle_keys();
+        // A bystander channel on another joint, holding a
+        // key INSIDE the same range: it must survive.
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(2),
+            keys: vec![Key::flat(2.0, 99.0)],
+        });
+        core.loop_range = Some((1, 3));
+        let depth = core.undo_depth();
+        assert_eq!(clear_keys_in_range_core(&mut core), 1);
+        let ch = selected_angle_channel(&core).expect("channel survives a range clear");
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![0.0, 4.0], "only the in-range key is gone");
+        assert_eq!(
+            core.project.channels[1].keys.len(),
+            1,
+            "the other channel is untouched"
+        );
+        assert_eq!(core.undo_depth(), depth + 1, "exactly one snapshot");
+        assert!(
+            core.status.contains("Cleared 1 key(s)"),
+            "the library owns the status: {}",
+            core.status
+        );
+        // Nothing left inside the range: the guard drops,
+        // and a direct call is a snapshot-free no-op.
+        assert!(!clear_range_enabled(&core));
+        assert_eq!(clear_keys_in_range_core(&mut core), 0);
+        assert_eq!(core.undo_depth(), depth + 1, "no second snapshot");
+    }
+
+    #[test]
+    fn clear_keys_in_range_core_refuses_without_a_joint_or_a_loop_range() {
+        // No loop range: status-only, no snapshot, keys intact.
+        let mut core = core_with_spread_angle_keys();
+        let depth = core.undo_depth();
+        assert_eq!(clear_keys_in_range_core(&mut core), 0);
+        assert!(core.status.contains("loop range"));
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(
+            selected_angle_channel(&core).map(|ch| ch.keys.len()),
+            Some(3)
+        );
+        // No joint selected: the same discipline.
+        let mut core = core_with_spread_angle_keys();
+        core.loop_range = Some((1, 3));
+        core.selected_node = None;
+        let depth = core.undo_depth();
+        assert_eq!(clear_keys_in_range_core(&mut core), 0);
+        assert!(core.status.contains("Select a joint"));
+        assert_eq!(core.undo_depth(), depth);
+    }
+
     #[test]
     fn nudge_enabled_mirrors_the_nudge_plans_refusals() {
         let mut core = core_with_angle_keys(); // keys at 0 and 2
@@ -1696,6 +1901,7 @@ mod tests {
             pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
             pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
             loop_playback: true,
+            playback_speed: 1.0,
             was_playing: false,
         }
     }

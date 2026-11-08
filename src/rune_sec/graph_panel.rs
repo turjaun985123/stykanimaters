@@ -250,6 +250,19 @@
 //! every row press for the consumers that still read it
 //! (the selector chips' active state among them).
 //!
+//! ## Delete channel (Phase K)
+//!
+//! The channel list gains a `graph-chan-delete` button
+//! beside the Phase J `graph-chan-duplicate`, shown under
+//! the same condition (a channel is drawn). Its handler
+//! [`delete_drawn_channel`] removes the drawn channel
+//! through `graph_keys::delete_channel` — the op owns
+//! the snapshot — and then repairs the stored pick with
+//! [`selection_after_delete`]: a pick on the deleted row
+//! is cleared (target resolution takes over), a pick
+//! past it shifts down one row, and `target` is never
+//! touched.
+//!
 //! ## State the shell must provide
 //!
 //! `State` needs one field (integrator wires it):
@@ -526,6 +539,46 @@ pub fn duplicate_channel_to_next(core: &mut EditorCore, sel: &GraphPanelState) {
     let from = core.project.channels[idx].figure;
     let to = (from + 1) % figures;
     stykanimate_rs::graph_keys::duplicate_channel_to_figure(core, idx, to);
+}
+
+/// Where a stored row pick points after the channel at
+/// `deleted` is removed from the project list (Phase K):
+/// no pick stays no pick; a pick BEFORE the deleted row
+/// is unmoved; a pick ON the deleted row is cleared (the
+/// panel falls back to target resolution, exactly as an
+/// unpicked state does); a pick AFTER it shifts down one
+/// row, still naming the same channel. Pure — the delete
+/// handler below is its only caller, and the four cases
+/// are pinned by its unit test.
+pub fn selection_after_delete(selected: Option<usize>, deleted: usize) -> Option<usize> {
+    match selected {
+        None => None,
+        Some(j) if j == deleted => None,
+        Some(j) if j > deleted => Some(j - 1),
+        some => some,
+    }
+}
+
+/// Delete the drawn channel (Phase K): resolves through
+/// [`effective_channel_index`] — a picked duplicate row
+/// deletes THAT twin — and forwards to
+/// `graph_keys::delete_channel`, which owns the snapshot
+/// and the removal. On success the stored pick is
+/// repaired through [`selection_after_delete`], so it
+/// can never dangle past the end of the shorter list or
+/// silently name the channel that slid into the deleted
+/// row; `target` is left as-is, so a cleared pick falls
+/// back to target resolution. With nothing drawn the
+/// press is a status-only refusal, mirroring
+/// [`duplicate_channel_to_next`].
+pub fn delete_drawn_channel(core: &mut EditorCore, sel: &mut GraphPanelState) {
+    let Some(idx) = effective_channel_index(core, sel) else {
+        core.status = "No graph channel selected to delete.".into();
+        return;
+    };
+    if stykanimate_rs::graph_keys::delete_channel(core, idx) {
+        sel.selected_channel = selection_after_delete(sel.selected_channel, idx);
+    }
 }
 
 /// The channel list's rows: EVERY channel in the project, in
@@ -1448,6 +1501,10 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     // wiring): shown only while a channel is drawn; the
     // press duplicates the drawn channel — twin-aware via
     // the effective index — onto the following figure.
+    // Delete channel (Phase K) sits directly beside it,
+    // under the same condition, in the same plain-btn
+    // style: the press removes the drawn channel through
+    // delete_drawn_channel, which repairs the stored pick.
     if drawn_idx.is_some() {
         chan_list = chan_list.child(btn(
             "graph-chan-duplicate",
@@ -1455,6 +1512,13 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
             false,
             t,
             |s: &mut State| duplicate_channel_to_next(&mut s.core, &s.graph_panel),
+        ));
+        chan_list = chan_list.child(btn(
+            "graph-chan-delete",
+            "Delete channel",
+            false,
+            t,
+            |s: &mut State| delete_drawn_channel(&mut s.core, &mut s.graph_panel),
         ));
     }
 
@@ -2629,6 +2693,97 @@ mod tests {
         assert_eq!(core.project.channels.len(), 1);
         assert_eq!(core.undo_depth(), depth, "no snapshot on the refusal");
         assert!(core.status.contains("Only one figure"));
+    }
+
+    #[test]
+    fn selection_after_delete_covers_all_four_cases() {
+        // Phase K: the pure repair the delete handler
+        // applies to the stored pick.
+        // No pick stays no pick, wherever the row was.
+        assert_eq!(selection_after_delete(None, 0), None);
+        assert_eq!(selection_after_delete(None, 3), None);
+        // A pick before the deleted row is unmoved.
+        assert_eq!(selection_after_delete(Some(0), 1), Some(0));
+        assert_eq!(selection_after_delete(Some(1), 3), Some(1));
+        // A pick on the deleted row is cleared — the
+        // panel falls back to target resolution.
+        assert_eq!(selection_after_delete(Some(0), 0), None);
+        assert_eq!(selection_after_delete(Some(2), 2), None);
+        // A pick after the deleted row shifts down one,
+        // still naming the same channel.
+        assert_eq!(selection_after_delete(Some(1), 0), Some(0));
+        assert_eq!(selection_after_delete(Some(3), 1), Some(2));
+    }
+
+    #[test]
+    fn delete_drawn_channel_removes_the_picked_twin_and_clears_the_pick() {
+        // Phase K: pick the SECOND of the duplicate twins
+        // and delete — that twin goes, the first survives,
+        // the pick is cleared and exactly one undo step is
+        // taken (the op's snapshot).
+        let mut core = core_with_duplicate_channels();
+        let mut st = GraphPanelState::default();
+        assert!(select_channel(&mut core, &mut st, 1));
+        assert_eq!(st.selected_channel, Some(1));
+        let depth = core.undo_depth();
+        delete_drawn_channel(&mut core, &mut st);
+        assert_eq!(core.project.channels.len(), 1);
+        // The survivor is the FIRST twin (one key, 1.0).
+        assert_eq!(core.project.channels[0].keys.len(), 1);
+        assert_eq!(core.project.channels[0].keys[0].value, 1.0);
+        assert_eq!(st.selected_channel, None, "pick on the deleted row clears");
+        assert_eq!(st.target, Some(ChannelTarget::RootX), "target stays as-is");
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot via the op");
+    }
+
+    #[test]
+    fn delete_drawn_channel_shifts_a_pick_past_the_deleted_row() {
+        // Phase K: the stored pick names row 1 — a
+        // channel of figure 1 — while figure 0 is
+        // selected, so the pick is stale and the DRAWN
+        // channel is figure 0's row 0 (target fallback;
+        // the pick goes stale exactly this way when the
+        // user switches figure in the figures panel).
+        // Deleting row 0 must shift the pick to Some(0),
+        // still naming figure 1's channel.
+        let mut core = EditorCore::new();
+        let mut other = channel(ChannelTarget::RootX, vec![Key::flat(0.0, 5.0)]);
+        other.figure = 1;
+        core.project.channels = vec![
+            channel(ChannelTarget::RootX, vec![Key::flat(0.0, 1.0)]),
+            other,
+        ];
+        let mut st = GraphPanelState {
+            target: Some(ChannelTarget::RootX),
+            selected_channel: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_channel_index(&core, &st),
+            Some(0),
+            "premise: the stale pick falls back to row 0"
+        );
+        let depth = core.undo_depth();
+        delete_drawn_channel(&mut core, &mut st);
+        assert_eq!(core.project.channels.len(), 1);
+        assert_eq!(core.project.channels[0].figure, 1, "figure 1's channel survives");
+        assert_eq!(st.selected_channel, Some(0), "the pick shifts down one row");
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot via the op");
+    }
+
+    #[test]
+    fn delete_drawn_channel_without_channels_changes_nothing() {
+        // Phase K refusal: the demo core has no channels,
+        // so nothing is drawn — no removal, no snapshot,
+        // no pick, only the refusal wording.
+        let mut core = EditorCore::new();
+        let mut st = GraphPanelState::default();
+        let depth = core.undo_depth();
+        delete_drawn_channel(&mut core, &mut st);
+        assert!(core.project.channels.is_empty());
+        assert_eq!(core.undo_depth(), depth, "no snapshot on the refusal");
+        assert_eq!(st.selected_channel, None);
+        assert!(core.status.contains("No graph channel selected to delete"));
     }
 
     #[test]

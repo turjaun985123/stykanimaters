@@ -10,6 +10,17 @@ use std::f32::consts::TAU;
 
 pub type V2 = [f32; 2];
 
+/// Radius of the ring drawn around a figure's head joint,
+/// in stage units. This constant is the single source for
+/// the value: every renderer — the CPU rasterizer
+/// (export.rs), the SVG export (svg.rs), the shell stage,
+/// the figure thumbnails and the figure inspector's
+/// bounding box — draws or measures the head ring with
+/// this radius. It is a plain radius in stage units,
+/// scaled by each site's own zoom/scale factor exactly as
+/// the literal 17.0 was before the constant existed.
+pub const HEAD_RING_RADIUS: f32 = 17.0;
+
 pub fn add(a: V2, b: V2) -> V2 {
     [a[0] + b[0], a[1] + b[1]]
 }
@@ -992,6 +1003,15 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn head_ring_radius_is_pinned() {
+        // Every renderer's head ring is drawn from this one
+        // constant; pin the value so an accidental edit
+        // fails loudly here instead of drifting the ring
+        // in one renderer at a time.
+        assert_eq!(HEAD_RING_RADIUS, 17.0);
+    }
 
     #[test]
     fn fk_head_above_hips() {
