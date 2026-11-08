@@ -545,9 +545,10 @@ has been measured, and no stage height is claimed.
 
 ## 6. Phase E addendum — gap closure map
 
-Appended 2026-11-08, mid-wave (sections still landing;
-statuses are a snapshot — the integrator updates the CI
-column after the green run). Phase E's charter is to close
+Appended 2026-11-08, mid-wave; CI column and the two
+corrections below filled by the integrator after the green
+run `42459754303` (commit `4035db6`): **1,218 tests passed,
+0 failed** (733 lib + 475 bin + 10 integration). Phase E's charter is to close
 the gaps listed in §5 above plus the Phase D delivery gaps
 that §5 did not enumerate (audio engine ops, FX/figure/graph
 engine ops, stage layers, timeline marks, workspace gating,
@@ -557,11 +558,11 @@ playback audio, timecode unification). Full charter and the
 | §5 gap | Closing section(s) | Status | CI |
 |---|---|---|---|
 | 1. Nothing in `src/rune_sec/` wired | Closed by Phase D integration (`9f26d44`); Phase E builds on the wired shell | ✅ closed (Phase D) | run `42457752206` GREEN |
-| 2. Duplicate surfaces: `onion` vs `onion-toggle`; `add-figure` ×2; `status_text` vs `status_strip` | §29 figures_panel (single `add-figure` home), §30 onion_controls (single onion home), §22 status_strip (single status surface) | written — app-bar duplicates removed at Phase E integration | _integrator_ |
-| 3. Not hand-audited sections (command_palette, fx_browser, fx_clips, menus, playback_controls, pose_tools, project_tools, settings_popover, snap_tests, text_tool; three_d_panel per-key map) | Phase E upgrades touch fx_clips (§16), menus (§24), playback_controls (§20), settings_popover (§21), command_palette (§25) with in-file tests; the remaining files' hand-audit is still owed and is **not** claimed closed by this wave | partially closed — audit debt for fx_browser, pose_tools, project_tools, snap_tests, text_tool, three_d_panel per-key map remains open | _integrator_ |
+| 2. Duplicate surfaces: `onion` vs `onion-toggle`; `add-figure` ×2; `status_text` vs `status_strip` | figures_panel / onion_controls / status_strip sections | **still partially open (integrator correction):** the status surface is single (status_strip), but the app bar still carries its quick `add-figure` and `onion` buttons alongside the panel homes — the removal this row promised did not happen in Phase E | run `42459754303` GREEN |
+| 3. Not hand-audited sections (command_palette, fx_browser, fx_clips, menus, playback_controls, pose_tools, project_tools, settings_popover, snap_tests, text_tool; three_d_panel per-key map) | Phase E upgrades touch fx_clips (§16), menus (§24), playback_controls (§20), settings_popover (§21), command_palette (§25) with in-file tests; the remaining files' hand-audit is still owed and is **not** claimed closed by this wave | partially closed — audit debt for fx_browser, pose_tools, project_tools, snap_tests, text_tool, three_d_panel per-key map remains open | run `42459754303` GREEN |
 | 4. `--tree` rect availability unverified; `--snap` on GPU-less CI unproven | §28 scenes (one per workspace) gives `--tree` more to assert; the rect question and the software-Vulkan question themselves are **not** closable by section code | open — unchanged, restated honestly in PHASE_E.md §5 | — |
-| 5. i18n data-ready, not wired; shell keys missing from the table | §27 i18n pass: 8 missing shell keys (`settings`, `frame`, `frames`, `figures`, `prev_frame`, `next_frame`, `fps`, `zoom`) added; labels routed through `i18n_wire::tr` | written | _integrator_ |
-| 6. Playback starts no audio | §20 playback_controls: play starts the audio mix | written | _integrator_ |
+| 5. i18n data-ready, not wired; shell keys missing from the table | §27 i18n pass: 8 missing shell keys (`settings`, `frame`, `frames`, `figures`, `prev_frame`, `next_frame`, `fps`, `zoom`) added; labels routed through `i18n_wire::tr` | written | run `42459754303` GREEN |
+| 6. Playback starts no audio | — | **still open (integrator correction):** no Phase E section wired audio start into the shell's Play; `playback_controls` contains no audio call. The engine still mixes audio into exports only | — |
 | 7. Inventory script blind spots (stepper_row keys, variable-held keys, data-table keys) | Not a Phase E section; §1.2-style hand coverage continues. The script was re-run for Phase E (§7 below) without error | open — documented, unchanged | — |
 | 8. `xc-bogus` literal in export_panel.rs | Fixture string, still present by design; still not a control | unchanged — not a gap | — |
 | 9. Docs debt: README described the GPUI build | Closed outside Phase E — README was rewritten for Rune in Phase D (§39 of that wave) | ✅ closed (Phase D) | — |
@@ -570,21 +571,21 @@ Phase D gaps not enumerated in §5, closed by Phase E:
 
 | Gap | Closing section(s) | Status | CI |
 |---|---|---|---|
-| No audio gain/fade/reverse/delete-clip ops (buttons honestly absent in Phase D) | §8 `audio_ops.rs` (engine) + §15 audio_panel buttons | written | _integrator_ |
-| FX clip edits inline in the panel | §9 `fx_ops.rs` (engine) + §16 fx_clips dispatch | written | _integrator_ |
-| Figure colour/duplicate as shell-local helpers | §10 `figure_ops.rs` (engine) + §17 inspector_figure dispatch | written | _integrator_ |
-| Graph copy-keys not built | §11 `graph_keys.rs` (engine) + §12/§18 panel surface, `key_clipboard` state | written | _integrator_ |
-| Style panel cycle-only; no direct setters | §7 editor ops + §13 inspector_style | written | _integrator_ |
-| No per-stroke delete | §7 `delete_stroke_at` + §14 stroke_inspector | written | _integrator_ |
-| Stage drew figures only (no weather/FX/rotation/guides/text) | §2 stage layers + §3 stage_fx + §4 stage_camera + §5 stage_text | written | _integrator_ |
-| Timeline without loop/key/camera marks | §6 timeline_marks (replaces chrome `timeline_row`) | written | _integrator_ |
-| No workspace gating in the Rune layout | §1 workspaces + §24 menus View entries + `Alt+1..8` in `on_key` | written | _integrator_ |
-| Guides toggle omitted (no guides existed) | §4 guides geometry + §21 settings toggle + `guides` state | written | _integrator_ |
-| Timecode floor-vs-round disagreement | §20/§22 single implementation | written | _integrator_ |
-| Project easing cycle-only | §7 `set_project_easing` + §19 easing_panel | written | _integrator_ |
-| No post-export record for the user | §26 export recap (`export_recap` state) | written | _integrator_ |
-| Help panel missing restored shortcuts | §23 help_panel | written | _integrator_ |
-| Command palette missing the new ops | §25 command_palette (+5 commands) | written | _integrator_ |
+| No audio gain/fade/reverse/delete-clip ops (buttons honestly absent in Phase D) | §8 `audio_ops.rs` (engine) + §15 audio_panel buttons | written | run `42459754303` GREEN |
+| FX clip edits inline in the panel | §9 `fx_ops.rs` (engine) + §16 fx_clips dispatch | written | run `42459754303` GREEN |
+| Figure colour/duplicate as shell-local helpers | §10 `figure_ops.rs` (engine) + §17 inspector_figure dispatch | written | run `42459754303` GREEN |
+| Graph copy-keys not built | §11 `graph_keys.rs` (engine) + §12/§18 panel surface, `key_clipboard` state | written | run `42459754303` GREEN |
+| Style panel cycle-only; no direct setters | §7 editor ops + §13 inspector_style | written | run `42459754303` GREEN |
+| No per-stroke delete | §7 `delete_stroke_at` + §14 stroke_inspector | written | run `42459754303` GREEN |
+| Stage drew figures only (no weather/FX/rotation/guides/text) | §2 stage layers + §3 stage_fx + §4 stage_camera + §5 stage_text | written | run `42459754303` GREEN |
+| Timeline without loop/key/camera marks | §6 timeline_marks (replaces chrome `timeline_row`) | written | run `42459754303` GREEN |
+| No workspace gating in the Rune layout | §1 workspaces + §24 menus View entries + `Alt+1..8` in `on_key` | written | run `42459754303` GREEN |
+| Guides toggle omitted (no guides existed) | §4 guides geometry + §21 settings toggle + `guides` state | written | run `42459754303` GREEN |
+| Timecode floor-vs-round disagreement | §20/§22 single implementation | written | run `42459754303` GREEN |
+| Project easing cycle-only | §7 `set_project_easing` + §19 easing_panel | written | run `42459754303` GREEN |
+| No post-export record for the user | §26 export recap (`export_recap` state) | written | run `42459754303` GREEN |
+| Help panel missing restored shortcuts | §23 help_panel | written | run `42459754303` GREEN |
+| Command palette missing the new ops | §25 command_palette (+5 commands) | written | run `42459754303` GREEN |
 
 ## 7. Phase E inventory snapshot
 
@@ -592,8 +593,7 @@ Phase D gaps not enumerated in §5, closed by Phase E:
 07:21 UTC, mid-wave (files still landing — treat as a
 floor, not a final count): **395 unique keys** (338 static
 + 57 dynamic patterns), up from 362 at Phase D green
-(run `42457752206`). The integrator's post-wiring run is
-the number of record; expect it to drop by the two
-deliberate duplicate removals (§29/§30) and rise by the
-Phase E keys.
+(run `42457752206`). Post-wiring count of record:
+**408 unique keys** (348 static + 60 dynamic patterns) at
+Phase E green (`42459754303`).
 
