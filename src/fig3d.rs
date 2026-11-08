@@ -2212,7 +2212,7 @@ mod pose_library_tests {
             );
         }
         assert_eq!(pose_file_name("Humanoid3"), "humanoid3.json");
-        assert_eq!(pose_file_name("My Bot!!"), "my-pose.json");
+        assert_eq!(pose_file_name("My Bot!!"), "my-bot.json");
         // The empty-slug fallback matches too.
         assert_eq!(pose_file_name("  --  "), "figure.json");
     }
