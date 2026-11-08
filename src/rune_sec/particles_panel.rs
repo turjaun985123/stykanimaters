@@ -916,7 +916,7 @@ mod tests {
     #[test]
     fn particle_palette_has_eight_distinct_colours() {
         assert_eq!(PARTICLE_PALETTE.len(), 8);
-        let mut sorted = PARTICLE_PALETTE;
+        let mut sorted = PARTICLE_PALETTE.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), 8, "every swatch colour is distinct");
