@@ -237,6 +237,31 @@
 //! are now 25 and the Features rows 29. The command
 //! palette's drift guard retired its Ctrl+S exception
 //! in the same pass — the hint is a key label now.
+//!
+//! UI mission Wave 9 refresh, 2026-11-08: two more
+//! Features rows for the mission's newest surfaces,
+//! verified against the tree the usual way, plus one
+//! correction of emphasis. Live MCP control is real:
+//! the settings card's `settings-live-mcp` toggle
+//! (`settings_popover`) starts `live_mcp`'s loopback
+//! bridge (port 32117 in `src/live_mcp.rs`), whose
+//! note states plainly that any program on this
+//! computer can drive the editor while it is on, with
+//! no password in this version. View zoom is real:
+//! the stage wheel runs `stage_view::view_zoom_at`
+//! against the session-only `ViewNav` (`src/stage_view.rs`;
+//! the wheel handler in `main.rs` never touches the
+//! camera), the stage overlay's Fit / Centre / 1:1 and
+//! −/+ keys steer the same view, its readout shows the
+//! effective zoom, and authoring the real camera stays
+//! in the Camera panel. The Loop range steppers row
+//! now says what Wave 5 of the mission made true: the
+//! timeline's loop row is the range's ONLY home —
+//! `playback_controls` and `frame_ops` no longer mount
+//! duplicate loop controls. Workspace switching
+//! (Alt+1 … Alt+8) was checked and needed no row: it
+//! has been listed in the Workspaces section since
+//! Phase E. The panel now holds 56 rows.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -329,7 +354,7 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             ),
             (
                 "Loop range steppers",
-                "Timeline — Set loop button and Start / End steppers below the frame chips",
+                "Timeline — the loop range's only home: Set loop button, Start / End steppers and Clear below the frame chips",
             ),
             (
                 "Camera key delete",
@@ -338,6 +363,10 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             (
                 "Swap frames",
                 "Frame ops — Swap with previous / next buttons or the command palette; camera, particle and graph keys follow the swap",
+            ),
+            (
+                "View zoom",
+                "Stage — the mouse wheel zooms the view, not the camera; the stage overlay's Fit / Centre / 1:1 and −/+ steer the same view, and the Camera panel authors the real camera",
             ),
             (
                 "Stroke selection",
@@ -414,6 +443,10 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             (
                 "Range export",
                 "Export panel — SVG and Spritesheet now take the loop range too",
+            ),
+            (
+                "Live MCP control",
+                "Settings — the Live MCP control toggle lets other programs on this computer drive the editor at http://127.0.0.1:32117/mcp; no password in this version",
             ),
         ],
         _ => vec![],
@@ -576,9 +609,9 @@ mod tests {
     use super::{group_rows, section_note, section_rows, shortcut_rows};
 
     #[test]
-    fn shortcut_rows_has_exactly_54_rows() {
+    fn shortcut_rows_has_exactly_56_rows() {
         // 10 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
-        // + 29 Features; Drawing contributes none (see the
+        // + 31 Features; Drawing contributes none (see the
         // module docs for which GPUI-era rows were dropped
         // and why). Phase G added the four palette/menu rows
         // to Shortcuts; Phase I added the Features section;
@@ -589,7 +622,9 @@ mod tests {
         // six more; Phase M six more. Phase N (V wave)
         // moved Quick save from Features to Shortcuts as
         // a Ctrl+S row — one row each way, total stands.
-        assert_eq!(shortcut_rows().len(), 54);
+        // The UI mission Wave 9 refresh added two Features
+        // rows (View zoom, Live MCP control).
+        assert_eq!(shortcut_rows().len(), 56);
     }
 
     #[test]
@@ -642,7 +677,7 @@ mod tests {
         // this order, and nowhere else. (The count covers
         // the Phase J, Phase K, Phase L and Phase M rows
         // too — see those tests.)
-        assert_eq!(section_rows("Features").len(), 29);
+        assert_eq!(section_rows("Features").len(), 31);
     }
 
     #[test]
@@ -680,9 +715,11 @@ mod tests {
         // more in Phase K, two at the Phase K close-out,
         // six in Phase L, six in Phase M). The Phase N
         // V-wave pass moved Quick save into Shortcuts, so
-        // twenty-nine remain and no thirtieth has crept in.
+        // twenty-nine remained after that move; the UI
+        // mission Wave 9 refresh added View zoom and Live
+        // MCP control, so thirty-one stand now.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 29);
+        assert_eq!(features.len(), 31);
         let jump = features
             .iter()
             .position(|(label, _)| *label == "Keyframe jump")
@@ -753,7 +790,7 @@ mod tests {
         // Placement: Playback speed sits with the
         // transport rows directly after Loop playback.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 29);
+        assert_eq!(features.len(), 31);
         let loop_row = features
             .iter()
             .position(|(label, _)| *label == "Loop playback")
@@ -799,7 +836,7 @@ mod tests {
         )));
         assert!(rows.contains(&(
             "Loop range steppers",
-            "Timeline — Set loop button and Start / End steppers below the frame chips"
+            "Timeline — the loop range's only home: Set loop button, Start / End steppers and Clear below the frame chips"
         )));
         assert!(rows.contains(&(
             "Stroke simplify",
@@ -825,7 +862,7 @@ mod tests {
         // Palette recents sits with the project rows,
         // directly after Reload from disk.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 29);
+        assert_eq!(features.len(), 31);
         let channel_row = features
             .iter()
             .position(|(label, _)| *label == "Delete graph channel")
@@ -925,7 +962,7 @@ mod tests {
         // after Split FX clip. No earlier phase's pinned
         // adjacency is disturbed by any of these.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 29);
+        assert_eq!(features.len(), 31);
         let clear_row = features
             .iter()
             .position(|(label, _)| *label == "Clear keys in loop range")
@@ -956,6 +993,53 @@ mod tests {
             .position(|(label, _)| *label == "Split FX clip")
             .expect("Split FX clip row");
         assert_eq!(features[split_row + 1].0, "Hide FX clips");
+    }
+
+    #[test]
+    fn wave_9_feature_rows_are_listed() {
+        // The UI mission Wave 9 refresh, verified against
+        // the tree before listing (see the module docs):
+        // Live MCP control — the `settings-live-mcp`
+        // toggle in `settings_popover` over `src/live_mcp.rs`'
+        // loopback bridge (port 32117, endpoint
+        // `http://127.0.0.1:32117/mcp`, its note carrying
+        // the same no-password wording the row repeats);
+        // View zoom — `stage_view::view_zoom_at` over the
+        // session-only `ViewNav` in `src/stage_view.rs`,
+        // driven by the wheel handler in `main.rs`, with
+        // the stage overlay's Fit / Centre / 1:1 and −/+
+        // keys in `camera_panel` steering the same view
+        // and the Camera panel authoring the real camera.
+        // The Loop range steppers row (pinned in the
+        // Phase L test) now names the timeline's loop row
+        // as the range's only home: `playback_controls`
+        // and `frame_ops` mount no loop-range controls
+        // since the mission's Wave 5 de-duplication.
+        // Workspace switching needed no new row — Alt+1 …
+        // Alt+8 have been listed since Phase E (see the
+        // workspace test below).
+        let rows = shortcut_rows();
+        assert!(rows.contains(&(
+            "View zoom",
+            "Stage — the mouse wheel zooms the view, not the camera; the stage overlay's Fit / Centre / 1:1 and −/+ steer the same view, and the Camera panel authors the real camera"
+        )));
+        assert!(rows.contains(&(
+            "Live MCP control",
+            "Settings — the Live MCP control toggle lets other programs on this computer drive the editor at http://127.0.0.1:32117/mcp; no password in this version"
+        )));
+        // Placement: View zoom sits with the stage /
+        // camera rows, directly after Swap frames; Live
+        // MCP control closes the Features section, after
+        // Range export. No earlier phase's pinned
+        // adjacency is disturbed by either.
+        let features = section_rows("Features");
+        assert_eq!(features.len(), 31);
+        let swap_row = features
+            .iter()
+            .position(|(label, _)| *label == "Swap frames")
+            .expect("Swap frames row");
+        assert_eq!(features[swap_row + 1].0, "View zoom");
+        assert_eq!(features.last().map(|(label, _)| *label), Some("Live MCP control"));
     }
 
     #[test]

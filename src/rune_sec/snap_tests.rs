@@ -823,6 +823,42 @@ fn stage_rect_is_identical_with_a_menu_open() {
             "stage rect moved after the menu closed: closed {closed:?}, settled {settled:?}"
         );
     }
+
+    // Wave 9 strengthening: the Edit menu gets the same
+    // pass. Its dropdown is a different surface (the kit
+    // divider and the frame-clipboard items) mounted
+    // through the same two root slots, so the invariant
+    // must hold for it too, not only for File — a
+    // per-menu mount difference is exactly what this
+    // test exists to catch.
+    tap(&mut rt, "menu-edit");
+    rt.frame(DT);
+    assert_eq!(rt.state.menus.open, Some(crate::rune_sec::menus::EDIT));
+    assert!(
+        presented_keys(&rt).contains("menu-edit-dropdown"),
+        "Edit dropdown surface presented"
+    );
+    let (edit_open, _) = rt
+        .presented("stage")
+        .expect("stage is presented with the Edit menu open");
+    for (a, b) in closed.iter().zip(edit_open.iter()) {
+        assert!(
+            (a - b).abs() <= 0.5,
+            "stage rect moved while the Edit menu was open: closed {closed:?}, open {edit_open:?}"
+        );
+    }
+
+    // And back again, the same scrim close as File's.
+    tap(&mut rt, "menu-scrim");
+    assert_eq!(rt.state.menus.open, None, "scrim press closes the Edit menu");
+    rt.frame(DT);
+    let (edit_settled, _) = rt.presented("stage").expect("stage is presented");
+    for (a, b) in closed.iter().zip(edit_settled.iter()) {
+        assert!(
+            (a - b).abs() <= 0.5,
+            "stage rect moved after the Edit menu closed: closed {closed:?}, settled {edit_settled:?}"
+        );
+    }
 }
 
 #[test]
@@ -1560,6 +1596,7 @@ fn project_section_key_coverage() {
         "proj-set-name",
         "new-proj",
         "save-proj",
+        "save-copy-proj",
         "recover",
     ] {
         assert!(keys.contains(want), "missing audit-map key {want:?}");
@@ -3314,6 +3351,120 @@ fn workspace_card_roots_sweep() {
     // 2–10 do.
     tap(&mut rt, "ws-animate");
     assert_eq!(rt.state.workspace, Workspace::Animate);
+}
+
+// ----------------------------------------------------------------
+// Round 12 (UI mission Wave 9): the workspace scenes.
+// scenes.rs carries one scene per workspace so the
+// headless `--snap`/`--tree` runs can render each
+// workspace's own set; the layout facts there (8, 18,
+// 21–25) name, per scene, a signature panel key that
+// must mount and a key the workspace gates out. This
+// test is the in-process counterpart: it resolves each
+// scene BY NAME in the `scenes()` table (the same
+// lookup `with_scene` performs), applies it to a fresh
+// runtime's state, and pins the workspace it lands on
+// plus the fact's key pair in the presented tree.
+// ----------------------------------------------------------------
+
+#[test]
+fn workspace_scenes_mount_their_signature_panels() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    // One row per workspace scene: table name, the
+    // workspace the scene must land on, the signature
+    // panel key, and the gated-out key (scenes.rs's
+    // layout facts carry the same pairs for the CI
+    // `--tree` checks). Wave 9 integration correction:
+    // `figures-panel` is gated out ONLY in Home and
+    // Export — the Figures section mounts in Draw,
+    // Graph, Effects, Audio and Build3D too (E9's
+    // gating audit), so those rows gate-check against
+    // `frames` (FrameOps, Animate-only) instead, and
+    // the loop below additionally asserts figures-panel
+    // is PRESENT in them.
+    let rows: [(&str, Workspace, &str, &str); 7] = [
+        ("home", Workspace::Home, "home-panel", "figures-panel"),
+        ("draw-open", Workspace::Draw, "stroke-inspector", "frames"),
+        ("build-open", Workspace::Build3D, "panel-3d", "frames"),
+        ("graph-open", Workspace::Graph, "graph-panel", "frames"),
+        (
+            "effects-open",
+            Workspace::Effects,
+            "fx-browser",
+            "frames",
+        ),
+        ("audio-open", Workspace::Audio, "audio-panel", "frames"),
+        (
+            "export-open",
+            Workspace::Export,
+            "export-panel",
+            "figures-panel",
+        ),
+    ];
+    let table = crate::rune_sec::scenes::scenes();
+    for (name, ws, present, absent) in rows {
+        // The scene must be registered under exactly
+        // this name — the headless runner looks it up
+        // the same way, and a rename that only updated
+        // one side would silently lose the scene's
+        // pixel proof.
+        let scene = table
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, f)| *f)
+            .unwrap_or_else(|| panic!("scene {name:?} is registered in scenes()"));
+
+        let mut rt = editor();
+        scene(&mut rt.state);
+        assert_eq!(
+            rt.state.workspace, ws,
+            "scene {name:?} lands on its workspace"
+        );
+        rt.frame(DT);
+        // Mounts and gate-outs travel through the
+        // presence fade — settle (bounded) both ways
+        // before asserting, the sweep's discipline.
+        for _ in 0..30 {
+            if presented_keys(&rt).contains(present) {
+                break;
+            }
+            rt.frame(DT);
+        }
+        for _ in 0..30 {
+            if !presented_keys(&rt).contains(absent) {
+                break;
+            }
+            rt.frame(DT);
+        }
+        let keys = presented_keys(&rt);
+        assert!(
+            keys.contains(present),
+            "scene {name:?}: signature panel {present:?} is presented"
+        );
+        assert!(
+            !keys.contains(absent),
+            "scene {name:?}: {absent:?} is gated out"
+        );
+        // Figures mounts in every workspace except Home
+        // and Export (E9's gating audit): in the rows
+        // whose gate-out key is `frames`, figures-panel
+        // must be PRESENT, not absent.
+        if absent == "frames" {
+            assert!(
+                keys.contains("figures-panel"),
+                "scene {name:?}: figures-panel mounts in this workspace"
+            );
+        }
+
+        // The scene's switch persisted through
+        // `select_workspace`, like a chip press — put
+        // the shared prefs back to Animate before the
+        // next runtime seeds from them (the rounds'
+        // discipline).
+        tap(&mut rt, "ws-animate");
+        assert_eq!(rt.state.workspace, Workspace::Animate);
+    }
 }
 
 #[test]

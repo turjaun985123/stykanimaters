@@ -528,6 +528,58 @@ pub fn spray_dots(points: &[[f32; 2]], mark: &SprayMark) -> Vec<([f32; 2], f32)>
     out
 }
 
+/// Expand an ordinary stroke's path into dab placements with
+/// brush scatter applied: the drawing-path half of scatter for
+/// strokes that stay strokes. ([`spray_dots`] is the other
+/// half: a spray stroke is *replaced* by its dots and never
+/// reaches this function.)
+///
+/// Dabs are placed along the path by [`resample`] at `spacing`
+/// units of arc length — the placements an unscattered
+/// dab-rendering of the stroke uses, so callers tie `spacing`
+/// to the stroke's own width as they would for any dab pass —
+/// and each dab's centre is then displaced by one offset drawn
+/// from [`spray_offsets`], the same xorshift64 stream spray
+/// uses. The determinism discipline is spray's exactly:
+///
+/// * dab `i` draws from the sub-seed
+///   `seed + i * 0x9E3779B97F4A7C15` (wrapping), the per-point
+///   derivation [`spray_dots`] uses, so dab streams never
+///   alias each other;
+/// * the offset is uniform over the disc of radius `scatter`
+///   (`r = scatter * sqrt(u)`), so no dab ever lands further
+///   than `scatter` from its unscattered placement;
+/// * the output depends only on `points`, `spacing`, `scatter`
+///   and `seed` — never on render order, frame, or machine —
+///   so every renderer places the same dabs for the same
+///   stroke. `seed` is the per-stroke seed a recorder derives
+///   for the stroke (a spray mark's seed is exactly such a
+///   value).
+///
+/// `scatter <= 0.0` (or NaN) returns the unscattered
+/// placements unchanged, dab for dab: scatter 0 draws
+/// identically to the stroke without scatter. Non-positive
+/// `spacing` places one dab per recorded point (that is
+/// [`resample`]'s own degenerate contract). Empty input
+/// yields no dabs; a single point yields one dab, displaced
+/// like any other.
+pub fn scatter_dabs(points: &[V2], spacing: f32, scatter: f32, seed: u64) -> Vec<V2> {
+    let placements = resample(points, spacing);
+    if !(scatter > 0.0) {
+        return placements;
+    }
+    placements
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let sub_seed =
+                seed.wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let offset = spray_offsets(sub_seed, 1, scatter)[0];
+            [p[0] + offset[0], p[1] + offset[1]]
+        })
+        .collect()
+}
+
 /// The eraser: remove every point within `radius` of `centre`
 /// (distance `<= radius`) from every stroke, splitting a stroke
 /// into several where the erasure cuts its middle. Each surviving
@@ -2149,5 +2201,86 @@ mod spray_dots_wave13_tests {
             assert_eq!(*centre, [7.0, 9.0], "zero radius: the dot is on the point");
             assert_eq!(*alpha, 0.8 * 0.45, "frac 0 -> the floor alpha");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wave 9 (D1): `scatter_dabs` contract — brush scatter applied
+// to an ordinary stroke's dab placements under spray's
+// determinism discipline: scatter 0 is the identity on the
+// placements, scatter > 0 displaces within its radius, and the
+// per-stroke seed alone drives the pattern.
+#[cfg(test)]
+mod scatter_dabs_tests {
+    use super::*;
+
+    /// A straight 100-unit horizontal path: `resample` at
+    /// spacing 10 places 11 dabs (0, 10, ..., 100).
+    fn path() -> Vec<V2> {
+        vec![[0.0, 0.0], [100.0, 0.0]]
+    }
+
+    #[test]
+    fn scatter_zero_returns_the_unscattered_placements() {
+        let pts = path();
+        let plain = resample(&pts, 10.0);
+        assert_eq!(plain.len(), 11);
+        for seed in [0u64, 1, 42, u64::MAX] {
+            assert_eq!(
+                scatter_dabs(&pts, 10.0, 0.0, seed),
+                plain,
+                "scatter 0 must not depend on the seed (seed {seed})"
+            );
+        }
+        // Negative and NaN scatter behave as 0, never as a
+        // backwards or undefined displacement.
+        assert_eq!(scatter_dabs(&pts, 10.0, -3.0, 7), plain);
+        assert_eq!(scatter_dabs(&pts, 10.0, f32::NAN, 7), plain);
+    }
+
+    #[test]
+    fn scatter_spreads_dabs_within_the_scatter_radius() {
+        let pts = path();
+        let plain = resample(&pts, 10.0);
+        let dabs = scatter_dabs(&pts, 10.0, 5.0, 42);
+        assert_eq!(
+            dabs.len(),
+            plain.len(),
+            "scatter displaces dabs, never adds or drops them"
+        );
+        let mut moved = 0;
+        for (dab, home) in dabs.iter().zip(&plain) {
+            let d = distance(*dab, *home);
+            assert!(
+                d <= 5.0 + 1e-4,
+                "dab {dab:?} is {d} from its placement, past the scatter radius"
+            );
+            if d > 1e-6 {
+                moved += 1;
+            }
+        }
+        assert!(moved > 0, "scatter 5 with seed 42 must displace at least one dab");
+    }
+
+    #[test]
+    fn scatter_is_deterministic_per_seed() {
+        let pts = path();
+        let a = scatter_dabs(&pts, 10.0, 5.0, 42);
+        let b = scatter_dabs(&pts, 10.0, 5.0, 42);
+        assert_eq!(a, b, "same seed -> identical dabs, so exports and redraws agree");
+        let other = scatter_dabs(&pts, 10.0, 5.0, 43);
+        assert_ne!(a, other, "the seed drives the pattern");
+    }
+
+    #[test]
+    fn scatter_dabs_of_no_points_is_empty() {
+        assert!(scatter_dabs(&[], 10.0, 5.0, 42).is_empty());
+    }
+
+    #[test]
+    fn scatter_single_point_yields_one_dab_within_the_radius() {
+        let dabs = scatter_dabs(&[[7.0, 9.0]], 10.0, 5.0, 42);
+        assert_eq!(dabs.len(), 1);
+        assert!(distance(dabs[0], [7.0, 9.0]) <= 5.0 + 1e-4);
     }
 }

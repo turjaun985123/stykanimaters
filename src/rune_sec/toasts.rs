@@ -49,6 +49,17 @@
 //! the normalise sweep's benign `"No … needed …"` outcome
 //! is carved out of Warn into Info.
 //!
+//! Wave 9 hardens the stack against repetition and its own
+//! height: [`ToastsState::push`] dedupes by (text, severity)
+//! across the whole live window — before, only a duplicate
+//! of the *newest* toast refreshed, so alternating ops that
+//! repeat a status (pose, nudge, pose…) stacked twins — and
+//! [`MAX_TOASTS`] is re-derived from the stage dock's
+//! geometry: three is the largest stack that cannot reach
+//! the camera pill at the smallest supported window, even
+//! when every card wraps to three lines (the constant's own
+//! docs carry the arithmetic).
+//!
 //! Why hand-rolled instead of rune-kit's `Toast` /
 //! `ToastRegion` (read at `crates/rune-kit/src/toast.rs` in the
 //! pinned Rune tree):
@@ -102,7 +113,27 @@ use crate::State;
 
 /// Most toasts on screen at once; a push past the cap drops
 /// the oldest toast.
-pub const MAX_TOASTS: usize = 4;
+///
+/// Wave 9 re-derived the number from the stage dock's
+/// geometry — the old value dated from the window-corner
+/// era, when the stack sat in dead space and covered
+/// nothing. The stack now hangs from the stage's top-right
+/// corner (12 pt insets, `main.rs`'s stage-wrap mount) and
+/// grows DOWN toward the camera pill pinned at the stage's
+/// bottom-right (the pill's top edge sits 41 pt above the
+/// stage's bottom edge — headless tree dumps, 2026-11-08).
+/// At the smallest supported window (1280×720) the stage is
+/// 350 pt tall, leaving 350 − 12 − 41 = 297 pt of stack
+/// room. A card measures 50 pt at one line and 54 pt at two
+/// (same dumps), ≈ 15 pt per wrapped line, so a three-line
+/// card is ≈ 69 pt; the stack gap is 8 pt and the Clear-all
+/// row adds its 25 pt plus a gap. Three toasts stay clear
+/// in every case — worst case 3 × 69 + 2 × 8 + 33 = 256 pt.
+/// Four do not: four three-line cards reach 4 × 69 + 3 × 8
+/// + 33 = 333 pt and would cover the pill's top edge; four
+/// only fits while every card happens to stay at two lines
+/// or fewer, which the pill cannot rely on.
+pub const MAX_TOASTS: usize = 3;
 
 /// Seconds a toast stays live. A toast expires when its age
 /// is strictly greater than this (`age > TOAST_TTL`); at
@@ -313,21 +344,34 @@ impl ToastsState {
     /// Show a status line.
     ///
     /// - Stale toasts are expired first (at `now`), so they
-    ///   never eat cap slots.
-    /// - A push identical to the newest toast — same text AND
-    ///   same severity — does not stack a copy; it refreshes
-    ///   that toast's birth time, so repeating the same op
-    ///   keeps one toast alive instead of piling up four.
-    ///   Non-consecutive duplicates are kept.
+    ///   never eat cap slots — and so the dedupe window
+    ///   below is exactly the live window.
+    /// - A push whose (text, severity) pair matches ANY live
+    ///   toast does not stack a copy; it refreshes that
+    ///   toast's birth time in place, so repeating a status
+    ///   — consecutively or alternating with other ops —
+    ///   keeps one toast per distinct status instead of
+    ///   filling the stack with twins. The refresh is in
+    ///   place on purpose: the toast keeps its items index,
+    ///   so its `toast-{index}` key and dismiss button never
+    ///   move under the pointer. Same text with a DIFFERENT
+    ///   severity is a different status and stacks normally;
+    ///   an expired twin is never refreshed — `expire` above
+    ///   has already collected it, so the push starts a fresh
+    ///   toast. (Wave 9: before, only a duplicate of the
+    ///   NEWEST toast refreshed; non-consecutive twins
+    ///   stacked.)
     /// - Past [`MAX_TOASTS`], the oldest toast is dropped.
     pub fn push(&mut self, text: impl Into<String>, severity: Severity, now: f32) {
         self.expire(now);
         let text = text.into();
-        if let Some(last) = self.items.last_mut() {
-            if last.text == text && last.severity == severity {
-                last.born = now;
-                return;
-            }
+        if let Some(existing) = self
+            .items
+            .iter_mut()
+            .find(|t| t.text == text && t.severity == severity)
+        {
+            existing.born = now;
+            return;
         }
         self.items.push(Toast::new(text, severity, now));
         while self.items.len() > MAX_TOASTS {
@@ -607,33 +651,92 @@ mod tests {
     }
 
     #[test]
-    fn push_non_consecutive_duplicate_is_kept() {
+    fn push_non_consecutive_duplicate_refreshes_the_live_original() {
+        // Wave 9: the dedupe window is the whole live stack,
+        // not just the newest toast — alternating ops that
+        // repeat a status refresh the original instead of
+        // stacking a twin.
         let mut s = ToastsState::new();
         s.push("A", Severity::Info, 0.0);
         s.push("B", Severity::Info, 0.0);
-        s.push("A", Severity::Info, 0.0);
-        assert_eq!(s.items.len(), 3);
+        s.push("A", Severity::Info, 3.0);
+        assert_eq!(s.items.len(), 2, "the repeated status must not stack a copy");
         let texts: Vec<&str> = s.items.iter().map(|t| t.text.as_str()).collect();
-        assert_eq!(texts, ["A", "B", "A"]);
+        assert_eq!(
+            texts,
+            ["A", "B"],
+            "the refresh is in place: order and items indices are stable"
+        );
+        assert_eq!(s.items[0].born, 3.0);
+        assert_eq!(s.items[1].born, 0.0, "the refresh touches only the matching toast");
+        // The refresh is real lifetime: at t=7.9 the
+        // un-refreshed "B" (born 0, age 7.9 > TTL) is gone
+        // while "A" (reborn at 3, age 4.9) still lives.
+        let live: Vec<&str> = s.live(7.9).map(|t| t.text.as_str()).collect();
+        assert_eq!(live, ["A"]);
+    }
+
+    #[test]
+    fn push_duplicate_with_a_different_severity_stacks_even_non_consecutively() {
+        // The dedupe key is the (text, severity) pair: the
+        // same words meaning something else are a different
+        // status, wherever in the window they land.
+        let mut s = ToastsState::new();
+        s.push("Export failed.", Severity::Info, 0.0);
+        s.push("B", Severity::Info, 0.0);
+        s.push("Export failed.", Severity::Error, 0.0);
+        assert_eq!(s.items.len(), 3);
+        assert_eq!(s.items[2].severity, Severity::Error);
+        assert_eq!(s.items[0].born, 0.0, "the Info twin was not refreshed either");
+    }
+
+    #[test]
+    fn push_after_the_twin_expired_starts_a_fresh_toast() {
+        // "Within the live window" is literal: push expires
+        // first, so a twin that is already dead is not
+        // refreshed — the push starts a new toast, born now,
+        // at the newest slot.
+        let mut s = ToastsState::new();
+        s.push("A", Severity::Info, 0.0);
+        s.push("B", Severity::Info, 4.0);
+        s.push("A", Severity::Info, 6.0); // the first "A" died at age > 5
+        let texts: Vec<&str> = s.items.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["B", "A"]);
+        assert_eq!(s.items[1].born, 6.0);
     }
 
     #[test]
     fn push_caps_at_max_dropping_the_oldest() {
-        let mut s = state_with(&["one", "two", "three", "four"], 0.0);
-        s.push("five", Severity::Info, 0.0);
+        let mut s = state_with(&["one", "two", "three"], 0.0);
+        s.push("four", Severity::Info, 0.0);
         assert_eq!(s.items.len(), MAX_TOASTS);
         let texts: Vec<&str> = s.items.iter().map(|t| t.text.as_str()).collect();
-        assert_eq!(texts, ["two", "three", "four", "five"]);
+        assert_eq!(texts, ["two", "three", "four"]);
     }
 
     #[test]
     fn push_dedupe_refresh_at_cap_drops_nothing() {
-        let mut s = state_with(&["one", "two", "three", "four"], 0.0);
-        s.push("four", Severity::Info, 1.0);
+        let mut s = state_with(&["one", "two", "three"], 0.0);
+        s.push("three", Severity::Info, 1.0);
         assert_eq!(s.items.len(), MAX_TOASTS);
         let texts: Vec<&str> = s.items.iter().map(|t| t.text.as_str()).collect();
-        assert_eq!(texts, ["one", "two", "three", "four"]);
-        assert_eq!(s.items[3].born, 1.0);
+        assert_eq!(texts, ["one", "two", "three"]);
+        assert_eq!(s.items[2].born, 1.0);
+    }
+
+    #[test]
+    fn push_refreshing_the_oldest_at_cap_drops_nothing() {
+        // Wave 9: the refresh reaches every live toast, the
+        // OLDEST included — and a refresh is never a push,
+        // so at the cap nothing is dropped to make room
+        // for it and nothing changes places.
+        let mut s = state_with(&["one", "two", "three"], 0.0);
+        s.push("one", Severity::Info, 2.0);
+        assert_eq!(s.items.len(), MAX_TOASTS);
+        let texts: Vec<&str> = s.items.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["one", "two", "three"]);
+        assert_eq!(s.items[0].born, 2.0);
+        assert_eq!(s.items[1].born, 0.0);
     }
 
     #[test]
@@ -656,8 +759,8 @@ mod tests {
 
     #[test]
     fn push_expires_stale_toasts_so_they_never_eat_cap_slots() {
-        let mut s = state_with(&["one", "two", "three", "four"], 0.0);
-        // All four are stale by t=6; a push then must leave a
+        let mut s = state_with(&["one", "two", "three"], 0.0);
+        // All three are stale by t=6; a push then must leave a
         // stack of one, not drop the new toast to cap pressure.
         s.push("fresh", Severity::Info, 6.0);
         assert_eq!(s.items.len(), 1);
@@ -780,11 +883,11 @@ mod tests {
 
     #[test]
     fn dismiss_all_removes_every_live_toast() {
-        let mut s = state_with(&["one", "two", "three", "four"], 0.0);
-        assert_eq!(s.live_count(1.0), 4);
+        let mut s = state_with(&["one", "two", "three"], 0.0);
+        assert_eq!(s.live_count(1.0), MAX_TOASTS);
         s.dismiss_all(1.0);
         assert_eq!(s.live_count(1.0), 0, "no toast stays live after Clear all");
-        assert!(s.is_empty(), "all four were live, so nothing remains stored");
+        assert!(s.is_empty(), "all three were live, so nothing remains stored");
         assert_eq!(s.newest_live_index(1.0), None);
     }
 

@@ -3,7 +3,10 @@
 //! The Rune shell does NOT adopt `rune-i18n` (audit
 //! `docs/RUNE_API_AUDIT.md` Q12: it would replace a solved problem
 //! with a build.rs + ICU4X stack). It reuses the project's own
-//! table in `stykanimate_rs::i18n` — 28 languages × 78 keys, with
+//! table in `stykanimate_rs::i18n` — 28 languages × 96 keys
+//! (78 through Phase E; +18 mission-era label keys in Wave 9,
+//! carried as English placeholders in the untranslated tables
+//! per the table's own convention), with
 //! fallback current language → English → the key itself
 //! (`i18n::t`, src/i18n.rs:235; fallback chain in `resolve`,
 //! src/i18n.rs:223).

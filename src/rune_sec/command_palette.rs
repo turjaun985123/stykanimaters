@@ -159,6 +159,24 @@
 //!   Phase J form; `fill-keys-range` answers its
 //!   loop-range guard first, in the keyframe tools'
 //!   wording.
+//! * Wave 9 (UI mission follow-up) appended three
+//!   commands over features that landed after Phase M:
+//!   `toggle-live-mcp` names the settings popover's own
+//!   handler directly (it already takes `&mut State`,
+//!   like the Phase I guide toggles), and `theme-light` /
+//!   `theme-dark` are thin shims over
+//!   `settings_popover::set_theme` passing exactly the
+//!   argument the settings Dark / Light buttons pass.
+//!   The eight workspace jumps needed no work — Phase I
+//!   already covers every workspace. One candidate was
+//!   deliberately NOT added by E6: a "save a copy"
+//!   command — at E6's edit time no State-level handler
+//!   called the `projects::save_copy` primitive yet.
+//!   Wave 9 integration appended it as the fourth Wave 9
+//!   command once D5's handler landed: `save-copy` names
+//!   `project_tools::save_copy_pressed` directly (the
+//!   derived "{name} copy" naming is the handler's own,
+//!   so the palette invents nothing).
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -738,6 +756,29 @@ fn cmd_fill_keys_range(s: &mut State) {
     }
 }
 
+// -- Wave 9 shims: post-Phase-M features. The theme
+// -- setter takes `&mut EditorCore` plus the target, so
+// -- each direction is a one-line forwarder passing
+// -- exactly the argument the settings popover's own
+// -- Dark / Light buttons pass (settings_popover.rs).
+// -- The Live MCP toggle needs no shim: its settings
+// -- handler already takes `&mut State`, so the table
+// -- names it directly, like the Phase I guide toggles.
+
+/// Wave 9: switch to the light theme — forwards to
+/// `settings_popover::set_theme`, the settings Light
+/// button's own call.
+fn cmd_theme_light(s: &mut State) {
+    crate::rune_sec::settings_popover::set_theme(&mut s.core, true);
+}
+
+/// Wave 9: switch to the dark theme; same forwarding
+/// as [`cmd_theme_light`], with the Dark button's
+/// argument.
+fn cmd_theme_dark(s: &mut State) {
+    crate::rune_sec::settings_popover::set_theme(&mut s.core, false);
+}
+
 fn cmd_add_frame(s: &mut State) {
     s.core.add_frame();
 }
@@ -1087,6 +1128,12 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "swap-frame-next", title: "Swap frame with next", group: "Frames", run: cmd_swap_frame_next },
     Command { key: "shift-channel-right", title: "Shift graph channel keys +1 frame", group: "Graph", run: cmd_shift_channel_right },
     Command { key: "fill-keys-range", title: "Fill keys across the loop range", group: "Graph", run: cmd_fill_keys_range },
+    // -- Wave 9 (appended: every entry above keeps its
+    // -- place) ------------------------------------------
+    Command { key: "toggle-live-mcp", title: "Toggle Live MCP", group: "View", run: crate::rune_sec::settings_popover::toggle_live_mcp },
+    Command { key: "theme-light", title: "Switch to light theme", group: "View", run: cmd_theme_light },
+    Command { key: "theme-dark", title: "Switch to dark theme", group: "View", run: cmd_theme_dark },
+    Command { key: "save-copy", title: "Save a copy of the project", group: "Projects", run: crate::rune_sec::project_tools::save_copy_pressed },
 ];
 
 // ----------------------------------------------------------------
@@ -1708,8 +1755,19 @@ mod tests {
         // fill-keys-range — the mute resolves the audio
         // panel's target, the graph pair the graph
         // panel's drawn channel, and both stand down
-        // with an explanation when there is no target).
-        assert_eq!(total, 108, "palette should cover 108 commands, has {total}");
+        // with an explanation when there is no target),
+        // +3 in Wave 9 (toggle-live-mcp, theme-light,
+        // theme-dark — the Live MCP toggle names the
+        // settings handler directly; the theme pair
+        // forward to settings_popover::set_theme with
+        // the settings buttons' own arguments. The
+        // go-* workspace jumps were already complete
+        // since Phase I), +1 at Wave 9 integration
+        // (save-copy — names project_tools'
+        // save_copy_pressed directly; E6 had skipped it
+        // because no State-level handler existed at its
+        // edit time, and D5's handler landed after).
+        assert_eq!(total, 112, "palette should cover 112 commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }
@@ -2202,6 +2260,54 @@ mod tests {
         s.core.loop_range = Some((0, 2));
         (COMMANDS[idx_of("fill-keys-range")].run)(&mut s);
         assert_eq!(s.core.project.channels[0].keys.len(), 3);
+    }
+
+    #[test]
+    fn wave_9_commands_are_present_and_wired() {
+        // All four Wave 9 keys resolve (idx_of panics if not).
+        for key in ["toggle-live-mcp", "theme-light", "theme-dark", "save-copy"] {
+            idx_of(key);
+        }
+        // Each new command is findable by a query fragment
+        // of its key (the key field is scored too, so a
+        // dashed fragment reaches the command).
+        for (query, key) in [
+            ("toggle-live", "toggle-live-mcp"),
+            ("theme-l", "theme-light"),
+            ("theme-d", "theme-dark"),
+            ("save-c", "save-copy"),
+        ] {
+            let got = filter_commands(query);
+            assert!(
+                got.iter().any(|&i| COMMANDS[i].key == key),
+                "query {query:?} should find {key}, got {:?}",
+                got.iter().map(|&i| COMMANDS[i].key).collect::<Vec<_>>()
+            );
+        }
+        // Theme pair: each command writes the core's
+        // theme field through settings_popover::set_theme
+        // with its own direction, and re-running the
+        // active direction is the setter's documented
+        // no-op (idempotent), not a toggle.
+        let mut s = crate::init();
+        (COMMANDS[idx_of("theme-dark")].run)(&mut s);
+        assert!(!s.core.light_theme);
+        (COMMANDS[idx_of("theme-light")].run)(&mut s);
+        assert!(s.core.light_theme);
+        (COMMANDS[idx_of("theme-light")].run)(&mut s);
+        assert!(s.core.light_theme, "set_theme is idempotent");
+        (COMMANDS[idx_of("theme-dark")].run)(&mut s);
+        assert!(!s.core.light_theme);
+        // toggle-live-mcp is deliberately NOT run here:
+        // its handler binds the real loopback port and
+        // persists LayoutPrefs, so it is covered by the
+        // settings popover's own tests and the live
+        // bridge's socket test, not by a palette smoke.
+        // Presence + findability above are the palette's
+        // contract for it. save-copy is likewise not run:
+        // its handler writes a real file into ./projects,
+        // which tests must not pollute — project_tools'
+        // own tests cover the factored pieces.
     }
 
     // -- command_hint (Phase N, P14 §4.4) -----------------------

@@ -1,7 +1,7 @@
 //! Icon builder — Font Awesome glyphs as Rune shapes.
 //!
 //! The rendering half of the shell's icon system. The
-//! curated path data lives in [`super::icon_data`] (102
+//! curated path data lives in [`super::icon_data`] (163
 //! Font Awesome Free solid icons, view-box height always
 //! 512, width varies per icon); the SVG path parser lives
 //! in the lib (`stykanimate_rs::icon_path`). This module
@@ -40,6 +40,31 @@
 //! [`icon_el`] returns an empty fixed-size spacer
 //! (`size` × `size`, no canvas) so a typo degrades to a
 //! blank slot in the layout instead of a crash.
+//!
+//! ## Size discipline
+//!
+//! [`icon_el`] takes a free `f32` height, so the size
+//! scale is a convention, not a type: call sites pass
+//! one of the kit steps from `super::icon_btn` —
+//! `ICON_SM` (12, chip/inline glyphs), `ICON_MD` (13,
+//! the standard button/panel glyph, = `ICON_SIZE`),
+//! `ICON_LG` (16, hero glyphs such as the command
+//! palette's search field) or `ICON_XL` (20, display
+//! glyphs such as `design::empty_state`'s) — never an
+//! off-scale literal. Kit builders already do this
+//! (`ICON_SIZE`, `CHIP_GLYPH_SIZE`, `glyph_size_for`);
+//! direct panel call sites converge onto the same
+//! steps (audit S17 D8). A genuinely off-scale size
+//! needs its reason documented at the call site, the
+//! way `status_strip`'s width proofs pin its segment
+//! glyph — an undocumented off-scale literal is drift,
+//! not a choice.
+//!
+//! The header's census count is guarded by the
+//! `curated_census_matches_the_module_header` test
+//! below: prose is not compiled, and the count already
+//! drifted silently once (102, through two expansions
+//! of the set) before that pin existed.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -154,6 +179,27 @@ mod tests {
     use super::*;
     use crate::rune_sec::icon_data::ICON_NAMES;
     use stykanimate_rs::icon_path::path_bbox;
+
+    /// Census guard for this module's header: the
+    /// header states the curated set's size in prose
+    /// ("163 Font Awesome Free solid icons"), and prose
+    /// is not compiled — the count already drifted
+    /// silently once, saying 102 through two expansions
+    /// of the set (audit S17 D9). `icon_data`'s own
+    /// tests pin `ICON_NAMES` for the data table's
+    /// sake; this pin exists so a census change fails
+    /// HERE, next to the header it invalidates. When
+    /// the curated set grows or shrinks, update the
+    /// header count in the same change.
+    #[test]
+    fn curated_census_matches_the_module_header() {
+        assert_eq!(
+            ICON_NAMES.len(),
+            163,
+            "curated census changed — update the icon count \
+             in the icons.rs module header in the same change"
+        );
+    }
 
     /// The whole curated set survives the pipeline:
     /// every name resolves, parses to at least one

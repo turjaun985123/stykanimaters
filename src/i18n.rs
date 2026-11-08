@@ -10,7 +10,7 @@
 //! The language set mirrors the original app's locale packs
 //! (`src/locales/packs/` in StykAnimate-App: 27 packs) plus Bengali,
 //! which the port added for its user — 28 languages in total.
-//! Every table carries exactly the same 78 keys.
+//! Every table carries exactly the same 96 keys.
 //!
 //! Translation approach: established animation terms are used where
 //! a language has them (French "pelure d'oignon", Polish "skórka
@@ -42,6 +42,25 @@
 //! only for now: the app bar's workspace chips still use the
 //! English names as their labels this wave, like every other
 //! button in the app, so the chips are not yet localised.
+//!
+//! The UI-mission keys (`live_mcp_control`, `live_mcp_off`,
+//! `discard_changes`, `rename`, `camera_delete_key`,
+//! `clear_key_no_undo`, `go_to_start`, `go_to_end`,
+//! `delete_frame_strokes`, `clip_missing_file`,
+//! `clip_unsupported_format`, `clip_unreadable_file`,
+//! `brush_preset`, `preset_size`, `preset_opacity`,
+//! `preset_scatter`, `preset_nib`, `preset_smoothing`) were
+//! added by the Wave 9 completeness audit of the labels the
+//! UI mission (Waves 1–8) and live MCP introduced. Their
+//! English values are the exact strings at the call sites
+//! (settings toggle, discard confirmations, camera key row,
+//! transport jumps, audio clip-health words, brush preset
+//! cyclers); every other language carries the English text
+//! as a placeholder, the same convention as the Wave 14
+//! workspace keys, for a later translation pass. Like the
+//! workspace keys they are infrastructure for now: the call
+//! sites still render the English literals until a wiring
+//! pass routes them through `tr`.
 //!
 //! The Rune shell keys (`settings`, `frame`, `frames`,
 //! `figures`, `prev_frame`, `next_frame`, `fps`, `zoom`) were
@@ -351,6 +370,25 @@ static EN: &[(&str, &str)] = &[
         "status_ready",
         "Drag a joint to pose. Hands and feet use IK; drag the hips to move.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static BN: &[(&str, &str)] = &[
@@ -447,6 +485,25 @@ static BN: &[(&str, &str)] = &[
         "status_ready",
         "পোজ দেওয়ার জন্য একটি জয়েন্ট টেনে ধরুন। হাত ও পা IK দিয়ে চলে; ফিগার সরাতে কোমর টানুন।",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static ES: &[(&str, &str)] = &[
@@ -543,6 +600,25 @@ static ES: &[(&str, &str)] = &[
         "status_ready",
         "Arrastra una articulación para posar. Las manos y los pies usan IK; arrastra las caderas para mover.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static AR: &[(&str, &str)] = &[
@@ -639,6 +715,25 @@ static AR: &[(&str, &str)] = &[
         "status_ready",
         "اسحب مفصلًا لتحديد الوضعية. تستخدم اليدان والقدمان IK؛ اسحب الوركين للتحريك.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static CS: &[(&str, &str)] = &[
@@ -735,6 +830,25 @@ static CS: &[(&str, &str)] = &[
         "status_ready",
         "Přetažením kloubu nastavte pózu. Ruce a nohy používají IK; postavu přesunete tažením za boky.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static DA: &[(&str, &str)] = &[
@@ -831,6 +945,25 @@ static DA: &[(&str, &str)] = &[
         "status_ready",
         "Træk i et led for at posere. Hænder og fødder bruger IK; træk i hofterne for at flytte.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static DE: &[(&str, &str)] = &[
@@ -927,6 +1060,25 @@ static DE: &[(&str, &str)] = &[
         "status_ready",
         "Ziehen Sie ein Gelenk, um die Pose zu setzen. Hände und Füße nutzen IK; ziehen Sie die Hüfte zum Bewegen.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static EL: &[(&str, &str)] = &[
@@ -1023,6 +1175,25 @@ static EL: &[(&str, &str)] = &[
         "status_ready",
         "Σύρετε μια άρθρωση για πόζα. Τα χέρια και τα πόδια χρησιμοποιούν IK· σύρετε τους γοφούς για μετακίνηση.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static ES419: &[(&str, &str)] = &[
@@ -1119,6 +1290,25 @@ static ES419: &[(&str, &str)] = &[
         "status_ready",
         "Arrastra una articulación para posar. Las manos y los pies usan IK; arrastra las caderas para moverlo.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static FI: &[(&str, &str)] = &[
@@ -1215,6 +1405,25 @@ static FI: &[(&str, &str)] = &[
         "status_ready",
         "Aseta asento vetämällä niveltä. Kädet ja jalat käyttävät IK:ta; siirrä vetämällä lantiosta.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static FR: &[(&str, &str)] = &[
@@ -1311,6 +1520,25 @@ static FR: &[(&str, &str)] = &[
         "status_ready",
         "Faites glisser une articulation pour poser. Les mains et les pieds utilisent l'IK ; faites glisser les hanches pour déplacer.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static HE: &[(&str, &str)] = &[
@@ -1407,6 +1635,25 @@ static HE: &[(&str, &str)] = &[
         "status_ready",
         "גררו מפרק כדי לקבוע פוזה. הידיים והרגליים משתמשות ב-IK; גררו את הירכיים כדי להזיז.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static HR: &[(&str, &str)] = &[
@@ -1503,6 +1750,25 @@ static HR: &[(&str, &str)] = &[
         "status_ready",
         "Povucite zglob za pozu. Ruke i stopala koriste IK; povucite kukove za pomicanje.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static HU: &[(&str, &str)] = &[
@@ -1599,6 +1865,25 @@ static HU: &[(&str, &str)] = &[
         "status_ready",
         "Húzzon egy ízületet a pózhoz. A kezek és lábak IK-t használnak; a mozgatáshoz húzza a csípőt.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static ID: &[(&str, &str)] = &[
@@ -1695,6 +1980,25 @@ static ID: &[(&str, &str)] = &[
         "status_ready",
         "Seret sendi untuk berpose. Tangan dan kaki menggunakan IK; seret pinggul untuk memindahkan.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static IT: &[(&str, &str)] = &[
@@ -1791,6 +2095,25 @@ static IT: &[(&str, &str)] = &[
         "status_ready",
         "Trascina un'articolazione per la posa. Mani e piedi usano IK; trascina i fianchi per spostare.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static KK: &[(&str, &str)] = &[
@@ -1887,6 +2210,25 @@ static KK: &[(&str, &str)] = &[
         "status_ready",
         "Поза қою үшін буынды сүйреңіз. Қолдар мен аяқтар IK пайдаланады; жылжыту үшін жамбасты сүйреңіз.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static NB: &[(&str, &str)] = &[
@@ -1983,6 +2325,25 @@ static NB: &[(&str, &str)] = &[
         "status_ready",
         "Dra et ledd for å posere. Hender og føtter bruker IK; dra hoftene for å flytte.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static NL: &[(&str, &str)] = &[
@@ -2079,6 +2440,25 @@ static NL: &[(&str, &str)] = &[
         "status_ready",
         "Sleep een gewricht om te poseren. Handen en voeten gebruiken IK; sleep de heupen om te verplaatsen.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static PL: &[(&str, &str)] = &[
@@ -2175,6 +2555,25 @@ static PL: &[(&str, &str)] = &[
         "status_ready",
         "Przeciągnij staw, aby ustawić pozę. Dłonie i stopy używają IK; przeciągnij biodra, aby przenieść.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static PT_BR: &[(&str, &str)] = &[
@@ -2271,6 +2670,25 @@ static PT_BR: &[(&str, &str)] = &[
         "status_ready",
         "Arraste uma articulação para posar. Mãos e pés usam IK; arraste os quadris para mover.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static RO: &[(&str, &str)] = &[
@@ -2367,6 +2785,25 @@ static RO: &[(&str, &str)] = &[
         "status_ready",
         "Trageți o articulație pentru poză. Mâinile și picioarele folosesc IK; trageți șoldurile pentru a muta.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static RU: &[(&str, &str)] = &[
@@ -2463,6 +2900,25 @@ static RU: &[(&str, &str)] = &[
         "status_ready",
         "Перетащите сустав, чтобы задать позу. Руки и ноги используют IK; перетащите бёдра для перемещения.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static SL: &[(&str, &str)] = &[
@@ -2559,6 +3015,25 @@ static SL: &[(&str, &str)] = &[
         "status_ready",
         "Povlecite sklep za pozo. Roke in stopala uporabljajo IK; povlecite boke za premik.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static TR: &[(&str, &str)] = &[
@@ -2655,6 +3130,25 @@ static TR: &[(&str, &str)] = &[
         "status_ready",
         "Poz vermek için bir eklemi sürükleyin. Eller ve ayaklar IK kullanır; taşımak için kalçayı sürükleyin.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static UK: &[(&str, &str)] = &[
@@ -2751,6 +3245,25 @@ static UK: &[(&str, &str)] = &[
         "status_ready",
         "Перетягніть суглоб, щоб задати позу. Руки й ноги використовують IK; перетягніть стегна для переміщення.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static VI: &[(&str, &str)] = &[
@@ -2847,6 +3360,25 @@ static VI: &[(&str, &str)] = &[
         "status_ready",
         "Kéo một khớp để tạo tư thế. Tay và chân dùng IK; kéo hông để di chuyển.",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 static ZH_HANS: &[(&str, &str)] = &[
@@ -2943,6 +3475,25 @@ static ZH_HANS: &[(&str, &str)] = &[
         "status_ready",
         "拖动关节来摆姿势。手和脚使用 IK；拖动臀部来移动。",
     ),
+    // UI mission additions (Wave 9 i18n audit)
+    ("live_mcp_control", "Live MCP control"),
+    ("live_mcp_off", "Live MCP off"),
+    ("discard_changes", "Discard changes?"),
+    ("rename", "Rename"),
+    ("camera_delete_key", "Delete"),
+    ("clear_key_no_undo", "Clear key (no undo)"),
+    ("go_to_start", "Go to start"),
+    ("go_to_end", "Go to end"),
+    ("delete_frame_strokes", "Delete frame"),
+    ("clip_missing_file", "missing file"),
+    ("clip_unsupported_format", "unsupported format"),
+    ("clip_unreadable_file", "unreadable file"),
+    ("brush_preset", "Brush preset"),
+    ("preset_size", "Preset size"),
+    ("preset_opacity", "Preset opacity"),
+    ("preset_scatter", "Preset scatter"),
+    ("preset_nib", "Preset nib"),
+    ("preset_smoothing", "Preset smoothing"),
 ];
 
 #[cfg(test)]
@@ -3015,6 +3566,51 @@ mod tests {
         assert_eq!(t(Lang::Ar, "help"), "مساعدة");
         assert_eq!(t(Lang::Pl, "help"), "Pomoc");
         assert_eq!(t(Lang::Uk, "weather_panel"), "Панель погоди");
+    }
+
+    /// The UI-mission keys (Wave 9 completeness audit) must
+    /// resolve in every language to a non-empty string that is
+    /// not the raw key, present in each language's own table.
+    /// Only English carries authored values so far; the other
+    /// 27 languages carry the English text as a placeholder
+    /// (the Wave 14 workspace-key convention), so every
+    /// language currently resolves to the English string.
+    #[test]
+    fn mission_keys_resolve_in_every_language() {
+        const MISSION_KEYS: [(&str, &str); 18] = [
+            ("live_mcp_control", "Live MCP control"),
+            ("live_mcp_off", "Live MCP off"),
+            ("discard_changes", "Discard changes?"),
+            ("rename", "Rename"),
+            ("camera_delete_key", "Delete"),
+            ("clear_key_no_undo", "Clear key (no undo)"),
+            ("go_to_start", "Go to start"),
+            ("go_to_end", "Go to end"),
+            ("delete_frame_strokes", "Delete frame"),
+            ("clip_missing_file", "missing file"),
+            ("clip_unsupported_format", "unsupported format"),
+            ("clip_unreadable_file", "unreadable file"),
+            ("brush_preset", "Brush preset"),
+            ("preset_size", "Preset size"),
+            ("preset_opacity", "Preset opacity"),
+            ("preset_scatter", "Preset scatter"),
+            ("preset_nib", "Preset nib"),
+            ("preset_smoothing", "Preset smoothing"),
+        ];
+        for lang in Lang::all() {
+            for (key, english) in MISSION_KEYS {
+                let text = t(lang, key);
+                assert!(!text.is_empty(), "{key} is empty in {lang:?}");
+                assert_ne!(text, key, "{key} in {lang:?} is just the key");
+                assert!(
+                    lookup(table_for(lang), key).is_some(),
+                    "{key} missing from {lang:?}'s own table"
+                );
+                // Placeholder convention: untranslated languages
+                // resolve to the English source string.
+                assert_eq!(text, english, "{key} in {lang:?}");
+            }
+        }
     }
 
     #[test]

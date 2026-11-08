@@ -115,6 +115,40 @@
 //! rest). Those fills stay exactly as measured; this
 //! module's [`error_ink`] must never be substituted
 //! for them.
+//!
+//! # Contrast audit (Wave 9)
+//!
+//! WCAG ratios computed with Rune's own colour
+//! semantics (`hex` decodes sRGB to linear with the
+//! standard EOTF, `Color::mix` interpolates in linear
+//! light, authored hexes are the rendered values), so
+//! the derived light muted below is its rendered
+//! value (`#9BA0AA`), not a naive sRGB lerp. The
+//! accent pair is excluded — the user's pending
+//! decision, untouched here. Real-text pairs, all
+//! clearing 4.5:1, no change: secondary on panel
+//! 6.74 (dark) / 5.88 (light); secondary on elevated
+//! 5.94 / 5.88; `success_on` on card 7.62 / 5.33;
+//! `warning_on` on card 8.93 / 5.41; `error_on` on
+//! card 5.28 / 5.43.
+//!
+//! Muted pairs: on panel 3.83 (dark) / 2.62 (light);
+//! on background 4.50 (dark) / 2.30 (light). Muted is
+//! nevertheless left unchanged: its only production
+//! consumer is decorative — `graph_panel::glyph_muted`
+//! (the channel rows' `chart-line` glyphs, documented
+//! as pure decoration in that module). No real text
+//! renders in [`muted_text`] in either theme (kit text
+//! takes `text_secondary`; `design::text_muted`'s one
+//! consumer is likewise a glyph, the splitter grip).
+//! A genuine third level cannot be 4.5:1 text in
+//! light anyway: clearing 4.5 on the white card would
+//! need the light mix factor cut from 0.30 to ≈ 0.07,
+//! i.e. muted ≈ secondary. If a future consumer ever
+//! renders real text in muted, the dark clearing step
+//! is a 0.056 linear mix toward white (`#818996`,
+//! 4.51 on the card) — and light muted must not be
+//! used for text at all.
 
 use rune::tok::{self, Theme};
 use rune::Color;

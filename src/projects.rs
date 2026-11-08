@@ -7,6 +7,7 @@
 //! where the slug is the project name lowercased with every
 //! non-alphanumeric character replaced by `-`.
 
+use crate::editor::EditorCore;
 use crate::export::render_frame_at;
 use crate::model::Project;
 use std::path::{Path, PathBuf};
@@ -76,6 +77,50 @@ pub fn save(project: &Project, dir: &Path) -> std::io::Result<PathBuf> {
     let path = dir.join(format!("{}.json", slug(&project.name)));
     let text = serde_json::to_string_pretty(project).map_err(std::io::Error::other)?;
     std::fs::write(&path, text)?;
+    Ok(path)
+}
+
+/// Save a copy of the editor's current project into
+/// `./projects/` under `new_name`, and return the written
+/// path. This is the primitive a later "Save a copy as…" UI
+/// action wires to: the file is named by the same [`slug`]
+/// rule as every other library path, and the JSON stored in
+/// it carries `new_name` as its project name, so a later
+/// [`scan`] lists the copy under its new name.
+///
+/// The core is only read: its own project name, current
+/// file and autosave/recovery association are all untouched
+/// (the project is cloned and the clone renamed). Unlike
+/// [`save`], an existing file at the target is never
+/// overwritten — the call fails with an "already exists"
+/// error, mirroring [`rename_project`], and writes nothing.
+pub fn save_copy(core: &EditorCore, new_name: &str) -> Result<PathBuf, String> {
+    let dir = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("projects");
+    save_copy_to(core, new_name, &dir)
+}
+
+/// `save_copy` against an explicit projects directory (the
+/// codebase's split, as in `editor.rs::save_named_project`,
+/// so tests can aim the write at a temp dir).
+fn save_copy_to(core: &EditorCore, new_name: &str, dir: &Path) -> Result<PathBuf, String> {
+    let stem = slug(new_name);
+    if stem.is_empty() {
+        return Err("project name produces an empty file name".to_string());
+    }
+    let path = dir.join(format!("{stem}.json"));
+    if path.exists() {
+        return Err(format!(
+            "project file already exists: {}",
+            path.display()
+        ));
+    }
+    let mut copy = core.project.clone();
+    copy.name = new_name.to_string();
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let text = serde_json::to_string_pretty(&copy).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
     Ok(path)
 }
 
@@ -352,5 +397,71 @@ mod tests {
         );
         // No match yields an empty list.
         assert!(filter_projects(&projects, "zzz").is_empty());
+    }
+
+    #[test]
+    fn save_copy_writes_current_state_under_the_new_name() {
+        let dir = temp_dir("save-copy").join("projects");
+        let core = EditorCore::new();
+        assert_eq!(core.project.name, "Untitled");
+
+        // The file lands under the NEW name's slug — the same
+        // rule `save` applies ("My Copy!" -> "my-copy-.json") —
+        // in a directory the call creates, as `./projects`
+        // creation works in production.
+        let path = save_copy_to(&core, "My Copy!", &dir).unwrap();
+        assert_eq!(path, dir.join("my-copy-.json"));
+        assert!(path.exists());
+
+        // The stored project is the current state, renamed:
+        // it scans and loads under the new name with the
+        // core's figures, frames, fps and stage intact.
+        let infos = scan(&dir);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "My Copy!");
+        let back = load(&path).unwrap();
+        assert_eq!(back.name, "My Copy!");
+        assert_eq!(back.figures.len(), core.project.figures.len());
+        assert_eq!(back.frames.len(), core.project.frames.len());
+        assert!((back.fps - core.project.fps).abs() < f32::EPSILON);
+        assert_eq!(back.stage, core.project.stage);
+
+        // The core itself is untouched: still "Untitled".
+        assert_eq!(core.project.name, "Untitled");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn save_copy_refuses_to_overwrite_an_existing_file() {
+        let dir = temp_dir("save-copy-collision");
+        let core = EditorCore::new();
+
+        // A pre-existing file at the target is left exactly
+        // as it was, and the error says so honestly.
+        let target = dir.join("taken.json");
+        std::fs::write(&target, b"sentinel").unwrap();
+        let err = save_copy_to(&core, "Taken", &dir).unwrap_err();
+        assert!(err.contains("already exists"), "unexpected error: {err}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"sentinel");
+
+        // Saving the same copy twice collides the same way:
+        // the first write survives the second call untouched.
+        let path = save_copy_to(&core, "Once Only", &dir).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let err = save_copy_to(&core, "Once Only", &dir).unwrap_err();
+        assert!(err.contains("already exists"), "unexpected error: {err}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_copy_rejects_a_name_with_an_empty_slug() {
+        let dir = temp_dir("save-copy-empty").join("projects");
+        let core = EditorCore::new();
+        let err = save_copy_to(&core, "", &dir).unwrap_err();
+        assert!(err.contains("empty file name"), "unexpected error: {err}");
+        // The refusal happens before anything is created.
+        assert!(!dir.exists());
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 }

@@ -132,6 +132,26 @@
 //!   case). Wiring those invocations into the
 //!   headless workflow is an integrator step; the
 //!   scene half of each pairing exists in this table.
+//!
+//! The UI mission Wave 9 scenes close the remaining
+//! workspace coverage gap: after them, every one of the
+//! eight workspaces has at least one scene that lands on
+//! it. Five switches are appended — `home`, `build-open`,
+//! `graph-open`, `effects-open`, `audio-open` — each a
+//! bare `workspaces::select_workspace` call, the chips'
+//! op, exactly like `export-open` and `draw-open` before
+//! them; those two already existed, so they are not
+//! duplicated. The new five are deliberately BARE
+//! switches: `build-open` proves the Build3D gating
+//! mounts the 3D panel with NO session live (where
+//! `three-d` proves it with one), `graph-open` the graph
+//! panel with no channels planted (where
+//! `graph-duplicates` proves it with two), and
+//! `effects-open` the FX browser with nothing added
+//! (where `fx-selected` / `fx-split-mid` prove the
+//! populated states). `home` gives the Home workspace —
+//! the project library every launch can land on — its
+//! first scene at all.
 
 use crate::State;
 
@@ -511,6 +531,111 @@ fn scene_settings_open_light(s: &mut State) {
     crate::rune_sec::settings_popover::toggle_open(s);
 }
 
+/// `"home"` — the shell switched to the Home
+/// workspace, so the snap renders the project
+/// library (`home-panel`) with every editing panel
+/// gated out. The switch is
+/// `workspaces::select_workspace` — the exact call
+/// the workspace chips and the palette's `go-*`
+/// commands make, as in `export-open`. Home had no
+/// scene before UI mission Wave 9: it is the
+/// workspace a launch can land on (the layout prefs
+/// restore it), yet it had no pixel proof at all.
+fn scene_home(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Home,
+    );
+}
+
+/// `"build-open"` — the shell switched to the
+/// Build3D workspace with NO fig3 session started,
+/// so the snap renders the 3D panel in its
+/// no-session state (its start control and guidance,
+/// not the preview session `three-d` exercises).
+/// The switch is `workspaces::select_workspace`
+/// alone — deliberately no `enter_3d`: this scene
+/// proves the workspace gating mounts the panel,
+/// where `three-d` proves the session state behind
+/// it.
+fn scene_build_open(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Build3D,
+    );
+}
+
+/// `"graph-open"` — the shell switched to the Graph
+/// workspace with no channels planted, so the snap
+/// renders the graph panel in its empty state (its
+/// no-channels guidance, not the populated channel
+/// list `graph-duplicates` exercises). The switch
+/// is `workspaces::select_workspace` alone, as in
+/// `export-open`.
+fn scene_graph_open(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Graph,
+    );
+}
+
+/// `"effects-open"` — the shell switched to the
+/// Effects workspace with nothing added, so the
+/// snap renders the FX browser and lanes in their
+/// empty states (not the populated states
+/// `fx-selected` and `fx-split-mid` exercise). The
+/// switch is `workspaces::select_workspace` alone,
+/// as in `export-open`.
+fn scene_effects_open(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Effects,
+    );
+}
+
+/// `"audio-open"` — the shell switched to the Audio
+/// workspace, so the snap renders the audio panel
+/// (`audio-panel`) with the Animate panels gated
+/// out. The switch is
+/// `workspaces::select_workspace`, as in
+/// `export-open`. Audio had no scene before UI
+/// mission Wave 9 — it was the last editing
+/// workspace with no pixel proof.
+fn scene_audio_open(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Audio,
+    );
+}
+
+/// `"clips-populated"` — the Animate workspace with
+/// two movieclips built from the demo figure and an
+/// edit session open on the first (Wave 9
+/// integration). Until this scene existed, NO headless
+/// tree contained a clip row: the clips panel's rows
+/// were the one panel surface the overflow scanner had
+/// never seen, which is exactly how a 108–188 pt row
+/// overflow survived Waves 1–8 (C9's finding). The
+/// clips are real (`create_clip_from_figure` over the
+/// demo project's figure 0); the second is renamed so
+/// the two rows differ; `enter_clip` opens the session
+/// so the session section and the row's Editing marker
+/// render too.
+fn scene_clips_populated(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Animate,
+    );
+    if s.core.create_clip_from_figure(0).is_some() {
+        if s.core.create_clip_from_figure(0).is_some() {
+            if let Some(second) = s.core.project.clips.get_mut(1) {
+                second.name = "Second clip".to_string();
+            }
+        }
+        s.core.enter_clip(0);
+    }
+}
+
 /// The scene table for `AppSpec::scenes`, in `--list-scenes`
 /// display order. Element type is Rune's own, verbatim:
 /// `(&'static str, fn(&mut State))` (tooling.rs:25).
@@ -533,6 +658,12 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("draw-open", scene_draw_open),
         ("default-light", scene_default_light),
         ("settings-open-light", scene_settings_open_light),
+        ("home", scene_home),
+        ("build-open", scene_build_open),
+        ("graph-open", scene_graph_open),
+        ("effects-open", scene_effects_open),
+        ("audio-open", scene_audio_open),
+        ("clips-populated", scene_clips_populated),
     ]
 }
 
@@ -659,7 +790,7 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 /// 18. Under `--scene draw-open` (Phase N): an element
 ///    keyed `stroke-inspector` exists (the Draw set's
 ///    stroke panel) and NO element is keyed `frames`
-///    (FrameOps belongs to Animate/Graph, not Draw) —
+///    (FrameOps is Animate-only, not Draw) —
 ///    fact 8's shape with the pair swapped: the Draw
 ///    gating mounted the drawing set and left the frame
 ///    tools out.
@@ -682,6 +813,46 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    The card's light rendering (pills, language
 ///    grid, chips on the light card surface) is a
 ///    `--snap` fact.
+/// 21. Under `--scene home` (UI mission Wave 9): an
+///    element keyed `home-panel` exists (the project
+///    library root) and NO element is keyed
+///    `figures-panel` — fact 8's shape: the Home
+///    gating mounted the library and left the editing
+///    panels out.
+/// 22. Under `--scene build-open` (UI mission
+///    Wave 9): an element keyed `panel-3d` exists
+///    (the 3D panel root, as in fact 14) and an element
+///    IS keyed `figures-panel` (the Figures section
+///    mounts in every workspace except Home/Export —
+///    figure selection is global editor state; Wave 9
+///    audit E9). Unlike
+///    fact 12 there is NO session here, so no
+///    preview-canvas key is asserted: this fact
+///    proves the workspace switch alone mounts the
+///    panel.
+/// 23. Under `--scene graph-open` (UI mission
+///    Wave 9): an element keyed `graph-panel` exists
+///    (the graph panel root) and an element IS keyed
+///    `figures-panel` (see fact 22). No channel rows
+///    are asserted: the scene plants none, where
+///    fact 10's scene plants two.
+/// 24. Under `--scene effects-open` (UI mission
+///    Wave 9): an element keyed `fx-browser` exists
+///    (the FX browser root) and an element IS keyed
+///    `figures-panel` — the Effects gating with
+///    nothing added, where fact 9's scene adds and
+///    selects an event.
+/// 25. Under `--scene audio-open` (UI mission
+///    Wave 9): an element keyed `audio-panel` exists
+///    (the audio panel root) and an element IS keyed
+///    `figures-panel` — the last workspace that had
+///    no scene.
+/// 26. Under `--scene clips-populated` (Wave 9
+///    integration): elements keyed `clip-dup-0` and
+///    `clip-dup-1` exist — two real clip rows in the
+///    clips panel, the surface no earlier scene
+///    populated — and the open edit session mounts
+///    its section under the list.
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -704,34 +875,43 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene draw-open: an element keyed \"stroke-inspector\" exists and no element is keyed \"frames\" (the Draw set, with FrameOps gated out — see fact 18)",
         "under --scene default-light: the element inventory is identical to the default tree's (theme is paint, not structure — see fact 19)",
         "under --scene settings-open-light: an element keyed \"settings-card\" exists and the inventory matches settings-open's (see fact 20)",
-
+        "under --scene home: an element keyed \"home-panel\" exists and no element is keyed \"figures-panel\" (the project library, with the editing panels gated out — see fact 21)",
+        "under --scene build-open: an element keyed \"panel-3d\" exists and an element is keyed \"figures-panel\" (the 3D panel mounted by the switch alone, no session; Figures mounts outside Home/Export — see fact 22)",
+        "under --scene graph-open: an element keyed \"graph-panel\" exists and an element is keyed \"figures-panel\" (the graph panel with no channels planted — see fact 23)",
+        "under --scene effects-open: an element keyed \"fx-browser\" exists and an element is keyed \"figures-panel\" (the FX browser with nothing added — see fact 24)",
+        "under --scene audio-open: an element keyed \"audio-panel\" exists and an element is keyed \"figures-panel\" (the audio panel — see fact 25)",
+        "under --scene clips-populated: elements keyed \"clip-dup-0\" and \"clip-dup-1\" exist (two real clip rows — see fact 26)",
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        scene_default_light, scene_draw_open, scene_export_open, scene_fx_selected,
-        scene_fx_split_mid, scene_graph_duplicates, scene_loop_range, scene_menu_open,
-        scene_palette_open, scene_settings_open, scene_settings_open_light,
-        scene_three_d, scene_three_d_stage, scenes,
+        scene_audio_open, scene_build_open, scene_clips_populated, scene_default_light, scene_draw_open,
+        scene_effects_open, scene_export_open, scene_fx_selected, scene_fx_split_mid,
+        scene_graph_duplicates, scene_graph_open, scene_home, scene_loop_range,
+        scene_menu_open, scene_palette_open, scene_settings_open,
+        scene_settings_open_light, scene_three_d, scene_three_d_stage, scenes,
     };
     use crate::init;
     use crate::rune_sec::workspaces::Workspace;
 
     /// The scene table is the headless contract:
-    /// seventeen scenes, each name unique (a duplicate
+    /// twenty-three scenes, each name unique (a duplicate
     /// would shadow the later entry in `with_scene`'s
     /// lookup), with the Phase J scenes in their display
     /// positions, the two Phase K scenes appended after
     /// them, the two Phase L scenes appended after those,
     /// the Phase M scene appended after them, the four
-    /// Phase N scenes appended after those, and the two
-    /// UI-mission Wave 7 light scenes appended last.
+    /// Phase N scenes appended after those, the two
+    /// UI-mission Wave 7 light scenes appended after
+    /// those, the five UI-mission Wave 9 workspace
+    /// scenes appended after those, and the Wave 9
+    /// integration clips-populated scene last.
     #[test]
-    fn scene_table_has_seventeen_uniquely_named_scenes() {
+    fn scene_table_has_twentythree_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 17, "seventeen scenes are registered");
+        assert_eq!(table.len(), 23, "twenty-three scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -750,6 +930,11 @@ mod tests {
         assert_eq!(table[14].0, "draw-open");
         assert_eq!(table[15].0, "default-light");
         assert_eq!(table[16].0, "settings-open-light");
+        assert_eq!(table[17].0, "home");
+        assert_eq!(table[18].0, "build-open");
+        assert_eq!(table[19].0, "graph-open");
+        assert_eq!(table[20].0, "effects-open");
+        assert_eq!(table[21].0, "audio-open");
     }
 
     /// The export scene reaches the Export workspace through
@@ -1014,6 +1199,119 @@ mod tests {
         let mut s = init();
         scene_draw_open(&mut s);
         assert_eq!(s.workspace, Workspace::Draw);
+    }
+
+    /// The home scene reaches the Home workspace
+    /// through the shell's own switch — the same end
+    /// state a chip press or the palette's `go-home`
+    /// command produces. This is the state behind
+    /// layout fact 21 (the library mounted, the
+    /// editing panels gated out). (The switch
+    /// persists the workspace to the layout prefs,
+    /// the shared-prefs discipline the other scene
+    /// tests already live with.)
+    #[test]
+    fn home_scene_lands_on_the_home_workspace() {
+        let mut s = init();
+        scene_home(&mut s);
+        assert_eq!(s.workspace, Workspace::Home);
+    }
+
+    /// The build-open scene reaches the Build3D
+    /// workspace through the switch ALONE: no fig3
+    /// session is started — the deliberate contrast
+    /// with `three-d`, whose session this test's
+    /// sibling pins. This is the state behind layout
+    /// fact 22 (the panel mounted by the switch,
+    /// with no session behind it).
+    #[test]
+    fn build_open_scene_lands_on_build3d_without_a_session() {
+        let mut s = init();
+        assert!(s.core.fig3.is_none(), "no session before the scene");
+        scene_build_open(&mut s);
+        assert_eq!(s.workspace, Workspace::Build3D);
+        assert!(
+            s.core.fig3.is_none(),
+            "the bare switch starts no session"
+        );
+    }
+
+    /// The graph-open scene reaches the Graph
+    /// workspace through the switch ALONE: no
+    /// channels are planted — the deliberate
+    /// contrast with `graph-duplicates`, which
+    /// plants two. This is the state behind layout
+    /// fact 23 (the panel in its empty state).
+    #[test]
+    fn graph_open_scene_lands_on_graph_without_channels() {
+        let mut s = init();
+        let len_before = s.core.project.channels.len();
+        scene_graph_open(&mut s);
+        assert_eq!(s.workspace, Workspace::Graph);
+        assert_eq!(
+            s.core.project.channels.len(),
+            len_before,
+            "the bare switch plants no channels"
+        );
+    }
+
+    /// The effects-open scene reaches the Effects
+    /// workspace through the switch ALONE: no
+    /// particle event is added and no FX clip is
+    /// created — the deliberate contrast with
+    /// `fx-selected` and `fx-split-mid`. This is
+    /// the state behind layout fact 24 (the browser
+    /// in its empty state).
+    #[test]
+    fn effects_open_scene_lands_on_effects_with_nothing_added() {
+        let mut s = init();
+        let particles_before = s.core.project.particles.len();
+        let clips_before = s.core.project.fx_clips.len();
+        scene_effects_open(&mut s);
+        assert_eq!(s.workspace, Workspace::Effects);
+        assert_eq!(
+            s.core.project.particles.len(),
+            particles_before,
+            "the bare switch adds no particle event"
+        );
+        assert_eq!(
+            s.core.project.fx_clips.len(),
+            clips_before,
+            "the bare switch adds no FX clip"
+        );
+        assert_eq!(s.particle_selected, None, "nothing is selected");
+        assert_eq!(s.fx_selected, None, "nothing is selected");
+    }
+
+    /// The audio-open scene reaches the Audio
+    /// workspace through the shell's own switch —
+    /// the same end state a chip press or the
+    /// palette's `go-audio` command produces. This
+    /// is the state behind layout fact 25.
+    #[test]
+    fn audio_open_scene_lands_on_the_audio_workspace() {
+        let mut s = init();
+        scene_audio_open(&mut s);
+        assert_eq!(s.workspace, Workspace::Audio);
+    }
+
+    /// The clips-populated scene (Wave 9 integration)
+    /// builds two real clips from the demo figure and
+    /// opens the edit session on the first — the state
+    /// behind layout fact 26, and the first scene whose
+    /// tree contains clip rows at all.
+    #[test]
+    fn clips_populated_scene_builds_two_clips_and_opens_a_session() {
+        let mut s = init();
+        scene_clips_populated(&mut s);
+        assert_eq!(s.workspace, Workspace::Animate);
+        assert_eq!(s.core.project.clips.len(), 2, "two clips are built");
+        assert_eq!(s.core.project.clips[1].name, "Second clip");
+        assert_eq!(
+            s.core.clip_edit.map(|session| session.clip),
+            Some(0),
+            "the edit session is open on the first clip"
+        );
     }
 
     /// The default-light scene flips ONLY the theme,
