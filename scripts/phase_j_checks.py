@@ -409,7 +409,10 @@ def inventory_counts() -> tuple[int, int, int, int]:
 # ----------------------------------------------------------------
 
 _DIFF_BTN_RE = re.compile(
-    r"\b(?:btn|fbtn|icon_btn|icon_only_btn|row_toggle|icon_btn_inert|icon_only_btn_inert)"
+    r"\b(?:btn|fbtn|icon_btn|icon_only_btn|row_toggle|icon_btn_inert|icon_only_btn_inert"
+    r"|btn_inert|btn_muted_live|danger_btn|danger_icon_btn|chip_btn"
+    r"|ctl|ictl|kbtn|pbtn|pibtn"
+    r"|panel_col|list_row|toggle|toggle_row|header_row|divider_keyed|swatch)"
     r"\(\s*\"([^\"]+)\""
 )
 _DIFF_KEY_RE = re.compile(r"\.key\(\s*\"([^\"]+)\"")

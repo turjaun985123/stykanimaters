@@ -172,6 +172,22 @@
 //!   grid deliberately stay plain text buttons (their
 //!   labels ARE the data: native language names, axis
 //!   letters, workspace names).
+//! * **Phase N restyle** — pure presentation, no
+//!   behaviour change: the card root is the design kit's
+//!   `panel_col` (radius 12, padding 12, the hairline
+//!   `card_border` the card previously lacked), its
+//!   header the kit's `panel_title` (gear + "Settings")
+//!   over a kit `divider`, its section headings the
+//!   kit's `section_label` — the two sentence-long notes
+//!   (guides composition, startup workspace) stay muted
+//!   prose, they are not headings — the stage readouts
+//!   the kit's `stepper_value`, and the four on/off rows
+//!   (Guides, Camera frame, Safe frames, Loop playback)
+//!   kit `toggle_row`s whose pill carries the state the
+//!   `eye` / `repeat` glyphs used to signal. The card
+//!   also carries the M2 entrance transition (fade +
+//!   4 pt rise on the SNAP spring pair; P15). Every key,
+//!   handler body and op is unchanged.
 //!
 //! ## Persistence
 //!
@@ -208,14 +224,14 @@
 //! // and in `view()`: tok::theme(!s.core.light_theme)
 //! ```
 
-use rune::tok::{type_, Theme};
-use rune::{col, row, text, El};
+use rune::tok::{self, type_, Theme};
+use rune::{col, row, text, El, Transition};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::i18n::Lang;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::icon_btn;
-use crate::rune_sec::icons::icon_el;
 use crate::rune_sec::playback_controls::SPEEDS;
 use crate::rune_sec::workspaces::{select_workspace, Workspace};
 use crate::State;
@@ -547,14 +563,14 @@ pub fn toggle_open(s: &mut State) {
     s.settings.open = !s.settings.open;
 }
 
-/// A small muted section heading inside the card.
-fn section_label(t: &Theme, label: &str) -> El {
+/// A sentence-long prose note inside the card (the
+/// guides-composition note, the startup-workspace note).
+/// NOT a heading: headings render through the design
+/// kit's `section_label` (Phase N); these two lines are
+/// body prose and keep the muted LABEL rendering they
+/// have always had.
+fn note_line(t: &Theme, label: &str) -> El {
     text(label).font(type_::LABEL).color(t.text_secondary)
-}
-
-/// A numeric readout between stepper buttons.
-fn readout(t: &Theme, value: String) -> El {
-    text(value).font(type_::LABEL).color(t.text)
 }
 
 /// One language button: applies its language via
@@ -597,13 +613,13 @@ fn stage_axis_row(s: &State, t: &Theme, axis: usize, heading: &str) -> El {
     row()
         .gap(8.0)
         .center_y()
-        .child(section_label(t, heading))
+        .child(design::section_label(heading, t))
         .child(btn(down_key, "-", false, t, move |s: &mut State| {
             apply_stage_step(&mut s.core, -dw, -dh);
         }))
-        .child(readout(
+        .child(design::stepper_value(
+            &format!("{}", s.core.project.stage[axis] as i32),
             t,
-            format!("{}", s.core.project.stage[axis] as i32),
         ))
         .child(btn(up_key, "+", false, t, move |s: &mut State| {
             apply_stage_step(&mut s.core, dw, dh);
@@ -659,29 +675,46 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
         },
     ));
     if open {
-        let mut card = col()
-            .key("settings-card")
-            .gap(8.0)
-            .padding(10.0)
-            .radius(8.0)
-            .fill(t.card);
-
-        // Card header (Phase H): the `gear` glyph beside
-        // the card's title, the shell's icon-row idiom.
-        card = card.child(
-            row()
-                .gap(6.0)
-                .center_y()
-                .child(icon_el("gear", 12.0, t.text_secondary))
-                .child(section_label(t, "Settings")),
+        // The card root is the kit's panel shell (Phase
+        // N): radius 12, padding 12, card fill + the
+        // hairline `card_border` the hand-rolled card
+        // lacked (gap stays 8 — panel_col's own). The
+        // M2 entrance transition (P15) rides on the card:
+        // the card is the element that mounts/unmounts
+        // with `open` (the outer `settings` col and its
+        // toggle never leave the column), so its presence
+        // fade becomes a fade + 4 pt rise on the SNAP
+        // spring pair (`pair::SNAP` — 0.25 s in /
+        // 0.20 s out, zero bounce).
+        let mut card = design::panel_col("settings-card", t).transition(
+            Transition::offset(0.0, -4.0)
+                .combined(Transition::opacity())
+                .springs(tok::motion::pair::SNAP),
         );
+
+        // Card header (Phase H icon row, Phase N kit
+        // form): the kit's `panel_title` — gear glyph +
+        // "Settings" — over a hairline divider (charter
+        // §2). The header row has never carried a key
+        // and invents none now: it is a plain row wearing
+        // `header_row`'s layout (full width, gap 8,
+        // centre-aligned) rather than the keyed builder.
+        card = card
+            .child(
+                row()
+                    .w_full()
+                    .gap(8.0)
+                    .center_y()
+                    .child(design::panel_title(Some("gear"), "Settings", None, t)),
+            )
+            .child(design::divider(t));
 
         // Theme: each button sets its own value outright.
         // The glyphs mirror the labels (Phase H): `moon`
         // names the dark state the Dark button sets, `sun`
         // the light state the Light button sets.
         let light = core.light_theme;
-        card = card.child(section_label(t, "Theme")).child(
+        card = card.child(design::section_label("Theme", t)).child(
             row()
                 .key("settings-theme")
                 .gap(6.0)
@@ -717,18 +750,18 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
             }
             grid = grid.child(lang_row);
         }
-        card = card.child(section_label(t, "Language")).child(grid);
+        card = card.child(design::section_label("Language", t)).child(grid);
 
         // Stage size: one stepper row per axis.
         card = card
-            .child(section_label(t, "Stage size"))
+            .child(design::section_label("Stage size", t))
             .child(stage_axis_row(s, t, 0, "W"))
             .child(stage_axis_row(s, t, 1, "H"));
 
         // Default easing: the cycle op, labelled with the
         // current value (section 10's panel offers the same
         // op under key `ease-project-cycle`).
-        card = card.child(section_label(t, "Default easing")).child(
+        card = card.child(design::section_label("Default easing", t)).child(
             row().key("settings-easing").gap(6.0).child(btn(
                 "settings-easing-cycle",
                 &easing_label(core),
@@ -741,19 +774,25 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
         );
 
         // Stage guides: the shell flag (State.guides),
-        // highlighted while on. The stage overlay draws the
-        // grid; nothing in the engine reads the flag.
+        // a kit `toggle_row` (Phase N) whose pill shows
+        // the state. The stage overlay draws the grid;
+        // nothing in the engine reads the flag. The
+        // keyed wrapper row is the row's existing shell;
+        // the toggle row grows inside it so the pill
+        // sits at the card's right edge.
         card = card.child(
-            row().key("settings-guides-row").gap(6.0).child(icon_btn(
-                "settings-guides",
-                "eye",
-                "Guides",
-                s.guides,
-                t,
-                |s: &mut State| {
-                    toggle_guides(s);
-                },
-            )),
+            row().key("settings-guides-row").gap(6.0).child(
+                design::toggle_row(
+                    "settings-guides",
+                    "Guides",
+                    s.guides,
+                    t,
+                    |s: &mut State| {
+                        toggle_guides(s);
+                    },
+                )
+                .grow(1.0),
+            ),
         );
 
         // Guide children: the camera-frame and safe-frames
@@ -770,28 +809,32 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
                     .gap(6.0)
                     .pl(14.0)
                     .opacity(0.85)
-                    .child(icon_btn(
-                        "settings-guides-frustum",
-                        "eye",
-                        "Camera frame",
-                        s.guides_frustum,
-                        t,
-                        |s: &mut State| {
-                            toggle_guides_frustum(s);
-                        },
-                    ))
-                    .child(icon_btn(
-                        "settings-guides-safe",
-                        "eye",
-                        "Safe frames",
-                        s.guides_safe,
-                        t,
-                        |s: &mut State| {
-                            toggle_guides_safe(s);
-                        },
-                    )),
+                    .child(
+                        design::toggle_row(
+                            "settings-guides-frustum",
+                            "Camera frame",
+                            s.guides_frustum,
+                            t,
+                            |s: &mut State| {
+                                toggle_guides_frustum(s);
+                            },
+                        )
+                        .grow(1.0),
+                    )
+                    .child(
+                        design::toggle_row(
+                            "settings-guides-safe",
+                            "Safe frames",
+                            s.guides_safe,
+                            t,
+                            |s: &mut State| {
+                                toggle_guides_safe(s);
+                            },
+                        )
+                        .grow(1.0),
+                    ),
             )
-            .child(section_label(
+            .child(note_line(
                 t,
                 "Stage guides: thirds grid + centre cross. \
                  Camera frame and safe frames show only while Guides is on.",
@@ -821,28 +864,32 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
         // Playback (Phase I): the loop toggle is a second
         // home for the transport's pb-loop switch — same
         // shell flag (State.loop_playback), same bare flip
-        // (toggle_loop_playback), rendered in the guides
-        // toggles' icon_btn row idiom with pb-loop's own
-        // `repeat` glyph. Under it, a muted readout of the
-        // audio player's liveness — a pure readout with no
+        // (toggle_loop_playback), rendered as a kit
+        // `toggle_row` like the guides toggles above
+        // (Phase N; the pill carries the state the
+        // `repeat` glyph used to signal). Under it, a
+        // muted readout of the audio player's liveness —
+        // a pure readout with no
         // handler (audio_state_line over the core's
         // playback_audio_active). Between them sits the
         // speed row (Phase M): five direct-select chips
         // over the transport cycle's SPEEDS table
         // (speed_row), the current speed's chip lit.
         card = card
-            .child(section_label(t, "Playback"))
+            .child(design::section_label("Playback", t))
             .child(
-                row().key("settings-loop-row").gap(6.0).child(icon_btn(
-                    "settings-loop",
-                    "repeat",
-                    "Loop playback",
-                    s.loop_playback,
-                    t,
-                    |s: &mut State| {
-                        toggle_loop_playback(s);
-                    },
-                )),
+                row().key("settings-loop-row").gap(6.0).child(
+                    design::toggle_row(
+                        "settings-loop",
+                        "Loop playback",
+                        s.loop_playback,
+                        t,
+                        |s: &mut State| {
+                            toggle_loop_playback(s);
+                        },
+                    )
+                    .grow(1.0),
+                ),
             )
             .child(speed_row(s, t))
             .child(
@@ -869,9 +916,9 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
             ws_grid = ws_grid.child(ws_row);
         }
         card = card
-            .child(section_label(t, "Startup workspace"))
+            .child(design::section_label("Startup workspace", t))
             .child(ws_grid)
-            .child(section_label(
+            .child(note_line(
                 t,
                 "Applies now and is the workspace opened at startup.",
             ));

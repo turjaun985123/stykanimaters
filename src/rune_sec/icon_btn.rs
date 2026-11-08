@@ -52,12 +52,31 @@
 //! all — pressing one does nothing because there is nothing
 //! attached, which is stronger than a wired handler that
 //! refuses: no status churn, no accidental snapshot.
+//!
+//! PHASE N ADDITIONS (foundation F3): the two LIVE builders
+//! gain `.press_scale(0.97)` (plan P15, item M1 — the
+//! spring-back press feedback Rune disables under Reduce
+//! Motion; layout and hit-testing keep the resting size,
+//! and the inert twins have no press to feed back, so they
+//! stay untouched). The family also grows the two members
+//! the Phase N charter's amendments name in this file:
+//! [`chip_btn`], the compact chip that absorbs the panels'
+//! local compact clones (`row_toggle`, `cap_chip`,
+//! `preset_chip`, `picker_cell`), and [`danger_icon_btn`],
+//! the icon form of `crate::chrome_view::danger_btn`,
+//! styled from the family constants
+//! `chrome_view::DANGER_FILL` / `DANGER_HOVER` /
+//! `DANGER_PRESS` — retiring inspector_segment's local
+//! hex-literal copy. (The text-only family members —
+//! `btn`, `btn_inert`, `btn_muted_live`, `danger_btn` —
+//! live in chrome_view.rs; this file owns the icon forms.)
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, Color, El};
 
-use crate::chrome_view::btn;
+use crate::chrome_view::{btn, danger_btn};
 use crate::rune_sec::icons;
+use crate::stage_view::hex_color;
 use crate::State;
 
 /// Glyph edge length (pt) in [`icon_btn`] — close to the
@@ -70,6 +89,16 @@ pub const ICON_SIZE: f32 = 13.0;
 /// is no kit value to mirror; 6 pt matches the gap the
 /// shell's dense rows use between small controls.
 pub const ICON_LABEL_GAP: f32 = 6.0;
+
+/// Press feedback scale for every LIVE builder in this
+/// file (Phase N, plan P15 item M1): the root springs to
+/// 97% while pressed and back on release. Rune keeps the
+/// resting layout and hit area while scaled, and turns
+/// the effect off entirely under the host's Reduce Motion
+/// setting. The inert twins carry no press handler and
+/// deliberately do NOT scale — there is no press to feed
+/// back.
+pub const PRESS_SCALE: f32 = 0.97;
 
 /// Whether `icon` names a glyph the icon catalogue can
 /// draw — the fallback decision for both builders, factored
@@ -137,6 +166,29 @@ pub fn press_color(active: bool, t: &Theme) -> Color {
     }
 }
 
+/// Resting fill of [`danger_icon_btn`]: the family's
+/// danger red, `chrome_view::DANGER_FILL` — the deeper
+/// red plan P12 verified at ≈5:1 against white text (the
+/// drifted local copies' `0xF16F78` measured 2.88:1 and
+/// failed). The constant is a `0xRRGGBB` value, converted
+/// with the shell's shared [`hex_color`]; the fallback is
+/// unreachable for a well-formed constant.
+pub fn danger_fill_color() -> Color {
+    hex_color(crate::chrome_view::DANGER_FILL).unwrap_or(Color::WHITE)
+}
+
+/// Hover fill of [`danger_icon_btn`]
+/// (`chrome_view::DANGER_HOVER`).
+pub fn danger_hover_color() -> Color {
+    hex_color(crate::chrome_view::DANGER_HOVER).unwrap_or(Color::WHITE)
+}
+
+/// Pressed fill of [`danger_icon_btn`]
+/// (`chrome_view::DANGER_PRESS`).
+pub fn danger_press_color() -> Color {
+    hex_color(crate::chrome_view::DANGER_PRESS).unwrap_or(Color::WHITE)
+}
+
 /// Glyph edge length inside an [`icon_only_btn`] of
 /// `button_size`: the shared [`ICON_SIZE`], but never
 /// larger than the button itself, so a small square can
@@ -172,6 +224,7 @@ pub fn icon_btn(
         .fill(fill_color(active, t))
         .hover(hover_color(active, t))
         .press(press_color(active, t))
+        .press_scale(PRESS_SCALE)
         .on_press(on_press)
         .gap(ICON_LABEL_GAP)
         .center_y()
@@ -243,6 +296,7 @@ pub fn icon_only_btn(
         .fill(fill_color(active, t))
         .hover(hover_color(active, t))
         .press(press_color(active, t))
+        .press_scale(PRESS_SCALE)
         .on_press(on_press)
         .center();
     if use_icon(icon) {
@@ -280,6 +334,117 @@ pub fn icon_only_btn_inert(key: &str, icon: &str, size: f32, t: &Theme) -> El {
         ));
     }
     root
+}
+
+/// Glyph edge length (pt) in [`chip_btn`] — one step
+/// below [`ICON_SIZE`], matching the compact rows the
+/// chip replaces (the menu items and the segment panel's
+/// old local danger button both drew at 12).
+pub const CHIP_GLYPH_SIZE: f32 = 12.0;
+
+/// Horizontal gap (pt) between glyph and label in
+/// [`chip_btn`] — tighter than [`ICON_LABEL_GAP`], in
+/// proportion to the chip's tighter padding.
+pub const CHIP_ICON_LABEL_GAP: f32 = 4.0;
+
+/// The family's compact chip (Phase N, plan P05): the
+/// shared form that absorbs figures_panel's `row_toggle`,
+/// inspector_style's `cap_chip` / `preset_chip` and
+/// easing_panel's `picker_cell` — four local clones of a
+/// small toggle that had drifted apart (two of them had
+/// lost their press fill entirely).
+///
+/// Metrics are the compact set the P05 state spec fixes:
+/// padding px 6 / py 3, radius 5 — `row_toggle`'s, the
+/// only compact metrics the shell already had. Fills,
+/// hover, press and ink are the family state table
+/// ([`fill_color`] / [`hover_color`] / [`press_color`] /
+/// [`glyph_color`]), so a chip is a small `icon_btn`,
+/// not a new look; the root carries the same
+/// [`PRESS_SCALE`] press feedback as the other live
+/// builders.
+///
+/// The icon is optional: `None` renders a text-only chip.
+/// `Some(name)` with a name the catalogue doesn't know
+/// degrades to text-only too — the module fallback rule
+/// (same key, same label, same handler, just no glyph).
+pub fn chip_btn(
+    key: &str,
+    icon: Option<&str>,
+    label: &str,
+    active: bool,
+    t: &Theme,
+    on_press: impl Fn(&mut State) + 'static,
+) -> El {
+    let ink = glyph_color(active, t);
+    let mut root = row()
+        .key(key)
+        .px(6.0)
+        .py(3.0)
+        .radius(5.0)
+        .fill(fill_color(active, t))
+        .hover(hover_color(active, t))
+        .press(press_color(active, t))
+        .press_scale(PRESS_SCALE)
+        .on_press(on_press)
+        .center_y();
+    if let Some(name) = icon.filter(|&name| use_icon(name)) {
+        root = root
+            .gap(CHIP_ICON_LABEL_GAP)
+            .child(icons::icon_el(name, CHIP_GLYPH_SIZE, ink));
+    }
+    root.child(text(label).font(type_::LABEL).color(ink))
+}
+
+/// The danger button with a leading glyph (Phase N, plan
+/// P05): [`icon_btn`]'s construction — same box (px 10 /
+/// py 5, radius 6), same gap, the family glyph at the
+/// full [`ICON_SIZE`] (the local copy this replaces drew
+/// at 12) — but filled from the danger constants
+/// ([`danger_fill_color`] / [`danger_hover_color`] /
+/// [`danger_press_color`]) with glyph and label in white.
+/// This is the shared form inspector_segment's local
+/// hex-literal `danger_btn` copy migrates to; the
+/// text-only form is `crate::chrome_view::danger_btn`.
+///
+/// Danger is a permanent state, not a toggle, so the
+/// `active` parameter — kept for signature parity with
+/// [`icon_btn`], whose call shape this mirrors — does
+/// not alter the fills: a delete button is red whether
+/// or not the panel considers it "current".
+///
+/// Unknown icon name → the text-only
+/// `crate::chrome_view::danger_btn` (the same fallback
+/// shape as [`icon_btn`] → `btn`: same key, same label,
+/// same handler, just no glyph).
+pub fn danger_icon_btn(
+    key: &str,
+    icon: &str,
+    label: &str,
+    active: bool,
+    t: &Theme,
+    on_press: impl Fn(&mut State) + 'static,
+) -> El {
+    if !use_icon(icon) {
+        return danger_btn(key, label, t, on_press);
+    }
+    // See the doc comment: `active` is signature parity
+    // only; danger fills do not vary with it.
+    let _ = active;
+    row()
+        .key(key)
+        .px(10.0)
+        .py(5.0)
+        .radius(6.0)
+        .fill(danger_fill_color())
+        .hover(danger_hover_color())
+        .press(danger_press_color())
+        .press_scale(PRESS_SCALE)
+        .on_press(on_press)
+        .gap(ICON_LABEL_GAP)
+        .center_y()
+        .child(icons::icon_el(icon, ICON_SIZE, Color::WHITE))
+        .child(text(label).font(type_::LABEL).color(Color::WHITE))
 }
 
 #[cfg(test)]
@@ -380,5 +545,71 @@ mod tests {
         let _ = icon_btn("k-fallback", "nope-not-real", "Play", true, &t, |_| {});
         let _ = icon_only_btn("k-only", "play", 26.0, false, &t, |_| {});
         let _ = icon_only_btn("k-only-empty", "nope-not-real", 26.0, true, &t, |_| {});
+    }
+
+    #[test]
+    fn press_scale_is_the_pinned_family_value() {
+        // P15 item M1 fixes the value for the whole live
+        // family. (That the inert twins never scale is
+        // structural — they attach no press handler or
+        // press_scale call — not something a value test
+        // can reach.)
+        assert_eq!(PRESS_SCALE, 0.97);
+    }
+
+    #[test]
+    fn danger_fills_read_the_chrome_constants() {
+        // The VALUES are chrome_view's (plan P12's ≈5:1
+        // deep red lives in DANGER_FILL / DANGER_HOVER /
+        // DANGER_PRESS); this file pins only that its
+        // helpers read those constants through the shared
+        // hex_color conversion, and that the danger rest
+        // fill is neither family resting fill — a
+        // copy-paste back to fill_color would silently
+        // un-danger the button.
+        let t = rune::tok::theme(true);
+        assert_eq!(
+            danger_fill_color(),
+            hex_color(crate::chrome_view::DANGER_FILL).unwrap_or(Color::WHITE)
+        );
+        assert_eq!(
+            danger_hover_color(),
+            hex_color(crate::chrome_view::DANGER_HOVER).unwrap_or(Color::WHITE)
+        );
+        assert_eq!(
+            danger_press_color(),
+            hex_color(crate::chrome_view::DANGER_PRESS).unwrap_or(Color::WHITE)
+        );
+        assert_ne!(danger_fill_color(), fill_color(false, &t));
+        assert_ne!(danger_fill_color(), fill_color(true, &t));
+    }
+
+    #[test]
+    fn chip_btn_constructs_across_icon_branches() {
+        // Construction-only pins, under the same limits
+        // as the builders' tests above: None → text chip,
+        // a known icon → glyph chip (inactive and
+        // active), an unknown icon → the degraded text
+        // chip. None of the branches panics.
+        let t = rune::tok::theme(true);
+        let _ = chip_btn("k-chip-text", None, "Round", false, &t, |_| {});
+        let _ = chip_btn("k-chip-icon", Some("play"), "Play", false, &t, |_| {});
+        let _ = chip_btn("k-chip-icon-active", Some("play"), "Play", true, &t, |_| {});
+        let _ = chip_btn("k-chip-degraded", Some("nope-not-real"), "Play", false, &t, |_| {});
+        // The compact metrics the P05 spec fixes: glyph
+        // one step below the family size, a tighter gap.
+        assert_eq!(CHIP_GLYPH_SIZE, 12.0);
+        assert_eq!(CHIP_ICON_LABEL_GAP, 4.0);
+    }
+
+    #[test]
+    fn danger_icon_btn_constructs_on_both_fallback_branches() {
+        // Known icon → the glyph row, at either `active`
+        // value (the fills ignore it by design); unknown
+        // icon → chrome_view::danger_btn's text-only form.
+        let t = rune::tok::theme(true);
+        let _ = danger_icon_btn("k-danger", "trash-can", "Delete segment", false, &t, |_| {});
+        let _ = danger_icon_btn("k-danger-active", "trash-can", "Delete segment", true, &t, |_| {});
+        let _ = danger_icon_btn("k-danger-fallback", "nope-not-real", "Delete segment", false, &t, |_| {});
     }
 }

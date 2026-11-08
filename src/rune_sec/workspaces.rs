@@ -51,6 +51,7 @@ use rune::{col, row, text, El};
 use stykanimate_rs::shell::{load_layout, save_layout, LayoutPrefs};
 
 use crate::chrome_view::btn;
+use crate::rune_sec::design;
 use crate::State;
 
 /// One of the eight workspaces. The active workspace
@@ -445,7 +446,10 @@ pub fn blurb_line(ws: Workspace) -> &'static str {
 /// uses — so a narrow window elides it with "…" instead
 /// of letting it wrap or push the layout wider.
 pub fn workspace_row(s: &State, t: &Theme) -> El {
-    let mut chips = row().key("workspace-chips").gap(4.0).center_y();
+    let mut chips = row()
+        .key("workspace-chips")
+        .gap(design::PANEL_GAP)
+        .center_y();
     for (i, ws) in Workspace::all().into_iter().enumerate() {
         let chip_label = format!("{} · Alt+{}", ws.label(), i + 1);
         chips = chips.child(btn(

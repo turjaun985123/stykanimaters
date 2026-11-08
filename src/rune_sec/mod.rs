@@ -15,6 +15,7 @@ pub mod audio_panel;
 pub mod camera_panel;
 pub mod clips_panel;
 pub mod command_palette;
+pub mod design;
 pub mod draw_tools;
 pub mod easing_panel;
 pub mod export_panel;

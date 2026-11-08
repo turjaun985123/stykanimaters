@@ -190,11 +190,13 @@
 use std::cell::RefCell;
 
 use rune::tok::{self, type_, Theme};
-use rune::{col, el, row, text, text_input, Color, El, Key, KeyEvent, TextEdit, Tx};
+use rune::{col, el, row, text, text_input, Color, El, Key, KeyEvent, TextEdit, Transition, Tx};
 use stykanimate_rs::audio_ops;
 use stykanimate_rs::graph_keys;
 use stykanimate_rs::vfx::ClipKind;
 
+use crate::rune_sec::design;
+use crate::rune_sec::icons;
 use crate::rune_sec::workspaces::Workspace;
 use crate::State;
 
@@ -1502,21 +1504,44 @@ fn palette_field_key(s: &mut State, ev: &KeyEvent) -> bool {
     }
 }
 
+/// The keyboard shortcut a command duplicates, if any
+/// (Phase N, P14 §4.4): the 17 commands whose action is
+/// also bound to a real key in `main.rs::on_key`, so the
+/// result row can teach the key at the moment of
+/// discovery via a trailing `design::kbd` chip. Keyed by
+/// *command* key — a different namespace from
+/// `menus::shortcut_hint`'s menu-item keys, so the two
+/// tables stay separate. Spellings mirror
+/// `help_panel::shortcut_rows` exactly; the drift-guard
+/// test below fails if a spelling stops naming a real
+/// binding there. Commands not listed here have no key
+/// binding and must not grow a chip — no invented hints.
+fn command_hint(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "play" => "Space",
+        "prev" => "Left",
+        "next" => "Right",
+        "add-frame" => "N",
+        "inbetween" => "I",
+        "undo" => "Ctrl+Z",
+        "redo" => "Ctrl+Shift+Z",
+        "save" => "Ctrl+S",
+        "onion" => "O",
+        "go-animate" => "Alt+1",
+        "go-draw" => "Alt+2",
+        "go-graph" => "Alt+3",
+        "go-effects" => "Alt+4",
+        "go-audio" => "Alt+5",
+        "go-build3d" => "Alt+6",
+        "go-export" => "Alt+7",
+        "go-home" => "Alt+8",
+        _ => return None,
+    })
+}
+
 // ----------------------------------------------------------------
 // View
 // ----------------------------------------------------------------
-
-/// A small non-interactive heading row over a section of
-/// the results list ("Recent" / "All commands"). Headings
-/// are not result rows: they never take the selection,
-/// which indexes [`display_commands`]' rows only.
-fn section_heading(label: &str, t: &Theme) -> El {
-    row()
-        .h(22.0)
-        .px(10.0)
-        .center_y()
-        .child(text(label).font(type_::LABEL).color(t.text_secondary))
-}
 
 /// The palette panel: a query field over a ranked result list
 /// (title left, group right; the highlighted row is
@@ -1549,61 +1574,76 @@ pub fn palette_view(s: &State, t: &Theme) -> El {
         .radius(12.0)
         .clip_rounded(12.0)
         .fill(t.card)
-        .border(1.0, Color::WHITE.alpha(0.10))
+        .border(1.0, t.card_border)
+        .transition(
+            Transition::offset(0.0, -4.0)
+                .combined(Transition::opacity())
+                .springs(tok::motion::pair::SNAP),
+        )
         .child(
             row()
                 .h(52.0)
                 .px(16.0)
                 .gap(10.0)
                 .center_y()
-                .child(text("⌕").font(type_::TITLE.lh(26.0)).color(t.text_secondary))
+                .child(icons::icon_el("magnifying-glass", 16.0, t.text_secondary))
                 .child(field),
         );
 
     if results.is_empty() {
-        panel = panel
-            .child(el().h(1.0).w_full().fill(t.separator))
-            .child(
-                row()
-                    .h(36.0)
-                    .px(16.0)
-                    .center_y()
-                    .child(text("No commands match").font(type_::BODY).color(t.text_secondary)),
-            );
+        panel = panel.child(design::empty_state(
+            "magnifying-glass",
+            "No commands match",
+            t,
+        ));
     } else {
         let mut list = col().padding(6.0).gap(2.0);
         for (row_i, &ci) in results.iter().enumerate() {
             if recent_rows > 0 && row_i == 0 {
-                list = list.child(section_heading("Recent", t));
+                list = list.child(
+                    row()
+                        .h(22.0)
+                        .px(8.0)
+                        .center_y()
+                        .child(design::section_label("Recent", t)),
+                );
             }
             if recent_rows > 0 && row_i == recent_rows {
-                list = list.child(section_heading("All commands", t));
+                list = list.child(
+                    row()
+                        .h(22.0)
+                        .px(8.0)
+                        .center_y()
+                        .child(design::section_label("All commands", t)),
+                );
             }
             let cmd = &COMMANDS[ci];
             let on = row_i == selected;
-            list = list.child(
-                row()
-                    .key(format!("cmd-{}", cmd.key))
-                    .h(34.0)
-                    .px(10.0)
-                    .radius(8.0)
-                    .center_y()
-                    .gap(8.0)
-                    .fill(if on { accent.alpha(0.85) } else { Color::TRANSPARENT })
-                    .hover(if on { accent.alpha(0.85) } else { t.control_track })
-                    .on_press(move |s: &mut State| run_command(s, ci))
-                    .child(
-                        text(cmd.title)
-                            .font(type_::BODY)
-                            .color(if on { Color::WHITE } else { t.text })
-                            .grow(1.0),
-                    )
-                    .child(
-                        text(cmd.group)
-                            .font(type_::LABEL)
-                            .color(if on { Color::WHITE } else { t.text_secondary }),
-                    ),
-            );
+            let mut result_row = row()
+                .key(format!("cmd-{}", cmd.key))
+                .h(34.0)
+                .px(8.0)
+                .radius(8.0)
+                .center_y()
+                .gap(8.0)
+                .fill(if on { accent.alpha(0.85) } else { Color::TRANSPARENT })
+                .hover(if on { accent.alpha(0.85) } else { t.control_track })
+                .on_press(move |s: &mut State| run_command(s, ci))
+                .child(
+                    text(cmd.title)
+                        .font(type_::BODY)
+                        .color(if on { Color::WHITE } else { t.text })
+                        .grow(1.0),
+                )
+                .child(
+                    text(cmd.group)
+                        .font(type_::LABEL)
+                        .color(if on { Color::WHITE } else { t.text_secondary }),
+                );
+            if let Some(hint) = command_hint(cmd.key) {
+                result_row = result_row.child(design::kbd(hint, t));
+            }
+            list = list.child(result_row);
         }
         panel = panel.child(el().h(1.0).w_full().fill(t.separator)).child(list);
     }
@@ -1612,12 +1652,16 @@ pub fn palette_view(s: &State, t: &Theme) -> El {
         row()
             .h(26.0)
             .px(16.0)
+            .gap(6.0)
             .center_y()
-            .child(
-                text("↑↓ navigate · Enter run · Esc close")
-                    .font(type_::LABEL)
-                    .color(t.text_secondary),
-            ),
+            .child(design::kbd("↑↓", t))
+            .child(text("navigate").font(type_::LABEL).color(t.text_secondary))
+            .child(text("·").font(type_::LABEL).color(t.text_secondary))
+            .child(design::kbd("Enter", t))
+            .child(text("run").font(type_::LABEL).color(t.text_secondary))
+            .child(text("·").font(type_::LABEL).color(t.text_secondary))
+            .child(design::kbd("Esc", t))
+            .child(text("close").font(type_::LABEL).color(t.text_secondary)),
     )
 }
 
@@ -2158,6 +2202,68 @@ mod tests {
         s.core.loop_range = Some((0, 2));
         (COMMANDS[idx_of("fill-keys-range")].run)(&mut s);
         assert_eq!(s.core.project.channels[0].keys.len(), 3);
+    }
+
+    // -- command_hint (Phase N, P14 §4.4) -----------------------
+
+    /// The full hint table, pinned: exactly these 17
+    /// commands duplicate a real key binding.
+    const EXPECTED_HINTS: [(&str, &str); 17] = [
+        ("play", "Space"),
+        ("prev", "Left"),
+        ("next", "Right"),
+        ("add-frame", "N"),
+        ("inbetween", "I"),
+        ("undo", "Ctrl+Z"),
+        ("redo", "Ctrl+Shift+Z"),
+        ("save", "Ctrl+S"),
+        ("onion", "O"),
+        ("go-animate", "Alt+1"),
+        ("go-draw", "Alt+2"),
+        ("go-graph", "Alt+3"),
+        ("go-effects", "Alt+4"),
+        ("go-audio", "Alt+5"),
+        ("go-build3d", "Alt+6"),
+        ("go-export", "Alt+7"),
+        ("go-home", "Alt+8"),
+    ];
+
+    #[test]
+    fn command_hint_table_matches_the_pinned_pairs() {
+        for (key, hint) in EXPECTED_HINTS {
+            assert_eq!(command_hint(key), Some(hint), "hint for {key}");
+            // The hinted command must exist in the table.
+            idx_of(key);
+        }
+        // And nothing else in the table carries a hint.
+        let hinted = COMMANDS
+            .iter()
+            .filter(|c| command_hint(c.key).is_some())
+            .count();
+        assert_eq!(hinted, EXPECTED_HINTS.len());
+        assert_eq!(command_hint("no-such-command"), None);
+    }
+
+    #[test]
+    fn command_hints_name_only_real_bindings() {
+        // Drift guard: every hint spelling must be a key
+        // label in the help panel's rows, so renaming a
+        // binding breaks this test instead of leaving a
+        // lying chip on the row. One documented exception:
+        // "Ctrl+S" is a real binding (main.rs::on_key) but
+        // the help panel still carries it in the Features
+        // "Quick save" row's prose — P14 gap H1, scheduled
+        // for the V-wave help pass — so it is checked
+        // against that prose instead of the label column.
+        let rows = crate::rune_sec::help_panel::shortcut_rows();
+        for (_, hint) in EXPECTED_HINTS {
+            let as_label = rows.iter().any(|(label, _)| *label == hint);
+            let in_prose = rows.iter().any(|(_, desc)| desc.contains(hint));
+            assert!(
+                as_label || (hint == "Ctrl+S" && in_prose),
+                "hint {hint} is not a help-panel key label"
+            );
+        }
     }
 
     // -- fuzzy_score -------------------------------------------

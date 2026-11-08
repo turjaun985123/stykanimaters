@@ -18,9 +18,21 @@ Key definitions recognised:
   - `btn("name", ...)`            the chrome `btn()` helper (and the
                                   section-local `fbtn`/`row_toggle`
                                   variants, plus Phase H's
-                                  `icon_btn`/`icon_only_btn`, whose
-                                  first argument is likewise the key),
-                                  whose first argument is the element key
+                                  `icon_btn`/`icon_only_btn` and their
+                                  inert twins, whose first argument is
+                                  likewise the key). Phase N repair
+                                  (2026-11-08): the helper list also
+                                  covers the local dialects the old
+                                  census was blind to (`ctl`/`ictl`,
+                                  `kbtn`, `pbtn`/`pibtn`, `danger_btn`)
+                                  and the Phase N family/kit helpers
+                                  (`btn_inert`, `btn_muted_live`,
+                                  `danger_icon_btn`, `chip_btn`, and
+                                  design.rs's `panel_col`, `list_row`,
+                                  `toggle`, `toggle_row`, `header_row`,
+                                  `divider_keyed`, `swatch`) — keys
+                                  passed to those helpers as string
+                                  literals count exactly like `.key()`
   - `btn(&format!("..."), ...)`   dynamic key pattern via a helper
   - `btn(match ... { A => "k" })` keys chosen by a match on the
                                   first argument (easing_panel idiom)
@@ -30,8 +42,14 @@ Key definitions recognised:
 Known blind spots (enumerated by hand in docs/QA_RUNE.md instead):
 positional dn/up key arguments to `stepper_row(...)` helpers, keys
 held in plain local variables before being passed to a helper
-(three_d_panel), and keys stored in data tables and passed by
-variable (export_panel's `xc-*` rows).
+(three_d_panel's `ictl(key, ...)` table, fx_clips' `swatch(key, ...)`),
+and keys stored in data tables and passed by variable
+(export_panel's `xc-*` rows). Note: the Phase M headline count
+(733) was taken with the pre-repair census, which could not see
+literal keys passed to `ctl`/`ictl`/`kbtn`/`pbtn`/`pibtn`/
+`danger_btn` — those keys existed and were live in the headless
+trees; the repaired census counts them, so post-repair totals
+run higher than 733 without any key having been added.
 
 Deliberately NOT extracted: key *lookups* such as
 `cx.layout_size("stage")` — those reference a key defined elsewhere
@@ -49,8 +67,15 @@ import sys
 
 STATIC_KEY_RE = re.compile(r'\.key\(\s*"([^"]+)"\s*\)')
 DYNAMIC_KEY_RE = re.compile(r'\.key\(\s*format!\(\s*"([^"]+)"')
-BTN_KEY_RE = re.compile(r'\b(?:btn|fbtn|row_toggle|icon_btn|icon_only_btn)\(\s*"([^"]+)"')
-BTN_DYN_RE = re.compile(r'\b(?:btn|fbtn|row_toggle|icon_btn|icon_only_btn)\(\s*&?\s*format!\(\s*"([^"]+)"')
+_KEY_HELPERS = (
+    r"btn|fbtn|row_toggle|icon_btn|icon_only_btn"
+    r"|icon_btn_inert|icon_only_btn_inert"
+    r"|btn_inert|btn_muted_live|danger_btn|danger_icon_btn|chip_btn"
+    r"|ctl|ictl|kbtn|pbtn|pibtn"
+    r"|panel_col|list_row|toggle|toggle_row|header_row|divider_keyed|swatch"
+)
+BTN_KEY_RE = re.compile(r'\b(?:' + _KEY_HELPERS + r')\(\s*"([^"]+)"')
+BTN_DYN_RE = re.compile(r'\b(?:' + _KEY_HELPERS + r')\(\s*&?\s*format!\(\s*"([^"]+)"')
 ENTRY_KEY_RE = re.compile(r'\bkey:\s*"([^"]+)"')
 ENTRY_DYN_RE = re.compile(r'\bkey:\s*format!\(\s*"([^"]+)"')
 STRING_RE = re.compile(r'"([^"]+)"')
@@ -61,7 +86,7 @@ def match_arm_keys(src: str) -> list[str]:
     find `btn(` calls whose first argument is a `match`, then take
     the string literals inside the brace-balanced match block."""
     keys: list[str] = []
-    for m in re.finditer(r'\b(?:btn|fbtn)\(\s*match\b', src):
+    for m in re.finditer(r'\b(?:' + _KEY_HELPERS + r')\(\s*match\b', src):
         brace = src.find("{", m.end())
         if brace < 0:
             continue

@@ -1,0 +1,489 @@
+//! The Phase N design kit: one card shell, one header,
+//! one row, one toggle, one slider visual — the shared
+//! builders every panel adopts so the shell stops
+//! re-inventing them per file (docs/PHASE_N_CHARTER.md,
+//! "card + hairline"). Declared from `rune_sec/mod.rs`
+//! only — bin-crate code, not part of the engine library.
+//!
+//! The API in this file is FIXED by the charter (plus its
+//! ratified amendments); adoption agents import
+//! `crate::rune_sec::design` and call these builders
+//! rather than restyling by hand. Three discipline rules
+//! hold throughout:
+//!
+//! * **Keys come from callers.** No builder invents a
+//!   key; the ones that take `key` put exactly that key
+//!   on the pressable/root element and nothing else.
+//! * **Handlers move verbatim.** Only [`toggle`],
+//!   [`toggle_row`] and [`swatch`] take a handler, and
+//!   they attach it untouched to the root — what a press
+//!   does is the caller's business, exactly as with
+//!   `chrome_view::btn`.
+//! * **Restyle roots, never nest wrappers** (P19): a
+//!   panel's card IS its existing root element passed
+//!   through [`panel_col`]'s styling, not a new wrapper
+//!   inside it.
+//!
+//! ## Rune API notes for consumers (learned building this)
+//!
+//! * `.hover(c)` / `.press(c)` are OVERLAYS drawn over
+//!   the element's fill while hovered/pressed, not
+//!   replacement fills (rune `el/visuals.rs`). That is
+//!   why an unselected [`list_row`] carries no resting
+//!   fill at all — the `t.hover` overlay alone paints
+//!   the highlight, straight over the panel card.
+//! * `Color::alpha(a)` REPLACES the alpha channel; it
+//!   does not multiply. [`selected_fill`] and
+//!   [`text_muted`] rely on that.
+//! * `type_::MONO_CAPTION` does not set the Mono family
+//!   in the pinned Rune rev — the token is metrically a
+//!   LABEL. [`kbd`] and [`stepper_value`] therefore
+//!   apply `.mono()` on top of the token (charter
+//!   amendment, P9/P11).
+//! * `icons::icon_el` degrades an unknown name to an
+//!   empty spacer rather than omitting the slot.
+//!   [`panel_title`] and [`empty_state`] check
+//!   `icons::has_icon` first and omit the glyph entirely
+//!   when the name is unknown.
+//! * Element internals are opaque to bin-crate unit
+//!   tests (the Phase G §12 finding), so this file's
+//!   tests pin the pure colour maths and the frac clamp,
+//!   and smoke-test that every builder constructs on
+//!   both of its branches — layout truth comes from the
+//!   shell's Runtime/headless checks, as elsewhere.
+
+use rune::tok::{self, type_, Theme};
+use rune::{col, el, row, text, Color, El};
+
+use crate::rune_sec::icons;
+use crate::State;
+
+/// Panel card corner radius (tok LG).
+pub const PANEL_RADIUS: f32 = 12.0;
+/// Panel card padding on all sides (tok S3).
+pub const PANEL_PAD: f32 = 12.0;
+/// Internal gap between a panel card's children (tok S2).
+pub const PANEL_GAP: f32 = 8.0;
+/// List-row corner radius (tok MD).
+pub const ROW_RADIUS: f32 = 8.0;
+/// Small-control corner radius (tok SM): buttons,
+/// swatches, chips.
+pub const CONTROL_RADIUS: f32 = 6.0;
+
+/// The shell's one accent colour — the same
+/// `tok::accent(0, true)` `chrome_view::btn` fills its
+/// active state with, named once here so kit builders
+/// and panels agree on it.
+pub fn accent() -> Color {
+    tok::accent(0, true)
+}
+
+/// The selected-list-row fill: the accent at 16% alpha
+/// (charter §5). Painted over the panel card, it reads
+/// as a tint, not a solid block.
+pub fn selected_fill() -> Color {
+    accent().alpha(0.16)
+}
+
+/// The third text level (charter amendment, P2):
+/// `text_secondary` at 0.6 alpha, for text that should
+/// sit below even the secondary tone. Derived from the
+/// theme — never a new hex literal.
+pub fn text_muted(t: &Theme) -> Color {
+    t.text_secondary.alpha(0.6)
+}
+
+/// A panel's card root: a `col` carrying the panel's
+/// existing root `key`, restyled in place — card fill,
+/// hairline border, LG radius, S3 padding, S2 internal
+/// gap, full width (charter §1). Children are appended
+/// by the caller; the first is normally a [`header_row`]
+/// holding a [`panel_title`], followed by a [`divider`].
+pub fn panel_col(key: &str, t: &Theme) -> El {
+    col()
+        .key(key)
+        .w_full()
+        .fill(t.card)
+        .border(1.0, t.card_border)
+        .radius(PANEL_RADIUS)
+        .padding(PANEL_PAD)
+        .gap(PANEL_GAP)
+}
+
+/// The header row shell for a panel card: full width,
+/// centre-aligned, S2 gap, carrying the caller's `key`
+/// (existing header keys survive byte-identical — e.g.
+/// `figures-panel-header`). Typically holds one
+/// [`panel_title`] cluster followed by trailing
+/// controls.
+pub fn header_row(key: &str) -> El {
+    row().key(key).w_full().gap(PANEL_GAP).center_y()
+}
+
+/// A panel header's growing left cluster: an optional
+/// 13 pt glyph in `text_secondary` (omitted when `icon`
+/// is `None` or names no curated icon), the title in
+/// SECTION / `t.text`, and an optional meta/count in
+/// LABEL / `text_secondary`. The cluster grows, so
+/// controls appended after it in a [`header_row`] sit
+/// at the right edge (charter §2).
+pub fn panel_title(icon: Option<&str>, title: &str, meta: Option<&str>, t: &Theme) -> El {
+    let mut cluster = row().grow(1.0).gap(PANEL_GAP).center_y();
+    if let Some(name) = icon {
+        if icons::has_icon(name) {
+            cluster = cluster.child(icons::icon_el(name, 13.0, t.text_secondary));
+        }
+    }
+    cluster = cluster.child(text(title).font(type_::SECTION).color(t.text));
+    if let Some(meta) = meta {
+        cluster = cluster.child(text(meta).font(type_::LABEL).color(t.text_secondary));
+    }
+    cluster
+}
+
+/// A section label inside a panel: SECTION in
+/// `text_secondary` (charter §3). Replaces the five-plus
+/// private `section()` / `section_label()` helpers the
+/// panels grew before the kit.
+pub fn section_label(label: &str, t: &Theme) -> El {
+    text(label).font(type_::SECTION).color(t.text_secondary)
+}
+
+/// A hairline divider: 1 pt tall, full width, in the
+/// theme's separator colour. One per panel, under the
+/// header (P19: section separation comes from labels +
+/// gap, not more hairlines).
+pub fn divider(t: &Theme) -> El {
+    el().h(1.0).w_full().fill(t.separator)
+}
+
+/// [`divider`] carrying a key — menu separators are
+/// keyed elements (`menu-file-sep`, …) whose keys must
+/// survive adoption (charter amendment, P7).
+pub fn divider_keyed(key: &str, t: &Theme) -> El {
+    divider(t).key(key)
+}
+
+/// A keyboard-shortcut chip: px 5 / py 1, radius 4,
+/// `control_off` fill, the label in MONO_CAPTION with
+/// the Mono family applied, `text_secondary` ink
+/// (charter §11). Used by help rows, menu hints and the
+/// palette footer; supersedes help_panel's local
+/// `key_cap`.
+pub fn kbd(label: &str, t: &Theme) -> El {
+    el()
+        .px(5.0)
+        .py(1.0)
+        .radius(4.0)
+        .fill(t.control_off)
+        .child(
+            text(label)
+                .font(type_::MONO_CAPTION.mono())
+                .color(t.text_secondary),
+        )
+}
+
+/// A panel's empty state: a centred 20 pt glyph over a
+/// LABEL message, both in `text_secondary`, with 12 pt
+/// of vertical air (charter §10). An unknown icon name
+/// omits the glyph (the message still renders) rather
+/// than leaving a blank slot. Replaces the bare
+/// "nothing here" text rows panels used to hand-roll.
+pub fn empty_state(icon: &str, message: &str, t: &Theme) -> El {
+    let mut body = col().w_full().py(12.0).gap(PANEL_GAP).items_center();
+    if icons::has_icon(icon) {
+        body = body.child(icons::icon_el(icon, 20.0, t.text_secondary));
+    }
+    body.child(text(message).font(type_::LABEL).color(t.text_secondary))
+}
+
+/// The shared list-row styling (charter §5): min
+/// height 28, px 8, MD radius, centre-aligned, S2 gap.
+/// Selected rows fill with [`selected_fill`]; unselected
+/// rows rest transparent on the card and paint the
+/// `t.hover` overlay while hovered (see the module docs
+/// on overlays). No handler — callers chain `.on_press`
+/// or children onto the returned element.
+fn row_base(selected: bool, t: &Theme) -> El {
+    let base = row()
+        .min_h(28.0)
+        .px(8.0)
+        .radius(ROW_RADIUS)
+        .center_y()
+        .gap(PANEL_GAP);
+    if selected {
+        base.fill(selected_fill())
+    } else {
+        base.hover(t.hover)
+    }
+}
+
+/// A styled list row carrying the caller's `key` —
+/// see [`row_base`] for the styling contract.
+pub fn list_row(key: &str, selected: bool, t: &Theme) -> El {
+    row_base(selected, t).key(key)
+}
+
+/// [`list_row`] without a key, for the row kinds that
+/// have no key of their own (text segment rows —
+/// charter amendment, P8).
+pub fn row_shell(selected: bool, t: &Theme) -> El {
+    row_base(selected, t)
+}
+
+/// Toggle track width (charter §7).
+const TOGGLE_W: f32 = 28.0;
+/// Toggle track height.
+const TOGGLE_H: f32 = 16.0;
+/// Toggle knob diameter.
+const TOGGLE_KNOB: f32 = 12.0;
+/// Knob inset from the track's edge, both ends.
+const TOGGLE_INSET: f32 = (TOGGLE_H - TOGGLE_KNOB) / 2.0;
+
+/// The toggle's pill visual, with no key and no
+/// handler: a 28×16 track (accent when on,
+/// `control_off` when off, radius 999) with a 12 pt
+/// `t.knob` dot inset at the left (off) or right (on)
+/// end. The knob is an absolutely-positioned child —
+/// the same construction the shell's sliders use — so
+/// its travel is exact, not spacer arithmetic.
+fn toggle_pill(on: bool, t: &Theme) -> El {
+    let knob_x = if on {
+        TOGGLE_W - TOGGLE_INSET - TOGGLE_KNOB
+    } else {
+        TOGGLE_INSET
+    };
+    el()
+        .size(TOGGLE_W, TOGGLE_H)
+        .radius(999.0)
+        .fill(if on { accent() } else { t.control_off })
+        .child(
+            el()
+                .size(TOGGLE_KNOB, TOGGLE_KNOB)
+                .absolute(knob_x, TOGGLE_INSET)
+                .radius(999.0)
+                .fill(t.knob),
+        )
+}
+
+/// The kit toggle (charter §7): the pill itself is the
+/// pressable root — the caller's `key` and handler `f`
+/// sit on the track element, so an existing control's
+/// key stays exactly where its press lands.
+pub fn toggle(key: &str, on: bool, t: &Theme, f: impl Fn(&mut State) + 'static) -> El {
+    toggle_pill(on, t).key(key).on_press(f)
+}
+
+/// A labelled toggle row: min height 28, pressable
+/// root carrying the caller's `key` and handler — a
+/// press anywhere on the row flips the setting. The
+/// LABEL text in `t.text` grows; the pill at the right
+/// is the same visual as [`toggle`]'s and is NOT
+/// separately pressable.
+pub fn toggle_row(
+    key: &str,
+    label: &str,
+    on: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    row()
+        .key(key)
+        .min_h(28.0)
+        .center_y()
+        .gap(PANEL_GAP)
+        .on_press(f)
+        .child(text(label).font(type_::LABEL).color(t.text).grow(1.0))
+        .child(toggle_pill(on, t))
+}
+
+/// A stepper's value readout (charter §6): the value
+/// in MONO_CAPTION with the Mono family applied,
+/// `t.text` ink, centred in a box at least 34 pt wide
+/// so the − / + buttons either side of it never shift
+/// as the value's digit count changes.
+pub fn stepper_value(value: &str, t: &Theme) -> El {
+    el().min_w(34.0).center().child(
+        text(value)
+            .font(type_::MONO_CAPTION.mono())
+            .color(t.text),
+    )
+}
+
+/// Slider geometry — the shell's established drag
+/// slider proportions (scene panel's weather sliders,
+/// layers' opacity slider), so a kit track feels
+/// identical to the sliders already in the shell.
+const SLIDER_W: f32 = 200.0;
+/// Slider element height.
+const SLIDER_H: f32 = 22.0;
+/// Slider knob diameter.
+const SLIDER_KNOB: f32 = 16.0;
+
+/// Clamp a slider fraction into [0, 1]; a non-finite
+/// input (a NaN out of some drag maths) reads as 0
+/// rather than poisoning the layout.
+fn clamp_frac(frac: f32) -> f32 {
+    if frac.is_finite() {
+        frac.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// A slider's visual track (charter §8): 200×22, a
+/// 4 pt `control_track` rail, the accent fill running
+/// from the left knob centre to the value's knob
+/// centre, and a 16 pt `t.knob` dot at the value —
+/// the scene/layers slider construction, restyled to
+/// the kit tokens. VISUAL ONLY: no key, no handler.
+/// The caller's own root keeps its key, size and
+/// `.on_drag` and takes this as its child, exactly as
+/// the weather and opacity sliders are built today.
+/// Unipolar: the wind slider's bipolar centre-fill is
+/// a documented exception that stays local (P9 D2).
+pub fn slider_track(frac: f32, t: &Theme) -> El {
+    let frac = clamp_frac(frac);
+    let travel = SLIDER_W - SLIDER_KNOB;
+    let knob_cx = SLIDER_KNOB / 2.0 + frac * travel;
+    el()
+        .size(SLIDER_W, SLIDER_H)
+        .child(
+            el()
+                .size(SLIDER_W, 4.0)
+                .absolute(0.0, (SLIDER_H - 4.0) / 2.0)
+                .radius(2.0)
+                .fill(t.control_track),
+        )
+        .child(
+            el()
+                .size((knob_cx - SLIDER_KNOB / 2.0).max(4.0), 4.0)
+                .absolute(SLIDER_KNOB / 2.0, (SLIDER_H - 4.0) / 2.0)
+                .radius(2.0)
+                .fill(accent()),
+        )
+        .child(
+            el()
+                .size(SLIDER_KNOB, SLIDER_KNOB)
+                .absolute(frac * travel, (SLIDER_H - SLIDER_KNOB) / 2.0)
+                .radius(SLIDER_KNOB / 2.0)
+                .fill(t.knob),
+        )
+}
+
+/// One colour swatch construction for the whole shell
+/// (charter amendment, P3/P18): a 24×24 pressable
+/// carrying the caller's `key` and handler, radius
+/// [`CONTROL_RADIUS`], filled with `color`. Selected
+/// swatches get a 2 pt accent border; unselected ones
+/// get a 1 pt `card_border` hairline so pale colours
+/// stay visible against the panel card.
+pub fn swatch(
+    key: &str,
+    color: Color,
+    selected: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    let base = el()
+        .key(key)
+        .size(24.0, 24.0)
+        .radius(CONTROL_RADIUS)
+        .fill(color)
+        .on_press(f);
+    if selected {
+        base.border(2.0, accent())
+    } else {
+        base.border(1.0, t.card_border)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accent_is_the_shells_button_accent() {
+        // The same token call chrome_view::btn makes;
+        // if the kit accent ever drifts from the button
+        // family's, active buttons and selected rows
+        // would stop matching.
+        assert_eq!(accent(), tok::accent(0, true));
+    }
+
+    #[test]
+    fn selected_fill_is_accent_at_sixteen_percent() {
+        let fill = selected_fill();
+        let a = accent();
+        assert_eq!(fill.a, 0.16);
+        assert_eq!((fill.r, fill.g, fill.b), (a.r, a.g, a.b));
+    }
+
+    #[test]
+    fn text_muted_is_secondary_at_sixty_percent() {
+        for dark in [true, false] {
+            let t = tok::theme(dark);
+            let muted = text_muted(&t);
+            assert_eq!(muted.a, 0.6);
+            assert_eq!(
+                (muted.r, muted.g, muted.b),
+                (t.text_secondary.r, t.text_secondary.g, t.text_secondary.b)
+            );
+            // A real third level: dimmer than secondary,
+            // not a restatement of it.
+            assert_ne!(muted, t.text_secondary);
+        }
+    }
+
+    #[test]
+    fn clamp_frac_bounds_and_rejects_non_finite() {
+        assert_eq!(clamp_frac(-0.5), 0.0);
+        assert_eq!(clamp_frac(0.0), 0.0);
+        assert_eq!(clamp_frac(0.25), 0.25);
+        assert_eq!(clamp_frac(1.0), 1.0);
+        assert_eq!(clamp_frac(1.5), 1.0);
+        assert_eq!(clamp_frac(f32::NAN), 0.0);
+        assert_eq!(clamp_frac(f32::INFINITY), 0.0);
+        assert_eq!(clamp_frac(f32::NEG_INFINITY), 0.0);
+    }
+
+    /// Every builder constructs on both of its branches
+    /// (element internals are opaque to a bin-crate unit
+    /// test, so — as in icon_btn's tests — these pin
+    /// that nothing panics; layout truth is the Runtime
+    /// tests' job).
+    #[test]
+    fn builders_construct_on_all_branches() {
+        for dark in [true, false] {
+            let t = tok::theme(dark);
+            let _ = panel_col("p", &t);
+            let _ = header_row("h");
+            // Known icon, unknown icon, no icon; meta and
+            // no meta.
+            let _ = panel_title(Some("play"), "Title", Some("3 items"), &t);
+            let _ = panel_title(Some("no-such-icon"), "Title", None, &t);
+            let _ = panel_title(None, "Title", Some("meta"), &t);
+            let _ = section_label("Section", &t);
+            let _ = divider(&t);
+            let _ = divider_keyed("d-sep", &t);
+            let _ = kbd("Ctrl+K", &t);
+            let _ = empty_state("play", "Nothing here", &t);
+            let _ = empty_state("no-such-icon", "Nothing here", &t);
+            let _ = list_row("row", true, &t);
+            let _ = list_row("row", false, &t);
+            let _ = row_shell(true, &t);
+            let _ = row_shell(false, &t);
+            let _ = toggle("tog", true, &t, |_| {});
+            let _ = toggle("tog", false, &t, |_| {});
+            let _ = toggle_row("tog-row", "Loop", true, &t, |_| {});
+            let _ = toggle_row("tog-row", "Loop", false, &t, |_| {});
+            let _ = stepper_value("42", &t);
+            let _ = slider_track(0.0, &t);
+            let _ = slider_track(0.5, &t);
+            let _ = slider_track(1.0, &t);
+            let _ = slider_track(f32::NAN, &t);
+            let _ = swatch("sw", Color::WHITE, true, &t, |_| {});
+            let _ = swatch("sw", Color::BLACK, false, &t, |_| {});
+        }
+    }
+}

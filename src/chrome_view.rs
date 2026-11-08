@@ -22,6 +22,16 @@
 //! are bare frame numbers and stay untranslated. `status_text`
 //! deliberately keeps its literal English format — see its own
 //! doc comment.
+//!
+//! Phase N (foundation F2) completed the button family in
+//! this file: `btn_inert` and `btn_muted_live` give the text
+//! button its two disabled forms (P05 §4's rule — inert
+//! drops the handler, muted-live keeps it so the press can
+//! deliver a refusal status; both render the resting card
+//! fill with secondary ink), and `danger_btn` is the
+//! family's one danger member, on the deepened reds P12
+//! measured for it. `btn` also gained Rune's `press_scale`
+//! press feedback (P15 M1).
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, Color, El};
@@ -35,6 +45,11 @@ use crate::State;
 /// fills; `active` renders it in the accent colour (toggle
 /// state). The press handler is attached here, as in the GPUI
 /// app's `btn()` helper.
+///
+/// Phase N (P15 M1) added `.press_scale(0.97)`: the box
+/// shrinks slightly while a press is held and springs back
+/// on release. Layout and hit testing keep the resting
+/// size, and the host's Reduce Motion setting turns it off.
 pub fn btn(
     key: &str,
     label: &str,
@@ -51,12 +66,125 @@ pub fn btn(
         .fill(if active { accent } else { t.card })
         .hover(if active { accent } else { t.control_track })
         .press(if active { accent } else { t.control_off })
+        .press_scale(0.97)
         .on_press(f)
         .child(
             text(label)
                 .font(type_::LABEL)
                 .color(if active { Color::WHITE } else { t.text }),
         )
+}
+
+/// The inert text button (Phase N, P05 §5.2): `btn`'s box
+/// and resting fill, secondary ink, and **no press handler
+/// at all** — a plain element, not a control, so a stray
+/// click cannot fire a refusal status or an undo snapshot.
+/// For controls whose op would no-op from the current
+/// state and has nothing to say about it. This is the
+/// element `icon_btn_inert`'s unknown-icon fallback always
+/// hand-rolled; naming it here gives the family one
+/// implementation of the inert text box.
+pub fn btn_inert(key: &str, label: &str, t: &Theme) -> El {
+    el()
+        .key(key)
+        .px(10.0)
+        .py(5.0)
+        .radius(6.0)
+        .fill(t.card)
+        .child(text(label).font(type_::LABEL).color(t.text_secondary))
+}
+
+/// The muted-live text button (Phase N, P05 §4/§5.2): the
+/// inert visual — resting card fill, secondary ink, no
+/// hover/press fills, no press feedback — with the press
+/// handler KEPT. This is frame_ops' `fbtn` muted branch
+/// promoted to a family member: the gated op still runs
+/// and its refusal status ("First frame: cannot shift it
+/// earlier.") is the designed feedback, so the status
+/// line answers instead of the button flashing. Use only
+/// where a test pins that refusal status; where the op
+/// has nothing to say, use [`btn_inert`] and drop the
+/// handler.
+///
+/// `active` keeps `fbtn`'s precedence: an ON toggle is
+/// not muted at all and renders exactly as `btn`'s active
+/// state (the muted gate applies to the off state). The
+/// two flags cannot both bite in practice — frame_ops'
+/// active sites are the loop endpoints, whose mute
+/// condition is an empty timeline, which cannot carry a
+/// loop.
+pub fn btn_muted_live(
+    key: &str,
+    label: &str,
+    active: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    if active {
+        return btn(key, label, true, t, f);
+    }
+    el()
+        .key(key)
+        .px(10.0)
+        .py(5.0)
+        .radius(6.0)
+        .fill(t.card)
+        .on_press(f)
+        .child(text(label).font(type_::LABEL).color(t.text_secondary))
+}
+
+/// The family's danger reds (Phase N, P12's measured fix).
+/// White LABEL text on the old local copies' `0xF16F78`
+/// measured ≈ 2.9:1 — under even the 3:1 floor, and its
+/// darker hover was paradoxically the *more* legible
+/// state. These deepened reds put the resting fill at
+/// ≈ 5:1 against white, with hover/press deeper still.
+/// Fixed names and values: `icon_btn`'s `danger_icon_btn`
+/// imports them from here so the text and icon danger
+/// members can never drift apart again (the two local
+/// copies this replaces had already drifted in shape).
+pub const DANGER_FILL: u32 = 0xC93A44;
+/// Hover step of [`DANGER_FILL`].
+pub const DANGER_HOVER: u32 = 0xB2323E;
+/// Press step of [`DANGER_FILL`].
+pub const DANGER_PRESS: u32 = 0x9C2934;
+
+/// A `0xRRGGBB` danger constant as a Rune colour, via the
+/// shell's hex idiom (the same conversion
+/// `stage_view::hex_color` performs). The fallback is
+/// unreachable — the format is always a valid 6-digit
+/// hex literal — and exists only because the parser is
+/// fallible in general.
+fn danger_color(rgb: u32) -> Color {
+    rune::color::hex(&format!("#{:06x}", rgb & 0xFF_FFFF)).unwrap_or(Color::WHITE)
+}
+
+/// The family's one danger button (Phase N, P05 §5.2):
+/// `btn`'s metrics and white LABEL ink on the danger
+/// fills ([`DANGER_FILL`] / [`DANGER_HOVER`] /
+/// [`DANGER_PRESS`]), always in the danger state — there
+/// is no inactive or inert form, matching the local
+/// copies it retires (inspector_figure's and
+/// inspector_segment's `danger_btn`, whose deliberate
+/// danger styling this preserves at a legible depth).
+/// Like `btn` it carries the family's `press_scale`.
+pub fn danger_btn(
+    key: &str,
+    label: &str,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    el()
+        .key(key)
+        .px(10.0)
+        .py(5.0)
+        .radius(6.0)
+        .fill(danger_color(DANGER_FILL))
+        .hover(danger_color(DANGER_HOVER))
+        .press(danger_color(DANGER_PRESS))
+        .press_scale(0.97)
+        .on_press(f)
+        .child(text(label).font(type_::LABEL).color(Color::WHITE))
 }
 
 /// Play/pause: flips `core.playing` (the GPUI app's
@@ -71,6 +199,29 @@ pub fn toggle_play(s: &mut State) {
     s.core.playing = !s.core.playing;
 }
 
+/// The app bar's modified marker (Phase N, charter §15):
+/// an 8 pt accent dot shown after the project name while
+/// the project is dirty, absent while it is clean. The
+/// signal is the same one the status strip's project
+/// segment reads (see `status_strip::project_text`): the
+/// core's public edit counter — dirty exactly when
+/// `core.edits_since_autosave() > 0`, i.e. edits the
+/// autosave has not captured yet. Not the recovery file's
+/// mtime: that is the autosave segment's separate signal,
+/// and the two must not be conflated.
+fn dirty_dot(core: &EditorCore) -> Option<El> {
+    if core.edits_since_autosave() > 0 {
+        Some(
+            el()
+                .size(8.0, 8.0)
+                .radius(4.0)
+                .fill(tok::accent(0, true)),
+        )
+    } else {
+        None
+    }
+}
+
 /// Top bar: project name, then Save / Load / Undo / Redo —
 /// each wired to its core op. Labels come from the i18n table
 /// (keys `save`, `load`, `undo`, `redo`) in the core's current
@@ -78,19 +229,37 @@ pub fn toggle_play(s: &mut State) {
 /// used to sit here were removed — they duplicated the
 /// figures panel's add-figure button and the onion panel's
 /// onion-toggle.)
+///
+/// Phase N (charter §15): the name (TITLE, as before) now
+/// rides in a growing cluster with [`dirty_dot`] — the
+/// accent dot appears after the name while the project is
+/// modified. §15's hairline divider under the bar +
+/// workspace row is deliberately NOT drawn here: the app
+/// bar, the menu bar and the workspace row are separate
+/// root children in main.rs, so a divider inside this
+/// builder would land between the app bar and the menu
+/// bar — the wrong place. That divider is an integrator
+/// layout item, recorded in the F2 report.
 pub fn app_bar(s: &State, t: &Theme) -> El {
     let core = &s.core;
+    let mut name_row = row()
+        .gap(6.0)
+        .center_y()
+        .grow(1.0)
+        .child(
+            text(core.project.name.clone())
+                .font(type_::TITLE)
+                .color(t.text),
+        );
+    if let Some(dot) = dirty_dot(core) {
+        name_row = name_row.child(dot);
+    }
     row()
         .key("app-bar")
         .w_full()
         .gap(8.0)
         .center_y()
-        .child(
-            text(core.project.name.clone())
-                .font(type_::TITLE)
-                .color(t.text)
-                .grow(1.0),
-        )
+        .child(name_row)
         .child(icon_btn("save", "floppy-disk", &i18n_wire::tr(core, "save"), false, t, |s| {
             s.core.save()
         }))
@@ -110,7 +279,11 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
 /// Duplicate / Delete frame. Labels come from the i18n table
 /// (keys `prev_frame`, `play`/`pause`, `next_frame`,
 /// `add_frame`, `duplicate_frame`, `delete_frame`) in the
-/// core's current language.
+/// core's current language. (Phase N, P06: Duplicate and
+/// Delete are `icon_btn`s now — `copy` / `trash-can` glyphs,
+/// the same dialect as the rest of the row and as the
+/// Frames section's counterparts; keys, labels, handlers
+/// and active flags unchanged.)
 pub fn transport_row(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let play_label = i18n_wire::tr(core, if core.playing { "pause" } else { "play" });
@@ -162,15 +335,17 @@ pub fn transport_row(s: &State, t: &Theme) -> El {
             t,
             |s| s.core.add_frame(),
         ))
-        .child(btn(
+        .child(icon_btn(
             "dup-frame",
+            "copy",
             &i18n_wire::tr(core, "duplicate_frame"),
             false,
             t,
             |s| s.core.duplicate_frame(),
         ))
-        .child(btn(
+        .child(icon_btn(
             "del-frame",
+            "trash-can",
             &i18n_wire::tr(core, "delete_frame"),
             false,
             t,
@@ -274,6 +449,54 @@ mod tests {
         assert_eq!(i18n_wire::tr(&core, "prev_frame"), "Previous frame");
         assert_eq!(i18n_wire::tr(&core, "next_frame"), "Next frame");
         assert_eq!(i18n_wire::tr(&core, "delete_frame"), "Delete");
+    }
+
+    /// The Phase N family members construct under both
+    /// themes and in both of `btn_muted_live`'s branches.
+    /// (Element trees are not readable from unit tests —
+    /// construction is the assertable level here; the
+    /// Runtime press tests are the behaviour net.)
+    #[test]
+    fn phase_n_family_members_construct() {
+        let dark = tok::theme(true);
+        let light = tok::theme(false);
+        for t in [&dark, &light] {
+            let _ = btn("x-btn", "Btn", false, t, |_| {});
+            let _ = btn_inert("x-inert", "Inert", t);
+            let _ = btn_muted_live("x-muted", "Muted", false, t, |_| {});
+            let _ = btn_muted_live("x-muted-on", "Muted on", true, t, |_| {});
+            let _ = danger_btn("x-danger", "Delete", t, |_| {});
+        }
+    }
+
+    /// The danger constants are the exact deepened reds
+    /// P12 verified (≈ 5:1 for white on the resting fill),
+    /// and each one round-trips through the shell's hex
+    /// conversion to itself — F3's `danger_icon_btn`
+    /// imports these values, so a silent drift here would
+    /// split the danger family again.
+    #[test]
+    fn danger_constants_are_the_p12_deepened_reds() {
+        assert_eq!(DANGER_FILL, 0xC93A44);
+        assert_eq!(DANGER_HOVER, 0xB2323E);
+        assert_eq!(DANGER_PRESS, 0x9C2934);
+        assert_eq!(danger_color(DANGER_FILL).hex(), "#c93a44ff");
+        assert_eq!(danger_color(DANGER_HOVER).hex(), "#b2323eff");
+        assert_eq!(danger_color(DANGER_PRESS).hex(), "#9c2934ff");
+    }
+
+    /// The app-bar dot is present exactly while the core
+    /// reports edits the autosave has not captured — the
+    /// status strip's dirty signal, not a side channel.
+    #[test]
+    fn dirty_dot_follows_the_autosave_edit_counter() {
+        let mut core = EditorCore::new();
+        assert!(dirty_dot(&core).is_none(), "a fresh core reads clean");
+        core.snapshot();
+        assert!(
+            dirty_dot(&core).is_some(),
+            "one snapshot-counted edit lights the dot"
+        );
     }
 
     #[test]

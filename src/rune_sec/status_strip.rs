@@ -708,7 +708,12 @@ pub fn extra_segments(
 /// direction for a floor (see [`est_text_width`]). Only
 /// a string made almost entirely of the widest glyphs
 /// (capital `W`, `m`) could beat it, and then only under
-/// simultaneous width pressure.
+/// simultaneous width pressure. Phase N sets two wholly
+/// numeric segments (timecode, speed) in a mono style at
+/// the same 12 pt / weight 500 (see [`numeric_font`]):
+/// a mono advance there is ≈ 0.6 em ≈ 7.2 pt, still
+/// under this 8.0 estimate, so the estimate covers them
+/// unchanged and no floor derived from it moves.
 pub const LABEL_CHAR_W: f32 = 8.0;
 
 /// Estimated painted width of `s` in the strip's label
@@ -783,19 +788,41 @@ fn segment(label: String, t: &Theme) -> El {
     text(label).font(type_::LABEL).color(t.text).min_w(floor)
 }
 
-/// Hex for glyph painting beside a strip label:
-/// `icon_el` takes a `0xRRGGBB` value where the label
-/// itself takes the theme's `Color`. The strip always
-/// builds with `tok::theme(true)` (see
-/// [`status_strip_state`]), whose text colour is the
-/// 2.0 palette's primary text, `#F1F3F7`.
-const GLYPH_TEXT: u32 = 0xF1F3F7;
+/// The font of the strip's two wholly numeric segments —
+/// the timecode and the playback-speed readout (Phase N,
+/// charter §12): `type_::MONO_CAPTION` with the Mono
+/// family applied (`.mono()` — the token alone keeps the
+/// Sans family in the pinned Rune rev). Same 12 pt /
+/// weight 500 as LABEL, and a 12 pt mono advance
+/// (≈ 0.6 em ≈ 7.2 pt) sits under the 8.0 pt
+/// [`LABEL_CHAR_W`] estimate, so the floors — computed
+/// from the label text alone — still cover the painted
+/// width and no floor in this module moves. Every other
+/// segment stays LABEL: the word+number labels
+/// ("Frame 1/5", "12 fps", "Zoom 100%", "Undo 0") are
+/// labels, not numeric segments.
+fn numeric_font() -> tok::TextStyle {
+    type_::MONO_CAPTION.mono()
+}
+
+/// One fixed strip segment set in [`numeric_font`] —
+/// the mono sibling of [`segment`], with identical
+/// floor discipline. Used for the timecode and speed
+/// segments only.
+fn segment_mono(label: String, t: &Theme) -> El {
+    let floor = est_text_width(&label);
+    text(label).font(numeric_font()).color(t.text).min_w(floor)
+}
 
 /// One fixed strip segment with a leading icon glyph
 /// (Phase H): a centred row of the glyph — 11 pt tall,
 /// width from the icon's own aspect — a 4 pt gap, and
 /// the label text, floored at the SAME
 /// [`est_text_width`] a plain [`segment`] would use.
+/// The glyph is painted in the theme's text colour —
+/// the same `t.text` as the label beside it (Phase N
+/// retired the hardcoded hex that used to duplicate
+/// that colour for the glyph).
 /// The floor stays computed from the text alone; the
 /// glyph is additive width inside the floored segment,
 /// absorbed by the floor's conservatism. Only a
@@ -809,15 +836,17 @@ fn segment_with_icon(label: String, icon: &str, t: &Theme) -> El {
         .gap(4.0)
         .center_y()
         .min_w(floor)
-        .child(crate::rune_sec::icons::icon_el_rgb(icon, 11.0, GLYPH_TEXT))
+        .child(crate::rune_sec::icons::icon_el(icon, 11.0, t.text))
         .child(text(label).font(type_::LABEL).color(t.text))
 }
 
 /// Hairline divider between segments. Floored at its
 /// own 1 pt so width pressure cannot shrink it away to
 /// nothing (the tail segment absorbs the shortage).
+/// Phase N (charter §12): a 1×10 tick in the theme's
+/// `separator` tone (was 1×12 in `control_track`).
 fn divider(t: &Theme) -> El {
-    el().size(1.0, 12.0).min_w(1.0).fill(t.control_track)
+    el().size(1.0, 10.0).min_w(1.0).fill(t.separator)
 }
 
 /// The status strip from the core alone: every segment
@@ -898,7 +927,7 @@ fn build_strip(
     let mut segments: Vec<El> = vec![
         segment(project_text(core), &t),
         segment(frame_text(core), &t),
-        segment(timecode(core.current, core.project.fps), &t),
+        segment_mono(timecode(core.current, core.project.fps), &t),
         segment(format!("{} fps", fps_text(core.project.fps)), &t),
         segment(zoom_text(core), &t),
         segment(selection_text(core), &t),
@@ -922,8 +951,11 @@ fn build_strip(
     // entirely at normal speed, leaving the strip
     // byte-identical to Phase K's (see the module
     // docs' Phase L note on the pinned floors).
+    // Phase N: it is built by `segment_mono` instead —
+    // the speed readout is wholly numeric, so it takes
+    // the mono style; the floor path is unchanged.
     if let Some(label) = speed {
-        segments.push(segment(label, &t));
+        segments.push(segment_mono(label, &t));
     }
     // Phase M: the 3D-session segment follows the
     // speed segment in the conditional block — both
@@ -1736,5 +1768,39 @@ mod tests {
         assert_eq!(selection_text(core), "Styk");
         assert_eq!(undo_text(core), "Undo 0");
         assert_eq!(play_text(core.playing), "❚❚ Paused");
+    }
+
+    // ---- Phase N numeric-segment mono style ----
+
+    #[test]
+    fn numeric_segments_use_the_mono_caption_style() {
+        // Phase N (charter §12): the strip's two wholly
+        // numeric segments — timecode and speed — are
+        // set in MONO_CAPTION with the Mono family
+        // applied. A built `El` is opaque to a unit
+        // test, so the pin lands on the style seam both
+        // call sites share: `segment_mono` fonts its
+        // text with `numeric_font()`, and no other
+        // builder in the module does.
+        assert_eq!(numeric_font(), type_::MONO_CAPTION.mono());
+        // `.mono()` really applied: the bare token keeps
+        // the Sans family, so the two styles differ.
+        assert_ne!(numeric_font(), type_::MONO_CAPTION);
+        // Same metrics as LABEL — 12 pt, weight 500 —
+        // so the LABEL_CHAR_W floors (computed from the
+        // label text alone) still cover the painted
+        // width, and the Phase K width proof above is
+        // untouched by the font change.
+        assert_eq!(numeric_font().size, type_::LABEL.size);
+        assert_eq!(numeric_font().weight, type_::LABEL.weight);
+        // Both mono call sites construct. (The timecode
+        // path is also exercised by every strip build
+        // above; the speed path by the Phase L tests.)
+        let t = tok::theme(true);
+        let _ = segment_mono(timecode(150, 12.0), &t);
+        let _ = segment_mono(speed_segment(1.5).unwrap(), &t);
+        // The plain segment path still constructs too —
+        // it stays LABEL for every other segment.
+        let _ = segment("Frame 1/5".to_string(), &t);
     }
 }

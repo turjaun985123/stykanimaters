@@ -30,6 +30,19 @@
 //! ([`Severity::icon`]) in place of the plain dot — the
 //! severity colour now tints the glyph itself.
 //!
+//! Phase N gives the stack its other three voices and its
+//! card anatomy: severity is no longer the integrator's
+//! guess — [`classify_status`] reads the status text's
+//! shape (the engine's `" failed"` failures, the `"No …"` /
+//! `"Nothing …"` refusals, the `"Exported …"` / `"Saved …"`
+//! confirmations) and the push site passes its verdict, so
+//! failures arrive red and refusals amber instead of every
+//! status wearing the blue info tint. Each card now leads
+//! with a 3 pt severity bar stretched to the card's full
+//! height (radius 12 card, gap 8 stack), and rows enter
+//! with a 24 pt slide + fade on the SETTLE spring pair
+//! (p15 M3) over the existing last-second fade-out.
+//!
 //! Why hand-rolled instead of rune-kit's `Toast` /
 //! `ToastRegion` (read at `crates/rune-kit/src/toast.rs` in the
 //! pinned Rune tree):
@@ -50,8 +63,9 @@
 //!   whose only actions are the newest toast's Undo button,
 //!   a per-toast dismiss button, and a stack-wide "Clear all".
 //! - What IS borrowed: `ToastRegion`'s proven placement —
-//!   pinned 32 pt from the right, 48 pt from the bottom, 12 pt
-//!   apart, 320 pt wide cards, 8 pt radius, 12 pt padding.
+//!   pinned 32 pt from the right, 48 pt from the bottom,
+//!   320 pt wide cards, 12 pt padding (Phase N: 8 pt stack
+//!   gap, 12 pt card radius).
 //!
 //! Feeding contract (the integrator's side): when
 //! `core.status` changes, call
@@ -71,7 +85,7 @@
 //! its fixed width.
 
 use rune::tok::{self, type_, Theme};
-use rune::{col, oklch, row, text, Color, El};
+use rune::{col, el, oklch, row, text, Color, El, Transition};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::rune_sec::i18n_wire;
@@ -96,8 +110,9 @@ pub const CLEAR_ALL_MIN: usize = 2;
 /// The last slice of a toast's life over which it fades out.
 const FADE_OUT: f32 = 1.0;
 
-/// How much a toast means it. The integrator maps status
-/// text to a severity; unclassified statuses are `Info`.
+/// How much a toast means it. Status text is mapped to a
+/// severity by [`classify_status`]; anything it does not
+/// recognise is `Info`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Severity {
     Info,
@@ -149,6 +164,46 @@ impl Severity {
             Severity::Warn => 0xE8A33D,
             Severity::Error => 0xE5484D,
         }
+    }
+}
+
+/// Classify a status line by its shape alone — the Phase N
+/// replacement for the push site's old hardcoded
+/// `Severity::Info`. The patterns are the engine's own
+/// status grammar, sampled from the tree: this function
+/// reads strings, it never rewrites them, and the wording
+/// of every status stays exactly as its op wrote it.
+///
+/// Rules, in order (order matters — a refusal-shaped
+/// failure is a failure):
+///
+/// 1. **Error** — contains `" failed"`: the engine's
+///    failure shape (`"Audio fade failed: no clip 1."`,
+///    `"Audio compress failed: output would overwrite
+///    the source."`, the export failures).
+/// 2. **Warn** — starts with `"No "` or `"Nothing "`: a
+///    refusal — the op did not happen, nothing is broken
+///    (`"No FX clip selected to split."`, `"No camera key
+///    on this frame."`, `"Nothing copied yet."`).
+/// 3. **Success** — starts with `"Exported "` or
+///    `"Saved "`: a confirmation that something left the
+///    editor (`"Exported 5 PNG frames to ./export"`,
+///    `"Exported out/animation.apng."`). Note the
+///    trailing space: the bare `"Saved."` is a neutral
+///    fact, not this shape.
+/// 4. **Info** — everything else: neutral facts
+///    (`"Undone."`, `"Redone."`), and the empty string,
+///    which the push site never sends but which must
+///    still classify without panicking.
+pub fn classify_status(status: &str) -> Severity {
+    if status.contains(" failed") {
+        Severity::Error
+    } else if status.starts_with("No ") || status.starts_with("Nothing ") {
+        Severity::Warn
+    } else if status.starts_with("Exported ") || status.starts_with("Saved ") {
+        Severity::Success
+    } else {
+        Severity::Info
     }
 }
 
@@ -315,7 +370,8 @@ pub fn toasts_view(s: &State, now: f32) -> El {
         .key("toasts")
         .pin(None, None, Some(32.0), Some(48.0))
         .max_w(320.0)
-        .gap(12.0);
+        .gap(8.0)
+        .items_end();
     let action_index = if undo_available(&s.core) {
         s.toasts.newest_live_index(now)
     } else {
@@ -353,8 +409,9 @@ pub fn toasts_view(s: &State, now: f32) -> El {
     column
 }
 
-/// One toast card: the severity glyph and the status text on the
-/// theme card surface, fading over its last second. `index`
+/// One toast card: a 3 pt severity bar at the leading edge,
+/// then the severity glyph and the status text on the theme
+/// card surface, fading over its last second. `index`
 /// is the toast's items index — it keys the card (stable for
 /// the toast's whole life, unlike a live position) and the
 /// row's buttons dismiss by it. When `action` holds — this
@@ -365,18 +422,21 @@ pub fn toasts_view(s: &State, now: f32) -> El {
 /// Every card ends with an icon-only dismiss button
 /// (`toast-dismiss-{index}`, an "xmark" glyph) that removes
 /// exactly this toast and nothing else.
+///
+/// Phase N anatomy: the card is radius 12 with an 8 pt gap;
+/// the bar is unkeyed and stretches to the card's full
+/// height (the card row stretches its children, and the
+/// glyph/text/action cluster keeps its own centring in an
+/// inner row), so the severity reads before the glyph does.
+/// The entrance is p15's M3: a 24 pt slide + fade on the
+/// SETTLE spring pair, composing with the age fade (the
+/// exit runs the same transition in reverse, then the
+/// last-second opacity fade finishes it).
 fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, undo_label: &str) -> El {
-    let mut card = row()
-        .key(format!("toast-{index}"))
-        .w(320.0)
-        .max_w(320.0)
-        .padding(12.0)
-        .gap(10.0)
-        .items_center()
-        .radius(8.0)
-        .fill(t.card)
-        .border(1.0, t.card_border)
-        .opacity(toast.fade(now))
+    let mut content = row()
+        .center_y()
+        .gap(8.0)
+        .grow(1.0)
         .child(icon_el_rgb(
             toast.severity.icon(),
             13.0,
@@ -390,7 +450,7 @@ fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, und
                 .grow(1.0),
         );
     if action {
-        card = card.child(icon_btn(
+        content = content.child(icon_btn(
             "toast-undo",
             "arrow-rotate-left",
             undo_label,
@@ -403,7 +463,7 @@ fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, und
         ));
     }
     let dismiss_key = format!("toast-dismiss-{index}");
-    card = card.child(icon_only_btn(
+    content = content.child(icon_only_btn(
         &dismiss_key,
         "xmark",
         26.0,
@@ -413,7 +473,29 @@ fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, und
             s.toasts.dismiss(index);
         },
     ));
-    card
+    row()
+        .key(format!("toast-{index}"))
+        .w(320.0)
+        .max_w(320.0)
+        .padding(12.0)
+        .gap(8.0)
+        .items_stretch()
+        .radius(12.0)
+        .fill(t.card)
+        .border(1.0, t.card_border)
+        .opacity(toast.fade(now))
+        .transition(
+            Transition::offset(24.0, 0.0)
+                .combined(Transition::opacity())
+                .springs(tok::motion::pair::SETTLE),
+        )
+        .child(
+            el()
+                .w(3.0)
+                .radius(1.5)
+                .fill(toast.severity.color()),
+        )
+        .child(content)
 }
 
 #[cfg(test)]
@@ -701,5 +783,80 @@ mod tests {
         assert!(undo_available(&core), "add_frame snapshots first, so undo is available");
         core.undo();
         assert!(!undo_available(&core), "the only step is spent");
+    }
+
+    // --- classify_status (Phase N) -------------------------------
+    // Every string below is a real status from the tree
+    // (grep-verified 2026-11-08) except the one precedence
+    // probe, which is marked where it stands.
+
+    #[test]
+    fn classify_reads_the_engine_failure_shape_as_error() {
+        // The `" failed"` shape, from the audio DSP ops and
+        // their test suites.
+        assert_eq!(classify_status("Audio fade failed: no clip 1."), Severity::Error);
+        assert_eq!(
+            classify_status("Audio compress failed: output would overwrite the source."),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("Audio compress failed: no clip 3."),
+            Severity::Error
+        );
+    }
+
+    #[test]
+    fn classify_reads_refusals_as_warn() {
+        // The op did not happen; nothing is broken.
+        assert_eq!(classify_status("No FX clip selected to split."), Severity::Warn);
+        assert_eq!(classify_status("No camera key on this frame."), Severity::Warn);
+        assert_eq!(classify_status("No saved file to reload."), Severity::Warn);
+        assert_eq!(classify_status("Nothing copied yet."), Severity::Warn);
+    }
+
+    #[test]
+    fn classify_reads_export_and_save_confirmations_as_success() {
+        assert_eq!(
+            classify_status("Exported 5 PNG frames to ./export"),
+            Severity::Success
+        );
+        assert_eq!(classify_status("Exported out/animation.apng."), Severity::Success);
+        // Rendered from the library save's `"Saved {} to the
+        // library."` format string.
+        assert_eq!(classify_status("Saved Styk to the library."), Severity::Success);
+    }
+
+    #[test]
+    fn classify_leaves_neutral_facts_as_info() {
+        assert_eq!(classify_status("Undone."), Severity::Info);
+        assert_eq!(classify_status("Redone."), Severity::Info);
+        // The Success rule needs its trailing space: the
+        // bare save acknowledgement is a neutral fact.
+        assert_eq!(classify_status("Saved."), Severity::Info);
+        // The push site never sends an empty status, but the
+        // classifier must not panic on one.
+        assert_eq!(classify_status(""), Severity::Info);
+    }
+
+    #[test]
+    fn classify_error_outranks_the_refusal_prefix() {
+        // Precedence probe: no current engine string carries
+        // both shapes (grep-verified 2026-11-08), but the
+        // rules are ordered so that if one ever does, the
+        // failure wins over the refusal — a thing that
+        // failed is not a mere "did not happen".
+        assert_eq!(classify_status("No frames failed to render."), Severity::Error);
+    }
+
+    #[test]
+    fn view_builds_with_a_classified_error_toast() {
+        // The Phase N row construction (severity bar, inner
+        // centred cluster, entrance transition) builds for a
+        // classified toast exactly as for a hand-severitied
+        // one; tree presence is the Runtime tests' job.
+        let mut s = crate::init();
+        let status = "Audio fade failed: no clip 1.";
+        s.toasts.push(status, classify_status(status), 0.0);
+        let _ = toasts_view(&s, 0.5);
     }
 }

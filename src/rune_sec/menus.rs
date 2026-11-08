@@ -22,6 +22,14 @@
 //! next and Edit ▸ Mute/Unmute audio clip, two more
 //! conditional items on the same offer-only-while-
 //! the-action-can-run discipline — see the EDIT arm).
+//! Phase N (foundation F5): the charter §9 menu restyle
+//! — the dropdown at radius 12 / padding 6 with the
+//! P15 M2 fade-and-rise entrance, items 28 high at
+//! px 8 with a fixed 18-wide leading icon slot so
+//! labels share one left edge, shortcut hints as kit
+//! `kbd` chips, and the separators as keyed kit
+//! dividers — keys, handlers and offer conditions
+//! unchanged throughout.
 //! Declared from `main.rs` by the integrator; bin-crate
 //! code, not part of the engine library.
 //!
@@ -92,7 +100,7 @@
 use std::path::{Path, PathBuf};
 
 use rune::tok::{self, type_, Theme};
-use rune::{col, el, row, text, Align, Color, El, Side};
+use rune::{col, el, row, text, Align, Color, El, Side, Transition};
 
 use crate::chrome_view::btn;
 use crate::State;
@@ -212,15 +220,63 @@ fn shortcut_hint(key: &str) -> Option<&'static str> {
     }
 }
 
+/// The fixed width (pt) of the leading icon slot every
+/// menu item reserves (Phase N, P07 §1.2): room for the
+/// 12 pt glyph plus air, identical on icon, hinted and
+/// plain items alike, so labels share one left edge down
+/// the whole menu instead of zig-zagging between icon
+/// and plain rows.
+const ICON_SLOT_W: f32 = 18.0;
+
+/// The leading slot + label group every item builder
+/// shares (Phase N): an [`ICON_SLOT_W`]-wide slot holding
+/// the item's 12 pt glyph at its left edge — or nothing,
+/// for hinted and plain items — then the label, 6 pt
+/// apart (the glyph-to-label rhythm the icon items
+/// always had, now every row's geometry). `color` is
+/// the label's own colour (white while active, theme
+/// text otherwise); the glyph takes the same colour,
+/// exactly as [`item_icon`] always drew it.
+fn slot_and_label(icon: Option<&str>, label: &str, color: Color) -> El {
+    let slot = el().w(ICON_SLOT_W);
+    let slot = match icon {
+        Some(name) => slot.child(crate::rune_sec::icons::icon_el(name, 12.0, color)),
+        None => slot,
+    };
+    row()
+        .gap(6.0)
+        .center_y()
+        .child(slot)
+        .child(text(label).font(type_::LABEL).color(color))
+}
+
+/// A menu item's right-edge shortcut hint (Phase N,
+/// P07 §1.2): a kit `kbd` chip while the item is
+/// inactive. While the item is active (accent fill) a
+/// `control_off` chip would sit low-contrast on the
+/// accent, so the hint stays the pre-Phase N treatment
+/// instead — plain text, white at 75% alpha, mirroring
+/// the white label.
+fn hint_el(hint: &str, active: bool, t: &Theme) -> El {
+    if active {
+        text(hint)
+            .font(type_::LABEL)
+            .color(Color::WHITE.alpha(0.75))
+    } else {
+        crate::rune_sec::design::kbd(hint, t)
+    }
+}
+
 /// A menu item carrying a shortcut hint: the same chrome
-/// as `chrome_view::btn` (10/5 padding, radius 6, the
-/// same fill/hover/press states and label font), rebuilt
-/// as a row so the hint rides inside the same pressable
+/// as `chrome_view::btn` (radius 6, the same
+/// fill/hover/press states and label font), rebuilt as a
+/// row so the hint rides inside the same pressable
 /// element — the item's key, press handler and hit area
 /// cover the whole row, hint included, like a native
-/// menu. The hint is inert decoration in the theme's
-/// secondary text colour (75% white over the accent fill
-/// while the item is active, mirroring the white label).
+/// menu. Phase N (charter §9, P07 §1.2) fixed the row at
+/// 28 high / px 8, gave it the shared leading icon slot
+/// (empty here — see [`slot_and_label`]) and made the
+/// hint a `kbd` chip (see [`hint_el`]).
 fn hinted_item(
     key: &str,
     label: &str,
@@ -230,10 +286,12 @@ fn hinted_item(
     f: impl Fn(&mut State) + 'static,
 ) -> El {
     let accent = tok::accent(0, true);
+    let ink = if active { Color::WHITE } else { t.text };
     row()
         .key(key)
-        .px(10.0)
+        .px(8.0)
         .py(5.0)
+        .h(28.0)
         .radius(6.0)
         .fill(if active { accent } else { t.card })
         .hover(if active { accent } else { t.control_track })
@@ -241,19 +299,9 @@ fn hinted_item(
         .on_press(f)
         .center_y()
         .gap(12.0)
-        .child(
-            text(label)
-                .font(type_::LABEL)
-                .color(if active { Color::WHITE } else { t.text }),
-        )
+        .child(slot_and_label(None, label, ink))
         .child(row().grow(1.0))
-        .child(
-            text(hint).font(type_::LABEL).color(if active {
-                Color::WHITE.alpha(0.75)
-            } else {
-                t.text_secondary
-            }),
-        )
+        .child(hint_el(hint, active, t))
 }
 
 /// The Font Awesome glyph an item leads with (Phase H),
@@ -327,14 +375,16 @@ fn menu_icon(key: &str) -> Option<&'static str> {
 }
 
 /// A menu item leading with a Font Awesome glyph: the
-/// same row chrome as [`hinted_item`] (10/5 padding,
-/// radius 6, the same fill/hover/press states), with
-/// the glyph at 12 pt in the label's own colour
-/// (white while active, theme text otherwise) ahead
-/// of the label, and the shortcut hint — for the items
-/// that have one — at the right edge exactly as
-/// `hinted_item` renders it. Key, press handler and
-/// hit area cover the whole row, icon included.
+/// same row chrome as [`hinted_item`] (radius 6, the
+/// same fill/hover/press states), with the glyph at
+/// 12 pt in the label's own colour (white while active,
+/// theme text otherwise) inside the shared leading slot
+/// (see [`slot_and_label`]), and the shortcut hint —
+/// for the items that have one — at the right edge
+/// exactly as `hinted_item` renders it (see
+/// [`hint_el`]). Key, press handler and hit area cover
+/// the whole row, icon included. Phase N (charter §9,
+/// P07 §1.2) fixed the row at 28 high / px 8.
 fn item_icon(
     key: &str,
     icon: &str,
@@ -348,8 +398,9 @@ fn item_icon(
     let label_color = if active { Color::WHITE } else { t.text };
     let mut r = row()
         .key(key)
-        .px(10.0)
+        .px(8.0)
         .py(5.0)
+        .h(28.0)
         .radius(6.0)
         .fill(if active { accent } else { t.card })
         .hover(if active { accent } else { t.control_track })
@@ -357,22 +408,47 @@ fn item_icon(
         .on_press(f)
         .center_y()
         .gap(12.0)
-        .child(
-            row()
-                .gap(6.0)
-                .center_y()
-                .child(crate::rune_sec::icons::icon_el(icon, 12.0, label_color))
-                .child(text(label).font(type_::LABEL).color(label_color)),
-        )
+        .child(slot_and_label(Some(icon), label, label_color))
         .child(row().grow(1.0));
     if let Some(hint) = hint {
-        r = r.child(text(hint).font(type_::LABEL).color(if active {
-            Color::WHITE.alpha(0.75)
-        } else {
-            t.text_secondary
-        }));
+        r = r.child(hint_el(hint, active, t));
     }
     r
+}
+
+/// A plain menu item — no glyph, no hint (Phase N,
+/// P07 §1.2): the menus-local builder for the items the
+/// [`menu_icon`] map leaves unmapped and
+/// [`shortcut_hint`] leaves hint-less (today exactly
+/// View ▸ Fit view and Centre on selection). It mirrors
+/// `chrome_view::btn`'s fills and radius at the menu
+/// item metrics (28 high, px 8) and reserves the same
+/// empty leading slot as every other item (see
+/// [`slot_and_label`]), so its label lines up with the
+/// icon items' labels instead of starting 18 pt
+/// earlier. Before Phase N these items were bare `btn`s
+/// — the last label zig-zag in the menus.
+fn plain_item(
+    key: &str,
+    label: &str,
+    active: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    let accent = tok::accent(0, true);
+    let ink = if active { Color::WHITE } else { t.text };
+    row()
+        .key(key)
+        .px(8.0)
+        .py(5.0)
+        .h(28.0)
+        .radius(6.0)
+        .fill(if active { accent } else { t.card })
+        .hover(if active { accent } else { t.control_track })
+        .press(if active { accent } else { t.control_off })
+        .on_press(f)
+        .center_y()
+        .child(slot_and_label(None, label, ink))
 }
 
 /// One menu item: a chrome button that runs `f` and then
@@ -380,8 +456,10 @@ fn item_icon(
 /// [`menu_icon`] map lead with their glyph (see
 /// [`item_icon`]); items whose action has a real shell
 /// key binding (see [`shortcut_hint`]) render it as a
-/// muted hint at the row's right edge; the rest are
-/// plain `btn`s, exactly as before.
+/// muted hint at the row's right edge; the rest go
+/// through the menus-local plain builder (see
+/// [`plain_item`]), which reserves the same leading
+/// slot so their labels align with the icon items'.
 fn item(
     key: &str,
     label: &str,
@@ -395,7 +473,7 @@ fn item(
         }
         _ => match shortcut_hint(key) {
             Some(hint) => hinted_item(key, label, hint, active, t, closing(f)),
-            None => btn(key, label, active, t, closing(f)),
+            None => plain_item(key, label, active, t, closing(f)),
         },
     }
 }
@@ -599,9 +677,13 @@ fn file_recent_items(
     items
 }
 
-/// A thin divider line between item groups.
+/// A thin divider line between item groups — the kit's
+/// keyed divider (Phase N, charter §9 / P07 §1.2): the
+/// key rides on the divider element itself, so the five
+/// separator keys survive the swap from the hand-rolled
+/// line byte-identical.
 fn separator(key: &str, t: &Theme) -> El {
-    el().key(key).h(1.0).fill(t.separator)
+    crate::rune_sec::design::divider_keyed(key, t)
 }
 
 /// The menu bar: one trigger button per menu, keyed with
@@ -642,7 +724,13 @@ pub fn menu_scrim(s: &State) -> El {
 /// trigger (below, start-aligned, 4 pt gap; the runtime
 /// flips/clamps it at the window edges). Mount it as the
 /// last root-column child, after [`menu_scrim`]. Inert
-/// when no menu is open.
+/// when no menu is open. Phase N (charter §9) set the
+/// surface to radius 12 / padding 6 — on this `col`, not
+/// `design::panel_col`, whose 12/8 padding/gap is the
+/// panel recipe — and gave it the P15 M2 entrance: a
+/// fade plus a 4 pt rise on the zero-bounce SNAP spring
+/// pair. The `.anchored(...)` placement stays the
+/// outermost call on the returned element.
 pub fn menu_dropdown(s: &State, t: &Theme) -> El {
     let Some(open) = s.menus.open else {
         return el();
@@ -651,12 +739,17 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
     let mut list = col()
         .key(format!("{}-dropdown", MENU_KEYS[open]))
         .min_w(190.0)
-        .padding(4.0)
+        .padding(6.0)
         .gap(2.0)
-        .radius(8.0)
+        .radius(12.0)
         .fill(t.card)
         .border(1.0, t.card_border)
-        .items_stretch();
+        .items_stretch()
+        .transition(
+            Transition::offset(0.0, -4.0)
+                .combined(Transition::opacity())
+                .springs(tok::motion::pair::SNAP),
+        );
     match open {
         FILE => {
             list = list

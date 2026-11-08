@@ -328,7 +328,11 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
         s.last_status = s.core.status.clone();
         if !s.last_status.is_empty() {
             s.toasts
-                .push(s.last_status.clone(), rune_sec::toasts::Severity::Info, now);
+                .push(
+                    s.last_status.clone(),
+                    rune_sec::toasts::classify_status(&s.last_status),
+                    now,
+                );
         }
     }
     if !s.toasts.is_empty() {
@@ -609,17 +613,20 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     if vis(Sec::PoseTools) {
         right = right.child(rune_sec::pose_tools::pose_tools(s, &t));
     }
+    // Phase N mount order (P16): Graph leads the keyframe
+    // tools so the curve canvas starts above the fold; the
+    // 3D panel and the everyday Playback/Frames panels sit
+    // above Camera; Scene is demoted below the
+    // Particles/Audio block so it no longer fills the
+    // Effects workspace's first screen.
+    if vis(Sec::Graph) {
+        right = right.child(rune_sec::graph_panel::graph_panel(s, cx, &t));
+    }
     if vis(Sec::KeyframeTools) {
         right = right.child(rune_sec::keyframe_tools::keyframe_section(s, &t));
     }
-    if vis(Sec::Camera) {
-        right = right.child(rune_sec::camera_panel::panel(s, &t));
-    }
-    if vis(Sec::Scene) {
-        right = right.child(rune_sec::scene_panel::scene_panel(s, &t));
-    }
-    if vis(Sec::Onion) {
-        right = right.child(rune_sec::onion_controls::onion_controls(s, &t));
+    if vis(Sec::ThreeD) {
+        right = right.child(rune_sec::three_d_panel::three_d_panel(s, &t));
     }
     if vis(Sec::Playback) {
         right = right.child(rune_sec::playback_controls::playback_controls(s, &t));
@@ -627,8 +634,11 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     if vis(Sec::FrameOps) {
         right = right.child(rune_sec::frame_ops::frames_section(s, &t));
     }
-    if vis(Sec::Graph) {
-        right = right.child(rune_sec::graph_panel::graph_panel(s, cx, &t));
+    if vis(Sec::Camera) {
+        right = right.child(rune_sec::camera_panel::panel(s, &t));
+    }
+    if vis(Sec::Onion) {
+        right = right.child(rune_sec::onion_controls::onion_controls(s, &t));
     }
     if vis(Sec::Easing) {
         right = right.child(rune_sec::easing_panel::easing_panel(s, &t));
@@ -655,13 +665,34 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         right = right.child(rune_sec::audio_panel::audio_panel(s, &t));
     }
     if vis(Sec::Waveform) {
-        right = right.child(rune_sec::waveform_view::waveform_el_state(s, [308.0, 56.0]));
+        // Phase N (P4): the waveform canvas sits in a card
+        // like every other panel — the canvas keeps its
+        // exact [308, 56] size (its drag maths are built
+        // for it); the card is integrator-owned because
+        // main.rs mounts the canvas directly.
+        right = right.child(
+            rune_sec::design::panel_col("waveform-card", &t)
+                .child(
+                    row()
+                        .w_full()
+                        .gap(8.0)
+                        .center_y()
+                        .child(rune_sec::design::panel_title(
+                            Some("wave-square"),
+                            "Waveform",
+                            None,
+                            &t,
+                        )),
+                )
+                .child(rune_sec::design::divider(&t))
+                .child(rune_sec::waveform_view::waveform_el_state(s, [308.0, 56.0])),
+        );
     }
     if vis(Sec::Clips) {
         right = right.child(rune_sec::clips_panel::clips_panel(s, &t));
     }
-    if vis(Sec::ThreeD) {
-        right = right.child(rune_sec::three_d_panel::three_d_panel(s, &t));
+    if vis(Sec::Scene) {
+        right = right.child(rune_sec::scene_panel::scene_panel(s, &t));
     }
     if vis(Sec::Export) {
         right = right.child(rune_sec::export_panel::export_panel(s, &t));
@@ -699,7 +730,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .w_full()
                 .min_h(0.0)
                 .fill(stage_fill)
-                .radius(8.0)
+                .radius(12.0)
                 .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| stage_drag(s, d))
                 .on_secondary_press_local(|s: &mut State, e: PointerEvent, _tx: &mut Tx| {
                     stage_secondary(s, e)
@@ -766,6 +797,9 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(chrome_view::app_bar(s, &t))
         .child(rune_sec::menus::menu_bar(s, &t))
         .child(rune_sec::workspaces::workspace_row(s, &t))
+        // Charter §15: hairline under the chrome block
+        // (app bar + menu bar + workspace row).
+        .child(rune_sec::design::divider(&t))
         .child(main_row)
         .child(rune_sec::toasts::toasts_view(s, s.toast_now))
         .child(rune_sec::menus::menu_scrim(s))
