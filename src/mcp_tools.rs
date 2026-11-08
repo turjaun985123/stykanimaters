@@ -962,7 +962,7 @@ fn parse_graph_target(
             }
         }
         return Err(format!(
-            "unknown graph target '{s}' (expected "root_x", "root_y", "angle:N", "length:N" or an object with an angle/length key)"
+            "unknown graph target '{s}' (expected \"root_x\", \"root_y\", \"angle:N\", \"length:N\" or an object with an angle/length key)"
         ));
     }
     if let Some(map) = target_v.as_object() {
