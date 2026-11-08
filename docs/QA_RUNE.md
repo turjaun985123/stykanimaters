@@ -489,8 +489,8 @@ has been measured, and no stage height is claimed.
 | # | What | Commit | CI run | Result |
 |---|---|---|---|---|
 | 1 | Phase B: GPUI removed, Rune shell lands | `6f03dd4` | `42455193634` | ✅ GREEN — 701 tests (691 unit + 10 integration) |
-| 2 | Phase C: interactive shell (stage/timeline/transport) | `7083701` | _TBD — integrator_ | _TBD_ |
-| 3 | Phase D: `rune_sec` wired into the binary (mod decls, `State` fields, panel mounting, `AppSpec.scenes`) | _TBD_ | _TBD_ | _TBD_ |
+| 2 | Phase C: interactive shell (stage/timeline/transport) | `7083701` | `42456311759` | ✅ GREEN — 708 tests (691 unit + 7 bin + 10 integration) |
+| 3 | Phase D: `rune_sec` wired into the binary (mod decls, `State` fields, panel mounting, `AppSpec.scenes`) | `9f26d44` + fixes `75116de`, `66f4e46` | `42457752206` | ✅ GREEN — 1,020 tests (691 lib + 319 bin + 10 integration); 362 element keys inventoried |
 | 4 | Headless `--tree` assertions (§3, facts 1–7) in CI | _TBD_ | _TBD_ | _TBD_ |
 | 5 | Headless `--snap` stage-height measurement (§3, step 4) | _TBD_ | _TBD_ | _TBD_ |
 | 6 | First user-PC screenshot review of the Rune shell | — | — | _TBD — user_ |
