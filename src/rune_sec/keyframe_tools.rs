@@ -11,30 +11,57 @@
 //! * "Key angle here" → `EditorCore::key_graph_angle`
 //!   (editor.rs:1203) — keys `Angle(selected_node)` at the
 //!   current frame with its current keyframed value.
-//! * "Auto tangents" → `EditorCore::smooth_graph_tangents`
-//!   (editor.rs:1240). This is the core's one smoothing op: it
-//!   runs `graph::smooth_channel` over every channel, which in
-//!   turn fits `graph::auto_tangents` (graph.rs:348, :305). The
-//!   brief's "auto tangents" and "smooth channel" are the same
-//!   op at core level, so there is deliberately ONE button —
-//!   two buttons calling one op would be a fake distinction.
-//! * Tangent presets → `EditorCore::apply_graph_ease_preset`
-//!   (editor.rs:1263), one button per `graph::TangentPreset`
-//!   variant (graph.rs:358): Smooth, EaseIn, EaseOut, EaseInOut,
-//!   Linear. Scoped to the selected figure's channels. (The
-//!   per-key interp modes are section 9's `set_graph_key_interp`
-//!   — not duplicated here.)
-//! * "Delete key here" → NO `EditorCore` op exists (verified:
-//!   the core's graph family is key/smooth/preset/interp/bake/
-//!   clear only). The handler below composes the engine's
-//!   public API exactly the way `set_graph_key_interp`
-//!   (editor.rs:1305) does internally: locate the selected
-//!   figure's `Angle(selected_node)` channel, `snapshot()`
-//!   (editor.rs:202, pub), then `Channel::remove_key`
-//!   (graph.rs:144 — removes the key nearest the frame, within
-//!   0.5 frames), then set `status`. Nothing is removed when no
-//!   key is near the current frame, and no snapshot is taken
-//!   for a no-op.
+//! * "Auto tangents" → `EditorCore::smooth_graph_tangents`.
+//!   This is the core's one smoothing op: it runs
+//!   `graph::smooth_channel` over every channel IN THE
+//!   PROJECT — all figures, not just the selected one —
+//!   which in turn fits `graph::auto_tangents`
+//!   (graph.rs:348, :305). The brief's "auto tangents" and
+//!   "smooth channel" are the same op at core level, so
+//!   there is deliberately ONE button — two buttons calling
+//!   one op would be a fake distinction. The write set is
+//!   the widest in this section, so the button's row
+//!   carries a scope label saying so (Wave 10, see the
+//!   note at the end of this header).
+//! * Tangent presets → `EditorCore::apply_graph_ease_preset`,
+//!   one button per `graph::TangentPreset` variant
+//!   (graph.rs:358): Smooth, EaseIn, EaseOut, EaseInOut,
+//!   Linear. The write set is EVERY channel belonging to
+//!   the selected figure and EVERY key in them — the op
+//!   rewrites each key's tangents, and the Linear preset
+//!   also rewrites each key's interp mode — never just
+//!   the selected joint's channel or the key at the
+//!   playhead. The chips' row carries a scope label
+//!   saying so (Wave 10). (The per-key interp modes are
+//!   section 9's `set_graph_key_interp` — not duplicated
+//!   here.)
+//! * "Delete key here" → NO `EditorCore` op removes a
+//!   GRAPH channel key (verified: the core's graph family
+//!   is key/smooth/preset/interp/bake/clear only). Wave 10
+//!   added `EditorCore::delete_keyframe`, but that is the
+//!   DOPESHEET's op: it deletes a POSE keyframe — a frame
+//!   whose stored pose changes versus the previous frame,
+//!   in the dense pose store `stats::figure_keyframes`
+//!   reads — by overwriting the frame's pose with the
+//!   previous frame's. It never reads or writes
+//!   `project.channels`, so it cannot remove a graph key,
+//!   and this handler cannot delete a pose keyframe: the
+//!   two "key" stores are different data. The handler
+//!   below therefore still composes the engine's public
+//!   API exactly the way `set_graph_key_interp` does
+//!   internally: locate the selected figure's
+//!   `Angle(selected_node)` channel, `snapshot()`
+//!   (editor.rs:226, pub), then `Channel::remove_key`
+//!   (graph.rs:144 — removes the key nearest the frame,
+//!   within 0.5 frames), then set `status`. Nothing is
+//!   removed when no key is near the current frame, and
+//!   no snapshot is taken for a no-op. (The same store
+//!   split covers Wave 10's `goto_next_keyframe` /
+//!   `goto_prev_keyframe`: they move the playhead between
+//!   POSE keyframes of a figure. This section has no
+//!   playhead navigation control, and no core op
+//!   navigates GRAPH keys, so there is nothing here to
+//!   converge to them.)
 //! * Copy keys / Paste keys → `stykanimate_rs::graph_keys`
 //!   (Phase E, section 11): `graph_keys::copy_keys(core,
 //!   channel_index)` / `graph_keys::paste_keys(core,
@@ -61,7 +88,11 @@
 //!   lookup `delete_key_here_core` uses.
 //! * Nudge left / right → NO `EditorCore` op moves a graph
 //!   key (verified: the core's graph family is
-//!   key/smooth/preset/interp/bake/clear only). The handler
+//!   key/smooth/preset/interp/bake/clear only). The library's
+//!   `graph_keys::shift_keys` is not one either: it shifts
+//!   EVERY key of a channel by one delta, where the nudge
+//!   moves the single key at the playhead under a collision
+//!   rule — a different op. The handler
 //!   composes the public graph API the way delete does:
 //!   resolve the channel via
 //!   `selected_angle_channel_index`, plan the move with
@@ -293,6 +324,76 @@
 //!   panel is the channel-owning surface directly
 //!   above it in the same column — see the note at
 //!   that call site.
+//!
+//! UI mission Wave 10 (agent D8) — round-2 convergence
+//! audit against the wave's new core ops and the
+//! dopesheet:
+//!
+//! * The wave's five new `EditorCore` ops
+//!   (`delete_keyframe`, `next_keyframe`,
+//!   `prev_keyframe`, `goto_next_keyframe`,
+//!   `goto_prev_keyframe`) are all POSE-keyframe ops
+//!   over the dense pose store (via
+//!   `stats::figure_keyframes`); none of them reads or
+//!   writes `project.channels`. Every composition in
+//!   this section acts on GRAPH channel keys, so none
+//!   of them converges to a new core op — the Delete
+//!   bullet above carries the full store-split
+//!   reasoning, and a test below pins that the pose
+//!   ops never touch the graph channels. No panel op
+//!   duplicates a core op under different undo/status
+//!   semantics: Key angle, Auto tangents and the
+//!   presets all call their core ops directly.
+//! * Cycle interp vs `EditorCore::set_graph_key_interp`
+//!   is a deliberate, documented divergence (the
+//!   Phase L bullet predates this note and does not
+//!   mention the core op): the core op sets the mode
+//!   of the key NEAREST the playhead with no distance
+//!   bound, so a press can silently retarget a key
+//!   many frames away; this section's contract is the
+//!   key AT the playhead (the engine's 0.5-frame
+//!   window), guarded inert otherwise, so the button,
+//!   its "Interp: {mode}" label and the write can
+//!   never disagree about which key is meant. The
+//!   handler therefore composes
+//!   `graph_keys::set_key_interp` with an explicit key
+//!   index instead. A test below pins both halves of
+//!   the divergence on identical fixtures.
+//! * Easing scope honesty: the section is framed by
+//!   its target line (one figure, one joint) and its
+//!   channel indicator, but two of its ops write far
+//!   wider — Auto tangents smooths every channel in
+//!   the project, and the tangent presets rewrite
+//!   every key of every channel of the selected
+//!   figure. Both rows now carry a kit
+//!   `design::section_label` naming the write set
+//!   ([`AUTO_TANGENTS_SCOPE_LABEL`] /
+//!   [`PRESET_SCOPE_LABEL`]) — the easing panel's own
+//!   idiom ("Graph keys — selected figure"). Every
+//!   other control's label already matches its traced
+//!   write set (this joint/frame, this channel, the
+//!   loop range, the playhead key), and Key all here's
+//!   "all" is the project channel set its status line
+//!   counts.
+//! * The "Key angle here" / "Key angle" split (Wave 9
+//!   note above) is RE-AFFIRMED after the dopesheet:
+//!   the dopesheet adds a third "key" vocabulary —
+//!   pose keyframes — to the same shell, which makes
+//!   this section's playhead-relative graph dialect
+//!   more worth keeping, not less. Nothing in the
+//!   dopesheet calls `key_graph_angle` or carries a
+//!   competing name for it.
+//! * Row widths re-audited against the 316 pt budget
+//!   with the longest names in the section: the preset
+//!   chips (≈68 pt each — 52 pt preview + padding,
+//!   "Ease in-out" the widest label) total ≈364 pt on
+//!   one line and wrap 4+1 through the row's
+//!   `flex_wrap` (≈296 pt on the first line); the
+//!   stamp row ("Key all here" + "Copy key +10")
+//!   measures ≈232 pt; the longest single-control row
+//!   ("Clear keys in loop range") ≈190 pt; the two new
+//!   scope labels are ≤43 characters (≈260 pt at the
+//!   SECTION face). Clean.
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, El};
@@ -919,7 +1020,12 @@ pub fn fill_keys_in_range_here(s: &mut State) {
 /// Cycle the interp mode of the selected angle
 /// channel's key at the current frame — Hermite →
 /// Linear → Step → Hermite (see [`next_interp`]) — and
-/// return whether the key's mode changed. The write
+/// return whether the key's mode changed. Deliberately
+/// NOT `EditorCore::set_graph_key_interp`: that op
+/// edits the key NEAREST the playhead with no distance
+/// bound, while this section's contract is the key AT
+/// the playhead — see the Wave 10 note in the module
+/// header. The write
 /// itself is the library's `graph_keys::set_key_interp`
 /// over the channel [`selected_angle_channel_index`]
 /// resolves: it owns the single snapshot and the status
@@ -1112,6 +1218,24 @@ pub const ACTIONS_ROW_KEY: &str = "keyframe-actions";
 /// tests can pin that the fix did not rename it.
 pub const DELETE_KEY_BUTTON_KEY: &str = "key-delete";
 
+/// Scope label over the Auto tangents row (Wave 10):
+/// `smooth_graph_tangents` smooths every channel in
+/// the project — all figures — the widest write set
+/// in this section, in a section otherwise framed by
+/// one figure and one joint. The label states the
+/// write set before the press, the easing panel's
+/// idiom for its own figure-wide group. Kept as a
+/// constant so the tests can pin the wording.
+pub const AUTO_TANGENTS_SCOPE_LABEL: &str = "Smoothing — every channel in the project";
+
+/// Scope label over the tangent-preset row (Wave 10):
+/// `apply_graph_ease_preset` rewrites every key of
+/// every channel belonging to the selected figure —
+/// never just the selected joint's channel or the key
+/// at the playhead. Same discipline as
+/// [`AUTO_TANGENTS_SCOPE_LABEL`].
+pub const PRESET_SCOPE_LABEL: &str = "Tangent presets — selected figure, all keys";
+
 /// The note shown when no joint is selected, or `None`
 /// when one is. The text is [`target_text`]'s no-joint
 /// wording, unchanged — Phase J changes where the note
@@ -1166,6 +1290,12 @@ pub fn no_joint_note_row(core: &EditorCore, t: &Theme) -> Option<El> {
 /// would refuse, via the `*_enabled` predicates above
 /// (Phases I, K, L and M); the plain text buttons stay wired in every
 /// state and land on their ops' status-only refusals.
+/// The two wide-scope ops carry kit section labels
+/// naming their write sets (Wave 10): Auto tangents
+/// smooths every channel in the project, and the
+/// tangent presets under
+/// [`PRESET_SCOPE_LABEL`] rewrite every key of every
+/// channel of the selected figure.
 /// The target slot under the header is state-dependent
 /// (Phase J): with a joint selected it is the original
 /// bare target line; with none it is the dedicated
@@ -1224,6 +1354,7 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                     delete_key_here(s)
                 })),
         )
+        .child(design::section_label(AUTO_TANGENTS_SCOPE_LABEL, t))
         .child(
             row()
                 .key("keyframe-auto")
@@ -1360,6 +1491,7 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                     icon_btn_inert("key-copy-to-frame", "copy", "Copy key +10", t)
                 }),
         )
+        .child(design::section_label(PRESET_SCOPE_LABEL, t))
         .child(presets)
 }
 
@@ -2541,5 +2673,103 @@ mod tests {
         assert_ne!(NO_JOINT_NOTE_ROW_KEY, ACTIONS_ROW_KEY);
         assert_eq!(ACTIONS_ROW_KEY, "keyframe-actions");
         assert_eq!(DELETE_KEY_BUTTON_KEY, "key-delete");
+    }
+
+    #[test]
+    fn scope_labels_name_the_wide_write_sets() {
+        // Wave 10: the two ops whose write set is wider
+        // than this section's one-joint framing carry a
+        // kit section label stating it. `El` has no
+        // tree-walk, so the wording is pinned through
+        // the constants the builder itself renders, plus
+        // a full section build.
+        assert_eq!(
+            AUTO_TANGENTS_SCOPE_LABEL,
+            "Smoothing — every channel in the project"
+        );
+        assert!(
+            AUTO_TANGENTS_SCOPE_LABEL.contains("every channel in the project"),
+            "the Auto tangents label names its project-wide write set"
+        );
+        assert_eq!(
+            PRESET_SCOPE_LABEL,
+            "Tangent presets — selected figure, all keys"
+        );
+        assert!(
+            PRESET_SCOPE_LABEL.contains("selected figure") && PRESET_SCOPE_LABEL.contains("all keys"),
+            "the preset label names its figure-wide, all-keys write set"
+        );
+        // Both fit the right column's 316 pt budget at
+        // the SECTION face (≈6 pt per character by the
+        // Wave 1 measurements) — a bare section_label
+        // has no truncation to fall back on.
+        assert!(AUTO_TANGENTS_SCOPE_LABEL.chars().count() <= 43);
+        assert!(PRESET_SCOPE_LABEL.chars().count() <= 43);
+        let t = rune::tok::theme(true);
+        let _ = keyframe_section(&state_with(core_with_angle_keys()), &t);
+    }
+
+    #[test]
+    fn wave10_pose_keyframe_ops_never_touch_graph_channels() {
+        // Wave 10's new core ops (`delete_keyframe`,
+        // `goto_next_keyframe`, `goto_prev_keyframe`)
+        // act on POSE keyframes in the dense pose store;
+        // this section deletes GRAPH channel keys. The
+        // stores are disjoint: running the pose ops —
+        // including a delete attempt on the base frame
+        // and both navigations — must leave the fixture
+        // channel's keys exactly as they were, which is
+        // why no handler in this section can converge to
+        // them.
+        let mut core = core_with_angle_keys();
+        let before: Vec<(f32, f32)> = core.project.channels[0]
+            .keys
+            .iter()
+            .map(|k| (k.frame, k.value))
+            .collect();
+        let _ = core.delete_keyframe(0, 0);
+        let _ = core.goto_next_keyframe(0);
+        let _ = core.goto_prev_keyframe(0);
+        let after: Vec<(f32, f32)> = core.project.channels[0]
+            .keys
+            .iter()
+            .map(|k| (k.frame, k.value))
+            .collect();
+        assert_eq!(after, before, "the pose ops never write the graph store");
+        assert_eq!(core.project.channels.len(), 1, "no channel created or removed");
+    }
+
+    #[test]
+    fn cycle_interp_refuses_the_distant_key_the_core_op_would_edit() {
+        // The documented divergence from
+        // `EditorCore::set_graph_key_interp` (Wave 10
+        // note): on identical fixtures with the playhead
+        // on frame 4 — two frames from the nearest key,
+        // outside the 0.5-frame window — the core op
+        // retargets that distant key, while this
+        // section's cycle refuses, inert and
+        // snapshot-free.
+        let mut via_core = core_with_angle_keys(); // keys at 0 and 2, Hermite
+        via_core.current = 4;
+        via_core.set_graph_key_interp(Interp::Step);
+        let ch = selected_angle_channel(&via_core).expect("channel survives");
+        assert_eq!(
+            ch.keys[1].interp,
+            Interp::Step,
+            "the core op edits the nearest key however far the playhead is"
+        );
+
+        let mut via_panel = core_with_angle_keys();
+        via_panel.current = 4;
+        assert!(!interp_cycle_enabled(&via_panel), "the guard reads no key here");
+        let depth = via_panel.undo_depth();
+        assert!(!cycle_key_interp_core(&mut via_panel));
+        assert_eq!(via_panel.undo_depth(), depth, "the refusal never snapshots");
+        let ch = selected_angle_channel(&via_panel).expect("channel survives");
+        assert_eq!(
+            ch.keys[1].interp,
+            Interp::Hermite,
+            "the distant key keeps its mode"
+        );
     }
 }

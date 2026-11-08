@@ -149,6 +149,198 @@
 //! is a 0.056 linear mix toward white (`#818996`,
 //! 4.51 on the card) — and light muted must not be
 //! used for text at all.
+//!
+//! # Contrast re-audit (Wave 10)
+//!
+//! The Wave 9 audit above was recomputed from the
+//! current token values: every published figure
+//! reproduces exactly (secondary 6.74 / 5.88 and
+//! 5.94 / 5.88; `success_on` 7.62 / 5.33;
+//! `warning_on` 8.93 / 5.41; `error_on` 5.28 /
+//! 5.43; muted 3.83 / 2.62 / 4.50 / 2.30; the
+//! light muted still renders `#9BA0AA`; the 0.056
+//! clearing step still lands `#818996` at 4.51).
+//! No token value changed in between. Pairs the
+//! first audit did not print, all clearing 4.5:
+//! primary text on card 14.37 (dark) / 17.41
+//! (light), on elevated 12.65 / 17.41, on the app
+//! background 16.88 / 15.24; secondary on the
+//! background 7.92 / 5.15. The danger fills were
+//! re-verified too: white on `#C93A44` 5.03, on
+//! `#B2323E` 6.14, on `#9C2934` 7.55 — the shell's
+//! standing precedent is that a fill carrying
+//! white text is held to ≈ 5:1.
+//!
+//! New or newly covered surfaces since Wave 9:
+//!
+//! * **Clips "Editing" marker** (Wave 9): the
+//!   accent as LABEL text on the card — 5.19 dark
+//!   / 5.06 light. Passes; the app accent as an
+//!   *ink* is not the contrast problem (below).
+//! * **Status strip** (the Wave 8 `strip_colors`
+//!   seam; segments paint on the app background):
+//!   text 16.88 / 15.24, secondary tail 7.92 /
+//!   5.15 — and the play-state segment, accent
+//!   text while playing: 6.10 dark / **4.43
+//!   light**. The one new real-text miss in this
+//!   re-audit, marginal (0.07 under) and only
+//!   while playback runs; recorded, not fixed —
+//!   any fix touches the accent decision below
+//!   or the strip's colour seam, not this file's
+//!   values alone.
+//! * **Toasts**: severity bar and glyph measure
+//!   on the *upstream* dark card (see the
+//!   hardcode list below): Info 5.47, Success
+//!   8.02, Warn 9.40, Error 5.56, body text
+//!   14.74 — all clear, in both appearances,
+//!   because the toast column never leaves the
+//!   dark theme. The export recap's severity
+//!   *text* takes the real theme and is the
+//!   Wave 9 `*_on`-on-card pairs above.
+//! * **Timeline marker row** (Wave 10): the
+//!   current frame's cell is now accent-filled
+//!   with white glyphs — the 3.14 pair below, as
+//!   *glyphs* (non-text), clearing the 3:1
+//!   non-text guidance by 0.14. Off the current
+//!   frame the accent glyph on the card is 5.08
+//!   dark / 3.14 light. The current chip's white
+//!   frame *number* is real text at the same
+//!   3.14 (pre-existing; part of the decision
+//!   below). Loop-range chip fill (card mixed
+//!   0.35 toward the accent, primary text on
+//!   it): 5.91 / 13.26.
+//! * **Tint surfaces** (primary text over an
+//!   accent tint of the card): selected list
+//!   rows (α 0.16) 8.69 / 15.51; the home
+//!   recovery banner (α 0.18) 8.28 / 15.28.
+//! * **Splitter grip** (Wave 9): `design::
+//!   text_muted` (secondary at α 0.6) over the
+//!   background — 5.15 dark / 1.94 light. A
+//!   decorative glyph (the hairline carries the
+//!   divider); the light grip falls under the
+//!   3:1 non-text guidance and is recorded as
+//!   an observation for the kit, not a text
+//!   failure. Muted's consumer list is unchanged
+//!   in kind: graph glyphs plus this grip, both
+//!   decoration, still no real text.
+//! * **Dopesheet lane** (Wave 10, in flight at
+//!   this audit): figure names and readouts are
+//!   primary / secondary text on the card
+//!   (14.37 / 17.41 and 6.74 / 5.88 — covered,
+//!   no new pair), and its keyframe diamonds
+//!   are the upstream accent as a glyph: on the
+//!   plain card 5.08 dark / 3.14 light, but on
+//!   the selected-fill tint (the current-frame
+//!   column and the selected figure's row)
+//!   **3.07 dark / 2.80 light** — the light
+//!   figure dips under the 3:1 non-text
+//!   guidance, recorded for the lane's owner;
+//!   the lane's own docs claim the accent
+//!   "cannot vanish", which is 0.20 of ratio
+//!   too optimistic in that one cell state.
+//!
+//! # The accent decision — evidence pack (no values changed)
+//!
+//! The standing question — white text on the
+//! accent at 3.14:1, keep or darken — is usually
+//! stated as if "the accent" were this module's
+//! [`ACCENT_DARK`]. It is not. **Two accents
+//! exist.** The fill that actually carries white
+//! text is upstream's `tok::accent(0, true)` —
+//! `oklch(0.66, 0.17, 256°)`, rendering as
+//! `#4392F7`, luminance 0.2845, white on it
+//! exactly 3.14 — hard-coded with the dark
+//! variant, so the same fill serves **both**
+//! appearances. This module's `#6C8CFF` (white
+//! on it 3.07) carries no white text anywhere:
+//! it works as ink, marker and dot (clips
+//! marker 5.19, strip segment 6.10 dark, camera
+//! dial marker, dirty dot), and its light twin
+//! `#4666D8` already measures 5.06 against
+//! white. Darkening this module's constants
+//! alone would therefore change **nothing** for
+//! button labels; a real fix replaces the
+//! `tok::accent(0, true)` fills (or routes them
+//! through an app-side fill token), which is a
+//! call-site wave, not a value edit.
+//!
+//! Blast radius of the white-on-upstream-accent
+//! pair, production sites at this audit: every
+//! active `chrome_view::btn` label and
+//! `icon_btn` glyph/label (rest, hover and
+//! press fills alike); the menus' three active
+//! row builders (label and hint in white); the
+//! timeline's current-frame chip number and
+//! the marker row's current-cell glyphs; the
+//! command palette's selected row — white on
+//! the accent at α 0.85 over the elevated
+//! surface, measuring **3.55 dark / 2.38
+//! light**, the worst instance in the shell.
+//! Non-text riders on the same value: the kit
+//! toggle pill (white knob), slider progress
+//! fill, swatch selection ring, `selected_fill`
+//! tint basis, graph-canvas handles, FX /
+//! particle row dots, the scene swatch ring.
+//!
+//! Candidates, computed for a 4.5:1 white-text
+//! target (foreground luminance ≤ 0.18333),
+//! **none applied**: holding the upstream
+//! hue/chroma (OKLCH C 0.17, h 256°) and
+//! lowering lightness, the boundary is
+//! L ≈ 0.571 (`#2576D9`, exactly 4.50); with
+//! headroom for hex rounding, L 0.56 renders
+//! `#2072D5` at 4.72 and L 0.55 renders
+//! `#1C6FD2` at 4.93 (rounded hexes re-measured
+//! 4.74 / 4.94). A linear scale of the rendered
+//! `#4392F7` by k = 0.645 (`#3577CC`) sits
+//! exactly on 4.50 with no rounding headroom
+//! and is recorded only to be ruled out. If
+//! the fills instead migrated to this module's
+//! accent family, [`ACCENT_DARK`] scaled by
+//! k = 0.611 renders `#556FCD` at 4.62 as a
+//! rounded hex, and [`ACCENT_LIGHT`] needs no
+//! candidate (5.06 already). One interaction
+//! the decider should see: the palette row's
+//! α 0.85 means even a compliant accent only
+//! reaches ≈ 3.0–3.1 there in light (white
+//! bleeds through the alpha) — darkening the
+//! accent does not fix that row in light; its
+//! alpha is a separate choice. The secondary
+//! accents carry no white text (no production
+//! consumer renders text on them); white on
+//! them would be 3.12 dark / 4.81 light.
+//!
+//! # Hard-coded theme check (Wave 10)
+//!
+//! The Wave 8 surfaces still resolve through
+//! this module: the status strip builds its
+//! theme via `app_theme(!light_theme)` at both
+//! call sites and `strip_colors` derives from
+//! the passed theme; menus take the caller's
+//! theme; no new `tok::theme(true)` crept into
+//! production code in Waves 8–10. Every other
+//! `tok::theme(…)` hit in `src/` is a
+//! `#[cfg(test)]` module or a doc comment
+//! (verified file by file). Two production
+//! offenders remain, both Phase N-era, both
+//! internally consistent (upstream text on
+//! upstream card, 14.74) and therefore
+//! appearance defects, not contrast failures:
+//!
+//! * `toasts.rs` (`toasts_view`): the whole
+//!   toast column — card fill, body text and
+//!   the theme fed to the severity helpers —
+//!   is the upstream dark theme in both
+//!   appearances, so light-theme toasts render
+//!   as dark cards and the `*_on` light
+//!   variants never reach them.
+//! * `camera_panel.rs` (`overlay`): the stage
+//!   camera pill likewise builds on
+//!   `tok::theme(true)`; its module docs record
+//!   the choice as deliberate (pill and buttons
+//!   from one theme), but the buttons it must
+//!   agree with take the caller's theme, so in
+//!   light the pill stays dark.
 
 use rune::tok::{self, Theme};
 use rune::Color;

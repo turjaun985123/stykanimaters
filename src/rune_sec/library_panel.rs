@@ -20,6 +20,7 @@
 //!   (editor.rs:2100), the same op the GPUI Library panel's
 //!   Insert button used.
 //! - A **Save current figure to library** button calling
+//!   [`save_current_figure`] →
 //!   `EditorCore::save_figure_to_library` (editor.rs:2115),
 //!   which writes `./library/<figure-name>.json` and reloads
 //!   the library, so the new entry appears in the list on the
@@ -178,6 +179,41 @@
 //!   "nothing here" lines are the kit's
 //!   [`design::empty_state`] with their message strings
 //!   byte-identical.
+//!
+//! ## Wave 10 (round-2 audit)
+//!
+//! - **Row widths**: entry rows are two-line now (name
+//!   + segment count, then the buttons) with the name
+//!   in Rune's truncating one-line mode — the
+//!   single-line row's fixed children alone overran
+//!   the card for every saved entry, and the longest
+//!   built-in name overran its share too; see
+//!   [`entry_row`]'s note for the measured arithmetic.
+//!   Invisible to headless scans because CI checkouts
+//!   have no `./library` files, so saved rows never
+//!   rendered there.
+//! - **Rename-session slot discipline**: the session
+//!   is a raw library slot, and two of the panel's own
+//!   actions can move slots — a successful delete of
+//!   an earlier entry ([`delete_entry`] now shifts the
+//!   session down with its entry; a failed delete
+//!   shifts nothing) and the save button's library
+//!   reload ([`save_current_figure`] captures the
+//!   target by name and re-resolves it afterwards via
+//!   [`reresolve_renaming`]). Before this wave either
+//!   action could leave the editor open on a different
+//!   entry than the one the user picked.
+//! - **Search scope, recorded**: an entry IS a name
+//!   plus a `FigureDef { nodes }` (model.rs) — there
+//!   is no kind or tag field anywhere in the library
+//!   model, so matching the display name and the
+//!   backing file name ([`entry_matches`]) covers
+//!   everything an entry carries. The factory audit
+//!   also closed clean: `FigureDef` has exactly three
+//!   named constructors (`humanoid`, `quadruped`,
+//!   `simple`) and the three built-ins map onto them
+//!   one-to-one, so no constructible figure type is
+//!   missing from the library.
 //!
 //! The successful-rename fs dispatch (a real file moved
 //! under `./library`) is deliberately **untested**, for
@@ -631,6 +667,77 @@ pub fn insert_at(core: &mut EditorCore, i: usize) {
     }
 }
 
+/// Delete library entry `i` from the panel (the per-row
+/// Delete button's handler): [`delete_saved`] plus the
+/// rename-session bookkeeping a removal can disturb.
+///
+/// The session is a raw library slot. Deleting the row
+/// under rename cancels it first (the long-standing
+/// rule — the session's entry is going away). A
+/// SUCCESSFUL delete of an entry BEFORE the target
+/// shifts every later slot down one, so the session
+/// follows its entry to `r - 1`; without the follow,
+/// the editor row would render under — and Apply would
+/// rename — a different entry than the one the user
+/// opened. A FAILED delete (the entry is kept, per
+/// [`delete_saved`]'s contract) shifts nothing, so the
+/// session is left exactly as it was: the length check
+/// is what tells the two apart.
+pub fn delete_entry(s: &mut State, i: usize) {
+    if s.library_panel.renaming == Some(i) {
+        cancel_rename(s);
+    }
+    let len_before = s.core.library.len();
+    delete_saved(&mut s.core, i);
+    if s.core.library.len() < len_before {
+        if let Some(r) = s.library_panel.renaming {
+            if r > i {
+                s.library_panel.renaming = Some(r - 1);
+            }
+        }
+    }
+}
+
+/// Re-point the open rename session at the entry named
+/// `target_name`, wherever it sits now; cancel the
+/// session when no entry carries that name any more.
+/// Library entry names are unique in practice (saved
+/// entries are named from file stems, and a directory
+/// cannot hold two files with one stem), so the name
+/// is a stable identity across a reload that may have
+/// moved the entry's slot.
+pub fn reresolve_renaming(s: &mut State, target_name: &str) {
+    match s.core.library.iter().position(|(n, _)| n == target_name) {
+        Some(slot) => s.library_panel.renaming = Some(slot),
+        None => cancel_rename(s),
+    }
+}
+
+/// Save the current figure to the library (the
+/// `library-save` button's handler): the core's
+/// `save_figure_to_library`, plus rename-session care —
+/// a successful save RELOADS the library in sorted
+/// file order (editor.rs `load_library`), which can
+/// move the slot of the entry being renamed when the
+/// new figure's stem sorts ahead of it. The session's
+/// target is captured by NAME before the save and
+/// re-resolved after it ([`reresolve_renaming`]), so
+/// the editor can never end up renaming a different
+/// entry than the one the user opened. A failed save
+/// leaves the library untouched, and the re-resolution
+/// lands on the same slot it started from.
+pub fn save_current_figure(s: &mut State) {
+    let target = s
+        .library_panel
+        .renaming
+        .and_then(|i| s.core.library.get(i))
+        .map(|(name, _)| name.clone());
+    s.core.save_figure_to_library();
+    if let Some(name) = target {
+        reresolve_renaming(s, &name);
+    }
+}
+
 /// The library slot pressing Enter in the search field
 /// inserts: the first row the current filter shows, by
 /// its REAL library slot — the same visible→real mapping
@@ -802,13 +909,14 @@ fn rename_editor_row(s: &State, t: &Theme) -> El {
         }))
 }
 
-/// One library row: name (growing), segment count muted,
-/// its Insert button, and — for saved entries only —
-/// Rename and Delete buttons. Built-in rows never get
-/// them: built-ins are constructed in code, have no
-/// file, and [`rename_saved`]/[`delete_saved`] would
-/// refuse them anyway. While this row is the rename
-/// target, the rename editor renders directly under it.
+/// One library row: name and segment count on the
+/// first line, the action buttons on a second line —
+/// Insert, and — for saved entries only — Rename and
+/// Delete. Built-in rows never get Rename/Delete:
+/// built-ins are constructed in code, have no file,
+/// and [`rename_saved`]/[`delete_saved`] would refuse
+/// them anyway. While this row is the rename target,
+/// the rename editor renders directly under it.
 ///
 /// Phase N: the row rides the kit's [`design::list_row`]
 /// shell (min height 28, px 8, radius 8, hover overlay)
@@ -817,30 +925,45 @@ fn rename_editor_row(s: &State, t: &Theme) -> El {
 /// per-row state the panel carries. The shell takes no
 /// handler: the row's pressable children below keep
 /// their keys and handlers exactly as before.
+///
+/// Wave 10 (round-2 width audit): the row used to be a
+/// SINGLE line — name + count + buttons side by side.
+/// Measured with the shell's own LABEL width model
+/// (fx_browser's `preset_char_width`), a saved row's
+/// FIXED children alone — "13 seg" ≈ 39 pt, Insert
+/// ≈ 80 pt, Rename ≈ 86 pt, Delete 26 pt, plus 32 pt
+/// of gaps — total ≈ 263 pt against the 236 pt the
+/// row has inside the card (276 pt column content −
+/// 24 pt card padding − 16 pt row padding), so Rename
+/// and Delete painted past the card's right edge for
+/// ANY saved entry, and the longest built-in name
+/// ("Built-in: Quadruped", ≈ 118 pt modelled) also
+/// overran its ≈ 101 pt share of a built-in row. No
+/// headless tree ever showed it: CI checkouts have no
+/// `./library` files, so saved rows never rendered
+/// there. The two-line anatomy is the figures panel's
+/// answer for action-rich rows (its FIG-1 rows): the
+/// name line keeps the full 236 pt (the name itself
+/// now also carries `.truncate()`, the shell's
+/// one-line elision, so an unbounded file-stem name
+/// elides instead of forcing the line wide), and the
+/// button line fits at ≈ 208 pt worst case.
 fn entry_row(entry: &LibraryRow, s: &State, t: &Theme) -> El {
     let i = entry.index;
-    let mut r = design::list_row(
-        &format!("library-row-{i}"),
-        s.library_panel.renaming == Some(i),
-        t,
-    )
-        .child(text(entry.name.clone()).font(type_::LABEL).color(t.text).grow(1.0))
-        .child(
-            text(format!("{} seg", entry.segments))
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        )
+    let mut buttons = row()
+        .gap(8.0)
+        .center_y()
         .child(icon_btn(&format!("library-insert-{i}"), "plus", "Insert", false, t, move |s: &mut State| {
             insert_at(&mut s.core, i);
         }));
     if !entry.builtin {
         // The rename target's mark lives on the row shell
-        // alone (the list_row selected fill above); this
+        // alone (the list_row selected fill below); this
         // button stays inactive so the state is never
         // painted twice — the text_tool precedent, applied
         // by the integrator after the V-wave audit found
         // the doubling.
-        r = r.child(icon_btn(
+        buttons = buttons.child(icon_btn(
             &format!("library-rename-{i}"),
             "pencil",
             "Rename",
@@ -848,24 +971,44 @@ fn entry_row(entry: &LibraryRow, s: &State, t: &Theme) -> El {
             t,
             move |s: &mut State| start_rename(s, i),
         ));
-        r = r.child(icon_only_btn(
+        buttons = buttons.child(icon_only_btn(
             &format!("library-delete-{i}"),
             "trash-can",
             "Delete entry",
             26.0,
             false,
             t,
-            move |s: &mut State| {
-                // Deleting the row under rename would shift
-                // every later slot; cancel the session first
-                // so `renaming` never points at another entry.
-                if s.library_panel.renaming == Some(i) {
-                    cancel_rename(s);
-                }
-                delete_saved(&mut s.core, i);
-            },
+            move |s: &mut State| delete_entry(s, i),
         ));
     }
+    let body = col()
+        .grow(1.0)
+        .gap(4.0)
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text(entry.name.clone())
+                        .font(type_::LABEL)
+                        .color(t.text)
+                        .grow(1.0)
+                        .truncate(),
+                )
+                .child(
+                    text(format!("{} seg", entry.segments))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                ),
+        )
+        .child(buttons);
+    let r = design::list_row(
+        &format!("library-row-{i}"),
+        s.library_panel.renaming == Some(i),
+        t,
+    )
+    .child(body);
     if s.library_panel.renaming == Some(i) {
         return col()
             .key(format!("library-row-wrap-{i}"))
@@ -940,7 +1083,7 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
             "Save current figure to library",
             false,
             t,
-            |s: &mut State| s.core.save_figure_to_library(),
+            |s: &mut State| save_current_figure(s),
         ));
         card = card.child(
             row()
@@ -1077,6 +1220,108 @@ mod tests {
         assert_eq!(core.project.figures.len(), n + 1);
         assert_eq!(core.library_index, 2);
         assert!(core.status.contains("Built-in: Mini"));
+        // The selection lands on the inserted figure
+        // (the core op's own state write, editor.rs
+        // `insert_library_figure`): whatever figure any
+        // other panel had selected is replaced by the
+        // new one, and the node selection clears.
+        assert_eq!(core.selected_figure, n);
+        assert_eq!(core.selected_node, None);
+    }
+
+    #[test]
+    fn insert_at_during_playback_still_inserts_and_selects() {
+        // Inserting mid-playback is the same op: the
+        // figure is appended and selected, and the op
+        // does not stop playback to do it (it never
+        // touches the flag) — the insert is honest
+        // either way, its status line reporting it.
+        let mut core = EditorCore::new();
+        core.playing = true;
+        let n = core.project.figures.len();
+        insert_at(&mut core, 0);
+        assert_eq!(core.project.figures.len(), n + 1);
+        assert_eq!(core.selected_figure, n);
+        assert!(core.playing, "the insert leaves playback running");
+    }
+
+    #[test]
+    fn delete_entry_cancels_the_session_on_its_own_row() {
+        // The delete dispatch itself fails here (the
+        // synthetic entry has no backing file — the
+        // failure path the fs discipline allows), but
+        // the session on the deleted row is cancelled
+        // BEFORE the attempt, as it always has been.
+        let mut s = crate::init();
+        s.core.library.push((
+            "zzz-test-nonexistent-entry".into(),
+            stykanimate_rs::model::FigureDef::simple(),
+        ));
+        let idx = s.core.library.len() - 1;
+        start_rename(&mut s, idx);
+        assert_eq!(s.library_panel.renaming, Some(idx));
+        delete_entry(&mut s, idx);
+        assert_eq!(s.library_panel.renaming, None);
+        // The failed delete kept the entry.
+        assert_eq!(s.core.library.len(), idx + 1);
+    }
+
+    #[test]
+    fn delete_entry_keeps_the_session_slot_when_the_delete_fails() {
+        // Renaming the LATER entry while deleting an
+        // EARLIER one: the delete fails (synthetic
+        // entry, no file), nothing is removed, so no
+        // slot moves and the session must stay exactly
+        // where it was — the shift-follow in
+        // `delete_entry` is gated on the library
+        // actually shrinking.
+        let mut s = crate::init();
+        s.core.library.push((
+            "zzz-test-earlier-entry".into(),
+            stykanimate_rs::model::FigureDef::simple(),
+        ));
+        let earlier = s.core.library.len() - 1;
+        s.core.library.push((
+            "zzz-test-later-entry".into(),
+            stykanimate_rs::model::FigureDef::simple(),
+        ));
+        let later = s.core.library.len() - 1;
+        start_rename(&mut s, later);
+        assert_eq!(s.library_panel.renaming, Some(later));
+        delete_entry(&mut s, earlier);
+        assert!(
+            s.core.status.contains("Library delete failed"),
+            "status: {}",
+            s.core.status
+        );
+        assert_eq!(s.core.library.len(), later + 1, "nothing was removed");
+        assert_eq!(s.library_panel.renaming, Some(later));
+    }
+
+    #[test]
+    fn reresolve_renaming_follows_the_entry_name() {
+        // The save-reload shape, minus the fs: the
+        // library vec is reordered under an open
+        // session (as `load_library`'s sorted order can
+        // do after a save), and the session must land
+        // back on the entry it was opened for — found
+        // by name, not by the stale slot.
+        let mut s = crate::init();
+        s.core.library
+            .push(("alpha-w10".into(), stykanimate_rs::model::FigureDef::simple()));
+        let alpha = s.core.library.len() - 1;
+        s.core.library
+            .push(("beta-w10".into(), stykanimate_rs::model::FigureDef::simple()));
+        let beta = s.core.library.len() - 1;
+        start_rename(&mut s, alpha);
+        assert_eq!(s.library_panel.renaming, Some(alpha));
+        s.core.library.swap(alpha, beta);
+        reresolve_renaming(&mut s, "alpha-w10");
+        assert_eq!(s.library_panel.renaming, Some(beta), "the session followed its entry");
+        // A name no entry carries any more closes the
+        // session rather than leaving it on a stranger.
+        reresolve_renaming(&mut s, "gone-w10");
+        assert_eq!(s.library_panel.renaming, None);
     }
 
     #[test]
@@ -1667,6 +1912,17 @@ mod tests {
         let idx = s.core.library.len() - 1;
         start_rename(&mut s, idx);
         assert_eq!(s.library_panel.renaming, Some(idx));
+        let _ = library_panel(&s, &t);
+        // Wave 10: a saved entry whose file-stem name is
+        // far longer than the row — the two-line,
+        // truncating row must construct for it too (its
+        // width arithmetic is in `entry_row`'s docs;
+        // element internals stay opaque here, as above).
+        s.library_panel.renaming = None;
+        s.core.library.push((
+            "a-very-long-saved-figure-name-that-cannot-fit-on-one-line".into(),
+            stykanimate_rs::model::FigureDef::simple(),
+        ));
         let _ = library_panel(&s, &t);
     }
 }

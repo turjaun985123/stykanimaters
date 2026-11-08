@@ -60,6 +60,28 @@
 //! when every card wraps to three lines (the constant's own
 //! docs carry the arithmetic).
 //!
+//! Wave 10 closes the two holes its round-2 audit proved.
+//! (1) Severity truth at the API surface: `push` took a
+//! caller-supplied severity, and this module's own dedupe
+//! tests once modelled a real failure string at `Info` —
+//! the API let a wrong severity pass silently. Status
+//! echoes now have [`ToastsState::push_status`], which
+//! derives the severity from the text via
+//! [`classify_status`] — the derivation the one production
+//! push site (the poll hook) was already doing longhand —
+//! and the tests below model real status strings only at
+//! their classified severity. (2) The pill guarantee:
+//! [`MAX_TOASTS`]' arithmetic premises a three-line
+//! ceiling per card, but nothing enforced it, and real
+//! statuses break it — path-bearing audio and export
+//! failures run past 100 characters, which at the
+//! Undo-carrying newest toast's ≈ 162 pt text width wraps
+//! to four lines or more. The card text now carries the
+//! renderer's line clamp at [`MAX_TOAST_LINES`], so the
+//! ceiling is enforced, not assumed; the model still
+//! stores and dedupes the full text, and the full string
+//! stays readable in the status line.
+//!
 //! Why hand-rolled instead of rune-kit's `Toast` /
 //! `ToastRegion` (read at `crates/rune-kit/src/toast.rs` in the
 //! pinned Rune tree):
@@ -86,14 +108,18 @@
 //!
 //! Feeding contract (the integrator's side): when
 //! `core.status` changes, call
-//! `state.toasts.push(status_text, severity, now)`; call
-//! `state.toasts.expire(now)` from the poll hook so dead
-//! toasts leave the model even while nothing is pushed. The
-//! view additionally filters by age, so a missed `expire`
-//! never shows a stale toast. `now` / `born` are seconds on
-//! the `AppSpec::poll` clock (`f64` there, cast to `f32`).
-//! Mount [`toasts_view`] as a direct child of the root element
-//! so the pin anchors to the window box.
+//! `state.toasts.push_status(status_text, now)` — the
+//! severity is derived from the text by
+//! [`classify_status`], never hand-picked (the poll hook
+//! currently open-codes that same derivation against
+//! [`ToastsState::push`]; `push_status` is its one-place
+//! form). Call `state.toasts.expire(now)` from the poll
+//! hook so dead toasts leave the model even while nothing
+//! is pushed. The view additionally filters by age, so a
+//! missed `expire` never shows a stale toast. `now` /
+//! `born` are seconds on the `AppSpec::poll` clock (`f64`
+//! there, cast to `f32`). Mount [`toasts_view`] in the
+//! stage wrap so the stack docks at the stage's top-right.
 //!
 //! Cards are capped at 320 pt wide (the column carries the
 //! same `max_w`), and the status text wraps *anywhere*: a
@@ -133,6 +159,12 @@ use crate::State;
 /// + 33 = 333 pt and would cover the pill's top edge; four
 /// only fits while every card happens to stay at two lines
 /// or fewer, which the pill cannot rely on.
+///
+/// Wave 10: the three-line premise this arithmetic stands
+/// on is no longer a premise — the view clamps every
+/// card's text to [`MAX_TOAST_LINES`] lines, so no status,
+/// however long, can grow a card past the ≈ 69 pt the
+/// budget charges for it.
 pub const MAX_TOASTS: usize = 3;
 
 /// Seconds a toast stays live. A toast expires when its age
@@ -144,6 +176,37 @@ pub const TOAST_TTL: f32 = 5.0;
 /// with fewer than two live toasts, the per-toast dismiss
 /// button is dismissal enough.
 pub const CLEAR_ALL_MIN: usize = 2;
+
+/// The most lines a toast card's text may paint — the
+/// ceiling [`MAX_TOASTS`]' pill arithmetic charges ≈ 69 pt
+/// for, now enforced by the renderer's line clamp
+/// (`El::max_lines`: wrapped text stops after this many
+/// lines and the last ends with "…" when more would
+/// follow; the element measures at most this many lines
+/// tall, and copying / accessibility keep the whole
+/// string).
+///
+/// Why a clamp is needed at all: the card's text column is
+/// 230 pt wide (320 card − 24 padding − 3 bar − 8 gap −
+/// 13 glyph − 8 gap − 26 dismiss − 8 gap), and only
+/// ≈ 162 pt on the newest toast, whose row also carries
+/// the Undo button — at LABEL (12 pt) that is roughly
+/// 25–38 characters per line. Real statuses exceed three
+/// such lines today: the longest fixed refusal runs
+/// 73 characters, and the path-bearing formats are
+/// unbounded (`"Audio clip added at frame {}: {}"`,
+/// `"Audio fade failed: could not write {}: {e}"` — a
+/// deep path plus an OS error passes 130 characters,
+/// four-plus lines at the narrow width). Unclamped, three
+/// such cards stack to ≈ 300 pt or more against the
+/// 297 pt of room at 1280×720, and the Wave 9 guarantee
+/// fails exactly for the failures that most need reading.
+///
+/// The clamp is display-only: the stored [`Toast`] keeps
+/// the full text (dedupe keys on it), the status line
+/// shows the string in full, and the elision is the
+/// renderer's own visible "…", never a silent cut.
+pub const MAX_TOAST_LINES: usize = 3;
 
 /// The last slice of a toast's life over which it fades out.
 const FADE_OUT: f32 = 1.0;
@@ -341,7 +404,17 @@ impl ToastsState {
         ToastsState::default()
     }
 
-    /// Show a status line.
+    /// Show a status line at an explicit severity.
+    ///
+    /// The severity is taken as given — this is the storage
+    /// primitive. A status echo (text that came from
+    /// `core.status`) should enter through
+    /// [`ToastsState::push_status`] instead, so its severity
+    /// is [`classify_status`]'s verdict on the text and can
+    /// never be a hand-picked tint that contradicts what
+    /// the status says; `push` remains for callers carrying
+    /// a severity the text itself does not determine, and
+    /// for the model's own tests.
     ///
     /// - Stale toasts are expired first (at `now`), so they
     ///   never eat cap slots — and so the dedupe window
@@ -377,6 +450,27 @@ impl ToastsState {
         while self.items.len() > MAX_TOASTS {
             self.items.remove(0);
         }
+    }
+
+    /// Show a status line with its severity DERIVED from
+    /// the text — the entry point for status echoes (the
+    /// feeding contract above). The severity is
+    /// [`classify_status`]'s verdict, computed here, in the
+    /// one place it can be computed from the text alone, so
+    /// a failure can never be pushed wearing a success tint
+    /// nor a refusal an info one by a caller's slip. (The
+    /// poll hook's push site open-codes exactly this —
+    /// `push(status, classify_status(status), now)`; this
+    /// method is that derivation with nowhere to slip.)
+    /// Everything else — expiry, dedupe, the cap — is
+    /// [`ToastsState::push`]'s, unchanged: derivation is
+    /// deterministic, so a repeated status derives the
+    /// same severity and dedupes against its earlier toast
+    /// exactly as a classified push does.
+    pub fn push_status(&mut self, text: impl Into<String>, now: f32) {
+        let text = text.into();
+        let severity = classify_status(&text);
+        self.push(text, severity, now);
     }
 
     /// Drop every toast older than [`TOAST_TTL`] at `now`.
@@ -521,6 +615,12 @@ pub fn toasts_view(s: &State, now: f32) -> El {
 /// (`toast-dismiss-{index}`, an "xmark" glyph) that removes
 /// exactly this toast and nothing else.
 ///
+/// The status text is line-clamped at
+/// [`MAX_TOAST_LINES`] (the renderer's own "…" marks the
+/// cut; the stored text is untouched), which is what
+/// keeps every card inside the height [`MAX_TOASTS`]'
+/// camera-pill budget charges for it.
+///
 /// Phase N anatomy: the card is radius 12 with an 8 pt gap;
 /// the bar is unkeyed and stretches to the card's full
 /// height (the card row stretches its children, and the
@@ -545,6 +645,7 @@ fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, und
                 .font(type_::LABEL)
                 .color(t.text)
                 .wrap_anywhere()
+                .max_lines(MAX_TOAST_LINES)
                 .grow(1.0),
         );
     if action {
@@ -620,10 +721,14 @@ mod tests {
     #[test]
     fn push_stores_text_severity_and_birth_time() {
         let mut s = ToastsState::new();
-        s.push("Saved.", Severity::Success, 2.5);
+        // The sample is a real status at its classified
+        // severity (`"Saved {} to the library."` — Success);
+        // storage fidelity is what is under test, and it
+        // needs no misclassified example to prove it.
+        s.push("Saved Styk to the library.", Severity::Success, 2.5);
         assert_eq!(s.items.len(), 1);
         let toast = &s.items[0];
-        assert_eq!(toast.text, "Saved.");
+        assert_eq!(toast.text, "Saved Styk to the library.");
         assert_eq!(toast.severity, Severity::Success);
         assert_eq!(toast.born, 2.5);
     }
@@ -631,8 +736,8 @@ mod tests {
     #[test]
     fn push_dedupes_consecutive_identical_and_refreshes_birth() {
         let mut s = ToastsState::new();
-        s.push("Saved.", Severity::Success, 0.0);
-        s.push("Saved.", Severity::Success, 3.0);
+        s.push("Saved Styk to the library.", Severity::Success, 0.0);
+        s.push("Saved Styk to the library.", Severity::Success, 3.0);
         assert_eq!(s.items.len(), 1, "identical consecutive push must not stack");
         assert_eq!(s.items[0].born, 3.0, "the surviving toast is reborn at the latest push");
         // The refresh is real lifetime: alive 4.9 s after the
@@ -644,9 +749,15 @@ mod tests {
 
     #[test]
     fn push_same_text_with_different_severity_is_not_a_duplicate() {
+        // The (text, severity) pair is the dedupe key —
+        // that key is what is under test, so the pair is
+        // chosen deliberately, not as a severity verdict on
+        // the text (verdicts are classify_status's job; a
+        // real failure string is never modelled at Info
+        // here — see the push_status tests).
         let mut s = ToastsState::new();
-        s.push("Export failed.", Severity::Info, 0.0);
-        s.push("Export failed.", Severity::Error, 0.0);
+        s.push("Export finished.", Severity::Info, 0.0);
+        s.push("Export finished.", Severity::Success, 0.0);
         assert_eq!(s.items.len(), 2);
     }
 
@@ -680,13 +791,15 @@ mod tests {
     fn push_duplicate_with_a_different_severity_stacks_even_non_consecutively() {
         // The dedupe key is the (text, severity) pair: the
         // same words meaning something else are a different
-        // status, wherever in the window they land.
+        // status, wherever in the window they land. (As in
+        // the consecutive test, the pair is the storage key
+        // under test, not a severity verdict on the text.)
         let mut s = ToastsState::new();
-        s.push("Export failed.", Severity::Info, 0.0);
+        s.push("Export finished.", Severity::Info, 0.0);
         s.push("B", Severity::Info, 0.0);
-        s.push("Export failed.", Severity::Error, 0.0);
+        s.push("Export finished.", Severity::Success, 0.0);
         assert_eq!(s.items.len(), 3);
-        assert_eq!(s.items[2].severity, Severity::Error);
+        assert_eq!(s.items[2].severity, Severity::Success);
         assert_eq!(s.items[0].born, 0.0, "the Info twin was not refreshed either");
     }
 
@@ -737,6 +850,46 @@ mod tests {
         assert_eq!(texts, ["one", "two", "three"]);
         assert_eq!(s.items[0].born, 2.0);
         assert_eq!(s.items[1].born, 0.0);
+    }
+
+    // --- push_status (Wave 10): severity is derived, never
+    // hand-picked -------------------------------------------
+
+    #[test]
+    fn push_status_derives_the_severity_from_the_text() {
+        // The entry point the feeding contract names for
+        // status echoes: the severity is classify_status's
+        // verdict on the text itself, so a status can never
+        // arrive wearing a hand-picked severity that
+        // contradicts its shape — a failure is never pushed
+        // as a success, nor a refusal as info. Every string
+        // is a real status from the tree.
+        let mut s = ToastsState::new();
+        s.push_status("Audio fade failed: no clip 1.", 0.0);
+        s.push_status("No camera key on this frame.", 0.0);
+        s.push_status("Exported 5 PNG frames to ./export", 0.0);
+        let severities: Vec<Severity> = s.items.iter().map(|t| t.severity).collect();
+        assert_eq!(
+            severities,
+            [Severity::Error, Severity::Warn, Severity::Success]
+        );
+        let mut info = ToastsState::new();
+        info.push_status("Undone.", 0.0);
+        assert_eq!(info.items[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn push_status_dedupes_and_refreshes_like_push() {
+        // Derivation is deterministic, so a repeated status
+        // derives the same severity and the pair-key dedupe
+        // refreshes it exactly as the poll site's classified
+        // push does today.
+        let mut s = ToastsState::new();
+        s.push_status("No camera key on this frame.", 0.0);
+        s.push_status("No camera key on this frame.", 3.0);
+        assert_eq!(s.items.len(), 1);
+        assert_eq!(s.items[0].born, 3.0);
+        assert_eq!(s.items[0].severity, Severity::Warn);
     }
 
     #[test]
@@ -948,6 +1101,76 @@ mod tests {
         assert!(undo_available(&core), "add_frame snapshots first, so undo is available");
         core.undo();
         assert!(!undo_available(&core), "the only step is spent");
+    }
+
+    // --- the line clamp (Wave 10) ----------------------------
+
+    #[test]
+    fn line_clamp_keeps_the_stack_inside_the_pill_budget() {
+        // The MAX_TOASTS arithmetic, pinned against the
+        // constants it is derived from (headless dumps,
+        // 2026-11-08: 297 pt of stack room at 1280×720;
+        // a card at the line clamp ≈ 69 pt; stack gap 8;
+        // the Clear-all row adds 33). If either constant
+        // moves, this test — not the camera pill — is what
+        // finds out.
+        assert_eq!(
+            MAX_TOAST_LINES, 3,
+            "the pill budget is derived at three lines per card"
+        );
+        let worst_case = MAX_TOASTS * 69 + (MAX_TOASTS - 1) * 8 + 33;
+        assert_eq!(worst_case, 256);
+        assert!(
+            worst_case <= 297,
+            "the worst-case stack must stay clear of the camera pill"
+        );
+    }
+
+    #[test]
+    fn long_statuses_are_stored_and_deduped_in_full() {
+        // The clamp is display-only: the model keeps the
+        // whole status (the status line shows it in full,
+        // and dedupe keys on it), so two long statuses that
+        // share a long prefix are still two statuses. Both
+        // strings follow the real
+        // `"Audio … failed: could not write {}: {e}"` format
+        // with a realistic path and OS error rendered in.
+        let a = "Audio fade failed: could not write \
+            /home/user/projects/a very long song name final mix.wav: \
+            No space left on device (os error 28)";
+        let b = "Audio echo failed: could not write \
+            /home/user/projects/a very long song name final mix.wav: \
+            No space left on device (os error 28)";
+        assert!(
+            a.len() > 120,
+            "the probe is genuinely past the clamp's three-line budget"
+        );
+        let mut s = ToastsState::new();
+        s.push_status(a, 0.0);
+        s.push_status(b, 0.0);
+        assert_eq!(s.items.len(), 2);
+        assert_eq!(s.items[0].text, a, "the stored text is never truncated");
+        assert_eq!(s.items[1].text, b);
+        assert_eq!(s.items[0].severity, Severity::Error);
+        // And the identical long status still dedupes.
+        s.push_status(a, 2.0);
+        assert_eq!(s.items.len(), 2);
+        assert_eq!(s.items[0].born, 2.0);
+    }
+
+    #[test]
+    fn view_builds_with_an_over_clamp_status() {
+        // A path-bearing failure far past three lines at
+        // the card's text width builds through the clamped
+        // row exactly as a short status does. (Rendered
+        // height is the headless dumps' job; this smoke
+        // build covers the clamped construction.)
+        let mut s = crate::init();
+        let status = "Audio fade failed: could not write \
+            /home/user/projects/a very long song name final mix.wav: \
+            No space left on device (os error 28)";
+        s.toasts.push(status, classify_status(status), 0.0);
+        let _ = toasts_view(&s, 0.5);
     }
 
     // --- classify_status (Phase N) -------------------------------

@@ -25,7 +25,10 @@
 //!   at the current frame carrying the pan/zoom/angle already
 //!   in effect — exactly "set key here".
 //! * Clear key → `camera_clear_key` (editor.rs:544)
-//! * Key-list row → `goto` (editor.rs:681); its Delete button →
+//! * Key-list row → [`goto_key_frame`] (in-range frames
+//!   land via `goto`, editor.rs:713; a row stranded past
+//!   the timeline end reports instead of silently
+//!   no-oping — Wave 10); its Delete button →
 //!   [`delete_camera_key_at`] at the row's own frame (UI
 //!   mission wave 4, audit s15 I-6: it used to compose
 //!   `goto(frame)` + `camera_clear_key()` — non-undoable, and
@@ -128,6 +131,42 @@
 //!   which is dark project space in both themes (see
 //!   [`overlay`]).
 //!
+//! * UI mission Wave 10 (round-2 audit): three findings.
+//!   (1) The panel now states the view/authored line in
+//!   its own copy ([`PANEL_NOTE`] under the header): every
+//!   panel control authors keys, the stage pill's
+//!   same-named controls are view-only — before this, the
+//!   only text was the panel doc's "view row" misnomer.
+//!   (2) Frame ops never move camera keys — the engine
+//!   says so itself (`delete_range` / `paste_range` /
+//!   `shift_frames` / `reverse_range` in editor.rs: data
+//!   outside `Frame` "is NOT remapped"), and the single
+//!   `delete_frame` doesn't touch them either — so keys
+//!   can be stranded past the timeline end. Rows now mark
+//!   them "past end" ([`CamKeyRow::stale`]) and gotos
+//!   report instead of silently no-oping
+//!   ([`goto_key_frame`]). Panel copy never claimed keys
+//!   shift; it now never pretends a stranded key is
+//!   reachable either. (3) Angle readouts are wrapped via
+//!   `model::norm_deg` (see [`angle_deg`]): stored angles
+//!   are written verbatim by the MCP `set_camera` tool
+//!   and by project import, and `camera_angle_at` returns
+//!   them raw at the end keys — an imported 725° key read
+//!   "725°" while its dial marker clamped to the stop.
+//!   Paste and Hold stamp the wrapped angle so the panel
+//!   never propagates an unwrapped value into new keys.
+//!   Audited clean: the MCP camera tools agree with the
+//!   panel (frame-all and centre call the same core ops
+//!   on the same targets — visible figures, the selected
+//!   figure; delete replicates
+//!   [`delete_camera_key_at`]'s semantics; follow writes
+//!   the same field snapshot-free, taking an explicit
+//!   figure index instead of the selection, as its own
+//!   description states); the dial's linear full-track =
+//!   360° sensitivity with the ±15° steppers for fine
+//!   work; key-row widths (worst realistic label ≈22
+//!   chars ≈150 pt + Delete inside the 316 pt column).
+//!
 //! Engine facts this panel lives with (verified, not worked
 //! around silently): `camera_clear_key` does NOT snapshot, so
 //! clearing a key is not undoable; and `camera_zoom_by`'s
@@ -183,9 +222,20 @@ pub fn zoom_label(core: &EditorCore) -> String {
 }
 
 /// The camera angle in effect at the current frame, in
-/// degrees (interpolated between keys).
+/// degrees (interpolated between keys), wrapped to the
+/// model's canonical (−180°, 180°] range. The wrap is not
+/// decorative: `camera_angle_at` normalises only its
+/// interpolation branch — at and beyond the end keys it
+/// returns the STORED angle raw, and stored angles are
+/// not guaranteed wrapped (the MCP `set_camera` tool and
+/// project import write them verbatim). An imported key
+/// at 725° would otherwise read "725°" here while the
+/// dial marker clamps to the 180° stop — the unwrapped-
+/// readout bug the 3D panel's yaw readout had (Wave 9).
+/// Every consumer of this helper (readout, dial marker,
+/// dial dead zone) wants the wrapped value.
 pub fn angle_deg(core: &EditorCore) -> f32 {
-    core.project.camera_angle_at(core.current as f32)
+    stykanimate_rs::model::norm_deg(core.project.camera_angle_at(core.current as f32))
 }
 
 /// The angle readout text, e.g. `"0°"` / `"-15°"`.
@@ -249,13 +299,35 @@ pub struct CamKeyRow {
     /// highlighted; its row is the one the panel's own Clear
     /// key button would remove).
     pub is_current: bool,
+    /// Whether this key's frame is past the end of the
+    /// timeline. Frame ops never move camera keys (see the
+    /// module docs), so deleting frames can strand a key
+    /// beyond the last frame: it still governs nothing —
+    /// evaluation clamps to the end keys — and the playhead
+    /// can never reach it. The row says so ("past end")
+    /// instead of offering a goto that silently no-ops;
+    /// its Delete still works, which is how a stranded
+    /// key is cleaned up.
+    pub stale: bool,
 }
 
 impl CamKeyRow {
     /// The row's goto-button label, e.g. `"F3 · 150% · 15°"`
-    /// (frame shown 1-based, as everywhere in the shell).
+    /// (frame shown 1-based, as everywhere in the shell;
+    /// the angle shown wrapped — see [`angle_deg`] — and a
+    /// stranded key's label ends `" · past end"`).
     pub fn label(&self) -> String {
-        format!("F{} · {}% · {:.0}°", self.frame + 1, self.zoom_pct, self.angle)
+        let base = format!(
+            "F{} · {}% · {:.0}°",
+            self.frame + 1,
+            self.zoom_pct,
+            stykanimate_rs::model::norm_deg(self.angle)
+        );
+        if self.stale {
+            format!("{base} · past end")
+        } else {
+            base
+        }
     }
 }
 
@@ -265,6 +337,7 @@ impl CamKeyRow {
 /// — the model's evaluators sort a copy per call, and so does
 /// this list.
 pub fn key_rows(core: &EditorCore) -> Vec<CamKeyRow> {
+    let frame_count = core.frame_count();
     let mut rows: Vec<CamKeyRow> = core
         .project
         .camera
@@ -274,6 +347,7 @@ pub fn key_rows(core: &EditorCore) -> Vec<CamKeyRow> {
             zoom_pct: (k.zoom * 100.0).round() as i64,
             angle: k.angle,
             is_current: k.frame == core.current,
+            stale: k.frame >= frame_count,
         })
         .collect();
     rows.sort_by_key(|r| r.frame);
@@ -317,21 +391,44 @@ pub fn next_key_frame(core: &EditorCore) -> Option<usize> {
         .min()
 }
 
+/// Jump the playhead to a camera key's frame — the key
+/// rows' goto and the Prev/Next jumps' landing. A frame
+/// inside the timeline goes through `goto`; a frame past
+/// the end (a key stranded by frame deletions — frame
+/// ops never move camera keys) cannot be reached, and
+/// `goto` would silently no-op on it, so the press
+/// reports instead and the playhead stays. Returns
+/// whether the playhead moved.
+pub fn goto_key_frame(core: &mut EditorCore, frame: usize) -> bool {
+    if frame >= core.frame_count() {
+        core.status = format!("Frame {} is past the end of the timeline.", frame + 1);
+        return false;
+    }
+    core.goto(frame);
+    true
+}
+
 /// Prev-key button: jump the playhead to [`prev_key_frame`]
-/// via `goto`. With no earlier key, status-only (the op
-/// convention `camera_clear_key` uses for a refused clear) —
-/// the playhead does not move.
+/// via [`goto_key_frame`]. With no earlier key, status-only
+/// (the op convention `camera_clear_key` uses for a refused
+/// clear) — the playhead does not move.
 pub fn goto_prev_key(core: &mut EditorCore) {
     match prev_key_frame(core) {
-        Some(frame) => core.goto(frame),
+        Some(frame) => {
+            goto_key_frame(core, frame);
+        }
         None => core.status = "No camera key before this frame.".into(),
     }
 }
 
 /// Next-key button: jump the playhead to [`next_key_frame`].
+/// A next key stranded past the timeline end reports via
+/// [`goto_key_frame`] rather than silently no-oping.
 pub fn goto_next_key(core: &mut EditorCore) {
     match next_key_frame(core) {
-        Some(frame) => core.goto(frame),
+        Some(frame) => {
+            goto_key_frame(core, frame);
+        }
         None => core.status = "No camera key after this frame.".into(),
     }
 }
@@ -410,7 +507,12 @@ pub fn paste_key_here(core: &mut EditorCore) {
     core.snapshot();
     core.project.set_camera_key(frame, clip.x, clip.y, clip.zoom);
     if let Some(k) = core.project.camera.iter_mut().find(|k| k.frame == frame) {
-        k.angle = clip.angle;
+        // The copied angle is stamped wrapped (the model's
+        // canonical range): a clipboard taken from an
+        // imported or MCP-written key can carry an
+        // unwrapped angle, and the paste should not
+        // propagate it into a fresh key.
+        k.angle = stykanimate_rs::model::norm_deg(clip.angle);
     }
     core.status = format!("Camera key pasted at frame {}.", frame + 1);
 }
@@ -461,7 +563,13 @@ pub fn hold_camera(core: &mut EditorCore) {
         return;
     };
     let (x, y, zoom) = core.camera_here();
-    let angle = core.project.camera_angle_at(core.current as f32);
+    // The held angle is stamped wrapped, like a paste:
+    // `camera_angle_at` can return an unwrapped stored
+    // angle at the end keys (see `angle_deg`), and the
+    // hold writes it onto every frame of the span.
+    let angle = stykanimate_rs::model::norm_deg(
+        core.project.camera_angle_at(core.current as f32),
+    );
     core.snapshot();
     for frame in a..=b {
         core.project.set_camera_key(frame, x, y, zoom);
@@ -800,6 +908,31 @@ fn angle_readout(core: &EditorCore, t: &Theme) -> El {
     design::stepper_value(&angle_label(core), t).key("cam-angle-label")
 }
 
+/// The note under the panel's header (Wave 10): the
+/// view/authored distinction, stated where the confusion
+/// happens. Every control in this panel upserts a camera
+/// KEY at the current frame — Fit, Centre, 1:1 and the
+/// zoom steppers included (`frame_all_figures`,
+/// `centre_on_selection`, `camera_zoom_by` all snapshot
+/// and set a key) — while the stage pill carries the same
+/// Fit / Centre / 1:1 labels for VIEW-only navigation
+/// (Wave 5). Before this note, nothing in the panel said
+/// which side of that line its controls were on, and the
+/// panel's own docs called the first row "the view row".
+pub const PANEL_NOTE: &str = "Everything here writes camera keys at the current frame — the stage pill's Fit, Centre and zoom change only the view.";
+
+/// A sentence-long prose note inside the card, rendered
+/// the way the settings card's notes are (muted LABEL,
+/// wrapped at the card's width — the rune-kit card
+/// precedent in `settings_popover::note_line`).
+fn note_line(t: &Theme, label: &str) -> El {
+    text(label)
+        .font(type_::LABEL)
+        .color(t.text_secondary)
+        .wrap()
+        .w_full()
+}
+
 /// The camera-key list section: a "Keys" header, the
 /// navigation row (Prev key / Next key — jumps to the
 /// nearest key either side of the playhead) and the
@@ -807,8 +940,10 @@ fn angle_readout(core: &EditorCore, t: &Theme) -> El {
 /// current frame), then one row per key — a goto button
 /// labelled with the key's frame, zoom and angle on a kit
 /// list-row shell (selected-filled when the key is on the
-/// current frame), plus a per-row Delete button
-/// ([`delete_camera_key_at`] at the row's frame —
+/// current frame; a key stranded past the timeline end is
+/// labelled "past end" and its goto reports instead of
+/// moving — [`goto_key_frame`]), plus a per-row Delete
+/// button ([`delete_camera_key_at`] at the row's frame —
 /// undoable, and the playhead stays put). With no keys,
 /// the kit [`design::empty_state`] (key glyph) instead of
 /// rows; the nav/clipboard rows stay, since Paste is
@@ -843,7 +978,7 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
     if rows.is_empty() {
         list = list.child(design::empty_state(
             "key",
-            "No camera keys yet — Set key pins the current view.",
+            "No camera keys yet — Set key pins the camera in effect at this frame.",
             t,
         ));
     }
@@ -862,7 +997,9 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
                     &r.label(),
                     false,
                     t,
-                    move |s: &mut State| s.core.goto(frame),
+                    move |s: &mut State| {
+                        goto_key_frame(&mut s.core, frame);
+                    },
                 ))
                 .child(btn(
                     &format!("cam-key-clear-{frame}"),
@@ -933,10 +1070,14 @@ fn follow_block(core: &EditorCore, t: &Theme) -> El {
         )
 }
 
-/// The full camera panel: a "Camera" header, the view row
-/// (Fit / Centre / 1:1), the zoom stepper row, the rotation
-/// stepper row, the rotation dial, the key row (Set key /
-/// Clear key), the camera-key list and the follow block.
+/// The full camera panel: a "Camera" header, the note
+/// naming the panel as key-authoring ([`PANEL_NOTE`]),
+/// the framing row (Fit / Centre / 1:1 — all three
+/// upsert a camera key here; the stage pill's same-named
+/// controls are the view-only ones), the zoom stepper
+/// row, the rotation stepper row, the rotation dial,
+/// the key row (Set key / Clear key), the camera-key
+/// list and the follow block.
 pub fn panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     // Card root + header (Phase N): the kit's `panel_col`
@@ -955,6 +1096,7 @@ pub fn panel(s: &State, t: &Theme) -> El {
                 .child(design::panel_title(Some("camera"), "Camera", None, t)),
         )
         .child(design::divider(t))
+        .child(note_line(t, PANEL_NOTE))
         .child(
             row()
                 .gap(6.0)
@@ -1343,11 +1485,11 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0],
-            CamKeyRow { frame: 0, zoom_pct: 100, angle: 15.0, is_current: false }
+            CamKeyRow { frame: 0, zoom_pct: 100, angle: 15.0, is_current: false, stale: false }
         );
         assert_eq!(
             rows[1],
-            CamKeyRow { frame: 2, zoom_pct: 100, angle: 45.0, is_current: true }
+            CamKeyRow { frame: 2, zoom_pct: 100, angle: 45.0, is_current: true, stale: false }
         );
         assert_eq!(rows[1].label(), "F3 · 100% · 45°");
         // The current marker follows the playhead.
@@ -1800,5 +1942,108 @@ playback_speed: 1.0,
         let frame = core.current;
         assert!(!delete_camera_key_at(&mut core, frame));
         assert_eq!(core.status, "No camera key at frame 3.");
+    }
+
+    // ---- Wave 10: note wording, wrapped angles, stale keys ----
+
+    #[test]
+    fn panel_note_wording_is_exact() {
+        // The note is the panel's only statement of the
+        // view/authored line — pin it the way the export
+        // panel pins its range-audio note, so a future
+        // copy edit has to make the change on purpose.
+        assert_eq!(
+            PANEL_NOTE,
+            "Everything here writes camera keys at the current frame — the stage pill's Fit, Centre and zoom change only the view."
+        );
+    }
+
+    #[test]
+    fn angle_readouts_wrap_unwrapped_stored_angles() {
+        // A stored angle written verbatim (MCP set_camera,
+        // project import) can be unwrapped; camera_angle_at
+        // returns it raw at the end keys. The readouts wrap
+        // it — the 3D yaw bug's camera-panel twin.
+        let mut core = EditorCore::new();
+        pin_key(&mut core, 0, 0.0, 0.0, 1.0, 725.0);
+        core.goto(0);
+        assert_eq!(angle_deg(&core), 5.0);
+        assert_eq!(angle_label(&core), "5°");
+        // The row label wraps too, while the row's stored
+        // value stays as stored.
+        let rows = key_rows(&core);
+        assert_eq!(rows[0].angle, 725.0);
+        assert_eq!(rows[0].label(), "F1 · 100% · 5°");
+        // Negative unwrapped angles wrap the other way.
+        pin_key(&mut core, 0, 0.0, 0.0, 1.0, -190.0);
+        assert_eq!(angle_label(&core), "170°");
+    }
+
+    #[test]
+    fn hold_and_paste_stamp_the_wrapped_angle() {
+        // Hold: the unwrapped angle in effect is stamped
+        // onto the span in its wrapped form.
+        let mut core = EditorCore::new(); // demo: 5 frames
+        pin_key(&mut core, 0, 100.0, 200.0, 1.5, 725.0);
+        core.goto(0);
+        hold_camera(&mut core);
+        assert_eq!(core.project.camera.len(), 5);
+        assert!(
+            core.project.camera.iter().all(|k| k.angle == 5.0),
+            "every held key carries the wrapped angle"
+        );
+        // Paste: a clipboard holding an unwrapped angle
+        // lands wrapped at the target frame.
+        let mut core = EditorCore::new();
+        pin_key(&mut core, 0, 10.0, 20.0, 2.0, 725.0);
+        core.goto(0);
+        copy_key_here(&mut core);
+        core.goto(3);
+        paste_key_here(&mut core);
+        let k = core.project.camera.iter().find(|k| k.frame == 3).unwrap();
+        assert_eq!(k.angle, 5.0);
+    }
+
+    #[test]
+    fn key_rows_mark_keys_past_the_timeline_end() {
+        // Frame ops never move camera keys (editor.rs), so
+        // deleting frames strands keys past the end. The
+        // demo has 5 frames (0..=4): a key on frame 7 is
+        // stranded, a key on frame 4 is not.
+        let mut core = EditorCore::new();
+        pin_key(&mut core, 4, 0.0, 0.0, 1.0, 0.0);
+        pin_key(&mut core, 7, 0.0, 0.0, 1.0, 15.0);
+        let rows = key_rows(&core);
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].stale);
+        assert_eq!(rows[0].label(), "F5 · 100% · 0°");
+        assert!(rows[1].stale);
+        assert_eq!(rows[1].label(), "F8 · 100% · 15° · past end");
+    }
+
+    #[test]
+    fn goto_key_frame_and_next_key_report_past_the_end() {
+        let mut core = EditorCore::new(); // demo: 5 frames
+        pin_key(&mut core, 7, 0.0, 0.0, 1.0, 15.0);
+        // The row goto on a stranded key: no move, a report.
+        core.goto(2);
+        assert!(!goto_key_frame(&mut core, 7));
+        assert_eq!(core.current, 2, "the playhead stays put");
+        assert_eq!(core.status, "Frame 8 is past the end of the timeline.");
+        // Next-key with only a stranded key ahead reports
+        // the same way (it used to goto() into a silent
+        // no-op, leaving the old status standing).
+        goto_next_key(&mut core);
+        assert_eq!(core.current, 2);
+        assert_eq!(core.status, "Frame 8 is past the end of the timeline.");
+        // An in-range goto still lands, via the same helper
+        // and via the row's own path.
+        pin_key(&mut core, 4, 0.0, 0.0, 1.0, 0.0);
+        assert!(goto_key_frame(&mut core, 4));
+        assert_eq!(core.current, 4);
+        // And the stranded key's Delete still works — that
+        // is how it is cleaned up.
+        assert!(delete_camera_key_at(&mut core, 7));
+        assert_eq!(core.project.camera.len(), 1);
     }
 }

@@ -173,6 +173,36 @@
 //! no-clips line is the kit [`design::empty_state`]
 //! under `wand-magic-sparkles`, text byte-identical.
 //! Keys, handlers and strip geometry are unchanged.
+//!
+//! Wave 10 (round-2 audit of this panel) fixes four
+//! proven defects. (1) The lane header's count named
+//! only the total (`"3 clip(s)"`), so a project whose
+//! clips were all hidden read as fully live; the
+//! count now comes from [`lane_count_text`] and names
+//! the hidden share while any clip is hidden. (2) The
+//! start steppers could push a clip fully past the
+//! project end: `fx_edit::move_clip` clamps only at
+//! frame 0, and once a clip's start reaches
+//! `frame_count` no frame samples it, its strip bar
+//! collapses to zero width at the edge (unpressable)
+//! and its timeline span draws nothing — the lane row
+//! was the only surface still showing it.
+//! [`nudge_clip_start`] now clamps positive deltas at
+//! the project end, symmetric with its frame-0 guard;
+//! the duration stepper's mirror no-op (shrinking a
+//! clip already at the backend's 0.1-frame floor) is
+//! refused the same way in [`nudge_duration`]. (3) A
+//! lane row was one line — dot, name, window,
+//! anchor, eye slot, selection dot — whose texts
+//! overflow the 316 pt column at ordinary values
+//! (the longest kind name with single-digit numbers
+//! already exceeds the line's text budget under the
+//! shell's conservative LABEL accounting; see
+//! [`fx_lane`]). The row is now two lines inside the
+//! same keyed, pressable shell, so nothing truncates
+//! at realistic values and every marker stays inside
+//! the card. Keys and handlers are unchanged
+//! throughout.
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, ScrollSpec, Shape, Tx};
@@ -378,6 +408,24 @@ pub fn clip_readout(entry: &FxClipEntry) -> String {
     line
 }
 
+/// The lane header's count text (Wave 10): `{total}
+/// clip(s)` while every clip is live, with
+/// ` · {hidden} hidden` appended while any clip is
+/// hidden. The header is the panel's one summary of
+/// the whole list, and a hidden clip renders nothing
+/// on the stage or in exports — a bare total read as
+/// "this much effect will play" even when every clip
+/// was hidden. The plain form is byte-identical to
+/// the pre-Wave-10 text, so nothing changes for a
+/// project with nothing hidden.
+pub fn lane_count_text(total: usize, hidden: usize) -> String {
+    if hidden == 0 {
+        format!("{total} clip(s)")
+    } else {
+        format!("{total} clip(s) · {hidden} hidden")
+    }
+}
+
 /// Selection after clip `deleted` was removed, with
 /// `len_after` clips remaining: a selection before the gap
 /// is untouched, one after it shifts down by one, and the
@@ -478,11 +526,12 @@ pub fn bar_alpha(hidden: bool) -> f32 {
 /// the glyph's aspect, so at 12 pt tall the 576×512
 /// eye-slash lays out 13.5 pt wide — not the 12 pt the
 /// live rows' spacer originally used, which shifted a
-/// hidden row's anchor text 1.5 pt left of its live
-/// neighbours'. The spacer takes this width, so the
-/// anchor column and the selection dot line up across
-/// hidden and live rows alike. Factored out so the
-/// width the builder uses is testable without an `El`.
+/// hidden row's trailing elements 1.5 pt left of its
+/// live neighbours'. The spacer takes this width, so
+/// the selection dot on the row's first line lines up
+/// across hidden and live rows alike. Factored out so
+/// the width the builder uses is testable without an
+/// `El`.
 pub fn eye_slash_slot_width() -> f32 {
     icon_width("eye-slash", 12.0).unwrap_or(12.0)
 }
@@ -721,12 +770,48 @@ pub fn press_outcome(
 /// nothing) when `i` is out of range, or when moving
 /// earlier from frame 0 — a no-op the op would only
 /// snapshot (the GPUI panel's `fx-earlier` guard, kept).
+///
+/// Positive deltas are clamped at the project end
+/// (Wave 10), the symmetric guard: the backend clamps
+/// only at frame 0 (`fx_edit::move_clip` takes
+/// `new_start.max(0.0)`), so an unclamped `+10` could
+/// land a clip's start at or past `frame_count`, where
+/// no frame ever samples it (`fx_edit::clips_at` needs
+/// `frame_f >= start` for a `frame_f` below
+/// `frame_count`), its strip bar collapses to zero
+/// width at the right edge ([`bar_rect`]) and its
+/// timeline span draws zero-width — the lane row would
+/// be the only surface still showing the clip, and
+/// every further `+` press buried it deeper. The clamp
+/// keeps the clip's fraction (a split's second half at
+/// x.5 still lands at y.5): the step shrinks to the
+/// largest whole-frame delta whose landing stays
+/// before `frame_count`, and a clip already starting
+/// in the last frame — or already past the end, where
+/// only an earlier move can rescue it — refuses the
+/// press instead of wasting a snapshot.
 fn nudge_clip_start(core: &mut EditorCore, i: usize, delta: i32) -> bool {
     let Some(entry) = core.project.fx_clips.get(i) else {
         return false;
     };
     if delta < 0 && entry.clip.start <= 0.0 {
         return false;
+    }
+    if delta > 0 {
+        let frames = core.frame_count() as f32;
+        // The largest whole-frame step whose landing
+        // `start + step` stays < frames: step < frames
+        // - start, so step_max = ceil(frames - start)
+        // - 1 (for a whole-frame distance d, that is
+        // d - 1: starting exactly d frames before the
+        // end, the last in-project landing is one step
+        // short of the end itself).
+        let max_delta = ((frames - entry.clip.start).ceil() as i32 - 1).max(0);
+        if max_delta == 0 {
+            return false;
+        }
+        core.fx_move_clip(i, delta.min(max_delta));
+        return true;
     }
     core.fx_move_clip(i, delta);
     true
@@ -744,11 +829,20 @@ fn nudge_start(s: &mut State, delta: i32) {
 /// via `EditorCore::fx_resize_clip` (the op applies the
 /// delta itself and the backend clamps the result to
 /// >= 0.1, so the handler passes the delta through
-/// untouched).
+/// untouched). One guard (Wave 10), mirroring
+/// [`nudge_clip_start`]'s frame-0 guard: shrinking a
+/// clip already AT the 0.1 floor is a no-op the op
+/// would only snapshot and report as a resize, so the
+/// press is refused before the call. A shrink that
+/// crosses the floor still goes through — the backend
+/// clamps its landing to 0.1, which is a real change.
 fn nudge_duration(s: &mut State, delta: f32) {
     let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return;
     };
+    if delta < 0.0 && s.core.project.fx_clips[i].clip.duration <= 0.1 {
+        return;
+    }
     s.core.fx_resize_clip(i, delta);
 }
 
@@ -1162,10 +1256,33 @@ pub fn strip_view(s: &State, t: &Theme) -> El {
 /// the secondary colour, and an `eye-slash` marker sits
 /// before the selection dot (a spacer of the glyph's
 /// own laid-out width — [`eye_slash_slot_width`],
-/// Wave 9 — on live rows keeps the anchor column and
-/// the trailing edge aligned). The empty
+/// Wave 9 — on live rows keeps the marker column and
+/// the trailing edge aligned). The header count names
+/// the hidden share while any clip is hidden
+/// ([`lane_count_text`], Wave 10). The empty
 /// lane is the kit [`design::empty_state`] under
 /// `wand-magic-sparkles` (audit S13-3), text unchanged.
+///
+/// Wave 10: the row is TWO lines inside the same keyed
+/// shell — name + eye marker + selection dot on line 1,
+/// window + anchor on line 2. The pre-Wave-10 single
+/// line could not fit its own texts: the card leaves
+/// 276 pt inside the row's padding (316 column − 2×12
+/// panel pad − 2×8 row px), the fixed children took
+/// 71.5 pt of it (dot 10 + eye slot 13.5 + selection
+/// dot 8 + five 8 pt gaps), and at the shell's
+/// conservative LABEL accounting (the fx_browser
+/// upper-bound model) even an ordinary row — `burst
+/// #1`, `frames 5–14`, `fig 2 · node 5` — sums to
+/// 288.5 pt, the longest kind (`shock_ring #1`) to
+/// 325.5 pt: the trailing markers were pushed past
+/// the card edge. Split across two lines, line 1's
+/// name has 220.5 pt (a `shock_ring #100` measures
+/// 101) and line 2's
+/// pair fits whole at four-digit fractional frames;
+/// both grown texts still carry `truncate()` as the
+/// valve for values beyond that envelope, so no
+/// marker can ever be pushed out of the card again.
 pub fn fx_lane(s: &State, t: &Theme) -> El {
     let rows = clip_rows(
         &s.core,
@@ -1215,35 +1332,68 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
                         .radius(5.0)
                         .fill(dot_fill),
                 )
+                // Two text lines beside the dot (Wave
+                // 10 — see the fn docs for the width
+                // proof): the name shares line 1 with
+                // the eye marker and the selection dot,
+                // the window and anchor share line 2.
+                // Every text, key and handler is the
+                // pre-restructure row's own.
                 .child(
-                    text(data.name)
-                        .font(type_::LABEL)
-                        .color(if data.hidden { t.text_secondary } else { t.text }),
-                )
-                .child(
-                    text(data.window)
-                        .font(type_::LABEL)
-                        .color(t.text_secondary)
-                        .grow(1.0),
-                )
-                .child(
-                    text(data.anchor)
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                )
-                .child(if data.hidden {
-                    icon_el("eye-slash", 12.0, t.text_secondary)
-                } else {
-                    el().size(eye_slash_slot_width(), 12.0)
-                })
-                .child(if data.selected {
-                    el().size(8.0, 8.0).radius(4.0).fill(accent)
-                } else {
-                    el().size(8.0, 8.0)
-                }),
+                    col()
+                        .grow(1.0)
+                        .gap(2.0)
+                        .child(
+                            row()
+                                .w_full()
+                                .gap(8.0)
+                                .center_y()
+                                .child(
+                                    text(data.name)
+                                        .font(type_::LABEL)
+                                        .color(if data.hidden {
+                                            t.text_secondary
+                                        } else {
+                                            t.text
+                                        })
+                                        .grow(1.0)
+                                        .truncate(),
+                                )
+                                .child(if data.hidden {
+                                    icon_el("eye-slash", 12.0, t.text_secondary)
+                                } else {
+                                    el().size(eye_slash_slot_width(), 12.0)
+                                })
+                                .child(if data.selected {
+                                    el().size(8.0, 8.0).radius(4.0).fill(accent)
+                                } else {
+                                    el().size(8.0, 8.0)
+                                }),
+                        )
+                        .child(
+                            row()
+                                .w_full()
+                                .gap(8.0)
+                                .center_y()
+                                .child(
+                                    text(data.window)
+                                        .font(type_::LABEL)
+                                        .color(t.text_secondary)
+                                        .grow(1.0)
+                                        .truncate(),
+                                )
+                                .child(
+                                    text(data.anchor)
+                                        .font(type_::LABEL)
+                                        .color(t.text_secondary),
+                                ),
+                        ),
+                ),
         );
     }
-    let count = format!("{} clip(s)", s.core.project.fx_clips.len());
+    let total = s.core.project.fx_clips.len();
+    let hidden = s.core.project.fx_clips.iter().filter(|e| e.hidden).count();
+    let count = lane_count_text(total, hidden);
     col()
         .key("fx-lane")
         .w_full()
@@ -1653,6 +1803,25 @@ mod tests {
         core
     }
 
+    /// `core_with` over a project lengthened to
+    /// `frames` frames. The demo project has five
+    /// frames, so timing tests that move clips against
+    /// a project end need the end somewhere specific;
+    /// the extra frames are empty `Frame`s (nothing in
+    /// this module reads their poses).
+    fn core_with_frames(clips: Vec<FxClipEntry>, frames: usize) -> EditorCore {
+        let mut core = core_with(clips);
+        while core.project.frames.len() < frames {
+            core.project.frames.push(stykanimate_rs::model::Frame {
+                poses: Vec::new(),
+                duration: 1.0,
+                easing: None,
+                bends: Vec::new(),
+            });
+        }
+        core
+    }
+
     #[test]
     fn frame_label_drops_integral_fractions_only() {
         assert_eq!(frame_label(4.0), "4");
@@ -1739,7 +1908,11 @@ mod tests {
 
     #[test]
     fn nudge_clip_start_moves_by_whole_frame_deltas() {
-        let mut core = core_with(vec![entry(4.5, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        // A 30-frame project: in the five-frame demo
+        // project the +1 step from 4.5 would land at
+        // 5.5, already past the end, and the Wave 10
+        // project-end clamp would (rightly) refuse it.
+        let mut core = core_with_frames(vec![entry(4.5, 10.0, ClipKind::Burst, 0xFF5D5D)], 30);
         // The op takes a whole-frame delta; a fractional
         // start keeps its fraction.
         assert!(nudge_clip_start(&mut core, 0, 1));
@@ -1796,6 +1969,171 @@ mod tests {
         // Out of range: no call, no panic.
         assert!(!nudge_clip_start(&mut core, 5, 1));
         assert_eq!(core.project.fx_clips[0].clip.start, 0.0, "no change");
+    }
+
+    #[test]
+    fn nudge_clip_start_clamps_at_the_project_end() {
+        // A clip starting at frame 28 of a 30-frame
+        // project: a +10 step would land it at 38,
+        // fully past the end, where nothing renders or
+        // selects it. The step clamps to the last
+        // in-project landing — the last frame's start.
+        let mut core = core_with_frames(vec![entry(28.0, 10.0, ClipKind::Burst, 0xFF5D5D)], 30);
+        assert!(nudge_clip_start(&mut core, 0, 10));
+        assert_eq!(core.project.fx_clips[0].clip.start, 29.0);
+        // Already starting in the last frame, a further
+        // step is refused outright — no snapshot spent
+        // (undo depth unchanged), no movement.
+        let depth = core.undo_depth();
+        assert!(!nudge_clip_start(&mut core, 0, 1));
+        assert_eq!(core.project.fx_clips[0].clip.start, 29.0);
+        assert_eq!(core.undo_depth(), depth, "a refused step snapshots nothing");
+        // A fractional start keeps its fraction under
+        // the clamp: 28.5 steps to 29.5 — it begins
+        // during the last frame — and no further.
+        let mut core = core_with_frames(vec![entry(28.5, 10.0, ClipKind::Burst, 0xFF5D5D)], 30);
+        assert!(nudge_clip_start(&mut core, 0, 10));
+        assert_eq!(core.project.fx_clips[0].clip.start, 29.5);
+        assert!(!nudge_clip_start(&mut core, 0, 1));
+        assert_eq!(core.project.fx_clips[0].clip.start, 29.5);
+        // A clip already past the end (an MCP move or
+        // a duplicate can put one there) refuses
+        // positive steps — they would only bury it
+        // deeper — but still steps back into the
+        // project.
+        let mut core = core_with_frames(vec![entry(35.0, 10.0, ClipKind::Burst, 0xFF5D5D)], 30);
+        assert!(!nudge_clip_start(&mut core, 0, 1));
+        assert!(nudge_clip_start(&mut core, 0, -10));
+        assert_eq!(core.project.fx_clips[0].clip.start, 25.0);
+    }
+
+    #[test]
+    fn duration_nudge_refuses_to_shrink_a_clip_already_at_the_floor() {
+        // At the backend's 0.1 floor, the shrink step
+        // is a no-op: the handler refuses it before the
+        // op, so no snapshot is spent and the duration
+        // is untouched.
+        let core = core_with(vec![entry(4.0, 0.1, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, Some(0));
+        let depth = state.core.undo_depth();
+        nudge_duration(&mut state, -1.0);
+        assert_eq!(state.core.undo_depth(), depth, "no snapshot for a no-op");
+        assert_eq!(state.core.project.fx_clips[0].clip.duration, 0.1);
+        // A shrink crossing the floor still goes
+        // through and lands on it via the backend
+        // clamp — a real change, exactly one snapshot.
+        let core = core_with(vec![entry(4.0, 0.5, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, Some(0));
+        let depth = state.core.undo_depth();
+        nudge_duration(&mut state, -1.0);
+        assert_eq!(state.core.undo_depth(), depth + 1);
+        assert_eq!(state.core.project.fx_clips[0].clip.duration, 0.1);
+        // Growing from the floor is unguarded.
+        nudge_duration(&mut state, 1.0);
+        let duration = state.core.project.fx_clips[0].clip.duration;
+        assert!((duration - 1.1).abs() < 1e-4, "duration {duration}");
+    }
+
+    #[test]
+    fn lane_count_text_names_the_hidden_share() {
+        // Nothing hidden: the pre-Wave-10 text,
+        // byte-identical.
+        assert_eq!(lane_count_text(0, 0), "0 clip(s)");
+        assert_eq!(lane_count_text(3, 0), "3 clip(s)");
+        // Any hidden clips: the share is named — the
+        // header must not read as fully live.
+        assert_eq!(lane_count_text(3, 1), "3 clip(s) · 1 hidden");
+        assert_eq!(lane_count_text(5, 5), "5 clip(s) · 5 hidden");
+    }
+
+    /// Conservative advance estimate for one character
+    /// at the LABEL font (12 pt, weight 500) — the
+    /// fx_browser width model's class table, copied:
+    /// every class is an UPPER bound against measured
+    /// tree text, so a line the model passes truly
+    /// fits. Non-ASCII is charged the full em.
+    fn label_width_model(s: &str) -> f32 {
+        s.chars()
+            .map(|c| match c {
+                ' ' => 4.0,
+                'i' | 'l' | 'j' | 't' | 'f' | '.' | ',' | ':' | ';' | '!' | '|' | '\'' | '`' => {
+                    4.0
+                }
+                '-' | '_' | '(' | ')' | '[' | ']' | '{' | '}' => 6.0,
+                'm' | 'w' => 10.0,
+                'M' | 'W' => 12.0,
+                '0'..='9' => 7.0,
+                'A'..='Z' => 9.0,
+                'a'..='z' => 7.0,
+                _ if c.is_ascii() => 7.0,
+                _ => 12.0,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn lane_row_lines_fit_the_column_budget() {
+        // Wave 10 width proof, pinned (see `fx_lane`'s
+        // docs). The card leaves 316 − 2×12 (panel pad)
+        // = 292 pt for a row; the row's own px leaves
+        // 292 − 2×8 = 276; the dot and the gap beside
+        // it leave a 258 pt text column.
+        let text_col = 316.0 - 24.0 - 16.0 - 10.0 - 8.0;
+        assert_eq!(text_col, 258.0);
+        // Worst-case row strings, built by the module's
+        // own formatters: the 100th clip, of the
+        // longest kind, with a four-digit fractional
+        // window and a three-digit figure anchor.
+        let mut clips: Vec<FxClipEntry> = (0..99)
+            .map(|_| entry(0.0, 1.0, ClipKind::Burst, 0xFF5D5D))
+            .collect();
+        let mut worst = entry(1000.5, 1000.0, ClipKind::ShockRing, 0x5DB2FF);
+        worst.figure = 99;
+        worst.node = 99;
+        clips.push(worst);
+        let core = core_with(clips);
+        let rows = clip_rows(&core, None);
+        let worst = &rows[99];
+        assert_eq!(worst.name, "shock_ring #100");
+        assert_eq!(worst.window, "frames 1001.5–2000.5");
+        assert_eq!(worst.anchor, "fig 100 · node 99");
+        // Line 1: name + gap + eye slot (13.5, the
+        // `eye_slash_slot_width` value) + gap +
+        // selection dot = the name against a 220.5 pt
+        // budget.
+        let line1 = label_width_model(&worst.name) + 8.0 + 13.5 + 8.0 + 8.0;
+        assert!(
+            line1 <= text_col,
+            "line 1 sums {line1} pt against the {text_col} pt column"
+        );
+        // Line 2: window + gap + anchor, whole — no
+        // truncation needed even at this envelope.
+        let line2 =
+            label_width_model(&worst.window) + 8.0 + label_width_model(&worst.anchor);
+        assert!(
+            line2 <= text_col,
+            "line 2 sums {line2} pt against the {text_col} pt column"
+        );
+        // The pre-Wave-10 single line, same strings:
+        // the three texts plus the fixed children
+        // (dot 10 + eye 13.5 + selection dot 8 + five
+        // gaps 40 = 71.5) overflowed the 276 pt row —
+        // and already did at ordinary values (`burst
+        // #1` / `frames 5–14` / `fig 2 · node 5`).
+        let fixed = 10.0 + 13.5 + 8.0 + 40.0;
+        let single = label_width_model(&worst.name)
+            + label_width_model(&worst.window)
+            + label_width_model(&worst.anchor)
+            + fixed;
+        assert!(single > 276.0, "the old line summed {single} pt");
+        let ordinary = label_width_model("burst #1")
+            + label_width_model("frames 5–14")
+            + label_width_model("fig 2 · node 5")
+            + fixed;
+        assert!(
+            ordinary > 276.0,
+            "even an ordinary old row summed {ordinary} pt"
+        );
     }
 
     // --------------------------------------------------

@@ -206,6 +206,39 @@
 //!   4 pt rise on the SNAP spring pair; P15). Every key,
 //!   handler body and op is unchanged.
 //!
+//! * **Wave 10 width audit** — the Phase N remainder
+//!   ("language rows can run past the card's right edge")
+//!   is PROVEN and fixed. Measured with the shell's own
+//!   conservative label-width model ([`button_width`])
+//!   against the card's 316 pt content width
+//!   ([`CARD_CONTENT_W`]), every one of the seven
+//!   4-button language rows runs over — by +16 to
+//!   +127 pt (worst: "Português (Brasil)" / "Română" /
+//!   "Русский" / "Slovenščina"). The rows already carried
+//!   `.flex_wrap()` (Wave 1), but wrap can only engage
+//!   at a definite width, and the rows — unlike
+//!   `fx_browser`'s working wrap rows — lacked the
+//!   `.w_full()` that pins a row to the card width, so
+//!   each row sized to its content and painted past the
+//!   edge (at 1440 pt, past the window itself, which is
+//!   why snaps looked clean). The fix is the missing
+//!   half of the idiom: `.w_full()` on the language
+//!   rows; the workspace and speed rows gain the same
+//!   pair defensively — all fit on one line at 316 pt
+//!   by the same arithmetic (258 / 222 and 259), but
+//!   the wider workspace row and the speed row pass
+//!   the 236 pt narrowest-column width
+//!   ([`CARD_CONTENT_W_MIN`]), where they now wrap
+//!   instead of overrunning. No button is truncated:
+//!   the widest single button ("Español
+//!   (Latinoamérica)", 181 pt) fits even the narrowest
+//!   column, so wrapping loses nothing. The rest of the
+//!   card audits clean at 316 pt: the notes wrap via
+//!   `note_line`, the toggle rows are grow-bounded,
+//!   the theme / stage / easing rows measure 150 pt or
+//!   less. Tests simulate the wrap packing and pin all
+//!   of these figures.
+//!
 //! ## Persistence
 //!
 //! Theme maps onto the EXISTING `LayoutPrefs.dark`
@@ -284,6 +317,60 @@ pub const STAGE_MAX: f32 = 4000.0;
 
 /// Language buttons per row in the picker grid.
 pub const LANG_COLUMNS: usize = 4;
+
+/// The settings card's content width at the shell's
+/// default layout: the right column is 340 pt wide
+/// (`LayoutPrefs::col_right_w`'s serde default,
+/// `shell.rs`) and the kit card pads 12 pt a side
+/// (`design::PANEL_PAD`), leaving 316. Every row of the
+/// card must fit — or wrap — inside this width.
+pub const CARD_CONTENT_W: f32 = 316.0;
+
+/// The card's content width at the NARROWEST right
+/// column the panel splitter allows (260 pt, the
+/// `main.rs` drag clamp): 260 − 24 = 236. A single
+/// button wider than this could not be placed by
+/// wrapping at any column width, so every button in
+/// the card must individually fit it.
+pub const CARD_CONTENT_W_MIN: f32 = 236.0;
+
+/// Conservative advance estimate for one character of a
+/// `chrome_view::btn` label at its LABEL font (12 pt,
+/// weight 500) — the same per-class upper-bound model
+/// `fx_browser::preset_char_width` established against
+/// measured tree text ("Shock ring" measures 61.5 pt
+/// for ten characters; the model charges 66), duplicated
+/// here because that fn is private to its module. A row
+/// the model passes truly fits; the model may call a
+/// borderline row over, never under. Non-ASCII
+/// characters are charged the full em (12 pt).
+fn label_char_width(c: char) -> f32 {
+    match c {
+        ' ' => 4.0,
+        'i' | 'l' | 'j' | 't' | 'f' | '.' | ',' | ':' | ';' | '!' | '|' | '\'' | '`' => 4.0,
+        '-' | '_' | '(' | ')' | '[' | ']' | '{' | '}' => 6.0,
+        'm' | 'w' => 10.0,
+        'M' | 'W' => 12.0,
+        '0'..='9' => 7.0,
+        'A'..='Z' => 9.0,
+        'a'..='z' => 7.0,
+        _ if c.is_ascii() => 7.0,
+        _ => 12.0,
+    }
+}
+
+/// The estimated painted width of a `btn` label, per
+/// [`label_char_width`].
+pub fn button_label_width(label: &str) -> f32 {
+    label.chars().map(label_char_width).sum()
+}
+
+/// The estimated full width of one `chrome_view::btn`:
+/// label plus the button's horizontal padding
+/// (10 pt a side, `chrome_view::btn`).
+pub fn button_width(label: &str) -> f32 {
+    button_label_width(label) + 20.0
+}
 
 // ---- Theme ----
 
@@ -713,10 +800,18 @@ fn stage_axis_row(s: &State, t: &Theme, axis: usize, heading: &str) -> El {
 /// highlighted ([`active_speed_index`]). Plain `btn`,
 /// the popover's picker idiom (the language / workspace
 /// grids): the labels are the data. A press applies its
-/// step through [`set_playback_speed`].
+/// step through [`set_playback_speed`]. The row carries
+/// the grids' wrap pair (`.w_full().flex_wrap()`,
+/// Wave 10): the five chips measure 259 pt — one line
+/// at the card's default width, wrapping instead of
+/// overrunning at the narrowest column width.
 fn speed_row(s: &State, t: &Theme) -> El {
     let active = active_speed_index(s.playback_speed);
-    let mut chips = row().key("settings-speed-row").gap(6.0);
+    let mut chips = row()
+        .key("settings-speed-row")
+        .gap(6.0)
+        .w_full()
+        .flex_wrap();
     for (i, &speed) in SPEEDS.iter().enumerate() {
         chips = chips.child(btn(
             &format!("settings-speed-{i}"),
@@ -1010,7 +1105,17 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
             .chunks(WORKSPACE_COLUMNS)
             .enumerate()
         {
-            let mut ws_row = row().key(format!("settings-ws-row-{i}")).gap(6.0);
+            // The wrap pair, as on the language rows
+            // (Wave 10): the rows measure 258 / 222 pt —
+            // one line each at the card's default 316 pt
+            // content width, but the wider row passes the
+            // 236 pt narrowest-column width, where it now
+            // wraps instead of overrunning the card.
+            let mut ws_row = row()
+                .key(format!("settings-ws-row-{i}"))
+                .gap(6.0)
+                .w_full()
+                .flex_wrap();
             for entry in chunk {
                 ws_row = ws_row.child(workspace_button(entry.clone(), s.workspace, t));
             }
@@ -1035,9 +1140,23 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
         // handler ([`language_button`] → [`set_language`]).
         let mut grid = col().key("settings-lang-grid").gap(4.0);
         for (i, chunk) in language_entries().chunks(LANG_COLUMNS).enumerate() {
+            // `.w_full()` is the load-bearing half of the
+            // wrap pair (Wave 10): measured by
+            // [`button_width`], every 4-button row runs
+            // 16–127 pt past the card's 316 pt content
+            // width, and `.flex_wrap()` alone cannot
+            // engage — a row with no definite width sizes
+            // to its content, so there is never anything
+            // to wrap against. `fx_browser`'s preset rows
+            // carry the pair for exactly this reason.
+            // Pinned to the card width, each row now wraps
+            // its later buttons onto a second line inside
+            // the card; every language stays selectable
+            // under its own key.
             let mut lang_row = row()
                 .key(format!("settings-lang-row-{i}"))
                 .gap(6.0)
+                .w_full()
                 .flex_wrap();
             for entry in chunk {
                 lang_row = lang_row.child(language_button(entry.clone(), core.lang, t));
@@ -1533,5 +1652,126 @@ playback_speed: 1.0,
         // (the speed row renders in the Playback block).
         state.settings.open = true;
         let _ = settings_popover(&state, &t);
+    }
+
+    // ---- Wave 10 width audit ----
+    //
+    // The figures below are the proof behind the
+    // module docs' Wave 10 bullet: row widths are
+    // ESTIMATES from the shell's conservative model
+    // ([`button_width`] — fx_browser's per-class table,
+    // an upper bound against measured tree text), so a
+    // row the model passes truly fits, and a row it
+    // fails was over by at least the stated margin in
+    // the model's own units.
+
+    /// Greedy flex-wrap packing, as Rune lays a
+    /// `.flex_wrap()` row out: walk the items in order,
+    /// starting a new line whenever the next item (plus
+    /// the gap before it) would pass `budget`. Returns
+    /// the packed line widths.
+    fn pack_lines(widths: &[f32], gap: f32, budget: f32) -> Vec<f32> {
+        let mut lines: Vec<f32> = Vec::new();
+        let mut line = 0.0f32;
+        for &w in widths {
+            let add = if line == 0.0 { w } else { w + gap };
+            if line + add > budget && line > 0.0 {
+                lines.push(line);
+                line = w;
+            } else {
+                line += add;
+            }
+        }
+        if line > 0.0 {
+            lines.push(line);
+        }
+        lines
+    }
+
+    #[test]
+    fn card_content_widths_match_the_shell_layout() {
+        // The default budget is not a free-floating
+        // literal: right column default (LayoutPrefs)
+        // minus the kit card's padding on both sides.
+        let prefs = stykanimate_rs::shell::LayoutPrefs::default();
+        assert_eq!(
+            prefs.col_right_w - 2.0 * design::PANEL_PAD,
+            CARD_CONTENT_W
+        );
+        // The narrowest budget: the splitter's 260 pt
+        // clamp floor (main.rs's drag handler) minus the
+        // same padding.
+        assert_eq!(260.0 - 2.0 * design::PANEL_PAD, CARD_CONTENT_W_MIN);
+    }
+
+    #[test]
+    fn button_width_model_matches_the_measured_anchor() {
+        // fx_browser's calibration point: "Shock ring"
+        // measures 61.5 pt in a real tree; the model
+        // must charge at least that (it charges 66).
+        assert_eq!(button_label_width("Shock ring"), 66.0);
+        assert!(button_label_width("Shock ring") >= 61.5);
+    }
+
+    #[test]
+    fn language_rows_overflow_unwrapped_and_wrap_inside_the_card() {
+        let entries = language_entries();
+        let widths: Vec<f32> = entries.iter().map(|e| button_width(e.label)).collect();
+        // The widest single button fits even the
+        // narrowest column — wrapping can always place
+        // every button, so no label needs truncating.
+        // (The widest is es-419's native name.)
+        let widest = widths.iter().copied().fold(0.0f32, f32::max);
+        assert_eq!(widest, 181.0);
+        assert!(widest <= CARD_CONTENT_W_MIN, "{widest} must fit the narrowest card");
+
+        // Per chunk row, in grid order: the one-line
+        // width the row painted at before the fix (the
+        // remainder, proven — every row is over), and
+        // the wrapped packing the `.w_full()` row now
+        // produces (every line inside the card).
+        let expected_one_line = [340.0, 332.0, 416.0, 356.0, 377.0, 443.0, 392.0];
+        for (i, chunk) in widths.chunks(LANG_COLUMNS).enumerate() {
+            let one_line = chunk.iter().sum::<f32>() + 6.0 * (chunk.len() - 1) as f32;
+            assert_eq!(one_line, expected_one_line[i], "row {i} one-line width");
+            assert!(
+                one_line > CARD_CONTENT_W,
+                "row {i} is the proven overflow the wrap fixes"
+            );
+            for line in pack_lines(chunk, 6.0, CARD_CONTENT_W) {
+                assert!(line <= CARD_CONTENT_W, "row {i} wraps inside the card: {line}");
+            }
+            // And at the narrowest column the same
+            // buttons still pack inside the card.
+            for line in pack_lines(chunk, 6.0, CARD_CONTENT_W_MIN) {
+                assert!(line <= CARD_CONTENT_W_MIN, "row {i} at min width: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_rows_fit_one_line_and_wrap_at_the_narrowest_column() {
+        let entries = workspace_entries();
+        let widths: Vec<f32> = entries.iter().map(|e| button_width(e.label)).collect();
+        let expected_one_line = [258.0, 222.0];
+        for (i, chunk) in widths.chunks(WORKSPACE_COLUMNS).enumerate() {
+            let one_line = chunk.iter().sum::<f32>() + 6.0 * (chunk.len() - 1) as f32;
+            assert_eq!(one_line, expected_one_line[i], "ws row {i}");
+            assert!(one_line <= CARD_CONTENT_W, "ws row {i} fits the default card");
+            for line in pack_lines(chunk, 6.0, CARD_CONTENT_W_MIN) {
+                assert!(line <= CARD_CONTENT_W_MIN, "ws row {i} at min width: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn speed_row_fits_one_line_and_wraps_at_the_narrowest_column() {
+        let widths: Vec<f32> = SPEEDS.iter().map(|&v| button_width(&speed_chip_label(v))).collect();
+        let one_line = widths.iter().sum::<f32>() + 6.0 * (widths.len() - 1) as f32;
+        assert_eq!(one_line, 259.0);
+        assert!(one_line <= CARD_CONTENT_W);
+        for line in pack_lines(&widths, 6.0, CARD_CONTENT_W_MIN) {
+            assert!(line <= CARD_CONTENT_W_MIN, "speed row at min width: {line}");
+        }
     }
 }

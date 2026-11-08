@@ -174,17 +174,21 @@
 //! UI mission Wave 9 convergence: the header title now
 //! follows the figure inspector's exact construction —
 //! `panel_title`'s title is "Segment {node}" and the
-//! node name rides in the meta slot (`Some(&st.name)`),
-//! where this panel used to bake both into one title
-//! string with a " · " separator. Same information,
-//! same order, same glyph; the name now renders in the
-//! kit's LABEL/`text_secondary` meta style like the
-//! figure panel's name does.
+//! node name rides in the meta slot, where this panel
+//! used to bake both into one title string with a " · "
+//! separator. Same information, same order, same glyph;
+//! the name now renders in the kit's
+//! LABEL/`text_secondary` meta style like the figure
+//! panel's name does. Wave 10 round 2: the meta copy is
+//! fitted with the figure inspector's own header-name
+//! budget, because the model's name is unbounded while
+//! the header row is not; `InspectorSegmentState` still
+//! carries the full name.
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::model::{NodeDef, Shape};
+use stykanimate_rs::model::{angle_of, NodeDef, Shape};
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
@@ -224,9 +228,12 @@ pub struct InspectorSegmentState {
     /// Segment thickness (definition units).
     pub thickness: f32,
     /// World direction of the segment at the current frame,
-    /// degrees in `[0, 360)` — from the solved positions, so
-    /// it is the angle actually on screen. For the root (no
-    /// segment) it is the node's pose angle at the frame.
+    /// degrees in `[0, 360)`, in the model's own angle
+    /// convention (`model::angle_of`: 0° down, 90° right,
+    /// 180° up, 270° left) — from the solved positions, so
+    /// it agrees with the pose angles the stage solver
+    /// writes. For the root (no segment) it is the node's
+    /// pose angle at the frame.
     pub angle_deg: f32,
     /// Current frame's bend for this node, degrees (0 when
     /// the frame stores no bend for it — the same read
@@ -254,6 +261,59 @@ pub fn norm_deg_360(a: f32) -> f32 {
 /// row's value, so the two can never disagree.
 pub fn format_deg(deg: f32) -> String {
     format!("{deg:.1}°")
+}
+
+/// Maximum characters a whole-number display value may
+/// occupy before the display switches to compact
+/// scientific notation. Model values are not bounded by
+/// the panel's own steppers: imports and the MCP
+/// `set_node` / `set_bend` tools can store lengths,
+/// thicknesses and bends far outside the stepper ranges,
+/// and a plain `text` value does not shrink to fit its
+/// row. Twelve characters leaves every ordinary value
+/// byte-identical to the historical `{:.0}` form while
+/// keeping even the four-button Bend row inside the
+/// 316 pt content budget.
+pub const DISPLAY_NUMBER_MAX_CHARS: usize = 12;
+
+/// Format a model value as a whole number for a readout
+/// or stepper, switching to one-decimal scientific
+/// notation only when the plain decimal form would be
+/// too wide for the panel (see
+/// [`DISPLAY_NUMBER_MAX_CHARS`]). Non-finite values keep
+/// their short Rust forms (`inf`, `NaN`).
+pub fn format_whole_number(value: f32) -> String {
+    let plain = format!("{value:.0}");
+    if plain.chars().count() <= DISPLAY_NUMBER_MAX_CHARS {
+        plain
+    } else {
+        format!("{value:.1e}")
+    }
+}
+
+/// Format a bend in degrees for the Bend readout and
+/// stepper: exactly [`format_deg`] for ordinary values,
+/// compact scientific notation for an imported or
+/// MCP-written bend whose plain form would overflow the
+/// row. (The Angle readout needs no such guard: its
+/// value is normalised into `[0, 360)` first.)
+pub fn format_deg_display(deg: f32) -> String {
+    let plain = format_deg(deg);
+    if plain.chars().count() <= DISPLAY_NUMBER_MAX_CHARS {
+        plain
+    } else {
+        format!("{deg:.1e}°")
+    }
+}
+
+/// Fit a node name for the panel header's meta slot,
+/// using the figure inspector's own header budget and
+/// word-boundary rule. The full name stays in the model
+/// and in [`InspectorSegmentState`]; only this display
+/// copy is shortened, exactly as the figure panel's
+/// header treats the figure name.
+pub fn fit_segment_header_name(name: &str) -> String {
+    crate::rune_sec::inspector_figure::fit_header_name(name)
 }
 
 /// Rotate the selected node's angle at the current frame by
@@ -408,7 +468,7 @@ pub fn bend_degrees(core: &EditorCore) -> Option<f32> {
 /// (and is unit testable without elements).
 pub fn format_bend_readout(deg: f32) -> String {
     let deg = if deg == 0.0 { 0.0 } else { deg };
-    format!("Bend {deg:.0}°")
+    format!("Bend {}°", format_whole_number(deg))
 }
 
 /// Straighten the selected node's segment: set its
@@ -481,13 +541,19 @@ pub fn segment_state(core: &EditorCore) -> Option<InspectorSegmentState> {
     let fig = core.project.figures.get(fi)?;
     let node = fig.def.nodes.get(ni)?;
     // World angle from the solved positions at the current
-    // frame (graph-aware, like the stage's `positions_f`).
+    // frame (graph-aware, like the stage's `positions_f`),
+    // measured with the model's own `angle_of`, so the
+    // readout speaks the same convention as the pose
+    // angles the stage solver writes: a segment pointing
+    // straight up (the demo chest, absolute pose angle
+    // 180°) reads 180°, not the 270° a screen-space
+    // `atan2(dy, dx)` would give.
     let angle_deg = match node.parent {
         Some(p) => {
             let pos = core.positions_f(core.current as f32, fi);
             match (pos.get(p), pos.get(ni)) {
                 (Some(a), Some(b)) => {
-                    norm_deg_360((b[1] - a[1]).atan2(b[0] - a[0]).to_degrees())
+                    norm_deg_360(angle_of([b[0] - a[0], b[1] - a[1]]))
                 }
                 _ => 0.0,
             }
@@ -732,7 +798,10 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
     // (the kit checks `has_icon` itself, the Phase H
     // guard's exact behaviour), the title text is
     // byte-identical to before, and a hairline divider
-    // sits under the header (charter §2).
+    // sits under the header (charter §2). The meta name
+    // is the fitted display copy (`fit_segment_header_name`);
+    // the model's full name is untouched.
+    let header_name = fit_segment_header_name(&st.name);
     let mut panel = panel
         .child(
             row()
@@ -742,7 +811,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                 .child(design::panel_title(
                     Some("shapes"),
                     &format!("Segment {}", st.node),
-                    Some(&st.name),
+                    Some(&header_name),
                     t,
                 )),
         )
@@ -791,17 +860,21 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
             })),
     );
     panel = panel
-        .child(readout_row("Length", format!("{:.0}", st.length), t))
-        .child(readout_row("Thickness", format!("{:.0}", st.thickness), t))
+        .child(readout_row("Length", format_whole_number(st.length), t))
+        .child(readout_row(
+            "Thickness",
+            format_whole_number(st.thickness),
+            t,
+        ))
         .child(readout_row("Angle", format_deg(st.angle_deg), t))
-        .child(readout_row("Bend", format_deg(st.bend_deg), t))
+        .child(readout_row("Bend", format_deg_display(st.bend_deg), t))
         .child(prose_readout_row("Shape", st.shape_label.clone(), t));
     // The origin has no segment to lengthen (the op no-ops);
     // the GPUI inspector omitted the row there too.
     if !st.is_root {
         panel = panel.child(stepper_row(
             "Length",
-            format!("{:.0}", st.length),
+            format_whole_number(st.length),
             "insp-len-dn",
             "insp-len-up",
             t,
@@ -812,7 +885,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
     panel = panel
         .child(stepper_row(
             "Thickness",
-            format!("{:.0}", st.thickness),
+            format_whole_number(st.thickness),
             "insp-th-dn",
             "insp-th-up",
             t,
@@ -872,7 +945,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
                             .color(t.text_secondary)
                             .grow(1.0),
                     )
-                    .child(design::stepper_value(&format_deg(st.bend_deg), t))
+                    .child(design::stepper_value(&format_deg_display(st.bend_deg), t))
                     .child(btn("seg-bend-m5", "−5°", false, t, |s| {
                         bend_selected(&mut s.core, (-5.0f32).to_radians())
                     }))
@@ -974,7 +1047,98 @@ mod tests {
             "angle not normalised: {}",
             st.angle_deg
         );
+        // The chest points straight up from the hips:
+        // its absolute pose angle is 180°, and the
+        // readout speaks the model's convention, so it
+        // must read 180° — a screen-space atan2(dy, dx)
+        // would report 270° for the same segment.
+        assert!(
+            (st.angle_deg - 180.0).abs() < 0.01,
+            "chest angle {}, want 180 (model convention)",
+            st.angle_deg
+        );
         assert_eq!(st.bend_deg, 0.0, "fresh frames store no bend");
+    }
+
+    #[test]
+    fn segment_state_rereads_external_edits_on_every_call() {
+        // The panel holds no cached copy of the model:
+        // `segment_state` is computed from the core on
+        // every call (and `inspector_segment` calls it on
+        // every render), so edits made outside this panel
+        // — an MCP `set_node` / `set_bend` write, an
+        // import, another panel's op — are what the next
+        // call reports, byte for byte.
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        let frame = core.current;
+        let before = segment_state(&core).unwrap();
+        {
+            let node = &mut core.project.figures[fi].def.nodes[1];
+            node.length = 123.0;
+            node.thickness = 9.0;
+        }
+        let nodes = core.project.figures[fi].def.nodes.len();
+        core.project.frames[frame].bends = vec![vec![0.0; nodes]];
+        core.project.frames[frame].bends[fi][1] = 0.35;
+        let after = segment_state(&core).unwrap();
+        assert_ne!(before.length, after.length, "the first read was live");
+        assert_eq!(after.length, 123.0);
+        assert_eq!(after.thickness, 9.0);
+        assert!(
+            (after.bend_deg - 0.35f32.to_degrees()).abs() < 0.01,
+            "bend readout {}, want the externally stored 0.35 rad",
+            after.bend_deg
+        );
+    }
+
+    #[test]
+    fn stage_drag_moves_the_angle_readout_in_model_convention() {
+        // A stage drag is the edit made furthest from
+        // this panel: `begin_drag` / `drag_to` let the
+        // model's own solver (`aim_node`) write the pose.
+        // Aiming the chest at a target 30° from straight
+        // down must move the panel's Angle readout to
+        // 30° — the value `model::angle_of` itself
+        // reports for the solved segment.
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        let frame = core.current as f32;
+        let pos = core.positions_f(frame, fi);
+        let (parent, child) = (pos[0], pos[1]);
+        assert!(core.begin_drag(child), "the chest joint is grabbable");
+        let len = core.project.figures[fi].def.nodes[1].length;
+        let dir = stykanimate_rs::model::dir(30.0);
+        core.drag_to([parent[0] + dir[0] * len, parent[1] + dir[1] * len]);
+        core.end_drag();
+        assert_eq!(core.selected_node, Some(1), "the drag keeps the joint");
+        let st = segment_state(&core).unwrap();
+        assert!(
+            (st.angle_deg - 30.0).abs() < 0.01,
+            "angle after drag {}, want 30 (model convention)",
+            st.angle_deg
+        );
+    }
+
+    #[test]
+    fn stage_selection_and_the_panel_share_one_selection_field() {
+        // There is no panel-side selection cache to fall
+        // out of sync: the stage's selection-only press
+        // writes `EditorCore::selected_node` (via
+        // `select_figure` + the field write in
+        // `secondary_select`), and this panel reads that
+        // same field on its next `segment_state` call.
+        let mut core = core_with_selection(Some(3));
+        let fi = core.selected_figure;
+        let chest = core.positions(core.current, fi)[1];
+        assert!(
+            crate::stage_view::secondary_select(&mut core, chest),
+            "the chest joint is selectable from the stage"
+        );
+        assert_eq!(core.selected_node, Some(1));
+        let st = segment_state(&core).unwrap();
+        assert_eq!(st.node, 1, "the panel follows the stage's selection");
+        assert_eq!(st.figure, fi);
     }
 
     #[test]
@@ -1115,21 +1279,21 @@ mod tests {
     #[test]
     fn rotate_selected_moves_the_readout_by_the_same_step() {
         // The readout is the solved world direction in
-        // screen space (atan2 over y-down positions, so it
-        // grows clockwise on screen); pose angles turn the
-        // other way (the engine's counter-clockwise
-        // convention, the same one drag posing and graph
-        // keys use). A local +5° step therefore moves the
-        // readout by exactly 5° in the readout's own sense:
-        // −5° (mod 360). The magnitude is what must match.
+        // the model's own angle convention
+        // (`model::angle_of` — the convention drag posing
+        // and graph keys write), so a local +5° step
+        // moves the readout by exactly +5° (mod 360):
+        // same direction, same magnitude, one convention
+        // across the solver, the readout and the Rotate
+        // row's value.
         let mut core = core_with_selection(Some(1));
         let before = segment_state(&core).unwrap().angle_deg;
         rotate_selected(&mut core, 5.0);
         let after = segment_state(&core).unwrap().angle_deg;
         let moved = norm_deg_360(after - before);
         assert!(
-            (moved - 355.0).abs() < 0.01,
-            "readout moved {moved}, want 355 (−5 in readout sense)"
+            (moved - 5.0).abs() < 0.01,
+            "readout moved {moved}, want +5 in model convention"
         );
     }
 
@@ -1194,6 +1358,46 @@ mod tests {
         core.project.frames[frame].bends[fi][1] = BEND_LIMIT_RAD - 0.01;
         bend_selected(&mut core, (5.0f32).to_radians());
         assert_eq!(core.project.frames[frame].bends[fi][1], BEND_LIMIT_RAD);
+    }
+
+    #[test]
+    fn bend_selected_clamps_in_the_panel_not_in_the_ik_solver() {
+        // The panel's bend is a RENDER arc (`Frame.bends`
+        // through `model::bend_mid`), not a joint angle:
+        // it never enters FK/IK at all. The two-bone
+        // solver's only bend input is `NodeDef.bend`, the
+        // ±1 side flag — a different field that this
+        // panel never writes. So the ±0.7 rad limit is
+        // applied HERE, before the write: an oversized
+        // request is stored at exactly the limit, the
+        // renderer's `bends_at` hands that same value to
+        // `bend_mid` unclamped, and neither the solved
+        // joint positions nor the IK side flag move.
+        // There is no downstream clamp to hide behind.
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        let frame = core.current;
+        let positions_before = core.positions_f(frame as f32, fi);
+        let ik_side_before = core.project.figures[fi].def.nodes[1].bend;
+        bend_selected(&mut core, 10.0);
+        assert_eq!(
+            core.project.frames[frame].bends[fi][1], BEND_LIMIT_RAD,
+            "the panel clamps its own request before storing it"
+        );
+        assert_eq!(
+            core.project.bends_at(frame as f32, fi)[1],
+            BEND_LIMIT_RAD,
+            "the renderer receives the stored value verbatim"
+        );
+        assert_eq!(
+            core.positions_f(frame as f32, fi),
+            positions_before,
+            "a bend never moves a solved joint"
+        );
+        assert_eq!(
+            core.project.figures[fi].def.nodes[1].bend, ik_side_before,
+            "the IK bend-side flag is a different field, untouched"
+        );
     }
 
     #[test]
@@ -1262,6 +1466,57 @@ mod tests {
         assert_eq!(format_bend_readout(20.053_523), "Bend 20°");
         assert_eq!(format_bend_readout(-20.053_523), "Bend -20°");
         assert_eq!(format_bend_readout(40.107_046), "Bend 40°");
+    }
+
+    #[test]
+    fn display_formatters_compact_only_extreme_values() {
+        // Ordinary values are byte-identical to the
+        // historical forms — the compact form exists
+        // solely so an imported or MCP-written extreme
+        // cannot push a readout or stepper row past the
+        // 316 pt content budget.
+        assert_eq!(format_whole_number(220.0), "220");
+        assert_eq!(format_whole_number(5.0), "5");
+        assert_eq!(format_whole_number(1e20), "1.0e20");
+        assert_eq!(format_whole_number(-1e20), "-1.0e20");
+        assert_eq!(format_whole_number(f32::INFINITY), "inf");
+        assert_eq!(format_whole_number(f32::NAN), "NaN");
+        assert_eq!(format_deg_display(40.107_046), "40.1°");
+        assert_eq!(format_deg_display(1e20), "1.0e20°");
+        assert_eq!(format_bend_readout(1e20), "Bend 1.0e20°");
+        assert_eq!(format_bend_readout(-1e20), "Bend -1.0e20°");
+        for s in [
+            format_whole_number(1e30),
+            format_deg_display(-1e30),
+            format_bend_readout(1e30),
+        ] {
+            assert!(
+                s.chars().count() <= DISPLAY_NUMBER_MAX_CHARS + 5,
+                "display value {s:?} is still too wide"
+            );
+        }
+    }
+
+    #[test]
+    fn header_name_is_fitted_for_display_only() {
+        // The state keeps the model's full name; only
+        // the header's display copy is fitted to the
+        // figure panel's 24-character budget, so a long
+        // imported node name cannot push the header row
+        // past the card edge.
+        let long = "y".repeat(200);
+        let mut core = core_with_selection(Some(1));
+        core.project.figures[core.selected_figure].def.nodes[1].name = long.clone();
+        assert_eq!(segment_state(&core).unwrap().name, long);
+        let fitted = fit_segment_header_name(&long);
+        assert_eq!(fitted.chars().count(), 24);
+        assert!(fitted.ends_with('…'), "fitted name {fitted:?} is elided");
+        assert_eq!(
+            fit_segment_header_name("Captain Scarlet Protector Of Worlds"),
+            "Captain Scarlet…",
+            "a space in the second half cuts at the word boundary"
+        );
+        assert_eq!(fit_segment_header_name("chest"), "chest");
     }
 
     #[test]

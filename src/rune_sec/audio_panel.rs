@@ -190,6 +190,30 @@
 //! so a crowded row wraps its buttons under the name
 //! instead of crushing it or pushing Delete past the
 //! card edge. Row key and per-row handlers unchanged.
+//!
+//! Wave 10 (round-2 audit) closes the one feedback gap
+//! the earlier phases left: the toolbar renders in the
+//! empty state too (by design — the build test below
+//! says its buttons "report 'no clips' via status when
+//! pressed"), and every `_last`-dispatched button does
+//! exactly that through its op ("Audio fade failed:
+//! there are no audio clips."). But the three handlers
+//! with no `_last` variant — `normalize_target`,
+//! `duplicate_target`, `mute_target` — matched on
+//! `effective_target` and did NOTHING on an empty
+//! project: no status, no state change, a press with
+//! zero feedback. They now set the same family line
+//! ("Audio normalise failed: there are no audio
+//! clips." / "Audio duplicate failed: …" / "Audio mute
+//! failed: …") — the `_last` ops' own sentence with
+//! each op's verb, spoken by the handler because the
+//! indexed ops have no empty-project form to speak
+//! through. Everything else the round-2 audit checked
+//! — probe cost per frame (one stat per clip, decode
+//! only on change), scope labels, the kit stepper
+//! readout, kit empty states, row widths against the
+//! 316 pt budget — was verified clean at source and is
+//! unchanged.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -798,10 +822,16 @@ fn live_target(s: &State) -> Option<usize> {
 /// clip (the op is index-based, `editor.rs:2743`): the
 /// selected clip when the selection is live, the last
 /// clip otherwise (Phase G; previously always the last).
-/// No-op when the project has no clips.
+/// Wave 10: with no clips there is no target and no
+/// `_last` variant to report through, so the handler
+/// sets the op family's no-clips line itself (see the
+/// module docs) — the press is never silent.
 fn normalize_target(s: &mut State) {
-    if let Some(i) = effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
-        s.core.audio_normalize(i);
+    match effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
+        Some(i) => s.core.audio_normalize(i),
+        None => {
+            s.core.status = "Audio normalise failed: there are no audio clips.".into();
+        }
     }
 }
 
@@ -825,11 +855,19 @@ fn normalise_all(s: &mut State) {
 /// under one snapshot; on success the copy becomes the
 /// selection so the user can move it with Earlier/Later.
 /// On the op's refusal (`None`) it has already set the
-/// status and nothing changes here.
+/// status and nothing changes here. Wave 10: with no
+/// clips there is no target to refuse, so the handler
+/// sets the op family's no-clips line itself (see the
+/// module docs) — the press is never silent.
 fn duplicate_target(s: &mut State) {
-    if let Some(i) = effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
-        if let Some(new_index) = s.core.audio_duplicate_clip_at(i) {
-            s.audio_panel.selected = Some(new_index);
+    match effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
+        Some(i) => {
+            if let Some(new_index) = s.core.audio_duplicate_clip_at(i) {
+                s.audio_panel.selected = Some(new_index);
+            }
+        }
+        None => {
+            s.core.status = "Audio duplicate failed: there are no audio clips.".into();
         }
     }
 }
@@ -838,18 +876,25 @@ fn duplicate_target(s: &mut State) {
 /// the selected clip when the selection is live, the
 /// last clip otherwise (the `effective_target`
 /// resolution `normalize_target` and `duplicate_target`
-/// use). With no clips there is no target and the press
-/// is a no-op: the toggle op is indexed (there is no
-/// `_last` mute variant), so there is nothing to call —
-/// but the button itself renders live in every state,
-/// exactly like the rest of the toolbar, whose buttons
-/// never render inert. DEPENDENCY (Phase M): calls
+/// use). With no clips there is no target to call the
+/// indexed toggle on (there is no `_last` mute variant),
+/// so — Wave 10 — the handler sets the op family's
+/// no-clips line itself (see the module docs) instead of
+/// the Phase M silent no-op; the button itself still
+/// renders live in every state, exactly like the rest of
+/// the toolbar, whose buttons never render inert.
+/// DEPENDENCY (Phase M): calls
 /// `audio_ops::audio_toggle_muted_at` from the parallel
 /// `audio_ops` section — until that lands this file does
 /// not compile, by design.
 fn mute_target(s: &mut State) {
-    if let Some(i) = effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
-        audio_ops::audio_toggle_muted_at(&mut s.core, i);
+    match effective_target(s.audio_panel.selected, s.core.project.audio.len()) {
+        Some(i) => {
+            audio_ops::audio_toggle_muted_at(&mut s.core, i);
+        }
+        None => {
+            s.core.status = "Audio mute failed: there are no audio clips.".into();
+        }
     }
 }
 
@@ -2400,6 +2445,39 @@ playback_speed: 1.0,
         let _ = std::fs::remove_file(&silent_a);
         let _ = std::fs::remove_file(&mid);
         let _ = std::fs::remove_file(&silent_c);
+    }
+
+    #[test]
+    fn target_handlers_report_no_clips_instead_of_silence() {
+        // Wave 10: the toolbar renders on an empty
+        // project, and its `_last`-dispatched buttons
+        // report through their ops ("Audio fade failed:
+        // there are no audio clips."). The three handlers
+        // with no `_last` variant — Normalise, Duplicate,
+        // Mute — used to do NOTHING on an empty project:
+        // a press with zero feedback. Each now sets the
+        // op family's no-clips line itself, and nothing
+        // else changes (no clip appears, no selection).
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        let mut s = state_with(core);
+        normalize_target(&mut s);
+        assert_eq!(
+            s.core.status,
+            "Audio normalise failed: there are no audio clips."
+        );
+        duplicate_target(&mut s);
+        assert_eq!(
+            s.core.status,
+            "Audio duplicate failed: there are no audio clips."
+        );
+        mute_target(&mut s);
+        assert_eq!(
+            s.core.status,
+            "Audio mute failed: there are no audio clips."
+        );
+        assert!(s.core.project.audio.is_empty());
+        assert_eq!(s.audio_panel.selected, None);
     }
 
     #[test]

@@ -177,6 +177,25 @@
 //!   `project_tools::save_copy_pressed` directly (the
 //!   derived "{name} copy" naming is the handler's own,
 //!   so the palette invents nothing).
+//! * Wave 10 appended two commands for figure-keyframe
+//!   navigation, `prev-keyframe` / `next-keyframe`
+//!   (Transport): the selected figure's pose keyframes
+//!   from `stats::figure_keyframes` (the dopesheet
+//!   rule), stepped with the playback panel's strict
+//!   `prev_key` / `next_key` helpers and jumped via
+//!   `EditorCore::goto`. The transport's `pb-prev-key` /
+//!   `pb-next-key` buttons walk camera + graph keys, so
+//!   figure pose keys had no jump anywhere; with no key
+//!   on the pressed side the shims report in the camera
+//!   panel's wording family ("No keyframe before /
+//!   after this frame." — a `classify_status` Warn) and
+//!   the playhead stays. One candidate was deliberately
+//!   NOT added: a "Toggle dopesheet" command — the
+//!   shell has no dopesheet lane or panel and no
+//!   visibility state for one to flip (the word survives
+//!   only in the lib's i18n strings and a stats doc
+//!   reference to the original app's rule), so the
+//!   command would have nothing real to run.
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -779,6 +798,47 @@ fn cmd_theme_dark(s: &mut State) {
     crate::rune_sec::settings_popover::set_theme(&mut s.core, false);
 }
 
+/// Wave 10: jump the playhead to the selected figure's
+/// previous pose keyframe. The key list is
+/// `stats::figure_keyframes` over
+/// `EditorCore::selected_figure` — the dopesheet rule:
+/// frame 0 counts when the figure is posed there, and
+/// every later frame whose pose changes is a key. The
+/// step itself reuses the playback panel's strict
+/// [`crate::rune_sec::playback_controls::prev_key`], so
+/// the palette and the transport walk a key list the
+/// same way (standing on a key steps to the one before
+/// it). The transport's `pb-prev-key` walks camera +
+/// graph keys instead — figure pose keys had no jump.
+/// With no key before the playhead the command reports
+/// in the camera panel's wording family
+/// (`camera_panel::goto_prev_key`'s "No camera key
+/// before this frame.") and the playhead does not move;
+/// on a hit it only `goto`s, like every other jump.
+fn cmd_prev_keyframe(s: &mut State) {
+    let c = &mut s.core;
+    let keys = stykanimate_rs::stats::figure_keyframes(&c.project, c.selected_figure);
+    match crate::rune_sec::playback_controls::prev_key(c.current, &keys) {
+        Some(frame) => c.goto(frame),
+        None => c.status = "No keyframe before this frame.".into(),
+    }
+}
+
+/// Wave 10: jump the playhead to the selected figure's
+/// next pose keyframe; the mirror of
+/// [`cmd_prev_keyframe`] over
+/// [`crate::rune_sec::playback_controls::next_key`],
+/// with the refusal in `camera_panel::goto_next_key`'s
+/// wording family.
+fn cmd_next_keyframe(s: &mut State) {
+    let c = &mut s.core;
+    let keys = stykanimate_rs::stats::figure_keyframes(&c.project, c.selected_figure);
+    match crate::rune_sec::playback_controls::next_key(c.current, &keys) {
+        Some(frame) => c.goto(frame),
+        None => c.status = "No keyframe after this frame.".into(),
+    }
+}
+
 fn cmd_add_frame(s: &mut State) {
     s.core.add_frame();
 }
@@ -805,10 +865,12 @@ fn cmd_paste_frame(s: &mut State) {
 
 fn cmd_undo(s: &mut State) {
     s.core.undo();
+    s.stroke_selected = None;
 }
 
 fn cmd_redo(s: &mut State) {
     s.core.redo();
+    s.stroke_selected = None;
 }
 
 fn cmd_save(s: &mut State) {
@@ -1134,6 +1196,10 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "theme-light", title: "Switch to light theme", group: "View", run: cmd_theme_light },
     Command { key: "theme-dark", title: "Switch to dark theme", group: "View", run: cmd_theme_dark },
     Command { key: "save-copy", title: "Save a copy of the project", group: "Projects", run: crate::rune_sec::project_tools::save_copy_pressed },
+    // -- Wave 10 (appended: every entry above keeps its
+    // -- place) ------------------------------------------
+    Command { key: "prev-keyframe", title: "Go to previous keyframe", group: "Transport", run: cmd_prev_keyframe },
+    Command { key: "next-keyframe", title: "Go to next keyframe", group: "Transport", run: cmd_next_keyframe },
 ];
 
 // ----------------------------------------------------------------
@@ -1766,8 +1832,17 @@ mod tests {
         // (save-copy — names project_tools'
         // save_copy_pressed directly; E6 had skipped it
         // because no State-level handler existed at its
-        // edit time, and D5's handler landed after).
-        assert_eq!(total, 112, "palette should cover 112 commands, has {total}");
+        // edit time, and D5's handler landed after), +2
+        // in Wave 10 (prev-keyframe, next-keyframe — the
+        // selected figure's pose keyframes from
+        // stats::figure_keyframes, stepped with the
+        // playback panel's strict prev_key / next_key and
+        // jumped via core.goto; the no-key side reports
+        // in the camera panel's wording family. A
+        // toggle-dopesheet candidate was skipped: the
+        // shell has no dopesheet lane or visibility state
+        // for a command to flip).
+        assert_eq!(total, 114, "palette should cover 114 commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }
@@ -1832,6 +1907,7 @@ mod tests {
             fill: None,
             spray: None,
             opacity: 1.0,
+            scatter: 0.0,
         };
         s.core.project.strokes.push(stroke(0x111111));
         s.core.project.strokes.push(stroke(0x222222));
@@ -2118,6 +2194,7 @@ mod tests {
             fill: None,
             spray: None,
             opacity: 1.0,
+            scatter: 0.0,
         };
         s.core.project.strokes.push(stroke(0x111111));
         s.core.project.strokes.push(stroke(0x222222));
@@ -2308,6 +2385,60 @@ mod tests {
         // its handler writes a real file into ./projects,
         // which tests must not pollute — project_tools'
         // own tests cover the factored pieces.
+    }
+
+    #[test]
+    fn wave_10_commands_are_present_and_wired() {
+        // Both Wave 10 keys resolve (idx_of panics if not).
+        for key in ["prev-keyframe", "next-keyframe"] {
+            idx_of(key);
+        }
+        // Findable by the plain query "keyframe": the
+        // word sits whole in both titles (and in both
+        // keys, which are scored too).
+        let got = filter_commands("keyframe");
+        for key in ["prev-keyframe", "next-keyframe"] {
+            assert!(
+                got.iter().any(|&i| COMMANDS[i].key == key),
+                "query \"keyframe\" should find {key}, got {:?}",
+                got.iter().map(|&i| COMMANDS[i].key).collect::<Vec<_>>()
+            );
+        }
+        // Wiring: the demo project's figure 0 is posed on
+        // every frame and changes on each, so copying
+        // frame 0's pose over frames 1 and 2 leaves its
+        // keyframes at exactly [0, 3, 4] under the
+        // dopesheet rule stats::figure_keyframes
+        // implements. The premise is asserted first, so a
+        // demo change fails here rather than downstream.
+        let mut s = crate::init();
+        let pose0 = s.core.project.frames[0].poses[0].clone();
+        s.core.project.frames[1].poses[0] = pose0.clone();
+        s.core.project.frames[2].poses[0] = pose0;
+        assert_eq!(
+            stykanimate_rs::stats::figure_keyframes(&s.core.project, s.core.selected_figure),
+            vec![0, 3, 4]
+        );
+        // At the first key, Prev has nowhere to go: the
+        // playhead stays and the refusal is the camera
+        // panel's wording family — a classify_status Warn.
+        s.core.goto(0);
+        (COMMANDS[idx_of("prev-keyframe")].run)(&mut s);
+        assert_eq!(s.core.current, 0, "no key before frame 0: the playhead stays");
+        assert_eq!(s.core.status, "No keyframe before this frame.");
+        // Next walks the key list strictly: 0 -> 3 -> 4.
+        (COMMANDS[idx_of("next-keyframe")].run)(&mut s);
+        assert_eq!(s.core.current, 3);
+        (COMMANDS[idx_of("next-keyframe")].run)(&mut s);
+        assert_eq!(s.core.current, 4);
+        // At the last key, Next refuses the same way.
+        (COMMANDS[idx_of("next-keyframe")].run)(&mut s);
+        assert_eq!(s.core.current, 4, "no key after the last key: the playhead stays");
+        assert_eq!(s.core.status, "No keyframe after this frame.");
+        // Prev from the last key steps back to the key
+        // before it (standing on a key is not a target).
+        (COMMANDS[idx_of("prev-keyframe")].run)(&mut s);
+        assert_eq!(s.core.current, 3);
     }
 
     // -- command_hint (Phase N, P14 §4.4) -----------------------

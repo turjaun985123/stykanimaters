@@ -368,6 +368,122 @@
 //! `design::empty_state` (Wave 6 conversion, verified
 //! in place) and its message names the frame scope
 //! the list actually filters by.
+//!
+//! ## Wave 10 round-2 audit (agent C6)
+//!
+//! A second pass over the selection's hygiene, the
+//! rows' widths and the list's growth, hunting what
+//! round 1 (B5, above) did not cover.
+//!
+//! **Widths — two growing texts did not flex.** The
+//! selection readout and the per-stroke summary are
+//! both `text(...).grow(1.0)` in rows with fixed
+//! siblings, and in Rune only a `.truncate()`d text
+//! flexes (the status strip's documented semantics:
+//! flex_shrink 1, minimum width 0, elision) — a plain
+//! growing text paints at full width and pushes its
+//! siblings past the card's right edge. The readout's
+//! row leaves it ≈101 pt of the 316 pt content
+//! column (three 26 pt icon buttons, the ≈105 pt
+//! Go to frame button, four 8 pt gaps), and the
+//! shortest live readout — "No stroke selected ·
+//! 1 stroke" — is already wider; a selected readout
+//! ("Stroke 118 of 120 · frame 60") wider still. The
+//! summary's room is ≈187 pt, and an ordinary filled
+//! spray summary is 42 chars ("2048 pts · w 24 ·
+//! filled · spray r12 · 50%"). Both texts now carry
+//! `.truncate()` — the clips / audio / figures
+//! panels' idiom for the same shape — so the buttons
+//! keep their places and elision stays display-only:
+//! [`stroke_summary`] and [`selection_readout`]
+//! still return the full strings (pinned by tests).
+//! The state was invisible to the overflow scan for
+//! the usual reason: no headless scene gives the
+//! demo project strokes, so neither row has ever
+//! been in a dumped tree with live data. The panel's
+//! other rows re-check clean at the same budget:
+//! the bulk rows' labels are fixed literals beside
+//! fixed buttons (≈297 pt worst), the header needs
+//! ten combined digits of frame + count to cross,
+//! and the measure / hint lines are column-flow
+//! prose, which wraps.
+//!
+//! **Selection hygiene — every other mutation path.**
+//! Reorder does not exist: the rows carry no move
+//! control, and no code anywhere swaps, sorts or
+//! inserts into `Project.strokes` (full-tree grep:
+//! the vec's only mutations are the editor's
+//! remove / retain / clear and the draw path's
+//! appends, which never shift an existing index).
+//! Simplify mutates the selected stroke's points in
+//! place at its own index. Frame navigation
+//! (`EditorCore::goto`) writes only the playhead,
+//! and frame deletion (`EditorCore::delete_frame`)
+//! touches only `project.frames` — the strokes vec
+//! and the `Stroke.frame` values are never
+//! renumbered, so an index keeps naming its stroke
+//! (its strokes are not removed either; which frame
+//! they render on after a deletion is the engine's
+//! standing behaviour, not a selection hazard). The
+//! Delete key, the Edit menu and the palette all
+//! delete the selected stroke itself and clear the
+//! selection; the palette's `delete-last-stroke`
+//! removes only the tail index, which can stale a
+//! selection (readers treat stale as unset) but
+//! never mispoint it. The engine's `lasso_erase`
+//! retain-removal is unreachable — no shell or MCP
+//! caller exists — but any future caller must remap
+//! like the presses here.
+//!
+//! **The one proven hole is project load, and its
+//! fix does not live in this file.** Every
+//! session-replacing press (Open / New / Recover /
+//! Reload, in both the Project section and Home)
+//! swaps `core.project` wholesale —
+//! `open_project_file` assigns the loaded project,
+//! Home's New installs `Project::new_demo` — while
+//! `State.stroke_selected` is shell state the core
+//! cannot clear. The presses curate the rest of the
+//! session (`clear_stale_solo`, `sync_name_edit`,
+//! the core's own figure / node / solo resets), but
+//! nothing clears the stroke selection, so a
+//! surviving `Some(i)` inside the new project's
+//! range silently names a stroke the user never
+//! selected there — the stage highlights it, the
+//! Width / Opacity / Simplify presses edit it, the
+//! Delete key deletes it. The B5 hazard through the
+//! load door. The fix is one line per press —
+//! `s.stroke_selected = None` after a successful
+//! swap, the `clear_stale_solo` discipline — in
+//! `project_tools` and `home_panel`; it is recorded
+//! here, where the selection's contract lives, for
+//! the integrator to place. Undo across a swap
+//! shares the mechanism (the undo history survives
+//! an open by design) and wants the same look.
+//!
+//! **Simplify status — verified honest.** The press
+//! reports the APPLIED count: it reads
+//! `project.strokes[i].points.len()` back from the
+//! mutated stroke after `simplify_stroke_at`, not
+//! the probe's kept count (pinned by
+//! `simplify_selected_reduces_a_jittery_stroke_in_one_undo_step`).
+//! Probe and op call the same deterministic
+//! `douglas_peucker_indices` over unchanged points,
+//! and the op refuses under exactly the probe's
+//! no-op condition, so the press never snapshots a
+//! change the op then declines; the op also gathers
+//! an exactly-parallel `widths` taper at the kept
+//! indices, so a simplified stroke's taper stays
+//! parallel to its points.
+//!
+//! **List growth — clean.** The stroke list is the
+//! panel's last block and the side columns scroll
+//! whole (main.rs mounts them `.scroll(...)`), so
+//! more rows only lengthen the column's scroll —
+//! nothing inside the panel is displaced, the case
+//! that forced the graph channel list's bound. The
+//! shell's other per-item lists (figures, layers,
+//! clips) are unbounded the same way.
 
 use rune::tok::{type_, Theme};
 use rune::{el, row, text, El};
@@ -1559,10 +1675,29 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .gap(8.0)
             .center_y()
             .child(
+                // `.truncate()` (Wave 10 round 2): the
+                // readout is the row's only flexible
+                // child, and a plain growing text does
+                // not shrink in Rune — only a truncating
+                // one flexes (the status strip's
+                // documented semantics). Without it the
+                // readout paints at full width and pushes
+                // Prev / Next / Go to frame / Clear past
+                // the card's right edge: the row's fixed
+                // parts (three 26 pt icon buttons, the
+                // Go to frame icon button, four 8 pt
+                // gaps) leave ≈101 pt of the 316 pt
+                // content column, and even the shortest
+                // live readout ("No stroke selected ·
+                // 1 stroke", 29 chars) is wider than
+                // that. The string itself is unchanged —
+                // elision is display-only, and the
+                // measure line below repeats the facts.
                 text(selection_readout(core, s.stroke_selected))
                     .font(type_::LABEL)
                     .color(t.text)
-                    .grow(1.0),
+                    .grow(1.0)
+                    .truncate(),
             )
             .child(icon_only_btn(
                 "stroke-sel-prev",
@@ -1860,10 +1995,30 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                             .color(t.text_secondary),
                     )
                     .child(
+                        // `.truncate()` (Wave 10 round 2):
+                        // the summary's length is unbounded
+                        // data (a point count with any
+                        // number of digits, the optional
+                        // fill and spray clauses) and a
+                        // plain growing text does not
+                        // shrink in Rune — only a
+                        // truncating one flexes. The row's
+                        // other parts (shell padding 16,
+                        // swatch 14, the `#n` label, three
+                        // 8 pt gaps, the Delete button)
+                        // leave ≈187 pt, which an ordinary
+                        // filled spray summary ("2048 pts ·
+                        // w 24 · filled · spray r12 · 50%",
+                        // 42 chars) already exceeds — the
+                        // Delete button was pushed past the
+                        // card edge. Elision is display-
+                        // only: `StrokeRow::summary` keeps
+                        // the full string (pinned by test).
                         text(srow.summary)
                             .font(type_::LABEL)
                             .color(t.text)
-                            .grow(1.0),
+                            .grow(1.0)
+                            .truncate(),
                     )
                     .child(btn(
                         &format!("stroke-del-{idx}"),
@@ -1900,6 +2055,7 @@ mod tests {
             fill: None,
             spray: None,
             opacity: 1.0,
+            scatter: 0.0,
         }
     }
 
@@ -2064,6 +2220,68 @@ mod tests {
             opacity: 0.5,
         });
         assert_eq!(stroke_summary(&sprayed), "20 pts · w 4 · spray r12 · 50%");
+    }
+
+    #[test]
+    fn stroke_rows_keep_the_full_summary_for_long_metadata() {
+        // Wave 10 round 2: the row's summary text
+        // elides on screen (`.truncate()` — the data
+        // is unbounded and the row's room is ≈187 pt),
+        // but elision is display-only: the row DATA
+        // keeps the full string, so nothing the panel
+        // reports is falsified. A filled spray stroke
+        // with a four-digit point count is the longest
+        // ordinary summary shape there is.
+        let mut core = EditorCore::new();
+        let mut big = plain_stroke(0, 2048);
+        big.width = 24.0;
+        big.fill = Some(0x00_FF00);
+        big.spray = Some(SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        });
+        core.project.strokes.push(big);
+        let rows = stroke_rows(&core);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].summary, "2048 pts · w 24 · filled · spray r12 · 50%",
+            "the full summary survives in the row data"
+        );
+        assert_eq!(rows[0].summary.chars().count(), 42);
+    }
+
+    #[test]
+    fn selection_readout_names_multi_digit_positions_and_frames() {
+        // Wave 10 round 2: the readout strings whose
+        // widths ground the selection row's
+        // `.truncate()` — the row leaves the readout
+        // ≈101 pt, and these ordinary-project forms
+        // are far wider (29+ chars in LABEL). The
+        // strings themselves are the contract; the
+        // view only elides their painting.
+        let mut core = EditorCore::new();
+        for _ in 0..120 {
+            core.project.strokes.push(plain_stroke(0, 1));
+        }
+        core.project.strokes[117].frame = 59;
+        assert_eq!(
+            selection_readout(&core, Some(117)),
+            "Stroke 118 of 120 · frame 60"
+        );
+        assert_eq!(
+            selection_readout(&core, None),
+            "No stroke selected · 120 strokes"
+        );
+        // The shortest live form, for the record: even
+        // a one-stroke project overflows the room
+        // without truncation.
+        let mut core = EditorCore::new();
+        core.project.strokes.push(plain_stroke(0, 1));
+        assert_eq!(
+            selection_readout(&core, None),
+            "No stroke selected · 1 stroke"
+        );
     }
 
     #[test]

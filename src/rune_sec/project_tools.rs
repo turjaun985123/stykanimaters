@@ -33,10 +33,11 @@
 //! | key | control | handler → action | verdict |
 //! |---|---|---|---|
 //! | `project-tools` | section root — the kit card (`design::panel_col`, Phase N) | — container, no handler | ok |
-//! | *(title row, unkeyed)* | "Project" header (`design::panel_title`: folder-open glyph + SECTION title, autosave text trailing, kit divider under — Phase N) + autosave text | renders `autosave_line(core.edits_since_autosave())` (editor.rs:1599) | ok — counter is the core's; see the autosave note on [`autosave_line`] |
+//! | *(title row, unkeyed)* | "Project" header (`design::panel_title`: folder-open glyph + SECTION title, kit divider under — Phase N) | — container, no handler | ok |
+//! | *(autosave line, unkeyed)* | the autosave status line on its own full-width row under the title (kit prose treatment: `.wrap().w_full()`) | renders `autosave_line(core.edits_since_autosave())` (editor.rs:1599) | fixed in Wave 10 — it trailed the title as one unwrapped text until the Wave 9 headless scan caught it at +25.6 pt past the card edge whenever edits ≥ 1 (see [`project_section`]); the counter it renders is the core's — see the autosave note on [`autosave_line`] |
 //! | `proj-name-field` | name-field wrapper (el) | — container, no handler | ok |
 //! | `proj-name` | text input | `on_edit` → `&mut State::name_edit`; `on_submit` → [`apply_name`] | ok — Enter and "Set name" share one path |
-//! | `proj-set-name` | "Set name" button (`icon_btn`, "check" icon) | [`apply_name`] → [`apply_project_name`]: trims, writes `Project::name` directly (no core rename op or setter exists — editor.rs has no `rename*` fn; the file-level rename is Home's `projects::rename_project`) | ok |
+//! | `proj-set-name` | "Set name" button (`icon_btn`, "check" icon) | [`apply_name`] → [`apply_project_name`]: trims, writes `Project::name` directly (no core rename op or setter exists — editor.rs has no `rename*` fn; the file-level rename is Home's `projects::rename_project`) | ok — Wave 10: a rename that changes the name takes a core snapshot first (a counted edit, so the dirty signal and the autosave cadence see it, and Undo can restore the old name); a same-name press counts nothing |
 //! | `proj-current-file` | "Current file: …" muted line under the name field (conditional — present only when the line resolves) | renders [`current_file_line`]: the `shell::last_opened_project` display name, shown only when it exactly matches `Project::name` | ok — Phase I §31; the match guard is the Phase G §32 lesson (recents store names, not the open file, so a mismatch would lie). `home_panel::current_project_path` was NOT used: it is the selector cursor, which `cycle-project` moves without opening |
 //! | `proj-current-meta` | "{size} · modified {time}" muted line under `proj-current-file` (conditional — present only when the §31 match holds AND the file resolves and stats) | renders [`current_file_meta`]: the §31 match (via [`current_file_path`]) gates it, the path resolves over `core.project_files` by the crate's slug rule ([`resolve_project_file`]), size via [`human_size`], time via [`modified_label`] | ok — Phase J §27; gated on the §31 decision itself, so the two lines can never disagree about which file the session is on |
 //! | `proj-reload` | "Reload from disk" button (`icon_btn`, "rotate-right" icon — Phase N; p13: rotate-right, not Redo's arrow-rotate-right) | [`reload_pressed`] → [`reload_target`] (the §27 gate as an owned path) → [`reload_from_disk`]: no target → status "No saved file to reload.", open never called; target → the open rows' exact discipline (point `project_index` at the file, `EditorCore::open_project_file` — it takes no path argument and returns `()`, editor.rs:3787 — [`clear_stale_solo`], [`sync_name_edit`]), with the success status overridden to name the discard | ok — Phase K §27; see the reload note below. UI mission Wave 4 (S16 D2): with a target and a dirty session the first press arms instead (`ConfirmAction::ReloadProject`; the button re-renders as the danger "Discard changes?") |
@@ -155,6 +156,121 @@ pub fn project_rows(core: &EditorCore) -> Vec<ProjectRow> {
 /// cannot drift apart on the dynamic pattern.
 pub fn open_row_key(i: usize) -> String {
     format!("open-proj-{i}")
+}
+
+/// Estimated painted advance of one character in
+/// `type_::LABEL` (12 pt, weight 500) — the fx_browser's
+/// measured class-maxima model (`preset_char_width`,
+/// fx_browser.rs), charges rounded UP to a clean step so
+/// a label the model passes truly fits: the model may
+/// truncate a borderline name early, never late.
+/// Non-ASCII is charged the full em. Keep the charges in
+/// sync with fx_browser's table; both measure the same
+/// font class.
+fn label_char_width(c: char) -> f32 {
+    match c {
+        // Real space advance: 3.20.
+        ' ' => 4.0,
+        // Widest member: 'f' at 4.55.
+        'i' | 'l' | 'j' | 't' | 'f' | '.' | ',' | ':' | ';' | '!' | '|' | '\'' | '`' => 5.0,
+        // Widest members: '-' and '_' at 5.55.
+        '-' | '_' | '(' | ')' | '[' | ']' | '{' | '}' => 6.0,
+        // 'm' at 10.66 ('w' is 9.95).
+        'm' | 'w' => 11.0,
+        // 'W' at 12.04 ('M' is 10.95).
+        'M' | 'W' => 12.5,
+        // Widest digit: '4' at 7.88.
+        '0'..='9' => 8.0,
+        // Widest remaining capital: 'Q' at 9.22.
+        'A'..='Z' => 9.5,
+        // Widest remaining lowercase: 'b'/'d'/'g'/'p'/'q'
+        // at 7.42.
+        'a'..='z' => 7.5,
+        // Widest remaining ASCII: '%' at 11.92 ('@' is
+        // 11.79) — a full em, like any wide glyph.
+        _ if c.is_ascii() => 12.0,
+        _ => 12.0,
+    }
+}
+
+/// The estimated painted width of `text` in
+/// `type_::LABEL`, per [`label_char_width`].
+pub fn label_width(text: &str) -> f32 {
+    text.chars().map(label_char_width).sum()
+}
+
+/// The inner width (pt) the Project card's rows lay out
+/// in at the left column's default 300 pt: border 1×2 +
+/// `design::PANEL_PAD` 12×2 come off, leaving 274. The
+/// shell's budgets are written against the default
+/// column widths (the Phase N convention); the splitter
+/// can narrow the column further, and the wrapped /
+/// truncated treatments below degrade gracefully there
+/// instead of spilling. (Private: its consumers are this
+/// file's width tests.)
+const CARD_INNER_W: f32 = 274.0;
+
+/// The selector-row label's display budget (pt): the
+/// card inner width minus the row gap (8) minus the
+/// widest button the row can carry — the armed state's
+/// "Discard changes?" `danger_btn` (LABEL text estimated
+/// at 120.5 by [`label_width`], plus its 10 pt padding
+/// each side ≈ 140.5). Sized for the armed state so the
+/// label renders identically armed or not: when the
+/// discard arm engages, only the button changes, as
+/// Wave 4 designed — the label never jumps.
+pub const ROW_LABEL_BUDGET: f32 = 124.0;
+
+/// The selector row's DISPLAY label for a saved project's
+/// file stem: the stem itself while it fits
+/// [`ROW_LABEL_BUDGET`], otherwise middle-truncated with
+/// "…" — head and tail both kept, growing alternately so
+/// neither side starves (the fx_browser's
+/// `preset_button_label` algorithm; the shell's filename
+/// treatment). Display only: [`ProjectRow`] keeps the
+/// full label, the row's key is its index and its Open
+/// handler opens by index, so a truncated label loses no
+/// function. Row labels are file stems — a project name
+/// is unbounded (the name field takes any length, and a
+/// named save slugifies it verbatim), so without this an
+/// long name's row pushes its Open button past the
+/// card's edge (Wave 10 audit; the figures panel's Wave 9
+/// row overflow was the same shape).
+pub fn row_display_label(label: &str) -> String {
+    if label_width(label) <= ROW_LABEL_BUDGET {
+        return label.to_string();
+    }
+    // The ellipsis is charged a full em, like any wide
+    // glyph in the model above.
+    let room = ROW_LABEL_BUDGET - 12.0;
+    let chars: Vec<char> = label.chars().collect();
+    let (mut head, mut tail, mut used) = (0usize, 0usize, 0.0f32);
+    loop {
+        let mut progressed = false;
+        if head + tail < chars.len() {
+            let w = label_char_width(chars[head]);
+            if used + w <= room {
+                head += 1;
+                used += w;
+                progressed = true;
+            }
+        }
+        if head + tail < chars.len() {
+            let w = label_char_width(chars[chars.len() - 1 - tail]);
+            if used + w <= room {
+                tail += 1;
+                used += w;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(&chars[chars.len() - tail..]);
+    out
 }
 
 /// A blank project with the codebase's established New-project
@@ -445,10 +561,28 @@ pub fn reload_target(core: &EditorCore) -> Option<PathBuf> {
 /// GPUI app drove from its Home panel, not from a name field).
 /// Returns false and explains in the status line when the name
 /// is empty.
+///
+/// Wave 10 audit (dirty truth): a rename is a project
+/// mutation, so when the name actually changes the press
+/// takes a core snapshot first — the core's own discipline
+/// for every mutating op. Before this, the field write
+/// bypassed the edit counter entirely: the dirty signal
+/// (`edits_since_autosave`) never saw a rename, the
+/// recovery snapshot kept the old name until 25 unrelated
+/// counted edits accumulated, the rename was silently
+/// losable on exit, and Undo could not restore the old
+/// name. The snapshot fixes all four at once (one counted
+/// edit, and an undo step whose restore carries the old
+/// name). A press that re-applies the name the project
+/// already has is not a mutation: no snapshot, no counted
+/// edit.
 pub fn apply_project_name(core: &mut EditorCore, raw: &str) -> bool {
     match clean_project_name(raw) {
         Some(name) => {
-            core.project.name = name.clone();
+            if name != core.project.name {
+                core.snapshot();
+                core.project.name = name.clone();
+            }
             core.status = format!("Project name set to \"{name}\".");
             true
         }
@@ -471,6 +605,7 @@ pub fn apply_project_name(core: &mut EditorCore, raw: &str) -> bool {
 /// untouched, as the tool leaves it.
 pub fn new_project(core: &mut EditorCore) {
     core.project = blank_project("Untitled");
+    core.note_project_swapped();
     core.current = 0;
     core.selected_figure = 0;
     core.selected_node = None;
@@ -489,6 +624,7 @@ pub fn new_project(core: &mut EditorCore) {
 /// stale solo would blank the stage with no explanation.
 pub fn apply_recovered_project(core: &mut EditorCore, project: Project) {
     core.project = project;
+    core.note_project_swapped();
     core.current = 0;
     core.playhead = 0.0;
     core.selected_figure = 0;
@@ -726,6 +862,14 @@ fn new_pressed(s: &mut State) {
     }
     s.confirm_action = None;
     new_project(&mut s.core);
+    // Wave 10 (C6): a stroke selection is an index into
+    // the OLD project's stroke list — after a swap it
+    // would silently name (and edit, or delete) a stroke
+    // the user never selected in this project. Every
+    // session-replacing press in this section clears it,
+    // the clear_stale_solo discipline for shell state the
+    // core cannot curate.
+    s.stroke_selected = None;
     sync_name_edit(s);
 }
 
@@ -834,6 +978,7 @@ fn open_row_pressed(s: &mut State, i: usize) {
     s.core.project_index = i;
     s.core.open_project_file();
     clear_stale_solo(&mut s.core);
+    s.stroke_selected = None;
     sync_name_edit(s);
 }
 
@@ -856,6 +1001,7 @@ fn recover_pressed(s: &mut State) {
     }
     s.confirm_action = None;
     recover_snapshot(&mut s.core);
+    s.stroke_selected = None;
     sync_name_edit(s);
 }
 
@@ -884,6 +1030,7 @@ fn reload_pressed(s: &mut State) {
     }
     s.confirm_action = None;
     reload_from_disk(&mut s.core, target.as_deref());
+    s.stroke_selected = None;
     sync_name_edit(s);
 }
 
@@ -907,12 +1054,35 @@ pub fn project_section(s: &State, t: &Theme) -> El {
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(design::panel_title(Some("folder-open"), "Project", None, t))
-                .child(
-                    text(autosave_line(core.edits_since_autosave()))
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                ),
+                .child(design::panel_title(Some("folder-open"), "Project", None, t)),
+        )
+        // Wave 10 (integrator tip, Wave 9 headless proof):
+        // the autosave line used to trail the title in its
+        // row as a single unwrapped text — at 2 counted
+        // edits the clips-populated tree measured it at
+        // x=98.13 with width 231.5, its right edge 329.6,
+        // +25.6 pt past the left column's 304 content
+        // edge. It only fires when edits ≥ 1 (the 0-edit
+        // line, "Recovery snapshot up to date.", is short
+        // enough to fit), which is why every default-state
+        // tree looked clean — and why in real use, where
+        // the counter is ≥ 1 almost always, it painted
+        // outside the card constantly. The line now gets
+        // its own full-width row under the title with the
+        // shell's proven prose treatment (.wrap().w_full(),
+        // the audio summary line's pattern): at the card's
+        // 274 pt inner width the current strings fit on
+        // one line for any plausible count (see the width
+        // test), and an extreme count — or a splitter-
+        // narrowed column — wraps inside the card instead
+        // of spilling. The strings themselves are
+        // unchanged.
+        .child(
+            text(autosave_line(core.edits_since_autosave()))
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .wrap()
+                .w_full(),
         )
         .child(design::divider(t))
         .child(
@@ -1064,7 +1234,11 @@ pub fn project_section(s: &State, t: &Theme) -> El {
                     .gap(8.0)
                     .center_y()
                     .child(
-                        text(row_data.label.clone())
+                        // Display label only — the row
+                        // opens by index, and ProjectRow
+                        // keeps the full stem (see
+                        // row_display_label for the budget).
+                        text(row_display_label(&row_data.label))
                             .font(type_::LABEL)
                             .color(t.text)
                             .grow(1.0),
@@ -1192,6 +1366,35 @@ playback_speed: 1.0,
     }
 
     #[test]
+    fn autosave_line_widths_fit_the_card() {
+        // The Wave 10 fix's budget, under the conservative
+        // width model (charges rounded up; the Wave 9 tree
+        // measured the 2-edit line at 231.5 pt where the
+        // model estimates 267 — the model may pass a line
+        // late, never early). On the line's own full-width
+        // row the common counts fit on ONE line inside the
+        // card's 274 pt inner width; larger counts fit
+        // within two lines, which the row's .wrap() absorbs
+        // instead of spilling past the card edge — the
+        // pre-fix title-row layout spilled at +25.6 pt
+        // already at 2 edits.
+        for n in [0, 1, 2] {
+            assert!(
+                label_width(&autosave_line(n)) <= CARD_INNER_W,
+                "count {n} fits one line: {}",
+                autosave_line(n)
+            );
+        }
+        for n in [25, 999] {
+            assert!(
+                label_width(&autosave_line(n)) <= 2.0 * CARD_INNER_W,
+                "count {n} wraps within two lines: {}",
+                autosave_line(n)
+            );
+        }
+    }
+
+    #[test]
     fn apply_name_sets_field_and_rejects_empty() {
         let mut core = EditorCore::new();
         assert!(apply_project_name(&mut core, "  Renamed Film "));
@@ -1199,6 +1402,36 @@ playback_speed: 1.0,
         assert!(!apply_project_name(&mut core, "   "));
         assert_eq!(core.project.name, "Renamed Film");
         assert!(core.status.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn rename_takes_a_snapshot_and_counts_as_an_edit() {
+        // Wave 10 (dirty truth): before the fix a rename
+        // wrote the field directly and the edit counter
+        // never moved — the dirty dot stayed dark, the
+        // recovery snapshot kept the old name, and Undo
+        // could not restore it.
+        let mut core = EditorCore::new();
+        let before = core.project.name.clone();
+        assert_eq!(core.edits_since_autosave(), 0, "a fresh core is clean");
+        assert!(apply_project_name(&mut core, "Renamed Film"));
+        assert_eq!(core.edits_since_autosave(), 1, "the rename is one counted edit");
+        assert!(session_dirty(&core), "the dirty signal sees the rename");
+        core.undo();
+        assert_eq!(core.project.name, before, "undo restores the old name");
+    }
+
+    #[test]
+    fn reapplying_the_same_name_counts_nothing() {
+        // A "Set name" press that changes nothing is not
+        // a mutation: no snapshot, no counted edit, the
+        // undo stack untouched.
+        let mut core = EditorCore::new();
+        let name = core.project.name.clone();
+        let depth = core.undo_depth();
+        assert!(apply_project_name(&mut core, &name));
+        assert_eq!(core.edits_since_autosave(), 0);
+        assert_eq!(core.undo_depth(), depth);
     }
 
     #[test]
@@ -1263,6 +1496,36 @@ playback_speed: 1.0,
         open_row_pressed(&mut s, 1);
         assert_eq!(s.confirm_action, None);
         assert_eq!(s.core.project_index, 1, "confirm opens the pressed row");
+    }
+
+    #[test]
+    fn open_row_arm_leaves_the_session_untouched() {
+        // Wave 10 audit (the cancel contract): the arming
+        // press is the flow's "cancel" surface — walking
+        // away from it must cost nothing, so it may touch
+        // ONLY the arm and the status line. Project,
+        // selector index, playhead, playback and selection
+        // all stay exactly as they were.
+        let mut core = EditorCore::new();
+        core.project.name = "Unsaved Work".into();
+        core.project_files = vec![
+            PathBuf::from("./projects/alpha.json"),
+            PathBuf::from("./projects/beta.json"),
+        ];
+        core.project_index = 0;
+        core.current = 1;
+        core.playing = true;
+        core.solo = Some(0);
+        core.snapshot();
+        let mut s = test_state(core);
+        open_row_pressed(&mut s, 1);
+        assert_eq!(s.confirm_action, Some(ConfirmAction::OpenProject));
+        assert!(s.core.status.contains("press Open again"), "{}", s.core.status);
+        assert_eq!(s.core.project.name, "Unsaved Work", "project untouched");
+        assert_eq!(s.core.project_index, 0, "index untouched");
+        assert_eq!(s.core.current, 1, "playhead untouched");
+        assert!(s.core.playing, "playback untouched");
+        assert_eq!(s.core.solo, Some(0), "selection untouched");
     }
 
     #[test]
@@ -1548,6 +1811,43 @@ playback_speed: 1.0,
         let mut core = EditorCore::new();
         core.project_files = Vec::new();
         assert!(project_rows(&core).is_empty());
+    }
+
+    #[test]
+    fn row_display_label_keeps_names_that_fit() {
+        assert_eq!(row_display_label("alpha"), "alpha");
+        assert_eq!(row_display_label("beta-cut"), "beta-cut");
+        assert_eq!(row_display_label("my-film-copy"), "my-film-copy");
+    }
+
+    #[test]
+    fn row_display_label_truncates_a_long_stem_in_the_middle() {
+        // Project names are unbounded, so their slugs are:
+        // this stem estimates ~420 pt against the row's
+        // 124 pt budget (the armed "Discard changes?"
+        // button is the binding width).
+        let label = row_display_label(
+            "the-quick-brown-fox-jumps-over-the-lazy-dog-again-and-again",
+        );
+        assert!(label.contains('…'), "the cut is marked: {label}");
+        assert!(
+            label_width(&label) <= ROW_LABEL_BUDGET,
+            "the truncated label fits its budget: {label}"
+        );
+        // Head and tail both survive — the stem's start
+        // and its distinguishing end stay readable.
+        assert!(label.starts_with("the"), "{label}");
+        assert!(label.ends_with("again"), "{label}");
+    }
+
+    #[test]
+    fn row_display_label_truncates_wide_glyphs_a_char_count_would_pass() {
+        // Twenty characters sounds short; twenty 'm's
+        // estimate 220 pt — width, not length, is the
+        // budget (the fx_browser model's lesson).
+        let label = row_display_label("mmmmmmmmmmmmmmmmmmmm");
+        assert!(label.contains('…'), "{label}");
+        assert!(label_width(&label) <= ROW_LABEL_BUDGET, "{label}");
     }
 
     #[test]

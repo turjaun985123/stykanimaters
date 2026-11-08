@@ -450,12 +450,7 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     if s.core.status != s.last_status {
         s.last_status = s.core.status.clone();
         if !s.last_status.is_empty() {
-            s.toasts
-                .push(
-                    s.last_status.clone(),
-                    rune_sec::toasts::classify_status(&s.last_status),
-                    now,
-                );
+            s.toasts.push_status(s.last_status.clone(), now);
         }
     }
     if !s.toasts.is_empty() {
@@ -610,10 +605,15 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         } else {
             s.core.undo();
         }
+        // Wave 10 (C6): the stroke selection never
+        // survives history navigation (see chrome_view's
+        // undo button for the hazard).
+        s.stroke_selected = None;
         return true;
     }
     if ev.is_command('y') {
         s.core.redo();
+        s.stroke_selected = None;
         return true;
     }
     if ev.is_command('s') {

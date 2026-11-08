@@ -335,14 +335,19 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
         icon_btn_inert("undo", "arrow-rotate-left", &i18n_wire::tr(core, "undo"), t)
     } else {
         icon_btn("undo", "arrow-rotate-left", &i18n_wire::tr(core, "undo"), false, t, |s| {
-            s.core.undo()
+            s.core.undo();
+            // Wave 10 (C6): history navigation can change
+            // the stroke list under the selection index —
+            // the selection never survives an undo/redo.
+            s.stroke_selected = None;
         })
     };
     let redo_btn = if core.redo_depth() == 0 {
         icon_btn_inert("redo", "arrow-rotate-right", &i18n_wire::tr(core, "redo"), t)
     } else {
         icon_btn("redo", "arrow-rotate-right", &i18n_wire::tr(core, "redo"), false, t, |s| {
-            s.core.redo()
+            s.core.redo();
+            s.stroke_selected = None;
         })
     };
     row()
@@ -373,15 +378,37 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
 /// the same dialect as the rest of the row and as the
 /// Frames section's counterparts; keys, labels, handlers
 /// and active flags unchanged.)
+///
+/// Wave 10 (audit E9): Prev/Next render through their
+/// `icon_btn_inert` twins on a zero-frame project — the
+/// live handlers guard on `n > 0` and do literally
+/// nothing there, no status included, so a live-looking
+/// button would lie (the app bar's Undo/Redo depth-gating
+/// idiom, applied to the frame count). Delete stays live
+/// at every count: `delete_frame` answers a one-frame
+/// press with its refusal status ("Cannot delete the
+/// only frame."), which is the designed feedback — the
+/// `btn_muted_live` class, not a silent no-op. Play stays
+/// live too: it flips real state the strip reports. Add
+/// and Duplicate stay live on an empty project — Add is
+/// the recovery action the timeline's empty state names —
+/// but note the core defect that makes that load-bearing:
+/// `EditorCore::add_frame` indexes `frames[current]`
+/// unguarded, so on a zero-frame project Add/Duplicate
+/// would panic in the core, not no-op; the guard belongs
+/// in the core op (engine-side, flagged in the E9
+/// report), not in a chrome gate that would strand the
+/// empty state's one named action.
 pub fn transport_row(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let play_label = i18n_wire::tr(core, if core.playing { "pause" } else { "play" });
-    row()
-        .key("transport")
-        .w_full()
-        .gap(8.0)
-        .center_y()
-        .child(icon_btn(
+    // Prev/Next, frame-count-gated (see this fn's docs):
+    // the inert twin drops the handler, so an empty-project
+    // press cannot even reach the guarded no-op.
+    let prev_btn = if core.frame_count() == 0 {
+        icon_btn_inert("prev", "chevron-left", &i18n_wire::tr(core, "prev_frame"), t)
+    } else {
+        icon_btn(
             "prev",
             "chevron-left",
             &i18n_wire::tr(core, "prev_frame"),
@@ -393,16 +420,12 @@ pub fn transport_row(s: &State, t: &Theme) -> El {
                     s.core.goto((s.core.current + n - 1) % n);
                 }
             },
-        ))
-        .child(icon_btn(
-            "play",
-            if core.playing { "pause" } else { "play" },
-            &play_label,
-            core.playing,
-            t,
-            |s| toggle_play(s),
-        ))
-        .child(icon_btn(
+        )
+    };
+    let next_btn = if core.frame_count() == 0 {
+        icon_btn_inert("next", "chevron-right", &i18n_wire::tr(core, "next_frame"), t)
+    } else {
+        icon_btn(
             "next",
             "chevron-right",
             &i18n_wire::tr(core, "next_frame"),
@@ -414,7 +437,23 @@ pub fn transport_row(s: &State, t: &Theme) -> El {
                     s.core.goto((s.core.current + 1) % n);
                 }
             },
+        )
+    };
+    row()
+        .key("transport")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(prev_btn)
+        .child(icon_btn(
+            "play",
+            if core.playing { "pause" } else { "play" },
+            &play_label,
+            core.playing,
+            t,
+            |s| toggle_play(s),
         ))
+        .child(next_btn)
         .child(el().grow(1.0))
         .child(icon_btn(
             "add-frame",
@@ -445,6 +484,16 @@ pub fn transport_row(s: &State, t: &Theme) -> El {
 /// The timeline: one numbered chip per frame in a horizontally
 /// scrolling row; the current frame is accent-filled. A chip
 /// press goes to that frame (`EditorCore::goto`).
+///
+/// Wave 10 (audit E9): this is the LEGACY Phase C builder —
+/// `main.rs` mounts `timeline_marks::timeline_marks` in this
+/// slot, and nothing calls this function. It stays because
+/// its keys (`timeline`, `frame-N`) are the census baseline
+/// the richer builder was built to match, and removing it
+/// would read as a key loss; but do not budget the timeline
+/// card's height against this row — the mounted card's
+/// stack (ruler, chips, marker row, clips lane, loop row)
+/// lives in `timeline_marks.rs`.
 pub fn timeline_row(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let accent = tok::accent(0, true);
@@ -629,6 +678,28 @@ mod tests {
         assert!(s.core.undo_depth() > 0, "one edit deepens the undo stack");
         assert_eq!(s.core.redo_depth(), 0, "redo stays empty until an undo");
         let _ = app_bar(&s, &t);
+    }
+
+    /// Wave 10 (audit E9): the transport row constructs in
+    /// both Prev/Next gating states — the populated demo
+    /// project (both live) and a zero-frame project (both
+    /// inert twins). Element trees are not readable from
+    /// unit tests, so construction is the assertable level
+    /// here; which form renders is the frame-count
+    /// comparison in `transport_row` itself, and the
+    /// presented-tree proof belongs to the Runtime suite.
+    /// The zero-frame state is reached by clearing the
+    /// demo project's frames directly — the same state a
+    /// loaded zero-frame project file produces.
+    #[test]
+    fn transport_row_builds_on_populated_and_empty_projects() {
+        let t = tok::theme(true);
+        let mut s = crate::init();
+        assert!(s.core.frame_count() > 0, "the demo project has frames");
+        let _ = transport_row(&s, &t);
+        s.core.project.frames.clear();
+        assert_eq!(s.core.frame_count(), 0, "the project is now empty");
+        let _ = transport_row(&s, &t);
     }
 
     /// UI mission Wave 4 (audit S16 D2): the app-bar

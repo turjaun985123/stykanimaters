@@ -119,9 +119,36 @@
 //! filter-no-match line becomes a kit `empty_state` with
 //! its message byte-identical. Keys, handlers and status
 //! strings are unchanged throughout.
+//!
+//! Wave 10 (round-2 audit) bounds the figure list: the
+//! rows now ride in their own scroll viewport
+//! (`figures-list`, capped at [`FIG_LIST_MAX_H`] — five
+//! rows) instead of stacking unbounded in the card. This
+//! was the shell's last unbounded list: the library list
+//! (fixed-height scroll region), the graph channel list
+//! (Wave 9, audit S12-07) and the FX clip list all bound
+//! theirs, while here ten figures measured ≈770 pt of
+//! panel — taller than the whole left-column viewport —
+//! pushing the panel's own bulk footer a full screen
+//! below its header and every panel under it (figure
+//! add, library, layers) as far down the column scroll.
+//! Lists of five or fewer figures lay out byte-identical
+//! to before (the cap only bites past five); the rows'
+//! keys and handlers are unchanged, and the no-match
+//! empty state still replaces the list outright, the
+//! library precedent. The same audit verified the rest
+//! of the panel clean: every row state field is derived
+//! fresh from the core in [`figure_rows`] at render (the
+//! panel's own state holds only collapse + filter text,
+//! so no toggle can go stale), the selected row reads
+//! `core.selected_figure` — the same field the Wave 10
+//! dopesheet lane's cell presses write — and the one
+//! unbounded user string left in the card, the filter
+//! query echoed by the no-match line, goes through the
+//! kit `empty_state`, which wraps.
 
 use rune::tok::{type_, Theme};
-use rune::{canvas, col, el, row, text, text_input, Color, El, LineCap, Shape, TextEdit};
+use rune::{canvas, col, el, row, text, text_input, Color, El, LineCap, ScrollSpec, Shape, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::V2;
 
@@ -710,6 +737,27 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
         )
 }
 
+/// Height (points) of one figure row as laid out by
+/// [`figure_row`]: the two control lines at 26 pt each
+/// (line 1's select cluster `min_h` and the 26 pt
+/// icon-only buttons set the line heights), the 2 pt
+/// gap between them, and the root's 4 pt vertical
+/// padding on both sides — 26 + 2 + 26 + 8 = 62. The
+/// 44 pt thumbnail is shorter than the line pair, so
+/// it never sets the height.
+pub const FIG_ROW_H: f32 = 62.0;
+
+/// Cap (points) on the figure list's scroll viewport:
+/// five rows at [`FIG_ROW_H`] plus the four
+/// [`design::PANEL_GAP`]s between them (342 pt). Five
+/// visible rows is the shell's list convention — the
+/// graph channel list's `CHAN_LIST_MAX_H` shows five
+/// channel rows the same way. Past the cap the list
+/// scrolls internally; at or under it the viewport is
+/// exactly the rows' height, so small projects lay out
+/// byte-identical to the unbounded panel.
+pub const FIG_LIST_MAX_H: f32 = 5.0 * FIG_ROW_H + 4.0 * design::PANEL_GAP;
+
 /// The figures panel: header (title, count, collapse toggle,
 /// "+ Figure"), the name-filter field, one row per visible
 /// figure, and the bulk visibility footer (All / None /
@@ -792,17 +840,38 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
     );
     // Rows for the visible figures only, built from the
     // full row list by real index, so every control and
-    // thumbnail still addresses its own figure.
+    // thumbnail still addresses its own figure. The rows
+    // ride in a bounded scroll viewport (Wave 10 — see
+    // FIG_LIST_MAX_H): past five rows the list scrolls
+    // inside the card instead of pushing the bulk footer
+    // and every panel below this one down the column.
+    // The no-match state replaces the list outright (the
+    // library panel's precedent), and an empty project
+    // shows neither, exactly as before.
     let rows = figure_rows(core);
-    for fi in &visible {
-        panel = panel.child(figure_row(&rows[*fi], core, t));
-    }
-    if visible.is_empty() && total > 0 {
-        panel = panel.child(design::empty_state(
-            "magnifying-glass",
-            &format!("No figures match \"{}\".", query.trim()),
-            t,
-        ));
+    if visible.is_empty() {
+        if total > 0 {
+            panel = panel.child(design::empty_state(
+                "magnifying-glass",
+                &format!("No figures match \"{}\".", query.trim()),
+                t,
+            ));
+        }
+    } else {
+        let mut list = col()
+            .key("figures-list")
+            .w_full()
+            .gap(design::PANEL_GAP);
+        for fi in &visible {
+            list = list.child(figure_row(&rows[*fi], core, t));
+        }
+        panel = panel.child(
+            list.scroll(ScrollSpec {
+                stick_bottom: false,
+            })
+            .min_h(0.0)
+            .max_h(FIG_LIST_MAX_H),
+        );
     }
     // Bulk visibility footer: the layers ops own the `hidden`
     // flags; each handler also clears solo so the bulk result
@@ -1345,6 +1414,57 @@ mod tests {
         let total = controls + 7.0 * LINE2_GAP;
         assert_eq!(total, 207.0);
         assert!(total <= 210.0, "line 2 totals {total} against the 210 budget");
+    }
+
+    #[test]
+    fn fig_list_viewport_caps_at_five_rows() {
+        // The Wave 10 bound, as an arithmetic pin in the
+        // line-two budget's style. One row lays out at
+        // 62 pt: two 26 pt control lines, the 2 pt gap
+        // between them, and the root's 4 pt padding top
+        // and bottom.
+        assert_eq!(FIG_ROW_H, 26.0 + 2.0 + 26.0 + 8.0);
+        assert_eq!(FIG_ROW_H, 62.0);
+        // The cap is five rows plus the four panel gaps
+        // between them — the graph channel list's
+        // five-row convention (CHAN_LIST_MAX_H).
+        assert_eq!(
+            FIG_LIST_MAX_H,
+            5.0 * FIG_ROW_H + 4.0 * crate::rune_sec::design::PANEL_GAP
+        );
+        assert_eq!(FIG_LIST_MAX_H, 342.0);
+        // Five rows exactly fill the viewport (no scroll,
+        // byte-identical layout to the unbounded panel);
+        // the sixth row is the first that scrolls.
+        let gap = crate::rune_sec::design::PANEL_GAP;
+        let content_h = |n: f32| n * FIG_ROW_H + (n - 1.0) * gap;
+        assert_eq!(content_h(5.0), FIG_LIST_MAX_H);
+        assert!(content_h(6.0) > FIG_LIST_MAX_H);
+        // Ten figures — the audit's case — now cost the
+        // panel the capped 342 pt of list, not ≈688 pt.
+        assert!(content_h(10.0) > 2.0 * FIG_LIST_MAX_H);
+    }
+
+    #[test]
+    fn figure_rows_build_for_a_many_figure_project() {
+        // The round-2 audit's case: well past the list
+        // cap, every row still derives from its real
+        // index (the bounded viewport changes layout
+        // only, never addressing) and constructs.
+        let core = named_core(&[
+            "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+            "Eleven", "Extra figure",
+        ]);
+        let rows = figure_rows(&core);
+        assert!(rows.len() >= 12, "the project carries 12+ figures");
+        let t = rune::tok::theme(true);
+        for (i, r) in rows.iter().enumerate() {
+            assert_eq!(r.index, i);
+            let _ = figure_row(r, &core, &t);
+        }
+        // The filter still addresses real indices at
+        // this size: only the twelfth figure matches.
+        assert_eq!(visible_figures(&core, "extra"), vec![11]);
     }
 
     #[test]

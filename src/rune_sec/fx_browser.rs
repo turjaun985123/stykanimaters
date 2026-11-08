@@ -49,11 +49,18 @@
 //!
 //! The Save button calls `EditorCore::fx_save_preset`
 //! (`editor.rs:2110`) with the LAST clip's index — the op
-//! names the preset `<kind>-<index+1>` itself. Saving one
-//! specific earlier clip stays with the clips section,
-//! whose rows carry their own per-clip save buttons (the
-//! GPUI arrangement). The button renders only when the
-//! project has at least one clip: with none, the op could
+//! names the preset `<kind>-<index+1>` itself, and this
+//! button is the shell's only preset save (the GPUI app's
+//! per-clip save buttons on the clips rows were not
+//! carried into this shell; named saves exist via MCP).
+//! Because the auto-name is positional, saving after the
+//! clip list has changed can reuse an earlier preset's
+//! name; since Wave 10 the engine never overwrites a
+//! different preset — `save_clip_preset_in` claims the
+//! next free suffix instead — and the status line always
+//! names the exact path written.
+//! The button renders only when the project has at
+//! least one clip: with none, the op could
 //! only report an error, and the GPUI save buttons likewise
 //! existed only on clip rows.
 //!
@@ -554,24 +561,50 @@ pub const PRESET_LABEL_BUDGET: f32 = 288.0;
 
 /// Conservative advance estimate for one character of a
 /// preset name at the button's LABEL font (12 pt, weight
-/// 500). Every class is an UPPER bound against measured
-/// tree text ("Shock ring" measures 61.5 pt for ten
-/// characters; this model charges 66), so a label the
-/// model passes truly fits — the model may truncate a
+/// 500 — Inter-Medium, the face Rune bundles and the
+/// shell's LABEL style renders). Every class is an UPPER
+/// bound against that font's real advances, measured
+/// from the bundled TTF (upm 2048, advance × 12 / 2048):
+/// the widest member of each class is named in its arm
+/// below. Wave 10 recalibration: the Wave 9 model was
+/// calibrated on one sample string ("Shock ring",
+/// 61.4 pt real) whose characters happen to sit under
+/// their class charges, which masked the classes that
+/// were UNDER-charged — "%" paints 11.92 pt but was
+/// charged 7, "@" 11.79 vs 7, digits up to 7.88 ("4")
+/// vs 7, "m" 10.66 vs 10 — so a model-passing name could
+/// still paint past the button (forty "4"s: 280 by the
+/// old model, 315.2 on screen, in a 296 pt inner width).
+/// The charges below are the measured class maxima
+/// rounded up to a clean step, so a label the model
+/// passes truly fits — the model may truncate a
 /// borderline name early, never late. Non-ASCII
-/// characters are charged the full em (12 pt), the CJK
-/// advance at this size.
+/// characters are charged the full em (12 pt): Inter's
+/// own non-ASCII letters sit under their Latin classes,
+/// "…" paints 10.92, and CJK/emoji ride the fallback
+/// font at ~1 em.
 fn preset_char_width(c: char) -> f32 {
     match c {
+        // Real space advance: 3.20.
         ' ' => 4.0,
-        'i' | 'l' | 'j' | 't' | 'f' | '.' | ',' | ':' | ';' | '!' | '|' | '\'' | '`' => 4.0,
+        // Widest member: 'f' at 4.55.
+        'i' | 'l' | 'j' | 't' | 'f' | '.' | ',' | ':' | ';' | '!' | '|' | '\'' | '`' => 5.0,
+        // Widest members: '-' and '_' at 5.55.
         '-' | '_' | '(' | ')' | '[' | ']' | '{' | '}' => 6.0,
-        'm' | 'w' => 10.0,
-        'M' | 'W' => 12.0,
-        '0'..='9' => 7.0,
-        'A'..='Z' => 9.0,
-        'a'..='z' => 7.0,
-        _ if c.is_ascii() => 7.0,
+        // 'm' at 10.66 ('w' is 9.95).
+        'm' | 'w' => 11.0,
+        // 'W' at 12.04 ('M' is 10.95).
+        'M' | 'W' => 12.5,
+        // Widest digit: '4' at 7.88.
+        '0'..='9' => 8.0,
+        // Widest remaining capital: 'Q' at 9.22.
+        'A'..='Z' => 9.5,
+        // Widest remaining lowercase: 'b'/'d'/'g'/'p'/'q'
+        // at 7.42.
+        'a'..='z' => 7.5,
+        // Widest remaining ASCII: '%' at 11.92 ('@' is
+        // 11.79) — a full em, like any wide glyph.
+        _ if c.is_ascii() => 12.0,
         _ => 12.0,
     }
 }
@@ -1024,18 +1057,28 @@ mod tests {
     #[test]
     fn preset_label_width_charges_upper_bounds() {
         // Pinned model values: each class is an upper
-        // bound against measured tree text ("Shock ring"
-        // paints 61.5 pt wide in the headless dumps; the
-        // model charges 66), so a passing label truly
+        // bound against Inter-Medium's real advances at
+        // 12 pt (the Wave 10 recalibration — see
+        // `preset_char_width`), so a passing label truly
         // fits and only a borderline name truncates
-        // early.
-        assert_eq!(preset_label_width("Shock ring"), 66.0);
-        assert_eq!(preset_label_width("lightning-12"), 71.0);
+        // early. "Shock ring" paints 61.4 pt for real;
+        // the model charges 71.
+        assert_eq!(preset_label_width("Shock ring"), 71.0);
+        assert_eq!(preset_label_width("lightning-12"), 79.5);
         assert_eq!(preset_label_width(""), 0.0);
-        // The widest classes: capital W and any
-        // non-ASCII character cost a full em.
-        assert_eq!(preset_label_width("W"), 12.0);
+        // The widest classes: capital W, and any
+        // non-ASCII character, cost ~a full em.
+        assert_eq!(preset_label_width("W"), 12.5);
         assert_eq!(preset_label_width("界"), 12.0);
+        // The classes the Wave 9 model under-charged,
+        // pinned at their measured maxima: '%' paints
+        // 11.92 and '@' 11.79 (both were charged 7),
+        // '4' is the widest digit at 7.88 (charged 7),
+        // 'm' paints 10.66 (charged 10).
+        assert_eq!(preset_label_width("%"), 12.0);
+        assert_eq!(preset_label_width("@"), 12.0);
+        assert_eq!(preset_label_width("4"), 8.0);
+        assert_eq!(preset_label_width("m"), 11.0);
     }
 
     #[test]
@@ -1078,6 +1121,50 @@ mod tests {
                 preset_label_width(&label) <= PRESET_LABEL_BUDGET,
                 "label for {name:?} fits: {}",
                 preset_label_width(&label)
+            );
+        }
+    }
+
+    #[test]
+    fn preset_button_label_truncates_names_the_old_model_passed() {
+        // Wave 10 regression: these names fit the Wave 9
+        // model's budget but paint wider than the card
+        // allows in Inter-Medium — forty "4"s charged
+        // 280 (old) vs a 315.2 pt real label in a 296 pt
+        // inner width; thirty "%"s charged 210 (old) vs
+        // 357.6 real; twenty-eight "m"s charged 280 (old)
+        // vs 298.5 real, a 318.5 pt button in a 316 pt
+        // card. Under the recalibrated model all three
+        // must truncate and fit.
+        for name in ["4".repeat(40), "%".repeat(30), "m".repeat(28)] {
+            let label = preset_button_label(&name);
+            assert!(label.contains('…'), "{name:?} now truncates: {label}");
+            assert!(
+                preset_label_width(&label) <= PRESET_LABEL_BUDGET,
+                "label for {name:?} fits: {}",
+                preset_label_width(&label)
+            );
+        }
+    }
+
+    #[test]
+    fn panel_glyphs_beyond_the_categories_resolve() {
+        // The category test above pins the five heading
+        // glyphs; the panel's other named glyphs — the
+        // title, the filter row and its empty state, the
+        // Recent heading, the presets empty state and
+        // the Save button — must equally resolve in the
+        // curated icon set (an unknown name renders as
+        // nothing).
+        for icon in [
+            "wand-magic-sparkles",
+            "magnifying-glass",
+            "clock",
+            "floppy-disk",
+        ] {
+            assert!(
+                crate::rune_sec::icon_data::icon_data(icon).is_some(),
+                "{icon} is not in the curated icon set"
             );
         }
     }

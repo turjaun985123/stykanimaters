@@ -10,13 +10,13 @@
 //!
 //! * **Frame tween** — the current frame's `model::Easing` for
 //!   the tween segment FROM this frame to the next
-//!   (`Frame.easing`, `model.rs:523-526`; `None` inherits the
+//!   (`Frame.easing`, `model.rs:565`; `None` inherits the
 //!   project-wide easing). One button per value, calling the
 //!   direct setter `EditorCore::set_frame_easing`
-//!   (`editor.rs:1983`), plus a "Project default" button that
+//!   (`editor.rs:2368`), plus a "Project default" button that
 //!   sets `None`.
 //! * **Project tween** — the project-wide default
-//!   (`Project.easing`, `model.rs:696`). One button per
+//!   (`Project.easing`, `model.rs:740`). One button per
 //!   value, calling the direct setter
 //!   `EditorCore::set_project_easing` (added in Phase E),
 //!   with the current easing shown active. Above the
@@ -29,14 +29,14 @@
 //!   second, drifting path to the same setting.)
 //! * **Graph keys** — `graph::TangentPreset`s applied to every
 //!   graph channel of the SELECTED figure via
-//!   `EditorCore::apply_graph_ease_preset` (`editor.rs:1263`).
+//!   `EditorCore::apply_graph_ease_preset` (`editor.rs:1422`).
 //!   This is a one-shot apply (it rewrites key tangents), not
 //!   a persistent setting, so its buttons are never shown as
 //!   "active".
 //!
 //! Every curve preview is drawn by sampling the engine's own
 //! easing math, never an approximation: frame/project previews
-//! sample `Easing::apply` (`model.rs:566`) and graph previews
+//! sample `Easing::apply` (`model.rs:605`) and graph previews
 //! delegate to `graph_panel::preset_preview`
 //! (`graph_panel.rs:225`), which applies the preset to the
 //! canonical ramp channel and evaluates it through
@@ -88,7 +88,7 @@ pub const PICK_W: f32 = 64.0;
 pub const PICK_H: f32 = 38.0;
 
 /// The four tween easings, in the engine's own cycle order
-/// (`Easing::next`, `model.rs:574`).
+/// (`Easing::next`, `model.rs:613`).
 pub const TWEEN_EASINGS: [Easing; 4] = [
     Easing::Linear,
     Easing::Smooth,
@@ -144,7 +144,7 @@ pub fn easing_curve(easing: Easing, samples: usize) -> Vec<f32> {
 /// The project picker's data: the four tween easings in
 /// display order, each paired with its sampled curve — the
 /// same `easing_curve` samples (from the engine's own
-/// `Easing::apply`, `model.rs:566`) that the per-row preview
+/// `Easing::apply`, `model.rs:605`) that the per-row preview
 /// chips draw. Factored out of the builder so tests can pin
 /// the strip's contents without a `State`.
 pub fn picker_curves() -> [(Easing, Vec<f32>); 4] {
@@ -162,9 +162,12 @@ pub fn tangent_curve(preset: TangentPreset, samples: usize) -> Vec<f32> {
 /// Apply a project-tween preset — the project group button
 /// handler's whole body, factored out so tests can drive the
 /// dispatch against a bare `EditorCore`. Goes through the
-/// core's direct setter (Phase E), so the press is one
-/// undoable op, exactly like the frame group's
-/// `set_frame_easing`.
+/// core's direct setter (Phase E). Unlike the frame group's
+/// `set_frame_easing`, the press is NOT an undoable op:
+/// `set_project_easing` (`editor.rs:1974`) takes no snapshot,
+/// by the core's own ruling that project-settings tweaks are
+/// not undoable edits (the same rule `cycle_easing` follows).
+/// The pinning test below keeps this doc honest.
 pub fn set_project_preset(core: &mut EditorCore, e: Easing) {
     core.set_project_easing(e);
 }
@@ -546,6 +549,25 @@ mod tests {
     }
 
     #[test]
+    fn project_preset_dispatch_takes_no_undo_snapshot() {
+        // The truth `set_project_preset`'s doc states:
+        // the press is NOT an undoable op. The core's
+        // project setter takes no snapshot (project-
+        // settings tweaks are not undoable edits there),
+        // unlike the frame group's snapshotting
+        // `set_frame_easing`. Pin the undo depth across a
+        // dispatch, mirroring the engine's own test for
+        // the setter — if the core ever starts
+        // snapshotting here, this panel's doc must change
+        // with it, and this test is what says so.
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        set_project_preset(&mut core, Easing::EaseIn);
+        assert_eq!(core.project.easing, Easing::EaseIn);
+        assert_eq!(core.undo_depth(), depth, "no snapshot is taken");
+    }
+
+    #[test]
     fn project_preset_active_tracks_the_current_easing() {
         // Exactly one project preset is active at any time,
         // and it follows each dispatch.
@@ -569,7 +591,7 @@ mod tests {
 
     #[test]
     fn picker_curves_hit_the_endpoints_exactly() {
-        // `Easing::apply` (model.rs:566) is exact at the ends
+        // `Easing::apply` (model.rs:605) is exact at the ends
         // for all four formulas, so the strip's curves start
         // at exactly 0.0 and end at exactly 1.0 — assert_eq,
         // not a tolerance.

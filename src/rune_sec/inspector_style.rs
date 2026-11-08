@@ -119,6 +119,26 @@
 //! `segment_shades` is a computed depth shading over a 3D
 //! pose, not a stored per-segment style an op can set).
 //!
+//! Stage visibility (UI mission Wave 10 audit): the
+//! stage (`stage_view::stage_shape`) draws each segment
+//! from the node's colour and `color2` only — it strokes
+//! every segment `LineCap::Round` at the node's uniform
+//! thickness and never reads `style.cap`, `style.taper`
+//! or `style.opacity`. Those three fields ARE honoured
+//! by both exporters (export.rs's `StyledSeg` cap
+//! coverage, taper half-width interpolation and opacity
+//! blend; svg.rs's cap, taper and opacity attributes),
+//! so the Cap chips, the Taper Step button and the
+//! Opacity stepper — and the cap carried by a preset or
+//! a paste — change the model and the exported output
+//! with no visible change on the stage itself. Colour
+//! and gradient edits are visible in both places.
+//! Closing the stage gap belongs to `stage_view` (the
+//! pieces it strokes carry no cap, width profile or
+//! per-node alpha), not to this panel; the note exists
+//! so the panel's contract is not read as promising
+//! stage feedback it cannot give.
+//!
 //! Phase N restyle — pure presentation, no behaviour
 //! change: the root is the design kit's `panel_col`, the
 //! header the kit's `panel_title` over a kit `divider`,
@@ -1438,6 +1458,71 @@ mod tests {
             Some(0x12_3456)
         );
         assert_eq!(core.undo_depth(), depth_before);
+    }
+
+    #[test]
+    fn paste_after_losing_the_selection_changes_nothing() {
+        // The realistic failed paste (Wave 10 audit): the
+        // clipboard is full, but the selection that was
+        // live at copy time is gone by paste time. The
+        // paste must refuse through the status line alone
+        // — no field on any node moves, no snapshot is
+        // taken, and the clipboard is NOT consumed: a
+        // later paste onto a fresh selection still lands.
+        // (`apply_style_without_a_selection_changes_nothing`
+        // pins the same refusal one level down, at
+        // `apply_style`; this pins the Paste button's own
+        // path end to end.)
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+
+        // Source node 1: a distinctive writable style,
+        // copied for real.
+        core.selected_node = Some(1);
+        core.set_node_color(0x12_3456);
+        core.set_node_color2(Some(0x34_5678));
+        core.set_node_cap(CapKind::Point);
+        core.set_node_opacity(0.55);
+        copy_style(&mut core);
+        assert_eq!(core.status, "Style copied.");
+
+        // Target node 2: a different value in every field
+        // — the state the failed paste must preserve.
+        core.selected_node = Some(2);
+        core.set_node_color(0xFF_0000);
+        core.set_node_color2(None);
+        core.set_node_cap(CapKind::Square);
+        core.set_node_opacity(0.9);
+
+        // The selection is lost; the paste is attempted.
+        core.selected_node = None;
+        let depth_before = core.undo_depth();
+        assert!(!paste_style(&mut core));
+        assert_eq!(core.status, "Select a joint first.");
+        assert_eq!(core.undo_depth(), depth_before);
+
+        // Neither node moved.
+        let target = &core.project.figures[0].def.nodes[2];
+        assert_eq!(target.color, Some(0xFF_0000));
+        assert_eq!(target.style.color2, None);
+        assert_eq!(target.style.cap, CapKind::Square);
+        assert_eq!(target.style.opacity, 0.9);
+        let source = &core.project.figures[0].def.nodes[1];
+        assert_eq!(source.color, Some(0x12_3456));
+        assert_eq!(source.style.cap, CapKind::Point);
+        assert_eq!(source.style.opacity, 0.55);
+
+        // And the clipboard survived the refusal: select
+        // the target again and the same paste lands.
+        assert!(clipboard_style().is_some());
+        core.selected_node = Some(2);
+        assert!(paste_style(&mut core));
+        assert_eq!(core.status, "Style pasted.");
+        let target = &core.project.figures[0].def.nodes[2];
+        assert_eq!(target.color, Some(0x12_3456));
+        assert_eq!(target.style.color2, Some(0x34_5678));
+        assert_eq!(target.style.cap, CapKind::Point);
+        assert_eq!(target.style.opacity, 0.55);
     }
 
     #[test]

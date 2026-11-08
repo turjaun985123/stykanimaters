@@ -378,6 +378,7 @@ fn spray_stroke_renders_deterministically_and_differs_from_plain() {
         fill: None,
         spray: None,
         opacity: 1.0,
+        scatter: 0.0,
     };
     let spray_stroke = Stroke {
         spray: Some(SprayMark {

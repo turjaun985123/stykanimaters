@@ -288,6 +288,67 @@
 //! replace, as are every key, label and handler in the
 //! panel.
 //!
+//! ## Wave 10 round 2 — rename honesty, the row budget
+//!
+//! A second audit pass over this panel, hunting the
+//! states the first rounds never rendered (no headless
+//! tree has ever contained a populated row: the CI
+//! library is empty, and the `home` scene renders this
+//! panel closed). Findings, all fixed in this file:
+//!
+//! - **Rename vs reopen.** [`confirm_rename`] re-touches
+//!   the recents with the typed name, but rows (and
+//!   [`reopen_target`]) keyed on the *stored* name,
+//!   which a file-only rename does not move — the
+//!   reopen offer silently vanished after every rename,
+//!   evicting whatever valid offer the recents front
+//!   held before it. `reopen_target` now falls back to
+//!   the file-stem match the shell's recovery check
+//!   already stats through.
+//! - **Rename vs the core's file list.** A successful
+//!   rename points `EditorCore::project_files` at the
+//!   new file name ([`dispatch_rename`]); the list
+//!   otherwise named a path that no longer existed,
+//!   losing the row's current marking and breaking a
+//!   later open through the core. (The File menu's
+//!   Open-recent block resolves recents by stored name
+//!   the same pre-Wave-10 way — menus.rs, outside this
+//!   panel; its own fallback status covers the miss.)
+//! - **The no-op rename.** A typed name that slugs to
+//!   the file's own name is a backend no-op returning
+//!   the same path; it is reported as one instead of
+//!   claiming a rename, and does not re-touch the
+//!   recents.
+//! - **The row budget.** Measured with the calibrated
+//!   charge model ([`label_char_width`]) against the
+//!   left column's 276 pt content width: the old
+//!   single-line row's buttons alone came to 286 pt,
+//!   the metadata line to ~375–575 pt unwrapped, the
+//!   delete-confirm question's share to ~104 pt, the
+//!   recovery banner's sentence to ~365 pt in a ~176 pt
+//!   share, the reopen label unbounded, and the header
+//!   title to ~183 pt into a ~150 pt cluster. The row
+//!   now stacks (name truncated to [`ROW_NAME_BUDGET`],
+//!   metadata wrapped, buttons on a wrapping row inside
+//!   the text column), the confirm question wraps on
+//!   its own line over its buttons (the full name stays
+//!   readable — it is a destructive confirm), the
+//!   banner text and the totals line wrap, the reopen
+//!   label is bounded ([`REOPEN_LABEL_BUDGET`]), and
+//!   the header title reads "Saved projects". Keys and
+//!   handlers are byte-identical throughout. Audited
+//!   clean in the same pass: the search row (~213 pt of
+//!   fixed anatomy at a three-digit count), the rename
+//!   line (167 pt fixed; the field takes the rest), the
+//!   mutual stand-down discipline between the rename,
+//!   delete and session-discard arms, the empty-name
+//!   and collision refusals (both land as
+//!   "Rename failed: …", the status grammar's Error
+//!   arm, with the session kept armed), and the New
+//!   button, which installs the starter project and
+//!   touches no file, recent or list entry — exactly
+//!   its label.
+//!
 //! ## Integrator wiring (main.rs)
 //!
 //! ```ignore
@@ -685,6 +746,23 @@ pub fn is_current_project(info: &ProjectInfo, current: Option<&Path>) -> bool {
 /// ([`project_file_index`]), because the scan reports
 /// `./projects/…` relative paths while the core's list is
 /// cwd-absolute.
+///
+/// Resolution is by exact stored name first. Since
+/// Wave 10 there is a second pass, by file stem: the
+/// recents front after a Home rename is the *typed*
+/// name ([`confirm_rename`] re-touches with it), which
+/// no row's stored name matches until the project is
+/// saved again — the rename is file-only — so exact
+/// matching alone made the reopen offer silently
+/// vanish after every rename (and evicted whatever
+/// valid offer the recents front held before it). The
+/// typed name slugs to exactly the renamed file's stem
+/// ([`name_file_slug`] — the same derivation the shell's
+/// recovery check stats through), so a stem match is
+/// that file, not a fuzzy guess. The exact match keeps
+/// precedence, and the stem pass applies the same
+/// shell-owned/recovery exclusion, so it can never land
+/// on the snapshot twin either.
 pub fn reopen_target<'a>(
     projects: &'a [ProjectInfo],
     last: Option<&str>,
@@ -694,10 +772,23 @@ pub fn reopen_target<'a>(
     if last.is_empty() {
         return None;
     }
+    let usable = |info: &ProjectInfo| {
+        !is_recovery_entry(info) && !is_shell_owned_entry(info)
+    };
     let target = projects
         .iter()
-        .find(|info| {
-            info.name == last && !is_recovery_entry(info) && !is_shell_owned_entry(info)
+        .find(|info| usable(info) && info.name == last)
+        .or_else(|| {
+            let stem = name_file_slug(last);
+            if stem.is_empty() {
+                None
+            } else {
+                projects.iter().find(|info| {
+                    usable(info)
+                        && info.path.file_stem().and_then(|s| s.to_str())
+                            == Some(stem.as_str())
+                })
+            }
         })?;
     if let Some(current) = current_path {
         let same_file = match (target.path.file_name(), current.file_name()) {
@@ -712,9 +803,146 @@ pub fn reopen_target<'a>(
 }
 
 /// The reopen button's label: the resolved display name
-/// from the scan, never the raw file stem.
+/// from the scan, never the raw file stem — and, since
+/// Wave 10, bounded to [`REOPEN_LABEL_BUDGET`]: the
+/// button sizes to its label, and a long stored name
+/// would paint it past the card's right edge. The name
+/// is middle-truncated for display only (the press
+/// opens by path, and the full name is on the row
+/// below); short names are returned byte-identical.
 pub fn reopen_label(target: &ProjectInfo) -> String {
-    format!("Reopen {}", target.name)
+    let prefix = "Reopen ";
+    let room = REOPEN_LABEL_BUDGET - text_width(prefix, label_char_width);
+    format!(
+        "{prefix}{}",
+        truncate_middle(&target.name, room, label_char_width)
+    )
+}
+
+/// The reopen button label's width budget, points
+/// (Wave 10): the button's fixed anatomy — kit `btn`
+/// padding (10 + 10), the 13 pt glyph, the 6 pt
+/// icon/label gap — is 39 pt, so a label charged at
+/// most this keeps the whole button inside the left
+/// column's 276 pt content width with margin.
+pub const REOPEN_LABEL_BUDGET: f32 = 228.0;
+
+/// Conservative advance estimate for one character at
+/// the kit's LABEL font (12 pt, weight 500 —
+/// Inter-Medium, the face Rune bundles and the shell's
+/// LABEL style renders). Every class is an UPPER bound
+/// against that font's real advances, measured from the
+/// bundled TTF (upm 2048, advance × 12 / 2048); the
+/// widest member of each class is named in its arm
+/// below. The charges are fx_browser's
+/// `preset_char_width` model (Wave 10 recalibration),
+/// duplicated because that copy is private to its
+/// module — the shell's slug rule is duplicated the
+/// same way (shell.rs). Keep the two in sync: a label
+/// this model passes truly fits; it may truncate a
+/// borderline name early, never late. Non-ASCII
+/// characters are charged the full em (12 pt): Inter's
+/// own non-ASCII letters sit under their Latin classes,
+/// "…" paints 10.92, and CJK/emoji ride the fallback
+/// font at ~1 em.
+fn label_char_width(c: char) -> f32 {
+    match c {
+        // Real space advance: 3.20.
+        ' ' => 4.0,
+        // Widest member: 'f' at 4.55.
+        'i' | 'l' | 'j' | 't' | 'f' | '.' | ',' | ':' | ';' | '!' | '|' | '\'' | '`' => 5.0,
+        // Widest members: '-' and '_' at 5.55.
+        '-' | '_' | '(' | ')' | '[' | ']' | '{' | '}' => 6.0,
+        // 'm' at 10.66 ('w' is 9.95).
+        'm' | 'w' => 11.0,
+        // 'W' at 12.04 ('M' is 10.95).
+        'M' | 'W' => 12.5,
+        // Widest digit: '4' at 7.88.
+        '0'..='9' => 8.0,
+        // Widest remaining capital: 'Q' at 9.22.
+        'A'..='Z' => 9.5,
+        // Widest remaining lowercase: 'b'/'d'/'g'/'p'/'q'
+        // at 7.42.
+        'a'..='z' => 7.5,
+        // Widest remaining ASCII: '%' at 11.92 ('@' is
+        // 11.79) — a full em, like any wide glyph.
+        _ if c.is_ascii() => 12.0,
+        _ => 12.0,
+    }
+}
+
+/// One character's charge at the row name's TITLE font
+/// (13 pt, weight 600): the LABEL charge scaled by the
+/// size ratio and rounded UP to the next half point, so
+/// it stays an upper bound at the larger size.
+fn title_char_width(c: char) -> f32 {
+    (label_char_width(c) * 13.0 / 12.0 * 2.0).ceil() / 2.0
+}
+
+/// The estimated painted width of `s` under a
+/// char-width model ([`label_char_width`] /
+/// [`title_char_width`]).
+fn text_width(s: &str, char_width: fn(char) -> f32) -> f32 {
+    s.chars().map(char_width).sum()
+}
+
+/// Middle-truncate `s` with "…" until its estimated
+/// width fits `budget` under the given char-width
+/// model: head and tail both kept, growing alternately
+/// so neither side starves (fx_browser's
+/// `preset_button_label` algorithm, generalised over
+/// the model). A string that already fits is returned
+/// unchanged. The truncating branch is only reached
+/// when the whole string exceeds the budget, which is
+/// more than the ellipsis leaves room for, so head and
+/// tail can never meet.
+fn truncate_middle(s: &str, budget: f32, char_width: fn(char) -> f32) -> String {
+    if text_width(s, char_width) <= budget {
+        return s.to_string();
+    }
+    // The ellipsis is charged by the same model (a
+    // full em at LABEL, its scaled charge at TITLE).
+    let room = budget - char_width('…');
+    let chars: Vec<char> = s.chars().collect();
+    let (mut head, mut tail, mut used) = (0usize, 0usize, 0.0f32);
+    loop {
+        let mut progressed = false;
+        if head + tail < chars.len() {
+            let w = char_width(chars[head]);
+            if used + w <= room {
+                head += 1;
+                used += w;
+                progressed = true;
+            }
+        }
+        if head + tail < chars.len() {
+            let w = char_width(chars[chars.len() - 1 - tail]);
+            if used + w <= room {
+                tail += 1;
+                used += w;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(chars[chars.len() - tail..].iter());
+    out
+}
+
+/// The file-name slug for a project name — lowercased,
+/// every non-alphanumeric character replaced by '-':
+/// the crate-wide naming convention
+/// (`editor.rs::save_named_project`, `projects::slug`,
+/// `shell::project_file_slug`). Each owner keeps a
+/// private copy (shell.rs's is explicit about it);
+/// keep this one in sync with them.
+fn name_file_slug(name: &str) -> String {
+    name.to_lowercase()
+        .replace(|c: char| !c.is_alphanumeric(), "-")
 }
 
 /// Whole-number fps prints bare (`12`), fractional keeps
@@ -1212,19 +1440,40 @@ pub fn cancel_rename(rename: &mut HomeRenameState) {
 ///
 /// Reporting mirrors [`dispatch_duplicate`]: success
 /// and failure both land on the status line in the
-/// family's "{Verb} failed: {e}" / past-tense shapes.
-/// On success the session clears and all three caches
-/// are invalidated (the renamed file must re-scan under
-/// its new name); on failure the rename stays armed
-/// with the typed text intact, so the user can fix the
-/// name and press again. Returns whether the rename
-/// landed — the caller's cue for the one follow-up
-/// this fn deliberately does not perform: the recents
-/// re-touch lives in [`confirm_rename`], because
-/// `shell::touch_recent` writes the shared on-disk
-/// `./projects`, and this dispatch stays unit-testable
-/// against a temp dir (the suite's no-pollution rule —
-/// see the snap tests' note on `./projects`).
+/// family's "{Verb} failed: {e}" / past-tense shapes
+/// (the failure shape carries " failed", the status
+/// grammar's Error arm). On a real rename the session
+/// clears, all three caches are invalidated (the
+/// renamed file must re-scan under its new name), and
+/// the core's project-file list is pointed at the new
+/// file name — it otherwise keeps naming the
+/// renamed-away path, so the rows' current marking
+/// ([`is_current_project`], matched by file name) would
+/// be lost and a later open through the core would hit
+/// a file that no longer exists. On failure the rename
+/// stays armed with the typed text intact, so the user
+/// can fix the name and press again.
+///
+/// One success-shaped case is *not* a rename (Wave 10):
+/// when the typed name slugs to the file the project
+/// already has, `rename_project` returns that same
+/// path and nothing on disk moved. The session clears
+/// (the name in the field is the file's name; there is
+/// nothing to fix and press again), the status says
+/// exactly that — "Project file is named {file} —
+/// nothing was renamed.", worded to stay in the
+/// grammar's Info family (no "failed" / "cannot" /
+/// "already") — and the function returns `false`, so
+/// [`confirm_rename`] does not re-touch the recents for
+/// a rename that did not happen. Returns whether a file
+/// actually moved — the caller's cue for the one
+/// follow-up this fn deliberately does not perform:
+/// the recents re-touch lives in [`confirm_rename`],
+/// because `shell::touch_recent` writes the shared
+/// on-disk `./projects`, and this dispatch stays
+/// unit-testable against a temp dir (the suite's
+/// no-pollution rule — see the snap tests' note on
+/// `./projects`).
 ///
 /// The backend caveat, stated in the success status
 /// itself: `rename_project` renames the FILE only — the
@@ -1244,11 +1493,33 @@ pub fn dispatch_rename(
     match projects::rename_project(&path, &new_name) {
         Ok(new_path) => {
             rename.armed = None;
-            panel.invalidate_caches();
             let file = new_path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            if new_path == path {
+                // The backend no-op: the typed name
+                // slugs to this file's own name. Report
+                // it as the non-event it is (see the
+                // docs above) — no cache drop, no
+                // file-list rewrite, no recents re-touch.
+                core.status =
+                    format!("Project file is named {file} — nothing was renamed.");
+                return false;
+            }
+            // Point the core's file list at the new
+            // name (matched by file name, the panel's
+            // established rule; each entry keeps its own
+            // directory — the core's list is cwd-absolute,
+            // the scan's paths relative).
+            if let Some(old_file_name) = path.file_name() {
+                for entry in core.project_files.iter_mut() {
+                    if entry.file_name() == Some(old_file_name) {
+                        *entry = entry.with_file_name(&file);
+                    }
+                }
+            }
+            panel.invalidate_caches();
             core.status = format!(
                 "Renamed project file to {file}. The name stored inside the file updates when the project is saved."
             );
@@ -1263,10 +1534,15 @@ pub fn dispatch_rename(
 
 /// The rename line's confirm press (and Enter in its
 /// field) at the `State` level: run [`dispatch_rename`]
-/// and, only on success, re-touch the recents list
-/// with the new name — recents are name-keyed, and the
-/// renamed file should head the list the File menu and
-/// the reopen action read.
+/// and, only when a file actually moved, re-touch the
+/// recents list with the new name — recents are
+/// name-keyed, and the renamed file should head the
+/// list the File menu and the reopen action read. The
+/// typed name stays resolvable for both readers: the
+/// shell's recovery check stats the file the name slugs
+/// to, and [`reopen_target`] falls back to that same
+/// file-stem match when no stored name matches (the
+/// rename is file-only, so the stored name lags).
 fn confirm_rename(s: &mut State) {
     let new_name = s.home_rename.edit.text.trim().to_string();
     if dispatch_rename(&mut s.core, &mut s.home_panel, &mut s.home_rename) {
@@ -1282,6 +1558,7 @@ pub fn dispatch_recover(core: &mut EditorCore) {
     match shell::read_recovery() {
         Some(project) => {
             core.project = project;
+            core.note_project_swapped();
             reset_session(core);
             core.status = "Recovered the snapshot from ./projects/.recovery.json.".into();
         }
@@ -1299,6 +1576,7 @@ pub fn dispatch_recover(core: &mut EditorCore) {
 /// the GPUI shell had for opens.
 pub fn dispatch_new(core: &mut EditorCore) {
     core.project = Project::new_demo();
+    core.note_project_swapped();
     reset_session(core);
     core.status = "New project.".into();
 }
@@ -1333,6 +1611,10 @@ fn open_row_pressed(s: &mut State, path: &Path, name: &str) {
     }
     s.confirm_action = None;
     dispatch_open(&mut s.core, path, name);
+    // Wave 10 (C6): the stroke selection indexes the old
+    // project's strokes — clear it on every swap (see
+    // project_tools' new_pressed for the full hazard).
+    s.stroke_selected = None;
 }
 
 /// The "New project" button's press: [`dispatch_new`]
@@ -1348,6 +1630,7 @@ fn new_project_pressed(s: &mut State) {
     }
     s.confirm_action = None;
     dispatch_new(&mut s.core);
+    s.stroke_selected = None;
 }
 
 /// The recovery banner's Recover press:
@@ -1368,6 +1651,7 @@ fn recover_banner_pressed(s: &mut State) {
     }
     s.confirm_action = None;
     dispatch_recover(&mut s.core);
+    s.stroke_selected = None;
     s.home_panel.recovery_offer = false;
 }
 
@@ -1514,7 +1798,13 @@ fn recovery_banner(s: &State, t: &Theme) -> El {
             text("Unsaved recovery snapshot is newer than the last save.")
                 .font(type_::LABEL)
                 .color(t.text)
-                .grow(1.0),
+                .grow(1.0)
+                // Wave 10: the sentence measures ~365 pt
+                // at LABEL charges; unwrapped it painted
+                // across the Recover button and past the
+                // card's edge (its grow share is ~176 pt).
+                // Prose wraps (the kit's treatment).
+                .wrap(),
         )
         .child(if armed {
             danger_btn("recover", "Discard changes?", t, recover_banner_pressed)
@@ -1523,10 +1813,31 @@ fn recovery_banner(s: &State, t: &Theme) -> El {
         })
 }
 
+/// The row name's display budget, points (Wave 10):
+/// the name renders at TITLE in the row's text column,
+/// whose narrowest form — beside a thumbnail, in the
+/// left column at its default 300 pt — is 196 pt wide
+/// (276 content − 16 row padding − 56 thumb − 8 gap).
+/// Display names are middle-truncated to this budget
+/// ([`row_display_name`]) so the budget holds with or
+/// without a thumbnail; the full name stays in the
+/// rename field, the search and every handler.
+pub const ROW_NAME_BUDGET: f32 = 188.0;
+
+/// A row's display name: the stored name itself while
+/// it fits [`ROW_NAME_BUDGET`] at the TITLE charges,
+/// middle-truncated with "…" past it (display only —
+/// callers keep using `info.name` for everything real).
+fn row_display_name(name: &str) -> String {
+    truncate_middle(name, ROW_NAME_BUDGET, title_char_width)
+}
+
 /// One project row: the scan-time thumbnail (Wave 4,
-/// when this file version has one), then name + real
-/// metadata on the left, Open / Duplicate / Delete on
-/// the right. Keys carry the GPUI
+/// when this file version has one), then a column —
+/// the name, the real metadata line, and the action
+/// row (Open / Duplicate / Rename / Delete, wrapped
+/// inside the column since Wave 10; see
+/// [`project_row_marked`]). Keys carry the GPUI
 /// tuple ids as strings (`home-open-{i}`, `home-dup-{i}`,
 /// `home-proj-del-{i}`),
 /// matching the `frame-{n}` key style `chrome_view` uses.
@@ -1638,31 +1949,56 @@ fn project_row_marked(
     if confirming {
         let name = info.name.clone();
         let confirm_name = info.name.clone();
+        // Wave 10: the question sits on its own line,
+        // wrapped, with the buttons on a row beneath —
+        // as a single line the question (TITLE, unwrapped,
+        // growing) shared its row with both buttons
+        // (88.5 + 52 pt + gaps), leaving ~104 pt of the
+        // 260 pt inner width for "Delete {name}?", so any
+        // name past ~13 characters painted across the
+        // buttons. A destructive confirm is the one place
+        // the full name must stay readable, so the name
+        // is NOT truncated — the line wraps instead. Keys
+        // and handlers are unchanged.
         return design::list_row(&format!("home-row-{i}"), true, t)
             .w_full()
             .child(
-                text(format!("Delete {name}?"))
-                    .font(type_::TITLE)
-                    .color(t.text)
-                    .grow(1.0),
-            )
-            .child(danger_btn(
-                "home-proj-del-confirm",
-                "Delete file",
-                t,
-                move |s: &mut State| {
-                    dispatch_delete_confirm(&mut s.core, &mut s.home_panel, &confirm_name);
-                },
-            ))
-            .child(btn(
-                "home-proj-del-cancel",
-                "Keep",
-                false,
-                t,
-                |s: &mut State| {
-                    cancel_delete(&mut s.home_panel);
-                },
-            ));
+                col()
+                    .gap(6.0)
+                    .grow(1.0)
+                    .child(
+                        text(format!("Delete {name}?"))
+                            .font(type_::TITLE)
+                            .color(t.text)
+                            .wrap()
+                            .w_full(),
+                    )
+                    .child(
+                        row()
+                            .gap(8.0)
+                            .child(danger_btn(
+                                "home-proj-del-confirm",
+                                "Delete file",
+                                t,
+                                move |s: &mut State| {
+                                    dispatch_delete_confirm(
+                                        &mut s.core,
+                                        &mut s.home_panel,
+                                        &confirm_name,
+                                    );
+                                },
+                            ))
+                            .child(btn(
+                                "home-proj-del-cancel",
+                                "Keep",
+                                false,
+                                t,
+                                |s: &mut State| {
+                                    cancel_delete(&mut s.home_panel);
+                                },
+                            )),
+                    ),
+            );
     }
     let open_key = format!("home-open-{i}");
     let dup_key = format!("home-dup-{i}");
@@ -1683,19 +2019,26 @@ fn project_row_marked(
     if let Some(image) = &thumb {
         row_el = row_el.child(thumb_el(image));
     }
-    row_el
-        .child(
-            col()
-                .gap(2.0)
-                .grow(1.0)
-                .child(text(info.name.clone()).font(type_::TITLE).color(t.text))
-                .child(
-                    text(row_meta_line(info, meta))
-                        .key(format!("home-proj-meta-{i}"))
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
-                ),
-        )
+    // Wave 10 row anatomy: the four action buttons ride
+    // in the text column, on a wrapping row under the
+    // metadata line — as siblings of the column they
+    // measured 286 pt of buttons alone (kit padding +
+    // glyph + LABEL charges, [`label_char_width`])
+    // against the row's 260 pt inner width, before any
+    // name, meta or thumbnail: the trailing buttons
+    // painted past the card's right edge and the name
+    // column collapsed to nothing. In the column
+    // (196 pt beside a thumbnail, 260 pt without) the
+    // same charges pack Open + Duplicate and Rename +
+    // Delete onto two lines — flex_wrap does the
+    // packing, keys, order and handlers are unchanged.
+    // The name is truncated to [`ROW_NAME_BUDGET`] and
+    // the metadata line wraps (`.wrap().w_full()`, the
+    // kit's prose treatment): unwrapped it measures
+    // ~375–575 pt, wider than any share of the row.
+    let buttons = row()
+        .gap(8.0)
+        .flex_wrap()
         .child(if open_armed {
             danger_icon_btn(&open_key, "folder-open", "Discard changes?", false, t, move |s: &mut State| {
                 open_row_pressed(s, &path, &name);
@@ -1732,7 +2075,26 @@ fn project_row_marked(
             cancel_rename(&mut s.home_rename);
             s.confirm_action = None;
             arm_delete(&mut s.home_panel, del_path.clone());
-        }))
+        }));
+    row_el.child(
+        col()
+            .gap(2.0)
+            .grow(1.0)
+            .child(
+                text(row_display_name(&info.name))
+                    .font(type_::TITLE)
+                    .color(t.text),
+            )
+            .child(
+                text(row_meta_line(info, meta))
+                    .key(format!("home-proj-meta-{i}"))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+                    .wrap()
+                    .w_full(),
+            )
+            .child(buttons),
+    )
 }
 
 /// The section as mounted in the shell column: a "Home"
@@ -1804,7 +2166,15 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
         design::header_row("home-header")
             .child(design::panel_title(
                 None,
-                "Saved projects in ./projects",
+                // Wave 10: shortened from "Saved projects
+                // in ./projects" — at SECTION charges the
+                // full string measures ~183 pt against the
+                // header cluster's ~150 pt (276 content −
+                // 8 gap − the New button's ~119), so its
+                // tail painted behind the New button. The
+                // directory still names itself in the
+                // recovery status lines and the panel docs.
+                "Saved projects",
                 None,
                 t,
             ))
@@ -1935,7 +2305,13 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
             text(totals_line(&metas, shown.len()))
                 .key("home-totals")
                 .font(type_::LABEL)
-                .color(t.text_secondary),
+                .color(t.text_secondary)
+                // Wave 10: three-digit counts push the
+                // line past the card's 276 pt at LABEL
+                // charges; the prose treatment wraps the
+                // extreme case instead of spilling it.
+                .wrap()
+                .w_full(),
         );
     }
     panel.child(card)
@@ -2115,18 +2491,68 @@ mod tests {
     }
 
     #[test]
-    fn reopen_target_is_none_when_the_file_is_gone() {
+    fn reopen_target_is_none_when_no_file_matches() {
         let entries = vec![
             info("Alpha", "projects/alpha.json"),
             info("Beta", "projects/beta.json"),
         ];
         // The recents front names a project whose file was
-        // deleted or renamed since: no button, no error.
+        // deleted outright: no stored name matches it and
+        // no library file carries its slug — no button,
+        // no error.
         assert!(reopen_target(&entries, Some("Gamma"), None).is_none());
-        // Display names match exactly — recents store the
-        // name verbatim, so a case variant is a different
-        // (missing) project, not a fuzzy hit.
-        assert!(reopen_target(&entries, Some("beta"), None).is_none());
+        // A name of pure punctuation slugs to dashes,
+        // which no file stem carries either.
+        assert!(reopen_target(&entries, Some("!!!"), None).is_none());
+    }
+
+    #[test]
+    fn reopen_target_resolves_a_renamed_project_by_file_stem() {
+        // The post-rename library (Wave 10): the file
+        // moved to my-film.json but its stored name is
+        // still "Demo" (the rename is file-only), and
+        // the recents front holds the typed name,
+        // "My Film" — no stored name matches it, so the
+        // exact pass misses and the file-stem pass lands
+        // on the renamed file.
+        let entries = vec![
+            info("Alpha", "projects/alpha.json"),
+            info("Demo", "projects/my-film.json"),
+        ];
+        let target = reopen_target(&entries, Some("My Film"), None).unwrap();
+        assert_eq!(target.path, PathBuf::from("projects/my-film.json"));
+        // The label names what will open — the stored
+        // name the row shows — not the typed string.
+        assert_eq!(reopen_label(target), "Reopen Demo");
+        // A case variant of the typed name resolves the
+        // same way: the slug is case-insensitive by
+        // construction. (This test's predecessor pinned
+        // a case variant as missing; that pin predates
+        // the rename feature, whose typed names are
+        // arbitrary-case by design, and it is exactly
+        // what made the reopen offer vanish after a
+        // rename.)
+        let target = reopen_target(&entries, Some("my film"), None).unwrap();
+        assert_eq!(target.path, PathBuf::from("projects/my-film.json"));
+        // The currently-open suppression still applies
+        // to a stem-resolved target (matched by file
+        // name, as ever).
+        assert!(reopen_target(
+            &entries,
+            Some("My Film"),
+            Some(Path::new("/home/user/projects/my-film.json")),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn reopen_target_stem_fallback_never_lands_on_the_snapshot() {
+        // Only the recovery snapshot is in the scan:
+        // neither pass may offer it — the exact pass
+        // excludes it by rule and its stem (".recovery")
+        // is no project's slug.
+        let entries = vec![info("Untitled", "projects/.recovery.json")];
+        assert!(reopen_target(&entries, Some("Untitled"), None).is_none());
     }
 
     #[test]
@@ -2665,6 +3091,192 @@ mod tests {
         assert!(core.status.starts_with("Rename failed:"), "{}", core.status);
         assert!(path.exists(), "the file is untouched");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dispatch_rename_to_its_own_file_name_is_an_honest_no_op() {
+        // Wave 10: the typed name slugs to the file the
+        // project already has — rename_project returns
+        // the same path and nothing on disk moves. The
+        // panel must say so (in the status grammar's
+        // Info family: the string carries no "failed",
+        // "cannot" or "already"), clear the session
+        // (there is nothing to fix and press again),
+        // keep its caches and the core's list, and
+        // report not-landed, so `confirm_rename` does
+        // not re-touch the recents for a rename that did
+        // not happen.
+        let dir = temp_dir("rename-noop");
+        let path = dir.join("demo.json");
+        std::fs::write(&path, project_json(1, 1)).unwrap();
+        let mut panel = HomePanelState::default();
+        *panel.scan_cache.borrow_mut() =
+            Some((None, vec![info("Demo", "projects/demo.json")]));
+        let mut rename = HomeRenameState::new();
+        begin_rename(&mut rename, path.clone(), "Demo");
+        // Typed whitespace around the name trims to the
+        // same slug — still the no-op.
+        rename.edit.replace_text("  Demo  ".to_string());
+        let mut core = EditorCore::new();
+        core.project_files = vec![path.clone()];
+        core.project_index = 0;
+        assert!(!dispatch_rename(&mut core, &mut panel, &mut rename));
+        assert_eq!(rename.armed, None, "a no-op still clears the session");
+        assert_eq!(
+            core.status,
+            "Project file is named demo.json — nothing was renamed."
+        );
+        assert!(path.exists(), "the file is untouched");
+        assert!(
+            panel.scan_cache.borrow().is_some(),
+            "no rename, no cache drop"
+        );
+        assert_eq!(core.project_files, vec![path.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dispatch_rename_points_the_core_file_list_at_the_new_name() {
+        // Wave 10: renaming the file of a listed (here:
+        // the selected) project rewrites the core's list
+        // by file name, so the selector, the rows'
+        // current marking and a later open through the
+        // core follow the renamed file instead of a path
+        // that no longer exists. Unrelated entries keep
+        // their paths; each rewritten entry keeps its
+        // own directory (the core's list is cwd-absolute,
+        // the scan's paths relative — only the file name
+        // is replaced).
+        let dir = temp_dir("rename-list");
+        let path = dir.join("demo.json");
+        std::fs::write(&path, project_json(1, 1)).unwrap();
+        let mut panel = HomePanelState::default();
+        let mut rename = HomeRenameState::new();
+        begin_rename(&mut rename, path.clone(), "Demo");
+        rename.edit.replace_text("My Film".to_string());
+        let mut core = EditorCore::new();
+        core.project_files = vec![
+            PathBuf::from("/abs/projects/demo.json"),
+            PathBuf::from("/abs/projects/other.json"),
+        ];
+        core.project_index = 0;
+        assert!(dispatch_rename(&mut core, &mut panel, &mut rename));
+        assert_eq!(
+            core.project_files[0],
+            PathBuf::from("/abs/projects/my-film.json")
+        );
+        assert_eq!(
+            core.project_files[1],
+            PathBuf::from("/abs/projects/other.json")
+        );
+        assert_eq!(
+            current_project_path(&core),
+            Some(Path::new("/abs/projects/my-film.json"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The four row buttons' widths under the charge
+    /// model, from the kit anatomies: `icon_btn` (Open)
+    /// is padding 20 + the 13 pt glyph + the 6 pt
+    /// icon/label gap + its label; `btn` is padding 20 +
+    /// its label.
+    fn row_button_widths() -> [f32; 4] {
+        [
+            20.0 + 13.0 + 6.0 + text_width("Open", label_char_width),
+            20.0 + text_width("Duplicate", label_char_width),
+            20.0 + text_width("Rename", label_char_width),
+            20.0 + text_width("Delete", label_char_width),
+        ]
+    }
+
+    /// Greedy flex_wrap packing: how many lines `widths`
+    /// take in a column `avail` wide with 8 pt gaps
+    /// (the row's gap) — the layout the row builder
+    /// delegates to Rune, modelled so the budget claim
+    /// is executable.
+    fn wrapped_lines(widths: &[f32], avail: f32) -> usize {
+        let mut lines = 1;
+        let mut used = 0.0f32;
+        for &w in widths {
+            if used > 0.0 && used + 8.0 + w > avail {
+                lines += 1;
+                used = w;
+            } else if used == 0.0 {
+                used = w;
+            } else {
+                used += 8.0 + w;
+            }
+        }
+        lines
+    }
+
+    #[test]
+    fn row_buttons_pack_into_two_lines_in_the_text_column() {
+        // The Wave 10 row budget, executable. In the
+        // text column — 196 pt beside a thumbnail,
+        // 260 pt without — the four buttons wrap onto
+        // exactly two lines under the charge model, and
+        // every single button fits the narrower column
+        // alone, so a wrap can never strand one past
+        // the edge.
+        let widths = row_button_widths();
+        for &w in &widths {
+            assert!(w <= 196.0, "button width {w} fits the narrow column");
+        }
+        assert_eq!(wrapped_lines(&widths, 196.0), 2);
+        assert_eq!(wrapped_lines(&widths, 260.0), 2);
+        // And the pre-Wave-10 single-line anatomy really
+        // did overflow: buttons + inter-button gaps +
+        // the list row's own padding exceed the panel's
+        // 276 pt content width before any name, metadata
+        // or thumbnail is allowed a single point.
+        let single_line: f32 = widths.iter().sum::<f32>() + 8.0 * 3.0 + 16.0;
+        assert!(
+            single_line > 276.0,
+            "the old anatomy measured {single_line}"
+        );
+    }
+
+    #[test]
+    fn row_display_name_truncates_to_the_title_budget() {
+        // Short names pass through byte-identical.
+        assert_eq!(row_display_name("Demo"), "Demo");
+        // A long name is middle-truncated: the estimate
+        // fits the budget, the ellipsis marks the cut,
+        // and both ends of the name survive.
+        let shown = row_display_name("The Extremely Long Director's Cut Final Version Two");
+        assert!(text_width(&shown, title_char_width) <= ROW_NAME_BUDGET);
+        assert!(shown.contains('…'), "{shown}");
+        assert!(shown.starts_with("The "), "{shown}");
+        assert!(shown.ends_with("Two"), "{shown}");
+    }
+
+    #[test]
+    fn reopen_label_truncates_long_names_to_its_budget() {
+        // Short names keep the exact historical label
+        // (also pinned by the reopen resolution tests).
+        assert_eq!(reopen_label(&info("Beta", "projects/beta.json")), "Reopen Beta");
+        // A long stored name is middle-truncated so the
+        // button fits the card; the prefix is never cut.
+        let label = reopen_label(&info(
+            "A Project Name That Runs Far Beyond The Card Edge",
+            "projects/long.json",
+        ));
+        assert!(text_width(&label, label_char_width) <= REOPEN_LABEL_BUDGET);
+        assert!(label.starts_with("Reopen A"), "{label}");
+        assert!(label.contains('…'), "{label}");
+    }
+
+    #[test]
+    fn name_file_slug_follows_the_crate_wide_rule() {
+        // The derivation both rename resolution and the
+        // shell's recovery check rely on: lowercased,
+        // every non-alphanumeric character a dash —
+        // including a trailing one (no trimming).
+        assert_eq!(name_file_slug("My Film"), "my-film");
+        assert_eq!(name_file_slug("My Copy!"), "my-copy-");
+        assert_eq!(name_file_slug("Café"), "café");
     }
 
     #[test]

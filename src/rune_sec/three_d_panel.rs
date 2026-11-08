@@ -98,6 +98,35 @@
 //!   session state, not project state), so both follow
 //!   it: snapshot-free.
 //!
+//! - Readout audit, round 2 (Wave 10): every readout's
+//!   source field, checked for the unwrapped-accumulator
+//!   class Wave 9 fixed for the azimuth. Pitch is NOT
+//!   an accumulator: the one op that moves it,
+//!   `fig3_orbit`, clamps the stored value to ±89.9°
+//!   (and the projector clamps again), so the stored
+//!   pitch the readout prints can never grow. There is
+//!   no roll field on `Camera3` at all. Distance is
+//!   clamped on both panel paths that write it
+//!   ([`zoom_distance`]'s range, and
+//!   `frame_camera_points`' own clamp to the same
+//!   range), and the joint position derives from
+//!   `evaluate3`, which is periodic in the pose's
+//!   accumulated rotations. Only the azimuth needed
+//!   the display wrap. The library rows and the
+//!   session summary did carry the OTHER unbounded
+//!   input — names: a library entry's stored name is
+//!   file data with no length limit, and the figure /
+//!   pose row name texts grew without Rune's one-line
+//!   truncate mode, so a long name forced the row past
+//!   the 316 pt card (the figures panel's documented
+//!   layout truth). The row names now truncate (the
+//!   full name stays in the Load / Apply handler and
+//!   in the text's accessibility string), and the
+//!   session summary — which carries the loaded
+//!   figure's name — wraps at full width (the settings
+//!   `note_line` pattern) instead of painting one
+//!   unwrapped line past the card.
+//!
 //! Controls that need a live session render dimmed when
 //! there is none. The text controls (`ctl`) stay
 //! **dimmed but wired**: the press still fires, and the
@@ -645,6 +674,14 @@ pub fn joint_position_text(core: &EditorCore) -> Option<String> {
 /// [0, 360) the longest possible line is the pinned
 /// 52-character extreme in the tests. Display-only: the
 /// stored camera is untouched.
+///
+/// The other two fields need no wrap (Wave 10 round-2
+/// audit): `fig3_orbit` clamps the STORED pitch to
+/// ±89.9° on every move, so elevation cannot
+/// accumulate, and the distance is clamped to
+/// [`ZOOM_DISTANCE_MIN`]..=[`ZOOM_DISTANCE_MAX`] by
+/// both panel paths that write it ([`zoom_distance`]
+/// and `frame_camera_points`).
 pub fn camera_readout_text(core: &EditorCore) -> Option<String> {
     let cam = &core.fig3.as_ref()?.camera;
     Some(format!(
@@ -855,9 +892,17 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 }),
         )
         .child(
+            // The summary carries the loaded figure's
+            // name — library file data, unbounded in
+            // length — so it wraps at the card's full
+            // width (the settings `note_line` pattern)
+            // rather than painting one unwrapped line
+            // past the card edge (Wave 10 round 2).
             text(session_summary(core))
                 .font(type_::LABEL)
-                .color(t.text_secondary),
+                .color(t.text_secondary)
+                .wrap()
+                .w_full(),
         )
         // Joint posing (the GPUI 3D group's controls).
         .child(
@@ -1203,10 +1248,21 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 .gap(6.0)
                 .center_y()
                 .child(
+                    // The stored name is library file
+                    // data, unbounded in length: without
+                    // Rune's one-line truncate mode its
+                    // min-content width forces the whole
+                    // row past the card edge and the Load
+                    // button with it (the figures panel's
+                    // documented layout truth). Truncation
+                    // is display-only — the handler below
+                    // loads by the full name (Wave 10
+                    // round 2).
                     text(name.clone())
                         .font(type_::LABEL)
                         .color(t.text)
-                        .grow(1.0),
+                        .grow(1.0)
+                        .truncate(),
                 )
                 .child(icon_btn(
                     &format!("fig3-lib-{i}"),
@@ -1260,10 +1316,15 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 .gap(6.0)
                 .center_y()
                 .child(
+                    // Same unbounded stored name as the
+                    // figure rows above: truncate the
+                    // display, keep the full name in the
+                    // Apply handler (Wave 10 round 2).
                     text(name.clone())
                         .font(type_::LABEL)
                         .color(t.text)
-                        .grow(1.0),
+                        .grow(1.0)
+                        .truncate(),
                 )
                 .child(if dim {
                     icon_btn_inert(&format!("pose3d-lib-{i}"), "check", "Apply", t)
@@ -1880,5 +1941,100 @@ mod tests {
         assert_eq!(core.status, "3D camera distance 320.00.");
         assert!(apply_preview_zoom(&mut core, -1));
         assert_eq!(core.fig3.as_ref().unwrap().camera.distance, 400.0);
+    }
+
+    // ---- Round-2 readout audit (Wave 10) ----
+
+    #[test]
+    fn pitch_cannot_accumulate_past_the_orbit_clamp() {
+        // The azimuth needed a display wrap because
+        // `fig3_orbit` accumulates yaw without bound.
+        // Pitch must NOT need one: the same op clamps
+        // the STORED pitch to ±89.9° on every move, so
+        // no sequence of orbits — button presses or
+        // preview drags, which call the same op — can
+        // grow it, and the readout's raw print is safe.
+        let mut core = EditorCore::new();
+        core.enter_3d();
+        core.fig3_orbit(0.0, -500.0);
+        assert_eq!(core.fig3.as_ref().unwrap().camera.pitch, -89.9);
+        assert!(
+            camera_readout_text(&core)
+                .unwrap()
+                .contains("elevation -89.9°")
+        );
+        core.fig3_orbit(0.0, 1000.0);
+        assert_eq!(core.fig3.as_ref().unwrap().camera.pitch, 89.9);
+        assert!(
+            camera_readout_text(&core)
+                .unwrap()
+                .contains("elevation 89.9°")
+        );
+    }
+
+    #[test]
+    fn zoom_readout_saturates_at_the_clamped_range() {
+        // The zoom half of the audit: the only panel
+        // path that steps the distance clamps it, so
+        // repeated steps saturate at the range ends
+        // instead of accumulating — and the readout
+        // (and the zoom status line) print the clamped
+        // value, never a runaway one.
+        let mut core = EditorCore::new();
+        core.enter_3d();
+        for _ in 0..40 {
+            assert!(apply_preview_zoom(&mut core, -1));
+        }
+        assert_eq!(
+            core.fig3.as_ref().unwrap().camera.distance,
+            ZOOM_DISTANCE_MAX
+        );
+        assert!(
+            camera_readout_text(&core).unwrap().ends_with("distance 4000.00")
+        );
+        for _ in 0..40 {
+            assert!(apply_preview_zoom(&mut core, 1));
+        }
+        assert_eq!(
+            core.fig3.as_ref().unwrap().camera.distance,
+            ZOOM_DISTANCE_MIN
+        );
+        assert!(camera_readout_text(&core).unwrap().ends_with("distance 40.00"));
+    }
+
+    #[test]
+    fn panel_builds_with_a_long_named_library_figure() {
+        // Library entry names are file data with no
+        // length limit (a hand-made or renamed entry
+        // can carry a name far wider than the card).
+        // Save the session figure under a very long
+        // name so BOTH library lists carry it — the
+        // figure list verbatim, the pose list as
+        // "<name> pose" — then build the panel: the
+        // summary (which wraps) and both library rows
+        // (whose names truncate) must construct with
+        // the long name in them. Element text is not
+        // readable back from a built `El`, so — like
+        // the zero-node build test — this pins
+        // construction, and the pure summary helper
+        // pins that the name really flows in.
+        let mut state = crate::init();
+        let t = rune::tok::theme(true);
+        state.core.enter_3d();
+        let long_name = "A".repeat(180);
+        state.core.fig3.as_mut().unwrap().figure.name = long_name.clone();
+        assert!(
+            session_summary(&state.core).starts_with(&long_name),
+            "the summary carries the loaded figure's name"
+        );
+        state.core.fig3_save_to_library();
+        assert!(state.core.fig3_library_list().contains(&long_name));
+        assert!(save_current_pose(&mut state.core));
+        assert!(
+            fig3d::scan_pose_library().contains(&format!("{long_name} pose")),
+            "the pose list carries the long name too"
+        );
+        let _ = three_d_panel(&state, &t);
+        let _ = preview_el(&state, &t);
     }
 }

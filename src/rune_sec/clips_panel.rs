@@ -148,6 +148,33 @@
 //! carries an "Editing" marker for the clip an edit
 //! session is on (`is_editing`). Keys and handlers are
 //! unchanged.
+//!
+//! UI mission Wave 10 (session honesty, round 2): a
+//! lifecycle audit of `core.clip_edit` against the panel.
+//! Panel-mediated paths were already sound — `delete_clip`
+//! / `move_clip` remap the core session in the same write,
+//! and `delete_clip_at` / `move_clip_at` repair the
+//! selection and rename target (pinned by tests below,
+//! including the session remap, which round 1 left
+//! untested at this level). Two defects were panel-side
+//! and are fixed here: `session_label` rendered a
+//! dangling session (reachable via undo — snapshots
+//! restore `Project` only) as "frame 1 of 0", and
+//! `apply_rename` trusted its stored index even when the
+//! clip list had changed underneath the open field
+//! through a path the panel did not mediate (undo/redo,
+//! live MCP); it now checks the name `begin_rename`
+//! captured and refuses a write onto a different clip.
+//! One gap is the ENGINE's, reported not fixed: undo/redo
+//! can silently retarget a live session — undoing a clip
+//! deletion restores the clip at its old index while
+//! `clip_edit.clip` keeps its remapped value, so the
+//! session (and this panel's marker and label, which
+//! faithfully follow the index) ends up editing a
+//! different clip than the user entered. Nothing
+//! panel-side can detect that; the repair belongs with
+//! the snapshot format or the undo/redo ops in
+//! editor.rs.
 
 use std::cell::RefCell;
 
@@ -209,6 +236,16 @@ pub struct ClipRenameState {
     /// May go stale (undo can shrink the clip list);
     /// readers bounds-check before use.
     pub target: Option<usize>,
+    /// The name the target clip carried when the rename
+    /// was opened (`begin_rename`). Indices are not
+    /// identity: paths that mutate the clip list without
+    /// the panel mediating — undo/redo (their snapshots
+    /// restore `Project` only) or the live MCP server —
+    /// can leave a different clip sitting at the target
+    /// index, and `apply_rename` refuses to write when the
+    /// clip now there does not carry this name. `None`
+    /// when no rename was opened through `begin_rename`.
+    pub opened_name: Option<String>,
     /// The in-progress name, loaded from the target clip
     /// by `begin_rename`.
     pub field: TextEdit,
@@ -218,6 +255,7 @@ impl ClipRenameState {
     pub fn new() -> Self {
         ClipRenameState {
             target: None,
+            opened_name: None,
             field: TextEdit::new(""),
         }
     }
@@ -336,6 +374,14 @@ pub fn rename_clip(core: &mut EditorCore, clip_idx: usize, field_text: &str) -> 
     }
     core.snapshot();
     core.project.clips[clip_idx].name = name.clone();
+    // Keep a live session's identity in step with its
+    // clip (Wave 10): the session name is the undo/redo
+    // retarget check, and a rename must not make it stale.
+    if let Some(session) = core.clip_edit.as_mut() {
+        if session.clip == clip_idx {
+            session.name = name.clone();
+        }
+    }
     core.status = format!("Clip {} renamed to {name}.", clip_idx + 1);
     true
 }
@@ -425,7 +471,7 @@ pub fn delete_clip(core: &mut EditorCore, clip_idx: usize) -> bool {
     for fig in &mut core.project.figures {
         fig.clip = target_after_delete(fig.clip, clip_idx);
     }
-    if let Some(session) = core.clip_edit {
+    if let Some(session) = core.clip_edit.clone() {
         core.clip_edit = target_after_delete(Some(session.clip), clip_idx)
             .map(|clip| ClipEditSession { clip, ..session });
     }
@@ -467,7 +513,7 @@ pub fn move_clip(core: &mut EditorCore, clip_idx: usize, up: bool) -> bool {
     for fig in &mut core.project.figures {
         fig.clip = target_after_swap(fig.clip, clip_idx, other);
     }
-    if let Some(session) = core.clip_edit {
+    if let Some(session) = core.clip_edit.clone() {
         if let Some(clip) = target_after_swap(Some(session.clip), clip_idx, other) {
             core.clip_edit = Some(ClipEditSession { clip, ..session });
         }
@@ -543,6 +589,9 @@ pub fn delete_clip_at(s: &mut State, clip_idx: usize) {
         p.selected = selection_after_delete(p.selected, clip_idx, len_after);
     });
     s.clips_rename.target = target_after_delete(s.clips_rename.target, clip_idx);
+    if s.clips_rename.target.is_none() {
+        s.clips_rename.opened_name = None;
+    }
 }
 
 /// Move clip `clip_idx` one slot from the panel (the
@@ -564,17 +613,21 @@ pub fn move_clip_at(s: &mut State, clip_idx: usize, up: bool) {
 /// aim the field at it (the per-row "Rename" button's
 /// dispatch). The fresh field claims keyboard focus (the
 /// command palette's open pattern), so typing goes to the
-/// name at once. An out-of-range index only sets the
-/// core's status line and leaves the field closed.
+/// name at once. The clip's current name is captured in
+/// `opened_name` — the identity `apply_rename` checks
+/// before writing (see `ClipRenameState::opened_name`).
+/// An out-of-range index only sets the core's status line
+/// and leaves the field closed.
 pub fn begin_rename(s: &mut State, clip_idx: usize) {
     let Some(name) = s.core.project.clips.get(clip_idx).map(|c| c.name.clone()) else {
         s.core.status = "No such clip.".into();
         return;
     };
-    let mut field = TextEdit::new(name);
+    let mut field = TextEdit::new(name.clone());
     field.focused = true;
     s.clips_rename.field = field;
     s.clips_rename.target = Some(clip_idx);
+    s.clips_rename.opened_name = Some(name);
 }
 
 /// Write the rename field back to its target clip (the
@@ -582,13 +635,36 @@ pub fn begin_rename(s: &mut State, clip_idx: usize) {
 /// editor closes either way: `rename_clip` refuses a stale
 /// target with a status line only, and a successful or
 /// no-op rename is done.
+///
+/// One refusal is the panel's own: when the clip now
+/// sitting at the target index is not the clip the rename
+/// was opened on — its name differs from the name
+/// `begin_rename` captured, because the clip list changed
+/// underneath the open field through a path the panel did
+/// not mediate (undo/redo restore `Project` only; the
+/// live MCP server can mutate clips at any time) — the
+/// write is refused with a status line rather than
+/// renaming a clip the user never opened. A target set
+/// without `begin_rename` (no captured name) keeps the
+/// old behaviour: `rename_clip` alone decides.
 pub fn apply_rename(s: &mut State) {
     let Some(target) = s.clips_rename.target else {
         return;
     };
+    if let Some(opened) = s.clips_rename.opened_name.clone() {
+        if let Some(clip) = s.core.project.clips.get(target) {
+            if clip.name != opened {
+                s.core.status = "Clip changed while renaming — rename cancelled.".into();
+                s.clips_rename.target = None;
+                s.clips_rename.opened_name = None;
+                return;
+            }
+        }
+    }
     let text = s.clips_rename.field.text.clone();
     rename_clip(&mut s.core, target, &text);
     s.clips_rename.target = None;
+    s.clips_rename.opened_name = None;
 }
 
 /// Whether a clip-editing session is active on the core
@@ -610,25 +686,38 @@ pub fn session_active(core: &EditorCore) -> bool {
 /// live), so the edited clip and the selected clip can be
 /// different rows with nothing to tell them apart.
 pub fn is_editing(core: &EditorCore, index: usize) -> bool {
-    core.clip_edit.map(|session| session.clip) == Some(index)
+    core.clip_edit.as_ref().map(|session| session.clip) == Some(index)
 }
 
 /// The session section's label while a session is active:
 /// which clip is being edited and where the session sits in
 /// it ("Editing <name> · frame <f> of <n>"). `None` when no
 /// session is active. A session whose clip is missing from
-/// the project (reachable only via undo) still labels,
-/// falling back to the clip's index and a zero count — the
-/// next session op closes such a session.
+/// the project — reachable via undo, whose snapshots restore
+/// `Project` only and never repair `clip_edit` — still
+/// labels, but honestly (Wave 10): it names the clip by
+/// index and says it no longer exists, instead of the old
+/// "frame 1 of 0" the live format produced for a zero
+/// count; a clip that exists with no frames says "no
+/// frames" the same way. Either way the next session op
+/// closes such a session (the core's `clip_session` drops
+/// it) and Exit stays reachable throughout.
 pub fn session_label(core: &EditorCore) -> Option<String> {
-    let session = core.clip_edit?;
-    let (name, frames) = match core.project.clips.get(session.clip) {
-        Some(clip) => (clip.name.clone(), clip.frames.len()),
-        None => (format!("clip {}", session.clip + 1), 0),
+    let session = core.clip_edit.as_ref()?;
+    let Some(clip) = core.project.clips.get(session.clip) else {
+        return Some(format!(
+            "Editing clip {} · clip no longer exists",
+            session.clip + 1
+        ));
     };
+    if clip.frames.is_empty() {
+        return Some(format!("Editing {} · no frames", clip.name));
+    }
+    let frames = clip.frames.len();
     let frame = session.frame.min(frames.saturating_sub(1));
     Some(format!(
-        "Editing {name} · frame {} of {frames}",
+        "Editing {} · frame {} of {frames}",
+        clip.name,
         frame + 1
     ))
 }
@@ -651,8 +740,8 @@ pub fn enter_selected_clip(core: &mut EditorCore) -> bool {
 /// clamped by the core at the first frame. No-op without a
 /// session.
 pub fn session_prev(core: &mut EditorCore) {
-    if let Some(session) = core.clip_edit {
-        core.clip_goto(session.frame.saturating_sub(1));
+    if let Some(frame) = core.clip_edit.as_ref().map(|s| s.frame) {
+        core.clip_goto(frame.saturating_sub(1));
     }
 }
 
@@ -661,8 +750,8 @@ pub fn session_prev(core: &mut EditorCore) {
 /// by the core at the clip's last frame. No-op without a
 /// session.
 pub fn session_next(core: &mut EditorCore) {
-    if let Some(session) = core.clip_edit {
-        core.clip_goto(session.frame + 1);
+    if let Some(frame) = core.clip_edit.as_ref().map(|s| s.frame) {
+        core.clip_goto(frame + 1);
     }
 }
 
@@ -1280,8 +1369,8 @@ playback_speed: 1.0,
         // A real selection enters that clip at its first frame.
         update_panel_state(|p| p.select(0));
         assert!(enter_selected_clip(&mut core));
-        assert_eq!(core.clip_edit.map(|s| s.clip), Some(0));
-        assert_eq!(core.clip_edit.map(|s| s.frame), Some(0));
+        assert_eq!(core.clip_edit.as_ref().map(|s| s.clip), Some(0));
+        assert_eq!(core.clip_edit.as_ref().map(|s| s.frame), Some(0));
         core.exit_clip();
         update_panel_state(|p| *p = ClipsPanelState::default());
     }
@@ -1328,17 +1417,17 @@ playback_speed: 1.0,
         // Prev/Next dispatch moves the session frame, clamped
         // at both ends by the core.
         session_next(&mut core);
-        assert_eq!(core.clip_edit.unwrap().frame, 1);
+        assert_eq!(core.clip_edit.as_ref().unwrap().frame, 1);
         session_prev(&mut core);
-        assert_eq!(core.clip_edit.unwrap().frame, 0);
+        assert_eq!(core.clip_edit.as_ref().unwrap().frame, 0);
         session_prev(&mut core);
-        assert_eq!(core.clip_edit.unwrap().frame, 0);
+        assert_eq!(core.clip_edit.as_ref().unwrap().frame, 0);
         // Add frame (the button's core op): the clip grows and
         // the session lands on the new frame; the project
         // timeline is untouched.
         core.clip_add_frame();
         assert_eq!(core.project.clips[0].frames.len(), n0 + 1);
-        assert_eq!(core.clip_edit.unwrap().frame, n0);
+        assert_eq!(core.clip_edit.as_ref().unwrap().frame, n0);
         assert_eq!(core.project.frames.len(), project_frames);
         // Delete frame: the clip shrinks back.
         core.clip_delete_frame();
@@ -1829,5 +1918,169 @@ playback_speed: 1.0,
         assert_eq!(empty.status, "No such clip.");
         assert_eq!(empty.undo_depth(), depth);
         assert_eq!(empty.project.figures.len(), figures_before);
+    }
+
+    #[test]
+    fn delete_and_move_remap_the_core_session() {
+        // Wave 10: the session remap inside `delete_clip`
+        // / `move_clip` was previously untested at this
+        // level — the panel's promise is that a session
+        // follows its clip through list surgery and ends
+        // when its clip is deleted, never stranding over
+        // a dead index.
+        let mut core = core_with_three_clips();
+        assert!(core.enter_clip(1)); // Bravo
+        // Deleting a clip BEFORE the session's shifts the
+        // session down with its clip.
+        assert!(delete_clip(&mut core, 0)); // Alpha
+        assert_eq!(core.clip_edit.as_ref().map(|s| s.clip), Some(0));
+        assert_eq!(core.project.clips[0].name, "Bravo");
+        // A swap moves the session with its clip too.
+        assert!(move_clip(&mut core, 0, false)); // Bravo <-> Charlie
+        assert_eq!(core.clip_edit.as_ref().map(|s| s.clip), Some(1));
+        assert_eq!(core.project.clips[1].name, "Bravo");
+        // Deleting a clip AFTER the session's leaves it be.
+        let mut core = core_with_three_clips();
+        assert!(core.enter_clip(0)); // Alpha
+        assert!(delete_clip(&mut core, 2)); // Charlie
+        assert_eq!(core.clip_edit.as_ref().map(|s| s.clip), Some(0));
+        // Deleting the edited clip itself ends the session.
+        assert!(delete_clip(&mut core, 0)); // Alpha
+        assert_eq!(core.clip_edit, None);
+    }
+
+    #[test]
+    fn session_label_is_honest_for_a_dangling_session() {
+        // Wave 10: undo restores `Project` only, so a
+        // session can outlive its clip (enter a session,
+        // then undo the clip's creation). The label must
+        // not dress that up as a frame position.
+        let mut core = EditorCore::new();
+        core.clip_edit = Some(ClipEditSession { clip: 4, frame: 0, name: String::new() });
+        assert!(session_active(&core), "Exit stays reachable");
+        assert_eq!(
+            session_label(&core).as_deref(),
+            Some("Editing clip 5 · clip no longer exists")
+        );
+        // The next session op closes the dangling session
+        // (the core's self-heal), as the label docs say.
+        core.clip_goto(0);
+        assert_eq!(core.clip_edit, None);
+        assert_eq!(core.status, "Movieclip is gone — editing session closed.");
+
+        // A clip that exists but has no frames (built on
+        // an empty timeline) labels just as plainly.
+        let mut core = EditorCore::new();
+        let mut empty = clip_with_frames(0);
+        empty.name = "Empty".to_string();
+        core.project.clips.push(empty);
+        core.clip_edit = Some(ClipEditSession { clip: 0, frame: 0, name: "Empty".into() });
+        assert_eq!(
+            session_label(&core).as_deref(),
+            Some("Editing Empty · no frames")
+        );
+    }
+
+    #[test]
+    fn apply_rename_refuses_when_the_target_clip_changed_under_the_field() {
+        let mut state = State {
+            core: EditorCore::new(),
+            last_poll: None,
+            wheel_zoom: 0.0,
+            figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
+            figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
+            library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
+            graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
+            audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            menus: crate::rune_sec::menus::MenusState::default(),
+            palette: crate::rune_sec::command_palette::PaletteState::new(),
+            settings: crate::rune_sec::settings_popover::SettingsState::default(),
+            toasts: crate::rune_sec::toasts::ToastsState::new(),
+            text_tool: crate::rune_sec::text_tool::TextToolState::new(),
+            name_edit: rune::TextEdit::new(""),
+            export_use_range: false,
+            fx_selected: None,
+            pose_clipboard: None,
+            last_status: String::new(),
+            toast_now: 0.0,
+            last_dark: true,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            guides: false,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+stroke_selected: None,
+particle_selected: None,
+guides_frustum: true,
+guides_safe: true,
+onion_ui: Default::default(),
+last_frame: 0,
+pose_rename: crate::rune_sec::pose_tools::PoseRenameState::new(),
+pose_library: crate::rune_sec::pose_tools::PoseLibraryState::new(),
+loop_playback: true,
+playback_speed: 1.0,
+            was_playing: false,
+            clips_rename: ClipRenameState::new(),
+            confirm_action: None,
+            home_rename: crate::rune_sec::home_panel::HomeRenameState::new(),
+        };
+        for name in ["Alpha", "Bravo"] {
+            let mut clip = clip_with_frames(2);
+            clip.name = name.to_string();
+            state.core.project.clips.push(clip);
+        }
+        // Panel-mediated reorder: the target follows its
+        // clip and the captured name still matches, so the
+        // rename lands on the clip the user opened.
+        begin_rename(&mut state, 0); // Alpha
+        assert_eq!(state.clips_rename.opened_name.as_deref(), Some("Alpha"));
+        move_clip_at(&mut state, 0, false); // Alpha -> index 1
+        assert_eq!(state.clips_rename.target, Some(1));
+        state.clips_rename.field.text = "Alpha prime".to_string();
+        apply_rename(&mut state);
+        assert_eq!(clip_names(&state.core), ["Bravo", "Alpha prime"]);
+        assert_eq!(state.clips_rename.target, None);
+        assert_eq!(state.clips_rename.opened_name, None);
+
+        // Unmediated delete (the undo / live-MCP shape):
+        // Bravo is deleted through the core-level fn,
+        // bypassing `delete_clip_at`'s repair, so the open
+        // rename still points at index 0 — where a
+        // different clip now sits. Apply must refuse
+        // rather than rename that clip.
+        begin_rename(&mut state, 0); // Bravo
+        assert_eq!(state.clips_rename.opened_name.as_deref(), Some("Bravo"));
+        assert!(delete_clip(&mut state.core, 0));
+        assert_eq!(clip_names(&state.core), ["Alpha prime"]);
+        assert_eq!(state.clips_rename.target, Some(0));
+        state.clips_rename.field.text = "Hijacked".to_string();
+        apply_rename(&mut state);
+        assert_eq!(clip_names(&state.core), ["Alpha prime"]);
+        assert_eq!(state.clips_rename.target, None);
+        assert_eq!(
+            state.core.status,
+            "Clip changed while renaming — rename cancelled."
+        );
+
+        // Unmediated rename of the target clip itself:
+        // same refusal — the name under the field is no
+        // longer the name the rename was opened on.
+        begin_rename(&mut state, 0); // Alpha prime
+        assert!(rename_clip(&mut state.core, 0, "Outside"));
+        state.clips_rename.field.text = "Hijacked".to_string();
+        apply_rename(&mut state);
+        assert_eq!(clip_names(&state.core), ["Outside"]);
+        assert_eq!(state.clips_rename.target, None);
+        assert_eq!(
+            state.core.status,
+            "Clip changed while renaming — rename cancelled."
+        );
+        update_panel_state(|p| *p = ClipsPanelState::default());
     }
 }

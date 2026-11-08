@@ -21,11 +21,24 @@
 //! so the app shell can restore them on startup. New
 //! fields are added with serde defaults so older
 //! `.layout.json` files keep loading.
+//!
+//! Every write in this module goes through the same
+//! atomic replace ([`write_file_atomic`]): the new
+//! document is written to a uniquely named temp file in
+//! the same directory and renamed over the real path, so
+//! a crash mid-write — or two saves racing — leaves the
+//! previous complete file or the new one at the real
+//! path, never a truncated one. (Every reader here
+//! already folds a missing or corrupt file into a
+//! default; the atomic replace means a torn file should
+//! never be the reason it has to.)
 
 use crate::model::Project;
 use serde::{Deserialize, Serialize};
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 /// File name of the recovery snapshot inside the projects dir.
@@ -41,6 +54,66 @@ fn default_dir() -> PathBuf {
     PathBuf::from("projects")
 }
 
+/// Sequence number for atomic-write temp files (see
+/// [`write_file_atomic`]): combined with the process id
+/// it makes every temp name unique, so two threads of
+/// this process — or two editor processes saving at the
+/// same moment — never write into the same temp file.
+static WRITE_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Write `text` to `path` atomically: serialise to a
+/// uniquely named temp file in the same directory, then
+/// rename it over `path`.
+///
+/// The temp file must live in the same directory because
+/// a rename is only atomic within one filesystem. The
+/// name is `.{file}.tmp-{pid}-{seq}`: the pid keeps two
+/// editor processes apart, the process-wide sequence
+/// keeps two threads of one process apart, and the
+/// leading dot plus the non-`.json` tail keep the temp
+/// out of every reader's way (all readers in this module
+/// look files up by their exact names, and the Home
+/// panel's project listing matches `*.json` names).
+/// `std::fs::rename` replaces an existing destination
+/// on both POSIX and Windows, so a reader opening `path`
+/// at any moment sees a complete old or complete new
+/// document — never the truncated half-write a direct
+/// `std::fs::write` onto `path` could leave behind if
+/// the process died (or another writer raced) mid-write.
+///
+/// Failure handling: a failed temp write or rename
+/// removes the temp file on a best-effort basis and
+/// propagates the error; a crash between the write and
+/// the rename can orphan one temp file, which is inert
+/// litter (nothing ever reads it). Deliberately no
+/// `fsync`: this buys untorn reads, not power-loss
+/// durability — an OS crash can still lose the newest
+/// save, which every reader here tolerates by falling
+/// back to its default, and skipping the sync keeps the
+/// splitter drag's save-per-pointer-move cheap.
+fn write_file_atomic(path: &Path, text: &str) -> io::Result<()> {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("write");
+    let seq = WRITE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{seq}",
+        std::process::id()
+    ));
+    let written = std::fs::File::create(&tmp)
+        .and_then(|mut f| f.write_all(text.as_bytes()));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 // ---- Recovery snapshot ----
 
 /// Write `project` as the recovery snapshot in `./projects/`,
@@ -50,11 +123,17 @@ pub fn write_recovery(project: &Project) -> io::Result<PathBuf> {
 }
 
 /// [`write_recovery`] with an explicit base directory.
+///
+/// The snapshot is replaced atomically
+/// ([`write_file_atomic`]): it is the user's crash
+/// safety net, so a crash *during* an autosave must not
+/// be able to truncate the very file that exists for
+/// recovering from crashes.
 pub fn write_recovery_in(dir: &Path, project: &Project) -> io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(RECOVERY_FILE);
     let text = serde_json::to_string_pretty(project).map_err(io::Error::other)?;
-    std::fs::write(&path, text)?;
+    write_file_atomic(&path, &text)?;
     Ok(path)
 }
 
@@ -99,7 +178,7 @@ pub fn touch_recent_in(dir: &Path, name: &str) {
     list.truncate(MAX_RECENTS);
     if std::fs::create_dir_all(dir).is_ok() {
         if let Ok(text) = serde_json::to_string_pretty(&list) {
-            let _ = std::fs::write(dir.join(RECENTS_FILE), text);
+            let _ = write_file_atomic(&dir.join(RECENTS_FILE), &text);
         }
     }
 }
@@ -359,7 +438,13 @@ pub fn load_layout() -> LayoutPrefs {
 /// ranges here, on load — the one place every reader
 /// (startup, palette recents, the settings toggles'
 /// load-modify-save) passes through — so a hand-edited
-/// or corrupt width is never honoured as written.
+/// or corrupt width is never honoured as written. The
+/// clamp also covers the non-finite cases a hand edit
+/// can produce: `1e999` reaches the field as +∞, and a
+/// NaN would slip straight through a bare `f32::clamp`
+/// (every NaN comparison is false), so
+/// [`clamp_col_width`] tests finiteness *before*
+/// clamping and falls back to the field's default.
 pub fn load_layout_in(dir: &Path) -> LayoutPrefs {
     let Ok(text) = std::fs::read_to_string(dir.join(LAYOUT_FILE)) else {
         return LayoutPrefs::default();
@@ -376,7 +461,14 @@ pub fn load_layout_in(dir: &Path) -> LayoutPrefs {
 /// Best-effort: like the recovery writer (and the recents
 /// writer) it creates the projects directory when needed,
 /// and write failures are swallowed — preferences are a
-/// convenience, never worth an error dialog.
+/// convenience, never worth an error dialog. The write
+/// itself is an atomic replace ([`write_file_atomic`]),
+/// which matters here more than anywhere: this is the
+/// shell's most frequently rewritten file (workspace
+/// switches, settings toggles, palette recents, and one
+/// save per pointer-move increment of a column-splitter
+/// drag), so it has the most chances to be caught
+/// mid-write by a crash or a racing save.
 pub fn save_layout(prefs: &LayoutPrefs) {
     save_layout_in(&default_dir(), prefs);
 }
@@ -385,7 +477,7 @@ pub fn save_layout(prefs: &LayoutPrefs) {
 pub fn save_layout_in(dir: &Path, prefs: &LayoutPrefs) {
     if std::fs::create_dir_all(dir).is_ok() {
         if let Ok(text) = serde_json::to_string_pretty(prefs) {
-            let _ = std::fs::write(dir.join(LAYOUT_FILE), text);
+            let _ = write_file_atomic(&dir.join(LAYOUT_FILE), &text);
         }
     }
 }
@@ -760,6 +852,150 @@ mod tests {
         let prefs = load_layout_in(&dir);
         assert_eq!(prefs.col_left_w, 220.0);
         assert_eq!(prefs.col_right_w, 480.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clamp_col_width_rejects_non_finite_values() {
+        // The unit-level pin for the NaN trap: a bare
+        // `f32::clamp` cannot catch NaN (every comparison
+        // with NaN is false, so clamp returns its input),
+        // which is why the helper tests finiteness first.
+        // NaN and both infinities fall back to the
+        // field's default, never propagate into layout.
+        assert_eq!(clamp_col_width(f32::NAN, 300.0, 220.0, 420.0), 300.0);
+        assert_eq!(
+            clamp_col_width(f32::INFINITY, 300.0, 220.0, 420.0),
+            300.0
+        );
+        assert_eq!(
+            clamp_col_width(f32::NEG_INFINITY, 340.0, 260.0, 480.0),
+            340.0
+        );
+        // Finite values still clamp/pass through as
+        // before — the finiteness check changed nothing
+        // for them.
+        assert_eq!(clamp_col_width(276.0, 300.0, 220.0, 420.0), 276.0);
+        assert_eq!(clamp_col_width(999.0, 300.0, 220.0, 420.0), 420.0);
+        assert_eq!(clamp_col_width(10.0, 340.0, 260.0, 480.0), 260.0);
+    }
+
+    #[test]
+    fn layout_non_finite_widths_in_file_fall_back_to_defaults() {
+        let dir = temp_dir("layout-col-nonfinite");
+        // A hand-edited file can carry a width JSON
+        // itself cannot spell as NaN but serde reads as
+        // an infinity: the overflowing exponent literal.
+        // (If a future serde instead rejected the whole
+        // document, the load's corrupt-file fallback
+        // lands on the same defaults — either way the
+        // widths must come back 300 / 340, never ∞.)
+        std::fs::write(
+            dir.join(LAYOUT_FILE),
+            "{\"workspace\":\"Draw\",\"dark\":true,\
+             \"col_left_w\":1e999,\"col_right_w\":-1e999}",
+        )
+        .unwrap();
+        let prefs = load_layout_in(&dir);
+        assert_eq!(prefs.col_left_w, 300.0);
+        assert_eq!(prefs.col_right_w, 340.0);
+        assert!(prefs.col_left_w.is_finite());
+        assert!(prefs.col_right_w.is_finite());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Names of every entry in `dir` (dotfiles included),
+    /// for the temp-litter assertions.
+    fn entry_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn atomic_writes_leave_no_temp_files_behind() {
+        let dir = temp_dir("atomic-no-litter");
+        // One write through each of the module's three
+        // writers — all of them go through the atomic
+        // replace, so after each completes its temp file
+        // must be gone (renamed), not littering the
+        // projects dir.
+        save_layout_in(&dir, &LayoutPrefs::default());
+        write_recovery_in(&dir, &Project::new_demo()).unwrap();
+        touch_recent_in(&dir, "Alpha");
+        let names = entry_names(&dir);
+        assert!(
+            names.iter().all(|n| !n.contains(".tmp-")),
+            "no temp litter after atomic writes: {names:?}"
+        );
+        assert_eq!(
+            names,
+            vec![
+                LAYOUT_FILE.to_string(),
+                RECOVERY_FILE.to_string(),
+                RECENTS_FILE.to_string()
+            ],
+            "exactly the three store files exist"
+        );
+        // And each store still reads back what was
+        // written through the new path.
+        assert_eq!(load_layout_in(&dir), LayoutPrefs::default());
+        assert!(read_recovery_in(&dir).is_some());
+        assert_eq!(recents_in(&dir), vec!["Alpha".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_layout_saves_never_tear_the_file() {
+        let dir = temp_dir("layout-concurrent");
+        // The prefs file's writers are all load-modify-
+        // save over one shared file (workspace switch,
+        // settings toggles, splitter drags, palette
+        // recents). Four writers racing 50 saves each:
+        // with the old direct `fs::write` a reader could
+        // catch the file mid-truncate; with the atomic
+        // replace the file on disk is always SOME
+        // writer's complete document.
+        let names = ["Alpha", "Beta", "Gamma", "Delta"];
+        let mut handles = Vec::new();
+        for name in names {
+            let dir = dir.clone();
+            handles.push(std::thread::spawn(move || {
+                let prefs = LayoutPrefs {
+                    workspace: name.to_string(),
+                    ..Default::default()
+                };
+                for _ in 0..50 {
+                    save_layout_in(&dir, &prefs);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        // Strict read of the raw bytes (not the lenient
+        // loader): the surviving document must parse as
+        // a whole LayoutPrefs...
+        let text = std::fs::read_to_string(dir.join(LAYOUT_FILE)).unwrap();
+        let parsed: LayoutPrefs = serde_json::from_str(&text)
+            .expect("the surviving prefs file is never torn");
+        // ...and be one writer's values — a torn file
+        // that happened to parse, or the corrupt-file
+        // default ("Animate"), fails here.
+        assert!(
+            names.contains(&parsed.workspace.as_str()),
+            "surviving prefs are one writer's complete save: {parsed:?}"
+        );
+        // No temp litter from the race either.
+        assert!(
+            entry_names(&dir)
+                .iter()
+                .all(|n| !n.contains(".tmp-")),
+            "no temp litter after racing saves"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

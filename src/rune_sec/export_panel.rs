@@ -34,10 +34,12 @@
 //! file present on disk), a note under the toggle row
 //! (key `xc-range-audio-note`, decision in
 //! `range_audio_note_shown`) states what range mode does
-//! with the sound: a range MP4 keeps the audio of WAV
-//! clips inside the range, non-WAV clips are left out of
-//! a range MP4, and a range WebM is silent — so the
-//! partial coverage is said out loud instead of the
+//! with the sound: a range MP4 keeps the audio of clips
+//! inside the range (WAV and, since Wave 10, any
+//! ffmpeg-readable format; an unreadable clip file fails
+//! the export rather than being dropped silently), and a
+//! range WebM is silent — so the coverage is said out
+//! loud instead of the
 //! project's sound quietly changing shape. (WebM never
 //! carries the sound, full or range; the WebM row's own
 //! note says that where the button is.)
@@ -287,14 +289,16 @@ pub fn output_text(core: &EditorCore, use_range: bool) -> String {
 /// The exact wording of the range-mode audio note
 /// (element key `xc-range-audio-note`). Since Wave 9 a
 /// range MP4 muxes the audio of WAV clips that intersect
-/// the range (`export::export_mp4_range`); what it still
-/// cannot carry is a non-WAV clip (the engine has no
-/// duration probe for one, so its span cannot be cut to
-/// the range), and the WebM path never muxes in any
-/// mode — the wording names both limits so it cannot
-/// imply a fully sounding range export either.
+/// the range (`export::export_mp4_range`); since Wave 10
+/// non-WAV clips are cut to the range the same way (the
+/// engine probes them with ffprobe and decodes the
+/// segment through ffmpeg), and a clip whose file cannot
+/// be probed or decoded fails the export outright rather
+/// than being dropped silently. The WebM path never
+/// muxes in any mode — the wording names that limit so
+/// it cannot imply a fully sounding range export either.
 pub const RANGE_AUDIO_NOTE: &str =
-    "Range MP4 exports include audio from WAV clips inside the range — non-WAV clips are left out, and range WebM exports are silent.";
+    "Range MP4 exports include audio from WAV and other ffmpeg-readable clips cut to the range — a clip whose file cannot be probed or decoded fails the export instead of being left out silently, and range WebM exports are silent.";
 
 /// Whether the range-mode audio note shows: the range
 /// toggle is on AND at least one clip would actually be
@@ -2123,15 +2127,18 @@ mod tests {
 
     #[test]
     fn range_audio_note_wording_is_exact() {
-        // The wording names the Wave 9 truth exactly: a
-        // range MP4 keeps WAV audio inside the range,
-        // non-WAV clips are left out, and WebM is silent
+        // The wording names the Wave 10 truth exactly: a
+        // range MP4 keeps clip audio inside the range,
+        // WAV or any other ffmpeg-readable format; a clip
+        // whose file cannot be probed or decoded fails
+        // the export instead of being left out silently,
+        // and WebM is silent
         // in every mode (`export::export_webm` never
         // muxes) — neither "range exports are silent" nor
         // an unqualified "includes audio" would be true.
         assert_eq!(
             RANGE_AUDIO_NOTE,
-            "Range MP4 exports include audio from WAV clips inside the range — non-WAV clips are left out, and range WebM exports are silent."
+            "Range MP4 exports include audio from WAV and other ffmpeg-readable clips cut to the range — a clip whose file cannot be probed or decoded fails the export instead of being left out silently, and range WebM exports are silent."
         );
     }
 

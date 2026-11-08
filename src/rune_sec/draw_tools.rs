@@ -59,10 +59,23 @@
 //!   [`brush_icon`] for the preset mapping): the Draw mode
 //!   toggle paints strokes, so "paintbrush"; the eraser tool
 //!   takes "eraser"; the shape stamps take the glyph of the
-//!   shape they stamp. Two buttons stay text-only because
-//!   the curated icon set has no honest glyph for them:
-//!   Mirror strokes (no flip/mirror glyph) and the Arrow
-//!   stamp (no plain arrow glyph). The stamp parameter
+//!   shape they stamp — "square" / "circle" are the curated
+//!   set's stand-ins for the Rect / Ellipse outlines (the
+//!   set has no rectangle or ellipse glyph of its own),
+//!   "draw-polygon" and "star" are exact. One button stays
+//!   text-only because the curated icon set has no honest
+//!   glyph for it: Mirror strokes (no flip/mirror glyph in
+//!   the set — verified against `ICON_NAMES`, Wave 10).
+//!   Wave 10 also corrected two glyphs whose earlier
+//!   excuses had gone stale: the Arrow stamp claimed
+//!   "no plain arrow glyph", but the set carries
+//!   "arrow-right" (icon_data.rs) and the stamp at the
+//!   default rotation points right, so it renders through
+//!   `icon_btn` now; and the Line stamp's generic "shapes"
+//!   cluster (a triangle, a square and a circle — none of
+//!   them the straight segment the button stamps) became
+//!   "minus", the single straight stroke the set offers
+//!   (it has no diagonal-line glyph). The stamp parameter
 //!   steppers stay text too — a − / value / + readout row
 //!   reads better without glyphs.
 //! * **Drawing readout (Phase I).** A muted line under the
@@ -112,6 +125,25 @@
 //!   paint.rs:430) — so [`width_label`]'s fractional and
 //!   fallback arms exist only so a future preset can
 //!   never make the readout print nonsense.
+//! * **Brush scatter readout (Wave 10).** Scatter has the
+//!   same shape as smoothing and width — a field of the
+//!   brush *preset* (`paint::Brush::scatter`, paint.rs:324)
+//!   — with one extra twist: unlike the other two it has
+//!   no per-stroke home a control could write either. A
+//!   stroke's scatter exists only inside its `SprayMark`,
+//!   whose radius `EditorCore::begin_draw` copies from the
+//!   active preset at the moment drawing starts (that is
+//!   the field's one consumer; `paint::scatter_dabs`
+//!   remains uncalled by any renderer — the renderers
+//!   expand spray marks through `paint::spray_dots`). So
+//!   the panel adds the third readout ([`scatter_readout`],
+//!   key `draw-scatter-readout`) under the width one: it
+//!   names the property that makes the Spray preset what
+//!   it is, which the smoothing ("off") and width lines
+//!   left invisible. A scatter *stepper* waits on a
+//!   writable field — a `Stroke::scatter` the renderer
+//!   reads, or per-preset overrides — and lands only when
+//!   the engine grows one.
 //! * **Panel card (Phase N).** The section is a kit panel
 //!   card now, not a loose column of rows (P16: "a row
 //!   pretending to be a panel"): the root is
@@ -141,13 +173,26 @@
 //!   renders in the accent fill against the inactive
 //!   card fill, the panel header's meta names it, and
 //!   the cycle button's label names it — three cues.
+//! * **Wave 10 clamp pass.** The Sides and Size steppers
+//!   rendered live at their clamps, where a press only
+//!   re-reported the unchanged value as if it had
+//!   stepped. They now follow the Wave 9 inert-at-clamp
+//!   discipline (the playback / onion form): at the bound
+//!   the button is the handler-free `btn_inert` under the
+//!   same key ([`stamp_step_btn`] / [`stamp_step_is_noop`]),
+//!   live again the moment the value leaves the bound.
+//!   Rotation is exempt by construction — it wraps, so
+//!   every press changes the value. The step handlers
+//!   themselves are unchanged (they still clamp), the
+//!   keys are unchanged, and the rows measure exactly as
+//!   before (`btn_inert` is `btn`'s box).
 
 use rune::tok::{type_, Theme};
 use rune::{row, text, El};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::paint::ShapeKind;
 
-use crate::chrome_view::btn;
+use crate::chrome_view::{btn, btn_inert};
 use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::{chip_btn, icon_btn};
 use crate::State;
@@ -291,6 +336,50 @@ pub fn width_readout(core: &EditorCore) -> String {
     width_label(active_brush_width(core))
 }
 
+/// The active brush preset's scatter radius, in stage
+/// units (`paint::Brush::scatter` via
+/// `EditorCore::active_brush`). Read-only by construction,
+/// exactly like smoothing and width: the value that
+/// governs new strokes is the preset's, and
+/// `EditorCore::begin_draw` is its consumer — a brush with
+/// scatter above zero makes it record a `SprayMark` with
+/// this radius on the stroke, which the renderers expand
+/// via `paint::spray_dots`. There is no per-stroke scatter
+/// field a panel control could write (a stroke's scatter
+/// lives only in its spray mark, written by the engine at
+/// draw time), so — as with smoothing and width — the
+/// panel shows the value as a readout and changing it
+/// means choosing another preset.
+pub fn active_brush_scatter(core: &EditorCore) -> f32 {
+    core.active_brush().scatter
+}
+
+/// Format a scatter radius as the readout's text: zero
+/// (or negative, or NaN — the engine's own test in
+/// `begin_draw` is `scatter > 0.0`, so all three mean the
+/// brush lands its marks on the recorded path) is "off";
+/// a positive radius counts stage units, whole numbers
+/// without decimals and fractional radii with one, the
+/// [`width_label`] convention. Every preset today is
+/// whole (Spray's 12), so the fractional arm serves a
+/// future finer preset.
+pub fn scatter_label(v: f32) -> String {
+    if !(v > 0.0) {
+        return "Scatter: off".to_string();
+    }
+    if v.fract() == 0.0 {
+        format!("Scatter: {v:.0} units")
+    } else {
+        format!("Scatter: {v:.1} units")
+    }
+}
+
+/// The scatter readout line for the core's active brush:
+/// [`scatter_label`] of [`active_brush_scatter`].
+pub fn scatter_readout(core: &EditorCore) -> String {
+    scatter_label(active_brush_scatter(core))
+}
+
 /// The centred drag box the shape buttons stamp into, as
 /// `(from, to)` stage corners: the stage centre ±
 /// [`SHAPE_HALF`], clamped into the stage so a stage smaller
@@ -356,6 +445,10 @@ pub fn push_stamp_stroke(core: &mut EditorCore, points: Vec<[f32; 2]>, what: &st
         } else {
             brush.opacity.clamp(0.0, 1.0)
         },
+        // Mirrors the editor's stamp: never a spray
+        // stroke, so the brush's scatter lives on the
+        // stroke itself.
+        scatter: brush.scatter,
     });
     core.status = format!("Stamped {what} on frame {} ({n} points).", core.current + 1);
 }
@@ -625,6 +718,40 @@ pub fn drawing_stats_line(stats: &DrawingStats) -> String {
     line
 }
 
+/// Whether stepping `value` by `delta` inside
+/// `[min, max]` would write back the identical value — a
+/// press that cannot change anything (the onion section's
+/// `step_is_noop` predicate, generalised to this panel's
+/// `i32` parameters). False for an out-of-range stored
+/// value: either press pulls it back inside the range,
+/// which is a real change.
+pub fn stamp_step_is_noop(value: i32, delta: i32, min: i32, max: i32) -> bool {
+    (value + delta).clamp(min, max) == value
+}
+
+/// One stamp stepper button: the live `btn` while the
+/// step would change the parameter, the handler-free
+/// `btn_inert` (same key, same box) when it can only
+/// no-op at the clamp — the Wave 9 inert-at-clamp
+/// discipline the playback and onion steppers already
+/// follow, so a press at the limit cannot re-report the
+/// unchanged value as if it had stepped. The Rotation
+/// steppers never use this: rotation wraps, so every
+/// press changes the value.
+fn stamp_step_btn(
+    key: &str,
+    label: &str,
+    noop: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    if noop {
+        btn_inert(key, label, t)
+    } else {
+        btn(key, label, false, t, f)
+    }
+}
+
 /// The Draw toolbar panel (Phase N: the kit card shell —
 /// see the module docs): a header row holding the kit
 /// title (the existing "Draw" text, the active brush's
@@ -633,7 +760,7 @@ pub fn drawing_stats_line(stats: &DrawingStats) -> String {
 /// labels — Tools (mode, eraser, brush cycle, mirror,
 /// simplify, smooth, clear), Brushes (one chip per preset,
 /// the active one highlighted) with the active preset's
-/// smoothing and width readouts under it, Shapes (Line /
+/// smoothing, width and scatter readouts under it, Shapes (Line /
 /// Rect / Ellipse stamps plus the Polygon / Star / Arrow
 /// stamps), and Stamp (the parameter steppers: Sides /
 /// Size / Rotation). Active states read from the core's
@@ -733,7 +860,7 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         // past the window. Wrapping packs them onto two
         // lines (313 / 127).
         .flex_wrap()
-        .child(icon_btn("draw-shape-line", "shapes", "Line", false, t, |s| {
+        .child(icon_btn("draw-shape-line", "minus", "Line", false, t, |s| {
             draw_shape_button(&mut s.core, ShapeKind::Line)
         }))
         .child(icon_btn("draw-shape-rect", "square", "Rect", false, t, |s| {
@@ -748,7 +875,7 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .child(icon_btn("stamp-star", "star", "Star", false, t, |s| {
             stamp_star_button(&mut s.core, &s.draw_tools)
         }))
-        .child(btn("stamp-arrow", "Arrow", false, t, |s| {
+        .child(icon_btn("stamp-arrow", "arrow-right", "Arrow", false, t, |s| {
             stamp_arrow_button(&mut s.core, &s.draw_tools)
         }));
 
@@ -782,25 +909,44 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .gap(8.0)
         .center_y()
         .child(text("Sides").font(type_::LABEL).color(t.text_secondary))
-        .child(btn("draw-sides-dn", "−", false, t, |s| {
-            step_stamp_sides(&mut s.core, &mut s.draw_tools, -1)
-        }))
+        .child(stamp_step_btn(
+            "draw-sides-dn",
+            "−",
+            stamp_step_is_noop(params.sides, -1, SIDES_MIN, SIDES_MAX),
+            t,
+            |s| step_stamp_sides(&mut s.core, &mut s.draw_tools, -1),
+        ))
         .child(design::stepper_value(&format!("{}", params.sides), t))
-        .child(btn("draw-sides-up", "+", false, t, |s| {
-            step_stamp_sides(&mut s.core, &mut s.draw_tools, 1)
-        }));
+        .child(stamp_step_btn(
+            "draw-sides-up",
+            "+",
+            stamp_step_is_noop(params.sides, 1, SIDES_MIN, SIDES_MAX),
+            t,
+            |s| step_stamp_sides(&mut s.core, &mut s.draw_tools, 1),
+        ));
     let stamp_params_2 = row()
         .key("draw-stamp-params-2")
         .gap(8.0)
         .center_y()
         .child(text("Size").font(type_::LABEL).color(t.text_secondary))
-        .child(btn("draw-size-dn", "−", false, t, |s| {
-            step_stamp_size(&mut s.core, &mut s.draw_tools, -1)
-        }))
+        .child(stamp_step_btn(
+            "draw-size-dn",
+            "−",
+            stamp_step_is_noop(params.size_pct, -SIZE_STEP_PCT, SIZE_MIN_PCT, SIZE_MAX_PCT),
+            t,
+            |s| step_stamp_size(&mut s.core, &mut s.draw_tools, -1),
+        ))
         .child(design::stepper_value(&format!("{}%", params.size_pct), t))
-        .child(btn("draw-size-up", "+", false, t, |s| {
-            step_stamp_size(&mut s.core, &mut s.draw_tools, 1)
-        }));
+        .child(stamp_step_btn(
+            "draw-size-up",
+            "+",
+            stamp_step_is_noop(params.size_pct, SIZE_STEP_PCT, SIZE_MIN_PCT, SIZE_MAX_PCT),
+            t,
+            |s| step_stamp_size(&mut s.core, &mut s.draw_tools, 1),
+        ));
+    // The Rotation steppers keep the plain live `btn`:
+    // rotation wraps (0° − 15° = 345°), so no press can
+    // no-op and there is no clamp to go inert at.
     let stamp_params_3 = row()
         .key("draw-stamp-params-3")
         .gap(8.0)
@@ -850,6 +996,12 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .child(
             text(width_readout(core))
                 .key("draw-width-readout")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(
+            text(scatter_readout(core))
+                .key("draw-scatter-readout")
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         )
@@ -1125,6 +1277,66 @@ mod tests {
         assert_eq!(core.status, "Stamp rotation: 345°.");
     }
 
+    #[test]
+    fn stamp_step_is_noop_only_at_the_clamp_in_the_step_direction() {
+        // Sides: at the minimum, stepping down cannot
+        // change the value; stepping up can. Mid-range,
+        // both directions move.
+        assert!(stamp_step_is_noop(SIDES_MIN, -1, SIDES_MIN, SIDES_MAX));
+        assert!(!stamp_step_is_noop(SIDES_MIN, 1, SIDES_MIN, SIDES_MAX));
+        assert!(stamp_step_is_noop(SIDES_MAX, 1, SIDES_MIN, SIDES_MAX));
+        assert!(!stamp_step_is_noop(SIDES_MAX, -1, SIDES_MIN, SIDES_MAX));
+        assert!(!stamp_step_is_noop(5, -1, SIDES_MIN, SIDES_MAX));
+        assert!(!stamp_step_is_noop(5, 1, SIDES_MIN, SIDES_MAX));
+        // Size steps move in SIZE_STEP_PCT increments.
+        assert!(stamp_step_is_noop(
+            SIZE_MIN_PCT,
+            -SIZE_STEP_PCT,
+            SIZE_MIN_PCT,
+            SIZE_MAX_PCT
+        ));
+        assert!(stamp_step_is_noop(
+            SIZE_MAX_PCT,
+            SIZE_STEP_PCT,
+            SIZE_MIN_PCT,
+            SIZE_MAX_PCT
+        ));
+        assert!(!stamp_step_is_noop(
+            100,
+            SIZE_STEP_PCT,
+            SIZE_MIN_PCT,
+            SIZE_MAX_PCT
+        ));
+        // An out-of-range stored value is pulled back
+        // inside the range by either press — a real
+        // change, so neither direction is a no-op (the
+        // onion predicate's documented semantics).
+        assert!(!stamp_step_is_noop(2, -1, SIDES_MIN, SIDES_MAX));
+        assert!(!stamp_step_is_noop(2, 1, SIDES_MIN, SIDES_MAX));
+    }
+
+    #[test]
+    fn panel_builds_with_stamp_params_at_their_clamps() {
+        // Both inert branches of every clampable stepper
+        // (and the live branches between them) build
+        // without panicking — the inert form is the same
+        // key in the same box, only handler-free.
+        let mut state = crate::init();
+        let t = rune::tok::theme(true);
+        state.draw_tools = DrawToolsState {
+            sides: SIDES_MIN,
+            size_pct: SIZE_MIN_PCT,
+            rotation_deg: 0,
+        };
+        let _panel = draw_tools(&state, &t);
+        state.draw_tools = DrawToolsState {
+            sides: SIDES_MAX,
+            size_pct: SIZE_MAX_PCT,
+            rotation_deg: 345,
+        };
+        let _panel = draw_tools(&state, &t);
+    }
+
     // ---- Drawing readout (Phase I) ----
 
     #[test]
@@ -1294,6 +1506,10 @@ mod tests {
                 width_readout(&state.core),
                 width_label(active_brush_width(&state.core))
             );
+            assert_eq!(
+                scatter_readout(&state.core),
+                scatter_label(active_brush_scatter(&state.core))
+            );
             let _panel = draw_tools(&state, &t);
         }
         state.core.toggle_draw_tool();
@@ -1361,6 +1577,46 @@ mod tests {
             );
             assert_eq!(b.width.fract(), 0.0, "{} width is whole", b.name);
             assert_eq!(width_label(b.width), format!("Width: {:.0} px", b.width));
+        }
+    }
+
+    // ---- Brush scatter readout (Wave 10) ----
+
+    #[test]
+    fn scatter_label_formats_off_and_positive_radii() {
+        // Zero, negative and NaN are all "off" — the
+        // engine's own consumer test in `begin_draw` is
+        // `scatter > 0.0`, so the label's off condition
+        // matches the behaviour exactly.
+        assert_eq!(scatter_label(0.0), "Scatter: off");
+        assert_eq!(scatter_label(-3.0), "Scatter: off");
+        assert_eq!(scatter_label(f32::NAN), "Scatter: off");
+        // Whole radii print without decimals (Spray's 12
+        // is the library's only positive value today);
+        // a fractional radius keeps one decimal, the
+        // width label's convention.
+        assert_eq!(scatter_label(12.0), "Scatter: 12 units");
+        assert_eq!(scatter_label(2.5), "Scatter: 2.5 units");
+    }
+
+    #[test]
+    fn active_brush_scatter_follows_the_selected_preset() {
+        let mut core = EditorCore::new();
+        // The default Pen preset lands marks on the path.
+        assert_eq!(active_brush_scatter(&core), 0.0);
+        assert_eq!(scatter_readout(&core), "Scatter: off");
+        // Spray (index 9) is the library's only scattered
+        // preset: radius 12, the value begin_draw copies
+        // onto the stroke's SprayMark.
+        select_brush(&mut core, 9);
+        assert_eq!(active_brush_scatter(&core), 12.0);
+        assert_eq!(scatter_readout(&core), "Scatter: 12 units");
+        // Every other preset reads off — the readout can
+        // never claim scatter the engine would not apply.
+        for i in 0..9 {
+            select_brush(&mut core, i);
+            assert_eq!(active_brush_scatter(&core), 0.0, "preset {i} is unscattered");
+            assert_eq!(scatter_readout(&core), "Scatter: off");
         }
     }
 

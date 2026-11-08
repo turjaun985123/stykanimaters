@@ -1468,6 +1468,7 @@ mod tests {
             fill: None,
             spray: None,
             opacity: 1.0,
+            scatter: 0.0,
         });
         let ev = s.core.particle_add_event(0, 100.0, 100.0);
         s.stroke_selected = Some(0);

@@ -38,13 +38,66 @@
 //! ```
 //!
 //! Not gated (no [`Section`] variant, by design): the
-//! figure-add toggle (part of the Figures area's chrome),
-//! the settings popover, the help panel, and the shell's
+//! settings popover, the help panel, and the shell's
 //! permanent furniture (app bar, menus, stage, camera
-//! overlay strip, transport, timeline, status strip,
-//! toasts) — those stay available in every workspace,
-//! exactly as the GPUI app kept Transport/Home visible in
-//! several of its workspaces.
+//! overlay pill, transport, the timeline card — see
+//! below — status strip, toasts, and the column
+//! splitters) — those stay available in every
+//! workspace, exactly as the GPUI app kept
+//! Transport/Home visible in several of its
+//! workspaces. Figure-add is NOT on this list: since
+//! UI mission Wave 3 it mounts under the
+//! [`Section::Figures`] gate in `main.rs`, because it
+//! orphaned into Home/Export before that.
+//!
+//! # The timeline card and its lanes (chrome, not sections)
+//!
+//! The timeline card (`timeline_marks::timeline_marks`,
+//! mounted by `main.rs` in the centre column — the
+//! centre always mounts; only the side columns are
+//! View-toggle gated) is permanent furniture: it
+//! renders in **all eight workspaces**, and no
+//! [`Section`] gates it or anything inside it.
+//! (`chrome_view::timeline_row` is the card's unused
+//! predecessor builder; the live card is
+//! timeline_marks'.) Its lanes stack inside one
+//! horizontal scroll viewport on the shared chip
+//! pitch (`timeline_marks::CHIP_PITCH`), top to
+//! bottom:
+//!
+//! - **Ruler** (`timeline-ruler`) and **frame chips**
+//!   (`timeline-chips`, chips keyed `frame-N`):
+//!   always, whenever the project has frames.
+//! - **Marker row** (`timeline-markers`): data-gated,
+//!   not workspace-gated — mounted only when at least
+//!   one frame carries a camera/graph marker.
+//! - **Clips lane** (`timeline-clips`): data-gated
+//!   the same way — mounted only when the project
+//!   holds at least one audio or FX clip. It
+//!   summarises the Audio/Effects sections' content
+//!   but appears in every workspace; do not "fix"
+//!   that by gating it to Audio/Effects.
+//! - **Dopesheet lane** (Wave 10): one row per figure
+//!   (capped at 4) over `stats::figure_keyframes`,
+//!   inside the same scrolled column. It is briefed
+//!   as an Animate-workspace lane (docs/DOPESHEET.md
+//!   §3): if it lands workspace-scoped, the gate is a
+//!   `s.workspace` check inside the timeline builder,
+//!   **not** a new [`Section`] — the card is chrome,
+//!   and a variant for a surface no workspace mounts
+//!   as a panel would break the census discipline
+//!   below for nothing. Reconcile this paragraph with
+//!   the landed lane when Wave 10 closes.
+//!
+//! Under the scroll viewport, still inside the card,
+//! the **loop row** (`timeline-loop-row`) mounts
+//! whenever frames exist; on a zero-frame project the
+//! whole scroll stack is replaced by the kit empty
+//! state. Lane presence is therefore a function of
+//! project data (and, for the dopesheet, the
+//! workspace) — never of [`section_visible`] — so
+//! audits should not look for lane entries in the
+//! gating table below.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -324,6 +377,24 @@ impl Section {
 // `figures-panel` in those workspaces; that is the
 // facts' error, not this table's — the sweep pins
 // `figures-panel` present in Draw and Graph.)
+//
+// Wave 10 audit (E8) — orphan check re-run on the
+// unchanged table: the union of the eight lists is
+// exactly the 29 variants of `Section::all()` (no
+// uncovered section, no phantom entry, no duplicate
+// — the coverage tests below pin the first and
+// third), and `main.rs`'s view gates on exactly 29
+// distinct `Section` variants, each exactly once, so
+// every mounted panel maps to a section and every
+// section has its one mount site (figure-add rides
+// the Figures gate). The Alt+1..8 order is intact:
+// `main.rs`'s `on_key` indexes `Workspace::all()`
+// with `n − 1` and the chip suffix is the position
+// in the same array + 1, both pinned by
+// `all_eight_workspaces_in_row_order`. The timeline
+// card's lanes are chrome, not sections — see the
+// module header; the Wave 10 dopesheet lane changes
+// nothing in this table.
 
 /// Animate: the core animating set — figures, library,
 /// layers, project, all three inspectors, pose and

@@ -402,7 +402,7 @@
 //!   segment and the autosave segment keep the
 //!   plain [`segment`] path (floored at
 //!   [`est_text_width`], no truncation), as do
-//!   timecode, zoom, selection, undo and every
+//!   timecode, selection, undo and every
 //!   conditional segment. The project segment's
 //!   suffix (` · {runtime}` plus the dirty ` ●`)
 //!   is protected the same way, so the strip's
@@ -427,6 +427,19 @@
 //!   way ([`segment_yielding`]): the smallest base
 //!   of the three, so it yields the smallest share
 //!   at every pressure level.
+//! - **Fourth — the zoom segment** (UI mission
+//!   Wave 10) yields the same way
+//!   ([`segment_yielding`]). Its base (72 pt at
+//!   `Zoom 100%`) ties the play segment's as the
+//!   largest the ladder had left protected, and
+//!   the value it carries is an echo: since Wave 9
+//!   it is the EFFECTIVE zoom, whose primary
+//!   readout is the stage overlay — the overlay
+//!   keeps the exact percentage visible at every
+//!   width while the strip's copy elides. The
+//!   proof that bought this rung — the deepest
+//!   coincidence's residual, made exact — is the
+//!   Wave 10 section below.
 //!
 //! The order is a sacrifice gradient, and it is
 //! worth stating exactly what that means
@@ -436,10 +449,11 @@
 //! grown width — a narrowing window consumes the
 //! tail first, as it always has; it sits at zero
 //! before any fixed segment comes under pressure
-//! — a shortage distributes over the three
-//! yielding bases in proportion to their size:
-//! play (72) ahead of the name (64) ahead of fps
-//! (48), in the default state's estimated widths.
+//! — a shortage distributes over the yielding
+//! bases in proportion to their size:
+//! play (72) and zoom (72) ahead of the name (64)
+//! ahead of fps (48), in the default state's
+//! estimated widths.
 //! No segment is removed, no label changes, and
 //! the loop segment keeps its glyph: at 1440
 //! (744 pt centre) there is no shortage, nothing
@@ -460,36 +474,209 @@
 //! - default state: fixed floors 512 (the Phase K
 //!   pin). The yielding bases inside that sum —
 //!   play 72, project name 64 (`Untitled`), fps
-//!   48 — total 184 of capacity, leaving 328 of
-//!   protected floors.
+//!   48 and, since Wave 10, zoom 72 — total 256
+//!   of capacity, leaving 256 of protected
+//!   floors.
 //! - at 744: 512 + 8 boundaries × 17 = 648 ≤ 744;
 //!   the tail takes the remaining 96. Nothing
 //!   yields.
 //! - at 584, default state: demand 648, shortage
-//!   64 — inside the 184 of yield capacity, and
+//!   64 — inside the 256 of yield capacity, and
 //!   the protected floors plus boundaries total
-//!   328 + 136 = 464 ≤ 584, so frame, autosave
+//!   256 + 136 = 392 ≤ 584, so frame, autosave
 //!   and the project suffix are whole at the
 //!   minimum size.
 //! - at 584 with the audit's C1 coincidence live
 //!   (audio 64 + speed `1.5×` 32 + 3D 16):
-//!   floors 624; the protected 440 ≤ 584 fits
-//!   whole in this accounting.
+//!   floors 624; the protected part is 368 since
+//!   Wave 10 (440 before it). The
+//!   boundary-charged proof is the Wave 10
+//!   section below.
 //!
 //! One honest remainder, in the Phase K tradition
 //! of charging what an accounting leaves out: the
 //! C1 coincidence at 584 also carries 11
 //! boundaries × 17 = 187 of gap/divider overhead,
 //! against which the 184 of estimated yield
-//! capacity leaves a residual of ≈ 43 pt in
-//! measured geometry — the failure is pushed from
-//! the default state (which overflowed before
-//! this change) to the deepest coincidence at the
-//! minimum size, not abolished. Closing it would
-//! take a smaller row gap or a fourth yielding
-//! segment; neither is in this change's brief,
-//! and the 1280×720 tree probe (audit C2) is the
-//! evidence that would justify either.
+//! capacity then in the ladder left a residual of
+//! ≈ 43 pt in measured geometry — the failure was
+//! pushed from the default state (which overflowed
+//! before this change) to the deepest coincidence
+//! at the minimum size, not abolished. Wave 10
+//! closed exactly that residual, with the fourth
+//! yielding segment this paragraph named as one of
+//! the two prices; the boundary-charged proof —
+//! the estimate made exact, its dirty-session
+//! variant, and the wall that remains beyond the
+//! bound — is the Wave 10 section below.
+//!
+//! ## UI mission Wave 10 — the deepest coincidence, proven
+//!
+//! Wave 3 left the strip's last width question as
+//! an estimate: the deepest coincidence (audio
+//! live + speed 1.5× + a 3D session, over the
+//! default state) at the 584 pt minimum centre,
+//! residual ≈ 43 pt. The ≈ had three sources: the
+//! boundary overhead was charged from a tree-dump
+//! measurement, the coincidence's labels were
+//! charged at default-state values without an
+//! audit of what each segment can actually say,
+//! and the audio leg's presence depends on live
+//! ffplay liveness, which no headless probe can
+//! produce. This section removes the first two
+//! and states the third exactly. The arithmetic
+//! is now a proof inside the strip's own
+//! accounting ([`est_text_width`] throughout),
+//! conditional — as every conditional segment's
+//! accounting in this module is — on the
+//! coincidence holding; it is pinned by
+//! `deepest_coincidence_proven_bound_at_584pt`.
+//!
+//! The boundary charge first, because it is now
+//! derived, not just measured: [`build_strip`]
+//! joins N elements with N−1 dividers (1 pt,
+//! floored) and a uniform 8 pt row gap on both
+//! sides of each, so the overhead is (N−1) × 17
+//! by construction. The default state's 8 × 17 =
+//! 136 is exactly what the Phase N dump measured
+//! (512 + 136 + tail 96 = 744), which is the
+//! formula's check against reality.
+//!
+//! Every segment's worst case, from its label fn,
+//! in the universe the earlier sections already
+//! charge — projects of at most 1000 frames,
+//! durations inside the editor's 0.25..=8.0 clamp,
+//! fps inside its 1.0..=60.0 clamp, counters at
+//! the 999 plausible cap Phase G/J use:
+//!
+//! - project suffix ` · 133:20 ●` — 11 chars,
+//!   88 pt (the universe's runtime edge: 1000
+//!   frames × 8.0 at 1 fps = 8000 s); protected.
+//!   The name itself is rung 2 — user text,
+//!   unbounded, and width-neutral to every bound
+//!   below: it can always elide to nothing, so a
+//!   longer name only enlarges the yield pool.
+//! - frame `Frame 1000/1000` — 15 chars, 120 pt;
+//!   protected, never yields.
+//! - timecode `16:39.0` — 7 chars, 56 pt (frame
+//!   999 at the 1 fps clamp floor); protected.
+//! - fps `59.9 fps` — 8 chars, 64 pt of base;
+//!   rung 3, pool side only.
+//! - zoom `Zoom 3200%` — 10 chars, 80 pt of base
+//!   (the [`zoom_text`] corner: camera 4.0 × view
+//!   8.0); rung 4, as of this section.
+//! - selection `{figure} › node {n}` — no finite
+//!   worst case: a figure's name is user text on
+//!   a protected segment (see the wall below).
+//! - undo `Undo 999 · Redo 999` — 19 chars,
+//!   152 pt (the stacks are uncapped in the
+//!   editor; 999 is this module's plausible cap);
+//!   protected.
+//! - play `▶ Playing` — 9 chars, 72 pt of base;
+//!   rung 1.
+//! - speed — the cycle's widest label is its
+//!   SLOWEST step, `0.25×` (5 chars, 40 pt); the
+//!   coincidence pins 1.5× (32 pt), and the
+//!   fastest step `2×` is the narrowest (16 pt).
+//! - fig3 `3D` — 2 chars, 16 pt, a constant.
+//! - audio `Audio on` — 8 chars, 64 pt, and a
+//!   CONSTANT: [`audio_segment`]'s text is a
+//!   literal, so the segment's width was never
+//!   the unprovable part of this coincidence —
+//!   only its presence is, and presence is the
+//!   coincidence's premise, not its arithmetic.
+//! - loop `Loop 999–1000` — 13 chars, 104 pt of
+//!   floor, the glyph inside it (Phase H).
+//! - stroke `Stroke 1000` — 11 chars, 88 pt;
+//!   particle `Particle 1000` — 13 chars, 104 pt.
+//! - autosave `Autosaved 999h ago` — 18 chars,
+//!   144 pt (Phase J's cap).
+//!
+//! The coincidence, charged in full: the eight
+//! always-present segments at their default-state
+//! labels (512, the Phase K pin), the three legs
+//! at 64 + 32 + 16 = 112 — floors and bases 624
+//! in all — the tail at its minimum of zero, and
+//! all 11 boundaries at 187. Before this change
+//! the protected floors were 440 (328 default +
+//! 112), so the row's minimum width was 440 +
+//! 187 = 627 against the 584 column: **an
+//! overflow of exactly 43 pt** — the Wave 3
+//! residual with its ≈ removed; every term is a
+//! pinned label width or a derived constant of
+//! the row's own construction. In a real editing
+//! session the coincidence's project is dirty, so
+//! the suffix is ` · 0:00 ●` (72, not 56): 643
+//! against 584, an overflow of 59. The failure
+//! sat in the protected set alone — the yield
+//! pool and the tail are already at zero in both
+//! variants; nothing flexible was left to take
+//! it. (The brief's fourth leg, the longest
+//! project name, moves neither number: the name
+//! is rung 2, pure pool.)
+//!
+//! The fourth rung is the zoom segment, on the
+//! ladder's own gradient: its 72 pt base ties the
+//! play segment's as the largest left protected;
+//! its value is an echo whose primary readout —
+//! the stage overlay's effective-zoom percentage
+//! — stays fully visible at every width; and it
+//! degrades the way rungs 1 and 3 do, by
+//! right-elision, never by painting over a
+//! neighbour and never by stating a wrong number
+//! (the ellipsis is part of the truncated
+//! rendering). No other single rung closes both
+//! variants: the frame readout (72) never yields,
+//! the suffix (56/72) is the save state, and the
+//! selection (32 at `Styk`) and undo (48 at
+//! `Undo 0`) segments each free less than the
+//! dirty variant's 59.
+//!
+//! After the rung, the coincidence's protected
+//! floors are 368 and its minimum width 368 +
+//! 187 = 555 ≤ 584 — **it fits the minimum
+//! window with 29 pt to spare**; the dirty
+//! variant fits at 571 (spare 13), and the bound
+//! is robust across the whole speed cycle:
+//! swapping 1.5× for the widest label (0.25×, +8)
+//! leaves the dirty variant at 579 (spare 5). In
+//! the default state the protected floors are now
+//! 256 and the yield pool 256; at 744 nothing
+//! yields in either state (in the coincidence the
+//! 67 pt shortage there lands on the tail and the
+//! yielding bases, every protected segment
+//! whole), so the Phase N measurements stand.
+//! The price, stated plainly: at 584 in the
+//! default state the zoom segment now shares the
+//! 64 pt shortage with rungs 1–3 — ∝ its base its
+//! paper share is ≈ 18 pt, narrowing its box to
+//! ≈ 54 pt, right where its label's painted width
+//! sits at the documented typical advance (≈ 0.5
+//! em), so its final glyphs may elide at the
+//! minimum window. The exact percentage remains
+//! on the stage overlay at all times.
+//!
+//! The wall that remains, so the next change does
+//! not have to rediscover it: the bound's
+//! premises are the coincidence above, and every
+//! further charge lands pt-for-pt on the dirty
+//! spare of 13 (5 at the widest speed), plus 17
+//! for each segment that joins the row. The
+//! autosave segment alone at its longest label
+//! (144 + 17) exceeds it; so do the table's worst
+//! cases arriving together — frame +48 over the
+//! charged 72, undo +104, the zoom corner +8.
+//! And the selection segment's floor is sized by
+//! a figure's name: user text on a protected
+//! segment, the species rung 2 exists to absorb,
+//! so a long-named selected figure at the minimum
+//! window can still push the row past its column.
+//! It is the principled candidate if a fifth rung
+//! is ever briefed. The audio leg's presence
+//! remains ffplay's to give — the bound is proven
+//! for the coincidence when it holds, and the
+//! coincidence itself is still only producible
+//! live.
 //!
 //! ## UI mission Wave 8 — the strip takes the app theme
 //!
@@ -709,18 +896,25 @@ pub fn frame_text(core: &EditorCore) -> String {
 ///
 /// Width: the label keeps its old width class —
 /// `Zoom {pct}%` is at most 9 characters (est. 72 pt,
-/// the Phase K pinned floor) for every percentage up
+/// the Phase K pinned width) for every percentage up
 /// to 999, which covers every view zoom (≤ 8×) at the
 /// default camera and the camera steppers' range
 /// (0.3–4.0, `editor.rs`) up to a 2.49× view. Only the
 /// extreme corner — camera 4.0 × view 8.0 = 3200% —
-/// grows it one character (`Zoom 3200%`, est. 80 pt);
-/// the segment is floored from its live label
-/// ([`segment`]), so those points come out of the
-/// tail absorber, never out of a neighbour, and the
+/// grows it one character (`Zoom 3200%`, est. 80 pt).
+/// UI mission Wave 10: the segment is built by
+/// [`segment_yielding`], based at its live label's
+/// estimated width — under width pressure those
+/// points come out of the segment's own box (it
+/// elides; the exact percentage stays on the stage
+/// overlay), never out of a neighbour, and the
+/// 3200% corner funds itself the same way. The
 /// Phase K default-state pins do not move: at the
-/// default (identity) view the label is still exactly
-/// `Zoom 100%`.
+/// default (identity) view the label is still
+/// exactly `Zoom 100%`, and at rest the yielding
+/// base reserves exactly the width the old floor
+/// did. See the module docs' Wave 10 section for
+/// the bound this rung closes.
 pub fn zoom_text(core: &EditorCore) -> String {
     let pct =
         (core.camera_here().2 * crate::stage_view::view_nav().zoom * 100.0).round() as i64;
@@ -1073,10 +1267,11 @@ fn segment_mono(label: String, color: Color) -> El {
 /// can never paint over a neighbour, at any width.
 /// At rest (no pressure) the box is exactly the
 /// old floor, so the strip at 1440 is unchanged.
-/// Only the play and fps segments use this — the
-/// first and third sacrifices in the compression
-/// order (see the module docs); every other
-/// segment keeps the floored [`segment`] path.
+/// Only the play, fps and zoom segments use this —
+/// the first, third and fourth sacrifices in the
+/// compression order (see the module docs); every
+/// other segment keeps the floored [`segment`]
+/// path.
 fn segment_yielding(label: String, color: Color) -> El {
     let base = est_text_width(&label);
     text(label).font(type_::LABEL).color(color).w(base).truncate()
@@ -1193,10 +1388,11 @@ pub fn status_strip(core: &EditorCore) -> El {
 /// hairlines. Width discipline (see the module docs):
 /// the protected segments are width-floored and never
 /// yield; a narrowing centre consumes the tail first,
-/// then the play segment, the project name and the
-/// fps segment yield in that order — every yielding
-/// segment truncates, so the segments can never
-/// overlap however narrow the strip gets.
+/// then the play segment, the project name, the
+/// fps segment and the zoom segment yield in that
+/// order — every yielding segment truncates, so the
+/// segments can never overlap however narrow the
+/// strip gets.
 /// Keyed `status-strip` so headless `--tree` checks can
 /// find it. Theme is the shell's current app theme —
 /// `app_theme(!core.light_theme)`, the exact
@@ -1260,7 +1456,13 @@ fn build_strip(
         // third in the compression order — truncating,
         // based at its estimated width, no floor.
         segment_yielding(format!("{} fps", fps_text(core.project.fps)), colors.text),
-        segment(zoom_text(core), colors.text),
+        // UI mission Wave 10: the zoom segment yields
+        // fourth in the compression order — truncating,
+        // based at its estimated width, no floor. The
+        // proof that bought the rung is the module
+        // docs' Wave 10 section (the deepest
+        // coincidence's proven bound).
+        segment_yielding(zoom_text(core), colors.text),
         segment(selection_text(core), colors.text),
         segment(undo_text(core), colors.text),
         // The play segment lights up in the accent colour
@@ -1349,13 +1551,13 @@ fn build_strip(
     // "…" to that box at real font metrics. The
     // string is pre-capped by `fit_hint` as a
     // backstop. The protected segments sit on their
-    // floors and cannot be compressed; the three
-    // yielding segments (play, project name, fps —
-    // see the module docs' Wave 3 section) narrow
-    // only through Rune's truncating mode, which
-    // elides glyphs to the box. Either way, no
-    // segment's glyphs can ever reach a neighbour's
-    // box.
+    // floors and cannot be compressed; the four
+    // yielding segments (play, project name, fps,
+    // zoom — see the module docs' Wave 3 and Wave 10
+    // sections) narrow only through Rune's truncating
+    // mode, which elides glyphs to the box. Either
+    // way, no segment's glyphs can ever reach a
+    // neighbour's box.
     segments.push(
         text(fit_hint(&core.status, MAX_STATUS_CHARS))
             .font(type_::LABEL)
@@ -2080,14 +2282,16 @@ mod tests {
         // The yielding bases inside that sum: the
         // play segment, the project NAME (the rest
         // of the project floor is the protected
-        // suffix), and the fps segment.
+        // suffix), the fps segment, and — since
+        // Wave 10 — the zoom segment.
         let (name, suffix) = project_parts(&core);
         let yield_capacity = est_text_width(play_text(core.playing))
             + est_text_width(&name)
-            + est_text_width(&format!("{} fps", fps_text(core.project.fps)));
-        assert_eq!(yield_capacity, 72.0 + 64.0 + 48.0);
+            + est_text_width(&format!("{} fps", fps_text(core.project.fps)))
+            + est_text_width(&zoom_text(&core));
+        assert_eq!(yield_capacity, 72.0 + 64.0 + 48.0 + 72.0);
         let protected = 512.0 - yield_capacity;
-        assert_eq!(protected, 328.0);
+        assert_eq!(protected, 256.0);
         // The protected set keeps the two segments
         // the wave brief names as always fully
         // visible whole: the frame readout, and the
@@ -2114,17 +2318,168 @@ mod tests {
         // 1.5× + 3D live): floors 624 in this
         // accounting; the protected part fits 584
         // whole and the yielding set covers the
-        // rest. (The module docs record the
-        // measured-geometry residual for this
-        // coincidence:
-        // its 11 boundaries are the one charge this
-        // floors accounting does not carry.)
+        // rest. The boundary-charged form of this
+        // coincidence — minimum widths against the
+        // column, clean and dirty — is the Wave 10
+        // proof in
+        // `deepest_coincidence_proven_bound_at_584pt`
+        // below.
         let c1_floors = 512.0
             + est_text_width(&audio_segment(true).unwrap())
             + est_text_width(&speed_segment(1.5).unwrap())
             + est_text_width(fig3_segment(true).unwrap());
         assert_eq!(c1_floors, 624.0);
         assert!(c1_floors - yield_capacity <= 584.0);
+    }
+
+    #[test]
+    fn deepest_coincidence_proven_bound_at_584pt() {
+        // UI mission Wave 10: the deepest coincidence
+        // — audio live, speed 1.5×, a 3D session, over
+        // the default state — at the 584 pt minimum
+        // centre, with EVERY charge carried: each
+        // present segment at its label's
+        // `est_text_width`, the tail at its minimum
+        // of zero, and all 11 boundaries at the
+        // measured 17 pt (derived in the module docs:
+        // (N−1) × (8 gap + 1 divider + 8 gap) for the
+        // row's N = 12 elements). Wave 3 left this as
+        // a ≈ 43 pt residual estimate; here it is
+        // exact, before and after the fourth rung
+        // (the zoom segment yielding) that closes it.
+        // If a coincidence label, the ladder's
+        // membership or the boundary constant changes,
+        // this test fails and the bound must be
+        // re-proven, not inherited.
+        let core = EditorCore::new();
+        // The legs, each a pinned literal of its
+        // label fn. The audio label is a constant
+        // string — its width is exact; only its
+        // presence depends on ffplay liveness, which
+        // is the coincidence's premise.
+        let audio = est_text_width(&audio_segment(true).unwrap());
+        assert_eq!(audio_segment(true).unwrap(), "Audio on");
+        assert_eq!(audio, 64.0);
+        // The speed leg at the coincidence's 1.5×,
+        // and the cycle's extremes: the widest label
+        // is the SLOWEST step, the narrowest the
+        // fastest.
+        assert_eq!(est_text_width(&speed_segment(1.5).unwrap()), 32.0);
+        assert_eq!(est_text_width(&speed_segment(0.25).unwrap()), 40.0);
+        assert_eq!(est_text_width(&speed_segment(2.0).unwrap()), 16.0);
+        let legs = audio
+            + est_text_width(&speed_segment(1.5).unwrap())
+            + est_text_width(fig3_segment(true).unwrap());
+        assert_eq!(legs, 64.0 + 32.0 + 16.0);
+        // The yield pool with the fourth rung: play,
+        // project name, fps, zoom.
+        let (name, clean_suffix) = project_parts(&core);
+        let pool = est_text_width(play_text(core.playing))
+            + est_text_width(&name)
+            + est_text_width(&format!("{} fps", fps_text(core.project.fps)))
+            + est_text_width(&zoom_text(&core));
+        assert_eq!(pool, 256.0);
+        // Protected floors in the coincidence: the
+        // default 512 minus the pool, plus the legs.
+        let protected = 512.0 - pool + legs;
+        assert_eq!(protected, 368.0);
+        // 12 elements in the row -> 11 boundaries.
+        let boundaries = 11.0 * 17.0;
+        assert_eq!(boundaries, 187.0);
+        // BEFORE the rung, the zoom floor (72) sat in
+        // the protected set: minimum width 627
+        // against the 584 column — an overflow of
+        // exactly 43, the Wave 3 residual made exact.
+        assert_eq!(protected + 72.0 + boundaries, 627.0);
+        assert_eq!(protected + 72.0 + boundaries - 584.0, 43.0);
+        // AFTER the rung: minimum width 555 — the
+        // coincidence fits with 29 pt to spare.
+        assert_eq!(protected + boundaries, 555.0);
+        assert!(protected + boundaries <= 584.0);
+        // The dirty variant: a real editing session's
+        // suffix carries the dirty dot, 16 pt wider
+        // than the clean one (` · 0:00` -> ` · 0:01 ●`
+        // at the same runtime width). Before the
+        // rung it overflowed by 59; after, it fits
+        // with 13 to spare.
+        let mut dirty = EditorCore::new();
+        dirty.add_frame();
+        let (_, dirty_suffix) = project_parts(&dirty);
+        let dirty_delta =
+            est_text_width(&dirty_suffix) - est_text_width(&clean_suffix);
+        assert_eq!(dirty_delta, 16.0);
+        assert_eq!(protected + 72.0 + dirty_delta + boundaries - 584.0, 59.0);
+        assert_eq!(protected + dirty_delta + boundaries, 571.0);
+        assert!(protected + dirty_delta + boundaries <= 584.0);
+        // Robust across the speed cycle: the widest
+        // speed label (+8 over 1.5×) still fits dirty.
+        assert!(protected + dirty_delta + 8.0 + boundaries <= 584.0);
+        // The demand side agrees: total floors/bases
+        // (624) plus boundaries, minus the column, is
+        // the shortage, and the pool covers it in
+        // every variant (the longest project name
+        // only enlarges the pool — it is rung 2).
+        assert_eq!(624.0 + boundaries - 584.0, 227.0);
+        assert!(624.0 + boundaries - 584.0 <= pool);
+        assert!(624.0 + dirty_delta + 8.0 + boundaries - 584.0 <= pool);
+        // The strip builds in the coincidence state
+        // (the audio leg cannot be forced without a
+        // player; the speed and 3D legs go through
+        // the composer exactly as
+        // `status_strip_state` passes them).
+        let t = app_theme::app_theme(true);
+        let _ = build_strip(
+            &core,
+            &t,
+            None,
+            None,
+            speed_segment(1.5),
+            fig3_segment(true),
+            None,
+        );
+    }
+
+    #[test]
+    fn worst_case_segment_widths_from_source() {
+        // UI mission Wave 10: the per-segment
+        // worst-case audit behind the module docs'
+        // table — each label produced by its own fn
+        // at the edge of the stated universe (at most
+        // 1000 frames, durations in the editor's
+        // 0.25..=8.0 clamp, fps in its 1.0..=60.0
+        // clamp, counters at the 999 plausible cap),
+        // or pinned as a literal where the value
+        // lives outside this module (the zoom
+        // corner's camera × view product, the frame
+        // readout at the frame cap).
+        // Timecode: the last frame at the slowest
+        // fps reads 999 s.
+        assert_eq!(timecode(999, 1.0), "16:39.0");
+        assert_eq!(est_text_width("16:39.0"), 56.0);
+        // Runtime: the universe's edge is 1000
+        // frames x 8.0 at 1 fps = 8000 s = 133:20,
+        // and the dirty suffix around it is 11
+        // characters.
+        let core = core_with_runtime(1.0, &[8000.0]);
+        assert_eq!(runtime_label(&core), "133:20");
+        assert_eq!(est_text_width(" · 133:20 ●"), 88.0);
+        // Frame readout at the frame cap.
+        assert_eq!(est_text_width("Frame 1000/1000"), 120.0);
+        // Zoom at its documented corner (camera
+        // 4.0 x view 8.0 = 3200%).
+        assert_eq!(est_text_width("Zoom 3200%"), 80.0);
+        // Undo at the plausible cap, redo live.
+        assert_eq!(est_text_width("Undo 999 · Redo 999"), 152.0);
+        // The selection-index conditionals at the
+        // cap, through their own fns.
+        assert_eq!(stroke_segment(Some(999)).unwrap(), "Stroke 1000");
+        assert_eq!(est_text_width("Stroke 1000"), 88.0);
+        assert_eq!(particle_segment(Some(999)).unwrap(), "Particle 1000");
+        assert_eq!(est_text_width("Particle 1000"), 104.0);
+        // The fps segment's widest base in range:
+        // a fractional rate just under the 60 clamp.
+        assert_eq!(fps_text(59.94), "59.9");
+        assert_eq!(est_text_width("59.9 fps"), 64.0);
     }
 
     // ---- Phase L speed segment ----

@@ -72,6 +72,11 @@
 //!   (editor.rs:489) over every node: one `snapshot()` for
 //!   the whole operation (the helper's doc has the full
 //!   reasoning), the op's own clamp [4.0, 220.0] per length.
+//!   Wave 10 clamp honesty: a press whose segments all
+//!   already sit on the clamp in the factor's direction
+//!   is a status-only refusal with no snapshot, and a
+//!   partially clamped scale reports the achieved
+//!   (summed-length) percentage, not the nominal factor.
 //!   Keys `fig-scale-dn` / `fig-scale-up`. What scaling
 //!   does NOT touch, by design or by model: the root
 //!   position and all pose angles (lengths only — see the
@@ -557,13 +562,24 @@ pub fn rename_selected_figure(core: &mut EditorCore, raw: &str) -> bool {
 /// `adjust_length` (editor.rs:489), once per node: select
 /// the node, pass the delta `len * factor − len`, and the
 /// op's own write — parented nodes only, clamped to
-/// [4.0, 220.0] — does the rest. A length that would pass
-/// a clamp simply lands on it; the scale still succeeds.
-/// `adjust_length` never snapshots, so the one
-/// `snapshot()` below (the keyframe_tools / pose_tools
-/// multi-write pattern: guard, snapshot once, write,
-/// status) is the scale's only undo entry. The node
-/// selection is restored afterwards.
+/// [4.0, 220.0] — does the rest. The node selection is
+/// restored afterwards.
+///
+/// Clamp honesty (Wave 10): the per-node clamp means the
+/// nominal factor is not always the achieved scale — a
+/// segment at 220.0 cannot grow, and one at 4.0 cannot
+/// shrink. The planned lengths are computed BEFORE the
+/// snapshot, with the op's own clamp arithmetic: when no
+/// parented length would move (every segment already sits
+/// on the clamp the factor pushes against), the press is
+/// a status-only refusal ("already at the segment size
+/// limit") and takes NO snapshot — previously it recorded
+/// an empty undo step and still reported the nominal
+/// factor as done. When some segments clamp and others
+/// move, the status reports the achieved scale — the
+/// after/before ratio of the summed parented lengths,
+/// as a whole percent — not the requested factor, so the
+/// readout never claims a resize the clamps prevented.
 ///
 /// Only lengths change. The root position, every pose
 /// angle and each node's `rest_angle` are deliberately
@@ -592,6 +608,32 @@ pub fn scale_selected_figure(core: &mut EditorCore, factor: f32) -> bool {
         core.status = format!("Figure {} has no segments to scale.", fi + 1);
         return false;
     }
+    // Plan the write before snapshotting (Wave 10 clamp
+    // honesty): each parented node's post-scale length,
+    // computed with `adjust_length`'s own arithmetic
+    // (`len + delta`, clamped to [4.0, 220.0]). A press
+    // whose plan moves nothing — every segment already
+    // on the clamp in the factor's direction — is a
+    // refusal, not an empty undo step wearing a success
+    // status.
+    let nodes = &core.project.figures[fi].def.nodes;
+    let mut before_total = 0.0f32;
+    let mut after_total = 0.0f32;
+    let mut any_change = false;
+    for node in nodes {
+        if node.parent.is_some() {
+            let planned = (node.length + (node.length * factor - node.length)).clamp(4.0, 220.0);
+            before_total += node.length;
+            after_total += planned;
+            if planned != node.length {
+                any_change = true;
+            }
+        }
+    }
+    if !any_change {
+        core.status = format!("Figure {} is already at the segment size limit.", fi + 1);
+        return false;
+    }
     core.snapshot();
     let saved_node = core.selected_node;
     let count = core.project.figures[fi].def.nodes.len();
@@ -601,7 +643,27 @@ pub fn scale_selected_figure(core: &mut EditorCore, factor: f32) -> bool {
         core.adjust_length(len * factor - len);
     }
     core.selected_node = saved_node;
-    core.status = format!("Figure {} scaled to {:.0}%.", fi + 1, factor * 100.0);
+    // Report the achieved scale, not the requested
+    // factor: with some segments clamped, the summed
+    // lengths grew (or shrank) by less than the factor.
+    // The unclamped case lands on the factor itself, so
+    // the familiar wording is unchanged there. A
+    // non-positive or non-finite before-total (a file's
+    // degenerate lengths) has no meaningful ratio; fall
+    // back to naming the requested factor as the target.
+    if before_total > 0.0 && before_total.is_finite() && after_total.is_finite() {
+        core.status = format!(
+            "Figure {} scaled to {:.0}%.",
+            fi + 1,
+            after_total / before_total * 100.0
+        );
+    } else {
+        core.status = format!(
+            "Figure {} scaled toward {:.0}%; some segments stopped at the size limit.",
+            fi + 1,
+            factor * 100.0
+        );
+    }
     true
 }
 
@@ -1020,7 +1082,17 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
             text(measure_line(&m))
                 .key("fig-measure")
                 .font(type_::LABEL)
-                .color(t.text_secondary),
+                .color(t.text_secondary)
+                // The line's numbers come from evaluated
+                // positions, which a project file can push
+                // to extreme magnitudes (far-off roots,
+                // huge stage boxes): a plain text does not
+                // shrink, so an unfitted line would paint
+                // past the card's 316 pt column. Truncation
+                // elides the tail in place — the three_d
+                // panel's readout-line form — while normal
+                // figures' lines render byte-identical.
+                .truncate(),
         );
     }
     panel = panel.child(place_row(t));
@@ -1485,6 +1557,117 @@ playback_speed: 1.0,
             core.project.figures[fi].def.nodes[ni].length, 4.0,
             "must land on the clamp, not below it"
         );
+    }
+
+    #[test]
+    fn scale_refuses_when_every_segment_is_at_the_growth_limit() {
+        // Wave 10 clamp honesty: with every parented
+        // length already on the 220.0 max, a 110% press
+        // can move nothing — it must refuse status-only
+        // and take no snapshot, not record an empty undo
+        // step and claim the scale happened.
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        for node in core.project.figures[fi].def.nodes.iter_mut() {
+            if node.parent.is_some() {
+                node.length = 220.0;
+            }
+        }
+        let depth = core.undo_depth();
+        assert!(!scale_selected_figure(&mut core, 1.1));
+        assert_eq!(core.undo_depth(), depth, "a no-move scale must not snapshot");
+        assert!(
+            lengths(&core, fi).iter().all(|&l| l == 0.0 || l == 220.0),
+            "no length may move"
+        );
+        assert_eq!(
+            core.status,
+            format!("Figure {} is already at the segment size limit.", fi + 1)
+        );
+    }
+
+    #[test]
+    fn scale_refuses_when_every_segment_is_at_the_shrink_limit() {
+        // The mirror image at the 4.0 floor with 90%.
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        for node in core.project.figures[fi].def.nodes.iter_mut() {
+            if node.parent.is_some() {
+                node.length = 4.0;
+            }
+        }
+        let depth = core.undo_depth();
+        assert!(!scale_selected_figure(&mut core, 0.9));
+        assert_eq!(core.undo_depth(), depth, "a no-move scale must not snapshot");
+        assert_eq!(
+            core.status,
+            format!("Figure {} is already at the segment size limit.", fi + 1)
+        );
+    }
+
+    #[test]
+    fn scale_reports_the_achieved_percentage_when_partly_clamped() {
+        // One long segment (210 -> clamps at 220 instead
+        // of 231) and nine short ones (10 -> 11): the
+        // summed lengths go 300 -> 319, so the truthful
+        // report is 106%, not the requested 110%.
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        let mut first = true;
+        for node in core.project.figures[fi].def.nodes.iter_mut() {
+            if node.parent.is_some() {
+                node.length = if first { 210.0 } else { 10.0 };
+                first = false;
+            }
+        }
+        assert!(scale_selected_figure(&mut core, 1.1));
+        assert_eq!(
+            core.status,
+            format!("Figure {} scaled to 106%.", fi + 1),
+            "the status must report the achieved scale, not the factor"
+        );
+    }
+
+    #[test]
+    fn scale_during_playback_writes_lengths_only_and_leaves_the_playhead() {
+        // Wave 10 playback audit: the scale writes the
+        // figure DEFINITION's lengths — no frame's pose
+        // data — so a press mid-playback cannot land a
+        // write inside the interpolation the playhead is
+        // sampling: the playhead, the current frame and
+        // the playing flag are all untouched, and the
+        // sampled poses keep their roots and angles (the
+        // lengths the evaluation reads are the new ones,
+        // at every frame, by design).
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        core.project.tween_playback = true;
+        core.playing = true;
+        core.playhead = 2.5;
+        core.current = 2;
+        let roots_before: Vec<_> = core
+            .project
+            .frames
+            .iter()
+            .map(|f| f.poses[fi].root)
+            .collect();
+        let angles_before: Vec<Vec<f32>> = core
+            .project
+            .frames
+            .iter()
+            .map(|f| f.poses[fi].angles.clone())
+            .collect();
+        assert!(scale_selected_figure(&mut core, 1.1));
+        assert!(core.playing, "playback is not stopped by the edit");
+        assert_eq!(core.playhead, 2.5, "the playhead does not move");
+        assert_eq!(core.current, 2, "the current frame does not move");
+        for (f, frame) in core.project.frames.iter().enumerate() {
+            assert_eq!(frame.poses[fi].root, roots_before[f], "frame {f} root moved");
+            assert_eq!(
+                frame.poses[fi].angles, angles_before[f],
+                "frame {f} angles changed"
+            );
+        }
     }
 
     #[test]

@@ -118,7 +118,13 @@
 //! `snapshot()` when the content actually changes,
 //! and none (with a "Text unchanged." status) when
 //! the field still holds the instance's own content.
-//! Row previews need no fix-up after an update —
+//! An empty `content` refuses too ("Type some text
+//! first.", nothing snapshotted, Wave 10 D6): writing
+//! it would blank the instance into an invisible stage
+//! text whose list row is an empty-labelled button,
+//! and erasing a text is the Delete button's job —
+//! the add path's empty refusal ([`add_text_to_core`])
+//! applied to the write-back. Row previews need no fix-up after an update —
 //! [`text_instances`] rebuilds them from the live
 //! content on every render.
 //!
@@ -222,6 +228,64 @@
 //! metrics). Every element key, handler and status
 //! string is byte-identical to the pre-adoption
 //! panel; only structure and styling moved.
+//!
+//! ## Wave 10 (D6): text tool round 2 — sub-state gating
+//!
+//! A second audit of the Wave 9 (C10) gating, hunting
+//! the states *inside* "loaded" where a control still
+//! presented live but could only refuse or no-op:
+//!
+//! - **Update with an empty field** blanked the loaded
+//!   instance (one snapshot, content `""`) — an
+//!   invisible stage text whose list row is an
+//!   empty-labelled button. [`update_text_instance`]
+//!   now refuses empty content with the add path's
+//!   "Type some text first."; erasing a text is the
+//!   Delete button's job.
+//! - **The nudge pad** rendered fully live for a loaded
+//!   instance with no transform keys, whose every
+//!   press refuses ("Text has no position to move.").
+//!   The pad now gates on the loaded instance having
+//!   keys, through the same muted-live form C10 used
+//!   for nothing-loaded (the handler stays, so the
+//!   refusal is still earned). Rotate deliberately
+//!   does NOT follow: a keyless rotate is a real
+//!   (empty) undo step by the §30 decision.
+//! - **The z-order buttons** rendered live when the
+//!   loaded instance already sat at the target end —
+//!   for a lone instance, both of them, permanently.
+//!   They now render handler-free inert in that state
+//!   ([`zorder_btn`], gated on the op's own
+//!   [`moved_index`] math), matching the layers panel,
+//!   whose reorder buttons go inert at the ends and
+//!   whose draw semantics are this row's: the vec's
+//!   end is the front — drawn last, on top — in both
+//!   panels (only the list order differs).
+//! - **Both size-stepper pairs** rendered live at the
+//!   clamp: the instance pair's press only reported
+//!   the size, and the segment pair's was a silent
+//!   no-op. Both now render handler-free inert at the
+//!   bound ([`step_btn`] over [`step_is_noop`]), the
+//!   onion steppers' discipline.
+//! - **The segment list rows** printed a segment's
+//!   full content with no truncation — the one
+//!   unbounded text left in the panel after C10 capped
+//!   the instance rows. The row text now truncates
+//!   (display only; the data is untouched).
+//!
+//! Element keys, status strings and handler effects
+//! are unchanged throughout: in a state where a press
+//! could only no-op, the button now *looks* like it.
+//! Audited clean: the instance/segment lists' lack of
+//! a height cap (the panel stacks in the column scroll
+//! like the figures and FX lists; no fixed sibling is
+//! pushed out), the stale-`loaded` path (the gating
+//! follows the live instances vec, and the ops
+//! bounds-refuse), frame deletion (no control here
+//! reads frame existence; keys sample-clamp at draw),
+//! and the same-colour swatch press (it does what its
+//! status says — its only cost is a redundant undo
+//! step, and the worn swatch is already accent-marked).
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, text_input, El, TextEdit as FieldEdit, Tx};
@@ -229,7 +293,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{InstanceKey, SegmentMedia, TextInstance};
 use stykanimate_rs::text_edit::{TextEdit as SegTextEdit, DEFAULT_TEXT_SIZE};
 
-use crate::chrome_view::{btn, btn_muted_live};
+use crate::chrome_view::{btn, btn_inert, btn_muted_live};
 use crate::rune_sec::design;
 use crate::State;
 
@@ -558,7 +622,10 @@ pub fn resize_text_instance(core: &mut EditorCore, index: usize, dir: i32) -> bo
 /// changes, so an edit is a single undo step; when
 /// `content` already equals the instance's content the
 /// press is a status-only no-op ("Text unchanged.")
-/// that snapshots nothing. A stale index refuses the
+/// that snapshots nothing. An empty `content` refuses
+/// the same status-only way ("Type some text first.")
+/// rather than blanking the instance — see the module
+/// docs (Wave 10 D6). A stale index refuses the
 /// same way ("No such text."). Returns whether the
 /// content changed.
 pub fn update_text_instance(core: &mut EditorCore, index: usize, content: &str) -> bool {
@@ -566,6 +633,10 @@ pub fn update_text_instance(core: &mut EditorCore, index: usize, content: &str) 
         core.status = "No such text.".into();
         return false;
     };
+    if content.is_empty() {
+        core.status = "Type some text first.".into();
+        return false;
+    }
     if inst.content == content {
         core.status = "Text unchanged.".into();
         return false;
@@ -893,6 +964,17 @@ pub fn step_size(size: f32, dir: i32) -> f32 {
     (size + dir as f32 * SIZE_STEP).clamp(SIZE_MIN, SIZE_MAX)
 }
 
+/// Whether one stepper step from `size` in `dir` cannot
+/// change the size: the size sits at the clamp the step
+/// pushes against, so [`step_size`] returns it
+/// unchanged (Wave 10 D6). An out-of-range stored size
+/// is NOT a no-op in either direction — each step
+/// clamps it back inside the range, which is a real
+/// change — exactly the onion steppers' edge. Pure.
+pub fn step_is_noop(size: f32, dir: i32) -> bool {
+    step_size(size, dir) == size
+}
+
 /// "Add text": put `content` on the selected node's
 /// segment at glyph height `size`, through the engine's
 /// real session ops ([`SegTextEdit::begin`] → `push_char`
@@ -1011,6 +1093,70 @@ fn edit_btn(
         btn(key, label, false, t, f)
     } else {
         btn_muted_live(key, label, false, t, f)
+    }
+}
+
+/// One size-stepper button (Wave 10 D6): three forms
+/// over one key and box, following the shell's gating
+/// doctrine (chrome_view's `btn_inert` / `btn_muted_live`
+/// split, in the onion steppers' `step_btn` shape):
+///
+/// - not `live` — the loaded instance's steppers with
+///   nothing loaded: the muted-live form via
+///   [`edit_btn`], handler kept, so a press still earns
+///   the "Load a text first." refusal (Wave 9 C10);
+/// - `live` but the step cannot change the size
+///   ([`step_is_noop`] — the size sits at the clamp the
+///   step pushes against): the handler-free
+///   [`btn_inert`], like the onion depth steppers at
+///   their ends — a press would only ever no-op;
+/// - otherwise the plain live [`btn`].
+///
+/// The segment pair (in `text-actions`) passes
+/// `live: true`: that area is not C10-gated — its
+/// steppers act on the pending size / the selected
+/// segment, never on `loaded` — so only the clamp
+/// form applies there.
+fn step_btn(
+    key: &str,
+    label: &str,
+    live: bool,
+    noop: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    if !live {
+        edit_btn(key, label, false, t, f)
+    } else if noop {
+        btn_inert(key, label, t)
+    } else {
+        btn(key, label, false, t, f)
+    }
+}
+
+/// One z-order button (Wave 10 D6): the live [`btn`]
+/// while the loaded instance can still move that way,
+/// the handler-free [`btn_inert`] (same key, same box)
+/// once it already sits at that end of the draw order —
+/// the layers panel's at-end discipline for its reorder
+/// buttons (`icon_btn_inert` when a figure cannot move),
+/// whose semantics are this row's: the vec's end is the
+/// front in both panels. The gate is the op's own
+/// [`moved_index`] math, so the button and the op can
+/// never disagree; the op's "Already at the front." /
+/// "Already at the back." refusals stay for its direct
+/// (handler-level) callers.
+fn zorder_btn(
+    key: &str,
+    label: &str,
+    can_move: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    if can_move {
+        btn(key, label, false, t, f)
+    } else {
+        btn_inert(key, label, t)
     }
 }
 
@@ -1158,6 +1304,12 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
     // Update button and the z-order row (Phase M §29)
     // are the conditional pieces: they appear only while
     // `loaded` names an instance that still exists.
+    // Wave 10 D6 gates two sub-states *inside* "loaded":
+    // the nudge pad also needs the instance to have keys
+    // (a keyless one has no position to move — the pad
+    // renders muted for it, its presses still earning the
+    // op's refusal), and the z-order buttons render inert
+    // once the instance already sits at that end.
     let loaded_row = instances
         .iter()
         .find(|r| Some(r.index) == s.text_tool.loaded);
@@ -1170,12 +1322,15 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
         None => "—".to_string(),
     };
     let edit_live = loaded_row.is_some();
+    let nudge_live = loaded_row.map_or(false, |r| r.keys > 0);
     let mut instance_edit = col()
         .key("text-instance-edit")
         .w_full()
         .gap(2.0)
         .child(design::section_label(&loaded_label, t));
-    if loaded_row.is_some() {
+    if let Some(lr) = loaded_row {
+        let li = lr.index;
+        let total = instances.len();
         instance_edit = instance_edit
             .child(
                 row()
@@ -1193,12 +1348,20 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                     .w_full()
                     .gap(8.0)
                     .center_y()
-                    .child(btn("text-front", "Bring to front", false, t, |s| {
-                        move_loaded(s, true)
-                    }))
-                    .child(btn("text-back", "Send to back", false, t, |s| {
-                        move_loaded(s, false)
-                    })),
+                    .child(zorder_btn(
+                        "text-front",
+                        "Bring to front",
+                        moved_index(total, li, true).is_some(),
+                        t,
+                        |s| move_loaded(s, true),
+                    ))
+                    .child(zorder_btn(
+                        "text-back",
+                        "Send to back",
+                        moved_index(total, li, false).is_some(),
+                        t,
+                        |s| move_loaded(s, false),
+                    )),
             );
     }
     instance_edit = instance_edit
@@ -1208,16 +1371,16 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(edit_btn("text-nudge-l", "←", edit_live, t, |s| {
+                .child(edit_btn("text-nudge-l", "←", nudge_live, t, |s| {
                     nudge_loaded(s, -NUDGE_STEP, 0.0)
                 }))
-                .child(edit_btn("text-nudge-u", "↑", edit_live, t, |s| {
+                .child(edit_btn("text-nudge-u", "↑", nudge_live, t, |s| {
                     nudge_loaded(s, 0.0, -NUDGE_STEP)
                 }))
-                .child(edit_btn("text-nudge-d", "↓", edit_live, t, |s| {
+                .child(edit_btn("text-nudge-d", "↓", nudge_live, t, |s| {
                     nudge_loaded(s, 0.0, NUDGE_STEP)
                 }))
-                .child(edit_btn("text-nudge-r", "→", edit_live, t, |s| {
+                .child(edit_btn("text-nudge-r", "→", nudge_live, t, |s| {
                     nudge_loaded(s, NUDGE_STEP, 0.0)
                 })),
         )
@@ -1241,13 +1404,23 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(edit_btn("text-isize-dn", "Size −", edit_live, t, |s| {
-                    resize_loaded(s, -1)
-                }))
+                .child(step_btn(
+                    "text-isize-dn",
+                    "Size −",
+                    edit_live,
+                    loaded_row.map_or(false, |r| step_is_noop(r.size, -1)),
+                    t,
+                    |s| resize_loaded(s, -1),
+                ))
                 .child(design::stepper_value(&loaded_size, t))
-                .child(edit_btn("text-isize-up", "Size +", edit_live, t, |s| {
-                    resize_loaded(s, 1)
-                })),
+                .child(step_btn(
+                    "text-isize-up",
+                    "Size +",
+                    edit_live,
+                    loaded_row.map_or(false, |r| step_is_noop(r.size, 1)),
+                    t,
+                    |s| resize_loaded(s, 1),
+                )),
         );
 
     let mut list = col().key("text-list").gap(2.0);
@@ -1262,12 +1435,19 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
             let selected = core.selected_node == Some(r.node);
             list = list.child(
                 design::row_shell(selected, t).child(
+                    // Truncated (Wave 10 D6): a segment's
+                    // content is field-typed and unbounded,
+                    // and this line was the one text in the
+                    // panel that could push past the card —
+                    // the display truncates, the data never
+                    // does (the instance rows' discipline).
                     text(format!(
                         "{}: “{}” · {:.0}",
                         r.name, r.content, r.size
                     ))
                     .font(type_::LABEL)
-                    .color(if selected { t.text } else { t.text_secondary }),
+                    .color(if selected { t.text } else { t.text_secondary })
+                    .truncate(),
                 ),
             );
         }
@@ -1303,13 +1483,23 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(btn("text-seg", "Add text", false, t, |s| add_from_field(s)))
-                .child(btn("text-size-down", "Size −", false, t, |s| {
-                    step_from_button(s, -1)
-                }))
+                .child(step_btn(
+                    "text-size-down",
+                    "Size −",
+                    true,
+                    step_is_noop(shown_size, -1),
+                    t,
+                    |s| step_from_button(s, -1),
+                ))
                 .child(design::stepper_value(&format!("{shown_size:.0}"), t))
-                .child(btn("text-size-up", "Size +", false, t, |s| {
-                    step_from_button(s, 1)
-                })),
+                .child(step_btn(
+                    "text-size-up",
+                    "Size +",
+                    true,
+                    step_is_noop(shown_size, 1),
+                    t,
+                    |s| step_from_button(s, 1),
+                )),
         )
         .child(list)
         .child(texts_list)
@@ -1358,6 +1548,23 @@ mod tests {
         assert_eq!(step_size(SIZE_MAX, 1), SIZE_MAX);
         assert_eq!(step_size(SIZE_MIN, -1), SIZE_MIN);
         assert_eq!(step_size(1000.0, 1), SIZE_MAX);
+    }
+
+    #[test]
+    fn step_is_noop_only_when_the_step_cannot_change_the_size() {
+        assert!(step_is_noop(SIZE_MAX, 1), "at the max, + cannot grow");
+        assert!(step_is_noop(SIZE_MIN, -1), "at the min, − cannot shrink");
+        assert!(!step_is_noop(SIZE_MAX, -1), "at the max, − still shrinks");
+        assert!(!step_is_noop(SIZE_MIN, 1), "at the min, + still grows");
+        assert!(!step_is_noop(28.0, 1));
+        assert!(!step_is_noop(28.0, -1));
+        // Out-of-range stored sizes: every step clamps
+        // the size back inside the range — a real
+        // change, never a no-op (the onion edge).
+        assert!(!step_is_noop(1000.0, 1), "the + step clamps an oversize in");
+        assert!(!step_is_noop(1000.0, -1), "the − step clamps an oversize in");
+        assert!(!step_is_noop(1.0, 1), "the + step clamps an undersize in");
+        assert!(!step_is_noop(1.0, -1), "the − step clamps an undersize in");
     }
 
     #[test]
@@ -1890,6 +2097,39 @@ mod tests {
         assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
     }
 
+    #[test]
+    fn update_text_instance_empty_content_is_status_only_noop() {
+        // Wave 10 D6: blanking an instance through
+        // Update would leave an invisible stage text
+        // whose list row is an empty-labelled button —
+        // the write-back refuses empty content with the
+        // add path's status instead.
+        let mut core = EditorCore::new();
+        push_instance_pos(&mut core, "Keep me", 20.0, &[(0.0, 10.0, 20.0)]);
+        let depth_before = core.undo_depth();
+        assert!(!update_text_instance(&mut core, 0, ""));
+        assert_eq!(core.status, "Type some text first.");
+        assert_eq!(
+            core.project.texts[0].content, "Keep me",
+            "the instance is not blanked"
+        );
+        assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
+    }
+
+    #[test]
+    fn update_loaded_with_an_empty_field_writes_nothing() {
+        let mut s = crate::init();
+        push_instance(&mut s.core, "Still here", 24.0, 1);
+        s.text_tool.loaded = Some(0);
+        // The field starts empty: the write-back refuses
+        // instead of blanking the loaded instance.
+        let depth_before = s.core.undo_depth();
+        update_loaded(&mut s);
+        assert_eq!(s.core.status, "Type some text first.");
+        assert_eq!(s.core.project.texts[0].content, "Still here");
+        assert_eq!(s.core.undo_depth(), depth_before, "nothing was snapshotted");
+    }
+
     /// Instance fixture with distinct per-key angles:
     /// `keys` are `(frame, x, y, angle)` tuples, so a
     /// test can prove a rotate adds its delta to every
@@ -2121,6 +2361,26 @@ mod tests {
         // list, not the raw index, and still builds.
         s.text_tool.loaded = Some(9);
         let _ = text_tool(&s, &t);
+        // A keyless loaded instance builds too (Wave 10
+        // D6): its nudge pad renders muted — every press
+        // would refuse — while the rest of the edit area,
+        // rotate included by the §30 decision, stays
+        // live; and as the second of two instances it is
+        // already at the front, so that z-order button
+        // renders inert.
+        push_instance(&mut s.core, "Keyless", 24.0, 0);
+        s.text_tool.loaded = Some(1);
+        let _ = text_tool(&s, &t);
+        // With a text segment on the selected node the
+        // segment list builds its (truncating) rows too,
+        // and a lone loaded instance's z-order buttons
+        // render inert at both ends.
+        let mut s2 = crate::init();
+        s2.core.selected_node = Some(1);
+        add_text_to_core(&mut s2.core, "Segment label", 28.0);
+        push_instance(&mut s2.core, "Lone", 24.0, 1);
+        s2.text_tool.loaded = Some(0);
+        let _ = text_tool(&s2, &t);
     }
 
     #[test]

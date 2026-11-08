@@ -101,11 +101,19 @@
 //!   (`project.frames[f].poses[fi] = pose`) per writable
 //!   frame, addressed by index so the current frame
 //!   never moves. Skipped frames are counted in the
-//!   status, never silently passed over.
+//!   status, never silently passed over. A partial
+//!   application (some frames skipped) is worded in the
+//!   status classifier's Warn grammar; only a full
+//!   application wears the plain shape (Wave 10).
 //! - **Copy pose to…** (one button per other figure) →
 //!   `EditorCore::copy_pose_between(selected, target)`
-//!   (editor.rs:1438), reading the selection live at press
-//!   time.
+//!   (editor.rs:1597), reading the selection live at press
+//!   time, routed through [`copy_pose_to`]: the engine op
+//!   itself has NO angle-count check (it writes the source
+//!   pose row over the target's unconditionally), so the
+//!   guard Paste pose carries is judged across figures
+//!   here first — a mismatched copy would panic
+//!   `model::evaluate` on the next render.
 //! - **Reset pose** → composed: `snapshot` + replace the
 //!   current pose with `FigureDef::rest_pose(current root)`
 //!   (model.rs:279) — the same rest pose a figure is created
@@ -287,6 +295,42 @@
 //! entries exist. The filter's search glyph drops
 //! 14 → 13 pt, the kit's search size (the figures
 //! filter's glyph). Keys and handlers unchanged.
+//!
+//! UI mission Wave 10 (audit D7, pose tools round 2):
+//! two findings land. **Copy pose to…** now routes
+//! through [`copy_pose_to`] — the engine op it calls
+//! has no angle-count check, so this row was the one
+//! cross-figure path that could write a mismatched
+//! pose into a row (and panic `model::evaluate` on
+//! the next render, or leave unread angles sitting in
+//! it); it now carries the guard Paste pose and the
+//! library applies already had, judged across
+//! figures. And **Apply pose to all frames** reports
+//! a PARTIAL application in the classifier's Warn
+//! grammar ("…; N cannot take the copied pose …") —
+//! the rename flow's partial-failure precedent in
+//! this same file — while a full application keeps
+//! its plain shape and the zero-frame case already
+//! read as a refusal (Wave 9). The rest of the
+//! round-2 hunt audited clean, and the proofs are
+//! pinned by tests below: the library is plain files
+//! under `./library/poses` and nothing in the
+//! project file references it, so saved poses
+//! survive restarts but belong to the working
+//! directory, not to any one project; a saved pose
+//! is root + angles only, so applying it to a
+//! same-count figure with different proportions
+//! transfers the angles exactly and leaves the
+//! target's own segment lengths in place (no silent
+//! distortion — a different angle count is the
+//! refusal case); the pose clipboard is a third,
+//! separate clipboard beside the core's frame and
+//! range clipboards, written by nothing outside
+//! this file, so neither paste shadows the other;
+//! and rename/delete already refuse the blank-name,
+//! exact- and slug-collision, and unreadable-target
+//! cases (the FX presets refuse their empty-slug
+//! case at save/load and have no rename at all).
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -427,6 +471,46 @@ pub fn paste_pose(core: &mut EditorCore, clip: &Option<Pose>) {
     );
 }
 
+/// Copy-pose-to press for target figure `j`: Paste
+/// pose's angle-count guard judged across figures, in
+/// front of the engine op. The write itself is a core
+/// op (`EditorCore::copy_pose_between`), and that op
+/// has NO rig check — it clones the source pose row
+/// over the target's unconditionally. The panel's
+/// gate only proves both pose rows exist, so without
+/// this guard the row was the one cross-figure path
+/// that could store a mismatched pose: with fewer
+/// angles than the target has nodes,
+/// `model::evaluate`'s direct `pose.angles[i]`
+/// indexing panics on the next render; with more,
+/// the extra angles sit in the row unread. The
+/// refusal is worded after Paste's, in the core op's
+/// own "Copy pose failed: …" failure shape. Every
+/// other outcome (missing rows, same figure) is the
+/// core op's own status, reached by delegating.
+pub fn copy_pose_to(core: &mut EditorCore, j: usize) {
+    let counts = selected_pose(core).map(|p| p.angles.len()).zip(
+        core.project
+            .frames
+            .get(core.current)
+            .and_then(|f| f.poses.get(j))
+            .map(|p| p.angles.len()),
+    );
+    if let Some((src_len, tgt_len)) = counts {
+        if src_len != tgt_len {
+            core.status = format!(
+                "Copy pose failed: figure {} has {} angles, figure {} has {} segments.",
+                core.selected_figure + 1,
+                src_len,
+                j + 1,
+                tgt_len
+            );
+            return;
+        }
+    }
+    core.copy_pose_between(core.selected_figure, j);
+}
+
 /// Snapshot once and write `pose` over the selected figure's
 /// current-frame pose — the single write path Paste pose and
 /// library Apply share, so both are exactly one undo step.
@@ -489,7 +573,21 @@ pub fn apply_pose_to_all_frames(core: &mut EditorCore, clip: &Option<Pose>) {
     for f in writable {
         core.project.frames[f].poses[fi] = clip.clone();
     }
-    core.status = format!("Pose applied to {applied} frames ({skipped} skipped).");
+    core.status = if skipped == 0 {
+        format!("Pose applied to {applied} frames (0 skipped).")
+    } else {
+        // A partial application — the user asked for
+        // ALL frames and some could not take the pose —
+        // must not wear the plain confirmation's shape:
+        // "cannot" puts it in the status classifier's
+        // Warn grammar, the same move the rename flow
+        // below makes for its partial failure (Wave 10
+        // audit D7; the zero-frame case above is the
+        // full-refusal sibling, Wave 9).
+        format!(
+            "Pose applied to {applied} frames; {skipped} cannot take the copied pose (no pose row or a different rig)."
+        )
+    };
 }
 
 /// Reset the selected figure's current-frame pose to its
@@ -1530,7 +1628,7 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
             let label = figure_label(core, j);
             trow = trow.child(if enabled {
                 btn(&key, &label, false, t, move |s: &mut State| {
-                    s.core.copy_pose_between(s.core.selected_figure, j)
+                    copy_pose_to(&mut s.core, j)
                 })
             } else {
                 btn_inert(&key, &label, t)
@@ -1649,6 +1747,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn copy_pose_to_copies_between_figures_as_one_undo_step() {
+        let mut c = core();
+        // A distinctive source pose on figure 1.
+        c.mirror_selected_pose();
+        let mirrored = selected_pose(&c).unwrap().clone();
+        c.add_figure();
+        // add_figure selects the figure it just added;
+        // the copy goes FROM figure 1 TO figure 2.
+        c.selected_figure = 0;
+        let depth = c.undo_depth();
+        copy_pose_to(&mut c, 1);
+        assert_eq!(c.undo_depth(), depth + 1);
+        let target = &c.project.frames[c.current].poses[1];
+        assert_eq!(target.angles, mirrored.angles);
+        assert_eq!(target.root, mirrored.root);
+        assert!(
+            c.status.contains("Copied figure 1's pose to figure 2"),
+            "unexpected status: {}",
+            c.status
+        );
+    }
+
+    #[test]
+    fn copy_pose_to_refuses_a_mismatched_rig() {
+        // Wave 10 audit D7: the engine op has no rig
+        // check, so the panel-side guard is the only
+        // thing between a differently-rigged target and
+        // a pose row `model::evaluate` would panic on.
+        // The target's row losing its angles is the
+        // paste tests' mismatch idiom.
+        let mut c = core();
+        c.add_figure();
+        c.selected_figure = 0;
+        c.project.frames[c.current].poses[1].angles.clear();
+        let before = c.project.frames[c.current].poses[1].clone();
+        let depth = c.undo_depth();
+        copy_pose_to(&mut c, 1);
+        assert_eq!(c.undo_depth(), depth, "a refused copy takes no snapshot");
+        assert_eq!(
+            c.project.frames[c.current].poses[1].angles,
+            before.angles,
+            "the target row is untouched"
+        );
+        assert!(
+            c.status.contains("Copy pose failed"),
+            "unexpected status: {}",
+            c.status
+        );
+    }
+
     // ---- Pose library (Phase F) ----
 
     /// A fresh per-test library directory under the OS temp
@@ -1750,6 +1899,35 @@ mod tests {
             "unexpected status: {}",
             c.status
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_library_pose_to_a_same_count_figure_keeps_its_own_lengths() {
+        // Wave 10 audit D7, area 1 pin: a Pose is root +
+        // angles only — segment lengths live in the
+        // figure's own def — so applying a saved pose to
+        // a figure with the same angle count but
+        // different proportions transfers the angles
+        // exactly and leaves the target's lengths (its
+        // proportions) untouched: no silent distortion.
+        // The different-count case is the refusal pinned
+        // by the test above.
+        let dir = temp_library("proportions");
+        let mut c = core();
+        c.mirror_selected_pose();
+        let saved = selected_pose(&c).unwrap().clone();
+        save_pose_library_in(&dir, &saved, "Styk").unwrap();
+        c.add_figure();
+        // add_figure selects the figure it added; give
+        // it visibly different proportions.
+        let longer = c.project.figures[1].def.nodes[1].length * 2.0;
+        c.project.figures[1].def.nodes[1].length = longer;
+        apply_library_pose_in(&mut c, &dir, "Styk");
+        let got = selected_pose(&c).unwrap();
+        assert_eq!(got.angles, saved.angles);
+        assert_eq!(got.root, saved.root);
+        assert_eq!(c.project.figures[1].def.nodes[1].length, longer);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2133,6 +2311,11 @@ mod tests {
                 c.frame_count()
             )
         );
+        assert_eq!(
+            crate::rune_sec::toasts::classify_status(&c.status),
+            crate::rune_sec::toasts::Severity::Info,
+            "a full application stays a plain confirmation"
+        );
         c.undo();
         for (f, before) in c.project.frames.iter().zip(&pre_apply) {
             assert_eq!(f.poses[0].angles, before.angles);
@@ -2160,7 +2343,17 @@ mod tests {
         assert_eq!(c.undo_depth(), depth + 1);
         assert_eq!(
             c.status,
-            format!("Pose applied to {} frames (2 skipped).", n - 2)
+            format!(
+                "Pose applied to {} frames; 2 cannot take the copied pose (no pose row or a different rig).",
+                n - 2
+            )
+        );
+        // The partial application reads as a warning,
+        // not a plain confirmation (Wave 10 audit D7).
+        assert_eq!(
+            crate::rune_sec::toasts::classify_status(&c.status),
+            crate::rune_sec::toasts::Severity::Warn,
+            "a partial application classifies as Warn"
         );
         assert!(
             c.project.frames[1].poses.is_empty(),
