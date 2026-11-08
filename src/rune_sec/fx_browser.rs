@@ -811,7 +811,7 @@ mod tests {
         // Phase K — byte-identical, no suffix.
         let core = EditorCore::new();
         for entry in FX_KINDS {
-            assert_eq!(kind_button_label(&core, entry), kind_label(entry.name));
+            assert_eq!(kind_button_label(&core, &entry), kind_label(entry.name));
         }
         assert_eq!(
             kind_button_label(&core, entry_of(ClipKind::Sparkle)),
