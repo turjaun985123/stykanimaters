@@ -157,7 +157,7 @@ jobs:
           BIN=./target/release/stykanimate-rs
           mkdir -p headless-out
           missing=0
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range; do
             timeout 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
               > "headless-out/tree-$scene.log" 2>&1
             echo $? > "headless-out/tree-$scene.exit"
@@ -175,7 +175,7 @@ jobs:
         run: |
           set +e
           BIN=./target/release/stykanimate-rs
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range; do
             if [ ! -f "headless-out/tree-$scene.json" ]; then
               timeout 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
                 > "headless-out/tree-$scene-xvfb.log" 2>&1
