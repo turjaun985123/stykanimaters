@@ -380,6 +380,16 @@ fn onion_skins(core: &EditorCore, prev: u8, next: u8) -> Vec<(Vec<(V2, V2)>, u32
     }
     let project = &core.project;
     let segs_at = |frame: usize, fi: usize| -> Vec<(V2, V2)> {
+        // Wave 10: a figure need not appear in every frame
+        // (its poses slot is simply absent — the engine's
+        // presence idiom, `fi < frame.poses.len()`). The
+        // onion pass walks neighbouring frames for EVERY
+        // figure, so without this guard scrubbing past a
+        // figure's entrance with onion skin on panicked in
+        // `positions` (index out of bounds).
+        if project.frames[frame].poses.len() <= fi {
+            return Vec::new();
+        }
         let pos = core.positions(frame, fi);
         let def = &project.figures[fi].def;
         def.nodes

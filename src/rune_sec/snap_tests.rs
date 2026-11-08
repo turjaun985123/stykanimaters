@@ -773,11 +773,15 @@ fn stage_rect_is_identical_with_a_menu_open() {
     // dump measures in the real binary — the centre
     // column's share after margins, gaps, the fixed
     // 300 / 340 side widths and the centre's own rows.
+    // Wave 10: 530 -> 504 — the dopesheet lane joined
+    // the timeline card (header + the demo's one figure
+    // row) while the empty marker row stopped mounting;
+    // the timeline's net growth is the stage's 26 pt.
     let (closed, _) = rt.presented("stage").expect("stage is presented");
-    for (want, got) in [328.0, 157.0, 744.0, 530.0].iter().zip(closed.iter()) {
+    for (want, got) in [328.0, 157.0, 744.0, 504.0].iter().zip(closed.iter()) {
         assert!(
             (want - got).abs() <= 1.0,
-            "closed stage rect pins [328, 157, 744, 530]: {closed:?}"
+            "closed stage rect pins [328, 157, 744, 504]: {closed:?}"
         );
     }
 
@@ -3963,30 +3967,26 @@ fn timeline_card_keeps_chips_marks_and_rows() {
     let (loop_after, _) = rt
         .presented("timeline-loop-row")
         .expect("loop row is still presented");
-    // Stacking is asserted as centre order + shared
-    // left edge, NOT edge abutment or displacement:
-    // `presented` returns the DRAWN box, and for this
-    // canvas the drawn box rests up to its own height
-    // above the layout slot while the loop row's drawn
-    // box does not move at all — both edge arithmetic
-    // and displacement were tried against CI and are
-    // not sound relations for a mid-session-mounted
-    // canvas. The layout truth is proven by the
-    // headless tree dump instead (Phase N run
-    // 42487139921, scene fx-split-mid: timeline
-    // 732..786, timeline-clips 788..798, loop row
-    // 800..825 — exact 2pt gaps, no overlap), and the
-    // snap of the same scene shows the lane's bar in
-    // its own strip. What the Runtime can soundly add:
-    // the lane mounts, its centre sits between the
-    // scroll row's and the loop row's, and it shares
-    // the card's left inset.
-    let scroll_c = scroll[1] + scroll[3] / 2.0;
-    let lane_c = lane[1] + lane[3] / 2.0;
-    let loop_c = loop_after[1] + loop_after[3] / 2.0;
+    // Wave 10: the centre-order assertion this block
+    // used to make (scroll < lane < loop) is no longer
+    // a sound relation — Wave 5 moved the clips lane
+    // INSIDE the scroll column (one shared offset), and
+    // the dopesheet lane joined it there, so the scroll
+    // row's drawn box now CONTAINS the lane and its
+    // centre sits below the lane's. What the Runtime
+    // can soundly prove: the lane mounts inside the
+    // scroll row on the card's left inset, and the loop
+    // row still stacks below the scroll row. The exact
+    // stacking inside the scroll column is proven by
+    // the headless tree dumps (overflow scanner rule 4
+    // bounds the whole timeline subtree).
     assert!(
-        scroll_c < lane_c && lane_c < loop_c,
-        "centre order is scroll < lane < loop: scroll {scroll:?}, lane {lane:?}, loop {loop_after:?}"
+        rect_inside(lane, scroll),
+        "clips lane inside the scroll row: lane {lane:?}, scroll {scroll:?}"
+    );
+    assert!(
+        loop_after[1] >= scroll[1] + scroll[3] - 0.5,
+        "loop row stacks below the scroll row: loop {loop_after:?}, scroll {scroll:?}"
     );
     assert!(
         (lane[0] - scroll[0]).abs() < 0.5,
