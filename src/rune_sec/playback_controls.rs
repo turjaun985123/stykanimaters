@@ -46,8 +46,8 @@
 //! (`project.fps` `model.rs:683`, `loop_range`, `current`,
 //! `project.frames[..].duration`).
 
-use rune::tok::type_;
-use rune::{col, row, text, Theme, El};
+use rune::tok::{type_, Theme};
+use rune::{col, row, text, El};
 
 use crate::chrome_view::btn;
 use crate::State;
