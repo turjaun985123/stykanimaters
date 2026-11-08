@@ -365,6 +365,7 @@ fn tool_get_project_stats(core: &mut EditorCore, _args: &Value) -> Result<Value,
         WeatherKind::Snow => "snow",
         WeatherKind::Fireflies => "fireflies",
         WeatherKind::Fog => "fog",
+        WeatherKind::Storm => "storm",
     });
     Ok(json!({
         "ok": true,
@@ -710,8 +711,11 @@ fn parse_clip_kind(name: &str) -> Result<ClipKind, String> {
         "galaxy" => Ok(ClipKind::Galaxy),
         "prism" => Ok(ClipKind::Prism),
         "vortex" => Ok(ClipKind::Vortex),
+        "glitter" => Ok(ClipKind::Glitter),
+        "wave" => Ok(ClipKind::Wave),
+        "shard" => Ok(ClipKind::Shard),
         other => Err(format!(
-            "unknown fx kind '{other}' (expected burst, sparkle, smoke, beam, aura, trail, confetti, shock_ring, ember, fountain, orbit, lightning, bubbles, leaves, meteor, petals, splash, spiral, fireworks, aurora, comet, galaxy, prism or vortex)"
+            "unknown fx kind '{other}' (expected burst, sparkle, smoke, beam, aura, trail, confetti, shock_ring, ember, fountain, orbit, lightning, bubbles, leaves, meteor, petals, splash, spiral, fireworks, aurora, comet, galaxy, prism, vortex, glitter, wave or shard)"
         )),
     }
 }
@@ -824,6 +828,60 @@ fn tool_fx_delete(core: &mut EditorCore, args: &Value) -> Result<Value, String> 
     }))
 }
 
+fn tool_fx_preset_save(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = req_usize(args, "index")?;
+    let name = req_str(args, "name")?;
+    if name.is_empty() {
+        return Err("argument 'name' must not be empty".into());
+    }
+    let Some(entry) = core.project.fx_clips.get(idx) else {
+        return Err(format!("no fx clip at index {idx}"));
+    };
+    // Only the ParticleClip is stored: figure/node anchors are
+    // project-specific and do not belong in a reusable preset.
+    let clip = entry.clip.clone();
+    crate::fx_edit::save_clip_preset(&clip, name).map_err(|e| e.to_string())?;
+    Ok(json!({
+        "ok": true,
+        "fx_index": idx,
+        "preset": name,
+        "kind": format!("{:?}", clip.kind),
+    }))
+}
+
+fn tool_fx_preset_add(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let name = req_str(args, "name")?;
+    let frame = req_f32(args, "frame")?;
+    if frame < 0.0 {
+        return Err("argument 'frame' must not be negative".into());
+    }
+    let mut clip = crate::fx_edit::load_clip_preset(name).map_err(|e| e.to_string())?;
+    // The preset keeps its kind/duration/colour; only its start is
+    // overridden by the requested frame.
+    clip.start = frame;
+    if core.project.figures.is_empty() {
+        return Err("project has no figures to anchor the fx clip".into());
+    }
+    // Anchored like add_fx_clip anchors its clips, on the selected
+    // figure's first node (presets carry no anchor of their own).
+    let figure = if core.selected_figure < core.project.figures.len() {
+        core.selected_figure
+    } else {
+        0
+    };
+    let kind = format!("{:?}", clip.kind);
+    core.project.fx_clips.push(crate::model::FxClipEntry { clip, figure, node: 0 });
+    Ok(json!({
+        "ok": true,
+        "fx_index": core.project.fx_clips.len() - 1,
+        "preset": name,
+        "kind": kind,
+        "figure": figure,
+        "node": 0,
+        "start": frame,
+    }))
+}
+
 fn tool_set_weather(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let kind = req_str(args, "kind")?;
     if kind == "off" {
@@ -835,14 +893,18 @@ fn tool_set_weather(core: &mut EditorCore, args: &Value) -> Result<Value, String
         "snow" => WeatherKind::Snow,
         "fireflies" => WeatherKind::Fireflies,
         "fog" => WeatherKind::Fog,
+        "storm" => WeatherKind::Storm,
         other => {
             return Err(format!(
-                "unknown weather kind '{other}' (expected \"rain\", \"snow\", \"fireflies\", \"fog\" or \"off\")"
+                "unknown weather kind '{other}' (expected \"rain\", \"snow\", \"fireflies\", \"fog\", \"storm\" or \"off\")"
             ))
         }
     };
-    let amount = opt_f32(args, "amount")?.unwrap_or(90.0).clamp(0.0, 200.0);
-    let wind = opt_f32(args, "wind")?.unwrap_or(20.0);
+    // Storm is heavier by default: more particles, stronger drift.
+    let (default_amount, default_wind) =
+        if wk == WeatherKind::Storm { (140.0, 30.0) } else { (90.0, 20.0) };
+    let amount = opt_f32(args, "amount")?.unwrap_or(default_amount).clamp(0.0, 200.0);
+    let wind = opt_f32(args, "wind")?.unwrap_or(default_wind);
     core.project.weather = Some(Weather { kind: wk, amount, wind });
     Ok(json!({
         "ok": true,
@@ -974,6 +1036,23 @@ fn tool_bake_graph(core: &mut EditorCore, args: &Value) -> Result<Value, String>
     Ok(json!({ "ok": true, "status": core.status, "project": project_summary(core) }))
 }
 
+fn tool_graph_tangent_preset(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let preset = match req_str(args, "preset")? {
+        "smooth" => crate::graph::TangentPreset::Smooth,
+        "ease-in" => crate::graph::TangentPreset::EaseIn,
+        "ease-out" => crate::graph::TangentPreset::EaseOut,
+        "ease-inout" => crate::graph::TangentPreset::EaseInOut,
+        "linear" => crate::graph::TangentPreset::Linear,
+        other => {
+            return Err(format!(
+                "unknown tangent preset '{other}' (expected \"smooth\", \"ease-in\", \"ease-out\", \"ease-inout\" or \"linear\")"
+            ))
+        }
+    };
+    core.apply_graph_ease_preset(preset);
+    Ok(json!({ "ok": true, "status": core.status, "project": project_summary(core) }))
+}
+
 // ---------------------------------------------------------------------
 // The tool table
 // ---------------------------------------------------------------------
@@ -1065,6 +1144,97 @@ fn tool_draw_shape(core: &mut EditorCore, args: &Value) -> Result<Value, String>
         return Err("argument 'width' must be positive".into());
     }
     let points = crate::paint::shape_points(kind, [x1, y1], [x2, y2]);
+    let n_points = points.len();
+    let frame = core.current;
+    core.project.strokes.push(Stroke {
+        frame,
+        points,
+        color,
+        width,
+        widths: Vec::new(),
+        fill: None,
+    });
+    Ok(json!({
+        "ok": true,
+        "frame": frame,
+        "points": n_points,
+        "strokes_on_frame": crate::draw_ops::stroke_count(&core.project, frame),
+    }))
+}
+
+fn tool_draw_polygon(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    // Geometry comes from paint::regular_polygon_points so MCP
+    // polygons match the editor's own stamp tools point-for-point:
+    // a closed regular polygon (sides + 1 points), first vertex
+    // straight up (rotation -90 degrees).
+    let cx = req_f32(args, "cx")?;
+    let cy = req_f32(args, "cy")?;
+    let radius = req_f32(args, "radius")?;
+    if radius <= 0.0 {
+        return Err("argument 'radius' must be positive".into());
+    }
+    let sides = match get(args, "sides") {
+        Some(v) => as_usize(v, "sides")?,
+        None => 5,
+    };
+    if sides < 3 {
+        return Err("argument 'sides' must be at least 3".into());
+    }
+    let frame = match get(args, "frame") {
+        Some(v) => as_usize(v, "frame")?,
+        None => core.current,
+    };
+    check_frame(core, frame)?;
+    // Same pen defaults as draw_shape (light grey; the active
+    // brush's width), with the same optional overrides.
+    let color = opt_color(args, "color")?.unwrap_or(0xE8E8EC);
+    let width = opt_f32(args, "width")?.unwrap_or_else(|| core.active_brush().width);
+    if width <= 0.0 {
+        return Err("argument 'width' must be positive".into());
+    }
+    let points = crate::paint::regular_polygon_points([cx, cy], radius, sides, -90.0);
+    let n_points = points.len();
+    core.project.strokes.push(Stroke {
+        frame,
+        points,
+        color,
+        width,
+        widths: Vec::new(),
+        fill: None,
+    });
+    Ok(json!({
+        "ok": true,
+        "frame": frame,
+        "points": n_points,
+        "strokes_on_frame": crate::draw_ops::stroke_count(&core.project, frame),
+    }))
+}
+
+fn tool_draw_star(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    // Geometry comes from paint::star_points: a star outline on
+    // the CURRENT frame, like draw_shape — outer radius 'radius',
+    // inner radius 45% of it, first point straight up.
+    let cx = req_f32(args, "cx")?;
+    let cy = req_f32(args, "cy")?;
+    let radius = req_f32(args, "radius")?;
+    if radius <= 0.0 {
+        return Err("argument 'radius' must be positive".into());
+    }
+    let points_count = match get(args, "points") {
+        Some(v) => as_usize(v, "points")?,
+        None => 5,
+    };
+    if points_count < 2 {
+        return Err("argument 'points' must be at least 2".into());
+    }
+    // Same pen defaults as draw_shape (light grey; the active
+    // brush's width), with the same optional overrides.
+    let color = opt_color(args, "color")?.unwrap_or(0xE8E8EC);
+    let width = opt_f32(args, "width")?.unwrap_or_else(|| core.active_brush().width);
+    if width <= 0.0 {
+        return Err("argument 'width' must be positive".into());
+    }
+    let points = crate::paint::star_points([cx, cy], radius, radius * 0.45, points_count, -90.0);
     let n_points = points.len();
     let frame = core.current;
     core.project.strokes.push(Stroke {
@@ -1525,7 +1695,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 json!({
                     "figure": { "type": "integer" },
                     "node": { "type": "integer" },
-                    "kind": { "type": "string", "enum": ["burst", "sparkle", "smoke", "beam", "aura", "trail", "confetti", "shock_ring", "ember", "fountain", "orbit", "lightning", "bubbles", "leaves", "meteor", "petals", "splash", "spiral", "fireworks", "aurora", "comet", "galaxy", "prism", "vortex"] },
+                    "kind": { "type": "string", "enum": ["burst", "sparkle", "smoke", "beam", "aura", "trail", "confetti", "shock_ring", "ember", "fountain", "orbit", "lightning", "bubbles", "leaves", "meteor", "petals", "splash", "spiral", "fireworks", "aurora", "comet", "galaxy", "prism", "vortex", "glitter", "wave", "shard"] },
                     "start": { "type": "number" },
                     "duration": { "type": "number" },
                     "color": { "type": "integer", "description": "0xRRGGBB (default: figure colour)" },
@@ -1588,11 +1758,35 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_fx_delete,
         },
         Tool {
+            name: "fx_preset_save",
+            description: "Save the FX clip at 'index' as a reusable preset under 'name' (kind, duration, colour and motion are stored; the figure/node anchor is not).",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "name": { "type": "string" }
+                }),
+                &["index", "name"],
+            ),
+            handler: tool_fx_preset_save,
+        },
+        Tool {
+            name: "fx_preset_add",
+            description: "Add a saved FX preset to the project at the given start frame: the preset's kind/duration/colour are kept, its start is overridden by 'frame', and the clip is anchored to the selected figure's first node. Errors if the preset does not exist.",
+            schema: obj_schema(
+                json!({
+                    "name": { "type": "string" },
+                    "frame": { "type": "number", "description": "Start frame for the added clip" }
+                }),
+                &["name", "frame"],
+            ),
+            handler: tool_fx_preset_add,
+        },
+        Tool {
             name: "set_weather",
             description: "Set continuous weather over the whole timeline, or turn it off.",
             schema: obj_schema(
                 json!({
-                    "kind": { "type": "string", "enum": ["rain", "snow", "fireflies", "fog", "off"] },
+                    "kind": { "type": "string", "enum": ["rain", "snow", "fireflies", "fog", "storm", "off"] },
                     "amount": { "type": "number", "description": "Particles per frame, 0-200" },
                     "wind": { "type": "number", "description": "Horizontal drift per second" }
                 }),
@@ -1643,6 +1837,17 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["from", "to"],
             ),
             handler: tool_bake_graph,
+        },
+        Tool {
+            name: "graph_tangent_preset",
+            description: "Apply an easing preset to the tangents of every graph channel key in one pass: \"smooth\", \"ease-in\", \"ease-out\", \"ease-inout\" or \"linear\". One undo step.",
+            schema: obj_schema(
+                json!({
+                    "preset": { "type": "string", "enum": ["smooth", "ease-in", "ease-out", "ease-inout", "linear"] }
+                }),
+                &["preset"],
+            ),
+            handler: tool_graph_tangent_preset,
         },
         Tool {
             name: "layers",
@@ -1701,6 +1906,39 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["kind", "x1", "y1", "x2", "y2"],
             ),
             handler: tool_draw_shape,
+        },
+        Tool {
+            name: "draw_polygon",
+            description: "Append a closed regular polygon as a stroke: centred at (cx, cy) with the given radius, 'sides' vertices (default 5, at least 3) plus the closing point, first vertex straight up. 'frame' defaults to the current frame. color is 0xRRGGBB (default light grey), width defaults to the active brush width.",
+            schema: obj_schema(
+                json!({
+                    "cx": { "type": "number" },
+                    "cy": { "type": "number" },
+                    "radius": { "type": "number" },
+                    "sides": { "type": "integer", "minimum": 3, "description": "Vertex count (default 5)" },
+                    "frame": { "type": "integer", "description": "Target frame (default: current frame)" },
+                    "color": { "type": "integer", "description": "0xRRGGBB" },
+                    "width": { "type": "number" }
+                }),
+                &["cx", "cy", "radius"],
+            ),
+            handler: tool_draw_polygon,
+        },
+        Tool {
+            name: "draw_star",
+            description: "Append a star outline as a stroke on the CURRENT frame: centred at (cx, cy), outer radius 'radius', inner radius 45% of it, 'points' spikes (default 5), first spike straight up. color is 0xRRGGBB (default light grey), width defaults to the active brush width.",
+            schema: obj_schema(
+                json!({
+                    "cx": { "type": "number" },
+                    "cy": { "type": "number" },
+                    "radius": { "type": "number" },
+                    "points": { "type": "integer", "minimum": 2, "description": "Spike count (default 5)" },
+                    "color": { "type": "integer", "description": "0xRRGGBB" },
+                    "width": { "type": "number" }
+                }),
+                &["cx", "cy", "radius"],
+            ),
+            handler: tool_draw_star,
         },
         Tool {
             name: "smooth_strokes",
@@ -1863,11 +2101,11 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 46);
+        assert_eq!(tools.len(), 51);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 46, "tool names must be unique");
+        assert_eq!(names.len(), 51, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
@@ -1948,6 +2186,17 @@ mod tests {
             core.project.weather.as_ref().map(|w| w.kind),
             Some(WeatherKind::Fog)
         ));
+        // Storm (wave 12) is heavier by default: amount 140, wind 30.
+        call(&mut core, &tools, "set_weather", json!({ "kind": "storm" })).unwrap();
+        assert!(matches!(
+            core.project.weather.as_ref().map(|w| w.kind),
+            Some(WeatherKind::Storm)
+        ));
+        let w = core.project.weather.unwrap();
+        assert_eq!(w.amount, 140.0);
+        assert_eq!(w.wind, 30.0);
+        let s = call(&mut core, &tools, "get_project_stats", json!({})).unwrap();
+        assert_eq!(s["weather"], "storm");
         call(&mut core, &tools, "set_weather", json!({ "kind": "off" })).unwrap();
         assert!(core.project.weather.is_none());
         call(&mut core, &tools, "add_audio_clip", json!({ "path": "music.wav", "start_frame": 0 })).unwrap();
@@ -2185,7 +2434,8 @@ mod tests {
         // including the wave-7 kinds (lightning, bubbles, leaves),
         // ember/fountain/orbit, which predate the fx timeline, and
         // the wave-10 kinds (fireworks, aurora, comet) and the
-        // wave-11 kinds (galaxy, prism, vortex).
+        // wave-11 kinds (galaxy, prism, vortex) and the wave-12
+        // kinds (glitter, wave, shard).
         for (name, debug) in [
             ("ember", "Ember"),
             ("fountain", "Fountain"),
@@ -2199,6 +2449,9 @@ mod tests {
             ("galaxy", "Galaxy"),
             ("prism", "Prism"),
             ("vortex", "Vortex"),
+            ("glitter", "Glitter"),
+            ("wave", "Wave"),
+            ("shard", "Shard"),
         ] {
             let r = call(&mut core, &tools, "add_fx_clip", json!({
                 "figure": 0, "node": 0, "kind": name, "start": 0.0, "duration": 6.0
@@ -2206,11 +2459,11 @@ mod tests {
             .unwrap();
             assert_eq!(r["kind"], debug, "{name}");
         }
-        assert_eq!(core.project.fx_clips.len(), 12);
+        assert_eq!(core.project.fx_clips.len(), 15);
 
         // fx_list reports the fx_edit view of the same clips.
         let r = call(&mut core, &tools, "fx_list", json!({})).unwrap();
-        assert_eq!(r["count"], 12);
+        assert_eq!(r["count"], 15);
         assert_eq!(r["clips"][3]["kind"], "lightning");
         assert_eq!(r["clips"][3]["figure"], 0);
         assert_eq!(r["clips"][3]["node"], 0);
@@ -2228,15 +2481,15 @@ mod tests {
         let r = call(&mut core, &tools, "fx_duplicate", json!({ "index": 3 })).unwrap();
         assert_eq!(r["fx_index"], 4);
         assert_eq!(r["start"], 14.0);
-        assert_eq!(core.project.fx_clips.len(), 13);
+        assert_eq!(core.project.fx_clips.len(), 16);
         assert_eq!(core.project.fx_clips[4].clip.start, 14.0);
 
         // Delete removes exactly the addressed clip.
         let r = call(&mut core, &tools, "fx_delete", json!({ "index": 4 })).unwrap();
-        assert_eq!(r["count"], 12);
-        assert_eq!(core.project.fx_clips.len(), 12);
+        assert_eq!(r["count"], 15);
+        assert_eq!(core.project.fx_clips.len(), 15);
         let r = call(&mut core, &tools, "fx_list", json!({})).unwrap();
-        assert_eq!(r["count"], 12);
+        assert_eq!(r["count"], 15);
     }
 
     #[test]
@@ -2333,6 +2586,114 @@ mod tests {
         let r = call(&mut core, &tools, "bake_graph", json!({ "from": 0, "to": 4 })).unwrap();
         assert_eq!(r["ok"], true);
         assert!(r["status"].is_string());
+    }
+
+    #[test]
+    fn wave12_kinds_and_tools() {
+        // The wave-12 FX kinds parse by name; near-misses are
+        // rejected with an error, never a panic.
+        assert!(matches!(parse_clip_kind("glitter"), Ok(ClipKind::Glitter)));
+        assert!(matches!(parse_clip_kind("wave"), Ok(ClipKind::Wave)));
+        assert!(matches!(parse_clip_kind("shard"), Ok(ClipKind::Shard)));
+        assert!(parse_clip_kind("gliter").is_err());
+        assert!(parse_clip_kind("waves").is_err());
+
+        let tools = tools();
+        let mut core = EditorCore::new();
+        call(&mut core, &tools, "new_project", json!({})).unwrap();
+        call(&mut core, &tools, "add_frame", json!({})).unwrap();
+
+        // draw_polygon: default 5 sides -> a closed stroke of
+        // sides + 1 points on the current frame.
+        let r = call(&mut core, &tools, "draw_polygon", json!({
+            "cx": 480.0, "cy": 360.0, "radius": 100.0
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["points"], 6);
+        assert_eq!(r["frame"], core.current);
+        assert_eq!(core.project.strokes.len(), 1);
+        let poly = &core.project.strokes[0];
+        assert_eq!(poly.points.len(), 6);
+        assert_eq!(poly.points.first(), poly.points.last(), "polygon is closed");
+        assert!(poly.width > 0.0);
+        // Explicit sides and an explicit target frame.
+        let r = call(&mut core, &tools, "draw_polygon", json!({
+            "cx": 100.0, "cy": 100.0, "radius": 40.0, "sides": 3, "frame": 0
+        }))
+        .unwrap();
+        assert_eq!(r["points"], 4);
+        assert_eq!(r["frame"], 0);
+        assert_eq!(core.project.strokes[1].frame, 0);
+        // Fewer than 3 sides is an error and adds nothing.
+        assert!(call(&mut core, &tools, "draw_polygon", json!({
+            "cx": 0.0, "cy": 0.0, "radius": 10.0, "sides": 2
+        }))
+        .is_err());
+        assert_eq!(core.project.strokes.len(), 2);
+
+        // draw_star goes on the current frame (frame 1 after the
+        // add_frame above moved the playhead).
+        let r = call(&mut core, &tools, "draw_star", json!({
+            "cx": 480.0, "cy": 360.0, "radius": 80.0
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["frame"], core.current);
+        assert_eq!(core.project.strokes.len(), 3);
+        let star = &core.project.strokes[2];
+        assert_eq!(star.frame, core.current);
+        assert!(star.points.len() >= 10, "5 spikes alternate outer/inner vertices");
+        assert_eq!(r["points"].as_u64().unwrap() as usize, star.points.len());
+
+        // graph_tangent_preset: a bad preset name errors; a real
+        // one runs through the editor op's status idiom.
+        assert!(call(&mut core, &tools, "graph_tangent_preset", json!({
+            "preset": "bouncy"
+        }))
+        .is_err());
+        let r = call(&mut core, &tools, "graph_tangent_preset", json!({
+            "preset": "ease-inout"
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert!(r["status"].is_string());
+
+        // FX presets: save a clip, add it back at a new frame.
+        // A pid-unique name keeps parallel test runs (and stale
+        // preset files) from colliding.
+        let pname = format!("wave12-test-{}", std::process::id());
+        call(&mut core, &tools, "add_fx_clip", json!({
+            "figure": 0, "node": 0, "kind": "glitter", "start": 0.0, "duration": 9.0
+        }))
+        .unwrap();
+        let r = call(&mut core, &tools, "fx_preset_save", json!({
+            "index": 0, "name": pname
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["kind"], "Glitter");
+        let before = core.project.fx_clips.len();
+        let r = call(&mut core, &tools, "fx_preset_add", json!({
+            "name": pname, "frame": 7.0
+        }))
+        .unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["kind"], "Glitter");
+        assert_eq!(core.project.fx_clips.len(), before + 1);
+        let added = &core.project.fx_clips[before];
+        assert_eq!(added.clip.kind, ClipKind::Glitter);
+        assert_eq!(added.clip.start, 7.0, "the requested frame overrides the stored start");
+        assert_eq!(added.clip.duration, 9.0, "the preset's duration is kept");
+        // A preset that was never saved is an error, not a panic.
+        assert!(call(&mut core, &tools, "fx_preset_add", json!({
+            "name": format!("wave12-missing-{}", std::process::id()), "frame": 0.0
+        }))
+        .is_err());
+        assert!(call(&mut core, &tools, "fx_preset_save", json!({
+            "index": 99, "name": pname
+        }))
+        .is_err());
     }
 
     #[test]

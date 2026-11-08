@@ -82,9 +82,12 @@ present and fall back to a folder-based flow when neither exists.
   block shift, range reverse, loop ranges, motion-path display
   with path smoothing, onion skin 1–3 in both directions, and a
   **graph engine** (Hermite channels for root X/Y, joint angles
-  and segment lengths, with shortest-path angle wrap and
-  Catmull-Rom auto-tangents) applied live
-  and editable in a visual graph panel.
+  and segment lengths, with shortest-path angle wrap,
+  Catmull-Rom auto-tangents, tangent presets — Smooth, EaseIn,
+  EaseOut, EaseInOut, Linear — and a multi-channel overlay
+  view-model) applied live
+  and editable in a visual graph panel. Motion statistics are
+  computed alongside the project statistics.
 - **Camera** — per-frame keys (centre, zoom **and rotation**) with
   interpolation; camera mode pans by dragging; a follow target can
   track a figure. The editor and every exporter render through
@@ -97,23 +100,32 @@ present and fall back to a folder-based flow when neither exists.
   presets (humanoid, quadruped, mini), and a local figure library
   (`./library/*.json` plus built-ins).
 - **Drawing** — Draw mode with an expanded brush library (preset
-  brushes, brush/eraser tools), per-point pressure widths, smoothing, nib
-  shapes, serpentine fill and erasers; strokes render in the
-  editor and all exports.
-- **VFX** (`src/vfx.rs`, `src/fx_edit.rs`) — 24 deterministic,
+  brushes, brush/eraser tools, brush opacity and scatter, and a
+  Spray brush with deterministic spray offsets — model data
+  for now, the stroke renderer does not apply scatter yet), per-point
+  pressure widths, smoothing, nib
+  shapes, serpentine fill and erasers; shape generators cover
+  line, rectangle, ellipse, polygon, star and arrow, with
+  stroke mirroring and editor stamp ops for shapes; strokes
+  render in the editor and all exports.
+- **VFX** (`src/vfx.rs`, `src/fx_edit.rs`) — 27 deterministic,
   seeded clip kinds (Burst, Sparkle, Smoke, Beam, Aura, Trail,
   Confetti, ShockRing, Ember, Fountain, Orbit, Lightning,
   Bubbles, Leaves, Meteor, Petals, Splash, Spiral, Fireworks,
-  Aurora, Comet, Galaxy, Prism, Vortex) anchored to joints,
-  with an FX timeline engine
-  (list/move/resize/duplicate/delete) in the GUI and over MCP;
-  plus continuous **weather** (rain, snow, fireflies, fog)
+  Aurora, Comet, Galaxy, Prism, Vortex, Glitter, Wave, Shard)
+  anchored to joints, with creation buttons in the GUI for
+  every kind, an FX timeline engine
+  (list/move/resize/duplicate/delete) in the GUI and over MCP,
+  and FX clip presets saved on disk;
+  plus continuous **weather** (rain, snow, fireflies, fog, storm)
   rendered in the canvas and the rasterizer.
 - **Audio** — clips placed at frames; playback mixes **all**
   clips audible at the playhead, synced via `ffplay`, and
   MP4/WebM exports mix every clip into the soundtrack at its
   frame offset; a waveform panel with per-clip normalise /
-  split / crossfade and a real mixdown export.
+  split / crossfade plus pitch shift and compressor (audio
+  engine, editor ops and panel buttons), and a real mixdown
+  export.
 - **Movieclips** — capture a figure's timeline as a clip, edit it
   in a dedicated clip session panel; clip figures play their own
   animation inside any project with a selectable loop mode —
@@ -121,8 +133,9 @@ present and fall back to a folder-based flow when neither exists.
 - **3D mode** (`src/fig3d.rs`) — a real 3D FK rig with Euler
   per-joint rotation, orbit camera and perspective projection,
   living in an editing session: pose A/B, animated bakes into
-  timeline frames, one-click bake to a native 2D figure, and a
-  persistent 3D figure library (`./library3d`).
+  timeline frames, one-click bake to a native 2D figure, a
+  persistent 3D figure library (`./library3d`), and a 3D pose
+  library.
 - **Formats** — the grammar is ported from the original app's own
   codecs and cross-verified against them in both directions:
   - *Import:* `.piv` v2/v3/v4/v5 (v5 incl. image side tables,
@@ -132,10 +145,12 @@ present and fall back to a folder-based flow when neither exists.
     tracks with real pixel extraction; joins baked at import).
   - *Export:* `.piv` v2/v3/v4/v5, `.stk`, `.nodes`, `.stknds`,
     plus PNG sequence, GIF, MP4, WebM, APNG, JPEG sequence, SVG
-    and spritesheets.
+    and spritesheets. MP4/WebM can also be exported for a frame
+    range (video-only).
   - A cross-format fixture corpus (`tests/fixtures/`) generated
     with the original's encoders guards the importers.
-- **Projects & shell** — named projects under `./projects/`, a
+- **Projects & shell** — named projects under `./projects/`
+  with rename, duplicate and filter in the project library, a
   Home panel with recents, a recovery snapshot, native open/save
   dialogs, save/load as JSON (`project.styk.json`), light/dark
   themes, and **28 languages** (the original's 27 + Bengali)
@@ -144,11 +159,14 @@ present and fall back to a folder-based flow when neither exists.
 ## Drive it from an AI agent (MCP)
 
 The `mcp_server` binary speaks MCP (JSON-RPC 2.0 over stdio,
-protocol `2024-11-05`) and exposes **57 tools**: project/figure/
-pose editing, camera (with rotation), graph keys, FX clip
-management, weather, audio, drawing, 3D sessions, movieclips,
+protocol `2024-11-05`) and exposes **62 tools**: project/figure/
+pose editing, camera (with rotation), graph keys and tangent
+presets, FX clip management and FX presets, weather (including
+storm), audio, drawing (including polygon and star shapes),
+3D sessions, movieclips,
 per-frame bends, pose mirroring, graph tangent smoothing,
-import/export in every supported format, and
+import/export in every supported format (including MP4/WebM
+frame-range formats), and
 rendering — including `render_frame_base64`, so an agent can see
 the frame it just made, and `render_contact_sheet`. Full tool catalogue and the client
 configuration snippet live in [docs/MCP.md](docs/MCP.md).
@@ -162,7 +180,8 @@ configuration snippet live in [docs/MCP.md](docs/MCP.md).
   state and every document operation; the GPUI layer translates
   mouse events and buttons into calls.
 - Exports are deterministic: same project → same bytes, in CI
-  as on a desktop.
+  as on a desktop; the byte-determinism integration proof now
+  covers APNG and JPEG sequence exports as well.
 - `vendor/xattr` is a byte-identical copy of crates.io
   `xattr 0.2.3` with one patched constant: it referenced
   `libc::ENOATTR`, which current `libc` removed on Linux; the

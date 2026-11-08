@@ -63,6 +63,9 @@ pub fn kind_name(kind: ClipKind) -> &'static str {
         ClipKind::Galaxy => "galaxy",
         ClipKind::Prism => "prism",
         ClipKind::Vortex => "vortex",
+        ClipKind::Glitter => "glitter",
+        ClipKind::Wave => "wave",
+        ClipKind::Shard => "shard",
     }
 }
 
@@ -155,6 +158,137 @@ pub fn clips_at(project: &Project, frame_f: f32) -> Vec<usize> {
     active.into_iter().map(|(_, index)| index).collect()
 }
 
+// ----------------------------------------------------------------
+// FX clip presets on disk
+//
+// A preset is one `ParticleClip` stored as JSON in
+// `./fx-presets/<slug>.json`, mirroring how the figure library
+// persists JSON (`fig3d::save_library_figure`): the directory is
+// created on save, the value is written with
+// `serde_json::to_string_pretty`, and listing scans the directory
+// for `*.json` files. The public functions fix the directory to
+// `./fx-presets/`; the private `*_in` helpers take the directory
+// explicitly so tests can exercise the real file I/O against a
+// temporary directory instead of the process working directory.
+// ----------------------------------------------------------------
+
+/// Directory (relative to the working directory) holding the FX
+/// clip preset files.
+const PRESET_DIR: &str = "fx-presets";
+
+/// Slug a preset name maps to on disk: ASCII letters are
+/// lowercased, `[A-Za-z0-9-_]` are kept as they are, and every
+/// other character becomes `-`. The mapping is per character (no
+/// collapsing or trimming), so the slug is empty only when the
+/// name itself is empty.
+fn preset_slug(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Path of the preset file for `slug` inside directory `dir`.
+fn preset_path(dir: &std::path::Path, slug: &str) -> std::path::PathBuf {
+    dir.join(format!("{slug}.json"))
+}
+
+/// Save `clip` as preset `name` in directory `dir` (created if
+/// missing), returning the file's path. An empty slug (an empty
+/// name) is an error and writes nothing.
+fn save_clip_preset_in(
+    dir: &std::path::Path,
+    clip: &crate::vfx::ParticleClip,
+    name: &str,
+) -> Result<std::path::PathBuf, String> {
+    let slug = preset_slug(name);
+    if slug.is_empty() {
+        return Err(format!(
+            "cannot save FX preset '{name}': the name produces an empty file slug"
+        ));
+    }
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("could not create FX preset directory {}: {e}", dir.display()))?;
+    let path = preset_path(dir, &slug);
+    let text = serde_json::to_string_pretty(clip)
+        .map_err(|e| format!("could not serialise FX preset '{name}': {e}"))?;
+    std::fs::write(&path, text)
+        .map_err(|e| format!("could not write FX preset '{name}' to {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// Load the preset called `name` from directory `dir`. A missing
+/// file is an error whose message names the preset, as is an
+/// unreadable or malformed one.
+fn load_clip_preset_in(
+    dir: &std::path::Path,
+    name: &str,
+) -> Result<crate::vfx::ParticleClip, String> {
+    let slug = preset_slug(name);
+    if slug.is_empty() {
+        return Err(format!(
+            "cannot load FX preset '{name}': the name produces an empty file slug"
+        ));
+    }
+    let path = preset_path(dir, &slug);
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "could not read FX preset '{name}' from {}: {e}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&text)
+        .map_err(|e| format!("FX preset '{name}' in {} is not valid: {e}", path.display()))
+}
+
+/// Sorted slugs of every preset stored in directory `dir` (the
+/// `*.json` file stems). A missing or unreadable directory yields
+/// an empty list.
+fn list_clip_presets_in(dir: &std::path::Path) -> Vec<String> {
+    let mut slugs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            if let Some(file_name) = file_name.to_str() {
+                if let Some(slug) = file_name.strip_suffix(".json") {
+                    slugs.push(slug.to_string());
+                }
+            }
+        }
+    }
+    slugs.sort();
+    slugs
+}
+
+/// Save `clip` as a named preset in `./fx-presets/<slug>.json`
+/// (the directory is created if missing) and return the file's
+/// path. See [`preset_slug`] for how the name maps to the slug;
+/// an empty slug is an error.
+pub fn save_clip_preset(
+    clip: &crate::vfx::ParticleClip,
+    name: &str,
+) -> Result<std::path::PathBuf, String> {
+    save_clip_preset_in(std::path::Path::new(PRESET_DIR), clip, name)
+}
+
+/// Load the preset called `name` from `./fx-presets/` (the same
+/// slug rule as [`save_clip_preset`]). A missing file is an error
+/// whose message names the preset.
+pub fn load_clip_preset(name: &str) -> Result<crate::vfx::ParticleClip, String> {
+    load_clip_preset_in(std::path::Path::new(PRESET_DIR), name)
+}
+
+/// Sorted slugs of every preset in `./fx-presets/`; empty when
+/// the directory does not exist.
+pub fn list_clip_presets() -> Vec<String> {
+    list_clip_presets_in(std::path::Path::new(PRESET_DIR))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +373,9 @@ mod tests {
             ClipKind::Galaxy,
             ClipKind::Prism,
             ClipKind::Vortex,
+            ClipKind::Glitter,
+            ClipKind::Wave,
+            ClipKind::Shard,
         ];
         let mut names: Vec<&str> = kinds.iter().map(|k| kind_name(*k)).collect();
         names.sort();
@@ -343,5 +480,105 @@ mod tests {
         // At 12: clips 1 and 2 are live with equal starts; the
         // tie keeps list order.
         assert_eq!(clips_at(&project, 12.0), vec![1, 2]);
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    // The public preset functions are hard-wired to ./fx-presets/,
+    // and no test in this crate changes the process working
+    // directory (it is process-global: parallel tests and other
+    // modules' ./-relative paths would race). These tests instead
+    // drive the dir-taking helpers the public functions delegate
+    // to, against a pid-unique temporary directory, so the real
+    // file I/O, slug and JSON code paths are all exercised.
+    use super::{list_clip_presets_in, load_clip_preset_in, preset_slug, save_clip_preset_in};
+    use crate::vfx::{ClipKind, ParticleClip};
+    use std::path::PathBuf;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("styk-fx-presets-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn sample_clip() -> ParticleClip {
+        ParticleClip {
+            start: 12.5,
+            duration: 30.0,
+            kind: ClipKind::Galaxy,
+            color: 0xFFC65D,
+            seed: 424_242,
+            angle: -45.0,
+            length: 220.0,
+        }
+    }
+
+    fn assert_same_clip(a: &ParticleClip, b: &ParticleClip) {
+        assert_eq!(a.kind, b.kind, "kind");
+        assert_eq!(a.start, b.start, "start");
+        assert_eq!(a.duration, b.duration, "duration");
+        assert_eq!(a.color, b.color, "colour");
+        assert_eq!(a.seed, b.seed, "seed");
+        assert_eq!(a.angle, b.angle, "angle");
+        assert_eq!(a.length, b.length, "length");
+    }
+
+    #[test]
+    fn slug_keeps_word_chars_maps_the_rest_and_lowercases() {
+        assert_eq!(preset_slug("Golden Burst"), "golden-burst");
+        assert_eq!(preset_slug("My FX_2"), "my-fx_2");
+        assert_eq!(preset_slug("a--b"), "a--b", "existing dashes are kept");
+        assert_eq!(preset_slug("!!!"), "---", "per-character mapping, no collapse");
+        assert_eq!(preset_slug("Café"), "caf-", "non-ASCII maps to '-'");
+        assert_eq!(preset_slug(""), "", "only an empty name slugs to empty");
+    }
+
+    #[test]
+    fn save_with_an_empty_name_is_an_error_and_writes_nothing() {
+        let dir = temp_dir("empty-name");
+        let err = save_clip_preset_in(&dir, &sample_clip(), "").unwrap_err();
+        assert!(err.contains("empty"), "error explains the slug: {err}");
+        assert!(!dir.exists(), "the slug check runs before any directory is created");
+    }
+
+    #[test]
+    fn save_then_load_round_trips_every_field() {
+        let dir = temp_dir("round-trip");
+        let clip = sample_clip();
+        let path = save_clip_preset_in(&dir, &clip, "My Galaxy!").unwrap();
+        assert_eq!(path, dir.join("my-galaxy-.json"));
+        assert!(path.is_file());
+        let loaded = load_clip_preset_in(&dir, "My Galaxy!").unwrap();
+        assert_same_clip(&loaded, &clip);
+        // The slug itself is a valid name for the same file.
+        let by_slug = load_clip_preset_in(&dir, "my-galaxy-").unwrap();
+        assert_same_clip(&by_slug, &clip);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_of_a_missing_preset_errors_with_the_name() {
+        let dir = temp_dir("missing");
+        let err = load_clip_preset_in(&dir, "no-such-preset").unwrap_err();
+        assert!(
+            err.contains("no-such-preset"),
+            "error names the preset: {err}"
+        );
+    }
+
+    #[test]
+    fn list_is_empty_without_a_directory_then_sorted_slugs() {
+        let dir = temp_dir("list");
+        assert!(
+            list_clip_presets_in(&dir).is_empty(),
+            "missing directory lists empty"
+        );
+        let clip = sample_clip();
+        save_clip_preset_in(&dir, &clip, "Beta").unwrap();
+        save_clip_preset_in(&dir, &clip, "alpha").unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a preset").unwrap();
+        assert_eq!(list_clip_presets_in(&dir), vec!["alpha", "beta"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

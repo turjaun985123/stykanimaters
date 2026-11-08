@@ -127,6 +127,49 @@ pub fn figure_keyframes(p: &Project, fi: usize) -> Vec<usize> {
     keys
 }
 
+/// Total distance (stage units) figure `fi`'s root travels
+/// across the timeline: the sum, over every pair of consecutive
+/// frames, of the Euclidean distance between the figure's root
+/// positions in those two frames. A pair counts only when the
+/// figure has a pose in BOTH frames — poses are positional, so
+/// a figure missing from a frame breaks the chain and the pairs
+/// touching the gap contribute nothing (no teleport credit for
+/// reappearing somewhere else). An out-of-range `fi`, a figure
+/// with no poses, or a project with fewer than two frames
+/// reports 0.
+pub fn root_travel(p: &Project, fi: usize) -> f32 {
+    if fi >= p.figures.len() {
+        return 0.0;
+    }
+    let mut total = 0.0f32;
+    for pair in p.frames.windows(2) {
+        if let (Some(a), Some(b)) = (pair[0].poses.get(fi), pair[1].poses.get(fi)) {
+            let dx = b.root[0] - a.root[0];
+            let dy = b.root[1] - a.root[1];
+            total += (dx * dx + dy * dy).sqrt();
+        }
+    }
+    total
+}
+
+/// Index of the figure whose root travels the most across the
+/// timeline (see [`root_travel`]), or `None` when the project
+/// has no figures. Ties resolve to the lowest index. A project
+/// whose figures never move still has a busiest figure — the
+/// first one, with travel 0.
+pub fn busiest_figure(p: &Project) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for fi in 0..p.figures.len() {
+        let travel = root_travel(p, fi);
+        // Strictly greater: an equal travel keeps the earlier
+        // (lowest) index already recorded.
+        if best.map_or(true, |(_, best_travel)| travel > best_travel) {
+            best = Some((fi, travel));
+        }
+    }
+    best.map(|(fi, _)| fi)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +335,145 @@ mod tests {
         // all five frames are keys, starting at frame 0.
         let p = Project::new_demo();
         assert_eq!(figure_keyframes(&p, 0), vec![0, 1, 2, 3, 4]);
+    }
+}
+
+#[cfg(test)]
+mod motion_tests {
+    use super::{busiest_figure, root_travel};
+    use crate::model::{FigureDef, FigureInstance, Frame, Pose, Project};
+
+    fn figure(name: &str) -> FigureInstance {
+        FigureInstance {
+            name: name.into(),
+            color: 0xFFFFFF,
+            def: FigureDef::humanoid(),
+            hidden: false,
+            clip: None,
+            locked: false,
+            opacity: 1.0,
+        }
+    }
+
+    fn at(x: f32, y: f32) -> Pose {
+        Pose {
+            root: [x, y],
+            angles: Vec::new(),
+        }
+    }
+
+    fn frame(poses: Vec<Pose>) -> Frame {
+        Frame {
+            poses,
+            duration: 1.0,
+            easing: None,
+            bends: Vec::new(),
+        }
+    }
+
+    fn project(figures: Vec<FigureInstance>, frames: Vec<Frame>) -> Project {
+        let mut p = Project::new_demo();
+        p.figures = figures;
+        p.frames = frames;
+        p
+    }
+
+    #[test]
+    fn root_travel_sums_consecutive_root_distances() {
+        // (0,0) -> (3,4) is 5, (3,4) -> (3,4) is 0,
+        // (3,4) -> (6,8) is 5: total exactly 10.
+        let p = project(
+            vec![figure("Walker")],
+            vec![
+                frame(vec![at(0.0, 0.0)]),
+                frame(vec![at(3.0, 4.0)]),
+                frame(vec![at(3.0, 4.0)]),
+                frame(vec![at(6.0, 8.0)]),
+            ],
+        );
+        assert_eq!(root_travel(&p, 0), 10.0);
+    }
+
+    #[test]
+    fn root_travel_gap_frames_contribute_nothing() {
+        // The figure is missing from frame 1, so the pairs
+        // (0,1) and (1,2) count nothing — the reappearance at
+        // (30,40) earns no teleport distance. Only (2,3)
+        // counts: (3,4) -> (6,8) is 5.
+        let p = project(
+            vec![figure("Ghost")],
+            vec![
+                frame(vec![at(0.0, 0.0)]),
+                frame(Vec::new()),
+                frame(vec![at(3.0, 4.0)]),
+                frame(vec![at(6.0, 8.0)]),
+            ],
+        );
+        assert_eq!(root_travel(&p, 0), 5.0);
+        // A figure absent from every middle frame and never
+        // reappearing travels nothing at all.
+        let p = project(
+            vec![figure("Ghost")],
+            vec![
+                frame(vec![at(0.0, 0.0)]),
+                frame(Vec::new()),
+                frame(vec![at(30.0, 40.0)]),
+            ],
+        );
+        assert_eq!(root_travel(&p, 0), 0.0);
+    }
+
+    #[test]
+    fn root_travel_degenerate_inputs_are_zero() {
+        let empty = project(Vec::new(), Vec::new());
+        assert_eq!(root_travel(&empty, 0), 0.0);
+        // Out-of-range figure and figure-less frames: no panic.
+        let p = project(vec![figure("Solo")], vec![frame(Vec::new())]);
+        assert_eq!(root_travel(&p, 0), 0.0);
+        assert_eq!(root_travel(&p, 9), 0.0);
+    }
+
+    #[test]
+    fn busiest_figure_picks_the_greatest_travel() {
+        // Figure 0 travels 5, figure 1 travels 10.
+        let p = project(
+            vec![figure("Calm"), figure("Busy")],
+            vec![
+                frame(vec![at(0.0, 0.0), at(0.0, 0.0)]),
+                frame(vec![at(3.0, 4.0), at(3.0, 4.0)]),
+                frame(vec![at(3.0, 4.0), at(6.0, 8.0)]),
+            ],
+        );
+        assert_eq!(root_travel(&p, 0), 5.0);
+        assert_eq!(root_travel(&p, 1), 10.0);
+        assert_eq!(busiest_figure(&p), Some(1));
+    }
+
+    #[test]
+    fn busiest_figure_ties_resolve_to_the_lowest_index() {
+        // Both figures travel exactly 5: index 0 wins. A
+        // stationary project also resolves to its first figure.
+        let p = project(
+            vec![figure("A"), figure("B")],
+            vec![
+                frame(vec![at(0.0, 0.0), at(10.0, 10.0)]),
+                frame(vec![at(3.0, 4.0), at(13.0, 14.0)]),
+            ],
+        );
+        assert_eq!(busiest_figure(&p), Some(0));
+        let still = project(
+            vec![figure("A"), figure("B")],
+            vec![frame(vec![at(1.0, 1.0), at(2.0, 2.0)])],
+        );
+        assert_eq!(busiest_figure(&still), Some(0));
+    }
+
+    #[test]
+    fn busiest_figure_empty_project_is_none() {
+        let p = project(Vec::new(), Vec::new());
+        assert_eq!(busiest_figure(&p), None);
+        // Frames without any figures are likewise None.
+        let p = project(Vec::new(), vec![frame(Vec::new()), frame(Vec::new())]);
+        assert_eq!(busiest_figure(&p), None);
     }
 }

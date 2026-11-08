@@ -3,7 +3,8 @@
 //! `paint.rs` works on bare point lists and stroke slices, this
 //! module knows about [`Project`] and frame numbers, so the editor
 //! (and any other frontend) can smooth, nib-profile and erase the
-//! strokes of one frame without re-implementing the bookkeeping.
+//! strokes of one frame — or mirror every stroke in the project at
+//! once — without re-implementing the bookkeeping.
 //!
 //! Width conventions (shared with `model::Stroke`, the rasterizer
 //! in `export.rs` and `paint::erase_at`): `Stroke.widths` is
@@ -15,7 +16,7 @@
 //! where they rewrite a stroke, matching `erase_at`'s behaviour.
 
 use crate::model::{Project, Stroke, V2};
-use crate::paint::{erase_at, nib_widths, smooth_path, Nib};
+use crate::paint::{erase_at, mirror_points_x, nib_widths, smooth_path, Nib};
 
 fn distance(a: V2, b: V2) -> f32 {
     ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt()
@@ -190,6 +191,91 @@ pub fn erase(project: &mut Project, frame: usize, centre: V2, radius: f32) -> us
     }
     project.strokes = out;
     changed
+}
+
+/// Mirror every stroke in the project across the vertical line
+/// `x = cx` (see [`mirror_points_x`]) and return how many strokes
+/// were mirrored: every stroke in `project.strokes`, on every
+/// frame, so a strokeless project returns 0.
+///
+/// Only `points` change: mirroring preserves the point count, so
+/// per-point `widths` stay parallel and keep describing the same
+/// points, and a `fill` stays valid because the mirrored outline
+/// is congruent to the original (unlike the eraser, which cuts
+/// outlines and must clear fills). Frame, colour and width
+/// metadata are untouched.
+pub fn mirror_strokes_all(project: &mut Project, cx: f32) -> usize {
+    let mut mirrored = 0;
+    for stroke in &mut project.strokes {
+        stroke.points = mirror_points_x(&stroke.points, cx);
+        mirrored += 1;
+    }
+    mirrored
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use crate::draw_ops::mirror_strokes_all;
+    use crate::model::{Project, Stroke, V2};
+
+    fn stroke(frame: usize, points: Vec<V2>) -> Stroke {
+        Stroke {
+            frame,
+            points,
+            color: 0xFF0000,
+            width: 4.0,
+            widths: Vec::new(),
+            fill: None,
+        }
+    }
+
+    fn project_with(strokes: Vec<Stroke>) -> Project {
+        let mut p = Project::new_demo();
+        p.strokes = strokes;
+        p
+    }
+
+    #[test]
+    fn mirror_strokes_all_mirrors_every_frame_and_counts() {
+        let first = stroke(0, vec![[10.0, 5.0], [30.0, 5.0]]);
+        let second = stroke(3, vec![[0.0, 0.0], [100.0, 50.0], [40.0, 20.0]]);
+        let mut p = project_with(vec![first, second]);
+
+        let mirrored = mirror_strokes_all(&mut p, 50.0);
+
+        assert_eq!(mirrored, 2, "both strokes, across both frames");
+        // x' = 2 * 50 - x = 100 - x; y untouched.
+        assert_eq!(p.strokes[0].points, vec![[90.0, 5.0], [70.0, 5.0]]);
+        assert_eq!(
+            p.strokes[1].points,
+            vec![[100.0, 0.0], [0.0, 50.0], [60.0, 20.0]]
+        );
+        // Metadata untouched.
+        assert_eq!(p.strokes[0].frame, 0);
+        assert_eq!(p.strokes[1].frame, 3);
+        assert_eq!(p.strokes[0].color, 0xFF0000);
+        assert_eq!(p.strokes[0].width, 4.0);
+    }
+
+    #[test]
+    fn mirror_strokes_all_on_strokeless_project_is_zero() {
+        let mut p = project_with(Vec::new());
+        assert_eq!(mirror_strokes_all(&mut p, 50.0), 0);
+        assert!(p.strokes.is_empty(), "nothing added, nothing changed");
+    }
+
+    #[test]
+    fn mirror_strokes_all_twice_restores_points_exactly() {
+        let original = vec![[12.5, 3.0], [87.25, 40.0], [50.0, 99.0]];
+        let mut p = project_with(vec![stroke(1, original.clone())]);
+        assert_eq!(mirror_strokes_all(&mut p, 33.5), 1);
+        assert_ne!(p.strokes[0].points, original, "first mirror moves the points");
+        assert_eq!(mirror_strokes_all(&mut p, 33.5), 1);
+        assert_eq!(
+            p.strokes[0].points, original,
+            "second mirror restores the points exactly"
+        );
+    }
 }
 
 #[cfg(test)]

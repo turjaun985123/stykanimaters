@@ -1,5 +1,6 @@
-//! Project library backend: scan, load, save and thumbnail the
-//! named projects stored as serde JSON under `./projects/`.
+//! Project library backend: scan, load, save, rename, duplicate,
+//! filter and thumbnail the named projects stored as serde JSON
+//! under `./projects/`.
 //!
 //! The file convention matches the editor's named save
 //! (`editor.rs::save_named_project`): one `<slug>.json` per project,
@@ -76,6 +77,82 @@ pub fn save(project: &Project, dir: &Path) -> std::io::Result<PathBuf> {
     let text = serde_json::to_string_pretty(project).map_err(std::io::Error::other)?;
     std::fs::write(&path, text)?;
     Ok(path)
+}
+
+/// Rename the project file at `path` to the file for `new_name`,
+/// following the library naming scheme (`<slug>.json`, see
+/// [`save`]) in the same directory, and return the new path.
+/// Renaming onto a *different* existing file is refused with an
+/// `AlreadyExists` error and leaves both files untouched;
+/// renaming to the name the file already carries is a no-op
+/// success. This renames the file on disk only — the `name`
+/// stored inside the JSON is unchanged, so a later [`scan`]
+/// still reports the stored name until the project is re-saved.
+pub fn rename_project(path: &Path, new_name: &str) -> std::io::Result<PathBuf> {
+    let stem = slug(new_name);
+    if stem.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "project name produces an empty file name",
+        ));
+    }
+    let dir = path.parent().unwrap_or_else(|| Path::new(""));
+    let new_path = dir.join(format!("{stem}.json"));
+    if new_path == path.to_path_buf() {
+        return Ok(new_path);
+    }
+    if new_path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("project file already exists: {}", new_path.display()),
+        ));
+    }
+    std::fs::rename(path, &new_path)?;
+    Ok(new_path)
+}
+
+/// Copy the project file at `path` to a sibling file named
+/// `<stem>-copy.json` and return the copy's path. If that name is
+/// taken, the suffix increments: `<stem>-copy-2.json`,
+/// `<stem>-copy-3.json`, and so on. The copy's bytes are identical
+/// to the source's; the source is left in place.
+pub fn duplicate_project(path: &Path) -> std::io::Result<PathBuf> {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "project path has no usable file stem",
+            )
+        })?;
+    let dir = path.parent().unwrap_or_else(|| Path::new(""));
+    let mut n = 1u32;
+    loop {
+        let file_name = if n == 1 {
+            format!("{stem}-copy.json")
+        } else {
+            format!("{stem}-copy-{n}.json")
+        };
+        let candidate = dir.join(file_name);
+        if !candidate.exists() {
+            std::fs::copy(path, &candidate)?;
+            return Ok(candidate);
+        }
+        n += 1;
+    }
+}
+
+/// The subset of `projects` whose name contains `query` as a
+/// case-insensitive substring, in the original order. An empty
+/// query returns every project (cloned).
+pub fn filter_projects(projects: &[ProjectInfo], query: &str) -> Vec<ProjectInfo> {
+    let needle = query.to_lowercase();
+    projects
+        .iter()
+        .filter(|info| needle.is_empty() || info.name.to_lowercase().contains(&needle))
+        .cloned()
+        .collect()
 }
 
 /// Render `frame` of the project and save it as a PNG thumbnail,
@@ -171,5 +248,109 @@ mod tests {
         assert_eq!(img.width(), project.stage[0] as u32);
         assert_eq!(img.height(), project.stage[1] as u32);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_moves_the_file_and_refuses_to_overwrite() {
+        let dir = temp_dir("rename");
+        let mut project = Project::new_demo();
+        project.name = "Old Name".into();
+        let original = save(&project, &dir).unwrap();
+        assert_eq!(original, dir.join("old-name.json"));
+        let bytes_before = std::fs::read(&original).unwrap();
+
+        // The file moves to the new name's slug, bytes untouched.
+        let renamed = rename_project(&original, "New Name").unwrap();
+        assert_eq!(renamed, dir.join("new-name.json"));
+        assert!(renamed.exists());
+        assert!(!original.exists());
+        assert_eq!(std::fs::read(&renamed).unwrap(), bytes_before);
+
+        // Renaming to the name it already has is a no-op success.
+        let same = rename_project(&renamed, "New Name").unwrap();
+        assert_eq!(same, renamed);
+        assert!(same.exists());
+
+        // Renaming onto a different existing file is refused and
+        // leaves both files exactly as they were.
+        let mut other = Project::new_demo();
+        other.name = "Taken".into();
+        let taken = save(&other, &dir).unwrap();
+        let taken_bytes = std::fs::read(&taken).unwrap();
+        let err = rename_project(&renamed, "Taken").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(renamed.exists());
+        assert_eq!(std::fs::read(&renamed).unwrap(), bytes_before);
+        assert_eq!(std::fs::read(&taken).unwrap(), taken_bytes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duplicate_copies_bytes_and_increments_on_collision() {
+        let dir = temp_dir("duplicate");
+        let mut project = Project::new_demo();
+        project.name = "Copy Me".into();
+        let original = save(&project, &dir).unwrap();
+        assert_eq!(original, dir.join("copy-me.json"));
+        let bytes = std::fs::read(&original).unwrap();
+
+        let first = duplicate_project(&original).unwrap();
+        assert_eq!(first, dir.join("copy-me-copy.json"));
+        assert_eq!(std::fs::read(&first).unwrap(), bytes);
+
+        let second = duplicate_project(&original).unwrap();
+        assert_eq!(second, dir.join("copy-me-copy-2.json"));
+        assert_eq!(std::fs::read(&second).unwrap(), bytes);
+
+        let third = duplicate_project(&original).unwrap();
+        assert_eq!(third, dir.join("copy-me-copy-3.json"));
+        assert_eq!(std::fs::read(&third).unwrap(), bytes);
+
+        // The source is left in place throughout.
+        assert!(original.exists());
+        assert_eq!(std::fs::read(&original).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn filter_matches_case_insensitively_and_preserves_order() {
+        let info = |name: &str| ProjectInfo {
+            name: name.into(),
+            path: PathBuf::from(format!("{name}.json")),
+            figures: 0,
+            frames: 0,
+            fps: 12.0,
+            modified: None,
+        };
+        let projects = vec![
+            info("Alpha Run"),
+            info("beta"),
+            info("ALPHA Bet"),
+            info("Gamma"),
+        ];
+        let names = |list: &[ProjectInfo]| -> Vec<&str> {
+            list.iter().map(|p| p.name.as_str()).collect()
+        };
+
+        // Empty query returns everything, in order.
+        assert_eq!(
+            names(&filter_projects(&projects, "")),
+            ["Alpha Run", "beta", "ALPHA Bet", "Gamma"]
+        );
+        // Case does not matter, on either side.
+        assert_eq!(
+            names(&filter_projects(&projects, "alpha")),
+            ["Alpha Run", "ALPHA Bet"]
+        );
+        assert_eq!(
+            names(&filter_projects(&projects, "ALPHA")),
+            ["Alpha Run", "ALPHA Bet"]
+        );
+        assert_eq!(
+            names(&filter_projects(&projects, "Bet")),
+            ["beta", "ALPHA Bet"]
+        );
+        // No match yields an empty list.
+        assert!(filter_projects(&projects, "zzz").is_empty());
     }
 }

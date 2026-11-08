@@ -1174,6 +1174,7 @@ impl EditorView {
             WeatherKind::Snow => "Snow",
             WeatherKind::Fireflies => "Fireflies",
             WeatherKind::Fog => "Fog",
+            WeatherKind::Storm => "Storm",
         };
         let summary = match cur {
             None => "Off — pick a kind".to_string(),
@@ -1186,7 +1187,7 @@ impl EditorView {
         };
         // Kind picker: one segmented control (ui::segmented)
         // instead of five separate buttons. Segment 0 is Off;
-        // segments 1-4 are the kinds, each keeping its old
+        // segments 1-5 are the kinds, each keeping its old
         // button's listener body unchanged.
         let active_index = match cur {
             None => 0,
@@ -1195,10 +1196,11 @@ impl EditorView {
                 WeatherKind::Snow => 2,
                 WeatherKind::Fireflies => 3,
                 WeatherKind::Fog => 4,
+                WeatherKind::Storm => 5,
             },
         };
         let mut segs = crate::ui_segmented::segmented(
-            &["Off", "Rain", "Snow", "Fireflies", "Fog"],
+            &["Off", "Rain", "Snow", "Fireflies", "Fog", "Storm"],
             active_index,
         )
         .into_iter();
@@ -1232,6 +1234,10 @@ impl EditorView {
                 WeatherKind::Fog,
                 Weather { kind: WeatherKind::Fog, amount: 60.0, wind: 0.0 },
             ),
+            (
+                WeatherKind::Storm,
+                Weather { kind: WeatherKind::Storm, amount: 140.0, wind: 30.0 },
+            ),
         ];
         for (n, (kind, preset)) in kinds.into_iter().enumerate() {
             kind_row = kind_row.child(
@@ -1252,6 +1258,7 @@ impl EditorView {
                             WeatherKind::Snow => "Weather: snow.",
                             WeatherKind::Fireflies => "Weather: fireflies.",
                             WeatherKind::Fog => "Weather: fog.",
+                            WeatherKind::Storm => "Weather: storm.",
                         }
                         .into();
                         cx.notify();
@@ -1533,6 +1540,14 @@ impl EditorView {
                 })))
                 .child(btn("audio-trimsil", "Trim silence", false, cx.listener(move |view, _ev, _w, cx| {
                     view.core.audio_trim_silence_last();
+                    cx.notify();
+                })))
+                .child(btn("audio-pitch", "Pitch +2", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.audio_pitch_last();
+                    cx.notify();
+                })))
+                .child(btn("audio-comp", "Compress", false, cx.listener(move |view, _ev, _w, cx| {
+                    view.core.audio_compress_last();
                     cx.notify();
                 }))),
         );
@@ -2257,6 +2272,25 @@ impl Render for EditorView {
                             view.graph_channel = GraphChannelSel::RootY;
                             cx.notify();
                         }))),
+                )
+                .child(
+                    group_row()
+                        .child(btn("graph-ease-in", "Ease in", false, cx.listener(|view, _ev, _w, cx| {
+                            view.core.apply_graph_ease_preset(crate::graph::TangentPreset::EaseIn);
+                            cx.notify();
+                        })))
+                        .child(btn("graph-ease-out", "Ease out", false, cx.listener(|view, _ev, _w, cx| {
+                            view.core.apply_graph_ease_preset(crate::graph::TangentPreset::EaseOut);
+                            cx.notify();
+                        })))
+                        .child(btn("graph-ease-inout", "Ease in-out", false, cx.listener(|view, _ev, _w, cx| {
+                            view.core.apply_graph_ease_preset(crate::graph::TangentPreset::EaseInOut);
+                            cx.notify();
+                        })))
+                        .child(btn("graph-ease-smooth", "Smooth tangents", false, cx.listener(|view, _ev, _w, cx| {
+                            view.core.apply_graph_ease_preset(crate::graph::TangentPreset::Smooth);
+                            cx.notify();
+                        }))),
                 );
             Some(
                 div()
@@ -2863,6 +2897,7 @@ impl Render for EditorView {
                     crate::vfx::WeatherKind::Snow => "Snow",
                     crate::vfx::WeatherKind::Fireflies => "Fireflies",
                     crate::vfx::WeatherKind::Fog => "Fog",
+                    crate::vfx::WeatherKind::Storm => "Storm",
                 };
                 format!("{kind} · {:.0}", w.amount)
             }),
@@ -3508,6 +3543,22 @@ impl Render for EditorView {
                                     view.core.toggle_draw_tool();
                                     cx.notify();
                                 })))
+                                .child(btn("stamp-poly", "Polygon", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.stamp_polygon();
+                                    cx.notify();
+                                })))
+                                .child(btn("stamp-star", "Star", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.stamp_star();
+                                    cx.notify();
+                                })))
+                                .child(btn("stamp-arrow", "Arrow", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.stamp_arrow();
+                                    cx.notify();
+                                })))
+                                .child(btn("mirror-strokes", "Mirror strokes", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.mirror_strokes_x();
+                                    cx.notify();
+                                })))
                         ),
                     )
                     .child(
@@ -3831,6 +3882,7 @@ impl Render for EditorView {
                                             WeatherKind::Rain => (Some(Weather { kind: WeatherKind::Snow, amount: 90.0, wind: 12.0 }), "Weather: snow."),
                                             WeatherKind::Snow => (Some(Weather { kind: WeatherKind::Fireflies, amount: 60.0, wind: 4.0 }), "Weather: fireflies."),
                                             WeatherKind::Fog => (None, "Weather: off."),
+                                            WeatherKind::Storm => (None, "Weather: off."),
                                             WeatherKind::Fireflies => (None, "Weather: off."),
                                         },
                                     };
@@ -4059,6 +4111,18 @@ impl Render for EditorView {
                                 })))
                                 .child(btn("fxclip-vortex", "FX clip Vortex", false, cx.listener(|view, _ev, _w, cx| {
                                     view.core.add_fx_clip(crate::vfx::ClipKind::Vortex);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-glitter", "FX clip Glitter", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Glitter);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-wave", "FX clip Wave", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Wave);
+                                    cx.notify();
+                                })))
+                                .child(btn("fxclip-shard", "FX clip Shard", false, cx.listener(|view, _ev, _w, cx| {
+                                    view.core.add_fx_clip(crate::vfx::ClipKind::Shard);
                                     cx.notify();
                                 })))
                         ),

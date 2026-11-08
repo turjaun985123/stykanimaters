@@ -351,6 +351,142 @@ pub fn smooth_channel(channel: &mut Channel) {
     auto_tangents(&mut channel.keys, angular);
 }
 
+/// A named tangent recipe for [`apply_tangent_preset`] — the
+/// one-click easing flavours a graph editor offers ("make it ease
+/// in", "make it linear") next to the free-form tangent handles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TangentPreset {
+    /// The natural Catmull-Rom spline: exactly
+    /// [`auto_tangents`]' result.
+    Smooth,
+    /// Motion leaves each key slowly and arrives at the next at
+    /// full speed: out-tangents are scaled to a tenth of their
+    /// segment's secant slope, in-tangents keep the full secant.
+    EaseIn,
+    /// The mirror of [`TangentPreset::EaseIn`]: motion leaves at
+    /// full speed and settles into each key slowly.
+    EaseOut,
+    /// Slow at both ends of every segment, fast in the middle:
+    /// both tangents scaled to 0.35 of their secants.
+    EaseInOut,
+    /// No easing at all: tangents zeroed and every key's
+    /// [`Interp`] set to [`Interp::Linear`], so evaluation is an
+    /// exact straight-line lerp on every segment.
+    Linear,
+}
+
+/// Apply a [`TangentPreset`] to every key in the slice: the
+/// batch counterpart of dragging each key's tangent handles into
+/// an easing shape by hand.
+///
+/// Slopes are derived per segment exactly as [`auto_tangents`]
+/// derives them — the secant between the segment's two keys,
+/// with [`norm_deg`] shortest-path deltas when `angular` is set
+/// and a flat 0.0 for a degenerate (non-increasing) span — then
+/// scaled per preset:
+///
+/// * `Smooth` delegates to [`auto_tangents`] outright, so its
+///   result is bit-for-bit that function's (Catmull-Rom through
+///   the neighbours, one-sided at the endpoints).
+/// * `EaseIn` sets each key's `out_tan` to 0.1 × the secant of
+///   the segment LEAVING it, and its `in_tan` to the full secant
+///   of the segment ARRIVING at it. On the canonical 0→100 ramp
+///   over 10 frames that samples ≈12.3 at the quarter point
+///   (linear would say 25): the curve visibly lags early, then
+///   catches up into the next key.
+/// * `EaseOut` mirrors it: `in_tan` at 0.1 × the arriving
+///   secant, `out_tan` at the full leaving secant (≈29.2 at the
+///   quarter point of the same ramp).
+/// * `EaseInOut` scales both tangents by 0.35. The factor is a
+///   sampled choice, not a round number: 0 would reproduce the
+///   smoothstep S-curve (≈15.6 / ≈84.4 at the quarter points of
+///   the ramp), 1.0 would reproduce the straight line, and 0.35
+///   lands between them at ≈18.9 / ≈81.1 — a clear ease at both
+///   ends that still passes exactly through the segment midpoint
+///   and keeps both tangents inside the [0, 3] band where a
+///   Hermite segment with same-sign secants stays monotonic, so
+///   the curve cannot overshoot its keys.
+/// * `Linear` zeroes both tangents and sets every key's
+///   [`Interp`] to [`Interp::Linear`].
+///
+/// Endpoint keys have only one neighbouring segment; the missing
+/// side reuses that segment's secant (scaled by the same factor),
+/// mirroring how [`auto_tangents`] gives endpoints the one-sided
+/// slope for both tangents.
+///
+/// No preset other than `Linear` touches [`Interp`] modes —
+/// exactly as with [`auto_tangents`], tangents are written even
+/// on Step/Linear keys (whose own segments ignore them) so the
+/// shapes are in place if a mode is later flipped back to
+/// Hermite. Fewer than two keys have no segment to shape and the
+/// slice is left completely untouched, for every preset.
+///
+/// Keys must be in ascending frame order (see
+/// [`Channel::sort_keys`]).
+pub fn apply_tangent_preset(keys: &mut [Key], preset: TangentPreset, angular: bool) {
+    let n = keys.len();
+    if n < 2 {
+        return;
+    }
+    match preset {
+        TangentPreset::Smooth => auto_tangents(keys, angular),
+        TangentPreset::Linear => {
+            for key in keys.iter_mut() {
+                key.in_tan = 0.0;
+                key.out_tan = 0.0;
+                key.interp = Interp::Linear;
+            }
+        }
+        TangentPreset::EaseIn | TangentPreset::EaseOut | TangentPreset::EaseInOut => {
+            let (in_factor, out_factor) = match preset {
+                TangentPreset::EaseIn => (1.0, 0.1),
+                TangentPreset::EaseOut => (0.1, 1.0),
+                _ => (0.35, 0.35),
+            };
+            // The same delta / pair-secant computation
+            // auto_tangents uses, including its wrap handling
+            // and degenerate-span rule.
+            let delta = |a: f32, b: f32| -> f32 {
+                if angular {
+                    norm_deg(b - a)
+                } else {
+                    b - a
+                }
+            };
+            let pair_slope = |keys: &[Key], i0: usize, i1: usize| -> f32 {
+                let dt = keys[i1].frame - keys[i0].frame;
+                if dt <= 0.0 {
+                    0.0
+                } else {
+                    delta(keys[i0].value, keys[i1].value) / dt
+                }
+            };
+            // Per-key arriving and leaving secants, computed
+            // from the untouched slice before any tangent is
+            // written. Endpoints reuse their single segment's
+            // secant on the missing side.
+            let mut tangents = Vec::with_capacity(n);
+            for i in 0..n {
+                let arriving = if i == 0 {
+                    pair_slope(keys, 0, 1)
+                } else {
+                    pair_slope(keys, i - 1, i)
+                };
+                let leaving = if i == n - 1 {
+                    pair_slope(keys, n - 2, n - 1)
+                } else {
+                    pair_slope(keys, i, i + 1)
+                };
+                tangents.push((arriving * in_factor, leaving * out_factor));
+            }
+            for (key, (i, o)) in keys.iter_mut().zip(tangents) {
+                key.in_tan = i;
+                key.out_tan = o;
+            }
+        }
+    }
+}
+
 /// Remove interior keys that contribute at most `tolerance`
 /// (in value units) to the channel's curve — the "reduce keys" /
 /// "simplify" operation of a graph editor, for channels that were
@@ -1247,5 +1383,221 @@ mod reduce_tests {
             "endpoints in ascending order: {:?}",
             ch.keys
         );
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::{
+        apply_tangent_preset, auto_tangents, Channel, ChannelTarget, Interp, Key, TangentPreset,
+    };
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    /// The canonical ramp: 0 -> 100 over frames 0..10, whose
+    /// single secant slope is exactly 10 units/frame and whose
+    /// linear samples are 25 / 50 / 75 at the quarter points.
+    fn ramp() -> Channel {
+        Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(0.0, 0.0), Key::flat(10.0, 100.0)],
+        }
+    }
+
+    #[test]
+    fn ease_in_samples_below_linear_early_and_lands_on_the_key() {
+        let mut ch = ramp();
+        apply_tangent_preset(&mut ch.keys, TangentPreset::EaseIn, false);
+        // Out-tangent 0.1 x secant = 1.0, in-tangent the full
+        // secant = 10.0.
+        assert!(approx(ch.keys[0].out_tan, 1.0), "out {}", ch.keys[0].out_tan);
+        assert!(approx(ch.keys[1].in_tan, 10.0), "in {}", ch.keys[1].in_tan);
+        // Hand-computed Hermite at t = 0.25 (m0 = 10, m1 = 100):
+        // 0.140625*10 + 0.15625*100 - 0.046875*100 = 12.34375.
+        let q = ch.value_at(2.5);
+        assert!(approx(q, 12.34375), "quarter point {q}");
+        assert!(q < 25.0, "ease-in lags the linear sample: {q} vs 25");
+        assert!(q > 0.0, "but it does move: {q}");
+        assert!(
+            approx(ch.value_at(5.0), 38.75),
+            "midpoint still lags: {}",
+            ch.value_at(5.0)
+        );
+        // The end of the segment is the key itself, exactly.
+        assert!(approx(ch.value_at(10.0), 100.0), "lands on the key");
+    }
+
+    #[test]
+    fn ease_out_samples_above_linear_early() {
+        let mut ch = ramp();
+        apply_tangent_preset(&mut ch.keys, TangentPreset::EaseOut, false);
+        assert!(approx(ch.keys[0].out_tan, 10.0), "out {}", ch.keys[0].out_tan);
+        assert!(approx(ch.keys[1].in_tan, 1.0), "in {}", ch.keys[1].in_tan);
+        // Mirror of ease-in: at t = 0.25 (m0 = 100, m1 = 10):
+        // 0.140625*100 + 0.15625*100 - 0.046875*10 = 29.21875.
+        let q = ch.value_at(2.5);
+        assert!(approx(q, 29.21875), "quarter point {q}");
+        assert!(q > 25.0, "ease-out leads the linear sample: {q} vs 25");
+        assert!(approx(ch.value_at(10.0), 100.0), "lands on the key");
+    }
+
+    #[test]
+    fn ease_in_out_traces_an_s_curve() {
+        let mut ch = ramp();
+        apply_tangent_preset(&mut ch.keys, TangentPreset::EaseInOut, false);
+        // Both tangents 0.35 x secant = 3.5.
+        assert!(approx(ch.keys[0].out_tan, 3.5), "out {}", ch.keys[0].out_tan);
+        assert!(approx(ch.keys[1].in_tan, 3.5), "in {}", ch.keys[1].in_tan);
+        // t = 0.25 (m0 = m1 = 35): 0.140625*35 + 0.15625*100
+        // - 0.046875*35 = 18.90625 — below the line early...
+        let q1 = ch.value_at(2.5);
+        assert!(approx(q1, 18.90625), "first quarter {q1}");
+        assert!(q1 < 25.0, "S-curve lags early: {q1}");
+        // ...through the exact midpoint by symmetry...
+        assert!(approx(ch.value_at(5.0), 50.0), "midpoint on the line");
+        // ...and above the line late (t = 0.75): 81.09375.
+        let q3 = ch.value_at(7.5);
+        assert!(approx(q3, 81.09375), "third quarter {q3}");
+        assert!(q3 > 75.0, "S-curve leads late: {q3}");
+    }
+
+    #[test]
+    fn linear_preset_makes_evaluation_exactly_linear() {
+        // Start from keys with junk tangents and Hermite mode:
+        // the preset must flatten both.
+        let mut ch = Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![
+                Key {
+                    frame: 0.0,
+                    value: 0.0,
+                    in_tan: 5.0,
+                    out_tan: -3.0,
+                    interp: Interp::Hermite,
+                },
+                Key {
+                    frame: 10.0,
+                    value: 100.0,
+                    in_tan: 7.0,
+                    out_tan: 2.0,
+                    interp: Interp::Step,
+                },
+            ],
+        };
+        apply_tangent_preset(&mut ch.keys, TangentPreset::Linear, false);
+        for k in &ch.keys {
+            assert!(approx(k.in_tan, 0.0) && approx(k.out_tan, 0.0), "tangents zeroed");
+            assert_eq!(k.interp, Interp::Linear, "every key set to Linear");
+        }
+        assert!(approx(ch.value_at(2.5), 25.0), "quarter is the lerp");
+        assert!(approx(ch.value_at(5.0), 50.0), "midpoint is the lerp");
+        assert!(approx(ch.value_at(7.5), 75.0), "three-quarter is the lerp");
+    }
+
+    #[test]
+    fn smooth_preset_matches_auto_tangents_bit_for_bit() {
+        // Uneven keys, so interior and one-sided endpoint slopes
+        // all differ and a wrong slope anywhere shows up.
+        let base = vec![
+            Key::flat(0.0, 0.0),
+            Key::flat(10.0, 50.0),
+            Key::flat(30.0, 90.0),
+            Key::flat(35.0, -20.0),
+        ];
+        for angular in [false, true] {
+            let mut via_preset = base.clone();
+            let mut via_auto = base.clone();
+            apply_tangent_preset(&mut via_preset, TangentPreset::Smooth, angular);
+            auto_tangents(&mut via_auto, angular);
+            assert_eq!(
+                via_preset, via_auto,
+                "Smooth delegates to auto_tangents (angular = {angular})"
+            );
+        }
+    }
+
+    #[test]
+    fn angular_ease_in_wraps_without_exploding() {
+        // Steady rotation through the wrap: every segment's
+        // wrapped secant is exactly 2.0 (never the -340 long way),
+        // so EaseIn gives in = 2.0, out = 0.2 on every key.
+        let mut ch = Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(0),
+            keys: vec![
+                Key::flat(0.0, 350.0),
+                Key::flat(10.0, 10.0),
+                Key::flat(20.0, 30.0),
+            ],
+        };
+        apply_tangent_preset(&mut ch.keys, TangentPreset::EaseIn, true);
+        for k in &ch.keys {
+            assert!(k.in_tan.is_finite() && k.out_tan.is_finite(), "no NaN/inf");
+            assert!(approx(k.in_tan, 2.0), "wrapped in-tangent {}", k.in_tan);
+            assert!(approx(k.out_tan, 0.2), "wrapped out-tangent {}", k.out_tan);
+        }
+        // The eased first segment still travels the short way:
+        // unwrapped 350 -> 370 with m0 = 2, m1 = 20 gives 357.75
+        // at the midpoint, normalised to -2.25 — near 0, nowhere
+        // near the 180 the long way would pass through.
+        let mid = ch.value_at(5.0);
+        assert!(approx(mid, -2.25), "wrapped midpoint {mid}");
+        assert!(mid.abs() < 10.0, "must not take the long way: {mid}");
+    }
+
+    #[test]
+    fn non_linear_presets_leave_interp_modes_alone() {
+        let mut ch = Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![
+                Key::flat(0.0, 0.0).with_interp(Interp::Step),
+                Key::flat(10.0, 50.0).with_interp(Interp::Linear),
+                Key::flat(30.0, 90.0),
+            ],
+        };
+        for preset in [
+            TangentPreset::Smooth,
+            TangentPreset::EaseIn,
+            TangentPreset::EaseOut,
+            TangentPreset::EaseInOut,
+        ] {
+            apply_tangent_preset(&mut ch.keys, preset, false);
+            assert_eq!(ch.keys[0].interp, Interp::Step, "{preset:?} kept Step");
+            assert_eq!(ch.keys[1].interp, Interp::Linear, "{preset:?} kept Linear");
+            assert_eq!(ch.keys[2].interp, Interp::Hermite, "{preset:?} kept Hermite");
+        }
+    }
+
+    #[test]
+    fn fewer_than_two_keys_is_a_noop_for_every_preset() {
+        // A single key, deliberately non-flat and Step: even the
+        // Linear preset (which rewrites interp modes) must not
+        // touch it — there is no segment to shape.
+        let one = vec![Key {
+            frame: 3.0,
+            value: 7.0,
+            in_tan: 3.0,
+            out_tan: -2.0,
+            interp: Interp::Step,
+        }];
+        for preset in [
+            TangentPreset::Smooth,
+            TangentPreset::EaseIn,
+            TangentPreset::EaseOut,
+            TangentPreset::EaseInOut,
+            TangentPreset::Linear,
+        ] {
+            let mut keys = one.clone();
+            apply_tangent_preset(&mut keys, preset, false);
+            assert_eq!(keys, one, "{preset:?} left the single key alone");
+            let mut none: Vec<Key> = Vec::new();
+            apply_tangent_preset(&mut none, preset, true);
+            assert!(none.is_empty(), "{preset:?} on an empty slice is a no-op");
+        }
     }
 }

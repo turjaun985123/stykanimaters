@@ -295,8 +295,11 @@ pub fn nib_widths(points: &[V2], base: f32, nib: Nib, nib_angle_deg: f32) -> Vec
 /// A named brush preset: the base width a stroke is recorded
 /// with, the nib that profiles its per-point widths when the
 /// stroke is finished, and how many Chaikin smoothing iterations
-/// are applied to the recorded path at that same moment. Pure
-/// data — the editor owns the behaviour (see `editor.rs`).
+/// are applied to the recorded path at that same moment. Wave 12
+/// added `opacity` and `scatter` so low-opacity, spread marks
+/// (the Spray preset) are expressible as data; the stroke
+/// pipeline does not consume those two fields yet. Pure data —
+/// the editor owns the behaviour (see `editor.rs`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Brush {
     pub name: &'static str,
@@ -308,6 +311,17 @@ pub struct Brush {
     /// Chaikin iterations applied to the finished stroke;
     /// 0 = keep the path exactly as recorded.
     pub smoothing: usize,
+    /// Stroke opacity, 0.0 (invisible) to 1.0 (fully opaque).
+    /// Model data for now: `Stroke` carries no opacity yet, so
+    /// the stroke pipeline does not apply this field — a
+    /// follow-up wires it into rendering.
+    pub opacity: f32,
+    /// Scatter radius in stage units: 0.0 lands marks exactly
+    /// on the recorded path; above 0.0, spray-style marks are
+    /// spread within this radius of it (see [`spray_offsets`]).
+    /// Like `opacity`, carried as model data until the stroke
+    /// pipeline consumes it.
+    pub scatter: f32,
 }
 
 /// The built-in brush library, in the order the editor's
@@ -324,6 +338,8 @@ pub fn brush_library() -> Vec<Brush> {
             nib: Nib::Round,
             nib_angle: 0.0,
             smoothing: 0,
+            opacity: 1.0,
+            scatter: 0.0,
         },
         Brush {
             name: "Pencil",
@@ -331,6 +347,8 @@ pub fn brush_library() -> Vec<Brush> {
             nib: Nib::Round,
             nib_angle: 0.0,
             smoothing: 0,
+            opacity: 1.0,
+            scatter: 0.0,
         },
         Brush {
             name: "Marker",
@@ -338,6 +356,8 @@ pub fn brush_library() -> Vec<Brush> {
             nib: Nib::Round,
             nib_angle: 0.0,
             smoothing: 1,
+            opacity: 1.0,
+            scatter: 0.0,
         },
         Brush {
             name: "Calligraphy",
@@ -345,6 +365,8 @@ pub fn brush_library() -> Vec<Brush> {
             nib: Nib::Calligraphy,
             nib_angle: 30.0,
             smoothing: 1,
+            opacity: 1.0,
+            scatter: 0.0,
         },
         Brush {
             name: "Brush",
@@ -352,6 +374,8 @@ pub fn brush_library() -> Vec<Brush> {
             nib: Nib::Square,
             nib_angle: 0.0,
             smoothing: 1,
+            opacity: 1.0,
+            scatter: 0.0,
         },
         Brush {
             name: "Paint Brush",
@@ -359,15 +383,18 @@ pub fn brush_library() -> Vec<Brush> {
             nib: Nib::Square,
             nib_angle: 45.0,
             smoothing: 2,
+            opacity: 1.0,
+            scatter: 0.0,
         },
         // Wave 10 additions — appended only: the indices above
         // must never move, because a saved `brush_index` refers
-        // into this list. Everything a preset can promise has to
-        // be expressible through width / nib / nib_angle /
-        // smoothing alone: the model has no opacity, spacing or
-        // scatter, so there is deliberately no "spray" or
-        // low-opacity entry here — such a name would describe a
-        // mark the stroke pipeline cannot draw.
+        // into this list. At the time, everything a preset could
+        // promise had to be expressible through width / nib /
+        // nib_angle / smoothing alone: the model had no opacity
+        // or scatter, so there was deliberately no "spray" or
+        // low-opacity entry. Wave 12 (below) added those two
+        // fields to `Brush`, which is what makes Spray
+        // expressible as data.
         Brush {
             // The left-hand mirror of Calligraphy: a broader
             // broad-edge nib whose edge sits at 315° instead of
@@ -378,6 +405,8 @@ pub fn brush_library() -> Vec<Brush> {
             nib: Nib::Calligraphy,
             nib_angle: 315.0,
             smoothing: 1,
+            opacity: 1.0,
+            scatter: 0.0,
         },
         Brush {
             // A chisel-tip marker: the square nib at 45° marks
@@ -390,6 +419,8 @@ pub fn brush_library() -> Vec<Brush> {
             nib: Nib::Square,
             nib_angle: 45.0,
             smoothing: 0,
+            opacity: 1.0,
+            scatter: 0.0,
         },
         Brush {
             // The widest mark in the library: a flat square nib
@@ -400,8 +431,65 @@ pub fn brush_library() -> Vec<Brush> {
             nib: Nib::Square,
             nib_angle: 0.0,
             smoothing: 3,
+            opacity: 1.0,
+            scatter: 0.0,
+        },
+        // Wave 12 addition — appended only, index 9.
+        Brush {
+            // Spray: a wide round nib at half opacity whose
+            // marks scatter up to 12 units around the recorded
+            // path (placement: `spray_offsets`). The opacity and
+            // scatter are model data today — the stroke pipeline
+            // does not apply them yet, so until the follow-up
+            // wires the renderer, this preset records like a
+            // wide round pen and the fields describe the mark it
+            // is meant to make.
+            name: "Spray",
+            width: 14.0,
+            nib: Nib::Round,
+            nib_angle: 0.0,
+            smoothing: 0,
+            opacity: 0.5,
+            scatter: 12.0,
         },
     ]
+}
+
+/// Deterministic pseudo-random offsets inside a disc of
+/// `radius`, for spray-style marks: `count` points, each at
+/// distance `radius * sqrt(u)` in direction `2π * v`, where `u`
+/// and `v` are successive outputs of a xorshift64 generator
+/// seeded from `seed`. The square root makes the points uniform
+/// over the disc's area instead of clustering at the centre.
+/// The sequence depends only on `seed`, so a spray stroke
+/// renders identically on every machine and in every export —
+/// no external RNG, no clock, no thread state. `count` 0
+/// returns an empty vector; `radius` 0 returns all-zero
+/// offsets. A zero `seed` is remapped to a fixed nonzero
+/// constant, because xorshift's zero state is a fixed point
+/// that would otherwise emit the same offset forever.
+pub fn spray_offsets(seed: u64, count: usize, radius: f32) -> Vec<[f32; 2]> {
+    let mut state: u64 = if seed == 0 {
+        0x9E37_79B9_7F4A_7C15
+    } else {
+        seed
+    };
+    let mut next_unit = || {
+        // xorshift64 (Marsaglia shifts 13/7/17): full period
+        // 2^64 - 1 over nonzero states.
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        // Top 24 bits scaled into [0, 1).
+        ((state >> 40) as f32) / 16_777_216.0
+    };
+    (0..count)
+        .map(|_| {
+            let r = radius * next_unit().sqrt();
+            let theta = next_unit() * std::f32::consts::TAU;
+            [r * theta.cos(), r * theta.sin()]
+        })
+        .collect()
 }
 
 /// The eraser: remove every point within `radius` of `centre`
@@ -523,6 +611,114 @@ pub fn shape_points(kind: ShapeKind, a: [f32; 2], b: [f32; 2]) -> Vec<[f32; 2]> 
             out
         }
     }
+}
+
+/// Outline points for a regular polygon with `sides` sides,
+/// centred on `center` with circumradius `radius` (stage
+/// coordinates, y down). The first vertex sits at `rotation_deg`
+/// (0° points right, along +x; positive angles run clockwise as
+/// seen on screen), the remaining vertices follow clockwise, and
+/// the outline is closed: `sides + 1` points with last == first,
+/// the closing point a verbatim copy of the first — the same
+/// conventions as [`shape_points`]' ellipse.
+///
+/// Degenerate case: `sides < 3` cannot form a polygon, so it
+/// returns the two-point placeholder `[center, center]` instead
+/// of panicking.
+pub fn regular_polygon_points(
+    center: [f32; 2],
+    radius: f32,
+    sides: usize,
+    rotation_deg: f32,
+) -> Vec<[f32; 2]> {
+    if sides < 3 {
+        return vec![center, center];
+    }
+    let start = rotation_deg.to_radians();
+    let mut out: Vec<[f32; 2]> = Vec::with_capacity(sides + 1);
+    for i in 0..sides {
+        // Angle 0 is the rightmost point; with y down an
+        // increasing angle runs clockwise on screen.
+        let t = start + (i as f32) * std::f32::consts::TAU / (sides as f32);
+        out.push([center[0] + radius * t.cos(), center[1] + radius * t.sin()]);
+    }
+    // Close with the first point verbatim, so the last point
+    // equals it exactly.
+    out.push(out[0]);
+    out
+}
+
+/// Outline points for a star with `points` points, centred on
+/// `center` (stage coordinates, y down). Vertices alternate
+/// between the `outer` and `inner` radii, starting with an outer
+/// vertex at `rotation_deg` (0° points right; positive angles
+/// run clockwise as seen on screen) and proceeding clockwise.
+/// The outline is closed: `2 * points + 1` points with
+/// last == first, the closing point a verbatim copy of the
+/// first.
+///
+/// Degenerate case: `points < 2` cannot form a star, so it
+/// returns the two-point placeholder `[center, center]`.
+pub fn star_points(
+    center: [f32; 2],
+    outer: f32,
+    inner: f32,
+    points: usize,
+    rotation_deg: f32,
+) -> Vec<[f32; 2]> {
+    if points < 2 {
+        return vec![center, center];
+    }
+    let start = rotation_deg.to_radians();
+    let total = 2 * points;
+    let mut out: Vec<[f32; 2]> = Vec::with_capacity(total + 1);
+    for i in 0..total {
+        let t = start + (i as f32) * std::f32::consts::TAU / (total as f32);
+        let r = if i % 2 == 0 { outer } else { inner };
+        out.push([center[0] + r * t.cos(), center[1] + r * t.sin()]);
+    }
+    // Close with the first point verbatim (see above).
+    out.push(out[0]);
+    out
+}
+
+/// Points for an arrow from `a` to `b` (stage coordinates, y
+/// down) as a single open polyline: `[a, b, wing1, b, wing2]` —
+/// out along the shaft, back along one wing of the head, out to
+/// the tip again, and back along the other wing. Each wing runs
+/// from the tip `b` in the direction back toward `a`, rotated
+/// ±35° away from the shaft, and is exactly `head_len` long.
+///
+/// Degenerate case: `a == b` has no shaft direction, so only
+/// `[a, b]` is returned.
+pub fn arrow_points(a: [f32; 2], b: [f32; 2], head_len: f32) -> Vec<[f32; 2]> {
+    if a == b {
+        return vec![a, b];
+    }
+    // Unit vector from the tip back toward the tail (nonzero
+    // because a != b).
+    let d = [a[0] - b[0], a[1] - b[1]];
+    let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+    let u = [d[0] / len, d[1] / len];
+    let spread = (35.0f32).to_radians();
+    let wing = |sign: f32| {
+        let t = sign * spread;
+        let (c, s) = (t.cos(), t.sin());
+        [
+            b[0] + head_len * (u[0] * c - u[1] * s),
+            b[1] + head_len * (u[0] * s + u[1] * c),
+        ]
+    };
+    vec![a, b, wing(1.0), b, wing(-1.0)]
+}
+
+/// Mirror `points` across the vertical line `x = cx` (stage
+/// coordinates): each x becomes `2 * cx - x`, y is unchanged,
+/// and the point order is preserved (so a closed outline stays
+/// closed). Mirroring twice with the same `cx` returns the
+/// original points.
+pub fn mirror_points_x(points: &[[f32; 2]], cx: f32) -> Vec<[f32; 2]> {
+    points.iter().map(|p| [2.0 * cx - p[0], p[1]]).collect()
 }
 
 #[cfg(test)]
@@ -1025,7 +1221,11 @@ mod brush_wave10_tests {
     #[test]
     fn library_grew_by_exactly_three_and_originals_did_not_move() {
         let lib = brush_library();
-        assert_eq!(lib.len(), 9, "six originals + three Wave 10 presets");
+        assert_eq!(
+            lib.len(),
+            10,
+            "six originals + three Wave 10 presets + Spray (Wave 12)"
+        );
         // The pre-existing order, pinned by name: a saved index
         // into this list must keep meaning the same brush.
         let originals = [
@@ -1281,6 +1481,246 @@ mod shape_wave11_tests {
         assert!(
             e.iter().all(|q| q[1] == 8.0),
             "zero-height ellipse stays on the centre line"
+        );
+    }
+}
+
+// Wave 12: shape generators round 2 + mirror helper. Exact-name
+// imports only (see the Wave 9 #[test] trap note above).
+#[cfg(test)]
+mod shape_wave12_tests {
+    use crate::paint::{arrow_points, mirror_points_x, regular_polygon_points, star_points};
+
+    fn dist(p: [f32; 2], q: [f32; 2]) -> f32 {
+        ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt()
+    }
+
+    fn assert_point_near(p: [f32; 2], q: [f32; 2], eps: f32) {
+        assert!(
+            (p[0] - q[0]).abs() <= eps && (p[1] - q[1]).abs() <= eps,
+            "{p:?} not within {eps} of {q:?}"
+        );
+    }
+
+    #[test]
+    fn polygon_square_at_rotation_zero() {
+        let pts = regular_polygon_points([10.0, 20.0], 5.0, 4, 0.0);
+        assert_eq!(pts.len(), 5, "4 sides + closing repeat");
+        // First vertex at the rotation angle: rotation 0 is
+        // exactly center + (radius, 0) (cos 0 = 1, sin 0 = 0).
+        assert_eq!(pts[0], [15.0, 20.0]);
+        assert_eq!(pts[4], pts[0], "closed: last == first");
+        // Clockwise on screen (y down): from the rightmost point
+        // the run heads DOWN to the bottom point, then left,
+        // then top.
+        assert_point_near(pts[1], [10.0, 25.0], 1e-4);
+        assert_point_near(pts[2], [5.0, 20.0], 1e-4);
+        assert_point_near(pts[3], [10.0, 15.0], 1e-4);
+    }
+
+    #[test]
+    fn polygon_counts_rotation_and_circumcircle() {
+        let hex = regular_polygon_points([0.0, 0.0], 10.0, 6, 0.0);
+        assert_eq!(hex.len(), 7, "6 sides + closing repeat");
+        assert_eq!(hex[6], hex[0], "closed: last == first");
+        for p in &hex {
+            assert!(
+                (dist(*p, [0.0, 0.0]) - 10.0).abs() < 1e-3,
+                "vertex {p:?} off the circumcircle"
+            );
+        }
+        // Rotation turns the first vertex: at 90° it is the
+        // bottom point (clockwise from +x in y-down coordinates).
+        let pts = regular_polygon_points([10.0, 20.0], 5.0, 4, 90.0);
+        assert_point_near(pts[0], [10.0, 25.0], 1e-4);
+    }
+
+    #[test]
+    fn polygon_degenerate_sides_return_centre_pair() {
+        let c = [3.0, 4.0];
+        for sides in [0usize, 1, 2] {
+            assert_eq!(regular_polygon_points(c, 5.0, sides, 0.0), vec![c, c]);
+        }
+    }
+
+    #[test]
+    fn star_five_points_has_11_points_closed() {
+        let pts = star_points([0.0, 0.0], 10.0, 4.0, 5, 0.0);
+        assert_eq!(pts.len(), 11, "2*5 vertices + closing repeat");
+        assert_eq!(pts[10], pts[0], "closed: last == first");
+        // First vertex is outer, at the rotation angle: exactly
+        // center + (outer, 0).
+        assert_eq!(pts[0], [10.0, 0.0]);
+    }
+
+    #[test]
+    fn star_alternates_outer_and_inner_radii() {
+        let c = [100.0, 50.0];
+        let pts = star_points(c, 10.0, 4.0, 5, 0.0);
+        for (i, p) in pts[..10].iter().enumerate() {
+            let want = if i % 2 == 0 { 10.0 } else { 4.0 };
+            assert!(
+                (dist(*p, c) - want).abs() < 1e-3,
+                "vertex {i} at the wrong radius: {p:?}"
+            );
+        }
+        // Clockwise on screen (y down): the first inner vertex
+        // (36° on) sits below the centre line.
+        assert!(pts[1][1] > c[1], "clockwise: y grows after the first vertex");
+    }
+
+    #[test]
+    fn star_degenerate_points_return_centre_pair() {
+        let c = [3.0, 4.0];
+        assert_eq!(star_points(c, 10.0, 4.0, 0, 0.0), vec![c, c]);
+        assert_eq!(star_points(c, 10.0, 4.0, 1, 0.0), vec![c, c]);
+    }
+
+    #[test]
+    fn arrow_polyline_shape_and_wings() {
+        let pts = arrow_points([0.0, 0.0], [10.0, 0.0], 5.0);
+        assert_eq!(pts.len(), 5);
+        assert_eq!(pts[0], [0.0, 0.0], "starts at the tail");
+        assert_eq!(pts[1], [10.0, 0.0], "out to the tip");
+        assert_eq!(pts[3], [10.0, 0.0], "back to the tip between the wings");
+        let (w1, w2) = (pts[2], pts[4]);
+        // Both wings are exactly head_len from the tip.
+        assert!((dist(w1, [10.0, 0.0]) - 5.0).abs() < 1e-4, "wing1 length");
+        assert!((dist(w2, [10.0, 0.0]) - 5.0).abs() < 1e-4, "wing2 length");
+        // Hand-computed: the direction from b back toward a is
+        // (-1, 0); rotated ±35° and scaled by 5 it lands at
+        // b + (-5·cos35°, ∓5·sin35°) ≈ (5.9042, ∓2.8679).
+        assert_point_near(w1, [5.9042, -2.8679], 1e-3);
+        assert_point_near(w2, [5.9042, 2.8679], 1e-3);
+    }
+
+    #[test]
+    fn arrow_degenerate_returns_endpoints_only() {
+        let p = [4.0, 6.0];
+        assert_eq!(arrow_points(p, p, 5.0), vec![p, p]);
+    }
+
+    #[test]
+    fn mirror_known_point_and_order() {
+        assert_eq!(mirror_points_x(&[[3.0, 7.0]], 10.0), vec![[17.0, 7.0]]);
+        // Order and y are preserved; x reflects about cx, and a
+        // point on the mirror line stays put.
+        let pts = vec![[0.0, 1.0], [2.0, 3.0], [10.0, 5.0]];
+        assert_eq!(
+            mirror_points_x(&pts, 10.0),
+            vec![[20.0, 1.0], [18.0, 3.0], [10.0, 5.0]]
+        );
+        assert!(mirror_points_x(&[], 10.0).is_empty());
+    }
+
+    #[test]
+    fn mirror_twice_returns_the_original_exactly() {
+        let pts = vec![[1.5, 2.0], [30.0, 40.5], [99.0, 0.0], [12.25, 7.75]];
+        let once = mirror_points_x(&pts, 50.0);
+        assert_eq!(mirror_points_x(&once, 50.0), pts);
+    }
+}
+
+// ---- Wave 12 brush model depth ----
+//
+// Separate module on purpose (same pattern as the Wave 10 and
+// Wave 11 modules): exact-name imports only, never a glob. Pins
+// the opacity/scatter model fields, the append-only Spray preset
+// at index 9, and the determinism contract of `spray_offsets`.
+#[cfg(test)]
+mod brush_wave12_tests {
+    use crate::paint::{brush_library, spray_offsets, Nib};
+
+    #[test]
+    fn spray_is_appended_at_index_9() {
+        let lib = brush_library();
+        assert_eq!(lib.len(), 10, "nine earlier presets + Spray");
+        // Indices 0..=8 did not move: the previous tail is intact.
+        assert_eq!(lib[8].name, "Broad Brush");
+        let b = lib[9];
+        assert_eq!(b.name, "Spray");
+        assert_eq!(b.width, 14.0);
+        assert_eq!(b.nib, Nib::Round);
+        assert_eq!(b.nib_angle, 0.0);
+        assert_eq!(b.smoothing, 0);
+        assert!((b.opacity - 0.5).abs() < 1e-6, "half opacity: {}", b.opacity);
+        assert_eq!(b.scatter, 12.0);
+        assert!(b.scatter > 0.0, "Spray is the first scattered preset");
+    }
+
+    #[test]
+    fn existing_brushes_keep_opaque_unscattered_defaults() {
+        let lib = brush_library();
+        // Behaviour unchanged for every pre-Wave-12 preset: fully
+        // opaque, marks exactly on the path.
+        for b in &lib[..9] {
+            assert_eq!(b.opacity, 1.0, "{} stays fully opaque", b.name);
+            assert_eq!(b.scatter, 0.0, "{} stays unscattered", b.name);
+        }
+        // Every preset carries sane model values.
+        for b in &lib {
+            assert!(
+                (0.0..=1.0).contains(&b.opacity),
+                "{} opacity in range",
+                b.name
+            );
+            assert!(b.scatter >= 0.0, "{} scatter not negative", b.name);
+        }
+    }
+
+    #[test]
+    fn spray_offsets_are_deterministic_per_seed() {
+        let a = spray_offsets(42, 32, 12.0);
+        let b = spray_offsets(42, 32, 12.0);
+        assert_eq!(a, b, "same seed, same offsets, every run");
+        let c = spray_offsets(43, 32, 12.0);
+        assert_ne!(a, c, "a different seed gives a different spray");
+    }
+
+    #[test]
+    fn spray_offsets_stay_within_radius() {
+        for seed in [0u64, 1, 7, 0xDEAD_BEEF] {
+            let pts = spray_offsets(seed, 64, 7.5);
+            assert_eq!(pts.len(), 64);
+            for p in &pts {
+                let len = (p[0] * p[0] + p[1] * p[1]).sqrt();
+                assert!(
+                    len <= 7.5 + 1e-3,
+                    "seed {seed}: offset {p:?} at distance {len} escapes the disc"
+                );
+            }
+            // The spray actually spreads: with a sqrt-uniform
+            // disc, 64 points cannot all sit in the inner half.
+            let max_len = pts
+                .iter()
+                .map(|p| (p[0] * p[0] + p[1] * p[1]).sqrt())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_len > 7.5 * 0.5,
+                "seed {seed}: spray hugs the centre (max {max_len})"
+            );
+        }
+    }
+
+    #[test]
+    fn spray_offsets_count_and_degenerate_cases() {
+        // Count is honoured exactly, including zero.
+        assert!(spray_offsets(9, 0, 5.0).is_empty());
+        assert_eq!(spray_offsets(9, 1, 5.0).len(), 1);
+        assert_eq!(spray_offsets(9, 5, 5.0).len(), 5);
+        assert_eq!(spray_offsets(9, 100, 5.0).len(), 100);
+        // Radius zero collapses every offset to the centre.
+        let zeros = spray_offsets(9, 8, 0.0);
+        assert!(
+            zeros.iter().all(|&p| p == [0.0, 0.0]),
+            "radius 0 gives all-zero offsets: {zeros:?}"
+        );
+        // Seed zero is remapped off the xorshift fixed point: it
+        // still produces a spread, not one repeated offset.
+        let seeded_zero = spray_offsets(0, 16, 5.0);
+        assert!(
+            seeded_zero.iter().any(|&p| p != seeded_zero[0]),
+            "seed 0 must not emit a single repeated offset"
         );
     }
 }

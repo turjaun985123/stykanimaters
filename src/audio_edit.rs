@@ -2,7 +2,8 @@
 //! a real multi-clip mixdown, playback scheduling, and editing
 //! operations: peak/RMS metering, normalisation, trim, split,
 //! crossfade joins, timeline clip splitting, and effects (fade,
-//! gain, reverse, echo, lowpass, silence trim).
+//! gain, reverse, echo, lowpass, silence trim, pitch shift,
+//! compression).
 //!
 //! Std-only, no decoding crates: WAV files are parsed and written
 //! by hand (RIFF/WAVE, PCM format 1, 16-bit, mono or stereo).
@@ -333,6 +334,92 @@ pub fn trim_silence(w: &mut WavData, threshold: f32) -> (usize, usize) {
     w.samples.drain((frames - back) * ch..);
     w.samples.drain(..front * ch);
     (front, back)
+}
+
+/// Resampling pitch shift in place: the buffer is replayed at
+/// `2^(semitones / 12)` times its original rate, so positive
+/// semitones raise the pitch and shorten the clip, negative
+/// semitones lower it and lengthen the clip — the classic
+/// "chipmunk / slow-down" shift. Pitch and duration change
+/// together; the stored sample rate is untouched and no
+/// time-stretching is attempted.
+///
+/// `semitones` clamps to -24..=24 (two octaves each way); 0.0
+/// leaves the data unchanged. The output has
+/// `round(frames / factor)` frames, at least 1. Resampling is by
+/// linear interpolation between source frames, per channel: an
+/// output frame reads only its own channel's source frames
+/// (frame-stride indexing, as in `echo`), so stereo channels
+/// never bleed. Empty audio is a no-op.
+pub fn pitch_shift(w: &mut WavData, semitones: f32) {
+    let ch = w.channels as usize;
+    let frames = w.frames();
+    if frames == 0 || ch == 0 {
+        return;
+    }
+    let semitones = semitones.clamp(-24.0, 24.0);
+    if semitones == 0.0 {
+        return;
+    }
+    let factor = 2f32.powf(semitones / 12.0);
+    let out_frames = ((frames as f32 / factor).round() as usize).max(1);
+    let mut out = vec![0.0f32; out_frames * ch];
+    for j in 0..out_frames {
+        // Source position for this output frame, in source frames.
+        let pos = j as f32 * factor;
+        let i0 = (pos.floor() as usize).min(frames - 1);
+        let i1 = (i0 + 1).min(frames - 1);
+        let frac = pos - pos.floor();
+        for c in 0..ch {
+            let a = w.samples[i0 * ch + c];
+            let b = w.samples[i1 * ch + c];
+            out[j * ch + c] = a * (1.0 - frac) + b * frac;
+        }
+    }
+    w.samples = out;
+}
+
+/// Feed-forward dynamic-range compression in place: a one-pole
+/// envelope follower tracks the per-frame level (the loudest
+/// channel's absolute value) and any frame whose envelope exceeds
+/// `threshold` is turned down by `(threshold / envelope)^(1 -
+/// 1/ratio)`; frames at or below the threshold pass at unity
+/// gain. The same gain is applied to every channel of a frame,
+/// so the stereo image is preserved.
+///
+/// The follower attacks with a ~1 ms time constant and releases
+/// with a ~100 ms one, both derived from the file's sample rate.
+/// `threshold` clamps to 0.05..=1.0 and `ratio` to 1.0..=20.0 (a
+/// ratio of 1.0 makes the gain exponent 0, i.e. no compression).
+/// The output is NOT hard-clamped — peaks can still exceed ±1.0
+/// during the attack — leaving headroom to the caller, as with
+/// `echo`; `write_wav` clamps on the way out. Empty audio and a
+/// zero sample rate are no-ops.
+pub fn compress(w: &mut WavData, threshold: f32, ratio: f32) {
+    let ch = w.channels as usize;
+    let frames = w.frames();
+    if frames == 0 || ch == 0 || w.sample_rate == 0 {
+        return;
+    }
+    let threshold = threshold.clamp(0.05, 1.0);
+    let ratio = ratio.clamp(1.0, 20.0);
+    let rate = w.sample_rate as f32;
+    let attack = 1.0 - (-1.0 / (0.001 * rate)).exp();
+    let release = 1.0 - (-1.0 / (0.100 * rate)).exp();
+    let exponent = 1.0 - 1.0 / ratio;
+    let mut env = 0.0f32;
+    for j in 0..frames {
+        let base = j * ch;
+        let level = (0..ch).fold(0.0f32, |m, c| m.max(w.samples[base + c].abs()));
+        let coeff = if level > env { attack } else { release };
+        env += coeff * (level - env);
+        if env > threshold {
+            let g = (threshold / env).powf(exponent);
+            for c in 0..ch {
+                w.samples[base + c] *= g;
+            }
+        }
+    }
 }
 
 /// Seconds to a frame index in `data`, rounded and clamped to the
@@ -1308,6 +1395,165 @@ mod tests {
             echo(&mut data, 0.3, 0.5);
             lowpass(&mut data, 1000.0);
             assert_eq!(trim_silence(&mut data, 0.01), (0, 0));
+            assert!(data.samples.is_empty());
+        }
+    }
+
+    #[test]
+    fn pitch_shift_zero_semitones_is_identity() {
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 2,
+            samples: vec![0.1, -0.2, 0.3, -0.4, 0.5, -0.6],
+        };
+        let before = data.samples.clone();
+        pitch_shift(&mut data, 0.0);
+        assert_eq!(data.samples, before);
+        assert_eq!(data.frames(), 3);
+    }
+
+    #[test]
+    fn pitch_shift_up_an_octave_halves_frames_and_picks_source_frames() {
+        // Mono ramp 0.0, 0.1, ..., 0.7. +12 semitones doubles the
+        // replay rate, so output frame j reads source frame 2j
+        // exactly (fraction 0): [0.0, 0.2, 0.4, 0.6].
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: (0..8).map(|i| i as f32 * 0.1).collect(),
+        };
+        pitch_shift(&mut data, 12.0);
+        assert_eq!(data.frames(), 4, "8 frames up an octave -> 4");
+        let expected = [0.0f32, 0.2, 0.4, 0.6];
+        for (got, want) in data.samples.iter().zip(expected.iter()) {
+            assert!((got - want).abs() < 1e-6, "got {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn pitch_shift_down_an_octave_doubles_frames_and_interpolates() {
+        // [0.0, 1.0] at half rate gives 4 frames at source
+        // positions 0, 0.5, 1.0, 1.5; the last position clamps to
+        // the final source frame: [0.0, 0.5, 1.0, 1.0].
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.0, 1.0],
+        };
+        pitch_shift(&mut data, -12.0);
+        assert_eq!(data.frames(), 4, "2 frames down an octave -> 4");
+        let expected = [0.0f32, 0.5, 1.0, 1.0];
+        for (got, want) in data.samples.iter().zip(expected.iter()) {
+            assert!((got - want).abs() < 1e-6, "got {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn pitch_shift_clamps_semitones_to_two_octaves() {
+        // +48 semitones clamps to +24: factor 4, so 8 frames -> 2,
+        // reading source frames 0 and 4.
+        let mut up = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: (0..8).map(|i| i as f32 * 0.1).collect(),
+        };
+        pitch_shift(&mut up, 48.0);
+        assert_eq!(up.frames(), 2);
+        assert!((up.samples[0] - 0.0).abs() < 1e-6);
+        assert!((up.samples[1] - 0.4).abs() < 1e-6);
+        // -48 clamps to -24: factor 1/4, so 8 frames -> 32.
+        let mut down = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: (0..8).map(|i| i as f32 * 0.1).collect(),
+        };
+        pitch_shift(&mut down, -48.0);
+        assert_eq!(down.frames(), 32);
+    }
+
+    #[test]
+    fn pitch_shift_stereo_keeps_channels_separate() {
+        // Left ramps 0.0..0.3, right sits at 0.9. Up an octave the
+        // output keeps source frames 0 and 2, each channel read
+        // from its own source channel only.
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 2,
+            samples: vec![0.0, 0.9, 0.1, 0.9, 0.2, 0.9, 0.3, 0.9],
+        };
+        pitch_shift(&mut data, 12.0);
+        assert_eq!(data.frames(), 2);
+        let expected = [0.0f32, 0.9, 0.2, 0.9];
+        for (got, want) in data.samples.iter().zip(expected.iter()) {
+            assert!((got - want).abs() < 1e-6, "got {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn compress_leaves_a_quiet_signal_untouched() {
+        // Constant 0.2 never pushes the envelope past the 0.4
+        // threshold, so every frame passes at unity gain and the
+        // samples are bit-identical.
+        let mut data = const_wav(8000, 0.1, 0.2);
+        compress(&mut data, 0.4, 4.0);
+        assert!(data.samples.iter().all(|s| *s == 0.2));
+    }
+
+    #[test]
+    fn compress_reduces_a_loud_constant_signal_by_the_expected_gain() {
+        // Constant 0.8, threshold 0.4, ratio 2. Once the envelope
+        // settles at 0.8 the gain is (0.4 / 0.8)^(1 - 1/2) =
+        // sqrt(0.5) ≈ 0.7071, so the output settles at ≈ 0.5657.
+        let mut data = const_wav(8000, 0.1, 0.8);
+        compress(&mut data, 0.4, 2.0);
+        // Frame 0: the ~1 ms attack at 8000 Hz lifts the envelope
+        // only to 0.8 * (1 - exp(-0.125)) ≈ 0.094 < 0.4, so the
+        // first frame still passes at unity gain.
+        assert_eq!(data.samples[0], 0.8);
+        let last = *data.samples.last().unwrap();
+        assert!(
+            (last - 0.5657).abs() < 0.005,
+            "settled output should be ≈ 0.5657, got {last}"
+        );
+        // Every settled frame is reduced, none is boosted or zeroed.
+        assert!(data.samples[400..].iter().all(|s| *s > 0.5 && *s < 0.8));
+    }
+
+    #[test]
+    fn compress_stereo_applies_one_gain_to_both_channels() {
+        // Frames (0.8, 0.4): the frame level is the max, 0.8, so
+        // both channels take the loud-signal gain sqrt(0.5) once
+        // settled — left ≈ 0.5657, right ≈ 0.2828 — and the 2:1
+        // channel balance is preserved.
+        let frames = 800;
+        let mut samples = Vec::with_capacity(frames * 2);
+        for _ in 0..frames {
+            samples.push(0.8);
+            samples.push(0.4);
+        }
+        let mut data = WavData {
+            sample_rate: 8000,
+            channels: 2,
+            samples,
+        };
+        compress(&mut data, 0.4, 2.0);
+        let (l, r) = (data.samples[(frames - 1) * 2], data.samples[(frames - 1) * 2 + 1]);
+        assert!((l - 0.5657).abs() < 0.005, "left settled: {l}");
+        assert!((r - 0.2828).abs() < 0.005, "right settled: {r}");
+        assert!((l / r - 2.0).abs() < 0.01, "balance preserved: {}", l / r);
+    }
+
+    #[test]
+    fn pitch_shift_and_compress_on_empty_audio_are_safe() {
+        for channels in [1u16, 2] {
+            let mut data = WavData {
+                sample_rate: 8000,
+                channels,
+                samples: Vec::new(),
+            };
+            pitch_shift(&mut data, 12.0);
+            pitch_shift(&mut data, -12.0);
+            compress(&mut data, 0.4, 4.0);
             assert!(data.samples.is_empty());
         }
     }

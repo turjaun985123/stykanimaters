@@ -776,6 +776,35 @@ pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
     }
 }
 
+/// Export the authored frames `from..=to` (inclusive, clamped to
+/// the timeline) as an MP4 (H.264, yuv420p) via the system
+/// `ffmpeg`. Frames keep their own durations (duration-expanded
+/// or tween-sampled, exactly as in a full export). An empty or
+/// inverted range is an error; errors if ffmpeg is missing.
+///
+/// VIDEO ONLY: unlike [`export_mp4`], this never muxes the
+/// project's audio — muxing a sub-range's audio needs offset
+/// math the mux path (`mux_plan`/`mux_audio`) does not support,
+/// so the range export is silent even when the project has
+/// audible clips. Use the full-range `export_mp4` when the
+/// project's audio matters.
+pub fn export_mp4_range(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+) -> std::io::Result<()> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let times = sample_times_range(project, from, to);
+    ffmpeg_encode_times(
+        project,
+        &times,
+        path,
+        &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+    )?;
+    Ok(())
+}
+
 /// Encode rendered frames with ffmpeg using the given video args.
 static ENCODE_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -784,8 +813,25 @@ fn unique_temp(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("styk-{tag}-{}-{seq}", std::process::id()))
 }
 
+/// Encode the whole timeline (see `sample_times`) with ffmpeg
+/// using the given video args.
 fn ffmpeg_encode(
     project: &Project,
+    path: &Path,
+    video_args: &[&str],
+) -> std::io::Result<usize> {
+    let times = sample_times(project);
+    ffmpeg_encode_times(project, &times, path, video_args)
+}
+
+/// Encode the given frame times with ffmpeg using the given
+/// video args: render each time to a PNG in a temp dir, then run
+/// ffmpeg over the sequence at the project fps. Returns the
+/// number of frames encoded. Errors if ffmpeg is missing or
+/// exits non-zero.
+fn ffmpeg_encode_times(
+    project: &Project,
+    times: &[f32],
     path: &Path,
     video_args: &[&str],
 ) -> std::io::Result<usize> {
@@ -794,7 +840,6 @@ fn ffmpeg_encode(
     }
     let tmp = unique_temp("enc");
     std::fs::create_dir_all(&tmp)?;
-    let times = sample_times(project);
     for (k, t) in times.iter().enumerate() {
         render_frame_at(project, *t)
             .save(tmp.join(format!("frame-{:04}.png", k + 1)))
@@ -826,6 +871,33 @@ fn ffmpeg_encode(
 /// present but fully opaque.
 pub fn export_webm(project: &Project, path: &Path) -> std::io::Result<usize> {
     ffmpeg_encode(project, path, &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"])
+}
+
+/// Export the authored frames `from..=to` (inclusive, clamped to
+/// the timeline) as a WebM (VP9) via the system `ffmpeg`. Frames
+/// keep their own durations (duration-expanded or tween-sampled,
+/// exactly as in a full export). An empty or inverted range is
+/// an error; errors if ffmpeg is missing.
+///
+/// VIDEO ONLY, like [`export_webm`] itself: no audio is muxed —
+/// the WebM export path has no audio support (muxing a
+/// sub-range's audio would additionally need offset math the
+/// mux path does not support).
+pub fn export_webm_range(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+) -> std::io::Result<()> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let times = sample_times_range(project, from, to);
+    ffmpeg_encode_times(
+        project,
+        &times,
+        path,
+        &["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "2M"],
+    )?;
+    Ok(())
 }
 
 /// What an export should do with the project's audio, decided
@@ -1855,7 +1927,10 @@ mod trail_tests {
 
 #[cfg(test)]
 mod range_export_tests {
-    use super::{export_gif, export_gif_range, export_png_sequence, export_png_sequence_range};
+    use super::{
+        export_gif, export_gif_range, export_mp4_range, export_png_sequence,
+        export_png_sequence_range, export_webm_range,
+    };
     use crate::model::Project;
     use image::AnimationDecoder as _;
     use std::path::{Path, PathBuf};
@@ -1990,5 +2065,62 @@ mod range_export_tests {
         let project = tiny_project();
         let dir = temp_dir("png-err");
         assert!(export_png_sequence_range(&project, 4, 1, &dir).is_err());
+    }
+
+    #[test]
+    fn mp4_range_writes_a_nonempty_video_file() {
+        let project = tiny_project();
+        let path = temp_file("mp4-sub", "mp4");
+        export_mp4_range(&project, 1, 3, &path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!bytes.is_empty(), "mp4 range export is empty");
+        assert_eq!(&bytes[4..8], b"ftyp", "not an MP4 container");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn webm_range_writes_a_nonempty_video_file() {
+        let project = tiny_project();
+        let path = temp_file("webm-sub", "webm");
+        export_webm_range(&project, 1, 3, &path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!bytes.is_empty(), "webm range export is empty");
+        assert_eq!(
+            &bytes[0..4],
+            &[0x1A, 0x45, 0xDF, 0xA3],
+            "not an EBML/WebM file"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn video_range_rejects_empty_and_inverted_ranges() {
+        let project = tiny_project();
+        let mp4_path = temp_file("mp4-err", "mp4");
+        let webm_path = temp_file("webm-err", "webm");
+        assert!(export_mp4_range(&project, 3, 1, &mp4_path).is_err(), "inverted range");
+        assert!(
+            export_mp4_range(&project, 99, 2, &mp4_path).is_err(),
+            "99..=2 clamps to 4..=2, still empty"
+        );
+        assert!(export_webm_range(&project, 3, 1, &webm_path).is_err(), "inverted range");
+        assert!(
+            export_webm_range(&project, 99, 2, &webm_path).is_err(),
+            "99..=2 clamps to 4..=2, still empty"
+        );
+    }
+
+    #[test]
+    fn video_full_range_exports_succeed() {
+        let project = tiny_project();
+        let last = project.frames.len() - 1;
+        let mp4_path = temp_file("mp4-fullrange", "mp4");
+        export_mp4_range(&project, 0, last, &mp4_path).unwrap();
+        assert!(std::fs::metadata(&mp4_path).unwrap().len() > 0);
+        let webm_path = temp_file("webm-fullrange", "webm");
+        export_webm_range(&project, 0, last, &webm_path).unwrap();
+        assert!(std::fs::metadata(&webm_path).unwrap().len() > 0);
+        let _ = std::fs::remove_file(&mp4_path);
+        let _ = std::fs::remove_file(&webm_path);
     }
 }

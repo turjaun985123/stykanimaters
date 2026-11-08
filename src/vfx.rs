@@ -130,6 +130,25 @@ pub enum ClipKind {
     /// turning faster as it falls, shrinking and fading as it
     /// arrives, until the whole vortex has been swallowed.
     Vortex,
+    /// A field of tiny glints scattered in a disc of radius
+    /// `length` (60 when unset) around the anchor: each mote
+    /// holds its seeded place and twinkles on its own phase —
+    /// alpha and size pulse together — while barely drifting,
+    /// so the field shimmers in place for the whole clip.
+    /// Every fourth mote is pulled toward white.
+    Glitter,
+    /// Three concentric rings expanding in stagger: each
+    /// ring's radius runs from the anchor out to `length`
+    /// (120 when unset) across the clip, offset a third of a
+    /// cycle from its neighbours, fading as it grows —
+    /// ShockRing's single front becomes a repeating ripple.
+    Wave,
+    /// A burst of tumbling shards: twenty motes fly outward
+    /// on Burst's ease-out arc with a stronger gravity sag,
+    /// each drawn in its own channel rotation of the clip
+    /// colour and tumbling — its apparent size oscillates at
+    /// its own seeded rate, the way Confetti's pieces flutter.
+    Shard,
 }
 
 /// A timed particle effect. `start` and `duration` are in frames;
@@ -867,6 +886,90 @@ pub fn clip_particles(
                 push(&mut out, pos, 3.4 * (0.35 + 0.65 * (1.0 - t)), alpha);
             }
         }
+        ClipKind::Glitter => {
+            // Thirty motes at seeded places in a disc of radius
+            // `length` (60 when unset). Each twinkles on its own
+            // phase and speed — alpha runs 0.12..1 of the shared
+            // envelope and the size pulses with it — and barely
+            // drifts (a ±2 wander plus a slight rise), so the
+            // field stays put and shimmers. Every fourth mote is
+            // the clip colour pulled 65% toward white, a hotter
+            // glint among the rest.
+            let disc = if clip.length > 0.0 { clip.length } else { 60.0 };
+            let white = [
+                color[0] + ((255 - color[0] as u16) * 65 / 100) as u8,
+                color[1] + ((255 - color[1] as u16) * 65 / 100) as u8,
+                color[2] + ((255 - color[2] as u16) * 65 / 100) as u8,
+            ];
+            for i in 0..30u32 {
+                let a = prand(seed, i, 1) * std::f32::consts::TAU;
+                let d = 3.0 + prand(seed, i, 2) * (disc - 3.0).max(1.0);
+                let phase = prand(seed, i, 3) * std::f32::consts::TAU;
+                let speed = 1.6 + prand(seed, i, 4) * 2.4;
+                let twinkle = 0.5 + 0.5 * (local * speed + phase).sin();
+                let pos = [
+                    anchor[0] + a.cos() * d + 2.0 * (local * 0.35 + phase).sin(),
+                    anchor[1] + a.sin() * d + 2.0 * (local * 0.3 + phase * 1.7).cos() - 4.0 * t,
+                ];
+                let col = if i % 4 == 3 { white } else { color };
+                push_c(
+                    &mut out,
+                    pos,
+                    1.5 + 1.5 * twinkle,
+                    envelope * (0.12 + 0.88 * twinkle),
+                    col,
+                );
+            }
+        }
+        ClipKind::Wave => {
+            // Three rings of fourteen motes. Ring k's phase is
+            // (t + k/3) mod 1 and its radius is that phase times
+            // `length` (120 when unset), so the rings chase each
+            // other outward in a steady stagger; a ring fades as
+            // its phase runs out, which hides the wrap back to
+            // the anchor. The whole ripple swells with the shared
+            // envelope but never fully vanishes at the clip's
+            // edges. Mote discs ride the circles exactly (angle
+            // jitter only), like ShockRing's front.
+            let reach = if clip.length > 0.0 { clip.length } else { 120.0 };
+            for ring in 0..3u32 {
+                let p = (t + ring as f32 / 3.0).fract();
+                let r = p * reach;
+                let alpha = (1.0 - p) * 0.9 * (0.25 + 0.75 * envelope);
+                for j in 0..14u32 {
+                    let idx = ring * 14 + j;
+                    let a = (j as f32 / 14.0) * std::f32::consts::TAU
+                        + local * 0.15
+                        + (prand(seed, idx, 1) - 0.5) * 0.08;
+                    let pos = [anchor[0] + a.cos() * r, anchor[1] + a.sin() * r];
+                    push(&mut out, pos, 3.0 * (1.0 - 0.4 * p), alpha);
+                }
+            }
+        }
+        ClipKind::Shard => {
+            // Twenty shards on Burst's ballistic arc — the same
+            // ease-out reach, a stronger 45-unit gravity sag —
+            // each tumbling: its apparent size oscillates between
+            // 30% and full at its own seeded rate (particles are
+            // discs, so tumbling reads as size, exactly like
+            // Confetti's flutter), and each carries its own
+            // channel rotation of the clip colour.
+            for i in 0..20u32 {
+                let a = prand(seed, i, 1) * std::f32::consts::TAU;
+                let reach = 40.0 + prand(seed, i, 2) * 95.0;
+                let d = reach * (1.0 - (1.0 - t) * (1.0 - t));
+                let pos = [
+                    anchor[0] + a.cos() * d,
+                    anchor[1] + a.sin() * d + 45.0 * t * t,
+                ];
+                let spin = local * (2.5 + 3.5 * prand(seed, i, 5))
+                    + prand(seed, i, 6) * std::f32::consts::TAU;
+                let size = 3.6 * (0.3 + 0.7 * spin.sin().abs());
+                let col = rotate_channels(color, i);
+                let alpha = (1.0 - t) * (0.8 + 0.2 * prand(seed, i, 3));
+                push_c(&mut out, pos, size, alpha, col);
+            }
+        }
     }
     out
 }
@@ -889,6 +992,7 @@ pub enum WeatherKind {
     Snow,
     Fireflies,
     Fog,
+    Storm,
 }
 
 /// Wrap a coordinate into `[0, m)`. The weather field lives on a
@@ -923,11 +1027,17 @@ fn wrap(v: f32, m: f32) -> f32 {
 /// - Fog banks are huge, faint discs that drift slower than the
 ///   wind with a slow vertical bob; it is their overlap that
 ///   makes the field read as fog rather than as particles.
+/// - Storm is heavy rain: denser and faster than Rain, driven by
+///   a gusting wind (the steady wind plus a slow sine of the
+///   frame), plus — on frames whose index mod 47 is 0 or 1 — one
+///   huge, very faint pale disc high on the stage suggesting a
+///   distant lightning flash, appended after the drops.
 ///
 /// `t` is `frame_f / fps` seconds (30 fps assumed if `fps` is not
 /// positive), so speeds are in stage units per second and look the
 /// same at any project frame rate. The particle count is
-/// `amount` rounded, clamped to `0..=200`.
+/// `amount` rounded, clamped to `0..=200`; Storm scales `amount`
+/// by 1.8 first and clamps to `0..=360`.
 pub fn weather_particles(
     w: &Weather,
     frame_f: f32,
@@ -936,13 +1046,21 @@ pub fn weather_particles(
 ) -> Vec<(V2, f32, [u8; 3], f32)> {
     let sw = stage[0].max(1.0);
     let sh = stage[1].max(1.0);
-    let count = w.amount.round().clamp(0.0, 200.0) as usize;
+    let count = match w.kind {
+        // Storm is denser than rain at the same amount.
+        WeatherKind::Storm => (w.amount * 1.8).round().clamp(0.0, 360.0) as usize,
+        _ => w.amount.round().clamp(0.0, 200.0) as usize,
+    };
     let mut out = Vec::with_capacity(count);
     if count == 0 {
         return out;
     }
     let secs = frame_f / if fps > 0.0 { fps } else { 30.0 };
     let wind = w.wind;
+    // Storm gusts: a slow, deterministic breathing on top of the
+    // steady wind — a pure function of the frame, the same for
+    // every drop in the frame.
+    let gust = wind + (frame_f * 0.05).sin() * 12.0;
     for i in 0..count as u32 {
         let p = match w.kind {
             WeatherKind::Rain => {
@@ -1015,8 +1133,39 @@ pub fn weather_particles(
                 let alpha = 0.05 + 0.05 * prand(seed, i, 6);
                 ([x, y], size, [216, 222, 232], alpha)
             }
+            WeatherKind::Storm => {
+                let seed = 0x9A17_0005;
+                let bx = prand(seed, i, 1) * sw;
+                let off = prand(seed, i, 2) * sh;
+                // Faster than rain, and slanted/drifted by the
+                // gusting wind rather than the steady wind.
+                let speed = 760.0 + prand(seed, i, 3) * 420.0;
+                let travel = off + speed * secs;
+                let y = wrap(travel, sh);
+                let slant = (gust / 600.0).clamp(-0.6, 0.6);
+                let x = wrap(bx + gust * secs + travel * slant, sw);
+                let alpha = 0.4 + 0.24 * prand(seed, i, 4);
+                ([x, y], 1.3, [188, 210, 238], alpha)
+            }
         };
         out.push(p);
+    }
+    // Storm lightning ambience: on frames whose index mod 47 is
+    // 0 or 1, one huge, very faint pale disc high on the stage
+    // suggests a distant flash. Its position is a pure function
+    // of the 47-frame cycle, so it holds still across the two
+    // flash frames and jumps between cycles.
+    if w.kind == WeatherKind::Storm {
+        let frame_idx = frame_f.round() as i64;
+        if frame_idx.rem_euclid(47) <= 1 {
+            let seed = 0x9A17_0006;
+            let cycle = frame_idx.div_euclid(47) as u32;
+            let x = (0.15 + 0.7 * prand(seed, cycle, 1)) * sw;
+            let y = (0.05 + 0.2 * prand(seed, cycle, 2)) * sh;
+            let radius = 170.0 + prand(seed, cycle, 3) * 130.0;
+            let alpha = 0.03 + 0.02 * prand(seed, cycle, 4);
+            out.push(([x, y], radius, [228, 234, 248], alpha));
+        }
     }
     out
 }
@@ -1037,7 +1186,7 @@ mod tests {
         }
     }
 
-    const KINDS: [ClipKind; 24] = [
+    const KINDS: [ClipKind; 27] = [
         ClipKind::Burst,
         ClipKind::Sparkle,
         ClipKind::Smoke,
@@ -1062,6 +1211,9 @@ mod tests {
         ClipKind::Galaxy,
         ClipKind::Prism,
         ClipKind::Vortex,
+        ClipKind::Glitter,
+        ClipKind::Wave,
+        ClipKind::Shard,
     ];
 
     #[test]
@@ -1840,6 +1992,149 @@ mod tests {
         assert_ne!(vortex, at(ClipKind::Fireworks), "vortex renders like fireworks");
     }
 
+    #[test]
+    fn wave12_kinds_emit_bounded_finite_particles_at_mid_clip() {
+        let anchor = [300.0, 300.0];
+        for kind in [ClipKind::Glitter, ClipKind::Wave, ClipKind::Shard] {
+            let c = clip(kind);
+            let mid_frame = c.start + c.duration * 0.5;
+            let a = clip_particles(&c, mid_frame, anchor);
+            let b = clip_particles(&c, mid_frame, anchor);
+            assert_eq!(a, b, "{kind:?} differs between identical calls");
+            assert!(!a.is_empty(), "{kind:?} should be live mid-clip");
+            assert!(a.len() <= 64, "{kind:?} emitted {} over budget", a.len());
+            for (p, size, _, alpha) in &a {
+                assert!(
+                    p[0].is_finite() && p[1].is_finite(),
+                    "{kind:?} mote at a non-finite position {p:?}"
+                );
+                assert!(size.is_finite() && *size > 0.0, "{kind:?} bad size {size}");
+                assert!(
+                    alpha.is_finite() && *alpha > 0.0 && *alpha <= 1.0,
+                    "{kind:?} bad alpha {alpha}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn glitter_field_stays_in_its_disc_and_twinkles() {
+        let c = clip(ClipKind::Glitter); // length 160 -> disc radius 160
+        let anchor = [300.0, 300.0];
+        let mid = clip_particles(&c, c.start + c.duration * 0.5, anchor);
+        // Every mote's alpha clears the emitter floor at mid-clip
+        // (envelope is 1 and the twinkle floor is 0.12), so the
+        // whole field is out.
+        assert_eq!(mid.len(), 30, "the full glitter field should be out mid-clip");
+        for (p, _, _, _) in &mid {
+            let d = ((p[0] - anchor[0]).powi(2) + (p[1] - anchor[1]).powi(2)).sqrt();
+            assert!(
+                d <= c.length + 6.0,
+                "glitter mote escaped its disc: radius {d}, disc {}",
+                c.length
+            );
+        }
+        // Twinkle: pooled across motes and frames, alphas spread
+        // widely (each mote pulses on its own phase and speed).
+        let mut lo = 1.0f32;
+        let mut hi = 0.0f32;
+        for frame in [16.0, 19.0, 22.0] {
+            for p in clip_particles(&c, frame, anchor) {
+                lo = lo.min(p.3);
+                hi = hi.max(p.3);
+            }
+        }
+        assert!(hi - lo > 0.3, "glitter never twinkles: alpha span {lo}..{hi}");
+    }
+
+    #[test]
+    fn wave_rings_ride_expanding_circles() {
+        let c = clip(ClipKind::Wave); // length 160 -> ring reach 160
+        let anchor = [300.0, 300.0];
+        let mid = clip_particles(&c, c.start + c.duration * 0.5, anchor);
+        // All three rings are above the alpha floor at mid-clip:
+        // phases 1/6, 1/2, 5/6 give alphas .75, .45, .15.
+        assert_eq!(mid.len(), 42, "all three rings should be out mid-clip");
+        // Every mote rides one of exactly three circles.
+        let mut radii: Vec<f32> = mid
+            .iter()
+            .map(|p| {
+                let d = ((p.0[0] - anchor[0]).powi(2) + (p.0[1] - anchor[1]).powi(2)).sqrt();
+                (d * 2.0).round() / 2.0
+            })
+            .collect();
+        radii.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        radii.dedup();
+        assert_eq!(radii.len(), 3, "motes should sit on three rings: {radii:?}");
+        assert!(radii[0] < 0.3 * c.length, "innermost ring too wide: {radii:?}");
+        assert!(radii[2] > 0.7 * c.length, "outermost ring too narrow: {radii:?}");
+        // Ring 0 (the first motes emitted) expands with t.
+        let r_at = |t: f32| {
+            let ps = clip_particles(&c, c.start + c.duration * t, anchor);
+            let p = ps[0].0;
+            ((p[0] - anchor[0]).powi(2) + (p[1] - anchor[1]).powi(2)).sqrt()
+        };
+        let r1 = r_at(0.25);
+        let r2 = r_at(0.75);
+        assert!(r2 > r1 + 40.0, "ring should expand: {r1} -> {r2}");
+    }
+
+    #[test]
+    fn shard_burst_flies_outward_tumbling_in_rotated_colours() {
+        let c = clip(ClipKind::Shard);
+        let anchor = [300.0, 300.0];
+        let mid = clip_particles(&c, c.start + c.duration * 0.5, anchor);
+        assert_eq!(mid.len(), 20, "the whole shard burst should be out mid-clip");
+        // Each shard carries its own channel rotation: all three
+        // rotations of the clip colour appear.
+        let mut colours: Vec<[u8; 3]> = mid.iter().map(|p| p.2).collect();
+        colours.sort();
+        colours.dedup();
+        assert_eq!(colours.len(), 3, "one channel rotation per shard class: {colours:?}");
+        // Outward: the mean radius grows across the burst.
+        let mean_r = |t: f32| {
+            let ps = clip_particles(&c, c.start + c.duration * t, anchor);
+            assert!(!ps.is_empty());
+            ps.iter()
+                .map(|p| ((p.0[0] - anchor[0]).powi(2) + (p.0[1] - anchor[1]).powi(2)).sqrt())
+                .sum::<f32>()
+                / ps.len() as f32
+        };
+        let r_early = mean_r(0.25);
+        let r_late = mean_r(0.65);
+        assert!(
+            r_late > r_early + 10.0,
+            "shards should fly outward: {r_early} -> {r_late}"
+        );
+        // Tumbling: apparent sizes change from one frame to the
+        // next for most shards (each spins at its own rate).
+        let a = clip_particles(&c, c.start + c.duration * 0.5, anchor);
+        let b = clip_particles(&c, c.start + c.duration * 0.5 + 1.0, anchor);
+        let changed = a
+            .iter()
+            .zip(b.iter())
+            .filter(|(x, y)| (x.1 - y.1).abs() > 0.05)
+            .count();
+        assert!(changed >= 10, "only {changed} shards changed size between frames");
+    }
+
+    #[test]
+    fn wave12_kinds_differ_from_each_other() {
+        let anchor = [300.0, 300.0];
+        let at = |kind: ClipKind| clip_particles(&clip(kind), 22.0, anchor);
+        let glitter = at(ClipKind::Glitter);
+        let wave = at(ClipKind::Wave);
+        let shard = at(ClipKind::Shard);
+        assert!(!glitter.is_empty() && !wave.is_empty() && !shard.is_empty());
+        assert_ne!(glitter, wave);
+        assert_ne!(glitter, shard);
+        assert_ne!(wave, shard);
+        // Closest cousins from earlier waves render differently.
+        assert_ne!(glitter, at(ClipKind::Sparkle), "glitter renders like sparkle");
+        assert_ne!(wave, at(ClipKind::ShockRing), "wave renders like shock ring");
+        assert_ne!(shard, at(ClipKind::Burst), "shard renders like burst");
+    }
+
     // ---- Weather ----
 
     fn weather(kind: WeatherKind, amount: f32, wind: f32) -> Weather {
@@ -1847,11 +2142,12 @@ mod tests {
     }
 
     const STAGE: [f32; 2] = [960.0, 720.0];
-    const WEATHER_KINDS: [WeatherKind; 4] = [
+    const WEATHER_KINDS: [WeatherKind; 5] = [
         WeatherKind::Rain,
         WeatherKind::Snow,
         WeatherKind::Fireflies,
         WeatherKind::Fog,
+        WeatherKind::Storm,
     ];
 
     #[test]
@@ -1961,6 +2257,98 @@ mod tests {
         assert!(lo < 0.35, "firefly never dims: min alpha {lo}");
         assert!(hi > 0.75, "firefly never glows: max alpha {hi}");
         assert!(lo >= 0.19 && hi <= 0.91, "alpha outside the 0.2..0.9 band");
+    }
+
+    #[test]
+    fn storm_weather_round_trips_through_serde() {
+        let w = weather(WeatherKind::Storm, 90.0, 10.0);
+        let text = serde_json::to_string(&w).unwrap();
+        assert!(text.contains("\"Storm\""), "kind wire name: {text}");
+        let back: Weather = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn storm_is_denser_than_rain() {
+        // Frame 10 is not a flash frame (10 mod 47), so both
+        // counts are pure drop counts.
+        let rain = weather_particles(&weather(WeatherKind::Rain, 60.0, 0.0), 10.0, STAGE, 30.0);
+        let storm = weather_particles(&weather(WeatherKind::Storm, 60.0, 0.0), 10.0, STAGE, 30.0);
+        assert_eq!(rain.len(), 60);
+        assert_eq!(storm.len(), 108, "storm scales amount by 1.8");
+        assert!(storm.len() > rain.len());
+    }
+
+    #[test]
+    fn storm_gusts_move_drops_sideways() {
+        // Same elapsed seconds (so the same fall), different
+        // frames: only the gust term can move drops sideways.
+        // 47 frames at 30 fps and 94 frames at 60 fps are both
+        // 47/30 seconds.
+        let w = weather(WeatherKind::Storm, 40.0, 0.0);
+        let a = weather_particles(&w, 47.0, STAGE, 30.0); // gust = sin(2.35)*12 > 0
+        let b = weather_particles(&w, 94.0, STAGE, 60.0); // gust = sin(4.7)*12 < 0
+        // Same frame, same output — bit-identical.
+        assert_eq!(a, weather_particles(&w, 47.0, STAGE, 30.0));
+        assert_eq!(b, weather_particles(&w, 94.0, STAGE, 60.0));
+        // Both are flash frames, so the flash disc rides last and
+        // the drops are the first 72 entries in both.
+        let drops = 72;
+        assert_eq!(a.len(), drops + 1);
+        assert_eq!(b.len(), drops + 1);
+        for k in 0..drops {
+            assert_eq!(
+                a[k].0[1], b[k].0[1],
+                "drop {k} fell differently at equal seconds"
+            );
+        }
+        assert!(
+            a[..drops] != b[..drops],
+            "gusts should shift the drops sideways between frames"
+        );
+    }
+
+    #[test]
+    fn storm_lightning_flash_frames() {
+        let w = weather(WeatherKind::Storm, 60.0, 0.0);
+        let flashes = |f: f32| {
+            weather_particles(&w, f, STAGE, 30.0)
+                .iter()
+                .filter(|p| p.1 > 100.0)
+                .count()
+        };
+        for f in [0.0, 1.0, 47.0, 48.0, 94.0, 95.0] {
+            assert_eq!(flashes(f), 1, "frame {f} should carry the flash");
+        }
+        for f in [2.0, 10.0, 46.0, 49.0, 93.0, 96.0] {
+            assert_eq!(flashes(f), 0, "frame {f} should not flash");
+        }
+        // The flash is one huge, very faint, pale disc, appended
+        // after the drops, sitting high on the stage.
+        let ps = weather_particles(&w, 47.0, STAGE, 30.0);
+        assert_eq!(ps.len(), 108 + 1, "108 drops plus the flash");
+        let flash = ps.last().unwrap();
+        assert!(flash.1 >= 170.0, "flash radius {}", flash.1);
+        assert!(flash.3 <= 0.05, "flash alpha {}", flash.3);
+        assert_eq!(flash.2, [228, 234, 248]);
+        assert!(
+            flash.0[1] < STAGE[1] * 0.3,
+            "flash should sit high on the stage: {:?}",
+            flash.0
+        );
+    }
+
+    #[test]
+    fn storm_values_are_finite() {
+        let w = weather(WeatherKind::Storm, 200.0, -45.0);
+        for f in [0.0, 1.0, 23.5, 47.0, 400.25, 5000.0] {
+            for (p, r, _, a) in weather_particles(&w, f, STAGE, 30.0) {
+                assert!(
+                    p[0].is_finite() && p[1].is_finite() && r.is_finite() && a.is_finite(),
+                    "non-finite storm particle at frame {f}"
+                );
+            }
+        }
     }
 
     #[test]

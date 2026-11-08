@@ -291,6 +291,64 @@ pub fn mat3_from_euler(e: [f32; 3]) -> Mat3 {
     mat3_mul(&rz, &mat3_mul(&ry, &rx))
 }
 
+/// Extract Euler angles `[x, y, z]` (degrees) from a rotation
+/// matrix — the documented inverse of [`mat3_from_euler`] for
+/// `R = Rz · Ry · Rx`.
+///
+/// Expanding the product in this file's layout (row-major
+/// `m[row][col]`, column vectors) gives:
+///
+/// ```text
+/// R[0] = [ cz·cy,  cz·sy·sx − sz·cx,  cz·sy·cx + sz·sx ]
+/// R[1] = [ sz·cy,  sz·sy·sx + cz·cx,  sz·sy·cx − cz·sx ]
+/// R[2] = [ −sy,    cy·sx,             cy·cx            ]
+/// ```
+///
+/// so `sin(y) = −R[2][0]`, and while `cos(y) ≠ 0` the other two
+/// angles fall out of the last row and the first column:
+/// `x = atan2(R[2][1], R[2][2])` and `z = atan2(R[1][0], R[0][0])`.
+/// The returned `y` always lies in `[-90°, 90°]` (the `asin`
+/// range); a matrix built with `y` outside that range comes back
+/// in the equivalent `(x ± 180°, 180° − y, z ± 180°)` form — the
+/// extracted angles always rebuild the same matrix.
+///
+/// **Gimbal lock** (`|R[2][0]| ≈ 1`, so `y = ±90°` and `cy = 0`):
+/// the first row degenerates to one combined angle —
+/// `R[0][1] = sin(x − z)`, `R[0][2] = cos(x − z)` at `y = +90°`,
+/// and `R[0][1] = −sin(x + z)`, `R[0][2] = −cos(x + z)` at
+/// `y = −90°` — so `x` and `z` are not independently determined.
+/// By convention this extraction sets `z := 0` and recovers the
+/// combined angle into `x`: `x = atan2(R[0][1], R[0][2])` at
+/// `+90°`, `x = atan2(−R[0][1], −R[0][2])` at `−90°`.
+pub fn mat3_to_euler(m: &Mat3) -> [f32; 3] {
+    // |sin(y)| this close to 1 counts as exactly ±90°; any closer
+    // to the pole than this, cos(y) ≲ 1.4e-3 keeps the regular
+    // atan2 pairs numerically meaningful in f32.
+    const GIMBAL_EPS: f32 = 1.0e-6;
+    if m[2][0] < -(1.0 - GIMBAL_EPS) {
+        // sin(y) = +1 → y = +90°; recover x − z with z := 0.
+        [m[0][1].atan2(m[0][2]).to_degrees(), 90.0, 0.0]
+    } else if m[2][0] > 1.0 - GIMBAL_EPS {
+        // sin(y) = −1 → y = −90°; recover x + z with z := 0.
+        [(-m[0][1]).atan2(-m[0][2]).to_degrees(), -90.0, 0.0]
+    } else {
+        let y = (-m[2][0]).clamp(-1.0, 1.0).asin();
+        let x = m[2][1].atan2(m[2][2]);
+        let z = m[1][0].atan2(m[0][0]);
+        [x.to_degrees(), y.to_degrees(), z.to_degrees()]
+    }
+}
+
+/// Transpose of a 3×3 matrix. For a rotation matrix the transpose
+/// is also the inverse, which is how the IK solver uses it.
+fn mat3_transpose(m: &Mat3) -> Mat3 {
+    [
+        [m[0][0], m[1][0], m[2][0]],
+        [m[0][1], m[1][1], m[2][1]],
+        [m[0][2], m[1][2], m[2][2]],
+    ]
+}
+
 fn v_add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
@@ -346,6 +404,400 @@ pub fn evaluate3(fig: &Figure3, pose: &Pose3) -> Vec<[f32; 3]> {
         }
     }
     positions
+}
+
+// ---------------------------------------------------------------------
+// Two-bone IK.
+// ---------------------------------------------------------------------
+
+/// Per-node world rotations under `pose`, composed exactly as
+/// [`evaluate3`] composes them internally (parent-first, local
+/// Euler via [`mat3_from_euler`]). `evaluate3` keeps its rotations
+/// private; the IK solver needs them, so they are recomputed here.
+fn world_rotations(fig: &Figure3, pose: &Pose3) -> Vec<Mat3> {
+    let mut out: Vec<Mat3> = Vec::with_capacity(fig.nodes.len());
+    for (i, node) in fig.nodes.iter().enumerate() {
+        let local = pose
+            .rotations
+            .get(i)
+            .copied()
+            .unwrap_or([0.0; 3]);
+        let local_r = mat3_from_euler(local);
+        match node.parent {
+            None => out.push(local_r),
+            Some(p) => out.push(mat3_mul(&out[p], &local_r)),
+        }
+    }
+    out
+}
+
+/// Rotation matrix for `angle_rad` about the unit vector `axis`
+/// (Rodrigues' formula, right-handed, column vectors).
+fn mat3_from_axis_angle(axis: [f32; 3], angle_rad: f32) -> Mat3 {
+    let (x, y, z) = (axis[0], axis[1], axis[2]);
+    let c = angle_rad.cos();
+    let s = angle_rad.sin();
+    let t = 1.0 - c;
+    [
+        [t * x * x + c, t * x * y - s * z, t * x * z + s * y],
+        [t * x * y + s * z, t * y * y + c, t * y * z - s * x],
+        [t * x * z - s * y, t * y * z + s * x, t * z * z + c],
+    ]
+}
+
+/// The shortest-arc rotation taking unit vector `from` to unit
+/// vector `to` (both must already be normalised). Identity when
+/// the two agree; for (near-)antiparallel inputs any perpendicular
+/// axis serves, and a fixed one is chosen deterministically.
+fn shortest_arc(from: [f32; 3], to: [f32; 3]) -> Mat3 {
+    let cr = v_cross(from, to);
+    let s = v_dot(cr, cr).sqrt();
+    let c = v_dot(from, to).clamp(-1.0, 1.0);
+    if s < 1.0e-7 {
+        if c > 0.0 {
+            return mat3_identity();
+        }
+        // Antiparallel: rotate 180° about any axis ⊥ `from`.
+        let helper = if from[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let axis = v_norm(v_cross(from, helper));
+        return mat3_from_axis_angle(axis, std::f32::consts::PI);
+    }
+    let axis = [cr[0] / s, cr[1] / s, cr[2] / s];
+    mat3_from_axis_angle(axis, s.atan2(c))
+}
+
+/// Solve a two-bone IK chain: adjust the rotations of joints
+/// `upper` and `fore` so that joint `end` moves to `target` in
+/// world space. `fore` must be `upper`'s child and `end` must be
+/// `fore`'s child. Every other joint's rotation, and the pose
+/// root, are copied from the input pose verbatim; only `upper`
+/// and `fore` change.
+///
+/// Method: with bone lengths `L1 = |offset[fore]|` and
+/// `L2 = |offset[end]|`, the desired elbow is placed by the law
+/// of cosines in projection form — `a = (L1² − L2² + d²) / (2d)`
+/// along the root→target axis and `h = √(L1² − a²)` to the side —
+/// where `d` is the root→target distance clamped to
+/// `[|L1 − L2|, L1 + L2]`. An unreachable target therefore leaves
+/// the chain fully extended toward it, and a too-close one fully
+/// folded. The elbow's side (the pole) is the current elbow
+/// direction projected perpendicular to the axis, so the chain
+/// keeps bending the way it already bends; if the elbow currently
+/// lies on the axis, a fixed perpendicular is used instead. Each
+/// joint is then re-aimed by the shortest-arc rotation from its
+/// current child direction to the desired one, composed in world
+/// space and converted back to a local Euler via
+/// [`mat3_to_euler`] (parent world rotations are inverted by
+/// transposition, which is exact for rotations).
+///
+/// A malformed chain — an index out of range, `fore` not a child
+/// of `upper`, `end` not a child of `fore`, or a zero-length
+/// bone — returns the input pose unchanged.
+pub fn solve_two_bone_ik(
+    fig: &Figure3,
+    pose: &Pose3,
+    upper: usize,
+    fore: usize,
+    end: usize,
+    target: [f32; 3],
+) -> Pose3 {
+    let n = fig.nodes.len();
+    let chained = upper < n
+        && fore < n
+        && end < n
+        && fig.nodes[fore].parent == Some(upper)
+        && fig.nodes[end].parent == Some(fore);
+    if !chained {
+        return pose.clone();
+    }
+    let off1 = fig.nodes[fore].offset;
+    let off2 = fig.nodes[end].offset;
+    let l1 = v_dot(off1, off1).sqrt();
+    let l2 = v_dot(off2, off2).sqrt();
+    if l1 < 1.0e-9 || l2 < 1.0e-9 {
+        return pose.clone();
+    }
+
+    let positions = evaluate3(fig, pose);
+    let root_pos = positions[upper];
+    let elbow_pos = positions[fore];
+    let end_pos = positions[end];
+
+    // --- Desired end and elbow, in world space. ---
+    let to_target = v_sub(target, root_pos);
+    let dist_raw = v_dot(to_target, to_target).sqrt();
+    let axis = if dist_raw > 1.0e-9 {
+        v_norm(to_target)
+    } else {
+        // The target sits on the joint itself: keep the chain's
+        // current direction; without one there is nothing to solve.
+        let cur = v_sub(end_pos, root_pos);
+        if v_dot(cur, cur) < 1.0e-18 {
+            return pose.clone();
+        }
+        v_norm(cur)
+    };
+    // The projection form needs |L1 − L2| ≤ d ≤ L1 + L2; clamp the
+    // reach into that range (fully folded / fully extended at the
+    // extremes).
+    let d_min = (l1 - l2).abs().max(1.0e-4);
+    let d = dist_raw.clamp(d_min, l1 + l2);
+    let desired_end = v_add(root_pos, [axis[0] * d, axis[1] * d, axis[2] * d]);
+    let a = (l1 * l1 - l2 * l2 + d * d) / (2.0 * d);
+    let h = (l1 * l1 - a * a).max(0.0).sqrt();
+    // Pole: the current elbow's direction, made perpendicular to
+    // the target axis, so the elbow keeps its side of the chain.
+    let elbow_vec = v_sub(elbow_pos, root_pos);
+    let along = v_dot(elbow_vec, axis);
+    let mut perp = [
+        elbow_vec[0] - axis[0] * along,
+        elbow_vec[1] - axis[1] * along,
+        elbow_vec[2] - axis[2] * along,
+    ];
+    if v_dot(perp, perp) < 1.0e-12 {
+        // The elbow lies on the target axis: pick a fixed
+        // perpendicular instead.
+        let helper = if axis[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let hd = v_dot(helper, axis);
+        perp = [
+            helper[0] - axis[0] * hd,
+            helper[1] - axis[1] * hd,
+            helper[2] - axis[2] * hd,
+        ];
+    }
+    let pole = v_norm(perp);
+    let desired_elbow = v_add(
+        root_pos,
+        [
+            axis[0] * a + pole[0] * h,
+            axis[1] * a + pole[1] * h,
+            axis[2] * a + pole[2] * h,
+        ],
+    );
+
+    // --- Re-aim the two joints, world space first. ---
+    let world = world_rotations(fig, pose);
+    let parent_world = match fig.nodes[upper].parent {
+        Some(p) => world[p],
+        None => mat3_identity(),
+    };
+
+    let mut out = pose.clone();
+    let need = upper.max(fore) + 1;
+    if out.rotations.len() < need {
+        // Materialise implicitly-identity entries so the two
+        // solved joints have slots; the values written here are
+        // exactly the identity those slots already meant.
+        out.rotations.resize(need, [0.0; 3]);
+    }
+
+    // Upper joint: swing its child direction onto the desired
+    // elbow position.
+    let d1 = shortest_arc(
+        v_norm(v_sub(elbow_pos, root_pos)),
+        v_norm(v_sub(desired_elbow, root_pos)),
+    );
+    let w_upper = mat3_mul(&d1, &world[upper]);
+    out.rotations[upper] =
+        mat3_to_euler(&mat3_mul(&mat3_transpose(&parent_world), &w_upper));
+
+    // Fore joint: the upper swing has already carried it (and the
+    // end) by `d1`; swing what remains onto the desired end.
+    let carried_dir = v_norm(mat3_apply(&d1, v_sub(end_pos, elbow_pos)));
+    let d2 = shortest_arc(
+        carried_dir,
+        v_norm(v_sub(desired_end, desired_elbow)),
+    );
+    let w_fore = mat3_mul(&d2, &mat3_mul(&d1, &world[fore]));
+    out.rotations[fore] =
+        mat3_to_euler(&mat3_mul(&mat3_transpose(&w_upper), &w_fore));
+
+    out
+}
+
+#[cfg(test)]
+mod ik_tests {
+    use super::{
+        evaluate3, humanoid3, mat3_from_euler, mat3_identity, mat3_to_euler,
+        solve_two_bone_ik, Mat3, Pose3,
+    };
+
+    fn assert_mat_approx(a: &Mat3, b: &Mat3, tol: f32) {
+        for r in 0..3 {
+            for c in 0..3 {
+                assert!(
+                    (a[r][c] - b[r][c]).abs() <= tol,
+                    "matrix entry [{r}][{c}]: {} vs {}",
+                    a[r][c],
+                    b[r][c]
+                );
+            }
+        }
+    }
+
+    fn assert_euler_approx(a: [f32; 3], b: [f32; 3], tol: f32) {
+        for i in 0..3 {
+            assert!(
+                (a[i] - b[i]).abs() <= tol,
+                "euler component {i}: {} vs {}",
+                a[i],
+                b[i]
+            );
+        }
+    }
+
+    fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+        let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    }
+
+    #[test]
+    fn euler_round_trip_non_singular() {
+        let cases: [[f32; 3]; 9] = [
+            [0.0, 0.0, 0.0],
+            [30.0, 45.0, 60.0],
+            [-45.0, -30.0, -120.0],
+            [120.0, 10.0, -75.0],
+            [-170.0, 80.0, 170.0],
+            [15.0, -89.0, -15.0],
+            [90.0, 0.0, 90.0],
+            [-90.0, -45.0, 33.0],
+            [10.0, 89.5, -170.0],
+        ];
+        for e in cases {
+            let back = mat3_to_euler(&mat3_from_euler(e));
+            assert_euler_approx(back, e, 0.01);
+        }
+    }
+
+    #[test]
+    fn euler_extraction_of_identity_is_zero() {
+        assert_euler_approx(mat3_to_euler(&mat3_identity()), [0.0; 3], 1.0e-6);
+    }
+
+    #[test]
+    fn euler_gimbal_lock_evaluates_the_same() {
+        // y = +90°: only x − z survives; extraction puts it in x
+        // with z := 0, and the matrix rebuilds identically.
+        let e = [30.0, 90.0, 20.0];
+        let back = mat3_to_euler(&mat3_from_euler(e));
+        assert_euler_approx(back, [10.0, 90.0, 0.0], 0.01);
+        assert_mat_approx(&mat3_from_euler(back), &mat3_from_euler(e), 1.0e-4);
+        // y = −90°: only x + z survives.
+        let e = [-50.0, -90.0, 65.0];
+        let back = mat3_to_euler(&mat3_from_euler(e));
+        assert_euler_approx(back, [15.0, -90.0, 0.0], 0.01);
+        assert_mat_approx(&mat3_from_euler(back), &mat3_from_euler(e), 1.0e-4);
+    }
+
+    // Left arm chain of humanoid3(): upperArm.L = 3 (parent
+    // chest), foreArm.L = 4, hand.L = 5; bone lengths 24 and 22,
+    // full reach 46.
+    const UPPER: usize = 3;
+    const FORE: usize = 4;
+    const END: usize = 5;
+
+    #[test]
+    fn ik_reaches_a_reachable_target() {
+        let fig = humanoid3();
+        let mut pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        pose.rotations[1] = [0.0, 0.0, 20.0]; // chest twist
+        pose.rotations[UPPER] = [10.0, -20.0, 30.0];
+        let before = evaluate3(&fig, &pose);
+        let shoulder = before[UPPER];
+        let target = [
+            shoulder[0] - 10.0,
+            shoulder[1] - 25.0,
+            shoulder[2] + 15.0,
+        ];
+        let solved = solve_two_bone_ik(&fig, &pose, UPPER, FORE, END, target);
+        let after = evaluate3(&fig, &solved);
+        assert!(
+            dist(after[END], target) < 2.0,
+            "end at {:?}, target {:?}",
+            after[END],
+            target
+        );
+        // Root and shoulder position untouched; every rotation
+        // outside the two solved joints is byte-identical.
+        assert_eq!(solved.root, pose.root);
+        assert!(dist(after[UPPER], shoulder) < 1.0e-4);
+        for i in 0..fig.nodes.len() {
+            if i != UPPER && i != FORE {
+                assert_eq!(
+                    solved.rotations[i], pose.rotations[i],
+                    "joint {i} changed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ik_unreachable_target_extends_the_chain() {
+        let fig = humanoid3();
+        let pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        let shoulder = evaluate3(&fig, &pose)[UPPER];
+        // Far away, down and toward the viewer: the chain must
+        // swing and end fully extended along that direction.
+        let dir = [0.0, -200.0, 40.0];
+        let target = [
+            shoulder[0] + dir[0],
+            shoulder[1] + dir[1],
+            shoulder[2] + dir[2],
+        ];
+        let solved = solve_two_bone_ik(&fig, &pose, UPPER, FORE, END, target);
+        let after = evaluate3(&fig, &solved);
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        let expected = [
+            shoulder[0] + 46.0 * dir[0] / len,
+            shoulder[1] + 46.0 * dir[1] / len,
+            shoulder[2] + 46.0 * dir[2] / len,
+        ];
+        assert!((dist(after[END], shoulder) - 46.0).abs() < 0.5);
+        assert!(
+            dist(after[END], expected) < 2.0,
+            "end at {:?}, expected {:?}",
+            after[END],
+            expected
+        );
+    }
+
+    #[test]
+    fn ik_solving_for_the_current_end_is_a_no_op() {
+        let fig = humanoid3();
+        let mut pose = Pose3::rest(&fig, [5.0, -3.0, 2.0]);
+        pose.rotations[UPPER] = [15.0, 10.0, -20.0];
+        pose.rotations[FORE] = [0.0, 0.0, 35.0]; // elbow bent
+        let before = evaluate3(&fig, &pose);
+        let solved = solve_two_bone_ik(&fig, &pose, UPPER, FORE, END, before[END]);
+        let after = evaluate3(&fig, &solved);
+        for i in 0..fig.nodes.len() {
+            assert!(
+                dist(after[i], before[i]) < 0.05,
+                "node {i} moved: {:?} -> {:?}",
+                before[i],
+                after[i]
+            );
+        }
+    }
+
+    #[test]
+    fn ik_rejects_a_non_chain() {
+        let fig = humanoid3();
+        let pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
+        // hand.L (5) is not upperArm.L's (3) child, so (3, 5, 4)
+        // is not a chain: the pose comes back unchanged.
+        let solved = solve_two_bone_ik(&fig, &pose, 3, 5, 4, [0.0, 0.0, 0.0]);
+        assert_eq!(solved, pose);
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -789,6 +1241,16 @@ pub fn bake_range(
 /// every run of non-alphanumeric characters collapsed to one `-`
 /// (and no leading/trailing `-`); an empty slug becomes `figure`.
 pub fn library_file_name(name: &str) -> String {
+    format!("fig3d-{}.json", library_slug(name))
+}
+
+/// The slug a library display `name` is stored under: the lowercased
+/// name with every run of non-alphanumeric characters collapsed to
+/// one `-` (and no leading/trailing `-`); an empty slug becomes
+/// `figure`. Shared by the figure library ([`library_file_name`])
+/// and the pose library ([`pose_file_name`]) so both sanitise names
+/// identically.
+fn library_slug(name: &str) -> String {
     let mut slug = String::new();
     let mut dash = false;
     for ch in name.chars() {
@@ -805,7 +1267,7 @@ pub fn library_file_name(name: &str) -> String {
     if slug.is_empty() {
         slug.push_str("figure");
     }
-    format!("fig3d-{slug}.json")
+    slug
 }
 
 /// One library file's contents: a figure plus the pose it was saved
@@ -874,6 +1336,105 @@ pub fn scan_library(dir: &Path) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+/// File name a library pose called `name` is stored under:
+/// `<slug>.json`, where the slug comes from [`library_slug`] — the
+/// same sanitising the figure library applies (see
+/// [`library_file_name`]), minus its `fig3d-` prefix.
+fn pose_file_name(name: &str) -> String {
+    format!("{}.json", library_slug(name))
+}
+
+/// One pose library file's contents: a pose under the name the user
+/// saved it by (mirrors [`LibraryEntry`] for the figure library).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PoseLibraryEntry {
+    name: String,
+    pose: Pose3,
+}
+
+/// The directory the 3D pose library lives in: `./library3d/poses`,
+/// beside the figure library's own files in `./library3d`.
+fn pose_library_dir() -> PathBuf {
+    PathBuf::from("library3d").join("poses")
+}
+
+/// Save `pose` into pose library directory `dir` (created if
+/// missing) under `name`, returning the file's path. The file is
+/// `<dir>/<slug>.json` (see [`pose_file_name`]) holding `{name,
+/// pose}` as JSON.
+fn save_pose_library_in(
+    dir: &Path,
+    pose: &Pose3,
+    name: &str,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(pose_file_name(name));
+    let entry = PoseLibraryEntry {
+        name: name.to_string(),
+        pose: pose.clone(),
+    };
+    let text = serde_json::to_string_pretty(&entry).map_err(std::io::Error::other)?;
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
+/// Save `pose` into the 3D pose library (`./library3d/poses`) under
+/// `name`, returning the file's path. See [`save_pose_library_in`].
+pub fn save_pose_library(pose: &Pose3, name: &str) -> std::io::Result<PathBuf> {
+    save_pose_library_in(&pose_library_dir(), pose, name)
+}
+
+/// Load the pose saved under `name` from pose library directory
+/// `dir`. An error is returned when no readable, well-formed entry
+/// exists for that name (missing file, invalid JSON, wrong shape).
+fn load_pose_library_in(dir: &Path, name: &str) -> std::io::Result<Pose3> {
+    let path = dir.join(pose_file_name(name));
+    let text = std::fs::read_to_string(&path)?;
+    let entry: PoseLibraryEntry = serde_json::from_str(&text).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+    })?;
+    Ok(entry.pose)
+}
+
+/// Load the pose saved under `name` from the 3D pose library
+/// (`./library3d/poses`). See [`load_pose_library_in`].
+pub fn load_pose_library(name: &str) -> std::io::Result<Pose3> {
+    load_pose_library_in(&pose_library_dir(), name)
+}
+
+/// The display names of every pose saved in pose library directory
+/// `dir`, sorted. Files that are not readable pose entries are
+/// skipped; a missing directory yields an empty list.
+fn scan_pose_library_in(dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_pose_file = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with(".json"))
+                .unwrap_or(false);
+            if is_pose_file {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(parsed) = serde_json::from_str::<PoseLibraryEntry>(&text) {
+                        names.push(parsed.name);
+                    }
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The display names of every pose saved in the 3D pose library
+/// (`./library3d/poses`), sorted. See [`scan_pose_library_in`].
+pub fn scan_pose_library() -> Vec<String> {
+    scan_pose_library_in(&pose_library_dir())
 }
 
 #[cfg(test)]
@@ -1586,5 +2147,92 @@ mod camera_framing_tests {
         };
         let pose = Pose3::rest(&fig, [0.0, 0.0, 0.0]);
         assert_eq!(frame_camera(&fig, &pose, [960.0, 720.0]), default_camera());
+    }
+}
+
+#[cfg(test)]
+mod pose_library_tests {
+    use super::{
+        humanoid3, library_file_name, load_pose_library, load_pose_library_in, pose_file_name,
+        save_pose_library, save_pose_library_in, scan_pose_library, scan_pose_library_in, Pose3,
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn pose_library_save_scan_load_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "stykr-fig3d-pose-library-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Scanning a directory that does not exist yet is empty, and
+        // loading a name that was never saved is an error.
+        assert!(scan_pose_library_in(&dir).is_empty());
+        assert!(load_pose_library_in(&dir, "Nope").is_err());
+
+        let fig = humanoid3();
+        let mut pose = Pose3::rest(&fig, [5.0, -6.0, 7.5]);
+        pose.rotations[2] = [0.0, 30.0, 0.0];
+        pose.rotations[3] = [12.5, 0.0, -50.25];
+        pose.rotations[10] = [30.0, -7.75, 0.0];
+        let path = save_pose_library_in(&dir, &pose, "Wave Pose").unwrap();
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            "wave-pose.json"
+        );
+        // A second, messier name exercises the slug rules.
+        let path2 = save_pose_library_in(&dir, &pose, "My Pose!!").unwrap();
+        assert_eq!(
+            path2.file_name().unwrap().to_str().unwrap(),
+            "my-pose.json"
+        );
+
+        assert_eq!(scan_pose_library_in(&dir), vec!["My Pose!!", "Wave Pose"]);
+        let loaded = load_pose_library_in(&dir, "Wave Pose").unwrap();
+        // The whole pose survives the round trip exactly, root and
+        // every joint rotation (the figure library test's float
+        // convention: exact equality after a JSON round trip).
+        assert_eq!(loaded, pose);
+        assert_eq!(loaded.root, pose.root);
+        assert_eq!(loaded.rotations.len(), pose.rotations.len());
+        for (got, want) in loaded.rotations.iter().zip(pose.rotations.iter()) {
+            assert_eq!(got, want);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pose_file_name_slug_matches_figure_library() {
+        // The pose library sanitises names exactly like the figure
+        // library: same slug, only the `fig3d-` prefix differs.
+        for name in ["Humanoid3", "My Bot!!", "Crouch  Pose", "  --  "] {
+            assert_eq!(
+                pose_file_name(name),
+                library_file_name(name).strip_prefix("fig3d-").unwrap()
+            );
+        }
+        assert_eq!(pose_file_name("Humanoid3"), "humanoid3.json");
+        assert_eq!(pose_file_name("My Bot!!"), "my-pose.json");
+        // The empty-slug fallback matches too.
+        assert_eq!(pose_file_name("  --  "), "figure.json");
+    }
+
+    #[test]
+    fn pose_library_public_api_uses_library3d_poses() {
+        let fig = humanoid3();
+        let mut pose = Pose3::rest(&fig, [1.0, 2.0, 3.0]);
+        pose.rotations[6] = [0.0, -45.0, 15.5];
+        let name = "Wave12 Pose Library Test";
+        let path = save_pose_library(&pose, name).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("library3d")
+                .join("poses")
+                .join("wave12-pose-library-test.json")
+        );
+        assert!(scan_pose_library().iter().any(|n| n == name));
+        assert_eq!(load_pose_library(name).unwrap(), pose);
+        // Clean up the file this test wrote into ./library3d/poses.
+        let _ = std::fs::remove_file(&path);
     }
 }

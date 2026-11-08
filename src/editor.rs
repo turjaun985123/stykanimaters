@@ -1154,6 +1154,43 @@ impl EditorCore {
         self.status = format!("Smoothed tangents on {n} graph channel(s).");
     }
 
+    /// Wave 12: apply a named tangent preset
+    /// (`crate::graph::TangentPreset`) to every graph channel
+    /// belonging to the selected figure, as one undo step. Angle
+    /// channels are shaped with shortest-path (wrapping) deltas
+    /// and every other target with plain deltas — the same
+    /// `angular` derivation `graph::smooth_channel` uses — and
+    /// each channel's keys are sorted first, as that wrapper
+    /// does. Channels belonging to other figures are untouched;
+    /// a selected figure with no channels is a no-op (no
+    /// snapshot).
+    pub fn apply_graph_ease_preset(&mut self, preset: crate::graph::TangentPreset) {
+        let fi = self.selected_figure;
+        let n = self
+            .project
+            .channels
+            .iter()
+            .filter(|ch| ch.figure == fi)
+            .count();
+        if n == 0 {
+            self.status = format!("No graph channels for figure {}.", fi + 1);
+            return;
+        }
+        self.snapshot();
+        for ch in &mut self.project.channels {
+            if ch.figure != fi {
+                continue;
+            }
+            ch.sort_keys();
+            let angular = matches!(ch.target, crate::graph::ChannelTarget::Angle(_));
+            crate::graph::apply_tangent_preset(&mut ch.keys, preset, angular);
+        }
+        self.status = format!(
+            "Applied {preset:?} preset to {n} graph channel(s) for figure {}.",
+            fi + 1
+        );
+    }
+
     /// Wave 11: bake every graph channel into real frame poses
     /// for frames `from..=to` (the end clamped to the timeline),
     /// as one undo step.
@@ -2209,6 +2246,88 @@ impl EditorCore {
         self.status = format!("Lasso erased {n} stroke(s).");
     }
 
+    /// Wave 12: mirror every stroke on the current frame across
+    /// the stage's vertical centre line (x = stage width / 2), as
+    /// one undo step. Only the points change — colour, width,
+    /// per-point widths and fill stay as drawn — and strokes on
+    /// other frames are left alone. Mirroring twice restores the
+    /// original drawing exactly. A frame with no strokes is a
+    /// no-op (no snapshot).
+    pub fn mirror_strokes_x(&mut self) {
+        let frame = self.current;
+        let n = self
+            .project
+            .strokes
+            .iter()
+            .filter(|s| s.frame == frame)
+            .count();
+        if n == 0 {
+            self.status = format!("No strokes to mirror on frame {}.", frame + 1);
+            return;
+        }
+        let cx = self.project.stage[0] / 2.0;
+        self.snapshot();
+        for s in &mut self.project.strokes {
+            if s.frame == frame {
+                s.points = crate::paint::mirror_points_x(&s.points, cx);
+            }
+        }
+        self.status = format!(
+            "Mirrored {n} stroke(s) on frame {} across the stage centre.",
+            frame + 1
+        );
+    }
+
+    /// Shared stamp construction: a generated outline becomes
+    /// ONE stroke on the current frame, built exactly like a
+    /// drawn stroke (`begin_draw`): the selected figure's
+    /// colour, the active brush's width recorded per point (a
+    /// drawn stroke carries a width for every point), and no
+    /// fill. One snapshot per stamp.
+    fn stamp_points(&mut self, points: Vec<V2>, what: &str) {
+        let brush = self.active_brush();
+        let color = self.project.figures[self.selected_figure].color;
+        let n = points.len();
+        self.snapshot();
+        self.project.strokes.push(crate::model::Stroke {
+            frame: self.current,
+            points,
+            color,
+            width: brush.width,
+            widths: vec![brush.width; n],
+            fill: None,
+        });
+        self.status = format!("Stamped {what} on frame {} ({n} points).", self.current + 1);
+    }
+
+    /// Wave 12: stamp a regular pentagon (radius 60, one vertex
+    /// pointing up) at the stage centre on the current frame.
+    pub fn stamp_polygon(&mut self) {
+        let c = [self.project.stage[0] / 2.0, self.project.stage[1] / 2.0];
+        let points = crate::paint::regular_polygon_points(c, 60.0, 5, -90.0);
+        self.stamp_points(points, "a pentagon");
+    }
+
+    /// Wave 12: stamp a five-pointed star (outer radius 60,
+    /// inner radius 26, one point up) at the stage centre on
+    /// the current frame.
+    pub fn stamp_star(&mut self) {
+        let c = [self.project.stage[0] / 2.0, self.project.stage[1] / 2.0];
+        let points = crate::paint::star_points(c, 60.0, 26.0, 5, -90.0);
+        self.stamp_points(points, "a star");
+    }
+
+    /// Wave 12: stamp a horizontal arrow at the stage centre on
+    /// the current frame, pointing right: the shaft runs from
+    /// 70 units left of centre to 70 units right, with a
+    /// 22-long head.
+    pub fn stamp_arrow(&mut self) {
+        let cx = self.project.stage[0] / 2.0;
+        let cy = self.project.stage[1] / 2.0;
+        let points = crate::paint::arrow_points([cx - 70.0, cy], [cx + 70.0, cy], 22.0);
+        self.stamp_points(points, "an arrow");
+    }
+
     // ---- Draw tools (wave 7) ----
 
     /// The active brush preset from `paint::brush_library`
@@ -2679,6 +2798,89 @@ impl EditorCore {
             lead + trail,
             lead,
             trail,
+            clip_idx + 1,
+            out.display()
+        );
+    }
+
+    /// Wave 12: pitch-shift the LAST audio clip up 2 semitones
+    /// (a rate shift — pitch and duration change together, the
+    /// stored sample rate is untouched). Same materialise-and-
+    /// repoint pattern as `audio_echo_last`; the product is
+    /// `<stem>.pitch.wav` and the source file is never
+    /// overwritten.
+    pub fn audio_pitch_last(&mut self) {
+        let Some(clip_idx) = self.project.audio.len().checked_sub(1) else {
+            self.status = "Audio pitch shift failed: there are no audio clips.".into();
+            return;
+        };
+        let clip = self.project.audio[clip_idx].clone();
+        let mut wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio pitch shift failed: {e}");
+                return;
+            }
+        };
+        crate::audio_edit::pitch_shift(&mut wav, 2.0);
+        let source = PathBuf::from(&clip.path);
+        let out = Self::audio_derived_path(&source, ".pitch.wav");
+        if out == source {
+            self.status = "Audio pitch shift failed: output would overwrite the source.".into();
+            return;
+        }
+        if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&wav)) {
+            self.status = format!(
+                "Audio pitch shift failed: could not write {}: {e}",
+                out.display()
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
+        self.status = format!(
+            "Pitch shift (+2 semitones) applied to audio clip {}: {}.",
+            clip_idx + 1,
+            out.display()
+        );
+    }
+
+    /// Wave 12: run a compressor (threshold 0.5, ratio 4.0)
+    /// over the LAST audio clip. Same materialise-and-repoint
+    /// pattern as `audio_echo_last`; the product is
+    /// `<stem>.comp.wav` and the source file is never
+    /// overwritten.
+    pub fn audio_compress_last(&mut self) {
+        let Some(clip_idx) = self.project.audio.len().checked_sub(1) else {
+            self.status = "Audio compress failed: there are no audio clips.".into();
+            return;
+        };
+        let clip = self.project.audio[clip_idx].clone();
+        let mut wav = match crate::audio_edit::read_wav(&clip.path) {
+            Ok(wav) => wav,
+            Err(e) => {
+                self.status = format!("Audio compress failed: {e}");
+                return;
+            }
+        };
+        crate::audio_edit::compress(&mut wav, 0.5, 4.0);
+        let source = PathBuf::from(&clip.path);
+        let out = Self::audio_derived_path(&source, ".comp.wav");
+        if out == source {
+            self.status = "Audio compress failed: output would overwrite the source.".into();
+            return;
+        }
+        if let Err(e) = std::fs::write(&out, crate::audio_edit::write_wav(&wav)) {
+            self.status = format!(
+                "Audio compress failed: could not write {}: {e}",
+                out.display()
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.audio[clip_idx].path = out.to_string_lossy().into_owned();
+        self.status = format!(
+            "Compressor (threshold 0.5, ratio 4.0) applied to audio clip {}: {}.",
             clip_idx + 1,
             out.display()
         );
@@ -5157,5 +5359,306 @@ mod wave11_tests {
         assert!(core.status.contains("no audio clips"), "status: {}", core.status);
         core.audio_trim_silence_last();
         assert!(core.status.contains("no audio clips"), "status: {}", core.status);
+    }
+}
+#[cfg(test)]
+mod wave12_tests {
+    use crate::audio_edit::WavData;
+    use crate::editor::EditorCore;
+    use crate::graph::{Channel, ChannelTarget, Key, TangentPreset};
+    use crate::model::AudioClip;
+
+    /// Write a tiny mono WAV into a pid-unique temp path and
+    /// return the path as a String. The `wave12` tag keeps these
+    /// files distinct from the wave11 tests' (same pid — one
+    /// test binary).
+    fn temp_wav(tag: &str, samples: Vec<f32>) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "styk-wave12-{tag}-{}.wav",
+            std::process::id()
+        ));
+        let wav = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples,
+        };
+        std::fs::write(&path, crate::audio_edit::write_wav(&wav)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// A fresh core whose only audio clip points at `path`.
+    fn core_with_clip(path: String) -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(AudioClip {
+            path,
+            start_frame: 0,
+        });
+        core
+    }
+
+    #[test]
+    fn audio_pitch_last_repoints_clip_to_a_new_file() {
+        let src = temp_wav("pitch", vec![0.5; 800]);
+        let mut core = core_with_clip(src.clone());
+        let edits = core.edits_since_autosave();
+        core.audio_pitch_last();
+        assert!(core.status.contains("Pitch shift"), "status: {}", core.status);
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        let new_path = core.project.audio[0].path.clone();
+        assert_ne!(new_path, src, "the clip must point at the pitch product");
+        assert!(new_path.ends_with(".pitch.wav"), "path: {new_path}");
+        let back = crate::audio_edit::read_wav(&new_path).expect("pitch product reads back");
+        // +2 semitones resamples by 2^(2/12): 800 frames become
+        // ~713 (pitch and duration change together).
+        assert!(
+            (700..800).contains(&back.frames()),
+            "frames: {}",
+            back.frames()
+        );
+        // The original file is untouched and still reads back.
+        assert!(crate::audio_edit::read_wav(&src).is_ok());
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&new_path);
+    }
+
+    #[test]
+    fn audio_compress_last_repoints_clip_to_a_new_file() {
+        let src = temp_wav("comp", vec![0.5; 800]);
+        let mut core = core_with_clip(src.clone());
+        let edits = core.edits_since_autosave();
+        core.audio_compress_last();
+        assert!(core.status.contains("Compressor"), "status: {}", core.status);
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        let new_path = core.project.audio[0].path.clone();
+        assert_ne!(new_path, src, "the clip must point at the compressed product");
+        assert!(new_path.ends_with(".comp.wav"), "path: {new_path}");
+        let back = crate::audio_edit::read_wav(&new_path).expect("compressed product reads back");
+        assert_eq!(back.frames(), 800, "compression keeps the frame count");
+        assert!(crate::audio_edit::read_wav(&src).is_ok());
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&new_path);
+    }
+
+    #[test]
+    fn audio_pitch_and_compress_report_when_there_are_no_clips() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        let edits = core.edits_since_autosave();
+        core.audio_pitch_last();
+        assert!(core.status.contains("no audio clips"), "status: {}", core.status);
+        core.audio_compress_last();
+        assert!(core.status.contains("no audio clips"), "status: {}", core.status);
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot without clips");
+    }
+
+    /// A stroke literal in the shape `begin_draw` records.
+    fn stroke(frame: usize, points: Vec<[f32; 2]>) -> crate::model::Stroke {
+        crate::model::Stroke {
+            frame,
+            points,
+            color: 0x112233,
+            width: 3.0,
+            widths: Vec::new(),
+            fill: None,
+        }
+    }
+
+    #[test]
+    fn mirror_strokes_x_mirrors_current_frame_only() {
+        let mut core = EditorCore::new();
+        core.project.strokes.clear();
+        let cur = core.current;
+        let w = core.project.stage[0];
+        core.project.strokes.push(stroke(cur, vec![[10.0, 20.0], [30.0, 40.0]]));
+        core.project.strokes.push(stroke(cur + 1, vec![[10.0, 20.0]]));
+        let edits = core.edits_since_autosave();
+        core.mirror_strokes_x();
+        assert!(
+            core.status.contains("Mirrored 1 stroke(s)"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        // x' = stage width - x; y unchanged; order preserved.
+        assert_eq!(
+            core.project.strokes[0].points,
+            vec![[w - 10.0, 20.0], [w - 30.0, 40.0]]
+        );
+        // The other frame's stroke is untouched.
+        assert_eq!(core.project.strokes[1].points, vec![[10.0, 20.0]]);
+        // Mirroring again restores the original points exactly.
+        core.mirror_strokes_x();
+        assert_eq!(core.project.strokes[0].points, vec![[10.0, 20.0], [30.0, 40.0]]);
+    }
+
+    #[test]
+    fn mirror_strokes_x_noops_without_strokes_on_the_frame() {
+        let mut core = EditorCore::new();
+        core.project.strokes.clear();
+        // A stroke on ANOTHER frame does not count.
+        core.project.strokes.push(stroke(core.current + 1, vec![[1.0, 2.0]]));
+        let edits = core.edits_since_autosave();
+        core.mirror_strokes_x();
+        assert!(
+            core.status.contains("No strokes to mirror"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot on a no-op");
+    }
+
+    #[test]
+    fn apply_graph_ease_preset_shapes_selected_figure_only() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        let keys = || {
+            vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(10.0, 50.0),
+                Key::flat(20.0, 0.0),
+            ]
+        };
+        core.project.channels.push(Channel {
+            figure: fi,
+            target: ChannelTarget::Angle(0),
+            keys: keys(),
+        });
+        core.project.channels.push(Channel {
+            figure: fi + 1,
+            target: ChannelTarget::Angle(0),
+            keys: keys(),
+        });
+        let edits = core.edits_since_autosave();
+        core.apply_graph_ease_preset(TangentPreset::Smooth);
+        assert!(core.status.contains("Smooth"), "status: {}", core.status);
+        assert!(
+            core.status.contains("1 graph channel(s)"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        // Smooth is Catmull-Rom: the first key's tangents are the
+        // one-sided secant (50 - 0) / (10 - 0) = 5.
+        assert_eq!(core.project.channels[0].keys[0].out_tan, 5.0);
+        assert_eq!(core.project.channels[0].keys[0].in_tan, 5.0);
+        // The other figure's channel keeps its flat tangents.
+        assert_eq!(core.project.channels[1].keys[0].out_tan, 0.0);
+        assert_eq!(core.project.channels[1].keys[0].in_tan, 0.0);
+    }
+
+    #[test]
+    fn apply_graph_ease_preset_noops_without_channels_for_the_figure() {
+        let mut core = EditorCore::new();
+        core.project.channels.clear();
+        let edits = core.edits_since_autosave();
+        core.apply_graph_ease_preset(TangentPreset::EaseInOut);
+        assert!(
+            core.status.contains("No graph channels"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot on a no-op");
+        // A channel belonging to another figure does not count.
+        core.project.channels.push(Channel {
+            figure: core.selected_figure + 1,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(0.0, 0.0), Key::flat(10.0, 10.0)],
+        });
+        core.apply_graph_ease_preset(TangentPreset::EaseInOut);
+        assert!(
+            core.status.contains("No graph channels"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits, "still no snapshot");
+    }
+
+    /// Assert the shared stamp state on the last stroke of a
+    /// core whose strokes were cleared: current frame, selected
+    /// figure's colour, active brush width (per point too), no
+    /// fill.
+    fn check_stamp(core: &EditorCore) -> &crate::model::Stroke {
+        assert_eq!(core.project.strokes.len(), 1, "exactly one stroke stamped");
+        let s = core.project.strokes.last().unwrap();
+        assert_eq!(s.frame, core.current);
+        assert_eq!(s.color, core.project.figures[core.selected_figure].color);
+        assert_eq!(s.width, core.active_brush().width);
+        assert_eq!(s.fill, None);
+        assert_eq!(s.widths.len(), s.points.len(), "a width per point");
+        assert!(s.widths.iter().all(|&x| x == s.width));
+        s
+    }
+
+    #[test]
+    fn stamp_polygon_appends_a_pentagon_at_stage_centre() {
+        let mut core = EditorCore::new();
+        core.project.strokes.clear();
+        let (w, h) = (core.project.stage[0], core.project.stage[1]);
+        let edits = core.edits_since_autosave();
+        core.stamp_polygon();
+        assert!(
+            core.status.contains("Stamped a pentagon"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        let s = check_stamp(&core);
+        // Closed pentagon: 5 vertices + the closing repeat, the
+        // first vertex pointing up from the centre (radius 60).
+        assert_eq!(s.points.len(), 6);
+        let first = s.points[0];
+        assert!((first[0] - w / 2.0).abs() < 0.001, "first x: {}", first[0]);
+        assert!(
+            (first[1] - (h / 2.0 - 60.0)).abs() < 0.001,
+            "first y: {}",
+            first[1]
+        );
+        assert_eq!(s.points[5], s.points[0], "closed: last repeats first");
+    }
+
+    #[test]
+    fn stamp_star_appends_a_five_pointed_star_at_stage_centre() {
+        let mut core = EditorCore::new();
+        core.project.strokes.clear();
+        let (cx, cy) = (core.project.stage[0] / 2.0, core.project.stage[1] / 2.0);
+        let edits = core.edits_since_autosave();
+        core.stamp_star();
+        assert!(core.status.contains("Stamped a star"), "status: {}", core.status);
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        let s = check_stamp(&core);
+        // 2 * 5 alternating outer/inner vertices + closing repeat.
+        assert_eq!(s.points.len(), 11);
+        assert_eq!(s.points[10], s.points[0], "closed: last repeats first");
+        // Every vertex sits on the outer (60) or inner (26) ring.
+        for p in &s.points {
+            let d = ((p[0] - cx) * (p[0] - cx) + (p[1] - cy) * (p[1] - cy)).sqrt();
+            assert!(
+                (d - 60.0).abs() < 0.01 || (d - 26.0).abs() < 0.01,
+                "vertex distance from centre: {d}"
+            );
+        }
+    }
+
+    #[test]
+    fn stamp_arrow_appends_a_right_pointing_arrow_at_stage_centre() {
+        let mut core = EditorCore::new();
+        core.project.strokes.clear();
+        let (cx, cy) = (core.project.stage[0] / 2.0, core.project.stage[1] / 2.0);
+        let edits = core.edits_since_autosave();
+        core.stamp_arrow();
+        assert!(
+            core.status.contains("Stamped an arrow"),
+            "status: {}",
+            core.status
+        );
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        let s = check_stamp(&core);
+        // [tail, tip, wing, tip, wing] — the shaft endpoints are
+        // the caller's points verbatim.
+        assert_eq!(s.points.len(), 5);
+        assert_eq!(s.points[0], [cx - 70.0, cy]);
+        assert_eq!(s.points[1], [cx + 70.0, cy]);
+        assert_eq!(s.points[3], s.points[1], "the polyline revisits the tip");
     }
 }

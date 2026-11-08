@@ -398,3 +398,68 @@ segment gradients audited as already implemented.
 Nothing in this section is CI-verified yet; statuses move to
 the per-wave tables above once the run is green, and
 docs/COMPARISON.md is refreshed after that run.
+
+## Wave 12 (in progress, 2026-11-08)
+
+Twenty code agents, aimed at the top remaining gaps listed in
+docs/COMPARISON.md — depth in the five systems rather than new
+feature families. Everything below is implemented in Wave 12;
+CI verification happens at integration (per the repo rule, CI
+is the first build/test any of this gets), so no item here is
+claimed verified yet.
+
+- **Brush model depth** — the brush model gains opacity and
+  scatter, a Spray brush joins the library, and spray offsets
+  are deterministic (seeded, like every other effect in the
+  project). Honest limit: opacity/scatter are model data for
+  now — the stroke recorder and renderers do not apply them
+  yet, so Spray currently draws like a wide round pen;
+  wiring them into Stroke is a follow-up.
+- **Shape generators round 2** — polygon, star and arrow
+  stroke generators join line/rectangle/ellipse, plus stroke
+  mirroring across `src/paint.rs`, `src/draw_ops.rs` and the
+  editor.
+- **3 new VFX kinds + GUI buttons** — Glitter, Wave, Shard:
+  27 deterministic clip kinds total (was 24), with GUI
+  creation buttons for the new kinds.
+- **Storm weather** — a fifth weather kind (Storm) beside
+  rain, snow, fireflies and fog.
+- **FX clip presets on disk** — FX clip presets can be saved
+  to and loaded from disk, not just created in place.
+- **Audio pitch shift + compressor** — pitch shift and a
+  compressor join the audio engine's processing set, with
+  editor ops and buttons in the audio panel.
+- **Graph tangent presets + overlay** — tangent presets
+  (Smooth, EaseIn, EaseOut, EaseInOut, Linear) for graph
+  keys, plus a multi-channel overlay view-model for the
+  graph panel.
+- **Editor stamp ops for shapes** — the editor gains stamp
+  operations that place the shape generators' output as
+  strokes in one action.
+- **MP4/WebM frame-range exports** — MP4 and WebM exports
+  can be limited to a frame range, like the Wave 11 GIF/PNG
+  ranges. Range exports are video-only; this is documented
+  in the exporter.
+- **3D pose library + two-bone IK** — a pose library for
+  the 3D session, plus two-bone IK in the 3D rig. The first
+  IK agent proved the blocker precisely: the crate had no
+  matrix→Euler extraction. A follow-up agent added
+  `mat3_to_euler` (with a documented gimbal-lock convention)
+  and the full solver on top of it; the solver's tests were
+  replayed in a Python simulation with zero error before
+  landing. CI is still the first Rust compile, as always.
+- **MCP round 6** — new tools including `draw_polygon`,
+  `draw_star`, `graph_tangent_preset` and FX preset tools;
+  storm and the three new kinds join `set_weather` /
+  `add_fx_clip`; MP4/WebM frame-range formats join the
+  export formats: 62 tools total.
+- **Determinism, round 3** — the byte-determinism proof
+  extends to APNG and JPEG sequence exports.
+- **Project library management** — the project library
+  gains rename, duplicate and filter operations.
+- **Motion statistics** — motion statistics are computed
+  and surfaced alongside the existing project statistics.
+
+Nothing in this section is CI-verified yet; statuses move to
+the per-wave tables above once the run is green, and
+docs/COMPARISON.md is refreshed after that run.

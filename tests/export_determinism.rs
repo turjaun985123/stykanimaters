@@ -11,7 +11,10 @@
 //! - PNG sequence (`export::export_png_sequence`, in-crate via
 //!   `image`),
 //! - contact sheet (`export::render_contact_sheet`, in-memory
-//!   pixels).
+//!   pixels),
+//! - APNG (`export::export_apng`, in-crate via the `png` crate),
+//! - JPEG sequence (`export::export_jpeg_sequence`, in-crate via
+//!   `image`).
 //!
 //! MP4 and WebM are deliberately NOT asserted here: they are
 //! encoded by the system `ffmpeg` binary, so their bytes depend
@@ -219,4 +222,69 @@ fn contact_sheet_is_byte_identical_across_renders() {
         third.as_raw(),
         "contact sheets of frames 0 and 2 are identical — the demo animation is not reaching the contact sheet"
     );
+}
+
+#[test]
+fn apng_export_is_byte_identical_across_runs() {
+    let project = tiny_project();
+    let dir = temp_dir("apng");
+    let path_a = dir.join("a.png");
+    let path_b = dir.join("b.png");
+
+    let n_a = export::export_apng(&project, &path_a).expect("apng export A");
+    let n_b = export::export_apng(&project, &path_b).expect("apng export B");
+    assert_eq!(n_a, 3, "apng should hold the 3 authored frames");
+    assert_eq!(n_a, n_b);
+
+    let bytes_a = std::fs::read(&path_a).expect("read apng A");
+    let bytes_b = std::fs::read(&path_b).expect("read apng B");
+    assert!(bytes_a.len() > 1000, "apng suspiciously small");
+    assert!(
+        bytes_a.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "missing PNG signature"
+    );
+    assert_eq!(bytes_a, bytes_b, "two apng exports differ");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn jpeg_sequence_export_is_byte_identical_across_runs() {
+    let project = tiny_project();
+    let dir_a = temp_dir("jpeg-a");
+    let dir_b = temp_dir("jpeg-b");
+
+    let n_a = export::export_jpeg_sequence(&project, &dir_a).expect("jpeg sequence A");
+    let n_b = export::export_jpeg_sequence(&project, &dir_b).expect("jpeg sequence B");
+    assert_eq!(n_a, 3, "jpeg sequence should write one file per frame");
+    assert_eq!(n_a, n_b);
+
+    // The file SETS must match: the same names in both directories.
+    let mut names_a: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&dir_a).expect("list jpeg dir A") {
+        let entry = entry.expect("jpeg dir A entry");
+        names_a.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    let mut names_b: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&dir_b).expect("list jpeg dir B") {
+        let entry = entry.expect("jpeg dir B entry");
+        names_b.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    names_a.sort();
+    names_b.sort();
+    assert_eq!(names_a.len(), 3, "jpeg sequence should hold 3 files");
+    assert_eq!(names_a, names_b, "jpeg sequence file sets differ");
+
+    // And every file's bytes must match, with the JPEG SOI marker
+    // as a non-vacuity check that these are real JPEG documents.
+    for name in &names_a {
+        let bytes_a = std::fs::read(dir_a.join(name)).expect("read jpeg A");
+        let bytes_b = std::fs::read(dir_b.join(name)).expect("read jpeg B");
+        assert!(bytes_a.len() > 1000, "{name}: jpeg suspiciously small");
+        assert_eq!(&bytes_a[0..2], &[0xFF, 0xD8], "{name}: missing JPEG SOI marker");
+        assert_eq!(bytes_a, bytes_b, "{name}: two jpeg sequence exports differ");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
 }

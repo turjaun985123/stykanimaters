@@ -15,10 +15,12 @@
 //! key; the value range covers every key value with 10% padding —
 //! except that a view containing any angle channel uses exactly
 //! -180..=180, the full circle of the normalised angle convention
-//! (see `Channel::value_at`).
+//! (see `Channel::value_at`). For multi-channel overlay displays,
+//! [`overlay_curves`] provides per-channel curves normalised to a
+//! shared 0.0..=1.0 band.
 
 use crate::graph::{Channel, ChannelTarget};
-use crate::model::V2;
+use crate::model::{Project, V2};
 
 /// A rectangular window onto channel data: frames
 /// `frame_min..=frame_max` and values `val_min..=val_max` are
@@ -153,6 +155,55 @@ impl GraphView {
             height,
         }
     }
+}
+
+/// Short human label for a channel target, as used in overlay
+/// legends: "root x", "root y", "angle N", "length N".
+fn target_label(target: &ChannelTarget) -> String {
+    match target {
+        ChannelTarget::RootX => "root x".to_string(),
+        ChannelTarget::RootY => "root y".to_string(),
+        ChannelTarget::Angle(n) => format!("angle {n}"),
+        ChannelTarget::Length(n) => format!("length {n}"),
+    }
+}
+
+/// Normalized curves for every channel of one figure, for a
+/// multi-channel overlay display: each matching channel is sampled
+/// at `samples` evenly spaced points across the project's full
+/// frame range (frame 0..=last) through [`Channel::value_at`],
+/// then normalized to 0.0..=1.0 against that channel's own sampled
+/// min/max — so channels with unrelated units can share one plot.
+/// A constant channel (zero sampled span) normalizes to all 0.5.
+/// `samples < 2` is treated as 2. Channels belonging to other
+/// figures are excluded; a project with no matching channels
+/// yields an empty vec. Entries keep project channel order.
+pub fn overlay_curves(
+    project: &Project,
+    figure: usize,
+    samples: usize,
+) -> Vec<(String, Vec<f32>)> {
+    let samples = samples.max(2);
+    let last = project.frames.len().saturating_sub(1) as f32;
+    project
+        .channels
+        .iter()
+        .filter(|ch| ch.figure == figure)
+        .map(|ch| {
+            let raw: Vec<f32> = (0..samples)
+                .map(|i| ch.value_at(last * (i as f32 / (samples - 1) as f32)))
+                .collect();
+            let lo = raw.iter().copied().fold(f32::INFINITY, f32::min);
+            let hi = raw.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let span = hi - lo;
+            let values = if span > 0.0 {
+                raw.iter().map(|v| (v - lo) / span).collect()
+            } else {
+                vec![0.5; samples]
+            };
+            (target_label(&ch.target), values)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -301,5 +352,98 @@ mod tests {
         // No keys at all still yields a usable, non-degenerate view.
         let empty = GraphView::auto_fit(&[], 12, 400.0, 200.0);
         assert!(empty.val_max > empty.val_min && empty.frame_max > empty.frame_min);
+    }
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use crate::graph::{Channel, ChannelTarget, Key};
+    use crate::model::Project;
+
+    use super::overlay_curves;
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    /// The demo project has 5 frames (0..=4). Channels: a rising
+    /// RootX and an Angle(3) on figure 0, a RootY on figure 1.
+    fn project() -> Project {
+        let mut p = Project::new_demo();
+        p.channels = vec![
+            Channel {
+                figure: 0,
+                target: ChannelTarget::RootX,
+                keys: vec![Key::flat(0.0, 0.0), Key::flat(4.0, 100.0)],
+            },
+            Channel {
+                figure: 0,
+                target: ChannelTarget::Angle(3),
+                keys: vec![Key::flat(0.0, 10.0), Key::flat(4.0, 50.0)],
+            },
+            Channel {
+                figure: 1,
+                target: ChannelTarget::RootY,
+                keys: vec![Key::flat(0.0, 7.0), Key::flat(4.0, 9.0)],
+            },
+        ];
+        p
+    }
+
+    #[test]
+    fn overlay_filters_by_figure_and_labels() {
+        let p = project();
+        let out = overlay_curves(&p, 0, 9);
+        assert_eq!(out.len(), 2, "only figure 0's channels: {out:?}");
+        assert_eq!(out[0].0, "root x");
+        assert_eq!(out[1].0, "angle 3");
+        assert!(out.iter().all(|(_, vs)| vs.len() == 9));
+        // Figure 1 sees only its own channel.
+        let other = overlay_curves(&p, 1, 9);
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].0, "root y");
+        // A figure with no channels gets nothing.
+        assert!(overlay_curves(&p, 99, 9).is_empty());
+    }
+
+    #[test]
+    fn overlay_rising_channel_spans_full_band() {
+        let p = project();
+        let out = overlay_curves(&p, 0, 9);
+        let vs = &out[0].1;
+        assert!(approx(vs[0], 0.0), "starts at the band floor: {vs:?}");
+        assert!(approx(vs[vs.len() - 1], 1.0), "ends at the ceiling: {vs:?}");
+        assert!(
+            vs.iter().all(|v| (0.0..=1.0).contains(v)),
+            "all samples inside 0.0..=1.0: {vs:?}"
+        );
+        // samples < 2 is treated as 2.
+        let clamped = overlay_curves(&p, 0, 1);
+        assert_eq!(clamped[0].1.len(), 2);
+        assert!(approx(clamped[0].1[0], 0.0) && approx(clamped[0].1[1], 1.0));
+    }
+
+    #[test]
+    fn overlay_constant_channel_is_midline() {
+        let mut p = Project::new_demo();
+        p.channels = vec![Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(0.0, 42.0)],
+        }];
+        let out = overlay_curves(&p, 0, 7);
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].1.iter().all(|v| approx(*v, 0.5)),
+            "constant channel normalizes to all 0.5: {:?}",
+            out[0].1
+        );
+    }
+
+    #[test]
+    fn overlay_no_channels_is_empty() {
+        let mut p = Project::new_demo();
+        p.channels = Vec::new();
+        assert!(overlay_curves(&p, 0, 8).is_empty());
     }
 }

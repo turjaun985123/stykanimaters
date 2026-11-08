@@ -42,6 +42,19 @@ fn arg_frame(core: &EditorCore, args: &Value) -> Result<usize, String> {
     }
 }
 
+/// A required non-negative integer argument (used by the
+/// frame-range export formats). Floats are rejected: the range
+/// bounds must be exact frame indices.
+fn arg_usize(args: &Value, key: &str) -> Result<usize, String> {
+    match args.get(key) {
+        Some(v) => v
+            .as_u64()
+            .map(|n| n as usize)
+            .ok_or_else(|| format!("argument '{key}' must be a non-negative integer")),
+        None => Err(format!("missing required integer argument: {key}")),
+    }
+}
+
 fn ensure_parent(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -197,6 +210,28 @@ fn tool_export_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
         .get("format")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing required string argument: format".to_string())?;
+    if format == "mp4_range" || format == "webm_range" {
+        // Frame-range video exports write through ffmpeg like
+        // export_mp4/export_webm, so they do not fit the byte
+        // pipeline below: they render straight to `path` and
+        // return the number of frames written.
+        let from = arg_usize(args, "from")?;
+        let to = arg_usize(args, "to")?;
+        let path_ref = Path::new(&path);
+        ensure_parent(path_ref)?;
+        if format == "mp4_range" {
+            crate::export::export_mp4_range(&core.project, from, to, path_ref)
+        } else {
+            crate::export::export_webm_range(&core.project, from, to, path_ref)
+        }
+        .map_err(|e| format!("render to {path} failed: {e}"))?;
+        return Ok(json!({
+            "path": path,
+            "format": format,
+            "from": from,
+            "to": to,
+        }));
+    }
     let bytes: Vec<u8> = match format {
         "piv2" => crate::pivot::export_piv_v2(&core.project),
         "piv3" => crate::pivot::export_piv_v3(&core.project),
@@ -525,13 +560,15 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "export_file",
-            description: "Export the project: 'piv2', 'piv3', 'piv4' or 'piv5' write the whole animation as .piv bytes; 'stk' writes a single figure as Pivot .stk bytes and 'nodes' writes it as a Stick Nodes .nodes figure (both take the 'figure' index, defaulting to the selected figure); 'stknds' writes the whole animation as a Stick Nodes project. Parent directories are created.",
+            description: "Export the project: 'piv2', 'piv3', 'piv4' or 'piv5' write the whole animation as .piv bytes; 'stk' writes a single figure as Pivot .stk bytes and 'nodes' writes it as a Stick Nodes .nodes figure (both take the 'figure' index, defaulting to the selected figure); 'stknds' writes the whole animation as a Stick Nodes project; 'mp4_range' and 'webm_range' render only frames 'from'..='to' (both required, integer frame indices) to a video file (needs ffmpeg). Parent directories are created.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Destination file path" },
-                    "format": { "type": "string", "enum": ["piv2", "piv3", "piv4", "piv5", "stk", "nodes", "stknds"] },
-                    "figure": { "type": "integer", "minimum": 0, "description": "Figure index for formats 'stk' and 'nodes' (default: selected figure)" }
+                    "format": { "type": "string", "enum": ["piv2", "piv3", "piv4", "piv5", "stk", "nodes", "stknds", "mp4_range", "webm_range"] },
+                    "figure": { "type": "integer", "minimum": 0, "description": "Figure index for formats 'stk' and 'nodes' (default: selected figure)" },
+                    "from": { "type": "integer", "minimum": 0, "description": "First frame for formats 'mp4_range' and 'webm_range' (required there)" },
+                    "to": { "type": "integer", "minimum": 0, "description": "Last frame for formats 'mp4_range' and 'webm_range' (required there)" }
                 },
                 "required": ["path", "format"]
             }),
@@ -947,6 +984,25 @@ mod tests {
             "export_file",
             &mut core,
             json!({ "path": "/tmp/x.stk", "format": "stk", "figure": 99999 })
+        )
+        .is_err());
+        // The range video formats require integer 'from'/'to'.
+        assert!(call(
+            "export_file",
+            &mut core,
+            json!({ "path": "/tmp/x.mp4", "format": "mp4_range" })
+        )
+        .is_err());
+        assert!(call(
+            "export_file",
+            &mut core,
+            json!({ "path": "/tmp/x.webm", "format": "webm_range", "from": 0 })
+        )
+        .is_err());
+        assert!(call(
+            "export_file",
+            &mut core,
+            json!({ "path": "/tmp/x.mp4", "format": "mp4_range", "from": 0.5, "to": 2 })
         )
         .is_err());
     }
