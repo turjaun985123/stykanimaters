@@ -1631,6 +1631,18 @@ fn prev_next_key_jumps_between_camera_keys() {
     // column, so scroll to it first.
     tap(&mut rt, "frame-1");
     assert_eq!(rt.state.core.current, 0);
+    // Phase N: the P16 mount order moved Playback above
+    // Camera, so the scroll now stops with this button low
+    // in the viewport — inside the toast stack's
+    // bottom-right corner, where the Set-key toasts would
+    // swallow the press. Let them expire first (poll
+    // expires by the virtual clock as frames advance).
+    for _ in 0..600 {
+        if rt.state.toasts.is_empty() {
+            break;
+        }
+        rt.frame(DT);
+    }
     scroll_into_view(&mut rt, "pb-next-key");
     tap(&mut rt, "pb-next-key");
     assert_eq!(
