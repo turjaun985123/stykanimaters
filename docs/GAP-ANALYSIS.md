@@ -399,14 +399,16 @@ Nothing in this section is CI-verified yet; statuses move to
 the per-wave tables above once the run is green, and
 docs/COMPARISON.md is refreshed after that run.
 
-## Wave 12 (in progress, 2026-11-08)
+## Wave 12 (delivered 2026-11-08, CI run 42442484756 green on 0139fa0, 779 tests)
 
 Twenty code agents, aimed at the top remaining gaps listed in
 docs/COMPARISON.md — depth in the five systems rather than new
 feature families. Everything below is implemented in Wave 12;
 CI verification happens at integration (per the repo rule, CI
-is the first build/test any of this gets), so no item here is
-claimed verified yet.
+is the first build/test any of this gets). Two CI fix commits
+followed (a test closure lifetime in projects.rs, and a wrong
+slug literal in the fig3d pose-library test); run 42442484756
+is green with 779 tests.
 
 - **Brush model depth** — the brush model gains opacity and
   scatter, a Spray brush joins the library, and spray offsets
