@@ -319,6 +319,7 @@ fn rich_project() -> Project {
         },
         figure: 0,
         node: 0,
+        hidden: false,
     });
     project
 }
@@ -376,6 +377,7 @@ fn spray_stroke_renders_deterministically_and_differs_from_plain() {
         widths: Vec::new(),
         fill: None,
         spray: None,
+        opacity: 1.0,
     };
     let spray_stroke = Stroke {
         spray: Some(SprayMark {

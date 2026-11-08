@@ -1361,7 +1361,7 @@ mod spray_wave13_tests {
 
 #[cfg(test)]
 mod audio_gain_tests {
-    use crate::model::{AudioClip, Project};
+    use crate::model::{AudioClip, FxClipEntry, Project, Stroke};
 
     #[test]
     fn audio_clip_json_without_gain_defaults_to_unity() {
