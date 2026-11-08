@@ -1595,7 +1595,7 @@ playback_speed: 1.0,
         assert!(core.project.camera.is_empty());
         core.undo();
         assert_eq!(core.project.camera.len(), 1);
-        let k = core.project.camera[0];
+        let k = &core.project.camera[0];
         assert_eq!((k.frame, k.x, k.y, k.zoom, k.angle), (2, 999.0, 888.0, 3.0, 45.0));
     }
 
