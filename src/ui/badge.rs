@@ -112,15 +112,15 @@ pub fn tag(text: &str) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{count_label, tone_colors, Tone};
-    use crate::ui_kit::{C_CELL, C_ERROR};
+    use crate::ui_kit::{C_ACCENT, C_CELL, C_ERROR, C_INK, C_MUTED};
 
     #[test]
     fn tone_colors_match_the_kit_palette() {
-        assert_eq!(tone_colors(Tone::Neutral), (C_CELL, 0x9AA3B2));
-        assert_eq!(tone_colors(Tone::Accent), (0x3D5A99, 0xE8E8EC));
-        assert_eq!(tone_colors(Tone::Success), (0x2E7D4F, 0xE8E8EC));
-        assert_eq!(tone_colors(Tone::Warn), (0x8A6D1F, 0xE8E8EC));
-        assert_eq!(tone_colors(Tone::Error), (C_ERROR, 0xE8E8EC));
+        assert_eq!(tone_colors(Tone::Neutral), (C_CELL, C_MUTED));
+        assert_eq!(tone_colors(Tone::Accent), (C_ACCENT, C_INK));
+        assert_eq!(tone_colors(Tone::Success), (0x2E7D4F, C_INK));
+        assert_eq!(tone_colors(Tone::Warn), (0x8A6D1F, C_INK));
+        assert_eq!(tone_colors(Tone::Error), (C_ERROR, C_INK));
     }
 
     #[test]

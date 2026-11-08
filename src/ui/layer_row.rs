@@ -87,8 +87,8 @@ mod tests {
     #[test]
     fn selected_row_is_the_opaque_accent() {
         assert_eq!(row_bg(true, false), (C_ACCENT << 8) | 0xFF);
-        // The accent itself, pinned: 0x3D5A99 with full alpha.
-        assert_eq!(row_bg(true, false), 0x3D5A_99FF);
+        // The accent itself, pinned: 0x6C8CFF with full alpha.
+        assert_eq!(row_bg(true, false), 0x6C8C_FFFF);
     }
 
     #[test]
@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn dimmed_row_is_the_opaque_panel_colour() {
         assert_eq!(row_bg(false, true), (C_PANEL << 8) | 0xFF);
-        assert_eq!(row_bg(false, true), 0x2226_2FFF);
+        assert_eq!(row_bg(false, true), 0x1D22_2BFF);
     }
 
     #[test]

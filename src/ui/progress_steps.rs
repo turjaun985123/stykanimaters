@@ -111,7 +111,7 @@ pub fn steps_row(labels: &[&str], current: usize) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{step_dot_color, step_state, steps_row, StepState};
-    use crate::ui_kit::C_CELL;
+    use crate::ui_kit::{C_ACCENT, C_CELL};
 
     #[test]
     fn step_state_compares_index_against_current() {
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn step_dot_color_matches_the_kit_palette() {
         assert_eq!(step_dot_color(StepState::Done), 0x2E7D4F);
-        assert_eq!(step_dot_color(StepState::Current), 0x3D5A99);
+        assert_eq!(step_dot_color(StepState::Current), C_ACCENT);
         assert_eq!(step_dot_color(StepState::Todo), C_CELL);
     }
 

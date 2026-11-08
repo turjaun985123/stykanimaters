@@ -106,33 +106,33 @@ pub fn frame_chip(number: usize, state: ChipState) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{chip_colors, ChipState};
-    use crate::ui_kit::C_CELL;
+    use crate::ui_kit::{C_ACCENT, C_CELL, C_INK};
 
     #[test]
     fn normal_chip_is_neutral_with_ink_text() {
-        assert_eq!(chip_colors(ChipState::Normal), (C_CELL, 0xE8E8EC));
+        assert_eq!(chip_colors(ChipState::Normal), (C_CELL, C_INK));
     }
 
     #[test]
     fn current_chip_is_accent_with_ink_text() {
-        assert_eq!(chip_colors(ChipState::Current), (0x3D5A99, 0xE8E8EC));
+        assert_eq!(chip_colors(ChipState::Current), (C_ACCENT, C_INK));
     }
 
     #[test]
     fn in_range_chip_is_dimmed_accent_with_ink_text() {
-        assert_eq!(chip_colors(ChipState::InRange), (0x2E4470, 0xE8E8EC));
+        assert_eq!(chip_colors(ChipState::InRange), (0x2E4470, C_INK));
     }
 
     #[test]
     fn keyframe_chip_is_neutral_with_accent_text() {
-        assert_eq!(chip_colors(ChipState::Keyframe), (C_CELL, 0x3D5A99));
+        assert_eq!(chip_colors(ChipState::Keyframe), (C_CELL, C_ACCENT));
     }
 
     #[test]
     fn current_keyframe_chip_matches_current() {
         assert_eq!(
             chip_colors(ChipState::CurrentKeyframe),
-            (0x3D5A99, 0xE8E8EC)
+            (C_ACCENT, C_INK)
         );
         assert_eq!(
             chip_colors(ChipState::CurrentKeyframe),
