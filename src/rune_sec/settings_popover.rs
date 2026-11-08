@@ -129,6 +129,23 @@
 //!   state. The chips render through plain `btn`, the
 //!   popover's picker-grid idiom (the language and
 //!   workspace grids): their labels ARE the data.
+//! * **Live MCP control** — a kit `toggle_row` (key
+//!   `settings-live-mcp`) starting / stopping the
+//!   editor-hosted MCP endpoint (`crate::live_mcp`; loopback
+//!   HTTP on port 32117). The row's state reads the bridge
+//!   itself (`live_mcp::is_enabled`) — the bridge is the
+//!   truth, never a mirrored bool in shell state — and the
+//!   press runs through [`toggle_live_mcp`], which persists
+//!   the RESULTING state to `LayoutPrefs.live_mcp` (so a
+//!   failed start is not remembered as on) and reports
+//!   through the core's status line: on names the endpoint,
+//!   a failed start names the busy port. The note under the
+//!   row shows the endpoint and says plainly that while on,
+//!   any program on this computer can drive the editor —
+//!   the endpoint has no password in this version (the
+//!   bridge module's own docs carry the full warning). The
+//!   bridge starts at launch when the persisted preference
+//!   is on; this toggle is its runtime switch.
 //! * **Startup workspace (Phase G)** — a compact picker
 //!   (eight buttons, the language grid's 4-wide layout)
 //!   naming the workspace the shell opens in. Picking one
@@ -191,8 +208,7 @@
 //!
 //! ## Persistence
 //!
-//! No new persisted fields are needed for these controls:
-//! theme maps onto the EXISTING `LayoutPrefs.dark`
+//! Theme maps onto the EXISTING `LayoutPrefs.dark`
 //! (`shell.rs`; `dark = !core.light_theme`, default dark),
 //! while language, stage size and default easing all live
 //! on the core/project and persist with the project file
@@ -204,7 +220,13 @@
 //! .dark` at startup and persists `prefs.dark` on change
 //! in `poll` (landed in the Phase D integration; an
 //! earlier note here claimed otherwise and the Phase N
-//! hygiene audit disproved it against the source).
+//! hygiene audit disproved it against the source). The
+//! Live MCP toggle is the one control with its own field:
+//! `LayoutPrefs.live_mcp` (serde-defaulted on, so a prefs
+//! file written before the field existed starts the
+//! bridge at launch), written by [`toggle_live_mcp`]
+//! through the same load-modify-save `poll` uses for the
+//! theme.
 //!
 //! ## Integrator wiring (main.rs)
 //!
@@ -494,6 +516,57 @@ pub fn active_speed_index(speed: f32) -> Option<usize> {
 /// here for the new rate to take effect.
 pub fn set_playback_speed(s: &mut State, speed: f32) {
     s.playback_speed = speed;
+}
+
+// ---- Live MCP control ----
+
+/// Switch live MCP control to the opposite of its current
+/// state — one press of the settings card's Live MCP
+/// toggle. The bridge itself is the state
+/// (`crate::live_mcp::is_enabled`); there is deliberately
+/// no mirrored bool in shell state to drift from it.
+///
+/// `set_enabled` returns the RESULTING state, and that —
+/// not the wish — is what gets persisted to
+/// `LayoutPrefs.live_mcp` (load-modify-save, the pattern
+/// `main`'s poll uses for theme flips) and reported on the
+/// status line:
+/// * started: `"Live MCP on — {endpoint}"`, so the user
+///   can point their MCP client at it;
+/// * asked for on but still off: the bind failed — the
+///   status names the port and the likely cause (another
+///   editor instance already holds it);
+/// * stopped: `"Live MCP off"`.
+pub fn toggle_live_mcp(s: &mut State) {
+    let want_on = !crate::live_mcp::is_enabled();
+    let on = crate::live_mcp::set_enabled(want_on);
+    let mut prefs = stykanimate_rs::shell::load_layout();
+    prefs.live_mcp = on;
+    stykanimate_rs::shell::save_layout(&prefs);
+    s.core.status = if on {
+        format!("Live MCP on — {}", crate::live_mcp::endpoint())
+    } else if want_on {
+        format!(
+            "Live MCP could not start — port {} is in use (another editor instance?).",
+            crate::live_mcp::PORT
+        )
+    } else {
+        "Live MCP off".to_string()
+    };
+}
+
+/// The note line under the Live MCP toggle: the endpoint
+/// an MCP client should be pointed at, and the plain-words
+/// warning the bridge's own module docs carry — while live
+/// control is on, any program running on this computer can
+/// drive the editor, because this version has no password.
+/// Shown in both states: the endpoint is where the client
+/// goes as soon as the toggle is flipped on.
+pub fn live_mcp_note() -> String {
+    format!(
+        "{} — while on, any program on this computer can drive the editor. No password in this version.",
+        crate::live_mcp::endpoint()
+    )
 }
 
 // ---- Startup workspace ----
@@ -910,6 +983,29 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
                     .color(t.text_secondary),
             );
 
+        // Live MCP control: a kit `toggle_row` like the
+        // guides / loop rows above (the pill carries the
+        // state), mounted directly — `settings-live-mcp`
+        // is the one new key this section adds. The row's
+        // state reads the bridge itself — `live_mcp::
+        // is_enabled`, never a mirrored bool — and the
+        // press runs through toggle_live_mcp (start/stop +
+        // persist + status). Under it, the note line: the
+        // endpoint for the user's MCP client and the
+        // plain-words no-password warning.
+        card = card
+            .child(design::section_label("Live MCP", t))
+            .child(design::toggle_row(
+                "settings-live-mcp",
+                "Live MCP control",
+                crate::live_mcp::is_enabled(),
+                t,
+                |s: &mut State| {
+                    toggle_live_mcp(s);
+                },
+            ))
+            .child(note_line(t, &live_mcp_note()));
+
         // Startup workspace: the eight workspaces as a
         // button grid (the language grid's layout), the
         // current one highlighted. Picking one switches
@@ -1321,6 +1417,24 @@ playback_speed: 1.0,
         // note and the Playback block).
         state.settings.open = true;
         let _ = settings_popover(&state, &t);
+    }
+
+    #[test]
+    #[test]
+    fn live_mcp_note_names_the_endpoint_and_the_warning() {
+        let note = live_mcp_note();
+        // The endpoint is the bridge's own, so the note can
+        // never drift from the address the client must use.
+        assert!(note.starts_with(&crate::live_mcp::endpoint()), "{note}");
+        assert!(note.contains("http://127.0.0.1:32117/mcp"), "{note}");
+        // The plain-words warning rides along: while on,
+        // any local program can drive the editor.
+        assert!(note.contains("any program on this computer"), "{note}");
+        assert!(note.contains("No password in this version."), "{note}");
+        // Deliberately NOT tested here: toggle_live_mcp —
+        // it starts the real bridge (binds the port), and
+        // the socket-binding proof lives in live_mcp's own
+        // end-to-end test, the suite's only one.
     }
 
     #[test]

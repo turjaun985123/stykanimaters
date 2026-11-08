@@ -627,12 +627,14 @@ mod tests {
             timeline_collapsed: true,
             sidebar_visible: false,
             palette_recents: Vec::new(),
+            live_mcp: false,
         };
         let out = prefs_with_workspace(&prefs, Workspace::Audio);
         assert_eq!(out.workspace, "Audio");
         assert!(!out.dark);
         assert!(out.timeline_collapsed);
         assert!(!out.sidebar_visible);
+        assert!(!out.live_mcp);
         assert_eq!(from_prefs(&out), Workspace::Audio);
     }
 

@@ -8,9 +8,12 @@
 //! [`McpServer::handle`] is pure with respect to IO — it takes one
 //! parsed JSON-RPC message and returns the response message, or
 //! `None` for notifications, which JSON-RPC says must not be
-//! answered. All editing state lives in the wrapped
-//! [`crate::editor::EditorCore`], so every tool sees (and mutates)
-//! the same project the GUI would.
+//! answered. All editing state lives in an
+//! [`crate::editor::EditorCore`]: the server's own wrapped core
+//! when routing through `handle`, or a host-supplied core when
+//! routing through [`McpServer::handle_on`] — the live-control
+//! path, where the GUI hands over its session's core so every
+//! tool edits the project the user is looking at.
 //!
 //! Supported methods: `initialize`, `ping`, `tools/list`,
 //! `tools/call`. Unknown methods get a `-32601` error; unroutable
@@ -55,6 +58,9 @@ pub fn all_tools() -> Vec<Tool> {
 }
 
 /// The MCP server: one editor core plus the JSON-RPC router.
+/// The wrapped core is the edit target for
+/// [`McpServer::handle`]; [`McpServer::handle_on`] routes against
+/// a caller-supplied core instead and leaves this one untouched.
 pub struct McpServer {
     pub core: crate::editor::EditorCore,
 }
@@ -72,11 +78,45 @@ impl McpServer {
         }
     }
 
-    /// Route one parsed JSON-RPC message. Returns the response
-    /// message, or `None` when the message is a notification (no
-    /// `id` member) — notifications are never answered, known or
-    /// not.
+    /// Route one parsed JSON-RPC message against this server's
+    /// own core. Returns the response message, or `None` when the
+    /// message is a notification (no `id` member) — notifications
+    /// are never answered, known or not.
+    ///
+    /// A thin delegate over the shared router with
+    /// `&mut self.core` as the edit target — the stdio binary's
+    /// path, behaviour unchanged.
     pub fn handle(&mut self, msg: &serde_json::Value) -> Option<serde_json::Value> {
+        Self::dispatch(&mut self.core, msg)
+    }
+
+    /// Route one parsed JSON-RPC message against an EXTERNAL
+    /// editor core — the live-control path: a host that owns an
+    /// [`EditorCore`](crate::editor::EditorCore) of its own (the
+    /// GUI's live session) hands it over for the duration of the
+    /// call, and every `tools/call` in the message runs against
+    /// that core. `self` is only the dispatch host here: this
+    /// server's own `core` is neither read nor mutated, so a host
+    /// may keep one `McpServer` purely as a router.
+    ///
+    /// The routing itself — the notification rule, the method
+    /// set, the error shapes — is exactly [`McpServer::handle`]'s.
+    pub fn handle_on(
+        &mut self,
+        core: &mut crate::editor::EditorCore,
+        msg: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        Self::dispatch(core, msg)
+    }
+
+    /// The JSON-RPC router shared by [`McpServer::handle`] and
+    /// [`McpServer::handle_on`]: everything below is
+    /// parameterised over the `core` the caller chose as the
+    /// edit target, never over `self`.
+    fn dispatch(
+        core: &mut crate::editor::EditorCore,
+        msg: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
         if !msg.is_object() {
             return Some(error_response(
                 Value::Null,
@@ -96,10 +136,10 @@ impl McpServer {
             ));
         };
         match method {
-            "initialize" => Some(success_response(id, self.initialize_result())),
+            "initialize" => Some(success_response(id, Self::initialize_result())),
             "ping" => Some(success_response(id, json!({}))),
-            "tools/list" => Some(success_response(id, self.tools_list_result())),
-            "tools/call" => Some(self.tools_call_result(id, msg.get("params"))),
+            "tools/list" => Some(success_response(id, Self::tools_list_result())),
+            "tools/call" => Some(Self::tools_call_result(core, id, msg.get("params"))),
             other => Some(error_response(
                 id,
                 -32601,
@@ -108,7 +148,7 @@ impl McpServer {
         }
     }
 
-    fn initialize_result(&self) -> Value {
+    fn initialize_result() -> Value {
         json!({
             "protocolVersion": "2024-11-05",
             "capabilities": { "tools": {} },
@@ -119,7 +159,7 @@ impl McpServer {
         })
     }
 
-    fn tools_list_result(&self) -> Value {
+    fn tools_list_result() -> Value {
         let tools: Vec<Value> = all_tools()
             .iter()
             .map(|t| {
@@ -133,7 +173,11 @@ impl McpServer {
         json!({ "tools": tools })
     }
 
-    fn tools_call_result(&mut self, id: Value, params: Option<&Value>) -> Value {
+    fn tools_call_result(
+        core: &mut crate::editor::EditorCore,
+        id: Value,
+        params: Option<&Value>,
+    ) -> Value {
         let Some(params) = params else {
             return error_response(id, -32602, "Invalid params: missing params object");
         };
@@ -146,7 +190,7 @@ impl McpServer {
         let Some(tool) = tools.iter().find(|t| t.name == name) else {
             return tool_result(id, Err(format!("unknown tool: {name}")));
         };
-        tool_result(id, (tool.handler)(&mut self.core, args))
+        tool_result(id, (tool.handler)(core, args))
     }
 }
 
@@ -455,5 +499,102 @@ mod tests {
         let mut server = McpServer::new();
         let resp = server.handle(&json!([1, 2, 3])).expect("answered");
         assert_eq!(resp["error"]["code"], -32600);
+    }
+
+    /// Same as [`call_payload`], but routed through
+    /// [`McpServer::handle_on`] against a caller-owned core.
+    fn call_payload_on(
+        server: &mut McpServer,
+        core: &mut crate::editor::EditorCore,
+        name: &str,
+        args: Value,
+    ) -> (Value, bool) {
+        let resp = server
+            .handle_on(
+                core,
+                &request(1, "tools/call", json!({ "name": name, "arguments": args })),
+            )
+            .expect("tools/call is a request and must be answered");
+        let result = &resp["result"];
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("content block carries text");
+        let is_error = result["isError"].as_bool().unwrap_or(false);
+        (
+            serde_json::from_str(text).unwrap_or(Value::String(text.to_string())),
+            is_error,
+        )
+    }
+
+    #[test]
+    fn handle_on_set_frame_moves_the_passed_core_only() {
+        let mut server = McpServer::new();
+        let mut external = crate::editor::EditorCore::new();
+        assert!(
+            external.project.frames.len() >= 2,
+            "demo project needs multiple frames"
+        );
+        let (out, is_error) =
+            call_payload_on(&mut server, &mut external, "set_frame", json!({ "frame": 1 }));
+        assert!(!is_error);
+        assert_eq!(out["current_frame"], 1);
+        assert_eq!(external.current, 1, "the passed core moved");
+        assert_eq!(server.core.current, 0, "the server's own core must not move");
+    }
+
+    #[test]
+    fn handle_on_content_tool_mutates_the_passed_core_only() {
+        let mut server = McpServer::new();
+        let mut external = crate::editor::EditorCore::new();
+        let own_figures = server.core.project.figures.len();
+        let ext_figures = external.project.figures.len();
+        let (_out, is_error) = call_payload_on(
+            &mut server,
+            &mut external,
+            "add_figure",
+            json!({ "kind": "mini" }),
+        );
+        assert!(!is_error);
+        assert_eq!(
+            external.project.figures.len(),
+            ext_figures + 1,
+            "the figure landed on the passed core"
+        );
+        assert_eq!(
+            server.core.project.figures.len(),
+            own_figures,
+            "the server's own core gained nothing"
+        );
+        // The change is visible through the same external route…
+        let (state, is_error) =
+            call_payload_on(&mut server, &mut external, "get_state", json!({}));
+        assert!(!is_error);
+        assert_eq!(
+            state["figures"].as_array().expect("figures array").len(),
+            ext_figures + 1
+        );
+        // …but not through the server's own core.
+        let (own_state, is_error) = call_payload(&mut server, "get_state", json!({}));
+        assert!(!is_error);
+        assert_eq!(
+            own_state["figures"].as_array().expect("figures array").len(),
+            own_figures
+        );
+    }
+
+    #[test]
+    fn handle_on_keeps_the_notification_rule_and_routing() {
+        let mut server = McpServer::new();
+        let mut external = crate::editor::EditorCore::new();
+        let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+        assert!(server.handle_on(&mut external, &note).is_none());
+        let resp = server
+            .handle_on(&mut external, &request(5, "initialize", json!({})))
+            .expect("initialize must be answered");
+        assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
+        let resp = server
+            .handle_on(&mut external, &request(6, "resources/list", json!({})))
+            .expect("unknown methods with an id must be answered");
+        assert_eq!(resp["error"]["code"], -32601);
     }
 }

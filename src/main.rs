@@ -18,6 +18,7 @@
 //! untouched.
 
 mod chrome_view;
+mod live_mcp;
 mod rune_sec;
 mod stage_view;
 
@@ -46,6 +47,23 @@ thread_local! {
     /// thread-local hand-off pattern other sections use
     /// (clips selection, camera clipboard).
     static STAGE_EL_SIZE: std::cell::Cell<[f32; 2]> = const { std::cell::Cell::new([0.0, 0.0]) };
+}
+
+thread_local! {
+    /// The live-MCP router (see `live_mcp`): an `McpServer`
+    /// used purely as a JSON-RPC dispatcher. `poll` drains
+    /// the bridge's request queue through it against the
+    /// LIVE core via `McpServer::handle_on`, so the router's
+    /// own core is never the edit target and stays untouched.
+    /// A thread-local for the same reason as `STAGE_EL_SIZE`
+    /// — shell plumbing with no home in `State` (the State
+    /// census is integrator-gated) — and a lazy one:
+    /// `McpServer::new` builds an `EditorCore`, so it is not
+    /// a const constructor and cannot ride the `const {}`
+    /// block above. The UI thread is the only thread that
+    /// ever polls, so the router lives where it is used.
+    static MCP_ROUTER: std::cell::RefCell<stykanimate_rs::mcp::McpServer> =
+        std::cell::RefCell::new(stykanimate_rs::mcp::McpServer::new());
 }
 
 /// A destructive session action armed and awaiting its
@@ -216,6 +234,18 @@ fn init() -> State {
     // and `poll` writes changes back.
     let layout = stykanimate_rs::shell::load_layout();
     core.light_theme = !layout.dark;
+    // Live MCP control starts with the editor when the
+    // persisted preference says so (LayoutPrefs::live_mcp,
+    // which defaults to on for prefs files written before
+    // the field existed). A failed start — in practice
+    // another editor instance already holding the port —
+    // is not fatal and needs no message here: the bridge
+    // simply stays off, and the Settings card's Live MCP
+    // toggle reads the bridge's real state, so the user
+    // sees it off and can retry once the port is free.
+    if layout.live_mcp {
+        let _ = live_mcp::set_enabled(true);
+    }
     if let Some(msg) = rune_sec::home_panel::startup_status() {
         core.status = msg;
     }
@@ -375,7 +405,9 @@ fn stage_wheel(s: &mut State, e: WheelEvent) -> bool {
 /// Shell housekeeping + playback clock. Housekeeping: status
 /// changes become toasts (expired here; while any toast is
 /// live the shell wakes twice a second so they fade on time),
-/// and theme flips persist to the layout prefs. Playback:
+/// theme flips persist to the layout prefs, and queued
+/// live-MCP requests drain against the live core (see
+/// `live_mcp`). Playback:
 /// while `core.playing`, advance the playhead by the real
 /// elapsed time (clamped so a long stall doesn't jump) and
 /// schedule the next frame at the project fps interval — the
@@ -398,6 +430,23 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     let now = t as f32;
     s.toast_now = now;
     let mut redraw = false;
+    // Live MCP control: requests queued by the bridge's
+    // listener thread run HERE, on the UI thread, against
+    // the live core — so the stage, timeline and panels
+    // show the client's edits as they land (the `live_mcp`
+    // module docs carry the synchronisation contract).
+    // Drained before the status check below so a tool's
+    // status line toasts in the same tick it was written,
+    // and capped per tick so a request burst cannot stall
+    // the frame; the queue keeps the rest for the next one.
+    if live_mcp::is_enabled() {
+        let drained = MCP_ROUTER.with(|router| {
+            live_mcp::drain(&mut s.core, &mut router.borrow_mut(), 8)
+        });
+        if drained > 0 {
+            redraw = true;
+        }
+    }
     if s.core.status != s.last_status {
         s.last_status = s.core.status.clone();
         if !s.last_status.is_empty() {

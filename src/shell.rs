@@ -247,9 +247,10 @@ fn default_true() -> bool {
 }
 
 /// Window layout preferences persisted across runs: which
-/// workspace was active, whether the dark theme was on, and
-/// the timeline / sidebar arrangement of the context-first
-/// shell. Stored as JSON at `.layout.json` in the projects
+/// workspace was active, whether the dark theme was on, the
+/// timeline / sidebar arrangement of the context-first
+/// shell, and whether live MCP control starts with the
+/// editor. Stored as JSON at `.layout.json` in the projects
 /// dir. The newer fields carry serde defaults so a
 /// `.layout.json` written by an older build still loads.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -273,11 +274,20 @@ pub struct LayoutPrefs {
     /// other field.
     #[serde(default)]
     pub palette_recents: Vec<String>,
+    /// Whether live MCP control — the editor-hosted MCP
+    /// endpoint (`live_mcp` in the shell; loopback HTTP on
+    /// port 32117) — starts with the editor. Read by the
+    /// shell's `init`, written back by the Settings card's
+    /// Live MCP toggle (the resulting state, so a failed
+    /// start is never remembered as on).
+    #[serde(default = "default_true")]
+    pub live_mcp: bool,
 }
 
 impl Default for LayoutPrefs {
     /// The first-run layout: the Animate workspace, dark
-    /// theme, timeline expanded, sidebar visible.
+    /// theme, timeline expanded, sidebar visible, live MCP
+    /// control on (see [`LayoutPrefs::live_mcp`]).
     fn default() -> Self {
         LayoutPrefs {
             workspace: "Animate".to_string(),
@@ -285,6 +295,7 @@ impl Default for LayoutPrefs {
             timeline_collapsed: false,
             sidebar_visible: true,
             palette_recents: Vec::new(),
+            live_mcp: true,
         }
     }
 }
@@ -611,6 +622,9 @@ mod tests {
         // make the whole file read as corrupt.
         assert!(!prefs.timeline_collapsed);
         assert!(prefs.sidebar_visible);
+        // Live MCP defaults ON for a pre-field file (the
+        // serde default is `default_true`, like the sidebar).
+        assert!(prefs.live_mcp);
         assert_eq!(
             prefs,
             LayoutPrefs {
@@ -631,6 +645,7 @@ mod tests {
             timeline_collapsed: true,
             sidebar_visible: false,
             palette_recents: Vec::new(),
+            live_mcp: false,
         };
         save_layout_in(&dir, &prefs);
         // The non-default values are really on disk, not
@@ -638,6 +653,7 @@ mod tests {
         let text = std::fs::read_to_string(dir.join(LAYOUT_FILE)).unwrap();
         assert!(text.contains("\"timeline_collapsed\": true"), "{text}");
         assert!(text.contains("\"sidebar_visible\": false"), "{text}");
+        assert!(text.contains("\"live_mcp\": false"), "{text}");
         assert_eq!(load_layout_in(&dir), prefs);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -653,6 +669,7 @@ mod tests {
             timeline_collapsed: true,
             sidebar_visible: false,
             palette_recents: Vec::new(),
+            live_mcp: false,
         };
         save_layout_in(&dir, &prefs);
 
@@ -675,6 +692,7 @@ mod tests {
         assert!(!after.dark);
         assert!(after.timeline_collapsed);
         assert!(!after.sidebar_visible);
+        assert!(!after.live_mcp);
         assert_eq!(
             after,
             LayoutPrefs {
