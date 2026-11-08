@@ -17,15 +17,12 @@
 
 use gpui::*;
 
-use crate::ui_kit::{C_ACCENT, C_BORDER, C_INK, C_MUTED};
+use crate::ui_kit::{C_ACCENT, C_BORDER, C_CELL, C_INK, C_MUTED};
 
 /// Loop-range cell shading: the dimmed accent the frame chips
 /// themselves use for in-range cells, so the ruler and the chips
 /// read as one block.
 const C_LOOP: u32 = 0x2E4470;
-/// Neutral cell background, shared with the chips and dopesheet.
-const C_CELL: u32 = 0x2C313A;
-
 /// The labelling interval for a timeline of `frame_count` frames:
 /// every frame is numbered on short timelines, and the step grows
 /// as the timeline does so the numbers never crowd. Never 0 — a

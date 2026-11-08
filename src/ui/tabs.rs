@@ -12,19 +12,35 @@
 
 use gpui::*;
 
-use crate::ui_kit::{C_ACCENT, C_INK, C_MUTED};
+use crate::ui_kit::{C_ACCENT, C_BORDER, C_CELL, C_INK, C_MUTED};
 
 /// Background of one tab: the accent colour for the active tab,
 /// the neutral button grey (`btn()`'s resting background in
 /// `app.rs`) for the rest.
 pub fn tab_bg(active: bool) -> u32 {
-    if active { C_ACCENT } else { 0x2C313A }
+    if active { C_ACCENT } else { C_CELL }
 }
 
 /// Text colour of one tab: ink for the active tab, muted for
 /// the rest.
 pub fn tab_fg(active: bool) -> u32 {
     if active { C_INK } else { C_MUTED }
+}
+
+/// Underline colour of one tab: the accent for the active tab,
+/// the kit's border colour for the rest.
+///
+/// This is a pure colour rule, split out from [`tab_strip`]
+/// (which paints no underline itself) so callers that want the
+/// modern tab treatment — a coloured bottom edge instead of, or
+/// alongside, the filled [`tab_bg`] — share one definition of
+/// which colour goes where: apply it as the bottom border of a
+/// tab element, e.g. `.border_b_2()` with
+/// `.border_color(rgb(tab_underline(is_active)))`, and the
+/// active tab is marked by its accent edge while inactive tabs
+/// blend into the strip's separator line.
+pub fn tab_underline(active: bool) -> u32 {
+    if active { C_ACCENT } else { C_BORDER }
 }
 
 /// One styled tab per label, in label order: rounded top
@@ -58,8 +74,8 @@ pub fn tab_strip(labels: &[&str], active: usize) -> Vec<Div> {
 
 #[cfg(test)]
 mod tests {
-    use super::{tab_bg, tab_fg, tab_strip};
-    use crate::ui_kit::{C_ACCENT, C_INK, C_MUTED};
+    use super::{tab_bg, tab_fg, tab_strip, tab_underline};
+    use crate::ui_kit::{C_ACCENT, C_BORDER, C_CELL, C_INK, C_MUTED};
 
     #[test]
     fn active_tab_uses_accent_background_and_ink_text() {
@@ -69,8 +85,15 @@ mod tests {
 
     #[test]
     fn inactive_tab_uses_neutral_background_and_muted_text() {
-        assert_eq!(tab_bg(false), 0x2C313A);
+        assert_eq!(tab_bg(false), C_CELL);
         assert_eq!(tab_fg(false), C_MUTED);
+    }
+
+    #[test]
+    fn underline_marks_only_the_active_tab_with_the_accent() {
+        assert_eq!(tab_underline(true), C_ACCENT);
+        assert_eq!(tab_underline(false), C_BORDER);
+        assert_ne!(tab_underline(true), tab_underline(false));
     }
 
     #[test]

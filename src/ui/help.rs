@@ -31,6 +31,14 @@ pub fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
         ("I", "Insert an inbetween frame"),
         ("O", "Toggle onion skin"),
         ("C", "Toggle camera mode"),
+        ("Alt+1", "Workspace: Animate"),
+        ("Alt+2", "Workspace: Draw"),
+        ("Alt+3", "Workspace: Build"),
+        ("Alt+4", "Workspace: Graph"),
+        ("Alt+5", "Workspace: Effects"),
+        ("Alt+6", "Workspace: Audio"),
+        ("Alt+7", "Workspace: 3D"),
+        ("Alt+8", "Workspace: Export"),
         ("Enter", "Text editing: confirm and set the text"),
         ("Esc", "Text editing: cancel without setting the text"),
         ("Backspace", "Text editing: delete the character before the cursor"),
@@ -155,8 +163,8 @@ mod tests {
     use super::{group_rows, shortcut_rows};
 
     #[test]
-    fn shortcut_rows_has_exactly_19_rows() {
-        assert_eq!(shortcut_rows().len(), 19);
+    fn shortcut_rows_has_exactly_27_rows() {
+        assert_eq!(shortcut_rows().len(), 27);
     }
 
     #[test]
@@ -167,6 +175,9 @@ mod tests {
         assert_eq!(rows[0], ("Space", "Play / pause"));
         assert!(rows.contains(&("Ctrl+Z", "Undo")));
         assert!(rows.contains(&("Ctrl+Shift+Z", "Redo")));
+        // First and last of the eight workspace switches.
+        assert!(rows.contains(&("Alt+1", "Workspace: Animate")));
+        assert!(rows.contains(&("Alt+8", "Workspace: Export")));
         // Left/Right appear twice: once global, once in the
         // text-authoring capture.
         assert_eq!(rows.iter().filter(|(k, _)| *k == "Left").count(), 2);
@@ -176,15 +187,16 @@ mod tests {
     #[test]
     fn shortcut_rows_globals_come_before_text_editing_rows() {
         let rows = shortcut_rows();
-        // The 10 global bindings come first; every row after
-        // them is a text-authoring row whose action says so.
-        for (key, action) in &rows[..10] {
+        // The 18 global bindings come first (10 general bindings
+        // plus the 8 Alt+number workspace switches); every row
+        // after them is a text-authoring row whose action says so.
+        for (key, action) in &rows[..18] {
             assert!(
                 !action.starts_with("Text editing:"),
                 "global row {key} is marked as text editing"
             );
         }
-        for (key, action) in &rows[10..] {
+        for (key, action) in &rows[18..] {
             assert!(
                 action.starts_with("Text editing:"),
                 "text-editing row {key} is not marked as such"

@@ -68,9 +68,13 @@ present and fall back to a folder-based flow when neither exists.
   segment (FK aim); dragging the hips moves the figure; a mirror
   op flips the current pose (the 3D session mirrors poses too).
 - **Editor UI** (`src/app.rs`, `src/ui_kit.rs`, `src/ui_*.rs`) —
-  redesigned chrome: a slim **app bar** (brand, File/Edit, panel
-  toggles, frame/FPS chips) over labelled **tool-group panels**
-  instead of a flat button wall. Panels for the keyframe graph,
+  redesigned chrome on a shared token-based design system: a
+  slim **app bar** (brand, File/Edit, panel toggles, frame/FPS
+  chips) over labelled **tool-group panels** instead of a flat
+  button wall. Eight **workspace presets** (Animate, Draw,
+  Build, Graph, Effects, Audio, 3D, Export) under the app bar
+  (Alt+1…8) arrange the panels and modes around one task; the
+  chosen workspace and theme persist between launches. Panels for the keyframe graph,
   audio, FX clips, movieclips, colour picker, easing picker,
   inspector, export centre and help; a per-figure **dopesheet**
   above the timeline; a state HUD above the framed canvas; status

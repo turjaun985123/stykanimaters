@@ -14,7 +14,7 @@
 //! padding, fully rounded, 12px text) so badges and chips can
 //! sit in the same row without a visible size step.
 
-use crate::ui_kit::{C_ACCENT, C_BORDER, C_INK, C_MUTED, C_PANEL};
+use crate::ui_kit::{C_ACCENT, C_BORDER, C_CELL, C_ERROR, C_INK, C_MUTED, C_PANEL};
 use gpui::*;
 
 /// Semantic tone of a badge or dot. The tone picks a background
@@ -40,11 +40,11 @@ pub enum Tone {
 /// same grey `info_chip` uses when inactive.
 pub fn tone_colors(tone: Tone) -> (u32, u32) {
     match tone {
-        Tone::Neutral => (0x2C313A, C_MUTED),
+        Tone::Neutral => (C_CELL, C_MUTED),
         Tone::Accent => (C_ACCENT, C_INK),
         Tone::Success => (0x2E7D4F, C_INK),
         Tone::Warn => (0x8A6D1F, C_INK),
-        Tone::Error => (0xB23A3A, C_INK),
+        Tone::Error => (C_ERROR, C_INK),
     }
 }
 
@@ -112,14 +112,15 @@ pub fn tag(text: &str) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{count_label, tone_colors, Tone};
+    use crate::ui_kit::{C_CELL, C_ERROR};
 
     #[test]
     fn tone_colors_match_the_kit_palette() {
-        assert_eq!(tone_colors(Tone::Neutral), (0x2C313A, 0x9AA3B2));
+        assert_eq!(tone_colors(Tone::Neutral), (C_CELL, 0x9AA3B2));
         assert_eq!(tone_colors(Tone::Accent), (0x3D5A99, 0xE8E8EC));
         assert_eq!(tone_colors(Tone::Success), (0x2E7D4F, 0xE8E8EC));
         assert_eq!(tone_colors(Tone::Warn), (0x8A6D1F, 0xE8E8EC));
-        assert_eq!(tone_colors(Tone::Error), (0xB23A3A, 0xE8E8EC));
+        assert_eq!(tone_colors(Tone::Error), (C_ERROR, 0xE8E8EC));
     }
 
     #[test]

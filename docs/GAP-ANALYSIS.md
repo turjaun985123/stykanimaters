@@ -543,3 +543,84 @@ any of this gets), so no item here is claimed verified yet.
 Nothing in this section is CI-verified yet; statuses move
 to the per-wave tables above once the run is green, and
 docs/COMPARISON.md is refreshed after that run.
+
+## Wave 14 — REDESIGN program, phase 1-2 + shell (in progress, 2026-11-08)
+
+Wave 14 is not a feature wave. It is the first slice of a
+seven-phase professional-studio redesign directive aimed at
+the desktop GUI itself: its visual quality, consistency,
+layout and usability. This wave covers phase 1 (repository
+and GUI audit), phase 2 (design-system foundation) and the
+application-shell layer that organises the existing panels
+and modes into workspaces. The later phases — depth work
+inside the animation, drawing, effects, audio and 3D
+workspaces, project/workflow improvements, optimisation and
+final integration — are not claimed here. Everything below
+is implemented in Wave 14; CI verification happens at
+integration (per the repo rule, CI is the first build/test
+any of this gets), so no item here is claimed verified yet.
+
+- **Audit and coordination docs** — the phase-1 audit
+  produced five documents: `docs/REDESIGN_ARCHITECTURE.md`
+  (module map and redesign strategy),
+  `docs/AGENT_TASK_MATRIX.md` (file ownership across the
+  redesign team), `docs/UI_COMPONENT_CONTRACTS.md` (the
+  agreed component interfaces), `docs/GUI_AUDIT.md` (the
+  critical evaluation of the existing GUI) and
+  `docs/QA_WAVE14.md` (the QA plan for the wave).
+- **Design tokens** — the shared UI kit's constants now
+  carry the redesign directive's palette as token values:
+  main background `#101216`, secondary background
+  `#171A21`, panel `#1D222B`, elevated surface `#252B36`,
+  primary accent `#6C8CFF`, secondary accent `#9B7CFF`,
+  primary text `#F1F3F7`, secondary text `#A1A9B7`, borders
+  `#303745`, alongside spacing, typography and radius
+  scales. A dark/light `Palette` pair defines both themes'
+  tokens; the dark tokens are what the components consume
+  today, and full per-component light-theme adoption is
+  phased work — the light theme is token-complete, not yet
+  applied component by component, and this section does
+  not claim otherwise.
+- **Workspace shell** — eight workspace presets (Animate,
+  Draw, Build, Graph, Effects, Audio, 3D, Export) sit in a
+  selector under the app bar, with Alt+1…8 shortcuts. Each
+  workspace applies real, already-existing panel and mode
+  state — the graph panel, FX panel, audio panel and
+  export centre, draw mode, the 3D session and the
+  inspector — arranged around one task; there are no new
+  panels and no decorative controls. The selected
+  workspace and the theme persist between launches through
+  the shell layer (`src/shell.rs`).
+- **Restyles on the token system** — the tool-group column,
+  timeline layer metrics and the figures sidebar/inspector
+  metrics were restyled onto the shared tokens and scales;
+  the stage gains a dark workspace surround so the framed
+  canvas reads as a scene inside a studio, with Fit and
+  Centre camera buttons backed by new editor framing
+  operations; the Home panel reads as a launcher with
+  distinct sections; the export centre notes when an
+  export will use the timeline's loop range.
+- **Performance** — the timeline's keyframe map is computed
+  once per render instead of being recomputed where it was
+  consumed, removing repeated work from the render path.
+- **Localisation** — eight workspace keys join the string
+  tables in all 28 languages (70 keys total), with genuine
+  translations in 9 languages and the established English
+  placeholder policy for the rest. As with every other
+  button in the app, the workspace chips themselves are
+  still labelled in English; the keys exist so the labels
+  can follow, and this section does not claim they have.
+- **GPUI honesty** — GPUI 0.2.2 has no native drag-docking,
+  tooltips or popover primitives, so the shell is
+  implemented in the form this toolkit actually supports:
+  workspace presets, panel collapse and persisted layout
+  preferences, not simulated docking.
+- **Visual verification is still pending** — the redesigned
+  UI has never been screenshot-verified on a real desktop.
+  CI green proves behaviour and determinism, not looks; the
+  visual verdict waits on running the CI artifact on a real
+  display, as with every UI wave before this one.
+
+Nothing in this section is CI-verified yet; statuses move
+to the per-wave tables above once the run is green, and
+docs/COMPARISON.md is refreshed after that run.

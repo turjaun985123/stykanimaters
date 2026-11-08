@@ -11,7 +11,7 @@
 use gpui::*;
 
 use crate::model::{norm_deg, Pose, Project};
-use crate::ui_kit::{C_ACCENT, C_BORDER, C_INK, C_MUTED};
+use crate::ui_kit::{C_ACCENT, C_BORDER, C_CELL, C_INK, C_MUTED};
 
 /// A root move larger than this (stage units) counts as a change.
 const ROOT_EPS: f32 = 0.5;
@@ -103,7 +103,7 @@ pub fn dopesheet(map: &[Vec<bool>], current: usize, names: &[String]) -> Div {
                     .px(px(6.0))
                     .py(px(2.0))
                     .rounded(px(6.0))
-                    .bg(rgb(if is_current { C_ACCENT } else { 0x2C313A }))
+                    .bg(rgb(if is_current { C_ACCENT } else { C_CELL }))
                     .child(div().w(px(6.0)).h(px(6.0)).rounded(px(999.0)).bg(rgb(dot))),
             );
         }

@@ -17,8 +17,10 @@ use gpui::*;
 
 use crate::ui_kit::{C_ACCENT, C_BORDER, C_INK, C_MUTED, C_PANEL};
 
-/// Accent colour for error toasts.
-pub const C_ERROR: u32 = 0xB23A3A;
+/// Accent colour for error toasts: the kit's shared error
+/// token, re-exported so existing `crate::ui_toast::C_ERROR`
+/// paths keep working unchanged.
+pub use crate::ui_kit::C_ERROR;
 
 /// How long a toast stays visible, in UI ticks. At the app's 33 ms
 /// tick this is ≈ 4 s.

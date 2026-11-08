@@ -14,7 +14,7 @@
 
 use gpui::*;
 
-use crate::ui_kit::{section_label, top_bar, C_BORDER, C_MUTED, C_PANEL};
+use crate::ui_kit::{palette, section_label, top_bar, Palette, C_BORDER, C_MUTED, C_PANEL};
 
 /// Title shown when a spec's title is empty or all whitespace.
 pub const DEFAULT_PANEL_TITLE: &str = "Panel";
@@ -111,13 +111,58 @@ pub fn panel_shell(spec: &PanelSpec, body: Div) -> Div {
         .child(body)
 }
 
+/// The header row of a themed panel: exactly [`panel_header`]'s
+/// metrics (title caption, then the subtitle in 12px when present),
+/// but both text colours come from `pal` instead of the flat kit
+/// constants, so the header follows the same theme as the shell.
+fn panel_header_themed(spec: &PanelSpec, pal: &Palette) -> Div {
+    let mut bar = top_bar().child(
+        div()
+            .text_size(px(10.0))
+            .text_color(rgb(pal.muted))
+            .child(spec.effective_title().to_uppercase()),
+    );
+    if let Some(subtitle) = spec.effective_subtitle() {
+        bar = bar.child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(pal.muted))
+                .child(subtitle.to_string()),
+        );
+    }
+    bar
+}
+
+/// A complete panel in the requested theme: the same container
+/// metrics as [`panel_shell`] (full width, thin border, rounded
+/// corners, padding, gaps), with the panel background, border and
+/// header colours taken from `crate::ui_kit::palette(dark)` —
+/// the dark palette when `dark` is true, the light palette
+/// otherwise. The body is the caller's, unchanged: theming stops
+/// at the shell, so a body built from the flat kit constants stays
+/// dark-styled inside a light shell until it is migrated itself.
+pub fn panel_shell_themed(spec: PanelSpec, dark: bool, body: Div) -> Div {
+    let pal = palette(dark);
+    div()
+        .flex_col()
+        .w_full()
+        .bg(rgb(pal.panel))
+        .border_1()
+        .border_color(rgb(pal.border))
+        .rounded(px(8.0))
+        .p(px(8.0))
+        .gap(px(6.0))
+        .child(panel_header_themed(&spec, &pal))
+        .child(body)
+}
+
 #[cfg(test)]
 mod tests {
     // NOTE: no `use super::*;` here — this file's `use gpui::*;`
     // would re-export GPUI's own `test` macro through the glob and
     // shadow the built-in `#[test]`, which then expands into itself
     // forever (CI failure, 2026-11-08). Import exact names only.
-    use super::{PanelSpec, DEFAULT_PANEL_TITLE};
+    use super::{panel_header, panel_shell_themed, PanelSpec, DEFAULT_PANEL_TITLE};
 
     #[test]
     fn default_spec_has_default_title_and_no_subtitle() {
@@ -154,6 +199,17 @@ mod tests {
     fn with_subtitle_sets_and_trims_the_subtitle() {
         let spec = PanelSpec::new("Export").with_subtitle("  every format  ");
         assert_eq!(spec.effective_subtitle(), Some("every format"));
+    }
+
+    #[test]
+    fn panel_shell_themed_builds_for_both_themes() {
+        // Construction only — a built Div's style is not
+        // inspectable from a unit test; the point is that both
+        // palette branches build without panicking (the same
+        // construction-only contract the sibling components use).
+        let spec = PanelSpec::new("Graph");
+        let _dark = panel_shell_themed(spec.clone(), true, panel_header(&spec));
+        let _light = panel_shell_themed(spec, false, panel_header(&spec));
     }
 
     #[test]

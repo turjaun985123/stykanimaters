@@ -10,7 +10,7 @@
 //! The language set mirrors the original app's locale packs
 //! (`src/locales/packs/` in StykAnimate-App: 27 packs) plus Bengali,
 //! which the port added for its user — 28 languages in total.
-//! Every table carries exactly the same 62 keys.
+//! Every table carries exactly the same 70 keys.
 //!
 //! Translation approach: established animation terms are used where
 //! a language has them (French "pelure d'oignon", Polish "skórka
@@ -31,6 +31,17 @@
 //! translations for these keys (a few values are established
 //! loanwords that legitimately match the English spelling, e.g.
 //! "Easing" in several languages).
+//!
+//! The Wave 14 workspace keys (`ws_animate`, `ws_draw`,
+//! `ws_build`, `ws_graph`, `ws_effects`, `ws_audio`, `ws_3d`,
+//! `ws_export`) carry genuine translations in English, Bengali,
+//! Spanish, German, French, Italian, Portuguese (Brazil), Russian
+//! and Chinese (Simplified); the remaining 19 languages carry the
+//! English text as a placeholder for these keys, to be translated
+//! in a later pass. These keys are localisation infrastructure
+//! only for now: the app bar's workspace chips still use the
+//! English names as their labels this wave, like every other
+//! button in the app, so the chips are not yet localised.
 
 /// Languages the UI can be displayed in: the original app's 27
 /// locale packs, plus Bengali (the port's own addition).
@@ -301,6 +312,15 @@ static EN: &[(&str, &str)] = &[
     ("fx_panel", "FX panel"),
     ("clips_panel", "Clips panel"),
     ("weather_panel", "Weather panel"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Pose mode."),
     (
@@ -379,6 +399,15 @@ static BN: &[(&str, &str)] = &[
     ("fx_panel", "এফএক্স প্যানেল"),
     ("clips_panel", "ক্লিপ প্যানেল"),
     ("weather_panel", "আবহাওয়া প্যানেল"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "অ্যানিমেট"),
+    ("ws_draw", "আঁকুন"),
+    ("ws_build", "তৈরি"),
+    ("ws_graph", "গ্রাফ"),
+    ("ws_effects", "ইফেক্টস"),
+    ("ws_audio", "অডিও"),
+    ("ws_3d", "3D"),
+    ("ws_export", "এক্সপোর্ট"),
     // Status line
     ("pose_mode", "পোজ মোড।"),
     (
@@ -457,6 +486,15 @@ static ES: &[(&str, &str)] = &[
     ("fx_panel", "Panel de FX"),
     ("clips_panel", "Panel de clips"),
     ("weather_panel", "Panel de clima"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animar"),
+    ("ws_draw", "Dibujar"),
+    ("ws_build", "Construir"),
+    ("ws_graph", "Gráfico"),
+    ("ws_effects", "Efectos"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Exportar"),
     // Status line
     ("pose_mode", "Modo pose."),
     (
@@ -535,6 +573,15 @@ static AR: &[(&str, &str)] = &[
     ("fx_panel", "لوحة المؤثرات"),
     ("clips_panel", "لوحة المقاطع"),
     ("weather_panel", "لوحة الطقس"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "وضع الوضعية."),
     (
@@ -613,6 +660,15 @@ static CS: &[(&str, &str)] = &[
     ("fx_panel", "Panel FX"),
     ("clips_panel", "Panel klipů"),
     ("weather_panel", "Panel počasí"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Režim pózy."),
     (
@@ -691,6 +747,15 @@ static DA: &[(&str, &str)] = &[
     ("fx_panel", "FX-panel"),
     ("clips_panel", "Klippanel"),
     ("weather_panel", "Vejrpanel"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Poseringstilstand."),
     (
@@ -769,6 +834,15 @@ static DE: &[(&str, &str)] = &[
     ("fx_panel", "FX-Panel"),
     ("clips_panel", "Clip-Panel"),
     ("weather_panel", "Wetter-Panel"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animieren"),
+    ("ws_draw", "Zeichnen"),
+    ("ws_build", "Bauen"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effekte"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Exportieren"),
     // Status line
     ("pose_mode", "Posenmodus."),
     (
@@ -847,6 +921,15 @@ static EL: &[(&str, &str)] = &[
     ("fx_panel", "Πίνακας FX"),
     ("clips_panel", "Πίνακας κλιπ"),
     ("weather_panel", "Πίνακας καιρού"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Λειτουργία πόζας."),
     (
@@ -925,6 +1008,15 @@ static ES419: &[(&str, &str)] = &[
     ("fx_panel", "Panel de FX"),
     ("clips_panel", "Panel de clips"),
     ("weather_panel", "Panel de clima"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Modo de pose."),
     (
@@ -1003,6 +1095,15 @@ static FI: &[(&str, &str)] = &[
     ("fx_panel", "FX-paneeli"),
     ("clips_panel", "Leikepaneeli"),
     ("weather_panel", "Sääpaneeli"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Asentotila."),
     (
@@ -1081,6 +1182,15 @@ static FR: &[(&str, &str)] = &[
     ("fx_panel", "Panneau FX"),
     ("clips_panel", "Panneau des clips"),
     ("weather_panel", "Panneau météo"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animer"),
+    ("ws_draw", "Dessiner"),
+    ("ws_build", "Construire"),
+    ("ws_graph", "Graphe"),
+    ("ws_effects", "Effets"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Exporter"),
     // Status line
     ("pose_mode", "Mode pose."),
     (
@@ -1159,6 +1269,15 @@ static HE: &[(&str, &str)] = &[
     ("fx_panel", "פאנל אפקטים"),
     ("clips_panel", "פאנל קליפים"),
     ("weather_panel", "פאנל מזג האוויר"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "מצב פוזה."),
     (
@@ -1237,6 +1356,15 @@ static HR: &[(&str, &str)] = &[
     ("fx_panel", "FX ploča"),
     ("clips_panel", "Ploča isječaka"),
     ("weather_panel", "Vremenska ploča"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Način poze."),
     (
@@ -1315,6 +1443,15 @@ static HU: &[(&str, &str)] = &[
     ("fx_panel", "FX-panel"),
     ("clips_panel", "Klippanel"),
     ("weather_panel", "Időjáráspanel"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Póz mód."),
     (
@@ -1393,6 +1530,15 @@ static ID: &[(&str, &str)] = &[
     ("fx_panel", "Panel FX"),
     ("clips_panel", "Panel klip"),
     ("weather_panel", "Panel cuaca"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Mode pose."),
     (
@@ -1471,6 +1617,15 @@ static IT: &[(&str, &str)] = &[
     ("fx_panel", "Pannello FX"),
     ("clips_panel", "Pannello clip"),
     ("weather_panel", "Pannello meteo"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Anima"),
+    ("ws_draw", "Disegna"),
+    ("ws_build", "Costruisci"),
+    ("ws_graph", "Grafico"),
+    ("ws_effects", "Effetti"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Esporta"),
     // Status line
     ("pose_mode", "Modalità posa."),
     (
@@ -1549,6 +1704,15 @@ static KK: &[(&str, &str)] = &[
     ("fx_panel", "FX панелі"),
     ("clips_panel", "Клиптер панелі"),
     ("weather_panel", "Ауа райы панелі"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Поза режимі."),
     (
@@ -1627,6 +1791,15 @@ static NB: &[(&str, &str)] = &[
     ("fx_panel", "FX-panel"),
     ("clips_panel", "Klipppanel"),
     ("weather_panel", "Værpanel"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Poseringsmodus."),
     (
@@ -1705,6 +1878,15 @@ static NL: &[(&str, &str)] = &[
     ("fx_panel", "FX-paneel"),
     ("clips_panel", "Clipspaneel"),
     ("weather_panel", "Weerpaneel"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Posemodus."),
     (
@@ -1783,6 +1965,15 @@ static PL: &[(&str, &str)] = &[
     ("fx_panel", "Panel FX"),
     ("clips_panel", "Panel klipów"),
     ("weather_panel", "Panel pogody"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Tryb pozy."),
     (
@@ -1861,6 +2052,15 @@ static PT_BR: &[(&str, &str)] = &[
     ("fx_panel", "Painel de FX"),
     ("clips_panel", "Painel de clipes"),
     ("weather_panel", "Painel de clima"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animar"),
+    ("ws_draw", "Desenhar"),
+    ("ws_build", "Construir"),
+    ("ws_graph", "Gráfico"),
+    ("ws_effects", "Efeitos"),
+    ("ws_audio", "Áudio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Exportar"),
     // Status line
     ("pose_mode", "Modo de pose."),
     (
@@ -1939,6 +2139,15 @@ static RO: &[(&str, &str)] = &[
     ("fx_panel", "Panou FX"),
     ("clips_panel", "Panou clipuri"),
     ("weather_panel", "Panou vreme"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Mod poză."),
     (
@@ -2017,6 +2226,15 @@ static RU: &[(&str, &str)] = &[
     ("fx_panel", "Панель FX"),
     ("clips_panel", "Панель клипов"),
     ("weather_panel", "Панель погоды"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Анимация"),
+    ("ws_draw", "Рисование"),
+    ("ws_build", "Сборка"),
+    ("ws_graph", "График"),
+    ("ws_effects", "Эффекты"),
+    ("ws_audio", "Аудио"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Экспорт"),
     // Status line
     ("pose_mode", "Режим позы."),
     (
@@ -2095,6 +2313,15 @@ static SL: &[(&str, &str)] = &[
     ("fx_panel", "Plošča FX"),
     ("clips_panel", "Plošča posnetkov"),
     ("weather_panel", "Plošča vremena"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Način poze."),
     (
@@ -2173,6 +2400,15 @@ static TR: &[(&str, &str)] = &[
     ("fx_panel", "FX paneli"),
     ("clips_panel", "Klip paneli"),
     ("weather_panel", "Hava durumu paneli"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Poz modu."),
     (
@@ -2251,6 +2487,15 @@ static UK: &[(&str, &str)] = &[
     ("fx_panel", "Панель FX"),
     ("clips_panel", "Панель кліпів"),
     ("weather_panel", "Панель погоди"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Режим пози."),
     (
@@ -2329,6 +2574,15 @@ static VI: &[(&str, &str)] = &[
     ("fx_panel", "Bảng FX"),
     ("clips_panel", "Bảng clip"),
     ("weather_panel", "Bảng thời tiết"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "Animate"),
+    ("ws_draw", "Draw"),
+    ("ws_build", "Build"),
+    ("ws_graph", "Graph"),
+    ("ws_effects", "Effects"),
+    ("ws_audio", "Audio"),
+    ("ws_3d", "3D"),
+    ("ws_export", "Export"),
     // Status line
     ("pose_mode", "Chế độ tư thế."),
     (
@@ -2407,6 +2661,15 @@ static ZH_HANS: &[(&str, &str)] = &[
     ("fx_panel", "特效面板"),
     ("clips_panel", "片段面板"),
     ("weather_panel", "天气面板"),
+    // Workspaces (Wave 14 redesign)
+    ("ws_animate", "动画"),
+    ("ws_draw", "绘制"),
+    ("ws_build", "构建"),
+    ("ws_graph", "图表"),
+    ("ws_effects", "特效"),
+    ("ws_audio", "音频"),
+    ("ws_3d", "3D"),
+    ("ws_export", "导出"),
     // Status line
     ("pose_mode", "姿态模式。"),
     (
@@ -2571,5 +2834,8 @@ mod tests {
         assert_eq!(t(Lang::Ar, "save"), "حفظ");
         assert_eq!(t(Lang::De, "undo"), "Rückgängig");
         assert_eq!(t(Lang::Tr, "undo"), "Geri al");
+        // Wave 14 workspace names.
+        assert_eq!(t(Lang::Ru, "ws_graph"), "График");
+        assert_eq!(t(Lang::ZhHans, "ws_effects"), "特效");
     }
 }

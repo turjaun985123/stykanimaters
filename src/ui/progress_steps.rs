@@ -12,7 +12,7 @@
 //! [`step_state`] holds the one comparison that decides a step's
 //! look, kept pure so it is testable without a window.
 
-use crate::ui_kit::{C_ACCENT, C_BORDER, C_INK, C_MUTED};
+use crate::ui_kit::{C_ACCENT, C_BORDER, C_CELL, C_INK, C_MUTED};
 use gpui::*;
 
 /// Dot colour for a finished step: the same green
@@ -21,7 +21,7 @@ use gpui::*;
 const C_DONE: u32 = 0x2E7D4F;
 /// Dot colour for a step still to come: the neutral grey
 /// `info_chip` uses when inactive.
-const C_TODO: u32 = 0x2C313A;
+const C_TODO: u32 = C_CELL;
 
 /// Where one step stands relative to the current step of the
 /// flow.
@@ -111,6 +111,7 @@ pub fn steps_row(labels: &[&str], current: usize) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{step_dot_color, step_state, steps_row, StepState};
+    use crate::ui_kit::C_CELL;
 
     #[test]
     fn step_state_compares_index_against_current() {
@@ -138,7 +139,7 @@ mod tests {
     fn step_dot_color_matches_the_kit_palette() {
         assert_eq!(step_dot_color(StepState::Done), 0x2E7D4F);
         assert_eq!(step_dot_color(StepState::Current), 0x3D5A99);
-        assert_eq!(step_dot_color(StepState::Todo), 0x2C313A);
+        assert_eq!(step_dot_color(StepState::Todo), C_CELL);
     }
 
     #[test]

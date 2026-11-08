@@ -12,7 +12,7 @@
 
 use gpui::*;
 
-use crate::ui_kit::{C_ACCENT, C_INK, C_MUTED};
+use crate::ui_kit::{C_ACCENT, C_CELL, C_INK, C_MUTED};
 
 /// Plain display data for one node row, mirrored from the fields
 /// of `model::NodeDef` the list shows: `label` is the node's
@@ -66,8 +66,8 @@ pub fn node_row(data: &NodeRowData, selected: bool) -> Div {
     };
     // The dot shows the node's own colour; a node with no override
     // gets the neutral chip grey the kit uses for "inherit/default"
-    // (the same 0x2C313A as an inactive info_chip).
-    let dot = data.colour.unwrap_or(0x2C313A);
+    // (the kit's C_CELL, the inactive info_chip fill).
+    let dot = data.colour.unwrap_or(C_CELL);
     let length_text = if data.is_origin {
         "origin".to_string()
     } else {

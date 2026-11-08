@@ -19,20 +19,20 @@
 
 use gpui::*;
 
-use crate::ui_kit::{C_ACCENT, C_INK, C_MUTED};
+use crate::ui_kit::{C_ACCENT, C_CELL, C_ERROR, C_INK, C_MUTED};
 use crate::ui_slider::clamp_fraction;
 
 /// Thickness of the meter bar.
 const BAR_H: f32 = 8.0;
 /// The kit's neutral well colour (the inactive chip background in
 /// `ui_kit::info_chip`), used for the unfilled track.
-const TRACK_BG: u32 = 0x2C313A;
+const TRACK_BG: u32 = C_CELL;
 /// Amber fill once the level reaches 70% — the warn tone from
 /// `crate::ui_badge`.
 const LEVEL_WARN: u32 = 0x8A6D1F;
 /// Red fill once the level passes 90% — the error tone from
 /// `crate::ui_badge`.
-const LEVEL_ERROR: u32 = 0xB23A3A;
+const LEVEL_ERROR: u32 = C_ERROR;
 /// First fraction drawn in the warn colour.
 const WARN_AT: f32 = 0.7;
 /// First fraction drawn in the error colour (exclusive: exactly
@@ -105,7 +105,7 @@ pub fn gauge_labeled(label: &str, frac: f32) -> Div {
 #[cfg(test)]
 mod tests {
     use super::level_colors;
-    use crate::ui_kit::C_ACCENT;
+    use crate::ui_kit::{C_ACCENT, C_ERROR};
 
     #[test]
     fn normal_levels_use_the_accent() {
@@ -123,8 +123,8 @@ mod tests {
 
     #[test]
     fn error_band_is_above_point_nine() {
-        assert_eq!(level_colors(0.91), 0xB23A3A);
-        assert_eq!(level_colors(1.0), 0xB23A3A);
+        assert_eq!(level_colors(0.91), C_ERROR);
+        assert_eq!(level_colors(1.0), C_ERROR);
     }
 
     #[test]

@@ -15,14 +15,11 @@
 
 use gpui::*;
 
-use crate::ui_kit::{C_ACCENT, C_BORDER, C_INK};
+use crate::ui_kit::{C_ACCENT, C_BORDER, C_CELL, C_INK};
 
 /// Loop/selection-range chip background: the dimmed accent the
 /// frame chips use for in-range cells.
 const C_RANGE: u32 = 0x2E4470;
-/// Neutral chip background, shared with the chips and dopesheet.
-const C_CELL: u32 = 0x2C313A;
-
 /// How one frame chip should read, decided by the caller from the
 /// frame's position: the playhead, the selection/loop range, and
 /// the project's keyframe flags.
@@ -109,10 +106,11 @@ pub fn frame_chip(number: usize, state: ChipState) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{chip_colors, ChipState};
+    use crate::ui_kit::C_CELL;
 
     #[test]
     fn normal_chip_is_neutral_with_ink_text() {
-        assert_eq!(chip_colors(ChipState::Normal), (0x2C313A, 0xE8E8EC));
+        assert_eq!(chip_colors(ChipState::Normal), (C_CELL, 0xE8E8EC));
     }
 
     #[test]
@@ -127,7 +125,7 @@ mod tests {
 
     #[test]
     fn keyframe_chip_is_neutral_with_accent_text() {
-        assert_eq!(chip_colors(ChipState::Keyframe), (0x2C313A, 0x3D5A99));
+        assert_eq!(chip_colors(ChipState::Keyframe), (C_CELL, 0x3D5A99));
     }
 
     #[test]

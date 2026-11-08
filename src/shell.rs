@@ -14,8 +14,13 @@
 //! for a future startup prompt: which project was open last,
 //! and whether the recovery snapshot is newer than its last
 //! named save.
+//!
+//! A third, smaller store holds the window layout
+//! preferences at `.layout.json` (last workspace, theme) so
+//! the app shell can restore them on startup.
 
 use crate::model::Project;
+use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -24,6 +29,8 @@ use std::time::SystemTime;
 pub const RECOVERY_FILE: &str = ".recovery.json";
 /// File name of the recents list inside the projects dir.
 pub const RECENTS_FILE: &str = "recents.json";
+/// File name of the layout preferences inside the projects dir.
+pub const LAYOUT_FILE: &str = ".layout.json";
 /// Maximum number of entries kept in the recents list.
 pub const MAX_RECENTS: usize = 10;
 
@@ -189,6 +196,62 @@ pub fn recovery_is_newer_than_last_project_in(dir: &Path) -> bool {
     recovery_newer(snapshot, saved)
 }
 
+// ---- Layout preferences ----
+
+/// Window layout preferences persisted across runs: which
+/// workspace was active and whether the dark theme was on.
+/// Stored as JSON at `.layout.json` in the projects dir.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LayoutPrefs {
+    /// Name of the active workspace (e.g. `"Animate"`).
+    pub workspace: String,
+    /// Whether the dark theme is enabled.
+    pub dark: bool,
+}
+
+impl Default for LayoutPrefs {
+    /// The first-run layout: the Animate workspace, dark theme.
+    fn default() -> Self {
+        LayoutPrefs {
+            workspace: "Animate".to_string(),
+            dark: true,
+        }
+    }
+}
+
+/// Load the layout preferences from `./projects/.layout.json`.
+/// A missing or corrupt file yields the default preferences —
+/// a broken prefs file must never block startup.
+pub fn load_layout() -> LayoutPrefs {
+    load_layout_in(&default_dir())
+}
+
+/// [`load_layout`] with an explicit base directory.
+pub fn load_layout_in(dir: &Path) -> LayoutPrefs {
+    let Ok(text) = std::fs::read_to_string(dir.join(LAYOUT_FILE)) else {
+        return LayoutPrefs::default();
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+/// Save the layout preferences to `./projects/.layout.json`.
+/// Best-effort: like the recovery writer (and the recents
+/// writer) it creates the projects directory when needed,
+/// and write failures are swallowed — preferences are a
+/// convenience, never worth an error dialog.
+pub fn save_layout(prefs: &LayoutPrefs) {
+    save_layout_in(&default_dir(), prefs);
+}
+
+/// [`save_layout`] with an explicit base directory.
+pub fn save_layout_in(dir: &Path, prefs: &LayoutPrefs) {
+    if std::fs::create_dir_all(dir).is_ok() {
+        if let Ok(text) = serde_json::to_string_pretty(prefs) {
+            let _ = std::fs::write(dir.join(LAYOUT_FILE), text);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +410,78 @@ mod tests {
         // compared → false, never a startup-blocking claim.
         std::fs::remove_file(&saved).unwrap();
         assert!(!recovery_is_newer_than_last_project_in(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_defaults_when_file_is_missing() {
+        let dir = temp_dir("layout-missing");
+        let prefs = load_layout_in(&dir);
+        assert_eq!(prefs, LayoutPrefs::default());
+        // The default itself is the first-run layout.
+        assert_eq!(prefs.workspace, "Animate");
+        assert!(prefs.dark);
+        // A directory that does not exist at all is also just
+        // "no prefs yet".
+        assert_eq!(
+            load_layout_in(&dir.join("nope")),
+            LayoutPrefs::default()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_round_trips_workspace_and_theme() {
+        let dir = temp_dir("layout-roundtrip");
+        let prefs = LayoutPrefs {
+            workspace: "Draw".to_string(),
+            dark: false,
+        };
+        save_layout_in(&dir, &prefs);
+        let path = dir.join(LAYOUT_FILE);
+        assert!(path.exists());
+        // The on-disk shape is the plain field-named JSON.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"workspace\": \"Draw\""), "{text}");
+        assert!(text.contains("\"dark\": false"), "{text}");
+        assert_eq!(load_layout_in(&dir), prefs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_corrupt_file_yields_the_default() {
+        let dir = temp_dir("layout-corrupt");
+        std::fs::write(dir.join(LAYOUT_FILE), "{ not layout prefs").unwrap();
+        assert_eq!(load_layout_in(&dir), LayoutPrefs::default());
+        // Valid JSON of the wrong shape is corrupt for us too.
+        std::fs::write(dir.join(LAYOUT_FILE), "[1, 2, 3]").unwrap();
+        assert_eq!(load_layout_in(&dir), LayoutPrefs::default());
+        // And a save repairs it.
+        let prefs = LayoutPrefs {
+            workspace: "Audio".to_string(),
+            dark: true,
+        };
+        save_layout_in(&dir, &prefs);
+        assert_eq!(load_layout_in(&dir), prefs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_save_twice_overwrites() {
+        let dir = temp_dir("layout-overwrite");
+        save_layout_in(
+            &dir,
+            &LayoutPrefs {
+                workspace: "Animate".to_string(),
+                dark: true,
+            },
+        );
+        let second = LayoutPrefs {
+            workspace: "3D".to_string(),
+            dark: false,
+        };
+        save_layout_in(&dir, &second);
+        assert_eq!(load_layout_in(&dir), second);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

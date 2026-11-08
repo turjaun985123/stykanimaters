@@ -10,7 +10,7 @@
 //! in, a `Div` out, no listeners and no element id inside — the
 //! caller drops [`timecode_chip`] into the bottom bar as-is.
 
-use crate::ui_kit::C_MUTED;
+use crate::ui_kit::{C_CELL, C_MUTED};
 use gpui::*;
 
 /// Format a duration in seconds as `M:SS.t` — minutes (not
@@ -59,7 +59,7 @@ pub fn timecode_chip(current_frame: usize, frame_count: usize, fps: f32) -> Div 
         .px(px(8.0))
         .py(px(4.0))
         .rounded(px(999.0))
-        .bg(rgb(0x2C313A))
+        .bg(rgb(C_CELL))
         .text_size(px(11.0))
         .text_color(rgb(C_MUTED))
         .child(timecode_label(current_frame, frame_count, fps))

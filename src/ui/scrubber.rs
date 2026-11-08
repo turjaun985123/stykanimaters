@@ -19,7 +19,7 @@
 
 use gpui::*;
 
-use crate::ui_kit::{C_ACCENT, C_BORDER, C_INK, C_MUTED};
+use crate::ui_kit::{C_ACCENT, C_BORDER, C_CELL, C_INK, C_MUTED};
 
 /// Height of the progress track itself.
 const TRACK_H: f32 = 6.0;
@@ -31,7 +31,7 @@ const TICK_W: f32 = 2.0;
 const TICK_H: f32 = 5.0;
 /// The kit's neutral well colour (the inactive chip background in
 /// `ui_kit::info_chip`), used for the unfilled track.
-const TRACK_BG: u32 = 0x2C313A;
+const TRACK_BG: u32 = C_CELL;
 
 /// Playback progress as a fraction of the timeline: `frame_f` over
 /// the last frame's index, clamped to `0.0..=1.0`. A timeline of

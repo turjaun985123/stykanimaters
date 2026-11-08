@@ -37,6 +37,15 @@ impl TanSide {
     }
 }
 
+/// Wave 14: the eight workspace presets, in selector order.
+/// A workspace is a preset over the existing panel flags and
+/// editor modes (see `EditorView::apply_workspace`) — it owns
+/// no state of its own beyond the active index, and the name
+/// is the persisted identity (`shell::LayoutPrefs::workspace`).
+const WORKSPACE_NAMES: [&str; 8] = [
+    "Animate", "Draw", "Build", "Graph", "Effects", "Audio", "3D", "Export",
+];
+
 /// Wave 9: an in-progress motion-path point drag — the grabbed
 /// frame root of the selected figure. `start` is the stage-space
 /// press point; `delta` is the total stage-space drag offset
@@ -59,6 +68,12 @@ pub struct EditorView {
     /// When true, the home panel (saved projects + recents)
     /// replaces the canvas area.
     show_home: bool,
+    /// Wave 14: active workspace preset index (into
+    /// WORKSPACE_NAMES), restored from the persisted layout in
+    /// `new` and written back on every switch. Purely a preset
+    /// selector — the panels and modes it drives keep their
+    /// own flags (see `apply_workspace`).
+    workspace: usize,
     /// Gesture recogniser for canvas pointer input (wave 5).
     /// GPUI 0.2.2 exposes no multi-pointer events on Linux (see
     /// `touch::PointerSource`), so today only the mouse feeds it,
@@ -227,12 +242,26 @@ impl PinchCamera {
 
 impl EditorView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        // Wave 14: restore the persisted layout (workspace +
+        // theme). The theme's real state is
+        // `EditorCore::light_theme`; `LayoutPrefs.dark` is only
+        // its persisted mirror — read into the core here, and
+        // written back from it in `apply_workspace` — never a
+        // second, independent copy.
+        let layout = crate::shell::load_layout();
+        let workspace = WORKSPACE_NAMES
+            .iter()
+            .position(|name| *name == layout.workspace)
+            .unwrap_or(0);
+        let mut core = EditorCore::new();
+        core.light_theme = !layout.dark;
         EditorView {
-            core: EditorCore::new(),
+            core,
             canvas_bounds: Rc::new(RefCell::new(Bounds::default())),
             focus_handle: cx.focus_handle(),
             player: crate::audio::AudioPlayer::new(),
             show_home: false,
+            workspace,
             recognizer: crate::touch::Recognizer::new(),
             clock: Instant::now(),
             pinch_cam: PinchCamera::new(),
@@ -260,6 +289,117 @@ impl EditorView {
             range_sel: None,
             audio_peaks_cache: std::collections::HashMap::new(),
         }
+    }
+
+    /// Wave 14: apply a workspace preset. A workspace is a
+    /// composition of the SAME flag writes the app-bar panel
+    /// toggles and the Draw / 3D mode buttons perform (each arm
+    /// below mirrors its toggle's turn-on/turn-off body,
+    /// including the graph/audio/FX mutual exclusion and the
+    /// graph-drag cleanup) — it invents no new state. Only
+    /// real, existing effects:
+    ///
+    /// - Animate: close the graph/audio/FX/clips/export
+    ///   panels, inspector on, leave draw mode and 3D mode.
+    /// - Draw: draw mode on (the Draw group's toggle writes
+    ///   `core.draw_mode` directly; same status line), colour
+    ///   panel on.
+    /// - Build: inspector on (segment properties live there),
+    ///   colour panel on. The figure/segment tool groups are
+    ///   always visible, so Build is honestly the
+    ///   inspector-focused preset.
+    /// - Graph / Effects / Audio: the respective panel on,
+    ///   with its toggle's mutual exclusion.
+    /// - 3D: `EditorCore::enter_3d` (self-guarding: an active
+    ///   session is kept, exactly like the 3D mode button).
+    /// - Export: export centre on.
+    ///
+    /// Every switch persists the layout: the workspace name
+    /// plus the theme mirror (`dark = !core.light_theme`).
+    fn apply_workspace(&mut self, i: usize) {
+        if i >= WORKSPACE_NAMES.len() {
+            return;
+        }
+        self.workspace = i;
+        match i {
+            0 => {
+                // Animate: the inspector toggle's turn-on body
+                // already closes graph/audio/FX/clips; export
+                // closes too (the brief's Animate preset), and
+                // both modes are left.
+                self.show_inspector = true;
+                self.show_graph = false;
+                self.graph_drag = None;
+                self.show_audio = false;
+                self.show_fx = false;
+                self.show_clips = false;
+                self.show_export = false;
+                if self.core.draw_mode {
+                    self.core.draw_mode = false;
+                }
+                if self.core.fig3.is_some() {
+                    self.core.exit_3d();
+                }
+            }
+            1 => {
+                // Draw: the draw-mode toggle's write + status.
+                self.core.draw_mode = true;
+                self.show_color = true;
+            }
+            2 => {
+                // Build: inspector on + colour panel on.
+                self.show_inspector = true;
+                self.show_graph = false;
+                self.graph_drag = None;
+                self.show_audio = false;
+                self.show_fx = false;
+                self.show_clips = false;
+                self.show_color = true;
+            }
+            3 => {
+                // Graph: the Graph toggle's turn-on body.
+                self.show_graph = true;
+                self.show_audio = false;
+                self.show_fx = false;
+            }
+            4 => {
+                // Effects: the FX toggle's turn-on body.
+                self.show_fx = true;
+                self.show_graph = false;
+                self.graph_drag = None;
+                self.show_audio = false;
+            }
+            5 => {
+                // Audio: the Audio toggle's turn-on body.
+                self.show_audio = true;
+                self.show_graph = false;
+                self.graph_drag = None;
+                self.show_fx = false;
+            }
+            6 => {
+                // 3D: the 3D mode button's enter path.
+                self.core.enter_3d();
+            }
+            _ => {
+                // Export: the Export toggle's turn-on body.
+                self.show_export = true;
+                self.show_graph = false;
+                self.show_audio = false;
+                self.show_fx = false;
+                self.show_clips = false;
+                self.graph_drag = None;
+            }
+        }
+        self.core.status = if i == 1 && self.core.draw_mode {
+            // The Draw arm reports the draw toggle's own line.
+            "Draw mode: drag on the canvas to paint a stroke on this frame.".into()
+        } else {
+            format!("Workspace: {}.", WORKSPACE_NAMES[i])
+        };
+        crate::shell::save_layout(&crate::shell::LayoutPrefs {
+            workspace: WORKSPACE_NAMES[i].to_string(),
+            dark: !self.core.light_theme,
+        });
     }
 
     /// Open a project chosen on the home panel, routed through
@@ -961,25 +1101,30 @@ impl EditorView {
                         .child(note),
                 )
         };
-        let mut col = div()
-            .flex_col()
-            .w_full()
-            .bg(rgb(C_PANEL))
-            .border_1()
-            .border_color(rgb(C_BORDER))
-            .rounded(px(8.0))
-            .p(px(8.0))
-            .gap(px(6.0))
-            .child(
-                top_bar()
-                    .child(section_label("Export"))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(C_MUTED))
-                            .child("Export centre — every format in one place"),
-                    ),
+        // Wave 14: the shell comes from the themed panel shell
+        // (`ui::panel::panel_shell_themed`) instead of the
+        // hand-built container this panel used before. The
+        // header the shell builds from this spec is the same
+        // Export title + subtitle the hand-built version had.
+        // The theme is the editor's own state, reachable here
+        // via `self.core`: `light_theme == false` is the dark
+        // theme, so the shell's `dark` is `!core.light_theme`.
+        // `col` below is now just the panel body.
+        let spec = crate::ui_panel::PanelSpec::new("Export")
+            .with_subtitle("Export centre — every format in one place");
+        let mut col = div().flex_col().gap(px(6.0));
+        if let Some((a, b)) = self.core.loop_range {
+            col = col.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(C_MUTED))
+                    .child(format!(
+                        "Loop range: frames {}–{} — frame-range exports (GIF/PNG/MP4/WebM/APNG/JPEG) can target a range via the range ops in the timeline/MCP.",
+                        a + 1,
+                        b + 1
+                    )),
             );
+        }
         // UI folder wave: category tabs (`ui::tabs`) under the
         // header. All (0) builds every row below, Media (1)
         // builds only the Images + Video & animation sections,
@@ -996,6 +1141,10 @@ impl EditorView {
         {
             tabs_row = tabs_row.child(
                 tab.id(("xc-tab", i))
+                    .border_b_2()
+                    .border_color(rgb(crate::ui_tabs::tab_underline(
+                        i == self.export_tab,
+                    )))
                     .cursor_pointer()
                     .on_click(cx.listener(move |view, _ev, _w, cx| {
                         view.export_tab = i;
@@ -1101,7 +1250,7 @@ impl EditorView {
                 EditorCore::export_stknds,
             ));
         }
-        col
+        crate::ui_panel::panel_shell_themed(spec, !self.core.light_theme, col)
     }
 
     /// UI components wave: the segment colour picker — a grid
@@ -2211,7 +2360,7 @@ impl Render for EditorView {
         let draw_on = core.draw_mode;
         let (ccx, ccy, czoom) = core.camera_here();
         let cam_label = format!("cam ({ccx:.0}, {ccy:.0}) x{czoom:.2} · {} key(s)", core.project.camera.len());
-        let (root_bg, bar_bg, row_bg) = if core.light_theme {
+        let (root_bg, _bar_bg, row_bg) = if core.light_theme {
             (0xE9EBEF, 0xD9DCE2, 0xD0D4DB)
         } else {
             (0x191C21, 0x21252D, 0x1D2129)
@@ -2477,6 +2626,7 @@ impl Render for EditorView {
             .flex_col()
             .gap(px(4.0))
             .w(px(168.0))
+            .bg(rgb(C_PANEL))
             .child(
                 // Sidebar header: caption + bulk visibility controls.
                 // The layers ops own the `hidden` flags; solo is the
@@ -2602,16 +2752,22 @@ impl Render for EditorView {
         }
 
         let range_sel = self.range_sel;
+        // The per-figure keyframe map is computed ONCE here and
+        // shared by every consumer in this render: the frame chips'
+        // key flags below, the dopesheet strip and the ruler's key
+        // union further down. Within-render dedup only — it is
+        // recomputed on the next render, so it can never go stale.
+        let dope_map = crate::ui_dope::keyframe_map(&core.project);
         // Keyframe flags for the chips (ui_frame_chip states):
         // a frame is a key frame when ANY figure's pose changes
-        // there — the same union the ruler below computes from
-        // its own keyframe_map call.
-        let chip_keys: Vec<bool> = {
-            let map = crate::ui_dope::keyframe_map(&core.project);
-            (0..core.frame_count())
-                .map(|f| map.iter().any(|row| row.get(f).copied().unwrap_or(false)))
-                .collect()
-        };
+        // there — the same union the ruler below computes.
+        let chip_keys: Vec<bool> = (0..core.frame_count())
+            .map(|f| {
+                dope_map
+                    .iter()
+                    .any(|row| row.get(f).copied().unwrap_or(false))
+            })
+            .collect();
         let mut timeline = div().flex().flex_row().gap(px(4.0));
         for i in 0..core.frame_count() {
             let is_current = i == core.current;
@@ -2663,8 +2819,12 @@ impl Render for EditorView {
         // with a dot on every frame where that figure's pose changes.
         let dope_names: Vec<String> =
             core.project.figures.iter().map(|f| f.name.clone()).collect();
-        let dope_map = crate::ui_dope::keyframe_map(&core.project);
-        let dopesheet = crate::ui_dope::dopesheet(&dope_map, core.current, &dope_names);
+        // Uses the shared `dope_map` computed above (one
+        // keyframe_map call per render, not one per consumer).
+        let dopesheet = crate::ui_dope::dopesheet(&dope_map, core.current, &dope_names)
+            .bg(rgb(C_PANEL))
+            .border_b_1()
+            .border_color(rgb(C_BORDER));
 
         // Timeline ruler + scrubber (ui components): frame numbers,
         // loop shading and keyframe dots aligned with the chips,
@@ -2769,6 +2929,21 @@ impl Render for EditorView {
                         )),
                 );
             }
+            // Project library (redesign): a "Projects" header over
+            // a card that groups the saved-project rows so the
+            // library reads as one surface. The scan, the recovery
+            // skip and every row are unchanged — only the grouping
+            // is new.
+            panel = panel.child(section_label("Projects"));
+            let mut rows = div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .p(px(8.0))
+                .bg(rgb(C_PANEL))
+                .border_1()
+                .border_color(rgb(C_BORDER))
+                .rounded(px(8.0));
             let entries = crate::projects::scan(std::path::Path::new("projects"));
             let mut listed = 0usize;
             for (i, info) in entries.iter().enumerate() {
@@ -2786,7 +2961,7 @@ impl Render for EditorView {
                 let path = info.path.clone();
                 let dup_path = info.path.clone();
                 let name = info.name.clone();
-                panel = panel.child(crate::ui_file_row::file_row(
+                rows = rows.child(crate::ui_file_row::file_row(
                     &crate::ui_file_row::FileRowData {
                         name: crate::ui_file_row::display_name(&name),
                         meta: crate::ui_file_row::meta_line(
@@ -2828,13 +3003,13 @@ impl Render for EditorView {
                 ));
             }
             if listed == 0 {
-                panel = panel.child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgb(C_MUTED))
-                        .child("No saved projects yet — use \"Save project\" to add one."),
-                );
+                rows = rows.child(crate::ui_empty::empty_state(
+                    "○",
+                    "No saved projects yet",
+                    "Use \"Save project\" to add one.",
+                ));
             }
+            panel = panel.child(rows);
             panel = panel.child(section_label("Recent projects"));
             let recents = crate::shell::recents();
             if recents.is_empty() {
@@ -2910,7 +3085,20 @@ impl Render for EditorView {
             // the read-only gauges below need the raw values.
             let seg_length = inspector_data.length;
             let seg_thickness = inspector_data.thickness;
-            let mut panel = crate::ui_inspector::inspector_panel(inspector_data);
+            // Wave 14: restate the shared panel_shell container
+            // metrics on the returned panel so this column matches
+            // the toggleable panels exactly (panel background, thin
+            // border, rounded corners, padding, gap). The width
+            // deliberately stays the component's fixed column width
+            // rather than panel_shell's full width; children and
+            // their order are untouched.
+            let mut panel = crate::ui_inspector::inspector_panel(inspector_data)
+                .bg(rgb(C_PANEL))
+                .border_1()
+                .border_color(rgb(C_BORDER))
+                .rounded(px(8.0))
+                .p(px(8.0))
+                .gap(px(6.0));
             if has_segment {
                 // The stepper rows display the same rounded
                 // values the gauges below show. has_segment means
@@ -3020,8 +3208,10 @@ impl Render for EditorView {
             loop_range: core.loop_range,
             onion: onion_on,
         };
-        // The stage column: HUD strip over the framed canvas, a
-        // quiet hint row under it, then the graph / audio panels.
+        // The stage column, on the darkest surround (C_BG): a
+        // right-aligned viewport row, the framed canvas with the
+        // HUD strip inside its top, a quiet hint row under it,
+        // then the graph / audio panels.
         let framed_canvas = div()
             .flex()
             .flex_1()
@@ -3056,6 +3246,46 @@ impl Render for EditorView {
         } else {
             framed_canvas
         };
+        // Wave 14: the HUD strip sits inside the framed area's
+        // top as a surface bar over the stage. Like the guides
+        // overlay it is a handler-free absolutely-positioned
+        // layer: every stage pointer handler lives on the render
+        // root and routes by position, so it cannot eat a click.
+        let framed_canvas = framed_canvas.child(
+            div()
+                .absolute()
+                .left(px(0.0))
+                .top(px(0.0))
+                .w_full()
+                .bg(rgb(C_SURFACE))
+                .p(px(4.0))
+                .child(hud_strip(&hud_state)),
+        );
+        // Wave 14: viewport controls above the stage, right-
+        // aligned in the dark surround. Each button writes a
+        // camera key at the current frame through an editor op
+        // that snapshots itself, so all three are undoable.
+        let viewport_row = div()
+            .flex()
+            .flex_row()
+            .justify_end()
+            .items_center()
+            .gap(px(4.0))
+            .child(btn("view-fit", "Fit", false, cx.listener(|view, _ev, _w, cx| {
+                view.core.frame_all_figures();
+                cx.notify();
+            })))
+            .child(btn("view-centre", "Centre", false, cx.listener(|view, _ev, _w, cx| {
+                view.core.centre_on_selection();
+                cx.notify();
+            })))
+            .child(btn("view-actual", "1:1", false, cx.listener(|view, _ev, _w, cx| {
+                let (_, _, zoom) = view.core.camera_here();
+                if zoom > 0.0 {
+                    view.core.camera_zoom_by(1.0 / zoom);
+                }
+                cx.notify();
+            })));
         let hint_row = div()
             .flex()
             .flex_row()
@@ -3063,7 +3293,7 @@ impl Render for EditorView {
             .items_center()
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_XS))
                     .text_color(rgb(C_MUTED))
                     .child("Drag a joint to pose · Hands and feet use IK · Drag the hips to move"),
             );
@@ -3072,9 +3302,10 @@ impl Render for EditorView {
             .flex_col()
             .flex_1()
             .w_full()
-            .p(px(8.0))
+            .bg(rgb(C_BG))
+            .p(px(12.0))
             .gap(px(6.0))
-            .child(hud_strip(&hud_state))
+            .child(viewport_row)
             .child(framed_canvas)
             .child(hint_row);
         let stage_col = match graph_panel {
@@ -3122,6 +3353,41 @@ impl Render for EditorView {
             None => middle,
         };
 
+        // Wave 14: the workspace selector row, placed directly
+        // under the app bar in the root chain below. Segments
+        // come from `ui::segmented::workspace_segmented`; each
+        // is wrapped in a div carrying its ("ws", i) id and a
+        // click listener that applies the preset — the weather
+        // panel's wx-seg wiring pattern, with the listener
+        // bodies unified through `apply_workspace`.
+        let mut workspace_row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .px(px(12.0))
+            .py(px(6.0))
+            .bg(rgb(C_SURFACE))
+            .border_b_1()
+            .border_color(rgb(C_BORDER));
+        for (i, seg) in crate::ui_segmented::workspace_segmented(
+            WORKSPACE_NAMES.as_slice(),
+            self.workspace,
+        )
+        .into_iter()
+        .enumerate()
+        {
+            workspace_row = workspace_row.child(
+                div()
+                    .id(("ws", i))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |view, _ev, _w, cx| {
+                        view.apply_workspace(i);
+                        cx.notify();
+                    }))
+                    .child(seg),
+            );
+        }
+
         div()
             .flex()
             .flex_col()
@@ -3131,6 +3397,7 @@ impl Render for EditorView {
                 let key = ev.keystroke.key.as_str();
                 let ctrl = ev.keystroke.modifiers.control;
                 let shift = ev.keystroke.modifiers.shift;
+                let alt = ev.keystroke.modifiers.alt;
                 // Text authoring captures the keyboard while active.
                 if view.text_edit.is_some() {
                     match key {
@@ -3174,6 +3441,28 @@ impl Render for EditorView {
                     }
                     cx.notify();
                     return;
+                }
+                // Wave 14: Alt+1..Alt+8 switch workspaces — the
+                // same presets the selector row applies. Placed
+                // after the text-authoring capture above, so
+                // authoring keeps the keyboard while it is active.
+                if alt {
+                    let ws = match key {
+                        "1" => Some(0usize),
+                        "2" => Some(1),
+                        "3" => Some(2),
+                        "4" => Some(3),
+                        "5" => Some(4),
+                        "6" => Some(5),
+                        "7" => Some(6),
+                        "8" => Some(7),
+                        _ => None,
+                    };
+                    if let Some(i) = ws {
+                        view.apply_workspace(i);
+                        cx.notify();
+                        return;
+                    }
                 }
                 match (key, ctrl, shift) {
                     ("z", true, false) => view.core.undo(),
@@ -3325,7 +3614,9 @@ impl Render for EditorView {
             .child(
                 top_bar()
                     .p(px(8.0))
-                    .bg(rgb(bar_bg))
+                    .bg(rgb(C_SURFACE))
+                    .border_b_1()
+                    .border_color(rgb(C_BORDER))
                     .child(brand())
                     .child(vsep())
                     .child(btn("save", tr("save"), false, cx.listener(|view, _ev, _w, cx| {
@@ -3424,14 +3715,14 @@ impl Render for EditorView {
                         cx.notify();
                     }))),
             )
+            .child(workspace_row)
             .child(
                 div()
                     .flex()
                     .flex_wrap()
-                    .gap(px(6.0))
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .bg(rgb(bar_bg))
+                    .gap(px(12.0))
+                    .p(px(12.0))
+                    .bg(rgb(C_SURFACE))
                     .child(
                         tool_group("Transport").child(
                             group_row()
@@ -4318,7 +4609,9 @@ impl Render for EditorView {
                     .flex_col()
                     .gap(px(6.0))
                     .p(px(8.0))
-                    .bg(rgb(bar_bg))
+                    .bg(rgb(C_SURFACE))
+                    .border_t_1()
+                    .border_color(rgb(C_BORDER))
                     .child(dopesheet)
                     .child(ruler)
                     .child(scrubber)
@@ -4326,10 +4619,13 @@ impl Render for EditorView {
                         top_bar()
                             .child(section_label("Timeline"))
                             .child(timeline.flex_1())
-                            .child(crate::ui_timecode::timecode_chip(
-                                core.current,
-                                core.frame_count(),
-                                core.project.fps,
+                            .child(info_chip(
+                                crate::ui_timecode::timecode_label(
+                                    core.current,
+                                    core.frame_count(),
+                                    core.project.fps,
+                                ),
+                                true,
                             )),
                     )
                     .child(status_el),

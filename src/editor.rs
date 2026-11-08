@@ -547,6 +547,105 @@ impl EditorCore {
         }
     }
 
+    /// Upsert a camera key at the current frame (exactly one
+    /// snapshot), preserving the camera angle in effect at this
+    /// frame: `set_camera_key` alone would give a fresh key
+    /// angle 0, snapping any interpolated rotation — the same
+    /// fix-up `rotate_camera` applies.
+    fn set_camera_key_here(&mut self, x: f32, y: f32, zoom: f32) {
+        self.snapshot();
+        let frame = self.current;
+        let angle = self.project.camera_angle_at(frame as f32);
+        self.project.set_camera_key(frame, x, y, zoom);
+        if let Some(k) = self.project.camera.iter_mut().find(|k| k.frame == frame) {
+            k.angle = angle;
+        }
+    }
+
+    /// Fit the camera to every visible figure at the current
+    /// frame (the canvas Fit button): one camera key at the
+    /// current frame, centred on the figures' joint bounds with a
+    /// zoom that fits those bounds into the stage with a 10%
+    /// margin, angle preserved.
+    ///
+    /// Camera convention (from the rasterizer's view closure in
+    /// export.rs `render_frame_at`, mirrored by the canvas map in
+    /// app.rs `paint_stage`): the key's (x, y) is the stage point
+    /// shown at the centre of the view and a stage span of length
+    /// L occupies L * zoom view units, so the view shows
+    /// stage_w / zoom by stage_h / zoom stage units around the
+    /// centre. Fitting bounds of bw x bh therefore needs
+    /// zoom <= stage_w / bw and zoom <= stage_h / bh; the 10%
+    /// margin divides that fit zoom by 1.1. A zero-size bounds
+    /// dimension (every joint on one line) imposes no constraint,
+    /// and a single-point bounds keeps the current zoom.
+    pub fn frame_all_figures(&mut self) {
+        let poses = self.project.poses_at(self.current as f32);
+        let mut min = [f32::INFINITY; 2];
+        let mut max = [f32::NEG_INFINITY; 2];
+        let mut any = false;
+        for (fi, fig) in self.project.figures.iter().enumerate() {
+            if fig.hidden {
+                continue;
+            }
+            let Some(pose) = poses.get(fi) else { continue };
+            for p in evaluate(&fig.def, pose) {
+                any = true;
+                min[0] = min[0].min(p[0]);
+                min[1] = min[1].min(p[1]);
+                max[0] = max[0].max(p[0]);
+                max[1] = max[1].max(p[1]);
+            }
+        }
+        if !any {
+            self.status = "No figures to frame.".into();
+            return;
+        }
+        let centre = [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0];
+        let (bw, bh) = (max[0] - min[0], max[1] - min[1]);
+        let mut fit = f32::INFINITY;
+        if bw > 0.0 {
+            fit = fit.min(self.project.stage[0] / bw);
+        }
+        if bh > 0.0 {
+            fit = fit.min(self.project.stage[1] / bh);
+        }
+        let zoom = if fit.is_finite() {
+            fit / 1.1
+        } else {
+            self.camera_here().2
+        };
+        self.set_camera_key_here(centre[0], centre[1], zoom);
+        self.status = format!(
+            "Camera fit all figures: zoom {zoom:.2} at frame {}.",
+            self.current + 1
+        );
+    }
+
+    /// Centre the camera on the selected figure's root at the
+    /// current frame (the canvas Centre button): one camera key
+    /// at the current frame with the current zoom and angle
+    /// unchanged, only the centre moved to the root.
+    pub fn centre_on_selection(&mut self) {
+        if self.selected_figure >= self.project.figures.len() {
+            self.status = "No figures to centre on.".into();
+            return;
+        }
+        let Some(pose) = self
+            .project
+            .poses_at(self.current as f32)
+            .get(self.selected_figure)
+        else {
+            self.status = "No figures to centre on.".into();
+            return;
+        };
+        let root = pose.root;
+        let zoom = self.camera_here().2;
+        let name = self.project.figures[self.selected_figure].name.clone();
+        self.set_camera_key_here(root[0], root[1], zoom);
+        self.status = format!("Camera centred on {name} at frame {}.", self.current + 1);
+    }
+
     pub fn add_quadruped(&mut self) {
         self.snapshot();
         let idx = self.project.figures.len();
@@ -6102,5 +6201,209 @@ mod wave13_tests {
             core.status
         );
         assert_eq!(core.edits_since_autosave(), edits, "no snapshot without clips");
+    }
+}
+
+#[cfg(test)]
+mod wave14_camera_tests {
+    use crate::editor::EditorCore;
+    use crate::model::{
+        CameraKey, FigureDef, FigureInstance, Frame, NodeDef, NodeStyle, Pose, Shape,
+    };
+
+    /// Two `FigureDef::simple()` figures with all-zero pose
+    /// angles. With every angle 0, FK points every segment
+    /// straight down (model::dir(0) = [0, 1]), so each figure's
+    /// joints lie on the vertical line through its root, spanning
+    /// root.y ..= root.y + 118 (the simple rig's longest
+    /// root-to-node chain: hips -> chest 52 -> arm 66 = 118).
+    /// Alpha's root is [100, 100], Beta's is [500, 300]; the
+    /// demo stage (960 x 720) is kept.
+    fn two_figure_core(frames: usize) -> EditorCore {
+        let mut core = EditorCore::new();
+        let def = FigureDef::simple();
+        let fig = |name: &str| FigureInstance {
+            name: name.into(),
+            color: 0xFFFFFF,
+            def: def.clone(),
+            hidden: false,
+            clip: None,
+            locked: false,
+            opacity: 1.0,
+        };
+        core.project.figures = vec![fig("Alpha"), fig("Beta")];
+        let frame = || Frame {
+            poses: vec![
+                Pose {
+                    root: [100.0, 100.0],
+                    angles: vec![0.0; 7],
+                },
+                Pose {
+                    root: [500.0, 300.0],
+                    angles: vec![0.0; 7],
+                },
+            ],
+            duration: 1.0,
+            easing: None,
+            bends: Vec::new(),
+        };
+        core.project.frames = (0..frames).map(|_| frame()).collect();
+        core.project.camera = Vec::new();
+        core.project.camera_follow = None;
+        core.current = 0;
+        core.selected_figure = 0;
+        core
+    }
+
+    #[test]
+    fn frame_all_fits_two_figures_with_ten_percent_margin() {
+        let mut core = two_figure_core(1);
+        let edits = core.edits_since_autosave();
+        core.frame_all_figures();
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        assert_eq!(core.project.camera.len(), 1);
+        let k = &core.project.camera[0];
+        assert_eq!(k.frame, 0);
+        // Joint bounds: x 100..=500, y 100..=418 -> centre (300, 259).
+        assert!((k.x - 300.0).abs() < 1e-3, "x: {}", k.x);
+        assert!((k.y - 259.0).abs() < 1e-3, "y: {}", k.y);
+        // Derivation: the view shows stage/zoom stage units around
+        // the camera centre (the view closure in export.rs
+        // render_frame_at; the canvas map in app.rs paint_stage
+        // agrees), so fitting bounds bw x bh needs
+        // zoom <= stage_w / bw and zoom <= stage_h / bh. Here
+        // 960/400 = 2.4 and 720/318 = 2.26415 — the height binds —
+        // and the 10% margin divides by 1.1.
+        let expected = (720.0f32 / 318.0) / 1.1;
+        assert!((k.zoom - expected).abs() < 1e-4, "zoom {} vs {expected}", k.zoom);
+        assert_eq!(k.angle, 0.0);
+        // The evaluated camera at frame 0 is the key itself.
+        assert_eq!(core.project.camera_at(0.0), (k.x, k.y, k.zoom));
+    }
+
+    #[test]
+    fn frame_all_ignores_hidden_figures() {
+        let mut core = two_figure_core(1);
+        core.project.figures[1].hidden = true;
+        core.frame_all_figures();
+        let k = &core.project.camera[0];
+        // Only Alpha counts: bounds x = {100} (zero width imposes
+        // no constraint), y 100..=218 -> centre (100, 159), zoom
+        // from the height alone.
+        assert!((k.x - 100.0).abs() < 1e-3, "x: {}", k.x);
+        assert!((k.y - 159.0).abs() < 1e-3, "y: {}", k.y);
+        let expected = (720.0f32 / 118.0) / 1.1;
+        assert!((k.zoom - expected).abs() < 1e-4, "zoom {} vs {expected}", k.zoom);
+    }
+
+    #[test]
+    fn frame_all_preserves_the_current_angle_when_inserting_a_key() {
+        let mut core = two_figure_core(3);
+        core.project.camera = vec![CameraKey {
+            frame: 0,
+            x: 480.0,
+            y: 360.0,
+            zoom: 1.0,
+            angle: 30.0,
+        }];
+        core.current = 2;
+        core.frame_all_figures();
+        // The fresh key at frame 2 must carry the angle in effect
+        // there (30, held from frame 0's key), not the 0.0 that
+        // set_camera_key gives a new key.
+        let k = core
+            .project
+            .camera
+            .iter()
+            .find(|k| k.frame == 2)
+            .expect("key at frame 2");
+        assert_eq!(k.angle, 30.0);
+        assert_eq!(core.project.camera_angle_at(2.0), 30.0);
+    }
+
+    #[test]
+    fn frame_all_noops_without_figures() {
+        let mut core = two_figure_core(1);
+        core.project.figures = Vec::new();
+        let edits = core.edits_since_autosave();
+        core.frame_all_figures();
+        assert_eq!(core.status, "No figures to frame.");
+        assert!(core.project.camera.is_empty());
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot");
+    }
+
+    #[test]
+    fn frame_all_single_point_bounds_keeps_current_zoom() {
+        let mut core = two_figure_core(1);
+        core.project.figures = vec![FigureInstance {
+            name: "Dot".into(),
+            color: 0xFFFFFF,
+            def: FigureDef {
+                nodes: vec![NodeDef {
+                    name: "origin".into(),
+                    parent: None,
+                    length: 0.0,
+                    rest_angle: 0.0,
+                    head: false,
+                    bend: 1.0,
+                    thickness: 6.0,
+                    color: None,
+                    ik_end: false,
+                    shape: Shape::Line,
+                    style: NodeStyle::default(),
+                    media: None,
+                }],
+            },
+            hidden: false,
+            clip: None,
+            locked: false,
+            opacity: 1.0,
+        }];
+        core.project.frames[0].poses = vec![Pose {
+            root: [200.0, 200.0],
+            angles: vec![0.0],
+        }];
+        core.frame_all_figures();
+        let k = &core.project.camera[0];
+        assert_eq!((k.x, k.y), (200.0, 200.0));
+        // No camera keys existed, so the current zoom is the
+        // no-keys default 1.0, and a point bounds must keep it.
+        assert_eq!(k.zoom, 1.0);
+    }
+
+    #[test]
+    fn centre_on_selection_centres_on_the_selected_root_and_keeps_zoom() {
+        let mut core = two_figure_core(1);
+        core.project.camera = vec![CameraKey {
+            frame: 0,
+            x: 480.0,
+            y: 360.0,
+            zoom: 2.0,
+            angle: 0.0,
+        }];
+        core.selected_figure = 1;
+        let edits = core.edits_since_autosave();
+        core.centre_on_selection();
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        assert_eq!(
+            core.project.camera.len(),
+            1,
+            "the key at frame 0 is replaced, not duplicated"
+        );
+        let k = &core.project.camera[0];
+        // Beta's root, with the pre-existing zoom untouched.
+        assert_eq!((k.x, k.y, k.zoom), (500.0, 300.0, 2.0));
+        assert!(core.status.contains("Beta"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn centre_on_selection_noops_without_figures() {
+        let mut core = two_figure_core(1);
+        core.project.figures = Vec::new();
+        let edits = core.edits_since_autosave();
+        core.centre_on_selection();
+        assert_eq!(core.status, "No figures to centre on.");
+        assert!(core.project.camera.is_empty());
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot");
     }
 }

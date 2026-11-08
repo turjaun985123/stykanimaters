@@ -11,7 +11,7 @@
 
 use gpui::*;
 
-use crate::ui_kit::{C_ACCENT, C_BORDER, C_INK, C_MUTED};
+use crate::ui_kit::{C_ACCENT, C_BORDER, C_CELL, C_INK, C_MUTED};
 
 /// Split a `0xRRGGBB` colour into its red, green and blue
 /// channels, each `0..=255`. Bits above the blue channel (there
@@ -44,7 +44,7 @@ pub fn channel_bar(channel: u8) -> Div {
         .w(px(BAR_W))
         .h(px(6.0))
         .rounded(px(999.0))
-        .bg(rgb(0x2C313A))
+        .bg(rgb(C_CELL))
         .child(
             div()
                 .w(px(fill))
