@@ -134,6 +134,43 @@
 //!   all of them must appear in Animate's presented
 //!   tree. The dynamic `open-proj-{i}` rows need a saved
 //!   project on disk and are not asserted.
+//!
+//! Round 6 (Phase I, section 39) adds four tests over the
+//! Phase I surfaces: the palette's workspace-jump
+//! commands, the transport's Prev key / Next key jumps,
+//! the clickable timeline markers, and the pose panel's
+//! inert Paste control. Facts they rest on, verified
+//! against the tree:
+//! * The jump commands are ordinary palette commands
+//!   (`go-animate` … `go-home`, Workspaces group) whose
+//!   shims call `workspaces::select_workspace`, so round
+//!   5's locate-and-walk driving pattern reaches them.
+//!   The query "export" matches seven commands (the six
+//!   `export-*` plus `go-export`), inside the palette's
+//!   `MAX_RESULTS` cap of 12, so the jump is always
+//!   listed for that query.
+//! * `pb-prev-key` / `pb-next-key` jump over
+//!   `playback_controls::key_frames` — camera keys union
+//!   graph keys, sorted and deduped. The demo project
+//!   has neither (asserted as the tests' premise), and
+//!   the camera panel's `cam-set-key` control keys the
+//!   camera at the current frame (its handler is
+//!   `rotate_camera(0.0)`, which sets a key), so two
+//!   presses at two frames build the exact jump list
+//!   [1, 3] the transport test walks. Prev at the first
+//!   key is a no-op (strict inequality), never a wrap.
+//! * A timeline marker cell (`marker-cam-{frame}`) is
+//!   presented only for a frame a camera key sits on,
+//!   and its press is `core.goto(frame)` — the chips'
+//!   own seek, on a separate element the chips' drag
+//!   gesture never sees.
+//! * The pose panel's Paste pose button is the control
+//!   that applies the clipboard pose; with an empty
+//!   clipboard it renders through the section's inert
+//!   branch, which attaches NO press handler — a press
+//!   routes nowhere, so the honest assertions are
+//!   presence plus a tap that changes nothing (status,
+//!   undo depth, current frame, joint positions).
 
 use std::collections::BTreeSet;
 
@@ -1205,4 +1242,317 @@ fn project_section_key_coverage() {
     ] {
         assert!(keys.contains(want), "missing audit-map key {want:?}");
     }
+}
+
+// ----------------------------------------------------------------
+// Round 6 (Phase I, section 39): palette workspace jumps,
+// transport keyframe jumps, timeline markers, and the pose
+// panel's inert Paste control.
+// ----------------------------------------------------------------
+
+/// Scroll the right column until the element keyed `key`
+/// sits inside the viewport, then settle (bounded) until
+/// it is fully presented — round 4's particles pattern,
+/// generalised: the column's wheel target and step are
+/// the ones that test proved, and the settle is the
+/// presence-fade courtesy rounds 3–5 use before pressing
+/// inside a freshly mounted panel.
+fn scroll_into_view(rt: &mut Runtime<State>, key: &str) {
+    for _ in 0..24 {
+        let (_, y) = rt
+            .find(key)
+            .unwrap_or_else(|| panic!("no element keyed {key:?}"));
+        if y < 850.0 {
+            break;
+        }
+        rt.wheel(1255.0, 450.0, -600.0);
+        rt.frame(DT);
+    }
+    for _ in 0..90 {
+        rt.frame(DT);
+        if let Some((_, opacity)) = rt.presented(key) {
+            if opacity > 0.99 {
+                break;
+            }
+        }
+    }
+}
+
+#[test]
+fn palette_workspace_jump_switches_workspace() {
+    use crate::rune_sec::command_palette::{display_commands, COMMANDS};
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // Seed Animate through its chip (the shared-prefs
+    // discipline), and settle out whatever panels a
+    // sibling-restored workspace left fading.
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+    for _ in 0..30 {
+        if !presented_keys(&rt).contains("export-panel") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    // The gating table: Export is {Export, Stats, Project}
+    // only, so Animate mounts FrameOps (`frames`, round 3's
+    // Animate-only key) and never the Export centre.
+    assert!(
+        presented_keys(&rt).contains("frames"),
+        "Animate mounts FrameOps"
+    );
+    assert!(
+        !presented_keys(&rt).contains("export-panel"),
+        "Animate gates the Export centre out"
+    );
+
+    // Open the palette the round 2/5 way and type the
+    // query through the real input path.
+    press_key(
+        &mut rt,
+        Key::Command('k'),
+        Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    );
+    assert!(rt.state.palette.open, "Ctrl+K opens the palette");
+    // A settling frame: the query field claims runtime
+    // focus from the flag `open_palette` set.
+    rt.frame(DT);
+    for c in "export".chars() {
+        type_char(&mut rt, c);
+    }
+    assert_eq!(
+        rt.state.palette.query.text, "export",
+        "typed characters landed in the query field"
+    );
+
+    // Locate the jump command in the palette's own
+    // listing for this query — the same `display_commands`
+    // `run_selected` resolves through — and walk the
+    // highlight to its row with Down, exactly as round
+    // 5's loop-toggle test drove the palette.
+    let (results, _) =
+        display_commands(&rt.state.palette.query.text, &rt.state.palette.recent);
+    let row = results
+        .iter()
+        .position(|&ci| COMMANDS[ci].key == "go-export")
+        .expect("the export query lists go-export (the Phase I jump command)");
+    let len = results.len();
+    let cur = rt.state.palette.selected % len;
+    for _ in 0..(row + len - cur) % len {
+        press_key(&mut rt, Key::Down, Mods::default());
+    }
+    assert_eq!(
+        rt.state.palette.selected, row,
+        "the highlight sits on the jump command's row"
+    );
+
+    // Enter runs it: the palette closes, the workspace
+    // field flips, the Export centre mounts and the
+    // Animate-only FrameOps panel leaves (settled,
+    // bounded, before the absence assert).
+    press_key(&mut rt, Key::Enter, Mods::default());
+    assert!(
+        !rt.state.palette.open,
+        "running a command closes the palette"
+    );
+    assert_eq!(
+        rt.state.workspace,
+        Workspace::Export,
+        "go-export switched the workspace"
+    );
+    assert!(
+        presented_keys(&rt).contains("export-panel"),
+        "Export mounts the Export centre"
+    );
+    for _ in 0..30 {
+        if !presented_keys(&rt).contains("frames") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    assert!(
+        !presented_keys(&rt).contains("frames"),
+        "Export gates FrameOps out"
+    );
+
+    // Restore Animate for the shared prefs, as rounds 2–5 do.
+    tap(&mut rt, "ws-animate");
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+}
+
+#[test]
+fn prev_next_key_jumps_between_camera_keys() {
+    use crate::rune_sec::playback_controls::key_frames;
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+    // Premise: the demo project carries no camera keys
+    // and no graph keys, so the transport's jump list
+    // starts empty and everything below is this test's
+    // own doing.
+    assert!(
+        key_frames(&rt.state.core).is_empty(),
+        "demo project has no key frames"
+    );
+
+    // Key the camera on frames 1 and 3 through the camera
+    // panel's own Set key control (`cam-set-key`; its
+    // handler keys the camera at the current frame). The
+    // camera panel sits in the right column, below the
+    // fold — scroll it into view before pressing.
+    tap(&mut rt, "frame-2");
+    assert_eq!(rt.state.core.current, 1);
+    scroll_into_view(&mut rt, "cam-set-key");
+    tap(&mut rt, "cam-set-key");
+    tap(&mut rt, "frame-4");
+    assert_eq!(rt.state.core.current, 3);
+    scroll_into_view(&mut rt, "cam-set-key");
+    tap(&mut rt, "cam-set-key");
+    assert_eq!(
+        key_frames(&rt.state.core),
+        vec![1, 3],
+        "both Set key presses landed"
+    );
+
+    // From frame 0 the Next key button walks the keys in
+    // order; the Playback panel is further down the same
+    // column, so scroll to it first.
+    tap(&mut rt, "frame-1");
+    assert_eq!(rt.state.core.current, 0);
+    scroll_into_view(&mut rt, "pb-next-key");
+    tap(&mut rt, "pb-next-key");
+    assert_eq!(
+        rt.state.core.current, 1,
+        "Next key lands on the first key"
+    );
+    tap(&mut rt, "pb-next-key");
+    assert_eq!(
+        rt.state.core.current, 3,
+        "Next key lands on the second key"
+    );
+
+    // Prev key walks back — and at the first key it is a
+    // no-op, not a wrap (the section's strict inequality).
+    tap(&mut rt, "pb-prev-key");
+    assert_eq!(
+        rt.state.core.current, 1,
+        "Prev key returns to the first key"
+    );
+    tap(&mut rt, "pb-prev-key");
+    assert_eq!(
+        rt.state.core.current, 1,
+        "Prev key at the first key is a no-op"
+    );
+}
+
+#[test]
+fn timeline_marker_press_seeks() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+    // Premise: no camera keys in the demo project, so no
+    // camera marker is presented for any frame.
+    assert!(
+        rt.state.core.project.camera.is_empty(),
+        "demo project starts without camera keys"
+    );
+    assert!(
+        !presented_keys(&rt).contains("marker-cam-2"),
+        "no camera marker before a key exists"
+    );
+
+    // Put a camera key on frame 2 through the camera
+    // panel's Set key control, as the transport test does.
+    tap(&mut rt, "frame-3");
+    assert_eq!(rt.state.core.current, 2);
+    scroll_into_view(&mut rt, "cam-set-key");
+    tap(&mut rt, "cam-set-key");
+    assert!(
+        presented_keys(&rt).contains("marker-cam-2"),
+        "the key's marker cell is presented"
+    );
+
+    // Seek away with a chip, then press the marker: its
+    // press is a plain `goto` to its own frame.
+    tap(&mut rt, "frame-1");
+    assert_eq!(rt.state.core.current, 0);
+    tap(&mut rt, "marker-cam-2");
+    assert_eq!(
+        rt.state.core.current, 2,
+        "the marker press seeks to its frame"
+    );
+}
+
+#[test]
+fn pose_panel_inert_apply_is_present_without_a_pose() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+    // Premise: nothing has been copied in this fresh
+    // shell, so Paste pose — the control that applies the
+    // clipboard pose — renders in its inert form. Inert
+    // and live share the key `pose-paste`; the inert form
+    // differs only visually (muted, and no press handler
+    // is attached at all), so presence plus a tap that
+    // changes nothing is the honest assertion.
+    assert!(
+        rt.state.pose_clipboard.is_none(),
+        "no pose on the clipboard"
+    );
+
+    // The pose panel sits in the right column, below the
+    // fold — scroll it into view before pressing.
+    scroll_into_view(&mut rt, "pose-paste");
+    let keys = presented_keys(&rt);
+    assert!(keys.contains("pose-tools"), "Animate mounts Pose tools");
+    assert!(
+        keys.contains("pose-paste"),
+        "the inert Paste pose control is presented"
+    );
+
+    // The tap routes nowhere: status, undo depth, the
+    // current frame and the figure's joint positions are
+    // all exactly as they were, and the clipboard stays
+    // empty.
+    let status = rt.state.core.status.clone();
+    let undo = rt.state.core.undo_depth();
+    let current = rt.state.core.current;
+    let joints = rt.state.core.positions(current, 0);
+    tap(&mut rt, "pose-paste");
+    assert_eq!(
+        rt.state.core.status, status,
+        "the inert press writes no status"
+    );
+    assert_eq!(
+        rt.state.core.undo_depth(),
+        undo,
+        "the inert press adds no undo step"
+    );
+    assert_eq!(
+        rt.state.core.current, current,
+        "the inert press does not seek"
+    );
+    assert_eq!(
+        rt.state.core.positions(current, 0),
+        joints,
+        "the inert press leaves the pose untouched"
+    );
+    assert!(
+        rt.state.pose_clipboard.is_none(),
+        "the clipboard stays empty"
+    );
 }

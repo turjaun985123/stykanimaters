@@ -81,11 +81,20 @@
 //!   opacity); and the head ring — its radius is stored
 //!   nowhere: both renderers draw a constant 17 units for
 //!   nodes flagged `head` (stage_view.rs, export.rs), so
-//!   a scaled figure keeps the same head size. The 110%
-//!   button carries the `expand` glyph via `icon_btn`
-//!   (Phase H); the 90% button stays text-only — the
-//!   curated icon set has no `compress` glyph to pair
-//!   with it.
+//!   a scaled figure keeps the same head size. Both
+//!   buttons carry Font Awesome glyphs via `icon_btn`:
+//!   the 110% button's `expand` since Phase H, and the
+//!   90% button's `down-left-and-up-right-to-center`
+//!   since Phase I — Phase H left it text-only because
+//!   the curated set then had no shrink glyph to pair
+//!   with `expand` (there is still no `compress`).
+//! * Measurements → [`figure_measure`] — a muted readout
+//!   line under the scale row (key `fig-measure`): joint
+//!   count, summed segment length and the joints'
+//!   bounding box at the display frame, all from the
+//!   evaluated positions the stage draws
+//!   (`EditorCore::positions_f`), so the numbers describe
+//!   the posed figure, graph channels included.
 //!
 //! When the project has no figures — or the selection is
 //! stale — the panel is one muted line.
@@ -184,6 +193,85 @@ pub fn figure_state(core: &EditorCore) -> Option<InspectorFigureState> {
         hidden: fig.hidden,
         locked: fig.locked,
     })
+}
+
+/// Measurements of the selected figure at the display
+/// frame: how many joints it has, how long its segments
+/// add up to, and how much stage space the posed figure
+/// covers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FigureMeasure {
+    /// Joint count (the evaluated position count).
+    pub nodes: usize,
+    /// Sum of the parent→joint distances over every
+    /// parented node, in stage units.
+    pub total_length: f32,
+    /// Bounding-box width of the joint positions.
+    pub width: f32,
+    /// Bounding-box height of the joint positions.
+    pub height: f32,
+}
+
+/// Measure the selected figure at the display frame, or
+/// `None` when there is no figure to measure (empty
+/// project, stale selection, or a figure whose rig
+/// evaluates to no joints).
+///
+/// Everything derives from `EditorCore::positions_f` —
+/// the same evaluated positions the stage draws — so the
+/// readout describes the figure as posed at this frame,
+/// graph channels included. Segment lengths are the
+/// parent→joint distances over the figure definition's
+/// parent links, measured on those positions (forward
+/// kinematics keeps each one equal to the node's authored
+/// length; a graph channel that drives lengths is
+/// reflected, as it is on stage). The selection is
+/// resolved through `project.figures.get` first because
+/// `positions_f` indexes the figure table directly and
+/// would panic on a stale selection.
+pub fn figure_measure(core: &EditorCore) -> Option<FigureMeasure> {
+    let fi = core.selected_figure;
+    let fig = core.project.figures.get(fi)?;
+    let pos = core.positions_f(core.display_frame(), fi);
+    if pos.is_empty() {
+        return None;
+    }
+    let mut total_length = 0.0f32;
+    for (i, node) in fig.def.nodes.iter().enumerate() {
+        if let Some(parent) = node.parent {
+            if let (Some(&a), Some(&b)) = (pos.get(parent), pos.get(i)) {
+                let dx = b[0] - a[0];
+                let dy = b[1] - a[1];
+                total_length += (dx * dx + dy * dy).sqrt();
+            }
+        }
+    }
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for p in &pos {
+        min_x = min_x.min(p[0]);
+        min_y = min_y.min(p[1]);
+        max_x = max_x.max(p[0]);
+        max_y = max_y.max(p[1]);
+    }
+    Some(FigureMeasure {
+        nodes: pos.len(),
+        total_length,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    })
+}
+
+/// The readout line for a measure: joint count, total
+/// length and bounding box, whole numbers throughout —
+/// "{nodes} joints · {total} long · {width}×{height}".
+pub fn measure_line(m: &FigureMeasure) -> String {
+    format!(
+        "{} joints · {:.0} long · {:.0}×{:.0}",
+        m.nodes, m.total_length, m.width, m.height
+    )
 }
 
 /// Persistent edit state for the rename field — the one
@@ -427,9 +515,16 @@ fn scale_stepper_row(t: &Theme) -> El {
                 .color(t.text_secondary)
                 .grow(1.0),
         )
-        .child(btn("fig-scale-dn", "90%", false, t, |s: &mut State| {
-            scale_selected_figure(&mut s.core, 0.9);
-        }))
+        .child(icon_btn(
+            "fig-scale-dn",
+            "down-left-and-up-right-to-center",
+            "90%",
+            false,
+            t,
+            |s: &mut State| {
+                scale_selected_figure(&mut s.core, 0.9);
+            },
+        ))
         .child(icon_btn(
             "fig-scale-up",
             "expand",
@@ -534,6 +629,14 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
     }
     panel = panel.child(opacity_stepper_row(&st, t));
     panel = panel.child(scale_stepper_row(t));
+    if let Some(m) = figure_measure(&s.core) {
+        panel = panel.child(
+            text(measure_line(&m))
+                .key("fig-measure")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    }
     panel.child(
         row()
             .w_full()
@@ -954,5 +1057,126 @@ loop_playback: true,
         assert!(!scale_selected_figure(&mut core, 0.9));
         assert_eq!(core.undo_depth(), 0, "refusal must be snapshot-free");
         assert_eq!(core.status, "No such figure.");
+    }
+
+    #[test]
+    fn figure_measure_is_none_without_figures() {
+        let mut core = EditorCore::new();
+        core.project.figures.clear();
+        assert!(figure_measure(&core).is_none());
+    }
+
+    #[test]
+    fn figure_measure_is_none_for_a_stale_selection() {
+        let mut core = EditorCore::new();
+        core.selected_figure = 999;
+        // Must read as "nothing to measure", not panic:
+        // positions_f indexes the figure table directly.
+        assert!(figure_measure(&core).is_none());
+    }
+
+    #[test]
+    fn figure_measure_reads_the_demo_figure() {
+        let core = EditorCore::new();
+        let fi = core.selected_figure;
+        let m = figure_measure(&core).expect("the demo project seeds a figure");
+        let pos = core.positions_f(core.display_frame(), fi);
+        assert_eq!(m.nodes, core.project.figures[fi].def.nodes.len());
+        assert_eq!(m.nodes, pos.len());
+        assert!(m.nodes > 0);
+        assert!(m.total_length > 0.0);
+        assert!(m.width >= 0.0 && m.height >= 0.0);
+        // The bounding box contains every joint: recompute
+        // the extremes from the raw positions and compare.
+        let min_x = pos.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+        let max_x = pos.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = pos.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+        let max_y = pos.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
+        assert!((m.width - (max_x - min_x)).abs() < 0.01);
+        assert!((m.height - (max_y - min_y)).abs() < 0.01);
+        // With no graph channels, forward kinematics keeps
+        // every segment at its authored length, so the
+        // measured total is the sum of the parented nodes'
+        // lengths.
+        if core.project.channels.is_empty() {
+            let authored: f32 = core.project.figures[fi]
+                .def
+                .nodes
+                .iter()
+                .filter(|n| n.parent.is_some())
+                .map(|n| n.length)
+                .sum();
+            assert!(
+                (m.total_length - authored).abs() < 0.1,
+                "measured {} vs authored sum {authored}",
+                m.total_length
+            );
+        }
+    }
+
+    #[test]
+    fn figure_measure_matches_a_hand_built_chain() {
+        use stykanimate_rs::model::{FigureDef, NodeDef, NodeStyle, Shape};
+        let node = |name: &str, parent: Option<usize>, length: f32| NodeDef {
+            name: name.into(),
+            parent,
+            length,
+            rest_angle: 0.0,
+            head: false,
+            bend: 1.0,
+            thickness: 5.0,
+            color: None,
+            ik_end: false,
+            shape: Shape::Line,
+            style: NodeStyle::default(),
+            media: None,
+        };
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        core.project.figures[fi].def = FigureDef {
+            nodes: vec![
+                node("root", None, 0.0),
+                node("reach", Some(0), 30.0),
+                node("drop", Some(1), 40.0),
+            ],
+        };
+        // Pose (angles are degrees; dir(a) = [sin a,
+        // cos a]): root at (100, 200); node 1 reaches +x
+        // by 30 (angle 90); node 2 hangs +y by 40 from
+        // node 1 (relative −90, absolute 0). The joints
+        // land at (100, 200), (130, 200), (130, 240).
+        for frame in core.project.frames.iter_mut() {
+            frame.poses[fi].root = [100.0, 200.0];
+            frame.poses[fi].angles[1] = 90.0;
+            frame.poses[fi].angles[2] = -90.0;
+        }
+        let m = figure_measure(&core).expect("the chain measures");
+        assert_eq!(m.nodes, 3);
+        assert!(
+            (m.total_length - 70.0).abs() < 0.01,
+            "30 + 40 by hand, got {}",
+            m.total_length
+        );
+        assert!(
+            (m.width - 30.0).abs() < 0.01,
+            "x spans 100..=130, got {}",
+            m.width
+        );
+        assert!(
+            (m.height - 40.0).abs() < 0.01,
+            "y spans 200..=240, got {}",
+            m.height
+        );
+    }
+
+    #[test]
+    fn measure_line_formats_whole_numbers() {
+        let m = FigureMeasure {
+            nodes: 14,
+            total_length: 512.4,
+            width: 120.6,
+            height: 288.2,
+        };
+        assert_eq!(measure_line(&m), "14 joints · 512 long · 121×288");
     }
 }

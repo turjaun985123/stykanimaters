@@ -121,6 +121,22 @@
 //! own status-only refusals ("No graph channels to
 //! key." / the copy refusals) — still snapshot-free,
 //! exactly as the ops were already written.
+//!
+//! Phase I (section 26/40) closes that difference: the
+//! five icon controls Phase H converted — Clear channel
+//! keys, the nudge pair, Key all here and Copy key +10 —
+//! render through `icon_btn_inert` / `icon_only_btn_inert`
+//! exactly when their op would refuse, decided by the
+//! pure predicates `clear_channel_enabled`,
+//! `nudge_enabled`, `key_all_enabled` and
+//! `copy_key_enabled` below. The nudge and stamp guards
+//! plan through the ops' own `nudge_plan`, so the tint
+//! can never disagree with the press. The plain `btn`
+//! controls (Key angle here, Delete key here, Auto
+//! tangents, the five presets) never carried an inert
+//! tint and stay wired — their refusals remain
+//! status-only — and Copy/Paste keys keep the muting
+//! `kbtn` already gave them.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El};
@@ -129,7 +145,7 @@ use stykanimate_rs::graph::{Channel, ChannelTarget, Key, TangentPreset};
 use stykanimate_rs::graph_keys;
 
 use crate::chrome_view::btn;
-use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
+use crate::rune_sec::icon_btn::{icon_btn, icon_btn_inert, icon_only_btn, icon_only_btn_inert};
 use crate::State;
 
 /// The graph channel this section acts on: the selected
@@ -160,6 +176,63 @@ pub fn selected_angle_channel_index(core: &EditorCore) -> Option<usize> {
 pub fn keyed_here(keys: &[Key], frame: usize) -> bool {
     let f = frame as f32;
     keys.iter().any(|k| (k.frame - f).abs() <= 0.5)
+}
+
+/// Whether planning a move of the selected channel's
+/// playhead key by `delta` frames lands — the shared
+/// render-time guard behind [`nudge_enabled`] and
+/// [`copy_key_enabled`]. It runs the ops' own
+/// [`nudge_plan`] over the selected angle channel, so it
+/// is false for exactly the ops' refusal set: no joint
+/// selected, no channel on the joint, no key at the
+/// playhead, a key within 0.5 frames of the landing spot,
+/// or a landing spot before frame 0. Pure: reads only.
+fn plan_would_move(core: &EditorCore, delta: i32) -> bool {
+    match selected_angle_channel(core) {
+        Some(ch) => matches!(
+            nudge_plan(&ch.keys, core.current as f32, delta),
+            NudgeOutcome::Moved { .. }
+        ),
+        None => false,
+    }
+}
+
+/// Whether the Nudge button for `delta` (−1 left, +1
+/// right) would move a key — the render-time twin of
+/// [`nudge_key_here_core`]'s refusals. When this is
+/// false the button renders inert (`icon_only_btn_inert`)
+/// instead of landing on the op's status-only refusal.
+pub fn nudge_enabled(core: &EditorCore, delta: i32) -> bool {
+    plan_would_move(core, delta)
+}
+
+/// Whether Copy key +10 would stamp a key — the
+/// render-time twin of [`copy_key_to_frame_core`]'s
+/// refusals, planned through the same [`nudge_plan`]
+/// with the stamp offset as its delta, collision at the
+/// landing spot included. When this is false the button
+/// renders inert (`icon_btn_inert`).
+pub fn copy_key_enabled(core: &EditorCore) -> bool {
+    plan_would_move(core, COPY_KEY_OFFSET_FRAMES)
+}
+
+/// Whether Key all here would key anything — its op's
+/// only refusal is a project with no graph channels, so
+/// the guard is the channel count. No selection is
+/// needed: keying everything is the point. When this is
+/// false the button renders inert (`icon_btn_inert`).
+pub fn key_all_enabled(core: &EditorCore) -> bool {
+    !core.project.channels.is_empty()
+}
+
+/// Whether Clear channel keys would remove anything —
+/// the render-time twin of
+/// [`clear_channel_keys_core`]'s refusal set: a joint is
+/// selected, its angle channel exists, and the channel
+/// holds at least one key. When this is false the
+/// button renders inert (`icon_btn_inert`).
+pub fn clear_channel_enabled(core: &EditorCore) -> bool {
+    selected_angle_channel(core).is_some_and(|ch| !ch.keys.is_empty())
 }
 
 /// The tangent preset buttons: every `TangentPreset` variant,
@@ -661,11 +734,12 @@ fn kbtn(
 /// state: Delete is accent-filled exactly when a key sits
 /// at this frame; Copy is muted until a channel exists to
 /// copy from, and Paste is muted while the key clipboard
-/// is empty. The stamp row's two buttons are icon
-/// buttons (Phase H) and stay wired in every state: with
-/// no channels (Key all) or no channel on the selected
-/// joint (Copy key +10) the press lands on the op's own
-/// status-only, snapshot-free refusal.
+/// is empty. The five icon controls (Clear channel keys,
+/// the nudge pair, Key all here, Copy key +10) render
+/// inert — muted, handler-free — exactly when their op
+/// would refuse, via the `*_enabled` predicates above
+/// (Phase I); the plain text buttons stay wired in every
+/// state and land on their ops' status-only refusals.
 pub fn keyframe_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let keyed = selected_angle_channel(core).is_some_and(|ch| keyed_here(&ch.keys, core.current));
@@ -726,46 +800,61 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                     t,
                     |s| paste_keys_here(s),
                 ))
-                .child(icon_btn(
-                    "key-clear-channel",
-                    "xmark",
-                    "Clear channel keys",
-                    false,
-                    t,
-                    |s| clear_channel_keys_here(s),
-                )),
+                .child(if clear_channel_enabled(core) {
+                    icon_btn(
+                        "key-clear-channel",
+                        "xmark",
+                        "Clear channel keys",
+                        false,
+                        t,
+                        |s| clear_channel_keys_here(s),
+                    )
+                } else {
+                    icon_btn_inert("key-clear-channel", "xmark", "Clear channel keys", t)
+                }),
         )
         .child(
             row()
                 .key("keyframe-nudge")
                 .gap(6.0)
-                .child(icon_only_btn("key-nudge-l", "chevron-left", 26.0, false, t, |s| {
-                    nudge_key_here(s, -1)
-                }))
-                .child(icon_only_btn("key-nudge-r", "chevron-right", 26.0, false, t, |s| {
-                    nudge_key_here(s, 1)
-                })),
+                .child(if nudge_enabled(core, -1) {
+                    icon_only_btn("key-nudge-l", "chevron-left", 26.0, false, t, |s| {
+                        nudge_key_here(s, -1)
+                    })
+                } else {
+                    icon_only_btn_inert("key-nudge-l", "chevron-left", 26.0, t)
+                })
+                .child(if nudge_enabled(core, 1) {
+                    icon_only_btn("key-nudge-r", "chevron-right", 26.0, false, t, |s| {
+                        nudge_key_here(s, 1)
+                    })
+                } else {
+                    icon_only_btn_inert("key-nudge-r", "chevron-right", 26.0, t)
+                }),
         )
         .child(
             row()
                 .key("keyframe-stamp")
                 .gap(6.0)
-                .child(icon_btn(
-                    "key-all-here",
-                    "key",
-                    "Key all here",
-                    false,
-                    t,
-                    |s| key_all_here(s),
-                ))
-                .child(icon_btn(
-                    "key-copy-to-frame",
-                    "copy",
-                    "Copy key +10",
-                    false,
-                    t,
-                    |s| copy_key_to_frame(s),
-                )),
+                .child(if key_all_enabled(core) {
+                    icon_btn("key-all-here", "key", "Key all here", false, t, |s| {
+                        key_all_here(s)
+                    })
+                } else {
+                    icon_btn_inert("key-all-here", "key", "Key all here", t)
+                })
+                .child(if copy_key_enabled(core) {
+                    icon_btn(
+                        "key-copy-to-frame",
+                        "copy",
+                        "Copy key +10",
+                        false,
+                        t,
+                        |s| copy_key_to_frame(s),
+                    )
+                } else {
+                    icon_btn_inert("key-copy-to-frame", "copy", "Copy key +10", t)
+                }),
         )
         .child(presets)
 }
@@ -1390,5 +1479,95 @@ mod tests {
         bare.selected_node = None;
         assert!(!copy_key_to_frame_core(&mut bare));
         assert!(bare.status.contains("Select a joint"));
+    }
+
+    #[test]
+    fn key_all_enabled_follows_the_project_channel_count() {
+        // No channels at all: the op's only refusal, so
+        // the button is inert.
+        let mut core = EditorCore::new();
+        core.project.channels.clear();
+        assert!(!key_all_enabled(&core));
+        // Any channel makes it live, with no selection
+        // required — keying everything is the point.
+        let mut core = core_with_angle_keys();
+        assert!(key_all_enabled(&core));
+        core.selected_node = None;
+        assert!(key_all_enabled(&core), "key-all needs no joint");
+    }
+
+    #[test]
+    fn clear_channel_enabled_needs_a_selected_channel_with_keys() {
+        // Channel with keys, joint selected: live.
+        let mut core = core_with_angle_keys();
+        assert!(clear_channel_enabled(&core));
+        // The channel emptied: the op would refuse, so
+        // the button goes inert.
+        core.project.channels[0].keys.clear();
+        assert!(!clear_channel_enabled(&core));
+        // No joint selected: inert.
+        let mut core = core_with_angle_keys();
+        core.selected_node = None;
+        assert!(!clear_channel_enabled(&core));
+        // A joint with no channel on it: inert.
+        let mut bare = EditorCore::new();
+        bare.selected_node = Some(1);
+        assert!(!clear_channel_enabled(&bare));
+    }
+
+    #[test]
+    fn nudge_enabled_mirrors_the_nudge_plans_refusals() {
+        let mut core = core_with_angle_keys(); // keys at 0 and 2
+        // Playhead on the frame-0 key: right lands on the
+        // free frame 1, left would leave the timeline.
+        core.current = 0;
+        assert!(nudge_enabled(&core, 1));
+        assert!(!nudge_enabled(&core, -1), "BeforeStart is inert");
+        // Playhead on the frame-2 key: both ways land.
+        core.current = 2;
+        assert!(nudge_enabled(&core, -1));
+        assert!(nudge_enabled(&core, 1));
+        // Playhead on a bare frame: no key here, both inert.
+        core.current = 4;
+        assert!(!nudge_enabled(&core, -1), "NoKeyHere is inert");
+        assert!(!nudge_enabled(&core, 1), "NoKeyHere is inert");
+        // A key on frame 1 blocks both neighbours' nudges
+        // into it — the collision refusal, read at render.
+        core.project.channels[0].keys.push(Key::flat(1.0, 99.0));
+        core.project.channels[0].sort_keys();
+        core.current = 0;
+        assert!(!nudge_enabled(&core, 1), "Blocked is inert");
+        core.current = 2;
+        assert!(!nudge_enabled(&core, -1), "Blocked is inert");
+        // No channel on the joint, then no joint: inert.
+        let mut bare = EditorCore::new();
+        bare.selected_node = Some(1);
+        assert!(!nudge_enabled(&bare, 1));
+        bare.selected_node = None;
+        assert!(!nudge_enabled(&bare, 1));
+    }
+
+    #[test]
+    fn copy_key_enabled_mirrors_the_stamp_plans_refusals() {
+        let mut core = core_with_angle_keys(); // keys at 0 and 2
+        // Playhead key at frame 0, landing frame 10 free.
+        core.current = 0;
+        assert!(copy_key_enabled(&core));
+        // The landing spot occupied — including by the
+        // fractional occupant inside the 0.5 window — is
+        // the stamp's collision refusal, so inert.
+        core.project.channels[0].keys.push(Key::flat(10.4, 99.0));
+        core.project.channels[0].sort_keys();
+        assert!(!copy_key_enabled(&core), "Blocked is inert");
+        // Playhead on a bare frame: nothing to stamp.
+        let mut core = core_with_angle_keys();
+        core.current = 4;
+        assert!(!copy_key_enabled(&core), "NoKeyHere is inert");
+        // No channel on the joint, then no joint: inert.
+        let mut bare = EditorCore::new();
+        bare.selected_node = Some(1);
+        assert!(!copy_key_enabled(&bare));
+        bare.selected_node = None;
+        assert!(!copy_key_enabled(&bare));
     }
 }

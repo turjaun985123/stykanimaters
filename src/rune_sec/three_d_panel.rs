@@ -44,18 +44,24 @@
 //!   library header rows lead with a `cube` glyph
 //!   (`icons::icon_el`); the library buttons render
 //!   through `icon_btn`: Save (both libraries) is
-//!   `floppy-disk`, Mirror is `copy`, per-entry Load is
+//!   `floppy-disk`, Mirror is `arrow-right-arrow-left`
+//!   (Phase I; `copy` in Phase H — mirroring swaps left
+//!   and right, it does not duplicate), per-entry Load is
 //!   `folder-open`, per-entry Apply is `check`. Keys,
 //!   labels, active flags and handlers are unchanged —
 //!   including the GPUI-era `save-pose-3d` /
 //!   `pose3d-lib-{i}` keys the Phase G §36 audit kept
-//!   deliberately. Dimmed buttons go through [`ictl`],
-//!   which keeps the muted shape below, glyph included.
+//!   deliberately. Dimmed buttons go through [`ictl`].
 //!
-//! Controls that need a live session render **dimmed but
-//! wired** when there is none: the press still fires, and the
+//! Controls that need a live session render dimmed when
+//! there is none. The text controls ([`ctl`]) stay
+//! **dimmed but wired**: the press still fires, and the
 //! op/helper answers "Enter 3D mode first." in the status
 //! line, so the muted look never hides a dead button.
+//! The icon library controls ([`ictl`]) went inert in
+//! Phase I instead: with no session they render through
+//! `icon_btn::icon_btn_inert` — same box, glyph and label
+//! in the muted colour, and no press handler at all.
 //!
 //! Element keys reuse the old GPUI control ids where one
 //! existed (`mode-3d`, `bake-3d`, …) so headless `--tree`
@@ -66,7 +72,7 @@ use rune::{col, el, row, text, El};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::fig3d;
 
-use crate::rune_sec::icon_btn::{icon_btn, ICON_LABEL_GAP, ICON_SIZE};
+use crate::rune_sec::icon_btn::{icon_btn, icon_btn_inert};
 use crate::rune_sec::icons::icon_el;
 use crate::State;
 
@@ -79,6 +85,14 @@ pub const CAMERA_PRESETS: [(&str, &str); 4] = [
     ("three-quarter", "3/4"),
     ("top", "Top"),
 ];
+
+/// The Mirror pose button's glyph (Phase I): Font
+/// Awesome's left/right swap arrows. Phase H shipped
+/// `copy` here, but mirroring exchanges the pose's left
+/// and right sides — it does not duplicate anything.
+/// A named constant so the tests can pin the choice (an
+/// element's children are not readable from a unit test).
+pub const MIRROR_ICON: &str = "arrow-right-arrow-left";
 
 /// One of the four humanoid limbs the IK buttons solve.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -487,14 +501,18 @@ fn ctl(
 /// controls. Live buttons delegate to
 /// `icon_btn::icon_btn` — the glyph-and-label button that
 /// mirrors the kit button's styling value for value.
-/// `dim` keeps [`ctl`]'s muted-but-wired shape exactly
-/// (control-off fill in every state, no hover/press
-/// change, handler wired), contents laid out as
-/// `icon_btn` lays them out — glyph then label at
-/// [`ICON_LABEL_GAP`] — with both drawn in the secondary
-/// text colour, so a session-less panel mutes exactly as
-/// it did before the glyph arrived and the press still
-/// fires the refusing op.
+///
+/// `dim` (Phase I) delegates to
+/// `icon_btn::icon_btn_inert`, the shared inert variant:
+/// the same box, glyph and label in the muted colour,
+/// and NO press handler at all. Phase H's dim branch
+/// hand-rolled [`ctl`]'s muted-but-wired shape here; the
+/// inert form is stronger — with no session a press
+/// cannot fire the refusing op, so there is no status
+/// churn and nothing to snapshot. The dimming condition
+/// itself is unchanged: callers pass the same `dim` they
+/// always did, and the handler argument is simply not
+/// attached on the dim branch.
 fn ictl(
     key: &str,
     icon: &str,
@@ -507,22 +525,7 @@ fn ictl(
     if !dim {
         return icon_btn(key, icon, label, active, t, f);
     }
-    el()
-        .key(key)
-        .px(10.0)
-        .py(5.0)
-        .radius(6.0)
-        .fill(t.control_off)
-        .hover(t.control_off)
-        .press(t.control_off)
-        .on_press(f)
-        .child(
-            row()
-                .gap(ICON_LABEL_GAP)
-                .center_y()
-                .child(icon_el(icon, ICON_SIZE, t.text_secondary))
-                .child(text(label).font(type_::LABEL).color(t.text_secondary)),
-        )
+    icon_btn_inert(key, icon, label, t)
 }
 
 fn section_label(text_: &str, t: &Theme) -> El {
@@ -775,7 +778,7 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             .child(ictl("save-pose-3d", "floppy-disk", "Save pose", false, dim, t, |s| {
                 save_current_pose(&mut s.core);
             }))
-            .child(ictl("mirror-pose-3d", "copy", "Mirror pose", false, dim, t, |s| {
+            .child(ictl("mirror-pose-3d", MIRROR_ICON, "Mirror pose", false, dim, t, |s| {
                 apply_mirror_pose(&mut s.core);
             })),
     );
@@ -1138,5 +1141,32 @@ mod tests {
                 fmt_fixed(cam.distance, 2)
             )
         );
+    }
+
+    #[test]
+    fn mirror_button_glyph_is_the_left_right_swap() {
+        // Phase I: the Mirror pose button's glyph is the
+        // left/right swap, not Phase H's `copy` — mirroring
+        // exchanges sides, it does not duplicate. The name
+        // is in the icon catalogue, so neither the live
+        // button nor its inert twin degrades to a
+        // glyph-less box.
+        assert_eq!(MIRROR_ICON, "arrow-right-arrow-left");
+        assert_ne!(MIRROR_ICON, "copy");
+        assert!(crate::rune_sec::icons::has_icon(MIRROR_ICON));
+    }
+
+    #[test]
+    fn ictl_builds_live_and_inert_forms() {
+        // Element construction is pure (a press needs a
+        // Runtime), so this pins that both branches of the
+        // Phase I migration construct: live → `icon_btn`,
+        // dim → `icon_btn_inert`. The dimming condition is
+        // the caller's `dim` flag, unchanged.
+        let t = rune::tok::theme(true);
+        let _ = ictl("k-live", "floppy-disk", "Save pose", false, false, &t, |_| {});
+        let _ = ictl("k-dim", "floppy-disk", "Save pose", false, true, &t, |_| {});
+        let _ = ictl("k-dim-mirror", MIRROR_ICON, "Mirror pose", false, true, &t, |_| {});
+        let _ = ictl("k-dim-apply", "check", "Apply", false, true, &t, |_| {});
     }
 }

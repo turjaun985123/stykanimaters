@@ -88,6 +88,17 @@
 //! `step_from_button`, likewise snapshots once per
 //! press), and a stale index is a status-only refusal
 //! that snapshots nothing.
+//!
+//! ## Phase I (§36): row content preview
+//!
+//! The instance rows have carried a content preview
+//! since §27 — the load button's label, capped by
+//! [`preview`] at 18 characters. §36 caps that label
+//! with the stricter [`text_preview`] instead: 14
+//! characters, and line breaks flattened to spaces so
+//! multi-line content stays on the row's one line.
+//! [`preview`] remains for its existing tests; the
+//! rows read [`text_preview`].
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, text_input, El, TextEdit as FieldEdit, Tx};
@@ -200,12 +211,36 @@ pub fn preview(content: &str) -> String {
     format!("{head}…")
 }
 
+/// How many characters of content [`text_preview`]
+/// shows before truncating.
+pub const TEXT_PREVIEW_CHARS: usize = 14;
+
+/// The single-line preview of a text instance's content
+/// that the "Existing texts" rows show (Phase I §36):
+/// line breaks become spaces, then the flattened text
+/// is kept whole when it fits in [`TEXT_PREVIEW_CHARS`]
+/// characters and otherwise cut to its first
+/// `TEXT_PREVIEW_CHARS` characters plus an ellipsis.
+/// Counts characters, never bytes, so multi-byte text
+/// truncates cleanly. Pure.
+pub fn text_preview(content: &str) -> String {
+    let flat: String = content
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    if flat.chars().count() <= TEXT_PREVIEW_CHARS {
+        return flat;
+    }
+    let head: String = flat.chars().take(TEXT_PREVIEW_CHARS).collect();
+    format!("{head}…")
+}
+
 /// One free-standing text instance (`Project.texts`), for
 /// the "Existing texts" list: its real index in the vec
 /// (the row's buttons act on the instance it names, even
-/// as deletions shift the indices of the rest), a content
-/// preview, how many transform keys it carries, and its
-/// glyph height.
+/// as deletions shift the indices of the rest), a
+/// single-line content preview ([`text_preview`]), how
+/// many transform keys it carries, and its glyph height.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextInstanceRow {
     pub index: usize,
@@ -223,7 +258,7 @@ pub fn text_instances(core: &EditorCore) -> Vec<TextInstanceRow> {
         .enumerate()
         .map(|(index, inst)| TextInstanceRow {
             index,
-            preview: preview(&inst.content),
+            preview: text_preview(&inst.content),
             keys: inst.keys.len(),
             size: inst.size,
         })
@@ -931,6 +966,76 @@ mod tests {
     }
 
     #[test]
+    fn text_preview_keeps_short_content_unchanged() {
+        assert_eq!(text_preview("Hello"), "Hello");
+        assert_eq!(text_preview("Hi"), "Hi");
+    }
+
+    #[test]
+    fn text_preview_empty_content_stays_empty() {
+        assert_eq!(text_preview(""), "");
+    }
+
+    #[test]
+    fn text_preview_keeps_exactly_fourteen_characters_unchanged() {
+        let exact = "a".repeat(TEXT_PREVIEW_CHARS);
+        assert_eq!(exact.chars().count(), 14);
+        assert_eq!(text_preview(&exact), exact, "exactly at the cap is not truncated");
+    }
+
+    #[test]
+    fn text_preview_truncates_fifteen_characters_with_an_ellipsis() {
+        let fifteen = "a".repeat(TEXT_PREVIEW_CHARS + 1);
+        let shown = text_preview(&fifteen);
+        assert_eq!(shown, format!("{}…", "a".repeat(TEXT_PREVIEW_CHARS)));
+        assert_eq!(shown.chars().count(), TEXT_PREVIEW_CHARS + 1);
+    }
+
+    #[test]
+    fn text_preview_counts_multibyte_characters_as_characters() {
+        // Each é is two bytes in UTF-8: a byte-based cut
+        // at 14 would split or miscount; the char-based
+        // one keeps 14 whole characters.
+        let long = "é".repeat(TEXT_PREVIEW_CHARS + 1);
+        let shown = text_preview(&long);
+        assert_eq!(shown, format!("{}…", "é".repeat(TEXT_PREVIEW_CHARS)));
+        // A short multi-byte string under the cap is kept
+        // whole, accents and all.
+        assert_eq!(text_preview("héllo wörld"), "héllo wörld");
+    }
+
+    #[test]
+    fn text_preview_flattens_newlines_to_spaces() {
+        assert_eq!(text_preview("Hello\nworld"), "Hello world");
+        assert_eq!(text_preview("one\r\ntwo"), "one  two", "each break char becomes a space");
+        // Flattening happens before the cap: the flattened
+        // text is what gets counted and cut.
+        assert_eq!(
+            text_preview("line one\nline two here"),
+            "line one line …",
+            "flattened to 22 chars, then cut to the first 14 plus an ellipsis"
+        );
+    }
+
+    #[test]
+    fn text_instances_rows_preview_is_the_single_line_text_preview() {
+        let mut core = EditorCore::new();
+        push_instance(&mut core, "First line\nand a good deal more after it", 24.0, 1);
+        let rows = text_instances(&core);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].preview,
+            text_preview("First line\nand a good deal more after it"),
+            "the row preview is the §36 preview of the content"
+        );
+        assert!(
+            !rows[0].preview.contains('\n'),
+            "a row preview never carries a line break"
+        );
+        assert_eq!(rows[0].preview, "First line and…");
+    }
+
+    #[test]
     fn text_instances_rows_carry_real_index_preview_keys_and_size() {
         let mut core = EditorCore::new();
         push_instance(&mut core, "First label", 24.0, 2);
@@ -942,7 +1047,7 @@ mod tests {
         assert_eq!(rows[0].keys, 2);
         assert_eq!(rows[0].size, 24.0);
         assert_eq!(rows[1].index, 1);
-        assert_eq!(rows[1].preview, preview("A much longer second label"));
+        assert_eq!(rows[1].preview, text_preview("A much longer second label"));
         assert_eq!(rows[1].keys, 1);
         assert_eq!(rows[1].size, 48.0);
     }

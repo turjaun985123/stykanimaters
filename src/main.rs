@@ -345,6 +345,7 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     // A wrapped playhead restarts the audio pass from the
     // top (Phase G); a no-op while audio is inactive.
     s.core.sync_playback_audio_on_wrap(prev_frame, s.core.current);
+    s.core.sync_playback_audio_on_seek(prev_frame, s.core.current);
     s.last_frame = s.core.current;
     let fps = s.core.project.fps.max(1.0);
     tx.wake_after(Duration::from_secs_f32(1.0 / fps));

@@ -15,6 +15,9 @@
 //! * [`EditorCore::duplicate_figure`] mirrors
 //!   `delete_figure`'s bookkeeping (editor.rs) run in
 //!   reverse, plus the index shifts an insertion requires.
+//! * [`EditorCore::recolor_figure`] is the whole-figure
+//!   counterpart of the per-node colour setters: one
+//!   snapshot, then every node's colour written directly.
 //!
 //! Bookkeeping scope: duplication inserts cloned pose rows
 //! (and bend rows, where a frame stores them) into every
@@ -288,6 +291,47 @@ impl EditorCore {
         self.status = "Figure duplicated.".into();
         Some(fi + 1)
     }
+
+    /// Recolour figure `fi` as a whole: write `color` as
+    /// every node's own colour — `NodeDef.color =
+    /// Some(color)`, the same field `set_node_color`
+    /// (editor.rs) writes one node at a time — under
+    /// exactly ONE snapshot, so the recolour is a single
+    /// undo step however many nodes the figure has.
+    /// `set_node_color` itself never snapshots; this op
+    /// snapshots once up front and then writes the field
+    /// directly in the loop, so no per-node snapshots
+    /// sneak in.
+    ///
+    /// Only the colour is written. A node's gradient end
+    /// colour (`NodeStyle.color2`) is deliberately NOT
+    /// recoloured: a gradient segment keeps its end
+    /// colour and now runs from `color` to that end. The
+    /// figure's own base colour (`FigureInstance.color`)
+    /// is likewise left alone — with every node carrying
+    /// an explicit colour it colours nothing until a
+    /// node's colour is cleared back to `None`.
+    ///
+    /// Returns `false`, changing nothing but the status
+    /// line (the refusal shape `duplicate_figure` uses),
+    /// when `fi` names no figure or the figure has no
+    /// nodes to recolour; a refusal takes no snapshot.
+    pub fn recolor_figure(&mut self, fi: usize, color: u32) -> bool {
+        let Some(fig) = self.project.figures.get(fi) else {
+            self.status = "No figure to recolour.".into();
+            return false;
+        };
+        if fig.def.nodes.is_empty() {
+            self.status = "Figure has no segments to recolour.".into();
+            return false;
+        }
+        self.snapshot();
+        for node in &mut self.project.figures[fi].def.nodes {
+            node.color = Some(color);
+        }
+        self.status = format!("Figure {} recoloured.", fi + 1);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -311,6 +355,75 @@ mod tests {
         core.set_figure_color(999, 0x2686E8);
         assert_eq!(core.status, "No such figure.");
         assert_eq!(core.project.figures[0].color, before);
+    }
+
+    #[test]
+    fn recolor_figure_colours_every_node_as_one_undo_step() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        let before: Vec<Option<u32>> = core.project.figures[fi]
+            .def
+            .nodes
+            .iter()
+            .map(|n| n.color)
+            .collect();
+        assert!(before.len() > 1, "the demo figure has several nodes");
+        let depth = core.undo_depth();
+        assert!(core.recolor_figure(fi, 0xE8862E));
+        assert_eq!(
+            core.undo_depth(),
+            depth + 1,
+            "exactly one snapshot for the whole figure"
+        );
+        assert!(core.project.figures[fi]
+            .def
+            .nodes
+            .iter()
+            .all(|n| n.color == Some(0xE8862E)));
+        assert_eq!(core.status, format!("Figure {} recoloured.", fi + 1));
+        // A single undo restores every node's original
+        // colour — the proof the writes shared one snapshot.
+        core.undo();
+        let after: Vec<Option<u32>> = core.project.figures[fi]
+            .def
+            .nodes
+            .iter()
+            .map(|n| n.color)
+            .collect();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn recolor_figure_keeps_gradient_end_colours() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        core.project.figures[fi].def.nodes[0].style.color2 = Some(0x112233);
+        assert!(core.recolor_figure(fi, 0x445566));
+        assert_eq!(core.project.figures[fi].def.nodes[0].color, Some(0x445566));
+        assert_eq!(
+            core.project.figures[fi].def.nodes[0].style.color2,
+            Some(0x112233),
+            "the gradient end colour is not part of a recolour"
+        );
+    }
+
+    #[test]
+    fn recolor_figure_guards_a_stale_index_without_a_snapshot() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        assert!(!core.recolor_figure(999, 0xE8862E));
+        assert_eq!(core.undo_depth(), depth, "a refusal takes no snapshot");
+        assert_eq!(core.status, "No figure to recolour.");
+    }
+
+    #[test]
+    fn recolor_figure_refuses_a_figure_with_no_nodes() {
+        let mut core = EditorCore::new();
+        core.project.figures[0].def.nodes.clear();
+        let depth = core.undo_depth();
+        assert!(!core.recolor_figure(0, 0xE8862E));
+        assert_eq!(core.undo_depth(), depth, "a refusal takes no snapshot");
+        assert_eq!(core.status, "Figure has no segments to recolour.");
     }
 
     #[test]

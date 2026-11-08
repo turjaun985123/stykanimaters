@@ -87,6 +87,29 @@
 //!   header Hide/Show toggle and the save button keep
 //!   the plain [`btn`] rendering.
 //!
+//! ## Phase I additions (section 37/40)
+//!
+//! - **File-name matching**: the search matched entry
+//!   names only. A saved entry also has a file name —
+//!   `./library/<name>.json`, the stem mapping proven
+//!   below — so the row filter ([`library_rows_q`]) now
+//!   goes through [`entry_matches`], which accepts a hit
+//!   on the display name OR on the backing file name
+//!   ([`entry_file_name`]): a query like `hero.json` or
+//!   `.json` finds saved entries it could not find
+//!   before. Built-ins have no file and still match by
+//!   name only.
+//! - **Count discipline**: the header count followed no
+//!   filter discipline — it always read `{total}
+//!   figures`. It now renders through [`count_line`],
+//!   the figures panel's standard (Phase G §17): while
+//!   a filter is active ([`filter_active`]) it reads
+//!   `{shown} of {total} figures`; idle it keeps the
+//!   header's existing `{total} figures` form,
+//!   byte-identical to before. The no-match line
+//!   (`No library figures match "…".`) already mirrored
+//!   the figures panel's and is unchanged.
+//!
 //! The successful-rename fs dispatch (a real file moved
 //! under `./library`) is deliberately **untested**, for
 //! exactly the delete reason given below: test binaries
@@ -232,14 +255,69 @@ pub fn name_matches(name: &str, query: &str) -> bool {
     q.is_empty() || name.to_lowercase().contains(&q)
 }
 
-/// One row per library entry whose name matches `query`,
-/// in library order. Row indices are the real library
+/// True when the search `query` actually narrows the
+/// list: non-empty once trimmed. A whitespace-only query
+/// is no filter at all. Mirrors
+/// `figures_panel::filter_active` — the two panels share
+/// the shell's filter discipline.
+pub fn filter_active(query: &str) -> bool {
+    !query.trim().is_empty()
+}
+
+/// The backing file name of the library entry `name`:
+/// `<name>.json` for a saved entry (see
+/// [`library_file_for`] — `load_library` names entries
+/// from file stems, so the file name is exactly the stem
+/// plus the extension). Built-ins are constructed in
+/// code and have no file: `None`.
+pub fn entry_file_name(name: &str) -> Option<String> {
+    if is_builtin(name) {
+        None
+    } else {
+        Some(format!("{name}.json"))
+    }
+}
+
+/// True when the library entry `name` matches the search
+/// `query`: a case-insensitive substring hit on the
+/// display name OR — for saved entries — on the backing
+/// file name ([`entry_file_name`]), so `hero.json` and
+/// `.json` find the entry `my-hero`. An empty (or
+/// whitespace-only) query matches everything, via
+/// [`name_matches`].
+pub fn entry_matches(name: &str, query: &str) -> bool {
+    if name_matches(name, query) {
+        return true;
+    }
+    match entry_file_name(name) {
+        Some(file) => name_matches(&file, query),
+        None => false,
+    }
+}
+
+/// The header count line, at the figures panel's
+/// discipline (`figures_panel::count_line`): with a
+/// filter active, "{shown} of {total} figures"; with no
+/// filter, the "{total} figures" form the header has
+/// always shown — the idle rendering is unchanged, only
+/// the filtered form is new.
+pub fn count_line(shown: usize, total: usize, query: &str) -> String {
+    if filter_active(query) {
+        format!("{shown} of {total} figures")
+    } else {
+        format!("{total} figures")
+    }
+}
+
+/// One row per library entry matching `query` (display
+/// name or backing file name — [`entry_matches`]), in
+/// library order. Row indices are the real library
 /// slots, unaffected by filtering.
 pub fn library_rows_q(core: &EditorCore, query: &str) -> Vec<LibraryRow> {
     core.library
         .iter()
         .enumerate()
-        .filter(|(_, (name, _))| name_matches(name, query))
+        .filter(|(_, (name, _))| entry_matches(name, query))
         .map(|(index, (name, def))| LibraryRow {
             index,
             name: name.clone(),
@@ -612,6 +690,15 @@ fn group(key: &str, label: &str, rows: &[LibraryRow], s: &State, t: &Theme) -> E
 pub fn library_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let collapsed = s.library_panel.collapsed;
+    // One query read for the whole panel: the header
+    // count and the card's row groups both derive from
+    // it, so the count can never disagree with the rows.
+    let query = s.library_panel.search.text.clone();
+    let header_count = count_line(
+        library_rows_q(core, &query).len(),
+        core.library.len(),
+        &query,
+    );
     let mut panel = col().key("library-panel").gap(6.0);
     panel = panel.child(
         row()
@@ -625,7 +712,7 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
                     .grow(1.0),
             )
             .child(
-                text(format!("{} figures", core.library.len()))
+                text(header_count)
                     .font(type_::LABEL)
                     .color(t.text_secondary),
             )
@@ -651,7 +738,6 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
             t,
             |s: &mut State| s.core.save_figure_to_library(),
         ));
-        let query = s.library_panel.search.text.clone();
         card = card.child(
             row()
                 .key("library-search-row")
@@ -1040,5 +1126,74 @@ mod tests {
         core.library_index = 7;
         clamp_library_index(&mut core);
         assert_eq!(core.library_index, 0, "empty library clamps to 0");
+    }
+
+    #[test]
+    fn filter_active_needs_real_text() {
+        assert!(!filter_active(""));
+        assert!(!filter_active("   "));
+        assert!(filter_active("hero"));
+        assert!(filter_active("  hero  "));
+    }
+
+    #[test]
+    fn entry_file_name_only_for_saved_entries() {
+        // A saved entry's file name is its stem plus the
+        // extension — the inverse of the loader's naming.
+        assert_eq!(entry_file_name("my-hero").as_deref(), Some("my-hero.json"));
+        assert_eq!(entry_file_name("a.b").as_deref(), Some("a.b.json"));
+        // Built-ins are constructed in code: no file.
+        assert_eq!(entry_file_name("Built-in: Mini"), None);
+    }
+
+    #[test]
+    fn entry_matches_name_or_file_name() {
+        // Display-name hits behave exactly like
+        // name_matches (case-insensitive substring).
+        assert!(entry_matches("my-hero", "HERO"));
+        assert!(entry_matches("Built-in: Mini", "mini"));
+        // File-name hits the display name alone would miss:
+        // the query reaches into the ".json" extension.
+        assert!(entry_matches("my-hero", "hero.json"));
+        assert!(entry_matches("my-hero", ".JSON"));
+        // Built-ins have no file name to hit.
+        assert!(!entry_matches("Built-in: Mini", ".json"));
+        assert!(!entry_matches("Built-in: Mini", "mini.json"));
+        // Genuine misses still miss, and the empty query
+        // still matches everything.
+        assert!(!entry_matches("my-hero", "villain"));
+        assert!(entry_matches("my-hero", ""));
+        assert!(entry_matches("my-hero", "   "));
+    }
+
+    #[test]
+    fn filtered_rows_match_file_name_queries() {
+        let mut core = EditorCore::new();
+        core.library
+            .push(("Alpha".into(), stykanimate_rs::model::FigureDef::simple()));
+        // "alpha.json" matches only through the file name,
+        // and the row keeps its real library slot.
+        let rows = saved_rows_q(&core, "alpha.json");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Alpha");
+        assert_eq!(rows[0].index, 3);
+        // ".json" matches saved entries (Alpha among
+        // them) and never a built-in.
+        let rows = library_rows_q(&core, ".json");
+        assert!(rows.iter().all(|r| !r.builtin));
+        assert!(rows.iter().any(|r| r.name == "Alpha"));
+        assert!(builtin_rows_q(&core, ".json").is_empty());
+    }
+
+    #[test]
+    fn count_line_follows_the_filter_discipline() {
+        // Idle: the header's long-standing form, unchanged.
+        assert_eq!(count_line(3, 3, ""), "3 figures");
+        assert_eq!(count_line(3, 3, "   "), "3 figures");
+        assert_eq!(count_line(0, 0, ""), "0 figures");
+        // Filtering: shown of total, including zero shown.
+        assert_eq!(count_line(1, 4, "alp"), "1 of 4 figures");
+        assert_eq!(count_line(0, 4, "zzz"), "0 of 4 figures");
+        assert_eq!(count_line(4, 4, "a"), "4 of 4 figures");
     }
 }

@@ -93,13 +93,32 @@
 //! are magnitudes a glyph cannot carry — and the strip
 //! canvas is drawing code, not element code, so it is
 //! untouched.
+//!
+//! Phase I adds two gestures. The strip press now
+//! seeks: a press on empty strip moves the playhead to
+//! the frame under the press ([`frame_at_x`] over the
+//! nominal [`STRIP_W`] space; [`press_outcome`] splits
+//! the select-or-seek decision out of the handler),
+//! while a press on a bar still selects, exactly as
+//! before — the fractional hit mapping the bars need
+//! was renamed [`frame_frac_at_x`] to make room for
+//! the seek's whole-frame [`frame_at_x`]. And the
+//! inspector gains a kind stepper: prev/next buttons
+//! cycling the selected clip's kind through the FX
+//! browser's category order via `fx_ops::fx_kind_cycle`
+//! and `EditorCore::fx_set_kind`, with the current
+//! kind labelled the way the browser labels it
+//! (`fx_browser::kind_label`).
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, ScrollSpec, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::fx_edit;
+use stykanimate_rs::fx_ops::fx_kind_cycle;
+use stykanimate_rs::vfx::ClipKind;
 
 use crate::chrome_view::btn;
+use crate::rune_sec::fx_browser::kind_label;
 use crate::rune_sec::icon_btn::icon_only_btn;
 use crate::rune_sec::icons::icon_el;
 use crate::stage_view::hex_color;
@@ -283,6 +302,19 @@ pub fn selection_after_delete(
     }
 }
 
+/// The kind `dir` steps from `current` in the
+/// canonical cycle order (Phase I): a named seam over
+/// `stykanimate_rs::fx_ops::fx_kind_cycle`, whose
+/// `FX_KIND_ORDER` walks the FX browser's five
+/// categories (Explosion, Energy, Magic, Nature,
+/// Particles) in the browser's row order, wrapping at
+/// both ends — Wave steps forward to Burst, Burst
+/// steps back to Wave. Kept here so this module's
+/// handlers and tests speak one vocabulary.
+pub fn cycle_kind(current: ClipKind, dir: i32) -> ClipKind {
+    fx_kind_cycle(current, dir)
+}
+
 // ----------------------------------------------------------------
 // Clip timeline strip — pure geometry
 //
@@ -413,16 +445,43 @@ pub fn bar_rect(
     [sx, y, ex - sx, bh]
 }
 
-/// The frame under strip x `x` (element points) in a
-/// strip `w` wide spanning `frames_total` frames:
-/// linear, clamped to `[0, frames_total]`. A press
-/// inside the element has `x < w`, so the result is
-/// effectively in `[0, frames_total)`.
-pub fn frame_at_x(x: f32, w: f32, frames_total: f32) -> f32 {
+/// The fractional frame under strip x `x` (element
+/// points) in a strip `w` wide spanning `frames_total`
+/// frames: linear, clamped to `[0, frames_total]`. A
+/// press inside the element has `x < w`, so the result
+/// is effectively in `[0, frames_total)`. This is the
+/// hit-testing mapping — clip windows are fractional,
+/// so bar selection needs the fraction. The playhead
+/// seek uses the whole-frame [`frame_at_x`] instead
+/// (Phase I; this helper carried that name until the
+/// seek landed).
+pub fn frame_frac_at_x(x: f32, w: f32, frames_total: f32) -> f32 {
     if w <= 0.0 || frames_total <= 0.0 {
         return 0.0;
     }
     (x / w * frames_total).clamp(0.0, frames_total)
+}
+
+/// The whole frame a seek press at strip x `x` lands
+/// on, where `x` is in NOMINAL strip points: the strip
+/// draws in a [`STRIP_W`] space stretched over its
+/// element by `view_box`, so the handler converts an
+/// element x into nominal points first (see
+/// [`press_outcome`]). The mapping is the proportion
+/// `x / STRIP_W` of a `frame_count`-frame timeline,
+/// floored and clamped to `0..frame_count - 1`: the
+/// playhead can only rest on a real frame, so the
+/// strip's right edge seeks the LAST frame, not one
+/// past it. A project with no frames seeks frame 0
+/// (there is nowhere else to be), and a non-finite `x`
+/// likewise — the waveform mapping's convention
+/// (`waveform_view::frame_at_x`).
+pub fn frame_at_x(x: f32, frame_count: usize) -> usize {
+    if frame_count == 0 || !x.is_finite() {
+        return 0;
+    }
+    let frac = (x / STRIP_W).clamp(0.0, 1.0);
+    ((frac * frame_count as f32).floor() as usize).min(frame_count - 1)
 }
 
 /// The lane under strip y `y` (element points) in a
@@ -457,10 +516,9 @@ pub fn clip_at(clips: &[(f32, f32)], frame: f32, lane: usize) -> Option<usize> {
 /// Resolve a strip press at element point (`x`, `y`) in
 /// an element `w` × `h` spanning `frames_total` frames
 /// to the clip it selects, or `None` for a press on
-/// empty strip (which leaves the selection unchanged —
-/// there is no "select nothing" gesture). This is the
-/// whole press logic; the element handler is a thin
-/// wrapper over it.
+/// empty strip. The "select nothing" answer is this
+/// function's whole contract — [`press_outcome`] layers
+/// the seek on top of it for the element handler.
 pub fn press_select(
     clips: &[(f32, f32)],
     x: f32,
@@ -473,9 +531,48 @@ pub fn press_select(
         return None;
     }
     let lanes_n = lane_count(&pack_lanes(clips)).max(1);
-    let frame = frame_at_x(x, w, frames_total);
+    let frame = frame_frac_at_x(x, w, frames_total);
     let lane = lane_at_y(y, h, lanes_n);
     clip_at(clips, frame, lane)
+}
+
+/// What a strip press resolves to: the clip it selects,
+/// or the frame it seeks the playhead to (Phase I).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PressOutcome {
+    /// Select this clip (list index).
+    Select(usize),
+    /// Seek the playhead to this frame (0-based).
+    Seek(usize),
+}
+
+/// Resolve a strip press at element point (`x`, `y`)
+/// in an element `w` × `h` spanning the whole
+/// timeline: a press on a bar selects it (via
+/// [`press_select`], byte-for-byte the pre-seek
+/// behaviour); a press on empty strip seeks. The seek
+/// conversion first turns the element x into the
+/// strip's nominal [`STRIP_W`] space — the drawing
+/// stretches by `view_box`, so element and nominal
+/// points differ whenever the laid-out element is not
+/// exactly [`STRIP_W`] wide — then maps it with
+/// [`frame_at_x`] over `frame_count` frames. Split
+/// out of the handler so the select-or-seek decision
+/// is testable without a `State`.
+pub fn press_outcome(
+    clips: &[(f32, f32)],
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    frames_total: f32,
+    frame_count: usize,
+) -> PressOutcome {
+    if let Some(i) = press_select(clips, x, y, w, h, frames_total) {
+        return PressOutcome::Select(i);
+    }
+    let nominal_x = if w > 0.0 { x / w * STRIP_W } else { 0.0 };
+    PressOutcome::Seek(frame_at_x(nominal_x, frame_count))
 }
 
 // ----------------------------------------------------------------
@@ -599,24 +696,56 @@ fn reanchor_selected(s: &mut State) {
     s.core.fx_set_anchor(i, figure, node);
 }
 
+/// The kind `dir` steps from the selected clip's kind,
+/// per [`cycle_kind`]; `None` when nothing valid is
+/// selected. Split from the handler so the choice is
+/// testable without a `State`.
+pub fn cycled_kind(core: &EditorCore, selected: Option<usize>, dir: i32) -> Option<ClipKind> {
+    let index = valid_selection(selected, core.project.fx_clips.len())?;
+    Some(cycle_kind(core.project.fx_clips[index].clip.kind, dir))
+}
+
+/// Cycle the selected clip's kind by `dir` steps
+/// (Phase I) through `EditorCore::fx_set_kind` — the
+/// op owns the snapshot and the status line ("FX clip
+/// N kind set to …"); this handler owns only the
+/// selection validation, like every other inspector
+/// handler here.
+fn cycle_selected_kind(s: &mut State, dir: i32) {
+    let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
+        return;
+    };
+    let next = cycle_kind(s.core.project.fx_clips[i].clip.kind, dir);
+    s.core.fx_set_kind(i, next);
+}
+
 /// The strip's press gesture: a press (drag Down) on a
 /// clip's bar selects that clip in `State::fx_selected`
 /// — the selection the lane rows and inspector already
-/// share, so no new state exists. Only the Down phase
-/// acts (selection is a press, not a scrub), a press on
-/// empty strip changes nothing, and the conversion runs
-/// over the drag's own reported element size, matching
-/// the drawn fractions at any laid-out width. Selection
-/// is view state: no snapshot, no status line, exactly
-/// like a lane-row press.
+/// share, so no new state exists. A press on empty
+/// strip instead seeks the playhead to the frame under
+/// the press (Phase I, via [`press_outcome`] and
+/// `EditorCore::goto`, which sets the current frame
+/// and the fractional playhead together) — the ruler
+/// behaviour the strip's whole-timeline span invites.
+/// Only the Down phase acts (both gestures are
+/// presses, not scrubs), and the conversion runs over
+/// the drag's own reported element size, matching the
+/// drawn fractions at any laid-out width. Selection is
+/// view state: no snapshot, no status line, exactly
+/// like a lane-row press; `goto` is likewise
+/// snapshot-free, so a seek leaves the undo stack and
+/// the status line untouched too.
 fn strip_press(s: &mut State, d: &Drag) {
     if d.phase != Phase::Down {
         return;
     }
     let windows = strip_windows(&s.core);
     let total = s.core.frame_count().max(1) as f32;
-    if let Some(i) = press_select(&windows, d.x, d.y, d.w, d.h, total) {
-        s.fx_selected = Some(i);
+    let count = s.core.frame_count();
+    match press_outcome(&windows, d.x, d.y, d.w, d.h, total, count) {
+        PressOutcome::Select(i) => s.fx_selected = Some(i),
+        PressOutcome::Seek(frame) => s.core.goto(frame),
     }
 }
 
@@ -880,7 +1009,9 @@ pub fn nudge_row(s: &State, t: &Theme) -> El {
 }
 
 /// The clip inspector for the selected FX clip: kind and
-/// anchor summary, start/duration steppers (move/resize),
+/// anchor summary, a kind stepper (Phase I: prev/next
+/// cycling through the browser's category order),
+/// start/duration steppers (move/resize),
 /// earlier/later nudge buttons (the GPUI panel's
 /// `fx-earlier`/`fx-later`), a nudge row (fine start
 /// moves and ±0.1 s duration steps), colour + end-colour
@@ -913,6 +1044,34 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
             ))
             .font(type_::LABEL)
             .color(t.text_secondary),
+        )
+        // Kind stepper (Phase I): prev/next cycle the
+        // clip's kind through the FX browser's category
+        // order (fx_ops::fx_kind_cycle +
+        // EditorCore::fx_set_kind); the label names the
+        // current kind the way the browser names it
+        // (fx_browser::kind_label).
+        .child(
+            row()
+                .key("fx-kind-row")
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text("Kind")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                )
+                .child(icon_only_btn("fx-kind-prev", "chevron-left", 26.0, false, t, |s| {
+                    cycle_selected_kind(s, -1)
+                }))
+                .child(
+                    text(kind_label(data.kind))
+                        .font(type_::BODY)
+                        .color(t.text),
+                )
+                .child(icon_only_btn("fx-kind-next", "chevron-right", 26.0, false, t, |s| {
+                    cycle_selected_kind(s, 1)
+                })),
         )
         // Start stepper: -/+ move the clip by one frame
         // (EditorCore::fx_move_clip).
@@ -1362,14 +1521,14 @@ mod tests {
     }
 
     #[test]
-    fn frame_and_lane_at_convert_points_back() {
-        assert_eq!(frame_at_x(0.0, 300.0, 30.0), 0.0);
-        assert_eq!(frame_at_x(150.0, 300.0, 30.0), 15.0);
-        assert_eq!(frame_at_x(300.0, 300.0, 30.0), 30.0);
+    fn frame_frac_and_lane_at_convert_points_back() {
+        assert_eq!(frame_frac_at_x(0.0, 300.0, 30.0), 0.0);
+        assert_eq!(frame_frac_at_x(150.0, 300.0, 30.0), 15.0);
+        assert_eq!(frame_frac_at_x(300.0, 300.0, 30.0), 30.0);
         // Outside the element clamps to the ends.
-        assert_eq!(frame_at_x(-10.0, 300.0, 30.0), 0.0);
-        assert_eq!(frame_at_x(450.0, 300.0, 30.0), 30.0);
-        assert_eq!(frame_at_x(10.0, 0.0, 30.0), 0.0);
+        assert_eq!(frame_frac_at_x(-10.0, 300.0, 30.0), 0.0);
+        assert_eq!(frame_frac_at_x(450.0, 300.0, 30.0), 30.0);
+        assert_eq!(frame_frac_at_x(10.0, 0.0, 30.0), 0.0);
 
         assert_eq!(lane_at_y(0.0, 28.0, 2), 0);
         assert_eq!(lane_at_y(13.0, 28.0, 2), 0);
@@ -1445,5 +1604,126 @@ mod tests {
         let shape = strip_shape(&core, Some(9), [STRIP_W, 2.0 * LANE_H], &t);
         assert!(!shape.is_empty());
         assert!(strip_shape(&core, None, [0.0, 0.0], &t).is_empty());
+    }
+
+    // --------------------------------------------------
+    // Phase I: strip seek + kind cycling
+    // --------------------------------------------------
+
+    #[test]
+    fn seek_frame_at_x_maps_the_nominal_width_proportionally() {
+        // STRIP_W nominal points over 30 frames: the
+        // left edge is frame 0, halfway is frame 15.
+        assert_eq!(frame_at_x(0.0, 30), 0);
+        assert_eq!(frame_at_x(STRIP_W / 2.0, 30), 15);
+        // Just inside the right edge is the last frame,
+        // and the edge itself clamps to it — never one
+        // past the end.
+        assert_eq!(frame_at_x(STRIP_W - 1.0, 30), 29);
+        assert_eq!(frame_at_x(STRIP_W, 30), 29);
+        // Beyond both edges clamps; a one-frame project
+        // maps everywhere to frame 0.
+        assert_eq!(frame_at_x(-20.0, 30), 0);
+        assert_eq!(frame_at_x(STRIP_W * 2.0, 30), 29);
+        assert_eq!(frame_at_x(STRIP_W / 2.0, 1), 0);
+    }
+
+    #[test]
+    fn seek_frame_at_x_handles_degenerate_inputs() {
+        // No frames: frame 0 is the only answer.
+        assert_eq!(frame_at_x(0.0, 0), 0);
+        assert_eq!(frame_at_x(STRIP_W / 2.0, 0), 0);
+        // Non-finite points seek nowhere (frame 0), the
+        // waveform mapping's convention.
+        assert_eq!(frame_at_x(f32::NAN, 30), 0);
+        assert_eq!(frame_at_x(f32::INFINITY, 30), 0);
+    }
+
+    #[test]
+    fn press_outcome_selects_bars_and_seeks_empty_strip() {
+        // One clip covering frames 0..10; strip element
+        // 300 x 14 over a 30-frame project.
+        let clips = [(0.0, 10.0)];
+        // On the bar: select, exactly as press_select
+        // resolved presses before the seek existed.
+        assert_eq!(
+            press_outcome(&clips, 50.0, 5.0, 300.0, 14.0, 30.0, 30),
+            PressOutcome::Select(0)
+        );
+        // Empty strip past the clip: seek. Element x 150
+        // of 300 is half the strip, so half the
+        // timeline — frame 15.
+        assert_eq!(
+            press_outcome(&clips, 150.0, 5.0, 300.0, 14.0, 30.0, 30),
+            PressOutcome::Seek(15)
+        );
+        // The far right of the strip seeks the last
+        // frame, not one past it.
+        assert_eq!(
+            press_outcome(&clips, 299.0, 5.0, 300.0, 14.0, 30.0, 30),
+            PressOutcome::Seek(29)
+        );
+        // No clips at all: every press is a seek.
+        assert_eq!(
+            press_outcome(&[], 150.0, 5.0, 300.0, 14.0, 30.0, 30),
+            PressOutcome::Seek(15)
+        );
+        // A wider element: the press converts through
+        // the element's own width, so half of a
+        // 600-wide element is still frame 15.
+        assert_eq!(
+            press_outcome(&clips, 300.0, 5.0, 600.0, 14.0, 30.0, 30),
+            PressOutcome::Seek(15)
+        );
+    }
+
+    #[test]
+    fn kind_cycle_wraps_at_both_ends_of_the_order() {
+        // The order is the FX browser's categories
+        // (fx_ops::FX_KIND_ORDER): Explosion opens with
+        // Burst, Particles closes with Wave.
+        assert_eq!(cycle_kind(ClipKind::Wave, 1), ClipKind::Burst);
+        assert_eq!(cycle_kind(ClipKind::Burst, -1), ClipKind::Wave);
+        // Neighbours step singly within a category...
+        assert_eq!(cycle_kind(ClipKind::Burst, 1), ClipKind::ShockRing);
+        assert_eq!(cycle_kind(ClipKind::ShockRing, -1), ClipKind::Burst);
+        // ...and across a category boundary
+        // (Explosion's last kind steps into Energy's
+        // first).
+        assert_eq!(cycle_kind(ClipKind::Splash, 1), ClipKind::Beam);
+        assert_eq!(cycle_kind(ClipKind::Beam, -1), ClipKind::Splash);
+        // A zero step is the kind itself.
+        assert_eq!(cycle_kind(ClipKind::Sparkle, 0), ClipKind::Sparkle);
+    }
+
+    #[test]
+    fn cycled_kind_reads_the_selected_clip() {
+        let core = core_with(vec![
+            entry(0.0, 10.0, ClipKind::Burst, 0xFF5D5D),
+            entry(12.0, 6.0, ClipKind::Wave, 0x5DB2FF),
+        ]);
+        assert_eq!(cycled_kind(&core, Some(0), 1), Some(ClipKind::ShockRing));
+        // The last kind in the order wraps to the first.
+        assert_eq!(cycled_kind(&core, Some(1), 1), Some(ClipKind::Burst));
+        assert_eq!(cycled_kind(&core, Some(1), -1), Some(ClipKind::Glitter));
+        // No selection, or a stale one, cycles nothing.
+        assert_eq!(cycled_kind(&core, None, 1), None);
+        assert_eq!(cycled_kind(&core, Some(7), 1), None);
+    }
+
+    #[test]
+    fn set_kind_through_the_op_changes_only_the_kind() {
+        // The handler's path, exercised the way
+        // cycle_selected_kind drives it: pick the
+        // cycled kind, then apply it through the op.
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let next = cycled_kind(&core, Some(0), 1).expect("a cycled kind");
+        core.fx_set_kind(0, next);
+        let clip = &core.project.fx_clips[0].clip;
+        assert_eq!(clip.kind, ClipKind::ShockRing);
+        // Start, duration and colour are untouched.
+        assert_eq!(clip.start, 4.0);
+        assert_eq!(clip.duration, 10.0);
+        assert_eq!(clip.color, 0xFF5D5D);
     }
 }

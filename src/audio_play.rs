@@ -23,15 +23,20 @@
 //! The `EditorCore` methods the Rune shell needs —
 //! [`EditorCore::start_playback_audio`],
 //! [`EditorCore::stop_playback_audio`],
-//! [`EditorCore::sync_playback_audio_on_wrap`] and
+//! [`EditorCore::sync_playback_audio_on_wrap`],
+//! [`EditorCore::sync_playback_audio_on_seek`] and
 //! [`EditorCore::playback_audio_active`] — delegating to that
 //! same player and mix. Start uses the GPUI shell's exact
 //! playhead convention: `current` frame over `fps` (floored at
 //! 1), so the audio starts at the frame the user sees selected.
-//! The sync method closes the loop-wrap limit (Phase G): when
+//! The wrap sync closes the loop-wrap limit (Phase G): when
 //! the shell's per-tick frame tracking shows the playhead
 //! wrapped while playing, it restarts the audio from the
-//! playhead, so each visual loop gets its own audio pass.
+//! playhead, so each visual loop gets its own audio pass. The
+//! seek sync closes the scrub-follow limit (Phase I): when
+//! the tracking shows the playhead jumping forward while
+//! playing, it restarts the audio from the new playhead, so a
+//! seek is heard from where the picture landed.
 //!
 //! ## Where the player lives, and why
 //!
@@ -59,19 +64,28 @@
 //! the timeline, or at the end of a loop range (the restart
 //! starts from the wrapped-to frame, so a range that begins
 //! mid-timeline restarts its audio at the range start, which
-//! is where the picture is). Two things remain open, plainly:
+//! is where the picture is).
 //!
-//! - **No scrub-follow.** Seeking or scrubbing while playing
-//!   does not re-sync the audio; only pressing Play and the
-//!   loop wrap restart it. A seek leaves the audio playing
-//!   its original course until it ends or playback stops.
-//! - **A wrap inside a single tick can be missed.** The
-//!   detection compares whole frames between ticks; a tick
-//!   that advanced the playhead by a full loop or more and
-//!   landed on a frame at or after the previous one is
-//!   indistinguishable from ordinary forward motion. At the
-//!   shell's per-frame tick rate this needs a stall of a
-//!   whole loop's duration, but it is not impossible.
+//! The scrub-follow limit is closed in both directions
+//! (Phase I): a backward seek while playing lowers `current`,
+//! which the wrap restart already reads as its signal, and
+//! [`EditorCore::sync_playback_audio_on_seek`] restarts the
+//! audio whenever a tick shows the playhead jumping forward
+//! by more than one frame. The shell's poll calls the two
+//! syncs side by side each tick (integrator wiring). One
+//! thing remains open, plainly:
+//!
+//! - **A wrap inside a single tick can still be missed in
+//!   one narrow shape.** The detection compares whole frames
+//!   between ticks; a tick that advanced the playhead by a
+//!   full loop or more and landed on the previous frame or
+//!   the one after it is indistinguishable from holding or
+//!   ordinary forward motion, so no restart fires. Landing
+//!   further ahead is caught by the seek restart instead —
+//!   it restarts from the landed frame either way, which is
+//!   where the picture is. At the shell's per-frame tick
+//!   rate this needs a stall of a whole loop's duration,
+//!   but it is not impossible.
 
 use std::cell::RefCell;
 
@@ -122,6 +136,30 @@ fn playhead_wrapped(
     frame_count: usize,
 ) -> bool {
     was_playing && now_playing && frame_count > 1 && cur_frame < prev_frame
+}
+
+/// Did the playhead jump forward between two poll ticks? Pure
+/// decision behind [`EditorCore::sync_playback_audio_on_seek`].
+///
+/// Normal playback advances `current` by exactly one frame
+/// per tick (or holds it, on a long-duration frame), so a
+/// tick that lands more than one frame ahead is a
+/// discontinuity: the user seeked or scrubbed forward, and
+/// the audio — still playing its original course — no longer
+/// matches the picture. Backward motion is deliberately not
+/// this function's business: a decrease is the wrap signal
+/// `playhead_wrapped` reads, and a backward seek while
+/// playing produces exactly that decrease, so the wrap
+/// restart already re-syncs it.
+///
+/// A stall counts too: a tick delayed long enough for the
+/// playhead to skip two or more frames reads as a seek. That
+/// is desirable, not a false positive — the two clocks were
+/// free to drift across the stall (there is no sample-clock
+/// sync; see the module docs), and restarting re-anchors the
+/// audio to where the picture actually landed.
+pub fn playhead_seeked(prev_frame: usize, cur_frame: usize) -> bool {
+    cur_frame > prev_frame && cur_frame - prev_frame > 1
 }
 
 impl EditorCore {
@@ -198,6 +236,44 @@ impl EditorCore {
             self.project.frames.len(),
         );
         if wrapped && self.playback_audio_active() {
+            self.stop_playback_audio();
+            self.start_playback_audio();
+        }
+    }
+
+    /// Re-sync the audio after a forward seek: if the playhead
+    /// jumped forward between the shell's previous poll tick
+    /// (`prev_frame`) and this one (`cur_frame`) while playing
+    /// — the decision lives in `playhead_seeked` — and sound
+    /// is actually running, restart it from the new position
+    /// via stop + start.
+    ///
+    /// The restart reuses [`EditorCore::start_playback_audio`],
+    /// so it inherits that method's behaviour exactly: it
+    /// starts at the current frame (the frame the seek landed
+    /// on), succeeds silently when nothing is audible there,
+    /// and reports a player launch failure on `core.status`.
+    /// Backward seeks need no path of their own here: they
+    /// lower `current`, which
+    /// [`EditorCore::sync_playback_audio_on_wrap`] already
+    /// reads as its wrap signal and restarts for.
+    ///
+    /// When there was no jump, playback is stopped, or no
+    /// audio is active (nothing audible, or the player already
+    /// exited), this is a no-op and writes nothing to the
+    /// status line. The shell calls it every poll tick beside
+    /// the wrap sync, with the frame it saw last tick and
+    /// `self.current`; the per-tick cost when nothing jumps is
+    /// the comparison plus one process-liveness check.
+    ///
+    /// The `playing` guard mirrors the wrap sync's: the call
+    /// happens inside the same tick that advanced the
+    /// playhead, so the state that produced the motion is the
+    /// state now. A seek made while stopped is followed by
+    /// Play's own fresh start, so no restart is owed for it.
+    pub fn sync_playback_audio_on_seek(&mut self, prev_frame: usize, cur_frame: usize) {
+        let seeked = self.playing && playhead_seeked(prev_frame, cur_frame);
+        if seeked && self.playback_audio_active() {
             self.stop_playback_audio();
             self.start_playback_audio();
         }
@@ -418,6 +494,51 @@ mod tests {
         core.sync_playback_audio_on_wrap(0, 1);
         core.playing = false;
         core.sync_playback_audio_on_wrap(last, 0);
+        assert_eq!(core.status, "Sentinel.");
+        assert!(!core.playback_audio_active());
+    }
+
+    #[test]
+    fn seeked_detects_forward_jumps() {
+        // Two or more frames ahead in one tick: a seek, a
+        // scrub, or a stall long enough to skip frames.
+        assert!(playhead_seeked(3, 5));
+        assert!(playhead_seeked(0, 2));
+        assert!(playhead_seeked(4, 10));
+        assert!(playhead_seeked(0, 9));
+    }
+
+    #[test]
+    fn seeked_ignores_advance_holds_and_backward_motion() {
+        // Exactly one frame ahead is ordinary advance.
+        assert!(!playhead_seeked(3, 4));
+        assert!(!playhead_seeked(0, 1));
+        // Holding on the same frame (a long-duration frame the
+        // playhead has not crossed yet) is not a seek.
+        assert!(!playhead_seeked(4, 4));
+        assert!(!playhead_seeked(0, 0));
+        // Backward motion is the wrap path's business: the
+        // full-timeline fold and the loop-range fold alike.
+        assert!(!playhead_seeked(9, 0));
+        assert!(!playhead_seeked(7, 3));
+    }
+
+    #[test]
+    fn seek_sync_without_audio_is_a_silent_no_op() {
+        // No clips → the player is never active, so even a
+        // textbook seek shape must leave everything untouched.
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.playing = true;
+        core.current = 3;
+        core.status = "Sentinel.".into();
+        core.sync_playback_audio_on_seek(0, core.current);
+        assert_eq!(core.status, "Sentinel.");
+        assert!(!core.playback_audio_active());
+        // Ordinary advance and a paused seek shape alike.
+        core.sync_playback_audio_on_seek(2, 3);
+        core.playing = false;
+        core.sync_playback_audio_on_seek(0, 3);
         assert_eq!(core.status, "Sentinel.");
         assert!(!core.playback_audio_active());
     }

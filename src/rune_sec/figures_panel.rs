@@ -65,13 +65,26 @@
 //! the opacity-cycle button (`opac`) stay text: the icon
 //! map names no glyph for them, and a cycle action is not
 //! a state a single static glyph would carry honestly.
+//!
+//! Phase I (section 20/40) adds one header control: a
+//! "Recolour figure" button (key `fig-recolor`, `paintbrush`
+//! glyph via `icon_btn`) that paints the WHOLE selected
+//! figure with the colour its selected joint resolves to,
+//! through `EditorCore::recolor_figure` (figure_ops.rs —
+//! one snapshot, per-node `color2` untouched, the op sets
+//! its own status). The colour decision lives in the pure
+//! [`recolor_source_color`] helper; the press dispatch is
+//! [`recolor_row`]. With no figure or no joint selected the
+//! press is silent — no status, no snapshot — the guarded
+//! style the editor's own selection ops use (e.g.
+//! `cycle_node_color` returns silently with no selection).
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, text_input, Color, El, LineCap, Shape, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::V2;
 
-use crate::rune_sec::icon_btn::icon_only_btn;
+use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::rune_sec::icons::icon_el;
 use crate::stage_view::{hex_color, ngon};
 use crate::State;
@@ -388,6 +401,41 @@ fn delete_row(core: &mut EditorCore, fi: usize) {
     core.delete_figure();
 }
 
+/// The recolour source for the header's "Recolour figure"
+/// button: the selected figure's index paired with the
+/// colour its selected joint resolves to, or `None` when
+/// there is no usable selection — no figure at the selected
+/// index, or no joint selected.
+///
+/// Colour resolution mirrors the engine's own rule,
+/// `node.color.unwrap_or(fig.color)` (export.rs's segment
+/// writer, and the stage's text pass): when the selected
+/// node carries an explicit colour (`NodeDef.color` is
+/// `Some`), that colour is the source; when it is `None`
+/// the node inherits, so the figure's own colour is the
+/// resolved value and is the source instead. Either way the
+/// returned colour is the one the stage would draw that
+/// joint in.
+pub fn recolor_source_color(core: &EditorCore) -> Option<(usize, u32)> {
+    let fi = core.selected_figure;
+    let fig = core.project.figures.get(fi)?;
+    let ni = core.selected_node?;
+    let node = fig.def.nodes.get(ni)?;
+    Some((fi, node.color.unwrap_or(fig.color)))
+}
+
+/// Recolour dispatch for the header button: paint the whole
+/// selected figure with its selected joint's resolved
+/// colour via `EditorCore::recolor_figure` (one snapshot;
+/// the op sets its own status, including its refusals).
+/// With no figure or no joint selected the press is silent
+/// — no status is set and nothing is snapshotted.
+fn recolor_row(core: &mut EditorCore) {
+    if let Some((fi, color)) = recolor_source_color(core) {
+        core.recolor_figure(fi, color);
+    }
+}
+
 /// One figure row, as a two-line card: line 1 is the live
 /// thumbnail canvas (`fig-thumb-{fi}`, Phase F), then the
 /// colour dot + name (press selects), the opacity readout,
@@ -566,7 +614,15 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
                 ))
                 .child(crate::chrome_view::btn("add-figure", "+ Figure", false, t, |s| {
                     s.core.add_figure()
-                })),
+                }))
+                .child(icon_btn(
+                    "fig-recolor",
+                    "paintbrush",
+                    "Recolour figure",
+                    false,
+                    t,
+                    |s: &mut State| recolor_row(&mut s.core),
+                )),
         );
     if collapsed {
         return panel;
@@ -922,5 +978,59 @@ mod tests {
         let headed = thumb_fit(&pos, true, THUMB_SIZE);
         assert!(headed.scale < plain.scale);
         assert_eq!(headed.map([50.0, 25.0]), [22.0, 22.0]);
+    }
+
+    #[test]
+    fn recolor_source_color_is_none_without_a_joint() {
+        // The demo core starts with no joint selected, so
+        // there is no colour source — and the dispatch press
+        // is silent: status untouched, nothing recoloured.
+        let mut core = EditorCore::new();
+        assert_eq!(core.selected_node, None);
+        assert_eq!(recolor_source_color(&core), None);
+        let status = core.status.clone();
+        recolor_row(&mut core);
+        assert_eq!(core.status, status);
+        // A selected index past the end of the project is
+        // no figure at all: still None, even with a joint.
+        core.selected_figure = 999;
+        core.selected_node = Some(0);
+        assert_eq!(recolor_source_color(&core), None);
+    }
+
+    #[test]
+    fn recolor_source_color_resolves_the_inherited_colour() {
+        // A selected joint whose node colour is None
+        // inherits: the source is the figure's own colour.
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        assert!(!core.project.figures[fi].def.nodes.is_empty());
+        core.project.figures[fi].def.nodes[0].color = None;
+        core.selected_node = Some(0);
+        let fig_color = core.project.figures[fi].color;
+        assert_eq!(recolor_source_color(&core), Some((fi, fig_color)));
+    }
+
+    #[test]
+    fn recolor_source_color_uses_the_explicit_node_colour() {
+        // A selected joint with an explicit colour: that
+        // colour is the source, and the dispatch paints
+        // every node of the figure with it (color2 aside).
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        core.selected_node = Some(0);
+        core.set_node_color(0x123456);
+        assert_eq!(
+            core.project.figures[fi].def.nodes[0].color,
+            Some(0x123456)
+        );
+        assert_eq!(recolor_source_color(&core), Some((fi, 0x123456)));
+        recolor_row(&mut core);
+        assert!(core.project.figures[fi]
+            .def
+            .nodes
+            .iter()
+            .all(|n| n.color == Some(0x123456)));
+        assert_eq!(core.status, format!("Figure {} recoloured.", fi + 1));
     }
 }

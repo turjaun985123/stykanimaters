@@ -38,6 +38,12 @@
 //! and out — a rising line, not a loudness mark) — via
 //! `icon_btn` / `icon_only_btn`; every key is unchanged.
 //!
+//! Phase I adds a selected-clip READOUT (`clip_readout`):
+//! a muted line under the clip rows naming the effective
+//! target's file name, start frame and gain at a glance,
+//! so the toolbar's aim is visible beside the rows
+//! themselves and not only in the line under "Operations".
+//!
 //! Every control calls a real `EditorCore` op (evidence in
 //! the handler comments). Phase E closed the gaps Phase D
 //! had to leave open — fade, reverse, gain, delete and move
@@ -55,6 +61,7 @@
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, text_input, El, TextEdit, Tx};
 use stykanimate_rs::audio_edit;
+use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::AudioClip;
 
 use crate::chrome_view::btn;
@@ -199,6 +206,41 @@ pub fn target_line(clips: &[AudioClip], selected: Option<usize>) -> String {
             count
         ),
     }
+}
+
+/// A clip path's final component, splitting on BOTH
+/// separators: clips are typed by hand in the add-clip
+/// row, so a Windows-style path (`audio\theme.wav`) must
+/// trim the same way a POSIX one does — `Path::file_name`
+/// alone treats `\` as an ordinary character on Linux.
+/// An empty path (or one ending in a separator) yields
+/// the empty string.
+pub fn clip_file_name(path: &str) -> &str {
+    path.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(path)
+}
+
+/// Phase I: the selected-clip readout — one line naming
+/// the EFFECTIVE target's facts at a glance: its 1-based
+/// clip number, file name, start frame (shown 1-based,
+/// like the rows' `f{n}`) and gain at two decimals (always
+/// shown here, unlike the rows' non-unity-only suffix —
+/// the readout's job is the full picture). The target is
+/// the same `effective_target` the DSP buttons use, so
+/// the line always names the clip an effect would hit:
+/// the live selection, or the last clip as the fallback.
+/// `None` when the project has no clips. Pure: reads only
+/// the in-memory clip list, never the filesystem.
+pub fn clip_readout(core: &EditorCore, selected: Option<usize>) -> Option<String> {
+    let clips = &core.project.audio;
+    let i = effective_target(selected, clips.len())?;
+    let clip = &clips[i];
+    Some(format!(
+        "Clip {}: {} · starts frame {} · gain {:.2}",
+        i + 1,
+        clip_file_name(&clip.path),
+        clip.start_frame + 1,
+        clip.gain
+    ))
 }
 
 /// Repair a selection after clip `deleted` was removed
@@ -491,7 +533,9 @@ fn delete_row_clip(s: &mut State, i: usize) {
 /// no keys — row selection rides the existing
 /// `audio-clip-{i}` row keys. Phase H adds no keys either:
 /// Split@cur, Fade and Add clip gain glyphs and Delete
-/// goes icon-only under their existing keys.
+/// goes icon-only under their existing keys. Phase I adds
+/// exactly one key, `audio-readout`, for the selected-clip
+/// readout line under the rows.
 pub fn audio_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let clips = &core.project.audio;
@@ -593,6 +637,21 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                 move |s| delete_row_clip(s, i),
             ));
             panel = panel.child(clip_row);
+        }
+        // Phase I: the selected-clip readout sits directly
+        // under the rows it describes (and above the
+        // Operations toolbar below) — the effective
+        // target's name, start frame and gain at a glance.
+        // Inside the non-empty branch on purpose: with no
+        // clips the panel keeps its existing empty state
+        // and no readout element is rendered at all.
+        if let Some(readout) = clip_readout(core, selected) {
+            panel = panel.child(
+                text(readout)
+                    .key("audio-readout")
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            );
         }
     }
 
@@ -762,6 +821,68 @@ mod tests {
         );
         assert_eq!(target_line(&[], None), "Target: none — no audio clips");
         assert_eq!(target_line(&[], Some(0)), "Target: none — no audio clips");
+    }
+
+    #[test]
+    fn clip_file_name_trims_both_separators() {
+        // POSIX and Windows separators trim alike, mixed
+        // paths take the final component, and a bare name
+        // (or an empty path) passes through untouched.
+        assert_eq!(clip_file_name("audio/theme.wav"), "theme.wav");
+        assert_eq!(clip_file_name("audio\\theme.wav"), "theme.wav");
+        assert_eq!(clip_file_name("a/b\\c/sting.ogg"), "sting.ogg");
+        assert_eq!(clip_file_name("theme.wav"), "theme.wav");
+        assert_eq!(clip_file_name(""), "");
+    }
+
+    #[test]
+    fn clip_readout_formats_the_effective_target() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip("audio/theme.wav", 0, 1.0));
+        core.project.audio.push(clip("audio\\sting.wav", 29, 0.5));
+        // A live selection names that clip: 1-based number
+        // and start frame (start_frame 29 shows as frame
+        // 30, the rows' f{n} convention), the file name
+        // trimmed on either separator, and the gain always
+        // shown at two decimals — unity included.
+        assert_eq!(
+            clip_readout(&core, Some(1)),
+            Some("Clip 2: sting.wav · starts frame 30 · gain 0.50".to_string())
+        );
+        assert_eq!(
+            clip_readout(&core, Some(0)),
+            Some("Clip 1: theme.wav · starts frame 1 · gain 1.00".to_string())
+        );
+    }
+
+    #[test]
+    fn clip_readout_falls_back_like_the_dsp_buttons() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip("a.wav", 0, 2.0));
+        core.project.audio.push(clip("b.wav", 3, 0.25));
+        // No selection: the readout names the LAST clip,
+        // the toolbar's own fallback.
+        assert_eq!(
+            clip_readout(&core, None),
+            Some("Clip 2: b.wav · starts frame 4 · gain 0.25".to_string())
+        );
+        // A stale selection (past the end after the
+        // project shrank) falls back the same way, via
+        // effective_target — it never names a dead index.
+        assert_eq!(
+            clip_readout(&core, Some(9)),
+            Some("Clip 2: b.wav · starts frame 4 · gain 0.25".to_string())
+        );
+    }
+
+    #[test]
+    fn clip_readout_is_none_without_clips() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        assert_eq!(clip_readout(&core, None), None);
+        assert_eq!(clip_readout(&core, Some(0)), None);
     }
 
     #[test]

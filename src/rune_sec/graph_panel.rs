@@ -196,6 +196,28 @@
 //! meaning; a wand on "Auto tangents" or "Smooth" would
 //! claim magic the ops do not perform.
 //!
+//! ## Stats block (Phase I)
+//!
+//! Under the channel list sits a stats block (keyed
+//! `graph-stats`, one line per channel keyed
+//! `graph-stat-{i}`): the glanceable numbers for every
+//! channel — figure name, target, key count and value
+//! range — from the engine's read-only
+//! `graph_keys::channel_stats` ([`stat_rows`] projects it,
+//! [`stat_line`] formats one row). Frames are deliberately
+//! omitted: keys + range is what a glance needs, and the
+//! canvas above already shows the span.
+//!
+//! The block exists only when the project has channels —
+//! with none, the channel list's own empty-state line
+//! already says everything. The DRAWN channel's line (the
+//! `(selected figure, target)` the canvas shows, resolved
+//! by [`channel_index`] exactly as the list's active row
+//! is) renders in the normal text colour; every other line
+//! is muted. Duplicate `(figure, target)` channels
+//! highlight the FIRST match only — the same resolution
+//! [`select_channel`] and every edit path use.
+//!
 //! ## State the shell must provide
 //!
 //! `State` needs one field (integrator wires it):
@@ -206,6 +228,7 @@ use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, row, text, Color, Cx, Drag, El, LineCap, Phase, ScrollSpec, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::graph::{Channel, ChannelTarget, Interp, Key, TangentPreset};
+use stykanimate_rs::graph_keys::{channel_stats, ChannelStat};
 use stykanimate_rs::graph_panel::{preset_preview, GraphView};
 use stykanimate_rs::model::V2;
 
@@ -469,6 +492,41 @@ pub fn select_channel(core: &mut EditorCore, st: &mut GraphPanelState, index: us
     }
     st.target = Some(target);
     true
+}
+
+/// One stats-block line for `stat`:
+/// "{figure_name} · {target_label}: {keys} keys,
+/// {min}..{max}", values at one decimal. Frames
+/// (`first_frame` / `last_frame`) are deliberately not
+/// shown — key count and value range are the glanceable
+/// part; the canvas shows the span. Pure formatting: the
+/// caller supplies the stat (in the panel, from
+/// `graph_keys::channel_stats`).
+pub fn stat_line(stat: &ChannelStat) -> String {
+    format!(
+        "{} · {}: {} keys, {:.1}..{:.1}",
+        stat.figure_name, stat.target_label, stat.keys, stat.min, stat.max
+    )
+}
+
+/// The stats block's rows: one `(line, is_drawn)` per
+/// channel in the project, in project order — the lines
+/// from [`stat_line`] over `graph_keys::channel_stats`.
+/// `channel_stats` walks `core.project.channels` in order,
+/// so a row's position IS its channel index, and the drawn
+/// channel's row is the one at [`channel_index`] of the
+/// [`effective_target`] — the exact resolution the channel
+/// list's active row uses. With duplicate `(figure,
+/// target)` channels only the FIRST match is flagged,
+/// mirroring [`select_channel`]. Empty when the project
+/// has no channels (the builder then shows no block).
+pub fn stat_rows(core: &EditorCore, sel: Option<ChannelTarget>) -> Vec<(String, bool)> {
+    let drawn = channel_index(core, effective_target(core, sel));
+    channel_stats(core)
+        .iter()
+        .enumerate()
+        .map(|(i, stat)| (stat_line(stat), drawn == Some(i)))
+        .collect()
 }
 
 /// Index of the key nearest `frame` — the same pick
@@ -1194,6 +1252,25 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         );
     }
 
+    // Stats block (Phase I): one muted line per channel
+    // under the list — figure, target, key count, value
+    // range (stat_rows / stat_line over the engine's
+    // channel_stats). The drawn channel's line takes the
+    // normal text colour instead (stat_rows flags it, first
+    // match on duplicates, exactly like the list's active
+    // row). No channels: no block at all — the list's
+    // empty-state line above already covers that case.
+    let stat_lines = stat_rows(core, s.graph_panel.target);
+    let mut stats_block = col().key("graph-stats").gap(2.0);
+    for (i, (line, is_drawn)) in stat_lines.iter().enumerate() {
+        stats_block = stats_block.child(
+            text(line.clone())
+                .key(format!("graph-stat-{i}"))
+                .font(type_::LABEL)
+                .color(if *is_drawn { t.text } else { t.text_secondary }),
+        );
+    }
+
     // Interp segmented control. The op behind it edits the
     // Angle(selected node) channel's key nearest the current
     // frame, so the row is labelled with exactly that and its
@@ -1285,7 +1362,11 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                 )
                 .child(text(readout).font(type_::LABEL).color(t.text_secondary)),
         )
-        .child(chan_list.scroll(ScrollSpec { stick_bottom: false }).min_h(0.0))
+        .child(chan_list.scroll(ScrollSpec { stick_bottom: false }).min_h(0.0));
+    if !stat_lines.is_empty() {
+        panel = panel.child(stats_block);
+    }
+    panel = panel
         .child(selector.scroll_x().w_full())
         .child(
             canvas(graph_shape(
@@ -2078,5 +2159,99 @@ mod tests {
         assert!(!select_channel(&mut core, &mut st, 99));
         assert_eq!(core.selected_figure, 0);
         assert_eq!(st.target, None);
+    }
+
+    /// A fabricated stat, so the formatting tests never
+    /// depend on `graph_keys::channel_stats` landing.
+    fn stat(
+        figure_name: &str,
+        target_label: &str,
+        keys: usize,
+        min: f32,
+        max: f32,
+    ) -> ChannelStat {
+        ChannelStat {
+            figure: 0,
+            figure_name: figure_name.to_string(),
+            target_label: target_label.to_string(),
+            keys,
+            min,
+            max,
+            first_frame: 0.0,
+            last_frame: 0.0,
+        }
+    }
+
+    #[test]
+    fn stat_line_formats_name_target_keys_and_range() {
+        // Name and target verbatim, key count plain, range
+        // at one decimal — and the frames the stat carries
+        // are NOT in the line (the glanceable part only).
+        let s = stat("Styk", "Angle 3", 5, -12.34, 90.0);
+        assert_eq!(stat_line(&s), "Styk · Angle 3: 5 keys, -12.3..90.0");
+        // A wholly negative range keeps both signs.
+        let s = stat("Figure 2", "Root Y", 2, -3.26, -1.04);
+        assert_eq!(stat_line(&s), "Figure 2 · Root Y: 2 keys, -3.3..-1.0");
+    }
+
+    #[test]
+    fn stat_line_empty_channel_prints_zeroes() {
+        // channel_stats reports an empty channel as zeroes;
+        // the line prints them without a special case.
+        let s = stat("Styk", "Root X", 0, 0.0, 0.0);
+        assert_eq!(stat_line(&s), "Styk · Root X: 0 keys, 0.0..0.0");
+    }
+
+    #[test]
+    fn stat_rows_flag_only_the_drawn_channel() {
+        let mut core = EditorCore::new();
+        core.project.channels = vec![
+            channel(
+                ChannelTarget::RootX,
+                vec![Key::flat(0.0, 0.0), Key::flat(2.0, 10.0)],
+            ),
+            channel(ChannelTarget::RootY, vec![Key::flat(1.0, 5.0)]),
+        ];
+        // The picked target's row is flagged; the other is
+        // not. Lines carry the same numbers channel_stats
+        // reports (2 keys over 0.0..10.0 here).
+        let rows = stat_rows(&core, Some(ChannelTarget::RootX));
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].0.contains("Root X: 2 keys, 0.0..10.0"), "{}", rows[0].0);
+        assert!(rows[0].1, "the drawn channel is flagged");
+        assert!(!rows[1].1);
+        // No pick: the fallback drawn channel (the figure's
+        // first) is the flagged one — the block highlights
+        // what the canvas actually draws.
+        let rows = stat_rows(&core, None);
+        assert!(rows[0].1 && !rows[1].1);
+    }
+
+    #[test]
+    fn stat_rows_duplicates_flag_the_first_match_only() {
+        let mut core = EditorCore::new();
+        // Two channels with the SAME (figure, target): the
+        // engine resolves the pair to the first, so the
+        // stats block highlights the first row only —
+        // select_channel's resolution, mirrored.
+        core.project.channels = vec![
+            channel(ChannelTarget::RootX, vec![Key::flat(0.0, 1.0)]),
+            channel(
+                ChannelTarget::RootX,
+                vec![Key::flat(0.0, 2.0), Key::flat(3.0, 4.0)],
+            ),
+        ];
+        let rows = stat_rows(&core, Some(ChannelTarget::RootX));
+        assert_eq!(rows.len(), 2, "both duplicates still list");
+        assert!(rows[0].1, "first match highlighted");
+        assert!(!rows[1].1, "the shadowed duplicate is not");
+    }
+
+    #[test]
+    fn stat_rows_empty_without_channels() {
+        // The demo core has no channels: no rows, so the
+        // builder shows no stats block at all.
+        let core = EditorCore::new();
+        assert!(stat_rows(&core, None).is_empty());
     }
 }

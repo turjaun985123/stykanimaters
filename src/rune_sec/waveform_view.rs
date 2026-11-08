@@ -82,13 +82,39 @@
 //! clip-time, the interaction is project-time. That
 //! divergence is deliberate (it is what makes the strip
 //! seekable).
+//!
+//! ## Selected-clip mode (Phase I, section 17)
+//!
+//! When the audio panel has a clip selected
+//! (`State::audio_panel.selected`, Phase G section 9) and
+//! that clip's own peaks exist, the strip draws the
+//! SELECTED clip instead of the last one:
+//! [`waveform_mode`] decides from the selection, the clip
+//! count and the selected clip's peaks at the draw bucket
+//! count (probed via `audio_ops::clip_peaks`, the library
+//! home Phase I section 4 gave the per-clip computation;
+//! gain is NOT applied there — the bars still scale by the
+//! clip's gain through [`bar_span`], as always). A caption
+//! element (`waveform-caption`, "Clip {n}", 1-based like
+//! the panel's own numbering) names the mode under the
+//! strip; project mode grows no caption, so its element
+//! tree is exactly what it was before this section.
+//!
+//! Deliberate, do not "fix": the playhead and the seek
+//! gesture keep the PROJECT mapping in both modes
+//! ([`playhead_x`] / [`frame_at_x`] over the whole
+//! timeline). Clip mode changes only which peaks the bars
+//! draw — it is a display of the selected clip's shape,
+//! not a second timeline — so the marker and the press
+//! keep agreeing with the rest of the shell in both modes.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use rune::{canvas, Color, Drag, El, LineCap, Phase, Shape, Tx};
+use rune::tok::type_;
+use rune::{canvas, col, text, Color, Drag, El, LineCap, Phase, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::AudioClip;
 
@@ -100,6 +126,13 @@ const WAVE_HEX: u32 = 0x6D8CFF;
 const CENTRE_HEX: u32 = 0x303744;
 /// Playhead tone (the stage's selected-joint amber).
 const PLAYHEAD_HEX: u32 = 0xFFC65D;
+/// Caption tone (the 2.0 palette's secondary text).
+const CAPTION_HEX: u32 = 0xA2AAB8;
+/// Height the caption row takes under the strip in
+/// selected-clip mode (Phase I, section 17): the canvas
+/// gives up this much of its height so canvas + caption
+/// together keep the strip's usual footprint.
+const CAPTION_STRIP_H: f32 = 18.0;
 
 /// Convert a `0xRRGGBB` colour to a Rune colour (the same
 /// helper `stage_view` carries; duplicated so this section
@@ -313,6 +346,72 @@ pub fn clip_peaks(clip: &AudioClip, buckets: usize) -> Option<(Vec<f32>, f32)> {
     Some(probed)
 }
 
+/// Which clip's peaks the strip draws (Phase I,
+/// section 17): the project view (the last clip, as
+/// always) or one selected clip's own peaks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveformMode {
+    /// The last clip's peaks stretched across the strip —
+    /// the strip's behaviour since Phase D.
+    Project,
+    /// The selected clip's own peaks (0-based clip index,
+    /// a valid index into `project.audio`).
+    Clip(usize),
+}
+
+/// The strip's mode decision, over plain values so it is
+/// testable without a `State` (this file's pure-function
+/// style — cf. [`playhead_x`]): [`WaveformMode::Clip`]
+/// when `selected` is `Some(i)`, `i` names an existing
+/// clip (`i < clip_count`), and that clip's peaks at the
+/// draw bucket count are non-empty; [`WaveformMode::Project`]
+/// otherwise. A stale selection (the project shrank under
+/// it) and a selected clip whose file will not decode
+/// (empty peaks) both read as Project — the strip falls
+/// back to the last clip rather than blanking. Note the
+/// peaks slice decides on LENGTH only: a readable but
+/// silent clip probes as all-zero peaks, which is a
+/// non-empty slice and quite rightly Clip mode.
+pub fn waveform_mode(
+    selected: Option<usize>,
+    clip_count: usize,
+    selected_peaks: &[f32],
+) -> WaveformMode {
+    match selected {
+        Some(i) if i < clip_count && !selected_peaks.is_empty() => WaveformMode::Clip(i),
+        _ => WaveformMode::Project,
+    }
+}
+
+/// The caption naming the strip's mode, or `None` when no
+/// caption element is built at all: `"Clip {n}"` in clip
+/// mode, with `n` 1-based (the audio panel's own numbering
+/// — its op statuses count clips from 1), and `None` in
+/// project mode, whose element tree stays exactly what it
+/// was before Phase I (section 17).
+pub fn waveform_caption(mode: WaveformMode) -> Option<String> {
+    match mode {
+        WaveformMode::Clip(i) => Some(format!("Clip {}", i + 1)),
+        WaveformMode::Project => None,
+    }
+}
+
+/// Display columns for a strip `w` points wide: one column
+/// per ~3 points (2 pt bar + 1 pt gap), capped so a very
+/// wide strip stays cheap. Factored out of
+/// [`waveform_bars`] so the builder probes selected-clip
+/// peaks at exactly the bucket count the bars will draw.
+fn strip_columns(w: f32) -> usize {
+    ((w / 3.0).floor() as usize).clamp(1, 512)
+}
+
+/// Probe buckets for `columns` display columns: peaks are
+/// probed at 4× the column count so [`reduce_columns`]
+/// still sees local extremes.
+fn strip_buckets(columns: usize) -> usize {
+    (columns * 4).clamp(96, 2048)
+}
+
 /// The waveform strip's bars as one `Shape` in
 /// canvas-element points, for the last audio clip in the
 /// project: centre line plus one column of mirrored bars per
@@ -337,38 +436,86 @@ fn waveform_bars(core: &EditorCore, el_size: [f32; 2]) -> Shape {
     let Some(clip) = core.project.audio.last() else {
         return shape;
     };
-    // One column per ~3 points (2 pt bar + 1 pt gap), capped
-    // so a very wide strip stays cheap; peaks probed at 4× the
-    // column count so the reduction still sees local extremes.
-    let columns = ((w / 3.0).floor() as usize).clamp(1, 512);
-    let buckets = (columns * 4).clamp(96, 2048);
+    let buckets = strip_buckets(strip_columns(w));
     let Some((peaks, _)) = clip_peaks(clip, buckets) else {
         return shape;
     };
-    let cols = reduce_columns(&peaks, columns);
+    draw_peak_bars(shape, &peaks, clip.gain, w, h)
+}
+
+/// Append the mirrored bar columns for `peaks` (reduced to
+/// the strip's display columns, amplitudes scaled by
+/// `gain` through [`bar_span`]) to `shape` — the drawing
+/// tail [`waveform_bars`] and [`waveform_bars_clip`] share,
+/// so project mode and selected-clip mode render peaks
+/// identically; only the peaks' source differs.
+fn draw_peak_bars(shape: Shape, peaks: &[f32], gain: f32, w: f32, h: f32) -> Shape {
+    let mut shape = shape;
+    let mid = h / 2.0;
+    let columns = strip_columns(w);
+    let cols = reduce_columns(peaks, columns);
     let accent = hex_color(WAVE_HEX).unwrap_or(Color::WHITE);
     let outer = accent.alpha(0.5);
     let pitch = w / columns as f32;
     let bar_w = (pitch - 1.0).max(1.0);
     for (i, &(min, max)) in cols.iter().enumerate() {
         let x = (i as f32 + 0.5) * pitch;
-        let (top, bottom) = bar_span(max, clip.gain, mid, mid);
+        let (top, bottom) = bar_span(max, gain, mid, mid);
         shape = shape.line([x, top], [x, bottom], bar_w, LineCap::Butt, outer);
-        let (top, bottom) = bar_span(min, clip.gain, mid, mid);
+        let (top, bottom) = bar_span(min, gain, mid, mid);
         shape = shape.line([x, top], [x, bottom], bar_w, LineCap::Butt, accent);
     }
     shape
 }
 
+/// The selected-clip counterpart of [`waveform_bars`]
+/// (Phase I, section 17): centre line plus bar columns for
+/// clip `index`'s own `peaks` (probed by the builder via
+/// `audio_ops::clip_peaks`, gain NOT applied there), scaled
+/// by that clip's `gain`. The mode decision has already
+/// proven the index valid and the peaks non-empty; the
+/// index is still re-checked here so this builder is safe
+/// to call on its own — an out-of-range index draws the
+/// centre line only, like an unreadable clip in project
+/// mode.
+fn waveform_bars_clip(
+    core: &EditorCore,
+    index: usize,
+    peaks: &[f32],
+    el_size: [f32; 2],
+) -> Shape {
+    let (w, h) = (el_size[0], el_size[1]);
+    let mut shape = Shape::new();
+    if w <= 0.0 || h <= 0.0 {
+        return shape;
+    }
+    let mid = h / 2.0;
+    let centre = hex_color(CENTRE_HEX).unwrap_or(Color::WHITE);
+    shape = shape.line([0.0, mid], [w, mid], 1.0, LineCap::Butt, centre);
+    let Some(clip) = core.project.audio.get(index) else {
+        return shape;
+    };
+    draw_peak_bars(shape, peaks, clip.gain, w, h)
+}
+
 /// The strip for [`waveform_el_state`]: the centre line and
 /// bars of [`waveform_bars`], plus the project-mapped
-/// playhead ([`playhead_x`] of the current frame), drawn
-/// whenever the project has frames — including over the
-/// empty lane of a project with no (readable) clip, since
-/// the strip still seeks there. Drawn last, over the bars,
-/// in the stage's selected-joint amber.
+/// playhead ([`with_playhead`]).
 fn waveform_shape_project(core: &EditorCore, el_size: [f32; 2]) -> Shape {
-    let mut shape = waveform_bars(core, el_size);
+    with_playhead(waveform_bars(core, el_size), core, el_size)
+}
+
+/// Append the project-mapped playhead to a bars shape:
+/// [`playhead_x`] of the current frame, drawn whenever the
+/// project has frames — including over the empty lane of a
+/// project with no (readable) clip, since the strip still
+/// seeks there. Drawn last, over the bars, in the stage's
+/// selected-joint amber. Shared by the project shape and
+/// the selected-clip shape (Phase I, section 17): the
+/// playhead is project-mapped in both modes, deliberately
+/// (see the module docs).
+fn with_playhead(shape: Shape, core: &EditorCore, el_size: [f32; 2]) -> Shape {
+    let mut shape = shape;
     let (w, h) = (el_size[0], el_size[1]);
     if w > 0.0 && h > 0.0 && core.frame_count() > 0 {
         let x = playhead_x(core.current, core.frame_count(), w);
@@ -376,6 +523,22 @@ fn waveform_shape_project(core: &EditorCore, el_size: [f32; 2]) -> Shape {
         shape = shape.line([x, 0.0], [x, h], 2.0, LineCap::Butt, playhead);
     }
     shape
+}
+
+/// The selected-clip strip (Phase I, section 17):
+/// [`waveform_bars_clip`] plus the same project-mapped
+/// playhead as the project strip ([`with_playhead`]).
+fn waveform_shape_clip(
+    core: &EditorCore,
+    index: usize,
+    peaks: &[f32],
+    el_size: [f32; 2],
+) -> Shape {
+    with_playhead(
+        waveform_bars_clip(core, index, peaks, el_size),
+        core,
+        el_size,
+    )
 }
 
 /// The seek gesture for [`waveform_el_state`]: pressing —
@@ -417,7 +580,51 @@ fn waveform_seek(s: &mut State, d: &Drag) {
 /// out at the `el_size` it passes — the current mount passes
 /// `[308.0, 56.0]` and the right column gives the canvas
 /// that width.
+///
+/// Phase I (section 17) adds the selected-clip mode: when
+/// [`waveform_mode`] reads Clip, the canvas draws the
+/// selected clip's own peaks (in a canvas shortened by
+/// [`CAPTION_STRIP_H`], so strip + caption keep the usual
+/// footprint) and a `waveform-caption` element under it
+/// names the clip. In Project mode the return is the bare
+/// canvas above — the element tree is byte-identical to
+/// what it was before this section. The playhead and the
+/// seek gesture are project-mapped in BOTH modes,
+/// deliberately (see the module docs): clip mode changes
+/// only which peaks the bars draw.
 pub fn waveform_el_state(s: &State, el_size: [f32; 2]) -> El {
+    let clip_count = s.core.project.audio.len();
+    let selected_peaks: Vec<f32> = match s.audio_panel.selected {
+        Some(i) if i < clip_count => stykanimate_rs::audio_ops::clip_peaks(
+            &s.core,
+            i,
+            strip_buckets(strip_columns(el_size[0])),
+        ),
+        _ => Vec::new(),
+    };
+    let mode = waveform_mode(s.audio_panel.selected, clip_count, &selected_peaks);
+    if let (WaveformMode::Clip(i), Some(caption)) = (mode, waveform_caption(mode)) {
+        let canvas_h = (el_size[1] - CAPTION_STRIP_H).max(0.0);
+        return col()
+            .gap(2.0)
+            .child(
+                canvas(waveform_shape_clip(
+                    &s.core,
+                    i,
+                    &selected_peaks,
+                    [el_size[0], canvas_h],
+                ))
+                .key("waveform")
+                .h(canvas_h)
+                .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| waveform_seek(s, d)),
+            )
+            .child(
+                text(caption)
+                    .key("waveform-caption")
+                    .font(type_::LABEL)
+                    .color(hex_color(CAPTION_HEX).unwrap_or(Color::WHITE)),
+            );
+    }
     canvas(waveform_shape_project(&s.core, el_size))
         .key("waveform")
         .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| waveform_seek(s, d))
@@ -678,5 +885,61 @@ mod tests {
             let x = playhead_x(f, 5, 100.0);
             assert_eq!(frame_at_x(x, 100.0, 5), f, "frame {f} at x {x}");
         }
+    }
+
+    // ---- Selected-clip mode (Phase I, section 17) ----
+
+    #[test]
+    fn waveform_mode_selection_table() {
+        let peaks: &[f32] = &[0.25, 0.5];
+        // No selection: project mode, whatever else is true.
+        assert_eq!(waveform_mode(None, 3, peaks), WaveformMode::Project);
+        assert_eq!(waveform_mode(None, 0, &[]), WaveformMode::Project);
+        // Stale selection (the project shrank under it):
+        // project mode even with peaks in hand.
+        assert_eq!(waveform_mode(Some(3), 3, peaks), WaveformMode::Project);
+        assert_eq!(waveform_mode(Some(9), 3, peaks), WaveformMode::Project);
+        assert_eq!(waveform_mode(Some(0), 0, peaks), WaveformMode::Project);
+        // Valid selection whose clip has no peaks (its file
+        // would not decode): project mode.
+        assert_eq!(waveform_mode(Some(1), 3, &[]), WaveformMode::Project);
+        // Valid selection with peaks: clip mode, index kept.
+        assert_eq!(waveform_mode(Some(1), 3, peaks), WaveformMode::Clip(1));
+        assert_eq!(waveform_mode(Some(0), 1, peaks), WaveformMode::Clip(0));
+        // A silent-but-readable clip probes as all-zero
+        // peaks: a non-empty slice, so still clip mode —
+        // the decision reads length, never amplitude.
+        assert_eq!(
+            waveform_mode(Some(2), 3, &[0.0, 0.0]),
+            WaveformMode::Clip(2)
+        );
+    }
+
+    #[test]
+    fn waveform_caption_only_in_clip_mode() {
+        // 1-based, the audio panel's own numbering.
+        assert_eq!(
+            waveform_caption(WaveformMode::Clip(0)).as_deref(),
+            Some("Clip 1")
+        );
+        assert_eq!(
+            waveform_caption(WaveformMode::Clip(4)).as_deref(),
+            Some("Clip 5")
+        );
+        // Project mode grows no caption element at all.
+        assert_eq!(waveform_caption(WaveformMode::Project), None);
+    }
+
+    #[test]
+    fn strip_layout_columns_and_buckets() {
+        // The mount's 308 pt strip: 102 columns, probed at
+        // 4x (the counts the bars have always drawn with).
+        assert_eq!(strip_columns(308.0), 102);
+        assert_eq!(strip_buckets(102), 408);
+        // The clamps at both ends.
+        assert_eq!(strip_columns(0.0), 1);
+        assert_eq!(strip_buckets(1), 96);
+        assert_eq!(strip_columns(10_000.0), 512);
+        assert_eq!(strip_buckets(512), 2048);
     }
 }

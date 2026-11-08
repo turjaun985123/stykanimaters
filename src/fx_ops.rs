@@ -1,7 +1,9 @@
 //! FX-clip engine ops: the `EditorCore` method family for
 //! editing the project's timed particle clips
 //! (`Project::fx_clips`) — move, resize, duplicate, delete,
-//! colours and anchor (Phase E, section 9).
+//! colours and anchor (Phase E, section 9), plus the clip
+//! kind setter and the kind cycle order (Phase I,
+//! section 7).
 //!
 //! These ops are the engine home for what the Phase D Rune
 //! FX-clips panel (`rune_sec/fx_clips.rs`) used to do inline:
@@ -23,9 +25,9 @@
 //!   to `fx_edit` (`move_clip` / `resize_clip` /
 //!   `duplicate_clip` / `delete_clip`, which own the
 //!   clamping: start >= 0, duration >= 0.1). Colour, end
-//!   colour and anchor have no `fx_edit` function, so —
-//!   exactly as the panel did — they write the field after
-//!   the snapshot.
+//!   colour, kind and anchor have no `fx_edit` function,
+//!   so — exactly as the panel did — they write the field
+//!   after the snapshot.
 //! * Success is reported on `status` in the panel's voice:
 //!   1-based clip and figure numbers, the frame wording of
 //!   `add_fx_clip`, and for the anchor the panel's exact
@@ -37,6 +39,7 @@
 
 use crate::editor::EditorCore;
 use crate::fx_edit;
+use crate::vfx::ClipKind;
 
 /// Display text for a frame position, mirroring the FX
 /// panel's `frame_label`: whole frames render without a
@@ -49,6 +52,67 @@ fn frame_label(frame: f32) -> String {
     } else {
         format!("{frame:.1}")
     }
+}
+
+/// All 27 clip kinds in the one canonical cycle order:
+/// the FX browser's presentation order
+/// (`rune_sec::fx_browser::FX_KINDS` — the five Wave 15
+/// categories Explosion, Energy, Magic, Nature, Particles,
+/// each in its row order). The browser lives in the shell
+/// crate, which the library cannot import, so the order is
+/// mirrored here; the two must be kept in step. This is
+/// the order the FX-clips panel's kind prev/next buttons
+/// walk.
+pub const FX_KIND_ORDER: [ClipKind; 27] = [
+    // Explosion
+    ClipKind::Burst,
+    ClipKind::ShockRing,
+    ClipKind::Shard,
+    ClipKind::Splash,
+    // Energy
+    ClipKind::Beam,
+    ClipKind::Aura,
+    ClipKind::Lightning,
+    ClipKind::Prism,
+    // Magic
+    ClipKind::Sparkle,
+    ClipKind::Orbit,
+    ClipKind::Galaxy,
+    ClipKind::Vortex,
+    ClipKind::Fireworks,
+    ClipKind::Spiral,
+    // Nature
+    ClipKind::Leaves,
+    ClipKind::Petals,
+    ClipKind::Bubbles,
+    ClipKind::Aurora,
+    // Particles
+    ClipKind::Smoke,
+    ClipKind::Ember,
+    ClipKind::Fountain,
+    ClipKind::Trail,
+    ClipKind::Confetti,
+    ClipKind::Meteor,
+    ClipKind::Comet,
+    ClipKind::Glitter,
+    ClipKind::Wave,
+];
+
+/// The kind `dir` steps from `current` in
+/// [`FX_KIND_ORDER`], wrapping at both ends: +1 is the
+/// next kind, -1 the previous one, 0 is `current` itself,
+/// and any larger step wraps as many times as needed.
+/// Pure helper for the panel's kind prev/next buttons —
+/// the panel applies the result through
+/// [`EditorCore::fx_set_kind`], which owns the snapshot
+/// and the status line.
+pub fn fx_kind_cycle(current: ClipKind, dir: i32) -> ClipKind {
+    let len = FX_KIND_ORDER.len() as i32;
+    let pos = FX_KIND_ORDER
+        .iter()
+        .position(|kind| *kind == current)
+        .unwrap_or(0) as i32;
+    FX_KIND_ORDER[(pos + dir).rem_euclid(len) as usize]
 }
 
 impl EditorCore {
@@ -187,6 +251,29 @@ impl EditorCore {
             index + 1,
             figure + 1,
             node
+        );
+    }
+
+    /// Set FX clip `index`'s kind — the change the clip
+    /// creation paths (`add_fx_clip`, the MCP tools) could
+    /// previously make only at creation time. No `fx_edit`
+    /// backend exists for kind, so — as the panel did for
+    /// colour — the field is written after the snapshot.
+    /// The status names the kind in the engine's snake-case
+    /// vocabulary (`fx_edit::kind_name`, the same names the
+    /// MCP tools accept). One undo step; an out-of-range
+    /// index only sets the status.
+    pub fn fx_set_kind(&mut self, index: usize, kind: ClipKind) {
+        if self.project.fx_clips.get(index).is_none() {
+            self.status = format!("FX clip kind failed: no FX clip {}.", index + 1);
+            return;
+        }
+        self.snapshot();
+        self.project.fx_clips[index].clip.kind = kind;
+        self.status = format!(
+            "FX clip {} kind set to {}.",
+            index + 1,
+            fx_edit::kind_name(kind)
         );
     }
 }
@@ -396,5 +483,65 @@ mod tests {
         assert_eq!(core.status, "FX clip anchor failed: no FX clip 10.");
         assert_eq!(project_json(&core), before, "project untouched");
         assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+    }
+
+    #[test]
+    fn set_kind_writes_kind_and_snapshots_once() {
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let edits = core.edits_since_autosave();
+        core.fx_set_kind(0, ClipKind::ShockRing);
+        assert_eq!(core.project.fx_clips[0].clip.kind, ClipKind::ShockRing);
+        // The status uses the engine's snake-case kind name.
+        assert_eq!(core.status, "FX clip 1 kind set to shock_ring.");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+    }
+
+    #[test]
+    fn set_kind_out_of_range_is_status_only() {
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        core.fx_set_kind(9, ClipKind::Wave);
+        assert_eq!(core.status, "FX clip kind failed: no FX clip 10.");
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+    }
+
+    #[test]
+    fn kind_cycle_steps_in_browser_order_and_wraps() {
+        // Within a category.
+        assert_eq!(fx_kind_cycle(ClipKind::Burst, 1), ClipKind::ShockRing);
+        assert_eq!(fx_kind_cycle(ClipKind::ShockRing, -1), ClipKind::Burst);
+        // Across category boundaries (Explosion -> Energy,
+        // Nature -> Particles).
+        assert_eq!(fx_kind_cycle(ClipKind::Splash, 1), ClipKind::Beam);
+        assert_eq!(fx_kind_cycle(ClipKind::Aurora, 1), ClipKind::Smoke);
+        // Wrap at both ends of the whole order.
+        assert_eq!(fx_kind_cycle(ClipKind::Wave, 1), ClipKind::Burst);
+        assert_eq!(fx_kind_cycle(ClipKind::Burst, -1), ClipKind::Wave);
+        // No step and whole turns stay put; bigger steps wrap.
+        assert_eq!(fx_kind_cycle(ClipKind::Sparkle, 0), ClipKind::Sparkle);
+        assert_eq!(fx_kind_cycle(ClipKind::Meteor, 27), ClipKind::Meteor);
+        assert_eq!(fx_kind_cycle(ClipKind::Meteor, -27), ClipKind::Meteor);
+        assert_eq!(fx_kind_cycle(ClipKind::Burst, 2), ClipKind::Shard);
+    }
+
+    #[test]
+    fn kind_cycle_order_covers_every_kind_exactly_once() {
+        assert_eq!(FX_KIND_ORDER.len(), 27);
+        for kind in FX_KIND_ORDER {
+            let count = FX_KIND_ORDER.iter().filter(|k| **k == kind).count();
+            assert_eq!(count, 1, "kind {kind:?} appears {count} times");
+        }
+        // Walking +1 from the first kind visits 27 distinct
+        // kinds and lands back at the start.
+        let mut visited: Vec<ClipKind> = Vec::new();
+        let mut kind = FX_KIND_ORDER[0];
+        for _ in 0..27 {
+            assert!(!visited.contains(&kind), "kind {kind:?} visited twice");
+            visited.push(kind);
+            kind = fx_kind_cycle(kind, 1);
+        }
+        assert_eq!(kind, FX_KIND_ORDER[0], "a full turn returns to the start");
     }
 }

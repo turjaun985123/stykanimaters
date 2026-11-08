@@ -103,7 +103,7 @@ use crate::State;
 
 /// The `xc-*` keys whose formats have a frame-range exporter
 /// in `export.rs`. Everything else always exports in full.
-pub const RANGE_KEYS: [&str; 6] = ["xc-png", "xc-jpeg", "xc-gif", "xc-apng", "xc-mp4", "xc-webm"];
+pub const RANGE_KEYS: [&str; 7] = ["xc-png", "xc-jpeg", "xc-gif", "xc-apng", "xc-mp4", "xc-webm", "xc-contact"];
 
 /// Does the format behind this `xc-*` key support frame-range
 /// export? (PNG/JPEG sequences, GIF, APNG, MP4, WebM — the
@@ -196,6 +196,7 @@ pub enum ExportOp {
     Jpeg,
     Svg,
     Spritesheet,
+    ContactSheet,
     Gif,
     Apng,
     Mp4,
@@ -210,6 +211,7 @@ impl ExportOp {
             ExportOp::Jpeg => "JPEG",
             ExportOp::Svg => "SVG",
             ExportOp::Spritesheet => "sheet",
+            ExportOp::ContactSheet => "contact sheet",
             ExportOp::Gif => "GIF",
             ExportOp::Apng => "APNG",
             ExportOp::Mp4 => "MP4",
@@ -226,6 +228,7 @@ impl ExportOp {
             ExportOp::Jpeg => "out/jpeg/",
             ExportOp::Svg => "./export/svg/",
             ExportOp::Spritesheet => "./export/spritesheet.png",
+            ExportOp::ContactSheet => "./export/contact-sheet.png",
             ExportOp::Gif => "./export/animation.gif",
             ExportOp::Apng => "out/animation.apng",
             ExportOp::Mp4 => "./export/animation.mp4",
@@ -327,6 +330,7 @@ fn run_export_op(s: &mut State, op: ExportOp) -> bool {
         ExportOp::Jpeg => s.core.export_jpeg_dir(),
         ExportOp::Svg => s.core.export_svg(),
         ExportOp::Spritesheet => s.core.export_sheet(),
+        ExportOp::ContactSheet => run_contact_full(&mut s.core),
         ExportOp::Gif => s.core.export_gif(),
         ExportOp::Apng => s.core.export_apng_file(),
         ExportOp::Mp4 => s.core.export_mp4(),
@@ -422,6 +426,47 @@ fn export_gif_action(s: &mut State) {
         None => s.core.export_gif(),
     }
     note_single(s, ExportOp::Gif);
+}
+
+/// The full contact-sheet export (Phase I, integrator
+/// wiring for export.rs's range pair): unlike the other
+/// formats there is no `EditorCore` op — the lib functions
+/// write the file and this helper sets the status in the
+/// family's voice (failure wording contains "failed", the
+/// `export_failed` signal).
+fn run_contact_full(core: &mut EditorCore) {
+    let dir = export_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("contact-sheet.png");
+    match stykanimate_rs::export::export_contact_sheet(&core.project, &path) {
+        Ok(_) => {
+            core.status = format!("Exported contact sheet to {}", path.display())
+        }
+        Err(e) => core.status = format!("Contact sheet export failed: {e}"),
+    }
+}
+
+fn export_contact_action(s: &mut State) {
+    match range_target(&s.core, s.export_use_range) {
+        Some((a, b)) => {
+            let dir = export_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join("contact-sheet.png");
+            match stykanimate_rs::export::export_contact_sheet_range(&s.core.project, a, b, &path) {
+                Ok(n) => {
+                    s.core.status = format!(
+                        "Exported {n}-frame contact sheet (frames {}–{}) to {}",
+                        a + 1,
+                        b + 1,
+                        path.display()
+                    )
+                }
+                Err(e) => s.core.status = format!("Contact sheet export failed: {e}"),
+            }
+        }
+        None => run_contact_full(&mut s.core),
+    }
+    note_single(s, ExportOp::ContactSheet);
 }
 
 fn export_apng_action(s: &mut State) {
@@ -819,7 +864,7 @@ fn bundle_row(
 /// The export panel: header, the loop-range note (when a
 /// range is set), the All frames / Loop range toggle with
 /// its effective-behaviour line, the four category sections
-/// with all 15 `xc-*` rows, the Bundles section (two
+/// with all 16 `xc-*` rows, the Bundles section (two
 /// `xc-bundle-*` rows), — once anything has been exported —
 /// the recap line showing the last export, and the Recent
 /// exports list closing the panel.
@@ -893,6 +938,14 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             EditorCore::export_sheet,
             ExportOp::Spritesheet.name(),
             ExportOp::Spritesheet.dest(),
+        ))
+        .child(range_row(
+            "xc-contact",
+            "table-cells-large",
+            "Contact sheet",
+            "Every frame as one tile sheet — ./export/contact-sheet.png",
+            t,
+            export_contact_action,
         ))
         .child(range_row(
             "xc-gif",

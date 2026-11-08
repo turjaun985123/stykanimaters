@@ -8,14 +8,16 @@
 //! motion stats. Nothing here mutates the core, and the
 //! builder takes `&State` like the other chrome builders.
 //!
-//! Below the grid sit two counts-only blocks the stats
+//! Below the grid sit three counts-only blocks the stats
 //! module does not cover: **Project totals**
 //! ([`project_totals`] — every content vec on the project
-//! model, counted) and **Figures** ([`figure_rows`] — per
-//! figure: node count plus how many graph channels, FX
-//! clips and particle events are anchored to it). They are
-//! labelled as counts and deliberately recompute none of
-//! the motion statistics above.
+//! model, counted), **Media** ([`media_totals`] — the
+//! audio start-frame span, the summed FX-clip duration,
+//! texts and strokes) and **Figures** ([`figure_rows`] —
+//! per figure: node count plus how many graph channels,
+//! FX clips and particle events are anchored to it). They
+//! are labelled as counts and deliberately recompute none
+//! of the motion statistics above.
 //!
 //! Cost note for the integrator: `project_stats` is linear
 //! in frames × poses and the segment count is linear in
@@ -84,6 +86,21 @@ pub fn format_distance(units: f32) -> String {
         0
     };
     format!("{} units", format_count(v))
+}
+
+/// Format a length measured in (possibly fractional)
+/// frames: whole values grouped like a count ("1,250"),
+/// fractional values to one decimal ("3.5"). Non-finite
+/// or negative input reads "0".
+pub fn format_frames(frames: f32) -> String {
+    if !frames.is_finite() || frames <= 0.0 {
+        return "0".to_string();
+    }
+    if frames.fract() == 0.0 {
+        format_count(frames as usize)
+    } else {
+        format!("{frames:.1}")
+    }
 }
 
 /// Format an fps value the way the status line does
@@ -198,6 +215,55 @@ pub fn project_totals(core: &EditorCore) -> Vec<(String, usize)> {
     ]
 }
 
+/// Media depth as `(label, value)` pairs, the value
+/// already formatted for display. What each row can say
+/// is bounded by the model. An
+/// [`stykanimate_rs::model::AudioClip`] stores only a
+/// path and a start frame — a clip's length lives in its
+/// sound file, not in the project — so the audio row is
+/// the count plus the span of start frames (earliest to
+/// latest), never an invented total duration. FX clips
+/// do carry a length
+/// (`stykanimate_rs::vfx::ParticleClip::duration`, in
+/// frames), so their row adds the durations summed over
+/// every clip. Texts and strokes are plain counts,
+/// repeated here so the media block reads on its own.
+pub fn media_totals(core: &EditorCore) -> Vec<(String, String)> {
+    let p = &core.project;
+    let audio = if p.audio.is_empty() {
+        "0".to_string()
+    } else {
+        let first = p.audio.iter().map(|c| c.start_frame).min().unwrap_or(0);
+        let last = p.audio.iter().map(|c| c.start_frame).max().unwrap_or(0);
+        if first == last {
+            format!("{} (start frame {})", format_count(p.audio.len()), first)
+        } else {
+            format!(
+                "{} (start frames {}–{})",
+                format_count(p.audio.len()),
+                first,
+                last
+            )
+        }
+    };
+    let fx = if p.fx_clips.is_empty() {
+        "0".to_string()
+    } else {
+        let total: f32 = p.fx_clips.iter().map(|e| e.clip.duration).sum();
+        format!(
+            "{} · {} frames of effects",
+            format_count(p.fx_clips.len()),
+            format_frames(total)
+        )
+    };
+    vec![
+        ("Audio clips".to_string(), audio),
+        ("FX clips".to_string(), fx),
+        ("Texts".to_string(), format_count(p.texts.len())),
+        ("Strokes".to_string(), format_count(p.strokes.len())),
+    ]
+}
+
 /// One figure's counts for the per-figure block: its name,
 /// the node count of its definition, and how many of the
 /// project's figure-indexed entries belong to it — graph
@@ -300,6 +366,33 @@ fn totals_el(s: &State, t: &Theme) -> El {
     block
 }
 
+/// One media row: the label and its formatted value, both
+/// muted — these rows annotate the counts above rather
+/// than headline anything. Keyed `stats-media-{slug}`.
+fn media_row_el(label: &str, value: &str, t: &Theme) -> El {
+    row()
+        .key(format!("stats-media-{}", label_slug(label)))
+        .gap(8.0)
+        .child(text(label.to_string()).color(t.text_secondary))
+        .child(text(value.to_string()).color(t.text_secondary))
+}
+
+/// The Media block: a caption over the muted rows from
+/// [`media_totals`] — audio clip count and start-frame
+/// span, FX clip count and summed duration, text and
+/// stroke counts. Keyed `stats-media`.
+fn media_el(s: &State, t: &Theme) -> El {
+    let mut block = col().key("stats-media").w_full().gap(2.0).child(
+        text("Media")
+            .font(type_::SECTION)
+            .color(t.text_secondary),
+    );
+    for (label, value) in media_totals(&s.core) {
+        block = block.child(media_row_el(&label, &value, t));
+    }
+    block
+}
+
 /// The per-figure block: a "Figures" caption over one
 /// compact line per figure from [`figure_rows`] — name,
 /// then its node / channel / FX-clip / particle counts.
@@ -324,8 +417,9 @@ fn figures_el(s: &State, t: &Theme) -> El {
 
 /// The stats panel: a "Project stats" caption over a
 /// five-column grid of stat cells (two rows at the current
-/// ten cells), then the Project totals count rows and the
-/// per-figure count lines. Mount it wherever a full-width
+/// ten cells), then the Project totals count rows, the
+/// Media rows and the per-figure count lines. Mount it
+/// wherever a full-width
 /// row fits; the column count is the one-line change if a
 /// narrow sidebar mount is preferred.
 pub fn stats_panel(s: &State, t: &Theme) -> El {
@@ -344,6 +438,7 @@ pub fn stats_panel(s: &State, t: &Theme) -> El {
         )
         .child(grid)
         .child(totals_el(s, t))
+        .child(media_el(s, t))
         .child(figures_el(s, t))
 }
 
@@ -617,6 +712,106 @@ mod tests {
             "totals not all zero: {totals:?}"
         );
         assert!(figure_rows(&core).is_empty());
+    }
+
+    #[test]
+    fn frames_format_whole_fractional_and_degenerate() {
+        assert_eq!(format_frames(0.0), "0");
+        assert_eq!(format_frames(2.0), "2");
+        assert_eq!(format_frames(3.5), "3.5");
+        assert_eq!(format_frames(1250.0), "1,250");
+        assert_eq!(format_frames(-1.0), "0");
+        assert_eq!(format_frames(f32::NAN), "0");
+    }
+
+    #[test]
+    fn media_totals_on_the_demo_project_are_zeroed() {
+        // The demo carries no audio, FX clips, texts or
+        // strokes, so every media row reads a plain "0".
+        let core = EditorCore::new();
+        assert_eq!(
+            media_totals(&core),
+            vec![
+                ("Audio clips".to_string(), "0".to_string()),
+                ("FX clips".to_string(), "0".to_string()),
+                ("Texts".to_string(), "0".to_string()),
+                ("Strokes".to_string(), "0".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn media_totals_on_the_stocked_project() {
+        let core = stocked_core();
+        // Stocked content: one audio clip starting at
+        // frame 0, two FX clips of 1.0 frames each, one
+        // text and two strokes.
+        assert_eq!(
+            media_totals(&core),
+            vec![
+                (
+                    "Audio clips".to_string(),
+                    "1 (start frame 0)".to_string()
+                ),
+                (
+                    "FX clips".to_string(),
+                    "2 · 2 frames of effects".to_string()
+                ),
+                ("Texts".to_string(), "1".to_string()),
+                ("Strokes".to_string(), "2".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn media_totals_span_audio_starts_and_sum_fx_durations() {
+        use stykanimate_rs::model::{AudioClip, FxClipEntry};
+        use stykanimate_rs::vfx::{ClipKind, ParticleClip};
+
+        let mut core = EditorCore::new();
+        // AudioClip carries no length, so only the start
+        // frames can be spanned: starts at 40, 4 and 12
+        // read as the range 4–40.
+        for start in [40usize, 4, 12] {
+            core.project.audio.push(AudioClip {
+                path: "clip.wav".into(),
+                start_frame: start,
+                gain: 1.0,
+            });
+        }
+        // FX durations do live in the model and sum:
+        // 1.5 + 2.0 = 3.5 frames.
+        for duration in [1.5f32, 2.0] {
+            core.project.fx_clips.push(FxClipEntry {
+                clip: ParticleClip {
+                    start: 0.0,
+                    duration,
+                    kind: ClipKind::Burst,
+                    color: 0xFFFFFF,
+                    seed: 1,
+                    angle: 0.0,
+                    length: 10.0,
+                    color2: None,
+                },
+                figure: 0,
+                node: 0,
+            });
+        }
+        let media = media_totals(&core);
+        assert_eq!(
+            media[0],
+            (
+                "Audio clips".to_string(),
+                "3 (start frames 4–40)".to_string()
+            )
+        );
+        assert_eq!(
+            media[1],
+            (
+                "FX clips".to_string(),
+                "2 · 3.5 frames of effects".to_string()
+            )
+        );
     }
 
     #[test]

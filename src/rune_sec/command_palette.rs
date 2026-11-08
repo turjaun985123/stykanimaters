@@ -70,6 +70,20 @@
 //!   display logic: [`filter_commands`] and
 //!   [`display_commands`] are length-agnostic and still
 //!   cap every listing at [`MAX_RESULTS`].
+//! * Phase I added 13 commands, all appended so every
+//!   existing entry keeps its place: the eight workspace
+//!   jumps (`go-animate` … `go-home`, thin shims over
+//!   `workspaces::select_workspace`, so a jump persists
+//!   exactly like a chip press) and five View toggles —
+//!   `toggle-guides`, `toggle-frustum` and
+//!   `toggle-safe-frame` name the settings popover's own
+//!   toggle fns directly (they already take
+//!   `&mut State`), while `toggle-left-panel` /
+//!   `toggle-right-panel` mirror the View menu's field
+//!   flips. One Phase I candidate was deliberately NOT
+//!   added: an onion toggle already exists here as
+//!   `onion` (the GPUI-era key), and a second entry
+//!   flipping the same field would only duplicate it.
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -102,6 +116,7 @@ use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, text_input, Color, El, Key, KeyEvent, TextEdit, Tx};
 use stykanimate_rs::vfx::ClipKind;
 
+use crate::rune_sec::workspaces::Workspace;
 use crate::State;
 
 /// Maximum number of result rows the palette shows at once.
@@ -366,6 +381,78 @@ fn cmd_stroke_select_next(s: &mut State) {
 /// stroke; same delegation as the next-stroke command.
 fn cmd_stroke_select_prev(s: &mut State) {
     crate::rune_sec::stroke_inspector::step_stroke_selection(s, -1);
+}
+
+// -- Phase I shims: workspace jumps (select_workspace
+// -- takes the target as an argument, so each jump is a
+// -- one-line forwarder naming its variant) and the two
+// -- panel-visibility flips (field flips with no op —
+// -- the View menu's own handlers in menus.rs do exactly
+// -- these writes). The three guide toggles need no shim:
+// -- settings_popover's toggle fns already take
+// -- `&mut State`, so the table names them directly.
+
+/// Phase I: go to the Animate workspace — forwards to
+/// `workspaces::select_workspace`, the workspace chips'
+/// own switch fn, so the jump persists the choice in
+/// `LayoutPrefs` exactly as a chip press does.
+fn cmd_go_animate(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(s, Workspace::Animate);
+}
+
+/// Phase I: go to the Draw workspace; same forwarding
+/// as [`cmd_go_animate`].
+fn cmd_go_draw(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(s, Workspace::Draw);
+}
+
+/// Phase I: go to the Graph workspace; same forwarding
+/// as [`cmd_go_animate`].
+fn cmd_go_graph(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(s, Workspace::Graph);
+}
+
+/// Phase I: go to the Effects workspace; same forwarding
+/// as [`cmd_go_animate`].
+fn cmd_go_effects(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(s, Workspace::Effects);
+}
+
+/// Phase I: go to the Audio workspace; same forwarding
+/// as [`cmd_go_animate`].
+fn cmd_go_audio(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(s, Workspace::Audio);
+}
+
+/// Phase I: go to the 3D workspace; same forwarding as
+/// [`cmd_go_animate`].
+fn cmd_go_build3d(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(s, Workspace::Build3D);
+}
+
+/// Phase I: go to the Export workspace; same forwarding
+/// as [`cmd_go_animate`].
+fn cmd_go_export(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(s, Workspace::Export);
+}
+
+/// Phase I: go to the Home workspace; same forwarding
+/// as [`cmd_go_animate`].
+fn cmd_go_home(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(s, Workspace::Home);
+}
+
+/// Phase I: toggle the left panel column — the View
+/// menu's own flip of the shell flag; no core call, no
+/// status change.
+fn cmd_toggle_left_panel(s: &mut State) {
+    s.show_left = !s.show_left;
+}
+
+/// Phase I: toggle the right panel column; same flip
+/// as [`cmd_toggle_left_panel`], on `show_right`.
+fn cmd_toggle_right_panel(s: &mut State) {
+    s.show_right = !s.show_right;
 }
 
 fn cmd_add_frame(s: &mut State) {
@@ -686,6 +773,22 @@ pub static COMMANDS: &[Command] = &[
     // -- 3D -------------------------------------------------------
     Command { key: "enter-3d", title: "Enter 3D mode", group: "3D", run: cmd_enter_3d },
     Command { key: "exit-3d", title: "Exit 3D mode", group: "3D", run: cmd_exit_3d },
+    // -- Workspaces (Phase I, appended: every entry above
+    // -- keeps its place) ------------------------------------------
+    Command { key: "go-animate", title: "Go to Animate workspace", group: "Workspaces", run: cmd_go_animate },
+    Command { key: "go-draw", title: "Go to Draw workspace", group: "Workspaces", run: cmd_go_draw },
+    Command { key: "go-graph", title: "Go to Graph workspace", group: "Workspaces", run: cmd_go_graph },
+    Command { key: "go-effects", title: "Go to Effects workspace", group: "Workspaces", run: cmd_go_effects },
+    Command { key: "go-audio", title: "Go to Audio workspace", group: "Workspaces", run: cmd_go_audio },
+    Command { key: "go-build3d", title: "Go to 3D workspace", group: "Workspaces", run: cmd_go_build3d },
+    Command { key: "go-export", title: "Go to Export workspace", group: "Workspaces", run: cmd_go_export },
+    Command { key: "go-home", title: "Go to Home workspace", group: "Workspaces", run: cmd_go_home },
+    // -- View toggles (Phase I) ------------------------------------
+    Command { key: "toggle-guides", title: "Toggle stage guides", group: "View", run: crate::rune_sec::settings_popover::toggle_guides },
+    Command { key: "toggle-frustum", title: "Toggle camera frame guide", group: "View", run: crate::rune_sec::settings_popover::toggle_guides_frustum },
+    Command { key: "toggle-safe-frame", title: "Toggle safe frames guide", group: "View", run: crate::rune_sec::settings_popover::toggle_guides_safe },
+    Command { key: "toggle-left-panel", title: "Toggle left panel", group: "View", run: cmd_toggle_left_panel },
+    Command { key: "toggle-right-panel", title: "Toggle right panel", group: "View", run: cmd_toggle_right_panel },
 ];
 
 // ----------------------------------------------------------------
@@ -1126,8 +1229,13 @@ mod tests {
         // Phase H (toggle-loop-playback,
         // stroke-select-next, stroke-select-prev — the
         // two Phase G skips, unblocked by the dispatch
-        // migration to fn(&mut State)).
-        assert_eq!(total, 84, "palette should cover 84 commands, has {total}");
+        // migration to fn(&mut State)), +13 in Phase I
+        // (the eight go-* workspace jumps, toggle-guides,
+        // toggle-frustum, toggle-safe-frame,
+        // toggle-left-panel, toggle-right-panel — a
+        // toggle-onion candidate was skipped because the
+        // onion toggle already exists as `onion`).
+        assert_eq!(total, 97, "palette should cover 97 commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }
@@ -1325,6 +1433,83 @@ mod tests {
         (COMMANDS[idx_of("stroke-select-prev")].run)(&mut s);
         assert_eq!(s.stroke_selected, None);
         assert_eq!(s.core.status, "No strokes to select.");
+    }
+
+    #[test]
+    fn phase_i_commands_are_present_and_wired() {
+        // All thirteen Phase I keys resolve (idx_of panics if not).
+        for key in [
+            "go-animate",
+            "go-draw",
+            "go-graph",
+            "go-effects",
+            "go-audio",
+            "go-build3d",
+            "go-export",
+            "go-home",
+            "toggle-guides",
+            "toggle-frustum",
+            "toggle-safe-frame",
+            "toggle-left-panel",
+            "toggle-right-panel",
+        ] {
+            idx_of(key);
+        }
+        // Workspace jumps: each command lands on its own
+        // workspace. The state is first parked on a
+        // different workspace, so the landing is the
+        // command's doing, not the seed's. (The run also
+        // persists the choice through select_workspace,
+        // like a chip press; the assertion reads the
+        // in-memory field the switch fn sets first.)
+        let jumps: [(&str, Workspace); 8] = [
+            ("go-animate", Workspace::Animate),
+            ("go-draw", Workspace::Draw),
+            ("go-graph", Workspace::Graph),
+            ("go-effects", Workspace::Effects),
+            ("go-audio", Workspace::Audio),
+            ("go-build3d", Workspace::Build3D),
+            ("go-export", Workspace::Export),
+            ("go-home", Workspace::Home),
+        ];
+        for (key, ws) in jumps {
+            let mut s = crate::init();
+            s.workspace = if ws == Workspace::Animate {
+                Workspace::Home
+            } else {
+                Workspace::Animate
+            };
+            (COMMANDS[idx_of(key)].run)(&mut s);
+            assert_eq!(s.workspace, ws, "{key} landed on the wrong workspace");
+        }
+        // Guide toggles: each flips its own shell flag
+        // and flips back, leaving the other two flags
+        // exactly as they were.
+        let mut s = crate::init();
+        let g = (s.guides, s.guides_frustum, s.guides_safe);
+        (COMMANDS[idx_of("toggle-guides")].run)(&mut s);
+        assert_eq!((s.guides, s.guides_frustum, s.guides_safe), (!g.0, g.1, g.2));
+        (COMMANDS[idx_of("toggle-guides")].run)(&mut s);
+        assert_eq!((s.guides, s.guides_frustum, s.guides_safe), g);
+        (COMMANDS[idx_of("toggle-frustum")].run)(&mut s);
+        assert_eq!((s.guides, s.guides_frustum, s.guides_safe), (g.0, !g.1, g.2));
+        (COMMANDS[idx_of("toggle-frustum")].run)(&mut s);
+        assert_eq!((s.guides, s.guides_frustum, s.guides_safe), g);
+        (COMMANDS[idx_of("toggle-safe-frame")].run)(&mut s);
+        assert_eq!((s.guides, s.guides_frustum, s.guides_safe), (g.0, g.1, !g.2));
+        (COMMANDS[idx_of("toggle-safe-frame")].run)(&mut s);
+        assert_eq!((s.guides, s.guides_frustum, s.guides_safe), g);
+        // Panel toggles: the View menu's field flips —
+        // each column flips independently and flips back.
+        let mut s = crate::init();
+        let (l, r) = (s.show_left, s.show_right);
+        (COMMANDS[idx_of("toggle-left-panel")].run)(&mut s);
+        assert_eq!((s.show_left, s.show_right), (!l, r));
+        (COMMANDS[idx_of("toggle-right-panel")].run)(&mut s);
+        assert_eq!((s.show_left, s.show_right), (!l, !r));
+        (COMMANDS[idx_of("toggle-left-panel")].run)(&mut s);
+        (COMMANDS[idx_of("toggle-right-panel")].run)(&mut s);
+        assert_eq!((s.show_left, s.show_right), (l, r));
     }
 
     // -- fuzzy_score -------------------------------------------

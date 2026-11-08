@@ -78,6 +78,12 @@
 //! swatch colour lights it again, because the highlight is
 //! an exact-equality check on the field.
 //!
+//! Stage readout (Phase I): under the preset row, a muted
+//! line ([`stage_readout`]) names the size the panel is
+//! actually set to — `960×720 · 4:3` — so a stage nudged
+//! off every preset still says what it is, aspect included,
+//! instead of the user reading two bare stepper values.
+//!
 //! No undo snapshots, on purpose: weather writes were never
 //! snapshotted. The GPUI listeners wrote `project.weather`
 //! directly (the wiring note above), and in this engine a
@@ -440,6 +446,48 @@ pub fn set_stage_preset(core: &mut EditorCore, w: f32, h: f32) {
     core.status = format!("Stage size: {} x {}.", w as i32, h as i32);
 }
 
+/// Greatest common divisor of two integers (Euclid's
+/// algorithm); sign-insensitive, and `gcd(0, n)` is `n`.
+fn gcd(a: i64, b: i64) -> i64 {
+    let (mut a, mut b) = (a.abs(), b.abs());
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+/// The stage readout (Phase I): `"{w}×{h} · {aspect}"` for
+/// the project's current stage size — for example
+/// `960×720 · 4:3`. Width and height are the field's values
+/// **rounded** to whole units (every preset and stepper
+/// step is whole, so rounding only ever tidies a loaded
+/// file's fractions; truncating would misreport 959.6 as
+/// 959). The aspect is the ratio reduced by the gcd when
+/// both reduced sides are small integers (≤ 40: `16:9`,
+/// `4:3`, `9:16`, `1:1`, …). A size whose reduced ratio
+/// still has a side over 40 has no honest small-integer
+/// name, so it falls back to ONE decimal form: the width
+/// over the height at two decimals, `"{:.2}:1"` — a
+/// 1000×333 stage reads `1000×333 · 3.00:1`. Pure: reads
+/// the project field, writes nothing.
+pub fn stage_readout(core: &EditorCore) -> String {
+    let w = core.project.stage[0].round() as i64;
+    let h = core.project.stage[1].round() as i64;
+    let g = gcd(w, h);
+    let (rw, rh) = if g > 0 { (w / g, h / g) } else { (w, h) };
+    if g > 0 && (1..=40).contains(&rw) && (1..=40).contains(&rh) {
+        format!("{w}×{h} · {rw}:{rh}")
+    } else {
+        // Degenerate or irreducible sizes: the decimal
+        // form, with the divisor guarded so a zero height
+        // from a hand-edited file cannot divide by zero.
+        let ratio = w as f32 / h.max(1) as f32;
+        format!("{w}×{h} · {ratio:.2}:1")
+    }
+}
+
 /// Stage background presets: (name, `0xRRGGBB`). The first is
 /// the engine's own default (`Project::background` in
 /// `model.rs`). The GPUI app never offered a background
@@ -781,6 +829,12 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
             text("Stage size").font(type_::LABEL).color(t.text_secondary),
         )
         .child(stage_presets)
+        .child(
+            text(stage_readout(core))
+                .key("scene-stage-readout")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
         .child(
             text("Resizing does not rescale figure positions.")
                 .font(type_::LABEL)
@@ -1156,5 +1210,83 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), 16, "swatch names must be unique");
+    }
+
+    fn core_with_stage(w: f32, h: f32) -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.stage = [w, h];
+        core
+    }
+
+    #[test]
+    fn stage_readout_names_every_preset_size() {
+        // The briefed examples, one per aspect family.
+        assert_eq!(stage_readout(&core_with_stage(960.0, 720.0)), "960×720 · 4:3");
+        assert_eq!(
+            stage_readout(&core_with_stage(1920.0, 1080.0)),
+            "1920×1080 · 16:9"
+        );
+        assert_eq!(
+            stage_readout(&core_with_stage(1080.0, 1920.0)),
+            "1080×1920 · 9:16"
+        );
+        assert_eq!(stage_readout(&core_with_stage(720.0, 720.0)), "720×720 · 1:1");
+        // Every preset in the table reduces to small integers,
+        // so none of them may hit the decimal fallback.
+        for &(_, w, h) in &STAGE_PRESETS {
+            let line = stage_readout(&core_with_stage(w, h));
+            assert!(
+                !line.contains('.'),
+                "preset {w}x{h} read out as {line:?}, expected a reduced ratio"
+            );
+            assert!(
+                line.starts_with(&format!("{}×{} · ", w as i32, h as i32)),
+                "readout {line:?} does not name the size"
+            );
+        }
+    }
+
+    #[test]
+    fn stage_readout_follows_the_project_field() {
+        // A fresh core reports the engine default, and a
+        // preset press moves the readout with the field —
+        // the line is a readout, not a label for the row.
+        let mut core = EditorCore::new();
+        assert_eq!(stage_readout(&core), "960×720 · 4:3");
+        set_stage_preset(&mut core, 640.0, 480.0);
+        assert_eq!(stage_readout(&core), "640×480 · 4:3");
+        adjust_stage(&mut core, 40.0, 0.0);
+        assert_eq!(stage_readout(&core), "680×480 · 17:12");
+    }
+
+    #[test]
+    fn stage_readout_rounds_rather_than_truncates() {
+        // Fractions from a loaded file round to the nearest
+        // whole unit: 959.6 is a 960 stage, not a 959 one.
+        assert_eq!(
+            stage_readout(&core_with_stage(959.6, 719.6)),
+            "960×720 · 4:3"
+        );
+        assert_eq!(
+            stage_readout(&core_with_stage(1919.5, 1080.4)),
+            "1920×1080 · 16:9"
+        );
+    }
+
+    #[test]
+    fn stage_readout_falls_back_to_a_decimal_for_irreducible_sizes() {
+        // 1000/333 is already in lowest terms and both sides
+        // are far over 40, so the decimal form names it:
+        // 1000/333 = 3.003… → 3.00:1.
+        assert_eq!(
+            stage_readout(&core_with_stage(1000.0, 333.0)),
+            "1000×333 · 3.00:1"
+        );
+        // A wide irreducible size: 3999/2000 is in lowest
+        // terms too (3999 = 3 × 31 × 43), 3999/2000 = 1.9995.
+        assert_eq!(
+            stage_readout(&core_with_stage(3999.0, 2000.0)),
+            "3999×2000 · 2.00:1"
+        );
     }
 }

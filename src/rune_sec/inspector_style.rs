@@ -66,6 +66,15 @@
 //!   after a paste reverts cap, gradient, colour and
 //!   opacity together.
 //!
+//! * Preset chips (Phase I) → [`STYLE_PRESETS`]: six
+//!   curated colour + cap pairs. A preset changes colour
+//!   and cap ONLY — it applies through the same atomic op
+//!   (`set_node_style_atomic`) with the selected node's
+//!   CURRENT gradient end and opacity passed straight
+//!   back, so both survive a preset press untouched
+//!   ([`preset_application`] computes the call's
+//!   arguments; [`apply_preset`] makes it).
+//!
 //! History: Phase D shipped cap and gradient as single
 //! press targets advancing `cycle_node_cap` /
 //! `cycle_node_gradient` one step per press, because no
@@ -92,6 +101,30 @@ use crate::State;
 /// The cap kinds in segmented-control display order (the
 /// engine's historical cycle order, Round → Square → Point).
 pub const CAP_ORDER: [CapKind; 3] = [CapKind::Round, CapKind::Square, CapKind::Point];
+
+/// One curated style preset: a name, a colour and a cap.
+/// Applying a preset changes exactly those two fields of
+/// the selected node's style (see [`preset_application`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StylePreset {
+    pub name: &'static str,
+    pub color: u32,
+    pub cap: CapKind,
+}
+
+/// The six style presets the panel offers, in display
+/// order (two rows of three chips). Every cap is a real
+/// [`CapKind`] variant — the model has Round, Square and
+/// Point only, so Violet's briefed Butt cap is Square, the
+/// other flat-ended cap (Point tapers to a tip).
+pub const STYLE_PRESETS: [StylePreset; 6] = [
+    StylePreset { name: "Ink", color: 0x20_242C, cap: CapKind::Round },
+    StylePreset { name: "Crimson", color: 0xD2_3B3B, cap: CapKind::Round },
+    StylePreset { name: "Ocean", color: 0x2B_6FD2, cap: CapKind::Square },
+    StylePreset { name: "Forest", color: 0x2E_9E5B, cap: CapKind::Round },
+    StylePreset { name: "Violet", color: 0x7A_4FD0, cap: CapKind::Square },
+    StylePreset { name: "Amber", color: 0xE8_A33D, cap: CapKind::Square },
+];
 
 /// The selected node's current style, if a node is selected.
 /// Pure read of the core's public selection fields — the same
@@ -327,6 +360,37 @@ pub fn apply_style(core: &mut EditorCore, clip: &StyleClipboard) -> bool {
     true
 }
 
+/// The arguments for applying `preset` to the currently
+/// selected node, in `set_node_style_atomic`'s parameter
+/// order `(color, color2, cap, opacity)`: the preset's own
+/// colour and cap, with the node's CURRENT gradient end
+/// and opacity passed through untouched — a preset press
+/// changes colour and cap only. `None` when no node is
+/// selected (the atomic op would refuse anyway).
+pub fn preset_application(
+    core: &EditorCore,
+    preset: &StylePreset,
+) -> Option<(u32, Option<u32>, CapKind, f32)> {
+    let style = selected_style(core)?;
+    Some((preset.color, style.color2, preset.cap, style.opacity))
+}
+
+/// Preset press: apply `preset` to the selected node
+/// through the engine's atomic style op — one snapshot,
+/// so one preset press is exactly one undo step. Returns
+/// `false`, changing nothing at all, when no node is
+/// selected. On success the status names the preset,
+/// superseding the atomic op's own status line (the paste
+/// path does the same with "Style pasted.").
+pub fn apply_preset(core: &mut EditorCore, preset: &StylePreset) -> bool {
+    let Some((color, color2, cap, opacity)) = preset_application(core, preset) else {
+        return false;
+    };
+    core.set_node_style_atomic(color, color2, cap, opacity);
+    core.status = format!("Style preset: {}.", preset.name);
+    true
+}
+
 /// Copy button: capture the selected node's style into the
 /// clipboard. With no selection, status-only (the setters'
 /// own refusal wording) and any earlier copy is left
@@ -416,6 +480,36 @@ fn cap_chip(cap: CapKind, current: bool, t: &Theme) -> El {
             text(cap_label(cap))
                 .font(type_::LABEL)
                 .color(if current { Color::WHITE } else { t.text }),
+        )
+}
+
+/// One preset chip: a small colour swatch in the preset's
+/// own colour beside its name (the panel's swatch + label
+/// idiom, as in the Colour header row), card-filled like a
+/// cap chip. Pressing it applies the preset via
+/// [`apply_preset`]. Keys are `style-preset-{i}` with `i`
+/// the preset's index in [`STYLE_PRESETS`].
+fn preset_chip(index: usize, preset: StylePreset, t: &Theme) -> El {
+    let swatch = el()
+        .size(12.0, 12.0)
+        .radius(3.0)
+        .fill(hex_color(preset.color).unwrap_or(Color::WHITE));
+    el()
+        .key(format!("style-preset-{index}"))
+        .px(8.0)
+        .py(5.0)
+        .radius(6.0)
+        .fill(t.card)
+        .hover(t.control_track)
+        .on_press(move |s: &mut State| {
+            apply_preset(&mut s.core, &preset);
+        })
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(swatch)
+                .child(text(preset.name).font(type_::LABEL).color(t.text)),
         )
 }
 
@@ -597,6 +691,28 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
             .child(icon_btn("style-paste", "clipboard", "Paste", false, t, |s| {
                 paste_style(&mut s.core);
             })),
+    );
+
+    // Presets: the six curated colour + cap pairs as
+    // swatch chips, two rows of three so the row stays
+    // inside the panel's width. A press changes colour
+    // and cap only — the node's gradient end and opacity
+    // are passed through untouched (see
+    // `preset_application`).
+    let mut preset_grid = col().gap(4.0);
+    for start in (0..STYLE_PRESETS.len()).step_by(3) {
+        let mut preset_row = row().gap(4.0);
+        for i in start..(start + 3).min(STYLE_PRESETS.len()) {
+            preset_row = preset_row.child(preset_chip(i, STYLE_PRESETS[i], t));
+        }
+        preset_grid = preset_grid.child(preset_row);
+    }
+    panel = panel.child(
+        row()
+            .key("style-presets")
+            .gap(8.0)
+            .child(text("Presets").font(type_::LABEL).color(t.text))
+            .child(preset_grid),
     );
 
     panel
@@ -992,5 +1108,102 @@ mod tests {
         // are exactly as they were.
         assert_eq!(core.status, status_before);
         assert_eq!(core.undo_depth(), depth_before);
+    }
+
+    #[test]
+    fn style_presets_table_is_six_distinct_colours_with_valid_caps() {
+        assert_eq!(STYLE_PRESETS.len(), 6);
+        // The briefed table, name by name. Violet's cap is
+        // Square: the model has no Butt variant (Round,
+        // Square and Point only), and Square is the other
+        // flat-ended cap.
+        let expected = [
+            ("Ink", 0x20_242C, CapKind::Round),
+            ("Crimson", 0xD2_3B3B, CapKind::Round),
+            ("Ocean", 0x2B_6FD2, CapKind::Square),
+            ("Forest", 0x2E_9E5B, CapKind::Round),
+            ("Violet", 0x7A_4FD0, CapKind::Square),
+            ("Amber", 0xE8_A33D, CapKind::Square),
+        ];
+        for (preset, (name, color, cap)) in STYLE_PRESETS.iter().zip(expected) {
+            assert_eq!(preset.name, name);
+            assert_eq!(preset.color, color);
+            assert_eq!(preset.cap, cap);
+            // A valid cap is one the segmented control can
+            // show — CAP_ORDER holds every CapKind variant.
+            assert!(CAP_ORDER.contains(&preset.cap));
+        }
+        // All six colours (and names) are distinct, so no
+        // two chips can be confused for each other.
+        for (i, a) in STYLE_PRESETS.iter().enumerate() {
+            for b in &STYLE_PRESETS[i + 1..] {
+                assert_ne!(a.color, b.color);
+                assert_ne!(a.name, b.name);
+            }
+        }
+    }
+
+    #[test]
+    fn preset_application_is_none_without_a_selection() {
+        let mut core = EditorCore::new();
+        core.selected_node = None;
+        for preset in &STYLE_PRESETS {
+            assert!(preset_application(&core, preset).is_none());
+        }
+        // And a press changes nothing at all.
+        let depth_before = core.undo_depth();
+        assert!(!apply_preset(&mut core, &STYLE_PRESETS[0]));
+        assert_eq!(core.undo_depth(), depth_before);
+    }
+
+    #[test]
+    fn preset_application_preserves_current_color2_and_opacity() {
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        // Current state a preset must NOT touch: a
+        // non-swatch gradient end and a mid opacity. The
+        // current colour and cap differ from the preset's,
+        // so the returned pair proves whose values won.
+        core.set_node_color(0xFF_0000);
+        core.set_node_color2(Some(0x34_5678));
+        core.set_node_cap(CapKind::Point);
+        core.set_node_opacity(0.55);
+
+        // Ocean: colour and cap come from the preset,
+        // gradient end and opacity from the current node.
+        let args = preset_application(&core, &STYLE_PRESETS[2])
+            .expect("node 1 is selected");
+        assert_eq!(args, (0x2B_6FD2, Some(0x34_5678), CapKind::Square, 0.55));
+
+        // With the gradient off, None passes through too.
+        core.set_node_color2(None);
+        let args = preset_application(&core, &STYLE_PRESETS[0])
+            .expect("node 1 is selected");
+        assert_eq!(args, (0x20_242C, None, CapKind::Round, 0.55));
+    }
+
+    #[test]
+    fn apply_preset_changes_colour_and_cap_only_in_one_undo_step() {
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        core.set_node_color(0xFF_0000);
+        core.set_node_color2(Some(0x34_5678));
+        core.set_node_cap(CapKind::Point);
+        core.set_node_opacity(0.55);
+
+        let depth_before = core.undo_depth();
+        // Violet (index 4).
+        assert!(apply_preset(&mut core, &STYLE_PRESETS[4]));
+        assert_eq!(core.status, "Style preset: Violet.");
+        assert_eq!(core.undo_depth(), depth_before + 1);
+
+        let node = &core.project.figures[0].def.nodes[1];
+        assert_eq!(node.color, Some(0x7A_4FD0));
+        assert_eq!(node.style.cap, CapKind::Square);
+        // Untouched by the preset: gradient end + opacity.
+        assert_eq!(node.style.color2, Some(0x34_5678));
+        assert_eq!(node.style.opacity, 0.55);
     }
 }

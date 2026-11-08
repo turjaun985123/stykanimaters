@@ -28,6 +28,10 @@
 //! * delete — `EditorCore::particle_delete_event(index)`
 //! * frame stepper — `EditorCore::particle_set_frame(
 //!   index, frame)`
+//! * kind stepper — `EditorCore::particle_set_kind(
+//!   index, kind)` (Phase I)
+//! * colour swatches — `EditorCore::particle_set_color(
+//!   index, color)` (Phase I)
 //! * anchor — `EditorCore::particle_set_anchor(index,
 //!   figure, node)` with `Option` figure/node, mirroring
 //!   the model's `ParticleEvent { figure: Option<usize>,
@@ -51,7 +55,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{ParticleEvent, ParticleKind};
 
 use crate::chrome_view::btn;
-use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::rune_sec::icons::icon_el;
 use crate::State;
 
@@ -68,6 +72,44 @@ pub fn kind_name(kind: ParticleKind) -> &'static str {
         ParticleKind::Smoke => "smoke",
     }
 }
+
+/// Every kind, in the `ParticleKind` enum's declaration
+/// order (model.rs: Burst, Sparkle, Smoke) — the order
+/// the detail block's kind stepper cycles through.
+pub const KIND_ORDER: [ParticleKind; 3] = [
+    ParticleKind::Burst,
+    ParticleKind::Sparkle,
+    ParticleKind::Smoke,
+];
+
+/// The kind one step from `current` in [`KIND_ORDER`],
+/// wrapping at both ends (`dir` is +1 / −1 from the
+/// stepper buttons; any other value still lands on a
+/// kind, by the same modular step).
+pub fn cycle_kind(current: ParticleKind, dir: i32) -> ParticleKind {
+    let count = KIND_ORDER.len() as i32;
+    let index = KIND_ORDER
+        .iter()
+        .position(|&kind| kind == current)
+        .unwrap_or(0) as i32;
+    KIND_ORDER[(index + dir).rem_euclid(count) as usize]
+}
+
+/// The detail block's colour swatches (`0xRRGGBB`): six
+/// hues around the wheel, then white and black. The hues
+/// reuse the shell's own accent vocabulary where it has
+/// one (handle red, selection amber, onion green, the
+/// secondary accent violet).
+pub const PARTICLE_PALETTE: [u32; 8] = [
+    0xFF5D5D, // red
+    0xFF9F43, // orange
+    0xFFC65D, // amber
+    0x7BE495, // green
+    0x57C7E3, // sky
+    0xA184FF, // violet
+    0xFFFFFF, // white
+    0x000000, // black
+];
 
 /// One list row's title: `Event {i+1} · frame {f+1}`
 /// (both numbers 1-based for display; the stored frame
@@ -147,6 +189,11 @@ pub struct ParticleDetailData {
     pub index: usize,
     /// Snake-case kind name.
     pub kind: &'static str,
+    /// The kind itself, for the kind stepper's cycle.
+    pub kind_value: ParticleKind,
+    /// The event's colour (`0xRRGGBB`), for the swatch
+    /// row's current-colour marker.
+    pub color: u32,
     /// 0-based start frame (display adds 1).
     pub frame: usize,
     /// Full anchor description ([`anchor_detail`]).
@@ -167,6 +214,8 @@ pub fn detail_data(core: &EditorCore, selected: Option<usize>) -> Option<Particl
     Some(ParticleDetailData {
         index,
         kind: kind_name(event.kind),
+        kind_value: event.kind,
+        color: event.color,
         frame: event.frame,
         anchor: anchor_detail(event),
         figure: event.figure,
@@ -262,6 +311,28 @@ fn step_frame(s: &mut State, delta: i32) {
     }
 }
 
+/// Step the selected event's kind by `dir` through
+/// [`cycle_kind`] via `EditorCore::particle_set_kind`.
+/// Cycling always lands on a different kind (three kinds,
+/// ±1 steps), so every press is a real edit and takes
+/// the op's snapshot.
+fn cycle_selected_kind(s: &mut State, dir: i32) {
+    let Some(i) = selected_event(&s.core, s.particle_selected) else {
+        return;
+    };
+    let next = cycle_kind(s.core.project.particles[i].kind, dir);
+    s.core.particle_set_kind(i, next);
+}
+
+/// Set the selected event's colour via
+/// `EditorCore::particle_set_color` (a swatch press).
+fn set_selected_color(s: &mut State, color: u32) {
+    let Some(i) = selected_event(&s.core, s.particle_selected) else {
+        return;
+    };
+    s.core.particle_set_color(i, color);
+}
+
 /// Anchor the selected event to the core's selected
 /// figure (and its selected joint, when one is chosen)
 /// via `EditorCore::particle_set_anchor` — the same
@@ -298,7 +369,8 @@ fn anchor_clear(s: &mut State) {
 // ----------------------------------------------------------------
 
 /// The detail block for the selected event: kind and
-/// anchor summary, a frame stepper, the anchor buttons
+/// anchor summary, a kind stepper and colour swatches
+/// (Phase I), a frame stepper, the anchor buttons
 /// (anchor to the selected figure / clear anchor), and
 /// delete. With events present but no valid selection it
 /// renders a guidance line instead of dead buttons.
@@ -311,6 +383,28 @@ fn detail_block(s: &State, t: &Theme) -> El {
         );
     };
     let i = data.index;
+    // Colour swatches (the scene panel's construction): a
+    // 26 pt slot per colour, accent-filled behind the
+    // 22 pt colour chip when it is the event's colour.
+    let accent = tok::accent(0, true);
+    let mut colors = row().key("particles-colors").gap(4.0).center_y();
+    for (ci, &rgb) in PARTICLE_PALETTE.iter().enumerate() {
+        colors = colors.child(
+            el()
+                .key(format!("particles-color-{ci}"))
+                .size(26.0, 26.0)
+                .radius(8.0)
+                .fill(if data.color == rgb { accent } else { t.bg })
+                .center()
+                .on_press(move |s: &mut State| set_selected_color(s, rgb))
+                .child(
+                    el()
+                        .size(22.0, 22.0)
+                        .radius(6.0)
+                        .fill(crate::stage_view::hex_color(rgb).unwrap_or(t.bg)),
+                ),
+        );
+    }
     col()
         .key("particles-detail")
         .w_full()
@@ -327,6 +421,54 @@ fn detail_block(s: &State, t: &Theme) -> El {
             ))
             .font(type_::LABEL)
             .color(t.text_secondary),
+        )
+        // Kind stepper: chevrons cycle Burst → Sparkle →
+        // Smoke through cycle_kind; the label names the
+        // kind the event has now (EditorCore::
+        // particle_set_kind).
+        .child(
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text("Kind")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                )
+                .child(icon_only_btn(
+                    "particles-kind-prev",
+                    "chevron-left",
+                    26.0,
+                    false,
+                    t,
+                    |s| cycle_selected_kind(s, -1),
+                ))
+                .child(
+                    text(kind_name(data.kind_value))
+                        .font(type_::BODY)
+                        .color(t.text),
+                )
+                .child(icon_only_btn(
+                    "particles-kind-next",
+                    "chevron-right",
+                    26.0,
+                    false,
+                    t,
+                    |s| cycle_selected_kind(s, 1),
+                )),
+        )
+        // Colour swatches (built above): a press sets the
+        // event's colour (EditorCore::particle_set_color).
+        .child(
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text("Colour")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                )
+                .child(colors),
         )
         // Frame stepper: -/+ move the event by one frame
         // (EditorCore::particle_set_frame).
@@ -739,6 +881,97 @@ mod tests {
         delete_selected(&mut state);
         assert!(state.core.project.particles.is_empty());
         assert_eq!(state.particle_selected, None);
+    }
+
+    #[test]
+    fn cycle_kind_wraps_both_ends_and_covers_every_variant_once() {
+        // Forward through the enum's declaration order.
+        assert_eq!(cycle_kind(ParticleKind::Burst, 1), ParticleKind::Sparkle);
+        assert_eq!(cycle_kind(ParticleKind::Sparkle, 1), ParticleKind::Smoke);
+        // Forward wrap: the last kind cycles to the first.
+        assert_eq!(cycle_kind(ParticleKind::Smoke, 1), ParticleKind::Burst);
+        // Backward wrap: the first kind cycles to the last.
+        assert_eq!(cycle_kind(ParticleKind::Burst, -1), ParticleKind::Smoke);
+        assert_eq!(cycle_kind(ParticleKind::Smoke, -1), ParticleKind::Sparkle);
+        assert_eq!(cycle_kind(ParticleKind::Sparkle, -1), ParticleKind::Burst);
+        // A full forward lap visits every variant exactly
+        // once and returns to the start.
+        let mut lap = vec![ParticleKind::Burst];
+        let mut current = ParticleKind::Burst;
+        for _ in 1..KIND_ORDER.len() {
+            current = cycle_kind(current, 1);
+            lap.push(current);
+        }
+        for kind in KIND_ORDER {
+            assert_eq!(
+                lap.iter().filter(|&&k| k == kind).count(),
+                1,
+                "{kind:?} visited exactly once per lap"
+            );
+        }
+        assert_eq!(cycle_kind(current, 1), ParticleKind::Burst);
+    }
+
+    #[test]
+    fn particle_palette_has_eight_distinct_colours() {
+        assert_eq!(PARTICLE_PALETTE.len(), 8);
+        let mut sorted = PARTICLE_PALETTE;
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 8, "every swatch colour is distinct");
+        assert!(PARTICLE_PALETTE.contains(&0xFFFFFF), "white is in");
+        assert!(PARTICLE_PALETTE.contains(&0x000000), "black is in");
+    }
+
+    #[test]
+    fn detail_data_carries_the_kind_value_and_color() {
+        let core = core_with(vec![event(4, Some(0), Some(3))]);
+        let data = detail_data(&core, Some(0)).expect("valid selection");
+        assert_eq!(data.kind_value, ParticleKind::Sparkle);
+        assert_eq!(data.color, 0xFFC65D);
+    }
+
+    #[test]
+    fn cycle_selected_kind_steps_and_wraps_the_selected_event() {
+        let mut state = demo_state();
+        // The fixture event is a Sparkle.
+        state.core.project.particles = vec![event(0, None, None)];
+        state.particle_selected = Some(0);
+        cycle_selected_kind(&mut state, 1);
+        assert_eq!(state.core.project.particles[0].kind, ParticleKind::Smoke);
+        cycle_selected_kind(&mut state, 1);
+        assert_eq!(
+            state.core.project.particles[0].kind,
+            ParticleKind::Burst,
+            "wrapped forward"
+        );
+        cycle_selected_kind(&mut state, -1);
+        assert_eq!(
+            state.core.project.particles[0].kind,
+            ParticleKind::Smoke,
+            "wrapped backward"
+        );
+        // No selection: nothing changes, no panic.
+        state.particle_selected = None;
+        cycle_selected_kind(&mut state, 1);
+        assert_eq!(state.core.project.particles[0].kind, ParticleKind::Smoke);
+    }
+
+    #[test]
+    fn set_selected_color_writes_only_the_selected_event() {
+        let mut state = demo_state();
+        state.core.project.particles = vec![event(0, None, None), event(2, None, None)];
+        state.particle_selected = Some(1);
+        set_selected_color(&mut state, PARTICLE_PALETTE[0]);
+        assert_eq!(state.core.project.particles[1].color, PARTICLE_PALETTE[0]);
+        assert_eq!(
+            state.core.project.particles[0].color, 0xFFC65D,
+            "the other event keeps its colour"
+        );
+        // No selection: nothing changes, no panic.
+        state.particle_selected = None;
+        set_selected_color(&mut state, PARTICLE_PALETTE[3]);
+        assert_eq!(state.core.project.particles[1].color, PARTICLE_PALETTE[0]);
     }
 
     #[test]

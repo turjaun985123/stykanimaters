@@ -1,7 +1,8 @@
 //! Particle-event engine ops: the `EditorCore` method
 //! family for editing the project's particle EVENTS
 //! (`Project::particles`) — add, delete, retime, re-anchor
-//! and reposition (Phase G, section 4).
+//! and reposition (Phase G, section 4), plus kind and
+//! colour (Phase I, section 6).
 //!
 //! Particle events are the one-shot effects the rasterizer
 //! draws from `export::particles_at` (a burst / sparkle /
@@ -218,6 +219,49 @@ impl EditorCore {
             index + 1
         );
     }
+
+    /// Set particle event `index`'s kind (burst / sparkle
+    /// / smoke) — the effect shape the rasterizer draws
+    /// for the event's live window (Phase I, section 6).
+    /// One undo step; an out-of-range index only sets the
+    /// status.
+    pub fn particle_set_kind(&mut self, index: usize, kind: ParticleKind) {
+        if self.project.particles.get(index).is_none() {
+            self.status = format!(
+                "Particle event kind failed: no particle event {}.",
+                index + 1
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.particles[index].kind = kind;
+        self.status = format!(
+            "Particle event {} kind set to {kind:?}.",
+            index + 1
+        );
+    }
+
+    /// Set particle event `index`'s colour (`0xRRGGBB`)
+    /// — the tint the rasterizer draws every particle of
+    /// the event in (Phase I, section 6). The status
+    /// wording mirrors `fx_set_color` in `fx_ops.rs`. One
+    /// undo step; an out-of-range index only sets the
+    /// status.
+    pub fn particle_set_color(&mut self, index: usize, color: u32) {
+        if self.project.particles.get(index).is_none() {
+            self.status = format!(
+                "Particle event colour failed: no particle event {}.",
+                index + 1
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.particles[index].color = color;
+        self.status = format!(
+            "Particle event {} colour set to #{color:06X}.",
+            index + 1
+        );
+    }
 }
 
 #[cfg(test)]
@@ -426,6 +470,64 @@ mod tests {
         assert_eq!(
             core.status,
             "Particle event position failed: no particle event 2."
+        );
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+    }
+
+    #[test]
+    fn set_kind_lands_and_leaves_the_other_fields_alone() {
+        let mut core = core_with(vec![event(2, 40.0, 7)]);
+        let edits = core.edits_since_autosave();
+        core.particle_set_kind(0, ParticleKind::Sparkle);
+        let ev = &core.project.particles[0];
+        assert_eq!(ev.kind, ParticleKind::Sparkle);
+        assert_eq!(core.status, "Particle event 1 kind set to Sparkle.");
+        // Only the kind changed: frame, point, seed and
+        // colour all keep the fixture's values.
+        assert_eq!((ev.frame, ev.x, ev.seed, ev.color), (2, 40.0, 7, 0xFFFFFF));
+        core.particle_set_kind(0, ParticleKind::Smoke);
+        assert_eq!(core.project.particles[0].kind, ParticleKind::Smoke);
+        assert_eq!(core.status, "Particle event 1 kind set to Smoke.");
+        assert_eq!(core.edits_since_autosave(), edits + 2, "one snapshot per op");
+    }
+
+    #[test]
+    fn set_kind_out_of_range_is_status_only() {
+        let mut core = core_with(vec![event(0, 0.0, 1)]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        core.particle_set_kind(1, ParticleKind::Smoke);
+        assert_eq!(
+            core.status,
+            "Particle event kind failed: no particle event 2."
+        );
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+    }
+
+    #[test]
+    fn set_color_lands_with_padded_hex_status() {
+        let mut core = core_with(vec![event(0, 0.0, 1)]);
+        let edits = core.edits_since_autosave();
+        core.particle_set_color(0, 0x0A0B0C);
+        let ev = &core.project.particles[0];
+        assert_eq!(ev.color, 0x0A0B0C);
+        assert_eq!(ev.kind, ParticleKind::Burst, "kind untouched");
+        // The status pads to six hex digits, like fx_ops.
+        assert_eq!(core.status, "Particle event 1 colour set to #0A0B0C.");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+    }
+
+    #[test]
+    fn set_color_out_of_range_is_status_only() {
+        let mut core = core_with(vec![event(0, 0.0, 1)]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        core.particle_set_color(3, 0xFF0000);
+        assert_eq!(
+            core.status,
+            "Particle event colour failed: no particle event 4."
         );
         assert_eq!(project_json(&core), before, "project untouched");
         assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");

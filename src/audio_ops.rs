@@ -53,6 +53,13 @@
 //! can now aim these effects at the selected clip instead
 //! of always the last one.
 //!
+//! Phase I (section 4): [`clip_peaks`] moves the per-clip
+//! waveform peak computation out of the Rune waveform panel
+//! and into the library, so a selected-clip view can ask for
+//! one clip's peaks by index instead of re-deriving them in
+//! panel code. It reuses the one loader path the panel has
+//! always used (see its note below).
+//!
 //! `audio_derived_path` below is a copy of the private helper
 //! of the same name in `editor.rs`: it is private to that
 //! module, so this file cannot call it — the body is kept
@@ -85,6 +92,52 @@ fn audio_derived_path(source: &PathBuf, suffix: &str) -> PathBuf {
     let mut out = source.clone();
     out.set_file_name(format!("{stem}{suffix}"));
     out
+}
+
+/// Phase I (section 4): the peak amplitude per bucket across
+/// audio clip `index`'s own samples, for a selected-clip
+/// waveform view.
+///
+/// The loading path is exactly the one the Rune waveform
+/// panel (`rune_sec/waveform_view.rs`) has always used: the
+/// clip's file is read with [`crate::audio_edit::read_wav`]
+/// and reduced with [`crate::audio_edit::peaks`] — no other
+/// decoder and no other reduction. Normalisation therefore
+/// matches the existing waveform code exactly: `read_wav`
+/// decodes PCM16 samples to -1.0..=1.0, and `peaks` takes
+/// the max-abs amplitude per bucket across all channels, so
+/// every returned value lies in 0.0..=1.0. The clip's `gain`
+/// is NOT applied here — the panel scales by gain at draw
+/// time, as it does for the project waveform today.
+///
+/// Pure and read-only: it takes `&EditorCore`, takes no
+/// snapshot and writes no status, so probing a waveform can
+/// never dirty the undo stack.
+///
+/// Every failure reads as an empty vec, so the panel can
+/// fall back to its project view: `buckets == 0`, an
+/// out-of-range `index`, a missing or unreadable file (the
+/// same error tolerance as the panel — `read_wav` failing
+/// for any reason, missing file and not-a-WAV alike), or a
+/// clip whose file decodes to no samples at all. That last
+/// case is deliberately stricter than `audio_edit::peaks`
+/// on its own, which would return all-zero buckets for
+/// empty audio: here an empty clip has no waveform to show,
+/// so it falls back like the other failures.
+pub fn clip_peaks(core: &EditorCore, index: usize, buckets: usize) -> Vec<f32> {
+    if buckets == 0 {
+        return Vec::new();
+    }
+    let Some(clip) = core.project.audio.get(index) else {
+        return Vec::new();
+    };
+    let Ok(data) = crate::audio_edit::read_wav(&clip.path) else {
+        return Vec::new();
+    };
+    if data.samples.is_empty() {
+        return Vec::new();
+    }
+    crate::audio_edit::peaks(&data, buckets)
 }
 
 impl EditorCore {
@@ -1295,5 +1348,98 @@ mod tests {
             empty.status,
             "Audio split at silences failed: no clip 1."
         );
+    }
+
+    // ---- Phase I: per-clip waveform peaks ----
+
+    #[test]
+    fn clip_peaks_reports_the_loud_second_half() {
+        let dir = temp_dir("peaks-loud-half");
+        // One second at 8 kHz: a quiet first half at 0.1 and
+        // a loud second half at -0.8 — negative on purpose,
+        // so the test proves the peaks are max-ABS, matching
+        // `audio_edit::peaks`, not max-signed.
+        let mut samples = vec![0.1; 4000];
+        samples.extend(vec![-0.8; 4000]);
+        let a = write_samples_wav(&dir, "a.wav", samples);
+        let mut core = core_with(vec![clip(&a, 0)]);
+        core.status = "untouched".into();
+        let edits = core.edits_since_autosave();
+        // Four buckets of 2000 frames each: two quiet, two loud.
+        let peaks = clip_peaks(&core, 0, 4);
+        assert_eq!(peaks.len(), 4);
+        let expected = [0.1, 0.1, 0.8, 0.8];
+        for (got, want) in peaks.iter().zip(expected) {
+            assert!((got - want).abs() < 0.001, "peak {got}, expected {want}");
+            assert!((0.0..=1.0).contains(got), "peak {got} outside 0.0..=1.0");
+        }
+        // Two buckets collapse to one peak per half.
+        let peaks = clip_peaks(&core, 0, 2);
+        assert_eq!(peaks.len(), 2);
+        assert!((peaks[0] - 0.1).abs() < 0.001);
+        assert!((peaks[1] - 0.8).abs() < 0.001);
+        // Pure and read-only: no status write, no snapshot.
+        assert_eq!(core.status, "untouched");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clip_peaks_uses_the_indexed_clips_own_samples() {
+        let dir = temp_dir("peaks-indexed");
+        let quiet = write_samples_wav(&dir, "quiet.wav", vec![0.2; 4000]);
+        let loud = write_samples_wav(&dir, "loud.wav", vec![0.9; 4000]);
+        let core = core_with(vec![clip(&quiet, 0), clip(&loud, 4)]);
+        // Each index peaks from its own file, not the last
+        // clip's — the whole point of the indexed helper.
+        let first = clip_peaks(&core, 0, 2);
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().all(|&v| (v - 0.2).abs() < 0.001));
+        let second = clip_peaks(&core, 1, 2);
+        assert_eq!(second.len(), 2);
+        assert!(second.iter().all(|&v| (v - 0.9).abs() < 0.001));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clip_peaks_empty_for_out_of_range_and_zero_buckets() {
+        let dir = temp_dir("peaks-refusals");
+        let a = write_samples_wav(&dir, "a.wav", vec![0.5; 4000]);
+        let core = core_with(vec![clip(&a, 0)]);
+        assert!(clip_peaks(&core, 1, 8).is_empty(), "index past the end");
+        assert!(clip_peaks(&core, 99, 8).is_empty(), "index far past the end");
+        assert!(clip_peaks(&core, 0, 0).is_empty(), "zero buckets");
+        // No clips at all: even index 0 is out of range.
+        let empty = EditorCore::new();
+        assert!(clip_peaks(&empty, 0, 8).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clip_peaks_empty_for_missing_or_unreadable_file() {
+        let dir = temp_dir("peaks-unreadable");
+        // A path that was never written.
+        let missing = dir.join("missing.wav").to_string_lossy().into_owned();
+        let core = core_with(vec![clip(&missing, 0)]);
+        assert!(clip_peaks(&core, 0, 8).is_empty(), "missing file");
+        // A file that exists but is not a WAV at all: the
+        // same `read_wav` error tolerance the panel has.
+        let junk = dir.join("junk.wav");
+        std::fs::write(&junk, b"this is not a wav file").unwrap();
+        let core = core_with(vec![clip(&junk.to_string_lossy(), 0)]);
+        assert!(clip_peaks(&core, 0, 8).is_empty(), "unreadable file");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clip_peaks_empty_for_a_clip_with_no_samples() {
+        let dir = temp_dir("peaks-empty");
+        // A well-formed WAV with an empty data chunk decodes
+        // successfully but has no samples: it reads as no
+        // waveform (an empty vec), NOT as all-zero buckets.
+        let a = write_samples_wav(&dir, "a.wav", Vec::new());
+        let core = core_with(vec![clip(&a, 0)]);
+        assert!(clip_peaks(&core, 0, 8).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

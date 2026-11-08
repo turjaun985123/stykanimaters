@@ -111,6 +111,20 @@
 //! empty project the row reads "No strokes" and every
 //! button is inert apart from the status line.
 //!
+//! ## Selected stroke measure (Phase I, section 33)
+//!
+//! While a valid selection exists, a muted line under
+//! the selection row (key `stroke-measure`) reports the
+//! selected stroke's facts ([`stroke_measure`]):
+//! `Stroke {n}: {points} pts · {length} long · frame
+//! {f}`. The length sums the base polyline's segment
+//! lengths — a spray stroke measures by its base
+//! polyline, the picking convention of Phase G section
+//! 5 — and a filled stroke's closing edge back to its
+//! first point is not counted. No selection (or a stale
+//! one) renders no line at all, so an unselected panel
+//! gains nothing.
+//!
 //! `State` access: the brush and stroke data read
 //! `s.core` (active brush, `brush_index`,
 //! `project.strokes`, `current`) and writes go through
@@ -559,6 +573,70 @@ pub fn selection_readout(core: &EditorCore, selected: Option<usize>) -> String {
     }
 }
 
+/// Measured facts about one stroke: its polyline point
+/// count, its total length in stage units, and the frame
+/// it was recorded on. Produced by [`stroke_measure`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StrokeMeasure {
+    /// Polyline point count (`Stroke.points.len()`).
+    pub points: usize,
+    /// Summed segment lengths along the base polyline, in
+    /// stage units. A stroke with fewer than two points
+    /// measures 0.
+    pub length: f32,
+    /// The frame the stroke was recorded on — the raw
+    /// `Stroke.frame` value, as [`stroke_frame_of`]
+    /// returns it (displays add 1).
+    pub frame: usize,
+}
+
+/// Measure the stroke at project-wide `index`: point
+/// count, total length and owning frame, or `None` when
+/// `index` is outside `Project.strokes`. The length sums
+/// the Euclidean lengths of the consecutive segments of
+/// the stroke's **base polyline** — a spray stroke is
+/// measured by that polyline too, never by its scattered
+/// dots, matching the stage picking convention
+/// (`stage_layers::stroke_at_point`, Phase G section 5).
+/// A filled stroke is measured along its open polyline:
+/// the closing edge back to the first point is not
+/// counted. Pure: same project state, same measure.
+pub fn stroke_measure(core: &EditorCore, index: usize) -> Option<StrokeMeasure> {
+    let stroke = core.project.strokes.get(index)?;
+    let length = stroke
+        .points
+        .windows(2)
+        .map(|seg| {
+            let d = [seg[1][0] - seg[0][0], seg[1][1] - seg[0][1]];
+            (d[0] * d[0] + d[1] * d[1]).sqrt()
+        })
+        .sum();
+    Some(StrokeMeasure {
+        points: stroke.points.len(),
+        length,
+        frame: stroke_frame_of(core, index)?,
+    })
+}
+
+/// The measure line shown under the selection row while
+/// a valid selection exists: `Stroke {n}: {points} pts ·
+/// {length} long · frame {f}` — the stroke's 1-based
+/// project position, its point count, its total length
+/// rounded to whole stage units, and its 1-based frame.
+/// `None` — and no line is rendered — with no selection,
+/// a stale one, or an empty project.
+pub fn measure_readout(core: &EditorCore, selected: Option<usize>) -> Option<String> {
+    let i = selected.filter(|&i| i < core.project.strokes.len())?;
+    let m = stroke_measure(core, i)?;
+    Some(format!(
+        "Stroke {}: {} pts · {:.0} long · frame {}",
+        i + 1,
+        m.points,
+        m.length,
+        m.frame + 1
+    ))
+}
+
 /// Prev / Next press: step `s.stroke_selected` through
 /// the project-wide stroke space ([`step_selection`]).
 /// View state only — no snapshot, no status, no core
@@ -811,6 +889,18 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 clear_stroke_selection(s);
             })),
     );
+
+    // Selected stroke measure (Phase I): a muted facts
+    // line under the selection row, rendered only while
+    // a valid selection exists — no selection, no line.
+    if let Some(line) = measure_readout(core, s.stroke_selected) {
+        panel = panel.child(
+            text(line)
+                .key("stroke-measure")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    }
 
     panel = panel.child(
         text(format!("Brush · {}", brush.name))
@@ -1525,6 +1615,91 @@ mod tests {
         assert!(!goto_selected_stroke_frame(&mut s));
         assert_eq!(s.core.status, "No strokes to select.");
         assert_eq!(s.stroke_selected, None);
+    }
+
+    /// A stroke on `frame` whose polyline is exactly
+    /// `points` — the measure tests need known geometry,
+    /// which the repeated-point `plain_stroke` cannot
+    /// give.
+    fn polyline_stroke(frame: usize, points: &[[f32; 2]]) -> Stroke {
+        let mut s = plain_stroke(frame, 0);
+        s.points = points.to_vec();
+        s
+    }
+
+    #[test]
+    fn stroke_measure_sums_the_base_polyline_segments() {
+        let mut core = EditorCore::new();
+        // Right angle: (0,0) → (3,0) → (3,4) is 3 + 4 = 7
+        // stage units over 3 points, recorded on frame 2.
+        core.project
+            .strokes
+            .push(polyline_stroke(2, &[[0.0, 0.0], [3.0, 0.0], [3.0, 4.0]]));
+        let m = stroke_measure(&core, 0).expect("index 0 exists");
+        assert_eq!(m.points, 3);
+        assert_eq!(m.length, 7.0);
+        assert_eq!(m.frame, 2, "the frame is stroke_frame_of's raw value");
+        // Out of range: no measure.
+        assert_eq!(stroke_measure(&core, 1), None);
+    }
+
+    #[test]
+    fn stroke_measure_handles_degenerate_polylines() {
+        let mut core = EditorCore::new();
+        core.project.strokes.push(polyline_stroke(0, &[]));
+        core.project.strokes.push(polyline_stroke(1, &[[5.0, 5.0]]));
+        assert_eq!(
+            stroke_measure(&core, 0),
+            Some(StrokeMeasure {
+                points: 0,
+                length: 0.0,
+                frame: 0
+            })
+        );
+        assert_eq!(
+            stroke_measure(&core, 1),
+            Some(StrokeMeasure {
+                points: 1,
+                length: 0.0,
+                frame: 1
+            })
+        );
+    }
+
+    #[test]
+    fn stroke_measure_uses_the_base_polyline_for_spray_strokes() {
+        let mut core = EditorCore::new();
+        let mut s = polyline_stroke(0, &[[0.0, 0.0], [6.0, 8.0]]);
+        s.spray = Some(SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        });
+        core.project.strokes.push(s);
+        let m = stroke_measure(&core, 0).expect("index 0 exists");
+        assert_eq!(m.points, 2);
+        // The 6-8-10 hypotenuse of the base polyline — the
+        // scattered spray dots play no part in the measure.
+        assert_eq!(m.length, 10.0);
+        assert_eq!(m.frame, 0);
+    }
+
+    #[test]
+    fn measure_readout_formats_the_selected_strokes_facts() {
+        let mut core = EditorCore::new();
+        assert_eq!(measure_readout(&core, None), None);
+        assert_eq!(measure_readout(&core, Some(0)), None, "empty project");
+        core.project
+            .strokes
+            .push(polyline_stroke(2, &[[0.0, 0.0], [3.0, 0.0], [3.0, 4.0]]));
+        // 1-based position and frame, whole-unit length.
+        assert_eq!(
+            measure_readout(&core, Some(0)).as_deref(),
+            Some("Stroke 1: 3 pts · 7 long · frame 3")
+        );
+        // No selection or a stale one: no line at all.
+        assert_eq!(measure_readout(&core, None), None);
+        assert_eq!(measure_readout(&core, Some(1)), None);
     }
 
     #[test]

@@ -7,7 +7,9 @@
 //! Every value shown is read live from the core:
 //!
 //! - project name — `core.project.name`
-//!   (`model.rs:682`), with a ` ●` suffix while the
+//!   (`model.rs:682`), with the project's total
+//!   runtime appended (` · {runtime}`, Phase I — see
+//!   [`runtime_label`]) and a ` ●` suffix while the
 //!   project has edits the autosave has not captured
 //!   (see [`project_text`])
 //! - frame position — `core.current` + 1 over
@@ -152,6 +154,23 @@
 //! stays text-only. The stroke and particle segments
 //! stay text-only too: a selection index has no
 //! honest glyph.
+//!
+//! ## Phase I — runtime inside the project segment
+//!
+//! The strip never showed the project's total
+//! runtime. Phase I appends it to the project
+//! segment's text (`{name} · {runtime}`, see
+//! [`project_text`] / [`runtime_label`]) rather than
+//! adding a tenth fixed segment: no new divider, no
+//! new floor competing with the tail, and the width
+//! cost is only the label's own characters. It is
+//! free under the width discipline because
+//! [`segment`] computes its floor from the final
+//! label string via [`est_text_width`] — no width
+//! anywhere in this module is hard-coded per segment —
+//! so the project segment's floor grows by exactly
+//! the runtime label's estimated width (≈ 5 chars,
+//! ≈ 40 pt) and the tail remains the single absorber.
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, El};
@@ -190,8 +209,44 @@ pub fn timecode(frame: usize, fps: f32) -> String {
     )
 }
 
-/// Project-name segment: the name, plus a ` ●` suffix
-/// while the project is dirty. The signal is the core's
+/// Total-runtime label (Phase I): the project's whole
+/// playback length formatted `m:ss` — minutes
+/// unpadded, seconds zero-padded, so seven seconds
+/// reads `0:07` and minutes keep counting past the
+/// hour (`65:00`), the same convention as
+/// [`timecode`].
+///
+/// The length itself is the engine's own total,
+/// `Project::total_seconds()` (`model.rs:855`): the
+/// sum of every frame's `duration` divided by the
+/// project fps. A frame's `duration` is a multiplier
+/// in frame periods — `adjust_frame_duration`
+/// (`editor.rs:1728`) scales it and formats it as
+/// `{:.2}x`, clamped to 0.25..=8.0 — so a frame with
+/// duration 2.0 at 12 fps lasts 2/12 s, and
+/// `total_seconds` is exactly Σ duration / fps (with
+/// fps floored at 1.0 inside the model fn). The total
+/// is rounded once, half away from zero, before the
+/// split into minutes and seconds — the strip's
+/// established rounding (see [`timecode`]) — so a
+/// 2.5 s project reads `0:03`. An empty project sums
+/// to zero and reads `0:00`; a non-finite total (only
+/// reachable from a hand-edited project file) also
+/// reads `0:00` rather than painting a nonsense
+/// number.
+pub fn runtime_label(core: &EditorCore) -> String {
+    let secs = core.project.total_seconds();
+    if !secs.is_finite() || secs <= 0.0 {
+        return "0:00".to_string();
+    }
+    let total = secs.round() as u64;
+    format!("{}:{:02}", total / 60, total % 60)
+}
+
+/// Project segment: the name, the total runtime
+/// appended as ` · {runtime}` (Phase I, see
+/// [`runtime_label`]), plus a ` ●` suffix while the
+/// project is dirty. The dirty signal is the core's
 /// public edit counter, `edits_since_autosave()`
 /// (`editor.rs:1587`) — edits counted since the core's
 /// last autosave stamp (the autosave writes a recovery
@@ -200,11 +255,18 @@ pub fn timecode(frame: usize, fps: f32) -> String {
 /// counter). Dirty is exactly `edits_since_autosave() >
 /// 0`; no other channel (status text, file mtimes) is
 /// consulted.
+///
+/// The runtime rides inside this segment instead of
+/// becoming a new one: [`segment`] floors the segment
+/// at [`est_text_width`] of the whole label, so the
+/// floor widens by the label's own width and the
+/// strip gains no new fixed segment.
 pub fn project_text(core: &EditorCore) -> String {
+    let base = format!("{} · {}", core.project.name, runtime_label(core));
     if core.edits_since_autosave() > 0 {
-        format!("{} ●", core.project.name)
+        format!("{base} ●")
     } else {
-        core.project.name.clone()
+        base
     }
 }
 
@@ -696,22 +758,103 @@ mod tests {
     fn project_text_has_no_dot_on_a_fresh_core() {
         // A fresh core has counted no edits, so the
         // autosave-relative dirty signal reads clean.
+        // Phase I: the segment now carries the runtime
+        // too — the demo is 5 frames of duration 1.0 at
+        // 12 fps, 5/12 s, which rounds to 0:00 — so the
+        // pin is the name plus ` · 0:00`, no dot.
         let core = EditorCore::new();
         assert_eq!(core.edits_since_autosave(), 0);
-        assert_eq!(project_text(&core), core.project.name);
+        assert_eq!(
+            project_text(&core),
+            format!("{} · 0:00", core.project.name)
+        );
     }
 
     #[test]
     fn project_text_gains_the_dot_after_an_edit() {
         // add_frame snapshots, which is an undoable edit
-        // and bumps the counter the marker reads.
+        // and bumps the counter the marker reads. Phase
+        // I: the runtime sits between the name and the
+        // dot — 6 frames of duration 1.0 at 12 fps is
+        // exactly 0.5 s, rounding half away from zero
+        // to 0:01.
         let mut core = EditorCore::new();
         core.add_frame();
         assert!(core.edits_since_autosave() > 0);
         assert_eq!(
             project_text(&core),
-            format!("{} ●", core.project.name)
+            format!("{} · 0:01 ●", core.project.name)
         );
+    }
+
+    // ---- Phase I runtime label ----
+
+    /// A core whose project runs at `fps` with the
+    /// given per-frame durations (the demo's frames,
+    /// truncated to the list's length — the runtime
+    /// only reads durations and fps).
+    fn core_with_runtime(fps: f32, durations: &[f32]) -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.fps = fps;
+        core.project.frames.truncate(durations.len());
+        for (frame, d) in core.project.frames.iter_mut().zip(durations) {
+            frame.duration = *d;
+        }
+        core
+    }
+
+    #[test]
+    fn runtime_label_empty_project_is_zero() {
+        let mut core = EditorCore::new();
+        core.project.frames.clear();
+        assert_eq!(runtime_label(&core), "0:00");
+    }
+
+    #[test]
+    fn runtime_label_zero_pads_seconds_under_a_minute() {
+        // 5 × 14.0 frame periods at 10 fps = 7.0 s.
+        let core = core_with_runtime(10.0, &[14.0, 14.0, 14.0, 14.0, 14.0]);
+        assert_eq!(runtime_label(&core), "0:07");
+    }
+
+    #[test]
+    fn runtime_label_counts_duration_as_frame_periods() {
+        // The model's own example (model.rs,
+        // durations_expand_and_total_time): durations
+        // 2 + 3 + 1 + 1 + 1 at 12 fps total 8/12 s,
+        // which rounds to one second.
+        let core = core_with_runtime(12.0, &[2.0, 3.0, 1.0, 1.0, 1.0]);
+        assert_eq!(runtime_label(&core), "0:01");
+        // A single frame held for 24 periods at 12 fps
+        // lasts exactly two seconds: duration is a
+        // multiplier on the frame period, not a count
+        // of frames.
+        let core = core_with_runtime(12.0, &[24.0]);
+        assert_eq!(runtime_label(&core), "0:02");
+    }
+
+    #[test]
+    fn runtime_label_fractional_durations_round_half_away_from_zero() {
+        // 25 periods at 10 fps = exactly 2.5 s, and the
+        // exact half rounds away from zero (the strip's
+        // timecode rounding), not down.
+        let core = core_with_runtime(10.0, &[25.0]);
+        assert_eq!(runtime_label(&core), "0:03");
+        // Two quarter-speed halves: 2.5 + 2.5 periods
+        // at 10 fps = exactly 0.5 s -> 0:01.
+        let core = core_with_runtime(10.0, &[2.5, 2.5]);
+        assert_eq!(runtime_label(&core), "0:01");
+        // Just under the half rounds down: 24 periods
+        // at 10 fps = 2.4 s.
+        let core = core_with_runtime(10.0, &[24.0]);
+        assert_eq!(runtime_label(&core), "0:02");
+    }
+
+    #[test]
+    fn runtime_label_minutes_unpadded_seconds_padded() {
+        // 7540 periods at 10 fps = 754 s = 12 min 34 s.
+        let core = core_with_runtime(10.0, &[7540.0]);
+        assert_eq!(runtime_label(&core), "12:34");
     }
 
     #[test]

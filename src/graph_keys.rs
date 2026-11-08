@@ -32,6 +32,14 @@
 //!   and the project untouched; the status line still reports
 //!   why, in the core's house style, so a UI binding never
 //!   fails silently.
+//!
+//! ## Channel statistics
+//!
+//! [`channel_stats`] is the read-only companion: one
+//! [`ChannelStat`] per channel, in project order, carrying the
+//! numbers a channel list shows next to each row (key count,
+//! value range, frame span). It never snapshots, never writes
+//! the status line and never mutates the project.
 
 use crate::editor::EditorCore;
 use crate::graph::{ChannelTarget, Key};
@@ -115,6 +123,99 @@ pub fn paste_keys(
         channel_index + 1
     );
     true
+}
+
+/// Human label for a channel target, in UI casing: "Root X",
+/// "Root Y", "Angle 3", "Length 3". This mirrors the graph
+/// panel's own `channel_label` (in `rune_sec/graph_panel.rs`)
+/// string for string — that helper lives in the shell crate
+/// and cannot be reused from the library, so the formatting is
+/// duplicated here and the two must be kept in step.
+pub fn target_label(target: ChannelTarget) -> String {
+    match target {
+        ChannelTarget::RootX => "Root X".to_string(),
+        ChannelTarget::RootY => "Root Y".to_string(),
+        ChannelTarget::Angle(n) => format!("Angle {n}"),
+        ChannelTarget::Length(n) => format!("Length {n}"),
+    }
+}
+
+/// Read-only summary of one channel, for a channel list that
+/// wants numbers next to each row: which figure and property
+/// the channel drives, how many keys it holds, the range of
+/// its key values and the span of its key frames.
+///
+/// An empty channel (no keys) reports `keys` 0 and zeroes for
+/// `min`, `max`, `first_frame` and `last_frame` — there is no
+/// range to report, and zero keeps the row printable without a
+/// special case. `figure_name` is the figure's current name;
+/// a channel pointing past the end of the figure list (stale,
+/// e.g. after a figure delete) falls back to "Figure {n}"
+/// with the 1-based index, so the row still names something.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChannelStat {
+    /// Index of the figure the channel drives.
+    pub figure: usize,
+    /// The figure's name (see the struct docs for the stale
+    /// fallback).
+    pub figure_name: String,
+    /// The target's label, from [`target_label`].
+    pub target_label: String,
+    /// Number of keys on the channel.
+    pub keys: usize,
+    /// Smallest key value; 0.0 on an empty channel.
+    pub min: f32,
+    /// Largest key value; 0.0 on an empty channel.
+    pub max: f32,
+    /// Frame of the earliest key; 0.0 on an empty channel.
+    pub first_frame: f32,
+    /// Frame of the latest key; 0.0 on an empty channel.
+    pub last_frame: f32,
+}
+
+/// One [`ChannelStat`] per channel in `core.project.channels`,
+/// in project channel order. Pure and read-only: no snapshot,
+/// no status write, no mutation — safe to call on every frame
+/// a list is drawn. Value and frame extremes are folded over
+/// the keys as stored, without assuming they are sorted, so a
+/// hand-built channel reports its true span.
+pub fn channel_stats(core: &EditorCore) -> Vec<ChannelStat> {
+    core.project
+        .channels
+        .iter()
+        .map(|ch| {
+            let figure_name = core
+                .project
+                .figures
+                .get(ch.figure)
+                .map(|f| f.name.clone())
+                .unwrap_or_else(|| format!("Figure {}", ch.figure + 1));
+            let (mut min, mut max) = (0.0f32, 0.0f32);
+            let (mut first_frame, mut last_frame) = (0.0f32, 0.0f32);
+            if let Some(first) = ch.keys.first() {
+                min = first.value;
+                max = first.value;
+                first_frame = first.frame;
+                last_frame = first.frame;
+                for k in &ch.keys[1..] {
+                    min = min.min(k.value);
+                    max = max.max(k.value);
+                    first_frame = first_frame.min(k.frame);
+                    last_frame = last_frame.max(k.frame);
+                }
+            }
+            ChannelStat {
+                figure: ch.figure,
+                figure_name,
+                target_label: target_label(ch.target),
+                keys: ch.keys.len(),
+                min,
+                max,
+                first_frame,
+                last_frame,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -319,5 +420,87 @@ mod tests {
             keys: Vec::new(),
         });
         assert_eq!(channel_index_of(&core, 0, ChannelTarget::RootX), Some(0));
+    }
+
+    #[test]
+    fn target_label_matches_the_graph_panels_casing() {
+        // The strings are the graph panel's `channel_label`
+        // output verbatim — the two formatters must not drift.
+        assert_eq!(target_label(ChannelTarget::RootX), "Root X");
+        assert_eq!(target_label(ChannelTarget::RootY), "Root Y");
+        assert_eq!(target_label(ChannelTarget::Angle(3)), "Angle 3");
+        assert_eq!(target_label(ChannelTarget::Length(12)), "Length 12");
+    }
+
+    #[test]
+    fn channel_stats_reports_every_field_and_stays_read_only() {
+        let mut core = core_with_channels();
+        // Pin the figure's name so the assertion does not lean
+        // on the demo project's naming.
+        core.project.figures[0].name = "Hero".to_string();
+        let edits_before = core.edits_since_autosave();
+        let status_before = core.status.clone();
+
+        let stats = channel_stats(&core);
+        assert_eq!(stats.len(), 2, "one stat per channel, project order");
+
+        // Channel 0: RootX with keys (10, 100), (14, 140),
+        // (20, 90) — value range 90..=140, frame span 10..=20.
+        let s0 = &stats[0];
+        assert_eq!(s0.figure, 0);
+        assert_eq!(s0.figure_name, "Hero");
+        assert_eq!(s0.target_label, "Root X");
+        assert_eq!(s0.keys, 3);
+        assert!(approx(s0.min, 90.0), "min value: {}", s0.min);
+        assert!(approx(s0.max, 140.0), "max value: {}", s0.max);
+        assert!(approx(s0.first_frame, 10.0), "first frame: {}", s0.first_frame);
+        assert!(approx(s0.last_frame, 20.0), "last frame: {}", s0.last_frame);
+
+        // Channel 1: RootY, empty — the documented zeroes.
+        let s1 = &stats[1];
+        assert_eq!(s1.figure, 0);
+        assert_eq!(s1.figure_name, "Hero");
+        assert_eq!(s1.target_label, "Root Y");
+        assert_eq!(s1.keys, 0);
+        assert!(approx(s1.min, 0.0), "empty min is 0.0");
+        assert!(approx(s1.max, 0.0), "empty max is 0.0");
+        assert!(approx(s1.first_frame, 0.0), "empty first frame is 0.0");
+        assert!(approx(s1.last_frame, 0.0), "empty last frame is 0.0");
+
+        // Pure read: no snapshot taken, no status written.
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before,
+            "channel_stats takes no snapshot"
+        );
+        assert_eq!(core.status, status_before, "channel_stats writes no status");
+    }
+
+    #[test]
+    fn channel_stats_names_a_stale_figure_by_number() {
+        let mut core = core_with_channels();
+        // A channel whose figure no longer exists still gets a
+        // printable row: the 1-based fallback name, and its own
+        // key numbers computed as usual.
+        core.project.channels.push(Channel {
+            figure: 7,
+            target: ChannelTarget::Angle(2),
+            keys: vec![Key::flat(3.0, -45.0)],
+        });
+        let stats = channel_stats(&core);
+        let stale = &stats[2];
+        assert_eq!(stale.figure, 7);
+        assert_eq!(stale.figure_name, "Figure 8");
+        assert_eq!(stale.target_label, "Angle 2");
+        assert_eq!(stale.keys, 1);
+        assert!(approx(stale.min, -45.0) && approx(stale.max, -45.0));
+        assert!(approx(stale.first_frame, 3.0) && approx(stale.last_frame, 3.0));
+    }
+
+    #[test]
+    fn channel_stats_empty_project_is_empty() {
+        let core = EditorCore::new();
+        assert!(core.project.channels.is_empty(), "demo premise");
+        assert!(channel_stats(&core).is_empty());
     }
 }

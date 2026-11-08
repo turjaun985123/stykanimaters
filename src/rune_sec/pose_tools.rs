@@ -39,6 +39,20 @@
 //! test modules needs the new field too, exactly as the
 //! Phase F fields were patched in.
 //!
+//! Phase I adds a third field for the pose-library name
+//! filter (see [`PoseLibraryState`]), on the same terms:
+//!
+//! ```ignore
+//! pub pose_library: rune_sec::pose_tools::PoseLibraryState,
+//! ```
+//!
+//! initialised with `PoseLibraryState::new()` in `init()`,
+//! plus one line in `main.rs`'s `text_focused()`:
+//!
+//! ```ignore
+//! || s.pose_library.filter.focused
+//! ```
+//!
 //! Control → behaviour map (every control is real; there is
 //! no placeholder in this section):
 //!
@@ -145,7 +159,7 @@
 //! the library controls through
 //! `crate::rune_sec::icon_btn::icon_btn`: Save pose
 //! (`floppy-disk`), Apply (`check`), Apply mirrored
-//! (`copy` — the catalogue carries no flip glyph, and
+//! (`copy` — the catalogue carried no flip glyph, and
 //! `repeat` already means loop/cycle elsewhere in the
 //! shell), Rename (`pencil`), Del (`trash-can`), and
 //! the rename editor's Apply / Cancel (`check` /
@@ -155,6 +169,28 @@
 //! the pose-op buttons (mirror / copy / paste / reset /
 //! bake, copy-to) are not in this section's icon map and
 //! stay on [`pbtn`]. Keys and handlers are unchanged.
+//!
+//! Phase I (section 23/40) retires the local half of
+//! that arrangement: [`pibtn`]'s inert branch is now
+//! icon_btn's shared inert twin
+//! (`crate::rune_sec::icon_btn::icon_btn_inert`,
+//! section 11) instead of a hand-rolled muted row —
+//! same box metrics, muted glyph and label, no press
+//! handler; the resting fill is the shared inert fill
+//! (the card colour) rather than this file's old
+//! `control_off`. Apply mirrored's glyph becomes
+//! `arrow-right-arrow-left` ([`APPLY_MIRRORED_ICON`]):
+//! the catalogue gained the honest flip glyph
+//! (section 10), so the `copy` stand-in is retired.
+//! The library also gains a name filter (field key
+//! `pose-lib-filter`, state in [`PoseLibraryState`])
+//! on figures_panel's Phase G idiom: the list shows
+//! only entries matching the query, rows keep their
+//! REAL indices into the scanned list (so every row
+//! key and handler addresses the same entry, filtered
+//! or not), and the count beside the heading is the
+//! bare total while idle, "{shown} of {total} poses"
+//! while a filter is active.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -166,7 +202,7 @@ use serde::{Deserialize, Serialize};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Pose;
 
-use crate::rune_sec::icon_btn::{icon_btn, ICON_LABEL_GAP, ICON_SIZE};
+use crate::rune_sec::icon_btn::{icon_btn, icon_btn_inert};
 use crate::rune_sec::icons::icon_el;
 use crate::State;
 
@@ -534,6 +570,75 @@ pub fn saved_pose_names() -> Vec<String> {
         let mut slot = slot.borrow_mut();
         cached_pose_names(&mut slot, Some(key), scan_pose_library)
     })
+}
+
+/// Pose-library panel state (Phase I): only the name
+/// filter's text. Like [`PoseRenameState`] this cannot
+/// live in a thread-local — `text_input`'s `on_edit`
+/// needs a `&mut TextEdit` path into `State` — so the
+/// integrator homes it in `State` beside `pose_rename`;
+/// the exact lines are in this file's module docs.
+/// Filtering is view-only: it never touches the
+/// library on disk or the project.
+pub struct PoseLibraryState {
+    /// Name-filter box contents (Rune core text edit).
+    /// The entry list filters through
+    /// [`visible_pose_entries`] on this text every
+    /// render; typing is the only writer.
+    pub filter: TextEdit,
+}
+
+impl PoseLibraryState {
+    pub fn new() -> Self {
+        PoseLibraryState {
+            filter: TextEdit::new(""),
+        }
+    }
+}
+
+/// True when the filter `query` actually narrows the
+/// list: non-empty once trimmed. A whitespace-only
+/// query is no filter at all (figures_panel's
+/// `filter_active`, same rule).
+pub fn pose_filter_active(query: &str) -> bool {
+    !query.trim().is_empty()
+}
+
+/// True when a pose `name` matches the filter `query`:
+/// case-insensitive substring; an empty (or
+/// whitespace-only) query matches everything
+/// (figures_panel's `figure_name_matches`, same rule).
+pub fn pose_name_matches(name: &str, query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    q.is_empty() || name.to_lowercase().contains(&q)
+}
+
+/// The REAL indices into `names` that the filter
+/// `query` leaves visible, in list order. An empty
+/// query yields every index. Rows are built from
+/// these indices, so every row key and handler (apply,
+/// mirror-apply, delete, rename) addresses the entry
+/// it shows, filtered or not — figures_panel's
+/// `visible_figures` discipline, carried over.
+pub fn visible_pose_entries(names: &[String], query: &str) -> Vec<usize> {
+    names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| pose_name_matches(name, query))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The library heading's count line: with a filter
+/// active, "{shown} of {total} poses"; with no
+/// filter, the bare total (figures_panel's
+/// `count_line` discipline).
+pub fn pose_count_line(shown: usize, total: usize, query: &str) -> String {
+    if pose_filter_active(query) {
+        format!("{shown} of {total} poses")
+    } else {
+        format!("{total}")
+    }
 }
 
 /// Save the selected figure's current-frame pose into the
@@ -977,16 +1082,27 @@ fn pbtn(
     }
 }
 
-/// One icon-bearing pose-library button (Phase H): the
-/// glyph-and-label sibling of [`pbtn`], in the same
-/// metrics. Live → [`icon_btn`] itself; inert → the
-/// muted glyph-and-label rendering with NO press
-/// handler, keeping `pbtn`'s discipline (an inert
-/// element, not a control that silently does nothing).
-/// The glyph metrics are `icon_btn`'s own
-/// ([`ICON_SIZE`] / [`ICON_LABEL_GAP`]), and the muted
-/// glyph takes the muted label's colour, so the two
-/// states differ only in fill and ink, never in shape.
+/// The glyph on the library Apply-mirrored buttons:
+/// Font Awesome's two-way horizontal arrows — the
+/// honest flip glyph, in the catalogue since Phase I
+/// section 10. Phase H shipped `copy` here because no
+/// flip glyph existed; this constant exists so the
+/// choice is pinned by a test rather than buried in a
+/// call site.
+pub const APPLY_MIRRORED_ICON: &str = "arrow-right-arrow-left";
+
+/// One icon-bearing pose-library button: the
+/// glyph-and-label sibling of [`pbtn`], kept as a thin
+/// dispatch because the library rows call it seven
+/// times over. Live → [`icon_btn`] itself; inert →
+/// [`icon_btn_inert`], the shared muted twin (Phase I
+/// section 11): same box metrics, glyph and label in
+/// the muted colour, NO press handler — `pbtn`'s
+/// discipline (an inert element, not a control that
+/// silently does nothing), now in the one shared form
+/// every migrated panel uses. Which buttons are inert
+/// when is decided by the callers' gates, unchanged
+/// from Phase H.
 fn pibtn(
     key: String,
     icon: &str,
@@ -998,19 +1114,7 @@ fn pibtn(
     if enabled {
         icon_btn(&key, icon, label, false, t, f)
     } else {
-        el()
-            .key(key)
-            .px(10.0)
-            .py(5.0)
-            .radius(6.0)
-            .fill(t.control_off)
-            .child(
-                row()
-                    .gap(ICON_LABEL_GAP)
-                    .center_y()
-                    .child(icon_el(icon, ICON_SIZE, t.text_secondary))
-                    .child(text(label).font(type_::LABEL).color(t.text_secondary)),
-            )
+        icon_btn_inert(&key, icon, label, t)
     }
 }
 
@@ -1098,12 +1202,47 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
         );
     let saved = saved_pose_names();
     if !saved.is_empty() {
-        body = body.child(
-            text("Pose library")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
-        for (i, name) in saved.iter().enumerate() {
+        let query = s.pose_library.filter.text.clone();
+        let visible = visible_pose_entries(&saved, &query);
+        body = body
+            .child(
+                row()
+                    .key("pose-lib-header")
+                    .gap(8.0)
+                    .center_y()
+                    .child(
+                        text("Pose library")
+                            .font(type_::LABEL)
+                            .color(t.text_secondary),
+                    )
+                    .child(
+                        text(pose_count_line(visible.len(), saved.len(), &query))
+                            .font(type_::LABEL)
+                            .color(t.text_secondary),
+                    ),
+            )
+            // Filter field (Phase I), mirroring the
+            // figures filter: typing is the only writer,
+            // and the list below filters on the text
+            // every render. View-only — no engine op.
+            .child(
+                row()
+                    .key("pose-lib-filter-row")
+                    .gap(8.0)
+                    .center_y()
+                    .child(icon_el("magnifying-glass", 14.0, t.text_secondary))
+                    .child(
+                        text_input(&s.pose_library.filter, type_::BODY.lh(26.0))
+                            .key("pose-lib-filter")
+                            .single_line()
+                            .grow(1.0)
+                            .color(t.text)
+                            .placeholder("Filter poses", t.text_secondary)
+                            .on_edit(|s: &mut State| &mut s.pose_library.filter),
+                    ),
+            );
+        for &i in &visible {
+            let name = &saved[i];
             let apply_name = name.clone();
             let mirror_name = name.clone();
             let del_name = name.clone();
@@ -1158,7 +1297,7 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                         ))
                         .child(pibtn(
                             format!("pose-lib-apply-mirror-{i}"),
-                            "copy",
+                            APPLY_MIRRORED_ICON,
                             "Apply mirrored",
                             has_pose,
                             t,
@@ -1176,6 +1315,13 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                 entry = entry.child(rename_editor_row(s, t));
             }
             body = body.child(entry);
+        }
+        if visible.is_empty() {
+            body = body.child(
+                text(format!("No poses match \"{}\".", query.trim()))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            );
         }
     }
     let targets = pose_targets(core);
@@ -1676,6 +1822,86 @@ mod tests {
         assert_eq!(scan_pose_library_in(&dir), vec!["Styk".to_string()]);
         assert!(dir.join("styk.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Pose library Phase I: filter + mirror glyph ----
+
+    #[test]
+    fn library_state_default_filter_is_empty() {
+        let st = PoseLibraryState::new();
+        assert!(st.filter.text.is_empty());
+        assert!(!st.filter.focused);
+    }
+
+    #[test]
+    fn pose_name_matches_is_case_insensitive_substring() {
+        assert!(pose_name_matches("Wave Pose", "wave"));
+        assert!(pose_name_matches("Wave Pose", "WAVE"));
+        assert!(pose_name_matches("Wave Pose", "ve Po"));
+        assert!(pose_name_matches("Styk", "STY"));
+        assert!(!pose_name_matches("Styk", "wave"));
+        assert!(!pose_name_matches("Styk", "stykk"));
+    }
+
+    #[test]
+    fn pose_name_matches_empty_query_matches_everything() {
+        assert!(pose_name_matches("Styk", ""));
+        assert!(pose_name_matches("Styk", "   "));
+        // The query is trimmed before matching.
+        assert!(pose_name_matches("Wave Pose", "  wave  "));
+    }
+
+    #[test]
+    fn visible_pose_entries_keep_real_indices() {
+        let names = vec![
+            "Alpha".to_string(),
+            "Beta".to_string(),
+            "alpha strike".to_string(),
+        ];
+        // Empty query: every entry, in order.
+        assert_eq!(visible_pose_entries(&names, ""), vec![0, 1, 2]);
+        assert_eq!(visible_pose_entries(&names, "   "), vec![0, 1, 2]);
+        // Filtered: the surviving entries keep their
+        // indices into the full list, so row keys and
+        // handlers still address the same poses.
+        assert_eq!(visible_pose_entries(&names, "alpha"), vec![0, 2]);
+        assert_eq!(visible_pose_entries(&names, "ALPHA"), vec![0, 2]);
+        assert_eq!(visible_pose_entries(&names, "Beta"), vec![1]);
+        // No match: no rows.
+        assert!(visible_pose_entries(&names, "qqq").is_empty());
+    }
+
+    #[test]
+    fn pose_count_line_is_the_bare_total_without_a_filter() {
+        // Byte-identical discipline to figures_panel: the
+        // idle count is the bare number.
+        assert_eq!(pose_count_line(3, 3, ""), "3");
+        assert_eq!(pose_count_line(3, 3, "   "), "3");
+        assert_eq!(pose_count_line(0, 0, ""), "0");
+    }
+
+    #[test]
+    fn pose_count_line_shows_shown_of_total_with_a_filter() {
+        assert_eq!(pose_count_line(2, 3, "alpha"), "2 of 3 poses");
+        assert_eq!(pose_count_line(0, 3, "qqq"), "0 of 3 poses");
+    }
+
+    #[test]
+    fn pose_filter_active_only_for_a_real_query() {
+        assert!(!pose_filter_active(""));
+        assert!(!pose_filter_active("   "));
+        assert!(pose_filter_active("a"));
+        assert!(pose_filter_active("  a  "));
+    }
+
+    #[test]
+    fn apply_mirrored_glyph_is_the_flip_glyph() {
+        // Phase I pin: the honest flip glyph replaced
+        // Phase H's `copy` stand-in, and the name must
+        // resolve in the catalogue or icon_btn would
+        // silently degrade to a plain text button.
+        assert_eq!(APPLY_MIRRORED_ICON, "arrow-right-arrow-left");
+        assert!(crate::rune_sec::icons::has_icon(APPLY_MIRRORED_ICON));
     }
 }
 

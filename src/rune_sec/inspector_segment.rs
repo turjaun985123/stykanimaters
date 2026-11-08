@@ -86,6 +86,14 @@
 //! * Delete segment → `delete_segment()` (editor.rs:434) —
 //!   key `del-seg`, danger-styled; the op itself refuses the
 //!   root and non-leaves with a status message.
+//! * Index line → `segment_topology` (this module) — one
+//!   muted line under the header giving the node's place
+//!   in the figure tree: its own index, its parent's
+//!   index (or "root") and how many children hang off
+//!   it. Read-only. Length and world angle already have
+//!   their own readout rows (see
+//!   `InspectorSegmentState`), so this adds the topology
+//!   the header's bare "Segment N" does not show.
 //!
 //! When nothing is selected the panel is one muted line.
 //!
@@ -351,6 +359,45 @@ pub fn segment_state(core: &EditorCore) -> Option<InspectorSegmentState> {
     })
 }
 
+/// The selected node's place in its figure's tree: its
+/// own index, its parent's index (`None` for the origin)
+/// and how many nodes hang directly off it. Returns
+/// `None` when no (valid) node is selected — the same
+/// defensive indexing as `segment_state`, so a stale
+/// selection reads as "nothing selected" instead of
+/// panicking.
+pub fn segment_topology(core: &EditorCore) -> Option<(usize, Option<usize>, usize)> {
+    let ni = core.selected_node?;
+    let fig = core.project.figures.get(core.selected_figure)?;
+    let node = fig.def.nodes.get(ni)?;
+    let children = fig
+        .def
+        .nodes
+        .iter()
+        .filter(|n| n.parent == Some(ni))
+        .count();
+    Some((ni, node.parent, children))
+}
+
+/// Format a `segment_topology` triple as the panel's
+/// Index line: "Node 3 · parent 1 · 1 child" for a
+/// mid-tree node, "Node 0 · root · 3 children" for the
+/// origin. The single formatter behind the line, so the
+/// wording lives in exactly one place (and is unit
+/// testable without elements).
+pub fn format_topology(node: usize, parent: Option<usize>, children: usize) -> String {
+    let parent_part = match parent {
+        Some(p) => format!("parent {p}"),
+        None => "root".to_string(),
+    };
+    let child_part = if children == 1 {
+        "1 child".to_string()
+    } else {
+        format!("{children} children")
+    };
+    format!("Node {node} · {parent_part} · {child_part}")
+}
+
 /// One read-only label/value row.
 fn readout_row(label: &str, value: String, t: &Theme) -> El {
     row()
@@ -471,8 +518,20 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
     } else {
         row().child(title)
     };
-    let mut panel = panel
-        .child(header)
+    let mut panel = panel.child(header);
+    // The Index line: one muted line under the header
+    // naming the node's place in the figure tree (see
+    // `segment_topology`). `segment_state` succeeded
+    // above, so this read succeeds too; the `if let` is
+    // belt-and-braces, not an expected path.
+    if let Some((ni, parent, children)) = segment_topology(&s.core) {
+        panel = panel.child(
+            text(format_topology(ni, parent, children))
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    }
+    panel = panel
         .child(readout_row("Length", format!("{:.0}", st.length), t))
         .child(readout_row("Thickness", format!("{:.0}", st.thickness), t))
         .child(readout_row("Angle", format_deg(st.angle_deg), t))
@@ -644,6 +703,47 @@ mod tests {
         let core = core_with_selection(Some(0));
         let st = segment_state(&core).expect("the origin exists");
         assert!(st.is_root);
+    }
+
+    #[test]
+    fn segment_topology_reads_the_demo_tree() {
+        // The demo figure is `FigureDef::humanoid`
+        // (model.rs): 0 hips is the root; 1 chest, 7 thigh
+        // L and 9 thigh R hang off it; 2 head, 3 upper-arm
+        // L and 5 upper-arm R hang off 1.
+        let core = core_with_selection(Some(1));
+        assert_eq!(segment_topology(&core), Some((1, Some(0), 3)));
+        let core = core_with_selection(Some(3));
+        assert_eq!(segment_topology(&core), Some((3, Some(1), 1)));
+    }
+
+    #[test]
+    fn segment_topology_marks_the_root_and_leaves() {
+        let core = core_with_selection(Some(0));
+        assert_eq!(segment_topology(&core), Some((0, None, 3)));
+        // Node 2 (head) is a leaf: a parent, no children.
+        let core = core_with_selection(Some(2));
+        assert_eq!(segment_topology(&core), Some((2, Some(1), 0)));
+    }
+
+    #[test]
+    fn segment_topology_is_none_without_a_valid_selection() {
+        assert!(segment_topology(&EditorCore::new()).is_none());
+        assert!(segment_topology(&core_with_selection(None)).is_none());
+        assert!(segment_topology(&core_with_selection(Some(999))).is_none());
+    }
+
+    #[test]
+    fn format_topology_names_root_parent_and_children() {
+        assert_eq!(format_topology(0, None, 3), "Node 0 · root · 3 children");
+        assert_eq!(
+            format_topology(3, Some(1), 1),
+            "Node 3 · parent 1 · 1 child"
+        );
+        assert_eq!(
+            format_topology(2, Some(1), 0),
+            "Node 2 · parent 1 · 0 children"
+        );
     }
 
     #[test]

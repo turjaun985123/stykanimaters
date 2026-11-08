@@ -89,9 +89,29 @@
 //! in it), and giving them the same chevrons as the step
 //! buttons would make a jump look like a step. The opacity
 //! −/+ steppers also stay text, matching the figures
-//! panel's identical steppers. This panel has no
-//! visibility or solo buttons — those live on the figures
-//! panel's rows.
+//! panel's identical steppers.
+//!
+//! Phase I (section 35/40) adds a small visibility footer
+//! row at the panel's end — the per-row eye/solo toggles
+//! still live on the figures panel's rows, but the two
+//! bulk shortcuts that panel keeps in its footer are
+//! useful here too, where layer work happens:
+//!
+//! * Show all → [`show_all_figures`]: the figures footer's
+//!   All handler verbatim — `layers::set_all_visible(..,
+//!   true)`, solo cleared, and the same status string
+//!   ("All figures shown ({changed} changed)."). The solo
+//!   clear is deliberate: `set_all_visible`'s own docs
+//!   leave solo to the caller, and a stale solo would keep
+//!   the stage showing only one figure despite the report.
+//! * Solo selected → [`solo_selected`]: the engine's
+//!   `EditorCore::toggle_solo` (editor.rs:1222) aimed at
+//!   the selected figure — the same call the figures
+//!   panel's per-row solo buttons make. The op owns the
+//!   status strings ("Solo: figure {n}." with the 1-based
+//!   figure *number*, "Solo off."), and because it is a
+//!   toggle, pressing the button while the selected figure
+//!   is already the solo turns solo off.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Drag, El, Phase, Tx};
@@ -343,6 +363,30 @@ fn jump_layer(core: &mut EditorCore, fi: usize, to_top: bool) {
     }
 }
 
+/// Show-all handler (the footer's left button): every
+/// figure's `hidden` flag cleared through the layers
+/// engine, solo cleared with it so the bulk result is the
+/// effective visibility, and the figures panel footer's
+/// own status string. No snapshot — the figures footer
+/// takes none either; the op works straight on the
+/// project's flags.
+fn show_all_figures(core: &mut EditorCore) {
+    let changed = stykanimate_rs::layers::set_all_visible(&mut core.project, true);
+    core.solo = None;
+    core.status = format!("All figures shown ({changed} changed).");
+}
+
+/// Solo-selected handler (the footer's right button): the
+/// engine's solo toggle aimed at the selected figure —
+/// the same call the figures panel's per-row solo buttons
+/// make, status strings included ("Solo: figure {n}."
+/// when it engages, "Solo off." when the selected figure
+/// was already the solo). The op guards the index itself,
+/// so a press with no figures is a safe no-op.
+fn solo_selected(core: &mut EditorCore) {
+    core.toggle_solo(core.selected_figure);
+}
+
 /// One layer row: name (press selects; accent when selected),
 /// opacity readout with −/+ steppers, and Bottom/down/up/Top
 /// reorder buttons — Down/Up are chevron icon buttons,
@@ -418,11 +462,19 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
 
 /// The full layers panel: a "Layers" header, one row per
 /// figure in draw order (front on top), the selected
-/// figure's opacity slider with its % readout, and the
-/// ordering note. With no figures the panel is just
-/// header + note (no slider — there is no selected figure
-/// to fade).
+/// figure's opacity slider with its % readout, the
+/// ordering note, and the visibility footer row
+/// (`layers-vis-row`: Show all + Solo selected). With no
+/// figures the panel is just header + note + footer (no
+/// slider — there is no selected figure to fade; the
+/// footer presses are harmless no-ops then).
 pub fn panel(s: &State, t: &Theme) -> El {
+    // The Solo selected button renders active while the
+    // solo target is the selected figure (computed up
+    // front — the panel body consumes `s` piece by piece
+    // below only by reference, but the flag is cheapest
+    // read once here).
+    let solo_on_selected = s.core.solo == Some(s.core.selected_figure);
     let mut body = col()
         .key("layers-panel")
         .gap(6.0)
@@ -451,6 +503,26 @@ pub fn panel(s: &State, t: &Theme) -> El {
         text(ORDER_NOTE)
             .font(type_::LABEL)
             .color(t.text_secondary),
+    )
+    .child(
+        row()
+            .key("layers-vis-row")
+            .gap(6.0)
+            .center_y()
+            .child(btn(
+                "layer-show-all",
+                "Show all",
+                false,
+                t,
+                |s: &mut State| show_all_figures(&mut s.core),
+            ))
+            .child(btn(
+                "layer-solo-selected",
+                "Solo selected",
+                solo_on_selected,
+                t,
+                |s: &mut State| solo_selected(&mut s.core),
+            )),
     )
 }
 
@@ -720,6 +792,74 @@ mod tests {
         set_figure_opacity(&mut core, 9, 0.5, true);
         assert_eq!(core.status, "No such figure.");
         assert_eq!(core.project.figures.len(), 1);
+    }
+
+    #[test]
+    fn show_all_figures_unhides_counts_changes_and_clears_solo() {
+        let mut core = EditorCore::new();
+        core.project.add_figure("B", 0xFF0000, [200.0, 200.0]);
+        core.project.add_figure("C", 0x00FF00, [300.0, 200.0]);
+        // Hide two of the three figures directly through
+        // the layers engine, and park a solo on figure 1 —
+        // the stale-solo case the handler must clear.
+        core.project.figures[0].hidden = true;
+        core.project.figures[2].hidden = true;
+        core.solo = Some(1);
+        show_all_figures(&mut core);
+        assert!(core.project.figures.iter().all(|f| !f.hidden));
+        assert_eq!(core.solo, None);
+        assert_eq!(core.status, "All figures shown (2 changed).");
+        // A second press changes nothing and says so.
+        show_all_figures(&mut core);
+        assert_eq!(core.status, "All figures shown (0 changed).");
+        assert!(core.project.figures.iter().all(|f| !f.hidden));
+    }
+
+    #[test]
+    fn show_all_figures_matches_the_layers_ops_count() {
+        // The reported count is the op's own: hiding every
+        // figure through set_all_visible makes Show all
+        // report the full figure count.
+        let mut core = EditorCore::new();
+        core.project.add_figure("B", 0xFF0000, [200.0, 200.0]);
+        let hidden = stykanimate_rs::layers::set_all_visible(&mut core.project, false);
+        assert_eq!(hidden, 2);
+        show_all_figures(&mut core);
+        assert_eq!(core.status, "All figures shown (2 changed).");
+    }
+
+    #[test]
+    fn solo_selected_uses_the_ops_status_and_toggles() {
+        let mut core = EditorCore::new();
+        core.project.add_figure("B", 0xFF0000, [200.0, 200.0]);
+        core.project.add_figure("C", 0x00FF00, [300.0, 200.0]);
+        core.select_figure(2);
+        // Engaging: the op's own string, with the 1-based
+        // figure number — not the figure name.
+        solo_selected(&mut core);
+        assert_eq!(core.solo, Some(2));
+        assert_eq!(core.status, "Solo: figure 3.");
+        // Pressing again on the same figure is the op's
+        // toggle-off, exactly like the figures panel's
+        // per-row solo buttons.
+        solo_selected(&mut core);
+        assert_eq!(core.solo, None);
+        assert_eq!(core.status, "Solo off.");
+        // A different selection solos that figure instead.
+        core.select_figure(0);
+        solo_selected(&mut core);
+        assert_eq!(core.solo, Some(0));
+        assert_eq!(core.status, "Solo: figure 1.");
+    }
+
+    #[test]
+    fn solo_selected_is_a_safe_no_op_with_no_figures() {
+        let mut core = EditorCore::new();
+        core.project.figures.clear();
+        core.status = "untouched".into();
+        solo_selected(&mut core);
+        assert_eq!(core.solo, None);
+        assert_eq!(core.status, "untouched");
     }
 
     #[test]

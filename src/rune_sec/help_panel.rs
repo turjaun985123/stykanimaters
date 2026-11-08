@@ -52,6 +52,24 @@
 //! while typing. Field-local Enter (rename and name fields
 //! applying on submit) stays excluded, like the other
 //! text-authoring keys above.
+//!
+//! Phase I (section 30/40) refresh, 2026-11-08: Phases G–I
+//! added user-facing features that are NOT keyboard
+//! shortcuts, and the audit above found no new shell key
+//! bindings to list. They are documented in a sixth
+//! section, `Features`, whose rows keep the (label, action)
+//! shape but whose label names the feature rather than a
+//! key — inventing key names for buttons would break this
+//! panel's honesty rule. The seven audited items map to
+//! six rows: the keyframe-jump buttons (Phase I,
+//! `playback_controls` `pb-prev-key` / `pb-next-key`) and
+//! the clickable timeline markers (Phase I,
+//! `timeline_marks` `marker-cam-{frame}` /
+//! `marker-graph-{frame}`) are one navigation story, so
+//! they share a row to keep the panel at 30 rows. Loop
+//! playback is named as what it is — the transport Loop
+//! button (`pb-loop`) or the palette's Toggle loop
+//! playback command — never as a key.
 
 use rune::tok::{type_, Family, Theme};
 use rune::{col, el, row, text, El};
@@ -62,7 +80,9 @@ use crate::rune_sec::icons::icon_el;
 /// The keyboard shortcuts that are real in this shell, as
 /// (key label, action) rows, grouped by section in panel
 /// order (see [`group_rows`]). Concatenating [`section_rows`]
-/// over the five sections yields exactly this list.
+/// over the six sections yields exactly this list. The
+/// `Features` section's labels name features, not keys —
+/// see the module docs.
 pub fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
     let mut rows = Vec::new();
     for (name, _) in group_rows() {
@@ -110,6 +130,32 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             ("I", "Insert an inbetween frame"),
         ],
         "Drawing" => vec![],
+        "Features" => vec![
+            (
+                "Loop playback",
+                "Transport Loop button or the command palette",
+            ),
+            (
+                "Keyframe jump",
+                "Prev key / Next key transport buttons — or click a timeline marker (◆ camera, ● graph)",
+            ),
+            (
+                "Stroke selection",
+                "Click a stroke on the stage to select it",
+            ),
+            (
+                "Particles panel",
+                "Effects workspace — add, select and delete particle events",
+            ),
+            (
+                "Audio clip selection",
+                "Click a clip row — the effects then act on that clip",
+            ),
+            (
+                "Bend steppers",
+                "Segment inspector buttons bend the selected segment by −5°, −1°, +1° or +5°",
+            ),
+        ],
         _ => vec![],
     }
 }
@@ -148,6 +194,10 @@ pub fn group_rows() -> Vec<(&'static str, &'static str)> {
             "Playback and frame keys — paused while typing in a text field",
         ),
         ("Drawing", "Freehand drawing keys"),
+        (
+            "Features",
+            "Features on buttons, panels and the stage — none of these is a keyboard shortcut",
+        ),
     ]
 }
 
@@ -217,7 +267,7 @@ fn help_section(name: &str, description: &str, t: &Theme) -> El {
 
 /// The help panel: a header (title + the open project's
 /// name, frame count and fps, read from the core) over the
-/// five sections from [`group_rows`]. Pure: it builds
+/// six sections from [`group_rows`]. Pure: it builds
 /// elements from `core` and never calls an op on it.
 pub fn help_panel(core: &EditorCore, t: &Theme) -> El {
     let fps = core.project.fps;
@@ -261,12 +311,64 @@ mod tests {
     use super::{group_rows, section_note, section_rows, shortcut_rows};
 
     #[test]
-    fn shortcut_rows_has_exactly_24_rows() {
-        // 9 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline;
-        // Drawing contributes none (see the module docs for
-        // which GPUI-era rows were dropped and why). Phase G
-        // added the four palette/menu rows to Shortcuts.
-        assert_eq!(shortcut_rows().len(), 24);
+    fn shortcut_rows_has_exactly_30_rows() {
+        // 9 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
+        // + 6 Features; Drawing contributes none (see the
+        // module docs for which GPUI-era rows were dropped
+        // and why). Phase G added the four palette/menu rows
+        // to Shortcuts; Phase I added the Features section.
+        assert_eq!(shortcut_rows().len(), 30);
+    }
+
+    #[test]
+    fn no_row_text_duplicates_another() {
+        // No two rows may carry the same (label, action)
+        // text — a duplicated row tells the user the same
+        // thing twice and crowds out a real feature.
+        let rows = shortcut_rows();
+        for (i, row) in rows.iter().enumerate() {
+            assert!(
+                !rows[..i].contains(row),
+                "duplicate row text: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn phase_i_feature_rows_are_listed() {
+        // The Phases G–I features the Phase I audit found
+        // missing, each described by how it is really
+        // reached (button, palette, panel or stage click) —
+        // none of them is a keyboard shortcut, and no row
+        // may pretend otherwise.
+        let rows = shortcut_rows();
+        assert!(rows.contains(&(
+            "Loop playback",
+            "Transport Loop button or the command palette"
+        )));
+        assert!(rows.contains(&(
+            "Keyframe jump",
+            "Prev key / Next key transport buttons — or click a timeline marker (◆ camera, ● graph)"
+        )));
+        assert!(rows.contains(&(
+            "Stroke selection",
+            "Click a stroke on the stage to select it"
+        )));
+        assert!(rows.contains(&(
+            "Particles panel",
+            "Effects workspace — add, select and delete particle events"
+        )));
+        assert!(rows.contains(&(
+            "Audio clip selection",
+            "Click a clip row — the effects then act on that clip"
+        )));
+        assert!(rows.contains(&(
+            "Bend steppers",
+            "Segment inspector buttons bend the selected segment by −5°, −1°, +1° or +5°"
+        )));
+        // The Features rows live in their own section, in
+        // this order, and nowhere else.
+        assert_eq!(section_rows("Features").len(), 6);
     }
 
     #[test]
@@ -350,9 +452,11 @@ mod tests {
         // bindings must say they pause while typing, and
         // Shortcuts must name the one exception the routing
         // order creates (Ctrl+K reaches the palette handler
-        // before the guard). Drawing has no keys to guard.
+        // before the guard). Drawing and Features have no
+        // keys to guard — Features is buttons and panels,
+        // and its description says so instead.
         for (name, description) in group_rows() {
-            if name == "Drawing" {
+            if name == "Drawing" || name == "Features" {
                 continue;
             }
             assert!(
@@ -393,20 +497,27 @@ mod tests {
     fn empty_sections_carry_notes_and_filled_sections_do_not() {
         assert!(section_rows("Drawing").is_empty());
         assert!(section_note("Drawing").is_some());
-        for name in ["Shortcuts", "Workspaces", "Posing", "Timeline"] {
+        for name in ["Shortcuts", "Workspaces", "Posing", "Timeline", "Features"] {
             assert!(!section_rows(name).is_empty(), "{name} should have rows");
             assert!(section_note(name).is_none(), "{name} should have no note");
         }
     }
 
     #[test]
-    fn group_rows_covers_all_five_sections_in_order() {
+    fn group_rows_covers_all_six_sections_in_order() {
         let rows = group_rows();
-        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.len(), 6);
         let names: Vec<&str> = rows.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
-            ["Shortcuts", "Workspaces", "Posing", "Timeline", "Drawing"]
+            [
+                "Shortcuts",
+                "Workspaces",
+                "Posing",
+                "Timeline",
+                "Drawing",
+                "Features"
+            ]
         );
     }
 

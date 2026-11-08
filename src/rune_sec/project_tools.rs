@@ -37,6 +37,7 @@
 //! | `proj-name-field` | name-field wrapper (el) | — container, no handler | ok |
 //! | `proj-name` | text input | `on_edit` → `&mut State::name_edit`; `on_submit` → [`apply_name`] | ok — Enter and "Set name" share one path |
 //! | `proj-set-name` | "Set name" button (`icon_btn`, "check" icon) | [`apply_name`] → [`apply_project_name`]: trims, writes `Project::name` directly (no core rename op or setter exists — editor.rs has no `rename*` fn; the file-level rename is Home's `projects::rename_project`) | ok |
+//! | `proj-current-file` | "Current file: …" muted line under the name field (conditional — present only when the line resolves) | renders [`current_file_line`]: the `shell::last_opened_project` display name, shown only when it exactly matches `Project::name` | ok — Phase I §31; the match guard is the Phase G §32 lesson (recents store names, not the open file, so a mismatch would lie). `home_panel::current_project_path` was NOT used: it is the selector cursor, which `cycle-project` moves without opening |
 //! | `new-proj` | "New" button (`icon_btn`, "file" icon) | [`new_pressed`] → [`new_project`] + [`sync_name_edit`]: installs [`blank_project`]`("Untitled")` — field-for-field the MCP `new_project` tool's defaults and reset set (mcp_tools.rs `tool_new_project`) — clears solo, stops playback, no snapshot/confirm | ok |
 //! | `save-proj` | "Save project" button (`icon_btn`, "floppy-disk" icon) | [`save_named_pressed`] → `EditorCore::save_named_project` (slugifies the name, writes `./projects/<slug>.json`, refreshes `project_files`, sets status), then — only on success — `shell::write_recovery` + `shell::touch_recent` to keep snapshot/recents in step | fixed in Phase H — the Phase G caveat is closed: the op returns `bool` and [`after_save`] gates the recovery/recents sync on it, so a failed save no longer plants a phantom recent |
 //! | `recover` | "Recover" button (`icon_btn`, "arrow-rotate-left" icon) | [`recover_pressed`] → [`recover_snapshot`] (`shell::read_recovery` = `./projects/.recovery.json`, shell.rs) → [`apply_recovered_project`] + [`sync_name_edit`] | fixed in Phase G — the reset now also clears solo and stops playback (see the fn) |
@@ -200,6 +201,47 @@ pub fn autosave_line(edits_since_autosave: u64) -> String {
         1 => "1 edit since the last recovery snapshot.".to_string(),
         n => format!("{n} edits since the last recovery snapshot."),
     }
+}
+
+/// The "Current file: …" line's decision, factored out of
+/// [`current_file_line`] so it is testable without touching
+/// the disk: `last_opened` is the display name
+/// `shell::last_opened_project` returns (the front of the
+/// recents list — recents store names, not paths), and
+/// `project_name` is the open project's `Project::name`.
+///
+/// The line appears only on an exact, non-empty match.
+/// `last_opened` names the most recent project the shell
+/// recorded, which is not necessarily the one now open —
+/// the user may have pressed New since, or be working on a
+/// project whose save never landed in recents — so showing
+/// it on a mismatch would name a file this session is not
+/// working on. That is the Phase G §32 lesson: home_panel's
+/// reopen target resolves the same recents name by match,
+/// never by assumption.
+pub fn file_line(last_opened: Option<String>, project_name: &str) -> Option<String> {
+    let name = last_opened?;
+    if name.is_empty() || name != project_name {
+        return None;
+    }
+    Some(format!("Current file: {name}"))
+}
+
+/// The current-file line for the open project, or `None`
+/// when the shell's last-opened record does not name this
+/// project (see [`file_line`] for the match rule).
+///
+/// Data source: `shell::last_opened_project`. The core
+/// keeps no loaded-path field, and the one path accessor
+/// that exists — `home_panel::current_project_path`
+/// (`project_files[project_index]`) — is the selector
+/// cursor, which the palette's `cycle-project` moves
+/// without opening anything, so it can point at a file
+/// that was never opened. The recents name plus the exact
+/// match is the only source that cannot lie about which
+/// file this session last opened or saved.
+pub fn current_file_line(core: &EditorCore) -> Option<String> {
+    file_line(stykanimate_rs::shell::last_opened_project(), &core.project.name)
 }
 
 // ---------------------------------------------------------------------
@@ -424,9 +466,11 @@ fn recover_pressed(s: &mut State) {
 // View
 // ---------------------------------------------------------------------
 
-/// The Project section: name field + Set name, New / Save
-/// project / Recover, the autosave line, and one Open row per
-/// saved project in the core's file list.
+/// The Project section: name field + Set name, the
+/// current-file line when the shell's last-opened record
+/// names this project, New / Save project / Recover, the
+/// autosave line, and one Open row per saved project in
+/// the core's file list.
 pub fn project_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let rows = project_rows(core);
@@ -473,16 +517,31 @@ pub fn project_section(s: &State, t: &Theme) -> El {
                         ),
                 )
                 .child(icon_btn("proj-set-name", "check", "Set name", false, t, apply_name)),
-        )
-        .child(
-            row()
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(icon_btn("new-proj", "file", "New", false, t, new_pressed))
-                .child(icon_btn("save-proj", "floppy-disk", "Save project", false, t, save_named_pressed))
-                .child(icon_btn("recover", "arrow-rotate-left", "Recover", false, t, recover_pressed)),
         );
+
+    // The current-file line sits directly under the name
+    // field, and only when the shell's last-opened record
+    // names this project (see current_file_line) — a session
+    // that never opened or saved a matching file shows
+    // nothing rather than another project's name.
+    if let Some(line) = current_file_line(core) {
+        section = section.child(
+            text(line)
+                .key("proj-current-file")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    }
+
+    section = section.child(
+        row()
+            .w_full()
+            .gap(8.0)
+            .center_y()
+            .child(icon_btn("new-proj", "file", "New", false, t, new_pressed))
+            .child(icon_btn("save-proj", "floppy-disk", "Save project", false, t, save_named_pressed))
+            .child(icon_btn("recover", "arrow-rotate-left", "Recover", false, t, recover_pressed)),
+    );
 
     if rows.is_empty() {
         // The core's own wording (cycle_project_file).
@@ -681,6 +740,33 @@ loop_playback: true,
     fn open_row_key_matches_the_audited_pattern() {
         assert_eq!(open_row_key(0), "open-proj-0");
         assert_eq!(open_row_key(12), "open-proj-12");
+    }
+
+    #[test]
+    fn file_line_shows_an_exact_name_match() {
+        assert_eq!(
+            file_line(Some("My Film".to_string()), "My Film"),
+            Some("Current file: My Film".to_string())
+        );
+    }
+
+    #[test]
+    fn file_line_absent_without_a_last_opened_name() {
+        assert_eq!(file_line(None, "My Film"), None);
+    }
+
+    #[test]
+    fn file_line_absent_when_the_name_differs() {
+        // The Phase G §32 guard: recents name the most recent
+        // project the shell recorded, not necessarily the open
+        // one — after New, the open project is "Untitled" while
+        // recents still front the previous film, and showing
+        // that name would claim a file this session is not on.
+        assert_eq!(file_line(Some("Other Film".to_string()), "Untitled"), None);
+        // Case is part of the name; there is no fuzzy match.
+        assert_eq!(file_line(Some("my film".to_string()), "My Film"), None);
+        // An empty record never renders a bare "Current file: ".
+        assert_eq!(file_line(Some(String::new()), ""), None);
     }
 
     #[test]

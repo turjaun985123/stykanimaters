@@ -46,6 +46,21 @@
 //! batch result is content-identical to N single presses and
 //! differs only in undo granularity and in leaving `current`
 //! on the original frame.
+//!
+//! The icon buttons (Phase I, section 25): the Phase H
+//! conversion to `icon_btn` lost the would-no-op muted tint
+//! the old `fbtn` rendering gave the clipboard, range-delete
+//! and insert buttons, because `icon_btn` had no muted form.
+//! They now render through the shared
+//! `icon_btn::icon_btn_inert` whenever their guard — the
+//! `*_enabled` helpers below, each decided from `State` /
+//! core state at render time — fails, and through the live
+//! `icon_btn` when it passes. Key, icon and label are the
+//! same in both forms. The inert form carries NO press
+//! handler, so a click on a gated button does nothing at
+//! all, not even a refusal status; the live form's handler
+//! is byte-for-byte the Phase H one. The plain `fbtn`
+//! buttons keep their older muted-but-wired form.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Color, El};
@@ -279,6 +294,73 @@ pub fn can_insert_frames(core: &EditorCore) -> bool {
     core.project.frames.get(core.current).is_some()
 }
 
+/// Copy frame's render-time guard (Phase I): the handler
+/// itself no-ops on an empty timeline — it only copies when
+/// `frame_count() > 0` — so the button renders inert then.
+/// With at least one frame the copy always lands.
+pub fn copy_frame_enabled(core: &EditorCore) -> bool {
+    core.frame_count() > 0
+}
+
+/// Paste frame's render-time guard (Phase I): the core's
+/// single-frame clipboard is private with no accessor, so
+/// the honest render-time signal is this UI's own
+/// [`FrameOpsState::frame_copied`] flag, set by Copy frame
+/// in this panel. Until it is set, `paste_frame` could only
+/// answer "Nothing copied yet.", so the button renders
+/// inert. (A paste can still be refused after a copy if the
+/// copied frame's figure count no longer matches; that
+/// lives inside the private clipboard and is not checkable
+/// at render time, so the live handler keeps that refusal.)
+pub fn paste_frame_enabled(ops: &FrameOpsState) -> bool {
+    ops.frame_copied
+}
+
+/// Copy range's render-time guard (Phase I): the handler's
+/// arguments fall back to the current frame alone when no
+/// range is selected (see [`copy_range_args`]), and
+/// `copy_range` refuses only an empty or out-of-range
+/// block, so any non-empty timeline can copy. On an empty
+/// timeline the press would change nothing, so the button
+/// renders inert.
+pub fn copy_range_enabled(core: &EditorCore) -> bool {
+    core.frame_count() > 0
+}
+
+/// Paste range's render-time guard (Phase I): the mirror
+/// of [`paste_frame_enabled`] for the range clipboard,
+/// tracked by [`FrameOpsState::range_copied`]. Until a
+/// Copy range has landed, `paste_range` could only refuse,
+/// so the button renders inert. (The figure-count refusal,
+/// as with Paste frame, is not render-checkable and stays
+/// with the live handler.)
+pub fn paste_range_enabled(ops: &FrameOpsState) -> bool {
+    ops.range_copied
+}
+
+/// Delete range's render-time guard (Phase I): the handler
+/// acts only when a selection exists, and `delete_range`
+/// refuses to delete every frame, so the button is live
+/// exactly when [`selected_range`] yields a block strictly
+/// smaller than the whole timeline. No selection — or a
+/// selection covering every frame, including a one-frame
+/// project's only frame — renders inert.
+pub fn delete_range_enabled(core: &EditorCore, ops: &FrameOpsState) -> bool {
+    match selected_range(core, ops) {
+        Some((lo, hi)) => hi - lo + 1 < core.frame_count(),
+        None => false,
+    }
+}
+
+/// Insert frames' render-time guard (Phase I): the batch
+/// insert refuses without a current frame (see
+/// [`insert_frames_after_current`]), which is exactly
+/// [`can_insert_frames`]; the wrapper keeps one named
+/// guard per icon button.
+pub fn insert_frames_enabled(core: &EditorCore) -> bool {
+    can_insert_frames(core)
+}
+
 /// Insert `count` blank frames directly after the current
 /// frame, as ONE undo step, leaving `current` on the original
 /// frame. Returns how many frames were inserted (0 when there
@@ -450,42 +532,62 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
             let fi = s.core.selected_figure;
             s.core.smooth_path_roots(fi);
         }))
-        .child(crate::rune_sec::icon_btn::icon_btn("copy-frame", "copy", "Copy frame", false, t, |s| {
-            if s.core.frame_count() > 0 {
-                s.core.copy_frame();
-                s.frame_ops.frame_copied = true;
-            }
-        }))
-        .child(crate::rune_sec::icon_btn::icon_btn("paste-frame", "clipboard", "Paste frame", false, t, |s| {
-            s.core.paste_frame();
-        }))
-        .child(crate::rune_sec::icon_btn::icon_btn("range-copy", "list", "Copy range", false, t, |s| {
-            let (from, count) = copy_range_args(&s.core, &s.frame_ops);
-            if s.core.copy_range(from, count) {
-                s.frame_ops.range_copied = true;
-            }
-        }))
-        .child(crate::rune_sec::icon_btn::icon_btn("range-paste", "list", "Paste range", false, t, |s| {
-            let at = s.core.current;
-            let before = s.core.status.clone();
-            if !s.core.paste_range(at) && s.core.status == before {
-                s.core.status = "Nothing to paste — copy a range first.".into();
-            }
-        }))
-        .child(crate::rune_sec::icon_btn::icon_btn(
-            "range-del",
-            "trash-can",
-            "Delete range",
-            false,
-            t,
-            |s| {
-                if let Some((lo, hi)) = selected_range(&s.core, &s.frame_ops) {
-                    if s.core.delete_range(lo, hi - lo + 1) {
-                        s.frame_ops.range_sel = None;
-                    }
+        .child(if copy_frame_enabled(core) {
+            crate::rune_sec::icon_btn::icon_btn("copy-frame", "copy", "Copy frame", false, t, |s| {
+                if s.core.frame_count() > 0 {
+                    s.core.copy_frame();
+                    s.frame_ops.frame_copied = true;
                 }
-            },
-        ))
+            })
+        } else {
+            crate::rune_sec::icon_btn::icon_btn_inert("copy-frame", "copy", "Copy frame", t)
+        })
+        .child(if paste_frame_enabled(ops) {
+            crate::rune_sec::icon_btn::icon_btn("paste-frame", "clipboard", "Paste frame", false, t, |s| {
+                s.core.paste_frame();
+            })
+        } else {
+            crate::rune_sec::icon_btn::icon_btn_inert("paste-frame", "clipboard", "Paste frame", t)
+        })
+        .child(if copy_range_enabled(core) {
+            crate::rune_sec::icon_btn::icon_btn("range-copy", "list", "Copy range", false, t, |s| {
+                let (from, count) = copy_range_args(&s.core, &s.frame_ops);
+                if s.core.copy_range(from, count) {
+                    s.frame_ops.range_copied = true;
+                }
+            })
+        } else {
+            crate::rune_sec::icon_btn::icon_btn_inert("range-copy", "list", "Copy range", t)
+        })
+        .child(if paste_range_enabled(ops) {
+            crate::rune_sec::icon_btn::icon_btn("range-paste", "list", "Paste range", false, t, |s| {
+                let at = s.core.current;
+                let before = s.core.status.clone();
+                if !s.core.paste_range(at) && s.core.status == before {
+                    s.core.status = "Nothing to paste — copy a range first.".into();
+                }
+            })
+        } else {
+            crate::rune_sec::icon_btn::icon_btn_inert("range-paste", "list", "Paste range", t)
+        })
+        .child(if delete_range_enabled(core, ops) {
+            crate::rune_sec::icon_btn::icon_btn(
+                "range-del",
+                "trash-can",
+                "Delete range",
+                false,
+                t,
+                |s| {
+                    if let Some((lo, hi)) = selected_range(&s.core, &s.frame_ops) {
+                        if s.core.delete_range(lo, hi - lo + 1) {
+                            s.frame_ops.range_sel = None;
+                        }
+                    }
+                },
+            )
+        } else {
+            crate::rune_sec::icon_btn::icon_btn_inert("range-del", "trash-can", "Delete range", t)
+        })
         .child(fbtn("loop-start", "Loop start", loop_on, n == 0, t, |s| {
             let cur = s.core.current;
             let (_, b) = s.core.loop_range.unwrap_or((cur, cur));
@@ -592,17 +694,21 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
                 s.frame_ops.insert_count = step_insert_count(s.frame_ops.insert_count, 1);
             },
         ))
-        .child(crate::rune_sec::icon_btn::icon_btn(
-            "fop-ins-n",
-            "plus",
-            "Insert frames",
-            false,
-            t,
-            |s| {
-                let count = s.frame_ops.insert_count;
-                insert_frames_after_current(&mut s.core, count);
-            },
-        ));
+        .child(if insert_frames_enabled(core) {
+            crate::rune_sec::icon_btn::icon_btn(
+                "fop-ins-n",
+                "plus",
+                "Insert frames",
+                false,
+                t,
+                |s| {
+                    let count = s.frame_ops.insert_count;
+                    insert_frames_after_current(&mut s.core, count);
+                },
+            )
+        } else {
+            crate::rune_sec::icon_btn::icon_btn_inert("fop-ins-n", "plus", "Insert frames", t)
+        });
 
     col()
         .w_full()
@@ -959,5 +1065,104 @@ mod tests {
         assert_eq!(insert_frames_after_current(&mut core, 4), 0);
         assert_eq!(core.undo_depth(), depth, "a refused insert spends no undo step");
         assert_eq!(core.status, "No frame to insert after.");
+    }
+
+    #[test]
+    fn copy_frame_guard_needs_at_least_one_frame() {
+        // Truth table for Copy frame's inert decision: live
+        // whenever a frame exists to copy, inert on an empty
+        // timeline (where the handler itself no-ops).
+        let mut core = EditorCore::new();
+        assert!(copy_frame_enabled(&core), "the demo timeline can copy");
+        core.project.frames.clear();
+        assert!(!copy_frame_enabled(&core), "nothing to copy from no frames");
+    }
+
+    #[test]
+    fn paste_frame_guard_follows_the_frame_copied_flag() {
+        // Truth table for Paste frame: inert until this panel
+        // has run Copy frame, live from then on.
+        let mut ops = FrameOpsState::default();
+        assert!(!paste_frame_enabled(&ops), "nothing copied yet");
+        ops.frame_copied = true;
+        assert!(paste_frame_enabled(&ops), "a copy in this panel arms paste");
+        ops.frame_copied = false;
+        assert!(!paste_frame_enabled(&ops), "the flag is the whole guard");
+    }
+
+    #[test]
+    fn copy_range_guard_needs_at_least_one_frame() {
+        // Truth table for Copy range: with no selection the
+        // handler falls back to the current frame, so any
+        // non-empty timeline is live; empty is inert.
+        let mut core = EditorCore::new();
+        assert!(copy_range_enabled(&core), "the current frame alone copies");
+        core.project.frames.clear();
+        assert!(!copy_range_enabled(&core), "no frame to fall back to");
+    }
+
+    #[test]
+    fn paste_range_guard_follows_the_range_copied_flag() {
+        // Truth table for Paste range: inert until this panel
+        // has run Copy range, live from then on — and the
+        // single-frame flag does not arm it.
+        let mut ops = FrameOpsState::default();
+        assert!(!paste_range_enabled(&ops), "nothing copied yet");
+        ops.frame_copied = true;
+        assert!(
+            !paste_range_enabled(&ops),
+            "Copy frame arms Paste frame, not Paste range"
+        );
+        ops.range_copied = true;
+        assert!(paste_range_enabled(&ops), "a range copy arms range paste");
+    }
+
+    #[test]
+    fn delete_range_guard_needs_a_partial_selection() {
+        // Truth table for Delete range over the demo's five
+        // frames: no selection is inert, a strict sub-range
+        // is live, the whole timeline is inert (the core
+        // refuses to delete every frame).
+        let mut core = EditorCore::new();
+        assert_eq!(core.frame_count(), 5, "the demo timeline this table assumes");
+        assert!(
+            !delete_range_enabled(&core, &FrameOpsState::default()),
+            "no selection, nothing for the handler to act on"
+        );
+        assert!(
+            delete_range_enabled(&core, &ops_with_sel(1, 3)),
+            "a three-frame selection in five frames deletes"
+        );
+        assert!(
+            delete_range_enabled(&core, &ops_with_sel(2, 2)),
+            "a single selected frame deletes while others remain"
+        );
+        assert!(
+            !delete_range_enabled(&core, &ops_with_sel(0, 4)),
+            "selecting every frame would delete the whole timeline"
+        );
+        // A one-frame project: its only frame can never be
+        // range-deleted, selected or not.
+        core.project.frames.truncate(1);
+        assert!(
+            !delete_range_enabled(&core, &ops_with_sel(0, 0)),
+            "the only frame is the whole timeline"
+        );
+        assert!(
+            !delete_range_enabled(&core, &FrameOpsState::default()),
+            "and no selection is still inert"
+        );
+    }
+
+    #[test]
+    fn insert_frames_guard_needs_a_current_frame() {
+        // Truth table for Insert frames: live while a current
+        // frame exists to insert after, inert on an empty
+        // timeline (where the batch insert refuses).
+        let mut core = EditorCore::new();
+        assert!(insert_frames_enabled(&core));
+        assert_eq!(insert_frames_enabled(&core), can_insert_frames(&core));
+        core.project.frames.clear();
+        assert!(!insert_frames_enabled(&core), "no frame to insert after");
     }
 }

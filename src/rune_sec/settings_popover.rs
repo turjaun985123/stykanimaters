@@ -3,9 +3,11 @@
 //! Phase G, section 13: guide split toggles + startup
 //! workspace picker; Phase H, section 32: Font Awesome
 //! glyphs — gear card header, sun/moon theme pair, eye
-//! visibility toggles): theme, language, stage size, the
-//! project default easing, stage guides and the startup
-//! workspace, behind one "Settings" toggle. Declared
+//! visibility toggles; Phase I, section 38: the Playback
+//! block — loop toggle + playback-audio readout): theme,
+//! language, stage size, the project default easing,
+//! stage guides, playback and the startup workspace,
+//! behind one "Settings" toggle. Declared
 //! under `rune_sec` from `main.rs` only — bin-crate code, not
 //! part of the engine library.
 //!
@@ -86,6 +88,25 @@
 //!   Guides is off — Rune buttons have no disabled state
 //!   and none is faked here; the card's note under the
 //!   row states the composition.
+//! * **Loop playback (Phase I)** — a toggle in the guides
+//!   toggles' `icon_btn` row idiom flipping the shell field
+//!   `State.loop_playback` (seeded `true` by the
+//!   integrator). The handler body is byte-for-byte the
+//!   transport's `pb-loop` flip — a bare flag flip, no core
+//!   call, no status change; the command palette's Toggle
+//!   loop playback command flips the same field, and the
+//!   shell's `poll` reads it to decide whether the playhead
+//!   wraps or stops at the end. This card is a second home
+//!   for the same switch, not a second flag.
+//! * **Playback audio (Phase I)** — a muted readout line,
+//!   no handler: `"Playback audio: on"` while
+//!   `EditorCore::playback_audio_active` (`audio_play.rs`)
+//!   reports the `ffplay` player process running, `"off"`
+//!   otherwise. That fn measures process liveness, not
+//!   audibility — on a machine with no audio device the
+//!   process may exit at once after a successful start, and
+//!   the line then honestly reads off (the fn's own docs
+//!   say the same).
 //! * **Startup workspace (Phase G)** — a compact picker
 //!   (eight buttons, the language grid's 4-wide layout)
 //!   naming the workspace the shell opens in. Picking one
@@ -301,6 +322,38 @@ pub fn toggle_guides_safe(s: &mut State) {
     s.guides_safe = !s.guides_safe;
 }
 
+// ---- Playback ----
+
+/// Flip the loop-playback flag on the shell state
+/// (`State.loop_playback`, seeded `true` by the
+/// integrator). The body is byte-for-byte the transport's
+/// `pb-loop` handler (playback_controls.rs): a bare flip
+/// of the shell flag — no core call, no status change, no
+/// undo snapshot. The shell's `poll` reads the flag to
+/// decide whether the playhead wraps or stops at the end,
+/// and the command palette's Toggle loop playback command
+/// flips the same field; this settings toggle is a second
+/// home for the one switch.
+pub fn toggle_loop_playback(s: &mut State) {
+    s.loop_playback = !s.loop_playback;
+}
+
+/// The playback-audio readout line: `"Playback audio:
+/// on"` while the engine's player is running, `"Playback
+/// audio: off"` otherwise. Pure formatting over the bool
+/// `EditorCore::playback_audio_active` (`audio_play.rs`)
+/// returns — that fn reports the `ffplay` process's
+/// liveness, not audibility, so on a machine with no
+/// audio device the line honestly reads off even after a
+/// successful start (its own docs say the same).
+pub fn audio_state_line(active: bool) -> &'static str {
+    if active {
+        "Playback audio: on"
+    } else {
+        "Playback audio: off"
+    }
+}
+
 // ---- Startup workspace ----
 
 /// Workspace buttons per row in the picker grid (the
@@ -437,7 +490,9 @@ fn stage_axis_row(s: &State, t: &Theme, axis: usize, heading: &str) -> El {
 /// `s.settings.open` — the settings card under it: Theme,
 /// Language grid, Stage W / H steppers, the default
 /// easing cycle, the stage-guides toggle with its two
-/// child toggles, and the startup-workspace picker.
+/// child toggles, the Playback block (loop toggle +
+/// playback-audio readout), and the startup-workspace
+/// picker.
 pub fn settings_popover(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let open = s.settings.open;
@@ -592,6 +647,36 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
                 "Stage guides: thirds grid + centre cross. \
                  Camera frame and safe frames show only while Guides is on.",
             ));
+
+        // Playback (Phase I): the loop toggle is a second
+        // home for the transport's pb-loop switch — same
+        // shell flag (State.loop_playback), same bare flip
+        // (toggle_loop_playback), rendered in the guides
+        // toggles' icon_btn row idiom with pb-loop's own
+        // `repeat` glyph. Under it, a muted readout of the
+        // audio player's liveness — a pure readout with no
+        // handler (audio_state_line over the core's
+        // playback_audio_active).
+        card = card
+            .child(section_label(t, "Playback"))
+            .child(
+                row().key("settings-loop-row").gap(6.0).child(icon_btn(
+                    "settings-loop",
+                    "repeat",
+                    "Loop playback",
+                    s.loop_playback,
+                    t,
+                    |s: &mut State| {
+                        toggle_loop_playback(s);
+                    },
+                )),
+            )
+            .child(
+                text(audio_state_line(core.playback_audio_active()))
+                    .key("settings-audio-state")
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            );
 
         // Startup workspace: the eight workspaces as a
         // button grid (the language grid's layout), the
@@ -919,5 +1004,40 @@ loop_playback: true,
         // name is "3D", not its variant name.
         assert_eq!(persisted_workspace_name(Workspace::Build3D), "3D");
         assert_eq!(persisted_workspace_name(Workspace::Animate), "Animate");
+    }
+
+    #[test]
+    fn loop_playback_toggle_flips_the_shell_field() {
+        let t = rune::tok::theme(true);
+        let mut state = shell_state();
+        // Integrator seed: loop playback starts on — the
+        // same state the transport's pb-loop shows.
+        assert!(state.loop_playback);
+        // The factored flip pb-loop's handler body performs.
+        toggle_loop_playback(&mut state);
+        assert!(!state.loop_playback);
+        toggle_loop_playback(&mut state);
+        assert!(state.loop_playback);
+        // The open card builds with the toggle in both
+        // states (it renders in the Playback block).
+        state.settings.open = true;
+        let _ = settings_popover(&state, &t);
+        toggle_loop_playback(&mut state);
+        let _ = settings_popover(&state, &t);
+    }
+
+    #[test]
+    fn audio_state_line_names_both_states() {
+        assert_eq!(audio_state_line(true), "Playback audio: on");
+        assert_eq!(audio_state_line(false), "Playback audio: off");
+        // A fresh core has never started the player, so the
+        // live readout the card renders is the off state —
+        // the same assertion audio_play's own tests make.
+        let core = core();
+        assert!(!core.playback_audio_active());
+        assert_eq!(
+            audio_state_line(core.playback_audio_active()),
+            "Playback audio: off"
+        );
     }
 }

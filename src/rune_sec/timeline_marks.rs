@@ -28,6 +28,11 @@
 //! added: `timeline-chips` on the inner content row that
 //! carries the drag handler (see below), and
 //! `timeline-markers` on the marker row under the chips.
+//! Phase I adds one key per marker glyph:
+//! `marker-cam-{frame}` and `marker-graph-{frame}`, where
+//! `{frame}` is the 0-based timeline index the key belongs
+//! to — the engine's own frame numbering (`CameraKey.frame`,
+//! [`graph_key_frame`]), not the chips' 1-based labels.
 //!
 //! ## Marker row
 //!
@@ -38,8 +43,14 @@
 //! its frame carries a camera key (`Project::camera`,
 //! `CameraKey.frame` — an exact frame number) and `●` when
 //! any graph channel has a key on it; both glyphs when both,
-//! blank when neither. The cells are **not** pressable — the
-//! chips above already own presses and drags.
+//! blank when neither. Each glyph is its own pressable
+//! element (Phase I): pressing one seeks to its frame with
+//! `core.goto`. That cannot fight the chips' drag gesture —
+//! the drag handler sits on the chips row, a sibling, and a
+//! press on a marker never reaches it. The glyphs, their
+//! colours, the cell geometry and the row's height are
+//! exactly what the display-only row had; the pressable
+//! wrapper adds no fill, padding or radius.
 //!
 //! Graph keys live at fractional times (`graph::Key.frame:
 //! f32`), so "on a frame" needs the engine's own mapping:
@@ -401,6 +412,28 @@ pub fn markers_for_project(core: &EditorCore) -> Vec<(bool, bool)> {
     out
 }
 
+/// Element key of the camera marker on `frame`:
+/// `marker-cam-{frame}`, with `frame` the 0-based timeline
+/// index (see the module docs' key section).
+pub fn camera_marker_key(frame: usize) -> String {
+    format!("marker-cam-{frame}")
+}
+
+/// Element key of the graph marker on `frame`:
+/// `marker-graph-{frame}`, with `frame` the 0-based
+/// timeline index (see the module docs' key section).
+pub fn graph_marker_key(frame: usize) -> String {
+    format!("marker-graph-{frame}")
+}
+
+/// What pressing a marker does: seek the playhead to the
+/// marker's frame — the core's plain `goto`, the same seek
+/// a chip click performs. A marker only exists for a frame
+/// inside the timeline, so no clamping is needed here.
+fn goto_marker(s: &mut State, frame: usize) {
+    s.core.goto(frame);
+}
+
 /// The row's drag gesture (see the module docs for the exact
 /// semantics). `d.data` records which gesture the press
 /// started: the selection anchor across phases as a fallback
@@ -512,18 +545,30 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
         }
         chips = chips.child(chip);
     }
-    // The marker row: one cell per chip, same geometry, no
-    // handlers — pure display (see the module docs). The
-    // camera diamond takes the accent so it reads apart
-    // from the graph dot at a glance.
+    // The marker row: one cell per chip, same geometry as
+    // the display-only row it replaces — each glyph now
+    // wrapped in a transparent pressable element keyed by
+    // its frame, pressing it seeks there (see the module
+    // docs). The camera diamond takes the accent so it
+    // reads apart from the graph dot at a glance.
     let mut marker_row = row().key("timeline-markers").gap(CHIP_GAP);
-    for &(camera, graph) in &markers {
+    for (i, &(camera, graph)) in markers.iter().enumerate() {
         let mut cell = row().size(CHIP_W, MARKER_H).center().gap(2.0);
         if camera {
-            cell = cell.child(text("◆").font(type_::LABEL).color(accent));
+            cell = cell.child(
+                el()
+                    .key(camera_marker_key(i))
+                    .on_press(move |s: &mut State| goto_marker(s, i))
+                    .child(text("◆").font(type_::LABEL).color(accent)),
+            );
         }
         if graph {
-            cell = cell.child(text("●").font(type_::LABEL).color(t.text_secondary));
+            cell = cell.child(
+                el()
+                    .key(graph_marker_key(i))
+                    .on_press(move |s: &mut State| goto_marker(s, i))
+                    .child(text("●").font(type_::LABEL).color(t.text_secondary)),
+            );
         }
         marker_row = marker_row.child(cell);
     }
@@ -853,6 +898,56 @@ mod tests {
         assert_eq!(graph_key_frame(1.0, 0), None);
         assert_eq!(graph_key_frame(f32::NAN, 5), None);
         assert_eq!(graph_key_frame(f32::INFINITY, 5), None);
+    }
+
+    // ---- clickable markers (Phase I): the keys the row
+    // renders and the seek a press performs ----
+
+    #[test]
+    fn marker_keys_use_the_engine_frame_index() {
+        assert_eq!(camera_marker_key(0), "marker-cam-0");
+        assert_eq!(camera_marker_key(2), "marker-cam-2");
+        assert_eq!(graph_marker_key(2), "marker-graph-2");
+        assert_eq!(graph_marker_key(4), "marker-graph-4");
+    }
+
+    #[test]
+    fn markers_row_keys_the_camera_marker_for_frame_2() {
+        // `El` has no public tree-walk, so the built row's
+        // keys are asserted through the helpers the builder
+        // itself calls, over the same markers vector it
+        // renders: build the row for the fixture (camera key
+        // on frame 2), then check its keyed frames.
+        let mut state = demo_state();
+        state.core = marked_core();
+        let t = rune::tok::theme(true);
+        let _ = timeline_marks(&state, &t);
+        let markers = markers_for_project(&state.core);
+        let mut camera_frames = Vec::new();
+        for (i, &(camera, _)) in markers.iter().enumerate() {
+            if camera {
+                camera_frames.push(i);
+            }
+        }
+        assert_eq!(camera_frames, vec![2]);
+        assert_eq!(camera_marker_key(camera_frames[0]), "marker-cam-2");
+        // Frame 2 carries a graph key too, keyed alongside
+        // the camera marker in the same cell.
+        assert!(markers[2].1);
+        assert_eq!(graph_marker_key(2), "marker-graph-2");
+        // A frame with neither key gets no marker element.
+        assert_eq!(markers[1], (false, false));
+    }
+
+    #[test]
+    fn pressing_a_marker_seeks_to_its_frame() {
+        let mut state = demo_state();
+        state.core = marked_core();
+        assert_eq!(state.core.current, 0);
+        goto_marker(&mut state, 2);
+        assert_eq!(state.core.current, 2);
+        goto_marker(&mut state, 4);
+        assert_eq!(state.core.current, 4);
     }
 
     // ---- builder smoke test (the drag handler itself is

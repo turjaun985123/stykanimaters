@@ -65,6 +65,11 @@
 //!   stamp (no plain arrow glyph). The stamp parameter
 //!   steppers stay text too — a − / value / + readout row
 //!   reads better without glyphs.
+//! * **Drawing readout (Phase I).** A muted line under the
+//!   "Draw" header summarises the whole project's drawing —
+//!   stroke and point counts plus the summed polyline length
+//!   ([`drawing_stats`]) — with a spray count appended only
+//!   when spray strokes exist.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -415,7 +420,66 @@ pub fn smooth_current_frame(core: &mut EditorCore) -> usize {
     n
 }
 
-/// The Draw toolbar section: a "Draw" label over four rows —
+/// What the project's drawing holds, for the readout line:
+/// the stroke and point counts and the summed polyline
+/// length over **every** stroke in the project (all frames —
+/// the line summarises the drawing as a whole, not just the
+/// frame in view). `spray_strokes` counts the strokes that
+/// carry a spray mark (`Stroke::spray`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawingStats {
+    /// Strokes in the project.
+    pub strokes: usize,
+    /// Points across all strokes.
+    pub points: usize,
+    /// Summed polyline length, in stage units.
+    pub total_length: f32,
+    /// Strokes carrying a `SprayMark`.
+    pub spray_strokes: usize,
+}
+
+/// Count [`DrawingStats`] over `core.project.strokes`. Pure
+/// read — no snapshot, no status change. A stroke with fewer
+/// than two points adds nothing to the length.
+pub fn drawing_stats(core: &EditorCore) -> DrawingStats {
+    let mut stats = DrawingStats {
+        strokes: 0,
+        points: 0,
+        total_length: 0.0,
+        spray_strokes: 0,
+    };
+    for stroke in &core.project.strokes {
+        stats.strokes += 1;
+        stats.points += stroke.points.len();
+        if stroke.spray.is_some() {
+            stats.spray_strokes += 1;
+        }
+        for pair in stroke.points.windows(2) {
+            let dx = pair[1][0] - pair[0][0];
+            let dy = pair[1][1] - pair[0][1];
+            stats.total_length += (dx * dx + dy * dy).sqrt();
+        }
+    }
+    stats
+}
+
+/// The readout line for [`drawing_stats`]: the counts and
+/// the length rounded to whole stage units, with the spray
+/// count appended only when spray strokes exist — a plain
+/// drawing's line stays three figures long.
+pub fn drawing_stats_line(stats: &DrawingStats) -> String {
+    let mut line = format!(
+        "{} strokes · {} points · {:.0} long",
+        stats.strokes, stats.points, stats.total_length
+    );
+    if stats.spray_strokes > 0 {
+        line += &format!(" · {} spray", stats.spray_strokes);
+    }
+    line
+}
+
+/// The Draw toolbar section: a "Draw" label and the drawing
+/// readout line over four rows —
 /// tools (mode, eraser, brush cycle, mirror, simplify, smooth,
 /// clear), the brush library (one button per preset, the
 /// active one highlighted), the shape tools (Line / Rect /
@@ -543,6 +607,12 @@ pub fn draw_tools(s: &State, t: &Theme) -> El {
         .key("draw-tools")
         .gap(6.0)
         .child(text("Draw").font(type_::LABEL).color(t.text_secondary))
+        .child(
+            text(drawing_stats_line(&drawing_stats(core)))
+                .key("draw-stats")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
         .child(tools)
         .child(brushes.scroll_x().w_full())
         .child(shapes)
@@ -811,6 +881,100 @@ mod tests {
         assert_eq!(core.status, "Stamp size: 125%.");
         step_stamp_rotation(&mut core, &mut params, -1);
         assert_eq!(core.status, "Stamp rotation: 345°.");
+    }
+
+    // ---- Drawing readout (Phase I) ----
+
+    #[test]
+    fn drawing_stats_of_an_empty_project_are_all_zero() {
+        let mut core = EditorCore::new();
+        // The demo project starts stroke-free in practice;
+        // clear anyway so the premise does not depend on it.
+        core.project.strokes.clear();
+        let stats = drawing_stats(&core);
+        assert_eq!(
+            stats,
+            DrawingStats {
+                strokes: 0,
+                points: 0,
+                total_length: 0.0,
+                spray_strokes: 0,
+            }
+        );
+        assert_eq!(drawing_stats_line(&stats), "0 strokes · 0 points · 0 long");
+    }
+
+    #[test]
+    fn drawing_stats_count_strokes_points_and_polyline_length() {
+        let mut core = EditorCore::new();
+        core.project.strokes.clear();
+        // Draw one stroke through the core's own draw ops:
+        // (0,0) -> (30,0) -> (30,40), two legs of 30 and 40.
+        // The default Pen brush (smoothing 0, round nib)
+        // leaves the recorded path exactly as drawn.
+        core.begin_draw([0.0, 0.0]);
+        core.draw_to([30.0, 0.0]);
+        core.draw_to([30.0, 40.0]);
+        core.end_draw();
+        let stats = drawing_stats(&core);
+        assert_eq!(stats.strokes, 1);
+        assert_eq!(stats.points, 3);
+        assert_eq!(stats.total_length, 70.0);
+        assert_eq!(stats.spray_strokes, 0);
+        // A stamped shape adds its own points and length:
+        // the Line stamp runs the shape box diagonal,
+        // (410,310) -> (550,410) on the demo stage.
+        draw_shape_button(&mut core, ShapeKind::Line);
+        let stats = drawing_stats(&core);
+        assert_eq!(stats.strokes, 2);
+        assert_eq!(stats.points, 5);
+        let diagonal = (140.0f32.powi(2) + 100.0f32.powi(2)).sqrt();
+        assert!((stats.total_length - (70.0 + diagonal)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn drawing_stats_count_spray_strokes_drawn_with_the_spray_brush() {
+        let mut core = EditorCore::new();
+        core.project.strokes.clear();
+        // The Spray preset (index 9, scatter 12) makes
+        // begin_draw record a SprayMark on the stroke.
+        select_brush(&mut core, 9);
+        core.begin_draw([100.0, 100.0]);
+        core.draw_to([140.0, 100.0]);
+        core.end_draw();
+        // A plain Pen stroke beside it stays unmarked.
+        select_brush(&mut core, 0);
+        core.begin_draw([0.0, 0.0]);
+        core.draw_to([0.0, 50.0]);
+        core.end_draw();
+        let stats = drawing_stats(&core);
+        assert_eq!(stats.strokes, 2);
+        assert_eq!(stats.spray_strokes, 1);
+        assert_eq!(stats.points, 4);
+        assert_eq!(stats.total_length, 90.0);
+        assert_eq!(
+            drawing_stats_line(&stats),
+            "2 strokes · 4 points · 90 long · 1 spray"
+        );
+    }
+
+    #[test]
+    fn drawing_stats_line_rounds_length_and_omits_an_empty_spray_count() {
+        let plain = DrawingStats {
+            strokes: 3,
+            points: 12,
+            total_length: 172.6,
+            spray_strokes: 0,
+        };
+        assert_eq!(drawing_stats_line(&plain), "3 strokes · 12 points · 173 long");
+        let sprayed = DrawingStats {
+            spray_strokes: 2,
+            ..plain
+        };
+        assert_eq!(
+            drawing_stats_line(&sprayed),
+            "3 strokes · 12 points · 173 long · 2 spray"
+        );
     }
 
     #[test]

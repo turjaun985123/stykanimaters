@@ -1414,6 +1414,63 @@ pub fn export_apng_range(
     encode_apng(project, &times, path)
 }
 
+/// Columns and thumbnail width used by the contact-sheet file
+/// exports: the same defaults the MCP `render_contact_sheet`
+/// tool uses (4 columns, 240 px thumbnails).
+const CONTACT_SHEET_COLS: usize = 4;
+const CONTACT_SHEET_THUMB_W: u32 = 240;
+
+/// Write a contact sheet of `indices` to `path` (the shared
+/// writer behind the contact-sheet exports, as `encode_gif` is
+/// behind the GIF exports). The image format comes from the
+/// path's extension, as with the spritesheet export. Returns the
+/// number of frames tiled.
+fn write_contact_sheet(
+    project: &Project,
+    indices: &[usize],
+    path: &Path,
+) -> std::io::Result<usize> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    render_contact_sheet(project, indices, CONTACT_SHEET_COLS, CONTACT_SHEET_THUMB_W)
+        .save(path)
+        .map_err(std::io::Error::other)?;
+    Ok(indices.len())
+}
+
+/// Export a contact sheet of the whole timeline to `path`: one
+/// tile per authored frame, in order. Returns the number of
+/// frames tiled. An empty project still writes the renderer's
+/// 1x1 background sheet and returns `Ok(0)`, mirroring the GIF
+/// export's empty-project behaviour.
+pub fn export_contact_sheet(project: &Project, path: &Path) -> std::io::Result<usize> {
+    if project.frames.is_empty() {
+        return write_contact_sheet(project, &[], path);
+    }
+    export_contact_sheet_range(project, 0, project.frames.len() - 1, path)
+}
+
+/// Export a contact sheet of the authored frames `from..=to`
+/// (inclusive, clamped to the timeline) to `path`, written
+/// exactly at `path` with no name suffix. Unlike the GIF/APNG
+/// range exports, a sheet tiles each authored frame exactly
+/// once: per-frame durations are not expanded, because a sheet
+/// is an overview, not a playback. Returns the number of frames
+/// tiled; an empty or inverted range is an error.
+pub fn export_contact_sheet_range(
+    project: &Project,
+    from: usize,
+    to: usize,
+    path: &Path,
+) -> std::io::Result<usize> {
+    let (from, to) = clamp_frame_range(project, from, to)?;
+    let indices: Vec<usize> = (from..=to).collect();
+    write_contact_sheet(project, &indices, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1680,6 +1737,102 @@ mod tests {
         let sheet = render_contact_sheet(&project, &[], 3, 64);
         assert_eq!((sheet.width(), sheet.height()), (1, 1));
         assert_eq!(sheet.get_pixel(0, 0).0, [26, 29, 36, 255]);
+    }
+
+    #[test]
+    fn contact_sheet_range_tiles_exactly_the_sub_range_frames() {
+        let project = tiny_project();
+        assert_eq!(project.frames.len(), 5);
+        let path = temp_file("sheet-sub", "png");
+        let n = export_contact_sheet_range(&project, 1, 3, &path).unwrap();
+        assert_eq!(n, 3, "frames 1..=3 of 5 must tile 3 frames");
+        // The written sheet is pixel-for-pixel the in-memory sheet
+        // of exactly frames 1, 2 and 3 at the export defaults.
+        let written = image::open(&path).unwrap().to_rgba8();
+        let expected = render_contact_sheet(
+            &project,
+            &[1, 2, 3],
+            CONTACT_SHEET_COLS,
+            CONTACT_SHEET_THUMB_W,
+        );
+        assert_eq!(written.dimensions(), expected.dimensions());
+        assert_eq!(written.as_raw(), expected.as_raw());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn contact_sheet_range_clamps_to_the_timeline() {
+        let project = tiny_project();
+        let path = temp_file("sheet-clamp", "png");
+        let n = export_contact_sheet_range(&project, 3, 999, &path).unwrap();
+        assert_eq!(n, 2, "3..=999 on 5 frames clamps to frames 3..=4");
+        let written = image::open(&path).unwrap().to_rgba8();
+        let expected = render_contact_sheet(
+            &project,
+            &[3, 4],
+            CONTACT_SHEET_COLS,
+            CONTACT_SHEET_THUMB_W,
+        );
+        assert_eq!(written.as_raw(), expected.as_raw());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn contact_sheet_range_rejects_empty_and_inverted_ranges() {
+        let project = tiny_project();
+        let path = temp_file("sheet-err", "png");
+        assert!(
+            export_contact_sheet_range(&project, 3, 1, &path).is_err(),
+            "inverted range"
+        );
+        assert!(
+            export_contact_sheet_range(&project, 99, 2, &path).is_err(),
+            "99..=2 clamps to 4..=2, still empty"
+        );
+        let mut empty = tiny_project();
+        empty.frames.clear();
+        assert!(
+            export_contact_sheet_range(&empty, 0, 0, &path).is_err(),
+            "an empty project has no range to export"
+        );
+    }
+
+    #[test]
+    fn contact_sheet_full_export_matches_the_full_range() {
+        let project = tiny_project();
+        let full_path = temp_file("sheet-full", "png");
+        let range_path = temp_file("sheet-fullrange", "png");
+        let n_full = export_contact_sheet(&project, &full_path).unwrap();
+        let n_range = export_contact_sheet_range(
+            &project,
+            0,
+            project.frames.len() - 1,
+            &range_path,
+        )
+        .unwrap();
+        assert_eq!(n_full, 5);
+        assert_eq!(n_full, n_range);
+        // Same tiles through the same writer: the files are
+        // byte-identical, as in the Wave 10 determinism suite.
+        assert_eq!(
+            std::fs::read(&full_path).unwrap(),
+            std::fs::read(&range_path).unwrap()
+        );
+        let _ = std::fs::remove_file(&full_path);
+        let _ = std::fs::remove_file(&range_path);
+    }
+
+    #[test]
+    fn contact_sheet_export_of_empty_project_writes_the_blank_sheet() {
+        let mut project = tiny_project();
+        project.frames.clear();
+        let path = temp_file("sheet-empty", "png");
+        let n = export_contact_sheet(&project, &path).unwrap();
+        assert_eq!(n, 0, "an empty project tiles zero frames");
+        let written = image::open(&path).unwrap().to_rgba8();
+        assert_eq!(written.dimensions(), (1, 1));
+        assert_eq!(written.get_pixel(0, 0).0, [26, 29, 36, 255]);
+        let _ = std::fs::remove_file(&path);
     }
 
 

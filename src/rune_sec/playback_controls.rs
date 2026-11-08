@@ -60,6 +60,26 @@
 //!   versions. The basic transport (Prev / Play-Pause /
 //!   Next) is not in this file — it lives in
 //!   `chrome_view::transport_row` and is converted there.
+//! * **Keyframe jumps** (Phase I) — `pb-prev-key` /
+//!   `pb-next-key` step the playhead to the nearest key
+//!   frame strictly before / after the current frame. The
+//!   key frames are the sorted, de-duplicated union of the
+//!   camera keys (`Project::camera`, `model.rs:690`;
+//!   `CameraKey.frame`, `model.rs:542`, already a `usize`)
+//!   and every graph channel's keys (`Project::channels`,
+//!   `model.rs:714`; `graph::Key.frame`, `graph.rs:70`, an
+//!   `f32`) mapped through
+//!   `timeline_marks::graph_key_frame` — the graph panel
+//!   seek's own rounding (`f32::round`, halves away from
+//!   zero), with out-of-timeline keys dropped, never
+//!   clamped; camera keys past the timeline end drop the
+//!   same way. Plain text buttons: no Font Awesome glyph
+//!   honestly means "previous / next keyframe". Unlike
+//!   Restart / Play range the jumps only `goto` — they
+//!   never touch `playing`, so stepping while paused stays
+//!   paused and stepping mid-playback keeps playing. At
+//!   either end of the key list the press is a silent
+//!   no-op, like the transport's other edges.
 //! * **Frame duration** — the `dur-dn` / `dur-up` steppers
 //!   call `EditorCore::adjust_frame_duration`
 //!   (`editor.rs:1675`) with the GPUI factors 0.5 / 2.0
@@ -83,6 +103,7 @@ use rune::{col, row, text, El};
 
 use crate::chrome_view::btn;
 use crate::rune_sec::icon_btn::icon_btn;
+use crate::rune_sec::timeline_marks::graph_key_frame;
 use crate::State;
 use stykanimate_rs::editor::EditorCore;
 
@@ -142,6 +163,57 @@ pub fn loop_range_text(range: Option<(usize, usize)>) -> String {
 /// Restart on a timeline with no range.
 pub fn play_range_start(loop_range: Option<(usize, usize)>) -> usize {
     loop_range.map(|(a, _)| a).unwrap_or(0)
+}
+
+/// Every key frame in the project, sorted ascending with
+/// duplicates removed: the union of the camera keys and
+/// all graph channel keys.
+///
+/// Camera keys carry their frame directly (`CameraKey::
+/// frame: usize`); a key stored past the timeline end (the
+/// timeline shrank after it was set) is dropped, matching
+/// `timeline_marks::markers_for_project`. Graph keys carry
+/// a fractional time (`Key::frame: f32`) and map through
+/// [`graph_key_frame`] — the graph seek's rounding, with
+/// out-of-timeline results dropped rather than clamped —
+/// so the jumps land exactly where the timeline's key
+/// markers are drawn.
+pub fn key_frames(core: &EditorCore) -> Vec<usize> {
+    let count = core.frame_count();
+    let mut frames: Vec<usize> = Vec::new();
+    for key in &core.project.camera {
+        if key.frame < count {
+            frames.push(key.frame);
+        }
+    }
+    for channel in &core.project.channels {
+        for key in &channel.keys {
+            if let Some(f) = graph_key_frame(key.frame, count) {
+                frames.push(f);
+            }
+        }
+    }
+    frames.sort_unstable();
+    frames.dedup();
+    frames
+}
+
+/// The key frame a **Prev key** press goes to from `cur`:
+/// the largest key strictly before it, or `None` when
+/// `cur` sits at or before the first key (the press is
+/// then a no-op). Standing exactly on a key steps to the
+/// PREVIOUS key — the strict inequality is what makes
+/// repeated presses walk the key list.
+pub fn prev_key(cur: usize, keys: &[usize]) -> Option<usize> {
+    keys.iter().copied().filter(|k| *k < cur).max()
+}
+
+/// The key frame a **Next key** press goes to from `cur`:
+/// the smallest key strictly after it, or `None` when
+/// `cur` sits at or past the last key. Standing exactly
+/// on a key steps to the NEXT key, mirroring [`prev_key`].
+pub fn next_key(cur: usize, keys: &[usize]) -> Option<usize> {
+    keys.iter().copied().filter(|k| *k > cur).min()
 }
 
 /// Button label for the loop toggle — the state is in the
@@ -274,9 +346,10 @@ fn section(label: String, t: &Theme) -> El {
 /// the old GPUI control ids where one existed (`fps-dn`,
 /// `fps-up`, `tween`, `loop-start`, `loop-end`, `loop-clear`,
 /// `dur-dn`, `dur-up`); the Phase F transport buttons are
-/// `pb-restart` / `pb-play-range` and the Phase G loop
-/// toggle is `pb-loop`, so headless `--tree` checks can
-/// find every control.
+/// `pb-restart` / `pb-play-range`, the Phase G loop
+/// toggle is `pb-loop` and the Phase I keyframe jumps are
+/// `pb-prev-key` / `pb-next-key`, so headless `--tree`
+/// checks can find every control.
 pub fn playback_controls(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let fps = core.project.fps;
@@ -324,7 +397,19 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
                     let start = play_range_start(s.core.loop_range);
                     start_playback_at(&mut s.core, start);
                 },
-            )),
+            ))
+            .child(btn("pb-prev-key", "Prev key", false, t, |s| {
+                let keys = key_frames(&s.core);
+                if let Some(f) = prev_key(s.core.current, &keys) {
+                    s.core.goto(f);
+                }
+            }))
+            .child(btn("pb-next-key", "Next key", false, t, |s| {
+                let keys = key_frames(&s.core);
+                if let Some(f) = next_key(s.core.current, &keys) {
+                    s.core.goto(f);
+                }
+            })),
     );
 
     // ---- Loop playback: shell-level on/off for the wrap
@@ -478,6 +563,27 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
 mod tests {
     use super::*;
     use stykanimate_rs::editor::EditorCore;
+    use stykanimate_rs::graph::{Channel, ChannelTarget, Key};
+
+    /// A demo core (5 frames) with the demo's own camera
+    /// keys and channels cleared, so each key test states
+    /// its whole key set explicitly.
+    fn bare_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.camera.clear();
+        core.project.channels.clear();
+        core
+    }
+
+    /// Push one graph channel keyed at the given fractional
+    /// frames (flat keys — only the frames matter here).
+    fn add_channel(core: &mut EditorCore, frames: &[f32]) {
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: frames.iter().map(|f| Key::flat(*f, 0.0)).collect(),
+        });
+    }
 
     #[test]
     fn presets_are_the_gpui_cycler_list_ascending() {
@@ -670,5 +776,114 @@ mod tests {
         // (editor.rs:719), so the stop check does too.
         assert!(!should_stop_at_end(true, false, Some((1, 99)), 3, 5));
         assert!(should_stop_at_end(true, false, Some((1, 99)), 4, 5));
+    }
+
+    #[test]
+    fn key_frames_unions_camera_and_graph_keys_sorted_and_deduped() {
+        let mut core = bare_core();
+        // Camera keys land out of order in the call order;
+        // set_camera_key keeps its own list sorted.
+        core.project.set_camera_key(3, 0.0, 0.0, 1.0);
+        core.project.set_camera_key(1, 0.0, 0.0, 1.0);
+        // Graph keys: 1.0 duplicates camera key 1, 2.5
+        // rounds onto camera key 3, 4.4 rounds to 4.
+        add_channel(&mut core, &[1.0, 2.5, 4.4]);
+        // A second channel contributes frame 0 (0.2 rounds
+        // down) — the union spans every channel.
+        add_channel(&mut core, &[0.2]);
+        assert_eq!(key_frames(&core), vec![0, 1, 3, 4]);
+    }
+
+    #[test]
+    fn key_frames_rounds_graph_keys_like_the_graph_seek() {
+        let mut core = bare_core();
+        // f32::round: halves away from zero, exactly the
+        // convention timeline_marks' own tests pin.
+        add_channel(&mut core, &[0.5, 2.49, 2.5]);
+        assert_eq!(key_frames(&core), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn key_frames_drops_out_of_timeline_keys() {
+        let mut core = bare_core();
+        // A camera key past the 5-frame timeline end drops,
+        // like timeline_marks' marker sweep drops it.
+        core.project.set_camera_key(9, 0.0, 0.0, 1.0);
+        // Graph keys: 4.6 rounds to 5 (past the end), 99.0
+        // is far out, -1.0 rounds below zero, NaN is not
+        // finite — all dropped, none clamped onto an edge.
+        add_channel(&mut core, &[4.6, 99.0, -1.0, f32::NAN]);
+        // One in-range key survives so the drops above are
+        // proven selective, not a blanket empty result.
+        add_channel(&mut core, &[4.4]);
+        assert_eq!(key_frames(&core), vec![4]);
+    }
+
+    #[test]
+    fn key_frames_is_empty_without_keys() {
+        let core = bare_core();
+        assert!(key_frames(&core).is_empty());
+    }
+
+    #[test]
+    fn prev_and_next_key_step_strictly_at_boundaries() {
+        let keys = [1, 3];
+        // Before the first key: no previous, next is 1.
+        assert_eq!(prev_key(0, &keys), None);
+        assert_eq!(next_key(0, &keys), Some(1));
+        // Exactly on a key: strictly before / after, so a
+        // press standing on key 1 goes BACK to nothing and
+        // FORWARD to 3 — repeated presses walk the list.
+        assert_eq!(prev_key(1, &keys), None);
+        assert_eq!(next_key(1, &keys), Some(3));
+        // Between keys.
+        assert_eq!(prev_key(2, &keys), Some(1));
+        assert_eq!(next_key(2, &keys), Some(3));
+        // Exactly on the last key.
+        assert_eq!(prev_key(3, &keys), Some(1));
+        assert_eq!(next_key(3, &keys), None);
+        // After the last key: previous is 3, no next.
+        assert_eq!(prev_key(4, &keys), Some(3));
+        assert_eq!(next_key(4, &keys), None);
+    }
+
+    #[test]
+    fn prev_and_next_key_on_an_empty_list_are_none() {
+        assert_eq!(prev_key(0, &[]), None);
+        assert_eq!(next_key(0, &[]), None);
+        assert_eq!(prev_key(3, &[]), None);
+        assert_eq!(next_key(3, &[]), None);
+    }
+
+    #[test]
+    fn key_jump_handlers_step_and_keep_the_playing_state() {
+        // The pb-prev-key / pb-next-key handler bodies,
+        // composed exactly as the buttons run them.
+        let mut core = bare_core();
+        core.project.set_camera_key(1, 0.0, 0.0, 1.0);
+        core.project.set_camera_key(3, 0.0, 0.0, 1.0);
+        core.goto(3);
+        core.playing = false;
+        // Prev from key 3 lands on key 1, still paused —
+        // the jumps goto only, never start playback.
+        let keys = key_frames(&core);
+        if let Some(f) = prev_key(core.current, &keys) {
+            core.goto(f);
+        }
+        assert_eq!(core.current, 1);
+        assert!(!core.playing);
+        // Next from key 1 returns to key 3.
+        let keys = key_frames(&core);
+        if let Some(f) = next_key(core.current, &keys) {
+            core.goto(f);
+        }
+        assert_eq!(core.current, 3);
+        // Prev at the first key is a silent no-op.
+        core.goto(1);
+        let keys = key_frames(&core);
+        if let Some(f) = prev_key(core.current, &keys) {
+            core.goto(f);
+        }
+        assert_eq!(core.current, 1);
     }
 }

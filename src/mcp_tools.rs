@@ -1147,6 +1147,19 @@ fn check_last_audio(core: &EditorCore) -> Result<usize, String> {
     }
 }
 
+/// Index of audio clip `index`, or a clean error when the
+/// project has no clip there (the pre-check the indexed
+/// audio tools share; mirrors tool_audio_delete_clip's range
+/// check so an out-of-range index is a clean Err, not just a
+/// status line).
+fn check_audio_index(core: &EditorCore, idx: usize) -> Result<usize, String> {
+    if idx >= core.project.audio.len() {
+        Err(format!("no audio clip at index {idx}"))
+    } else {
+        Ok(idx)
+    }
+}
+
 fn tool_audio_fade(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
     let idx = check_last_audio(core)?;
     core.audio_fade_last();
@@ -1214,6 +1227,84 @@ fn tool_audio_delete_clip(core: &mut EditorCore, args: &Value) -> Result<Value, 
         "deleted": idx,
         "path": path,
         "count": core.project.audio.len(),
+    }))
+}
+
+// ---------------------------------------------------------------------
+// Indexed audio DSP tools (phase I): MCP parity for the
+// Phase H audio_ops primaries, which until now were only
+// reachable from the audio panel. Each handler takes the
+// clip 'index' (0-based), pre-checks it like
+// tool_audio_delete_clip, runs the *_at op and reports
+// through `core.status` exactly like the *_last tools
+// above.
+// ---------------------------------------------------------------------
+
+fn tool_audio_echo(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = check_audio_index(core, req_usize(args, "index")?)?;
+    core.audio_echo_at(idx);
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_audio_lowpass(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = check_audio_index(core, req_usize(args, "index")?)?;
+    core.audio_lowpass_at(idx);
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_audio_trim_silence(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = check_audio_index(core, req_usize(args, "index")?)?;
+    core.audio_trim_silence_at(idx);
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_audio_pitch(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = check_audio_index(core, req_usize(args, "index")?)?;
+    core.audio_pitch_at(idx);
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_audio_compress(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = check_audio_index(core, req_usize(args, "index")?)?;
+    core.audio_compress_at(idx);
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_audio_split_silences(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = check_audio_index(core, req_usize(args, "index")?)?;
+    let added = core.audio_split_silences_at(idx);
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "added": added,
+        "count": core.project.audio.len(),
+        "status": core.status,
+        "project": project_summary(core),
     }))
 }
 
@@ -2536,6 +2627,72 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_audio_delete_clip,
         },
         Tool {
+            name: "audio_echo",
+            description: "Apply a feedback echo (0.18s delay, 35% feedback) to the audio clip at 'index': a processed copy of its file is written and the clip repointed (the editor's Echo op). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_audio_echo,
+        },
+        Tool {
+            name: "audio_lowpass",
+            description: "Apply a 1200 Hz low-pass filter to the audio clip at 'index': a processed copy of its file is written and the clip repointed (the editor's Lowpass op). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_audio_lowpass,
+        },
+        Tool {
+            name: "audio_trim_silence",
+            description: "Trim leading and trailing silence from the audio clip at 'index': a processed copy of its file is written and the clip repointed (the editor's Trim silence op). One undo step when there is silence to trim.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_audio_trim_silence,
+        },
+        Tool {
+            name: "audio_pitch",
+            description: "Pitch-shift the audio clip at 'index' up 2 semitones: a processed copy of its file is written and the clip repointed (the editor's Pitch op). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_audio_pitch,
+        },
+        Tool {
+            name: "audio_compress",
+            description: "Compress the audio clip at 'index' (threshold 0.5, ratio 4.0): a processed copy of its file is written and the clip repointed (the editor's Compress op). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_audio_compress,
+        },
+        Tool {
+            name: "audio_split_silences",
+            description: "Split the audio clip at 'index' wherever silence of 0.25s or more falls: each part is written as its own file and becomes its own clip, and the result reports how many clips were added. One undo step when a split happens.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_audio_split_silences,
+        },
+        Tool {
             name: "graph_key",
             description: "Add a graph-editor channel key: target is \"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": node}; frame and value are numbers (degrees for angles).",
             schema: obj_schema(
@@ -2906,11 +3063,11 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 71);
+        assert_eq!(tools.len(), 77);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 71, "tool names must be unique");
+        assert_eq!(names.len(), 77, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
@@ -3756,6 +3913,128 @@ mod tests {
         assert!(call(&mut core, &tools, "audio_set_gain", json!({ "gain": -1.0 })).is_err());
         assert!(call(&mut core, &tools, "audio_set_gain", json!({})).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn phase_i_indexed_audio_dsp_tools_validate_index() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        call(&mut core, &tools, "new_project", json!({})).unwrap();
+        const NAMES: [&str; 6] = [
+            "audio_echo",
+            "audio_lowpass",
+            "audio_trim_silence",
+            "audio_pitch",
+            "audio_compress",
+            "audio_split_silences",
+        ];
+        // Missing, non-integer and negative indices are clean
+        // errors for every one of the six, clips or no clips.
+        for name in NAMES {
+            assert!(call(&mut core, &tools, name, json!({})).is_err(), "{name}: missing index");
+            assert!(
+                call(&mut core, &tools, name, json!({ "index": "0" })).is_err(),
+                "{name}: string index"
+            );
+            assert!(
+                call(&mut core, &tools, name, json!({ "index": 1.5 })).is_err(),
+                "{name}: fractional index"
+            );
+            assert!(
+                call(&mut core, &tools, name, json!({ "index": -1 })).is_err(),
+                "{name}: negative index"
+            );
+            assert!(
+                call(&mut core, &tools, name, json!({ "index": 0 })).is_err(),
+                "{name}: no clips yet"
+            );
+        }
+        // With one clip on the timeline, index 1 is out of
+        // range: the refusal is the delete_clip error, and the
+        // clip list is untouched.
+        call(&mut core, &tools, "add_audio_clip", json!({
+            "path": "a.wav", "start_frame": 0
+        }))
+        .unwrap();
+        for name in NAMES {
+            let err = call(&mut core, &tools, name, json!({ "index": 1 })).unwrap_err();
+            assert_eq!(err, "no audio clip at index 1", "{name}");
+        }
+        assert_eq!(core.project.audio.len(), 1);
+    }
+
+    #[test]
+    fn phase_i_indexed_audio_dsp_tools_run_on_real_files() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        call(&mut core, &tools, "new_project", json!({})).unwrap();
+        // Real WAVs on disk: the *_at ops read the addressed
+        // clip's file, so the fake paths the other tests use
+        // are not enough. Clip 1 is steady tone (for echo);
+        // clip 2 is tone, half a second of silence, tone
+        // (for the split).
+        let dir = std::env::temp_dir();
+        let tone_path = dir.join(format!("phase-i-tone-{}.wav", std::process::id()));
+        let tone = crate::audio_edit::WavData {
+            sample_rate: 8_000,
+            channels: 1,
+            samples: vec![0.5; 4_000],
+        };
+        std::fs::write(&tone_path, crate::audio_edit::write_wav(&tone)).unwrap();
+        let gap_path = dir.join(format!("phase-i-gap-{}.wav", std::process::id()));
+        let mut gap_samples = vec![0.5; 2_000];
+        gap_samples.extend(vec![0.0; 4_000]);
+        gap_samples.extend(vec![0.5; 2_000]);
+        let gap = crate::audio_edit::WavData {
+            sample_rate: 8_000,
+            channels: 1,
+            samples: gap_samples,
+        };
+        std::fs::write(&gap_path, crate::audio_edit::write_wav(&gap)).unwrap();
+        call(&mut core, &tools, "add_audio_clip", json!({
+            "path": tone_path.to_string_lossy().into_owned(), "start_frame": 0
+        }))
+        .unwrap();
+        call(&mut core, &tools, "add_audio_clip", json!({
+            "path": gap_path.to_string_lossy().into_owned(), "start_frame": 0
+        }))
+        .unwrap();
+
+        // Echo addresses clip 1 only: it is repointed at its
+        // echo product and clip 2 keeps its path.
+        let r = call(&mut core, &tools, "audio_echo", json!({ "index": 0 })).unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["audio_index"], 0);
+        assert!(
+            r["status"].as_str().unwrap().starts_with("Echo applied to audio clip 1"),
+            "status: {}", r["status"]
+        );
+        assert!(core.project.audio[0].path.ends_with(".echo.wav"));
+        assert_eq!(
+            core.project.audio[1].path,
+            gap_path.to_string_lossy().into_owned()
+        );
+
+        // The remaining one-shot effects run against clip 1
+        // in turn; each reports through the status line.
+        for name in ["audio_lowpass", "audio_trim_silence", "audio_pitch", "audio_compress"] {
+            let r = call(&mut core, &tools, name, json!({ "index": 0 })).unwrap();
+            assert_eq!(r["ok"], true, "{name}");
+            assert_eq!(r["audio_index"], 0, "{name}");
+            assert!(r["status"].is_string(), "{name} reports through the status line");
+        }
+
+        // Split addresses clip 2: two sounding parts make one
+        // added clip, reported in the result.
+        let r = call(&mut core, &tools, "audio_split_silences", json!({ "index": 1 })).unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["audio_index"], 1);
+        assert_eq!(r["added"], 1);
+        assert_eq!(r["count"], 3);
+        assert_eq!(core.project.audio.len(), 3);
+
+        let _ = std::fs::remove_file(&tone_path);
+        let _ = std::fs::remove_file(&gap_path);
     }
 
     #[test]

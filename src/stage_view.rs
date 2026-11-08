@@ -231,6 +231,86 @@ fn point_at(a: V2, b: V2, t: f32) -> V2 {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
 }
 
+/// The line pieces one figure segment draws as, in stage
+/// space: `(from, to, colour)` triples the caller strokes at
+/// the node's thickness. This is the stage's copy of the
+/// rasterizer's segment construction (export.rs
+/// `render_frame_at`, the `StyledSeg` split):
+///
+/// * `bend == 0.0` — the pre-bend construction, unchanged:
+///   one flat line, or [`GRADIENT_STEPS`] gradient pieces
+///   along the straight segment when the node has a `color2`.
+/// * `bend != 0.0` — the segment arcs through
+///   `model::bend_mid(a, b, bend)` and draws as two pieces
+///   meeting there, exactly as export splits its segment.
+///   A gradient segment splits EACH piece again into
+///   [`GRADIENT_STEPS`] sub-steps along that piece, coloured
+///   over that piece's own colour range — export's first
+///   piece runs `near` → the t = 0.5 mid colour, its second
+///   the mid colour → `color2` — so the blend stays
+///   continuous across the arc joint.
+///
+/// `near` is the hex the flat path starts from (node colour,
+/// else the faded figure colour) and `flat` that same colour
+/// as a `Color` (the caller's `node_color` result); the
+/// gradient derives from the hex pair, as the exporters
+/// derive theirs.
+fn segment_pieces(
+    a: V2,
+    b: V2,
+    bend: f32,
+    near: u32,
+    color2: Option<u32>,
+    flat: Color,
+) -> Vec<(V2, V2, Color)> {
+    // One run of drawing along `from`→`to`: gradient
+    // sub-steps at the usual midpoint samples when `steps`
+    // carries them, else the run's single flat line.
+    fn run(
+        out: &mut Vec<(V2, V2, Color)>,
+        from: V2,
+        to: V2,
+        steps: Option<Vec<u32>>,
+        flat: Color,
+    ) {
+        match steps {
+            Some(steps) => {
+                let n = GRADIENT_STEPS as f32;
+                for (k, hex) in steps.iter().enumerate() {
+                    out.push((
+                        point_at(from, to, k as f32 / n),
+                        point_at(from, to, (k + 1) as f32 / n),
+                        hex_color(*hex).unwrap_or(Color::WHITE),
+                    ));
+                }
+            }
+            None => out.push((from, to, flat)),
+        }
+    }
+    let mut out = Vec::new();
+    if bend == 0.0 {
+        run(&mut out, a, b, gradient_steps(near, color2), flat);
+    } else {
+        let mid = model::bend_mid(a, b, bend);
+        match color2 {
+            Some(far) => {
+                // Export's two-piece colour split: the first
+                // piece's far colour is the whole segment's
+                // t = 0.5 blend, and the second piece starts
+                // from that same blend.
+                let mid_hex = gradient_color(near, far, 0.5);
+                run(&mut out, a, mid, gradient_steps(near, Some(mid_hex)), flat);
+                run(&mut out, mid, b, gradient_steps(mid_hex, Some(far)), flat);
+            }
+            None => {
+                run(&mut out, a, mid, None, flat);
+                run(&mut out, mid, b, None, flat);
+            }
+        }
+    }
+    out
+}
+
 /// The shell's selection accent, `0xRRGGBB` — the 2.0 primary
 /// accent, and the same value `stage_fx::GIZMO_COLOR` pins for
 /// the particle gizmo, so both Phase G selection markers read
@@ -369,7 +449,10 @@ fn highlight_prim(
 /// display frame — segments in per-node colour at real thickness
 /// with round caps (a node with a `color2` gradient draws as
 /// [`GRADIENT_STEPS`] blended sub-segments, mirroring the
-/// exporters), shape-node rings/polygons, head rings — plus
+/// exporters; a node with a nonzero bend at the display frame
+/// arcs through `model::bend_mid` as two pieces, again
+/// mirroring the exporters — see [`segment_pieces`]),
+/// shape-node rings/polygons, head rings — plus
 /// joint handles on the selected figure. Mirrors the GPUI stage's
 /// `draw_data`/`paint_stage` decisions (opacity fades toward the
 /// background; solo/hidden figures skipped via
@@ -475,6 +558,16 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
             continue;
         }
         let pos = core.positions_f(display, fi);
+        // Per-node bends at the display frame (export.rs makes
+        // the same per-figure fetch); empty when the project
+        // carries no bend data, and every segment then takes
+        // the straight path in `segment_pieces` unchanged.
+        // Bends apply to this main figure pass only: the onion
+        // skins above and the joint handles below stay
+        // unbended, exactly as they were before bends reached
+        // the stage (the rasterizer draws no ghosts at all, so
+        // there is no exporter ghost behaviour to mirror).
+        let bends = project.bends_at(display, fi);
         // Canvas fade for layer opacity (the rasterizer uses true
         // alpha for segments; the canvas blends toward the bg —
         // the GPUI stage's decision).
@@ -491,36 +584,36 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         };
         for (i, node) in fig.def.nodes.iter().enumerate() {
             if let Some(p) = node.parent {
-                // Gradient segments (node.style.color2 set) draw
-                // as GRADIENT_STEPS sub-segments blending node
-                // colour → color2, parent joint → node joint —
-                // the exporters' direction and lerp. The near
-                // hex is exactly the colour the flat path draws
-                // (node colour, else the faded figure colour), so
-                // the gradient starts where the flat segment did;
-                // color2 is used raw, as export.rs uses it.
-                match gradient_steps(node.color.unwrap_or(faded), node.style.color2) {
-                    Some(steps) => {
-                        for (k, hex) in steps.iter().enumerate() {
-                            let n = GRADIENT_STEPS as f32;
-                            shape = shape.line(
-                                rt.to_screen(point_at(pos[p], pos[i], k as f32 / n)),
-                                rt.to_screen(point_at(pos[p], pos[i], (k + 1) as f32 / n)),
-                                node.thickness * s,
-                                LineCap::Round,
-                                hex_color(*hex).unwrap_or(Color::WHITE),
-                            );
-                        }
-                    }
-                    None => {
-                        shape = shape.line(
-                            rt.to_screen(pos[p]),
-                            rt.to_screen(pos[i]),
-                            node.thickness * s,
-                            LineCap::Round,
-                            node_color(node),
-                        );
-                    }
+                // Segment pieces from `segment_pieces`: flat,
+                // gradient (GRADIENT_STEPS sub-segments blending
+                // node colour → color2, parent joint → node
+                // joint — the exporters' direction and lerp), and
+                // arced through `model::bend_mid` when this node's
+                // bend at the display frame is nonzero — the
+                // indexing export uses (`bends` is per node; the
+                // segment to node `i` takes node `i`'s bend). The
+                // near hex is exactly the colour the flat path
+                // draws (node colour, else the faded figure
+                // colour), so the gradient starts where the flat
+                // segment did; color2 is used raw, as export.rs
+                // uses it.
+                let bend = bends.get(i).copied().unwrap_or(0.0);
+                let pieces = segment_pieces(
+                    pos[p],
+                    pos[i],
+                    bend,
+                    node.color.unwrap_or(faded),
+                    node.style.color2,
+                    node_color(node),
+                );
+                for (a, b, color) in pieces {
+                    shape = shape.line(
+                        rt.to_screen(a),
+                        rt.to_screen(b),
+                        node.thickness * s,
+                        LineCap::Round,
+                        color,
+                    );
                 }
             }
         }
@@ -822,5 +915,131 @@ mod tests {
         let skins = onion_skins(&core, 3, 1);
         assert_eq!(skins.len(), 1);
         assert_eq!(skins[0].1, 0x7BE495);
+    }
+
+    #[test]
+    fn segment_pieces_straight_flat_is_one_line() {
+        let pieces = segment_pieces([0.0, 0.0], [80.0, 40.0], 0.0, 0x123456, None, Color::WHITE);
+        assert_eq!(pieces, vec![([0.0, 0.0], [80.0, 40.0], Color::WHITE)]);
+    }
+
+    #[test]
+    fn segment_pieces_zero_bend_matches_the_straight_construction() {
+        // The pre-bend drawing, built by hand: gradient pieces
+        // coloured at the (k + 0.5) / 6 samples along the
+        // straight segment, endpoints walking k/6 → (k+1)/6.
+        // A zero bend must reproduce it exactly, so bend-less
+        // and all-zero projects draw not one line differently.
+        let (a, b) = ([10.0, 20.0], [110.0, 60.0]);
+        let (near, far) = (0x102030u32, 0xE0D0C0u32);
+        let n = GRADIENT_STEPS as f32;
+        let expect: Vec<(V2, V2, Color)> = (0..GRADIENT_STEPS)
+            .map(|k| {
+                (
+                    point_at(a, b, k as f32 / n),
+                    point_at(a, b, (k + 1) as f32 / n),
+                    hex_color(gradient_color(near, far, (k as f32 + 0.5) / n))
+                        .unwrap_or(Color::WHITE),
+                )
+            })
+            .collect();
+        assert_eq!(segment_pieces(a, b, 0.0, near, Some(far), Color::WHITE), expect);
+    }
+
+    #[test]
+    fn segment_pieces_bent_flat_splits_at_bend_mid() {
+        let (a, b) = ([0.0, 0.0], [80.0, 40.0]);
+        let bend = 0.6;
+        let pieces = segment_pieces(a, b, bend, 0x123456, None, Color::WHITE);
+        // Two lines where the straight segment drew one, both
+        // in the flat colour, meeting exactly at bend_mid's
+        // output (computed here by the model itself).
+        assert_eq!(pieces.len(), 2);
+        let mid = model::bend_mid(a, b, bend);
+        assert_eq!(pieces[0], (a, mid, Color::WHITE));
+        assert_eq!(pieces[1], (mid, b, Color::WHITE));
+        // The joint really leaves the straight midpoint —
+        // bend_mid's whole point for a nonzero bend.
+        assert_ne!(mid, point_at(a, b, 0.5));
+    }
+
+    #[test]
+    fn segment_pieces_bent_gradient_splits_each_half() {
+        let (a, b) = ([0.0, 0.0], [90.0, 0.0]);
+        let (near, far) = (0x000000u32, 0xFFFFFFu32);
+        // Straight gradient: GRADIENT_STEPS pieces. Bent:
+        // each half gets its own GRADIENT_STEPS sub-steps.
+        let straight = segment_pieces(a, b, 0.0, near, Some(far), Color::WHITE);
+        assert_eq!(straight.len(), GRADIENT_STEPS);
+        let bent = segment_pieces(a, b, 0.5, near, Some(far), Color::WHITE);
+        assert_eq!(bent.len(), 2 * GRADIENT_STEPS);
+        // The halves meet exactly at the bend midpoint.
+        let mid = model::bend_mid(a, b, 0.5);
+        assert_eq!(bent[GRADIENT_STEPS - 1].1, mid);
+        assert_eq!(bent[GRADIENT_STEPS].0, mid);
+        // Export's colour split: the second half is coloured
+        // over [mid blend, color2], so its first piece takes
+        // that range's first midpoint sample.
+        let mid_hex = gradient_color(near, far, 0.5);
+        let expect = gradient_color(mid_hex, far, 0.5 / GRADIENT_STEPS as f32);
+        assert_eq!(bent[GRADIENT_STEPS].2, hex_color(expect).unwrap_or(Color::WHITE));
+        // And the first half over [near, mid blend]: its last
+        // piece takes that range's last midpoint sample.
+        let expect_first = gradient_color(
+            near,
+            mid_hex,
+            (GRADIENT_STEPS as f32 - 0.5) / GRADIENT_STEPS as f32,
+        );
+        assert_eq!(
+            bent[GRADIENT_STEPS - 1].2,
+            hex_color(expect_first).unwrap_or(Color::WHITE)
+        );
+    }
+
+    #[test]
+    fn core_bend_data_absent_and_all_zero_draw_straight() {
+        let mut core = EditorCore::new();
+        core.current = 0;
+        let display = core.display_frame();
+        // Absent: no bend data anywhere → bends_at is empty,
+        // so every segment's bend reads 0.0.
+        assert!(core.project.bends_at(display, 0).is_empty());
+        // All-zero data collapses to the same empty report,
+        // so the two projects feed the segment pass identical
+        // (zero) bends — the count equality the straight path
+        // rests on.
+        let nodes = core.project.figures[0].def.nodes.len();
+        for frame in core.project.frames.iter_mut() {
+            frame.bends = vec![vec![0.0; nodes]];
+        }
+        assert!(core.project.bends_at(display, 0).is_empty());
+        // One bent node: exactly its segment splits, through
+        // bend_mid of its evaluated endpoints.
+        let (ni, parent) = core.project.figures[0]
+            .def
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(i, n)| n.parent.map(|p| (i, p)))
+            .expect("the demo figure has segments");
+        for frame in core.project.frames.iter_mut() {
+            frame.bends[0][ni] = 0.5;
+        }
+        let bends = core.project.bends_at(display, 0);
+        assert_eq!(bends.len(), nodes);
+        assert_eq!(bends[ni], 0.5);
+        let pos = core.positions_f(display, 0);
+        let node = &core.project.figures[0].def.nodes[ni];
+        let pieces = segment_pieces(
+            pos[parent],
+            pos[ni],
+            bends.get(ni).copied().unwrap_or(0.0),
+            0xE8E8EC,
+            node.style.color2,
+            Color::WHITE,
+        );
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(pieces[0].1, model::bend_mid(pos[parent], pos[ni], 0.5));
+        assert_eq!(pieces[1].0, model::bend_mid(pos[parent], pos[ni], 0.5));
     }
 }
