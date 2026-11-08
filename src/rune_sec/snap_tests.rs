@@ -25,10 +25,41 @@
 //!   window points plus effective opacity.
 //! * `Runtime::find(key)` returns the element's drawn centre,
 //!   which is what the taps below aim at.
+//!
+//! Round 2 (Phase E, section 37) adds four tests over the
+//! Phase D surfaces — menus, the command palette, the
+//! settings theme buttons and the workspace chips. New API
+//! facts they rest on, likewise verified in the pinned
+//! source:
+//! * `Runtime::key(ev)` queues a key event (dispatched on
+//!   the next `frame`), and `Runtime::state` is a `pub`
+//!   field — the tests read section state (`state.menus`,
+//!   `state.palette`, `state.workspace`, …) straight off
+//!   it, the same way round 1 read `state.core`.
+//! * `KeyEvent` is exactly `{ key: Key, mods: Mods }` (both
+//!   `pub`, `edit/keys.rs`). `KeyEvent::is_command(c)`
+//!   matches `Key::Command(c)` ONLY — a `Key::Text` event
+//!   with ctrl/cmd mods does not open the palette — so the
+//!   Ctrl+K event below is built as `Key::Command('k')`,
+//!   the shape rune's own edit tests use for chords.
+//! * Typing needs no seeding: `route_key`
+//!   (runtime/input/keys.rs) delivers `Key::Text` events
+//!   to the focused input's editor, and a field whose
+//!   `TextEdit.focused` flag is set claims that focus at
+//!   commit (`sync_requested_focus`) — `open_palette`
+//!   sets the flag, so after a settling frame the queued
+//!   characters land in `state.palette.query.text` for
+//!   real (rune's own `on_key_tests` prove the same path:
+//!   flag + frame + `Key::Text` ⇒ the field's text grows).
+//! * `Runtime::find` returns the FIRST node in tree order
+//!   with a key, so the menu test taps only dropdown-unique
+//!   keys (`export` is asserted, never tapped; the Edit
+//!   item tapped is `copy-frame`) — `save`/`load`/`undo`
+//!   also live in the app bar, earlier in the tree.
 
 use std::collections::BTreeSet;
 
-use rune::{Env, Runtime};
+use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 use crate::stage_view::{to_screen, to_stage, view_transform};
 use crate::{init, on_key, poll, view, State};
@@ -76,6 +107,22 @@ fn presented_keys(rt: &Runtime<State>) -> BTreeSet<String> {
         .iter()
         .filter_map(|e| e.key.clone())
         .collect()
+}
+
+/// Queue one key event, then run one frame so the runtime
+/// dispatches it through the real routing (app `on_key`,
+/// focused input, editor — `route_key` in the pinned
+/// source).
+fn press_key(rt: &mut Runtime<State>, key: Key, mods: Mods) {
+    rt.key(KeyEvent { key, mods });
+    rt.frame(DT);
+}
+
+/// Type one character into whatever field holds focus, the
+/// way the OS delivers it: a plain `Key::Text` event, no
+/// modifiers.
+fn type_char(rt: &mut Runtime<State>, c: char) {
+    press_key(rt, Key::Text(c.to_string()), Mods::default());
 }
 
 #[test]
@@ -261,5 +308,164 @@ fn stage_drag_grabs_the_root_joint_and_moves_the_pose() {
     assert!(
         (settled[0] - moved[0]).abs() < 0.01 && (settled[1] - moved[1]).abs() < 0.01,
         "the pose stays where the drag left it: {moved:?} -> {settled:?}"
+    );
+}
+
+// ----------------------------------------------------------------
+// Round 2 (Phase E, section 37): menus, palette, settings,
+// workspaces — the Phase D surfaces driven end to end.
+// ----------------------------------------------------------------
+
+#[test]
+fn file_menu_opens_lists_items_and_scrim_closes() {
+    let mut rt = editor();
+    assert_eq!(rt.state.menus.open, None);
+    assert!(
+        !presented_keys(&rt).contains("export"),
+        "no File dropdown before the trigger is pressed"
+    );
+
+    // Trigger: the menu opens (state) and its dropdown is
+    // presented with its items. `save`/`load` also exist in
+    // the app bar, so the dropdown-only item key `export`
+    // (and the dropdown surface's own key) are the proof
+    // the items are really there.
+    tap(&mut rt, "menu-file");
+    // A settling frame: the dropdown is `anchored` to the
+    // trigger, so let its first commit land before reading
+    // the presented tree.
+    rt.frame(DT);
+    assert_eq!(
+        rt.state.menus.open,
+        Some(crate::rune_sec::menus::FILE),
+        "File trigger opens the File menu"
+    );
+    let keys = presented_keys(&rt);
+    assert!(keys.contains("menu-file-dropdown"), "dropdown surface presented");
+    assert!(keys.contains("export"), "File ▸ Export PNG item presented");
+    assert!(keys.contains("menu-scrim"), "dismissal scrim presented");
+
+    // Scrim: a press on the full-window dismissal layer
+    // closes the menu and the dropdown leaves the tree.
+    tap(&mut rt, "menu-scrim");
+    assert_eq!(rt.state.menus.open, None, "scrim press closes the menu");
+    let keys = presented_keys(&rt);
+    assert!(!keys.contains("menu-file-dropdown"), "dropdown dismissed");
+    assert!(!keys.contains("export"), "dropdown items dismissed");
+
+    // Close-on-select: Edit ▸ Copy frame runs its op and
+    // dismisses the menu (every item goes through the
+    // menus section's closing wrapper). `copy-frame` is
+    // dropdown-unique — `find` returns the first key match
+    // in tree order, and the app bar's `undo` would shadow
+    // the Edit menu's.
+    tap(&mut rt, "menu-edit");
+    assert_eq!(rt.state.menus.open, Some(crate::rune_sec::menus::EDIT));
+    tap(&mut rt, "copy-frame");
+    assert_eq!(rt.state.menus.open, None, "selecting an item closes the menu");
+}
+
+#[test]
+fn command_palette_ctrl_k_types_and_enter_runs_undo() {
+    let mut rt = editor();
+
+    // Something undoable first, so the palette's Undo has a
+    // visible effect: the demo project's five frames -> six.
+    tap(&mut rt, "add-frame");
+    assert_eq!(rt.state.core.frame_count(), 6);
+
+    // Ctrl+K opens the palette. `palette_handle_key` (called
+    // first by the shell's `on_key`) checks
+    // `ev.is_command('k')`, which matches `Key::Command('k')`
+    // only — hence this event shape (rune's own edit tests
+    // build command chords the same way).
+    press_key(
+        &mut rt,
+        Key::Command('k'),
+        Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    );
+    assert!(rt.state.palette.open, "Ctrl+K opens the palette");
+    assert!(
+        presented_keys(&rt).contains("command-palette"),
+        "palette panel is mounted"
+    );
+    // A settling frame: the freshly mounted query field
+    // claims runtime focus from the `focused` flag
+    // `open_palette` set on its TextEdit.
+    rt.frame(DT);
+
+    // Type the query through the real input path — queued
+    // Key::Text events routed to the focused field, no
+    // state seeding. The text landing in the field's own
+    // edit state is the proof the path is real.
+    for c in "undo".chars() {
+        type_char(&mut rt, c);
+    }
+    assert_eq!(
+        rt.state.palette.query.text, "undo",
+        "typed characters landed in the query field"
+    );
+
+    // Enter runs the highlighted row: `filter_commands`
+    // ranks Undo first for "undo" (the palette section's own
+    // unit tests prove the ranking), and running a command
+    // closes the palette. Either Enter route lands there —
+    // the single-line field's `on_submit` and
+    // `palette_handle_key` both call `run_selected`.
+    press_key(&mut rt, Key::Enter, Mods::default());
+    assert_eq!(
+        rt.state.core.frame_count(),
+        5,
+        "the palette's Undo reverted the added frame"
+    );
+    assert!(!rt.state.palette.open, "running a command closes the palette");
+}
+
+#[test]
+fn settings_theme_buttons_flip_core_light_theme() {
+    let mut rt = editor();
+
+    // The settings card starts closed and its theme buttons
+    // exist only while it is open — open it first. (The
+    // settings section is mounted in every workspace, so
+    // this does not depend on the seeded workspace.)
+    tap(&mut rt, "settings-toggle");
+    assert!(rt.state.settings.open, "Settings toggle opens the card");
+
+    // Each theme button sets its own value outright, never
+    // a blind toggle, so these assertions hold whatever
+    // theme the persisted layout prefs seeded at `init`.
+    tap(&mut rt, "settings-theme-light");
+    assert!(rt.state.core.light_theme, "Light sets core.light_theme");
+    tap(&mut rt, "settings-theme-dark");
+    assert!(!rt.state.core.light_theme, "Dark clears core.light_theme");
+}
+
+#[test]
+fn workspace_chip_switches_the_workspace_field() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // The chip row is permanent shell furniture (mounted
+    // under the menu bar in every workspace). A press runs
+    // the workspaces section's `select_workspace`: the
+    // field flips (and the choice persists to the layout
+    // prefs — the section's own behaviour, not faked here).
+    tap(&mut rt, "ws-draw");
+    assert_eq!(
+        rt.state.workspace,
+        Workspace::Draw,
+        "Draw chip selects the Draw workspace"
+    );
+    // And back — which also leaves the shared layout prefs
+    // naming Animate again, as they started.
+    tap(&mut rt, "ws-animate");
+    assert_eq!(
+        rt.state.workspace,
+        Workspace::Animate,
+        "Animate chip switches back"
     );
 }

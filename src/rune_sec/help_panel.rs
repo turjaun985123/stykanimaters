@@ -1,28 +1,34 @@
 //! Help panel for the Rune editor shell (Rune migration
-//! Phase D, section 25/40): a pure builder over `&EditorCore`
-//! — it reads project facts for its header and never mutates
-//! the core. The panel's open/close state lives in the shell's
-//! menu state, not here.
+//! Phase D, section 25/40; Phase E, section 23/40): a pure
+//! builder over `&EditorCore` — it reads project facts for
+//! its header and never mutates the core. The panel's
+//! open/close state lives in the shell's menu state, not
+//! here.
 //!
 //! Content discipline (the GPUI-era `ui::help` rule, kept):
 //! every shortcut row names a key that does something real.
-//! A row survives if either the Rune shell handles the key
-//! today (`main.rs` `on_key`, `chrome_view` buttons) or the
-//! GPUI-era binding's backing op/field still exists in
-//! `editor.rs`. Dropped from the GPUI-era list, deliberately:
+//! A row survives if the Rune shell handles the key today:
+//! the `main.rs` `on_key` bindings, `chrome_view` buttons,
+//! the command palette's key handler (which `on_key`
+//! consults first), or — since Phase E — the shell's
+//! workspace keys. Two groups of GPUI-era rows were dropped
+//! in Phase D; Phase E restores one of them:
 //!
-//! - `Alt+1` … `Alt+8` (workspace switching) — workspace was
-//!   GPUI view state; `EditorCore` has no workspace op, and
-//!   the Rune shell has no workspace state yet. The panel
-//!   says so in the Workspaces section instead of listing
-//!   dead keys.
+//! - `Alt+1` … `Alt+8` (workspace switching) — dropped in
+//!   Phase D because the Rune shell had no workspace state;
+//!   restored in Phase E, where the shell's `on_key` binds
+//!   them to the workspaces in table order (Animate, Draw,
+//!   Graph, Effects, Audio, 3D, Export, Home). They are
+//!   shell bindings, not `EditorCore` ops.
 //! - The nine text-authoring capture rows (`Enter`, `Esc`,
 //!   `Backspace`, `Home`, `End`, typing, and the text-mode
-//!   `Delete`/`Left`/`Right`) — the engine's `text_edit`
-//!   module survives, but the Rune shell does not wire a
-//!   text-authoring capture yet, so those keys currently
-//!   do nothing. `Delete` still appears once, with its real
-//!   shell meaning: delete the selected segment.
+//!   `Delete`/`Left`/`Right`) — still dropped: the engine's
+//!   `text_edit` module survives, but the Rune shell does
+//!   not wire a text-authoring capture, so in that sense
+//!   those keys do nothing. `Delete` still appears once,
+//!   with its real shell meaning: delete the selected
+//!   segment. (The guides toggle is a button in the View
+//!   menu, not a key, so it is not a row either.)
 //!
 //! Search is a later section; the rows are static data
 //! ([`shortcut_rows`], [`section_rows`], [`group_rows`]) so a
@@ -45,18 +51,28 @@ pub fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
 }
 
 /// The shortcut rows belonging to one help section, by the
-/// section names from [`group_rows`]. Workspaces and Drawing
-/// currently have no live keys, so they return empty lists —
-/// the panel renders their [`section_note`] text instead.
+/// section names from [`group_rows`]. Drawing currently has
+/// no live keys, so it returns an empty list — the panel
+/// renders its [`section_note`] text instead.
 pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
     match section {
         "Shortcuts" => vec![
             ("Ctrl+Z", "Undo"),
             ("Ctrl+Shift+Z", "Redo"),
             ("Ctrl+Y", "Redo"),
+            ("Ctrl+K", "Open the command palette"),
             ("Delete", "Delete the selected segment"),
         ],
-        "Workspaces" => vec![],
+        "Workspaces" => vec![
+            ("Alt+1", "Switch to the Animate workspace"),
+            ("Alt+2", "Switch to the Draw workspace"),
+            ("Alt+3", "Switch to the Graph workspace"),
+            ("Alt+4", "Switch to the Effects workspace"),
+            ("Alt+5", "Switch to the Audio workspace"),
+            ("Alt+6", "Switch to the 3D workspace"),
+            ("Alt+7", "Switch to the Export workspace"),
+            ("Alt+8", "Switch to the Home workspace"),
+        ],
         "Posing" => vec![
             ("C", "Toggle camera mode"),
             ("O", "Toggle onion skin"),
@@ -78,11 +94,6 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
 /// sections that have rows.
 pub fn section_note(section: &str) -> Option<&'static str> {
     match section {
-        "Workspaces" => Some(
-            "Alt+1 to Alt+8 switched workspaces in the GPUI shell. \
-             The Rune shell has no workspace state yet, so those keys \
-             currently do nothing.",
-        ),
         "Drawing" => Some(
             "No keyboard shortcuts yet. Draw mode exists in the core \
              and stage drags paint while it is on, but no key toggles it.",
@@ -197,11 +208,11 @@ mod tests {
     use super::{group_rows, section_note, section_rows, shortcut_rows};
 
     #[test]
-    fn shortcut_rows_has_exactly_11_rows() {
-        // 4 Shortcuts + 2 Posing + 5 Timeline; Workspaces and
-        // Drawing contribute none (see the module docs for
+    fn shortcut_rows_has_exactly_20_rows() {
+        // 5 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline;
+        // Drawing contributes none (see the module docs for
         // which GPUI-era rows were dropped and why).
-        assert_eq!(shortcut_rows().len(), 11);
+        assert_eq!(shortcut_rows().len(), 20);
     }
 
     #[test]
@@ -223,6 +234,9 @@ mod tests {
         assert_eq!(rows[0], ("Ctrl+Z", "Undo"));
         assert!(rows.contains(&("Ctrl+Shift+Z", "Redo")));
         assert!(rows.contains(&("Ctrl+Y", "Redo")));
+        assert!(rows.contains(&("Ctrl+K", "Open the command palette")));
+        assert!(rows.contains(&("Alt+1", "Switch to the Animate workspace")));
+        assert!(rows.contains(&("Alt+8", "Switch to the Home workspace")));
         assert!(rows.contains(&("Space", "Play / pause")));
         assert!(rows.contains(&("Left", "Previous frame (wraps around)")));
         assert!(rows.contains(&("Right", "Next frame (wraps around)")));
@@ -234,16 +248,30 @@ mod tests {
     }
 
     #[test]
+    fn workspace_rows_cover_all_eight_workspaces_in_table_order() {
+        // Phase E wires Alt+1..Alt+8 in the shell's on_key,
+        // in the workspaces table order; the section lists
+        // exactly those eight rows, in that order.
+        let expected: Vec<(&str, &str)> = vec![
+            ("Alt+1", "Switch to the Animate workspace"),
+            ("Alt+2", "Switch to the Draw workspace"),
+            ("Alt+3", "Switch to the Graph workspace"),
+            ("Alt+4", "Switch to the Effects workspace"),
+            ("Alt+5", "Switch to the Audio workspace"),
+            ("Alt+6", "Switch to the 3D workspace"),
+            ("Alt+7", "Switch to the Export workspace"),
+            ("Alt+8", "Switch to the Home workspace"),
+        ];
+        assert_eq!(section_rows("Workspaces"), expected);
+    }
+
+    #[test]
     fn dropped_gpui_era_rows_stay_dropped() {
         let rows = shortcut_rows();
-        // Workspace switching has no backing op in
-        // EditorCore and no state in the Rune shell.
-        assert!(
-            !rows.iter().any(|(k, _)| k.starts_with("Alt+")),
-            "workspace keys must not be listed as live shortcuts"
-        );
         // The text-authoring capture is not wired in the
         // Rune shell, so none of its rows may appear.
+        // (Workspace keys, dropped in Phase D, are live
+        // again since Phase E — see the workspace test.)
         assert!(
             !rows.iter().any(|(_, a)| a.starts_with("Text editing:")),
             "text-editing rows must not be listed as live shortcuts"
@@ -261,11 +289,9 @@ mod tests {
 
     #[test]
     fn empty_sections_carry_notes_and_filled_sections_do_not() {
-        assert!(section_rows("Workspaces").is_empty());
         assert!(section_rows("Drawing").is_empty());
-        assert!(section_note("Workspaces").is_some());
         assert!(section_note("Drawing").is_some());
-        for name in ["Shortcuts", "Posing", "Timeline"] {
+        for name in ["Shortcuts", "Workspaces", "Posing", "Timeline"] {
             assert!(!section_rows(name).is_empty(), "{name} should have rows");
             assert!(section_note(name).is_none(), "{name} should have no note");
         }

@@ -245,6 +245,17 @@ impl EditorCore {
         }
     }
 
+    /// Number of edits that can currently be undone (the undo
+    /// stack depth, capped at 60 by `snapshot`).
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Number of edits that can currently be redone.
+    pub fn redo_depth(&self) -> usize {
+        self.redo.len()
+    }
+
     /// Hit test in stage coordinates. Returns (figure, node).
     pub fn hit_test(&self, p: V2) -> Option<(usize, usize)> {
         let mut best: Option<(usize, usize, f32)> = None;
@@ -1688,6 +1699,15 @@ impl EditorCore {
         self.status = format!("Easing: {}.", self.project.easing.label());
     }
 
+    /// Set the project easing directly (the easing picker's
+    /// preset buttons). Like `cycle_easing` it does not
+    /// snapshot — project-settings tweaks are not undoable
+    /// edits in this core.
+    pub fn set_project_easing(&mut self, easing: crate::model::Easing) {
+        self.project.easing = easing;
+        self.status = format!("Easing: {}.", self.project.easing.label());
+    }
+
     pub fn toggle_tween_playback(&mut self) {
         self.project.tween_playback = !self.project.tween_playback;
         self.status = format!(
@@ -1822,6 +1842,53 @@ impl EditorCore {
                     Some(c) => format!("Gradient to #{c:06X}."),
                     None => "Gradient off (solid colour).".into(),
                 };
+            }
+            None => self.status = "Select a joint first.".into(),
+        }
+    }
+
+    /// Set the selected segment's cap directly (the style
+    /// panel's segmented control) instead of cycling it.
+    /// Snapshots and reports exactly like `cycle_node_cap`.
+    pub fn set_node_cap(&mut self, cap: crate::model::CapKind) {
+        self.snapshot();
+        match self.selected_node_mut() {
+            Some(node) => {
+                node.style.cap = cap;
+                self.status = format!("Segment cap: {:?}", node.style.cap);
+            }
+            None => self.status = "Select a joint first.".into(),
+        }
+    }
+
+    /// Set the selected segment's gradient end colour
+    /// directly, or clear it with `None` (the style panel's
+    /// swatch row). Snapshots and reports exactly like
+    /// `cycle_node_gradient`.
+    pub fn set_node_color2(&mut self, color2: Option<u32>) {
+        self.snapshot();
+        match self.selected_node_mut() {
+            Some(node) => {
+                node.style.color2 = color2;
+                self.status = match node.style.color2 {
+                    Some(c) => format!("Gradient to #{c:06X}."),
+                    None => "Gradient off (solid colour).".into(),
+                };
+            }
+            None => self.status = "Select a joint first.".into(),
+        }
+    }
+
+    /// Set the selected segment's opacity directly (the
+    /// style panel's stepper), clamped to 0.05..=1.0 so a
+    /// segment can never be made fully invisible by accident.
+    /// Snapshots and reports like the other style setters.
+    pub fn set_node_opacity(&mut self, opacity: f32) {
+        self.snapshot();
+        match self.selected_node_mut() {
+            Some(node) => {
+                node.style.opacity = opacity.clamp(0.05, 1.0);
+                self.status = format!("Segment opacity {:.0}%.", node.style.opacity * 100.0);
             }
             None => self.status = "Select a joint first.".into(),
         }
@@ -2386,6 +2453,20 @@ impl EditorCore {
             let n = stroke.points.len();
             self.status = format!("Stroke drawn ({n} points).");
         }
+    }
+
+    /// Delete the stroke at `index` in `project.strokes`
+    /// (the stroke inspector's per-stroke delete), with a
+    /// snapshot so the delete is undoable. Out of range only
+    /// reports — nothing is removed or snapshotted.
+    pub fn delete_stroke_at(&mut self, index: usize) {
+        if index >= self.project.strokes.len() {
+            self.status = format!("No stroke {} to delete.", index + 1);
+            return;
+        }
+        self.snapshot();
+        self.project.strokes.remove(index);
+        self.status = format!("Stroke {} deleted.", index + 1);
     }
 
     pub fn clear_frame_drawings(&mut self) {
@@ -4015,6 +4096,105 @@ mod tests {
         core.cycle_node_color();
         core.cycle_figure_opacity(0);
         assert_eq!(core.edits_since_autosave(), 3);
+    }
+
+    #[test]
+    fn undo_and_redo_depth_track_the_stacks() {
+        let mut core = EditorCore::new();
+        assert_eq!(core.undo_depth(), 0);
+        assert_eq!(core.redo_depth(), 0);
+        core.add_frame();
+        core.add_frame();
+        assert_eq!(core.undo_depth(), 2);
+        core.undo();
+        assert_eq!(core.undo_depth(), 1);
+        assert_eq!(core.redo_depth(), 1);
+        core.redo();
+        assert_eq!(core.undo_depth(), 2);
+        assert_eq!(core.redo_depth(), 0);
+        // A fresh edit clears the redo stack.
+        core.undo();
+        assert_eq!(core.redo_depth(), 1);
+        core.add_frame();
+        assert_eq!(core.redo_depth(), 0);
+    }
+
+    #[test]
+    fn node_style_setters_write_the_selected_node() {
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        core.set_node_cap(crate::model::CapKind::Square);
+        assert_eq!(
+            core.project.figures[0].def.nodes[1].style.cap,
+            crate::model::CapKind::Square
+        );
+        // Same status wording as cycle_node_cap.
+        assert_eq!(core.status, "Segment cap: Square");
+        core.set_node_color2(Some(0x112233));
+        assert_eq!(
+            core.project.figures[0].def.nodes[1].style.color2,
+            Some(0x112233)
+        );
+        assert_eq!(core.status, "Gradient to #112233.");
+        core.set_node_color2(None);
+        assert_eq!(core.project.figures[0].def.nodes[1].style.color2, None);
+        assert_eq!(core.status, "Gradient off (solid colour).");
+        core.set_node_opacity(0.5);
+        assert_eq!(core.project.figures[0].def.nodes[1].style.opacity, 0.5);
+        // Opacity is clamped to 0.05..=1.0.
+        core.set_node_opacity(2.0);
+        assert_eq!(core.project.figures[0].def.nodes[1].style.opacity, 1.0);
+        core.set_node_opacity(0.0);
+        assert_eq!(core.project.figures[0].def.nodes[1].style.opacity, 0.05);
+    }
+
+    #[test]
+    fn node_style_setters_no_op_without_a_selection() {
+        let mut core = EditorCore::new();
+        assert_eq!(core.selected_node, None);
+        let before = core.project.figures[0].def.nodes[1].style;
+        core.set_node_cap(crate::model::CapKind::Point);
+        assert_eq!(core.status, "Select a joint first.");
+        core.set_node_color2(Some(0xFFFFFF));
+        assert_eq!(core.status, "Select a joint first.");
+        core.set_node_opacity(0.25);
+        assert_eq!(core.status, "Select a joint first.");
+        assert_eq!(core.project.figures[0].def.nodes[1].style, before);
+    }
+
+    #[test]
+    fn set_project_easing_writes_without_snapshotting() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        core.set_project_easing(crate::model::Easing::EaseIn);
+        assert_eq!(core.project.easing, crate::model::Easing::EaseIn);
+        assert!(core.status.starts_with("Easing: "));
+        // Mirrors cycle_easing: project-settings tweaks are
+        // not undoable edits, so the undo stack is untouched.
+        assert_eq!(core.undo_depth(), depth);
+    }
+
+    #[test]
+    fn delete_stroke_at_removes_the_indexed_stroke() {
+        let mut core = EditorCore::new();
+        let mk = |color| crate::model::Stroke {
+            frame: 0,
+            points: vec![[0.0, 0.0], [10.0, 10.0]],
+            color,
+            width: 3.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+        };
+        core.project.strokes = vec![mk(0x111111), mk(0x222222), mk(0x333333)];
+        core.delete_stroke_at(1);
+        let colors: Vec<u32> = core.project.strokes.iter().map(|s| s.color).collect();
+        assert_eq!(colors, vec![0x111111, 0x333333]);
+        assert_eq!(core.status, "Stroke 2 deleted.");
+        // Out of range: status only, list untouched.
+        core.delete_stroke_at(9);
+        assert_eq!(core.project.strokes.len(), 2);
+        assert_eq!(core.status, "No stroke 10 to delete.");
     }
 
     #[test]

@@ -20,6 +20,16 @@
 //!   wording the editor ops use — exactly how `EditorCore`'s
 //!   own 3D ops consume fig3d internally (`fig3_bake` calls
 //!   `fig3d::bake_nodes` on the session state the same way).
+//! - The joint list's direct selection writes the same field
+//!   the one existing selection op writes:
+//!   `fig3_select_next` (editor.rs) assigns `st.selected` and
+//!   reports `"3D joint: {name}."` — there is no direct-select
+//!   op, so `select_joint` below writes that field with that
+//!   wording. Pose save and pose mirror are likewise fig3d
+//!   free functions with no core wrapper:
+//!   `fig3d::save_pose_library` (fig3d.rs:1544) and
+//!   `fig3d::mirror_pose` (fig3d.rs:1342), wired by
+//!   `save_current_pose` / `apply_mirror_pose` below.
 //!
 //! Controls that need a live session render **dimmed but
 //! wired** when there is none: the press still fires, and the
@@ -225,6 +235,98 @@ pub fn apply_ik(core: &mut EditorCore, limb: Limb) -> bool {
     }
 }
 
+/// The session figure's joints as `(index, name)` rows for
+/// the joint list, in node order. Empty without a session.
+/// Pure over the core.
+pub fn joint_rows(core: &EditorCore) -> Vec<(usize, String)> {
+    match &core.fig3 {
+        None => Vec::new(),
+        Some(st) => st
+            .figure
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (i, n.name.clone()))
+            .collect(),
+    }
+}
+
+/// Select joint `index` directly: writes `st.selected` —
+/// the field `EditorCore::fig3_select_next` cycles — with
+/// that op's status wording. Returns false (status set)
+/// without a session or for an out-of-range index, leaving
+/// the selection untouched.
+pub fn select_joint(core: &mut EditorCore, index: usize) -> bool {
+    let mut ok = false;
+    if let Some(st) = &mut core.fig3 {
+        if index < st.figure.nodes.len() {
+            st.selected = index;
+            ok = true;
+        }
+    }
+    if ok {
+        let name = core.fig3.as_ref().unwrap().figure.nodes[index].name.clone();
+        core.status = format!("3D joint: {name}.");
+    } else if core.fig3.is_some() {
+        core.status = "That joint does not exist on this figure.".into();
+    } else {
+        core.status = "Enter 3D mode first.".into();
+    }
+    ok
+}
+
+/// The name a pose is saved under by [`save_current_pose`]:
+/// the pose library's convention is a free display name
+/// (stored in the entry, slugified for the file name by
+/// fig3d), and the panel has no text field, so the session
+/// figure's name carries it: `"<figure> pose"`.
+pub fn pose_save_name(core: &EditorCore) -> Option<String> {
+    core.fig3
+        .as_ref()
+        .map(|st| format!("{} pose", st.figure.name))
+}
+
+/// Save the session pose into the 3D pose library via
+/// `fig3d::save_pose_library`, under [`pose_save_name`].
+/// Returns false (status set) without a session or on a
+/// write error. The saved entry appears in the pose list
+/// below on the next build (the panel re-scans per build).
+pub fn save_current_pose(core: &mut EditorCore) -> bool {
+    let Some(name) = pose_save_name(core) else {
+        core.status = "Enter 3D mode first.".into();
+        return false;
+    };
+    let pose = core.fig3.as_ref().unwrap().pose.clone();
+    match fig3d::save_pose_library(&pose, &name) {
+        Ok(_) => {
+            core.status = format!("Saved 3D pose '{name}'.");
+            true
+        }
+        Err(e) => {
+            core.status = format!("3D pose '{name}' failed to save: {e}");
+            false
+        }
+    }
+}
+
+/// Mirror the session pose across the YZ plane via
+/// `fig3d::mirror_pose` (left/right partner joints exchange
+/// rotations; an exact involution). Returns false (status
+/// set) without a session.
+pub fn apply_mirror_pose(core: &mut EditorCore) -> bool {
+    let mut ok = false;
+    if let Some(st) = &mut core.fig3 {
+        st.pose = fig3d::mirror_pose(&st.figure, &st.pose);
+        ok = true;
+    }
+    if ok {
+        core.status = "3D pose mirrored.".into();
+    } else {
+        core.status = "Enter 3D mode first.".into();
+    }
+    ok
+}
+
 /// The Enter/Exit toggle's label, from real session state.
 pub fn toggle_label(in_session: bool) -> &'static str {
     if in_session {
@@ -353,7 +455,38 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 .child(ctl("orbit-3d", "Orbit +15", false, dim, t, |s| {
                     s.core.fig3_orbit(15.0, 0.0)
                 })),
-        )
+        );
+
+    // Joint list: one row per joint of the session figure;
+    // pressing a row selects that joint directly (the field
+    // `fig3_select_next` cycles), the current joint renders
+    // active. Without a session there is no figure to list.
+    panel = panel.child(section_label("Joints", t));
+    if in_session {
+        let selected = core.fig3.as_ref().unwrap().selected;
+        for (i, name) in joint_rows(core) {
+            panel = panel.child(
+                row().gap(6.0).center_y().child(ctl(
+                    &format!("joint-sel-3d-{i}"),
+                    &format!("{i} · {name}"),
+                    i == selected,
+                    false,
+                    t,
+                    move |s| {
+                        select_joint(&mut s.core, i);
+                    },
+                )),
+            );
+        }
+    } else {
+        panel = panel.child(
+            text("Enter 3D to list the figure's joints.")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    }
+
+    panel = panel
         // Camera presets + frame.
         .child(
             row()
@@ -459,7 +592,21 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
 
     // Pose library: ./library3d/poses via fig3d's scan;
     // Apply sets the session pose (dimmed without one).
-    panel = panel.child(section_label("Pose library", t));
+    // Save stores the current pose under "<figure> pose"
+    // (fig3d::save_pose_library); Mirror flips it across
+    // the YZ plane (fig3d::mirror_pose).
+    panel = panel.child(
+        row()
+            .gap(6.0)
+            .center_y()
+            .child(section_label("Pose library", t).grow(1.0))
+            .child(ctl("save-pose-3d", "Save pose", false, dim, t, |s| {
+                save_current_pose(&mut s.core);
+            }))
+            .child(ctl("mirror-pose-3d", "Mirror pose", false, dim, t, |s| {
+                apply_mirror_pose(&mut s.core);
+            })),
+    );
     let poses = fig3d::scan_pose_library();
     if poses.is_empty() {
         panel = panel.child(
@@ -615,5 +762,91 @@ mod tests {
         core.fig3_mark_pose_b();
         let txt = session_summary(&core);
         assert!(txt.contains("pose B marked"), "unexpected: {txt}");
+    }
+
+    #[test]
+    fn joint_rows_come_from_the_real_session_figure() {
+        let mut core = EditorCore::new();
+        assert!(joint_rows(&core).is_empty(), "no session, no rows");
+        core.enter_3d();
+        let rows = joint_rows(&core);
+        let st = core.fig3.as_ref().unwrap();
+        assert_eq!(rows.len(), st.figure.nodes.len());
+        assert!(rows.len() >= 15, "humanoid chain set: {rows:?}");
+        for (i, (idx, name)) in rows.iter().enumerate() {
+            assert_eq!(*idx, i, "rows are in node order");
+            assert_eq!(name, &st.figure.nodes[i].name);
+        }
+    }
+
+    #[test]
+    fn select_joint_dispatches_directly() {
+        let mut core = EditorCore::new();
+        // No session: refused, editor-op wording.
+        assert!(!select_joint(&mut core, 0));
+        assert_eq!(core.status, "Enter 3D mode first.");
+        core.enter_3d();
+        // Direct dispatch to a mid-chain joint, with the
+        // cycling op's exact status wording.
+        let name = core.fig3.as_ref().unwrap().figure.nodes[5].name.clone();
+        assert!(select_joint(&mut core, 5));
+        assert_eq!(core.fig3.as_ref().unwrap().selected, 5);
+        assert_eq!(core.status, format!("3D joint: {name}."));
+        // Rotation now lands on the selected joint — the
+        // selection the rotate op reads is the one we set.
+        let before = core.fig3.as_ref().unwrap().pose.clone();
+        core.fig3_rotate(0, 30.0);
+        assert_ne!(core.fig3.as_ref().unwrap().pose, before);
+        // Out of range: refused, selection untouched.
+        assert!(!select_joint(&mut core, 999));
+        assert_eq!(core.fig3.as_ref().unwrap().selected, 5);
+    }
+
+    #[test]
+    fn save_current_pose_writes_a_loadable_library_entry() {
+        let mut core = EditorCore::new();
+        assert!(!save_current_pose(&mut core));
+        assert_eq!(core.status, "Enter 3D mode first.");
+        core.enter_3d();
+        // Make the pose distinctive, then save it.
+        assert!(select_joint(&mut core, 3));
+        core.fig3_rotate(2, 40.0);
+        let saved_pose = core.fig3.as_ref().unwrap().pose.clone();
+        let name = pose_save_name(&core).unwrap();
+        assert!(save_current_pose(&mut core));
+        assert_eq!(core.status, format!("Saved 3D pose '{name}'."));
+        // The entry is in the library scan and loads back as
+        // the exact pose that was saved.
+        assert!(
+            fig3d::scan_pose_library().contains(&name),
+            "saved pose missing from the library scan"
+        );
+        assert_eq!(fig3d::load_pose_library(&name).unwrap(), saved_pose);
+        // And the panel's own Apply path restores it after
+        // the session pose moves on.
+        core.fig3_rotate(2, 15.0);
+        assert_ne!(core.fig3.as_ref().unwrap().pose, saved_pose);
+        assert!(apply_pose(&mut core, &name));
+        assert_eq!(core.fig3.as_ref().unwrap().pose, saved_pose);
+    }
+
+    #[test]
+    fn mirror_pose_flips_and_restores() {
+        let mut core = EditorCore::new();
+        assert!(!apply_mirror_pose(&mut core));
+        assert_eq!(core.status, "Enter 3D mode first.");
+        core.enter_3d();
+        // An asymmetric pose: left arm raised only.
+        assert!(select_joint(&mut core, 3));
+        core.fig3_rotate(2, 40.0);
+        let original = core.fig3.as_ref().unwrap().pose.clone();
+        assert!(apply_mirror_pose(&mut core));
+        assert_eq!(core.status, "3D pose mirrored.");
+        let mirrored = core.fig3.as_ref().unwrap().pose.clone();
+        assert_ne!(mirrored, original, "mirror must change an asymmetric pose");
+        // mirror_pose is an exact involution: a second press
+        // restores the original pose bit-for-bit.
+        assert!(apply_mirror_pose(&mut core));
+        assert_eq!(core.fig3.as_ref().unwrap().pose, original);
     }
 }

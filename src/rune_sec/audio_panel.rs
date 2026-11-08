@@ -5,21 +5,24 @@
 //!
 //! The panel is the Rune form of the GPUI app's `audio_panel`:
 //! a summary line, one row per clip (name, start frame,
-//! per-clip gain), an operations toolbar acting on the LAST
-//! clip, and an add-clip row with a file-name entry.
+//! per-clip gain, per-clip ops incl. Delete), an operations
+//! toolbar acting on the LAST clip (effects, Fade, Reverse,
+//! a gain stepper, Earlier/Later move, Mixdown), and an
+//! add-clip row with a file-name entry.
 //!
 //! Every control calls a real `EditorCore` op (evidence in
-//! the handler comments). Three operations the old brief
-//! listed have **no** `EditorCore` op and are therefore NOT
-//! buttons here — the DSP exists in `audio_edit` (`fade`,
-//! `audio_edit.rs:176`; `gain`, `:213`; `reverse`, `:225`)
-//! but nothing materialises it (no snapshot / repoint /
-//! status op), and there is no delete-clip op at all
-//! (nothing removes a single clip from `project.audio`).
-//! Wiring them needs new engine ops, which this section may
-//! not write. Per-clip gain is likewise display-only: the
-//! `AudioClip.gain` field exists (`model.rs:505`) and is
-//! honoured by playback/mixdown, but no op mutates it.
+//! the handler comments). Phase E closed the gaps Phase D
+//! had to leave open — fade, reverse, gain, delete and move
+//! now exist as core ops in `audio_ops.rs`
+//! (`audio_fade_last`, `audio_reverse_last`,
+//! `audio_set_gain_last` / `audio_clip_gain_step`,
+//! `delete_audio_clip`, `audio_move_last`), materialising
+//! the `audio_edit` DSP (`fade`, `audio_edit.rs:176`;
+//! `gain`, `:213`; `reverse`, `:225`) the way the older
+//! `_last` effect ops do. Per-clip gain is therefore no
+//! longer display-only: the toolbar stepper steps the last
+//! clip's `AudioClip.gain` (`model.rs:505`), the field
+//! playback and mixdown honour.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, text_input, El, TextEdit, Tx};
@@ -81,6 +84,23 @@ pub fn gain_suffix(gain: f32) -> String {
         format!(" · gain {gain:.2}")
     } else {
         String::new()
+    }
+}
+
+/// The gain the toolbar stepper acts on: the LAST clip's
+/// gain, or `None` when the project has no clips.
+pub fn last_gain(clips: &[AudioClip]) -> Option<f32> {
+    clips.last().map(|c| c.gain)
+}
+
+/// The gain stepper's readout: `"Gain 1.10"` for the last
+/// clip's current gain, `"Gain —"` when there are no clips
+/// (the stepper ops then report "no clips" via their own
+/// status text, like the other `_last` buttons).
+pub fn gain_readout(clips: &[AudioClip]) -> String {
+    match last_gain(clips) {
+        Some(gain) => format!("Gain {gain:.2}"),
+        None => "Gain —".to_string(),
     }
 }
 
@@ -183,8 +203,11 @@ fn normalize_last(s: &mut State) {
 /// The audio panel: header + summary, clip rows with the
 /// per-clip ops the engine defines by index (Normalise,
 /// Split at the current frame, Crossfade into the next
-/// clip), the last-clip operations toolbar, and the
-/// add-clip row. Element keys reuse the GPUI control ids.
+/// clip, Delete), the last-clip operations toolbar, and
+/// the add-clip row. Element keys reuse the GPUI control
+/// ids where they existed; the Phase E keys (`audio-fade`,
+/// `audio-reverse`, `audio-gain-*`, `audio-move-*`,
+/// `audio-del-{i}`) are new.
 pub fn audio_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let clips = &core.project.audio;
@@ -253,13 +276,25 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                     move |s| s.core.audio_crossfade(i),
                 ));
             }
+            clip_row = clip_row.child(btn(
+                &format!("audio-del-{i}"),
+                "Delete",
+                false,
+                t,
+                move |s| { s.core.delete_audio_clip(i); },
+            ));
             panel = panel.child(clip_row);
         }
     }
 
     // Operations on the LAST clip — the engine's `_last`
     // effect ops, plus index-based Normalise aimed at the
-    // last clip and the whole-project Mixdown.
+    // last clip and the whole-project Mixdown. Phase E
+    // added the materialising ops from `audio_ops.rs`:
+    // Fade and Reverse (DSP on the last clip), the gain
+    // stepper (`audio_clip_gain_step`, ±0.1 per press, with
+    // the live `gain_readout` between the steppers), and
+    // Earlier/Later (`audio_move_last`, one slot per press).
     panel = panel.child(text("Operations").font(type_::LABEL).color(t.text_secondary));
     panel = panel.child(
         row()
@@ -284,6 +319,29 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             }))
             .child(btn("audio-comp", "Compress", false, t, |s| {
                 s.core.audio_compress_last()
+            }))
+            .child(btn("audio-fade", "Fade", false, t, |s| {
+                s.core.audio_fade_last();
+            }))
+            .child(btn("audio-reverse", "Reverse", false, t, |s| {
+                s.core.audio_reverse_last();
+            }))
+            .child(btn("audio-gain-dn", "Gain -", false, t, |s| {
+                s.core.audio_clip_gain_step(-0.1);
+            }))
+            .child(
+                text(gain_readout(clips))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            )
+            .child(btn("audio-gain-up", "Gain +", false, t, |s| {
+                s.core.audio_clip_gain_step(0.1);
+            }))
+            .child(btn("audio-move-earlier", "Earlier", false, t, |s| {
+                s.core.audio_move_last(-1);
+            }))
+            .child(btn("audio-move-later", "Later", false, t, |s| {
+                s.core.audio_move_last(1);
             }))
             .child(btn("mixdown", "Mixdown", false, t, |s| {
                 s.core.mixdown_audio()
@@ -322,6 +380,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stykanimate_rs::editor::EditorCore;
 
     fn clip(path: &str, start_frame: usize, gain: f32) -> AudioClip {
         AudioClip {
@@ -413,5 +472,108 @@ mod tests {
             "2 clips · total 1.0 s · 1 with gain ≠ 1.0"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn gain_readout_shows_the_last_clips_gain() {
+        assert_eq!(gain_readout(&[]), "Gain —");
+        assert_eq!(gain_readout(&[clip("a.wav", 0, 1.0)]), "Gain 1.00");
+        // The readout follows the LAST clip (the stepper's
+        // target), not the first.
+        assert_eq!(
+            gain_readout(&[clip("a.wav", 0, 2.0), clip("b.wav", 3, 0.5)]),
+            "Gain 0.50"
+        );
+        assert_eq!(last_gain(&[]), None);
+        assert_eq!(last_gain(&[clip("a.wav", 0, 0.75)]), Some(0.75));
+    }
+
+    #[test]
+    fn gain_step_calls_update_the_readout_on_a_real_core() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip("fake/theme.wav", 0, 1.0));
+        assert_eq!(gain_readout(&core.project.audio), "Gain 1.00");
+
+        // The exact step the Gain + button sends.
+        core.audio_clip_gain_step(0.1);
+        let gain = core.project.audio[0].gain;
+        assert!((gain - 1.1).abs() < 1e-6, "unexpected gain {gain}");
+        assert_eq!(gain_readout(&core.project.audio), "Gain 1.10");
+
+        // Two Gain - presses land at 0.90.
+        core.audio_clip_gain_step(-0.1);
+        core.audio_clip_gain_step(-0.1);
+        assert_eq!(gain_readout(&core.project.audio), "Gain 0.90");
+    }
+
+    #[test]
+    fn delete_audio_clip_removes_the_indexed_clip() {
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip("a/first.wav", 0, 1.0));
+        core.project.audio.push(clip("a/second.wav", 5, 0.5));
+
+        // The exact call the row's Delete button sends.
+        core.delete_audio_clip(0);
+        assert_eq!(core.project.audio.len(), 1);
+        assert_eq!(core.project.audio[0].path, "a/second.wav");
+        // The readout now targets the surviving last clip.
+        assert_eq!(gain_readout(&core.project.audio), "Gain 0.50");
+    }
+
+    /// A shell `State` over the given core, field-for-field
+    /// the literal `clips_panel`'s build test uses.
+    fn state_with(core: EditorCore) -> State {
+        State {
+            core,
+            last_poll: None,
+            wheel_zoom: 0.0,
+            figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
+            figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
+            library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
+            graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
+            audio_panel: AudioPanelState::new(),
+            menus: crate::rune_sec::menus::MenusState::default(),
+            palette: crate::rune_sec::command_palette::PaletteState::new(),
+            settings: crate::rune_sec::settings_popover::SettingsState::default(),
+            toasts: crate::rune_sec::toasts::ToastsState::new(),
+            text_tool: crate::rune_sec::text_tool::TextToolState::new(),
+            name_edit: rune::TextEdit::new(""),
+            export_use_range: false,
+            fx_selected: None,
+            pose_clipboard: None,
+            last_status: String::new(),
+            toast_now: 0.0,
+            last_dark: true,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            guides: false,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
+        }
+    }
+
+    #[test]
+    fn audio_panel_builds_toolbar_with_and_without_clips() {
+        let t = rune::tok::theme(true);
+        // No clips: the empty-state line plus the toolbar
+        // (its `_last` buttons report "no clips" via status
+        // when pressed) must still build.
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        let _ = audio_panel(&state_with(core), &t);
+
+        // Clips present: rows (with Delete) and the full
+        // toolbar incl. Fade / Reverse / gain stepper /
+        // Earlier / Later build against the populated list.
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip("fake/theme.wav", 0, 1.25));
+        core.project.audio.push(clip("fake/sting.wav", 9, 1.0));
+        let _ = audio_panel(&state_with(core), &t);
     }
 }

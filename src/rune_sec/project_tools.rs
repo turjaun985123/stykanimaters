@@ -10,7 +10,12 @@
 //!   with `TextEdit::new(core.project.name.clone())` — the name
 //!   field's edit state (Rune core `TextEdit`, audit Q5). The
 //!   section re-syncs it after every project switch it performs
-//!   (New / Open / Recover) via [`sync_name_edit`].
+//!   (New / Open / Recover) via [`sync_name_edit`], and the
+//!   integrator ALSO calls [`sync_name_edit`] from `poll()` on
+//!   every tick, so switches this section does not perform —
+//!   the app bar's Load, the Home panel's open, an MCP-driven
+//!   rename — re-sync the field within a frame as well. See
+//!   the fn's docs for the focused-field guard.
 //! - a `mod` declaration mounting this file, and one
 //!   `.child(project_tools::project_section(s, &t))` in the view.
 //!
@@ -223,11 +228,46 @@ pub fn recover_snapshot(core: &mut EditorCore) -> bool {
 // State-level handlers
 // ---------------------------------------------------------------------
 
-/// Re-seed the name field from the open project (after New /
-/// Open / Recover changed it). A no-op when the field already
-/// shows the current name, so an in-progress edit is never
-/// clobbered by an unrelated sync.
-fn sync_name_edit(s: &mut State) {
+/// Sync the name field with the open project's name.
+///
+/// The name field owns its own edit buffer (`State::name_edit`),
+/// so anything that changes `Project::name` behind the field's
+/// back leaves the field showing a stale name: the app bar's
+/// Load, the Home panel's open, an MCP-driven rename — none of
+/// them know this field exists. This section's own switches
+/// (New / Open / Recover) call this fn from their handlers, but
+/// the fix for every other path is polling: **the integrator
+/// calls this in `main.rs`'s `poll()` on every tick.** The
+/// check is one string compare, so an idle tick costs nothing,
+/// and any project switch — Load, Open, Recover, New, or a
+/// rename arriving over MCP — re-syncs the field within a
+/// frame of the name changing.
+///
+/// Behaviour, precisely:
+///
+/// - Field already shows the project name → no-op (the caret
+///   and selection are left exactly where they are).
+/// - Field differs and is NOT focused → the whole buffer is
+///   replaced via `TextEdit::replace_text` (rune `edit.rs`:
+///   replaces the draft, discards its undo history, moves the
+///   caret to the end of the new text, and preserves the
+///   `focused` flag — this fn adds no selection/focus side
+///   effects of its own beyond exactly what `replace_text`
+///   itself does).
+/// - Field differs and IS focused → **skip**. A focused field
+///   whose text differs from the project name is a user
+///   mid-typing a new name; replacing the buffer would eat
+///   their keystrokes. Their text wins until they submit
+///   (Enter / "Set name" applies it via [`apply_name`]) or
+///   leave the field, at which point the next poll tick syncs
+///   normally. The cost of this choice: a project switch that
+///   lands while the user is typing in the name field leaves
+///   the field stale until they stop editing — deliberate;
+///   the alternative destroys in-progress typing.
+pub fn sync_name_edit(s: &mut State) {
+    if s.name_edit.focused {
+        return;
+    }
     let name = s.core.project.name.clone();
     if s.name_edit.text != name {
         s.name_edit.replace_text(name);
@@ -375,6 +415,42 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// A shell `State` around `core`, built the way the other
+    /// sections' tests build one (every section field at its
+    /// default; only `core` and `name_edit` matter here).
+    fn test_state(core: EditorCore) -> State {
+        State {
+            core,
+            last_poll: None,
+            wheel_zoom: 0.0,
+            figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
+            figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
+            library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
+            graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
+            audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            menus: crate::rune_sec::menus::MenusState::default(),
+            palette: crate::rune_sec::command_palette::PaletteState::new(),
+            settings: crate::rune_sec::settings_popover::SettingsState::default(),
+            toasts: crate::rune_sec::toasts::ToastsState::new(),
+            text_tool: crate::rune_sec::text_tool::TextToolState::new(),
+            name_edit: rune::TextEdit::new(""),
+            export_use_range: false,
+            fx_selected: None,
+            pose_clipboard: None,
+            last_status: String::new(),
+            toast_now: 0.0,
+            last_dark: true,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            guides: false,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
+        }
+    }
+
     #[test]
     fn clean_name_trims_and_rejects_empty() {
         assert_eq!(clean_project_name("  My Film  "), Some("My Film".to_string()));
@@ -476,5 +552,54 @@ mod tests {
         let mut core = EditorCore::new();
         core.project_files = Vec::new();
         assert!(project_rows(&core).is_empty());
+    }
+
+    #[test]
+    fn sync_replaces_stale_text_when_unfocused() {
+        let mut core = EditorCore::new();
+        core.project.name = "Loaded Project".into();
+        let mut s = test_state(core);
+        s.name_edit.replace_text("Stale Name");
+        assert!(!s.name_edit.focused);
+        sync_name_edit(&mut s);
+        assert_eq!(s.name_edit.text, "Loaded Project");
+        // replace_text's own documented side effect: the caret
+        // lands at the end of the replacement text.
+        assert_eq!(s.name_edit.focus, "Loaded Project".len());
+        assert_eq!(s.name_edit.anchor, "Loaded Project".len());
+    }
+
+    #[test]
+    fn sync_is_a_no_op_when_text_matches() {
+        let mut core = EditorCore::new();
+        core.project.name = "Same Name".into();
+        let mut s = test_state(core);
+        s.name_edit.replace_text("Same Name");
+        // Park the caret where replace_text would NOT leave
+        // it: if the sync (wrongly) re-applied replace_text,
+        // the caret would snap back to the end.
+        s.name_edit.focus = 0;
+        s.name_edit.anchor = 0;
+        sync_name_edit(&mut s);
+        assert_eq!(s.name_edit.text, "Same Name");
+        assert_eq!(s.name_edit.focus, 0);
+        assert_eq!(s.name_edit.anchor, 0);
+    }
+
+    #[test]
+    fn sync_skips_while_the_field_is_focused() {
+        let mut core = EditorCore::new();
+        core.project.name = "Other Project".into();
+        let mut s = test_state(core);
+        s.name_edit.replace_text("Half-typed na");
+        s.name_edit.focused = true;
+        sync_name_edit(&mut s);
+        // The user's in-progress typing is untouched.
+        assert_eq!(s.name_edit.text, "Half-typed na");
+        // Once the field loses focus, the next sync lands
+        // normally — the guard defers, it does not disable.
+        s.name_edit.focused = false;
+        sync_name_edit(&mut s);
+        assert_eq!(s.name_edit.text, "Other Project");
     }
 }

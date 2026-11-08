@@ -1,6 +1,7 @@
 //! Settings popover (Phase D, section 24 of the GPUI→Rune
-//! migration): theme, language, stage size and the project
-//! default easing, behind one "Settings" toggle. Declared
+//! migration; guides toggle added in Phase E, section 21):
+//! theme, language, stage size, the project default easing
+//! and stage guides, behind one "Settings" toggle. Declared
 //! under `rune_sec` from `main.rs` only — bin-crate code, not
 //! part of the engine library.
 //!
@@ -60,16 +61,16 @@
 //!   buttons coexist with distinct keys; this one is the
 //!   Settings home for the same op.
 //!
-//! ## Deliberately NOT here: a Guides toggle
-//!
-//! The brief asked for one "if a core field exists". It
-//! does not: there is no guides field on `EditorCore` or
-//! `Project`, and nothing in the Rune shell draws guides
-//! (the GPUI overlay lived in the removed `app.rs` /
-//! `src/ui/overlay.rs`). A toggle wired to nothing would be
-//! a fake control, so it is omitted. Follow-up: add a guides
-//! flag to the shell state + guide lines in `stage_view`,
-//! then a toggle here can flip the real flag.
+//! * **Guides** — one toggle button flipping the shell
+//!   field `State.guides` (added by the integrator; default
+//!   `false`). Guides are a pure view overlay — the stage
+//!   draws a thirds grid + centre cross while the flag is
+//!   set (Phase E section 4's `guides_geometry` in
+//!   `stage_camera`) — so the flag lives in shell state,
+//!   not on `EditorCore`/`Project`, and this card is its
+//!   only writer. Phase D omitted this toggle because no
+//!   guides existed to flip; Phase E adds the geometry, so
+//!   the toggle now controls something real.
 //!
 //! ## Persistence
 //!
@@ -93,6 +94,10 @@
 //! pub settings: settings_popover::SettingsState,
 //! // in `init()`:
 //! settings: settings_popover::SettingsState::default(),
+//! // the guides toggle additionally needs, in `State`:
+//! pub guides: bool,
+//! // in `init()`:
+//! guides: false,
 //! // in `view()`, after the app bar:
 //! .child(rune_sec::settings_popover::settings_popover(s, &t))
 //! // and in `view()`: tok::theme(!s.core.light_theme)
@@ -216,6 +221,19 @@ pub fn easing_label(core: &EditorCore) -> String {
     format!("Easing: {}", core.project.easing.label())
 }
 
+// ---- Guides ----
+
+/// Flip the stage-guides flag on the shell state
+/// (`State.guides`, added by the integrator — default
+/// `false`). The flag lives in the shell, not the core:
+/// guides are a view overlay (the stage draws the thirds
+/// grid + centre cross while it is set), with no engine
+/// state behind them. This toggle is the flag's only
+/// writer.
+pub fn toggle_guides(s: &mut State) {
+    s.guides = !s.guides;
+}
+
 // ---- View ----
 
 /// Flip the settings card open/closed (the toggle button's
@@ -279,8 +297,8 @@ fn stage_axis_row(s: &State, t: &Theme, axis: usize, heading: &str) -> El {
 /// The section as mounted in the shell column: the
 /// "Settings" toggle (accent-filled while open), and — when
 /// `s.settings.open` — the settings card under it: Theme,
-/// Language grid, Stage W / H steppers, and the default
-/// easing cycle.
+/// Language grid, Stage W / H steppers, the default
+/// easing cycle, and the stage-guides toggle.
 pub fn settings_popover(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let open = s.settings.open;
@@ -348,6 +366,26 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
                 },
             )),
         );
+
+        // Stage guides: the shell flag (State.guides),
+        // highlighted while on. The stage overlay draws the
+        // grid; nothing in the engine reads the flag.
+        card = card
+            .child(
+                row().key("settings-guides-row").gap(6.0).child(btn(
+                    "settings-guides",
+                    "Guides",
+                    s.guides,
+                    t,
+                    |s: &mut State| {
+                        toggle_guides(s);
+                    },
+                )),
+            )
+            .child(section_label(
+                t,
+                "Stage guides: thirds grid + centre cross.",
+            ));
 
         panel = panel.child(card);
     }
@@ -459,5 +497,53 @@ mod tests {
         assert_eq!(easing_label(&core), "Easing: ease-out");
         core.cycle_easing();
         assert_eq!(easing_label(&core), "Easing: linear");
+    }
+
+    #[test]
+    fn guides_toggle_flips_the_shell_field() {
+        let t = rune::tok::theme(true);
+        // Full shell State, built the way the sibling
+        // sections' panel tests build it — guides starts
+        // off (the integrator's init default).
+        let mut state = State {
+            core: EditorCore::new(),
+            last_poll: None,
+            wheel_zoom: 0.0,
+            figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
+            figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
+            library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
+            graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
+            audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            menus: crate::rune_sec::menus::MenusState::default(),
+            palette: crate::rune_sec::command_palette::PaletteState::new(),
+            settings: SettingsState::default(),
+            toasts: crate::rune_sec::toasts::ToastsState::new(),
+            text_tool: crate::rune_sec::text_tool::TextToolState::new(),
+            name_edit: rune::TextEdit::new(""),
+            export_use_range: false,
+            fx_selected: None,
+            pose_clipboard: None,
+            guides: false,
+            last_status: String::new(),
+            toast_now: 0.0,
+            last_dark: true,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
+        };
+        assert!(!state.guides);
+        // The card builds with guides off and on (the open
+        // card is where the toggle renders).
+        state.settings.open = true;
+        let _ = settings_popover(&state, &t);
+        toggle_guides(&mut state);
+        assert!(state.guides);
+        let _ = settings_popover(&state, &t);
+        toggle_guides(&mut state);
+        assert!(!state.guides);
     }
 }

@@ -1,6 +1,8 @@
 //! FX clips lane + clip inspector for the Rune editor shell
-//! (Phase D, section 14). Declared from `main.rs` only — this
-//! is bin-crate code, not part of the engine library.
+//! (Phase D, section 14; Phase E, section 16 — handlers
+//! moved onto the real EditorCore FX ops). Declared from
+//! `main.rs` only — this is bin-crate code, not part of the
+//! engine library.
 //!
 //! ## Integration contract
 //!
@@ -20,25 +22,42 @@
 //!
 //! ## Ops (all real; no invented engine API)
 //!
-//! Every mutation follows the exact pattern the GPUI FX
-//! panel used (pre-removal `app.rs` `fx_panel`): take an
-//! undo snapshot (`EditorCore::snapshot`, editor.rs:202),
-//! then call the `fx_edit` backend the MCP tools also use:
+//! Every mutation goes through the `EditorCore` FX ops in
+//! `src/fx_ops.rs` (Phase E, section 9), which own the undo
+//! snapshot and route to the `fx_edit` backend the MCP
+//! tools also use:
 //!
 //! * earlier / later + start stepper —
-//!   `fx_edit::move_clip` (fx_edit.rs:92)
-//! * duration stepper — `fx_edit::resize_clip`
-//!   (fx_edit.rs:103; clamps duration to >= 0.1 itself)
-//! * duplicate — `fx_edit::duplicate_clip` (fx_edit.rs:117)
-//! * delete — `fx_edit::delete_clip` (fx_edit.rs:128)
+//!   `EditorCore::fx_move_clip(index, delta)` (whole-frame
+//!   delta, `i32` — the codebase's move-op convention, cf.
+//!   `shift_frames` / `move_figure`; the backend clamps the
+//!   resulting start to >= 0 and fractional starts keep
+//!   their fraction)
+//! * duration stepper — `EditorCore::fx_resize_clip(index,
+//!   delta)` (frame delta, `f32`; the backend clamps the
+//!   resulting duration to >= 0.1)
+//! * duplicate — `EditorCore::fx_duplicate_clip(index)`,
+//!   returning the copy's index (the copy is inserted right
+//!   after the original, in list and in time)
+//! * delete — `EditorCore::fx_delete_clip(index)`
+//! * colour / end colour — `EditorCore::fx_set_color` /
+//!   `fx_set_color2`
+//! * re-anchor — `EditorCore::fx_set_anchor(index, figure,
+//!   node)`, the anchoring `add_fx_clip` performs at
+//!   creation (editor.rs:2005)
 //!
-//! Colour, end colour and joint anchor have NO dedicated
-//! op anywhere in the engine (the MCP `add_fx_clip` tool
-//! sets colour only at creation time, mcp_tools.rs:736),
-//! so those handlers snapshot and then write the field on
-//! `Project::fx_clips[i]` directly — the same shape as the
-//! `fx_edit` calls above, and the same anchoring
-//! `EditorCore::add_fx_clip` performs (editor.rs:2005).
+//! Phase D note: this section originally snapshotted
+//! locally and called `fx_edit` (or wrote colour/anchor
+//! fields) directly, because no EditorCore FX ops existed;
+//! Phase E replaced those handlers with the ops above.
+//! Selection bookkeeping stays in this module (the ops
+//! know nothing of `State::fx_selected`): duplicate selects
+//! the returned index, delete repairs the selection with
+//! [`selection_after_delete`]. The one status line the
+//! handlers still own is the no-joint re-anchor message —
+//! `fx_set_anchor` assumes a valid joint, so the handler
+//! checks `selected_node` first, exactly as `add_fx_clip`
+//! does.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Color, El, ScrollSpec};
@@ -215,101 +234,105 @@ pub fn selection_after_delete(
 }
 
 // ----------------------------------------------------------------
-// Ops (snapshot + backend call — the GPUI panel's pattern)
+// Handlers (thin wrappers over the EditorCore FX ops in
+// fx_ops.rs; the ops own the snapshot, these own the
+// selection)
 // ----------------------------------------------------------------
 
-/// Move clip `i` to `new_start`: snapshot, then
-/// `fx_edit::move_clip`. Returns false (and snapshots
-/// nothing) when `i` is out of range.
-fn move_clip_to(core: &mut EditorCore, i: usize, new_start: f32) -> bool {
-    if core.project.fx_clips.get(i).is_none() {
+/// Nudge clip `i` by `delta` whole frames via
+/// `EditorCore::fx_move_clip`. Returns false (and calls
+/// nothing) when `i` is out of range, or when moving
+/// earlier from frame 0 — a no-op the op would only
+/// snapshot (the GPUI panel's `fx-earlier` guard, kept).
+fn nudge_clip_start(core: &mut EditorCore, i: usize, delta: i32) -> bool {
+    let Some(entry) = core.project.fx_clips.get(i) else {
+        return false;
+    };
+    if delta < 0 && entry.clip.start <= 0.0 {
         return false;
     }
-    core.snapshot();
-    fx_edit::move_clip(&mut core.project, i, new_start)
+    core.fx_move_clip(i, delta);
+    true
 }
 
 /// Nudge the selected clip's start by `delta` frames.
-/// Moving earlier at frame 0 is a no-op without a snapshot
-/// (the GPUI panel's `fx-earlier` guard).
-fn nudge_start(s: &mut State, delta: f32) {
+fn nudge_start(s: &mut State, delta: i32) {
     let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return;
     };
-    let start = s.core.project.fx_clips[i].clip.start;
-    if delta < 0.0 && start <= 0.0 {
-        return;
-    }
-    move_clip_to(&mut s.core, i, start + delta);
+    nudge_clip_start(&mut s.core, i, delta);
 }
 
 /// Nudge the selected clip's duration by `delta` frames
-/// (snapshot + `fx_edit::resize_clip`, which clamps the
-/// result to >= 0.1).
+/// via `EditorCore::fx_resize_clip` (the op applies the
+/// delta itself and the backend clamps the result to
+/// >= 0.1, so the handler passes the delta through
+/// untouched).
 fn nudge_duration(s: &mut State, delta: f32) {
     let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return;
     };
-    let duration = s.core.project.fx_clips[i].clip.duration;
-    s.core.snapshot();
-    fx_edit::resize_clip(&mut s.core.project, i, duration + delta);
+    s.core.fx_resize_clip(i, delta);
 }
 
-/// Duplicate the selected clip (snapshot +
-/// `fx_edit::duplicate_clip`); the copy becomes the
+/// Duplicate the selected clip via
+/// `EditorCore::fx_duplicate_clip`; the copy becomes the
 /// selection, as it is the clip the user most likely
 /// wants to adjust next.
 fn duplicate_selected(s: &mut State) {
     let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return;
     };
-    s.core.snapshot();
-    if let Some(new_index) = fx_edit::duplicate_clip(&mut s.core.project, i) {
+    if let Some(new_index) = s.core.fx_duplicate_clip(i) {
         s.fx_selected = Some(new_index);
     }
 }
 
-/// Delete the selected clip (snapshot +
-/// `fx_edit::delete_clip`) and repair the selection with
-/// [`selection_after_delete`].
+/// Delete the selected clip via
+/// `EditorCore::fx_delete_clip` and repair the selection
+/// with [`selection_after_delete`]. The op returns
+/// nothing, so whether a clip was actually removed is
+/// judged by the list length.
 fn delete_selected(s: &mut State) {
     let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return;
     };
-    s.core.snapshot();
-    if fx_edit::delete_clip(&mut s.core.project, i) {
-        let len_after = s.core.project.fx_clips.len();
+    let len_before = s.core.project.fx_clips.len();
+    s.core.fx_delete_clip(i);
+    let len_after = s.core.project.fx_clips.len();
+    if len_after < len_before {
         s.fx_selected = selection_after_delete(s.fx_selected, i, len_after);
     }
 }
 
-/// Set the selected clip's primary colour. No dedicated
-/// op exists (see module docs): snapshot, then write the
-/// field — the `fx_edit`-call shape.
+/// Set the selected clip's primary colour via
+/// `EditorCore::fx_set_color`.
 fn set_color(s: &mut State, color: u32) {
     let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return;
     };
-    s.core.snapshot();
-    s.core.project.fx_clips[i].clip.color = color;
+    s.core.fx_set_color(i, color);
 }
 
 /// Set (or clear, with `None`) the selected clip's
-/// gradient end colour. Same no-op-exists pattern as
-/// [`set_color`].
+/// gradient end colour via `EditorCore::fx_set_color2`.
 fn set_color2(s: &mut State, color2: Option<u32>) {
     let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return;
     };
-    s.core.snapshot();
-    s.core.project.fx_clips[i].clip.color2 = color2;
+    s.core.fx_set_color2(i, color2);
 }
 
 /// Re-anchor the selected clip to the currently selected
 /// joint (`EditorCore::selected_figure` /
-/// `selected_node`) — the anchoring `add_fx_clip`
-/// performs at creation. With no joint selected it only
-/// sets the same status message `add_fx_clip` uses.
+/// `selected_node`) via `EditorCore::fx_set_anchor` — the
+/// anchoring `add_fx_clip` performs at creation. The op
+/// bounds-checks only the clip index and assumes a valid
+/// joint, so the no-joint case is handled here with the
+/// same status message `add_fx_clip` uses; on success the
+/// op's own status line stands (it kept this panel's
+/// exact "FX clip N re-anchored to fig F node M."
+/// wording).
 fn reanchor_selected(s: &mut State) {
     let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return;
@@ -319,16 +342,7 @@ fn reanchor_selected(s: &mut State) {
         return;
     };
     let figure = s.core.selected_figure;
-    s.core.snapshot();
-    let entry = &mut s.core.project.fx_clips[i];
-    entry.figure = figure;
-    entry.node = node;
-    s.core.status = format!(
-        "FX clip {} re-anchored to fig {} node {}.",
-        i + 1,
-        figure + 1,
-        node
-    );
+    s.core.fx_set_anchor(i, figure, node);
 }
 
 // ----------------------------------------------------------------
@@ -500,7 +514,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
             .color(t.text_secondary),
         )
         // Start stepper: -/+ move the clip by one frame
-        // (snapshot + fx_edit::move_clip).
+        // (EditorCore::fx_move_clip).
         .child(
             row()
                 .gap(8.0)
@@ -511,7 +525,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                         .color(t.text_secondary),
                 )
                 .child(btn(&format!("fx-start-dec-{i}"), "-", false, t, |s| {
-                    nudge_start(s, -1.0)
+                    nudge_start(s, -1)
                 }))
                 .child(
                     text(frame_label(data.start + 1.0))
@@ -519,11 +533,11 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                         .color(t.text),
                 )
                 .child(btn(&format!("fx-start-inc-{i}"), "+", false, t, |s| {
-                    nudge_start(s, 1.0)
+                    nudge_start(s, 1)
                 })),
         )
         // Duration stepper: -/+ resize by one frame
-        // (snapshot + fx_edit::resize_clip).
+        // (EditorCore::fx_resize_clip).
         .child(
             row()
                 .gap(8.0)
@@ -552,10 +566,10 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(btn(&format!("fx-earlier-{i}"), "Earlier", false, t, |s| {
-                    nudge_start(s, -1.0)
+                    nudge_start(s, -1)
                 }))
                 .child(btn(&format!("fx-later-{i}"), "Later", false, t, |s| {
-                    nudge_start(s, 1.0)
+                    nudge_start(s, 1)
                 }))
                 .child(el().grow(1.0))
                 .child(btn(&format!("fx-dup-{i}"), "Duplicate", false, t, |s| {
@@ -743,14 +757,30 @@ mod tests {
     }
 
     #[test]
-    fn move_clip_to_moves_and_rejects_bad_index() {
-        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
-        assert!(move_clip_to(&mut core, 0, 9.0));
-        assert_eq!(core.project.fx_clips[0].clip.start, 9.0);
-        // move_clip clamps negative starts to 0.
-        assert!(move_clip_to(&mut core, 0, -3.0));
+    fn nudge_clip_start_moves_by_whole_frame_deltas() {
+        let mut core = core_with(vec![entry(4.5, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        // The op takes a whole-frame delta; a fractional
+        // start keeps its fraction.
+        assert!(nudge_clip_start(&mut core, 0, 1));
+        assert_eq!(core.project.fx_clips[0].clip.start, 5.5);
+        assert!(nudge_clip_start(&mut core, 0, -1));
+        assert_eq!(core.project.fx_clips[0].clip.start, 4.5);
+        // A delta that would cross frame 0 is clamped by
+        // the backend, and the call still counts as issued.
+        let mut core = core_with(vec![entry(0.5, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        assert!(nudge_clip_start(&mut core, 0, -1));
         assert_eq!(core.project.fx_clips[0].clip.start, 0.0);
-        assert!(!move_clip_to(&mut core, 5, 1.0));
+    }
+
+    #[test]
+    fn nudge_clip_start_guards_frame_zero_and_bad_index() {
+        let mut core = core_with(vec![entry(0.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        // Earlier at frame 0: no call, no change (the op
+        // would only take a snapshot).
+        assert!(!nudge_clip_start(&mut core, 0, -1));
+        assert_eq!(core.project.fx_clips[0].clip.start, 0.0);
+        // Out of range: no call, no panic.
+        assert!(!nudge_clip_start(&mut core, 5, 1));
         assert_eq!(core.project.fx_clips[0].clip.start, 0.0, "no change");
     }
 }

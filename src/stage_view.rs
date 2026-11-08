@@ -24,10 +24,11 @@
 //! Drawing reads the element size from the previous commit's
 //! layout (`Cx::layout_size("stage")` in `main.rs`); drag events
 //! carry the element's `w`/`h` themselves, so both paths feed the
-//! same function the same inputs. Camera *rotation* is not applied
-//! here: the GPUI stage never applied it either (it is a
-//! rasterizer/export concern; `Project::camera_angle_at` exists
-//! if a later phase wants it).
+//! same function the same inputs. Phase E applies camera
+//! *rotation* too, through `stage_camera::RotTransform` (the
+//! rasterizer's own convention), and draws the full stage stack:
+//! guides (optional), onion skins, drawing strokes, figures,
+//! FX particles, text labels, weather — the export order.
 
 use rune::{Color, LineCap, Shape};
 use stykanimate_rs::editor::EditorCore;
@@ -153,6 +154,29 @@ fn onion_skins(core: &EditorCore) -> Vec<(Vec<(V2, V2)>, u32, f32)> {
     out
 }
 
+/// Convert one stage-space particle primitive (FX clip mote or
+/// weather particle) into the shape being built, through the
+/// rotated transform: discs become small polygons (Shape has no
+/// circle primitive), lines keep a hairline-plus width.
+fn particle_prim(
+    shape: Shape,
+    rt: &crate::rune_sec::stage_camera::RotTransform,
+    s: f32,
+    prim: crate::rune_sec::stage_fx::ParticlePrim,
+) -> Shape {
+    use crate::rune_sec::stage_fx::ParticlePrim;
+    match prim {
+        ParticlePrim::Disc { pos, radius, color, alpha } => {
+            let c = hex_color(color).unwrap_or(Color::WHITE).alpha(alpha);
+            shape.fill(ngon(rt.to_screen(pos), (radius * s).max(0.8), 10), c)
+        }
+        ParticlePrim::Line { a, b, color, alpha } => {
+            let c = hex_color(color).unwrap_or(Color::WHITE).alpha(alpha);
+            shape.line(rt.to_screen(a), rt.to_screen(b), (1.5 * s).max(1.0), LineCap::Round, c)
+        }
+    }
+}
+
 /// The whole stage as one vector `Shape` in canvas-element
 /// points: onion skins (under), then every visible figure at the
 /// display frame — segments in per-node colour at real thickness
@@ -161,18 +185,55 @@ fn onion_skins(core: &EditorCore) -> Vec<(Vec<(V2, V2)>, u32, f32)> {
 /// `draw_data`/`paint_stage` decisions (opacity fades toward the
 /// background; solo/hidden figures skipped via
 /// `layers::visible_figures`).
-pub fn stage_shape(core: &EditorCore, el_size: [f32; 2]) -> Shape {
+pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], guides: bool) -> Shape {
     let project = &core.project;
     let display = core.display_frame();
     let cam = project.camera_at(display);
     let vt = view_transform(el_size, project.stage, cam);
+    let rt = crate::rune_sec::stage_camera::RotTransform::for_display(core, el_size);
     let s = vt.scale;
     let mut shape = Shape::new();
+
+    if guides {
+        let guide_color = Color::WHITE.alpha(0.22);
+        for prim in crate::rune_sec::stage_camera::guides_geometry(project.stage) {
+            let crate::rune_sec::stage_camera::GuidePrim::Line { a, b } = prim;
+            shape = shape.line(rt.to_screen(a), rt.to_screen(b), 1.0, LineCap::Round, guide_color);
+        }
+    }
 
     for (segs, color_hex, alpha) in onion_skins(core) {
         let color = hex_color(color_hex).unwrap_or(Color::WHITE).alpha(alpha);
         for (a, b) in segs {
-            shape = shape.line(to_screen(&vt, a), to_screen(&vt, b), 5.0 * s, LineCap::Round, color);
+            shape = shape.line(rt.to_screen(a), rt.to_screen(b), 5.0 * s, LineCap::Round, color);
+        }
+    }
+
+    // Drawing strokes under the figures (the GPUI canvas's
+    // order): polylines at real width, filled shapes, spray dots.
+    for prim in crate::rune_sec::stage_layers::stroke_geometry(core) {
+        use crate::rune_sec::stage_layers::StrokePrim;
+        match prim {
+            StrokePrim::Polyline { pts, width, color } => {
+                let screen: Vec<[f32; 2]> = pts.iter().map(|p| rt.to_screen(*p)).collect();
+                shape = shape.stroke_with(
+                    screen,
+                    false,
+                    (width * s).max(1.0),
+                    LineCap::Round,
+                    hex_color(color).unwrap_or(Color::WHITE),
+                );
+            }
+            StrokePrim::Filled { pts, color } => {
+                let screen: Vec<[f32; 2]> = pts.iter().map(|p| rt.to_screen(*p)).collect();
+                shape = shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE));
+            }
+            StrokePrim::Dots { pts, radius, color, opacity } => {
+                let c = hex_color(color).unwrap_or(Color::WHITE).alpha(opacity);
+                for p in pts {
+                    shape = shape.fill(ngon(rt.to_screen(p), (radius * s).max(0.8), 8), c);
+                }
+            }
         }
     }
 
@@ -199,8 +260,8 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2]) -> Shape {
         for (i, node) in fig.def.nodes.iter().enumerate() {
             if let Some(p) = node.parent {
                 shape = shape.line(
-                    to_screen(&vt, pos[p]),
-                    to_screen(&vt, pos[i]),
+                    rt.to_screen(pos[p]),
+                    rt.to_screen(pos[i]),
                     node.thickness * s,
                     LineCap::Round,
                     node_color(node),
@@ -210,7 +271,7 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2]) -> Shape {
         // Shape segments: circle rings and regular polygons
         // centred on the node (rasterizer + GPUI parity).
         for (i, node) in fig.def.nodes.iter().enumerate() {
-            let centre = to_screen(&vt, pos[i]);
+            let centre = rt.to_screen(pos[i]);
             let r = node.length / 2.0 * s;
             match node.shape {
                 model::Shape::Circle => {
@@ -234,7 +295,7 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2]) -> Shape {
         for (i, node) in fig.def.nodes.iter().enumerate() {
             if node.head {
                 shape = shape.stroke_with(
-                    ngon(to_screen(&vt, pos[i]), 17.0 * s, 24),
+                    ngon(rt.to_screen(pos[i]), 17.0 * s, 24),
                     true,
                     5.0 * s,
                     LineCap::Round,
@@ -251,9 +312,22 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2]) -> Shape {
                 let r = if selected { 8.0 } else { 5.0 } * s.max(0.6);
                 let color = hex_color(if selected { 0xFFC65D } else { 0xFF5D5D })
                     .unwrap_or(Color::WHITE);
-                shape = shape.fill(ngon(to_screen(&vt, *joint), r, 8), color);
+                shape = shape.fill(ngon(rt.to_screen(*joint), r, 8), color);
             }
         }
+    }
+    // FX particles, text labels, then weather on top — the
+    // rasterizer's pass order (export.rs render_frame_at).
+    for prim in crate::rune_sec::stage_fx::fx_geometry(core) {
+        shape = particle_prim(shape, &rt, s, prim);
+    }
+    for prim in crate::rune_sec::stage_text::text_geometry(core) {
+        let crate::rune_sec::stage_text::TextPrim::GlyphBox { corners, color } = prim;
+        let screen: Vec<[f32; 2]> = corners.iter().map(|p| rt.to_screen(*p)).collect();
+        shape = shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE));
+    }
+    for prim in crate::rune_sec::stage_fx::weather_geometry(core) {
+        shape = particle_prim(shape, &rt, s, prim);
     }
     shape
 }

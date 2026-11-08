@@ -16,11 +16,14 @@
 //!   (`editor.rs:1983`), plus a "Project default" button that
 //!   sets `None`.
 //! * **Project tween** — the project-wide default
-//!   (`Project.easing`, `model.rs:696`). The core offers NO
-//!   direct setter for this one — only
-//!   `EditorCore::cycle_easing` (`editor.rs:1686`) — so this
-//!   group is honestly a single Cycle button showing the
-//!   current value, not four fake preset buttons.
+//!   (`Project.easing`, `model.rs:696`). One button per
+//!   value, calling the direct setter
+//!   `EditorCore::set_project_easing` (added in Phase E),
+//!   with the current easing shown active. (Phase D shipped
+//!   a single Cycle button here because `cycle_easing` was
+//!   the only op then; the direct setter superseded it and
+//!   the cycle button was removed rather than kept as a
+//!   second, drifting path to the same setting.)
 //! * **Graph keys** — `graph::TangentPreset`s applied to every
 //!   graph channel of the SELECTED figure via
 //!   `EditorCore::apply_graph_ease_preset` (`editor.rs:1263`).
@@ -38,6 +41,7 @@
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, row, text, Color, El, Shape};
+use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::graph::TangentPreset;
 use stykanimate_rs::model::Easing;
 
@@ -110,6 +114,24 @@ pub fn easing_curve(easing: Easing, samples: usize) -> Vec<f32> {
 /// `Channel::value_at` and normalised into 0.0..=1.0.
 pub fn tangent_curve(preset: TangentPreset, samples: usize) -> Vec<f32> {
     stykanimate_rs::graph_panel::preset_preview(preset, samples)
+}
+
+/// Apply a project-tween preset — the project group button
+/// handler's whole body, factored out so tests can drive the
+/// dispatch against a bare `EditorCore`. Goes through the
+/// core's direct setter (Phase E), so the press is one
+/// undoable op, exactly like the frame group's
+/// `set_frame_easing`.
+pub fn set_project_preset(core: &mut EditorCore, e: Easing) {
+    core.set_project_easing(e);
+}
+
+/// Whether `preset` is the core's current project tween —
+/// the project group's active-state rule. The project easing
+/// is a single value, so exactly one preset is active at
+/// any time.
+pub fn project_preset_active(core: &EditorCore, preset: Easing) -> bool {
+    core.project.easing == preset
 }
 
 /// Map normalised curve samples into preview-box points:
@@ -219,22 +241,28 @@ pub fn easing_panel(s: &State, t: &Theme) -> El {
         ));
     }
 
-    // ---- Project tween: cycle_easing is the only op.
-    panel = panel.child(section("Project tween (default for all frames)".to_string(), t));
-    panel = panel.child(preset_row(
-        preview(
-            &easing_curve(project_easing, CURVE_SAMPLES),
-            accent,
-            t,
-        ),
-        btn(
-            "ease-project-cycle",
-            &format!("Cycle (now {})", project_easing.label()),
-            false,
-            t,
-            |s| s.core.cycle_easing(),
-        ),
+    // ---- Project tween: set_project_easing on the project.
+    panel = panel.child(section(
+        "Project tween (default for all frames)".to_string(),
+        t,
     ));
+    for e in TWEEN_EASINGS {
+        panel = panel.child(preset_row(
+            preview(&easing_curve(e, CURVE_SAMPLES), accent, t),
+            btn(
+                match e {
+                    Easing::Linear => "ease-project-linear",
+                    Easing::Smooth => "ease-project-smooth",
+                    Easing::EaseIn => "ease-project-ease-in",
+                    Easing::EaseOut => "ease-project-ease-out",
+                },
+                tween_label(e),
+                project_preset_active(core, e),
+                t,
+                move |s| set_project_preset(&mut s.core, e),
+            ),
+        ));
+    }
 
     // ---- Graph keys: apply_graph_ease_preset, one-shot.
     panel = panel.child(section(
@@ -341,5 +369,33 @@ mod tests {
         assert_eq!(pts[0][1], 26.0);
         assert_eq!(pts[1][1], 2.0);
         assert!(curve_points(&[0.5], 44.0, 28.0, 2.0).is_empty());
+    }
+
+    #[test]
+    fn project_preset_dispatch_sets_exactly_that_easing() {
+        // The project group's buttons dispatch through
+        // `set_project_preset` → the core's direct setter:
+        // after each dispatch the project easing is exactly
+        // the pressed preset (no cycling, no drift).
+        let mut core = EditorCore::new();
+        for e in TWEEN_EASINGS {
+            set_project_preset(&mut core, e);
+            assert_eq!(core.project.easing, e, "dispatching {}", e.label());
+        }
+    }
+
+    #[test]
+    fn project_preset_active_tracks_the_current_easing() {
+        // Exactly one project preset is active at any time,
+        // and it follows each dispatch.
+        let mut core = EditorCore::new();
+        for e in TWEEN_EASINGS {
+            set_project_preset(&mut core, e);
+            let active: Vec<Easing> = TWEEN_EASINGS
+                .into_iter()
+                .filter(|&p| project_preset_active(&core, p))
+                .collect();
+            assert_eq!(active, vec![e], "after dispatching {}", e.label());
+        }
     }
 }

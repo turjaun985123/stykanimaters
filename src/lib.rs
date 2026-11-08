@@ -5,13 +5,17 @@
 
 pub mod audio;
 pub mod audio_edit;
+pub mod audio_ops;
 pub mod dialogs;
 pub mod draw_ops;
 pub mod editor;
 pub mod export;
 pub mod fig3d;
+pub mod figure_ops;
 pub mod fx_edit;
+pub mod fx_ops;
 pub mod graph;
+pub mod graph_keys;
 pub mod graph_panel;
 pub mod i18n;
 pub mod layers;

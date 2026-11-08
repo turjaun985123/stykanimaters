@@ -66,6 +66,28 @@
 //! your last save", judged on the state the user left behind,
 //! not on the snapshot the panel itself just took).
 //!
+//! ## Startup decision (Phase E, section 25/40)
+//!
+//! At boot the shell asks this section two things:
+//! [`startup_recovery`] — does the recovery snapshot hold
+//! unsaved work newer than the last named save? — and
+//! [`startup_status`] — the status line to show when it
+//! does. `init()` builds the panel state with
+//! [`initial_state`] instead of `HomePanelState::default()`:
+//! on [`StartupRecovery::Offer`] the panel starts open with
+//! the recovery banner already offered, so the user meets
+//! the offer on the first frame instead of discovering it
+//! whenever they happen to open Home.
+//!
+//! [`initial_state`] performs **no writes** — unlike
+//! [`toggle_open`] it does not snapshot the current work,
+//! because at boot the snapshot on disk *is* the evidence:
+//! rewriting it before judging it would corrupt the
+//! verdict. The decision is judged purely on the state the
+//! user left behind, and `toggle_open`'s
+//! capture-before-write behaviour for later opens is
+//! unchanged.
+//!
 //! ## Integrator wiring (main.rs)
 //!
 //! ```ignore
@@ -75,7 +97,7 @@
 //! // in `State`:
 //! pub home_panel: home_panel::HomePanelState,
 //! // in `init()`:
-//! home_panel: home_panel::HomePanelState::default(),
+//! home_panel: home_panel::initial_state(),
 //! // in `view()`, in the shell column:
 //! .child(rune_sec::home_panel::home_panel(s, &t))
 //! ```
@@ -100,7 +122,8 @@ use crate::State;
 /// state itself lives in `EditorCore` / on disk, as before.
 #[derive(Clone, Debug, Default)]
 pub struct HomePanelState {
-    /// Panel expanded under the "Home" toggle.
+    /// Panel expanded under the "Home" toggle. Starts
+    /// open when [`initial_state`] offers a recovery.
     pub open: bool,
     /// Search box contents (Rune core text edit). The row
     /// list filters through `projects::filter_projects` on
@@ -108,9 +131,10 @@ pub struct HomePanelState {
     pub search: TextEdit,
     /// Whether the recovery banner is offered: the
     /// `shell::recovery_is_newer_than_last_project` verdict
-    /// captured by [`toggle_open`] before its snapshot write
-    /// (see the module docs). Cleared by a successful
-    /// Recover press; recomputed on every open.
+    /// — captured by [`initial_state`] at boot, and by
+    /// [`toggle_open`] before its snapshot write on every
+    /// later open (see the module docs). Cleared by a
+    /// successful Recover press.
     pub recovery_offer: bool,
     /// The Wave 15 scan cache: `(projects-dir mtime, scan)`
     /// — `None` until the first render fills it. Interior
@@ -354,6 +378,108 @@ pub fn toggle_open(s: &mut State) {
     if s.home_panel.open {
         s.home_panel.recovery_offer = shell::recovery_is_newer_than_last_project();
         let _ = shell::write_recovery(&s.core.project);
+    }
+}
+
+// ---- Startup decision (Phase E) ----
+
+/// The boot-time recovery decision: does the recovery
+/// snapshot hold unsaved work newer than the last named
+/// save? The shell asks once, at startup, via
+/// [`startup_recovery`]; `Offer` means the Home panel
+/// should start open with its recovery banner showing
+/// (see [`initial_state`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartupRecovery {
+    /// No newer snapshot: boot normally, Home closed.
+    None,
+    /// The snapshot is newer than the last named save:
+    /// offer it.
+    Offer,
+}
+
+impl StartupRecovery {
+    /// The decision from the shell's newer-than verdict
+    /// (`shell::recovery_is_newer_than_last_project`,
+    /// shell.rs:177): newer → `Offer`, anything else →
+    /// `None`.
+    pub fn from_newer(newer: bool) -> Self {
+        if newer {
+            StartupRecovery::Offer
+        } else {
+            StartupRecovery::None
+        }
+    }
+}
+
+/// The status line the shell shows at boot when a
+/// recovery is offered (see [`startup_status`]).
+const STARTUP_RECOVERY_STATUS: &str =
+    "A newer recovery file exists — open Home to restore it.";
+
+/// The startup recovery decision for the real
+/// `./projects` directory, from
+/// `shell::recovery_is_newer_than_last_project`
+/// (shell.rs:177). The shell check is metadata-only and
+/// folds every filesystem error into `false`, so this is
+/// safe to call from `init()` — it can never block
+/// startup.
+pub fn startup_recovery() -> StartupRecovery {
+    StartupRecovery::from_newer(shell::recovery_is_newer_than_last_project())
+}
+
+/// [`startup_recovery`] with an explicit base directory
+/// (the testable core; shell.rs's `_in` convention).
+pub fn startup_recovery_in(dir: &Path) -> StartupRecovery {
+    StartupRecovery::from_newer(shell::recovery_is_newer_than_last_project_in(dir))
+}
+
+/// The status line the shell shows at boot when
+/// [`startup_recovery`] offers a snapshot: `Some` on
+/// `Offer`, `None` otherwise (boot normally, no message).
+pub fn startup_status() -> Option<String> {
+    startup_status_for(startup_recovery())
+}
+
+/// [`startup_status`] with an explicit base directory.
+pub fn startup_status_in(dir: &Path) -> Option<String> {
+    startup_status_for(startup_recovery_in(dir))
+}
+
+fn startup_status_for(decision: StartupRecovery) -> Option<String> {
+    match decision {
+        StartupRecovery::Offer => Some(STARTUP_RECOVERY_STATUS.into()),
+        StartupRecovery::None => None,
+    }
+}
+
+/// The panel state `init()` should start from (instead
+/// of `HomePanelState::default()`): the startup decision,
+/// run once. On [`StartupRecovery::Offer`] the panel
+/// starts open with the recovery banner offered, so the
+/// offer is on screen from the first frame; on `None` it
+/// is exactly the default state.
+///
+/// Unlike [`toggle_open`], this performs **no writes**:
+/// it never snapshots the current project as the recovery
+/// file. At boot the snapshot on disk *is* the evidence —
+/// rewriting it before judging it would corrupt the
+/// verdict (see the module docs).
+pub fn initial_state() -> HomePanelState {
+    initial_state_for(startup_recovery())
+}
+
+/// [`initial_state`] with an explicit base directory.
+pub fn initial_state_in(dir: &Path) -> HomePanelState {
+    initial_state_for(startup_recovery_in(dir))
+}
+
+fn initial_state_for(decision: StartupRecovery) -> HomePanelState {
+    let offer = decision == StartupRecovery::Offer;
+    HomePanelState {
+        open: offer,
+        recovery_offer: offer,
+        ..HomePanelState::default()
     }
 }
 
@@ -670,5 +796,84 @@ mod tests {
         let mut core = EditorCore::new();
         dispatch_duplicate(&mut core, Path::new("projects/does-not-exist.json"));
         assert!(core.status.starts_with("Duplicate failed:"), "{}", core.status);
+    }
+
+    /// Pin a file's modification time (the std handle API,
+    /// shell.rs's test pattern — no extra crates).
+    fn set_mtime(path: &Path, t: SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    #[test]
+    fn startup_decision_maps_the_newer_verdict() {
+        assert_eq!(StartupRecovery::from_newer(true), StartupRecovery::Offer);
+        assert_eq!(StartupRecovery::from_newer(false), StartupRecovery::None);
+        assert_eq!(
+            startup_status_for(StartupRecovery::Offer).as_deref(),
+            Some("A newer recovery file exists — open Home to restore it.")
+        );
+        assert_eq!(startup_status_for(StartupRecovery::None), None);
+    }
+
+    #[test]
+    fn startup_recovery_follows_the_snapshot_age() {
+        let dir = temp_dir("startup-recovery");
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let t1 = t0 + std::time::Duration::from_secs(60);
+        let t2 = t1 + std::time::Duration::from_secs(60);
+
+        // Nothing on disk: no offer, no status line.
+        assert_eq!(startup_recovery_in(&dir), StartupRecovery::None);
+        assert_eq!(startup_status_in(&dir), None);
+
+        // A snapshot with no named save to beat: offer.
+        let snapshot = shell::write_recovery_in(&dir, &Project::new_demo()).unwrap();
+        assert_eq!(startup_recovery_in(&dir), StartupRecovery::Offer);
+        assert_eq!(
+            startup_status_in(&dir).as_deref(),
+            Some("A newer recovery file exists — open Home to restore it.")
+        );
+
+        // Last save older than the snapshot: still an offer.
+        shell::touch_recent_in(&dir, "Old Save");
+        let saved = dir.join("old-save.json");
+        std::fs::write(&saved, "{}").unwrap();
+        set_mtime(&snapshot, t1);
+        set_mtime(&saved, t0);
+        assert_eq!(startup_recovery_in(&dir), StartupRecovery::Offer);
+
+        // The save overtakes the snapshot: no offer.
+        set_mtime(&saved, t2);
+        assert_eq!(startup_recovery_in(&dir), StartupRecovery::None);
+        assert_eq!(startup_status_in(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn initial_state_opens_only_on_an_offer_and_writes_nothing() {
+        // No snapshot: exactly the default (closed) state,
+        // and the check leaves the directory untouched — a
+        // boot-time write of the recovery file would
+        // manufacture the very evidence being judged.
+        let dir = temp_dir("startup-initial-none");
+        let state = initial_state_in(&dir);
+        assert!(!state.open);
+        assert!(!state.recovery_offer);
+        assert!(state.search.text.is_empty());
+        assert!(!dir.join(shell::RECOVERY_FILE).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Newer snapshot: open, banner offered.
+        let dir = temp_dir("startup-initial-offer");
+        shell::write_recovery_in(&dir, &Project::new_demo()).unwrap();
+        let state = initial_state_in(&dir);
+        assert!(state.open);
+        assert!(state.recovery_offer);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

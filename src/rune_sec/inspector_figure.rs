@@ -1,5 +1,8 @@
 //! Figure inspector panel (Rune migration Phase D, section
-//! 4/40). Declared from `main.rs` only (as
+//! 4/40; upgraded in Phase E, section 17/40, to dispatch
+//! colour and duplicate through the real engine ops in
+//! src/figure_ops.rs instead of the local dispatch helpers
+//! this file carried while the engine lacked them). Declared from `main.rs` only (as
 //! `mod rune_sec::inspector_figure` or the section
 //! aggregator's re-export) — bin-crate code, not part of the
 //! engine library.
@@ -10,18 +13,13 @@
 //! control dispatches to the engine exactly the way the
 //! engine's own surfaces do:
 //!
-//! * Colour swatches → there is **no `EditorCore` op** that
-//!   sets a figure's colour (verified against the full
-//!   `pub fn` list of editor.rs). The established precedent
-//!   is a direct field write plus a status line — the core's
-//!   own colour ops do exactly that for nodes
-//!   (`set_node_color`, editor.rs:521: writes the field, sets
-//!   the status, and deliberately does not snapshot), and so
-//!   does the MCP layer for figures (mcp_tools.rs:321,
-//!   `core.project.figures[idx].color = color`). The
-//!   [`set_figure_color`] dispatch below follows that
-//!   precedent: bounds-checked field write + status, no
-//!   snapshot. Keys `fig-color-{rrggbb}`.
+//! * Colour swatches → `EditorCore::set_figure_color(fi,
+//!   rgb)` (src/figure_ops.rs) — the Phase E engine op for
+//!   exactly this write. The swatch handler reads the
+//!   current selection at press time and delegates; the
+//!   write itself and the status line are the op's
+//!   business, as with every other core op. Keys
+//!   `fig-color-{rrggbb}`.
 //! * Opacity −/+ → `step_figure_opacity(fi, ∓0.1)`
 //!   (editor.rs:1177) — the layers engine's clamped setter,
 //!   the same op the figures sidebar's steppers call. Keys
@@ -36,22 +34,15 @@
 //!   true geometric mirror. It is the only horizontal-flip
 //!   the core offers for a figure (`mirror_strokes_x`,
 //!   editor.rs:2482, flips frame drawings, not the figure).
-//! * Duplicate → there is **no duplicate-figure op**
-//!   anywhere in the engine (verified: no
-//!   `duplicate_figure`/`clone_figure` in editor.rs,
-//!   layers.rs or the model). The [`duplicate_figure`]
-//!   dispatch below performs the structural clone in this
-//!   file, mirroring `delete_figure`'s bookkeeping
-//!   (editor.rs:1603): it snapshots first (as every
-//!   structural figure op does), inserts the cloned
-//!   instance right after the original, inserts a clone of
-//!   the figure's pose (and bend row, where one is stored)
-//!   into every frame at the same index so the parallel
-//!   per-frame tables stay parallel, shifts stored figure
-//!   indices above the insertion point (particle anchors,
-//!   the session's solo target), and selects the copy. A
-//!   movieclip figure's copy shares the same clip, like a
-//!   second instance of it. Key `fig-duplicate`.
+//! * Duplicate → `EditorCore::duplicate_figure(fi)`
+//!   (src/figure_ops.rs) — the Phase E engine op that
+//!   performs the structural clone (the instance plus its
+//!   per-frame pose/bend rows, keeping the parallel
+//!   per-frame tables parallel) and returns the copy's
+//!   index as `Option<usize>`. The panel ignores the
+//!   return value: selecting the copy and wording the
+//!   status line are the op's business. Key
+//!   `fig-duplicate`.
 //! * Delete figure → `delete_figure()` (editor.rs:1603) —
 //!   key `fig-del` (the GPUI sidebar's tuple-id root),
 //!   danger-styled; the op itself refuses to delete the
@@ -75,7 +66,6 @@
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::model::Pose;
 
 use crate::chrome_view::btn;
 use crate::stage_view::hex_color;
@@ -148,85 +138,6 @@ pub fn figure_state(core: &EditorCore) -> Option<InspectorFigureState> {
     })
 }
 
-/// Set the selected figure's colour. No `EditorCore` op
-/// exists for this (see the module docs); this follows the
-/// engine's own colour-write precedent — bounds-checked
-/// direct field write plus a status line, no snapshot, the
-/// same shape as `set_node_color` (editor.rs:521) and the
-/// MCP layer's figure-colour write (mcp_tools.rs:321).
-pub fn set_figure_color(core: &mut EditorCore, rgb: u32) {
-    let fi = core.selected_figure;
-    let Some(fig) = core.project.figures.get_mut(fi) else {
-        core.status = "No such figure.".into();
-        return;
-    };
-    fig.color = rgb;
-    core.status = format!("Figure {} colour changed.", fi + 1);
-}
-
-/// Duplicate the selected figure: insert a clone of the
-/// instance right after the original, with the original's
-/// pose (and bend row, where stored) cloned into every
-/// frame at the same index. No engine op exists for this
-/// (see the module docs); the bookkeeping mirrors
-/// `delete_figure` (editor.rs:1603), run in reverse, plus
-/// the index shifts an insertion requires. The copy is
-/// named `"<name> copy"` and becomes the selection.
-pub fn duplicate_figure(core: &mut EditorCore) {
-    let fi = core.selected_figure;
-    let Some(fig) = core.project.figures.get(fi).cloned() else {
-        core.status = "No figure to duplicate.".into();
-        return;
-    };
-    // Clone the per-frame rows before mutating anything.
-    let frame_poses: Vec<Option<Pose>> = core
-        .project
-        .frames
-        .iter()
-        .map(|f| f.poses.get(fi).cloned())
-        .collect();
-    let frame_bends: Vec<Option<Vec<f32>>> = core
-        .project
-        .frames
-        .iter()
-        .map(|f| f.bends.get(fi).cloned())
-        .collect();
-    core.snapshot();
-    let mut copy = fig;
-    copy.name = format!("{} copy", copy.name);
-    core.project.figures.insert(fi + 1, copy);
-    for (frame, pose) in core.project.frames.iter_mut().zip(frame_poses) {
-        if let Some(p) = pose {
-            frame.poses.insert(fi + 1, p);
-        }
-    }
-    for (frame, bends) in core.project.frames.iter_mut().zip(frame_bends) {
-        if let Some(b) = bends {
-            frame.bends.insert(fi + 1, b);
-        }
-    }
-    // Stored figure indices above the insertion point shift
-    // by one, so anchors keep pointing at the same figure:
-    // particle anchors in the project, and the session's
-    // solo target. (`delete_figure` performs the mirror
-    // bookkeeping for its removal.)
-    for e in &mut core.project.particles {
-        if let Some(f) = e.figure {
-            if f > fi {
-                e.figure = Some(f + 1);
-            }
-        }
-    }
-    if let Some(solo) = core.solo {
-        if solo > fi {
-            core.solo = Some(solo + 1);
-        }
-    }
-    core.selected_figure = fi + 1;
-    core.selected_node = None;
-    core.status = "Figure duplicated.".into();
-}
-
 /// One read-only label/value row.
 fn readout_row(label: &str, value: String, t: &Theme) -> El {
     row()
@@ -289,7 +200,9 @@ fn danger_btn(key: &str, label: &str, f: impl Fn(&mut State) + 'static) -> El {
 
 /// One colour swatch: a rounded square in the palette
 /// colour; the figure's current colour gets a white
-/// border. Pressing writes it via [`set_figure_color`].
+/// border. Pressing applies it through the engine op
+/// `EditorCore::set_figure_color`, targeted at whatever
+/// figure is selected at press time.
 fn swatch(rgb: u32, selected: bool) -> El {
     let fill = hex_color(rgb).unwrap_or(Color::WHITE);
     let mut e = el()
@@ -299,7 +212,10 @@ fn swatch(rgb: u32, selected: bool) -> El {
         .fill(fill)
         .hover(fill)
         .press(fill)
-        .on_press(move |s: &mut State| set_figure_color(&mut s.core, rgb));
+        .on_press(move |s: &mut State| {
+            let fi = s.core.selected_figure;
+            s.core.set_figure_color(fi, rgb);
+        });
     if selected {
         e = e.border(2.0, Color::WHITE);
     }
@@ -363,7 +279,8 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
                 s.core.mirror_selected_pose()
             }))
             .child(btn("fig-duplicate", "Duplicate", false, t, |s| {
-                duplicate_figure(&mut s.core)
+                let fi = s.core.selected_figure;
+                s.core.duplicate_figure(fi);
             }))
             .child(danger_btn("fig-del", "Delete figure", |s| {
                 s.core.delete_figure()
@@ -440,63 +357,6 @@ mod tests {
     }
 
     #[test]
-    fn set_figure_color_writes_the_selected_figure() {
-        let mut core = EditorCore::new();
-        let fi = core.selected_figure;
-        set_figure_color(&mut core, 0x2686E8);
-        assert_eq!(core.project.figures[fi].color, 0x2686E8);
-        assert!(core.status.contains("colour changed"));
-    }
-
-    #[test]
-    fn set_figure_color_guards_a_stale_selection() {
-        let mut core = EditorCore::new();
-        core.selected_figure = 999;
-        set_figure_color(&mut core, 0x2686E8);
-        assert_eq!(core.status, "No such figure.");
-    }
-
-    #[test]
-    fn duplicate_figure_inserts_a_selected_copy_with_its_poses() {
-        let mut core = EditorCore::new();
-        let n = core.project.figures.len();
-        let fi = core.selected_figure;
-        let orig = core.project.figures[fi].clone();
-        duplicate_figure(&mut core);
-        assert_eq!(core.project.figures.len(), n + 1);
-        let copy = &core.project.figures[fi + 1];
-        assert_eq!(copy.name, format!("{} copy", orig.name));
-        assert_eq!(copy.color, orig.color);
-        assert_eq!(copy.def.nodes.len(), orig.def.nodes.len());
-        assert_eq!(copy.opacity, orig.opacity);
-        // The original is untouched and every frame's pose
-        // table stays parallel to the figure list.
-        assert_eq!(core.project.figures[fi].name, orig.name);
-        for frame in &core.project.frames {
-            assert_eq!(frame.poses.len(), core.project.figures.len());
-        }
-        if let Some(frame) = core.project.frames.first() {
-            assert_eq!(
-                frame.poses[fi + 1].angles,
-                frame.poses[fi].angles,
-                "the copy starts from the original's pose"
-            );
-        }
-        assert_eq!(core.selected_figure, fi + 1);
-        assert!(core.selected_node.is_none());
-        assert_eq!(core.status, "Figure duplicated.");
-    }
-
-    #[test]
-    fn duplicate_figure_without_figures_is_a_no_op() {
-        let mut core = EditorCore::new();
-        core.project.figures.clear();
-        duplicate_figure(&mut core);
-        assert!(core.project.figures.is_empty());
-        assert_eq!(core.status, "No figure to duplicate.");
-    }
-
-    #[test]
     fn panel_builds_with_and_without_figures() {
         let t = rune::tok::theme(true);
         let with_figures = State {
@@ -522,6 +382,12 @@ mod tests {
             last_status: String::new(),
             toast_now: 0.0,
             last_dark: true,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            guides: false,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
         };
         let _ = inspector_figure(&with_figures, &t);
         let mut bare_core = EditorCore::new();
@@ -549,6 +415,12 @@ mod tests {
             last_status: String::new(),
             toast_now: 0.0,
             last_dark: true,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            guides: false,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
         };
         let _ = inspector_figure(&bare, &t);
     }

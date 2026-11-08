@@ -28,6 +28,49 @@
 //!   reachable if the vec is cleared — `load_library` seeds
 //!   the three built-ins).
 //!
+//! ## Phase E additions (section 36/40)
+//!
+//! - **Search**: a Rune `TextEdit` in
+//!   [`LibraryPanelState::search`] filters both groups by
+//!   case-insensitive name substring every render, through
+//!   the `*_rows_q` variants of the row helpers (the plain
+//!   helpers remain as empty-query wrappers). Rows keep
+//!   their real library slot indices while filtered, so
+//!   Insert/Delete still target the right entry.
+//! - **Delete** (saved entries only — the button is not
+//!   rendered for built-ins, and [`delete_saved`] refuses
+//!   them again defensively): removes the entry's backing
+//!   file and then the `core.library` vec entry, in that
+//!   order. If the file removal fails, the vec entry is
+//!   KEPT and the error is reported on `core.status` —
+//!   the panel never claims a delete the disk refused.
+//!   After a successful removal, `core.library_index` is
+//!   clamped back into range (see [`clamped_index`]).
+//!
+//! ## Entry name ↔ backing file mapping
+//!
+//! Proven from `load_library` (editor.rs:162): it reads
+//! `./library/*.json` in sorted order and names each entry
+//! from the file's **stem** (`f.file_stem()`), so a saved
+//! entry's stored name IS its file stem and the backing
+//! file is exactly `./library/<name>.json` — see
+//! [`library_file_for`]. The write side agrees:
+//! `save_figure_to_library` (editor.rs:2182) writes
+//! `./library/<figure name, spaces→'-', lowercased>.json`
+//! and reloads, so the reloaded entry's name is that stem.
+//! Built-ins are not files at all (constructed in code),
+//! which is why they can never be deleted here.
+//!
+//! The successful-delete fs dispatch (a real file removed
+//! from `./library`) is deliberately **untested**: test
+//! binaries share the process CWD, so writing/deleting
+//! files under `./library` from a unit test is fragile
+//! and could destroy a developer's real saved figures.
+//! The pure mapping, the filter, the index clamp, the
+//! built-in refusal and the failure-keeps-entry path
+//! (via a synthetic entry whose file does not exist) are
+//! all covered below.
+//!
 //! Section 2 (`figure_add`) also lists the library, as one
 //! flat pick-list inside the add-figure popover stand-in;
 //! this panel is the library's own home, with segment
@@ -47,8 +90,10 @@
 //! .child(rune_sec::library_panel::library_panel(s, &t))
 //! ```
 
+use std::path::PathBuf;
+
 use rune::tok::{type_, Theme};
-use rune::{col, row, text, El, ScrollSpec};
+use rune::{col, row, text, text_input, El, ScrollSpec, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
@@ -67,16 +112,24 @@ pub const BUILTIN_PREFIX: &str = "Built-in: ";
 pub const LIST_HEIGHT: f32 = 200.0;
 
 /// View-state for this section: whether the panel body is
-/// collapsed. Owned by `State` (see the module docs for the
-/// wiring); everything about the library itself lives in
-/// `EditorCore`.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+/// collapsed, plus the search field. Owned by `State` (see
+/// the module docs for the wiring); everything about the
+/// library itself lives in `EditorCore`.
+///
+/// The derive drops `Eq` (kept through Phase D) because
+/// Rune's `TextEdit` is `PartialEq` but not `Eq`
+/// (rune `edit.rs`: `#[derive(Clone, Default, PartialEq)]`).
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct LibraryPanelState {
     /// When true, only the header renders (the save button
     /// and the list are omitted). Toggled by the header's
     /// Hide/Show control — a pure view-state change, no
     /// engine op.
     pub collapsed: bool,
+    /// Search box contents (Rune core text edit). The row
+    /// list filters through the `*_rows_q` helpers on this
+    /// text every render; typing is the only writer.
+    pub search: TextEdit,
 }
 
 /// Display-ready data for one library row, derived from the
@@ -101,11 +154,22 @@ pub fn is_builtin(name: &str) -> bool {
     name.starts_with(BUILTIN_PREFIX)
 }
 
-/// One row per library entry, in library order.
-pub fn library_rows(core: &EditorCore) -> Vec<LibraryRow> {
+/// True when `name` matches the search `query`:
+/// case-insensitive substring; an empty (or whitespace-
+/// only) query matches everything.
+pub fn name_matches(name: &str, query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    q.is_empty() || name.to_lowercase().contains(&q)
+}
+
+/// One row per library entry whose name matches `query`,
+/// in library order. Row indices are the real library
+/// slots, unaffected by filtering.
+pub fn library_rows_q(core: &EditorCore, query: &str) -> Vec<LibraryRow> {
     core.library
         .iter()
         .enumerate()
+        .filter(|(_, (name, _))| name_matches(name, query))
         .map(|(index, (name, def))| LibraryRow {
             index,
             name: name.clone(),
@@ -115,17 +179,98 @@ pub fn library_rows(core: &EditorCore) -> Vec<LibraryRow> {
         .collect()
 }
 
+/// One row per library entry, in library order.
+pub fn library_rows(core: &EditorCore) -> Vec<LibraryRow> {
+    library_rows_q(core, "")
+}
+
+/// The built-in rows matching `query` (panel order preserved).
+pub fn builtin_rows_q(core: &EditorCore, query: &str) -> Vec<LibraryRow> {
+    library_rows_q(core, query)
+        .into_iter()
+        .filter(|r| r.builtin)
+        .collect()
+}
+
 /// The built-in rows (panel order preserved).
 pub fn builtin_rows(core: &EditorCore) -> Vec<LibraryRow> {
-    library_rows(core).into_iter().filter(|r| r.builtin).collect()
+    builtin_rows_q(core, "")
+}
+
+/// The saved-figure rows matching `query` (everything not
+/// built-in).
+pub fn saved_rows_q(core: &EditorCore, query: &str) -> Vec<LibraryRow> {
+    library_rows_q(core, query)
+        .into_iter()
+        .filter(|r| !r.builtin)
+        .collect()
 }
 
 /// The saved-figure rows (everything not built-in).
 pub fn saved_rows(core: &EditorCore) -> Vec<LibraryRow> {
-    library_rows(core)
-        .into_iter()
-        .filter(|r| !r.builtin)
-        .collect()
+    saved_rows_q(core, "")
+}
+
+/// The backing file of a saved library entry:
+/// `./library/<name>.json`. Exact by construction —
+/// `load_library` names entries from file stems (see the
+/// module docs for the evidence), so the stem→file step
+/// is the precise inverse. Only meaningful for saved
+/// entries; built-ins have no file.
+pub fn library_file_for(name: &str) -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("library")
+        .join(format!("{name}.json"))
+}
+
+/// Pure index clamp: keep a library selection valid for a
+/// library of `len` entries — `0` when empty, otherwise at
+/// most `len - 1`; an in-range index is returned unchanged.
+pub fn clamped_index(index: usize, len: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        index.min(len - 1)
+    }
+}
+
+/// Clamp `core.library_index` back into range after the
+/// library vec shrank, so the core's unchecked
+/// `library[library_index]` insert can never go stale.
+pub fn clamp_library_index(core: &mut EditorCore) {
+    core.library_index = clamped_index(core.library_index, core.library.len());
+}
+
+/// Delete saved library entry `i`: remove its backing
+/// file first, then the vec entry, then clamp
+/// `library_index`.
+///
+/// Honest failure rule: if the file removal fails (missing
+/// file included), the vec entry is KEPT and the error is
+/// reported on `core.status` — the panel never claims a
+/// delete the disk refused. Built-ins are refused before
+/// any fs access (they have no file). Out-of-range `i` is
+/// a silent no-op, matching [`insert_at`].
+pub fn delete_saved(core: &mut EditorCore, i: usize) {
+    let Some((name, _)) = core.library.get(i) else {
+        return;
+    };
+    let name = name.clone();
+    if is_builtin(&name) {
+        core.status = format!("\"{name}\" is built in and can't be deleted.");
+        return;
+    }
+    match std::fs::remove_file(library_file_for(&name)) {
+        Ok(()) => {
+            core.library.remove(i);
+            clamp_library_index(core);
+            core.status = format!("Deleted \"{name}\" from the library.");
+        }
+        Err(e) => {
+            core.status = format!("Library delete failed for \"{name}\": {e}");
+        }
+    }
 }
 
 /// Insert library slot `i` into the project: point
@@ -152,10 +297,13 @@ fn group_label(t: &Theme, label: &str) -> El {
 }
 
 /// One library row: name (growing), segment count muted,
-/// and its Insert button.
+/// its Insert button, and — for saved entries only — a
+/// Delete button. Built-in rows never get one: built-ins
+/// are constructed in code, have no file, and
+/// [`delete_saved`] would refuse them anyway.
 fn entry_row(entry: &LibraryRow, t: &Theme) -> El {
     let i = entry.index;
-    row()
+    let mut r = row()
         .key(format!("library-row-{i}"))
         .gap(8.0)
         .center_y()
@@ -167,7 +315,17 @@ fn entry_row(entry: &LibraryRow, t: &Theme) -> El {
         )
         .child(btn(&format!("library-insert-{i}"), "Insert", false, t, move |s: &mut State| {
             insert_at(&mut s.core, i);
-        }))
+        }));
+    if !entry.builtin {
+        r = r.child(btn(
+            &format!("library-delete-{i}"),
+            "Delete",
+            false,
+            t,
+            move |s: &mut State| delete_saved(&mut s.core, i),
+        ));
+    }
+    r
 }
 
 /// One labelled group of rows ("Built-in" / "Saved").
@@ -228,22 +386,41 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
             t,
             |s: &mut State| s.core.save_figure_to_library(),
         ));
+        let query = s.library_panel.search.text.clone();
+        card = card.child(
+            row()
+                .key("library-search-row")
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text_input(&s.library_panel.search, type_::BODY.lh(26.0))
+                        .key("library-search")
+                        .single_line()
+                        .grow(1.0)
+                        .color(t.text)
+                        .placeholder("Search library", t.text_secondary)
+                        .on_edit(|s: &mut State| &mut s.library_panel.search),
+                ),
+        );
         if core.library.is_empty() {
             card = card.child(group_label(
                 t,
                 "Library is empty — save a figure to add one.",
             ));
         } else {
+            let builtins = builtin_rows_q(core, &query);
+            let saved = saved_rows_q(core, &query);
+            if builtins.is_empty() && saved.is_empty() {
+                card = card.child(group_label(
+                    t,
+                    &format!("No library figures match \"{}\".", query.trim()),
+                ));
+            }
             let list = col()
                 .key("library-list")
                 .gap(6.0)
-                .child(group(
-                    "library-builtins",
-                    "Built-in",
-                    &builtin_rows(core),
-                    t,
-                ))
-                .child(group("library-saved", "Saved", &saved_rows(core), t));
+                .child(group("library-builtins", "Built-in", &builtins, t))
+                .child(group("library-saved", "Saved", &saved, t));
             card = card.child(
                 list.scroll(ScrollSpec {
                     stick_bottom: false,
@@ -341,5 +518,128 @@ mod tests {
         let n = core.project.figures.len();
         insert_at(&mut core, usize::MAX);
         assert_eq!(core.project.figures.len(), n);
+    }
+
+    #[test]
+    fn state_default_search_is_empty() {
+        let st = LibraryPanelState::default();
+        assert!(st.search.text.is_empty());
+        assert!(!st.collapsed);
+    }
+
+    #[test]
+    fn name_matches_is_case_insensitive_substring() {
+        assert!(name_matches("Built-in: Humanoid", "human"));
+        assert!(name_matches("my-hero", "HERO"));
+        assert!(name_matches("my-hero", "y-he"));
+        assert!(!name_matches("my-hero", "villain"));
+        // Empty / whitespace queries match everything.
+        assert!(name_matches("anything", ""));
+        assert!(name_matches("anything", "   "));
+    }
+
+    #[test]
+    fn filtered_rows_keep_real_library_indices() {
+        let mut core = EditorCore::new();
+        core.library
+            .push(("Alpha".into(), stykanimate_rs::model::FigureDef::simple()));
+        core.library
+            .push(("Beta".into(), stykanimate_rs::model::FigureDef::simple()));
+        // "alp" matches only the saved Alpha entry, at its
+        // real slot (after the three built-ins).
+        let rows = saved_rows_q(&core, "alp");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Alpha");
+        assert_eq!(rows[0].index, 3);
+        // Built-ins are filterable too, with real indices.
+        let rows = builtin_rows_q(&core, "mini");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].index, 2);
+        // A query matching nothing yields no rows at all.
+        assert!(library_rows_q(&core, "zzz-no-match").is_empty());
+        // Empty query = the unfiltered helpers' output.
+        assert_eq!(library_rows_q(&core, ""), library_rows(&core));
+        assert_eq!(saved_rows_q(&core, ""), saved_rows(&core));
+    }
+
+    #[test]
+    fn library_file_maps_name_to_library_dir_json() {
+        let p = library_file_for("my-hero");
+        assert_eq!(p.file_name().unwrap(), "my-hero.json");
+        assert_eq!(p.parent().unwrap().file_name().unwrap(), "library");
+        // Dotted stems (file "a.b.json" loads as entry "a.b")
+        // map back to the same file.
+        assert_eq!(library_file_for("a.b").file_name().unwrap(), "a.b.json");
+    }
+
+    #[test]
+    fn clamped_index_bounds() {
+        assert_eq!(clamped_index(0, 0), 0);
+        assert_eq!(clamped_index(5, 0), 0);
+        assert_eq!(clamped_index(0, 3), 0);
+        assert_eq!(clamped_index(2, 3), 2);
+        assert_eq!(clamped_index(3, 3), 2);
+        assert_eq!(clamped_index(usize::MAX, 3), 2);
+    }
+
+    #[test]
+    fn delete_saved_refuses_builtins_without_touching_fs() {
+        let mut core = EditorCore::new();
+        let n = core.library.len();
+        delete_saved(&mut core, 0);
+        assert_eq!(core.library.len(), n);
+        assert!(core.status.contains("built in"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn delete_saved_out_of_range_is_a_no_op() {
+        let mut core = EditorCore::new();
+        let n = core.library.len();
+        let status_before = core.status.clone();
+        delete_saved(&mut core, usize::MAX);
+        assert_eq!(core.library.len(), n);
+        assert_eq!(core.status, status_before);
+    }
+
+    #[test]
+    fn delete_saved_keeps_entry_when_file_removal_fails() {
+        // The failure path, exercised honestly: a synthetic
+        // saved entry whose backing file does not exist, so
+        // remove_file fails (NotFound) and the entry must be
+        // KEPT with the error on the status line. The
+        // success path (a real file under ./library actually
+        // removed) is untested by design — see the module
+        // docs: tests share the process CWD and must never
+        // delete files from a real ./library.
+        let mut core = EditorCore::new();
+        core.library.push((
+            "zzz-test-nonexistent-entry".into(),
+            stykanimate_rs::model::FigureDef::simple(),
+        ));
+        let idx = core.library.len() - 1;
+        core.library_index = idx;
+        delete_saved(&mut core, idx);
+        assert_eq!(core.library.len(), idx + 1, "entry must be kept");
+        assert_eq!(core.library[idx].0, "zzz-test-nonexistent-entry");
+        assert!(
+            core.status.contains("Library delete failed"),
+            "status: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn clamp_library_index_after_shrink() {
+        let mut core = EditorCore::new();
+        core.library_index = 2;
+        clamp_library_index(&mut core);
+        assert_eq!(core.library_index, 2, "in-range index unchanged");
+        core.library.truncate(1);
+        clamp_library_index(&mut core);
+        assert_eq!(core.library_index, 0);
+        core.library.clear();
+        core.library_index = 7;
+        clamp_library_index(&mut core);
+        assert_eq!(core.library_index, 0, "empty library clamps to 0");
     }
 }

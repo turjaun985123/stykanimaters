@@ -16,6 +16,13 @@
 //!   (Play/Pause and Onion have no op; the GPUI app flipped the
 //!   field from its button handlers, and chrome_view still
 //!   does for those two).
+//! * Phase E added five commands over the new engine ops:
+//!   `duplicate-figure`, `delete-last-stroke`, `fade-audio`,
+//!   `reverse-audio` and `delete-audio-clip`. The two
+//!   index-taking ops (`duplicate_figure`,
+//!   `delete_audio_clip`, `delete_stroke_at`) are wrapped by
+//!   shims that resolve "the selected figure" / "the last
+//!   entry" at call time and stand down on empty lists.
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -178,6 +185,32 @@ fn cmd_fx_lightning(c: &mut EditorCore) {
     c.add_fx_clip(ClipKind::Lightning);
 }
 
+/// Phase E: the duplicate op takes a figure index, so the
+/// shim passes the current selection — the same pattern as
+/// `cmd_solo_figure` / `cmd_lock_figure`.
+fn cmd_duplicate_figure(c: &mut EditorCore) {
+    let fi = c.selected_figure;
+    c.duplicate_figure(fi);
+}
+
+/// Phase E: `delete_stroke_at` takes a project-wide stroke
+/// index, so the shim resolves the last stroke at call time
+/// and stands down when the project has no strokes.
+fn cmd_delete_last_stroke(c: &mut EditorCore) {
+    if let Some(i) = c.project.strokes.len().checked_sub(1) {
+        c.delete_stroke_at(i);
+    }
+}
+
+/// Phase E: `delete_audio_clip` takes a clip index, so the
+/// shim resolves the last clip at call time and stands down
+/// when the project has no audio clips.
+fn cmd_delete_last_audio_clip(c: &mut EditorCore) {
+    if let Some(i) = c.project.audio.len().checked_sub(1) {
+        c.delete_audio_clip(i);
+    }
+}
+
 /// The command inventory. Order matters: it is the display
 /// order for an empty query and the tie-break order for equal
 /// fuzzy scores.
@@ -209,6 +242,7 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "add-figure", title: "Add figure", group: "Figures", run: EditorCore::add_figure },
     Command { key: "add-quadruped", title: "Add quadruped figure", group: "Figures", run: EditorCore::add_quadruped },
     Command { key: "del-figure", title: "Delete figure", group: "Figures", run: EditorCore::delete_figure },
+    Command { key: "duplicate-figure", title: "Duplicate figure", group: "Figures", run: cmd_duplicate_figure },
     Command { key: "hide-figure", title: "Toggle figure hidden", group: "Figures", run: EditorCore::toggle_figure_hidden },
     Command { key: "solo-figure", title: "Solo selected figure", group: "Figures", run: cmd_solo_figure },
     Command { key: "lock-figure", title: "Lock selected figure", group: "Figures", run: cmd_lock_figure },
@@ -245,6 +279,7 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "clear-drawings", title: "Clear frame drawings", group: "Draw", run: EditorCore::clear_frame_drawings },
     Command { key: "mirror-strokes", title: "Mirror strokes horizontally", group: "Draw", run: EditorCore::mirror_strokes_x },
     Command { key: "stamp-polygon", title: "Stamp polygon", group: "Draw", run: EditorCore::stamp_polygon },
+    Command { key: "delete-last-stroke", title: "Delete last stroke", group: "Draw", run: cmd_delete_last_stroke },
     // -- Effects --------------------------------------------------
     Command { key: "particle-burst", title: "Add particle: Burst", group: "Effects", run: cmd_particle_burst },
     Command { key: "particle-sparkle", title: "Add particle: Sparkle", group: "Effects", run: cmd_particle_sparkle },
@@ -258,6 +293,9 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "audio-lowpass", title: "Audio: lowpass last clip", group: "Audio", run: EditorCore::audio_lowpass_last },
     Command { key: "audio-trim-silence", title: "Audio: trim silence", group: "Audio", run: EditorCore::audio_trim_silence_last },
     Command { key: "audio-split-silences", title: "Audio: split at silences", group: "Audio", run: EditorCore::audio_split_at_silences_last },
+    Command { key: "fade-audio", title: "Audio: fade last clip", group: "Audio", run: EditorCore::audio_fade_last },
+    Command { key: "reverse-audio", title: "Audio: reverse last clip", group: "Audio", run: EditorCore::audio_reverse_last },
+    Command { key: "delete-audio-clip", title: "Audio: delete last clip", group: "Audio", run: cmd_delete_last_audio_clip },
     // -- Export ---------------------------------------------------
     Command { key: "export-png", title: "Export PNG sequence", group: "Export", run: EditorCore::export_png },
     Command { key: "export-gif", title: "Export GIF", group: "Export", run: EditorCore::export_gif },
@@ -613,7 +651,7 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(total, keys.len(), "duplicate command keys");
-        assert!(total >= 60, "palette should cover ~60+ commands, has {total}");
+        assert!(total >= 77, "palette should cover 77+ commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }
@@ -641,6 +679,68 @@ mod tests {
         // Undo on a fresh core is a safe no-op.
         let mut fresh = EditorCore::new();
         (COMMANDS[idx_of("undo")].run)(&mut fresh);
+    }
+
+    #[test]
+    fn phase_e_commands_are_present_and_wired() {
+        use stykanimate_rs::model::{AudioClip, Stroke};
+        // All five Phase E keys resolve (idx_of panics if not).
+        for key in [
+            "duplicate-figure",
+            "delete-last-stroke",
+            "fade-audio",
+            "reverse-audio",
+            "delete-audio-clip",
+        ] {
+            idx_of(key);
+        }
+        // Duplicate figure: the demo project starts with one
+        // figure; the shim passes the selection to the op.
+        let mut core = EditorCore::new();
+        let figures = core.project.figures.len();
+        (COMMANDS[idx_of("duplicate-figure")].run)(&mut core);
+        assert_eq!(core.project.figures.len(), figures + 1);
+        // Delete last stroke: the empty guard stands down,
+        // then a real run removes only the newest stroke.
+        let mut core = EditorCore::new();
+        (COMMANDS[idx_of("delete-last-stroke")].run)(&mut core);
+        assert!(core.project.strokes.is_empty());
+        let stroke = |color: u32| Stroke {
+            frame: 0,
+            points: vec![[0.0, 0.0]],
+            color,
+            width: 1.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+        };
+        core.project.strokes.push(stroke(0x111111));
+        core.project.strokes.push(stroke(0x222222));
+        (COMMANDS[idx_of("delete-last-stroke")].run)(&mut core);
+        assert_eq!(core.project.strokes.len(), 1);
+        assert_eq!(core.project.strokes[0].color, 0x111111);
+        // The audio trio on a clipless core: every one is a
+        // status-only no-op (the *_last ops self-guard, the
+        // delete shim's own guard stands down first).
+        let mut core = EditorCore::new();
+        (COMMANDS[idx_of("fade-audio")].run)(&mut core);
+        (COMMANDS[idx_of("reverse-audio")].run)(&mut core);
+        (COMMANDS[idx_of("delete-audio-clip")].run)(&mut core);
+        assert!(core.project.audio.is_empty());
+        // Delete last clip removes exactly the newest entry.
+        core.project.audio.push(AudioClip {
+            path: "a.wav".into(),
+            start_frame: 0,
+            gain: 1.0,
+        });
+        core.project.audio.push(AudioClip {
+            path: "b.wav".into(),
+            start_frame: 4,
+            gain: 1.0,
+        });
+        (COMMANDS[idx_of("delete-audio-clip")].run)(&mut core);
+        assert_eq!(core.project.audio.len(), 1);
+        assert_eq!(core.project.audio[0].path, "a.wav");
     }
 
     // -- fuzzy_score -------------------------------------------

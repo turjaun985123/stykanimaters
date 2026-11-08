@@ -35,7 +35,7 @@ use rune::{
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Pose;
 
-use stage_view::{stage_shape, to_stage, view_transform};
+use stage_view::stage_shape;
 
 pub struct State {
     pub core: EditorCore,
@@ -71,6 +71,19 @@ pub struct State {
     /// Pose clipboard (pose_tools section; the core clipboard
     /// holds whole frames, not single poses).
     pub pose_clipboard: Option<Pose>,
+    /// Active workspace (Phase E workspaces section; persists
+    /// through LayoutPrefs.workspace and gates which panels
+    /// mount).
+    pub workspace: rune_sec::workspaces::Workspace,
+    /// Stage guides overlay on/off (settings section).
+    pub guides: bool,
+    /// Left/right column visibility (View menu toggles).
+    pub show_left: bool,
+    pub show_right: bool,
+    /// Graph-key clipboard (keyframe_tools section).
+    pub key_clipboard: Option<Vec<stykanimate_rs::graph::Key>>,
+    /// Last export recap line (export_panel section).
+    pub export_recap: String,
     /// Last status line fed to the toast stack.
     last_status: String,
     /// Shell clock (seconds) as of the last `poll`, for the
@@ -88,6 +101,9 @@ fn init() -> State {
     // and `poll` writes changes back.
     let layout = stykanimate_rs::shell::load_layout();
     core.light_theme = !layout.dark;
+    if let Some(msg) = rune_sec::home_panel::startup_status() {
+        core.status = msg;
+    }
     let name = core.project.name.clone();
     let status = core.status.clone();
     State {
@@ -97,7 +113,7 @@ fn init() -> State {
         figures_panel: Default::default(),
         figure_add: Default::default(),
         library_panel: Default::default(),
-        home_panel: Default::default(),
+        home_panel: rune_sec::home_panel::initial_state(),
         frame_ops: Default::default(),
         graph_panel: Default::default(),
         audio_panel: rune_sec::audio_panel::AudioPanelState::new(),
@@ -110,6 +126,12 @@ fn init() -> State {
         export_use_range: false,
         fx_selected: None,
         pose_clipboard: None,
+        workspace: rune_sec::workspaces::from_prefs(&layout),
+        guides: false,
+        show_left: true,
+        show_right: true,
+        key_clipboard: None,
+        export_recap: String::new(),
         last_status: status,
         toast_now: 0.0,
         last_dark: layout.dark,
@@ -126,8 +148,8 @@ fn init() -> State {
 /// the press hit-tests and drags a joint.
 fn stage_drag(s: &mut State, d: &mut Drag) {
     let core = &mut s.core;
-    let vt = view_transform([d.w, d.h], core.project.stage, core.camera_here());
-    let p = to_stage(&vt, [d.x, d.y]);
+    let rt = rune_sec::stage_camera::RotTransform::for_drag(core, [d.w, d.h]);
+    let p = rt.to_stage([d.x, d.y]);
     match d.phase {
         Phase::Down => {
             if core.draw_mode {
@@ -187,6 +209,7 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
         .map(|last| ((t - last) as f32).clamp(0.0, 0.1))
         .unwrap_or(0.0);
     s.last_poll = Some(t);
+    rune_sec::project_tools::sync_name_edit(s);
     let now = t as f32;
     s.toast_now = now;
     let mut redraw = false;
@@ -237,6 +260,7 @@ fn text_focused(s: &State) -> bool {
         || s.name_edit.focused
         || s.audio_panel.name.focused
         || s.home_panel.search.focused
+        || s.library_panel.search.focused
         || s.text_tool.field.focused
 }
 
@@ -256,6 +280,17 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     }
     if text_focused(s) {
         return false;
+    }
+    if ev.mods.alt {
+        if let Key::Text(text) = &ev.key {
+            if let Some(n) = text.chars().next().and_then(|c| c.to_digit(10)) {
+                if (1..=8).contains(&n) {
+                    let ws = rune_sec::workspaces::Workspace::all()[(n - 1) as usize];
+                    rune_sec::workspaces::select_workspace(s, ws);
+                    return true;
+                }
+            }
+        }
     }
     if ev.is_command('z') {
         if ev.mods.shift {
@@ -319,15 +354,33 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     let stage_size = cx.layout_size("stage").unwrap_or(core.project.stage);
     let stage_fill = stage_view::hex_color(core.project.background).unwrap_or(t.card);
 
+    // Workspace gating (Phase E): a panel mounts only in the
+    // workspaces whose table lists it; a column left empty by
+    // gating isn't mounted at all. Figure-add, settings and
+    // help are deliberately ungated (the workspaces module
+    // documents why).
+    use rune_sec::workspaces::Section as Sec;
+    let ws = s.workspace;
+    let vis = |sec: Sec| rune_sec::workspaces::section_visible(ws, sec);
+
     // Left column: projects + figures + library + layers.
     let mut left = col().key("side-left").gap(12.0);
-    left = left
-        .child(rune_sec::home_panel::home_panel(s, &t))
-        .child(rune_sec::project_tools::project_section(s, &t))
-        .child(rune_sec::figures_panel::figures_panel(s, &t))
-        .child(rune_sec::figure_add::figure_add_panel(s, &t))
-        .child(rune_sec::library_panel::library_panel(s, &t))
-        .child(rune_sec::layers_panel::panel(s, &t));
+    if vis(Sec::Home) {
+        left = left.child(rune_sec::home_panel::home_panel(s, &t));
+    }
+    if vis(Sec::Project) {
+        left = left.child(rune_sec::project_tools::project_section(s, &t));
+    }
+    if vis(Sec::Figures) {
+        left = left.child(rune_sec::figures_panel::figures_panel(s, &t));
+    }
+    left = left.child(rune_sec::figure_add::figure_add_panel(s, &t));
+    if vis(Sec::Library) {
+        left = left.child(rune_sec::library_panel::library_panel(s, &t));
+    }
+    if vis(Sec::Layers) {
+        left = left.child(rune_sec::layers_panel::panel(s, &t));
+    }
 
     // Right column: contextual sections in workflow order —
     // selection first, then scene/camera, graph/easing, draw,
@@ -336,31 +389,76 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     if s.menus.help_open {
         right = right.child(rune_sec::help_panel::help_panel(core, &t));
     }
-    right = right
-        .child(rune_sec::settings_popover::settings_popover(s, &t))
-        .child(rune_sec::inspector_segment::inspector_segment(s, &t))
-        .child(rune_sec::inspector_figure::inspector_figure(s, &t))
-        .child(rune_sec::inspector_style::style_panel(s, &t))
-        .child(rune_sec::pose_tools::pose_tools(s, &t))
-        .child(rune_sec::keyframe_tools::keyframe_section(s, &t))
-        .child(rune_sec::camera_panel::panel(s, &t))
-        .child(rune_sec::scene_panel::scene_panel(s, &t))
-        .child(rune_sec::onion_controls::onion_controls(s, &t))
-        .child(rune_sec::playback_controls::playback_controls(s, &t))
-        .child(rune_sec::frame_ops::frames_section(s, &t))
-        .child(rune_sec::graph_panel::graph_panel(s, cx, &t))
-        .child(rune_sec::easing_panel::easing_panel(s, &t))
-        .child(rune_sec::draw_tools::draw_tools(s, &t))
-        .child(rune_sec::stroke_inspector::stroke_panel(s, &t))
-        .child(rune_sec::text_tool::text_tool(s, &t))
-        .child(rune_sec::fx_browser::fx_browser(s, &t))
-        .child(rune_sec::fx_clips::fx_section(s, &t))
-        .child(rune_sec::audio_panel::audio_panel(s, &t))
-        .child(rune_sec::waveform_view::waveform_el(core, [308.0, 56.0]))
-        .child(rune_sec::clips_panel::clips_panel(s, &t))
-        .child(rune_sec::three_d_panel::three_d_panel(s, &t))
-        .child(rune_sec::export_panel::export_panel(s, &t))
-        .child(rune_sec::stats_view::stats_panel(s, &t));
+    right = right.child(rune_sec::settings_popover::settings_popover(s, &t));
+    if vis(Sec::InspectorSegment) {
+        right = right.child(rune_sec::inspector_segment::inspector_segment(s, &t));
+    }
+    if vis(Sec::InspectorFigure) {
+        right = right.child(rune_sec::inspector_figure::inspector_figure(s, &t));
+    }
+    if vis(Sec::InspectorStyle) {
+        right = right.child(rune_sec::inspector_style::style_panel(s, &t));
+    }
+    if vis(Sec::PoseTools) {
+        right = right.child(rune_sec::pose_tools::pose_tools(s, &t));
+    }
+    if vis(Sec::KeyframeTools) {
+        right = right.child(rune_sec::keyframe_tools::keyframe_section(s, &t));
+    }
+    if vis(Sec::Camera) {
+        right = right.child(rune_sec::camera_panel::panel(s, &t));
+    }
+    if vis(Sec::Scene) {
+        right = right.child(rune_sec::scene_panel::scene_panel(s, &t));
+    }
+    if vis(Sec::Onion) {
+        right = right.child(rune_sec::onion_controls::onion_controls(s, &t));
+    }
+    if vis(Sec::Playback) {
+        right = right.child(rune_sec::playback_controls::playback_controls(s, &t));
+    }
+    if vis(Sec::FrameOps) {
+        right = right.child(rune_sec::frame_ops::frames_section(s, &t));
+    }
+    if vis(Sec::Graph) {
+        right = right.child(rune_sec::graph_panel::graph_panel(s, cx, &t));
+    }
+    if vis(Sec::Easing) {
+        right = right.child(rune_sec::easing_panel::easing_panel(s, &t));
+    }
+    if vis(Sec::DrawTools) {
+        right = right.child(rune_sec::draw_tools::draw_tools(s, &t));
+    }
+    if vis(Sec::StrokeInspector) {
+        right = right.child(rune_sec::stroke_inspector::stroke_panel(s, &t));
+    }
+    if vis(Sec::TextTool) {
+        right = right.child(rune_sec::text_tool::text_tool(s, &t));
+    }
+    if vis(Sec::FxBrowser) {
+        right = right.child(rune_sec::fx_browser::fx_browser(s, &t));
+    }
+    if vis(Sec::FxClips) {
+        right = right.child(rune_sec::fx_clips::fx_section(s, &t));
+    }
+    if vis(Sec::Audio) {
+        right = right.child(rune_sec::audio_panel::audio_panel(s, &t));
+    }
+    if vis(Sec::Waveform) {
+        right = right.child(rune_sec::waveform_view::waveform_el(core, [308.0, 56.0]));
+    }
+    if vis(Sec::Clips) {
+        right = right.child(rune_sec::clips_panel::clips_panel(s, &t));
+    }
+    if vis(Sec::ThreeD) {
+        right = right.child(rune_sec::three_d_panel::three_d_panel(s, &t));
+    }
+    if vis(Sec::Export) {
+        right = right.child(rune_sec::export_panel::export_panel(s, &t));
+    }
+    if vis(Sec::Stats) {
+        right = right.child(rune_sec::stats_view::stats_panel(s, &t));
+    }
 
     // Centre column: (palette), stage, camera overlay strip,
     // transport, timeline, status strip.
@@ -370,7 +468,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
     centre = centre
         .child(
-            canvas(stage_shape(core, stage_size))
+            canvas(stage_shape(core, stage_size, s.guides))
                 .key("stage")
                 .grow(1.0)
                 .w_full()
@@ -388,8 +486,35 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .child(rune_sec::camera_panel::overlay(core)),
         )
         .child(chrome_view::transport_row(s, &t))
-        .child(chrome_view::timeline_row(s, &t))
+        .child(rune_sec::timeline_marks::timeline_marks(s, &t))
         .child(rune_sec::status_strip::status_strip(core));
+
+    // The side columns mount only while the View toggles show
+    // them (menus section); the centre always mounts.
+    let mut main_row = row()
+        .key("main-row")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .gap(12.0);
+    if s.show_left {
+        main_row = main_row.child(
+            left.scroll(ScrollSpec { stick_bottom: false })
+                .w(300.0)
+                .grow(1.0)
+                .min_h(0.0),
+        );
+    }
+    main_row = main_row.child(centre);
+    if s.show_right {
+        main_row = main_row.child(
+            right
+                .scroll(ScrollSpec { stick_bottom: false })
+                .w(340.0)
+                .grow(1.0)
+                .min_h(0.0),
+        );
+    }
 
     col()
         .w_full()
@@ -399,28 +524,8 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         .gap(12.0)
         .child(chrome_view::app_bar(s, &t))
         .child(rune_sec::menus::menu_bar(s, &t))
-        .child(
-            row()
-                .key("main-row")
-                .w_full()
-                .grow(1.0)
-                .min_h(0.0)
-                .gap(12.0)
-                .child(
-                    left.scroll(ScrollSpec { stick_bottom: false })
-                        .w(300.0)
-                        .grow(1.0)
-                        .min_h(0.0),
-                )
-                .child(centre)
-                .child(
-                    right
-                        .scroll(ScrollSpec { stick_bottom: false })
-                        .w(340.0)
-                        .grow(1.0)
-                        .min_h(0.0),
-                ),
-        )
+        .child(rune_sec::workspaces::workspace_row(s, &t))
+        .child(main_row)
         .child(rune_sec::toasts::toasts_view(&s.toasts, s.toast_now))
         .child(rune_sec::menus::menu_scrim(s))
         .child(rune_sec::menus::menu_dropdown(s, &t))

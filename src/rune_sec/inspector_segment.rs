@@ -449,6 +449,12 @@ mod tests {
             last_status: String::new(),
             toast_now: 0.0,
             last_dark: true,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            guides: false,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
         };
         let _ = inspector_segment(&bare, &t);
         let selected = State {
@@ -474,6 +480,12 @@ mod tests {
             last_status: String::new(),
             toast_now: 0.0,
             last_dark: true,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            guides: false,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
         };
         let _ = inspector_segment(&selected, &t);
         let root = State {
@@ -499,6 +511,12 @@ mod tests {
             last_status: String::new(),
             toast_now: 0.0,
             last_dark: true,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            guides: false,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
         };
         let _ = inspector_segment(&root, &t);
     }

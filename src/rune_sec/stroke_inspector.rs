@@ -1,4 +1,5 @@
-//! Stroke / brush inspector (Rune Phase D, section 12/40).
+//! Stroke / brush inspector (Rune Phase D, section 12/40;
+//! per-stroke delete added in Phase E, section 14/40).
 //! Declared under `crate::rune_sec` — bin-crate code, not part
 //! of the engine library.
 //!
@@ -43,19 +44,21 @@
 //! One row per stroke on the current frame
 //! (`Project.strokes`, model.rs:703, filtered by
 //! `Stroke.frame == EditorCore.current`), with a colour
-//! swatch and a data summary (points, width, fill, spray
-//! mark). **There is no per-stroke delete op** — a grep for
-//! delete/remove stroke across the engine finds nothing;
-//! the removal ops that exist are frame-scoped
-//! (`clear_frame_drawings`, editor.rs:2391 — the Clear
-//! button below) and pointer-scoped (the eraser drag and
-//! `lasso_erase`, editor.rs:2449). So the list is
-//! display-only and Clear is the one destructive control.
+//! swatch, a data summary (points, width, fill, spray
+//! mark) and a **Delete** button. The button calls the
+//! per-stroke delete op `EditorCore::delete_stroke_at`
+//! (added in Phase E, section 7) with the stroke's index
+//! in `Project.strokes` — carried on the row data
+//! ([`StrokeRow::project_index`]), never the row position,
+//! because the frame filter makes the two differ whenever
+//! other frames carry strokes. The frame-scoped Clear
+//! (`clear_frame_drawings`, editor.rs:2391) remains as
+//! the bulk removal above the list.
 //!
 //! No new `State` fields: everything reads `s.core` (active
 //! brush, `brush_index`, `project.strokes`, `current`) and
-//! writes go through the `brush_index` field write or the
-//! one frame-clear op.
+//! writes go through the `brush_index` field write, the
+//! frame-clear op or `delete_stroke_at`.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El};
@@ -358,6 +361,56 @@ pub fn stroke_summary(stroke: &Stroke) -> String {
     out
 }
 
+/// One stroke-list row's data. The list is filtered to the
+/// current frame, so a row's display position and its
+/// stroke's index in `Project.strokes` differ whenever
+/// other frames carry strokes — the Delete button must
+/// target [`StrokeRow::project_index`], never the position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StrokeRow {
+    /// Index into `Project.strokes` — the delete target
+    /// and the row button's key suffix.
+    pub project_index: usize,
+    /// 1-based position within this frame's list (the
+    /// `#n` label).
+    pub position: usize,
+    /// The stroke's colour (swatch fill).
+    pub color: u32,
+    /// The one-line data summary (see [`stroke_summary`]).
+    pub summary: String,
+}
+
+/// The current frame's stroke rows, in project order,
+/// built over [`frame_stroke_indices`] so every row
+/// carries its stroke's real `Project.strokes` index.
+pub fn stroke_rows(core: &EditorCore) -> Vec<StrokeRow> {
+    frame_stroke_indices(core)
+        .into_iter()
+        .enumerate()
+        .map(|(k, idx)| {
+            let stroke = &core.project.strokes[idx];
+            StrokeRow {
+                project_index: idx,
+                position: k + 1,
+                color: stroke.color,
+                summary: stroke_summary(stroke),
+            }
+        })
+        .collect()
+}
+
+/// Row Delete press: remove the stroke at
+/// `project_index` in `Project.strokes` via the core's
+/// per-stroke delete op (`EditorCore::delete_stroke_at`,
+/// Phase E section 7 — snapshot, removal and status are
+/// the op's business). Later strokes shift down one
+/// index; the panel rebuilds its rows from the core on
+/// the next view pass, so no row data is ever reused
+/// across a deletion.
+pub fn delete_stroke(core: &mut EditorCore, project_index: usize) {
+    core.delete_stroke_at(project_index);
+}
+
 /// One parameter row: label, current value, and the −/+
 /// stepper pair stepping that parameter through the preset
 /// library ([`step_param`]).
@@ -390,7 +443,8 @@ fn param_row(
 /// The stroke inspector panel: the active brush's parameter
 /// set (steppers + nib segmented control, all stepping the
 /// preset selection — see the module docs), then the
-/// current frame's stroke list with the frame Clear button.
+/// current frame's stroke list with per-row Delete buttons
+/// and the frame Clear button.
 pub fn stroke_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let brush = core.active_brush();
@@ -471,7 +525,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
     }
 
     // ---- Current frame's strokes ----
-    let indices = frame_stroke_indices(core);
+    let rows = stroke_rows(core);
     let mut header = row()
         .key("strokes-header")
         .gap(8.0)
@@ -482,22 +536,22 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .color(t.text)
                 .grow(1.0),
         );
-    if !indices.is_empty() {
+    if !rows.is_empty() {
         header = header.child(btn("strokes-clear", "Clear frame", false, t, |s| {
             s.core.clear_frame_drawings()
         }));
     }
     panel = panel.child(header);
 
-    if indices.is_empty() {
+    if rows.is_empty() {
         panel = panel.child(
             text("No strokes on this frame.")
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         );
     } else {
-        for (k, &idx) in indices.iter().enumerate() {
-            let stroke = &core.project.strokes[idx];
+        for srow in rows {
+            let idx = srow.project_index;
             panel = panel.child(
                 row()
                     .gap(8.0)
@@ -506,19 +560,28 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                         el()
                             .size(14.0, 14.0)
                             .radius(4.0)
-                            .fill(hex_color(stroke.color).unwrap_or(t.text)),
+                            .fill(hex_color(srow.color).unwrap_or(t.text)),
                     )
                     .child(
-                        text(format!("#{}", k + 1))
+                        text(format!("#{}", srow.position))
                             .font(type_::LABEL)
                             .color(t.text_secondary),
                     )
                     .child(
-                        text(stroke_summary(stroke))
+                        text(srow.summary)
                             .font(type_::LABEL)
                             .color(t.text)
                             .grow(1.0),
-                    ),
+                    )
+                    .child(btn(
+                        &format!("stroke-del-{idx}"),
+                        "Delete",
+                        false,
+                        t,
+                        move |s: &mut State| {
+                            delete_stroke(&mut s.core, idx);
+                        },
+                    )),
             );
         }
     }
@@ -703,5 +766,71 @@ mod tests {
             opacity: 0.5,
         });
         assert_eq!(stroke_summary(&sprayed), "20 pts · w 4 · spray r12 · 50%");
+    }
+
+    #[test]
+    fn stroke_rows_carry_project_indices_across_interleaved_frames() {
+        let mut core = EditorCore::new();
+        // Interleave frames 0, 1, 0, 1, 0; distinct point
+        // counts make each stroke identifiable by summary.
+        for (frame, pts) in [(0, 1), (1, 2), (0, 3), (1, 4), (0, 5)] {
+            core.project.strokes.push(plain_stroke(frame, pts));
+        }
+        // Frame 0's rows: project indices 0, 2, 4 shown at
+        // display positions 1, 2, 3 — the delete target is
+        // the project index, never the row position.
+        let rows = stroke_rows(&core);
+        assert_eq!(
+            rows.iter().map(|r| r.project_index).collect::<Vec<_>>(),
+            vec![0, 2, 4]
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.position).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(rows[1].summary, "3 pts · w 4");
+        assert_eq!(rows[1].color, 0xFF_0000);
+        core.goto(1);
+        let rows = stroke_rows(&core);
+        assert_eq!(
+            rows.iter().map(|r| r.project_index).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(rows[0].summary, "2 pts · w 4");
+    }
+
+    #[test]
+    fn delete_stroke_removes_the_row_s_project_stroke() {
+        let mut core = EditorCore::new();
+        for (frame, pts) in [(0, 1), (1, 2), (0, 3), (1, 4), (0, 5)] {
+            core.project.strokes.push(plain_stroke(frame, pts));
+        }
+        // Delete frame 0's middle row: its project index is
+        // 2 (the 3-point stroke). Deleting by row position
+        // instead would kill project index 1 — a frame-1
+        // stroke — which must survive.
+        let rows = stroke_rows(&core);
+        delete_stroke(&mut core, rows[1].project_index);
+        let remaining: Vec<usize> = core
+            .project
+            .strokes
+            .iter()
+            .map(|s| s.points.len())
+            .collect();
+        assert_eq!(remaining, vec![1, 2, 4, 5]);
+        // Frame 0's rebuilt rows renumber over the
+        // survivors and still point at the right strokes:
+        // the 5-point stroke moved from project index 4
+        // to index 3.
+        let rows = stroke_rows(&core);
+        assert_eq!(
+            rows.iter().map(|r| r.project_index).collect::<Vec<_>>(),
+            vec![0, 3]
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.position).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(rows[1].summary, "5 pts · w 4");
     }
 }

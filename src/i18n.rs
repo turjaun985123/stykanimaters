@@ -10,7 +10,7 @@
 //! The language set mirrors the original app's locale packs
 //! (`src/locales/packs/` in StykAnimate-App: 27 packs) plus Bengali,
 //! which the port added for its user — 28 languages in total.
-//! Every table carries exactly the same 70 keys.
+//! Every table carries exactly the same 78 keys.
 //!
 //! Translation approach: established animation terms are used where
 //! a language has them (French "pelure d'oignon", Polish "skórka
@@ -42,6 +42,21 @@
 //! only for now: the app bar's workspace chips still use the
 //! English names as their labels this wave, like every other
 //! button in the app, so the chips are not yet localised.
+//!
+//! The Rune shell keys (`settings`, `frame`, `frames`,
+//! `figures`, `prev_frame`, `next_frame`, `fps`, `zoom`) were
+//! added in Phase E of the Rune migration, with genuine
+//! translations in all 28 languages, so the Rune shell's
+//! `SHELL_KEYS` list (src/rune_sec/i18n_wire.rs) is now fully
+//! covered. Each value is built from that language's own
+//! existing vocabulary in these tables: the frame word from
+//! `add_frame` / `transport_first`, the figures plural from
+//! `figures_layers`, prev/next on the `transport_first` /
+//! `transport_last` pattern, zoom from `cam_zoom_plus`. Two
+//! exceptions by nature: `fps` is the abbreviation "FPS" in
+//! every language's animation software (Chinese uses 帧率),
+//! and a few languages do not mark plurals, so `frames` matches
+//! `frame` there (Greek, Indonesian, Vietnamese, Chinese).
 
 /// Languages the UI can be displayed in: the original app's 27
 /// locale packs, plus Bengali (the port's own addition).
@@ -321,6 +336,15 @@ static EN: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Settings"),
+    ("frame", "Frame"),
+    ("frames", "Frames"),
+    ("figures", "Figures"),
+    ("prev_frame", "Previous frame"),
+    ("next_frame", "Next frame"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Pose mode."),
     (
@@ -408,6 +432,15 @@ static BN: &[(&str, &str)] = &[
     ("ws_audio", "অডিও"),
     ("ws_3d", "3D"),
     ("ws_export", "এক্সপোর্ট"),
+    // Rune shell labels (Phase E)
+    ("settings", "সেটিংস"),
+    ("frame", "ফ্রেম"),
+    ("frames", "ফ্রেমসমূহ"),
+    ("figures", "ফিগারসমূহ"),
+    ("prev_frame", "আগের ফ্রেম"),
+    ("next_frame", "পরের ফ্রেম"),
+    ("fps", "FPS"),
+    ("zoom", "জুম"),
     // Status line
     ("pose_mode", "পোজ মোড।"),
     (
@@ -495,6 +528,15 @@ static ES: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Exportar"),
+    // Rune shell labels (Phase E)
+    ("settings", "Ajustes"),
+    ("frame", "Fotograma"),
+    ("frames", "Fotogramas"),
+    ("figures", "Figuras"),
+    ("prev_frame", "Fotograma anterior"),
+    ("next_frame", "Fotograma siguiente"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Modo pose."),
     (
@@ -582,6 +624,15 @@ static AR: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "الإعدادات"),
+    ("frame", "إطار"),
+    ("frames", "إطارات"),
+    ("figures", "الأشكال"),
+    ("prev_frame", "الإطار السابق"),
+    ("next_frame", "الإطار التالي"),
+    ("fps", "FPS"),
+    ("zoom", "تكبير"),
     // Status line
     ("pose_mode", "وضع الوضعية."),
     (
@@ -669,6 +720,15 @@ static CS: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Nastavení"),
+    ("frame", "Snímek"),
+    ("frames", "Snímky"),
+    ("figures", "Figury"),
+    ("prev_frame", "Předchozí snímek"),
+    ("next_frame", "Další snímek"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Režim pózy."),
     (
@@ -756,6 +816,15 @@ static DA: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Indstillinger"),
+    ("frame", "Billede"),
+    ("frames", "Billeder"),
+    ("figures", "Figurer"),
+    ("prev_frame", "Forrige billede"),
+    ("next_frame", "Næste billede"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Poseringstilstand."),
     (
@@ -843,6 +912,15 @@ static DE: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Exportieren"),
+    // Rune shell labels (Phase E)
+    ("settings", "Einstellungen"),
+    ("frame", "Frame"),
+    ("frames", "Frames"),
+    ("figures", "Figuren"),
+    ("prev_frame", "Vorheriger Frame"),
+    ("next_frame", "Nächster Frame"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Posenmodus."),
     (
@@ -930,6 +1008,15 @@ static EL: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Ρυθμίσεις"),
+    ("frame", "Καρέ"),
+    ("frames", "Καρέ"),
+    ("figures", "Φιγούρες"),
+    ("prev_frame", "Προηγούμενο καρέ"),
+    ("next_frame", "Επόμενο καρέ"),
+    ("fps", "FPS"),
+    ("zoom", "Ζουμ"),
     // Status line
     ("pose_mode", "Λειτουργία πόζας."),
     (
@@ -1017,6 +1104,15 @@ static ES419: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Ajustes"),
+    ("frame", "Fotograma"),
+    ("frames", "Fotogramas"),
+    ("figures", "Figuras"),
+    ("prev_frame", "Fotograma anterior"),
+    ("next_frame", "Fotograma siguiente"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Modo de pose."),
     (
@@ -1104,6 +1200,15 @@ static FI: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Asetukset"),
+    ("frame", "Ruutu"),
+    ("frames", "Ruudut"),
+    ("figures", "Hahmot"),
+    ("prev_frame", "Edellinen ruutu"),
+    ("next_frame", "Seuraava ruutu"),
+    ("fps", "FPS"),
+    ("zoom", "Zoomaus"),
     // Status line
     ("pose_mode", "Asentotila."),
     (
@@ -1191,6 +1296,15 @@ static FR: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Exporter"),
+    // Rune shell labels (Phase E)
+    ("settings", "Paramètres"),
+    ("frame", "Image"),
+    ("frames", "Images"),
+    ("figures", "Figures"),
+    ("prev_frame", "Image précédente"),
+    ("next_frame", "Image suivante"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Mode pose."),
     (
@@ -1278,6 +1392,15 @@ static HE: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "הגדרות"),
+    ("frame", "פריים"),
+    ("frames", "פריימים"),
+    ("figures", "דמויות"),
+    ("prev_frame", "הפריים הקודם"),
+    ("next_frame", "הפריים הבא"),
+    ("fps", "FPS"),
+    ("zoom", "זום"),
     // Status line
     ("pose_mode", "מצב פוזה."),
     (
@@ -1365,6 +1488,15 @@ static HR: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Postavke"),
+    ("frame", "Sličica"),
+    ("frames", "Sličice"),
+    ("figures", "Figure"),
+    ("prev_frame", "Prethodna sličica"),
+    ("next_frame", "Sljedeća sličica"),
+    ("fps", "FPS"),
+    ("zoom", "Zumiranje"),
     // Status line
     ("pose_mode", "Način poze."),
     (
@@ -1452,6 +1584,15 @@ static HU: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Beállítások"),
+    ("frame", "Képkocka"),
+    ("frames", "Képkockák"),
+    ("figures", "Figurák"),
+    ("prev_frame", "Előző képkocka"),
+    ("next_frame", "Következő képkocka"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Póz mód."),
     (
@@ -1539,6 +1680,15 @@ static ID: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Pengaturan"),
+    ("frame", "Bingkai"),
+    ("frames", "Bingkai"),
+    ("figures", "Figur"),
+    ("prev_frame", "Bingkai sebelumnya"),
+    ("next_frame", "Bingkai berikutnya"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Mode pose."),
     (
@@ -1626,6 +1776,15 @@ static IT: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Esporta"),
+    // Rune shell labels (Phase E)
+    ("settings", "Impostazioni"),
+    ("frame", "Fotogramma"),
+    ("frames", "Fotogrammi"),
+    ("figures", "Figure"),
+    ("prev_frame", "Fotogramma precedente"),
+    ("next_frame", "Fotogramma successivo"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Modalità posa."),
     (
@@ -1713,6 +1872,15 @@ static KK: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Параметрлер"),
+    ("frame", "Кадр"),
+    ("frames", "Кадрлар"),
+    ("figures", "Фигуралар"),
+    ("prev_frame", "Алдыңғы кадр"),
+    ("next_frame", "Келесі кадр"),
+    ("fps", "FPS"),
+    ("zoom", "Масштаб"),
     // Status line
     ("pose_mode", "Поза режимі."),
     (
@@ -1800,6 +1968,15 @@ static NB: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Innstillinger"),
+    ("frame", "Bilde"),
+    ("frames", "Bilder"),
+    ("figures", "Figurer"),
+    ("prev_frame", "Forrige bilde"),
+    ("next_frame", "Neste bilde"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Poseringsmodus."),
     (
@@ -1887,6 +2064,15 @@ static NL: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Instellingen"),
+    ("frame", "Frame"),
+    ("frames", "Frames"),
+    ("figures", "Figuren"),
+    ("prev_frame", "Vorige frame"),
+    ("next_frame", "Volgende frame"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Posemodus."),
     (
@@ -1974,6 +2160,15 @@ static PL: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Ustawienia"),
+    ("frame", "Klatka"),
+    ("frames", "Klatki"),
+    ("figures", "Figury"),
+    ("prev_frame", "Poprzednia klatka"),
+    ("next_frame", "Następna klatka"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Tryb pozy."),
     (
@@ -2061,6 +2256,15 @@ static PT_BR: &[(&str, &str)] = &[
     ("ws_audio", "Áudio"),
     ("ws_3d", "3D"),
     ("ws_export", "Exportar"),
+    // Rune shell labels (Phase E)
+    ("settings", "Configurações"),
+    ("frame", "Quadro"),
+    ("frames", "Quadros"),
+    ("figures", "Figuras"),
+    ("prev_frame", "Quadro anterior"),
+    ("next_frame", "Quadro seguinte"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Modo de pose."),
     (
@@ -2148,6 +2352,15 @@ static RO: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Setări"),
+    ("frame", "Cadru"),
+    ("frames", "Cadre"),
+    ("figures", "Figuri"),
+    ("prev_frame", "Cadrul anterior"),
+    ("next_frame", "Cadrul următor"),
+    ("fps", "FPS"),
+    ("zoom", "Zoom"),
     // Status line
     ("pose_mode", "Mod poză."),
     (
@@ -2235,6 +2448,15 @@ static RU: &[(&str, &str)] = &[
     ("ws_audio", "Аудио"),
     ("ws_3d", "3D"),
     ("ws_export", "Экспорт"),
+    // Rune shell labels (Phase E)
+    ("settings", "Настройки"),
+    ("frame", "Кадр"),
+    ("frames", "Кадры"),
+    ("figures", "Фигуры"),
+    ("prev_frame", "Предыдущий кадр"),
+    ("next_frame", "Следующий кадр"),
+    ("fps", "FPS"),
+    ("zoom", "Масштаб"),
     // Status line
     ("pose_mode", "Режим позы."),
     (
@@ -2322,6 +2544,15 @@ static SL: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Nastavitve"),
+    ("frame", "Sličica"),
+    ("frames", "Sličice"),
+    ("figures", "Figure"),
+    ("prev_frame", "Prejšnja sličica"),
+    ("next_frame", "Naslednja sličica"),
+    ("fps", "FPS"),
+    ("zoom", "Povečava"),
     // Status line
     ("pose_mode", "Način poze."),
     (
@@ -2409,6 +2640,15 @@ static TR: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Ayarlar"),
+    ("frame", "Kare"),
+    ("frames", "Kareler"),
+    ("figures", "Figürler"),
+    ("prev_frame", "Önceki kare"),
+    ("next_frame", "Sonraki kare"),
+    ("fps", "FPS"),
+    ("zoom", "Yakınlaştırma"),
     // Status line
     ("pose_mode", "Poz modu."),
     (
@@ -2496,6 +2736,15 @@ static UK: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Налаштування"),
+    ("frame", "Кадр"),
+    ("frames", "Кадри"),
+    ("figures", "Фігури"),
+    ("prev_frame", "Попередній кадр"),
+    ("next_frame", "Наступний кадр"),
+    ("fps", "FPS"),
+    ("zoom", "Масштаб"),
     // Status line
     ("pose_mode", "Режим пози."),
     (
@@ -2583,6 +2832,15 @@ static VI: &[(&str, &str)] = &[
     ("ws_audio", "Audio"),
     ("ws_3d", "3D"),
     ("ws_export", "Export"),
+    // Rune shell labels (Phase E)
+    ("settings", "Cài đặt"),
+    ("frame", "Khung hình"),
+    ("frames", "Khung hình"),
+    ("figures", "Hình"),
+    ("prev_frame", "Khung hình trước"),
+    ("next_frame", "Khung hình tiếp theo"),
+    ("fps", "FPS"),
+    ("zoom", "Thu phóng"),
     // Status line
     ("pose_mode", "Chế độ tư thế."),
     (
@@ -2670,6 +2928,15 @@ static ZH_HANS: &[(&str, &str)] = &[
     ("ws_audio", "音频"),
     ("ws_3d", "3D"),
     ("ws_export", "导出"),
+    // Rune shell labels (Phase E)
+    ("settings", "设置"),
+    ("frame", "帧"),
+    ("frames", "帧"),
+    ("figures", "人物"),
+    ("prev_frame", "上一帧"),
+    ("next_frame", "下一帧"),
+    ("fps", "帧率"),
+    ("zoom", "缩放"),
     // Status line
     ("pose_mode", "姿态模式。"),
     (
@@ -2768,6 +3035,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn shell_keys_resolve_in_every_language() {
+        // The Phase E Rune-shell keys: present in every language's
+        // own table (not only via the English fallback), non-empty,
+        // never the raw key.
+        const SHELL_KEYS: [&str; 8] = [
+            "settings",
+            "frame",
+            "frames",
+            "figures",
+            "prev_frame",
+            "next_frame",
+            "fps",
+            "zoom",
+        ];
+        for lang in Lang::all() {
+            for key in SHELL_KEYS {
+                let text = t(lang, key);
+                assert!(!text.is_empty(), "{key} is empty in {:?}", lang);
+                assert_ne!(text, key, "{key} in {:?} is just the key", lang);
+                assert!(
+                    lookup(table_for(lang), key).is_some(),
+                    "{key} missing from {:?}'s own table",
+                    lang
+                );
+            }
+        }
+        // Authored spot checks across scripts and language groups.
+        assert_eq!(t(Lang::En, "settings"), "Settings");
+        assert_eq!(t(Lang::De, "settings"), "Einstellungen");
+        assert_eq!(t(Lang::Fr, "settings"), "Paramètres");
+        assert_eq!(t(Lang::Bn, "prev_frame"), "আগের ফ্রেম");
+        assert_eq!(t(Lang::Bn, "figures"), "ফিগারসমূহ");
+        assert_eq!(t(Lang::Es, "next_frame"), "Fotograma siguiente");
+        assert_eq!(t(Lang::Ru, "zoom"), "Масштаб");
+        assert_eq!(t(Lang::Uk, "prev_frame"), "Попередній кадр");
+        assert_eq!(t(Lang::ZhHans, "prev_frame"), "上一帧");
+        assert_eq!(t(Lang::ZhHans, "fps"), "帧率");
+        assert_eq!(t(Lang::Ar, "next_frame"), "الإطار التالي");
+        assert_eq!(t(Lang::Tr, "frames"), "Kareler");
     }
 
     #[test]

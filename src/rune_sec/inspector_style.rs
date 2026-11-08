@@ -1,33 +1,36 @@
-//! Segment style inspector (Rune Phase D, section 5/40).
+//! Segment style inspector (Rune Phase D, section 5/40;
+//! direct setters in Phase E, section 13/40).
 //! Declared under `crate::rune_sec` — bin-crate code, not part
 //! of the engine library.
 //!
 //! Style panel for the currently selected segment. Every
-//! control calls exactly one real `EditorCore` op — the three
-//! selected-node style cyclers in `editor.rs`:
+//! control calls exactly one real `EditorCore` op:
 //!
+//! * Cap segmented control → `set_node_cap` (editor.rs, added
+//!   by Phase E section 7 beside the style cyclers): each
+//!   chip sets exactly its own kind — Round, Square or Point.
+//! * Gradient swatches → `set_node_color2` (same addition):
+//!   each swatch sets exactly its own gradient end colour —
+//!   None (off), white or #222222.
+//! * Opacity stepper → `set_node_opacity` (same addition):
+//!   − / + in 0.05 steps over the model's 0.0..=1.0 range,
+//!   with a % readout.
 //! * Taper stepper → `cycle_node_taper` (editor.rs:1796):
-//!   taper cycles 1.0 → 0.6 → 0.3 → 0.0 → 1.0.
-//! * Cap segmented control → `cycle_node_cap` (editor.rs:1785):
-//!   Round → Square → Point via `style::cycle_cap`.
-//! * Gradient swatches → `cycle_node_gradient` (editor.rs:1812):
-//!   `color2` cycles None → white → #222222 → None.
+//!   taper cycles 1.0 → 0.6 → 0.3 → 0.0 → 1.0. Taper stays a
+//!   cycle control on purpose: the engine has NO
+//!   `set_node_taper`, and adding one is an engine change,
+//!   not a panel change.
 //!
-//! There is NO direct-set op for cap or gradient (no
-//! `set_node_cap` / `set_node_color2` in the engine), and each
-//! cycler snapshots once per call — so the segmented control
-//! and the swatch row are each ONE press target that advances
-//! the cycle by a single step, exactly like the GPUI app's
-//! single Cap/Gradient buttons. Pressing a specific chip does
-//! not jump straight to that state.
+//! History: Phase D shipped cap and gradient as single
+//! press targets advancing `cycle_node_cap` /
+//! `cycle_node_gradient` one step per press, because no
+//! direct-set op existed. Phase E section 7 added the
+//! setters to the engine, so the chips and swatches now set
+//! their own values directly.
 //!
-//! Deliberately absent (no verified op — see the section
-//! report): per-segment opacity (`NodeStyle.opacity` exists in
-//! the model but no editor op mutates it for the selected
-//! node; only figure-level `cycle_figure_opacity` /
-//! `step_figure_opacity` exist) and shade steps (fig3d's
-//! `segment_shades` is a computed depth shading, not a stored
-//! per-segment style an op can set).
+//! Deliberately absent: shade steps (fig3d's
+//! `segment_shades` is a computed depth shading over a 3D
+//! pose, not a stored per-segment style an op can set).
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Color, El};
@@ -38,9 +41,8 @@ use crate::chrome_view::btn;
 use crate::stage_view::hex_color;
 use crate::State;
 
-/// The cap cycle order, matching `style::cycle_cap`
-/// (Round → Square → Point → Round). Display order for the
-/// segmented control.
+/// The cap kinds in segmented-control display order (the
+/// engine's historical cycle order, Round → Square → Point).
 pub const CAP_ORDER: [CapKind; 3] = [CapKind::Round, CapKind::Square, CapKind::Point];
 
 /// The selected node's current style, if a node is selected.
@@ -72,16 +74,29 @@ pub fn cap_index(cap: CapKind) -> usize {
     CAP_ORDER.iter().position(|&c| c == cap).unwrap_or(0)
 }
 
-/// Which of the gradient cycle states `color2` is in:
+/// Which of the gradient states `color2` is in:
 /// 0 = off (None), 1 = white, 2 = #222222, 3 = any other
-/// colour (reachable only from a loaded file — the cycler
-/// sends it back to None on the next press).
+/// colour (reachable only from a loaded file — it matches no
+/// swatch; pressing a swatch sets that swatch's value
+/// directly via `set_node_color2`).
 pub fn gradient_state(color2: Option<u32>) -> usize {
     match color2 {
         None => 0,
         Some(0xFF_FFFF) => 1,
         Some(0x22_2222) => 2,
         Some(_) => 3,
+    }
+}
+
+/// The `color2` value the swatch for `state` sets when
+/// pressed: 0 = None (off), 1 = white, 2 = #222222. Only
+/// states 0..3 are rendered as swatches; any other input
+/// maps to None.
+pub fn gradient_value(state: usize) -> Option<u32> {
+    match state {
+        1 => Some(0xFF_FFFF),
+        2 => Some(0x22_2222),
+        _ => None,
     }
 }
 
@@ -101,16 +116,50 @@ pub fn taper_text(taper: f32) -> String {
     stykanimate_rs::style::taper_label(taper)
 }
 
+/// Opacity step for the − / + stepper.
+pub const OPACITY_STEP: f32 = 0.05;
+
+/// The opacity after one stepper press in direction `dir`
+/// (−1 / +1) from `current`: stepped by [`OPACITY_STEP`],
+/// clamped to the model's 0.0..=1.0 range, and rounded to
+/// whole percents so repeated steps don't accumulate float
+/// dust (0.95000004).
+pub fn opacity_stepped(current: f32, dir: i32) -> f32 {
+    let stepped = current + dir as f32 * OPACITY_STEP;
+    (stepped.clamp(0.0, 1.0) * 100.0).round() / 100.0
+}
+
+/// % readout for an opacity value (`100%`, `55%`, `5%`).
+pub fn opacity_text(opacity: f32) -> String {
+    format!("{}%", (opacity * 100.0).round() as i32)
+}
+
+/// One opacity stepper press against the core: read the
+/// selected node's current opacity, step it, and set it back
+/// through the real `set_node_opacity` op. No selection →
+/// no-op (the panel renders no stepper without a selection
+/// anyway).
+pub fn step_opacity(core: &mut EditorCore, dir: i32) {
+    let Some(style) = selected_style(core) else {
+        return;
+    };
+    core.set_node_opacity(opacity_stepped(style.opacity, dir));
+}
+
 /// One cap segment chip: accent-filled when it is the current
-/// cap, card-filled otherwise. Purely visual — the press
-/// target is the segmented row as a whole (see module docs).
+/// cap, card-filled otherwise. Each chip is its own press
+/// target — pressing it sets exactly that cap through
+/// `EditorCore::set_node_cap`.
 fn cap_chip(cap: CapKind, current: bool, t: &Theme) -> El {
     let accent = tok::accent(0, true);
     el()
+        .key(format!("style-cap-{}", cap_label(cap).to_lowercase()))
         .px(10.0)
         .py(5.0)
         .radius(6.0)
         .fill(if current { accent } else { t.card })
+        .hover(if current { accent } else { t.control_track })
+        .on_press(move |s: &mut State| s.core.set_node_cap(cap))
         .child(
             text(cap_label(cap))
                 .font(type_::LABEL)
@@ -120,8 +169,10 @@ fn cap_chip(cap: CapKind, current: bool, t: &Theme) -> El {
 
 /// One gradient swatch: an 18×18 colour square (the `Off`
 /// state uses the theme's off-track fill). The current state
-/// gets an accent frame; purely visual — the press target is
-/// the swatch row as a whole (see module docs).
+/// gets an accent frame. Each swatch is its own press
+/// target — pressing it sets exactly that gradient end
+/// colour through `EditorCore::set_node_color2`
+/// ([`gradient_value`]).
 fn gradient_swatch(state: usize, current: bool, t: &Theme) -> El {
     let fill = match state {
         1 => hex_color(0xFF_FFFF).unwrap_or(Color::WHITE),
@@ -129,7 +180,16 @@ fn gradient_swatch(state: usize, current: bool, t: &Theme) -> El {
         _ => t.control_off,
     };
     let swatch = el().size(18.0, 18.0).radius(4.0).fill(fill);
-    let cell = el().padding(2.0).radius(6.0);
+    let cell = el()
+        .key(format!("style-gradient-{state}"))
+        .padding(2.0)
+        .radius(6.0)
+        .hover(if current {
+            tok::accent(0, true)
+        } else {
+            t.control_track
+        })
+        .on_press(move |s: &mut State| s.core.set_node_color2(gradient_value(state)));
     if current {
         cell.fill(tok::accent(0, true)).child(swatch)
     } else {
@@ -138,10 +198,10 @@ fn gradient_swatch(state: usize, current: bool, t: &Theme) -> El {
 }
 
 /// The segment style panel: a header naming the selected
-/// segment, then the taper stepper, cap segmented control and
-/// gradient swatches. With no segment selected it renders the
-/// header plus a hint and no controls (the cycler ops would
-/// only answer "Select a joint first.").
+/// segment, then the taper stepper, cap segmented control,
+/// gradient swatches and opacity stepper. With no segment
+/// selected it renders the header plus a hint and no controls
+/// (the style ops would only answer "Select a joint first.").
 pub fn style_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let mut panel = col().key("inspector-style").w_full().gap(8.0);
@@ -159,7 +219,8 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
     };
 
     // Taper: current value (engine wording) + one Step button
-    // — the only taper op is the forward cycler.
+    // — the only taper op is the forward cycler (no direct
+    // setter exists; see module docs).
     panel = panel.child(
         row()
             .key("style-taper-row")
@@ -177,8 +238,9 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
             })),
     );
 
-    // Cap: segmented display of all three kinds, current
-    // accented; the row is a single press target cycling once.
+    // Cap: segmented control of all three kinds, current
+    // accented; each chip sets its own kind directly via
+    // `set_node_cap`.
     let mut cap_row = row().gap(4.0);
     for cap in CAP_ORDER {
         cap_row = cap_row.child(cap_chip(cap, cap == style.cap, t));
@@ -189,18 +251,12 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
             .gap(8.0)
             .center_y()
             .child(text("Cap").font(type_::LABEL).color(t.text))
-            .child(
-                el()
-                    .key("style-cap")
-                    .radius(6.0)
-                    .hover(t.control_track)
-                    .on_press(|s: &mut State| s.core.cycle_node_cap())
-                    .child(cap_row),
-            ),
+            .child(el().key("style-cap").radius(6.0).child(cap_row)),
     );
 
-    // Gradient: swatches for the three cycle states, current
-    // framed; the row is a single press target cycling once.
+    // Gradient: one swatch per end-colour state, current
+    // framed; each swatch sets its own colour directly via
+    // `set_node_color2`.
     let gstate = gradient_state(style.color2);
     let mut swatches = row().gap(4.0).center_y();
     for state in 0..3 {
@@ -212,19 +268,34 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
             .gap(8.0)
             .center_y()
             .child(text("Gradient").font(type_::LABEL).color(t.text))
-            .child(
-                el()
-                    .key("style-gradient")
-                    .radius(6.0)
-                    .hover(t.control_track)
-                    .on_press(|s: &mut State| s.core.cycle_node_gradient())
-                    .child(swatches),
-            )
+            .child(el().key("style-gradient").radius(6.0).child(swatches))
             .child(
                 text(gradient_label(style.color2))
                     .font(type_::LABEL)
                     .color(t.text_secondary),
             ),
+    );
+
+    // Opacity: − / + stepper (0.05 steps, % readout) setting
+    // the selected node's opacity via `set_node_opacity`.
+    panel = panel.child(
+        row()
+            .key("style-opacity-row")
+            .gap(8.0)
+            .center_y()
+            .child(text("Opacity").font(type_::LABEL).color(t.text))
+            .child(
+                text(opacity_text(style.opacity))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+                    .grow(1.0),
+            )
+            .child(btn("style-opacity-dn", "−", false, t, |s| {
+                step_opacity(&mut s.core, -1)
+            }))
+            .child(btn("style-opacity-up", "+", false, t, |s| {
+                step_opacity(&mut s.core, 1)
+            })),
     );
 
     panel
@@ -286,5 +357,86 @@ mod tests {
         let style = selected_style(&core).expect("demo figure has a node 1");
         // A fresh demo project carries default-styled nodes.
         assert_eq!(style, NodeStyle::default());
+    }
+
+    #[test]
+    fn cap_chips_set_exactly_that_cap_via_the_op() {
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        // The default cap is Round. One direct set must land
+        // on Point — a single cycle step would give Square,
+        // so this proves the chip dispatch is a direct set.
+        core.set_node_cap(CapKind::Point);
+        assert_eq!(selected_style(&core).unwrap().cap, CapKind::Point);
+        core.set_node_cap(CapKind::Square);
+        assert_eq!(selected_style(&core).unwrap().cap, CapKind::Square);
+        core.set_node_cap(CapKind::Round);
+        assert_eq!(selected_style(&core).unwrap().cap, CapKind::Round);
+    }
+
+    #[test]
+    fn gradient_swatches_set_exactly_that_colour_via_the_op() {
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        // From Off, one direct set must land on #222222 — a
+        // single cycle step would give white, so this proves
+        // the swatch dispatch is a direct set.
+        core.set_node_color2(gradient_value(2));
+        assert_eq!(selected_style(&core).unwrap().color2, Some(0x22_2222));
+        core.set_node_color2(gradient_value(1));
+        assert_eq!(selected_style(&core).unwrap().color2, Some(0xFF_FFFF));
+        core.set_node_color2(gradient_value(0));
+        assert_eq!(selected_style(&core).unwrap().color2, None);
+    }
+
+    #[test]
+    fn gradient_values_match_the_swatch_states() {
+        assert_eq!(gradient_value(0), None);
+        assert_eq!(gradient_value(1), Some(0xFF_FFFF));
+        assert_eq!(gradient_value(2), Some(0x22_2222));
+        // Round-trip: each swatch value reads back as its own
+        // state, so the pressed swatch is the framed one.
+        for state in 0..3 {
+            assert_eq!(gradient_state(gradient_value(state)), state);
+        }
+    }
+
+    #[test]
+    fn opacity_stepper_steps_by_five_percent_and_clamps() {
+        assert_eq!(opacity_stepped(1.0, -1), 0.95);
+        assert_eq!(opacity_stepped(0.5, 1), 0.55);
+        assert_eq!(opacity_stepped(0.5, -1), 0.45);
+        // Clamped at both ends of the model's 0.0..=1.0 range.
+        assert_eq!(opacity_stepped(1.0, 1), 1.0);
+        assert_eq!(opacity_stepped(0.98, 1), 1.0);
+        assert_eq!(opacity_stepped(0.0, -1), 0.0);
+        assert_eq!(opacity_stepped(0.02, -1), 0.0);
+    }
+
+    #[test]
+    fn opacity_stepper_drives_the_real_op() {
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        // Default opacity is 1.0: + is clamped at 100%, then
+        // each − press removes exactly one 0.05 step.
+        step_opacity(&mut core, 1);
+        assert_eq!(selected_style(&core).unwrap().opacity, 1.0);
+        step_opacity(&mut core, -1);
+        assert_eq!(selected_style(&core).unwrap().opacity, 0.95);
+        step_opacity(&mut core, -1);
+        assert_eq!(selected_style(&core).unwrap().opacity, 0.90);
+        step_opacity(&mut core, 1);
+        assert_eq!(selected_style(&core).unwrap().opacity, 0.95);
+    }
+
+    #[test]
+    fn opacity_text_is_a_whole_percent() {
+        assert_eq!(opacity_text(1.0), "100%");
+        assert_eq!(opacity_text(0.55), "55%");
+        assert_eq!(opacity_text(0.05), "5%");
+        assert_eq!(opacity_text(0.0), "0%");
     }
 }

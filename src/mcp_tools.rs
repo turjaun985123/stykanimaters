@@ -351,6 +351,35 @@ fn tool_list_figures(core: &mut EditorCore, _args: &Value) -> Result<Value, Stri
     Ok(json!({ "figures": figures }))
 }
 
+fn tool_figure_set_color(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    let color = opt_color(args, "color")?
+        .ok_or_else(|| "missing required argument 'color'".to_string())?;
+    core.set_figure_color(fi, color);
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "color": core.project.figures[fi].color,
+    }))
+}
+
+fn tool_figure_duplicate(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    let Some(new_idx) = core.duplicate_figure(fi) else {
+        // The op refused and explained via the status line.
+        return Err(core.status.clone());
+    };
+    Ok(json!({
+        "ok": true,
+        "figure": new_idx,
+        "duplicated_from": fi,
+        "name": core.project.figures[new_idx].name,
+        "figures": core.project.figures.len(),
+    }))
+}
+
 fn tool_get_project_stats(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
     use crate::vfx::WeatherKind;
     let p = &core.project;
@@ -788,10 +817,22 @@ fn tool_fx_move(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     if start < 0.0 {
         return Err("argument 'start' must not be negative".into());
     }
-    if !crate::fx_edit::move_clip(&mut core.project, idx, start) {
+    if idx >= core.project.fx_clips.len() {
         return Err(format!("no fx clip at index {idx}"));
     }
-    Ok(json!({ "ok": true, "fx_index": idx, "start": start }))
+    // The phase-E EditorCore op moves by a whole-frame delta
+    // (snapshotting, so MCP moves are undoable like the
+    // panel's); the tool's contract stays the absolute start,
+    // so the delta comes from the clip's current start and
+    // the result is read back.
+    let current = core.project.fx_clips[idx].clip.start;
+    let delta = (start - current).round() as i32;
+    core.fx_move_clip(idx, delta);
+    Ok(json!({
+        "ok": true,
+        "fx_index": idx,
+        "start": core.project.fx_clips[idx].clip.start,
+    }))
 }
 
 fn tool_fx_resize(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
@@ -800,16 +841,29 @@ fn tool_fx_resize(core: &mut EditorCore, args: &Value) -> Result<Value, String> 
     if duration <= 0.0 {
         return Err("argument 'duration' must be positive".into());
     }
-    if !crate::fx_edit::resize_clip(&mut core.project, idx, duration) {
+    if idx >= core.project.fx_clips.len() {
         return Err(format!("no fx clip at index {idx}"));
     }
-    Ok(json!({ "ok": true, "fx_index": idx, "duration": duration }))
+    // The op resizes by a delta; the tool's contract stays
+    // the absolute duration, read back after the call (the
+    // op clamps the result to >= 0.1).
+    let current = core.project.fx_clips[idx].clip.duration;
+    core.fx_resize_clip(idx, duration - current);
+    Ok(json!({
+        "ok": true,
+        "fx_index": idx,
+        "duration": core.project.fx_clips[idx].clip.duration,
+    }))
 }
 
 fn tool_fx_duplicate(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let idx = req_usize(args, "index")?;
-    let Some(new_idx) = crate::fx_edit::duplicate_clip(&mut core.project, idx) else {
+    if idx >= core.project.fx_clips.len() {
         return Err(format!("no fx clip at index {idx}"));
+    }
+    let Some(new_idx) = core.fx_duplicate_clip(idx) else {
+        // The op refused and explained via the status line.
+        return Err(core.status.clone());
     };
     Ok(json!({
         "ok": true,
@@ -821,13 +875,64 @@ fn tool_fx_duplicate(core: &mut EditorCore, args: &Value) -> Result<Value, Strin
 
 fn tool_fx_delete(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let idx = req_usize(args, "index")?;
-    if !crate::fx_edit::delete_clip(&mut core.project, idx) {
+    if idx >= core.project.fx_clips.len() {
         return Err(format!("no fx clip at index {idx}"));
     }
+    core.fx_delete_clip(idx);
     Ok(json!({
         "ok": true,
         "deleted": idx,
         "count": core.project.fx_clips.len(),
+    }))
+}
+
+fn tool_fx_set_color(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = req_usize(args, "index")?;
+    let color = opt_color(args, "color")?
+        .ok_or_else(|| "missing required argument 'color'".to_string())?;
+    if idx >= core.project.fx_clips.len() {
+        return Err(format!("no fx clip at index {idx}"));
+    }
+    core.fx_set_color(idx, color);
+    Ok(json!({
+        "ok": true,
+        "fx_index": idx,
+        "color": core.project.fx_clips[idx].clip.color,
+    }))
+}
+
+fn tool_fx_set_color2(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = req_usize(args, "index")?;
+    // Same convention as add_fx_clip: an absent or null 'color2'
+    // means no gradient end — here it clears the clip back to a
+    // solid colour.
+    let color2 = opt_color(args, "color2")?;
+    if idx >= core.project.fx_clips.len() {
+        return Err(format!("no fx clip at index {idx}"));
+    }
+    core.fx_set_color2(idx, color2);
+    Ok(json!({
+        "ok": true,
+        "fx_index": idx,
+        "color2": core.project.fx_clips[idx].clip.color2,
+    }))
+}
+
+fn tool_fx_set_anchor(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = req_usize(args, "index")?;
+    let fi = req_usize(args, "figure")?;
+    let ni = req_usize(args, "node")?;
+    check_node(core, fi, ni)?;
+    if idx >= core.project.fx_clips.len() {
+        return Err(format!("no fx clip at index {idx}"));
+    }
+    core.fx_set_anchor(idx, fi, ni);
+    let entry = &core.project.fx_clips[idx];
+    Ok(json!({
+        "ok": true,
+        "fx_index": idx,
+        "figure": entry.figure,
+        "node": entry.node,
     }))
 }
 
@@ -927,6 +1032,96 @@ fn tool_add_audio_clip(core: &mut EditorCore, args: &Value) -> Result<Value, Str
         "audio_index": core.project.audio.len() - 1,
         "path": path,
         "start_frame": start_frame,
+    }))
+}
+
+// ---------------------------------------------------------------------
+// Audio clip tools (phase E): wrappers over the EditorCore
+// audio_ops that the Rune audio panel gained. The *_last DSP
+// ops materialise a processed copy of the last clip's file and
+// repoint the clip, reporting through `core.status` exactly
+// like the panel buttons; move/delete are plain timeline
+// edits. Handlers pre-check the clip list so an empty project
+// is a clean Err, not just a status line (the fig3 idiom).
+// ---------------------------------------------------------------------
+
+/// Index of the last audio clip, or a clean error when the
+/// project has none (the *_last ops all act on it).
+fn check_last_audio(core: &EditorCore) -> Result<usize, String> {
+    if core.project.audio.is_empty() {
+        Err("project has no audio clips".into())
+    } else {
+        Ok(core.project.audio.len() - 1)
+    }
+}
+
+fn tool_audio_fade(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let idx = check_last_audio(core)?;
+    core.audio_fade_last();
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_audio_reverse(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let idx = check_last_audio(core)?;
+    core.audio_reverse_last();
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_audio_set_gain(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let gain = req_f32(args, "gain")?;
+    if gain < 0.0 {
+        return Err("argument 'gain' must not be negative".into());
+    }
+    let idx = check_last_audio(core)?;
+    core.audio_set_gain_last(gain);
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "gain": gain,
+        "status": core.status,
+        "project": project_summary(core),
+    }))
+}
+
+fn tool_audio_move_clip(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let start_frame = req_usize(args, "start_frame")?;
+    let idx = check_last_audio(core)?;
+    // The op moves by a signed delta (clamped at frame 0);
+    // the tool's contract stays the absolute start frame, so
+    // the delta comes from the clip's current start.
+    let current = core.project.audio[idx].start_frame as i64;
+    let delta = (start_frame as i64 - current).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    core.audio_move_last(delta);
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "start_frame": core.project.audio[idx].start_frame,
+        "status": core.status,
+    }))
+}
+
+fn tool_audio_delete_clip(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = req_usize(args, "index")?;
+    if idx >= core.project.audio.len() {
+        return Err(format!("no audio clip at index {idx}"));
+    }
+    let path = core.project.audio[idx].path.clone();
+    core.delete_audio_clip(idx);
+    Ok(json!({
+        "ok": true,
+        "deleted": idx,
+        "path": path,
+        "count": core.project.audio.len(),
     }))
 }
 
@@ -1415,6 +1610,27 @@ fn tool_simplify_strokes(core: &mut EditorCore, args: &Value) -> Result<Value, S
     }))
 }
 
+fn tool_delete_stroke(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    // 'index' is the stroke's position in the project-wide
+    // stroke list — the order draw_stroke appends in and the
+    // stroke inspector lists (per-stroke delete is the
+    // editor's delete_stroke_at op; the frame's other strokes
+    // are untouched).
+    let idx = req_usize(args, "index")?;
+    let Some(stroke) = core.project.strokes.get(idx) else {
+        return Err(format!("no stroke at index {idx}"));
+    };
+    let frame = stroke.frame;
+    core.delete_stroke_at(idx);
+    Ok(json!({
+        "ok": true,
+        "deleted": idx,
+        "frame": frame,
+        "count": core.project.strokes.len(),
+        "status": core.status,
+    }))
+}
+
 fn tool_apply_nib(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let frame = req_usize(args, "frame")?;
     check_frame(core, frame)?;
@@ -1685,6 +1901,29 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_list_figures,
         },
         Tool {
+            name: "figure_set_color",
+            description: "Set a figure's colour (0xRRGGBB) — the colour its segments draw in unless a segment carries its own colour override.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "color": { "type": "integer", "description": "0xRRGGBB" }
+                }),
+                &["figure", "color"],
+            ),
+            handler: tool_figure_set_color,
+        },
+        Tool {
+            name: "figure_duplicate",
+            description: "Duplicate a figure: the copy (same definition, colour and per-frame poses) is inserted right after the original and becomes the selected figure. Returns the new figure index.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" }
+                }),
+                &["figure"],
+            ),
+            handler: tool_figure_duplicate,
+        },
+        Tool {
             name: "get_project_stats",
             description: "Project summary counts: figures, frames, fps, duration in seconds, FX/audio clips, sprites, texts, weather kind (or null), movieclips and graph channels.",
             schema: obj_schema(json!({}), &[]),
@@ -1846,7 +2085,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "fx_move",
-            description: "Move an FX clip to a new start frame (clamped at 0).",
+            description: "Move an FX clip to a new start frame (clamped at 0). One undo step.",
             schema: obj_schema(
                 json!({
                     "index": { "type": "integer" },
@@ -1858,7 +2097,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "fx_resize",
-            description: "Set an FX clip's duration in frames.",
+            description: "Set an FX clip's duration in frames. One undo step.",
             schema: obj_schema(
                 json!({
                     "index": { "type": "integer" },
@@ -1870,7 +2109,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "fx_duplicate",
-            description: "Duplicate an FX clip: the copy is inserted right after it and starts where the original ends.",
+            description: "Duplicate an FX clip: the copy is inserted right after it and starts where the original ends. One undo step.",
             schema: obj_schema(
                 json!({
                     "index": { "type": "integer" }
@@ -1881,7 +2120,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "fx_delete",
-            description: "Delete an FX clip by index.",
+            description: "Delete an FX clip by index. One undo step.",
             schema: obj_schema(
                 json!({
                     "index": { "type": "integer" }
@@ -1889,6 +2128,43 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["index"],
             ),
             handler: tool_fx_delete,
+        },
+        Tool {
+            name: "fx_set_color",
+            description: "Set an FX clip's particle colour (0xRRGGBB). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "color": { "type": "integer", "description": "0xRRGGBB" }
+                }),
+                &["index", "color"],
+            ),
+            handler: tool_fx_set_color,
+        },
+        Tool {
+            name: "fx_set_color2",
+            description: "Set an FX clip's gradient end colour (0xRRGGBB; particles blend colour -> color2). Omit 'color2' (or pass null) to clear the gradient back to a solid colour. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "color2": { "type": "integer", "description": "0xRRGGBB gradient end colour" }
+                }),
+                &["index"],
+            ),
+            handler: tool_fx_set_color2,
+        },
+        Tool {
+            name: "fx_set_anchor",
+            description: "Re-anchor an FX clip to a figure's node — the joint its particles are emitted from. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "figure": { "type": "integer" },
+                    "node": { "type": "integer" }
+                }),
+                &["index", "figure", "node"],
+            ),
+            handler: tool_fx_set_anchor,
         },
         Tool {
             name: "fx_preset_save",
@@ -1938,6 +2214,51 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["path", "start_frame"],
             ),
             handler: tool_add_audio_clip,
+        },
+        Tool {
+            name: "audio_fade",
+            description: "Apply a fade-in/fade-out to the LAST audio clip: a processed copy of its file is written and the clip repointed (the editor's Fade op). One undo step.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_audio_fade,
+        },
+        Tool {
+            name: "audio_reverse",
+            description: "Reverse the LAST audio clip: a processed copy of its file is written and the clip repointed (the editor's Reverse op). One undo step.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_audio_reverse,
+        },
+        Tool {
+            name: "audio_set_gain",
+            description: "Apply a gain to the LAST audio clip (the editor's gain op; 1.0 is unity, 0.5 halves the level). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "gain": { "type": "number", "description": "Linear gain, 1.0 = unity" }
+                }),
+                &["gain"],
+            ),
+            handler: tool_audio_set_gain,
+        },
+        Tool {
+            name: "audio_move_clip",
+            description: "Move the LAST audio clip so it starts at 'start_frame' on the timeline.",
+            schema: obj_schema(
+                json!({
+                    "start_frame": { "type": "integer" }
+                }),
+                &["start_frame"],
+            ),
+            handler: tool_audio_move_clip,
+        },
+        Tool {
+            name: "audio_delete_clip",
+            description: "Delete the audio clip at 'index' from the timeline (the clip's file on disk is not touched).",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_audio_delete_clip,
         },
         Tool {
             name: "graph_key",
@@ -2136,6 +2457,17 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_simplify_strokes,
         },
         Tool {
+            name: "delete_stroke",
+            description: "Delete one stroke by its index in the project's stroke list (the order draw_stroke appends in). Returns the frame the stroke was on. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" }
+                }),
+                &["index"],
+            ),
+            handler: tool_delete_stroke,
+        },
+        Tool {
             name: "apply_nib",
             description: "Give every stroke on a frame a nib width profile: \"round\" (uniform), \"square\" or \"calligraphy\" (angle-dependent, angle in degrees, default 45). Returns the stroke count.",
             schema: obj_schema(
@@ -2273,11 +2605,11 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 54);
+        assert_eq!(tools.len(), 65);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 54, "tool names must be unique");
+        assert_eq!(names.len(), 65, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
@@ -2642,7 +2974,7 @@ mod tests {
         assert_eq!(r["clips"][3]["start"], 0.0);
         assert_eq!(r["clips"][3]["end"], 6.0);
 
-        // Move + resize go through fx_edit's ops.
+        // Move + resize go through the fx_ops EditorCore ops.
         let r = call(&mut core, &tools, "fx_move", json!({ "index": 3, "start": 10.0 })).unwrap();
         assert_eq!(r["start"], 10.0);
         assert_eq!(core.project.fx_clips[3].clip.start, 10.0);
@@ -2983,6 +3315,149 @@ mod tests {
     }
 
     #[test]
+    fn phase_e_op_tools() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        call(&mut core, &tools, "new_project", json!({})).unwrap();
+
+        // --- figure colour + duplicate (figure_ops) ---
+        let r = call(&mut core, &tools, "figure_set_color", json!({
+            "figure": 0, "color": 0x3366FF
+        }))
+        .unwrap();
+        assert_eq!(r["color"], 0x3366FF);
+        assert_eq!(core.project.figures[0].color, 0x3366FF);
+        assert!(call(&mut core, &tools, "figure_set_color", json!({ "figure": 0 })).is_err(),
+            "the colour argument is required");
+        assert!(call(&mut core, &tools, "figure_set_color", json!({
+            "figure": 9, "color": 1
+        }))
+        .is_err());
+        let r = call(&mut core, &tools, "figure_duplicate", json!({ "figure": 0 })).unwrap();
+        assert_eq!(r["figure"], 1, "the copy lands right after the original");
+        assert_eq!(core.project.figures.len(), 2);
+        assert_eq!(core.project.figures[1].color, 0x3366FF, "the copy keeps the colour");
+
+        // --- fx colour / colour2 / anchor (fx_ops) ---
+        call(&mut core, &tools, "add_fx_clip", json!({
+            "figure": 0, "node": 0, "kind": "burst", "start": 0.0, "duration": 6.0
+        }))
+        .unwrap();
+        let r = call(&mut core, &tools, "fx_set_color", json!({
+            "index": 0, "color": 0xFF0000
+        }))
+        .unwrap();
+        assert_eq!(r["color"], 0xFF0000);
+        assert_eq!(core.project.fx_clips[0].clip.color, 0xFF0000);
+        let r = call(&mut core, &tools, "fx_set_color2", json!({
+            "index": 0, "color2": 0x0000FF
+        }))
+        .unwrap();
+        assert_eq!(r["color2"], 0x0000FF);
+        assert_eq!(core.project.fx_clips[0].clip.color2, Some(0x0000FF));
+        // Omitting color2 clears the gradient back to solid.
+        let r = call(&mut core, &tools, "fx_set_color2", json!({ "index": 0 })).unwrap();
+        assert_eq!(r["color2"], Value::Null);
+        assert_eq!(core.project.fx_clips[0].clip.color2, None);
+        let r = call(&mut core, &tools, "fx_set_anchor", json!({
+            "index": 0, "figure": 1, "node": 2
+        }))
+        .unwrap();
+        assert_eq!(r["figure"], 1);
+        assert_eq!(r["node"], 2);
+        assert_eq!(core.project.fx_clips[0].figure, 1);
+        assert_eq!(core.project.fx_clips[0].node, 2);
+        assert!(call(&mut core, &tools, "fx_set_color", json!({
+            "index": 7, "color": 1
+        }))
+        .is_err());
+        assert!(call(&mut core, &tools, "fx_set_anchor", json!({
+            "index": 0, "figure": 0, "node": 99
+        }))
+        .is_err());
+
+        // --- delete_stroke removes exactly the addressed stroke ---
+        call(&mut core, &tools, "draw_stroke", json!({
+            "frame": 0, "points": [[0.0, 0.0], [10.0, 10.0]]
+        }))
+        .unwrap();
+        call(&mut core, &tools, "draw_stroke", json!({
+            "frame": 0, "points": [[50.0, 50.0], [60.0, 60.0]]
+        }))
+        .unwrap();
+        assert_eq!(core.project.strokes.len(), 2);
+        let r = call(&mut core, &tools, "delete_stroke", json!({ "index": 0 })).unwrap();
+        assert_eq!(r["count"], 1);
+        assert_eq!(r["frame"], 0);
+        assert_eq!(core.project.strokes.len(), 1);
+        assert_eq!(
+            core.project.strokes[0].points[0], [50.0, 50.0],
+            "the second stroke survives"
+        );
+        assert!(call(&mut core, &tools, "delete_stroke", json!({ "index": 5 })).is_err());
+
+        // --- audio: *_last tools error cleanly with no clips ---
+        assert!(call(&mut core, &tools, "audio_fade", json!({})).is_err());
+        assert!(call(&mut core, &tools, "audio_reverse", json!({})).is_err());
+        assert!(call(&mut core, &tools, "audio_set_gain", json!({ "gain": 0.5 })).is_err());
+        assert!(call(&mut core, &tools, "audio_move_clip", json!({ "start_frame": 3 })).is_err());
+        // Move/delete edit the timeline without touching files.
+        // (Grow the timeline first so a start frame of 7 is in
+        // range even if the op clamps to the timeline.)
+        for _ in 0..8 {
+            call(&mut core, &tools, "add_frame", json!({})).unwrap();
+        }
+        call(&mut core, &tools, "add_audio_clip", json!({
+            "path": "a.wav", "start_frame": 0
+        }))
+        .unwrap();
+        call(&mut core, &tools, "add_audio_clip", json!({
+            "path": "b.wav", "start_frame": 2
+        }))
+        .unwrap();
+        let r = call(&mut core, &tools, "audio_move_clip", json!({ "start_frame": 7 })).unwrap();
+        assert_eq!(r["start_frame"], 7);
+        assert_eq!(core.project.audio[1].start_frame, 7, "the LAST clip moved");
+        assert_eq!(core.project.audio[0].start_frame, 0, "the first clip stayed");
+        let r = call(&mut core, &tools, "audio_delete_clip", json!({ "index": 0 })).unwrap();
+        assert_eq!(r["count"], 1);
+        assert_eq!(core.project.audio[0].path, "b.wav");
+        assert!(call(&mut core, &tools, "audio_delete_clip", json!({ "index": 4 })).is_err());
+    }
+
+    #[test]
+    fn phase_e_audio_dsp_tools_run_on_a_real_file() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        call(&mut core, &tools, "new_project", json!({})).unwrap();
+        // A real half-second WAV on disk: the *_last ops read
+        // the clip's file, process it and repoint the clip, so
+        // the fake paths the other tests use are not enough.
+        let path =
+            std::env::temp_dir().join(format!("phase-e-audio-{}.wav", std::process::id()));
+        let wav = crate::audio_edit::WavData {
+            sample_rate: 8_000,
+            channels: 1,
+            samples: (0..4_000).map(|i| (i as f32 * 0.01).sin() * 0.5).collect(),
+        };
+        std::fs::write(&path, crate::audio_edit::write_wav(&wav)).unwrap();
+        call(&mut core, &tools, "add_audio_clip", json!({
+            "path": path.to_string_lossy().into_owned(), "start_frame": 0
+        }))
+        .unwrap();
+        for name in ["audio_fade", "audio_reverse"] {
+            let r = call(&mut core, &tools, name, json!({})).unwrap();
+            assert_eq!(r["ok"], true, "{name}");
+            assert!(r["status"].is_string(), "{name} reports through the status line");
+        }
+        let r = call(&mut core, &tools, "audio_set_gain", json!({ "gain": 0.5 })).unwrap();
+        assert_eq!(r["ok"], true);
+        assert!(call(&mut core, &tools, "audio_set_gain", json!({ "gain": -1.0 })).is_err());
+        assert!(call(&mut core, &tools, "audio_set_gain", json!({})).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn bad_arguments_error_instead_of_panicking() {
         let tools = tools();
         let mut core = EditorCore::new();
@@ -3042,6 +3517,19 @@ mod tests {
             ("clip_create", json!({ "figure": 12 })),
             ("set_bend", json!({ "figure": 0, "frame": 0, "node": 99, "radians": 0.5 })),
             ("set_bend", json!({ "figure": 0, "frame": 0, "node": 1 })),
+            ("figure_set_color", json!({ "figure": 0 })), // colour required
+            ("figure_set_color", json!({ "figure": 9, "color": 1 })),
+            ("figure_duplicate", json!({ "figure": 9 })),
+            ("fx_set_color", json!({ "index": 0, "color": 1 })), // no clips yet
+            ("fx_set_color2", json!({ "index": 0, "color2": 1 })), // no clips yet
+            ("fx_set_anchor", json!({ "index": 0, "figure": 0, "node": 99 })),
+            ("audio_fade", json!({})), // no audio clips
+            ("audio_reverse", json!({})), // no audio clips
+            ("audio_set_gain", json!({})), // gain required
+            ("audio_set_gain", json!({ "gain": -0.5 })),
+            ("audio_delete_clip", json!({ "index": 0 })), // no clips yet
+            ("audio_move_clip", json!({ "start_frame": 1 })), // no clips yet
+            ("delete_stroke", json!({ "index": 0 })), // no strokes yet
         ];
         for (name, args) in cases {
             let r = call(&mut core, &tools, name, args.clone());

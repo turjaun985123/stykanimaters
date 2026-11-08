@@ -1,0 +1,295 @@
+name: Headless Rune probe (snap / tree)
+
+# =====================================================================
+# HEADLESS PROBE — Rune Phase E experiment (fail-soft, dispatch-only)
+#
+# PURPOSE
+#   Every Rune binary carries built-in headless tooling
+#   (docs/RUNE_API_AUDIT.md, rune tooling/args.rs):
+#     --tree out.json   element tree dump ("with animated values")
+#     --snap out.png    offscreen render (no window) at --at seconds
+#     --scene NAME      apply an AppSpec::scenes fn first
+#     --crop KEY        snapshot a single element subtree
+#   This workflow runs those modes against the CI-built editor binary
+#   on a GPU-less GitHub runner and uploads whatever they produce.
+#
+# THE UNPROVEN QUESTIONS THIS JOB ANSWERS (data, not pass/fail)
+#   Q1. Does `--tree` run with no GPU and no display? The audit says
+#       tree mode needs no rendering, but "no rendering" was never the
+#       same as "runs on ubuntu-latest" — the binary may still want a
+#       display server or a wgpu adapter before it dumps. The job
+#       tries plain first, then retries under xvfb, and records which
+#       path (if any) produced JSON.
+#   Q2. Does `--snap` render under lavapipe (the software Vulkan
+#       driver in mesa-vulkan-drivers)? Pixel snapshots need a wgpu
+#       adapter; on a GPU-less runner that means software Vulkan.
+#       Open since the audit's Q8; docs/QA_RUNE.md §4 rows 4–5 wait
+#       on this answer.
+#   Q3. Does the `--tree` JSON carry element rects? If yes, the
+#       stage-height budget (stage >= 360 px at 1280x720,
+#       docs/QA_RUNE.md §3) can be asserted mechanically. If no, the
+#       fallback is `--snap --crop stage` and the cropped PNG's own
+#       height. A probe step below greps the dump for rect fields.
+#       (The audited flag set has no window-size flag, so snaps use
+#       the app's default 1440x900 size; the 1280x720 budget check
+#       stays approximate until size control is confirmed.)
+#
+# FAIL-SOFT CONTRACT
+#   This workflow can never break the main pipeline: it is a separate
+#   file from "Build, Test & Binary" (workflow.yml), it is
+#   manual-only (see below), and every snap/tree/probe step is
+#   continue-on-error, with artifact uploads set to
+#   if-no-files-found: ignore. A failure here means "the probe found
+#   something", never "the repo is broken". The build step itself is
+#   deliberately NOT fail-soft: if the binary stops building, the
+#   main workflow is already red for the same reason and a probe
+#   result would be meaningless.
+#
+# WHY workflow_dispatch ONLY (no push trigger)
+#   A push trigger would pay for a second full release build on every
+#   push — roughly doubling CI minutes — to re-answer questions that
+#   only need answering when the shell layout or the Rune pin
+#   changes. Run it by hand: Actions tab -> this workflow -> Run
+#   workflow. To promote it later, once it has proven stable, add
+#   alongside workflow_dispatch below:
+#       push:
+#         branches: [master]
+#         paths: ["src/**"]
+#
+# HOW TO READ THE RESULTS
+#   * The run's Summary tab lists, per output, PRESENT or MISSING
+#     plus byte sizes; the rect probe's findings are appended there.
+#   * The `headless-probe-output` artifact holds the raw files:
+#     tree-<scene>.json (+ .log / .exit per invocation, and -xvfb
+#     variants when the fallback ran), snap-default.png,
+#     snap-stage.png (the `--crop stage` variant), vulkaninfo.txt,
+#     rect-probe.txt.
+#   * Tree JSON present from the PLAIN attempt -> Q1: yes, tree mode
+#     needs neither GPU nor display on the runner. Present only from
+#     the XVFB attempt -> tree mode needs a display but not a GPU.
+#     Missing entirely -> read the step logs and .exit files; that
+#     is the answer too, just a disappointing one.
+#   * snap-default.png present -> Q2: yes, lavapipe renders Rune;
+#     the QA_RUNE §3 fallback (a) and CI screenshot checks unlock.
+#   * rect-probe.txt says whether the tree dump carries rects (Q3).
+# =====================================================================
+
+on:
+  workflow_dispatch:
+
+# Manual runs of the probe should not pile up on each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Same as the main workflow: incremental artifacts bloat the cache.
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  headless-probe:
+    name: Headless --tree / --snap probe (software Vulkan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # The build-dep list mirrors workflow.yml (the binary links the
+      # same libraries); the probe adds mesa-vulkan-drivers (lavapipe,
+      # the software Vulkan adapter Q2 is about), vulkan-tools
+      # (vulkaninfo, to prove lavapipe is actually visible) and xvfb
+      # (the virtual display for the Q1 fallback attempt).
+      - name: Install system libraries (build deps + software Vulkan + xvfb)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libvulkan-dev \
+            libasound2-dev \
+            libudev-dev \
+            cmake \
+            clang \
+            ffmpeg \
+            mesa-vulkan-drivers \
+            vulkan-tools \
+            xvfb
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # Same cache as the main workflow, so a warm target dir is
+      # reused instead of recompiling the world for a probe.
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-release
+          cache-on-failure: true
+
+      - name: Build (release, all binaries)
+        run: cargo build --release --locked --bins
+
+      # Evidence for Q2 before any snap is attempted: if lavapipe is
+      # not even visible to vulkaninfo, a missing PNG is explained
+      # before it happens.
+      - name: Record the Vulkan stack (is lavapipe visible?)
+        continue-on-error: true
+        run: |
+          mkdir -p headless-out
+          vulkaninfo --summary 2>&1 | tee headless-out/vulkaninfo.txt || true
+
+      # Q1, attempt 1: no display, no GPU — the audit's claim, tested
+      # exactly. One dump per scene from docs/QA_RUNE.md §3. `set +e`
+      # so a failing invocation is recorded, not fatal; the step
+      # still reports failure if any scene produced no JSON, which is
+      # what arms the xvfb fallback below.
+      - name: Tree dumps — plain (no display)
+        id: tree_plain
+        continue-on-error: true
+        timeout-minutes: 6
+        run: |
+          set +e
+          BIN=./target/release/stykanimate-rs
+          mkdir -p headless-out
+          missing=0
+          for scene in default frame-3 selected playing; do
+            timeout 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
+              > "headless-out/tree-$scene.log" 2>&1
+            echo $? > "headless-out/tree-$scene.exit"
+            [ -f "headless-out/tree-$scene.json" ] || missing=1
+          done
+          exit $missing
+
+      # Q1, attempt 2: only the scenes attempt 1 missed, under a
+      # virtual display. The outcome split plain-vs-xvfb is itself
+      # the Q1 answer (display needed? yes/no).
+      - name: Tree dumps — xvfb fallback (only scenes the plain attempt missed)
+        if: ${{ !cancelled() && steps.tree_plain.outcome == 'failure' }}
+        continue-on-error: true
+        timeout-minutes: 6
+        run: |
+          set +e
+          BIN=./target/release/stykanimate-rs
+          for scene in default frame-3 selected playing; do
+            if [ ! -f "headless-out/tree-$scene.json" ]; then
+              timeout 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
+                > "headless-out/tree-$scene-xvfb.log" 2>&1
+              echo $? > "headless-out/tree-$scene-xvfb.exit"
+            fi
+          done
+
+      # Q2: offscreen render under lavapipe. Full window first, then
+      # the stage crop (QA_RUNE §3 fallback a — the cropped PNG's
+      # height is the stage-height measurement if Q3 answers no).
+      # Plain attempt first; one xvfb retry if no PNG appeared, so a
+      # display dependency in snap mode is also surfaced as data.
+      - name: Snap renders — lavapipe attempt
+        continue-on-error: true
+        timeout-minutes: 8
+        env:
+          WGPU_BACKEND: vulkan
+        run: |
+          set +e
+          BIN=./target/release/stykanimate-rs
+          mkdir -p headless-out
+          timeout 120 "$BIN" --snap headless-out/snap-default.png --scene default --at 0 \
+            > headless-out/snap-default.log 2>&1
+          echo $? > headless-out/snap-default.exit
+          timeout 120 "$BIN" --snap headless-out/snap-stage.png --scene default --at 0 --crop stage \
+            > headless-out/snap-stage.log 2>&1
+          echo $? > headless-out/snap-stage.exit
+          if [ ! -f headless-out/snap-default.png ]; then
+            timeout 120 xvfb-run -a "$BIN" --snap headless-out/snap-default.png --scene default --at 0 \
+              > headless-out/snap-default-xvfb.log 2>&1
+            echo $? > headless-out/snap-default-xvfb.exit
+          fi
+
+      # Q3: scan whatever tree dumps exist for rect-like fields and
+      # for the shape of the `stage` node. Pure stdlib python; every
+      # failure mode (no files, unreadable JSON) is reported in the
+      # probe text instead of failing.
+      - name: Probe tree JSON for element rects
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          python3 - <<'PYEOF' || true
+          import glob, json, os
+          out = []
+          files = sorted(glob.glob("headless-out/tree-*.json"))
+          if not files:
+              out.append("No tree dumps present - rect question unanswered (tree mode produced nothing).")
+          RECT_KEYS = {"rect", "bounds", "frame", "size", "width", "height", "w", "h", "x", "y"}
+          for path in files:
+              try:
+                  data = json.load(open(path))
+              except Exception as e:
+                  out.append(f"{path}: unreadable JSON ({e})")
+                  continue
+              keys = set()
+              stage_nodes = []
+              def walk(node):
+                  if isinstance(node, dict):
+                      keys.update(str(k) for k in node.keys())
+                      if node.get("key") == "stage" or node.get("name") == "stage":
+                          stage_nodes.append(node)
+                      for v in node.values():
+                          walk(v)
+                  elif isinstance(node, list):
+                      for v in node:
+                          walk(v)
+              walk(data)
+              hits = sorted(k for k in keys if k.lower() in RECT_KEYS)
+              out.append(f"{path}: rect-like keys: {hits if hits else 'NONE'}")
+              if stage_nodes:
+                  s = stage_nodes[0]
+                  out.append(f"{path}: 'stage' node fields: {sorted(str(k) for k in s.keys())}")
+                  out.append(f"{path}: 'stage' node (truncated): {json.dumps(s)[:400]}")
+              else:
+                  out.append(f"{path}: no node with key/name == 'stage' found")
+          text = "\n".join(out) + "\n"
+          os.makedirs("headless-out", exist_ok=True)
+          open("headless-out/rect-probe.txt", "w").write(text)
+          print(text)
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a") as fh:
+                  fh.write("\n### Tree rect probe (Q3)\n\n```\n" + text + "```\n")
+          PYEOF
+
+      # Whatever exists is the result — including "nothing exists".
+      # if-no-files-found: ignore is load-bearing: an absent output
+      # is probe data, not a workflow failure.
+      - name: Upload probe output (whatever exists)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: headless-probe-output
+          path: headless-out/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Summary — which artifacts exist
+        if: ${{ always() }}
+        run: |
+          {
+            echo "## Headless probe results"
+            echo ""
+            echo "| Output | Status | Bytes |"
+            echo "|---|---|---|"
+            for f in headless-out/tree-default.json headless-out/tree-frame-3.json headless-out/tree-selected.json headless-out/tree-playing.json headless-out/snap-default.png headless-out/snap-stage.png headless-out/vulkaninfo.txt headless-out/rect-probe.txt; do
+              if [ -f "$f" ]; then
+                echo "| $f | PRESENT | $(stat -c%s "$f") |"
+              else
+                echo "| $f | MISSING | - |"
+              fi
+            done
+            echo ""
+            echo "Per-invocation exit codes and logs (.exit / .log, incl. -xvfb variants) are in the 'headless-probe-output' artifact."
+            echo "Interpretation guide: see the header comment in .github/workflows/headless.yml."
+          } >> "$GITHUB_STEP_SUMMARY"
+          ls -la headless-out || true

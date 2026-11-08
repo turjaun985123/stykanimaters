@@ -34,6 +34,49 @@
 //! Those handlers are factored as `apply_*(&mut EditorCore,
 //! ..)` so they are testable without a `State`.
 //!
+//! ## Canvas pointer interaction
+//!
+//! The curve canvas also takes drags (`graph_drag`, factored
+//! into the testable `drag_down` / `drag_move` / `drag_up`
+//! over a bare `EditorCore` + [`GraphPanelState`]):
+//!
+//! - **Down on a key handle** (within [`GRAB_RADIUS`] px,
+//!   hit-tested by `GraphView::hit_key`): one
+//!   `EditorCore::snapshot()` — the only snapshot of the
+//!   gesture — and the key is grabbed.
+//! - **Move**: the pointer converts back to data through the
+//!   SAME fit the drawing used (see [`drag_view`]), the key's
+//!   frame is clamped to `>= 0.0`, its value is unclamped,
+//!   and the channel is re-sorted after every move
+//!   (`drag_key_to`), so `value_at` — and the graph-aware
+//!   posing that reads these channels — stays valid on every
+//!   redraw, even mid-drag. Angle channels need no extra
+//!   work: the stage's `positions_f` evaluates channels
+//!   itself.
+//! - **Up**: the final key position is written to
+//!   `core.status`. A gesture the runtime reports as
+//!   cancelled (Escape / focus loss) instead restores the
+//!   pre-drag project with one `core.undo()` — the Down
+//!   snapshot is exactly one undo step.
+//! - **A click that hits no key** (Down+Up within
+//!   [`CLICK_TRAVEL`] px) seeks: `core.goto` of the frame
+//!   under the pointer, rounded (`seek_frame`). A longer
+//!   drag across empty canvas does nothing.
+//!
+//! The handlers recompute the fit per phase from the drag's
+//! own `w`/`h` — the size the element was actually drawn at
+//! for this gesture — via the same [`drag_view`] the builder
+//! draws with, so hit math can never disagree with the
+//! drawing. One honest consequence: `auto_fit` derives its
+//! value range from the channel's keys, so dragging the
+//! extreme key of a non-angle channel re-pads the fit
+//! slightly as it moves (the key trails the pointer by the
+//! padding factor); angle channels are immune (their fit is
+//! always the full -180..=180 circle), and the frame range
+//! only stretches when a key is dragged past the current
+//! end. The drawing and the drag always share the fit, so
+//! they never disagree with each other.
+//!
 //! ## Scoping, honestly
 //!
 //! The core's graph ops scope by SELECTION, not by this
@@ -53,7 +96,7 @@
 //! — see [`GraphPanelState`].
 
 use rune::tok::{self, type_, Theme};
-use rune::{canvas, col, row, text, Color, Cx, El, LineCap, Shape};
+use rune::{canvas, col, row, text, Color, Cx, Drag, El, LineCap, Phase, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::graph::{Channel, ChannelTarget, Interp, TangentPreset};
 use stykanimate_rs::graph_panel::{preset_preview, GraphView};
@@ -78,10 +121,20 @@ pub const REDUCE_TOLERANCE: f32 = 0.5;
 /// Tangent-preset preview chip size, in points.
 const PREVIEW_W: f32 = 52.0;
 const PREVIEW_H: f32 = 30.0;
+/// Grab radius for key handles on the curve canvas, in
+/// points. The handles DRAW at radius 4.5; the pick radius is
+/// deliberately more forgiving.
+pub const GRAB_RADIUS: f32 = 10.0;
+/// Pointer travel, in points, under which a Down+Up on empty
+/// canvas counts as a click (and seeks) rather than a drag.
+/// Matches the 4 pt click-run threshold Rune itself uses for
+/// click counting (see the `Drag::clicks` docs).
+pub const CLICK_TRAVEL: f32 = 4.0;
 
 /// Panel-local view state: which channel the user picked in
-/// the selector. Everything else the panel shows is derived
-/// from `EditorCore` per frame.
+/// the selector, plus the in-progress canvas key drag.
+/// Everything else the panel shows is derived from
+/// `EditorCore` per frame.
 #[derive(Clone, Debug, Default)]
 pub struct GraphPanelState {
     /// The last selector pick. `None` — and any pick that no
@@ -90,6 +143,29 @@ pub struct GraphPanelState {
     /// automatic choice, so the panel never draws a channel
     /// the selector doesn't offer.
     pub target: Option<ChannelTarget>,
+    /// Index into the drawn channel's `keys` of the key an
+    /// in-progress canvas drag grabbed at Down. `None`
+    /// outside a key drag.
+    ///
+    /// STALE-INDEX RISK, and the mitigation: `drag_key_to`
+    /// re-sorts the channel after every Move, so the grabbed
+    /// key's index can change mid-drag (dragging a key past
+    /// its neighbour permutes both). The index is therefore
+    /// never trusted across a Move on its own: it is only a
+    /// hint, re-resolved on every Move by
+    /// [`resolve_drag_index`] against [`Self::drag_anchor`]
+    /// (the grabbed key's frame), and refreshed to the key's
+    /// post-sort index after each move. Two keys sitting at
+    /// the EXACT same frame and value are interchangeable to
+    /// the resolver — degenerate duplicate data; the curve
+    /// they produce is identical either way, though a later
+    /// move could in principle continue with the twin (they
+    /// may carry different tangents).
+    pub drag_key: Option<usize>,
+    /// The grabbed key's frame as of Down / the last Move —
+    /// the drag's identity anchor for [`resolve_drag_index`].
+    /// Meaningless while `drag_key` is `None`.
+    pub drag_anchor: f32,
 }
 
 /// Human label for a channel target, in UI casing: "Root X",
@@ -301,22 +377,232 @@ pub fn apply_reduce(core: &mut EditorCore, target: ChannelTarget) {
     core.status = format!("Reduced graph channel: removed {removed} key(s).");
 }
 
+/// The fit the panel draws AND drags with, for a canvas of
+/// `size`: `GraphView::auto_fit` over the drawn channel alone
+/// (an angle channel gets the full -180..=180 circle, a value
+/// channel its keys with 10% padding; no channel fits the
+/// bare timeline). [`graph_shape`] builds its view through
+/// here and so does every drag phase, recomputed per phase
+/// from the then-current project — pointer math and pixels
+/// can never be based on different transforms.
+pub fn drag_view(core: &EditorCore, target: ChannelTarget, size: [f32; 2]) -> GraphView {
+    let fit: &[Channel] = match channel_for(core, target) {
+        Some(c) => std::slice::from_ref(c),
+        None => &[],
+    };
+    GraphView::auto_fit(fit, core.frame_count(), size[0], size[1])
+}
+
+/// Resolve a drag's grabbed key under the channel's CURRENT
+/// key order. `hint` is the index recorded at Down / the last
+/// Move and `anchor` the grabbed key's frame then. The hint
+/// wins when the key sitting there still has the anchor
+/// frame (the common no-crossing case); otherwise the key
+/// nearest the anchor is the grabbed one (a re-sort moved
+/// it). `None` when the channel has no keys at all.
+pub fn resolve_drag_index(ch: &Channel, hint: usize, anchor: f32) -> Option<usize> {
+    if let Some(k) = ch.keys.get(hint) {
+        if (k.frame - anchor).abs() <= 1e-4 {
+            return Some(hint);
+        }
+    }
+    nearest_key(ch, anchor)
+}
+
+/// Move key `idx` of `ch` to (`frame`, `value`) — frame
+/// clamped to `>= 0.0`, value unclamped — and re-sort the
+/// channel. Returns the key's NEW index after the sort (the
+/// sort can permute it past a crossed neighbour), re-found
+/// by its exact frame+value with a nearest-frame fallback,
+/// or `None` when `idx` is out of range (channel untouched).
+pub fn drag_key_to(ch: &mut Channel, idx: usize, frame: f32, value: f32) -> Option<usize> {
+    let k = ch.keys.get_mut(idx)?;
+    k.frame = frame.max(0.0);
+    k.value = value;
+    let (f, v) = (k.frame, k.value);
+    ch.sort_keys();
+    ch.keys
+        .iter()
+        .position(|k| k.frame == f && k.value == v)
+        .or_else(|| nearest_key(ch, f))
+}
+
+/// The frame a click at pixel `x` seeks to: the view's data
+/// frame at `x`, rounded to the nearest whole frame (halves
+/// round away from zero, `f32::round` semantics) and clamped
+/// into the timeline. `None` when there are no frames.
+pub fn seek_frame(view: &GraphView, x: f32, frame_count: usize) -> Option<usize> {
+    if frame_count == 0 {
+        return None;
+    }
+    let (frame, _) = view.to_data([x, 0.0]);
+    let f = frame.round().clamp(0.0, (frame_count - 1) as f32);
+    Some(f as usize)
+}
+
+/// Canvas drag, Down phase: hit-test the drawn channel's key
+/// handles at `px` (a canvas of `size`) through the panel's
+/// own fit. On a hit: snapshot ONCE for the whole gesture,
+/// grab the key into `st`, return true. On a miss nothing is
+/// recorded — whether the gesture becomes a seek is decided
+/// at Up from its travel.
+pub fn drag_down(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: [f32; 2]) -> bool {
+    if size[0] <= 0.0 || size[1] <= 0.0 {
+        return false;
+    }
+    let target = effective_target(core, st.target);
+    let Some(ci) = channel_index(core, target) else {
+        return false;
+    };
+    let view = drag_view(core, target, size);
+    let hit = view.hit_key(&core.project.channels[ci], px, GRAB_RADIUS);
+    match hit {
+        Some(i) => {
+            core.snapshot();
+            st.drag_anchor = core.project.channels[ci].keys[i].frame;
+            st.drag_key = Some(i);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Canvas drag, Move phase: while a key is grabbed, move it
+/// to the pointer's data position (converted through the fit
+/// as of this Move's start) and re-anchor the drag state to
+/// its post-sort index. No snapshot — the Down snapshot
+/// covers the whole gesture. Returns true when a key moved;
+/// a stale grab (channel gone, key gone) ends the drag.
+pub fn drag_move(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: [f32; 2]) -> bool {
+    let Some(hint) = st.drag_key else {
+        return false;
+    };
+    if size[0] <= 0.0 || size[1] <= 0.0 {
+        return false;
+    }
+    let target = effective_target(core, st.target);
+    let Some(ci) = channel_index(core, target) else {
+        st.drag_key = None;
+        return false;
+    };
+    let idx = resolve_drag_index(&core.project.channels[ci], hint, st.drag_anchor);
+    let Some(idx) = idx else {
+        st.drag_key = None;
+        return false;
+    };
+    let view = drag_view(core, target, size);
+    let (frame, value) = view.to_data(px);
+    let ch = &mut core.project.channels[ci];
+    match drag_key_to(ch, idx, frame, value) {
+        Some(new_idx) => {
+            st.drag_key = Some(new_idx);
+            st.drag_anchor = ch.keys[new_idx].frame;
+            true
+        }
+        None => {
+            st.drag_key = None;
+            false
+        }
+    }
+}
+
+/// Canvas drag, Up phase. With a key grabbed: end the drag —
+/// the final position goes to `core.status`, or, when the
+/// runtime cancelled the gesture (`cancelled`), the Down
+/// snapshot is rolled back with one `core.undo()`. With no
+/// key grabbed: a click (travel within [`CLICK_TRAVEL`])
+/// seeks the playhead to the frame under the pointer via
+/// `core.goto`; a longer drag over empty canvas does
+/// nothing. Returns true when the gesture changed anything.
+pub fn drag_up(
+    core: &mut EditorCore,
+    st: &mut GraphPanelState,
+    px: V2,
+    size: [f32; 2],
+    travel: f32,
+    cancelled: bool,
+) -> bool {
+    if let Some(hint) = st.drag_key.take() {
+        if cancelled {
+            core.undo();
+            return true;
+        }
+        let target = effective_target(core, st.target);
+        if let Some(ci) = channel_index(core, target) {
+            let ch = &core.project.channels[ci];
+            if let Some(idx) = resolve_drag_index(ch, hint, st.drag_anchor) {
+                let k = ch.keys[idx];
+                core.status = format!(
+                    "Graph key moved: frame {:.1}, value {:.1}.",
+                    k.frame, k.value
+                );
+            }
+        }
+        return true;
+    }
+    if cancelled || travel > CLICK_TRAVEL || size[0] <= 0.0 {
+        return false;
+    }
+    let target = effective_target(core, st.target);
+    let view = drag_view(core, target, size);
+    match seek_frame(&view, px[0], core.frame_count()) {
+        Some(f) => {
+            core.goto(f);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The canvas element's drag handler: element-local points
+/// and the element's own drawn size go straight to the
+/// phase helpers (pointer capture is Rune's — a drag that
+/// leaves the canvas still reports its Moves and Up here).
+fn graph_drag(s: &mut State, d: &mut Drag) {
+    let px = [d.x, d.y];
+    let size = [d.w, d.h];
+    match d.phase {
+        Phase::Down => {
+            drag_down(&mut s.core, &mut s.graph_panel, px, size);
+        }
+        Phase::Move => {
+            drag_move(&mut s.core, &mut s.graph_panel, px, size);
+        }
+        Phase::Up => {
+            let travel =
+                ((d.x - d.start_x).powi(2) + (d.y - d.start_y).powi(2)).sqrt();
+            drag_up(
+                &mut s.core,
+                &mut s.graph_panel,
+                px,
+                size,
+                travel,
+                d.cancelled(),
+            );
+        }
+    }
+}
+
 /// The curve canvas as one `Shape`: the zero line (when the
 /// fitted range crosses zero), the current-frame line, the
 /// sampled curve, a diamond per key, and an accent diamond on
 /// the curve at the current frame. The view is
 /// `GraphView::auto_fit` over the drawn channel alone, so an
 /// angle channel gets the full -180..=180 circle and a value
-/// channel gets its keys with 10% padding.
-fn graph_shape(core: &EditorCore, target: ChannelTarget, size: [f32; 2], t: &Theme) -> Shape {
+/// channel gets its keys with 10% padding. `drag` is the
+/// grabbed key's index (resolved for the CURRENT key order),
+/// drawn larger in the accent colour while it is dragged.
+fn graph_shape(
+    core: &EditorCore,
+    target: ChannelTarget,
+    size: [f32; 2],
+    t: &Theme,
+    drag: Option<usize>,
+) -> Shape {
     let (w, h) = (size[0], size[1]);
     let accent = tok::accent(0, true);
     let ch = channel_for(core, target);
-    let fit: &[Channel] = match ch {
-        Some(c) => std::slice::from_ref(c),
-        None => &[],
-    };
-    let view = GraphView::auto_fit(fit, core.frame_count(), w, h);
+    let view = drag_view(core, target, size);
     let mut shape = Shape::new();
     if view.val_min < 0.0 && view.val_max > 0.0 {
         let y = view.to_px(0.0, 0.0)[1];
@@ -337,8 +623,12 @@ fn graph_shape(core: &EditorCore, target: ChannelTarget, size: [f32; 2], t: &The
             shape = shape.stroke(pts, 2.0, accent);
         }
         let amber = hex_color(0xFFC65D).unwrap_or(Color::WHITE);
-        for handle in view.key_handles(ch) {
-            shape = shape.fill(diamond(handle, 4.5).to_vec(), amber);
+        for (i, handle) in view.key_handles(ch).into_iter().enumerate() {
+            shape = if drag == Some(i) {
+                shape.fill(diamond(handle, 6.5).to_vec(), accent)
+            } else {
+                shape.fill(diamond(handle, 4.5).to_vec(), amber)
+            };
         }
         let now_pt = view.to_px(core.current as f32, ch.value_at(core.current as f32));
         shape = shape.fill(diamond(now_pt, 3.5).to_vec(), accent);
@@ -471,6 +761,15 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         }))
         .child(btn("graph-clear", "Clear", false, t, |s| s.core.clear_graph()));
 
+    // The grabbed key, resolved against the CURRENT key
+    // order for the highlight (the stored index is only a
+    // hint once re-sorts start permuting it — see
+    // GraphPanelState::drag_key).
+    let drag_idx = s.graph_panel.drag_key.and_then(|hint| {
+        let ch = channel_for(core, target)?;
+        resolve_drag_index(ch, hint, s.graph_panel.drag_anchor)
+    });
+
     let mut panel = col()
         .key("graph-panel")
         .w_full()
@@ -489,12 +788,13 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         )
         .child(selector.scroll_x().w_full())
         .child(
-            canvas(graph_shape(core, target, size, t))
+            canvas(graph_shape(core, target, size, t, drag_idx))
                 .key("graph-canvas")
                 .w_full()
                 .h(GRAPH_H)
                 .fill(t.card)
-                .radius(8.0),
+                .radius(8.0)
+                .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| graph_drag(s, d)),
         );
     if ch.is_none() {
         panel = panel.child(
@@ -773,5 +1073,180 @@ mod tests {
         )];
         apply_reduce(&mut core, ChannelTarget::RootX);
         assert_eq!(core.project.channels[0].keys.len(), 3);
+    }
+
+    #[test]
+    fn pointer_roundtrip_through_the_panels_own_fit() {
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(4.0, 80.0),
+                Key::flat(8.0, 20.0),
+            ],
+        )];
+        let size = [480.0, 170.0];
+        let view = drag_view(&core, ChannelTarget::RootX, size);
+        let ch = &core.project.channels[0];
+        // Every key's drawn pixel converts back to its data
+        // and hit-tests to its own index — the drag uses the
+        // exact transform the drawing used.
+        for (i, k) in ch.keys.iter().enumerate() {
+            let px = view.to_px(k.frame, k.value);
+            let (f, v) = view.to_data(px);
+            assert!(
+                approx(f, k.frame) && approx(v, k.value),
+                "key {i} roundtrip ({}, {}) -> ({f}, {v})",
+                k.frame,
+                k.value
+            );
+            assert_eq!(view.hit_key(ch, px, GRAB_RADIUS), Some(i));
+        }
+        // The middle of the canvas is far from every handle.
+        assert_eq!(view.hit_key(ch, [240.0, 160.0], GRAB_RADIUS), None);
+    }
+
+    #[test]
+    fn drag_key_to_crosses_neighbours_clamps_and_reindexes() {
+        let mut ch = channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(4.0, 40.0),
+                Key::flat(8.0, 80.0),
+            ],
+        );
+        // Drag key 0 past its neighbour: it lands at index 1
+        // and the order is ascending again.
+        assert_eq!(drag_key_to(&mut ch, 0, 6.5, 55.0), Some(1));
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![4.0, 6.5, 8.0]);
+        assert_eq!(ch.keys[1].value, 55.0);
+        // Frames clamp at 0; values do not clamp.
+        assert_eq!(drag_key_to(&mut ch, 2, -2.0, -10.0), Some(0));
+        assert_eq!(ch.keys[0].frame, 0.0);
+        assert_eq!(ch.keys[0].value, -10.0);
+        // Out-of-range index: no change, no new index.
+        assert_eq!(drag_key_to(&mut ch, 99, 1.0, 1.0), None);
+        assert_eq!(ch.keys.len(), 3);
+        assert_eq!(ch.keys[1].frame, 4.0);
+    }
+
+    #[test]
+    fn resolve_drag_index_uses_hint_then_anchor() {
+        let ch = channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 10.0),
+                Key::flat(4.0, 20.0),
+                Key::flat(8.0, 30.0),
+            ],
+        );
+        // Fast path: the hinted key still sits at the anchor.
+        assert_eq!(resolve_drag_index(&ch, 1, 4.0), Some(1));
+        // A re-sort permuted the vec (here by hand): the hint
+        // now points at the frame-8 key, so the anchor decides.
+        let permuted = channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(4.0, 20.0),
+                Key::flat(8.0, 30.0),
+                Key::flat(0.0, 10.0),
+            ],
+        );
+        assert_eq!(resolve_drag_index(&permuted, 1, 4.0), Some(0));
+        // A stale out-of-range hint still resolves by anchor.
+        assert_eq!(resolve_drag_index(&ch, 99, 4.0), Some(1));
+        // No keys: nothing to resolve.
+        let empty = channel(ChannelTarget::RootX, vec![]);
+        assert_eq!(resolve_drag_index(&empty, 0, 4.0), None);
+    }
+
+    #[test]
+    fn seek_frame_rounds_and_clamps() {
+        // 60 px per frame over frames 0..=8.
+        let view = GraphView {
+            frame_min: 0.0,
+            frame_max: 8.0,
+            val_min: -8.0,
+            val_max: 88.0,
+            width: 480.0,
+            height: 170.0,
+        };
+        assert_eq!(seek_frame(&view, 144.0, 10), Some(2), "frame 2.4 rounds down");
+        assert_eq!(seek_frame(&view, 150.0, 10), Some(3), "frame 2.5 rounds up");
+        assert_eq!(seek_frame(&view, -30.0, 10), Some(0), "before the start clamps");
+        assert_eq!(seek_frame(&view, 10_000.0, 5), Some(4), "past the end clamps");
+        assert_eq!(seek_frame(&view, 144.0, 0), None, "no frames: no seek");
+    }
+
+    #[test]
+    fn drag_gesture_end_to_end_and_click_seek() {
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(4.0, 80.0),
+                Key::flat(8.0, 20.0),
+            ],
+        )];
+        let mut st = GraphPanelState::default();
+        let size = [480.0, 170.0];
+
+        // Down on key 1's handle grabs it.
+        let view = drag_view(&core, ChannelTarget::RootX, size);
+        let grab = view.to_px(4.0, 80.0);
+        assert!(drag_down(&mut core, &mut st, grab, size));
+        assert_eq!(st.drag_key, Some(1));
+        assert!(approx(st.drag_anchor, 4.0));
+
+        // Move to data (6, 10): the key follows, still sorted.
+        let dest = view.to_px(6.0, 10.0);
+        assert!(drag_move(&mut core, &mut st, dest, size));
+        let keys = &core.project.channels[0].keys;
+        assert!(approx(keys[1].frame, 6.0) && approx(keys[1].value, 10.0));
+        assert_eq!(st.drag_key, Some(1));
+
+        // Up ends the drag and reports the final position.
+        assert!(drag_up(&mut core, &mut st, dest, size, 40.0, false));
+        assert_eq!(st.drag_key, None);
+        assert!(
+            core.status.contains("Graph key moved"),
+            "status: {}",
+            core.status
+        );
+
+        // A click on empty canvas seeks: x=470 is past the
+        // fitted end (frame 8) but the demo has only 5 frames,
+        // so the seek clamps to frame index 4.
+        let far = [470.0, 165.0];
+        assert!(!drag_down(&mut core, &mut st, far, size));
+        core.goto(0);
+        assert!(drag_up(&mut core, &mut st, far, size, 1.0, false));
+        assert_eq!(core.current, 4);
+        // A long drag over empty canvas does NOT seek, and
+        // neither does a cancelled click.
+        core.goto(0);
+        assert!(!drag_up(&mut core, &mut st, far, size, 30.0, false));
+        assert_eq!(core.current, 0);
+        assert!(!drag_up(&mut core, &mut st, far, size, 1.0, true));
+        assert_eq!(core.current, 0);
+
+        // A cancelled key drag rolls back through the Down
+        // snapshot: the key returns to (6, 10).
+        let grab2 = drag_view(&core, ChannelTarget::RootX, size).to_px(6.0, 10.0);
+        assert!(drag_down(&mut core, &mut st, grab2, size));
+        let dest2 = drag_view(&core, ChannelTarget::RootX, size).to_px(2.0, 70.0);
+        assert!(drag_move(&mut core, &mut st, dest2, size));
+        assert!(drag_up(&mut core, &mut st, dest2, size, 200.0, true));
+        assert_eq!(st.drag_key, None);
+        let keys = &core.project.channels[0].keys;
+        assert!(
+            keys.iter()
+                .any(|k| approx(k.frame, 6.0) && approx(k.value, 10.0)),
+            "cancel restored the pre-drag key: {keys:?}"
+        );
     }
 }

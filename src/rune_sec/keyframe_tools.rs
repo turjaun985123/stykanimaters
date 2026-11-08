@@ -35,19 +35,40 @@
 //!   0.5 frames), then set `status`. Nothing is removed when no
 //!   key is near the current frame, and no snapshot is taken
 //!   for a no-op.
-//! * Copy keys → NOT BUILT: no copy/paste-keys op or key
-//!   clipboard exists anywhere in the engine (grep-verified
-//!   across editor.rs/graph.rs). Reported as an engine gap
-//!   rather than faked.
+//! * Copy keys / Paste keys → `stykanimate_rs::graph_keys`
+//!   (Phase E, section 11): `graph_keys::copy_keys(core,
+//!   channel_index)` / `graph_keys::paste_keys(core,
+//!   channel_index, keys, at_frame)`. The Phase D gap is
+//!   CLOSED: Phase D found no copy/paste-keys op or key
+//!   clipboard anywhere in the engine; Phase E added the
+//!   engine helpers, and this section supplies the shell
+//!   clipboard (`State::key_clipboard`, an
+//!   `Option<Vec<Key>>` owned by the shell — the core's own
+//!   clipboard holds whole frames, not keys). Copy stores the
+//!   selected angle channel's keys; Paste inserts them at
+//!   the current frame into the channel the panel targets
+//!   at paste time — `paste_keys` rebases the group so its
+//!   earliest key lands on the current frame, replaces
+//!   existing keys within 0.5 frames of a pasted key,
+//!   snapshots, and reports the paste on the status line
+//!   itself. Paste requires that channel to already exist
+//!   (key the joint once to create it) — `paste_keys`
+//!   takes a channel index, so there is nothing to paste
+//!   into until one does. Channel resolution is
+//!   `selected_angle_channel_index`, delegating to
+//!   `graph_keys::channel_index_of` for the selected
+//!   figure's `Angle(selected_node)` target — the same
+//!   lookup `delete_key_here_core` uses.
 //!
 //! The keyed-frame indicator is a read-only graph query over
 //! `core.project.channels` — the same channel
 //! `key_graph_angle` authors.
 
 use rune::tok::{type_, Theme};
-use rune::{col, row, text, El};
+use rune::{col, el, row, text, El};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::graph::{Channel, ChannelTarget, Key, TangentPreset};
+use stykanimate_rs::graph_keys;
 
 use crate::chrome_view::btn;
 use crate::State;
@@ -62,6 +83,16 @@ pub fn selected_angle_channel(core: &EditorCore) -> Option<&Channel> {
         .channels
         .iter()
         .find(|ch| ch.figure == core.selected_figure && ch.target == ChannelTarget::Angle(ni))
+}
+
+/// The index of the channel [`selected_angle_channel`]
+/// returns — the form the `graph_keys` copy/paste helpers
+/// take. Resolved by `graph_keys::channel_index_of` (the
+/// engine's own first-match lookup) for the selected
+/// figure's `Angle(selected_node)` target.
+pub fn selected_angle_channel_index(core: &EditorCore) -> Option<usize> {
+    let ni = core.selected_node?;
+    graph_keys::channel_index_of(core, core.selected_figure, ChannelTarget::Angle(ni))
 }
 
 /// Whether `keys` holds a key at `frame` (the engine's own
@@ -125,12 +156,7 @@ pub fn delete_key_here_core(core: &mut EditorCore) -> bool {
     };
     let fi = core.selected_figure;
     let frame = core.current as f32;
-    let Some(ci) = core
-        .project
-        .channels
-        .iter()
-        .position(|ch| ch.figure == fi && ch.target == ChannelTarget::Angle(ni))
-    else {
+    let Some(ci) = selected_angle_channel_index(core) else {
         core.status = format!("No graph keys for figure {} joint {}.", fi + 1, ni);
         return false;
     };
@@ -151,11 +177,114 @@ pub fn delete_key_here(s: &mut State) {
     delete_key_here_core(&mut s.core);
 }
 
+/// Copy the selected angle channel's keys via
+/// `graph_keys::copy_keys`. Returns the copied keys for the
+/// shell clipboard, or `None` (status set) when there is no
+/// joint selected, no channel on it, or the channel holds
+/// no keys — an empty copy never reaches the clipboard, so
+/// Paste's muted state always means "nothing to paste".
+pub fn copy_keys_here_core(core: &mut EditorCore) -> Option<Vec<Key>> {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a joint first, then Copy keys.".into();
+        return None;
+    };
+    let fi = core.selected_figure;
+    let Some(ci) = selected_angle_channel_index(core) else {
+        core.status = format!("No graph keys for figure {} joint {} to copy.", fi + 1, ni);
+        return None;
+    };
+    let keys = graph_keys::copy_keys(core, ci)?;
+    if keys.is_empty() {
+        core.status = format!("No graph keys for figure {} joint {} to copy.", fi + 1, ni);
+        return None;
+    }
+    core.status = format!(
+        "Copied {} keys from figure {} joint {}.",
+        keys.len(),
+        fi + 1,
+        ni
+    );
+    Some(keys)
+}
+
+/// Paste `clipboard`'s keys at the current frame into the
+/// selected angle channel via `graph_keys::paste_keys`,
+/// which rebases the group so its earliest key lands on
+/// the current frame, snapshots, and reports the paste on
+/// the status line itself — so this wrapper sets status
+/// only for its own pre-checks (no clipboard, no joint, no
+/// target channel). Returns whether keys were pasted. The
+/// target channel must already exist (see the module
+/// docs).
+pub fn paste_keys_here_core(core: &mut EditorCore, clipboard: Option<&[Key]>) -> bool {
+    let Some(keys) = clipboard.filter(|k| !k.is_empty()) else {
+        core.status = "Copy some keys first, then Paste keys.".into();
+        return false;
+    };
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a joint first, then Paste keys.".into();
+        return false;
+    };
+    let fi = core.selected_figure;
+    let Some(ci) = selected_angle_channel_index(core) else {
+        core.status = format!(
+            "No graph channel for figure {} joint {} to paste into — key it once first.",
+            fi + 1,
+            ni
+        );
+        return false;
+    };
+    graph_keys::paste_keys(core, ci, keys, core.current as f32)
+}
+
+/// `State` wrapper for [`copy_keys_here_core`]: stores the
+/// copied keys into the shell key clipboard.
+pub fn copy_keys_here(s: &mut State) {
+    if let Some(keys) = copy_keys_here_core(&mut s.core) {
+        s.key_clipboard = Some(keys);
+    }
+}
+
+/// `State` wrapper for [`paste_keys_here_core`]: pastes
+/// from the shell key clipboard (read-only — a clipboard
+/// can be pasted more than once).
+pub fn paste_keys_here(s: &mut State) {
+    paste_keys_here_core(&mut s.core, s.key_clipboard.as_deref());
+}
+
+/// One clipboard button, in the chrome's metrics
+/// (`chrome_view::btn`). When `enabled` is false the button
+/// renders muted (off fill, secondary text) and carries NO
+/// press handler — an inert element, not a control that
+/// silently does nothing (the pose_tools muting pattern).
+fn kbtn(
+    key: &str,
+    label: &str,
+    enabled: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    let base = el().key(key).px(10.0).py(5.0).radius(6.0);
+    if enabled {
+        base.fill(t.card)
+            .hover(t.control_track)
+            .press(t.control_off)
+            .on_press(f)
+            .child(text(label).font(type_::LABEL).color(t.text))
+    } else {
+        base.fill(t.control_off)
+            .child(text(label).font(type_::LABEL).color(t.text_secondary))
+    }
+}
+
 /// The keyframe tools section: header, selection target,
-/// keyed-frame indicator, the key/delete/auto buttons, and
-/// the five tangent preset buttons (scoped by the op to the
-/// selected figure). Buttons highlight with real state: Delete
-/// is accent-filled exactly when a key sits at this frame.
+/// keyed-frame indicator, the key/delete/auto buttons, the
+/// copy/paste-keys clipboard row, and the five tangent
+/// preset buttons (scoped by the op to the selected
+/// figure). Buttons highlight with real state: Delete is
+/// accent-filled exactly when a key sits at this frame;
+/// Copy is muted until a channel exists to copy from, and
+/// Paste is muted while the key clipboard is empty.
 pub fn keyframe_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let keyed = selected_angle_channel(core).is_some_and(|ch| keyed_here(&ch.keys, core.current));
@@ -197,6 +326,25 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                 .child(btn("key-auto", "Auto tangents", false, t, |s| {
                     s.core.smooth_graph_tangents()
                 })),
+        )
+        .child(
+            row()
+                .key("keyframe-clipboard")
+                .gap(6.0)
+                .child(kbtn(
+                    "key-copy",
+                    "Copy keys",
+                    selected_angle_channel_index(core).is_some(),
+                    t,
+                    |s| copy_keys_here(s),
+                ))
+                .child(kbtn(
+                    "key-paste",
+                    "Paste keys",
+                    s.key_clipboard.as_ref().is_some_and(|k| !k.is_empty()),
+                    t,
+                    |s| paste_keys_here(s),
+                )),
         )
         .child(presets)
 }
@@ -276,5 +424,92 @@ mod tests {
         core.selected_node = None;
         assert!(!delete_key_here_core(&mut core));
         assert!(core.status.contains("Select a joint"));
+    }
+
+    /// A core whose figure 0 / joint 1 angle channel holds
+    /// flat keys at frames 0 and 2 (values 10 and 30), with
+    /// joint 1 selected — the copy/paste fixture. Both keys
+    /// sit inside the demo's 5-frame timeline so the pasted
+    /// group (shifted by the paste frame) stays in range.
+    fn core_with_angle_keys() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![Key::flat(0.0, 10.0), Key::flat(2.0, 30.0)],
+        });
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        core
+    }
+
+    #[test]
+    fn channel_index_matches_the_selected_angle_channel() {
+        let mut core = core_with_angle_keys();
+        assert_eq!(selected_angle_channel_index(&core), Some(0));
+        core.selected_node = Some(2);
+        assert_eq!(selected_angle_channel_index(&core), None);
+        core.selected_node = None;
+        assert_eq!(selected_angle_channel_index(&core), None);
+    }
+
+    #[test]
+    fn copy_keys_here_returns_the_selected_channels_keys() {
+        let mut core = core_with_angle_keys();
+        let keys = copy_keys_here_core(&mut core).expect("channel has keys to copy");
+        assert_eq!(keys.len(), 2);
+        assert_eq!((keys[0].frame, keys[0].value), (0.0, 10.0));
+        assert_eq!((keys[1].frame, keys[1].value), (2.0, 30.0));
+        assert!(core.status.contains("Copied 2 keys"));
+    }
+
+    #[test]
+    fn copy_then_paste_lands_the_keys_at_the_current_frame() {
+        let mut core = core_with_angle_keys();
+        let keys = copy_keys_here_core(&mut core).expect("copied");
+        // Retarget: same channel, emptied, playhead on frame
+        // index 1. The pasted group lands starting there, so
+        // the keys copied from frames 0/2 arrive at 1/3 with
+        // their values intact.
+        core.project.channels[0].keys.clear();
+        core.current = 1;
+        assert!(paste_keys_here_core(&mut core, Some(&keys)));
+        let ch = selected_angle_channel(&core).expect("channel survives paste");
+        assert_eq!(ch.keys.len(), 2);
+        assert_eq!((ch.keys[0].frame, ch.keys[0].value), (1.0, 10.0));
+        assert_eq!((ch.keys[1].frame, ch.keys[1].value), (3.0, 30.0));
+        // paste_keys reports the paste itself, in its own
+        // wording ("Pasted 2 graph key(s) at frame 1 …").
+        assert!(core.status.contains("Pasted 2 graph key(s)"));
+    }
+
+    #[test]
+    fn paste_keys_here_noops_without_a_clipboard() {
+        let mut core = core_with_angle_keys();
+        assert!(!paste_keys_here_core(&mut core, None));
+        assert!(core.status.contains("Copy some keys first"));
+        assert!(!paste_keys_here_core(&mut core, Some(&[])));
+        // The channel is untouched either way.
+        assert_eq!(selected_angle_channel(&core).map(|ch| ch.keys.len()), Some(2));
+    }
+
+    #[test]
+    fn copy_keys_here_noops_without_a_channel() {
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        assert!(copy_keys_here_core(&mut core).is_none());
+        assert!(core.status.contains("No graph keys"));
+        core.selected_node = None;
+        assert!(copy_keys_here_core(&mut core).is_none());
+        assert!(core.status.contains("Select a joint"));
+    }
+
+    #[test]
+    fn paste_keys_here_noops_without_a_target_channel() {
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        let keys = [Key::flat(0.0, 10.0)];
+        assert!(!paste_keys_here_core(&mut core, Some(&keys)));
+        assert!(core.status.contains("key it once first"));
     }
 }

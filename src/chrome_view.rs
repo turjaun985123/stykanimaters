@@ -9,11 +9,23 @@
 //! those two; see `editor.rs` field docs). Element keys carry
 //! the old GPUI control ids where one existed, so headless
 //! `--tree` checks can find them.
+//!
+//! Labels: since Phase E the app-bar and transport labels
+//! resolve through `rune_sec::i18n_wire::tr` against the
+//! engine's current language (`core.lang`), so they follow the
+//! language picker. Two labels take the table's canonical text
+//! rather than Phase C's shorter literals: the onion toggle
+//! shows `onion_skin` ("Onion skin") and the delete-frame
+//! button shows `delete_frame` ("Delete"). The timeline chips
+//! are bare frame numbers and stay untranslated. `status_text`
+//! deliberately keeps its literal English format — see its own
+//! doc comment.
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
 
+use crate::rune_sec::i18n_wire;
 use crate::State;
 
 /// One chrome button: a padded, rounded label with hover/press
@@ -57,7 +69,9 @@ pub fn toggle_play(s: &mut State) {
 }
 
 /// Top bar: project name, then Save / Load / Undo / Redo /
-/// + Figure / Onion — each wired to its core op.
+/// + Figure / Onion — each wired to its core op. Labels come
+/// from the i18n table (keys `save`, `load`, `undo`, `redo`,
+/// `add_figure`, `onion_skin`) in the core's current language.
 pub fn app_bar(s: &State, t: &Theme) -> El {
     let core = &s.core;
     row()
@@ -71,53 +85,97 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
                 .color(t.text)
                 .grow(1.0),
         )
-        .child(btn("save", "Save", false, t, |s| s.core.save()))
-        .child(btn("load", "Load", false, t, |s| s.core.load()))
-        .child(btn("undo", "Undo", false, t, |s| s.core.undo()))
-        .child(btn("redo", "Redo", false, t, |s| s.core.redo()))
-        .child(btn("add-figure", "+ Figure", false, t, |s| s.core.add_figure()))
-        .child(btn("onion", "Onion", core.onion, t, |s| {
-            s.core.onion = !s.core.onion;
+        .child(btn("save", &i18n_wire::tr(core, "save"), false, t, |s| {
+            s.core.save()
         }))
+        .child(btn("load", &i18n_wire::tr(core, "load"), false, t, |s| {
+            s.core.load()
+        }))
+        .child(btn("undo", &i18n_wire::tr(core, "undo"), false, t, |s| {
+            s.core.undo()
+        }))
+        .child(btn("redo", &i18n_wire::tr(core, "redo"), false, t, |s| {
+            s.core.redo()
+        }))
+        .child(btn(
+            "add-figure",
+            &i18n_wire::tr(core, "add_figure"),
+            false,
+            t,
+            |s| s.core.add_figure(),
+        ))
+        .child(btn(
+            "onion",
+            &i18n_wire::tr(core, "onion_skin"),
+            core.onion,
+            t,
+            |s| {
+                s.core.onion = !s.core.onion;
+            },
+        ))
 }
 
 /// Transport + frame ops row: Prev / Play-Pause / Next (frame
 /// stepping wraps, as the GPUI key handler did), then Add /
-/// Duplicate / Delete frame.
+/// Duplicate / Delete frame. Labels come from the i18n table
+/// (keys `prev_frame`, `play`/`pause`, `next_frame`,
+/// `add_frame`, `duplicate_frame`, `delete_frame`) in the
+/// core's current language.
 pub fn transport_row(s: &State, t: &Theme) -> El {
     let core = &s.core;
+    let play_label = i18n_wire::tr(core, if core.playing { "pause" } else { "play" });
     row()
         .key("transport")
         .w_full()
         .gap(8.0)
         .center_y()
-        .child(btn("prev", "Prev", false, t, |s| {
-            let n = s.core.frame_count();
-            if n > 0 {
-                s.core.goto((s.core.current + n - 1) % n);
-            }
-        }))
         .child(btn(
-            "play",
-            if core.playing { "Pause" } else { "Play" },
-            core.playing,
+            "prev",
+            &i18n_wire::tr(core, "prev_frame"),
+            false,
             t,
-            |s| toggle_play(s),
+            |s| {
+                let n = s.core.frame_count();
+                if n > 0 {
+                    s.core.goto((s.core.current + n - 1) % n);
+                }
+            },
         ))
-        .child(btn("next", "Next", false, t, |s| {
-            let n = s.core.frame_count();
-            if n > 0 {
-                s.core.goto((s.core.current + 1) % n);
-            }
-        }))
+        .child(btn("play", &play_label, core.playing, t, |s| toggle_play(s)))
+        .child(btn(
+            "next",
+            &i18n_wire::tr(core, "next_frame"),
+            false,
+            t,
+            |s| {
+                let n = s.core.frame_count();
+                if n > 0 {
+                    s.core.goto((s.core.current + 1) % n);
+                }
+            },
+        ))
         .child(el().grow(1.0))
-        .child(btn("add-frame", "+ Frame", false, t, |s| s.core.add_frame()))
-        .child(btn("dup-frame", "Duplicate", false, t, |s| {
-            s.core.duplicate_frame()
-        }))
-        .child(btn("del-frame", "Delete frame", false, t, |s| {
-            s.core.delete_frame()
-        }))
+        .child(btn(
+            "add-frame",
+            &i18n_wire::tr(core, "add_frame"),
+            false,
+            t,
+            |s| s.core.add_frame(),
+        ))
+        .child(btn(
+            "dup-frame",
+            &i18n_wire::tr(core, "duplicate_frame"),
+            false,
+            t,
+            |s| s.core.duplicate_frame(),
+        ))
+        .child(btn(
+            "del-frame",
+            &i18n_wire::tr(core, "delete_frame"),
+            false,
+            t,
+            |s| s.core.delete_frame(),
+        ))
 }
 
 /// The timeline: one numbered chip per frame in a horizontally
@@ -152,6 +210,16 @@ pub fn timeline_row(s: &State, t: &Theme) -> El {
 /// Zoom {pct}% · {core.status}` — the same fields the GPUI
 /// status strip showed (zoom is the camera key zoom at the
 /// current frame, via `EditorCore::camera_here`).
+///
+/// Phase E decision: this format stays literal English. The
+/// `frame` and `zoom` words do exist in the i18n table, but
+/// the `fps` entry is the label "FPS" (an abbreviation), while
+/// this line uses lowercase "fps" as a unit suffix after the
+/// number — dropping the table value in would change the
+/// rendered text and break the format this function's tests
+/// pin. The segmented `status_strip` section is the shell's
+/// live status surface; this line remains as the compact
+/// fallback it was in Phase C.
 pub fn status_text(core: &EditorCore) -> String {
     let fps = core.project.fps;
     let fps_txt = if fps.fract() == 0.0 {
@@ -173,6 +241,44 @@ pub fn status_text(core: &EditorCore) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every i18n key the app bar / transport labels resolve
+    /// through must exist in the table — otherwise `tr` would
+    /// silently render the raw key as the button label.
+    #[test]
+    fn chrome_label_keys_exist_in_the_table() {
+        for key in [
+            "save",
+            "load",
+            "undo",
+            "redo",
+            "add_figure",
+            "onion_skin",
+            "prev_frame",
+            "play",
+            "pause",
+            "next_frame",
+            "add_frame",
+            "duplicate_frame",
+            "delete_frame",
+        ] {
+            assert!(i18n_wire::key_in_table(key), "label key {key} not in table");
+        }
+    }
+
+    /// With the default language (English) the wired labels are
+    /// exactly the table's English text — the two documented
+    /// changes from the Phase C literals included.
+    #[test]
+    fn english_labels_match_the_table() {
+        let core = EditorCore::new();
+        assert_eq!(i18n_wire::tr(&core, "save"), "Save");
+        assert_eq!(i18n_wire::tr(&core, "add_figure"), "+ Figure");
+        assert_eq!(i18n_wire::tr(&core, "onion_skin"), "Onion skin");
+        assert_eq!(i18n_wire::tr(&core, "prev_frame"), "Previous frame");
+        assert_eq!(i18n_wire::tr(&core, "next_frame"), "Next frame");
+        assert_eq!(i18n_wire::tr(&core, "delete_frame"), "Delete");
+    }
 
     #[test]
     fn status_text_reports_frame_fps_zoom_and_status() {

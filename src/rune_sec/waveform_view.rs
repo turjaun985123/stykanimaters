@@ -14,12 +14,18 @@
 //! reduced it with `crate::audio_edit::peaks`
 //! (`src/audio_edit.rs:537` — max-abs amplitude per bucket
 //! across all channels), keeping `WavData::duration_secs`
-//! (`src/audio_edit.rs:31`) alongside. The view-side peaks cache
-//! the GPUI app kept lived in the deleted `EditorView`, not in
-//! the core, so — like the GPUI panel's overview strip, which
-//! re-read the WAV on every render — this builder reads the
-//! file fresh. An unreadable file yields no waveform (centre
-//! line only), the GPUI panel's "no error UI" behaviour.
+//! (`src/audio_edit.rs:31`) alongside. The view-side peaks
+//! cache the GPUI app kept lived in the deleted `EditorView`,
+//! not in the core, and the first Rune version of this module
+//! re-read the WAV on every build — worst during playback,
+//! where the strip rebuilds per frame. Phase E restores a
+//! cache (see [`clip_peaks`]): probed peaks live in a
+//! thread-local map keyed by path + file length/mtime +
+//! bucket count, so an unchanged file is decoded once, not
+//! once per frame. Only successful probes are cached — a
+//! file that appears later must show up. An unreadable file
+//! yields no waveform (centre line only), the GPUI panel's
+//! "no error UI" behaviour.
 //!
 //! Which clip: the core's audio ops are the `audio_*_last`
 //! family (e.g. `src/editor.rs:2913`), so the strip shows
@@ -38,6 +44,11 @@
 //! strip's `AudioStripData::playhead` computation: the current
 //! frame mapped into the clip's span
 //! `start_frame .. start_frame + duration_secs * fps`.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::time::SystemTime;
 
 use rune::{canvas, Color, El, LineCap, Shape};
 use stykanimate_rs::editor::EditorCore;
@@ -128,16 +139,124 @@ pub fn playhead_fraction(
     }
 }
 
+/// Cache key for one probe: everything that can change its
+/// result. `len` + `mtime` come from one `fs::metadata` stat
+/// of the file at probe time — cheap next to decoding the
+/// WAV, and together they catch rewrites (an edit that keeps
+/// the exact byte length still moves the mtime).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
+    path: String,
+    len: u64,
+    mtime: SystemTime,
+    buckets: usize,
+}
+
+/// Cap on cached probes. The strip only ever shows one clip
+/// (the last), and a clip is probed at few bucket counts, so
+/// a handful of entries covers real use. When an insert
+/// finds the map full it is cleared wholesale — deliberately
+/// simple rather than an LRU: eviction precision buys
+/// nothing at this size, and the worst case is one re-decode.
+const PEAKS_CACHE_CAP: usize = 8;
+
+thread_local! {
+    /// Probed peaks + durations by [`CacheKey`], shared via
+    /// `Rc` so a hit clones the tuple, not the map entry's
+    /// identity. Thread-local like the clips panel's state
+    /// (`clips_panel.rs`): the strip is built on the UI thread
+    /// only, and per-thread storage keeps parallel tests
+    /// isolated from each other.
+    static PEAKS_CACHE: RefCell<HashMap<CacheKey, Rc<(Vec<f32>, f32)>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The key for `path` at `buckets`, from a fresh stat.
+/// `None` when the file cannot be statted or its mtime read
+/// (usually: it does not exist).
+fn cache_key(path: &str, buckets: usize) -> Option<CacheKey> {
+    let md = std::fs::metadata(path).ok()?;
+    Some(CacheKey {
+        path: path.to_string(),
+        len: md.len(),
+        mtime: md.modified().ok()?,
+        buckets,
+    })
+}
+
+fn cache_get(key: &CacheKey) -> Option<(Vec<f32>, f32)> {
+    PEAKS_CACHE.with(|c| c.borrow().get(key).map(|hit| (**hit).clone()))
+}
+
+/// Last-resort lookup for a file that cannot be statted: any
+/// cached probe of the same path at the same bucket count,
+/// whatever its recorded len/mtime. If several generations of
+/// the file are cached, whichever the map yields first wins —
+/// the peaks of a vanished file are a display nicety, not
+/// data worth versioning.
+fn cache_get_stale(clip: &AudioClip, buckets: usize) -> Option<(Vec<f32>, f32)> {
+    PEAKS_CACHE.with(|c| {
+        c.borrow()
+            .iter()
+            .find(|(k, _)| k.path == clip.path && k.buckets == buckets)
+            .map(|(_, hit)| (**hit).clone())
+    })
+}
+
+fn cache_insert(key: CacheKey, probed: (Vec<f32>, f32)) {
+    PEAKS_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() >= PEAKS_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(key, Rc::new(probed));
+    });
+}
+
 /// Probe one clip's peaks the way the GPUI app did: read the
 /// WAV via `audio_edit::read_wav`, reduce with
 /// `audio_edit::peaks` at `buckets` buckets, and return the
-/// peaks plus the clip's duration in seconds. `None` when the
-/// file cannot be read (missing, not PCM16 WAV, …) — callers
-/// draw no waveform for that clip.
+/// peaks plus the clip's duration in seconds (the duration
+/// caches alongside the peaks, in the same entry). `None`
+/// when the file cannot be read (missing, not PCM16 WAV, …)
+/// — callers draw no waveform for that clip.
+///
+/// Successful probes are cached in [`PEAKS_CACHE`] under the
+/// file's current (path, len, mtime, buckets); a later call
+/// with an unchanged file is served from the map and never
+/// touches the decoder. Failures are never cached, so a file
+/// that appears (or becomes readable) later probes fresh.
+/// One race is accepted: if the file changes between the
+/// stat and the read, the peaks are stored under the
+/// pre-read key — the next call stats the new len/mtime,
+/// misses, and re-probes, so the entry self-corrects.
+///
+/// When the file cannot be statted at all (deleted, usually),
+/// a previous successful probe of the same path + buckets is
+/// served stale via [`cache_get_stale`] instead of blanking
+/// the strip mid-session; a file that reappears stats into a
+/// fresh key and re-probes then.
 pub fn clip_peaks(clip: &AudioClip, buckets: usize) -> Option<(Vec<f32>, f32)> {
+    let key = cache_key(&clip.path, buckets);
+    match &key {
+        Some(key) => {
+            if let Some(hit) = cache_get(key) {
+                return Some(hit);
+            }
+        }
+        None => {
+            if let Some(hit) = cache_get_stale(clip, buckets) {
+                return Some(hit);
+            }
+        }
+    }
     let data = stykanimate_rs::audio_edit::read_wav(&clip.path).ok()?;
     let duration_secs = data.duration_secs();
-    Some((stykanimate_rs::audio_edit::peaks(&data, buckets), duration_secs))
+    let probed = (stykanimate_rs::audio_edit::peaks(&data, buckets), duration_secs);
+    if let Some(key) = key {
+        cache_insert(key, probed.clone());
+    }
+    Some(probed)
 }
 
 /// The waveform strip as one `Shape` in canvas-element points,
@@ -199,7 +318,7 @@ pub fn waveform_el(core: &EditorCore, el_size: [f32; 2]) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stykanimate_rs::audio_edit::{peaks, WavData};
+    use stykanimate_rs::audio_edit::{peaks, write_wav, WavData};
 
     fn clip(start_frame: usize, gain: f32) -> AudioClip {
         AudioClip {
@@ -305,5 +424,93 @@ mod tests {
         assert_eq!(playhead_fraction(&c, 2.0, 30.0, 70), None);
         // Zero-length clips have no span.
         assert_eq!(playhead_fraction(&c, 0.0, 30.0, 10), None);
+    }
+
+    // ---- Peaks cache (Phase E, section 27) ----
+
+    /// One second of 440 Hz sine at amplitude 0.8, mono 8 kHz
+    /// (the same signal the reduction tests use).
+    fn sine_wav() -> WavData {
+        let samples: Vec<f32> = (0..8000)
+            .map(|i| {
+                let t = i as f32 / 8000.0;
+                (t * 440.0 * std::f32::consts::TAU).sin() * 0.8
+            })
+            .collect();
+        WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples,
+        }
+    }
+
+    fn temp_wav_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "stykanimate-rune-waveform-{}-{}.wav",
+            std::process::id(),
+            tag
+        ))
+    }
+
+    fn clip_at(path: &std::path::Path) -> AudioClip {
+        AudioClip {
+            path: path.to_string_lossy().into_owned(),
+            start_frame: 0,
+            gain: 1.0,
+        }
+    }
+
+    #[test]
+    fn clip_peaks_hit_survives_file_deletion() {
+        let path = temp_wav_path("cache-hit");
+        std::fs::write(&path, write_wav(&sine_wav())).unwrap();
+        let c = clip_at(&path);
+        let first = clip_peaks(&c, 64).expect("fresh probe");
+        assert_eq!(first.0.len(), 64);
+        assert_eq!(first.1, 1.0);
+        assert!(first.0.iter().all(|&v| v > 0.7 && v <= 0.81));
+        // Delete the file: a fresh read would now fail, so an
+        // identical second result can only come from the cache.
+        std::fs::remove_file(&path).unwrap();
+        let second = clip_peaks(&c, 64).expect("cached probe");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn clip_peaks_miss_after_the_file_is_rewritten() {
+        let path = temp_wav_path("cache-miss");
+        std::fs::write(&path, write_wav(&sine_wav())).unwrap();
+        let c = clip_at(&path);
+        let first = clip_peaks(&c, 64).expect("fresh probe");
+        assert!(first.0.iter().copied().fold(0.0f32, f32::max) > 0.7);
+        // Rewrite the same path with flat DC: same length, new
+        // mtime. (The pause keeps the two writes on distinct
+        // mtime ticks even on coarse-grained filesystems.)
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let dc = WavData {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.3; 8000],
+        };
+        std::fs::write(&path, write_wav(&dc)).unwrap();
+        let second = clip_peaks(&c, 64).expect("re-probe after rewrite");
+        assert_eq!(second.1, 1.0);
+        let max = second.0.iter().copied().fold(0.0f32, f32::max);
+        assert!(max < 0.35, "expected DC peaks after rewrite, got max {max}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn clip_peaks_failures_are_not_cached() {
+        let path = temp_wav_path("cache-none");
+        let _ = std::fs::remove_file(&path);
+        let c = clip_at(&path);
+        assert!(clip_peaks(&c, 64).is_none());
+        // The file appears later: had the failure been cached,
+        // this would still read as missing.
+        std::fs::write(&path, write_wav(&sine_wav())).unwrap();
+        let probed = clip_peaks(&c, 64).expect("probe once the file exists");
+        assert_eq!(probed.0.len(), 64);
+        let _ = std::fs::remove_file(&path);
     }
 }

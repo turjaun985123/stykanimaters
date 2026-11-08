@@ -1,7 +1,8 @@
 //! File / Edit / View / Help menus for the Rune editor shell
-//! (Phase D, section 22 — menus). Declared from `main.rs` by
-//! the integrator; bin-crate code, not part of the engine
-//! library.
+//! (Phase D, section 22 — menus; Phase E upgrade: View ▸
+//! sidebar toggles and Help ▸ Command palette). Declared
+//! from `main.rs` by the integrator; bin-crate code, not
+//! part of the engine library.
 //!
 //! # Approach (chosen from source evidence)
 //!
@@ -40,6 +41,12 @@
 //! mod rune_sec { pub mod menus; }  // (or a rune_sec.rs)
 //! // State: add `pub menus: menus::MenusState`,
 //! // init with `MenusState::default()`.
+//! // State (Phase E): add `pub show_left: bool` and
+//! // `pub show_right: bool`, both init `true`; view()
+//! // mounts the left (figures) column only while
+//! // `show_left` is set and the right (inspector) column
+//! // only while `show_right` is set — the View menu's
+//! // sidebar toggles flip them.
 //! // view(): mount `menus::menu_bar(s, &t)` as its own row
 //! // under the app bar, and append as the LAST root-column
 //! // children, in this order:
@@ -51,7 +58,12 @@
 //!
 //! Every item calls exactly one real `EditorCore` op (or,
 //! for Onion, flips the same public core field the app-bar
-//! Onion button flips — there is no op for it). Element keys
+//! Onion button flips — there is no op for it). Phase E
+//! added the two View ▸ sidebar toggles, which flip the
+//! shell's own `State::show_left` / `State::show_right`
+//! layout fields (integrator-owned, see the wiring above),
+//! and Help ▸ Command palette, which calls the palette
+//! section's `open_palette`. Element keys
 //! carry the Wave 15 menu ids (`menu-file` …) on the
 //! triggers and the original GPUI button ids on the items,
 //! so headless `--tree` checks can find them.
@@ -209,14 +221,18 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
                 }));
         }
         VIEW => {
-            // Only real core view state/ops: `core.onion`
-            // is a public field (no op exists — the app
-            // bar's Onion button flips it too), and the
-            // camera-framing ops from the GPUI View buttons.
-            // There is no guides toggle in the core (grep:
-            // no `guides` in editor.rs/model.rs), and panel
-            // toggles are integrator view state, not core
-            // ops, so neither appears here.
+            // Core view state/ops: `core.onion` is a public
+            // field (no op exists — the app bar's Onion
+            // button flips it too), and the camera-framing
+            // ops from the GPUI View buttons. There is no
+            // guides toggle in the core (grep: no `guides`
+            // in editor.rs/model.rs). The two sidebar
+            // toggles are Phase E: they flip the shell's
+            // own layout fields (`State::show_left` /
+            // `show_right`, integrator-owned, default
+            // visible) and render active while their column
+            // is shown — the same field-flip pattern as
+            // Onion, one level up (shell state, not core).
             list = list
                 .child(item("onion", "Onion skin", core.onion, t, |s| {
                     s.core.onion = !s.core.onion;
@@ -227,14 +243,45 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
                 }))
                 .child(item("view-centre", "Centre on selection", false, t, |s| {
                     s.core.centre_on_selection()
-                }));
+                }))
+                .child(separator("menu-view-sep2", t))
+                .child(item(
+                    "view-toggle-left",
+                    "Figures sidebar",
+                    s.show_left,
+                    t,
+                    |s| {
+                        s.show_left = !s.show_left;
+                    },
+                ))
+                .child(item(
+                    "view-toggle-right",
+                    "Inspector sidebar",
+                    s.show_right,
+                    t,
+                    |s| {
+                        s.show_right = !s.show_right;
+                    },
+                ));
         }
         _ => {
             // HELP — "Shortcuts" flips the flag the
             // integrator's help panel renders from.
-            list = list.child(item("help", "Shortcuts", s.menus.help_open, t, |s| {
-                s.menus.help_open = !s.menus.help_open;
-            }));
+            // "Command palette" (Phase E) calls the
+            // palette section's open fn — the menu is the
+            // discoverable door next to the Ctrl+K handler
+            // the integrator routes in `on_key`. It is an
+            // action item (no active state), and the shared
+            // `item` wrapper closes this menu after opening
+            // the palette, as for every other item.
+            list = list
+                .child(item("help", "Shortcuts", s.menus.help_open, t, |s| {
+                    s.menus.help_open = !s.menus.help_open;
+                }))
+                .child(separator("menu-help-sep", t))
+                .child(item("menu-palette", "Command palette", false, t, |s| {
+                    crate::rune_sec::command_palette::open_palette(s);
+                }));
         }
     }
     list.anchored(MENU_KEYS[open], Side::Bottom, Align::Start, 4.0)
@@ -281,5 +328,28 @@ mod tests {
             ["menu-file", "menu-edit", "menu-view", "menu-help"]
         );
         assert_eq!(MENUS.len(), MENU_KEYS.len());
+    }
+
+    #[test]
+    fn view_and_help_dropdowns_build_in_both_sidebar_states() {
+        // Phase E: the View dropdown reads the shell's
+        // `show_left` / `show_right` fields for the sidebar
+        // toggles' active state, and the Help dropdown
+        // carries the Command palette item. Build both
+        // dropdowns with the sidebars shown and hidden —
+        // construction must not panic in either state, and
+        // the integrator contract is that both fields
+        // default to visible.
+        let t = rune::tok::theme(true);
+        let mut s = crate::init();
+        assert!(s.show_left, "left sidebar defaults to visible");
+        assert!(s.show_right, "right sidebar defaults to visible");
+        s.menus.open = Some(VIEW);
+        let _ = menu_dropdown(&s, &t);
+        s.show_left = false;
+        s.show_right = false;
+        let _ = menu_dropdown(&s, &t);
+        s.menus.open = Some(HELP);
+        let _ = menu_dropdown(&s, &t);
     }
 }

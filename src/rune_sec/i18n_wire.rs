@@ -3,7 +3,7 @@
 //! The Rune shell does NOT adopt `rune-i18n` (audit
 //! `docs/RUNE_API_AUDIT.md` Q12: it would replace a solved problem
 //! with a build.rs + ICU4X stack). It reuses the project's own
-//! table in `stykanimate_rs::i18n` — 28 languages × 70 keys, with
+//! table in `stykanimate_rs::i18n` — 28 languages × 78 keys, with
 //! fallback current language → English → the key itself
 //! (`i18n::t`, src/i18n.rs:235; fallback chain in `resolve`,
 //! src/i18n.rs:223).
@@ -24,10 +24,13 @@
 //!   here automatically.
 //! - A coverage helper ([`shell_key_coverage`]) listing which of
 //!   the keys the new shell wants ([`SHELL_KEYS`]) actually exist
-//!   in the table. Missing keys are REPORTED, never invented —
-//!   their translations are a later pass; until then `tr` shows
-//!   the English-fallback/key text via `i18n::t`'s existing
-//!   behaviour.
+//!   in the table. Since Phase E added the last 8 keys
+//!   (`settings`, `frame`, `frames`, `figures`, `prev_frame`,
+//!   `next_frame`, `fps`, `zoom`) to `i18n.rs` with genuine
+//!   translations in all 28 languages, coverage is complete:
+//!   [`missing_shell_keys`] returns an empty list, and the helper
+//!   remains as the guard that would report any future gap
+//!   instead of letting it render silently.
 
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::i18n::{self, Lang};
@@ -84,12 +87,12 @@ pub fn key_in_table(key: &str) -> bool {
 /// the figures sidebar, the status line (Frame / fps / Zoom),
 /// panels and workspaces it links to, and Settings.
 ///
-/// Every entry names a label the shell actually shows or is
-/// about to show (see `src/chrome_view.rs`, which today hardcodes
-/// the English text for the first group). Keys that already
-/// exist in the table resolve today; the rest are listed by
-/// [`missing_shell_keys`] for the translation pass — they are
-/// deliberately NOT added to `i18n.rs` from here.
+/// Every entry names a label the shell actually shows (see
+/// `src/chrome_view.rs`, whose app-bar and transport labels
+/// resolve through [`tr`] since Phase E). All 30 keys exist in
+/// the table — the last 8 arrived with the Phase E translation
+/// pass in `i18n.rs` — so [`missing_shell_keys`] is empty; the
+/// coverage split stays as the regression guard.
 pub const SHELL_KEYS: &[&str] = &[
     // App bar
     "save",
@@ -131,8 +134,10 @@ pub const SHELL_KEYS: &[&str] = &[
 ];
 
 /// Split [`SHELL_KEYS`] into `(present, missing)` against the
-/// live table. `present` keys translate today; `missing` keys
-/// are the translation pass's work list.
+/// live table. Since Phase E, every shell key is present and
+/// `missing` is empty; the split is kept so a future key added
+/// to [`SHELL_KEYS`] ahead of its translations is reported
+/// here instead of failing silently in the UI.
 pub fn shell_key_coverage() -> (Vec<&'static str>, Vec<&'static str>) {
     let mut present = Vec::new();
     let mut missing = Vec::new();
@@ -146,9 +151,11 @@ pub fn shell_key_coverage() -> (Vec<&'static str>, Vec<&'static str>) {
     (present, missing)
 }
 
-/// The shell keys with no entry in any language table yet.
-/// Reported, not invented: until the translation pass adds
-/// them, [`tr`] falls back to the key text itself.
+/// The shell keys with no entry in any language table.
+/// Empty since the Phase E translation pass completed
+/// coverage; retained as the standing report channel — if a
+/// future shell key lands before its translations, it shows
+/// up here (and [`tr`] falls back to the key text meanwhile).
 pub fn missing_shell_keys() -> Vec<&'static str> {
     shell_key_coverage().1
 }
@@ -184,9 +191,34 @@ mod tests {
     fn tr_falls_back_to_the_key_for_unknown_keys() {
         let core = core();
         // i18n::t's documented last resort — the shell shows the
-        // key rather than a blank.
-        assert_eq!(tr(&core, "settings"), "settings");
+        // key rather than a blank. ("settings" itself resolved
+        // to the key until Phase E added it to the table; it is
+        // asserted as a real translation below.)
         assert_eq!(tr(&core, "no_such_key_anywhere"), "no_such_key_anywhere");
+    }
+
+    #[test]
+    fn phase_e_shell_keys_translate() {
+        let mut core = core();
+        // The 8 keys Phase E added resolve to real text, in
+        // English and in the core's current language.
+        assert_eq!(tr(&core, "settings"), "Settings");
+        assert_eq!(tr(&core, "prev_frame"), "Previous frame");
+        assert_eq!(tr(&core, "next_frame"), "Next frame");
+        assert_eq!(tr(&core, "frame"), "Frame");
+        assert_eq!(tr(&core, "frames"), "Frames");
+        assert_eq!(tr(&core, "figures"), "Figures");
+        assert_eq!(tr(&core, "fps"), "FPS");
+        assert_eq!(tr(&core, "zoom"), "Zoom");
+        core.lang = Lang::Bn;
+        assert_eq!(tr(&core, "settings"), "সেটিংস");
+        assert_eq!(tr(&core, "prev_frame"), "আগের ফ্রেম");
+        core.lang = Lang::De;
+        assert_eq!(tr(&core, "settings"), "Einstellungen");
+        assert_eq!(tr(&core, "zoom"), "Zoom");
+        core.lang = Lang::ZhHans;
+        assert_eq!(tr(&core, "next_frame"), "下一帧");
+        assert_eq!(tr(&core, "fps"), "帧率");
     }
 
     #[test]
@@ -219,10 +251,21 @@ mod tests {
         for key in ["save", "load", "undo", "redo", "play", "pause"] {
             assert!(present.contains(&key), "{key} must be in the table");
         }
-        // The known gaps are reported as missing, not invented.
-        for key in ["settings", "frames", "figures", "prev_frame", "next_frame"] {
-            assert!(missing.contains(&key), "{key} should be reported missing");
+        // Phase E completed coverage: the keys that were the
+        // known gaps are present now, and nothing is missing.
+        for key in [
+            "settings",
+            "frame",
+            "frames",
+            "figures",
+            "prev_frame",
+            "next_frame",
+            "fps",
+            "zoom",
+        ] {
+            assert!(present.contains(&key), "{key} should be in the table now");
         }
+        assert!(missing.is_empty(), "missing should be empty, got {missing:?}");
         assert_eq!(missing_shell_keys(), missing);
     }
 
@@ -230,7 +273,12 @@ mod tests {
     fn key_in_table_matches_known_keys() {
         assert!(key_in_table("save"));
         assert!(key_in_table("ws_animate"));
-        assert!(!key_in_table("settings"));
+        // All 8 Phase E keys are in the table now.
+        for key in [
+            "settings", "frame", "frames", "figures", "prev_frame", "next_frame", "fps", "zoom",
+        ] {
+            assert!(key_in_table(key), "{key} should be in the table");
+        }
         assert!(!key_in_table("definitely_not_a_key"));
     }
 }

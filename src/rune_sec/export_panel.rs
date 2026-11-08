@@ -24,10 +24,37 @@
 //! full MP4 export muxes audio; the range path cannot), and
 //! the notes say that too.
 //!
+//! Two bundle buttons sit under the categories: "Export
+//! all images" (PNG + JPEG + SVG + spritesheet) and "Export
+//! all video" (MP4 + WebM). A bundle is a composition of the
+//! same full `EditorCore` ops the single-format buttons call
+//! in "All frames" mode, run in `plan_bundle` order. Bundles
+//! deliberately ignore the range toggle: of the bundle
+//! members only PNG/JPEG/MP4/WebM have range exporters at
+//! all, and a bundle that silently ranged some formats and
+//! not others would not match its label — the bundle rows'
+//! notes say "always export in full" instead. Each op sets
+//! `core.status` as it runs; when the bundle finishes, the
+//! handler overwrites the status with one recap line (built
+//! by `bundle_recap` from the ops actually called, naming
+//! any that failed) and stores the same line in the panel
+//! recap.
+//!
+//! The recap line under the bundles shows the last export —
+//! bundle or single — as "Exported <name> → <destination>",
+//! or "<name> export failed" when the op reported failure.
+//! Failure detection reads `core.status`: the export ops
+//! return `()` and report only through the status line, and
+//! every failure wording in `editor.rs` contains "failed"
+//! (see `export_failed`).
+//!
 //! Panel state: the toggle position lives in
-//! `State::export_use_range` (see the integration report —
-//! `main.rs` owns `State`). The range itself is the core's
-//! real `loop_range`, set in the timeline; this panel only
+//! `State::export_use_range` and the recap line in
+//! `State::export_recap` (see the integration report —
+//! `main.rs` owns `State`; the integrator adds
+//! `pub export_recap: String`, initialised to
+//! `String::new()`). The range itself is the core's real
+//! `loop_range`, set in the timeline; this panel only
 //! reads it.
 
 use std::path::PathBuf;
@@ -117,6 +144,181 @@ fn export_dir() -> PathBuf {
         .join("export")
 }
 
+// ---- Bundle plans and recaps -----------------------------
+// `plan_bundle` is the single source of truth for what a
+// bundle runs: the bundle handler executes exactly this
+// list, in this order, and `bundle_recap` reports exactly
+// this list. Keeping both on the plan means the recap can
+// never claim a format the bundle did not call.
+
+/// One media export operation a bundle (or a single-format
+/// button) can run. Each variant maps to exactly one
+/// `EditorCore` op — the same call the format's own button
+/// makes in "All frames" mode (see `run_export_op`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExportOp {
+    Png,
+    Jpeg,
+    Svg,
+    Spritesheet,
+    Gif,
+    Apng,
+    Mp4,
+    Webm,
+}
+
+impl ExportOp {
+    /// The format's display name, as used in recaps.
+    pub fn name(self) -> &'static str {
+        match self {
+            ExportOp::Png => "PNG",
+            ExportOp::Jpeg => "JPEG",
+            ExportOp::Svg => "SVG",
+            ExportOp::Spritesheet => "sheet",
+            ExportOp::Gif => "GIF",
+            ExportOp::Apng => "APNG",
+            ExportOp::Mp4 => "MP4",
+            ExportOp::Webm => "WebM",
+        }
+    }
+
+    /// Where the format's full export writes — the same
+    /// destinations the rows' guidance notes print (JPEG and
+    /// APNG are the odd ones out: `out/`, not `./export/`).
+    pub fn dest(self) -> &'static str {
+        match self {
+            ExportOp::Png => "./export/",
+            ExportOp::Jpeg => "out/jpeg/",
+            ExportOp::Svg => "./export/svg/",
+            ExportOp::Spritesheet => "./export/spritesheet.png",
+            ExportOp::Gif => "./export/animation.gif",
+            ExportOp::Apng => "out/animation.apng",
+            ExportOp::Mp4 => "./export/animation.mp4",
+            ExportOp::Webm => "./export/animation.webm",
+        }
+    }
+}
+
+/// Which bundle a plan (or a bundle button) describes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BundleKind {
+    /// "Export all images": PNG + JPEG + SVG + spritesheet.
+    Images,
+    /// "Export all video": MP4 + WebM.
+    Video,
+}
+
+/// The ops a bundle runs, in execution order. Pure, so the
+/// order and membership are unit-testable without exporting
+/// anything.
+pub fn plan_bundle(kind: BundleKind) -> Vec<ExportOp> {
+    match kind {
+        BundleKind::Images => vec![
+            ExportOp::Png,
+            ExportOp::Jpeg,
+            ExportOp::Svg,
+            ExportOp::Spritesheet,
+        ],
+        BundleKind::Video => vec![ExportOp::Mp4, ExportOp::Webm],
+    }
+}
+
+/// Did the export op that just ran report failure? The
+/// `EditorCore` export ops return `()` and report only
+/// through `core.status`; every failure wording in
+/// `editor.rs` contains "failed" ("Export failed: …",
+/// "JPEG export failed: …", "Spritesheet failed: …", …)
+/// and no success wording does, so the status line is the
+/// failure signal. Checked immediately after each op call,
+/// before anything else can overwrite the status.
+pub fn export_failed(core: &EditorCore) -> bool {
+    core.status.to_lowercase().contains("failed")
+}
+
+/// The recap line for one finished single-format export:
+/// name + destination ("Exported PNG → ./export/").
+pub fn single_recap(name: &str, dest: &str) -> String {
+    format!("Exported {name} → {dest}")
+}
+
+/// The recap line for a single-format export whose op
+/// reported failure — the recap never claims a failed
+/// export as exported.
+pub fn failed_recap(name: &str) -> String {
+    format!("{name} export failed")
+}
+
+/// Record the outcome of a single-format export in the
+/// panel's recap line: `single_recap` on success,
+/// `failed_recap` when the op reported failure.
+fn note_single(s: &mut State, op: ExportOp) {
+    s.export_recap = if export_failed(&s.core) {
+        failed_recap(op.name())
+    } else {
+        single_recap(op.name(), op.dest())
+    };
+}
+
+/// The recap line for a finished bundle, built from the
+/// plan: every op that ran and did not fail, with its
+/// destination, in plan order; the failed ops (if any) are
+/// named after a "; failed:" marker instead of being
+/// claimed as exported.
+pub fn bundle_recap(kind: BundleKind, failed: &[ExportOp]) -> String {
+    let mut done: Vec<String> = Vec::new();
+    for op in plan_bundle(kind) {
+        if !failed.contains(&op) {
+            done.push(format!("{} → {}", op.name(), op.dest()));
+        }
+    }
+    let mut recap = if done.is_empty() {
+        "Exported nothing".to_string()
+    } else {
+        format!("Exported {}", done.join(", "))
+    };
+    if !failed.is_empty() {
+        let names: Vec<&str> = failed.iter().map(|op| op.name()).collect();
+        recap += &format!("; failed: {}", names.join(", "));
+    }
+    recap
+}
+
+/// Run one planned op — exactly the call the format's
+/// single-format button makes in "All frames" mode — and
+/// report whether the op signalled failure.
+fn run_export_op(s: &mut State, op: ExportOp) -> bool {
+    match op {
+        ExportOp::Png => s.core.export_png(),
+        ExportOp::Jpeg => s.core.export_jpeg_dir(),
+        ExportOp::Svg => s.core.export_svg(),
+        ExportOp::Spritesheet => s.core.export_sheet(),
+        ExportOp::Gif => s.core.export_gif(),
+        ExportOp::Apng => s.core.export_apng_file(),
+        ExportOp::Mp4 => s.core.export_mp4(),
+        ExportOp::Webm => s.core.export_webm(),
+    }
+    export_failed(&s.core)
+}
+
+/// Run a whole bundle: every op in `plan_bundle` order,
+/// always the full ops (bundles ignore the range toggle —
+/// see the module docs). Each op overwrites `core.status`
+/// as it runs; when the bundle finishes, this handler has
+/// the last word: it overwrites the status with the bundle
+/// recap and stores the same line as the panel recap, so
+/// both show the summary rather than whichever op ran last.
+fn run_bundle(s: &mut State, kind: BundleKind) {
+    let mut failed: Vec<ExportOp> = Vec::new();
+    for op in plan_bundle(kind) {
+        if run_export_op(s, op) {
+            failed.push(op);
+        }
+    }
+    let recap = bundle_recap(kind, &failed);
+    s.core.status = recap.clone();
+    s.export_recap = recap;
+}
+
 // ---- Range-capable actions --------------------------------
 // Each falls back to the full `EditorCore` op when no range
 // target applies, so the button never silently does less
@@ -141,6 +343,7 @@ fn export_png_action(s: &mut State) {
         }
         None => s.core.export_png(),
     }
+    note_single(s, ExportOp::Png);
 }
 
 fn export_jpeg_action(s: &mut State) {
@@ -160,6 +363,7 @@ fn export_jpeg_action(s: &mut State) {
         }
         None => s.core.export_jpeg_dir(),
     }
+    note_single(s, ExportOp::Jpeg);
 }
 
 fn export_gif_action(s: &mut State) {
@@ -182,6 +386,7 @@ fn export_gif_action(s: &mut State) {
         }
         None => s.core.export_gif(),
     }
+    note_single(s, ExportOp::Gif);
 }
 
 fn export_apng_action(s: &mut State) {
@@ -203,6 +408,7 @@ fn export_apng_action(s: &mut State) {
         }
         None => s.core.export_apng_file(),
     }
+    note_single(s, ExportOp::Apng);
 }
 
 fn export_mp4_action(s: &mut State) {
@@ -228,6 +434,7 @@ fn export_mp4_action(s: &mut State) {
         }
         None => s.core.export_mp4(),
     }
+    note_single(s, ExportOp::Mp4);
 }
 
 fn export_webm_action(s: &mut State) {
@@ -250,6 +457,7 @@ fn export_webm_action(s: &mut State) {
         }
         None => s.core.export_webm(),
     }
+    note_single(s, ExportOp::Webm);
 }
 
 // ---- Rows and sections ------------------------------------
@@ -265,19 +473,29 @@ fn section(title: &str, t: &Theme) -> El {
 
 /// One format row for a full-export-only format: an `xc-`
 /// button calling the `EditorCore` op, plus its muted
-/// guidance note — the GPUI `xc_row` shape.
+/// guidance note — the GPUI `xc_row` shape. The handler
+/// also records the panel recap (`recap_name` +
+/// `recap_dest`, or a failure note when the op reports
+/// one — see `note_single`).
 fn plain_row(
     key: &'static str,
     label: &'static str,
     note: &'static str,
     t: &Theme,
     op: fn(&mut EditorCore),
+    recap_name: &'static str,
+    recap_dest: &'static str,
 ) -> El {
     row()
         .gap(8.0)
         .center_y()
         .child(btn(key, label, false, t, move |s: &mut State| {
-            op(&mut s.core)
+            op(&mut s.core);
+            s.export_recap = if export_failed(&s.core) {
+                failed_recap(recap_name)
+            } else {
+                single_recap(recap_name, recap_dest)
+            };
         }))
         .child(text(note).font(type_::LABEL).color(t.text_secondary))
 }
@@ -300,10 +518,32 @@ fn range_row(
         .child(text(note).font(type_::LABEL).color(t.text_secondary))
 }
 
+/// One bundle row: an `xc-bundle-*` button running
+/// `run_bundle` for its kind, plus the note stating that
+/// bundles always export in full (the range toggle governs
+/// only the single-format buttons).
+fn bundle_row(
+    key: &'static str,
+    label: &'static str,
+    note: &'static str,
+    t: &Theme,
+    kind: BundleKind,
+) -> El {
+    row()
+        .gap(8.0)
+        .center_y()
+        .child(btn(key, label, false, t, move |s: &mut State| {
+            run_bundle(s, kind)
+        }))
+        .child(text(note).font(type_::LABEL).color(t.text_secondary))
+}
+
 /// The export panel: header, the loop-range note (when a
 /// range is set), the All frames / Loop range toggle with
-/// its effective-behaviour line, then the four category
-/// sections with all 15 `xc-*` rows.
+/// its effective-behaviour line, the four category sections
+/// with all 15 `xc-*` rows, the Bundles section (two
+/// `xc-bundle-*` rows), and — once anything has been
+/// exported — the recap line showing the last export.
 pub fn export_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let use_range = s.export_use_range;
@@ -356,6 +596,8 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "One SVG per frame in ./export/svg/",
             t,
             EditorCore::export_svg,
+            ExportOp::Svg.name(),
+            ExportOp::Svg.dest(),
         ));
     panel = panel.child(images);
 
@@ -366,6 +608,8 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "All frames on one sheet — ./export/spritesheet.png",
             t,
             EditorCore::export_sheet,
+            ExportOp::Spritesheet.name(),
+            ExportOp::Spritesheet.dest(),
         ))
         .child(range_row(
             "xc-gif",
@@ -407,6 +651,8 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "Pivot v2 project — ./export/animation-v2.piv",
             t,
             EditorCore::export_piv2,
+            ".piv v2",
+            "./export/animation-v2.piv",
         ))
         .child(plain_row(
             "xc-v3",
@@ -414,6 +660,8 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "Pivot v3 project — ./export/animation.piv",
             t,
             EditorCore::export_piv,
+            ".piv v3",
+            "./export/animation.piv",
         ))
         .child(plain_row(
             "xc-v4",
@@ -421,6 +669,8 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "Pivot v4 project — ./export/animation-v4.piv",
             t,
             EditorCore::export_piv4,
+            ".piv v4",
+            "./export/animation-v4.piv",
         ))
         .child(plain_row(
             "xc-v5",
@@ -428,6 +678,8 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "Pivot v5 project — out/animation-v5.piv (out/, not export/)",
             t,
             EditorCore::export_v5_file,
+            ".piv v5",
+            "out/animation-v5.piv",
         ))
         .child(plain_row(
             "xc-stk",
@@ -435,6 +687,8 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "Selected figure only — ./export/<figure>.stk",
             t,
             EditorCore::export_stk,
+            ".stk",
+            "./export/<figure>.stk",
         ))
         .child(plain_row(
             "xc-nodes",
@@ -442,6 +696,8 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "Selected figure for Stick Nodes — ./export/<figure>.nodes",
             t,
             EditorCore::export_nodes,
+            ".nodes",
+            "./export/<figure>.nodes",
         ))
         .child(plain_row(
             "xc-stknds",
@@ -449,8 +705,37 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "Whole project for Stick Nodes — ./export/animation.stknds",
             t,
             EditorCore::export_stknds,
+            ".stknds",
+            "./export/animation.stknds",
         ));
     panel = panel.child(formats);
+
+    let bundles = section("Bundles", t)
+        .child(bundle_row(
+            "xc-bundle-images",
+            "Export all images",
+            "PNG + JPEG + SVG + spritesheet in one press. Bundles always export in full — the range toggle above applies only to the single-format buttons.",
+            t,
+            BundleKind::Images,
+        ))
+        .child(bundle_row(
+            "xc-bundle-video",
+            "Export all video",
+            "MP4 + WebM in one press, full exports (the MP4 keeps its audio). Bundles always export in full — the range toggle above applies only to the single-format buttons.",
+            t,
+            BundleKind::Video,
+        ));
+    panel = panel.child(bundles);
+
+    if !s.export_recap.is_empty() {
+        panel = panel.child(
+            row().key("xc-recap").child(
+                text(s.export_recap.clone())
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            ),
+        );
+    }
 
     panel
 }
@@ -518,5 +803,93 @@ mod tests {
         core.loop_range = Some((0, 1));
         assert!(effective_text(&core, true).contains("frames 1–2"));
         assert!(effective_text(&core, false).contains("all"));
+    }
+
+    #[test]
+    fn images_bundle_plan_is_png_jpeg_svg_sheet_in_order() {
+        assert_eq!(
+            plan_bundle(BundleKind::Images),
+            vec![
+                ExportOp::Png,
+                ExportOp::Jpeg,
+                ExportOp::Svg,
+                ExportOp::Spritesheet
+            ]
+        );
+    }
+
+    #[test]
+    fn video_bundle_plan_is_mp4_then_webm() {
+        assert_eq!(
+            plan_bundle(BundleKind::Video),
+            vec![ExportOp::Mp4, ExportOp::Webm]
+        );
+    }
+
+    #[test]
+    fn bundle_plans_have_no_duplicates_and_do_not_overlap() {
+        for kind in [BundleKind::Images, BundleKind::Video] {
+            let plan = plan_bundle(kind);
+            let mut sorted = plan.clone();
+            sorted.sort_by_key(|op| op.name());
+            sorted.dedup();
+            assert_eq!(sorted.len(), plan.len(), "{kind:?} plan repeats an op");
+        }
+        let images = plan_bundle(BundleKind::Images);
+        for op in plan_bundle(BundleKind::Video) {
+            assert!(!images.contains(&op), "{op:?} is in both bundles");
+        }
+    }
+
+    #[test]
+    fn bundle_recap_lists_every_planned_op_with_its_destination() {
+        assert_eq!(
+            bundle_recap(BundleKind::Images, &[]),
+            "Exported PNG → ./export/, JPEG → out/jpeg/, SVG → ./export/svg/, sheet → ./export/spritesheet.png"
+        );
+        assert_eq!(
+            bundle_recap(BundleKind::Video, &[]),
+            "Exported MP4 → ./export/animation.mp4, WebM → ./export/animation.webm"
+        );
+    }
+
+    #[test]
+    fn bundle_recap_names_failures_instead_of_claiming_them() {
+        assert_eq!(
+            bundle_recap(BundleKind::Video, &[ExportOp::Mp4]),
+            "Exported WebM → ./export/animation.webm; failed: MP4"
+        );
+        assert_eq!(
+            bundle_recap(BundleKind::Video, &[ExportOp::Mp4, ExportOp::Webm]),
+            "Exported nothing; failed: MP4, WebM"
+        );
+    }
+
+    #[test]
+    fn single_and_failed_recap_wording() {
+        assert_eq!(single_recap("SVG", "./export/svg/"), "Exported SVG → ./export/svg/");
+        assert_eq!(failed_recap(".piv v5"), ".piv v5 export failed");
+    }
+
+    #[test]
+    fn export_failed_reads_the_core_status_convention() {
+        let mut core = EditorCore::new();
+        core.status = "Exported 5 PNG frames to ./export".into();
+        assert!(!export_failed(&core));
+        core.status = "MP4 export failed: ffmpeg not found".into();
+        assert!(export_failed(&core));
+        core.status = "Spritesheet failed: no frames".into();
+        assert!(export_failed(&core));
+    }
+
+    #[test]
+    fn op_destinations_match_the_row_notes() {
+        // JPEG and APNG are the two formats that write to
+        // out/ instead of ./export/ — the recaps must not
+        // claim otherwise.
+        assert_eq!(ExportOp::Jpeg.dest(), "out/jpeg/");
+        assert_eq!(ExportOp::Apng.dest(), "out/animation.apng");
+        assert_eq!(ExportOp::Png.dest(), "./export/");
+        assert_eq!(ExportOp::Spritesheet.dest(), "./export/spritesheet.png");
     }
 }
