@@ -1462,14 +1462,23 @@ fn project_section_key_coverage() {
 /// presence-fade courtesy rounds 3–5 use before pressing
 /// inside a freshly mounted panel.
 fn scroll_into_view(rt: &mut Runtime<State>, key: &str) {
+    // Phase N: the helper scrolls BOTH ways. The P16 mount
+    // order put Playback above Camera, so a test that first
+    // scrolls deep (to the camera panel) can leave its next
+    // target ABOVE the viewport, where find() reports a
+    // negative centre y — which the old one-way check read
+    // as "already in view" and never scrolled at all.
     for _ in 0..24 {
         let (_, y) = rt
             .find(key)
             .unwrap_or_else(|| panic!("no element keyed {key:?}"));
-        if y < 850.0 {
+        if y > 850.0 {
+            rt.wheel(1255.0, 450.0, -600.0);
+        } else if y < 200.0 {
+            rt.wheel(1255.0, 450.0, 600.0);
+        } else {
             break;
         }
-        rt.wheel(1255.0, 450.0, -600.0);
         rt.frame(DT);
     }
     for _ in 0..90 {
@@ -1631,36 +1640,7 @@ fn prev_next_key_jumps_between_camera_keys() {
     // column, so scroll to it first.
     tap(&mut rt, "frame-1");
     assert_eq!(rt.state.core.current, 0);
-    // Phase N: the P16 mount order moved Playback above
-    // Camera, so the scroll now stops with this button low
-    // in the viewport — inside the toast stack's
-    // bottom-right corner, where the Set-key toasts would
-    // swallow the press. Let them expire first (poll
-    // expires by the virtual clock as frames advance).
-    for _ in 0..600 {
-        if rt.state.toasts.is_empty() {
-            break;
-        }
-        rt.frame(DT);
-    }
     scroll_into_view(&mut rt, "pb-next-key");
-    // TEMP DIAGNOSTIC (Phase N foundation CI): dump what
-    // covers the tap point.
-    {
-        let pt = rt.find("pb-next-key").unwrap();
-        eprintln!("DIAG pb-next-key centre: {pt:?}");
-        eprintln!("DIAG toasts empty: {}", rt.state.toasts.is_empty());
-        for e in rt.elements() {
-            let r = e.rect;
-            if pt.0 >= r[0] && pt.0 <= r[0] + r[2] && pt.1 >= r[1] && pt.1 <= r[1] + r[3] {
-                eprintln!(
-                    "DIAG at point: key={:?} text={:?} rect={r:?}",
-                    e.key, e.text
-                );
-            }
-        }
-        eprintln!("DIAG current={} keys={:?}", rt.state.core.current, key_frames(&rt.state.core));
-    }
     tap(&mut rt, "pb-next-key");
     assert_eq!(
         rt.state.core.current, 1,
