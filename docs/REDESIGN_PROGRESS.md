@@ -338,3 +338,84 @@ range MP4 exports gaining frame-accurate WAV audio. The
 CI and headless verdicts for the wave's tree are recorded
 in §3's table when they land; nothing here claims them
 early.
+
+### 6.5 Wave 10 — dopesheet + engine depth + panels round 2 (2026-11-09)
+
+A follow-on improvement wave ordered by the user on
+2026-11-09 (04:00 +06), in the same five-squad shape as
+Wave 9: 50 agents, one owner per file, integrator wiring
+the shared files. Its headline item is the **dopesheet
+rebuild**: a Wave 9 audit found that no dopesheet exists
+in the Rune shell — the GPUI shell's per-figure key rows
+(`ui_dope::keyframe_map` / `dopesheet`) were lost in the
+GPUI→Rune migration and never rebuilt, leaving only the
+timeline's merged camera/graph marker row. The user
+approved rebuilding it on 2026-11-08, and the wave builds
+it as a lane inside the Animate timeline card: one row
+per figure (selected first, capped at 4 + a "+N more"
+line), keyframe diamonds from the surviving engine
+helper `stats::figure_keyframes`, click a cell to go to
+that frame and select the figure, sharing the frame
+chips' scroll and pitch (the name gutter offsets the
+lane's columns by a constant 124 pt — measured exactly
+in the headless tree, disclosed in `docs/DOPESHEET.md`).
+The research, the original app's sheet design, the gap
+analysis and the landed-vs-planned table live in
+`docs/DOPESHEET.md`. The engine grew the keyframe ops
+the sheet implies (`delete_keyframe` = hold the previous
+pose, `goto_next/prev_keyframe`, palette + MCP surface).
+
+Also landed: `Stroke.scatter` wired end to end (model
+field, `stroke_dabs` placements shared by the stage,
+the raster exporter and the SVG exporter, MCP
+`draw_stroke` arg — it was model-only since Phase M);
+two engine panics closed (`add_frame` on a zero-frame
+project; `copy_pose_between` across different rig
+sizes) and a third found by the wave's own new test
+during integration (onion skins on a figure absent
+from a neighbouring frame); FX presets can no longer
+silently overwrite a different preset; the dirty
+baseline now resets on save/swap so "N edits since the
+last recovery snapshot" means what it says; a clip edit
+session can no longer be silently retargeted by
+undo/redo; non-WAV range-export audio; live MCP
+hardening (read deadline, /health identity); the
+settings language rows' true overflow root cause
+(flex_wrap without w_full — every row overflowed, worst
++127 pt) fixed; home/library row restructures; the
+figures list bounded; the segment angle readout's
+wrong convention fixed; gate check 8 (scene ↔ headless
+coverage) and overflow-scanner rule 4 (timeline-card
+bounds) added.
+
+**Verification**: gate 8/8 PASS (zero keys lost vs the
+Wave 9 commit; the recalibrated census reads 894 —
+787 static + 107 dynamic patterns on the gate's
+57-file basis). CI run 42531689025 GREEN on 6138daf:
+**2,852 tests (1,079 lib + 1,763 bin + 10
+integration)**, up from 2,683. Headless run
+42532480879: all probes exit 0; **overflow scan CLEAN
+on all 27 trees** — Wave 9's one hit (the project
+autosave line at edits ≥ 1) is gone. Pixel pass on the
+new snaps: the dopesheet lane reads cleanly (two rows,
+diamonds on the authored keys, selected row + current
+column tinted); stage measures 744×504 at 1440×900
+(the lane's net cost, pinned in the snap tests) and
+584×324 at 1280×720 — the lane caps at 4 rows, so the
+small-window stage stays workable without a collapse
+toggle. Inventory: palette 114, MCP 140 (91 registry +
+8 io + 41 built-ins), scenes 24, help 57, i18n 99 × 28,
+icons 163.
+
+Honest remainders: the stage still ignores style
+cap/taper/opacity that both exporters honour (scoped
+as the Wave 11 "stage style fidelity" headline); the
+dopesheet columns sit a constant 124 pt right of the
+chips (the name gutter — pitch and scroll are shared,
+the offset is constant); white-on-accent contrast is
+still the user's open decision (the E7 evidence pack
+in `app_theme.rs` shows the carrying value is upstream
+`tok::accent` #4392F7 at 3.14:1 — darkening the app
+token alone would fix nothing); sound remains
+user-verified only; Home project rows are still not
+pixel-proven (no populated-Home scene yet).
