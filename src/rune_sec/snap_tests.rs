@@ -918,6 +918,19 @@ fn particles_panel_add_selects_the_new_event() {
         presented_keys(&rt).contains("particles"),
         "Effects mounts the particles panel"
     );
+    // The panel sits below Settings, Scene and the FX
+    // panels in the right column — below the 900 pt
+    // viewport's fold. Scroll the column (wheel over it,
+    // the real user's path) until the Add button's centre
+    // is inside the window, or the press lands nowhere.
+    for _ in 0..24 {
+        let (_, y) = rt.find("particles-add").expect("particles-add presented");
+        if y < 850.0 {
+            break;
+        }
+        rt.wheel(1255.0, 450.0, -600.0);
+        rt.frame(DT);
+    }
     // Settle (bounded) through the freshly mounted panel's
     // presence fade before pressing inside it — round 3's
     // guides lesson.
