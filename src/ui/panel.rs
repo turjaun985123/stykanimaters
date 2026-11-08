@@ -209,7 +209,8 @@ mod tests {
         // construction-only contract the sibling components use).
         let spec = PanelSpec::new("Graph");
         let _dark = panel_shell_themed(spec.clone(), true, panel_header(&spec));
-        let _light = panel_shell_themed(spec, false, panel_header(&spec));
+        let body = panel_header(&spec);
+        let _light = panel_shell_themed(spec, false, body);
     }
 
     #[test]
