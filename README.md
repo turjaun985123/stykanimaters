@@ -2,8 +2,15 @@
 
 An end-to-end Rust port of [StykAnimate](https://github.com/filippocalippo/StykAnimate-App)
 (the free, open-source stick figure animation app), rebuilt with
-[Rust](https://www.rust-lang.org) and [GPUI](https://www.gpui.rs)
-(`gpui = "=0.2.2"` from crates.io). GPL-3.0-or-later, like the original.
+[Rust](https://www.rust-lang.org) and [Rune](https://github.com/anomalyco/rune),
+anomalyco's native GPU-rendered Rust UI framework. Rune has no
+crates.io releases yet, so it is pinned by git revision
+(`rev = "87caf2a3a2d9e3fb6172f5a62997748dbf25748e"` for both
+`rune` and `rune-kit` in `Cargo.toml`). The editor was previously
+built on GPUI 0.2.2; the GPUI shell was removed in full on
+2026-11-08 and the migration record lives in
+[docs/RUNE_MIGRATION.md](docs/RUNE_MIGRATION.md).
+GPL-3.0-or-later, like the original.
 
 It is a single native binary: a full stick-figure animation editor
 (posing with FK + two-bone IK, timeline, camera, drawing, VFX,
@@ -20,8 +27,33 @@ the release profile, and a stripped binary package uploaded as
 the `stykanimaters-linux-x86_64` artifact (both binaries —
 `stykanimate-rs`, the editor, and `mcp_server` — plus
 SHA256SUMS). Download it from the repo's Actions tab and run
-`./stykanimate-rs`. The editor has been run and screenshot-verified
-this way on a real Linux desktop.
+`./stykanimate-rs`. (The earlier GPUI editor was run and
+screenshot-verified this way on a real Linux desktop; the Rune
+shell's first real-desktop run is still pending — see the
+headless checks below, which are how it is verified meanwhile.)
+
+## Run it — and check it headlessly
+
+```sh
+./stykanimate-rs                 # the editor (1440×900 window, 1280×720 min)
+```
+
+Every Rune binary carries built-in headless tooling, so the UI
+can be rendered and inspected with no display at all:
+
+```sh
+./stykanimate-rs --snap out.png   # render the UI offscreen to a PNG
+./stykanimate-rs --tree out.json  # dump the element tree as JSON
+# also: --scene NAME (named snapshot state), --script FILE
+# (scripted input), --at SECONDS, --crop KEY (one element's rect)
+```
+
+Honest status: `--tree` and the in-process `Runtime`
+interaction tests need no GPU; `--snap` renders through the
+real GPU pipeline and needs a wgpu adapter — on a GPU-less
+machine that means a software Vulkan driver, which is
+**unproven on this project's CI runner** at the time of
+writing.
 
 ## Build from source
 
@@ -37,6 +69,10 @@ this way on a real Linux desktop.
 > cargo test --release --locked           # what CI tests
 > cargo run --release                     # the editor
 > ```
+>
+> The Rune dependencies are fetched from GitHub at the pinned
+> revision on first build (network needed once; `--locked`
+> keeps the resolution reproducible after that).
 
 System libraries (Ubuntu/Debian) — this is the exact install line
 from `.github/workflows/workflow.yml`, plus `ffmpeg` (used for
@@ -67,23 +103,36 @@ present and fall back to a folder-based flow when neither exists.
   per-limb bend direction); dragging any other joint rotates its
   segment (FK aim); dragging the hips moves the figure; a mirror
   op flips the current pose (the 3D session mirrors poses too).
-- **Editor UI** (`src/app.rs`, `src/ui_kit.rs`, `src/ui_*.rs`) —
-  redesigned chrome on a shared token-based design system: a
-  slim **app bar** (brand, File/Edit, panel toggles, frame/FPS
-  chips) over labelled **tool-group panels** instead of a flat
-  button wall. Eight **workspaces** (Animate, Draw,
-  Build, Graph, Effects, Audio, 3D, Export) under the app bar
-  (Alt+1…8) **gate which tool groups and panels render** —
-  each workspace shows only its own tools (4–12 of the 24
-  tool groups), and the stage takes the space the hidden
-  groups free up; the chosen workspace and theme persist
-  between launches. Panels for the keyframe graph,
-  audio, FX clips, movieclips, colour picker, easing picker,
-  inspector, export centre and help; a per-figure **dopesheet**
-  above the timeline; a state HUD above the framed canvas; status
-  messages arrive as a **toast stack**; the figures sidebar has
-  colour dots, lock/solo/opacity controls and opacity steppers.
-  Transport includes |< < > >| stepping and a loop range.
+- **Editor UI** — a Rune shell (`src/main.rs` +
+  `src/stage_view.rs` + `src/chrome_view.rs`, declared as
+  modules of the binary; the library stays UI-free). What it
+  has today (Phase C, CI-green): a stage canvas drawing **all
+  figures** at the displayed frame — per-node colours and
+  thickness, shape nodes, head rings, and onion skins with the
+  previous shell's exact alpha falloff — with **drag posing**
+  through the engine's own `begin_drag`/`drag_to`/`end_drag`
+  ops (FK aim, two-bone IK, root move), camera/draw drag modes,
+  and wheel zoom. Drawing and dragging share one
+  `view_transform` whose screen↔stage roundtrip is
+  unit-tested, so the figure tracks the cursor exactly. The
+  app bar carries Save / Load / Undo / Redo / + Figure /
+  Onion; the timeline is clickable numbered **frame chips**
+  with Add / Duplicate / Delete frame; transport (prev /
+  play-pause / next) plays through the core's `advance_play`
+  (fps, per-frame durations and loop range honoured); the
+  keyboard covers space, arrows, Ctrl+Z / Ctrl+Shift+Z /
+  Ctrl+Y and Delete-segment; a status line shows frame, fps,
+  zoom and the core status message. Everything shown calls a
+  real engine op — there are no placeholder controls.
+  The GPUI-era panels (workspaces, tool groups, graph, audio,
+  FX, export centre, Home…) were deleted with GPUI and are
+  being rebuilt section by section in `src/rune_sec/` —
+  figures, segment/style inspectors, camera, scene, easing,
+  graph, draw, strokes, FX, audio, clips, library, 3D,
+  export, home, menus, command palette, settings, help,
+  toasts, keyframes/layers, text, projects and stats panels,
+  plus `Runtime` interaction tests and named `--snap` scenes
+  (Phase D, in progress; see docs/GAP-ANALYSIS.md).
 - **Timeline depth** — per-frame durations and easing (per-frame
   override of the project easing), frame copy/paste, inbetween,
   block shift, range reverse, loop ranges, motion-path display
@@ -123,24 +172,26 @@ present and fall back to a folder-based flow when neither exists.
   Confetti, ShockRing, Ember, Fountain, Orbit, Lightning,
   Bubbles, Leaves, Meteor, Petals, Splash, Spiral, Fireworks,
   Aurora, Comet, Galaxy, Prism, Vortex, Glitter, Wave, Shard)
-  anchored to joints, with creation buttons in the GUI for
-  every kind, an FX timeline engine
-  (list/move/resize/duplicate/delete) in the GUI and over MCP,
+  anchored to joints, with an FX timeline engine
+  (list/move/resize/duplicate/delete) over MCP,
   per-clip colour gradients (a start colour and an end
-  colour), and FX clip presets saved on disk with save/apply
-  buttons in the FX panel;
+  colour), and FX clip presets saved on disk;
   plus continuous **weather** (rain, snow, fireflies, fog, storm)
-  rendered in the canvas and the rasterizer.
+  rendered in the rasterizer and every export. (The GUI
+  creation buttons and FX panel were GPUI-era and return with
+  the Phase D sections.)
 - **Audio** — clips placed at frames, each with a per-clip
   gain; playback mixes **all** clips audible at the playhead
   at their gains, synced via `ffplay`, and MP4/WebM exports
   mix every clip into the soundtrack at its frame offset and
-  gain; a waveform panel with per-clip normalise / split
+  gain; per-clip normalise / split
   (including split at silences) / crossfade plus pitch shift
-  and compressor (audio engine, editor ops and panel
-  buttons), and a real mixdown export.
-- **Movieclips** — capture a figure's timeline as a clip, edit it
-  in a dedicated clip session panel; clip figures play their own
+  and compressor (audio engine and editor ops; the GPUI-era
+  waveform panel returns with the Phase D sections), and a
+  real mixdown export.
+- **Movieclips** — capture a figure's timeline as a clip
+  (the clip-session editing panel returns with the Phase D
+  sections); clip figures play their own
   animation inside any project with a selectable loop mode —
   **Loop**, **PingPong** or **Once**.
 - **3D mode** (`src/fig3d.rs`) — a real 3D FK rig with Euler
@@ -165,13 +216,14 @@ present and fall back to a folder-based flow when neither exists.
   - A cross-format fixture corpus (`tests/fixtures/`) generated
     with the original's encoders guards the importers.
 - **Projects & shell** — named projects under `./projects/`
-  with rename, duplicate and filter in the project library, a
-  Home panel with recents, a per-project duplicate button and
-  a most-active-figure line, a recovery snapshot and
-  session-continuity helpers, native open/save
-  dialogs, save/load as JSON (`project.styk.json`), light/dark
-  themes, and **28 languages** (the original's 27 + Bengali)
-  cycled from the toolbar.
+  with rename, duplicate and filter in the project library
+  (`src/projects.rs`), a recovery snapshot and
+  session-continuity helpers (`src/shell.rs`), native open/save
+  dialogs, save/load as JSON (`project.styk.json`), and
+  **28 languages** (the original's 27 + Bengali) in
+  `src/i18n.rs`. These library features survived the Rune
+  migration untouched; the Home panel and settings surfaces
+  that present them return with the Phase D sections.
 
 ## Drive it from an AI agent (MCP)
 
@@ -191,30 +243,34 @@ configuration snippet live in [docs/MCP.md](docs/MCP.md).
 
 ## Architecture notes
 
-- The crate is a library (`src/lib.rs`); the GPUI editor
-  (`src/main.rs`) and the MCP server (`src/bin/mcp_server.rs`)
+- The crate is a library (`src/lib.rs`) with **no UI
+  dependencies**; the Rune editor (`src/main.rs`, with
+  `stage_view.rs` / `chrome_view.rs` / `rune_sec/` as binary
+  modules) and the MCP server (`src/bin/mcp_server.rs`)
   are two thin binaries over the same engine.
 - `model.rs` has no UI dependencies; `editor.rs` holds editor
-  state and every document operation; the GPUI layer translates
-  mouse events and buttons into calls.
+  state and every document operation; the Rune shell translates
+  pointer events and buttons into calls.
 - Exports are deterministic: same project → same bytes, in CI
   as on a desktop; the byte-determinism integration proof
   covers APNG and JPEG sequence exports and now also runs a
   rich project (storm weather, FX clips, spray strokes), not
   just the demo project.
-- `vendor/xattr` is a byte-identical copy of crates.io
-  `xattr 0.2.3` with one patched constant: it referenced
-  `libc::ENOATTR`, which current `libc` removed on Linux; the
-  vendored copy maps it to `ENODATA` there. Wired through
-  `[patch.crates-io]` in `Cargo.toml`.
+- The UI framework is a **git dependency, not a crates.io
+  one**: `rune` + `rune-kit` pinned at rev `87caf2a` (see
+  above). The GPUI-era `[patch.crates-io]` vendored `xattr`
+  copy was deleted with GPUI — nothing is patched now.
 
 ## Honest limits
 
-- **No touch input.** GPUI 0.2.2 has no touch API at all —
-  proven from the crate source in [docs/TOUCH.md](docs/TOUCH.md).
-  The gesture recogniser and pinch-to-camera code are written
-  and tested but unreachable from hardware until GPUI ships
-  touch events; a touchscreen arrives as one emulated mouse.
+- **No touch input.** Under GPUI 0.2.2 this was proven
+  impossible — the toolkit had no touch API at all
+  ([docs/TOUCH.md](docs/TOUCH.md)). The gesture recogniser and
+  pinch-to-camera engine code are still written and tested;
+  under Rune a `TouchPhase` type exists but touch-driven
+  posing is **unproven** (not yet audited against the pinned
+  rev), so for now a touchscreen arrives as one emulated
+  mouse, as before.
 - **`.piv` text side tables carry bitmap glyphs.** Text is
   written into v5 files with each bitmap pixel as a tiny square
   glyph outline (cross-verified with the original's codecs) and
@@ -231,11 +287,15 @@ configuration snippet live in [docs/MCP.md](docs/MCP.md).
   instance data (styles/filters, smart-stretch, sounds) is
   consumed but not modelled, and the 28 localisations are
   machine-produced where the original's are human-maintained.
-- **Visual checks happen on the user's machine.** This project's
-  dev VM uses a virtual display with software Vulkan where the
-  GUI renders black screenshots; the editor is verified visually
-  from CI artifacts run on a real desktop (first verified
-  2026-11-08).
+- **Visual checks: headless now, desktop still gold.**
+  The GPUI editor could only be verified visually from CI
+  artifacts run on a real desktop (this project's dev VM
+  renders black screenshots), first verified 2026-11-08.
+  The Rune shell can render itself offscreen (`--snap` PNG,
+  `--tree` element dump) and be driven by in-process
+  `Runtime` tests — but `--snap` on a GPU-less CI runner
+  (software Vulkan) is unproven at the time of writing, and
+  the Rune shell has not yet had its first real-desktop run.
 
 ## Licence
 

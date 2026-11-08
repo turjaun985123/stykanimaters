@@ -1,0 +1,463 @@
+//! Settings popover (Phase D, section 24 of the GPUI→Rune
+//! migration): theme, language, stage size and the project
+//! default easing, behind one "Settings" toggle. Declared
+//! under `rune_sec` from `main.rs` only — bin-crate code, not
+//! part of the engine library.
+//!
+//! ## Why not the rune-kit `Popover`?
+//!
+//! Same reason as `figure_add` (section 2): the kit's
+//! `Popover::build` needs a `rune_kit::Kit` and an overlay
+//! layer fed into `rune_kit::root(...)`, and the shell's root
+//! is a plain `col()` themed by `rune::tok` — no `Kit` exists
+//! yet. Until the integrator wires one, this is a
+//! state-toggled section standing in for the popover: same
+//! controls, same ops, no floating layer. Swapping the card
+//! below for a kit `Popover` later changes only this file's
+//! [`settings_popover`] body and the root call.
+//!
+//! ## Controls → real ops / fields (nothing is faked)
+//!
+//! * **Theme (Dark / Light)** — two buttons setting the pub
+//!   field `EditorCore.light_theme` (`editor.rs:63`, default
+//!   `false` = dark). The GPUI shell's theme button flipped
+//!   exactly this field and persisted it as
+//!   `LayoutPrefs.dark = !light_theme`. Each button sets its
+//!   own value (never a blind toggle), so the highlighted
+//!   button always names the theme actually in force.
+//!   INTEGRATOR GAP: `main.rs`'s `view` currently calls
+//!   `tok::theme(true)` unconditionally, so the flip is real
+//!   but invisible until `view` reads
+//!   `tok::theme(!s.core.light_theme)` — see the report.
+//! * **Language** — one button per language of the project's
+//!   own i18n table (28 today, from `Lang::all()`,
+//!   `i18n.rs:150`, native names via `Lang::label()`,
+//!   `i18n.rs:116` — the same data
+//!   `rune_sec::i18n_wire::language_options` exposes). The
+//!   current language's button is highlighted
+//!   (`EditorCore.lang`, `editor.rs:82`). Picking one sets
+//!   the pub field directly — the only setter the core
+//!   offers besides `cycle_lang` (`editor.rs:1906`), which is
+//!   a cycle, not a select — and writes the same status line
+//!   `cycle_lang` writes (`"Language: {label}"`).
+//! * **Stage W / H steppers** — ±[`STAGE_STEP`] per press on
+//!   the pub field `Project.stage` (`model.rs:685`), each
+//!   axis clamped to [`STAGE_MIN`]..=[`STAGE_MAX`]. The core
+//!   has no stage-size op; the step/clamp/status are the
+//!   GPUI shell's own view helper verbatim (`adjust_stage` in
+//!   the pre-removal `app.rs`: step 40, clamp 200..=4000,
+//!   status `"Stage size: {w} x {h}."`). The stage renderer
+//!   reads this field every frame, so the resize is live.
+//! * **Default easing** — one cycle button calling the real
+//!   op `EditorCore::cycle_easing` (`editor.rs:1686`), which
+//!   advances `Project.easing` (`model.rs:696`) through
+//!   `Easing::next` and writes its own status. The button
+//!   label shows the current value (`Easing::label`,
+//!   `model.rs:582`). The core offers no direct setter for
+//!   the project default, so — exactly like the easing panel
+//!   (section 10, key `ease-project-cycle`) — this is
+//!   honestly a cycle button, not four fake presets. The two
+//!   buttons coexist with distinct keys; this one is the
+//!   Settings home for the same op.
+//!
+//! ## Deliberately NOT here: a Guides toggle
+//!
+//! The brief asked for one "if a core field exists". It
+//! does not: there is no guides field on `EditorCore` or
+//! `Project`, and nothing in the Rune shell draws guides
+//! (the GPUI overlay lived in the removed `app.rs` /
+//! `src/ui/overlay.rs`). A toggle wired to nothing would be
+//! a fake control, so it is omitted. Follow-up: add a guides
+//! flag to the shell state + guide lines in `stage_view`,
+//! then a toggle here can flip the real flag.
+//!
+//! ## Persistence
+//!
+//! No new persisted fields are needed for these controls:
+//! theme maps onto the EXISTING `LayoutPrefs.dark`
+//! (`shell.rs`; `dark = !core.light_theme`, default dark),
+//! while language, stage size and default easing all live
+//! on the core/project and persist with the project file
+//! itself. Integrator follow-ups (in `main.rs`, not here):
+//! seed `core.light_theme` from `shell::load_layout().dark`
+//! at startup and save it back on change; today the Rune
+//! shell neither loads nor saves `LayoutPrefs` at all.
+//!
+//! ## Integrator wiring (main.rs)
+//!
+//! ```ignore
+//! mod rune_sec {
+//!     pub mod settings_popover;
+//! }
+//! // in `State`:
+//! pub settings: settings_popover::SettingsState,
+//! // in `init()`:
+//! settings: settings_popover::SettingsState::default(),
+//! // in `view()`, after the app bar:
+//! .child(rune_sec::settings_popover::settings_popover(s, &t))
+//! // and in `view()`: tok::theme(!s.core.light_theme)
+//! ```
+
+use rune::tok::{type_, Theme};
+use rune::{col, row, text, El};
+use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::i18n::Lang;
+
+use crate::chrome_view::btn;
+use crate::State;
+
+/// View-state for this section: whether the settings card is
+/// shown under the "Settings" toggle. Owned by `State` (see
+/// the module docs for the wiring); the card is rebuilt from
+/// it every frame. Everything the card controls lives on the
+/// core — this struct holds nothing else.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SettingsState {
+    /// Settings card expanded under the toggle.
+    pub open: bool,
+}
+
+/// Stage-size step per button press (the GPUI shell's
+/// `adjust_stage` step).
+pub const STAGE_STEP: f32 = 40.0;
+
+/// Smallest stage width/height the steppers allow (the GPUI
+/// shell's clamp floor).
+pub const STAGE_MIN: f32 = 200.0;
+
+/// Largest stage width/height the steppers allow (the GPUI
+/// shell's clamp ceiling).
+pub const STAGE_MAX: f32 = 4000.0;
+
+/// Language buttons per row in the picker grid.
+pub const LANG_COLUMNS: usize = 4;
+
+// ---- Theme ----
+
+/// Set the theme on the core's real field
+/// (`EditorCore.light_theme`, `editor.rs:63`): `true` =
+/// light, `false` = dark. Idempotent — pressing the already
+/// active theme's button changes nothing.
+pub fn set_theme(core: &mut EditorCore, light: bool) {
+    core.light_theme = light;
+}
+
+// ---- Language ----
+
+/// One pickable language row of the picker: element key,
+/// button label (the language's native name) and the value
+/// it applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LangEntry {
+    pub key: String,
+    pub label: &'static str,
+    pub lang: Lang,
+}
+
+/// All languages of the i18n table, in picker order, derived
+/// from `Lang::all()` / `Lang::label()` (`i18n.rs:150` /
+/// `i18n.rs:116`) — the same source
+/// `rune_sec::i18n_wire::language_options` reads, so a 29th
+/// language appears here automatically.
+pub fn language_entries() -> Vec<LangEntry> {
+    Lang::all()
+        .iter()
+        .map(|l| LangEntry {
+            key: format!("settings-lang-{}", l.code()),
+            label: l.label(),
+            lang: *l,
+        })
+        .collect()
+}
+
+/// Apply a picked language: set the pub field
+/// `EditorCore.lang` (`editor.rs:82`) and write the status
+/// line the core's own `cycle_lang` writes
+/// (`editor.rs:1906`), so the feedback reads identically
+/// whichever path changed the language.
+pub fn set_language(core: &mut EditorCore, lang: Lang) {
+    core.lang = lang;
+    core.status = format!("Language: {}", lang.label());
+}
+
+// ---- Stage size ----
+
+/// The stage size after stepping `stage` by `(dw, dh)`, each
+/// axis clamped to [`STAGE_MIN`]..=[`STAGE_MAX`] — the pure
+/// half of the GPUI shell's `adjust_stage`.
+pub fn stepped_stage_size(stage: [f32; 2], dw: f32, dh: f32) -> [f32; 2] {
+    [
+        (stage[0] + dw).clamp(STAGE_MIN, STAGE_MAX),
+        (stage[1] + dh).clamp(STAGE_MIN, STAGE_MAX),
+    ]
+}
+
+/// Step the stage size on the real field (`Project.stage`,
+/// `model.rs:685`) and report the new size in the status
+/// line, byte-for-byte the GPUI shell's `adjust_stage`
+/// behaviour. There is no core op for this; the field is
+/// pub and the renderer consumes it directly.
+pub fn apply_stage_step(core: &mut EditorCore, dw: f32, dh: f32) {
+    core.project.stage = stepped_stage_size(core.project.stage, dw, dh);
+    core.status = format!(
+        "Stage size: {} x {}.",
+        core.project.stage[0] as i32, core.project.stage[1] as i32
+    );
+}
+
+// ---- Default easing ----
+
+/// The easing cycle button's label: the project default's
+/// current value (`Project.easing`, `model.rs:696`;
+/// `Easing::label`, `model.rs:582`). The button itself calls
+/// `EditorCore::cycle_easing` (`editor.rs:1686`) — this
+/// helper exists so the label format is testable.
+pub fn easing_label(core: &EditorCore) -> String {
+    format!("Easing: {}", core.project.easing.label())
+}
+
+// ---- View ----
+
+/// Flip the settings card open/closed (the toggle button's
+/// handler).
+pub fn toggle_open(s: &mut State) {
+    s.settings.open = !s.settings.open;
+}
+
+/// A small muted section heading inside the card.
+fn section_label(t: &Theme, label: &str) -> El {
+    text(label).font(type_::LABEL).color(t.text_secondary)
+}
+
+/// A numeric readout between stepper buttons.
+fn readout(t: &Theme, value: String) -> El {
+    text(value).font(type_::LABEL).color(t.text)
+}
+
+/// One language button: applies its language via
+/// [`set_language`]; highlighted when it is the core's
+/// current language.
+fn language_button(entry: LangEntry, current: Lang, t: &Theme) -> El {
+    let key = entry.key.clone();
+    let lang = entry.lang;
+    btn(&key, entry.label, lang == current, t, move |s: &mut State| {
+        set_language(&mut s.core, lang);
+    })
+}
+
+/// One stage axis row: heading, `-` stepper, readout of the
+/// current size, `+` stepper. `axis` is 0 for width, 1 for
+/// height; the steppers move only that axis, through
+/// [`apply_stage_step`] (real field + status).
+fn stage_axis_row(s: &State, t: &Theme, axis: usize, heading: &str) -> El {
+    let (down_key, up_key) = if axis == 0 {
+        ("settings-stage-w-down", "settings-stage-w-up")
+    } else {
+        ("settings-stage-h-down", "settings-stage-h-up")
+    };
+    let (dw, dh) = if axis == 0 {
+        (STAGE_STEP, 0.0)
+    } else {
+        (0.0, STAGE_STEP)
+    };
+    row()
+        .gap(8.0)
+        .center_y()
+        .child(section_label(t, heading))
+        .child(btn(down_key, "-", false, t, move |s: &mut State| {
+            apply_stage_step(&mut s.core, -dw, -dh);
+        }))
+        .child(readout(
+            t,
+            format!("{}", s.core.project.stage[axis] as i32),
+        ))
+        .child(btn(up_key, "+", false, t, move |s: &mut State| {
+            apply_stage_step(&mut s.core, dw, dh);
+        }))
+}
+
+/// The section as mounted in the shell column: the
+/// "Settings" toggle (accent-filled while open), and — when
+/// `s.settings.open` — the settings card under it: Theme,
+/// Language grid, Stage W / H steppers, and the default
+/// easing cycle.
+pub fn settings_popover(s: &State, t: &Theme) -> El {
+    let core = &s.core;
+    let open = s.settings.open;
+    let mut panel = col().key("settings").gap(6.0);
+    panel = panel.child(btn("settings-toggle", "Settings", open, t, |s: &mut State| {
+        toggle_open(s);
+    }));
+    if open {
+        let mut card = col()
+            .key("settings-card")
+            .gap(8.0)
+            .padding(10.0)
+            .radius(8.0)
+            .fill(t.card);
+
+        // Theme: each button sets its own value outright.
+        let light = core.light_theme;
+        card = card.child(section_label(t, "Theme")).child(
+            row()
+                .key("settings-theme")
+                .gap(6.0)
+                .child(btn("settings-theme-dark", "Dark", !light, t, |s: &mut State| {
+                    set_theme(&mut s.core, false);
+                }))
+                .child(btn(
+                    "settings-theme-light",
+                    "Light",
+                    light,
+                    t,
+                    |s: &mut State| {
+                        set_theme(&mut s.core, true);
+                    },
+                )),
+        );
+
+        // Language: the full table as a button grid, the
+        // current language highlighted.
+        let mut grid = col().key("settings-lang-grid").gap(4.0);
+        for (i, chunk) in language_entries().chunks(LANG_COLUMNS).enumerate() {
+            let mut lang_row = row().key(format!("settings-lang-row-{i}")).gap(6.0);
+            for entry in chunk {
+                lang_row = lang_row.child(language_button(entry.clone(), core.lang, t));
+            }
+            grid = grid.child(lang_row);
+        }
+        card = card.child(section_label(t, "Language")).child(grid);
+
+        // Stage size: one stepper row per axis.
+        card = card
+            .child(section_label(t, "Stage size"))
+            .child(stage_axis_row(s, t, 0, "W"))
+            .child(stage_axis_row(s, t, 1, "H"));
+
+        // Default easing: the cycle op, labelled with the
+        // current value (section 10's panel offers the same
+        // op under key `ease-project-cycle`).
+        card = card.child(section_label(t, "Default easing")).child(
+            row().key("settings-easing").gap(6.0).child(btn(
+                "settings-easing-cycle",
+                &easing_label(core),
+                false,
+                t,
+                |s: &mut State| {
+                    s.core.cycle_easing();
+                },
+            )),
+        );
+
+        panel = panel.child(card);
+    }
+    panel
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn core() -> EditorCore {
+        EditorCore::new()
+    }
+
+    #[test]
+    fn state_defaults_closed() {
+        assert!(!SettingsState::default().open);
+    }
+
+    #[test]
+    fn set_theme_writes_the_core_field_both_ways() {
+        let mut core = core();
+        // EditorCore::new defaults to the dark theme.
+        assert!(!core.light_theme);
+        set_theme(&mut core, true);
+        assert!(core.light_theme);
+        // Idempotent: setting the active theme again is a no-op.
+        set_theme(&mut core, true);
+        assert!(core.light_theme);
+        set_theme(&mut core, false);
+        assert!(!core.light_theme);
+    }
+
+    #[test]
+    fn language_entries_cover_the_whole_table() {
+        let entries = language_entries();
+        assert_eq!(entries.len(), 28);
+        assert_eq!(entries.len(), Lang::all().len());
+        assert_eq!(entries[0].lang, Lang::En);
+        assert_eq!(entries[0].label, "English");
+        assert_eq!(entries[0].key, "settings-lang-en");
+        assert!(entries
+            .iter()
+            .any(|e| e.lang == Lang::Bn && e.label == "বাংলা"));
+        // Keys unique (headless --tree lookups depend on it).
+        let mut keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), 28);
+    }
+
+    #[test]
+    fn set_language_sets_field_and_cycle_lang_status() {
+        let mut core = core();
+        set_language(&mut core, Lang::De);
+        assert_eq!(core.lang, Lang::De);
+        // Same status text cycle_lang (editor.rs:1906) writes.
+        assert_eq!(core.status, "Language: Deutsch");
+        set_language(&mut core, Lang::En);
+        assert_eq!(core.lang, Lang::En);
+        assert_eq!(core.status, "Language: English");
+    }
+
+    #[test]
+    fn stage_step_moves_one_axis_by_the_gpui_step() {
+        assert_eq!(stepped_stage_size([960.0, 720.0], STAGE_STEP, 0.0), [1000.0, 720.0]);
+        assert_eq!(stepped_stage_size([960.0, 720.0], -STAGE_STEP, 0.0), [920.0, 720.0]);
+        assert_eq!(stepped_stage_size([960.0, 720.0], 0.0, STAGE_STEP), [960.0, 760.0]);
+        assert_eq!(STAGE_STEP, 40.0);
+    }
+
+    #[test]
+    fn stage_step_clamps_to_the_gpui_range() {
+        assert_eq!(
+            stepped_stage_size([4000.0, 200.0], STAGE_STEP, -STAGE_STEP),
+            [4000.0, 200.0]
+        );
+        assert_eq!(
+            stepped_stage_size([210.0, 3990.0], -STAGE_STEP, STAGE_STEP),
+            [200.0, 4000.0]
+        );
+        assert_eq!((STAGE_MIN, STAGE_MAX), (200.0, 4000.0));
+    }
+
+    #[test]
+    fn apply_stage_step_writes_field_and_gpui_status() {
+        let mut core = core();
+        core.project.stage = [960.0, 720.0];
+        apply_stage_step(&mut core, STAGE_STEP, 0.0);
+        assert_eq!(core.project.stage, [1000.0, 720.0]);
+        // Byte-for-byte the GPUI shell's adjust_stage status.
+        assert_eq!(core.status, "Stage size: 1000 x 720.");
+        apply_stage_step(&mut core, 0.0, -STAGE_STEP);
+        assert_eq!(core.project.stage, [1000.0, 680.0]);
+        assert_eq!(core.status, "Stage size: 1000 x 680.");
+    }
+
+    #[test]
+    fn easing_label_names_the_current_project_default() {
+        let mut core = core();
+        // Project::new_demo defaults to Easing::Linear.
+        assert_eq!(easing_label(&core), "Easing: linear");
+        // The same op the button calls advances the label.
+        core.cycle_easing();
+        assert_eq!(easing_label(&core), "Easing: smooth");
+        core.cycle_easing();
+        assert_eq!(easing_label(&core), "Easing: ease-in");
+        core.cycle_easing();
+        assert_eq!(easing_label(&core), "Easing: ease-out");
+        core.cycle_easing();
+        assert_eq!(easing_label(&core), "Easing: linear");
+    }
+}

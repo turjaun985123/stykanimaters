@@ -11,14 +11,35 @@ comparison + addenda documents.
 | | Original (StykAnimate-App) | Port (StykAnimate-RS) |
 |---|---|---|
 | Version | 1.2.5 | 0.1.0 |
-| Runtime | Electron + WebGPU app, Python codec backend | One native binary: Rust + GPUI 0.2.2 |
+| Runtime | Electron + WebGPU app, Python codec backend | One native binary: Rust engine + Rune UI (git-pinned rev 87caf2a; GPUI 0.2.2 until the 2026-11-08 migration) |
 | Application code | 103,549 lines JS in 535 modules under `src/` (excluding `src/locales`) | 56,059 lines Rust: 32 core modules + 2 binaries + a dedicated UI library |
-| UI code | Inside the JS total | `src/ui/`: **39 components, 5,900+ lines**, all presentation-only builders over plain data |
+| UI code | Inside the JS total | Rune shell: `src/main.rs` + `stage_view.rs` + `chrome_view.rs` (728 lines at Phase C) + section modules under `src/rune_sec/` (Phase D, in progress). The GPUI-era `src/ui/` component library was deleted in the migration |
 | Generated code | 179,460-line compiled locale bundle (`locale-packs.mjs`) | none |
 | Backend/codecs | 12,987 lines Python (`codecs/` + `backend/`) | included in the Rust total (`pivot.rs`, `nodes.rs`, `nodes_anim.rs` ≈ 8,400 lines) |
 | Tests | 876 files in `tests/` (fixtures + suites) | 866 tests CI-verified green at Wave 13 (`4adfc85`), including byte-determinism integration tests for frame renders (incl. a rich storm + FX + spray project), GIF, SVG, spritesheet, PNG-sequence, contact-sheet, APNG and JPEG-sequence exports + a cross-format fixture corpus with manifest (now incl. a text-bearing v5 file written by the original's own writer) |
 | UI languages | 27 | 28 (the same 27 + Bengali), 62 keys |
 | Licence | GPL-3.0-or-later | GPL-3.0-or-later |
+
+**Shape update (2026-11-08, after the table above was
+measured):** the port's UI is no longer GPUI. The whole
+GPUI shell — the `src/app.rs` monolith and the 39-component
+`src/ui/` library — was deleted and the editor is being
+rebuilt on **Rune**, anomalyco's native GPU-rendered Rust
+UI framework, git-pinned at rev 87caf2a (it has no
+crates.io releases). The engine underneath did not change:
+same model, editor ops, formats, exporters and MCP server.
+What the switch buys the port's "shape" is verifiability:
+every Rune binary renders itself headlessly (`--snap` to
+PNG, `--tree` element dumps) and can be driven by
+in-process `Runtime` interaction tests, so the UI joins
+the engine under CI-checkable proof instead of depending
+on screenshots from a real desktop (pixel snapping on the
+GPU-less CI runner is still unproven; tree dumps and
+Runtime tests need no GPU). The Rune shell reached a
+working, CI-green editor at Phase C (CI run 42456311759,
+708 tests: 691 unit + 7 binary + 10 integration) and the
+panel-by-panel feature rebuild is Phase D, in progress —
+see docs/RUNE_MIGRATION.md and docs/GAP-ANALYSIS.md.
 
 ## Feature matrix
 
