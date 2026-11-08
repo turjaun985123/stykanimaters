@@ -787,9 +787,9 @@ fn angle_readout(core: &EditorCore, t: &Theme) -> El {
 /// current frame), plus a per-row Delete button
 /// ([`delete_camera_key_at`] at the row's frame —
 /// undoable, and the playhead stays put). With no keys,
-/// an explanatory empty line instead of rows; the
-/// nav/clipboard rows stay, since Paste is exactly how a
-/// first key can arrive.
+/// the kit [`design::empty_state`] (key glyph) instead of
+/// rows; the nav/clipboard rows stay, since Paste is
+/// exactly how a first key can arrive.
 fn key_list(core: &EditorCore, t: &Theme) -> El {
     let rows = key_rows(core);
     let mut list = col().key("cam-key-list").gap(4.0);
@@ -799,10 +799,10 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(icon_only_btn("cam-prev-key", "chevron-left", 26.0, false, t, |s: &mut State| {
+                .child(icon_only_btn("cam-prev-key", "chevron-left", "Previous key", 26.0, false, t, |s: &mut State| {
                     goto_prev_key(&mut s.core)
                 }))
-                .child(icon_only_btn("cam-next-key", "chevron-right", 26.0, false, t, |s: &mut State| {
+                .child(icon_only_btn("cam-next-key", "chevron-right", "Next key", 26.0, false, t, |s: &mut State| {
                     goto_next_key(&mut s.core)
                 })),
         )
@@ -818,11 +818,11 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
                 })),
         );
     if rows.is_empty() {
-        list = list.child(
-            text("No camera keys yet.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        list = list.child(design::empty_state(
+            "key",
+            "No camera keys yet — Set key pins the current view.",
+            t,
+        ));
     }
     for r in rows {
         let frame = r.frame;
@@ -898,10 +898,10 @@ fn follow_block(core: &EditorCore, t: &Theme) -> El {
             row()
                 .gap(6.0)
                 .center_y()
-                .child(icon_only_btn("cam-follow-prev", "chevron-left", 26.0, false, t, |s: &mut State| {
+                .child(icon_only_btn("cam-follow-prev", "chevron-left", "Previous follow target", 26.0, false, t, |s: &mut State| {
                     follow_cycle(&mut s.core, -1)
                 }))
-                .child(icon_only_btn("cam-follow-next", "chevron-right", 26.0, false, t, |s: &mut State| {
+                .child(icon_only_btn("cam-follow-next", "chevron-right", "Next follow target", 26.0, false, t, |s: &mut State| {
                     follow_cycle(&mut s.core, 1)
                 }))
                 .child(icon_btn("cam-follow-clear", "xmark", "Clear", false, t, |s: &mut State| {

@@ -924,11 +924,11 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
             );
         }
     } else {
-        panel = panel.child(
-            text("Enter 3D to list the figure's joints.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        panel = panel.child(design::empty_state(
+            "cube",
+            "Enter 3D to list the figure's joints.",
+            t,
+        ));
     }
 
     // Selected-joint position readout (Phase F): the
@@ -1155,11 +1155,11 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
     );
     let figures = core.fig3_library_list();
     if figures.is_empty() {
-        panel = panel.child(
-            text("No saved 3D figures.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        panel = panel.child(design::empty_state(
+            "cube",
+            "No saved 3D figures.",
+            t,
+        ));
     }
     for (i, name) in figures.iter().enumerate() {
         let load_name = name.clone();
@@ -1212,11 +1212,11 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
     );
     let poses = fig3d::scan_pose_library();
     if poses.is_empty() {
-        panel = panel.child(
-            text("No saved 3D poses.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        panel = panel.child(design::empty_state(
+            "cube",
+            "No saved 3D poses.",
+            t,
+        ));
     }
     for (i, name) in poses.iter().enumerate() {
         let pose_name = name.clone();

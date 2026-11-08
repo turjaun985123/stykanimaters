@@ -568,6 +568,7 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                         .child(icon_only_btn(
                             &format!("fig-lock-{fi}"),
                             if r.locked { "lock" } else { "lock-open" },
+                            if r.locked { "Unlock figure" } else { "Lock figure" },
                             26.0, r.locked,
                             t,
                             move |s: &mut State| s.core.toggle_figure_lock(fi),
@@ -605,6 +606,7 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                         .child(icon_only_btn(
                             &format!("fig-up-{fi}"),
                             "chevron-up",
+                            "Move up",
                             26.0, false,
                             t,
                             move |s: &mut State| move_row(&mut s.core, fi, 1),
@@ -612,6 +614,7 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                         .child(icon_only_btn(
                             &format!("fig-dn-{fi}"),
                             "chevron-down",
+                            "Move down",
                             26.0, false,
                             t,
                             move |s: &mut State| move_row(&mut s.core, fi, -1),
@@ -627,6 +630,7 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                         .child(icon_only_btn(
                             &format!("fig-eye-{fi}"),
                             if r.hidden { "eye-slash" } else { "eye" },
+                            if r.hidden { "Show figure" } else { "Hide figure" },
                             26.0, r.hidden,
                             t,
                             // The old listener selected the figure first:
@@ -639,6 +643,7 @@ fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
                         .child(icon_only_btn(
                             &format!("fig-del-{fi}"),
                             "trash-can",
+                            "Delete figure",
                             26.0, false,
                             t,
                             move |s: &mut State| delete_row(&mut s.core, fi),

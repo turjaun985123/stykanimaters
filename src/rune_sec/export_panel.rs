@@ -1541,11 +1541,11 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         .key("xc-history");
     let history = recent_exports_cached();
     if history.is_empty() {
-        recent = recent.child(
-            text("No exports yet")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        recent = recent.child(design::empty_state(
+            "clock",
+            "No exports yet",
+            t,
+        ));
     } else {
         let now = SystemTime::now();
         for r in &history {

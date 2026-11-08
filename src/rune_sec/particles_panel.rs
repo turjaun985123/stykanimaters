@@ -593,6 +593,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
                 .child(icon_only_btn(
                     "particles-kind-prev",
                     "chevron-left",
+                    "Previous kind",
                     26.0,
                     false,
                     t,
@@ -602,6 +603,7 @@ fn detail_block(s: &State, t: &Theme) -> El {
                 .child(icon_only_btn(
                     "particles-kind-next",
                     "chevron-right",
+                    "Next kind",
                     26.0,
                     false,
                     t,

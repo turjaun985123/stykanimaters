@@ -1289,10 +1289,10 @@ pub fn nudge_row(s: &State, t: &Theme) -> El {
                 .child(btn("fx-nudge-l10", "-10", false, t, |s| {
                     nudge_start(s, -10)
                 }))
-                .child(icon_only_btn("fx-nudge-l", "chevron-left", 26.0, false, t, |s| {
+                .child(icon_only_btn("fx-nudge-l", "chevron-left", "Nudge earlier", 26.0, false, t, |s| {
                     nudge_start(s, -1)
                 }))
-                .child(icon_only_btn("fx-nudge-r", "chevron-right", 26.0, false, t, |s| {
+                .child(icon_only_btn("fx-nudge-r", "chevron-right", "Nudge later", 26.0, false, t, |s| {
                     nudge_start(s, 1)
                 }))
                 .child(btn("fx-nudge-r10", "+10", false, t, |s| {
@@ -1386,7 +1386,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 )
-                .child(icon_only_btn("fx-kind-prev", "chevron-left", 26.0, false, t, |s| {
+                .child(icon_only_btn("fx-kind-prev", "chevron-left", "Previous kind", 26.0, false, t, |s| {
                     cycle_selected_kind(s, -1)
                 }))
                 .child(
@@ -1394,7 +1394,7 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                         .font(type_::BODY)
                         .color(t.text),
                 )
-                .child(icon_only_btn("fx-kind-next", "chevron-right", 26.0, false, t, |s| {
+                .child(icon_only_btn("fx-kind-next", "chevron-right", "Next kind", 26.0, false, t, |s| {
                     cycle_selected_kind(s, 1)
                 })),
         )
@@ -1457,10 +1457,10 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                     nudge_start(s, 1)
                 }))
                 .child(el().grow(1.0))
-                .child(icon_only_btn(&format!("fx-dup-{i}"), "copy", 26.0, false, t, |s| {
+                .child(icon_only_btn(&format!("fx-dup-{i}"), "copy", "Duplicate clip", 26.0, false, t, |s| {
                     duplicate_selected(s)
                 }))
-                .child(icon_only_btn(&format!("fx-del-{i}"), "trash-can", 26.0, false, t, |s| {
+                .child(icon_only_btn(&format!("fx-del-{i}"), "trash-can", "Delete clip", 26.0, false, t, |s| {
                     delete_selected(s)
                 })),
         )

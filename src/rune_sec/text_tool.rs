@@ -1053,11 +1053,11 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
     let mut texts_list = col().key("text-instances").gap(2.0);
     texts_list = texts_list.child(design::section_label("Existing texts", t));
     if instances.is_empty() {
-        texts_list = texts_list.child(
-            text("No free-standing texts.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        texts_list = texts_list.child(design::empty_state(
+            "font",
+            "No free-standing texts.",
+            t,
+        ));
     } else {
         for r in &instances {
             let i = r.index;
@@ -1191,11 +1191,11 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
 
     let mut list = col().key("text-list").gap(2.0);
     if rows.is_empty() {
-        list = list.child(
-            text("No text segments on this figure.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        list = list.child(design::empty_state(
+            "font",
+            "No text segments on this figure.",
+            t,
+        ));
     } else {
         for r in &rows {
             let selected = core.selected_node == Some(r.node);

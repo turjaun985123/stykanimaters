@@ -1087,6 +1087,7 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
             clip_row = clip_row.child(icon_only_btn(
                 &format!("audio-del-{i}"),
                 "trash-can",
+                "Delete clip",
                 26.0, false,
                 t,
                 move |s| delete_row_clip(s, i),

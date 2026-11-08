@@ -182,6 +182,37 @@
 //! muted or not. [`clip_is_muted`] is the one read of
 //! the flag both paths share.
 //!
+//! ## Clip health caption (UI mission Wave 6-D)
+//!
+//! Wave 4 gave the audio panel's clip rows health
+//! badges (audit D2): a clip whose file is missing, not
+//! a WAV, or unreadable no longer renders identically
+//! to a healthy silent clip THERE. The strip kept the
+//! old behaviour one level down: a selected clip in any
+//! of those states cannot decode, so its peaks come
+//! back empty, [`waveform_mode`] falls back to Project,
+//! and the strip showed the last clip (or a bare centre
+//! line) with nothing saying the SELECTED clip is the
+//! broken one. [`waveform_el_state`] now closes that:
+//! in project mode with a valid selection, the selected
+//! clip is run through the panel's own probe
+//! ([`crate::rune_sec::audio_panel::probe_clip`], served
+//! from the panel state's shared cache, so the decoder
+//! still runs at most once per file change) and a
+//! non-healthy result puts a caption under the strip —
+//! [`clip_health_caption`]: "Clip {n} · missing file" /
+//! "unsupported format" / "unreadable file", the panel's
+//! [`crate::rune_sec::audio_panel::health_word`]
+//! vocabulary — in the warning ink the panel's badge
+//! uses ([`crate::rune_sec::app_theme::warning_on`]).
+//! The caption takes the clip-mode caption's slot (same
+//! `waveform-caption` key, same reserved
+//! [`CAPTION_STRIP_H`]), so the strip's footprint is
+//! unchanged; a healthy selected clip, a stale
+//! selection and no selection all build exactly the
+//! tree they built before — no caption, no geometry
+//! change.
+//!
 //! ## Theme wiring (UI mission, Wave 2 — s02 §3.1, s14 D7)
 //!
 //! Until this section the strip was the shell's one
@@ -214,6 +245,7 @@ use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::AudioClip;
 
 use crate::rune_sec::app_theme;
+use crate::rune_sec::audio_panel::{health_word, probe_clip, ClipHealth};
 use crate::State;
 
 /// Height the caption row takes under the strip in
@@ -623,6 +655,22 @@ pub fn waveform_caption(mode: WaveformMode, muted: bool) -> Option<String> {
         WaveformMode::Clip(i) => Some(clip_caption(i, muted)),
         WaveformMode::Project => None,
     }
+}
+
+/// The health caption for the SELECTED clip (Wave 6-D;
+/// see the module docs): `"Clip {n} · {health}"` with
+/// the audio panel's own health vocabulary
+/// ([`health_word`] — "missing file" / "unsupported
+/// format" / "unreadable file") and its 1-based clip
+/// numbering, or `None` for a healthy clip — a healthy
+/// selection grows no health caption, exactly as a
+/// healthy row grows no badge in the panel. The caller
+/// (the builder's project-mode tail) only reaches this
+/// with a valid selection whose peaks would not decode;
+/// the health itself comes from the panel's cached
+/// probe ([`probe_clip`]), never a second decoder.
+pub fn clip_health_caption(index: usize, health: ClipHealth) -> Option<String> {
+    health_word(health).map(|word| format!("Clip {} · {word}", index + 1))
 }
 
 /// Display columns for a strip `w` points wide: one column
@@ -1110,6 +1158,16 @@ fn waveform_seek(s: &mut State, d: &Drag) {
 /// docs' "Theme wiring" section) instead of file-local
 /// hex constants. The element tree, geometry and
 /// gesture are exactly what they were.
+/// UI mission Wave 6-D adds one project-mode branch:
+/// a selected clip the panel's probe finds non-healthy
+/// (missing / unsupported / unreadable — the states
+/// whose peaks cannot decode, hence the project
+/// fallback) returns the strip in a column with a
+/// warning-ink health caption in the caption slot
+/// (see the module docs' "Clip health caption").
+/// Every other input — healthy selection, stale
+/// selection, no selection — returns exactly the tree
+/// it returned before.
 pub fn waveform_el_state(s: &State, el_size: [f32; 2], t: &Theme) -> El {
     let clip_count = s.core.project.audio.len();
     let selected_peaks: Vec<f32> = match s.audio_panel.selected {
@@ -1147,6 +1205,40 @@ pub fn waveform_el_state(s: &State, el_size: [f32; 2], t: &Theme) -> El {
                     .font(type_::LABEL)
                     .color(t.text_secondary),
             );
+    }
+    // Wave 6-D (see the module docs' "Clip health
+    // caption"): project mode with a valid selection
+    // whose file the panel's probe finds non-healthy
+    // gets the health caption in the caption slot. The
+    // probe is the panel's own, served from the panel
+    // state's cache — no second decode — and a healthy
+    // probe falls through to the bare canvas below, so
+    // the healthy / stale / unselected trees (and their
+    // geometry) are byte-identical to before.
+    if let Some(i) = s.audio_panel.selected.filter(|&i| i < clip_count) {
+        let probe = probe_clip(&s.audio_panel.probe_cache, &s.core.project.audio[i]);
+        if let Some(note) = clip_health_caption(i, probe.health) {
+            let canvas_h = (el_size[1] - CAPTION_STRIP_H).max(0.0);
+            return col()
+                .gap(2.0)
+                .child(
+                    canvas(waveform_shape_project(
+                        &s.core,
+                        s.audio_panel.selected,
+                        [el_size[0], canvas_h],
+                        t,
+                    ))
+                    .key("waveform")
+                    .h(canvas_h)
+                    .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| waveform_seek(s, d)),
+                )
+                .child(
+                    text(note)
+                        .key("waveform-caption")
+                        .font(type_::LABEL)
+                        .color(app_theme::warning_on(t)),
+                );
+        }
     }
     canvas(waveform_shape_project(&s.core, s.audio_panel.selected, el_size, t))
         .key("waveform")
@@ -1452,6 +1544,120 @@ mod tests {
         );
         // Project mode grows no caption element at all.
         assert_eq!(waveform_caption(WaveformMode::Project, false), None);
+    }
+
+    // ---- Clip health caption (Wave 6-D) ----
+
+    #[test]
+    fn clip_health_caption_names_the_three_failure_states() {
+        // The panel's vocabulary, 1-based numbering.
+        assert_eq!(
+            clip_health_caption(0, ClipHealth::Missing).as_deref(),
+            Some("Clip 1 · missing file")
+        );
+        assert_eq!(
+            clip_health_caption(2, ClipHealth::Unsupported).as_deref(),
+            Some("Clip 3 · unsupported format")
+        );
+        assert_eq!(
+            clip_health_caption(1, ClipHealth::Unreadable).as_deref(),
+            Some("Clip 2 · unreadable file")
+        );
+        // A healthy clip grows no health caption.
+        assert_eq!(clip_health_caption(0, ClipHealth::Healthy), None);
+    }
+
+    #[test]
+    fn waveform_builds_with_a_missing_selected_clip() {
+        // The health-caption branch end to end: the
+        // selected clip's file does not exist, so its
+        // peaks cannot decode, the mode falls back to
+        // Project, and the builder takes the caption
+        // column instead of the bare canvas.
+        let path = temp_wav_path("health-missing");
+        let _ = std::fs::remove_file(&path);
+        let mut s = crate::init();
+        s.core.project.audio.push(AudioClip {
+            path: path.to_string_lossy().into_owned(),
+            start_frame: 0,
+            gain: 1.0,
+            muted: false,
+        });
+        s.audio_panel.selected = Some(0);
+        let t = rune::tok::theme(true);
+        let _captioned = waveform_el_state(&s, [308.0, 56.0], &t);
+        // The probe the builder consulted agrees.
+        let probe = probe_clip(&s.audio_panel.probe_cache, &s.core.project.audio[0]);
+        assert_eq!(probe.health, ClipHealth::Missing);
+    }
+
+    #[test]
+    fn waveform_builds_with_an_unsupported_selected_clip() {
+        // A real file with a non-WAV extension: the
+        // probe calls it Unsupported without decoding.
+        let path = std::env::temp_dir().join(format!(
+            "stykanimate-rune-waveform-{}-health.mp3",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"not a wav, whatever the bytes").unwrap();
+        let mut s = crate::init();
+        s.core.project.audio.push(AudioClip {
+            path: path.to_string_lossy().into_owned(),
+            start_frame: 0,
+            gain: 1.0,
+            muted: false,
+        });
+        s.audio_panel.selected = Some(0);
+        let t = rune::tok::theme(true);
+        let _captioned = waveform_el_state(&s, [308.0, 56.0], &t);
+        let probe = probe_clip(&s.audio_panel.probe_cache, &s.core.project.audio[0]);
+        assert_eq!(probe.health, ClipHealth::Unsupported);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn waveform_builds_with_an_unreadable_selected_clip() {
+        // A `.wav` path whose bytes the decoder
+        // rejects: Unreadable, same caption branch.
+        let path = temp_wav_path("health-unreadable");
+        std::fs::write(&path, b"this is not a wav file at all").unwrap();
+        let mut s = crate::init();
+        s.core.project.audio.push(AudioClip {
+            path: path.to_string_lossy().into_owned(),
+            start_frame: 0,
+            gain: 1.0,
+            muted: false,
+        });
+        s.audio_panel.selected = Some(0);
+        let t = rune::tok::theme(true);
+        let _captioned = waveform_el_state(&s, [308.0, 56.0], &t);
+        let probe = probe_clip(&s.audio_panel.probe_cache, &s.core.project.audio[0]);
+        assert_eq!(probe.health, ClipHealth::Unreadable);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn waveform_builds_with_a_healthy_selected_clip() {
+        // The guard on the health branch: a healthy
+        // selected clip probes Healthy, so no health
+        // caption is produced and the builder takes the
+        // pre-existing clip-mode tree.
+        let path = temp_wav_path("health-healthy");
+        std::fs::write(&path, write_wav(&sine_wav())).unwrap();
+        let mut s = crate::init();
+        s.core.project.audio.push(AudioClip {
+            path: path.to_string_lossy().into_owned(),
+            start_frame: 0,
+            gain: 1.0,
+            muted: false,
+        });
+        s.audio_panel.selected = Some(0);
+        let probe = probe_clip(&s.audio_panel.probe_cache, &s.core.project.audio[0]);
+        assert_eq!(probe.health, ClipHealth::Healthy);
+        assert_eq!(clip_health_caption(0, probe.health), None);
+        let t = rune::tok::theme(true);
+        let _clip_mode = waveform_el_state(&s, [308.0, 56.0], &t);
+        let _ = std::fs::remove_file(&path);
     }
 
     // ---- Muted clips (Phase M, section 16) ----

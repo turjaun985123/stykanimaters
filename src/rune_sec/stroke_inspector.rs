@@ -1493,6 +1493,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .child(icon_only_btn(
                 "stroke-sel-prev",
                 "chevron-left",
+                "Previous stroke",
                 26.0, false,
                 t,
                 |s| {
@@ -1502,6 +1503,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
             .child(icon_only_btn(
                 "stroke-sel-next",
                 "chevron-right",
+                "Next stroke",
                 26.0, false,
                 t,
                 |s| {
@@ -1518,7 +1520,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                     goto_selected_stroke_frame(s);
                 },
             ))
-            .child(icon_only_btn("stroke-sel-clear", "xmark", 26.0, false, t, |s| {
+            .child(icon_only_btn("stroke-sel-clear", "xmark", "Clear selection", 26.0, false, t, |s| {
                 clear_stroke_selection(s);
             })),
     );
@@ -1556,6 +1558,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .child(icon_only_btn(
                     "stroke-width-dn",
                     "chevron-down",
+                    "Decrease width",
                     26.0, false,
                     t,
                     |s| {
@@ -1567,6 +1570,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .child(icon_only_btn(
                     "stroke-width-up",
                     "chevron-up",
+                    "Increase width",
                     26.0, false,
                     t,
                     |s| {
@@ -1600,6 +1604,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .child(icon_only_btn(
                     "stroke-opacity-dn",
                     "chevron-down",
+                    "Decrease opacity",
                     26.0, false,
                     t,
                     |s| {
@@ -1611,6 +1616,7 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
                 .child(icon_only_btn(
                     "stroke-opacity-up",
                     "chevron-up",
+                    "Increase opacity",
                     26.0, false,
                     t,
                     |s| {
@@ -1739,11 +1745,11 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
     panel = panel.child(header);
 
     if rows.is_empty() {
-        panel = panel.child(
-            text("No strokes on this frame.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        panel = panel.child(design::empty_state(
+            "paintbrush",
+            "No strokes on this frame.",
+            t,
+        ));
     } else {
         for srow in rows {
             let idx = srow.project_index;

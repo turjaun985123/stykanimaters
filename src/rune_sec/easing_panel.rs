@@ -405,20 +405,39 @@ pub fn easing_panel(s: &State, t: &Theme) -> El {
     // button rows: those presets ARE state (the current
     // easing highlights), a different control.
     panel = panel.child(design::section_label("Graph keys — selected figure", t));
-    for p in TANGENT_PRESETS {
-        panel = panel.child(design::tangent_preset_chip(
-            match p {
-                TangentPreset::Smooth => "ease-graph-smooth",
-                TangentPreset::EaseIn => "ease-graph-ease-in",
-                TangentPreset::EaseOut => "ease-graph-ease-out",
-                TangentPreset::EaseInOut => "ease-graph-ease-in-out",
-                TangentPreset::Linear => "ease-graph-linear",
-            },
-            p,
-            tangent_label(p),
-            false,
+    // UI mission Wave 6 (audit S12-16): with no graph
+    // channels on the selected figure the five chips
+    // could only write a refusal ("No graph channels
+    // for figure N."), so the group shows the kit
+    // empty state instead — the same predicate
+    // `apply_graph_ease_preset` itself no-ops on.
+    let fig_has_channels = core
+        .project
+        .channels
+        .iter()
+        .any(|ch| ch.figure == core.selected_figure);
+    if fig_has_channels {
+        for p in TANGENT_PRESETS {
+            panel = panel.child(design::tangent_preset_chip(
+                match p {
+                    TangentPreset::Smooth => "ease-graph-smooth",
+                    TangentPreset::EaseIn => "ease-graph-ease-in",
+                    TangentPreset::EaseOut => "ease-graph-ease-out",
+                    TangentPreset::EaseInOut => "ease-graph-ease-in-out",
+                    TangentPreset::Linear => "ease-graph-linear",
+                },
+                p,
+                tangent_label(p),
+                false,
+                t,
+                move |s| s.core.apply_graph_ease_preset(p),
+            ));
+        }
+    } else {
+        panel = panel.child(design::empty_state(
+            "chart-line",
+            "No graph channels on this figure yet — Key angle starts one.",
             t,
-            move |s| s.core.apply_graph_ease_preset(p),
         ));
     }
 

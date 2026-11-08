@@ -343,8 +343,11 @@
 //! its own drawn curve) and the stats / value lines
 //! are unchanged: canvas work and readouts, not
 //! chrome. The "No graph keys on this channel yet"
-//! line stays a muted LABEL line — per-channel
-//! guidance under the canvas, not a list empty state.
+//! line is also the kit [`design::empty_state`] under
+//! the same glyph (UI mission Wave 6, audit S12-16 —
+//! the mission §5G / Phase O charter rule 7 supersede
+//! the earlier Phase N ruling that kept it a bare
+//! muted LABEL line as per-channel guidance).
 //!
 //! ## State the shell must provide
 //!
@@ -1938,11 +1941,11 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         );
     }
     if ch.is_none() {
-        panel = panel.child(
-            text("No graph keys on this channel yet — select a joint on the stage, then Key angle.")
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
+        panel = panel.child(design::empty_state(
+            "chart-line",
+            "No graph keys on this channel yet — select a joint on the stage, then Key angle.",
+            t,
+        ));
     }
     panel
         .child(interp_row)

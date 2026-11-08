@@ -665,6 +665,7 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
                 icon_only_btn(
                     &format!("layer-down-{fi}"),
                     "chevron-down",
+                    "Move down",
                     26.0, false,
                     t,
                     move |s: &mut State| move_layer(&mut s.core, fi, -1),
@@ -673,6 +674,7 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
                 icon_only_btn_inert(
                     &format!("layer-down-{fi}"),
                     "chevron-down",
+                    "Move down",
                     26.0,
                     t,
                 )
@@ -681,6 +683,7 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
                 icon_only_btn(
                     &format!("layer-up-{fi}"),
                     "chevron-up",
+                    "Move up",
                     26.0, false,
                     t,
                     move |s: &mut State| move_layer(&mut s.core, fi, 1),
@@ -689,6 +692,7 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
                 icon_only_btn_inert(
                     &format!("layer-up-{fi}"),
                     "chevron-up",
+                    "Move up",
                     26.0,
                     t,
                 )

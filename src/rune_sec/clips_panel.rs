@@ -734,6 +734,7 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
         .child(icon_only_btn(
             &format!("clip-up-{index}"),
             "chevron-up",
+            "Move up",
             26.0,
             false,
             t,
@@ -744,6 +745,7 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
         .child(icon_only_btn(
             &format!("clip-dn-{index}"),
             "chevron-down",
+            "Move down",
             26.0,
             false,
             t,

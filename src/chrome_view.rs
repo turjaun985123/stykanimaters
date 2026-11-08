@@ -32,6 +32,16 @@
 //! family's one danger member, on the deepened reds P12
 //! measured for it. `btn` also gained Rune's `press_scale`
 //! press feedback (P15 M1).
+//!
+//! UI mission wave 6: every member of the family wires its
+//! label as the element's help text (Rune's native
+//! tooltip), under the convention documented in
+//! `rune_sec::icon_btn`'s module docs — a builder that
+//! receives a human label passes it to the help setter, so
+//! call sites inherit the tooltip by construction. This
+//! file had to move with icon_btn.rs: that file's
+//! unknown-icon fallbacks delegate to `btn` / `danger_btn`
+//! here, and the tooltip must survive the degrade.
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, Color, El};
@@ -61,6 +71,7 @@ pub fn btn(
     let accent = tok::accent(0, true);
     el()
         .key(key)
+        .help(label)
         .px(10.0)
         .py(5.0)
         .radius(6.0)
@@ -88,6 +99,7 @@ pub fn btn(
 pub fn btn_inert(key: &str, label: &str, t: &Theme) -> El {
     el()
         .key(key)
+        .help(label)
         .px(10.0)
         .py(5.0)
         .radius(6.0)
@@ -126,6 +138,7 @@ pub fn btn_muted_live(
     }
     el()
         .key(key)
+        .help(label)
         .px(10.0)
         .py(5.0)
         .radius(6.0)
@@ -177,6 +190,7 @@ pub fn danger_btn(
 ) -> El {
     el()
         .key(key)
+        .help(label)
         .px(10.0)
         .py(5.0)
         .radius(6.0)

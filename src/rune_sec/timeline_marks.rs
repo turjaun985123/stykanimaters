@@ -142,6 +142,50 @@
 //!   no snapshot to restore; a selection is view state, and
 //!   the next press starts a fresh one.
 //!
+//! ## Press feedback (UI mission Wave 6-D, audit S17 D1/I-2)
+//!
+//! The frame chip is the most-pressed control in the shell
+//! and, alone among the kit's pressables, had no press
+//! state: it defined fill + hover and stopped. The kit's
+//! own treatment — a `.press(t.press)` overlay and
+//! `.press_scale(PRESS_SCALE)` — cannot fire on a chip,
+//! and this is proven from the pinned Rune source, not
+//! assumed: the press and press-scale tracks engage only
+//! on the element that **captured** the pointer
+//! (`runtime/input/hover.rs`: `captured == Some(n.path)`),
+//! capture goes to the press's primary target
+//! (`runtime/input/pointer.rs`), and a node is a primary
+//! target only if it takes primary input
+//! (`runtime/input/hit.rs`) — a handler, a textbox, a
+//! focusable. The chips carry no handlers by design (the
+//! gesture above owns the pointer), so the row captures
+//! and a `.press()` chained on a chip would be dead
+//! paint. Giving a chip its own `on_press`/`on_drag` to
+//! make it capture would take the gesture off the row
+//! and break the coordinate basis the drag reads.
+//!
+//! What the gesture code itself can honestly support is
+//! what happens here: [`timeline_drag`] records the chip
+//! under the held pointer in a `thread_local`
+//! ([`pressed_chip`] — the shell's pattern for view state
+//! that is not project state, cf. the stage's view nav),
+//! and the chip builder bakes the kit's press overlay
+//! into that chip's fill with [`pressed_fill`] — the same
+//! `t.press` token, composited source-over exactly as
+//! Rune paints `.press()` at full strength. While the
+//! chip is held its hover overlay is not chained: Rune
+//! paints press **over** hover, and the chip's hover is a
+//! baked colour (for the current chip, the opaque
+//! accent), which would cover the tint entirely; dropping
+//! it for the duration of the hold is the static
+//! equivalent of that paint order. The record is written
+//! before the handler can bail out and cleared on **Up**
+//! wherever the release lands, so no stale press paint
+//! can outlive the gesture. `press_scale` stays unadopted
+//! for the reason above — it is the same capture-bound
+//! track — and is recorded here as a known limit, not
+//! silently skipped.
+//!
 //! ## Loop edge dragging
 //!
 //! When a loop range exists, a press within [`EDGE_PX`]
@@ -314,6 +358,8 @@
 //! constant, handler, label and key is unchanged; the
 //! card is always returned, even when it holds the
 //! scroll row alone.
+
+use std::cell::Cell;
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, Drag, El, LineCap, Phase, Shape, Tx};
@@ -784,6 +830,60 @@ fn ruler_drag(s: &mut State, d: &mut Drag) {
     }
 }
 
+thread_local! {
+    /// The chip under the held pointer while a chips-row
+    /// drag is in flight (Wave 6-D press feedback — see
+    /// the module docs' "Press feedback" section for why
+    /// this record exists and why the kit's `.press()` /
+    /// `press_scale` cannot do the job). Written by
+    /// [`timeline_drag`] on every phase, read by the chip
+    /// builder in [`timeline_marks`]; `None` whenever no
+    /// chips-row gesture is held. A `thread_local` because
+    /// it is pure view state with the gesture's own
+    /// lifetime — the shell's pattern for such state (cf.
+    /// the stage's view nav in `stage_view`).
+    static PRESSED_CHIP: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// The chip currently showing press feedback, if a
+/// chips-row drag is being held over one.
+pub fn pressed_chip() -> Option<usize> {
+    PRESSED_CHIP.with(|c| c.get())
+}
+
+fn set_pressed_chip(frame: Option<usize>) {
+    PRESSED_CHIP.with(|c| c.set(frame));
+}
+
+/// The press record one drag phase leaves behind: a
+/// release clears it wherever it lands (even where
+/// `frame` names no chip); a press or a move points it
+/// at the chip under the pointer (or clears it when the
+/// position names none). Pure, so the bookkeeping the
+/// handler performs is testable without a `Drag` (which
+/// only the runtime can construct).
+pub fn press_target(phase: Phase, frame: Option<usize>) -> Option<usize> {
+    match phase {
+        Phase::Up => None,
+        Phase::Down | Phase::Move => frame,
+    }
+}
+
+/// A fill with the kit's press overlay baked in: Rune
+/// paints `.press(c)` as `c` composited source-over the
+/// element's fill at full strength while the element is
+/// captured, which for an opaque fill is exactly the
+/// fill mixed toward `press` by `press`'s own alpha.
+/// The fill's alpha is restored after the mix (`mix`
+/// lerps alpha too; source-over onto an opaque fill
+/// keeps it opaque). This is the composite
+/// [`timeline_marks`] paints on the held chip, since
+/// the chip itself can never be the captured element
+/// (see the module docs).
+pub fn pressed_fill(fill: Color, press: Color) -> Color {
+    fill.mix(press, press.a).alpha(fill.a)
+}
+
 /// The row's drag gesture (see the module docs for the exact
 /// semantics). `d.data` records which gesture the press
 /// started: the selection anchor across phases as a fallback
@@ -791,7 +891,14 @@ fn ruler_drag(s: &mut State, d: &mut Drag) {
 /// edge sentinel for an edge drag.
 fn timeline_drag(s: &mut State, d: &mut Drag) {
     let n = s.core.frame_count();
-    let Some(f) = frame_at_x(d.x, CHIP_W, CHIP_GAP, n) else {
+    // Wave 6-D press feedback: record the chip under the
+    // held pointer before anything can bail out, so a
+    // release clears the record even when it lands where
+    // `frame_at_x` names no chip (the early return below
+    // would otherwise strand the press paint).
+    let frame = frame_at_x(d.x, CHIP_W, CHIP_GAP, n);
+    set_pressed_chip(press_target(d.phase, frame));
+    let Some(f) = frame else {
         return;
     };
     match d.phase {
@@ -910,18 +1017,31 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
         } else {
             t.control_off
         };
+        // Wave 6-D (audit S17 D1/I-2): the held chip paints
+        // the kit's press treatment — the `t.press` overlay
+        // baked into its fill by `pressed_fill`, the closest
+        // honest equivalent of `.press(t.press)` for an
+        // element that can never capture the pointer (see
+        // the module docs' "Press feedback" section). While
+        // held, the hover overlay is not chained: Rune
+        // paints press over hover, and this chip's hover is
+        // a baked colour (the opaque accent on the current
+        // chip) that would cover the tint outright.
+        let held = pressed_chip() == Some(i);
+        let fill = if held { pressed_fill(fill, t.press) } else { fill };
         let mut chip = el()
             .key(format!("frame-{}", i + 1))
             .size(CHIP_W, CHIP_H)
             .radius(6.0)
-            .fill(fill)
-            .hover(if current { accent } else { t.control_track })
-            .center()
-            .child(
-                text(chip_label(i, duration))
-                    .font(type_::LABEL)
-                    .color(if current { Color::WHITE } else { t.text }),
-            );
+            .fill(fill);
+        if !held {
+            chip = chip.hover(if current { accent } else { t.control_track });
+        }
+        chip = chip.center().child(
+            text(chip_label(i, duration))
+                .font(type_::LABEL)
+                .color(if current { Color::WHITE } else { t.text }),
+        );
         if in_sel(s.frame_ops.range_sel, i) {
             let ink = if current { Color::WHITE } else { accent };
             chip = chip.outline(2.0, 1.0, ink);
@@ -1407,6 +1527,59 @@ mod tests {
         assert_eq!(chip_label(11, 8.0), "12 ×8");
         assert_eq!(duration_suffix(2.5), Some("×2.5".to_string()));
         assert_eq!(duration_suffix(0.75), Some("×0.75".to_string()));
+    }
+
+    // ---- press feedback (Wave 6-D) ----
+
+    #[test]
+    fn press_target_tracks_the_pointer_and_clears_on_release() {
+        assert_eq!(press_target(Phase::Down, Some(2)), Some(2));
+        assert_eq!(press_target(Phase::Move, Some(0)), Some(0));
+        assert_eq!(press_target(Phase::Move, Some(4)), Some(4));
+        // A release clears wherever it lands — over a
+        // chip or over nothing at all.
+        assert_eq!(press_target(Phase::Up, Some(2)), None);
+        assert_eq!(press_target(Phase::Up, None), None);
+        // A press position that names no chip holds
+        // nothing.
+        assert_eq!(press_target(Phase::Down, None), None);
+        assert_eq!(press_target(Phase::Move, None), None);
+    }
+
+    #[test]
+    fn pressed_fill_is_the_press_overlay_composite() {
+        let fill = Color { r: 0.2, g: 0.4, b: 0.6, a: 1.0 };
+        // The dark theme's press token: white at 0.03.
+        let press = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.03 };
+        let out = pressed_fill(fill, press);
+        // Source-over at full strength: each channel
+        // moves 3% of the way to white; the fill's alpha
+        // is kept (source-over onto an opaque fill stays
+        // opaque — `mix` alone would lerp it to 0.97).
+        assert!((out.r - 0.224).abs() < 1e-6, "r: {}", out.r);
+        assert!((out.g - 0.418).abs() < 1e-6, "g: {}", out.g);
+        assert!((out.b - 0.612).abs() < 1e-6, "b: {}", out.b);
+        assert_eq!(out.a, 1.0);
+        // A transparent press colour changes nothing.
+        assert_eq!(pressed_fill(fill, Color::TRANSPARENT), fill);
+    }
+
+    #[test]
+    fn timeline_builds_with_a_chip_held() {
+        // Builder smoke over the held branch (the gesture
+        // itself needs a runtime-made `Drag`; its
+        // bookkeeping is the pure `press_target` above):
+        // with the press record set the timeline still
+        // builds, and the record is cleared afterwards so
+        // no other test on this thread inherits it.
+        let state = demo_state();
+        let t = rune::tok::theme(true);
+        set_pressed_chip(Some(0));
+        assert_eq!(pressed_chip(), Some(0));
+        let _held = timeline_marks(&state, &t);
+        set_pressed_chip(None);
+        assert_eq!(pressed_chip(), None);
+        let _resting = timeline_marks(&state, &t);
     }
 
     // ---- in_loop / in_sel ----

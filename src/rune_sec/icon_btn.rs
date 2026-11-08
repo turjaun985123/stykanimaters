@@ -34,9 +34,10 @@
 //! [`use_icon`] first and, when the name is unknown, returns
 //! the plain `btn(key, label, active, t, on_press)` — same
 //! key, same label, same handler, just no glyph.
-//! [`icon_only_btn`] has no label to fall back to, so an
-//! unknown name yields the same square button with no glyph
-//! child: right size, right key, still pressable.
+//! [`icon_only_btn`] renders no text, so there is no text
+//! form to fall back to: an unknown name yields the same
+//! square button with no glyph child: right size, right
+//! key, still pressable (its label still rides as help).
 //!
 //! INERT VARIANTS (Phase I, section 11): some panels gate a
 //! button on state its op would no-op without — a pose
@@ -78,6 +79,49 @@
 //! icon size scale ([`ICON_SM`] / [`ICON_MD`] /
 //! [`ICON_LG`] / [`ICON_XL`]) the adoption waves
 //! converge direct `icon_el` call sites onto.
+//!
+//! TOOLTIP CONVENTION (UI mission wave 6, audit S17
+//! item I-1 / defect D2): Rune renders tooltips
+//! natively from an element's help text — no app-side
+//! wiring, and the text rides the `--tree` dump, so
+//! adoption is headlessly verifiable. The rule for
+//! this kit:
+//!
+//! * **A builder that receives a human label wires
+//!   that label as the element's help text.** Every
+//!   call site then inherits a tooltip by construction,
+//!   with no signature change and no geometry change
+//!   (help is metadata; Rune's layout never reads it).
+//!   In this file: [`icon_btn`], [`icon_btn_inert`],
+//!   [`chip_btn`], [`chip_btn_inert`] and
+//!   [`danger_icon_btn`]; the text family in
+//!   chrome_view.rs follows the same rule, so the
+//!   fallback branches that delegate to it inherit too.
+//! * **Icon-only controls MUST carry help** — a glyph
+//!   with no visible label is undiscoverable without
+//!   one. [`icon_only_btn`] and
+//!   [`icon_only_btn_inert`] therefore take a label
+//!   parameter (UI mission wave 6-A2, the builder
+//!   change audit S18-8 specifies): it is wired as
+//!   help text exactly like the labelled builders'
+//!   labels, and rendered nowhere — the square stays
+//!   icon-only on screen. The label is the CALL
+//!   SITE's word for the action, never derived from
+//!   the two strings the builders already had: the
+//!   key is an internal id (`fig-eye-0`), and the
+//!   icon name is a catalogue identifier
+//!   (`trash-can`, `arrow-rotate-left`) whose meaning
+//!   is state-dependent besides — the same `eye`
+//!   glyph means show on one row and hide on
+//!   another, so a state-dependent call site passes
+//!   the label for the state it is rendering (the
+//!   press performs the named action, the
+//!   audio-panel mute-toggle precedent).
+//! * Labelled controls SHOULD additionally carry
+//!   shortcut hints (`help_keys`) where a shortcut
+//!   exists — but a builder cannot know its call
+//!   site's shortcut, so that half of I-1 stays with
+//!   the call sites.
 
 use rune::tok::{self, type_, Theme};
 use rune::{el, row, text, Color, El};
@@ -247,11 +291,16 @@ pub fn icon_btn(
     on_press: impl Fn(&mut State) + 'static,
 ) -> El {
     if !use_icon(icon) {
+        // The fallback is chrome_view::btn, which wires
+        // the same label as its help text — the tooltip
+        // survives the degrade (see the module docs'
+        // tooltip convention).
         return btn(key, label, active, t, on_press);
     }
     let glyph = glyph_color(active, t);
     row()
         .key(key)
+        .help(label)
         .px(10.0)
         .py(5.0)
         .radius(6.0)
@@ -288,6 +337,7 @@ pub fn icon_btn_inert(key: &str, icon: &str, label: &str, t: &Theme) -> El {
     if !use_icon(icon) {
         return el()
             .key(key)
+            .help(label)
             .px(10.0)
             .py(5.0)
             .radius(6.0)
@@ -296,6 +346,7 @@ pub fn icon_btn_inert(key: &str, icon: &str, label: &str, t: &Theme) -> El {
     }
     row()
         .key(key)
+        .help(label)
         .px(10.0)
         .py(5.0)
         .radius(6.0)
@@ -312,11 +363,19 @@ pub fn icon_btn_inert(key: &str, icon: &str, label: &str, t: &Theme) -> El {
 /// would break the square contract — centring does the
 /// placement instead.
 ///
+/// TOOLTIP: `label` is wired as the element's help text
+/// and rendered nowhere (wave 6-A2, audit S18-8) — it is
+/// the call site's word for the action, and a
+/// state-dependent site passes the label for the state
+/// it is rendering. See the module docs' tooltip
+/// convention.
+///
 /// Unknown icon name → the same square with no glyph child
 /// (see the module docs' fallback rule).
 pub fn icon_only_btn(
     key: &str,
     icon: &str,
+    label: &str,
     size: f32,
     active: bool,
     t: &Theme,
@@ -324,6 +383,7 @@ pub fn icon_only_btn(
 ) -> El {
     let mut root = row()
         .key(key)
+        .help(label)
         .w(size)
         .h(size)
         .radius(6.0)
@@ -350,11 +410,17 @@ pub fn icon_only_btn(
 /// [`glyph_color_muted`], and NO press, hover or press-fill
 /// handler.
 ///
+/// TOOLTIP: `label` is wired as the element's help text
+/// and rendered nowhere, exactly as the live twin (see
+/// [`icon_only_btn`]) — an inert control is just as
+/// undiscoverable without a name.
+///
 /// Unknown icon name → the same square with no glyph
 /// child, exactly as [`icon_only_btn`] degrades.
-pub fn icon_only_btn_inert(key: &str, icon: &str, size: f32, t: &Theme) -> El {
+pub fn icon_only_btn_inert(key: &str, icon: &str, label: &str, size: f32, t: &Theme) -> El {
     let mut root = row()
         .key(key)
+        .help(label)
         .w(size)
         .h(size)
         .radius(6.0)
@@ -413,6 +479,7 @@ pub fn chip_btn(
     let ink = glyph_color(active, t);
     let mut root = row()
         .key(key)
+        .help(label)
         .px(6.0)
         .py(3.0)
         .radius(5.0)
@@ -456,6 +523,7 @@ pub fn chip_btn_inert(key: &str, icon: Option<&str>, label: &str, t: &Theme) -> 
     let ink = glyph_color_muted(t);
     let mut root = row()
         .key(key)
+        .help(label)
         .px(6.0)
         .py(3.0)
         .radius(5.0)
@@ -499,6 +567,9 @@ pub fn danger_icon_btn(
     on_press: impl Fn(&mut State) + 'static,
 ) -> El {
     if !use_icon(icon) {
+        // The fallback is chrome_view::danger_btn, which
+        // wires the same label as its help text — the
+        // tooltip survives the degrade.
         return danger_btn(key, label, t, on_press);
     }
     // See the doc comment: `active` is signature parity
@@ -506,6 +577,7 @@ pub fn danger_icon_btn(
     let _ = active;
     row()
         .key(key)
+        .help(label)
         .px(10.0)
         .py(5.0)
         .radius(6.0)
@@ -598,11 +670,11 @@ mod tests {
         let t = rune::tok::theme(true);
         let _ = icon_btn_inert("k-inert", "play", "Play", &t);
         let _ = icon_btn_inert("k-inert-fallback", "nope-not-real", "Play", &t);
-        let _ = icon_only_btn_inert("k-only-inert", "play", 26.0, &t);
-        let _ = icon_only_btn_inert("k-only-inert-empty", "nope-not-real", 26.0, &t);
+        let _ = icon_only_btn_inert("k-only-inert", "play", "Play", 26.0, &t);
+        let _ = icon_only_btn_inert("k-only-inert-empty", "nope-not-real", "Play", 26.0, &t);
         // A square smaller than the glyph caps the same way
         // the live square does.
-        let _ = icon_only_btn_inert("k-only-inert-small", "play", 10.0, &t);
+        let _ = icon_only_btn_inert("k-only-inert-small", "play", "Play", 10.0, &t);
     }
 
     #[test]
@@ -616,8 +688,8 @@ mod tests {
         let t = rune::tok::theme(true);
         let _ = icon_btn("k-icon", "play", "Play", false, &t, |_| {});
         let _ = icon_btn("k-fallback", "nope-not-real", "Play", true, &t, |_| {});
-        let _ = icon_only_btn("k-only", "play", 26.0, false, &t, |_| {});
-        let _ = icon_only_btn("k-only-empty", "nope-not-real", 26.0, true, &t, |_| {});
+        let _ = icon_only_btn("k-only", "play", "Play", 26.0, false, &t, |_| {});
+        let _ = icon_only_btn("k-only-empty", "nope-not-real", "Play", 26.0, true, &t, |_| {});
     }
 
     #[test]
@@ -707,6 +779,39 @@ mod tests {
         assert_eq!(ICON_LG, 16.0);
         assert_eq!(ICON_XL, 20.0);
         assert!(ICON_SM < ICON_MD && ICON_MD < ICON_LG && ICON_LG < ICON_XL);
+    }
+
+    #[test]
+    fn labelled_builders_construct_with_help_text() {
+        // UI mission wave 6: every label-receiving builder
+        // in this file wires its label as the element's
+        // help text (the module docs' tooltip convention).
+        // The help string itself is not readable back from
+        // an element in a bin-crate unit test, so — as with
+        // the construction tests above — these pin that
+        // wiring the call changes nothing constructible:
+        // both fallback branches, both themes' inputs, and
+        // an empty label (Rune's help setter maps an empty
+        // string to NO tooltip, so an unlabelled call site
+        // degrades to silence rather than an empty bubble).
+        let t = rune::tok::theme(true);
+        let _ = icon_btn("k-h1", "play", "Play", false, &t, |_| {});
+        let _ = icon_btn("k-h2", "nope-not-real", "Play", false, &t, |_| {});
+        let _ = icon_btn_inert("k-h3", "play", "Play", &t);
+        let _ = icon_btn_inert("k-h4", "nope-not-real", "Play", &t);
+        let _ = chip_btn("k-h5", Some("play"), "Play", false, &t, |_| {});
+        let _ = chip_btn("k-h6", None, "Round", false, &t, |_| {});
+        let _ = chip_btn_inert("k-h7", None, "Round", &t);
+        let _ = danger_icon_btn("k-h8", "trash-can", "Delete", false, &t, |_| {});
+        let _ = icon_btn("k-h9", "play", "", false, &t, |_| {});
+        let _ = chip_btn_inert("k-h10", None, "", &t);
+        // Wave 6-A2: the icon-only pair takes a label too
+        // (audit S18-8) — same construction-only pin, both
+        // fallback branches, plus an empty label.
+        let _ = icon_only_btn("k-h11", "play", "Play", 26.0, false, &t, |_| {});
+        let _ = icon_only_btn("k-h12", "nope-not-real", "Play", 26.0, false, &t, |_| {});
+        let _ = icon_only_btn_inert("k-h13", "play", "Play", 26.0, &t);
+        let _ = icon_only_btn_inert("k-h14", "play", "", 26.0, &t);
     }
 
     #[test]

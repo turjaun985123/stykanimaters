@@ -43,6 +43,12 @@
 //! with a 24 pt slide + fade on the SETTLE spring pair
 //! (p15 M3) over the existing last-second fade-out.
 //!
+//! Wave 6 (audit S18-11a) extends the classifier: the
+//! subject-first refusal grammar (`"cannot"`, `"already"`,
+//! `"at least"`, `" is empty"`) now also reads Warn, and
+//! the normalise sweep's benign `"No … needed …"` outcome
+//! is carved out of Warn into Info.
+//!
 //! Why hand-rolled instead of rune-kit's `Toast` /
 //! `ToastRegion` (read at `crates/rune-kit/src/toast.rs` in the
 //! pinned Rune tree):
@@ -180,28 +186,63 @@ impl Severity {
 /// 1. **Error** — contains `" failed"`: the engine's
 ///    failure shape (`"Audio fade failed: no clip 1."`,
 ///    `"Audio compress failed: output would overwrite
-///    the source."`, the export failures).
-/// 2. **Warn** — starts with `"No "` or `"Nothing "`: a
+///    the source."`, the export failures). First, so a
+///    failure whose reason wears refusal words stays a
+///    failure (`"Audio crossfade failed: a clip is
+///    empty."`).
+/// 2. **Info** — the no-op sweep shape: starts with
+///    `"No "` and contains `" needed "`. The normalise
+///    op ran over every clip and found none needing the
+///    change (`"No audio clips needed normalising to
+///    peak 0.90."`) — a benign outcome, not a refusal,
+///    carved out of rule 3 (audit S18's one false Warn;
+///    the `" needed "` census is this one family).
+/// 3. **Warn** — starts with `"No "` or `"Nothing "`: a
 ///    refusal — the op did not happen, nothing is broken
 ///    (`"No FX clip selected to split."`, `"No camera key
 ///    on this frame."`, `"Nothing copied yet."`).
-/// 3. **Success** — starts with `"Exported "` or
+/// 4. **Success** — starts with `"Exported "` or
 ///    `"Saved "`: a confirmation that something left the
 ///    editor (`"Exported 5 PNG frames to ./export"`,
 ///    `"Exported out/animation.apng."`). Note the
 ///    trailing space: the bare `"Saved."` is a neutral
-///    fact, not this shape.
-/// 4. **Info** — everything else: neutral facts
+///    fact, not this shape. This rule sits ahead of the
+///    refusal grammar below so a confirmation can never
+///    be flipped by a stray grammar word inside it.
+/// 5. **Warn** — the refusal grammar (Wave 6, audit
+///    S18-11a): contains `"cannot"`, `"already"`,
+///    `"at least"` or `" is empty"`. These are the
+///    subject-first refusals rule 3's prefixes miss —
+///    the op did not happen because the state forbids
+///    or already satisfies it (`"Frame 2 cannot be
+///    swapped with itself."`, `"Clip 2 is already
+///    muted."`, `"A movieclip needs at least one
+///    frame."`, `"Keep at least one figure."`, `"3D
+///    library is empty — save a 3D figure first."`,
+///    `"First frame: cannot shift it earlier."`). The
+///    `"at least"` arm covers the audit's `"needs at
+///    least"` and `"Keep at least"` shapes at once;
+///    every `"at least"` status in the tree is a
+///    refusal (grep census, 2026-11-08).
+/// 6. **Info** — everything else: neutral facts
 ///    (`"Undone."`, `"Redone."`), and the empty string,
 ///    which the push site never sends but which must
 ///    still classify without panicking.
 pub fn classify_status(status: &str) -> Severity {
     if status.contains(" failed") {
         Severity::Error
+    } else if status.starts_with("No ") && status.contains(" needed ") {
+        Severity::Info
     } else if status.starts_with("No ") || status.starts_with("Nothing ") {
         Severity::Warn
     } else if status.starts_with("Exported ") || status.starts_with("Saved ") {
         Severity::Success
+    } else if status.contains("cannot")
+        || status.contains("already")
+        || status.contains("at least")
+        || status.contains(" is empty")
+    {
+        Severity::Warn
     } else {
         Severity::Info
     }
@@ -466,6 +507,7 @@ fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, und
     content = content.child(icon_only_btn(
         &dismiss_key,
         "xmark",
+        "Dismiss",
         26.0,
         false,
         t,
@@ -812,6 +854,124 @@ mod tests {
         assert_eq!(classify_status("No camera key on this frame."), Severity::Warn);
         assert_eq!(classify_status("No saved file to reload."), Severity::Warn);
         assert_eq!(classify_status("Nothing copied yet."), Severity::Warn);
+    }
+
+    #[test]
+    fn classify_reads_the_refusal_grammar_as_warn() {
+        // Wave 6 (audit S18 §6 defect 2 / S18-11a): the
+        // subject-first refusals the `"No "`/`"Nothing "`
+        // prefixes miss. Every string is real (grep-verified
+        // 2026-11-08; format strings rendered with the values
+        // their own ops' tests assert). First, the eight
+        // shapes the audit names:
+        assert_eq!(
+            classify_status("Frame 2 cannot be swapped with itself."),
+            Severity::Warn
+        );
+        assert_eq!(classify_status("Clip 2 is already muted."), Severity::Warn);
+        assert_eq!(
+            classify_status("A movieclip needs at least one frame."),
+            Severity::Warn
+        );
+        assert_eq!(classify_status("Keep at least one figure."), Severity::Warn);
+        assert_eq!(
+            classify_status("Lasso needs at least 3 points; nothing erased."),
+            Severity::Warn
+        );
+        assert_eq!(
+            classify_status("Every frame in the range already has a key."),
+            Severity::Warn
+        );
+        assert_eq!(
+            classify_status("3D library is empty — save a 3D figure first."),
+            Severity::Warn
+        );
+        assert_eq!(
+            classify_status("First frame: cannot shift it earlier."),
+            Severity::Warn
+        );
+        // Same-family siblings the same grammar arms catch:
+        assert_eq!(
+            classify_status("Last frame: cannot shift it later."),
+            Severity::Warn
+        );
+        assert_eq!(
+            classify_status("Frame 11 already has a key on this channel."),
+            Severity::Warn
+        );
+        assert_eq!(
+            classify_status("Bake animation needs at least 2 frames."),
+            Severity::Warn
+        );
+        assert_eq!(classify_status("Figure name cannot be empty."), Severity::Warn);
+        assert_eq!(classify_status("Project name cannot be empty."), Severity::Warn);
+        assert_eq!(
+            classify_status("Key at frame 1 cannot move earlier."),
+            Severity::Warn
+        );
+        assert_eq!(classify_status("Clip 1 is already first."), Severity::Warn);
+        assert_eq!(classify_status("Clip 1 is already last."), Severity::Warn);
+        assert_eq!(classify_status("3D mode is already active."), Severity::Warn);
+        assert_eq!(classify_status("Motion path already smooth."), Severity::Warn);
+        assert_eq!(classify_status("Stroke 1 is already simple."), Severity::Warn);
+        assert_eq!(
+            classify_status("A library figure named \"demo\" already exists."),
+            Severity::Warn
+        );
+        assert_eq!(
+            classify_status("Pose 'idle' already has that name."),
+            Severity::Warn
+        );
+        // Already Warn by its prefix; the grammar agrees, so
+        // the prefix and grammar rules cannot drift apart on
+        // this string.
+        assert_eq!(
+            classify_status(
+                "Nothing to fill: the last stroke needs at least 3 points to make a shape."
+            ),
+            Severity::Warn
+        );
+    }
+
+    #[test]
+    fn classify_reads_the_normalise_no_op_as_info() {
+        // Audit S18 §6 defect 3: the one false Warn. The
+        // normalise sweep ran and found nothing to do — a
+        // benign outcome, not a refusal (both peak values
+        // the op's own tests produce).
+        assert_eq!(
+            classify_status("No audio clips needed normalising to peak 0.90."),
+            Severity::Info
+        );
+        assert_eq!(
+            classify_status("No audio clips needed normalising to peak 0.50."),
+            Severity::Info
+        );
+        // The carve-out is the `" needed "` shape only:
+        // sibling `"No "` refusals from the same panel stay
+        // Warn.
+        assert_eq!(classify_status("No audio clips to mix."), Severity::Warn);
+        assert_eq!(
+            classify_status("No audio clip selected to mute."),
+            Severity::Warn
+        );
+    }
+
+    #[test]
+    fn classify_failure_reasons_wearing_refusal_words_stay_error() {
+        // Near-miss precedence: both strings carry the
+        // `" is empty"` grammar word inside a `" failed"`
+        // reason. Error is checked first, so a failure
+        // whose reason names an empty thing is still a
+        // failure, never a mere refusal.
+        assert_eq!(
+            classify_status("Audio crossfade failed: a clip is empty."),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("Audio trim failed: the trim range is empty."),
+            Severity::Error
+        );
     }
 
     #[test]

@@ -851,6 +851,7 @@ fn entry_row(entry: &LibraryRow, s: &State, t: &Theme) -> El {
         r = r.child(icon_only_btn(
             &format!("library-delete-{i}"),
             "trash-can",
+            "Delete entry",
             26.0,
             false,
             t,

@@ -1280,18 +1280,18 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                 .key("keyframe-nudge")
                 .gap(6.0)
                 .child(if nudge_enabled(core, -1) {
-                    icon_only_btn("key-nudge-l", "chevron-left", 26.0, false, t, |s| {
+                    icon_only_btn("key-nudge-l", "chevron-left", "Nudge key earlier", 26.0, false, t, |s| {
                         nudge_key_here(s, -1)
                     })
                 } else {
-                    icon_only_btn_inert("key-nudge-l", "chevron-left", 26.0, t)
+                    icon_only_btn_inert("key-nudge-l", "chevron-left", "Nudge key earlier", 26.0, t)
                 })
                 .child(if nudge_enabled(core, 1) {
-                    icon_only_btn("key-nudge-r", "chevron-right", 26.0, false, t, |s| {
+                    icon_only_btn("key-nudge-r", "chevron-right", "Nudge key later", 26.0, false, t, |s| {
                         nudge_key_here(s, 1)
                     })
                 } else {
-                    icon_only_btn_inert("key-nudge-r", "chevron-right", 26.0, t)
+                    icon_only_btn_inert("key-nudge-r", "chevron-right", "Nudge key later", 26.0, t)
                 }),
         )
         .child(

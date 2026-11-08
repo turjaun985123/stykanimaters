@@ -88,6 +88,29 @@
 //!   are the same construction by design, and merging
 //!   them is a later, graph-owned step; do not "fix"
 //!   the duplication from a consumer side.
+//!
+//! ## UI mission wave 6 — tooltip adoption
+//!
+//! * Under the convention documented in
+//!   `crate::rune_sec::icon_btn`'s module docs (a
+//!   builder that receives a human label wires it as
+//!   the element's help text), this file's two
+//!   label-receiving pressables adopt it:
+//!   [`toggle_row`] and [`tangent_preset_chip`].
+//! * The remaining pressables here carry NO help, and
+//!   that is deliberate, not an oversight: [`swatch`]
+//!   receives a bare `Color` — it has no colour name
+//!   to show, and a hex string would be junk, not a
+//!   tooltip (naming swatches is audit S18-10
+//!   call-site work); [`list_row`] / [`row_shell`]
+//!   receive no label at all (their content arrives
+//!   as children, and their only string is the
+//!   caller's key — an internal id); [`slider_track`]
+//!   is a visual with no key, handler or text — the
+//!   caller's drag root owns whatever naming it gets.
+//!   The display-only members ([`kbd`],
+//!   [`panel_title`], [`empty_state`], …) are not
+//!   controls and stay unwired.
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Color, El, Shape};
@@ -392,6 +415,7 @@ pub fn toggle_row(
 ) -> El {
     row()
         .key(key)
+        .help(label)
         .min_h(28.0)
         .center_y()
         .gap(PANEL_GAP)
@@ -488,6 +512,16 @@ pub fn slider_track(frac: f32, t: &Theme) -> El {
 /// so the swatch's own colour stays visible under the
 /// feedback — before this, a press gave no signal at
 /// all until the border changed after the fact.
+///
+/// TOOLTIP: none, deliberately (UI mission wave 6).
+/// The kit's tooltip convention wires a builder's
+/// human label as help text, but this builder receives
+/// a bare `Color` — no colour name reaches it, and the
+/// only derivable string is the hex value, which is
+/// junk as a tooltip. Naming swatches means call
+/// sites passing their palette names in (audit S18-10
+/// adoption); do not "fix" this from the kit side with
+/// a hex string.
 pub fn swatch(
     key: &str,
     color: Color,
@@ -597,6 +631,7 @@ pub fn tangent_preset_chip(
     );
     let chip = col()
         .key(key)
+        .help(label)
         .padding(4.0)
         .gap(2.0)
         .radius(CONTROL_RADIUS)
