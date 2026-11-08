@@ -222,6 +222,37 @@ Phase N additions (same gate, new check 6):
   to Phase M (43 fields — Phase N adds none), and
   the caller census guards the same ops.
 
+UI mission Wave 9 additions (same gate, check 7):
+
+- Check 7 is the LITERAL & EMPTY-STATE GUARD. (a) A
+  census of production hex colour literals in
+  src/rune_sec/ — both `0xRRGGBB` integer literals
+  (underscore separators normalised) and "#RRGGBB"
+  string literals — against the UI mission Wave 7
+  colour census classification: the lawful sources
+  are the token files (app_theme.rs, the single
+  palette constructor; design.rs, the design-token
+  file), and every other literal must fall inside a
+  named exception in LITERAL_CONST_EXCEPTIONS /
+  LITERAL_LINE_EXCEPTIONS below (colour-picker /
+  palette DATA, preset DATA, project-content
+  defaults, stage/canvas content colours,
+  Fig3Palette::LEGACY, 24-bit channel masks). A
+  literal outside every exception is UNCLASSIFIED
+  and fails: new colour literals must either move
+  into the token files or earn a named exception
+  with a classification, never land silently.
+  snap_tests.rs is excluded by name: main.rs
+  declares it under #[cfg(test)], so the whole file
+  is test code, not production. (The Wave 7 chrome
+  danger-fill exception lives in src/chrome_view.rs,
+  outside this check's src/rune_sec/ scope.)
+  (b) Bare `text("No …")` / `text("Nothing…")`
+  empty lines in src/rune_sec/ production code must
+  stay ZERO — the Wave 6 sweep converted every one
+  to the kit `design::empty_state`; there are no
+  exceptions to this half.
+
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
 blanked source (the repo's established scan idiom), and
@@ -463,6 +494,9 @@ _DIFF_BTN_RE = re.compile(
     r"\b(?:btn|fbtn|icon_btn|icon_only_btn|row_toggle|icon_btn_inert|icon_only_btn_inert"
     r"|btn_inert|btn_muted_live|danger_btn|danger_icon_btn|chip_btn"
     r"|ctl|ictl|kbtn|pbtn|pibtn"
+    # Wave 9: step_btn/edit_btn/v_splitter forward the key
+    # verbatim as arg 1 (see rune_inventory._KEY_HELPERS).
+    r"|step_btn|edit_btn|v_splitter"
     r"|panel_col|list_row|toggle|toggle_row|header_row|divider_keyed|swatch)"
     r"\(\s*\"([^\"]+)\""
 )
@@ -1135,6 +1169,283 @@ def check_design_adoption() -> tuple[bool, list[str]]:
 
 
 # ----------------------------------------------------------------
+# Check 7 — literal & empty-state guard (UI mission Wave 9)
+# ----------------------------------------------------------------
+
+
+def blank_comments(src: str) -> str:
+    """blank_code's sibling: comment contents blanked,
+    string / char literal contents PRESERVED (positions
+    and newlines identical), so scans that need string
+    contents — "#RRGGBB" literals, `text("No …")` —
+    still never see text that lives in a comment."""
+    out = list(src)
+    i, n = 0, len(src)
+    while i < n:
+        ch = src[i]
+        two = src[i : i + 2]
+        if two == "//":
+            j = src.find("\n", i)
+            j = n if j < 0 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+        elif two == "/*":
+            depth = 1
+            j = i + 2
+            while j < n and depth:
+                if src[j : j + 2] == "/*":
+                    depth += 1
+                    j += 2
+                elif src[j : j + 2] == "*/":
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            for k in range(i, min(j, n)):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j
+        elif ch == '"':
+            j = i + 1
+            while j < n:
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == '"':
+                    j += 1
+                    break
+                j += 1
+            i = j
+        elif ch == "'":
+            m = _CHAR_LIT_RE.match(src, i)
+            i = m.end() if m else i + 1
+        else:
+            i += 1
+    return "".join(out)
+
+
+# The lawful colour sources (Wave 7 census): literals
+# here ARE the palette, not violations of it.
+LITERAL_SOURCE_FILES = {
+    "app_theme.rs": "the single app palette constructor (Wave 2 / Wave 7 census)",
+    "design.rs": "the design-token file (holds no hex literals today)",
+}
+# Files under src/rune_sec/ that are not production
+# code at all: main.rs declares snap_tests under
+# #[cfg(test)], so every line of it is test code.
+LITERAL_TEST_FILES = {
+    "snap_tests.rs": "test-only module (#[cfg(test)] in main.rs) — not production code",
+}
+
+# Const-span exceptions: (file, const name) -> the
+# Wave 7 classification. A hex literal is exempt when
+# it sits inside the named const's declaration span
+# (from the `const` keyword to the `;` after its `=`).
+LITERAL_CONST_EXCEPTIONS = {
+    ("clips_panel.rs", "FIGURE_COLORS"): "palette DATA (clip colour swatches)",
+    ("fx_clips.rs", "SWATCHES"): "palette DATA (clip colour / end-colour picker)",
+    ("fx_clips.rs", "STRIP_ACCENT"): "stage/canvas content colour (selected clip strip outline)",
+    ("inspector_figure.rs", "PALETTE"): "palette DATA (figure colour picker)",
+    ("inspector_segment.rs", "PALETTE"): "palette DATA (segment colour picker)",
+    ("inspector_style.rs", "STYLE_PRESETS"): "preset DATA (named style presets applied to user strokes)",
+    ("particles_panel.rs", "PARTICLE_PALETTE"): "palette DATA (particle colour picker)",
+    ("text_tool.rs", "TEXT_PALETTE"): "palette DATA (text colour picker)",
+    ("scene_panel.rs", "BACKGROUND_SWATCHES"): "palette DATA (stage background presets)",
+    ("scene_panel.rs", "BG_PRESETS"): "palette DATA (stage background presets)",
+    ("fig3_preview.rs", "GRID_COLOR"): "Fig3Palette::LEGACY constant (pre-theme 3D palette)",
+    ("fig3_preview.rs", "SELECTED_COLOR"): "Fig3Palette::LEGACY constant (pre-theme 3D palette)",
+    ("fig3_preview.rs", "SHADOW_COLOR"): "Fig3Palette::LEGACY constant (pre-theme 3D palette)",
+    ("onion_controls.rs", "FUTURE_ONION_RGB"): "stage content colour (future-frame onion tint; Wave 7 census class)",
+    ("stage_fx.rs", "GIZMO_COLOR"): "stage content colour (FX gizmo accent)",
+    ("stage_text.rs", "BACKING_COLOR"): "stage content colour (text backing plate on the stage canvas)",
+    ("timeline_marks.rs", "AUDIO_SPAN_RGB"): "stage/canvas content colour (timeline audio clip span)",
+    ("timeline_marks.rs", "FX_SPAN_RGB"): "stage/canvas content colour (timeline FX clip span)",
+}
+
+# Line exceptions: (file, regex over the literal's raw
+# source line) -> classification. Each regex pins the
+# exact literal it exempts, so a NEW literal — even on
+# an exempted line — still reads UNCLASSIFIED.
+LITERAL_LINE_EXCEPTIONS = [
+    (
+        "graph_panel.rs",
+        r"hex_color\(0xFFC65D\)",
+        "stage content colour (graph key-handle amber; Wave 7 census class)",
+    ),
+    (
+        "project_tools.rs",
+        r"background:\s*0x232830",
+        "project-content default (blank demo project background)",
+    ),
+    (
+        "project_tools.rs",
+        r"color:\s*0xE8E8EC",
+        "project-content default (blank demo project figure colour)",
+    ),
+    (
+        "inspector_style.rs",
+        r"Some\(0x(?:FF_FFFF|22_2222)\)",
+        "gradient swatch DATA (the two gradient end-colour values, matched and set)",
+    ),
+    (
+        "inspector_style.rs",
+        r"hex_color\(0x(?:FF_FFFF|22_2222)\)",
+        "gradient swatch DATA (gradient_swatch paints each swatch with the exact value it sets)",
+    ),
+    (
+        "icons.rs",
+        r"&\s*0xFF_FFFF",
+        "24-bit channel mask in icon_color (not a colour value)",
+    ),
+    (
+        "scene_panel.rs",
+        r"&\s*0xFF_FFFF",
+        "24-bit channel mask in set_background (not a colour value)",
+    ),
+    (
+        "text_tool.rs",
+        r"&\s*0xFF_FFFF",
+        "24-bit channel mask on a text instance colour (not a colour value)",
+    ),
+]
+
+_HEX_INT_RE = re.compile(r"0x[0-9A-Fa-f_]+")
+_HEX_STR_RE = re.compile(r'"#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?"')
+_BARE_NO_RE = re.compile(r'\btext\(\s*"(?:No |Nothing)')
+
+
+def const_decl_span(blanked_prod: str, name: str) -> tuple[int, int] | None:
+    """Span of `const NAME … = …;` in blanked production
+    code: from the `const` keyword to the semicolon
+    AFTER the `=` (a `[u32; 16]` type carries its own
+    semicolon, so the first `;` is not the end)."""
+    m = re.search(rf"\bconst\s+{name}\b", blanked_prod)
+    if not m:
+        return None
+    eq = blanked_prod.find("=", m.end())
+    if eq < 0:
+        return None
+    semi = blanked_prod.find(";", eq)
+    return (m.start(), (semi + 1) if semi >= 0 else len(blanked_prod))
+
+
+def check_literal_guard() -> tuple[bool, list[str]]:
+    lines: list[str] = []
+    ok = True
+    paths = sorted(glob.glob(os.path.join(ROOT, "src", "rune_sec", "*.rs")))
+    by_class: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    unclassified: list[str] = []
+    bare_hits: list[str] = []
+    total = 0
+
+    def note(cls: str) -> None:
+        by_class[cls] = by_class.get(cls, 0) + 1
+
+    for full in paths:
+        rel = os.path.relpath(full, ROOT)
+        base = os.path.basename(rel)
+        with open(full, encoding="utf-8") as fh:
+            raw = fh.read()
+        raw_lines = raw.splitlines()
+        blanked = blank_code(raw)
+        uncommented = blank_comments(raw)
+        prod_end = len(production_region(blanked))
+        prod_blank = blanked[:prod_end]
+        prod_uncommented = uncommented[:prod_end]
+
+        # (b) Bare empty lines: production region, real
+        # code only (the comment-blanked text keeps
+        # strings, the code-blanked text proves the
+        # `text(` at the match offset is code, not a
+        # comment or string interior).
+        if base not in LITERAL_TEST_FILES:
+            for m in _BARE_NO_RE.finditer(prod_uncommented):
+                if prod_blank[m.start()] != "t":
+                    continue
+                lineno = prod_uncommented.count("\n", 0, m.start()) + 1
+                bare_hits.append(f"{rel}:{lineno}: {raw_lines[lineno - 1].strip()}")
+
+        # (a) Hex colour literals in the production
+        # region: integer forms in code-blanked text
+        # (comments/strings cannot fake one), string
+        # forms in comment-blanked text.
+        occurrences: list[tuple[int, str]] = []
+        for m in _HEX_INT_RE.finditer(prod_blank):
+            digits = m.group(0)[2:].replace("_", "")
+            if len(digits) in (6, 8) and all(
+                c in "0123456789abcdefABCDEF" for c in digits
+            ):
+                occurrences.append((m.start(), m.group(0)))
+        for m in _HEX_STR_RE.finditer(prod_uncommented):
+            occurrences.append((m.start(), m.group(0)))
+        occurrences.sort()
+        if not occurrences:
+            continue
+        if base in LITERAL_TEST_FILES:
+            lines.append(
+                f"  {base}: {len(occurrences)} literal(s) — skipped: "
+                f"{LITERAL_TEST_FILES[base]}"
+            )
+            continue
+        if base in LITERAL_SOURCE_FILES:
+            source_counts[base] = len(occurrences)
+            total += len(occurrences)
+            continue
+        spans = [
+            (const_decl_span(prod_blank, name), cls)
+            for (f, name), cls in LITERAL_CONST_EXCEPTIONS.items()
+            if f == base
+        ]
+        line_exceptions = [
+            (re.compile(pat), cls)
+            for f, pat, cls in LITERAL_LINE_EXCEPTIONS
+            if f == base
+        ]
+        for at, literal in occurrences:
+            total += 1
+            cls = next((c for span, c in spans if span and span[0] <= at < span[1]), None)
+            if cls is None:
+                lineno = prod_blank.count("\n", 0, at) + 1
+                line_text = raw_lines[lineno - 1] if lineno - 1 < len(raw_lines) else ""
+                cls = next((c for pat, c in line_exceptions if pat.search(line_text)), None)
+            if cls is None:
+                lineno = prod_blank.count("\n", 0, at) + 1
+                unclassified.append(f"{rel}:{lineno}: {literal} :: {raw_lines[lineno - 1].strip()}")
+            else:
+                note(cls)
+
+    for base, why in LITERAL_SOURCE_FILES.items():
+        if base in source_counts:
+            lines.append(
+                f"  lawful source {base}: {source_counts[base]} literal(s) — {why}"
+            )
+    lines.append(f"  production hex literals censused: {total}")
+    for cls in sorted(by_class):
+        lines.append(f"    exempt — {cls}: {by_class[cls]}")
+    if unclassified:
+        ok = False
+        lines.append(
+            f"  UNCLASSIFIED: {len(unclassified)} literal(s) outside the Wave 7 "
+            "classification — move them into the token files or add a named exception:"
+        )
+        lines.extend(f"    {u}" for u in unclassified)
+    else:
+        lines.append("  UNCLASSIFIED: 0 — every literal is a token source or a named exception")
+    if bare_hits:
+        ok = False
+        lines.append(
+            f"  bare empty lines: {len(bare_hits)} FOUND — the Wave 6 sweep reached "
+            "zero; empty states use design::empty_state:"
+        )
+        lines.extend(f"    {h}" for h in bare_hits)
+    else:
+        lines.append('  bare empty lines: 0 — no text("No …") / text("Nothing…") in production code')
+    return ok, lines
+
+
+# ----------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------
 
@@ -1183,6 +1494,9 @@ def main() -> int:
 
     ok, lines = check_design_adoption()
     report("6. DESIGN ADOPTION (Phase N design-kit census)", ok, lines)
+
+    ok, lines = check_literal_guard()
+    report("7. LITERAL & EMPTY-STATE GUARD (UI mission Wave 9)", ok, lines)
 
     print()
     if failures:

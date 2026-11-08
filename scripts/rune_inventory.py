@@ -73,6 +73,13 @@ _KEY_HELPERS = (
     r"|btn_inert|btn_muted_live|danger_btn|danger_icon_btn|chip_btn"
     r"|ctl|ictl|kbtn|pbtn|pibtn"
     r"|panel_col|list_row|toggle|toggle_row|header_row|divider_keyed|swatch"
+    # Wave 9 local dispatchers + kit splitter: step_btn
+    # (onion_controls), edit_btn (text_tool) and v_splitter
+    # (design) each take the key as arg 1 and forward it
+    # verbatim to a listed builder — verified at source at
+    # Wave 9 integration; without them 13 mounted keys were
+    # invisible to the census.
+    r"|step_btn|edit_btn|v_splitter"
 )
 BTN_KEY_RE = re.compile(r'\b(?:' + _KEY_HELPERS + r')\(\s*"([^"]+)"')
 BTN_DYN_RE = re.compile(r'\b(?:' + _KEY_HELPERS + r')\(\s*&?\s*format!\(\s*"([^"]+)"')

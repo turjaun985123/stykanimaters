@@ -1,9 +1,10 @@
 # Redesign Progress — StykAnimate-RS 2.0
 
-The honest tracker for the redesign program across both user
-directives: the Wave 14 directive (20-agent overhaul, 7 phases) and
-the 2.0 directive (context-sensitive workspaces; the button wall must
-go). Updated per wave. Statuses mean: **DONE** = implemented and
+The honest tracker for the redesign program across the user
+directives: the Wave 14 directive (20-agent overhaul, 7 phases), the
+2.0 directive (context-sensitive workspaces; the button wall must
+go), and the 2026-11-08 UI/UX transformation mission (see §6).
+Updated per wave. Statuses mean: **DONE** = implemented and
 CI-verified; **IN PROGRESS** = being worked in the named wave;
 **PENDING** = not started; **BLOCKED-BY-USER** = cannot be completed
 from this environment (see the note). No status is granted on
@@ -13,7 +14,9 @@ Program references: `docs/REDESIGN_ARCHITECTURE.md` (strategy),
 `docs/GUI_AUDIT.md` (measured baseline), `docs/QA_WAVE14.md`
 (preservation audit), `docs/UI_COMPONENT_CONTRACTS.md` (component
 inventory and gaps), `docs/ULTIMATE_UI_ARCHITECTURE.md`,
-`docs/WORKSPACE_DESIGN_SPEC.md`, `docs/AGENT_OWNERSHIP.md` (2.0 wave).
+`docs/WORKSPACE_DESIGN_SPEC.md`, `docs/AGENT_OWNERSHIP.md` (2.0 wave),
+`docs/PHASE_N_CHARTER.md` (Rune design kit), and — the current
+verdict document — `docs/ui_mission/ACCEPTANCE.md` (UI mission).
 
 ---
 
@@ -197,3 +200,124 @@ at integration; nothing here is claimed verified yet):
 - **Still open** — everything in section 4 stands, headed by
   real-desktop screenshots: the wall being down is proven in
   code, not yet seen on a display.
+
+---
+
+## 6. The UI/UX transformation mission (2026-11-08) — CLOSED
+
+Sections 1–5 above describe the GPUI-era program. Between them and
+this section, the shell was rebuilt on Rune (migration Phases A–H)
+and Phase N put the whole Rune shell on one design kit
+(`docs/PHASE_N_CHARTER.md`, "card + hairline"). The mission below
+started from that baseline — an 804-key census (ACCEPTANCE.md,
+criterion 5) — so the §1 table's statuses are historical, not
+current. The mission's own verdict document is
+`docs/ui_mission/ACCEPTANCE.md`; this section is the progress
+record, and every figure in it traces to that review or to the
+gate script (`scripts/phase_j_checks.py`), with the source named.
+
+### 6.1 What the mission changed, wave by wave
+
+(Condensed from ACCEPTANCE.md, "What the mission changed".)
+
+- **Phase 1** — 20 squad audits (`docs/ui_mission/audit/s01..s20`).
+  Headline finding: one defect family — controls overflowing their
+  cards (22 rows tree-proven, worst +563 pt) — outranked every
+  cosmetic item.
+- **Wave 1** — all 22 overflow rows repaired across 16 files;
+  `scripts/overflow_scan.py` kept as the standing guard.
+- **Wave 2** — the brief's palette centralised in one app-side
+  constructor (`src/rune_sec/app_theme.rs`); kit press/hover/inert
+  states; `design::empty_state` learned to wrap (the root fix for
+  two residual overflows).
+- **Wave 3** — command palette anchored as an overlay (it had
+  squeezed the stage to height 0); toasts docked inside the stage;
+  status-strip yield ladder for narrow windows; menus deduplicated
+  onto the app bar; undo/redo inert on empty stacks.
+- **Wave 4** — Home project thumbnails + rename; discard
+  confirmations on project-destroying actions; export notes made
+  truthful about audio; audio scope split + clip-health badges;
+  graph interpolation edits the channel the graph draws; tangent
+  presets converged on one kit chip; camera Clear→Delete (undoable).
+- **Wave 5** — clips lane moved inside the timeline scroll (one
+  shared offset; overlapping clips stack into sub-lane rows); loop
+  controls reduced to one home (the timeline row); stage boundary
+  drawn inside the stage; **view zoom** — the mouse wheel now zooms
+  the view instead of rewriting the project's camera track.
+- **Live MCP** (user-inserted priority, between Waves 5 and 6) —
+  the running editor itself is now drivable over MCP: the stdio
+  server's dispatch was parameterised over an external core
+  (`handle_on`), and a loopback-only HTTP bridge
+  (127.0.0.1:32117, no auth in v1, settings toggle) feeds it the
+  live editor core; end-to-end socket test in CI.
+- **Wave 6** — tooltips by construction (`.help()` in every button
+  builder; all 37 icon-only sites truthfully labelled); last bare
+  empty states converted to the kit; `classify_status` refusal
+  grammar (22 status strings Info→Warn); timeline chip press
+  paint; waveform clip-health caption.
+- **Wave 7** — light-theme scenes (`default-light`,
+  `settings-open-light`) and 1280×720 headless probes; toast
+  severities and the graph glyph unified onto the one palette;
+  status-strip fit at 1280×720 proven from tree dumps.
+- **Wave 8** — the two defects Wave 7's proof exposed: the status
+  strip was invisible in the light theme (it had hard-coded the
+  upstream dark theme — now a `strip_colors` seam on the app
+  theme), and opening a menu grew the stage by 24 pt (menu layers
+  now mount only while open, behind permanent in-flow spacers;
+  closed geometry byte-identical, open geometry equal to it).
+
+### 6.2 Final counts at mission close
+
+| Figure | Value | Source |
+|---|---|---|
+| Tests | 2,584 (999 lib + 1,575 bin + 10 integration), 0 failed | ACCEPTANCE.md crit. 6; CI run 42499569292 |
+| Headless probes | all exit 0; overflow scan CLEAN on every tree | ACCEPTANCE.md crit. 2/6; headless run 42499571269 |
+| Distinct element keys | 809 (804 baseline + additive; retirements recorded in ACCEPTANCE.md crit. 5) | ACCEPTANCE.md crit. 5; gate check 2 per wave |
+| Headless scenes | 17 (15 at Phase N close + 2 light-theme scenes, Wave 7) | `scenes()` in `src/rune_sec/scenes.rs` at HEAD; gate check 5 |
+| Command palette commands | 108 | gate check 5 at mission close |
+| MCP tools | 91 registry tools; 102 total incl. server built-ins | gate check 5 (registry); total per project record since Phase M |
+| Curated icons | 163 | gate check 5 (`ICON_NAMES`) |
+| Localisation | 78 keys × 28 languages, census unchanged | ACCEPTANCE.md crit. 10; gate-verified |
+| Gate | 6/6 checks PASS | `scripts/phase_j_checks.py` |
+
+Honest agent count: ≈68 assignments (20 auditors + ~48 coders)
+against the brief's ordered 100 — recorded in ACCEPTANCE.md; the
+count was never padded.
+
+### 6.3 Remainders carried out of the mission
+
+(From ACCEPTANCE.md, "Honest remainders".)
+
+- White-on-accent contrast measures **3.14:1** as rendered; the
+  brief's accent was kept as the user's latest word, and darkening
+  it toward ~4.5:1 is a **user decision** (also §4's contrast
+  thread, now measured rather than estimated).
+- Panel resizing (no Rune splitter exists; a hand-built drag
+  splitter is a feature build) and File-menu Save As (needs a core
+  op that does not exist) remain **user decisions** — §4's
+  drag-resize item carries into the Rune shell unchanged.
+- The status strip's deepest coincidence state (audio + 1.5×
+  speed + 3D) carries a ≈43 pt *estimated* residual at 1280×720;
+  it cannot be produced headlessly, so the yield ladder was not
+  tuned to an estimate.
+- Home thumbnails are unit-proven but have no headless snap (no
+  Home scene exists). Sound remains user-verified only.
+- §4's light-theme adoption item is **closed** by this mission:
+  panels read the app theme (Waves 2/7/8 retired the last private
+  palettes — waveform, toasts, graph glyph, status strip).
+- §1 item 16 (command palette) is **closed**: the palette exists
+  and is overlay-anchored (Wave 3), 108 commands at close.
+- §1 item 24's block is superseded for the Rune shell: the shell
+  was screenshot-verified on the user's PC during the migration,
+  and the mission's visual proof is the headless snap/tree suite,
+  pixel-read per wave (ACCEPTANCE.md crit. 7).
+
+### 6.4 Wave 9 — IN PROGRESS
+
+A 50-agent improvement wave ordered by the user on 2026-11-08
+(22:27 +06), after the mission close. At the time of writing its
+edits are in the working tree, uncommitted (22 modified files);
+a gate run over the in-flight tree passes 6/6, reading 818 total
+unique keys, 111 palette commands and 22 scenes (gate checks
+1/5) — those are in-flight figures, not close figures, and no CI
+verdict is claimed for Wave 9 until it is integrated and pushed.
