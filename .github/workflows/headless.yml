@@ -172,7 +172,7 @@ jobs:
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
           mkdir -p headless-out
           missing=0
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys; do
             probe 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
               > "headless-out/tree-$scene.log" 2>&1
             echo $? > "headless-out/tree-$scene.exit"
@@ -222,7 +222,7 @@ jobs:
           # CWD-relative, so probe() also wipes ./projects
           # before every invocation.
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open export-open fx-selected home build-open graph-open effects-open audio-open clips-populated; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys; do
             if [ ! -f "headless-out/tree-$scene.json" ]; then
               probe 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
                 > "headless-out/tree-$scene-xvfb.log" 2>&1
@@ -313,6 +313,14 @@ jobs:
           probe 120 "$BIN" --snap headless-out/snap-clips-populated.png --scene clips-populated --at 0 \
             > headless-out/snap-clips-populated.log 2>&1
           echo $? > headless-out/snap-clips-populated.exit
+          # Wave 10: the dopesheet lane in a populated
+          # state (two keyed figures, playhead mid-row) —
+          # the first tree/snap containing dope rows and
+          # cells, and the pixel evidence for the lane's
+          # frame-column alignment against the chips.
+          probe 120 "$BIN" --snap headless-out/snap-dopesheet-keys.png --scene dopesheet-keys --at 0 \
+            > headless-out/snap-dopesheet-keys.log 2>&1
+          echo $? > headless-out/snap-dopesheet-keys.exit
           # Two Effects-workspace snaps, because the scene
           # names are historical: the scene NAMED fx-selected
           # selects a particle event (State::particle_selected)

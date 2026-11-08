@@ -50,6 +50,73 @@ unchanged (the self-test pins this).
    (Rect-derived, so already width-agnostic.)
 3. Window rule. No element anywhere may cross x < 0 or
    x > W (overlays included).
+4. Timeline-card rule (Wave 10). The timeline card is
+   centre-column chrome: an unkeyed card holding one
+   horizontal scroll row (keyed `timeline`) plus, under
+   it, the non-scrolling loop row. The card is found
+   structurally -- it is the scroll row's parent element
+   -- because Phase N deliberately left it unkeyed.
+   - Every descendant of the card must lie within the
+     card's own y-range. The scroll inside the card is
+     horizontal only (scroll_x never moves y) and the
+     centre column does not scroll vertically, so every
+     y in the subtree is a painted y; Rune does not
+     clip, so a row past the card's bottom edge paints
+     over the status strip. This is the vertical budget
+     the dopesheet lane is checked against: the lane
+     adds one row per figure, so it is the first
+     timeline content whose height grows with the
+     project.
+   - The card's non-scroll content -- the scroll row
+     itself (its rect is the viewport, w_full inside
+     the card's padding) and everything under the card
+     but outside the scroll row (the loop row) -- must
+     also lie within the card's x-range, the card rule
+     (rule 2) extended to this one card.
+   - The card root itself must fit the window
+     vertically (rule 3 is horizontal only): a card
+     pushed past the window's bottom edge is the same
+     defect one level up.
+   Strict descendants of the scroll row (the content
+   column, ruler, chips, marker row, clips lane,
+   dopesheet lane: headers and cells) get NO horizontal
+   judgement: their rects are drawn positions under a
+   live horizontal scroll offset, the dump carries no
+   offset field this scan could correct by, and content
+   wider than the viewport is a working scroll, not an
+   overflow. The rule is inert when no `timeline`
+   element exists (a zero-frame project: the card then
+   holds only the kit empty state, no fixed-geometry
+   content to judge).
+
+Checks considered and NOT added (they would
+false-positive or judge what rects cannot show):
+
+- Horizontal bounds on scrolled content (chips, clip
+  spans, dope cells/headers): see rule 4 -- the right
+  edge of scrolled content is scroll-dependent by
+  definition, and so is the left edge once the
+  viewport has scrolled.
+- Cell pitch / alignment (a dope cell's x against
+  frame x CHIP_PITCH): the pitch is a source constant
+  (timeline_marks.rs); duplicating it here would
+  create a second source of truth that can drift, and
+  misalignment is an alignment defect, not a
+  paint-past-bounds overflow -- the family this scan
+  exists for. The in-process snap tests pin cell
+  behaviour instead.
+- Dope header width against its row slot: the slot
+  width is not an element in the dump, so there is no
+  rect to judge the header against; a too-wide header
+  inside the scroll still paints within the content
+  extent, and its failure mode is overlap, not
+  overflow.
+- A vertical window rule for all elements: the side
+  columns scroll vertically, and below-the-fold
+  content there legitimately draws past the window's
+  bottom edge. Rule 4's vertical clause is sound only
+  because the timeline card sits in no vertical
+  scroll container.
 
 Exemptions (closed list -- anything else is a hit):
 
@@ -62,15 +129,20 @@ Exemptions (closed list -- anything else is a hit):
   settings-card are real hits (S19 §1 false-positive note).
 - The timeline scroll subtree (any element whose path
   contains a `timeline` segment): it scrolls horizontally
-  by design. This is also the scan-time form of the
-  general exemption "subtree rooted at an element whose
+  by design, so it is exempt from rules 1-3. Rule 4's
+  vertical clause still applies inside it (see above).
+  This is also the scan-time form of the general
+  exemption "subtree rooted at an element whose
   builder sets scroll_x": at scan time the timeline is
-  the only such subtree; a new one must be added here by
-  key with a reason.
+  the only such subtree; a new one must be added here
+  by key with a reason.
 - Zero-size elements (w = 0 or h = 0: collapsed canvases,
   spacers).
-- Vertical overflow is never flagged: both side columns
-  scroll vertically; below-the-fold cards are legitimate.
+- Vertical overflow in the side columns is never
+  flagged: both side columns scroll vertically, so
+  below-the-fold cards are legitimate. The one
+  vertical judgement in the scan is rule 4's, inside
+  the timeline card (see above).
 """
 
 import json
@@ -78,6 +150,7 @@ import sys
 
 TOL = 0.5
 DEFAULT_WINDOW_W = 1440.0
+DEFAULT_WINDOW_H = 900.0
 # Left column: anchored left, fixed at every window width.
 # Card x-range [16, 316]; content right edge 304.
 LEFT_CONTENT_EDGE = 304.0
@@ -109,24 +182,33 @@ def column_index(segs):
     return None
 
 
-def window_width(elements):
-    """Window width from the tree's root element.
+def window_size(elements):
+    """(width, height) of the window, from the tree root.
 
     The root is the element with the shallowest path (#0);
-    its rect is the window. Falls back to the reference
-    width 1440 when no usable root rect exists, which
-    reproduces the pre-generalisation behaviour exactly.
+    its rect is the window. Each dimension falls back to
+    the reference window (1440 x 900) when the root rect
+    does not provide it, which reproduces the
+    pre-generalisation width behaviour exactly.
     """
     root = None
     for el in elements:
         segs = segments(el.get("path", ""))
         if segs and (root is None or len(segs) < len(root[0])):
             root = (segs, el)
+    win_w, win_h = DEFAULT_WINDOW_W, DEFAULT_WINDOW_H
     if root is not None:
         rect = root[1].get("rect") or [0, 0, 0, 0]
         if rect[2] > 0:
-            return float(rect[2])
-    return DEFAULT_WINDOW_W
+            win_w = float(rect[2])
+        if len(rect) > 3 and rect[3] > 0:
+            win_h = float(rect[3])
+    return win_w, win_h
+
+
+def window_width(elements):
+    """Window width from the tree's root element."""
+    return window_size(elements)[0]
 
 
 def content_edges(win_w):
@@ -136,7 +218,7 @@ def content_edges(win_w):
 
 def scan_tree(tree):
     elements = tree.get("elements", [])
-    win_w = window_width(elements)
+    win_w, win_h = window_size(elements)
     left_edge, right_edge = content_edges(win_w)
     columns = {"side-left": left_edge, "side-right": right_edge}
 
@@ -151,20 +233,53 @@ def scan_tree(tree):
             rect = el.get("rect") or [0, 0, 0, 0]
             card_roots[el["path"]] = (segs[-1], rect[0], rect[0] + rect[2])
 
+    # Timeline card (rule 4): the element keyed `timeline`
+    # is the card's horizontal scroll row; the card itself
+    # is deliberately unkeyed (Phase N), so the card root
+    # is found structurally, as the scroll row's parent
+    # element. Rect-derived, so width-agnostic like rule
+    # 2. Absent on a zero-frame project (the card then
+    # holds only the kit empty state) -- rule 4 stays
+    # inert there.
+    tl_row_path = None
+    tl_card = None  # (path, x, y, right, bottom)
+    for el in elements:
+        if el.get("key") == "timeline":
+            tl_row_path = el.get("path", "")
+            break
+    if tl_row_path and "/" in tl_row_path:
+        card_path = tl_row_path.rsplit("/", 1)[0]
+        for el in elements:
+            if el.get("path") == card_path:
+                rect = el.get("rect") or [0, 0, 0, 0]
+                if rect[2] > 0 and rect[3] > 0:
+                    tl_card = (
+                        card_path,
+                        rect[0],
+                        rect[1],
+                        rect[0] + rect[2],
+                        rect[1] + rect[3],
+                    )
+                break
+
     hits = []
     for el in elements:
         epath = el.get("path", "")
         rect = el.get("rect") or [0, 0, 0, 0]
-        x, _y, w, h = rect
+        x, y, w, h = rect
         right = x + w
+        bottom = y + h
         key = el.get("key")
         segs = segments(epath)
 
-        # Exemptions that silence the element entirely.
+        # Zero-size elements are silenced entirely
+        # (collapsed canvases, spacers).
         if w <= 0 or h <= 0:
             continue  # zero-size
-        if any(s in SCROLL_SEGMENTS for s in segs):
-            continue  # horizontal-scroll subtree (timeline)
+        # The horizontal-scroll subtree is exempt from
+        # rules 1-3; rule 4's vertical clause still
+        # applies inside it.
+        in_scroll = any(s in SCROLL_SEGMENTS for s in segs)
 
         ci = column_index(segs)
         is_card_root = epath in card_roots
@@ -181,34 +296,60 @@ def scan_tree(tree):
         rules = []
         overflow = 0.0
 
-        # Rule 1 -- content edge (not for card roots / aliases,
-        # and not for the column element itself: len == ci + 1
-        # means the element IS side-left/side-right, the
-        # container, whose own right edge is 316 / W-16 by design).
-        if (
-            ci is not None
-            and len(segs) > ci + 1
-            and not is_card_root
-            and key not in CARD_ALIAS_KEYS
-        ):
-            edge = columns[segs[ci]]
-            if right > edge + TOL:
-                rules.append("content")
-                overflow = max(overflow, right - edge)
+        if not in_scroll:
+            # Rule 1 -- content edge (not for card roots / aliases,
+            # and not for the column element itself: len == ci + 1
+            # means the element IS side-left/side-right, the
+            # container, whose own right edge is 316 / W-16 by design).
+            if (
+                ci is not None
+                and len(segs) > ci + 1
+                and not is_card_root
+                and key not in CARD_ALIAS_KEYS
+            ):
+                edge = columns[segs[ci]]
+                if right > edge + TOL:
+                    rules.append("content")
+                    overflow = max(overflow, right - edge)
 
-        # Rule 2 -- within the card root's own x-range.
-        if card_range is not None and not is_card_root and key not in CARD_ALIAS_KEYS:
-            cx0, cx1 = card_range
-            excess = max(right - cx1, cx0 - x)
+            # Rule 2 -- within the card root's own x-range.
+            if card_range is not None and not is_card_root and key not in CARD_ALIAS_KEYS:
+                cx0, cx1 = card_range
+                excess = max(right - cx1, cx0 - x)
+                if excess > TOL:
+                    rules.append("card")
+                    overflow = max(overflow, excess)
+
+            # Rule 3 -- inside the window.
+            excess = max(right - win_w, -x)
             if excess > TOL:
-                rules.append("card")
+                rules.append("window")
                 overflow = max(overflow, excess)
 
-        # Rule 3 -- inside the window.
-        excess = max(right - win_w, -x)
-        if excess > TOL:
-            rules.append("window")
-            overflow = max(overflow, excess)
+        # Rule 4 -- timeline card budget (see module
+        # docstring). Applies to the card root and every
+        # descendant; strict descendants of the scroll row
+        # are judged vertically only.
+        if tl_card is not None:
+            cpath, cx, cy, cright, cbot = tl_card
+            if epath == cpath:
+                # The card root itself: vertical fit in
+                # the window (rule 3 covers its horizontal
+                # fit -- the card is not in the scroll
+                # subtree).
+                excess = max(-y, bottom - win_h)
+                if excess > TOL:
+                    rules.append("timeline-card")
+                    overflow = max(overflow, excess)
+            elif epath.startswith(cpath + "/"):
+                excess = max(cy - y, bottom - cbot)
+                if not epath.startswith(tl_row_path + "/"):
+                    excess = max(excess, cx - x, right - cright)
+                if excess > TOL:
+                    rules.append("timeline-card")
+                    overflow = max(overflow, excess)
+                    if parent_card is None:
+                        parent_card = "timeline-card"
 
         if rules:
             label = key if key else "(unkeyed %s)" % segs[-1]
@@ -234,8 +375,11 @@ def scan_file(path):
 
 # ------------------------------------------------------------------
 # Self-test: synthetic fixtures proving (a) the generalised
-# edges reduce EXACTLY to the original constants at W=1440 and
-# (b) a violation that only exists at 1280 is caught at 1280.
+# edges reduce EXACTLY to the original constants at W=1440,
+# (b) a violation that only exists at 1280 is caught at 1280,
+# and (c) the timeline-card rule (rule 4) stays silent on a
+# conforming card -- including scrolled content far past the
+# window -- and catches each of its violation classes.
 # ------------------------------------------------------------------
 
 def _el(path, rect, key=None):
@@ -274,6 +418,66 @@ def _fixture(win_w, win_h):
                 [r_card_x + 176.0, 200.0, 170.0, 20.0], "chip-wide"),  # right = edge+18
             # Overlay crossing the window edge.
             _el("#0/overlay", [win_w - 80.0, 10.0, 90.0, 20.0], "overlay-wide"),  # right = W+10
+        ]
+    }
+
+
+def _timeline_fixture(win_w, win_h, loop_dx=0.0, dope_dy=0.0,
+                        timeline_dw=0.0, card_dy=0.0):
+    """A minimal centre-column tree: stage + timeline card.
+
+    Card geometry follows the real layout's anchors: the
+    centre column starts at x=328 (16 margin + 300 left
+    column + 12 gap) and its width ends 368 pt before the
+    window's right edge (12 gap + 340 right column + 16
+    margin), so card width = W-696 at any W; the card sits
+    near the window's bottom. Inside the scroll row, a
+    50-frame content column (1700 pt wide on the 34 pt
+    frame pitch) with a far chip and a far dopesheet cell
+    -- all far past the window's right edge, all
+    legitimate scrolled content. The deltas plant one
+    rule-4 violation each: loop_dx pushes the loop row's
+    Clear button past the card's right edge, dope_dy drops
+    a dopesheet row past the card's bottom, timeline_dw
+    widens the scroll viewport itself past the card, and
+    card_dy pushes the whole card past the window's
+    bottom edge.
+    """
+    card_x = 328.0
+    card_w = win_w - 696.0
+    card_y = win_h - 201.0 + card_dy
+    inner_x = card_x + 8.0
+    inner_w = card_w - 16.0
+    tl_y = card_y + 8.0
+    lane_y = tl_y + 52.0
+    base = "#0/main-row/centre/#3"
+    return {
+        "elements": [
+            _el("#0", [0.0, 0.0, win_w, win_h]),
+            _el("#0/main-row", [16.0, 141.0, win_w - 32.0, win_h - 157.0]),
+            _el("#0/main-row/centre",
+                [card_x, 141.0, card_w, win_h - 157.0], "centre"),
+            _el("#0/main-row/centre/stage", [card_x, 157.0, card_w, 100.0], "stage"),
+            # The (unkeyed) timeline card and its scroll row.
+            _el(base, [card_x, card_y, card_w, 121.0]),
+            _el(base + "/timeline",
+                [inner_x, tl_y, inner_w + timeline_dw, 74.0], "timeline"),
+            # Scrolled content: ruler/chips/lanes stack.
+            _el(base + "/timeline/#0", [inner_x, tl_y, 1700.0, 74.0]),
+            _el(base + "/timeline/#0/#1/frame-50",
+                [inner_x + 49.0 * 34.0, tl_y + 26.0, 30.0, 24.0], "frame-50"),
+            _el(base + "/timeline/#0/dopesheet-lane",
+                [inner_x, lane_y, 1700.0, 18.0], "dopesheet-lane"),
+            _el(base + "/timeline/#0/dopesheet-lane/dope-row-0",
+                [inner_x, lane_y + dope_dy, 120.0, 18.0], "dope-row-0"),
+            _el(base + "/timeline/#0/dopesheet-lane/dope-cell-0-49",
+                [inner_x + 49.0 * 34.0, lane_y, 30.0, 18.0], "dope-cell-0-49"),
+            # Non-scroll card content: the loop row.
+            _el(base + "/timeline-loop-row",
+                [inner_x, card_y + 86.0, inner_w, 27.0], "timeline-loop-row"),
+            _el(base + "/timeline-loop-row/loop-clear",
+                [inner_x + inner_w - 60.0 + loop_dx, card_y + 89.0, 60.0, 20.0],
+                "loop-clear"),
         ]
     }
 
@@ -322,6 +526,63 @@ def self_test():
 
     # A rootless tree falls back to the reference width.
     check(window_width([]) == 1440.0, "empty tree falls back to W=1440")
+    check(window_size([]) == (1440.0, 900.0),
+          "empty tree falls back to the 1440x900 reference window")
+
+    # Rule 4: a conforming timeline card is silent at both
+    # window sizes -- including its scrolled content, whose
+    # right edges (past x=2000) no rule may judge.
+    for win_w, win_h in ((1440.0, 900.0), (1280.0, 720.0)):
+        hits = scan_tree(_timeline_fixture(win_w, win_h))
+        by_key = {h["key"]: h for h in hits}
+        tag = "timeline W=%d" % win_w
+        check(len(hits) == 0,
+              "%s: conforming card is clean (got %d hit(s))" % (tag, len(hits)))
+        check("frame-50" not in by_key,
+              "%s: a scrolled chip past the window edge is not flagged" % tag)
+        check("dope-cell-0-49" not in by_key,
+              "%s: a scrolled dope cell past the window edge is not flagged" % tag)
+
+    # Rule 4 violations, one planted defect per run.
+    hits = scan_tree(_timeline_fixture(1440.0, 900.0, loop_dx=18.0))
+    by_key = {h["key"]: h for h in hits}
+    check(len(hits) == 1 and "loop-clear" in by_key,
+          "loop row button 10 pt past the card's right edge is caught")
+    check("timeline-card" in by_key.get("loop-clear", {}).get("rules", ""),
+          "loop row hit names the timeline-card rule")
+    check(abs(by_key.get("loop-clear", {}).get("overflow", 0) - 10.0) < 1e-9,
+          "loop row overflow measures 10.0 pt")
+    check(by_key.get("loop-clear", {}).get("card") == "timeline-card",
+          "loop row hit is attributed to the timeline card")
+
+    hits = scan_tree(_timeline_fixture(1280.0, 720.0, loop_dx=18.0))
+    by_key = {h["key"]: h for h in hits}
+    check(len(hits) == 1
+          and abs(by_key.get("loop-clear", {}).get("overflow", 0) - 10.0) < 1e-9,
+          "the same loop row violation is caught at W=1280 (card is rect-derived)")
+
+    hits = scan_tree(_timeline_fixture(1440.0, 900.0, dope_dy=52.0))
+    by_key = {h["key"]: h for h in hits}
+    check(len(hits) == 1 and "dope-row-0" in by_key,
+          "dopesheet row 9 pt past the card's bottom edge is caught (vertical clause)")
+    check("timeline-card" in by_key.get("dope-row-0", {}).get("rules", "")
+          and abs(by_key.get("dope-row-0", {}).get("overflow", 0) - 9.0) < 1e-9,
+          "dopesheet row overflow measures 9.0 pt")
+
+    hits = scan_tree(_timeline_fixture(1440.0, 900.0, timeline_dw=24.0))
+    by_key = {h["key"]: h for h in hits}
+    check(len(hits) == 1 and "timeline" in by_key,
+          "scroll viewport itself 16 pt wider than its card is caught")
+    check(abs(by_key.get("timeline", {}).get("overflow", 0) - 16.0) < 1e-9,
+          "scroll viewport overflow measures 16.0 pt")
+
+    hits = scan_tree(_timeline_fixture(1440.0, 900.0, card_dy=100.0))
+    by_key = {h["key"]: h for h in hits}
+    check(len(hits) == 1 and "(unkeyed #3)" in by_key,
+          "card root pushed 20 pt past the window's bottom edge is caught")
+    check("timeline-card" in by_key.get("(unkeyed #3)", {}).get("rules", "")
+          and abs(by_key.get("(unkeyed #3)", {}).get("overflow", 0) - 20.0) < 1e-9,
+          "card root overflow measures 20.0 pt")
 
     if failures:
         print("SELF-TEST: %d failure(s)" % len(failures))

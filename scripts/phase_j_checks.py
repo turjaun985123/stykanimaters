@@ -253,6 +253,41 @@ UI mission Wave 9 additions (same gate, check 7):
   to the kit `design::empty_state`; there are no
   exceptions to this half.
 
+Wave 10 additions (same gate, check 8):
+
+- Check 8 is COVERAGE COMPLETENESS: the scene /
+  headless cross-reference, in both directions,
+  plus the layout-fact sequence. (a) Every scene
+  registered in scenes.rs's `scenes()` must appear
+  in at least one of the `for scene in …` tree
+  loops in .github/workflows/headless.yml — the
+  Wave 9 lesson: `export-open` / `fx-selected`
+  existed as scenes for months but were in no loop,
+  so their panels were never tree-dumped and an
+  overflowing Export panel stayed invisible. (The
+  per-loop split is printed report-only: the second
+  loop is the xvfb fallback, which only retries
+  scenes the plain attempt missed, so its list is
+  a retry subset by design — the plain loop is the
+  coverage contract.) (b) The layout facts
+  documented above `layout_assertions()` in
+  scenes.rs must be numbered 1..=N with no gaps or
+  duplicates, `layout_assertions()` must hold
+  exactly N strings (the vec is positional: string
+  i IS fact i), and a string's `see fact N`
+  citation, where present, must name its own
+  position. (c) The reverse direction: every scene
+  name headless.yml uses — tree-loop lists and
+  literal `--scene NAME` probes alike — must be
+  registered in `scenes()`; a stale name in the
+  YAML makes the probe step produce nothing for
+  that scene and say nothing about it. A failure
+  under (a) on a mid-wave tree is the gate working
+  (the Phase K UNWIRED precedent): the integrator
+  resolves it by adding the scene to the loops in
+  headless.yml, never by unregistering the scene
+  or weakening this check.
+
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
 blanked source (the repo's established scan idiom), and
@@ -497,6 +532,16 @@ _DIFF_BTN_RE = re.compile(
     # Wave 9: step_btn/edit_btn/v_splitter forward the key
     # verbatim as arg 1 (see rune_inventory._KEY_HELPERS).
     r"|step_btn|edit_btn|v_splitter"
+    # Wave 10 (E3 + integration): mirror the inventory's
+    # helper census — chip_btn_inert, tangent_preset_chip,
+    # weather_slider, separator, item, group, plain_row,
+    # range_row, bundle_row, stamp_step_btn, zorder_btn
+    # all take the key as arg 1 and apply it verbatim
+    # (verified at source; see rune_inventory._KEY_HELPERS).
+    r"|chip_btn_inert|tangent_preset_chip|weather_slider"
+    r"|separator|item|group"
+    r"|plain_row|range_row|bundle_row"
+    r"|stamp_step_btn|zorder_btn"
     r"|panel_col|list_row|toggle|toggle_row|header_row|divider_keyed|swatch)"
     r"\(\s*\"([^\"]+)\""
 )
@@ -1446,6 +1491,210 @@ def check_literal_guard() -> tuple[bool, list[str]]:
 
 
 # ----------------------------------------------------------------
+# Check 8 — coverage completeness (Wave 10): scenes <->
+# headless.yml in both directions + the layout-fact
+# sequence. Regex over the two files, in this script's
+# idiom: structure located on comment/string-blanked
+# text (offsets identical to the raw text — blank_code
+# preserves length), string contents read back from the
+# raw text at the same offsets.
+# ----------------------------------------------------------------
+
+_FACT_ITEM_RE = re.compile(r"^\s*///\s+(\d+)\.(?:\s|$)")
+_LOOP_RE = re.compile(r"for\s+scene\s+in\s+([^;]+?);\s*do")
+_SCENE_ARG_RE = re.compile(r"--scene\s+([A-Za-z0-9][A-Za-z0-9_-]*)")
+_SEE_FACT_RE = re.compile(r"see fact (\d+)")
+
+
+def _fn_region(raw: str, blanked: str, sig_re: str) -> str:
+    """The raw text of a fn body (signature's `{` to its
+    matching `}`), located on the blanked copy; empty
+    string when the signature is not found."""
+    m = re.search(sig_re, blanked)
+    if not m:
+        return ""
+    open_idx = blanked.index("{", m.start())
+    _, end = brace_block(blanked, open_idx)
+    return raw[open_idx:end]
+
+
+def check_coverage() -> tuple[bool, list[str]]:
+    lines: list[str] = []
+    ok = True
+
+    scenes_raw = read("src/rune_sec/scenes.rs")
+    scenes_blanked = blank_code(scenes_raw)
+
+    # Registered scenes: the ("name", fn) tuples of the
+    # vec! scenes() returns — the same live extraction
+    # check 5 counts, here with the names read back.
+    scenes_region = _fn_region(scenes_raw, scenes_blanked, r"pub fn scenes\s*\(\)[^{]*\{")
+    registered = re.findall(r'\(\s*"([^"]+)"\s*,', scenes_region)
+    if not registered:
+        return False, ["could not parse the scenes() vec in scenes.rs — the census itself is broken"]
+    registered_set = set(registered)
+
+    # headless.yml scene usage. Full-line comments are
+    # dropped first: the workflow's header comment
+    # documents `--scene NAME` in prose, which is not a
+    # probe. Loop lists (the `for scene in …; do` lines)
+    # and literal `--scene NAME` probe arguments are the
+    # two real uses; the loops' own `--scene "$scene"`
+    # is the variable form of the lists.
+    yml_lines = [
+        ln
+        for ln in read(".github/workflows/headless.yml").splitlines()
+        if not ln.lstrip().startswith("#")
+    ]
+    yml = "\n".join(yml_lines)
+    loops = [m.group(1).split() for m in _LOOP_RE.finditer(yml)]
+    if not loops:
+        return False, ["no `for scene in …; do` tree loop found in headless.yml — the workflow changed shape; update this check"]
+    loop_union: set[str] = set()
+    for loop in loops:
+        loop_union |= set(loop)
+    direct = sorted(set(_SCENE_ARG_RE.findall(yml)))
+
+    # (a) Forward coverage: every registered scene is
+    # tree-dumped by at least one loop.
+    uncovered = [name for name in registered if name not in loop_union]
+    if uncovered:
+        ok = False
+        for name in uncovered:
+            lines.append(
+                f'  scene "{name}": registered in scenes() but in NO tree loop in '
+                "headless.yml — its surfaces are never tree-dumped (the Wave 9 "
+                "export-panel blind spot); the integrator adds it to the loops "
+                "in .github/workflows/headless.yml"
+            )
+    else:
+        lines.append(
+            f"  forward coverage: all {len(registered)} registered scenes appear "
+            "in the headless.yml tree loops"
+        )
+    for i, loop in enumerate(loops, 1):
+        role = (
+            "plain attempt — the coverage contract"
+            if i == 1
+            else "xvfb fallback — retries only scenes the plain attempt missed"
+        )
+        lines.append(f"  tree loop {i} ({role}): {len(loop)} scene names")
+    # Report-only: scenes a later loop omits that an
+    # earlier loop covers (today: the Wave 7 light pair
+    # is absent from the fallback's retry list). Not a
+    # failure — the fallback only runs for scenes whose
+    # plain dump is missing, and the plain loop is the
+    # contract (see the header).
+    for i, loop in enumerate(loops, 1):
+        if i == 1:
+            continue
+        subset_gap = [
+            name for name in registered if name in loop_union and name not in set(loop)
+        ]
+        if subset_gap:
+            lines.append(
+                f"  tree loop {i} subset note (report only): does not list "
+                f"{', '.join(subset_gap)} — covered by an earlier loop"
+            )
+
+    # (c) Reverse coverage: no stale names in the YAML.
+    stale_loops = sorted(loop_union - registered_set)
+    stale_direct = [name for name in direct if name not in registered_set]
+    if stale_loops or stale_direct:
+        ok = False
+        for name in stale_loops:
+            lines.append(
+                f'  headless.yml tree loops name "{name}", which scenes() does '
+                "not register — the probe produces nothing for it and says "
+                "nothing (stale name: renamed scene or typo)"
+            )
+        for name in stale_direct:
+            lines.append(
+                f'  a --scene probe in headless.yml names "{name}", which '
+                "scenes() does not register — the probe produces nothing for "
+                "it and says nothing (stale name: renamed scene or typo)"
+            )
+    else:
+        lines.append(
+            "  reverse coverage: every scene name in headless.yml (tree loops "
+            "+ --scene probes) is registered in scenes() — no stale names"
+        )
+
+    # (b) Layout facts: the numbered doc list above
+    # layout_assertions() must run 1..=N in order; the
+    # assertions vec is positional (string i is fact
+    # i), so it must hold exactly N strings, and any
+    # `see fact N` citation inside a string must name
+    # that string's own position.
+    raw_lines = scenes_raw.splitlines()
+    start = next(
+        (i for i, ln in enumerate(raw_lines) if "Layout facts a CI" in ln), None
+    )
+    stop = next(
+        (
+            i
+            for i, ln in enumerate(raw_lines)
+            if start is not None and i > start and "pub fn layout_assertions" in ln
+        ),
+        None,
+    )
+    if start is None or stop is None:
+        ok = False
+        lines.append("  layout facts: the fact list above layout_assertions() was not found in scenes.rs")
+    else:
+        facts: list[int] = []
+        for ln in raw_lines[start:stop]:
+            fm = _FACT_ITEM_RE.match(ln)
+            if fm:
+                facts.append(int(fm.group(1)))
+        expected = list(range(1, len(facts) + 1))
+        if facts != expected:
+            ok = False
+            missing = [n for n in range(1, max(facts, default=0) + 1) if n not in facts]
+            dupes = sorted({n for n in facts if facts.count(n) > 1})
+            detail = []
+            if missing:
+                detail.append(f"gap(s) at {missing}")
+            if dupes:
+                detail.append(f"duplicate(s) {dupes}")
+            if not detail:
+                detail.append("numbers out of order")
+            lines.append(
+                f"  layout facts: NOT sequential — found {facts} "
+                f"({'; '.join(detail)}); renumber so the list runs 1..=N with no gaps or duplicates"
+            )
+        assertions_region = _fn_region(
+            scenes_raw, scenes_blanked, r"pub fn layout_assertions\s*\(\)[^{]*\{"
+        )
+        assertions = re.findall(r'"((?:\\.|[^"\\])*)"', assertions_region)
+        if len(assertions) != len(facts):
+            ok = False
+            lines.append(
+                f"  layout facts: layout_assertions() holds {len(assertions)} strings "
+                f"for {len(facts)} documented facts — the vec is positional "
+                "(string i is fact i); add/remove the string with its fact"
+            )
+        miscited: list[str] = []
+        for i, text in enumerate(assertions, 1):
+            for cit in _SEE_FACT_RE.findall(text):
+                if int(cit) != i:
+                    miscited.append(f"string {i} cites fact {cit}")
+        if miscited:
+            ok = False
+            lines.append(
+                "  layout facts: miscited assertion string(s) — a `see fact N` "
+                f"citation must name its own string's fact: {'; '.join(miscited)}"
+            )
+        if facts == expected and len(assertions) == len(facts) and not miscited:
+            lines.append(
+                f"  layout facts: 1..={len(facts)} sequential, no gaps or duplicates; "
+                f"layout_assertions() holds {len(assertions)} strings and every "
+                "`see fact N` citation names its own fact"
+            )
+    return ok, lines
+
+
+# ----------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------
 
@@ -1497,6 +1746,9 @@ def main() -> int:
 
     ok, lines = check_literal_guard()
     report("7. LITERAL & EMPTY-STATE GUARD (UI mission Wave 9)", ok, lines)
+
+    ok, lines = check_coverage()
+    report("8. COVERAGE (scenes <-> headless.yml; layout-fact sequence)", ok, lines)
 
     print()
     if failures:
