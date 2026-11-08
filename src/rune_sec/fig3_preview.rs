@@ -175,7 +175,81 @@ pub fn preview_prims(
         push_figure(&mut prims, s, w, cam, viewport, ground_y);
     }
 
+    // The panel's canvas does not clip its drawing to its
+    // own rect (proven by the Phase L headless three-d
+    // snap: the grid's long projected lines painted over
+    // the shell below the panel), so every segment is cut
+    // to the viewport here — the one place all preview
+    // drawing passes through.
     prims
+        .into_iter()
+        .filter_map(|p| {
+            clip_segment_to_viewport(p.a, p.b, viewport).map(|(a, b)| PreviewPrim {
+                a,
+                b,
+                color: p.color,
+                width: p.width,
+            })
+        })
+        .collect()
+}
+
+/// Clip a 2D segment to the viewport rectangle
+/// `[0, w] × [0, h]` (Liang–Barsky); `None` when the
+/// segment lies wholly outside or the viewport is empty.
+fn clip_segment_to_viewport(
+    a: [f32; 2],
+    b: [f32; 2],
+    viewport: [f32; 2],
+) -> Option<([f32; 2], [f32; 2])> {
+    let (w, h) = (viewport[0], viewport[1]);
+    if !(w > 0.0 && h > 0.0) {
+        return None;
+    }
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let mut t0 = 0.0f32;
+    let mut t1 = 1.0f32;
+    // One (p, q) pair per edge — left, right, top, bottom —
+    // in the form p·t <= q.
+    let edges = [
+        (-d[0], a[0]),
+        (d[0], w - a[0]),
+        (-d[1], a[1]),
+        (d[1], h - a[1]),
+    ];
+    for (p, q) in edges {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                if r > t1 {
+                    return None;
+                }
+                if r > t0 {
+                    t0 = r;
+                }
+            } else {
+                if r < t0 {
+                    return None;
+                }
+                if r < t1 {
+                    t1 = r;
+                }
+            }
+        }
+    }
+    // The final clamp absorbs float rounding at the edges,
+    // so a cut endpoint lands exactly on the boundary.
+    let cut = |t: f32| {
+        [
+            (a[0] + t * d[0]).clamp(0.0, w),
+            (a[1] + t * d[1]).clamp(0.0, h),
+        ]
+    };
+    Some((cut(t0), cut(t1)))
 }
 
 /// The ground grid: `fig3d::grid_line_points` segments,
@@ -488,15 +562,41 @@ mod tests {
         assert!(feet < 0.0, "the rest humanoid's feet are below the origin");
         let bare = preview_prims(None, true, VP);
         let with = preview_prims(Some(&state), true, VP);
-        let grid_max_y = |prims: &[PreviewPrim]| {
+        // The whole grid sits lower on screen (Y down), so
+        // its TOPMOST line is lower too. The topmost extent
+        // is the statistic that survives viewport clipping:
+        // both grids' lowest lines run off the canvas and
+        // are cut at its bottom edge, so a max-y comparison
+        // would read the clip bound on both sides.
+        let grid_min_y = |prims: &[PreviewPrim]| {
             prims
                 .iter()
                 .filter(|p| p.color == GRID_COLOR)
                 .flat_map(|p| [p.a[1], p.b[1]])
-                .fold(f32::NEG_INFINITY, f32::max)
+                .fold(f32::INFINITY, f32::min)
         };
-        assert!(grid_max_y(&with) > grid_max_y(&bare));
+        assert!(grid_min_y(&with) > grid_min_y(&bare));
         assert_ne!(with, bare);
+    }
+
+    #[test]
+    fn grid_prims_stay_inside_the_viewport() {
+        // Regression for the bleed in the Phase L headless
+        // three-d snap: the canvas does not clip, so the
+        // grid's projected lines — hundreds of points long —
+        // painted over the shell below the panel. Every
+        // grid endpoint now lands inside the viewport, with
+        // and without a session.
+        for prims in [
+            preview_prims(None, true, VP),
+            preview_prims(Some(&rest_state(0)), true, VP),
+        ] {
+            assert!(!prims.is_empty());
+            for prim in &prims {
+                assert!(inside(prim.a), "prim starts outside: {:?}", prim.a);
+                assert!(inside(prim.b), "prim ends outside: {:?}", prim.b);
+            }
+        }
     }
 
     #[test]
