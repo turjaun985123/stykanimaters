@@ -6,6 +6,7 @@
 pub mod audio;
 pub mod audio_edit;
 pub mod audio_ops;
+pub mod audio_play;
 pub mod dialogs;
 pub mod draw_ops;
 pub mod editor;

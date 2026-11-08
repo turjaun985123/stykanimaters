@@ -61,6 +61,23 @@
 //! `pivot.rs`'s `bitmap_glyph_rows` already does — because
 //! the original is private to `media.rs`. If the font ever
 //! changes there, this copy (and pivot.rs's) must follow.
+//!
+//! ## Backing plates (shell-only, NOT a rasterizer feature)
+//!
+//! Bare bitmap cells are hard to read over busy stage art,
+//! so [`text_geometry`] wraps every label's glyph boxes in a
+//! readability aid the export rasterizer does not have: each
+//! glyph box is preceded in the output by a backing plate —
+//! the same box scaled by [`BACKING_SCALE`] about its own
+//! centre, filled with [`BACKING_COLOR`] at [`BACKING_ALPHA`]
+//! (translucent black). Neighbouring plates overlap into one
+//! continuous dark backing per glyph cluster, separating the
+//! text from whatever is drawn behind it. [`label_boxes`] is
+//! untouched by this and remains the exact `composite_text`
+//! mirror; the plates exist only in `text_geometry`'s
+//! output, so exported renders are unchanged and the glyph
+//! boxes themselves (corners, order, colour) are identical
+//! to what `label_boxes` produced before plates existed.
 
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{InstanceKey, SegmentMedia, V2};
@@ -72,8 +89,12 @@ pub enum TextPrim {
     /// label) whose corners are ordered like `media.rs`'s
     /// image quads — starting at the local (−x, −y) corner and
     /// walking the local +x edge first — filled with `color`
-    /// (a `0xRRGGBB` engine colour).
-    GlyphBox { corners: [V2; 4], color: u32 },
+    /// (a `0xRRGGBB` engine colour) at opacity `alpha`
+    /// (`1.0` = fully opaque, which every real glyph box
+    /// carries; the backing plates `text_geometry`
+    /// interleaves carry [`BACKING_COLOR`]/[`BACKING_ALPHA`]
+    /// instead — see the module docs).
+    GlyphBox { corners: [V2; 4], color: u32, alpha: f32 },
 }
 
 /// The glyph pixel grid: 3 columns × 5 rows per character.
@@ -82,6 +103,21 @@ const GLYPH_ROWS: usize = 5;
 /// Character advance in cells: 3 glyph columns + 1 gap
 /// (media.rs:322).
 const CHAR_ADVANCE: f32 = 4.0;
+
+/// Backing-plate fill (shell-only readability aid — see the
+/// module docs): black, so a plate darkens busy art behind
+/// glyphs of any colour.
+pub const BACKING_COLOR: u32 = 0x000000;
+/// Backing-plate opacity: dark enough to separate the
+/// glyphs from the art, light enough to keep the art
+/// visible through the plate.
+pub const BACKING_ALPHA: f32 = 0.55;
+/// Backing-plate size relative to its glyph box, scaled
+/// about the box centre: 1.5× extends the plate a quarter
+/// cell past the glyph on every side (a cell box is 2 half-
+/// extents wide), so plates of adjacent lit pixels overlap
+/// into one continuous backing.
+pub const BACKING_SCALE: f32 = 1.5;
 
 /// Filled boxes for one label: `content` centred at `pos`,
 /// running along `angle_deg` (stage-space degrees, y-down),
@@ -136,9 +172,45 @@ pub fn label_boxes(pos: V2, angle_deg: f32, content: &str, size: f32, color: u32
                         centre[1] - u[1] * half + v[1] * half,
                     ],
                 ];
-                out.push(TextPrim::GlyphBox { corners, color });
+                out.push(TextPrim::GlyphBox { corners, color, alpha: 1.0 });
             }
         }
+    }
+    out
+}
+
+/// `corners` scaled by `k` about their own centre (the
+/// average of the four — glyph boxes are centre-symmetric,
+/// so the average is the box centre).
+fn scaled_about_centre(corners: [V2; 4], k: f32) -> [V2; 4] {
+    let mut centre = [0.0, 0.0];
+    for c in &corners {
+        centre[0] += c[0] / 4.0;
+        centre[1] += c[1] / 4.0;
+    }
+    corners.map(|c| [
+        centre[0] + (c[0] - centre[0]) * k,
+        centre[1] + (c[1] - centre[1]) * k,
+    ])
+}
+
+/// Interleave backing plates into one label's glyph boxes:
+/// every glyph box is preceded by its plate (same box,
+/// scaled by [`BACKING_SCALE`] about its centre, in
+/// [`BACKING_COLOR`] at [`BACKING_ALPHA`]), so a painter
+/// walking the output in order draws plate, glyph, plate,
+/// glyph. The glyph boxes pass through unchanged and in
+/// order. Shell-only — see the module docs.
+fn with_backing(boxes: Vec<TextPrim>) -> Vec<TextPrim> {
+    let mut out = Vec::with_capacity(boxes.len() * 2);
+    for prim in boxes {
+        let TextPrim::GlyphBox { corners, .. } = &prim;
+        out.push(TextPrim::GlyphBox {
+            corners: scaled_about_centre(*corners, BACKING_SCALE),
+            color: BACKING_COLOR,
+            alpha: BACKING_ALPHA,
+        });
+        out.push(prim);
     }
     out
 }
@@ -147,7 +219,10 @@ pub fn label_boxes(pos: V2, angle_deg: f32, content: &str, size: f32, color: u32
 /// glyph boxes in stage coordinates: segment text for every
 /// stage-visible figure (in figure, then node order), then
 /// the free-standing `Project.texts` instances (which the
-/// rasterizer also draws last, on top).
+/// rasterizer also draws last, on top). Each label's glyph
+/// boxes carry the shell-only backing plates described in
+/// the module docs (see [`with_backing`]); the glyph boxes
+/// themselves are exactly [`label_boxes`]' output.
 pub fn text_geometry(core: &EditorCore) -> Vec<TextPrim> {
     let project = &core.project;
     let display = core.display_frame();
@@ -175,7 +250,7 @@ pub fn text_geometry(core: &EditorCore) -> Vec<TextPrim> {
             let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
             let angle_deg = ab[1].atan2(ab[0]).to_degrees();
             let color = node.color.unwrap_or(fig.color);
-            out.extend(label_boxes(mid, angle_deg, content, *size, color));
+            out.extend(with_backing(label_boxes(mid, angle_deg, content, *size, color)));
         }
     }
 
@@ -187,13 +262,13 @@ pub fn text_geometry(core: &EditorCore) -> Vec<TextPrim> {
         if size <= 0.0 {
             continue;
         }
-        out.extend(label_boxes(
+        out.extend(with_backing(label_boxes(
             [key.x, key.y],
             key.angle,
             &text.content,
             size,
             text.color,
-        ));
+        )));
     }
     out
 }
@@ -315,6 +390,20 @@ mod tests {
             .collect()
     }
 
+    /// The glyph boxes of a `text_geometry` output with the
+    /// backing plates dropped: glyphs are the opaque prims
+    /// (plates carry `BACKING_ALPHA`). The rasterizer-parity
+    /// assertions below run over this subset — plates are a
+    /// shell-only aid layered on top of the same glyph
+    /// stream.
+    fn glyphs(prims: &[TextPrim]) -> Vec<TextPrim> {
+        prims
+            .iter()
+            .filter(|p| matches!(p, TextPrim::GlyphBox { alpha, .. } if *alpha == 1.0))
+            .cloned()
+            .collect()
+    }
+
     /// The first real segment (parented, non-degenerate) of
     /// figure 0 in the demo project — its index and endpoints.
     fn first_segment(core: &EditorCore) -> (usize, V2, V2) {
@@ -414,6 +503,8 @@ mod tests {
     fn segment_text_sits_on_the_segment_midpoint() {
         let (core, _ni, a, b) = core_with_segment_text("HI", 25.0);
         let prims = text_geometry(&core);
+        assert_eq!(prims.len(), 40, "20 glyph pixels, each with a backing plate");
+        let prims = glyphs(&prims);
         assert_eq!(prims.len(), 20, "H+I lit pixels");
         // Both glyphs touch the label's extremes, so the bbox
         // centre is the label centre: the segment midpoint,
@@ -443,7 +534,7 @@ mod tests {
         core.project.figures[0].def.nodes[ni].color = Some(0x00FF00);
         let prims = text_geometry(&core);
         assert!(!prims.is_empty());
-        assert!(colours(&prims).iter().all(|c| *c == 0x00FF00));
+        assert!(colours(&glyphs(&prims)).iter().all(|c| *c == 0x00FF00));
     }
 
     #[test]
@@ -468,6 +559,8 @@ mod tests {
             ],
         });
         let prims = text_geometry(&core);
+        assert_eq!(prims.len(), 20, "10 glyph pixels, each with a backing plate");
+        let prims = glyphs(&prims);
         assert_eq!(prims.len(), 10, "A lit pixels");
         assert!(colours(&prims).iter().all(|c| *c == 0x112233));
         // Display frame is 0: the label sits at the first
@@ -509,6 +602,8 @@ mod tests {
             keys: vec![InstanceKey { frame: 3.0, x: 70.0, y: 80.0, scale: 2.0, angle: 0.0 }],
         });
         let prims = text_geometry(&core);
+        assert_eq!(prims.len(), 20, "10 glyph pixels, each with a backing plate");
+        let prims = glyphs(&prims);
         assert_eq!(prims.len(), 10);
         let (lo, hi) = bbox(&prims);
         let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
@@ -519,5 +614,66 @@ mod tests {
         // A non-positive scaled size is skipped, as in media.rs.
         core.project.texts[0].keys[0].scale = 0.0;
         assert!(text_geometry(&core).is_empty());
+    }
+
+    #[test]
+    fn backing_plate_precedes_every_glyph_with_the_same_centre() {
+        // Rotated label, so the check runs on real geometry,
+        // not just axis-aligned boxes.
+        let boxes = label_boxes([10.0, 20.0], 30.0, "HI", 25.0, 0xAABBCC);
+        let prims = with_backing(boxes.clone());
+        assert_eq!(prims.len(), boxes.len() * 2);
+        for (pair, glyph) in prims.chunks_exact(2).zip(boxes.iter()) {
+            let (backing, g) = (&pair[0], &pair[1]);
+            assert_eq!(g, glyph, "glyph prim passes through unchanged");
+            let TextPrim::GlyphBox { color, alpha, .. } = backing;
+            assert_eq!(*color, BACKING_COLOR, "plate colour");
+            assert_eq!(*alpha, BACKING_ALPHA, "plate alpha");
+            // Same centre: the plate is the glyph box grown
+            // about its own centre.
+            let (bc, gc) = (box_centre(backing), box_centre(g));
+            assert!(
+                (bc[0] - gc[0]).abs() < 1e-4 && (bc[1] - gc[1]).abs() < 1e-4,
+                "plate centre {bc:?} vs glyph centre {gc:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn backing_plate_is_larger_by_a_quarter_cell_per_side() {
+        // Unrotated, size 25: cell = 5, glyph box 5x5, plate
+        // 7.5x7.5 at BACKING_SCALE 1.5 — 1.25 units of margin
+        // on every side.
+        let prims = with_backing(label_boxes([100.0, 200.0], 0.0, "A", 25.0, 0x112233));
+        let TextPrim::GlyphBox { corners: plate, .. } = &prims[0];
+        let TextPrim::GlyphBox { corners: glyph, .. } = &prims[1];
+        let span = |cs: &[V2; 4]| [cs[1][0] - cs[0][0], cs[3][1] - cs[0][1]];
+        let (gs, ps) = (span(glyph), span(plate));
+        assert!((gs[0] - 5.0).abs() < 1e-4 && (gs[1] - 5.0).abs() < 1e-4, "glyph span {gs:?}");
+        assert!((ps[0] - 7.5).abs() < 1e-4 && (ps[1] - 7.5).abs() < 1e-4, "plate span {ps:?}");
+        // The extra size is split evenly around the glyph:
+        // the plate's (-x, -y) corner sits 1.25 beyond the
+        // glyph's on both axes.
+        assert!((plate[0][0] - (glyph[0][0] - 1.25)).abs() < 1e-4, "plate lo x {}", plate[0][0]);
+        assert!((plate[0][1] - (glyph[0][1] - 1.25)).abs() < 1e-4, "plate lo y {}", plate[0][1]);
+    }
+
+    #[test]
+    fn text_geometry_interleaves_plates_then_glyphs() {
+        let (core, _, _, _) = core_with_segment_text("A", 25.0);
+        let prims = text_geometry(&core);
+        assert_eq!(prims.len(), 20, "10 glyph pixels + 10 plates");
+        for pair in prims.chunks_exact(2) {
+            let TextPrim::GlyphBox { alpha: pa, color: pc, .. } = &pair[0];
+            let TextPrim::GlyphBox { alpha: ga, .. } = &pair[1];
+            assert_eq!((*pc, *pa), (BACKING_COLOR, BACKING_ALPHA), "plate first");
+            assert_eq!(*ga, 1.0, "glyph second, opaque");
+        }
+        // The glyph subset keeps the label's own colour
+        // (figure fallback here) — plates never recolour it.
+        let fig_color = core.project.figures[0].color;
+        assert!(colours(&glyphs(&prims)).iter().all(|c| *c == fig_color));
+        // Empty labels stay empty: no plates without glyphs.
+        assert!(with_backing(Vec::new()).is_empty());
     }
 }

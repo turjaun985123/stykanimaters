@@ -23,6 +23,14 @@
 //!   `delete_audio_clip`, `delete_stroke_at`) are wrapped by
 //!   shims that resolve "the selected figure" / "the last
 //!   entry" at call time and stand down on empty lists.
+//! * Phase F added recents: every command run from the
+//!   palette is recorded in [`PaletteState::recent`]
+//!   (most-recent-first, capped at [`MAX_RECENT`], no
+//!   duplicates). An empty query lists the recents first,
+//!   under a "Recent" heading (see [`display_commands`]);
+//!   a typed query filters exactly as before and ignores
+//!   the recents entirely. Recents are session-only — the
+//!   list starts empty on every launch.
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -60,6 +68,10 @@ use crate::State;
 
 /// Maximum number of result rows the palette shows at once.
 pub const MAX_RESULTS: usize = 12;
+
+/// Maximum number of recently-run commands remembered for
+/// the empty-query list's "Recent" section.
+pub const MAX_RECENT: usize = 5;
 
 // ----------------------------------------------------------------
 // Command table
@@ -385,6 +397,61 @@ pub fn filter_commands(query: &str) -> Vec<usize> {
     scored.into_iter().map(|(_, i)| i).take(MAX_RESULTS).collect()
 }
 
+// ----------------------------------------------------------------
+// Recents (pure)
+// ----------------------------------------------------------------
+
+/// Record `key` as the most recently run command: it moves
+/// to the front, any earlier entry for the same key is
+/// dropped (no duplicates), and the list is capped at
+/// [`MAX_RECENT`] with the oldest entries falling off the
+/// end.
+pub fn push_recent(recent: &mut Vec<&'static str>, key: &'static str) {
+    recent.retain(|&k| k != key);
+    recent.insert(0, key);
+    recent.truncate(MAX_RECENT);
+}
+
+/// The rows the palette actually lists, as table indices,
+/// plus how many *leading* rows are recents (the view puts
+/// a "Recent" heading over them).
+///
+/// An empty (or whitespace) query leads with the recents —
+/// resolved to table indices in most-recent-first order,
+/// unknown keys skipped, never repeated — followed by the
+/// plain table-order list ([`filter_commands`] with an
+/// empty query) with the recents removed, the whole thing
+/// capped at [`MAX_RESULTS`]. A non-empty query defers to
+/// [`filter_commands`] unchanged and reports 0 recents.
+pub fn display_commands(query: &str, recent: &[&'static str]) -> (Vec<usize>, usize) {
+    if !query.trim().is_empty() {
+        return (filter_commands(query), 0);
+    }
+    let mut rows: Vec<usize> = Vec::new();
+    for key in recent {
+        if let Some(i) = COMMANDS.iter().position(|c| c.key == *key) {
+            if !rows.contains(&i) {
+                rows.push(i);
+            }
+        }
+    }
+    let recent_rows = rows.len();
+    for i in filter_commands("") {
+        if !rows.contains(&i) {
+            rows.push(i);
+        }
+    }
+    rows.truncate(MAX_RESULTS);
+    (rows, recent_rows.min(rows.len()))
+}
+
+/// How many rows the palette currently lists for `s`
+/// (recents-aware): the length keyboard navigation wraps
+/// within.
+fn listed_len(s: &State) -> usize {
+    display_commands(&s.palette.query.text, &s.palette.recent).0.len()
+}
+
 /// Move a selection index by `delta` within `len` rows,
 /// wrapping at both ends; 0 when there are no rows.
 pub fn wrap_move(selected: usize, len: usize, delta: i32) -> usize {
@@ -408,13 +475,20 @@ pub fn clamped_selected(selected: usize, len: usize) -> usize {
 // ----------------------------------------------------------------
 
 /// Everything the palette needs between frames: whether it is
-/// open, the query field's edit state, and the highlighted
+/// open, the query field's edit state, the highlighted
 /// result row (an index into the *filtered* list, clamped by
-/// [`clamped_selected`] wherever it is read).
+/// [`clamped_selected`] wherever it is read), and the recents
+/// list (keys of the last commands run from the palette,
+/// most-recent-first — see [`push_recent`]).
 pub struct PaletteState {
     pub open: bool,
     pub query: TextEdit,
     pub selected: usize,
+    /// Keys of the commands most recently run from the
+    /// palette, most-recent-first, capped at [`MAX_RECENT`]
+    /// with no duplicates. Session-only: it starts empty on
+    /// every launch and survives open/close cycles.
+    pub recent: Vec<&'static str>,
 }
 
 impl PaletteState {
@@ -423,6 +497,7 @@ impl PaletteState {
             open: false,
             query: TextEdit::new(""),
             selected: 0,
+            recent: Vec::new(),
         }
     }
 }
@@ -452,20 +527,24 @@ pub fn close_palette(s: &mut State) {
 /// Run the currently highlighted command against the core and
 /// close the palette. A stale selection (query changed under
 /// it) is clamped first; an empty result list just closes.
+/// The run is recorded in the recents list.
 pub fn run_selected(s: &mut State) {
-    let results = filter_commands(&s.palette.query.text);
+    let (results, _) = display_commands(&s.palette.query.text, &s.palette.recent);
     let row = clamped_selected(s.palette.selected, results.len());
     if let Some(&ci) = results.get(row) {
         (COMMANDS[ci].run)(&mut s.core);
+        push_recent(&mut s.palette.recent, COMMANDS[ci].key);
     }
     close_palette(s);
 }
 
 /// Run the command at table index `ci` (a result-row press)
-/// and close the palette.
+/// and close the palette. The run is recorded in the recents
+/// list.
 fn run_command(s: &mut State, ci: usize) {
     if let Some(cmd) = COMMANDS.get(ci) {
         (cmd.run)(&mut s.core);
+        push_recent(&mut s.palette.recent, cmd.key);
     }
     close_palette(s);
 }
@@ -487,12 +566,12 @@ pub fn palette_handle_key(s: &mut State, ev: &KeyEvent) -> bool {
     }
     match ev.key {
         Key::Down => {
-            let len = filter_commands(&s.palette.query.text).len();
+            let len = listed_len(s);
             s.palette.selected = wrap_move(s.palette.selected, len, 1);
             true
         }
         Key::Up => {
-            let len = filter_commands(&s.palette.query.text).len();
+            let len = listed_len(s);
             s.palette.selected = wrap_move(s.palette.selected, len, -1);
             true
         }
@@ -515,12 +594,12 @@ pub fn palette_handle_key(s: &mut State, ev: &KeyEvent) -> bool {
 fn palette_field_key(s: &mut State, ev: &KeyEvent) -> bool {
     match ev.key {
         Key::Down => {
-            let len = filter_commands(&s.palette.query.text).len();
+            let len = listed_len(s);
             s.palette.selected = wrap_move(s.palette.selected, len, 1);
             true
         }
         Key::Up => {
-            let len = filter_commands(&s.palette.query.text).len();
+            let len = listed_len(s);
             s.palette.selected = wrap_move(s.palette.selected, len, -1);
             true
         }
@@ -536,14 +615,28 @@ fn palette_field_key(s: &mut State, ev: &KeyEvent) -> bool {
 // View
 // ----------------------------------------------------------------
 
+/// A small non-interactive heading row over a section of
+/// the results list ("Recent" / "All commands"). Headings
+/// are not result rows: they never take the selection,
+/// which indexes [`display_commands`]' rows only.
+fn section_heading(label: &str, t: &Theme) -> El {
+    row()
+        .h(22.0)
+        .px(10.0)
+        .center_y()
+        .child(text(label).font(type_::LABEL).color(t.text_secondary))
+}
+
 /// The palette panel: a query field over a ranked result list
 /// (title left, group right; the highlighted row is
-/// accent-filled). Self-contained — the integrator renders it
+/// accent-filled). With an empty query the recents lead under
+/// a "Recent" heading, followed by the full list under "All
+/// commands". Self-contained — the integrator renders it
 /// while `state.palette.open`, typically as an overlay above
 /// the main column.
 pub fn palette_view(s: &State, t: &Theme) -> El {
     let accent = tok::accent(0, true);
-    let results = filter_commands(&s.palette.query.text);
+    let (results, recent_rows) = display_commands(&s.palette.query.text, &s.palette.recent);
     let selected = clamped_selected(s.palette.selected, results.len());
 
     let field = text_input(&s.palette.query, type_::BODY.lh(26.0))
@@ -589,6 +682,12 @@ pub fn palette_view(s: &State, t: &Theme) -> El {
     } else {
         let mut list = col().padding(6.0).gap(2.0);
         for (row_i, &ci) in results.iter().enumerate() {
+            if recent_rows > 0 && row_i == 0 {
+                list = list.child(section_heading("Recent", t));
+            }
+            if recent_rows > 0 && row_i == recent_rows {
+                list = list.child(section_heading("All commands", t));
+            }
             let cmd = &COMMANDS[ci];
             let on = row_i == selected;
             list = list.child(
@@ -861,5 +960,98 @@ mod tests {
         assert_eq!(clamped_selected(4, 5), 4);
         assert_eq!(clamped_selected(9, 5), 4);
         assert_eq!(clamped_selected(3, 0), 0);
+    }
+
+    // -- recents ----------------------------------------------
+
+    #[test]
+    fn push_recent_puts_newest_first() {
+        let mut recent: Vec<&'static str> = Vec::new();
+        push_recent(&mut recent, "undo");
+        assert_eq!(recent, vec!["undo"]);
+        push_recent(&mut recent, "play");
+        assert_eq!(recent, vec!["play", "undo"]);
+    }
+
+    #[test]
+    fn push_recent_dedups_by_moving_to_front() {
+        let mut recent: Vec<&'static str> = Vec::new();
+        push_recent(&mut recent, "undo");
+        push_recent(&mut recent, "play");
+        push_recent(&mut recent, "redo");
+        push_recent(&mut recent, "undo");
+        assert_eq!(recent, vec!["undo", "redo", "play"]);
+    }
+
+    #[test]
+    fn push_recent_caps_at_max_recent() {
+        let mut recent: Vec<&'static str> = Vec::new();
+        for key in ["play", "undo", "redo", "save", "load", "add-frame"] {
+            push_recent(&mut recent, key);
+        }
+        assert_eq!(recent.len(), MAX_RECENT);
+        assert_eq!(recent[0], "add-frame");
+        assert_eq!(recent[MAX_RECENT - 1], "undo");
+        assert!(!recent.contains(&"play"), "oldest entry fell off: {recent:?}");
+        // Re-running a survivor keeps the cap and the order.
+        push_recent(&mut recent, "save");
+        assert_eq!(recent.len(), MAX_RECENT);
+        assert_eq!(recent[0], "save");
+    }
+
+    #[test]
+    fn empty_query_without_recents_is_the_plain_list() {
+        let (rows, recent_rows) = display_commands("", &[]);
+        assert_eq!(recent_rows, 0);
+        assert_eq!(rows, filter_commands(""));
+        // A whitespace query counts as empty here too.
+        let (rows, recent_rows) = display_commands("   ", &[]);
+        assert_eq!(recent_rows, 0);
+        assert_eq!(rows, filter_commands(""));
+    }
+
+    #[test]
+    fn empty_query_leads_with_recents_then_table_order() {
+        // Recents drawn from three spots in the table: the
+        // first page ("play"), just past it ("undo") and far
+        // down it ("export-mp4"). The one already on the
+        // first page must not appear twice.
+        let recent: Vec<&'static str> = vec!["export-mp4", "undo", "play"];
+        let (rows, recent_rows) = display_commands("", &recent);
+        assert_eq!(recent_rows, 3);
+        assert_eq!(rows[0], idx_of("export-mp4"));
+        assert_eq!(rows[1], idx_of("undo"));
+        assert_eq!(rows[2], idx_of("play"));
+        assert_eq!(rows.len(), MAX_RESULTS);
+        // No command appears twice.
+        let mut deduped = rows.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(deduped.len(), rows.len(), "duplicate rows: {rows:?}");
+        // The tail is the plain list with the recents removed.
+        let tail: Vec<usize> = filter_commands("")
+            .into_iter()
+            .filter(|i| !recent.iter().any(|k| idx_of(k) == *i))
+            .take(rows.len() - recent_rows)
+            .collect();
+        assert_eq!(rows[recent_rows..], tail[..]);
+    }
+
+    #[test]
+    fn nonempty_query_ignores_recents() {
+        let recent: Vec<&'static str> = vec!["export-mp4", "undo"];
+        for q in ["undo", "export", "e", "add-frame"] {
+            let (rows, recent_rows) = display_commands(q, &recent);
+            assert_eq!(recent_rows, 0, "query {q:?} must not surface recents");
+            assert_eq!(rows, filter_commands(q), "query {q:?} changed behaviour");
+        }
+    }
+
+    #[test]
+    fn unknown_recent_keys_are_skipped() {
+        let recent: Vec<&'static str> = vec!["no-such-command", "undo"];
+        let (rows, recent_rows) = display_commands("", &recent);
+        assert_eq!(recent_rows, 1);
+        assert_eq!(rows[0], idx_of("undo"));
     }
 }

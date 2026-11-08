@@ -15,6 +15,13 @@
 //! * Opacity stepper → `set_node_opacity` (same addition):
 //!   − / + in 0.05 steps over the model's 0.0..=1.0 range,
 //!   with a % readout.
+//! * Colour RGB steppers (Phase F) → `set_node_color`
+//!   (editor.rs:532 — the same op the segment inspector's
+//!   colour swatches press): R / G / B rows step one channel
+//!   by 8 (clamped 0..=255) off the node's effective colour
+//!   and write the composed `#RRGGBB` back. Like the swatch
+//!   op and the op it mirrors, it does not snapshot; the
+//!   readout shows the composed hex value.
 //! * Taper stepper → `cycle_node_taper` (editor.rs:1796):
 //!   taper cycles 1.0 → 0.6 → 0.3 → 0.0 → 1.0. Taper stays a
 //!   cycle control on purpose: the engine has NO
@@ -146,6 +153,93 @@ pub fn step_opacity(core: &mut EditorCore, dir: i32) {
     core.set_node_opacity(opacity_stepped(style.opacity, dir));
 }
 
+/// Per-press channel step for the RGB colour steppers.
+pub const RGB_STEP: i32 = 8;
+
+/// Split a `0xRRGGBB` colour into its `(r, g, b)` channels.
+pub fn rgb_split(rgb: u32) -> (u8, u8, u8) {
+    (
+        ((rgb >> 16) & 0xFF) as u8,
+        ((rgb >> 8) & 0xFF) as u8,
+        (rgb & 0xFF) as u8,
+    )
+}
+
+/// Compose a `0xRRGGBB` colour from its channels (the exact
+/// inverse of [`rgb_split`]).
+pub fn rgb_join(r: u8, g: u8, b: u8) -> u32 {
+    ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+}
+
+/// One channel after a stepper press in direction `dir`
+/// (−1 / +1): stepped by [`RGB_STEP`], clamped to 0..=255.
+pub fn step_channel(value: u8, dir: i32) -> u8 {
+    (value as i32 + dir * RGB_STEP).clamp(0, 255) as u8
+}
+
+/// Hex readout for a colour (`#E8E8EC`) — the same format
+/// the gradient label uses.
+pub fn color_text(rgb: u32) -> String {
+    format!("#{rgb:06X}")
+}
+
+/// The selected node's effective colour: its own
+/// `NodeDef.color` when set, else the figure's colour (what
+/// the stage actually draws — `stage_view` resolves it the
+/// same way). `None` only when nothing is selected.
+pub fn selected_color(core: &EditorCore) -> Option<u32> {
+    let ni = core.selected_node?;
+    let fig = core.project.figures.get(core.selected_figure)?;
+    let node = fig.def.nodes.get(ni)?;
+    Some(node.color.unwrap_or(fig.color))
+}
+
+/// One RGB channel stepper press against the core: read the
+/// selected node's effective colour, step channel `channel`
+/// (0 = R, 1 = G, 2 = B) by [`RGB_STEP`], and write the
+/// composed colour back through `set_node_color` — the op
+/// the segment inspector's swatches press (field write +
+/// status, no snapshot, mirroring `cycle_node_color`).
+/// No selection (or a bad channel index) → no-op.
+pub fn step_color_channel(core: &mut EditorCore, channel: usize, dir: i32) {
+    let Some(rgb) = selected_color(core) else {
+        return;
+    };
+    let (r, g, b) = rgb_split(rgb);
+    let (r, g, b) = match channel {
+        0 => (step_channel(r, dir), g, b),
+        1 => (r, step_channel(g, dir), b),
+        2 => (r, g, step_channel(b, dir)),
+        _ => return,
+    };
+    core.set_node_color(rgb_join(r, g, b));
+}
+
+/// One RGB channel stepper row: channel letter, the
+/// channel's current value, and − / + buttons stepping it
+/// by [`RGB_STEP`] via [`step_color_channel`]. Keys are
+/// `style-<letter>-dn` / `style-<letter>-up`.
+fn channel_row(channel: usize, label: &str, value: u8, t: &Theme) -> El {
+    let lower = label.to_lowercase();
+    row()
+        .key(format!("style-{lower}-row"))
+        .gap(8.0)
+        .center_y()
+        .child(text(label).font(type_::LABEL).color(t.text))
+        .child(
+            text(value.to_string())
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0),
+        )
+        .child(btn(&format!("style-{lower}-dn"), "−", false, t, move |s| {
+            step_color_channel(&mut s.core, channel, -1)
+        }))
+        .child(btn(&format!("style-{lower}-up"), "+", false, t, move |s| {
+            step_color_channel(&mut s.core, channel, 1)
+        }))
+}
+
 /// One cap segment chip: accent-filled when it is the current
 /// cap, card-filled otherwise. Each chip is its own press
 /// target — pressing it sets exactly that cap through
@@ -275,6 +369,36 @@ pub fn style_panel(s: &State, t: &Theme) -> El {
                     .color(t.text_secondary),
             ),
     );
+
+    // Colour: hex readout + a live preview square, then one
+    // stepper row per RGB channel stepping the node's own
+    // colour via `set_node_color` (the swatch op). Stepping
+    // starts from the effective colour (the node's own, or
+    // the figure's while unset), so the first press never
+    // jumps to near-black.
+    if let Some(rgb) = selected_color(core) {
+        let (r, g, b) = rgb_split(rgb);
+        let preview = el()
+            .size(18.0, 18.0)
+            .radius(4.0)
+            .fill(hex_color(rgb).unwrap_or(Color::WHITE));
+        panel = panel.child(
+            row()
+                .key("style-color-row")
+                .gap(8.0)
+                .center_y()
+                .child(text("Colour").font(type_::LABEL).color(t.text))
+                .child(preview)
+                .child(
+                    text(color_text(rgb))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                ),
+        );
+        panel = panel.child(channel_row(0, "R", r, t));
+        panel = panel.child(channel_row(1, "G", g, t));
+        panel = panel.child(channel_row(2, "B", b, t));
+    }
 
     // Opacity: − / + stepper (0.05 steps, % readout) setting
     // the selected node's opacity via `set_node_opacity`.
@@ -430,6 +554,85 @@ mod tests {
         assert_eq!(selected_style(&core).unwrap().opacity, 0.90);
         step_opacity(&mut core, 1);
         assert_eq!(selected_style(&core).unwrap().opacity, 0.95);
+    }
+
+    #[test]
+    fn rgb_split_and_join_round_trip() {
+        for rgb in [0x00_0000, 0xFF_FFFF, 0xE8_E8EC, 0x12_3456, 0x00_FF80] {
+            let (r, g, b) = rgb_split(rgb);
+            assert_eq!(rgb_join(r, g, b), rgb, "round trip of {rgb:#08X}");
+        }
+        assert_eq!(rgb_split(0xE8_E8EC), (232, 232, 236));
+        assert_eq!(rgb_split(0x00_0000), (0, 0, 0));
+        assert_eq!(rgb_join(255, 0, 128), 0xFF_0080);
+    }
+
+    #[test]
+    fn step_channel_steps_by_eight_and_clamps() {
+        assert_eq!(step_channel(100, 1), 108);
+        assert_eq!(step_channel(100, -1), 92);
+        assert_eq!(step_channel(0, 1), 8);
+        assert_eq!(step_channel(255, -1), 247);
+        // Clamped at both ends of the 0..=255 range.
+        assert_eq!(step_channel(255, 1), 255);
+        assert_eq!(step_channel(250, 1), 255);
+        assert_eq!(step_channel(0, -1), 0);
+        assert_eq!(step_channel(4, -1), 0);
+    }
+
+    #[test]
+    fn selected_color_prefers_the_node_then_the_figure() {
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        // Unset node colour → the figure's colour is the
+        // effective (drawn) colour.
+        core.project.figures[0].def.nodes[1].color = None;
+        let figure_color = core.project.figures[0].color;
+        assert_eq!(selected_color(&core), Some(figure_color));
+        // A set node colour wins.
+        core.project.figures[0].def.nodes[1].color = Some(0x12_3456);
+        assert_eq!(selected_color(&core), Some(0x12_3456));
+        // No selection → no colour.
+        core.selected_node = None;
+        assert_eq!(selected_color(&core), None);
+    }
+
+    #[test]
+    fn color_stepper_drives_the_real_op_and_clamps() {
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        core.set_node_color(0x64_320A);
+        // R +1: 100 → 108, other channels untouched.
+        step_color_channel(&mut core, 0, 1);
+        assert_eq!(selected_color(&core), Some(0x6C_320A));
+        // G −1: 50 → 42.
+        step_color_channel(&mut core, 1, -1);
+        assert_eq!(selected_color(&core), Some(0x6C_2A0A));
+        // B clamps at 0 (10 − 8 − 8 would go negative).
+        step_color_channel(&mut core, 2, -1);
+        step_color_channel(&mut core, 2, -1);
+        assert_eq!(selected_color(&core), Some(0x6C_2A00));
+        // And at 255: set R near the top, one press clamps.
+        core.set_node_color(0xFA_2A00);
+        step_color_channel(&mut core, 0, 1);
+        assert_eq!(selected_color(&core), Some(0xFF_2A00));
+        // A bad channel index is a no-op.
+        step_color_channel(&mut core, 3, 1);
+        assert_eq!(selected_color(&core), Some(0xFF_2A00));
+        // The op stored it as the node's own colour.
+        assert_eq!(
+            core.project.figures[0].def.nodes[1].color,
+            Some(0xFF_2A00)
+        );
+    }
+
+    #[test]
+    fn color_text_is_uppercase_hex() {
+        assert_eq!(color_text(0xE8_E8EC), "#E8E8EC");
+        assert_eq!(color_text(0x00_0000), "#000000");
+        assert_eq!(color_text(0xFF_0080), "#FF0080");
     }
 
     #[test]

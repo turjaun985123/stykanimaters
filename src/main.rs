@@ -84,6 +84,18 @@ pub struct State {
     pub key_clipboard: Option<Vec<stykanimate_rs::graph::Key>>,
     /// Last export recap line (export_panel section).
     pub export_recap: String,
+    /// Figure rename field (inspector_figure section, Phase F).
+    pub inspector_figure: rune_sec::inspector_figure::InspectorFigureEditState,
+    /// Movieclip rename session (clips_panel section, Phase F).
+    pub clips_rename: rune_sec::clips_panel::ClipRenameState,
+    /// FX browser filter + recents (fx_browser section,
+    /// Phase F).
+    pub fx_browser: rune_sec::fx_browser::FxBrowserState,
+    /// Draw stamp parameters (draw_tools section, Phase F).
+    pub draw_tools: rune_sec::draw_tools::DrawToolsState,
+    /// Previous `core.playing` as seen by `poll`, so playback
+    /// audio starts/stops on the flip (Phase F audio glue).
+    was_playing: bool,
     /// Last status line fed to the toast stack.
     last_status: String,
     /// Shell clock (seconds) as of the last `poll`, for the
@@ -132,6 +144,11 @@ fn init() -> State {
         show_right: true,
         key_clipboard: None,
         export_recap: String::new(),
+        inspector_figure: rune_sec::inspector_figure::InspectorFigureEditState::new(),
+        clips_rename: rune_sec::clips_panel::ClipRenameState::new(),
+        fx_browser: Default::default(),
+        draw_tools: Default::default(),
+        was_playing: false,
         last_status: status,
         toast_now: 0.0,
         last_dark: layout.dark,
@@ -210,6 +227,7 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
         .unwrap_or(0.0);
     s.last_poll = Some(t);
     rune_sec::project_tools::sync_name_edit(s);
+    rune_sec::inspector_figure::sync_figure_name_edit(s);
     let now = t as f32;
     s.toast_now = now;
     let mut redraw = false;
@@ -231,6 +249,18 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
         let mut prefs = stykanimate_rs::shell::load_layout();
         prefs.dark = dark;
         stykanimate_rs::shell::save_layout(&prefs);
+    }
+    // Playback audio follows the playing flag (Phase F): the
+    // flip is observed here so every play/pause source —
+    // transport button, Space, command palette — starts and
+    // stops the sound in one place.
+    if s.core.playing != s.was_playing {
+        s.was_playing = s.core.playing;
+        if s.core.playing {
+            s.core.start_playback_audio();
+        } else {
+            s.core.stop_playback_audio();
+        }
     }
     if !s.core.playing {
         return redraw;
@@ -262,6 +292,10 @@ fn text_focused(s: &State) -> bool {
         || s.home_panel.search.focused
         || s.library_panel.search.focused
         || s.text_tool.field.focused
+        || s.inspector_figure.name.focused
+        || s.clips_rename.field.focused
+        || s.library_panel.rename.focused
+        || s.fx_browser.query.focused
 }
 
 /// App shortcuts. The command palette gets first claim
@@ -526,7 +560,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(rune_sec::menus::menu_bar(s, &t))
         .child(rune_sec::workspaces::workspace_row(s, &t))
         .child(main_row)
-        .child(rune_sec::toasts::toasts_view(&s.toasts, s.toast_now))
+        .child(rune_sec::toasts::toasts_view(s, s.toast_now))
         .child(rune_sec::menus::menu_scrim(s))
         .child(rune_sec::menus::menu_dropdown(s, &t))
 }

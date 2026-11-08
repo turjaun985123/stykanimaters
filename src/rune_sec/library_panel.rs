@@ -47,6 +47,39 @@
 //!   After a successful removal, `core.library_index` is
 //!   clamped back into range (see [`clamped_index`]).
 //!
+//! ## Phase F additions (section 33/40)
+//!
+//! - **Rename** (saved entries only — the button is not
+//!   rendered for built-ins, and [`rename_saved`] refuses
+//!   them again defensively): the per-row **Rename**
+//!   button ([`start_rename`]) loads the entry's name
+//!   into the [`LibraryPanelState::rename`] field and
+//!   marks the row in [`LibraryPanelState::renaming`];
+//!   an editor row (field + Apply + Cancel) renders
+//!   under that row. Apply ([`apply_rename`] →
+//!   [`rename_saved`]) sanitises the typed name into a
+//!   file stem ([`sanitize_stem`] — the save path's own
+//!   slug), refuses empty stems and collisions (another
+//!   entry's name, via [`name_taken`], or an existing
+//!   file at the target path), renames the backing file
+//!   FIRST with `std::fs::rename`, and only then updates
+//!   the vec entry's name — the delete contract mirrored:
+//!   any fs error keeps the entry under its old name and
+//!   reports on `core.status`. The entry keeps its slot,
+//!   so `library_index` needs no clamp. A refused or
+//!   failed rename keeps the editor open so the name can
+//!   be fixed; a settled one closes it. Deleting the row
+//!   being renamed cancels the rename session first, so
+//!   `renaming` can never point at a shifted entry.
+//!
+//! The successful-rename fs dispatch (a real file moved
+//! under `./library`) is deliberately **untested**, for
+//! exactly the delete reason given below: test binaries
+//! share the process CWD. The sanitiser, the collision
+//! check, the built-in refusal, the same-name settle and
+//! the failure-keeps-entry path (via a synthetic entry
+//! whose file does not exist) are all covered below.
+//!
 //! ## Entry name ↔ backing file mapping
 //!
 //! Proven from `load_library` (editor.rs:162): it reads
@@ -88,6 +121,10 @@
 //! library_panel: library_panel::LibraryPanelState::default(),
 //! // in `view()`, in the sidebar column:
 //! .child(rune_sec::library_panel::library_panel(s, &t))
+//! // in `text_focused()` (Phase F — the rename field joins
+//! // the search field there, so global shortcuts stay out
+//! // of the user's typing):
+//! || s.library_panel.rename.focused
 //! ```
 
 use std::path::PathBuf;
@@ -112,13 +149,19 @@ pub const BUILTIN_PREFIX: &str = "Built-in: ";
 pub const LIST_HEIGHT: f32 = 200.0;
 
 /// View-state for this section: whether the panel body is
-/// collapsed, plus the search field. Owned by `State` (see
-/// the module docs for the wiring); everything about the
-/// library itself lives in `EditorCore`.
+/// collapsed, the search field, and the rename session.
+/// Owned by `State` (see the module docs for the wiring);
+/// everything about the library itself lives in
+/// `EditorCore`.
 ///
 /// The derive drops `Eq` (kept through Phase D) because
 /// Rune's `TextEdit` is `PartialEq` but not `Eq`
 /// (rune `edit.rs`: `#[derive(Clone, Default, PartialEq)]`).
+/// The derived `Default` covers the Phase F fields too:
+/// `TextEdit` defaults to empty (the `search` field
+/// already relies on it) and `Option` defaults to `None`,
+/// so `LibraryPanelState::default()` keeps working for
+/// the integrator's `init()`.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct LibraryPanelState {
     /// When true, only the header renders (the save button
@@ -130,6 +173,16 @@ pub struct LibraryPanelState {
     /// list filters through the `*_rows_q` helpers on this
     /// text every render; typing is the only writer.
     pub search: TextEdit,
+    /// Rename editor contents (Rune core text edit):
+    /// [`start_rename`] loads the entry's current name
+    /// here; Apply reads it back. Meaningful only while
+    /// [`Self::renaming`] is `Some`.
+    pub rename: TextEdit,
+    /// Library slot currently being renamed, if a rename
+    /// session is open. Set by [`start_rename`], cleared
+    /// by [`apply_rename`] (when the rename settles) and
+    /// [`cancel_rename`].
+    pub renaming: Option<usize>,
 }
 
 /// Display-ready data for one library row, derived from the
@@ -273,6 +326,99 @@ pub fn delete_saved(core: &mut EditorCore, i: usize) {
     }
 }
 
+/// Sanitise typed rename text into a library file stem:
+/// trim, then the save path's own slug — spaces→`-`,
+/// lowercased (`save_figure_to_library`, editor.rs:2187)
+/// — plus one guard the save path never needs because
+/// figure names come from inside the app: path
+/// separators (`/`, `\`) also become `-`, so a typed
+/// name can never make [`library_file_for`] point
+/// outside `./library`. May return an empty string
+/// (blank input); the caller refuses that case.
+pub fn sanitize_stem(raw: &str) -> String {
+    raw.trim()
+        .replace(' ', "-")
+        .replace('/', "-")
+        .replace('\\', "-")
+        .to_lowercase()
+}
+
+/// True when library slot `except` may NOT take the stem
+/// `stem` because a DIFFERENT entry already carries it.
+/// The entry's own current name is not a collision (the
+/// same-name case is settled by the caller before this
+/// is consulted). Built-ins are entries too and are
+/// checked like any other, though a sanitised stem can
+/// never actually equal a `Built-in: ` name (the slug
+/// lowercases and dashes the prefix away).
+pub fn name_taken(core: &EditorCore, stem: &str, except: usize) -> bool {
+    core.library
+        .iter()
+        .enumerate()
+        .any(|(j, (name, _))| j != except && name == stem)
+}
+
+/// Rename saved library entry `i` to the stem sanitised
+/// from `raw_new`: rename the backing file FIRST
+/// (`std::fs::rename`), then update the vec entry — the
+/// [`delete_saved`] contract mirrored. The entry keeps
+/// its slot, so `library_index` needs no clamp.
+///
+/// Returns whether the rename session is settled:
+/// `true` when the editor should close (renamed, the
+/// sanitised name already IS the entry's name, or `i`
+/// is a stale out-of-range slot — a silent no-op, as in
+/// [`delete_saved`]); `false` when the user should keep
+/// editing, with the reason on `core.status` (built-in
+/// refusal, empty stem, name/file collision, or the fs
+/// rename failing). On any failure the entry keeps its
+/// old name — the panel never claims a rename the disk
+/// refused. A target file that exists but is not a
+/// loaded entry (e.g. an unparseable `.json` the loader
+/// skipped) is also a refusal: `fs::rename` would
+/// silently overwrite it on Unix.
+pub fn rename_saved(core: &mut EditorCore, i: usize, raw_new: &str) -> bool {
+    let Some((name, _)) = core.library.get(i) else {
+        return true;
+    };
+    let old = name.clone();
+    if is_builtin(&old) {
+        core.status = format!("\"{old}\" is built in and can't be renamed.");
+        return false;
+    }
+    let new_stem = sanitize_stem(raw_new);
+    if new_stem.is_empty() {
+        core.status = "Type a new name for the library figure first.".to_string();
+        return false;
+    }
+    if new_stem == old {
+        core.status = format!("\"{old}\" already has that name.");
+        return true;
+    }
+    if name_taken(core, &new_stem, i) {
+        core.status = format!("A library figure named \"{new_stem}\" already exists.");
+        return false;
+    }
+    let old_path = library_file_for(&old);
+    let new_path = library_file_for(&new_stem);
+    if new_path.exists() {
+        core.status =
+            format!("A file named \"{new_stem}.json\" already exists in the library folder.");
+        return false;
+    }
+    match std::fs::rename(&old_path, &new_path) {
+        Ok(()) => {
+            core.library[i].0 = new_stem.clone();
+            core.status = format!("Renamed \"{old}\" to \"{new_stem}\".");
+            true
+        }
+        Err(e) => {
+            core.status = format!("Library rename failed for \"{old}\": {e}");
+            false
+        }
+    }
+}
+
 /// Insert library slot `i` into the project: point
 /// `library_index` at it, then the core's insert op.
 /// Bounds-checked here because `insert_library_figure`
@@ -291,17 +437,95 @@ pub fn toggle_collapsed(s: &mut State) {
     s.library_panel.collapsed = !s.library_panel.collapsed;
 }
 
+/// Open the rename editor for library slot `i` (the
+/// per-row Rename button's handler): load the entry's
+/// current name into the rename field and mark the row
+/// as being renamed. The fresh `TextEdit` puts the caret
+/// at the end of the name; its `focused` flag claims
+/// keyboard focus on the next commit (the command
+/// palette's open path relies on the same mechanism), so
+/// the integrator's `text_focused` must include the
+/// rename field — see the module docs. Built-ins and
+/// out-of-range slots open nothing (no Rename button
+/// renders for built-ins anyway).
+pub fn start_rename(s: &mut State, i: usize) {
+    let Some((name, _)) = s.core.library.get(i) else {
+        return;
+    };
+    if is_builtin(name) {
+        return;
+    }
+    let name = name.clone();
+    s.library_panel.rename = TextEdit::new(name);
+    s.library_panel.rename.focused = true;
+    s.library_panel.renaming = Some(i);
+}
+
+/// Apply the open rename (the Apply button's handler):
+/// run [`rename_saved`] with the field's text, and close
+/// the session only when it settles — a refused or
+/// failed rename stays open, status line explaining why,
+/// so the name can be corrected.
+pub fn apply_rename(s: &mut State) {
+    let Some(i) = s.library_panel.renaming else {
+        return;
+    };
+    let raw = s.library_panel.rename.text.clone();
+    if rename_saved(&mut s.core, i, &raw) {
+        s.library_panel.renaming = None;
+        s.library_panel.rename = TextEdit::default();
+    }
+}
+
+/// Abandon the open rename (the Cancel button's
+/// handler): close the session and drop the typed text.
+/// Nothing on disk or in the library was touched —
+/// renames only happen in [`apply_rename`].
+pub fn cancel_rename(s: &mut State) {
+    s.library_panel.renaming = None;
+    s.library_panel.rename = TextEdit::default();
+}
+
 /// A small muted group heading inside the panel.
 fn group_label(t: &Theme, label: &str) -> El {
     text(label).font(type_::LABEL).color(t.text_secondary)
 }
 
+/// The rename editor row rendered under the row being
+/// renamed: the name field plus Apply and Cancel. Only
+/// one rename session can be open, so the keys are
+/// unindexed — the row's own identity comes from its
+/// position under the renamed entry.
+fn rename_editor_row(s: &State, t: &Theme) -> El {
+    row()
+        .key("library-rename-row")
+        .gap(8.0)
+        .center_y()
+        .child(
+            text_input(&s.library_panel.rename, type_::BODY.lh(26.0))
+                .key("library-rename")
+                .single_line()
+                .grow(1.0)
+                .color(t.text)
+                .placeholder("New name", t.text_secondary)
+                .on_edit(|s: &mut State| &mut s.library_panel.rename),
+        )
+        .child(btn("library-rename-apply", "Apply", false, t, |s: &mut State| {
+            apply_rename(s)
+        }))
+        .child(btn("library-rename-cancel", "Cancel", false, t, |s: &mut State| {
+            cancel_rename(s)
+        }))
+}
+
 /// One library row: name (growing), segment count muted,
-/// its Insert button, and — for saved entries only — a
-/// Delete button. Built-in rows never get one: built-ins
-/// are constructed in code, have no file, and
-/// [`delete_saved`] would refuse them anyway.
-fn entry_row(entry: &LibraryRow, t: &Theme) -> El {
+/// its Insert button, and — for saved entries only —
+/// Rename and Delete buttons. Built-in rows never get
+/// them: built-ins are constructed in code, have no
+/// file, and [`rename_saved`]/[`delete_saved`] would
+/// refuse them anyway. While this row is the rename
+/// target, the rename editor renders directly under it.
+fn entry_row(entry: &LibraryRow, s: &State, t: &Theme) -> El {
     let i = entry.index;
     let mut r = row()
         .key(format!("library-row-{i}"))
@@ -318,24 +542,46 @@ fn entry_row(entry: &LibraryRow, t: &Theme) -> El {
         }));
     if !entry.builtin {
         r = r.child(btn(
+            &format!("library-rename-{i}"),
+            "Rename",
+            s.library_panel.renaming == Some(i),
+            t,
+            move |s: &mut State| start_rename(s, i),
+        ));
+        r = r.child(btn(
             &format!("library-delete-{i}"),
             "Delete",
             false,
             t,
-            move |s: &mut State| delete_saved(&mut s.core, i),
+            move |s: &mut State| {
+                // Deleting the row under rename would shift
+                // every later slot; cancel the session first
+                // so `renaming` never points at another entry.
+                if s.library_panel.renaming == Some(i) {
+                    cancel_rename(s);
+                }
+                delete_saved(&mut s.core, i);
+            },
         ));
+    }
+    if s.library_panel.renaming == Some(i) {
+        return col()
+            .key(format!("library-row-wrap-{i}"))
+            .gap(4.0)
+            .child(r)
+            .child(rename_editor_row(s, t));
     }
     r
 }
 
 /// One labelled group of rows ("Built-in" / "Saved").
 /// Renders nothing when the group is empty.
-fn group(key: &str, label: &str, rows: &[LibraryRow], t: &Theme) -> El {
+fn group(key: &str, label: &str, rows: &[LibraryRow], s: &State, t: &Theme) -> El {
     let mut g = col().key(key.to_string()).gap(4.0);
     if !rows.is_empty() {
         g = g.child(group_label(t, label));
         for entry in rows {
-            g = g.child(entry_row(entry, t));
+            g = g.child(entry_row(entry, s, t));
         }
     }
     g
@@ -419,8 +665,8 @@ pub fn library_panel(s: &State, t: &Theme) -> El {
             let list = col()
                 .key("library-list")
                 .gap(6.0)
-                .child(group("library-builtins", "Built-in", &builtins, t))
-                .child(group("library-saved", "Saved", &saved, t));
+                .child(group("library-builtins", "Built-in", &builtins, s, t))
+                .child(group("library-saved", "Saved", &saved, s, t));
             card = card.child(
                 list.scroll(ScrollSpec {
                     stick_bottom: false,
@@ -623,6 +869,139 @@ mod tests {
         assert_eq!(core.library[idx].0, "zzz-test-nonexistent-entry");
         assert!(
             core.status.contains("Library delete failed"),
+            "status: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn state_default_rename_session_is_closed() {
+        // The derived Default must cover the Phase F
+        // fields: no session open, empty rename field.
+        let st = LibraryPanelState::default();
+        assert_eq!(st.renaming, None);
+        assert!(st.rename.text.is_empty());
+        assert!(!st.rename.focused);
+    }
+
+    #[test]
+    fn sanitize_stem_slugs_like_the_save_path() {
+        // The engine's own slug (editor.rs:2187):
+        // spaces→'-', lowercased.
+        assert_eq!(sanitize_stem("My Hero"), "my-hero");
+        assert_eq!(sanitize_stem("CAPS LOCK"), "caps-lock");
+        assert_eq!(sanitize_stem("already-a-stem"), "already-a-stem");
+        // Typed input is trimmed first.
+        assert_eq!(sanitize_stem("  Padded Name  "), "padded-name");
+        // Path separators can never survive into a stem.
+        assert_eq!(sanitize_stem("a/b\\c"), "a-b-c");
+        // Blank input sanitises to nothing (caller refuses).
+        assert_eq!(sanitize_stem(""), "");
+        assert_eq!(sanitize_stem("   "), "");
+    }
+
+    #[test]
+    fn name_taken_ignores_the_entry_itself() {
+        let mut core = EditorCore::new();
+        core.library
+            .push(("alpha".into(), stykanimate_rs::model::FigureDef::simple()));
+        core.library
+            .push(("beta".into(), stykanimate_rs::model::FigureDef::simple()));
+        let alpha = core.library.len() - 2;
+        let beta = core.library.len() - 1;
+        assert!(name_taken(&core, "beta", alpha), "another entry's name is taken");
+        assert!(!name_taken(&core, "alpha", alpha), "own name is not a collision");
+        assert!(!name_taken(&core, "gamma", alpha), "unused name is free");
+        assert!(name_taken(&core, "alpha", beta));
+    }
+
+    #[test]
+    fn rename_saved_refuses_builtins_without_touching_fs() {
+        let mut core = EditorCore::new();
+        let n = core.library.len();
+        assert!(!rename_saved(&mut core, 0, "New Name"));
+        assert_eq!(core.library.len(), n);
+        assert_eq!(core.library[0].0, "Built-in: Humanoid");
+        assert!(core.status.contains("built in"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn rename_saved_out_of_range_settles_silently() {
+        // A stale session index closes without a status
+        // change — the delete out-of-range contract.
+        let mut core = EditorCore::new();
+        let n = core.library.len();
+        let status_before = core.status.clone();
+        assert!(rename_saved(&mut core, usize::MAX, "New Name"));
+        assert_eq!(core.library.len(), n);
+        assert_eq!(core.status, status_before);
+    }
+
+    #[test]
+    fn rename_saved_rejects_empty_and_colliding_names() {
+        // Both refusals happen before any fs access, so
+        // these run against synthetic entries safely.
+        let mut core = EditorCore::new();
+        core.library
+            .push(("alpha".into(), stykanimate_rs::model::FigureDef::simple()));
+        core.library
+            .push(("beta".into(), stykanimate_rs::model::FigureDef::simple()));
+        let alpha = core.library.len() - 2;
+        // Empty after sanitising.
+        assert!(!rename_saved(&mut core, alpha, "   "));
+        assert_eq!(core.library[alpha].0, "alpha");
+        assert!(core.status.contains("Type a new name"), "status: {}", core.status);
+        // "Beta" sanitises to the other entry's stem.
+        assert!(!rename_saved(&mut core, alpha, "Beta"));
+        assert_eq!(core.library[alpha].0, "alpha");
+        assert!(
+            core.status.contains("already exists"),
+            "status: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn rename_saved_same_name_settles_without_fs() {
+        // The synthetic entry has no backing file, so any
+        // fs attempt would fail — settling here proves the
+        // same-name case short-circuits before the rename.
+        let mut core = EditorCore::new();
+        core.library.push((
+            "ghost-entry".into(),
+            stykanimate_rs::model::FigureDef::simple(),
+        ));
+        let idx = core.library.len() - 1;
+        assert!(rename_saved(&mut core, idx, " Ghost-Entry "));
+        assert_eq!(core.library[idx].0, "ghost-entry");
+        assert!(
+            core.status.contains("already has that name"),
+            "status: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn rename_saved_keeps_entry_when_file_rename_fails() {
+        // The failure path, exercised honestly like the
+        // delete twin: a synthetic saved entry whose
+        // backing file does not exist, so fs::rename fails
+        // (NotFound) and the entry must keep its OLD name
+        // with the error on the status line. The success
+        // path (a real file under ./library actually
+        // moved) is untested by design — see the module
+        // docs: tests share the process CWD and must never
+        // move files in a real ./library.
+        let mut core = EditorCore::new();
+        core.library.push((
+            "zzz-test-nonexistent-entry".into(),
+            stykanimate_rs::model::FigureDef::simple(),
+        ));
+        let idx = core.library.len() - 1;
+        assert!(!rename_saved(&mut core, idx, "A New Name"));
+        assert_eq!(core.library[idx].0, "zzz-test-nonexistent-entry");
+        assert!(
+            core.status.contains("Library rename failed"),
             "status: {}",
             core.status
         );

@@ -1,8 +1,10 @@
 //! File / Edit / View / Help menus for the Rune editor shell
 //! (Phase D, section 22 — menus; Phase E upgrade: View ▸
-//! sidebar toggles and Help ▸ Command palette). Declared
-//! from `main.rs` by the integrator; bin-crate code, not
-//! part of the engine library.
+//! sidebar toggles and Help ▸ Command palette; Phase F:
+//! right-aligned shortcut hints on the items that have
+//! real shell key bindings, and View ▸ Stage guides).
+//! Declared from `main.rs` by the integrator; bin-crate
+//! code, not part of the engine library.
 //!
 //! # Approach (chosen from source evidence)
 //!
@@ -68,8 +70,8 @@
 //! triggers and the original GPUI button ids on the items,
 //! so headless `--tree` checks can find them.
 
-use rune::tok::Theme;
-use rune::{col, el, row, Align, El, Side};
+use rune::tok::{self, type_, Theme};
+use rune::{col, el, row, text, Align, Color, El, Side};
 
 use crate::chrome_view::btn;
 use crate::State;
@@ -120,9 +122,100 @@ impl MenusState {
     }
 }
 
+/// The item handler wrapper: run the item's action, then
+/// close the menu (selecting an item always dismisses it,
+/// as in the GPUI dropdowns). Every item — hinted or not —
+/// goes through this same wrapper.
+fn closing(f: impl Fn(&mut State) + 'static) -> impl Fn(&mut State) + 'static {
+    move |s: &mut State| {
+        f(s);
+        s.menus.close();
+    }
+}
+
+/// The keyboard-shortcut hint shown at a menu item's right
+/// edge, keyed by the item's element key — or `None` when
+/// the shell binds no key to the item's action. Every entry
+/// was verified against the shell's actual key routing
+/// (`main.rs::on_key`, which runs
+/// `command_palette::palette_handle_key` first):
+///
+/// - `undo` — Ctrl+Z (`on_key`: `is_command('z')` without
+///   shift runs `core.undo()`);
+/// - `redo` — Ctrl+Shift+Z (the same arm with shift;
+///   Ctrl+Y is a second binding for the same op — the
+///   hint shows the primary one);
+/// - `onion` — O (`on_key`'s plain-`o` arm flips
+///   `core.onion`, the same field this item flips);
+/// - `menu-palette` — Ctrl+K (`palette_handle_key`:
+///   `is_command('k')` opens the palette while closed).
+///
+/// Everything else in these menus — Save, Load, Export
+/// PNG, Copy/Paste frame, Fit view, Centre on selection,
+/// the sidebar toggles, Stage guides, Shortcuts — has NO
+/// shell key binding and gets no hint: an invented hint
+/// would be a lie on screen. The spellings match the
+/// help panel's shortcut table (`help_panel.rs`). Pinned
+/// by the `shortcut_hints_name_only_real_bindings` test.
+fn shortcut_hint(key: &str) -> Option<&'static str> {
+    match key {
+        "undo" => Some("Ctrl+Z"),
+        "redo" => Some("Ctrl+Shift+Z"),
+        "onion" => Some("O"),
+        "menu-palette" => Some("Ctrl+K"),
+        _ => None,
+    }
+}
+
+/// A menu item carrying a shortcut hint: the same chrome
+/// as `chrome_view::btn` (10/5 padding, radius 6, the
+/// same fill/hover/press states and label font), rebuilt
+/// as a row so the hint rides inside the same pressable
+/// element — the item's key, press handler and hit area
+/// cover the whole row, hint included, like a native
+/// menu. The hint is inert decoration in the theme's
+/// secondary text colour (75% white over the accent fill
+/// while the item is active, mirroring the white label).
+fn hinted_item(
+    key: &str,
+    label: &str,
+    hint: &str,
+    active: bool,
+    t: &Theme,
+    f: impl Fn(&mut State) + 'static,
+) -> El {
+    let accent = tok::accent(0, true);
+    row()
+        .key(key)
+        .px(10.0)
+        .py(5.0)
+        .radius(6.0)
+        .fill(if active { accent } else { t.card })
+        .hover(if active { accent } else { t.control_track })
+        .press(if active { accent } else { t.control_off })
+        .on_press(f)
+        .center_y()
+        .gap(12.0)
+        .child(
+            text(label)
+                .font(type_::LABEL)
+                .color(if active { Color::WHITE } else { t.text }),
+        )
+        .child(row().grow(1.0))
+        .child(
+            text(hint).font(type_::LABEL).color(if active {
+                Color::WHITE.alpha(0.75)
+            } else {
+                t.text_secondary
+            }),
+        )
+}
+
 /// One menu item: a chrome button that runs `f` and then
-/// closes the menu (selecting an item always dismisses it,
-/// as in the GPUI dropdowns).
+/// closes the menu (see [`closing`]). Items whose action
+/// has a real shell key binding (see [`shortcut_hint`])
+/// render it as a muted hint at the row's right edge;
+/// the rest are plain `btn`s, exactly as before.
 fn item(
     key: &str,
     label: &str,
@@ -130,10 +223,10 @@ fn item(
     t: &Theme,
     f: impl Fn(&mut State) + 'static,
 ) -> El {
-    btn(key, label, active, t, move |s: &mut State| {
-        f(s);
-        s.menus.close();
-    })
+    match shortcut_hint(key) {
+        Some(hint) => hinted_item(key, label, hint, active, t, closing(f)),
+        None => btn(key, label, active, t, closing(f)),
+    }
 }
 
 /// A thin divider line between item groups.
@@ -224,18 +317,26 @@ pub fn menu_dropdown(s: &State, t: &Theme) -> El {
             // Core view state/ops: `core.onion` is a public
             // field (no op exists — the app bar's Onion
             // button flips it too), and the camera-framing
-            // ops from the GPUI View buttons. There is no
-            // guides toggle in the core (grep: no `guides`
-            // in editor.rs/model.rs). The two sidebar
-            // toggles are Phase E: they flip the shell's
-            // own layout fields (`State::show_left` /
-            // `show_right`, integrator-owned, default
-            // visible) and render active while their column
-            // is shown — the same field-flip pattern as
-            // Onion, one level up (shell state, not core).
+            // ops from the GPUI View buttons. Stage guides
+            // (Phase F) is shell state, not core: the flag
+            // is `State::guides` and its single writer is
+            // the settings section's `toggle_guides` (the
+            // Settings card's toggle) — this item calls
+            // that same fn rather than growing a second
+            // toggle, and renders active while the flag is
+            // set. The two sidebar toggles are Phase E:
+            // they flip the shell's own layout fields
+            // (`State::show_left` / `show_right`,
+            // integrator-owned, default visible) and render
+            // active while their column is shown — the same
+            // field-flip pattern as Onion, one level up
+            // (shell state, not core).
             list = list
                 .child(item("onion", "Onion skin", core.onion, t, |s| {
                     s.core.onion = !s.core.onion;
+                }))
+                .child(item("view-guides", "Stage guides", s.guides, t, |s| {
+                    crate::rune_sec::settings_popover::toggle_guides(s);
                 }))
                 .child(separator("menu-view-sep", t))
                 .child(item("view-fit", "Fit view", false, t, |s| {
@@ -328,6 +429,57 @@ mod tests {
             ["menu-file", "menu-edit", "menu-view", "menu-help"]
         );
         assert_eq!(MENUS.len(), MENU_KEYS.len());
+    }
+
+    #[test]
+    fn shortcut_hints_name_only_real_bindings() {
+        // The verified list, from `main.rs::on_key` and
+        // `command_palette::palette_handle_key` (see the
+        // `shortcut_hint` docs): exactly four menu items
+        // have shell key bindings.
+        assert_eq!(shortcut_hint("undo"), Some("Ctrl+Z"));
+        assert_eq!(shortcut_hint("redo"), Some("Ctrl+Shift+Z"));
+        assert_eq!(shortcut_hint("onion"), Some("O"));
+        assert_eq!(shortcut_hint("menu-palette"), Some("Ctrl+K"));
+        // Every other item key used by `menu_dropdown`
+        // has no binding and must stay hint-less — if a
+        // future binding is added to the shell, add its
+        // entry to `shortcut_hint` and to this list in
+        // the same change.
+        for key in [
+            "save",
+            "load",
+            "export",
+            "copy-frame",
+            "paste-frame",
+            "view-guides",
+            "view-fit",
+            "view-centre",
+            "view-toggle-left",
+            "view-toggle-right",
+            "help",
+        ] {
+            assert_eq!(shortcut_hint(key), None, "{key} has no shell binding");
+        }
+    }
+
+    #[test]
+    fn all_dropdowns_build_with_hinted_items_and_guides_states() {
+        // Phase F: hinted items (Edit ▸ Undo/Redo, View ▸
+        // Onion skin, Help ▸ Command palette) and the
+        // View ▸ Stage guides item build without
+        // panicking, with the guides flag off and on.
+        let t = rune::tok::theme(true);
+        let mut s = crate::init();
+        assert!(!s.guides, "stage guides default to off");
+        for menu in [FILE, EDIT, VIEW, HELP] {
+            s.menus.open = Some(menu);
+            let _ = menu_dropdown(&s, &t);
+        }
+        crate::rune_sec::settings_popover::toggle_guides(&mut s);
+        assert!(s.guides);
+        s.menus.open = Some(VIEW);
+        let _ = menu_dropdown(&s, &t);
     }
 
     #[test]

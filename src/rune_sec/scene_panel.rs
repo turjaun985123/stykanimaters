@@ -12,6 +12,15 @@
 //! clamps, same status strings — so behaviour is identical,
 //! only the toolkit changed.
 //!
+//! Stage size is a plain project field (`Project::stage`):
+//! the exporters read it as the render size, and the stage
+//! steppers have always written it directly. The Phase F
+//! preset row writes it exactly the same way. Resizing —
+//! by stepper or preset — changes the canvas only: figure
+//! positions are absolute stage coordinates and are NOT
+//! rescaled to fit the new size (the panel says so in a
+//! note line under the presets).
+//!
 //! The two GPUI buttons both labelled "Weather", disambiguated
 //! by their listener bodies (`git show a5e0b18:src/app.rs`):
 //! - `btn("weather")` in the Scene group **cycled** the kind
@@ -353,6 +362,37 @@ pub fn adjust_stage(core: &mut EditorCore, dw: f32, dh: f32) {
     );
 }
 
+/// Stage-size presets (Phase F): (label, width, height).
+/// The first is the engine's own default (`Project::stage`
+/// in `model.rs`), labelled "Default". Every size sits
+/// inside the stepper clamp (200..=4000 per axis), so a
+/// preset write needs no clamping of its own.
+pub const STAGE_PRESETS: [(&str, f32, f32); 6] = [
+    ("Default", 960.0, 720.0),
+    ("HD wide", 1280.0, 720.0),
+    ("HD tall", 720.0, 1280.0),
+    ("Full HD", 1920.0, 1080.0),
+    ("Full HD tall", 1080.0, 1920.0),
+    ("Small", 640.0, 480.0),
+];
+
+/// True when `stage` is exactly the `w` × `h` preset — the
+/// preset button's active highlight. Exact comparison is
+/// right here: presets write whole numbers, and a stage
+/// nudged one unit off a preset by the steppers is honestly
+/// no longer that preset.
+pub fn stage_matches_preset(stage: [f32; 2], w: f32, h: f32) -> bool {
+    stage[0] == w && stage[1] == h
+}
+
+/// Stage-preset handler body: write the size directly to
+/// the project field (the stepper pattern — no op exists)
+/// and report it with [`adjust_stage`]'s status string.
+pub fn set_stage_preset(core: &mut EditorCore, w: f32, h: f32) {
+    core.project.stage = [w, h];
+    core.status = format!("Stage size: {} x {}.", w as i32, h as i32);
+}
+
 /// Stage background presets: (name, `0xRRGGBB`). The first is
 /// the engine's own default (`Project::background` in
 /// `model.rs`). The GPUI app never offered a background
@@ -475,7 +515,8 @@ fn weather_slider(
 
 /// The Scene panel: weather (kind picker + cycle + density
 /// and wind steppers with drag sliders under them), stage
-/// size steppers, and background colour swatches.
+/// size steppers with the preset row under them, and
+/// background colour swatches.
 pub fn scene_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let weather = core.project.weather;
@@ -523,6 +564,25 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
             );
         }
         swatches = swatches.child(swatch_row);
+    }
+
+    // Stage-size presets (Phase F): one button per preset,
+    // the one matching the current stage accent-filled (the
+    // kind picker's highlight). Three per row — six labels
+    // do not fit a single panel row.
+    let mut stage_presets = col().key("scene-stage-presets").gap(4.0);
+    for chunk in STAGE_PRESETS.chunks(3) {
+        let mut preset_row = row().gap(4.0).center_y();
+        for &(label, w, h) in chunk {
+            preset_row = preset_row.child(btn(
+                &format!("scene-stage-{}x{}", w as i32, h as i32),
+                label,
+                stage_matches_preset(core.project.stage, w, h),
+                t,
+                move |s: &mut State| set_stage_preset(&mut s.core, w, h),
+            ));
+        }
+        stage_presets = stage_presets.child(preset_row);
     }
 
     col()
@@ -619,6 +679,15 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
             |s: &mut State| adjust_stage(&mut s.core, 0.0, -40.0),
             |s: &mut State| adjust_stage(&mut s.core, 0.0, 40.0),
         ))
+        .child(
+            text("Stage size").font(type_::LABEL).color(t.text_secondary),
+        )
+        .child(stage_presets)
+        .child(
+            text("Resizing does not rescale figure positions.")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
         .child(
             row()
                 .gap(8.0)
@@ -752,6 +821,68 @@ mod tests {
         );
         adjust_stage(&mut core, 100_000.0, -100_000.0);
         assert_eq!(core.project.stage, [4000.0, 200.0]);
+    }
+
+    #[test]
+    fn stage_preset_writes_the_field_and_reports_like_the_steppers() {
+        let mut core = EditorCore::new();
+        set_stage_preset(&mut core, 1920.0, 1080.0);
+        assert_eq!(core.project.stage, [1920.0, 1080.0]);
+        assert_eq!(core.status, "Stage size: 1920 x 1080.");
+        set_stage_preset(&mut core, 720.0, 1280.0);
+        assert_eq!(core.project.stage, [720.0, 1280.0]);
+        assert_eq!(core.status, "Stage size: 720 x 1280.");
+    }
+
+    #[test]
+    fn stage_preset_matcher_is_exact_and_orientation_aware() {
+        // A fresh project's stage is the first preset.
+        let core = EditorCore::new();
+        let (_, w, h) = STAGE_PRESETS[0];
+        assert!(stage_matches_preset(core.project.stage, w, h));
+        // Transposed dimensions are a different preset.
+        assert!(!stage_matches_preset([720.0, 1280.0], 1280.0, 720.0));
+        assert!(stage_matches_preset([720.0, 1280.0], 720.0, 1280.0));
+        // One unit off (a stepper nudge) matches nothing.
+        assert!(!stage_matches_preset([961.0, 720.0], 960.0, 720.0));
+        assert!(!stage_matches_preset([960.0, 721.0], 960.0, 720.0));
+    }
+
+    #[test]
+    fn stage_presets_are_six_unique_and_start_with_the_engine_default() {
+        assert_eq!(STAGE_PRESETS.len(), 6);
+        // The briefed table, in order.
+        let sizes: Vec<(i32, i32)> = STAGE_PRESETS
+            .iter()
+            .map(|&(_, w, h)| (w as i32, h as i32))
+            .collect();
+        assert_eq!(
+            sizes,
+            vec![
+                (960, 720),
+                (1280, 720),
+                (720, 1280),
+                (1920, 1080),
+                (1080, 1920),
+                (640, 480),
+            ]
+        );
+        // Sizes key the elements (scene-stage-{w}x{h}), so
+        // they must be unique; so must the labels.
+        let mut deduped = sizes.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(deduped.len(), 6, "preset sizes must be unique");
+        // "Default" really is the engine default.
+        let (_, w, h) = STAGE_PRESETS[0];
+        assert_eq!(STAGE_PRESETS[0].0, "Default");
+        assert_eq!(EditorCore::new().project.stage, [w, h]);
+        // Every preset sits inside the stepper clamp, so a
+        // preset write never needs clamping of its own.
+        for &(_, w, h) in &STAGE_PRESETS {
+            assert!((200.0..=4000.0).contains(&w), "width {w}");
+            assert!((200.0..=4000.0).contains(&h), "height {h}");
+        }
     }
 
     #[test]

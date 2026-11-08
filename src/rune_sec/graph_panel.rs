@@ -40,6 +40,11 @@
 //! into the testable `drag_down` / `drag_move` / `drag_up`
 //! over a bare `EditorCore` + [`GraphPanelState`]):
 //!
+//! - **Down on a tangent handle** of the selected key
+//!   (hit-tested in data space by [`hit_tangent_handle`])
+//!   takes priority over the key hit-test below: one
+//!   snapshot, and the drag edits that key's tangent
+//!   instead — see "Tangent drags" further down.
 //! - **Down on a key handle** (within [`GRAB_RADIUS`] px,
 //!   hit-tested by `GraphView::hit_key`): one
 //!   `EditorCore::snapshot()` — the only snapshot of the
@@ -77,6 +82,39 @@
 //! end. The drawing and the drag always share the fit, so
 //! they never disagree with each other.
 //!
+//! ## Tangent drags
+//!
+//! The selected key also grows a pair of tangent handles —
+//! small diamonds joined to the key by a thin line, drawn at
+//! the Bézier control-point position on each side's tangent
+//! ray ([`tangent_handle_data`]: a third of the neighbouring
+//! segment's span along the ray). A press on one grabs the
+//! HANDLE, not the key: Moves rewrite only that side's slope
+//! from the pointer's data position ([`tangent_slope`]) —
+//! per-side, i.e. broken tangents, which is the model's own
+//! convention: `in_tan`/`out_tan` are independent fields,
+//! `Channel::set_tangents` writes them independently, and
+//! the EaseIn/EaseOut presets set them asymmetrically on
+//! purpose. Aligning the two sides is what the batch ops
+//! are for (`auto_tangents`, the presets), not a drag
+//! constraint.
+//!
+//! Gesture discipline matches the key drag exactly: one
+//! snapshot at Down (only on a hit), none during Moves, one
+//! `core.undo()` rollback when the runtime cancels. Two
+//! simplifications are safe here, documented rather than
+//! hidden. First, frames and values never change during a
+//! tangent drag, so keys never re-sort and the grabbed
+//! index needs no anchor/re-resolution (contrast
+//! [`GraphPanelState::drag_key`]). Second, `auto_fit`'s
+//! ranges derive from key frames and values alone, so the
+//! fit is bit-stable across the whole gesture — the pointer
+//! mapping cannot drift mid-drag the way an extreme key
+//! drag can re-pad it. The honest cost of that stability: a
+//! strong hand-set tangent can bend the drawn curve outside
+//! the fitted value range, where the canvas clips it — the
+//! same thing that already happens to preset-shaped curves.
+//!
 //! ## Scoping, honestly
 //!
 //! The core's graph ops scope by SELECTION, not by this
@@ -98,7 +136,7 @@
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, row, text, Color, Cx, Drag, El, LineCap, Phase, Shape, Tx};
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::graph::{Channel, ChannelTarget, Interp, TangentPreset};
+use stykanimate_rs::graph::{Channel, ChannelTarget, Interp, Key, TangentPreset};
 use stykanimate_rs::graph_panel::{preset_preview, GraphView};
 use stykanimate_rs::model::V2;
 
@@ -130,9 +168,45 @@ pub const GRAB_RADIUS: f32 = 10.0;
 /// Matches the 4 pt click-run threshold Rune itself uses for
 /// click counting (see the `Drag::clicks` docs).
 pub const CLICK_TRAVEL: f32 = 4.0;
+/// Where along the neighbouring segment a tangent handle
+/// sits, as a fraction of the segment's frame span: exactly
+/// the Hermite→Bézier control-point position (1/3), so the
+/// handle lies on the key's tangent line at the point the
+/// equivalent cubic Bézier would put its control point.
+pub const TANGENT_HANDLE_FRAC: f32 = 1.0 / 3.0;
+/// Drawn radius of a tangent-handle diamond, in points —
+/// smaller than the key diamonds (4.5) they hang off. The
+/// pick radius is the shared [`GRAB_RADIUS`].
+pub const TANGENT_HANDLE_RADIUS: f32 = 3.0;
+/// Closest a pointer may sit to a key's frame, in frames,
+/// for a tangent drag to read a slope from it: nearer than
+/// this the slope would explode toward vertical, so the
+/// move writes nothing and the tangent keeps its value.
+pub const MIN_TANGENT_DX: f32 = 0.05;
+
+/// Which end of a key a tangent handle belongs to: `In`
+/// carries the key's `in_tan` (the slope of the curve
+/// arriving at the key, governing the segment that ENDS
+/// there); `Out` carries its `out_tan` (the slope leaving
+/// it, governing the segment that STARTS there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TangentSide {
+    In,
+    Out,
+}
+
+impl TangentSide {
+    /// Lower-case name for status lines ("in" / "out").
+    fn label(self) -> &'static str {
+        match self {
+            TangentSide::In => "in",
+            TangentSide::Out => "out",
+        }
+    }
+}
 
 /// Panel-local view state: which channel the user picked in
-/// the selector, plus the in-progress canvas key drag.
+/// the selector, plus the in-progress canvas drags.
 /// Everything else the panel shows is derived from
 /// `EditorCore` per frame.
 #[derive(Clone, Debug, Default)]
@@ -166,6 +240,17 @@ pub struct GraphPanelState {
     /// the drag's identity anchor for [`resolve_drag_index`].
     /// Meaningless while `drag_key` is `None`.
     pub drag_anchor: f32,
+    /// The tangent handle an in-progress canvas drag grabbed
+    /// at Down: `(key index, side)` into the drawn channel.
+    /// `None` outside a tangent drag; mutually exclusive
+    /// with [`Self::drag_key`] (Down sets exactly one).
+    ///
+    /// Unlike `drag_key`, the index needs NO anchor: a
+    /// tangent drag never changes a key's frame or value, so
+    /// the channel never re-sorts mid-gesture and the index
+    /// recorded at Down stays the grabbed key for the whole
+    /// drag.
+    pub drag_handle: Option<(usize, TangentSide)>,
 }
 
 /// Human label for a channel target, in UI casing: "Root X",
@@ -427,6 +512,136 @@ pub fn drag_key_to(ch: &mut Channel, idx: usize, frame: f32, value: f32) -> Opti
         .or_else(|| nearest_key(ch, f))
 }
 
+/// The panel's selected key on the drawn channel: the key
+/// nearest the current frame — the same pick the interp
+/// control documents for `set_graph_key_interp`
+/// ([`current_interp`] reads exactly it on its own channel;
+/// ties go to the earlier key, via [`nearest_key`]). This
+/// is the key whose tangent handles are drawn and grabbable.
+pub fn selected_key_index(core: &EditorCore, target: ChannelTarget) -> Option<usize> {
+    let ch = channel_for(core, target)?;
+    nearest_key(ch, core.current as f32)
+}
+
+/// Data position of key `idx`'s `side` tangent handle: on
+/// the key's tangent ray, [`TANGENT_HANDLE_FRAC`] of the way
+/// toward the neighbouring key on that side — the cubic
+/// Bézier control point of the segment that side governs.
+/// `None` when that side governs no segment (the first
+/// key's In, the last key's Out), when the neighbour sits
+/// at a non-increasing frame (degenerate span), or when
+/// `idx` is out of range.
+pub fn tangent_handle_data(ch: &Channel, idx: usize, side: TangentSide) -> Option<(f32, f32)> {
+    let k = ch.keys.get(idx)?;
+    match side {
+        TangentSide::Out => {
+            let next = ch.keys.get(idx + 1)?;
+            let span = next.frame - k.frame;
+            if span <= 0.0 {
+                return None;
+            }
+            Some((
+                k.frame + TANGENT_HANDLE_FRAC * span,
+                k.value + TANGENT_HANDLE_FRAC * span * k.out_tan,
+            ))
+        }
+        TangentSide::In => {
+            if idx == 0 {
+                return None;
+            }
+            let prev = &ch.keys[idx - 1];
+            let span = k.frame - prev.frame;
+            if span <= 0.0 {
+                return None;
+            }
+            Some((
+                k.frame - TANGENT_HANDLE_FRAC * span,
+                k.value - TANGENT_HANDLE_FRAC * span * k.in_tan,
+            ))
+        }
+    }
+}
+
+/// Hit-test key `key_idx`'s tangent handles against pixel
+/// `px`, in DATA space: the pointer converts through `view`
+/// once, and each handle's data position is compared with
+/// per-axis tolerances — `radius` pixels expressed in frames
+/// and in values through the view's own scale, so the
+/// elliptical pick region means the same thing on screen
+/// despite the two axes' different units. The nearer handle
+/// (normalised distance) wins; `None` when neither side has
+/// a handle, both lie outside the region, or the view is
+/// degenerate.
+pub fn hit_tangent_handle(
+    view: &GraphView,
+    ch: &Channel,
+    key_idx: usize,
+    px: V2,
+    radius: f32,
+) -> Option<TangentSide> {
+    if view.width <= 0.0 || view.height <= 0.0 {
+        return None;
+    }
+    let tol_f = radius / view.width * (view.frame_max - view.frame_min).abs();
+    let tol_v = radius / view.height * (view.val_max - view.val_min).abs();
+    if tol_f <= 0.0 || tol_v <= 0.0 {
+        return None;
+    }
+    let (df, dv) = view.to_data(px);
+    let mut best: Option<(TangentSide, f32)> = None;
+    for side in [TangentSide::In, TangentSide::Out] {
+        let Some((hf, hv)) = tangent_handle_data(ch, key_idx, side) else {
+            continue;
+        };
+        let nf = (df - hf) / tol_f;
+        let nv = (dv - hv) / tol_v;
+        let d2 = nf * nf + nv * nv;
+        if d2 <= 1.0 && best.map_or(true, |(_, b)| d2 < b) {
+            best = Some((side, d2));
+        }
+    }
+    best.map(|(side, _)| side)
+}
+
+/// The slope a tangent drag assigns from a pointer at data
+/// `data`: the slope of the line through the key and the
+/// pointer — one formula for both sides, because the In and
+/// Out rays are the same line through the key. `None` when
+/// the pointer sits within [`MIN_TANGENT_DX`] frames of the
+/// key's frame, where the slope would explode toward
+/// vertical: the caller keeps the stored tangent for that
+/// move instead of writing garbage.
+pub fn tangent_slope(key: &Key, data: (f32, f32)) -> Option<f32> {
+    let dx = data.0 - key.frame;
+    if dx.abs() < MIN_TANGENT_DX {
+        None
+    } else {
+        Some((data.1 - key.value) / dx)
+    }
+}
+
+/// Write the tangent `side` of key `idx` from a pointer at
+/// data `data` ([`tangent_slope`]) — ONLY that side: the
+/// model's tangents are per-side (broken) by design (see
+/// the module docs). The other side, the key's frame and
+/// value, and the key order are all untouched, so no
+/// re-sort is needed or done. Returns whether a tangent was
+/// written (false: index out of range, or the pointer too
+/// close to the key's frame to read a slope from).
+pub fn drag_tangent_to(ch: &mut Channel, idx: usize, side: TangentSide, data: (f32, f32)) -> bool {
+    let Some(k) = ch.keys.get_mut(idx) else {
+        return false;
+    };
+    let Some(slope) = tangent_slope(k, data) else {
+        return false;
+    };
+    match side {
+        TangentSide::In => k.in_tan = slope,
+        TangentSide::Out => k.out_tan = slope,
+    }
+    true
+}
+
 /// The frame a click at pixel `x` seeks to: the view's data
 /// frame at `x`, rounded to the nearest whole frame (halves
 /// round away from zero, `f32::round` semantics) and clamped
@@ -440,12 +655,13 @@ pub fn seek_frame(view: &GraphView, x: f32, frame_count: usize) -> Option<usize>
     Some(f as usize)
 }
 
-/// Canvas drag, Down phase: hit-test the drawn channel's key
-/// handles at `px` (a canvas of `size`) through the panel's
-/// own fit. On a hit: snapshot ONCE for the whole gesture,
-/// grab the key into `st`, return true. On a miss nothing is
-/// recorded — whether the gesture becomes a seek is decided
-/// at Up from its travel.
+/// Canvas drag, Down phase: hit-test the drawn channel at
+/// `px` (a canvas of `size`) through the panel's own fit —
+/// the selected key's tangent handles first (they win over
+/// the key hit-test), then the key handles themselves. On a
+/// hit: snapshot ONCE for the whole gesture, grab into `st`,
+/// return true. On a miss nothing is recorded — whether the
+/// gesture becomes a seek is decided at Up from its travel.
 pub fn drag_down(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: [f32; 2]) -> bool {
     if size[0] <= 0.0 || size[1] <= 0.0 {
         return false;
@@ -455,25 +671,56 @@ pub fn drag_down(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: 
         return false;
     };
     let view = drag_view(core, target, size);
+    if let Some(sel) = selected_key_index(core, target) {
+        if let Some(side) =
+            hit_tangent_handle(&view, &core.project.channels[ci], sel, px, GRAB_RADIUS)
+        {
+            core.snapshot();
+            st.drag_handle = Some((sel, side));
+            st.drag_key = None;
+            return true;
+        }
+    }
     let hit = view.hit_key(&core.project.channels[ci], px, GRAB_RADIUS);
     match hit {
         Some(i) => {
             core.snapshot();
             st.drag_anchor = core.project.channels[ci].keys[i].frame;
             st.drag_key = Some(i);
+            st.drag_handle = None;
             true
         }
         None => false,
     }
 }
 
-/// Canvas drag, Move phase: while a key is grabbed, move it
-/// to the pointer's data position (converted through the fit
-/// as of this Move's start) and re-anchor the drag state to
-/// its post-sort index. No snapshot — the Down snapshot
-/// covers the whole gesture. Returns true when a key moved;
-/// a stale grab (channel gone, key gone) ends the drag.
+/// Canvas drag, Move phase: while a tangent handle is
+/// grabbed, rewrite that side's slope from the pointer's
+/// data position; while a key is grabbed, move it to the
+/// pointer's data position (converted through the fit as of
+/// this Move's start) and re-anchor the drag state to its
+/// post-sort index. No snapshot either way — the Down
+/// snapshot covers the whole gesture. Returns true when
+/// something was written; a stale grab (channel gone, key
+/// gone) ends the drag.
 pub fn drag_move(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: [f32; 2]) -> bool {
+    if let Some((idx, side)) = st.drag_handle {
+        if size[0] <= 0.0 || size[1] <= 0.0 {
+            return false;
+        }
+        let target = effective_target(core, st.target);
+        let Some(ci) = channel_index(core, target) else {
+            st.drag_handle = None;
+            return false;
+        };
+        if core.project.channels[ci].keys.get(idx).is_none() {
+            st.drag_handle = None;
+            return false;
+        }
+        let view = drag_view(core, target, size);
+        let data = view.to_data(px);
+        return drag_tangent_to(&mut core.project.channels[ci], idx, side, data);
+    }
     let Some(hint) = st.drag_key else {
         return false;
     };
@@ -506,14 +753,16 @@ pub fn drag_move(core: &mut EditorCore, st: &mut GraphPanelState, px: V2, size: 
     }
 }
 
-/// Canvas drag, Up phase. With a key grabbed: end the drag —
-/// the final position goes to `core.status`, or, when the
-/// runtime cancelled the gesture (`cancelled`), the Down
-/// snapshot is rolled back with one `core.undo()`. With no
-/// key grabbed: a click (travel within [`CLICK_TRAVEL`])
-/// seeks the playhead to the frame under the pointer via
-/// `core.goto`; a longer drag over empty canvas does
-/// nothing. Returns true when the gesture changed anything.
+/// Canvas drag, Up phase. With a tangent handle grabbed:
+/// end the drag — the final slope goes to `core.status`, or,
+/// when the runtime cancelled the gesture (`cancelled`), the
+/// Down snapshot is rolled back with one `core.undo()`. With
+/// a key grabbed: the same discipline on the key's final
+/// position. With neither grabbed: a click (travel within
+/// [`CLICK_TRAVEL`]) seeks the playhead to the frame under
+/// the pointer via `core.goto`; a longer drag over empty
+/// canvas does nothing. Returns true when the gesture
+/// changed anything.
 pub fn drag_up(
     core: &mut EditorCore,
     st: &mut GraphPanelState,
@@ -522,6 +771,28 @@ pub fn drag_up(
     travel: f32,
     cancelled: bool,
 ) -> bool {
+    if let Some((idx, side)) = st.drag_handle.take() {
+        if cancelled {
+            core.undo();
+            return true;
+        }
+        let target = effective_target(core, st.target);
+        if let Some(ci) = channel_index(core, target) {
+            if let Some(k) = core.project.channels[ci].keys.get(idx) {
+                let slope = match side {
+                    TangentSide::In => k.in_tan,
+                    TangentSide::Out => k.out_tan,
+                };
+                core.status = format!(
+                    "Graph {} tangent set: key frame {:.1}, slope {:.2}.",
+                    side.label(),
+                    k.frame,
+                    slope
+                );
+            }
+        }
+        return true;
+    }
     if let Some(hint) = st.drag_key.take() {
         if cancelled {
             core.undo();
@@ -585,19 +856,26 @@ fn graph_drag(s: &mut State, d: &mut Drag) {
 
 /// The curve canvas as one `Shape`: the zero line (when the
 /// fitted range crosses zero), the current-frame line, the
-/// sampled curve, a diamond per key, and an accent diamond on
-/// the curve at the current frame. The view is
+/// sampled curve, a diamond per key, the selected key's
+/// tangent handles (a thin line from the key to a small
+/// diamond at each side's [`tangent_handle_data`] position;
+/// the dragged side in the accent colour), and an accent
+/// diamond on the curve at the current frame. The view is
 /// `GraphView::auto_fit` over the drawn channel alone, so an
 /// angle channel gets the full -180..=180 circle and a value
 /// channel gets its keys with 10% padding. `drag` is the
 /// grabbed key's index (resolved for the CURRENT key order),
-/// drawn larger in the accent colour while it is dragged.
+/// drawn larger in the accent colour while it is dragged;
+/// `sel` is the selected key (see [`selected_key_index`])
+/// and `drag_handle` the tangent drag in progress, if any.
 fn graph_shape(
     core: &EditorCore,
     target: ChannelTarget,
     size: [f32; 2],
     t: &Theme,
     drag: Option<usize>,
+    sel: Option<usize>,
+    drag_handle: Option<(usize, TangentSide)>,
 ) -> Shape {
     let (w, h) = (size[0], size[1]);
     let accent = tok::accent(0, true);
@@ -629,6 +907,28 @@ fn graph_shape(
             } else {
                 shape.fill(diamond(handle, 4.5).to_vec(), amber)
             };
+        }
+        // Tangent handles of the selected key only — one
+        // pair per key at most, so the canvas stays readable
+        // (and matches the hit-test, which only offers the
+        // selected key's handles).
+        if let Some(sel) = sel {
+            if let Some(k) = ch.keys.get(sel) {
+                let kp = view.to_px(k.frame, k.value);
+                for side in [TangentSide::In, TangentSide::Out] {
+                    if let Some((hf, hv)) = tangent_handle_data(ch, sel, side) {
+                        let hp = view.to_px(hf, hv);
+                        let col = if drag_handle == Some((sel, side)) {
+                            accent
+                        } else {
+                            t.text_secondary
+                        };
+                        shape = shape.line(kp, hp, 1.0, LineCap::Round, col.alpha(0.6));
+                        shape =
+                            shape.fill(diamond(hp, TANGENT_HANDLE_RADIUS).to_vec(), col);
+                    }
+                }
+            }
         }
         let now_pt = view.to_px(core.current as f32, ch.value_at(core.current as f32));
         shape = shape.fill(diamond(now_pt, 3.5).to_vec(), accent);
@@ -769,6 +1069,9 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         let ch = channel_for(core, target)?;
         resolve_drag_index(ch, hint, s.graph_panel.drag_anchor)
     });
+    // The selected key, whose tangent handles the canvas
+    // draws and the drag hit-tests.
+    let sel_idx = selected_key_index(core, target);
 
     let mut panel = col()
         .key("graph-panel")
@@ -788,7 +1091,15 @@ pub fn graph_panel(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
         )
         .child(selector.scroll_x().w_full())
         .child(
-            canvas(graph_shape(core, target, size, t, drag_idx))
+            canvas(graph_shape(
+                core,
+                target,
+                size,
+                t,
+                drag_idx,
+                sel_idx,
+                s.graph_panel.drag_handle,
+            ))
                 .key("graph-canvas")
                 .w_full()
                 .h(GRAPH_H)
@@ -1247,6 +1558,211 @@ mod tests {
             keys.iter()
                 .any(|k| approx(k.frame, 6.0) && approx(k.value, 10.0)),
             "cancel restored the pre-drag key: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn selected_key_index_is_the_key_nearest_the_playhead() {
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(4.0, 80.0),
+                Key::flat(8.0, 20.0),
+            ],
+        )];
+        core.goto(3);
+        assert_eq!(selected_key_index(&core, ChannelTarget::RootX), Some(1));
+        core.goto(0);
+        assert_eq!(selected_key_index(&core, ChannelTarget::RootX), Some(0));
+        // No channel for the target: no selection.
+        assert_eq!(selected_key_index(&core, ChannelTarget::RootY), None);
+    }
+
+    #[test]
+    fn tangent_handle_data_sits_on_the_tangent_ray() {
+        let mut mid = Key::flat(10.0, 100.0);
+        mid.in_tan = 2.0;
+        mid.out_tan = -1.0;
+        let ch = channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(0.0, 0.0), mid, Key::flat(20.0, 40.0)],
+        );
+        // Segment spans are 10 frames each way; the handle
+        // sits a third of the span along the tangent line:
+        // In: (10 − 10/3, 100 − (10/3)·2); Out: (10 + 10/3,
+        // 100 + (10/3)·(−1)).
+        let (f, v) = tangent_handle_data(&ch, 1, TangentSide::In).unwrap();
+        assert!(
+            approx(f, 10.0 - 10.0 / 3.0) && approx(v, 100.0 - 20.0 / 3.0),
+            "in handle ({f}, {v})"
+        );
+        let (f, v) = tangent_handle_data(&ch, 1, TangentSide::Out).unwrap();
+        assert!(
+            approx(f, 10.0 + 10.0 / 3.0) && approx(v, 100.0 - 10.0 / 3.0),
+            "out handle ({f}, {v})"
+        );
+        // Endpoints lack the side that governs no segment.
+        assert_eq!(tangent_handle_data(&ch, 0, TangentSide::In), None);
+        assert_eq!(tangent_handle_data(&ch, 2, TangentSide::Out), None);
+        // A lone key has neither handle.
+        let one = channel(ChannelTarget::RootX, vec![Key::flat(1.0, 1.0)]);
+        assert_eq!(tangent_handle_data(&one, 0, TangentSide::In), None);
+        assert_eq!(tangent_handle_data(&one, 0, TangentSide::Out), None);
+        // Out of range: nothing.
+        assert_eq!(tangent_handle_data(&ch, 9, TangentSide::In), None);
+    }
+
+    #[test]
+    fn hit_tangent_handle_picks_the_side_in_data_space() {
+        let mut core = EditorCore::new();
+        let mut mid = Key::flat(4.0, 80.0);
+        mid.in_tan = 5.0;
+        mid.out_tan = -5.0;
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(0.0, 0.0), mid, Key::flat(8.0, 20.0)],
+        )];
+        let size = [480.0, 170.0];
+        let view = drag_view(&core, ChannelTarget::RootX, size);
+        let ch = &core.project.channels[0];
+        // Each handle's own pixel hits its own side.
+        for side in [TangentSide::In, TangentSide::Out] {
+            let (hf, hv) = tangent_handle_data(ch, 1, side).unwrap();
+            let px = view.to_px(hf, hv);
+            assert_eq!(
+                hit_tangent_handle(&view, ch, 1, px, GRAB_RADIUS),
+                Some(side)
+            );
+        }
+        // The key's own pixel is a third of a segment away
+        // from both handles: no tangent hit there (the key
+        // hit-test owns that press).
+        let kp = view.to_px(4.0, 80.0);
+        assert_eq!(hit_tangent_handle(&view, ch, 1, kp, GRAB_RADIUS), None);
+        // Key 0 has no In handle, and its Out handle is far
+        // from kp: no hit for it either.
+        assert_eq!(hit_tangent_handle(&view, ch, 0, kp, GRAB_RADIUS), None);
+    }
+
+    #[test]
+    fn tangent_slope_reads_the_line_through_the_key() {
+        let k = Key::flat(4.0, 40.0);
+        // Down-right and up-left on the same line: slope 10 —
+        // one formula serves both sides.
+        assert_eq!(tangent_slope(&k, (8.0, 80.0)), Some(10.0));
+        assert_eq!(tangent_slope(&k, (0.0, 0.0)), Some(10.0));
+        // A falling line: negative slope.
+        assert_eq!(tangent_slope(&k, (6.0, 20.0)), Some(-10.0));
+        // Pointer (nearly) on the key's own frame: no
+        // meaningful slope — the tangent stays as it was.
+        assert_eq!(tangent_slope(&k, (4.0, 90.0)), None);
+        assert_eq!(tangent_slope(&k, (4.01, 90.0)), None);
+    }
+
+    #[test]
+    fn drag_tangent_to_sets_only_the_dragged_side() {
+        let mut k = Key::flat(4.0, 40.0);
+        k.in_tan = 1.5;
+        k.out_tan = -2.0;
+        let mut ch = channel(
+            ChannelTarget::RootX,
+            vec![Key::flat(0.0, 0.0), k, Key::flat(8.0, 20.0)],
+        );
+        // Drag the Out handle to data (8, 80): slope
+        // (80 − 40) / (8 − 4) = 10; in_tan untouched — the
+        // model's broken-tangent convention.
+        assert!(drag_tangent_to(&mut ch, 1, TangentSide::Out, (8.0, 80.0)));
+        assert!(approx(ch.keys[1].out_tan, 10.0));
+        assert!(approx(ch.keys[1].in_tan, 1.5), "other side untouched");
+        // Drag the In handle to (0, 0): slope
+        // (0 − 40) / (0 − 4) = 10; the first edit survives.
+        assert!(drag_tangent_to(&mut ch, 1, TangentSide::In, (0.0, 0.0)));
+        assert!(approx(ch.keys[1].in_tan, 10.0));
+        assert!(approx(ch.keys[1].out_tan, 10.0), "first edit kept");
+        // Frames and values never move, and the key order is
+        // untouched — no re-sort is needed or done.
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![0.0, 4.0, 8.0]);
+        assert!(approx(ch.keys[1].value, 40.0));
+        // Pointer on the key's frame writes nothing, and
+        // neither does an out-of-range index.
+        assert!(!drag_tangent_to(&mut ch, 1, TangentSide::Out, (4.0, 99.0)));
+        assert!(!drag_tangent_to(&mut ch, 7, TangentSide::Out, (8.0, 80.0)));
+    }
+
+    #[test]
+    fn tangent_drag_gesture_end_to_end_and_cancel() {
+        let mut core = EditorCore::new();
+        core.project.channels = vec![channel(
+            ChannelTarget::RootX,
+            vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(4.0, 80.0),
+                Key::flat(8.0, 20.0),
+            ],
+        )];
+        // Park the playhead on the middle key: it is the
+        // selected key, whose tangent handles are live.
+        core.goto(4);
+        let mut st = GraphPanelState::default();
+        let size = [480.0, 170.0];
+        let view = drag_view(&core, ChannelTarget::RootX, size);
+
+        // Priority is narrow: a press on the selected key's
+        // own diamond still starts a KEY drag — the handles
+        // sit a third of a segment away from it.
+        let kp = view.to_px(4.0, 80.0);
+        assert!(drag_down(&mut core, &mut st, kp, size));
+        assert_eq!(st.drag_key, Some(1));
+        assert_eq!(st.drag_handle, None);
+        assert!(drag_up(&mut core, &mut st, kp, size, 0.0, false));
+
+        // Down on the middle key's Out handle grabs the
+        // handle, not the key.
+        let (hf, hv) =
+            tangent_handle_data(&core.project.channels[0], 1, TangentSide::Out).unwrap();
+        let grab = view.to_px(hf, hv);
+        assert!(drag_down(&mut core, &mut st, grab, size));
+        assert_eq!(st.drag_handle, Some((1, TangentSide::Out)));
+        assert_eq!(st.drag_key, None);
+
+        // Move to data (6, 30): the out slope becomes
+        // (30 − 80) / (6 − 4) = −25. The fit cannot drift —
+        // tangent edits touch no key frame or value — so the
+        // pre-drag view still maps the pointer exactly.
+        let dest = view.to_px(6.0, 30.0);
+        assert!(drag_move(&mut core, &mut st, dest, size));
+        let k = core.project.channels[0].keys[1];
+        assert!(approx(k.out_tan, -25.0), "out tangent follows: {}", k.out_tan);
+        assert!(approx(k.in_tan, 0.0), "in tangent untouched");
+
+        // Up reports the tangent and ends the gesture.
+        assert!(drag_up(&mut core, &mut st, dest, size, 30.0, false));
+        assert_eq!(st.drag_handle, None);
+        assert!(
+            core.status.contains("out tangent set"),
+            "status: {}",
+            core.status
+        );
+
+        // A cancelled handle drag rolls back through the Down
+        // snapshot: out_tan returns to −25 (the handle has
+        // moved with the new tangent, so re-derive its pixel).
+        let (hf2, hv2) =
+            tangent_handle_data(&core.project.channels[0], 1, TangentSide::Out).unwrap();
+        let view2 = drag_view(&core, ChannelTarget::RootX, size);
+        let grab2 = view2.to_px(hf2, hv2);
+        assert!(drag_down(&mut core, &mut st, grab2, size));
+        let dest2 = view2.to_px(6.0, 130.0);
+        assert!(drag_move(&mut core, &mut st, dest2, size));
+        assert!(approx(core.project.channels[0].keys[1].out_tan, 25.0));
+        assert!(drag_up(&mut core, &mut st, dest2, size, 30.0, true));
+        assert_eq!(st.drag_handle, None);
+        assert!(
+            approx(core.project.channels[0].keys[1].out_tan, -25.0),
+            "cancel restored the pre-drag tangent"
         );
     }
 }

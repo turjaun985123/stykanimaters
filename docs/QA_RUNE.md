@@ -597,3 +597,49 @@ floor, not a final count): **395 unique keys** (338 static
 **408 unique keys** (348 static + 60 dynamic patterns) at
 Phase E green (`42459754303`).
 
+---
+
+## 8. Phase F addendum — gap closure map
+
+Appended 2026-11-08, mid-wave (sections still landing;
+statuses are a snapshot — the integrator updates the CI
+column after the green run). Phase F's charter and the
+40-section table: `docs/PHASE_F.md`.
+
+**The event that opens this phase:** on 2026-11-08 the user
+ran the Phase E build on their own PC and sent a screenshot
++ screen video — the first real-screen verification of the
+Rune shell (§4 row 6 is closable on its strength). The
+screenshot proved workspaces + gating, the stage with onion
+skins, and the Phase E surfaces on a real display; the video
+showed playback actually playing. The same evidence exposed
+two defects, which lead this map.
+
+| Phase E remainder | Closing section(s) | Status | CI |
+|---|---|---|---|
+| **D1 — status-strip text overlap** at real window widths (new; from the user's screenshot + video) | §6 status_strip fix | written | _integrator_ |
+| **D2 — stray ".layout" row** in the project list (new; from the user's screenshot) | §7 home_panel fix | written | _integrator_ |
+| App-bar duplicate `add-figure` / `onion` buttons still present (§6 row 2 remainder) | §8 chrome_view dedup | written | _integrator_ |
+| Playback starts no audio (§6 row 6, still open after Phase E) | §16 `audio_play.rs` glue (new lib module: `start/stop_playback_audio`, `playback_audio_active` over the Wave 10 `audio::AudioPlayer`) + §17 playback_controls surface | glue written — shell wiring is the integrator's step, and **hearing it is user-verified only**: CI cannot prove sound. Player limits inherited (no loop sync, no scrub-follow) — see PHASE_F §5 | _integrator_ |
+| `duplicate_figure` / `delete_figure` do not remap FX-clip anchors or graph channels (pre-existing engine gap, documented in Phase E) | §37 figure remap fix | written | _integrator_ |
+| Hand-audit debt (§6 row 3 remainder): fx_browser, pose_tools, project_tools, snap_tests, text_tool, three_d_panel per-key map | Phase F sections rework fx_browser (§28), pose_tools (§22), text_tool (§27), three_d_panel (§31), snap_tests (§39) — each rework is a fresh read of that file; **project_tools has no Phase F section and its audit stays owed**. Not claimed fully closed | partially closed — project_tools audit + any per-key maps the reworks don't reach remain open | _integrator_ |
+| Stage fidelity vs the rasterizer: Rune stage drew flat first-colours (no gradients), no selection highlight for strokes, no FX gizmos, no frustum/safe frames, no text backing plates | §1 stage gradients, §2 stroke highlight, §3 FX gizmos, §4 frustum/safe frames, §5 text plates | written — geometry + tests only; **pixels unverified until the user's next screenshot** | _integrator_ |
+| MCP parity: engine ops added in Phase E (and Phase F §37) not all exposed as MCP tools | §38 mcp_tools parity pass | written | _integrator_ |
+| `--tree` rect availability unverified; `--snap` on GPU-less CI unproven (§5 gap 4) | Not closable by Phase F section code; `headless.yml` (Phase E) is still dispatch-only and has never been run | open — unchanged | — |
+| Inventory script blind spots (§5 gap 7) | Not a Phase F section; §1.2-style hand coverage continues. Mid-wave inventory: **442 keys** (375 static + 67 dynamic) at 07:56 UTC vs 408 at Phase E green — floor, not final | open — documented, unchanged | — |
+
+Phase F depth work with no Phase E gap behind it (new
+surface, recorded so the inventory growth is explained):
+workspace blurbs (§10), timeline loop drag (§11), palette
+recents (§12), graph tangent drag (§13), camera key
+copy/paste (§14), stage-size presets (§15), figure
+thumbnails (§18), figure rename (§19), segment angle
+steppers (§20), node RGB editor (§21), pose library (§22),
+keyframe nudge/clear (§23), frame duration stepper (§24),
+draw stamp controls (§25), stroke bulk ops (§26), text
+list (§27), FX search/recents (§28), FX nudge (§29), clip
+duplicate/rename (§30), 3D readouts (§31), export history
+(§32), library rename (§33), layer opacity slider (§34),
+easing picker (§35), action toasts (§36), menu hints (§9),
+Runtime tests round 3 (§39).
+

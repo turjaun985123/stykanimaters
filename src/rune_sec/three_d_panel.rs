@@ -30,6 +30,15 @@
 //!   `fig3d::save_pose_library` (fig3d.rs:1544) and
 //!   `fig3d::mirror_pose` (fig3d.rs:1342), wired by
 //!   `save_current_pose` / `apply_mirror_pose` below.
+//! - The readouts (Phase F) are pure helpers over the same
+//!   session state: [`selected_joint_position`] runs
+//!   `fig3d::evaluate3` — the evaluator [`apply_ik`] already
+//!   uses — and [`camera_readout_text`] reads the session
+//!   camera's orbit fields (azimuth = `Camera3.yaw`,
+//!   elevation = `Camera3.pitch`, both degrees; distance in
+//!   world units), borrowed, never moved. Both recompute at
+//!   every panel build, so they track selection, posing and
+//!   orbiting as they happen.
 //!
 //! Controls that need a live session render **dimmed but
 //! wired** when there is none: the press still fires, and the
@@ -363,6 +372,74 @@ pub fn session_summary(core: &EditorCore) -> String {
     }
 }
 
+/// Format `v` with `places` decimals, never printing a
+/// negative zero: `-0.0` itself, and small negatives that
+/// round to zero at this precision, both print as `0.00…`
+/// — a readout that says "-0.00" reads as a bug. Real
+/// negatives keep their sign. Pure and unit-tested.
+pub fn fmt_fixed(v: f32, places: usize) -> String {
+    let v = if v == 0.0 { 0.0 } else { v };
+    let s = format!("{:.*}", places, v);
+    if s.starts_with('-') && s[1..].chars().all(|c| c == '0' || c == '.') {
+        s[1..].to_string()
+    } else {
+        s
+    }
+}
+
+/// The selected joint's solved world position, from the
+/// evaluator the engine (and [`apply_ik`] above) already
+/// uses: `fig3d::evaluate3(&st.figure, &st.pose)` at
+/// `st.selected`. `None` without a session; an out-of-range
+/// selection (the ops clamp it, but the readout never
+/// panics) also yields `None`.
+pub fn selected_joint_position(core: &EditorCore) -> Option<[f32; 3]> {
+    let st = core.fig3.as_ref()?;
+    fig3d::evaluate3(&st.figure, &st.pose)
+        .get(st.selected)
+        .copied()
+}
+
+/// The position readout line: `"<joint> · x .. · y .. ·
+/// z .."` with two decimals per axis ([`fmt_fixed`]).
+/// `None` without a session. Recomputed from the live
+/// session at every panel build, so it follows both
+/// selection and pose changes.
+pub fn joint_position_text(core: &EditorCore) -> Option<String> {
+    let st = core.fig3.as_ref()?;
+    let p = selected_joint_position(core)?;
+    let name = st
+        .figure
+        .nodes
+        .get(st.selected)
+        .map(|n| n.name.as_str())
+        .unwrap_or("?");
+    Some(format!(
+        "{name} · x {} · y {} · z {}",
+        fmt_fixed(p[0], 2),
+        fmt_fixed(p[1], 2),
+        fmt_fixed(p[2], 2)
+    ))
+}
+
+/// The camera orbit readout line: azimuth, elevation and
+/// distance of the session camera. The engine's field
+/// names are `Camera3.yaw` (azimuth) and `Camera3.pitch`
+/// (elevation), both in degrees; distance is in world
+/// units (fig3d.rs:84-90). The camera is borrowed, never
+/// moved — `Camera3` is not `Copy`. Angles print with one
+/// decimal, distance with two ([`fmt_fixed`]). `None`
+/// without a session.
+pub fn camera_readout_text(core: &EditorCore) -> Option<String> {
+    let cam = &core.fig3.as_ref()?.camera;
+    Some(format!(
+        "azimuth {}° · elevation {}° · distance {}",
+        fmt_fixed(cam.yaw, 1),
+        fmt_fixed(cam.pitch, 1),
+        fmt_fixed(cam.distance, 2)
+    ))
+}
+
 /// A panel button. Live buttons delegate to
 /// `chrome_view::btn` so the geometry matches the rest of
 /// the chrome exactly; `dim` renders the same shape muted
@@ -486,6 +563,22 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
         );
     }
 
+    // Selected-joint position readout (Phase F): the
+    // solved world position of `st.selected`, recomputed
+    // from the live session on every build, so it tracks
+    // selection and posing changes as they happen.
+    if in_session {
+        if let Some(line) = joint_position_text(core) {
+            panel = panel.child(
+                row()
+                    .gap(6.0)
+                    .center_y()
+                    .child(section_label("Position", t))
+                    .child(text(line).font(type_::LABEL).color(t.text)),
+            );
+        }
+    }
+
     panel = panel
         // Camera presets + frame.
         .child(
@@ -508,7 +601,26 @@ pub fn three_d_panel(s: &State, t: &Theme) -> El {
                 .child(ctl("cam-frame-3d", "Frame camera", false, dim, t, |s| {
                     apply_frame_camera(&mut s.core);
                 })),
-        )
+        );
+
+    // Camera orbit readout (Phase F): azimuth / elevation /
+    // distance of the session camera, directly under the
+    // camera controls. The panel's only orbit stepper is
+    // the "Orbit +15" button in the posing row — there are
+    // no per-axis steppers for the readout to sit beside.
+    if in_session {
+        if let Some(line) = camera_readout_text(core) {
+            panel = panel.child(
+                row()
+                    .gap(6.0)
+                    .center_y()
+                    .child(section_label("Orbit", t))
+                    .child(text(line).font(type_::LABEL).color(t.text)),
+            );
+        }
+    }
+
+    panel = panel
         // IK solves.
         .child(
             row()
@@ -848,5 +960,101 @@ mod tests {
         // restores the original pose bit-for-bit.
         assert!(apply_mirror_pose(&mut core));
         assert_eq!(core.fig3.as_ref().unwrap().pose, original);
+    }
+
+    #[test]
+    fn fmt_fixed_never_prints_a_negative_zero() {
+        assert_eq!(fmt_fixed(0.0, 2), "0.00");
+        assert_eq!(fmt_fixed(-0.0, 2), "0.00");
+        // Small negatives that round to zero lose the sign.
+        assert_eq!(fmt_fixed(-0.004, 2), "0.00");
+        assert_eq!(fmt_fixed(-0.04, 1), "0.0");
+        // Real negatives keep it.
+        assert_eq!(fmt_fixed(-0.006, 2), "-0.01");
+        assert_eq!(fmt_fixed(-1.5, 2), "-1.50");
+        // Ordinary values at both precisions the readouts use.
+        assert_eq!(fmt_fixed(400.0, 2), "400.00");
+        assert_eq!(fmt_fixed(89.9, 1), "89.9");
+        assert_eq!(fmt_fixed(1234.567, 2), "1234.57");
+    }
+
+    #[test]
+    fn readouts_are_none_without_a_session() {
+        let core = EditorCore::new();
+        assert_eq!(selected_joint_position(&core), None);
+        assert_eq!(joint_position_text(&core), None);
+        assert_eq!(camera_readout_text(&core), None);
+    }
+
+    #[test]
+    fn joint_position_readout_matches_the_evaluator() {
+        let mut core = EditorCore::new();
+        core.enter_3d();
+        // Whatever is selected, the readout is exactly the
+        // evaluator's world position for that node, named
+        // and formatted at two decimals.
+        let (name, expected) = {
+            let st = core.fig3.as_ref().unwrap();
+            let world = fig3d::evaluate3(&st.figure, &st.pose);
+            (st.figure.nodes[st.selected].name.clone(), world[st.selected])
+        };
+        assert_eq!(selected_joint_position(&core), Some(expected));
+        assert_eq!(
+            joint_position_text(&core).unwrap(),
+            format!(
+                "{name} · x {} · y {} · z {}",
+                fmt_fixed(expected[0], 2),
+                fmt_fixed(expected[1], 2),
+                fmt_fixed(expected[2], 2)
+            )
+        );
+        // Changing the selection moves the readout to the
+        // newly selected joint.
+        assert!(select_joint(&mut core, 5));
+        let st = core.fig3.as_ref().unwrap();
+        let world = fig3d::evaluate3(&st.figure, &st.pose);
+        assert_eq!(selected_joint_position(&core), Some(world[5]));
+        // Posing moves it too: rotate the shoulder (3) and
+        // the hand (5) lands somewhere else.
+        let before = selected_joint_position(&core).unwrap();
+        assert!(select_joint(&mut core, 3));
+        core.fig3_rotate(2, 40.0);
+        assert!(select_joint(&mut core, 5));
+        assert_ne!(selected_joint_position(&core).unwrap(), before);
+    }
+
+    #[test]
+    fn camera_readout_tracks_presets_and_orbit() {
+        let mut core = EditorCore::new();
+        core.enter_3d();
+        // A fresh session starts on the default camera.
+        assert_eq!(
+            camera_readout_text(&core).unwrap(),
+            "azimuth 0.0° · elevation 0.0° · distance 400.00"
+        );
+        assert!(apply_camera_preset(&mut core, "side"));
+        assert_eq!(
+            camera_readout_text(&core).unwrap(),
+            "azimuth 90.0° · elevation 0.0° · distance 400.00"
+        );
+        // Orbiting (the panel's Orbit button op) moves the
+        // azimuth the readout prints.
+        core.fig3_orbit(15.0, 0.0);
+        assert_eq!(
+            camera_readout_text(&core).unwrap(),
+            "azimuth 105.0° · elevation 0.0° · distance 400.00"
+        );
+        // And the readout always agrees with the borrowed
+        // camera's fields, whatever produced them.
+        let cam = &core.fig3.as_ref().unwrap().camera;
+        assert_eq!(
+            camera_readout_text(&core).unwrap(),
+            format!(
+                "azimuth {}° · elevation {}° · distance {}",
+                fmt_fixed(cam.yaw, 1),
+                fmt_fixed(cam.pitch, 1),
+                fmt_fixed(cam.distance, 2)
+            )
+        );
     }
 }

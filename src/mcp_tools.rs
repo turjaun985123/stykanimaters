@@ -493,6 +493,26 @@ fn tool_set_frame_durations(core: &mut EditorCore, args: &Value) -> Result<Value
     Ok(json!({ "ok": true, "updated": updated }))
 }
 
+fn tool_set_project_easing(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let easing = match req_str(args, "easing")? {
+        "linear" => crate::model::Easing::Linear,
+        "smooth" => crate::model::Easing::Smooth,
+        "ease-in" => crate::model::Easing::EaseIn,
+        "ease-out" => crate::model::Easing::EaseOut,
+        other => {
+            return Err(format!(
+                "unknown easing '{other}' (expected \"linear\", \"smooth\", \"ease-in\" or \"ease-out\")"
+            ))
+        }
+    };
+    core.set_project_easing(easing);
+    Ok(json!({
+        "ok": true,
+        "easing": core.project.easing.label(),
+        "status": core.status,
+    }))
+}
+
 fn tool_get_pose(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let fi = req_usize(args, "figure")?;
     let frame = req_usize(args, "frame")?;
@@ -633,6 +653,78 @@ fn tool_set_node(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
         "length": node.length,
         "thickness": node.thickness,
         "color": node.color,
+    }))
+}
+
+/// Select (figure, node) so the selected-node style setters
+/// (set_node_cap / set_node_color2 / set_node_opacity) act on
+/// it — the select-then-delegate pattern add_node and
+/// delete_node already use for the builder ops.
+fn select_node(core: &mut EditorCore, fi: usize, ni: usize) {
+    core.selected_figure = fi;
+    core.selected_node = Some(ni);
+}
+
+fn tool_set_node_cap(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    let ni = req_usize(args, "node")?;
+    check_node(core, fi, ni)?;
+    let cap = match req_str(args, "cap")? {
+        "round" => crate::model::CapKind::Round,
+        "square" => crate::model::CapKind::Square,
+        "point" => crate::model::CapKind::Point,
+        other => {
+            return Err(format!(
+                "unknown cap '{other}' (expected \"round\", \"square\" or \"point\")"
+            ))
+        }
+    };
+    select_node(core, fi, ni);
+    core.set_node_cap(cap);
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "node": ni,
+        "cap": format!("{:?}", core.project.figures[fi].def.nodes[ni].style.cap).to_lowercase(),
+        "status": core.status,
+    }))
+}
+
+fn tool_set_node_color2(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    let ni = req_usize(args, "node")?;
+    check_node(core, fi, ni)?;
+    // Same convention as fx_set_color2: an absent or null
+    // 'color2' clears the gradient back to a solid colour.
+    let color2 = opt_color(args, "color2")?;
+    select_node(core, fi, ni);
+    core.set_node_color2(color2);
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "node": ni,
+        "color2": core.project.figures[fi].def.nodes[ni].style.color2,
+        "status": core.status,
+    }))
+}
+
+fn tool_set_node_opacity(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    let ni = req_usize(args, "node")?;
+    check_node(core, fi, ni)?;
+    let opacity = req_f32(args, "opacity")?;
+    if opacity < 0.0 {
+        return Err("argument 'opacity' must not be negative".into());
+    }
+    select_node(core, fi, ni);
+    core.set_node_opacity(opacity);
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "node": ni,
+        // The op clamps to 0.05..=1.0; read the stored value back.
+        "opacity": core.project.figures[fi].def.nodes[ni].style.opacity,
+        "status": core.status,
     }))
 }
 
@@ -1357,6 +1449,139 @@ fn tool_scale_channel_values(core: &mut EditorCore, args: &Value) -> Result<Valu
 /// All content-building tools, in the order agents usually need them.
 
 // ---------------------------------------------------------------------
+// Graph key copy/paste (phase F): the graph_keys ops the
+// keyframe panel gained in phase E. The MCP Tool handler is a
+// bare fn pointer over &mut EditorCore — there is no
+// server-side clipboard to keep between calls — so copy
+// RETURNS the keys to the client and paste takes them back as
+// an explicit 'keys' argument (the same key JSON both ways).
+// ---------------------------------------------------------------------
+
+fn interp_name(interp: crate::graph::Interp) -> &'static str {
+    match interp {
+        crate::graph::Interp::Hermite => "hermite",
+        crate::graph::Interp::Linear => "linear",
+        crate::graph::Interp::Step => "step",
+    }
+}
+
+fn key_json(key: &crate::graph::Key) -> Value {
+    json!({
+        "frame": key.frame,
+        "value": key.value,
+        "in_tan": key.in_tan,
+        "out_tan": key.out_tan,
+        "interp": interp_name(key.interp),
+    })
+}
+
+/// Parse the 'keys' argument of graph_paste_keys: an array of
+/// key objects in the shape graph_copy_keys returns. 'frame'
+/// and 'value' are required per key; tangents default to 0 and
+/// 'interp' to "hermite". Everything is validated up front, so
+/// a malformed key never leaves a half-pasted channel.
+fn parse_keys(args: &Value) -> Result<Vec<crate::graph::Key>, String> {
+    let raw = match get(args, "keys") {
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| "argument 'keys' must be an array of key objects".to_string())?,
+        None => return Err("missing required argument 'keys'".into()),
+    };
+    if raw.is_empty() {
+        return Err("argument 'keys' must contain at least one key".into());
+    }
+    let mut keys = Vec::with_capacity(raw.len());
+    for (i, v) in raw.iter().enumerate() {
+        let obj = v
+            .as_object()
+            .ok_or_else(|| format!("argument 'keys[{i}]' must be a key object"))?;
+        let field = |name: &str| -> Result<Option<f32>, String> {
+            match obj.get(name).filter(|x| !x.is_null()) {
+                Some(x) => x
+                    .as_f64()
+                    .map(|f| Some(f as f32))
+                    .ok_or_else(|| format!("argument 'keys[{i}].{name}' must be a number")),
+                None => Ok(None),
+            }
+        };
+        let frame = field("frame")?
+            .ok_or_else(|| format!("argument 'keys[{i}]' is missing 'frame'"))?;
+        if frame < 0.0 {
+            return Err(format!("argument 'keys[{i}].frame' must not be negative"));
+        }
+        let value = field("value")?
+            .ok_or_else(|| format!("argument 'keys[{i}]' is missing 'value'"))?;
+        let interp = match obj.get("interp").filter(|x| !x.is_null()) {
+            Some(x) => {
+                let name = x
+                    .as_str()
+                    .ok_or_else(|| format!("argument 'keys[{i}].interp' must be a string"))?;
+                match name {
+                    "hermite" => crate::graph::Interp::Hermite,
+                    "linear" => crate::graph::Interp::Linear,
+                    "step" => crate::graph::Interp::Step,
+                    other => {
+                        return Err(format!(
+                            "unknown interp '{other}' in 'keys[{i}]' (expected \"hermite\", \"linear\" or \"step\")"
+                        ))
+                    }
+                }
+            }
+            None => crate::graph::Interp::Hermite,
+        };
+        keys.push(crate::graph::Key {
+            frame,
+            value,
+            in_tan: field("in_tan")?.unwrap_or(0.0),
+            out_tan: field("out_tan")?.unwrap_or(0.0),
+            interp,
+        });
+    }
+    Ok(keys)
+}
+
+fn tool_graph_copy_keys(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    let target = parse_graph_target(core, fi, args)?;
+    let idx = channel_index(core, fi, target)?;
+    let keys = crate::graph_keys::copy_keys(core, idx)
+        .ok_or_else(|| "internal error: channel vanished after lookup".to_string())?;
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "target": format!("{target:?}"),
+        "keys": keys.iter().map(key_json).collect::<Vec<_>>(),
+        "key_count": keys.len(),
+    }))
+}
+
+fn tool_graph_paste_keys(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = req_usize(args, "figure")?;
+    check_figure(core, fi)?;
+    let target = parse_graph_target(core, fi, args)?;
+    let at_frame = req_f32(args, "at_frame")?;
+    if at_frame < 0.0 {
+        return Err("argument 'at_frame' must not be negative".into());
+    }
+    let keys = parse_keys(args)?;
+    let idx = channel_index(core, fi, target)?;
+    if !crate::graph_keys::paste_keys(core, idx, &keys, at_frame) {
+        // The op refused and explained via the status line.
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "target": format!("{target:?}"),
+        "pasted": keys.len(),
+        "at_frame": at_frame,
+        "channel_keys": core.project.channels[idx].keys.len(),
+        "status": core.status,
+    }))
+}
+
+// ---------------------------------------------------------------------
 // Drawing tools (wave 7): strokes are project data
 // (Project.strokes), manipulated through draw_ops so MCP, the
 // editor and the rasterizer all agree on the width conventions
@@ -1971,6 +2196,17 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_set_frame_durations,
         },
         Tool {
+            name: "set_project_easing",
+            description: "Set the project's default easing for tweened playback: \"linear\", \"smooth\", \"ease-in\" or \"ease-out\" (the easing panel's preset buttons). A project-settings tweak — not an undo step.",
+            schema: obj_schema(
+                json!({
+                    "easing": { "type": "string", "enum": ["linear", "smooth", "ease-in", "ease-out"] }
+                }),
+                &["easing"],
+            ),
+            handler: tool_set_project_easing,
+        },
+        Tool {
             name: "get_pose",
             description: "Read a figure's pose in a frame: {root: [x, y], angles: [degrees per node]}.",
             schema: obj_schema(
@@ -2017,6 +2253,45 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["figure", "node"],
             ),
             handler: tool_set_node,
+        },
+        Tool {
+            name: "set_node_cap",
+            description: "Set a segment's end cap directly: \"round\", \"square\" or \"point\" (the style panel's cap control). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "node": { "type": "integer" },
+                    "cap": { "type": "string", "enum": ["round", "square", "point"] }
+                }),
+                &["figure", "node", "cap"],
+            ),
+            handler: tool_set_node_cap,
+        },
+        Tool {
+            name: "set_node_color2",
+            description: "Set a segment's gradient end colour (0xRRGGBB; the segment blends its own colour -> color2). Omit 'color2' (or pass null) to clear the gradient back to a solid colour. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "node": { "type": "integer" },
+                    "color2": { "type": "integer", "description": "0xRRGGBB gradient end colour" }
+                }),
+                &["figure", "node"],
+            ),
+            handler: tool_set_node_color2,
+        },
+        Tool {
+            name: "set_node_opacity",
+            description: "Set a segment's opacity (the style panel's opacity stepper; clamped to 0.05-1.0 so a segment can never be made fully invisible). One undo step.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "node": { "type": "integer" },
+                    "opacity": { "type": "number", "description": "Opacity, clamped to 0.05-1.0" }
+                }),
+                &["figure", "node", "opacity"],
+            ),
+            handler: tool_set_node_opacity,
         },
         Tool {
             name: "add_node",
@@ -2331,6 +2606,32 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
             handler: tool_scale_channel_values,
         },
         Tool {
+            name: "graph_copy_keys",
+            description: "Copy all keys of one graph channel, returned as key objects ({frame, value, in_tan, out_tan, interp}) to feed to graph_paste_keys. Target addressing matches graph_key. Errors when the channel does not exist.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": nodeIndex}" }
+                }),
+                &["figure", "target"],
+            ),
+            handler: tool_graph_copy_keys,
+        },
+        Tool {
+            name: "graph_paste_keys",
+            description: "Paste keys into a graph channel: the earliest pasted key lands at 'at_frame' and existing keys within half a frame of a pasted key are replaced. 'keys' is the array graph_copy_keys returns (per key: frame and value required, in_tan/out_tan default 0, interp \"hermite\"/\"linear\"/\"step\" default \"hermite\"). Target addressing matches graph_key; the channel must already exist. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "figure": { "type": "integer" },
+                    "target": { "description": "\"root_x\", \"root_y\", \"angle:N\", \"length:N\" or {\"angle\": nodeIndex}" },
+                    "keys": { "type": "array", "items": { "type": "object" }, "description": "Key objects as returned by graph_copy_keys" },
+                    "at_frame": { "type": "number" }
+                }),
+                &["figure", "target", "keys", "at_frame"],
+            ),
+            handler: tool_graph_paste_keys,
+        },
+        Tool {
             name: "layers",
             description: "Apply layer state to a figure: locked, hidden, opacity (0.05-1.0), and solo (true solos this figure in the editor, false clears its solo).",
             schema: obj_schema(
@@ -2605,11 +2906,11 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 65);
+        assert_eq!(tools.len(), 71);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 65, "tool names must be unique");
+        assert_eq!(names.len(), 71, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
@@ -3458,6 +3759,169 @@ mod tests {
     }
 
     #[test]
+    fn phase_f_parity_tools() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        call(&mut core, &tools, "new_project", json!({})).unwrap();
+
+        // --- set_project_easing (the editor's direct setter) ---
+        let r = call(&mut core, &tools, "set_project_easing", json!({ "easing": "smooth" })).unwrap();
+        assert_eq!(r["easing"], "smooth");
+        assert_eq!(core.project.easing.label(), "smooth");
+        for name in ["linear", "ease-in", "ease-out"] {
+            let r = call(&mut core, &tools, "set_project_easing", json!({ "easing": name })).unwrap();
+            assert_eq!(r["easing"], name);
+            assert_eq!(core.project.easing.label(), name);
+        }
+        assert!(call(&mut core, &tools, "set_project_easing", json!({ "easing": "bouncy" })).is_err());
+        assert!(call(&mut core, &tools, "set_project_easing", json!({})).is_err());
+
+        // --- node style setters (selection-based editor ops) ---
+        let r = call(&mut core, &tools, "set_node_cap", json!({
+            "figure": 0, "node": 1, "cap": "square"
+        }))
+        .unwrap();
+        assert_eq!(r["cap"], "square");
+        assert_eq!(
+            format!("{:?}", core.project.figures[0].def.nodes[1].style.cap),
+            "Square"
+        );
+        assert!(call(&mut core, &tools, "set_node_cap", json!({
+            "figure": 0, "node": 1, "cap": "flat"
+        }))
+        .is_err());
+        assert!(call(&mut core, &tools, "set_node_cap", json!({
+            "figure": 0, "node": 99, "cap": "round"
+        }))
+        .is_err());
+
+        let r = call(&mut core, &tools, "set_node_color2", json!({
+            "figure": 0, "node": 1, "color2": 0x112233
+        }))
+        .unwrap();
+        assert_eq!(r["color2"], 0x112233);
+        assert_eq!(core.project.figures[0].def.nodes[1].style.color2, Some(0x112233));
+        // Omitting color2 clears the gradient, like fx_set_color2.
+        let r = call(&mut core, &tools, "set_node_color2", json!({
+            "figure": 0, "node": 1
+        }))
+        .unwrap();
+        assert_eq!(r["color2"], Value::Null);
+        assert_eq!(core.project.figures[0].def.nodes[1].style.color2, None);
+
+        let r = call(&mut core, &tools, "set_node_opacity", json!({
+            "figure": 0, "node": 1, "opacity": 0.5
+        }))
+        .unwrap();
+        assert_eq!(r["opacity"], 0.5);
+        assert_eq!(core.project.figures[0].def.nodes[1].style.opacity, 0.5);
+        // The op clamps into 0.05..=1.0 and the tool reads the
+        // stored value back.
+        let r = call(&mut core, &tools, "set_node_opacity", json!({
+            "figure": 0, "node": 1, "opacity": 2.0
+        }))
+        .unwrap();
+        assert_eq!(r["opacity"], 1.0);
+        call(&mut core, &tools, "set_node_opacity", json!({
+            "figure": 0, "node": 1, "opacity": 0.0
+        }))
+        .unwrap();
+        let stored = core.project.figures[0].def.nodes[1].style.opacity;
+        assert!((stored - 0.05).abs() < 1e-6, "clamped to the 0.05 floor, got {stored}");
+        assert!(call(&mut core, &tools, "set_node_opacity", json!({
+            "figure": 0, "node": 1, "opacity": -0.5
+        }))
+        .is_err());
+
+        // --- graph key copy/paste round trip (graph_keys ops) ---
+        call(&mut core, &tools, "graph_key", json!({
+            "figure": 0, "target": "root_x", "frame": 0.0, "value": 0.0
+        }))
+        .unwrap();
+        call(&mut core, &tools, "graph_key", json!({
+            "figure": 0, "target": "root_x", "frame": 4.0, "value": 100.0
+        }))
+        .unwrap();
+        let r = call(&mut core, &tools, "graph_copy_keys", json!({
+            "figure": 0, "target": "root_x"
+        }))
+        .unwrap();
+        assert_eq!(r["key_count"], 2);
+        let copied = r["keys"].clone();
+        assert_eq!(copied[0]["frame"], 0.0);
+        assert_eq!(copied[1]["frame"], 4.0);
+        assert_eq!(copied[1]["value"], 100.0);
+        assert_eq!(copied[0]["interp"], "hermite");
+        // Copying a channel that does not exist is an error.
+        assert!(call(&mut core, &tools, "graph_copy_keys", json!({
+            "figure": 0, "target": "root_y"
+        }))
+        .is_err());
+
+        // A destination channel holding one key at frame 1.
+        call(&mut core, &tools, "graph_key", json!({
+            "figure": 0, "target": "angle:2", "frame": 1.0, "value": 30.0
+        }))
+        .unwrap();
+        // Paste the copied keys at frame 2: they rebase to
+        // frames 2 and 6, and the frame-1 key (a full frame
+        // away from the nearest pasted key) survives.
+        let r = call(&mut core, &tools, "graph_paste_keys", json!({
+            "figure": 0, "target": "angle:2", "keys": copied, "at_frame": 2.0
+        }))
+        .unwrap();
+        assert_eq!(r["pasted"], 2);
+        assert_eq!(r["channel_keys"], 3);
+        let ang = core
+            .project
+            .channels
+            .iter()
+            .find(|c| matches!(c.target, crate::graph::ChannelTarget::Angle(2)))
+            .unwrap();
+        let frames: Vec<f32> = ang.keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![1.0, 2.0, 6.0]);
+        assert_eq!(ang.keys[2].value, 100.0);
+        // Paste an explicit step key rebased onto frame 1: the
+        // key already there is replaced, tangents default to 0.
+        let r = call(&mut core, &tools, "graph_paste_keys", json!({
+            "figure": 0, "target": "angle:2", "at_frame": 1.0,
+            "keys": [{ "frame": 9.0, "value": 5.0, "interp": "step" }]
+        }))
+        .unwrap();
+        assert_eq!(r["channel_keys"], 3, "replaced, not appended");
+        let ang = core
+            .project
+            .channels
+            .iter()
+            .find(|c| matches!(c.target, crate::graph::ChannelTarget::Angle(2)))
+            .unwrap();
+        assert_eq!(ang.keys[0].frame, 1.0);
+        assert_eq!(ang.keys[0].value, 5.0);
+        assert!(matches!(ang.keys[0].interp, crate::graph::Interp::Step));
+        // Paste failures: missing channel, empty keys, a key
+        // without a value, a negative target frame.
+        assert!(call(&mut core, &tools, "graph_paste_keys", json!({
+            "figure": 0, "target": "root_y", "at_frame": 0.0,
+            "keys": [{ "frame": 0.0, "value": 1.0 }]
+        }))
+        .is_err());
+        assert!(call(&mut core, &tools, "graph_paste_keys", json!({
+            "figure": 0, "target": "root_x", "keys": [], "at_frame": 0.0
+        }))
+        .is_err());
+        assert!(call(&mut core, &tools, "graph_paste_keys", json!({
+            "figure": 0, "target": "root_x", "at_frame": 0.0,
+            "keys": [{ "frame": 0.0 }]
+        }))
+        .is_err());
+        assert!(call(&mut core, &tools, "graph_paste_keys", json!({
+            "figure": 0, "target": "root_x", "at_frame": -1.0,
+            "keys": [{ "frame": 0.0, "value": 1.0 }]
+        }))
+        .is_err());
+    }
+
+    #[test]
     fn bad_arguments_error_instead_of_panicking() {
         let tools = tools();
         let mut core = EditorCore::new();
@@ -3530,6 +3994,17 @@ mod tests {
             ("audio_delete_clip", json!({ "index": 0 })), // no clips yet
             ("audio_move_clip", json!({ "start_frame": 1 })), // no clips yet
             ("delete_stroke", json!({ "index": 0 })), // no strokes yet
+            ("set_project_easing", json!({})), // easing required
+            ("set_project_easing", json!({ "easing": "bouncy" })),
+            ("set_node_cap", json!({ "figure": 0, "node": 0 })), // cap required
+            ("set_node_cap", json!({ "figure": 0, "node": 0, "cap": "flat" })),
+            ("set_node_cap", json!({ "figure": 0, "node": 99, "cap": "round" })),
+            ("set_node_color2", json!({ "figure": 0, "node": 99, "color2": 1 })),
+            ("set_node_opacity", json!({ "figure": 0, "node": 0 })), // opacity required
+            ("set_node_opacity", json!({ "figure": 0, "node": 0, "opacity": -0.5 })),
+            ("graph_copy_keys", json!({ "figure": 0, "target": "root_x" })), // no channel yet
+            ("graph_paste_keys", json!({ "figure": 0, "target": "root_x", "keys": [], "at_frame": 0.0 })),
+            ("graph_paste_keys", json!({ "figure": 0, "target": "root_x", "at_frame": 0.0 })), // keys required
         ];
         for (name, args) in cases {
             let r = call(&mut core, &tools, name, args.clone());

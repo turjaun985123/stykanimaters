@@ -55,10 +55,37 @@
 //! (`clear_frame_drawings`, editor.rs:2391) remains as
 //! the bulk removal above the list.
 //!
+//! ## Bulk ops (Phase F, section 26)
+//!
+//! A row at the panel top acts on **every** stroke in
+//! `Project.strokes`, across all frames — deliberately a
+//! wider scope than the frame-filtered list below it,
+//! because the frame-scoped removal already exists (the
+//! Clear button above). **Recolour all** rewrites every
+//! stroke's base `color` to the bulk target colour
+//! ([`bulk_target_color`]: the selected node's colour,
+//! falling back to the selected figure's — the stage's
+//! own node-over-figure resolution); a stroke's `fill`
+//! and spray mark keep their own values. **Delete all**
+//! empties `Project.strokes`.
+//!
+//! Undo composition: there is no bulk op in the core,
+//! and `delete_stroke_at` snapshots **per call**, so
+//! looping it would flood the undo stack with one step
+//! per stroke. Both bulk ops here therefore compose the
+//! core's public parts exactly as `delete_stroke_at`
+//! itself is built: one `EditorCore::snapshot()`
+//! (editor.rs:202 — public, serialises the whole
+//! project, strokes included) followed by direct
+//! `project.strokes` writes — one press, one undo step.
+//! An empty stroke list takes no snapshot at all: the
+//! press only reports that there are no strokes.
+//!
 //! No new `State` fields: everything reads `s.core` (active
 //! brush, `brush_index`, `project.strokes`, `current`) and
 //! writes go through the `brush_index` field write, the
-//! frame-clear op or `delete_stroke_at`.
+//! frame-clear op, `delete_stroke_at` or the bulk
+//! composition above.
 
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El};
@@ -411,6 +438,77 @@ pub fn delete_stroke(core: &mut EditorCore, project_index: usize) {
     core.delete_stroke_at(project_index);
 }
 
+/// The bulk Recolour's target colour: the selected
+/// node's own colour when a node is selected and
+/// carries one, else the selected figure's colour —
+/// the same node-over-figure resolution the stage
+/// draws with (`stage_view`'s node-colour closure
+/// reads `node.color` over the figure's base colour).
+pub fn bulk_target_color(core: &EditorCore) -> u32 {
+    let fig = &core.project.figures[core.selected_figure];
+    match core.selected_node {
+        Some(ni) => fig
+            .def
+            .nodes
+            .get(ni)
+            .and_then(|node| node.color)
+            .unwrap_or(fig.color),
+        None => fig.color,
+    }
+}
+
+/// Bulk Recolour press: rewrite every stroke's base
+/// `color` (all frames — see the module docs for the
+/// scope choice) to [`bulk_target_color`]. Exactly one
+/// snapshot, taken only when there is something to
+/// recolour; on an empty stroke list the press only
+/// reports that there are no strokes. Returns the
+/// number of strokes recoloured.
+pub fn recolor_all_strokes(core: &mut EditorCore) -> usize {
+    let n = core.project.strokes.len();
+    if n == 0 {
+        core.status = "No strokes to recolour.".into();
+        return 0;
+    }
+    let color = bulk_target_color(core);
+    // One undo step for the whole press: `snapshot()`
+    // is the same public call `delete_stroke_at`
+    // makes per stroke; composing it once here and
+    // writing the field directly is what keeps the
+    // bulk op to a single step.
+    core.snapshot();
+    for stroke in &mut core.project.strokes {
+        stroke.color = color;
+    }
+    core.status = format!(
+        "Recoloured {n} stroke{}.",
+        if n == 1 { "" } else { "s" }
+    );
+    n
+}
+
+/// Bulk Delete press: remove every stroke in
+/// `Project.strokes` (all frames). Same one-snapshot
+/// composition as [`recolor_all_strokes`]; looping
+/// `delete_stroke_at` instead would cost one undo
+/// step per stroke. On an empty stroke list the
+/// press only reports that there are no strokes.
+/// Returns the number of strokes removed.
+pub fn delete_all_strokes(core: &mut EditorCore) -> usize {
+    let n = core.project.strokes.len();
+    if n == 0 {
+        core.status = "No strokes to delete.".into();
+        return 0;
+    }
+    core.snapshot();
+    core.project.strokes.clear();
+    core.status = format!(
+        "Deleted {n} stroke{}.",
+        if n == 1 { "" } else { "s" }
+    );
+    n
+}
+
 /// One parameter row: label, current value, and the −/+
 /// stepper pair stepping that parameter through the preset
 /// library ([`step_param`]).
@@ -449,6 +547,30 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let brush = core.active_brush();
     let mut panel = col().key("stroke-inspector").w_full().gap(8.0);
+
+    // Bulk stroke ops, at the panel top per the brief:
+    // both act on every stroke in the project (all
+    // frames) as a single undo step — see the module
+    // docs. Always rendered: on an empty stroke list a
+    // press reports "no strokes" and changes nothing.
+    panel = panel.child(
+        row()
+            .key("stroke-bulk-row")
+            .gap(8.0)
+            .center_y()
+            .child(
+                text("All strokes")
+                    .font(type_::LABEL)
+                    .color(t.text)
+                    .grow(1.0),
+            )
+            .child(btn("stroke-recolor-all", "Recolour all", false, t, |s| {
+                recolor_all_strokes(&mut s.core);
+            }))
+            .child(btn("stroke-delete-all", "Delete all", false, t, |s| {
+                delete_all_strokes(&mut s.core);
+            })),
+    );
 
     panel = panel.child(
         text(format!("Brush · {}", brush.name))
@@ -832,5 +954,103 @@ mod tests {
             vec![1, 2]
         );
         assert_eq!(rows[1].summary, "5 pts · w 4");
+    }
+
+    fn colored_stroke(frame: usize, color: u32) -> Stroke {
+        let mut s = plain_stroke(frame, 2);
+        s.color = color;
+        s
+    }
+
+    #[test]
+    fn bulk_target_color_prefers_node_colour_then_figure() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        core.project.figures[fi].color = 0x00_00FF;
+        // No node selected: the figure's colour.
+        core.selected_node = None;
+        assert_eq!(bulk_target_color(&core), 0x00_00FF);
+        // Node selected but carrying no colour of its
+        // own: still the figure's colour.
+        core.selected_node = Some(0);
+        core.project.figures[fi].def.nodes[0].color = None;
+        assert_eq!(bulk_target_color(&core), 0x00_00FF);
+        // Node selected with its own colour: the node's.
+        core.project.figures[fi].def.nodes[0].color = Some(0x12_3456);
+        assert_eq!(bulk_target_color(&core), 0x12_3456);
+    }
+
+    #[test]
+    fn recolor_all_strokes_recolors_all_frames_as_one_undo_step() {
+        let mut core = EditorCore::new();
+        core.project
+            .strokes
+            .push(colored_stroke(0, 0xAA_0000));
+        core.project
+            .strokes
+            .push(colored_stroke(1, 0x00_BB00));
+        core.project
+            .strokes
+            .push(colored_stroke(0, 0x00_00CC));
+        let fi = core.selected_figure;
+        core.project.figures[fi].color = 0x77_7777;
+        core.selected_node = None;
+        let depth = core.undo_depth();
+        assert_eq!(recolor_all_strokes(&mut core), 3);
+        assert!(
+            core.project.strokes.iter().all(|s| s.color == 0x77_7777),
+            "every stroke, on every frame, takes the target colour"
+        );
+        assert_eq!(core.status, "Recoloured 3 strokes.");
+        // One press = one undo step, and that one undo
+        // restores every original colour.
+        assert_eq!(core.undo_depth(), depth + 1);
+        core.undo();
+        let colours: Vec<u32> =
+            core.project.strokes.iter().map(|s| s.color).collect();
+        assert_eq!(colours, vec![0xAA_0000, 0x00_BB00, 0x00_00CC]);
+    }
+
+    #[test]
+    fn delete_all_strokes_empties_all_frames_as_one_undo_step() {
+        let mut core = EditorCore::new();
+        for frame in [0, 1, 0] {
+            core.project.strokes.push(plain_stroke(frame, 2));
+        }
+        let depth = core.undo_depth();
+        assert_eq!(delete_all_strokes(&mut core), 3);
+        assert!(core.project.strokes.is_empty());
+        assert_eq!(core.status, "Deleted 3 strokes.");
+        assert_eq!(core.undo_depth(), depth + 1);
+        core.undo();
+        let frames: Vec<usize> =
+            core.project.strokes.iter().map(|s| s.frame).collect();
+        assert_eq!(frames, vec![0, 1, 0], "one undo restores all frames' strokes");
+    }
+
+    #[test]
+    fn bulk_ops_report_singular_counts() {
+        let mut core = EditorCore::new();
+        core.project.strokes.push(plain_stroke(0, 2));
+        assert_eq!(recolor_all_strokes(&mut core), 1);
+        assert_eq!(core.status, "Recoloured 1 stroke.");
+        assert_eq!(delete_all_strokes(&mut core), 1);
+        assert_eq!(core.status, "Deleted 1 stroke.");
+    }
+
+    #[test]
+    fn bulk_ops_on_an_empty_list_take_no_snapshot() {
+        let mut core = EditorCore::new();
+        core.project.strokes.clear();
+        let depth = core.undo_depth();
+        assert_eq!(recolor_all_strokes(&mut core), 0);
+        assert_eq!(core.status, "No strokes to recolour.");
+        assert_eq!(delete_all_strokes(&mut core), 0);
+        assert_eq!(core.status, "No strokes to delete.");
+        assert_eq!(
+            core.undo_depth(),
+            depth,
+            "an empty press must not add an undo step"
+        );
     }
 }

@@ -150,6 +150,18 @@ impl EditorCore {
                 entries
                     .filter_map(|e| e.ok().map(|e| e.path()))
                     .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+                    // The shell keeps its own files in this
+                    // directory (layout prefs, recovery snapshot,
+                    // recents); they are not openable projects
+                    // and must never surface in the selector —
+                    // the stray ".layout" row (Phase F fix).
+                    .filter(|p| {
+                        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        !name.starts_with('.')
+                            && name != crate::shell::LAYOUT_FILE
+                            && name != crate::shell::RECOVERY_FILE
+                            && name != crate::shell::RECENTS_FILE
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -1622,9 +1634,18 @@ impl EditorCore {
         for frame in &mut self.project.frames {
             frame.poses.remove(fi);
         }
-        self.project
-            .particles
-            .retain(|e| e.figure.map(|f| f != fi).unwrap_or(true));
+        // Every figure-indexed reference follows the removal
+        // (Phase F figure_ops census: particles, FX clips,
+        // graph channels, camera follow) — refs to the removed
+        // figure drop, refs above it shift down.
+        crate::figure_ops::remap_figures_after_remove(&mut self.project, fi);
+        if self.solo == Some(fi) {
+            self.solo = None;
+        } else if let Some(s) = self.solo {
+            if s > fi {
+                self.solo = Some(s - 1);
+            }
+        }
         self.selected_figure = fi.min(self.project.figures.len() - 1);
         self.selected_node = None;
         self.status = "Figure deleted.".into();

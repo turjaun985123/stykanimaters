@@ -93,6 +93,52 @@
 //! renderers' own precedence (spray first:
 //! `src/export.rs:407`, `src/svg.rs:61`).
 //!
+//! ## Selection highlight (Phase F, section 2)
+//!
+//! [`highlight_geometry`] produces the glow/outline version
+//! of ONE authored stroke, for the integrator to draw when
+//! the stroke-inspector row for that stroke is selected.
+//! The contract:
+//!
+//! * **Indexing is project-wide**: `project_index` is the
+//!   index into `core.project.strokes` — the same indexing
+//!   `EditorCore::delete_stroke_at` (`src/editor.rs:2462`)
+//!   and the stroke inspector's rows use. An out-of-range
+//!   index yields an empty vec, never a panic.
+//! * **Frame rule matches the base layer**: a stroke whose
+//!   `frame` is not the authored frame ([`authored_frame`])
+//!   yields an empty vec — a highlight is only ever produced
+//!   for a stroke the stage is actually drawing, so the
+//!   integrator can draw the result unconditionally.
+//! * **Same decomposition as [`stroke_geometry`]**, same
+//!   spray → filled → plain precedence, with each prim
+//!   expanded: a plain stroke becomes one [`StrokePrim::
+//!   Polyline`] through the *same points* at a grown width
+//!   (a translucent underlay — see the colour note below);
+//!   a spray stroke becomes one [`StrokePrim::Dots`] per
+//!   dot with the *same centres and alphas* as the base
+//!   layer and a grown radius; a filled stroke (≥ 3 points)
+//!   becomes one [`StrokePrim::Polyline`] tracing the
+//!   polygon's outline **expanded outward from its
+//!   centroid**, closed (first point repeated at the end
+//!   unless the stored points already close the loop).
+//!   A filled stroke under 3 points falls through to the
+//!   plain rule, and a sub-2-point plain stroke yields an
+//!   empty vec — exactly the base layer's fallbacks, so the
+//!   highlight never invents a shape the stage doesn't draw.
+//! * **Colours are the stroke's own** (line colour, fill
+//!   colour), carried for type consistency with the base
+//!   prims. The highlight pass is the integrator's accent
+//!   pass: it is expected to recolour every prim to the
+//!   accent colour and apply translucency at conversion
+//!   time (`StrokePrim::Polyline` has no alpha field; for
+//!   `Dots`, multiply the carried `opacity` by the accent
+//!   alpha). This module stays colour-policy-free.
+//! * **Draw order (integrator)**: draw the highlight prims
+//!   in the stroke layer's slot, *before* the base stroke
+//!   prims, so the glow sits under the stroke it marks and
+//!   the stroke itself stays crisp on top.
+//!
 //! ## Draw order (integrator)
 //!
 //! The GPUI canvas painted this layer **under the figures**
@@ -205,6 +251,111 @@ pub fn stroke_geometry(core: &EditorCore) -> Vec<StrokePrim> {
         }
     }
     out
+}
+
+/// Width growth for a plain stroke's highlight underlay:
+/// `width * HIGHLIGHT_WIDTH_SCALE + HIGHLIGHT_WIDTH_PAD`
+/// (stage units). The pad keeps even a hairline stroke's
+/// highlight visible; the scale keeps a fat stroke's
+/// highlight proportional.
+const HIGHLIGHT_WIDTH_SCALE: f32 = 1.5;
+const HIGHLIGHT_WIDTH_PAD: f32 = 3.0;
+/// Radius growth for a spray dot's highlight:
+/// `radius * HIGHLIGHT_DOT_SCALE + HIGHLIGHT_DOT_PAD`
+/// (stage units), same reasoning as the width growth.
+const HIGHLIGHT_DOT_SCALE: f32 = 1.8;
+const HIGHLIGHT_DOT_PAD: f32 = 1.5;
+/// How far (stage units) a filled stroke's highlight
+/// outline sits outside the polygon, measured along the
+/// ray from the polygon's centroid through each vertex.
+const HIGHLIGHT_EXPAND: f32 = 3.0;
+/// Extra width (stage units) on the filled outline
+/// polyline over the stroke's own `width`.
+const HIGHLIGHT_OUTLINE_PAD: f32 = 2.0;
+
+/// The polygon through `pts` pushed outward by `expand`
+/// stage units along each vertex's ray from the centroid,
+/// closed: the first point is appended at the end unless
+/// the stored points already close the loop. A vertex
+/// sitting on the centroid (degenerate) stays put — it has
+/// no outward direction.
+fn expanded_outline(pts: &[[f32; 2]], expand: f32) -> Vec<[f32; 2]> {
+    let n = pts.len() as f32;
+    let centroid = [
+        pts.iter().map(|p| p[0]).sum::<f32>() / n,
+        pts.iter().map(|p| p[1]).sum::<f32>() / n,
+    ];
+    let mut out: Vec<[f32; 2]> = pts
+        .iter()
+        .map(|&p| {
+            let d = [p[0] - centroid[0], p[1] - centroid[1]];
+            let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+            if len > 1e-6 {
+                [p[0] + d[0] / len * expand, p[1] + d[1] / len * expand]
+            } else {
+                p
+            }
+        })
+        .collect();
+    if let (Some(&first), Some(&last)) = (out.first(), out.last()) {
+        if first != last {
+            out.push(first);
+        }
+    }
+    out
+}
+
+/// Selection-highlight geometry for one authored stroke,
+/// in stage coordinates. See the module docs ("Selection
+/// highlight") for the full contract: project-wide indexing
+/// (the `delete_stroke_at` indexing), the authored-frame
+/// rule, the per-kind expansion, and the colour policy
+/// (prims carry the stroke's own colours; the integrator's
+/// accent pass recolours and fades them). Pure, like
+/// [`stroke_geometry`]: same project state, same result.
+pub fn highlight_geometry(core: &EditorCore, project_index: usize) -> Vec<StrokePrim> {
+    let project = &core.project;
+    let Some(stroke) = project.strokes.get(project_index) else {
+        return Vec::new();
+    };
+    // Only a stroke the stage draws now can be highlighted.
+    if stroke.frame != authored_frame(core) {
+        return Vec::new();
+    }
+    // Spray first (the base layer's precedence): one prim
+    // per dot, same centres and alphas, grown radius.
+    if let Some(mark) = &stroke.spray {
+        let radius = (stroke.width * 0.5).max(1.0) * HIGHLIGHT_DOT_SCALE + HIGHLIGHT_DOT_PAD;
+        return paint::spray_dots(&stroke.points, mark)
+            .into_iter()
+            .map(|(centre, alpha)| StrokePrim::Dots {
+                pts: vec![centre],
+                radius,
+                color: stroke.color,
+                opacity: alpha,
+            })
+            .collect();
+    }
+    // Filled: the expanded outline of the polygon.
+    if let Some(fill) = stroke.fill {
+        if stroke.points.len() >= 3 {
+            return vec![StrokePrim::Polyline {
+                pts: expanded_outline(&stroke.points, HIGHLIGHT_EXPAND),
+                width: stroke.width + HIGHLIGHT_OUTLINE_PAD,
+                color: fill,
+            }];
+        }
+    }
+    // Plain: the same polyline, wider — an underlay the
+    // integrator draws translucent in the accent colour.
+    if stroke.points.len() >= 2 {
+        return vec![StrokePrim::Polyline {
+            pts: stroke.points.clone(),
+            width: stroke.width * HIGHLIGHT_WIDTH_SCALE + HIGHLIGHT_WIDTH_PAD,
+            color: stroke.color,
+        }];
+    }
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -430,5 +581,138 @@ mod tests {
     fn no_strokes_no_geometry() {
         let core = core_with(Vec::new());
         assert!(stroke_geometry(&core).is_empty());
+    }
+
+    #[test]
+    fn highlight_polyline_is_wider_with_the_same_points() {
+        let pts = [[10.0, 20.0], [30.0, 40.0], [50.0, 20.0]];
+        let core = core_with(vec![plain(0, &pts, 0x2686E8, 6.0)]);
+        let geo = highlight_geometry(&core, 0);
+        assert_eq!(
+            geo,
+            vec![StrokePrim::Polyline {
+                pts: pts.to_vec(),
+                // 6.0 * 1.5 + 3.0 — grown, per the contract.
+                width: 12.0,
+                color: 0x2686E8,
+            }]
+        );
+        // And strictly wider than the base layer's prim.
+        match &stroke_geometry(&core)[0] {
+            StrokePrim::Polyline { width, .. } => assert!(*width < 12.0),
+            other => panic!("expected base polyline, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn highlight_uses_the_project_wide_index() {
+        // The delete_stroke_at indexing: index 1 is the
+        // second stroke in project order, whatever its kind.
+        let core = core_with(vec![
+            plain(0, &[[0.0, 0.0], [10.0, 0.0]], 0x111111, 4.0),
+            plain(0, &[[0.0, 5.0], [10.0, 5.0]], 0x222222, 4.0),
+        ]);
+        match &highlight_geometry(&core, 1)[..] {
+            [StrokePrim::Polyline { color, .. }] => assert_eq!(*color, 0x222222),
+            other => panic!("expected the second stroke's highlight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn highlight_missing_index_is_empty() {
+        let core = core_with(vec![plain(0, &[[0.0, 0.0], [10.0, 0.0]], 0x111111, 4.0)]);
+        assert!(highlight_geometry(&core, 1).is_empty());
+        assert!(highlight_geometry(&core, usize::MAX).is_empty());
+        let empty = core_with(Vec::new());
+        assert!(highlight_geometry(&empty, 0).is_empty());
+    }
+
+    #[test]
+    fn highlight_spray_expands_the_dot_radius_only() {
+        let mut s = plain(0, &[[100.0, 100.0], [160.0, 100.0]], 0xE8862E, 6.0);
+        s.spray = Some(SprayMark {
+            seed: 7,
+            radius: 10.0,
+            opacity: 0.8,
+        });
+        let core = core_with(vec![s]);
+        let base = stroke_geometry(&core);
+        let geo = highlight_geometry(&core, 0);
+        // Same decomposition: one Dots prim per dot, same
+        // centres and alphas as the base layer.
+        assert_eq!(geo.len(), base.len());
+        for (hl, bs) in geo.iter().zip(base.iter()) {
+            let (
+                StrokePrim::Dots {
+                    pts: hp,
+                    radius: hr,
+                    color: hc,
+                    opacity: ho,
+                },
+                StrokePrim::Dots {
+                    pts: bp,
+                    radius: br,
+                    color: bc,
+                    opacity: bo,
+                },
+            ) = (hl, bs)
+            else {
+                panic!("spray highlight must be Dots, got {hl:?}");
+            };
+            assert_eq!(hp, bp, "highlight keeps the dot centre");
+            assert_eq!(ho, bo, "highlight keeps the dot alpha");
+            assert_eq!(hc, bc);
+            // Base radius 3.0 -> 3.0 * 1.8 + 1.5 = 6.9.
+            assert!((*hr - 6.9).abs() < 1e-6, "grown radius, got {hr}");
+            assert!(hr > br);
+        }
+    }
+
+    #[test]
+    fn highlight_filled_is_an_expanded_closed_outline() {
+        // An unclosed triangle: the outline must close it.
+        let pts = [[0.0, 0.0], [40.0, 0.0], [20.0, 30.0]];
+        let mut s = plain(0, &pts, 0x445566, 3.0);
+        s.fill = Some(0x112233);
+        let core = core_with(vec![s]);
+        match &highlight_geometry(&core, 0)[..] {
+            [StrokePrim::Polyline {
+                pts: outline,
+                width,
+                color,
+            }] => {
+                assert_eq!(*color, 0x112233, "outline carries the fill colour");
+                assert_eq!(*width, 5.0, "width is stroke width + 2.0 pad");
+                assert_eq!(outline.len(), 4, "3 vertices + closing repeat");
+                assert_eq!(outline[0], outline[3], "outline is closed");
+                // Every vertex sits ~HIGHLIGHT_EXPAND (3.0)
+                // farther from the centroid than its source.
+                let c = [20.0, 10.0];
+                for (o, p) in outline[..3].iter().zip(pts.iter()) {
+                    let d_out = ((o[0] - c[0]).powi(2) + (o[1] - c[1]).powi(2)).sqrt();
+                    let d_in = ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2)).sqrt();
+                    assert!(
+                        (d_out - d_in - 3.0).abs() < 1e-4,
+                        "vertex {p:?} expanded by {}, expected 3.0",
+                        d_out - d_in
+                    );
+                }
+            }
+            other => panic!("expected one outline polyline, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn highlight_other_frame_stroke_is_empty() {
+        let core = core_with(vec![plain(1, &[[0.0, 0.0], [10.0, 0.0]], 0x111111, 4.0)]);
+        // The stroke exists (index 0) but is not on the
+        // authored frame the stage is showing.
+        assert!(highlight_geometry(&core, 0).is_empty());
+    }
+
+    #[test]
+    fn highlight_sub_two_point_plain_stroke_is_empty() {
+        let core = core_with(vec![plain(0, &[[5.0, 5.0]], 0x111111, 4.0)]);
+        assert!(highlight_geometry(&core, 0).is_empty());
     }
 }

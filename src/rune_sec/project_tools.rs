@@ -448,6 +448,11 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            was_playing: false,
         }
     }
 

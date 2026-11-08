@@ -4,18 +4,20 @@
 //! the engine library.
 //!
 //! Every control here calls exactly one real `EditorCore` op
-//! (or, for Play/Pause and Onion, flips the same public core
-//! field the GPUI app's buttons flipped — there is no op for
-//! those two; see `editor.rs` field docs). Element keys carry
-//! the old GPUI control ids where one existed, so headless
-//! `--tree` checks can find them.
+//! (or, for Play/Pause, flips the same public core field the
+//! GPUI app's button flipped — there is no op for it; see
+//! `editor.rs` field docs). Element keys carry the old GPUI
+//! control ids where one existed, so headless `--tree` checks
+//! can find them. Phase F removed the app bar's + Figure and
+//! Onion buttons: they duplicated the figures panel's own
+//! add-figure button and the onion controls panel's
+//! onion-toggle, so those panels are the single homes now.
 //!
 //! Labels: since Phase E the app-bar and transport labels
 //! resolve through `rune_sec::i18n_wire::tr` against the
 //! engine's current language (`core.lang`), so they follow the
-//! language picker. Two labels take the table's canonical text
-//! rather than Phase C's shorter literals: the onion toggle
-//! shows `onion_skin` ("Onion skin") and the delete-frame
+//! language picker. One label takes the table's canonical text
+//! rather than Phase C's shorter literal: the delete-frame
 //! button shows `delete_frame` ("Delete"). The timeline chips
 //! are bare frame numbers and stay untranslated. `status_text`
 //! deliberately keeps its literal English format — see its own
@@ -68,10 +70,13 @@ pub fn toggle_play(s: &mut State) {
     s.core.playing = !s.core.playing;
 }
 
-/// Top bar: project name, then Save / Load / Undo / Redo /
-/// + Figure / Onion — each wired to its core op. Labels come
-/// from the i18n table (keys `save`, `load`, `undo`, `redo`,
-/// `add_figure`, `onion_skin`) in the core's current language.
+/// Top bar: project name, then Save / Load / Undo / Redo —
+/// each wired to its core op. Labels come from the i18n table
+/// (keys `save`, `load`, `undo`, `redo`) in the core's current
+/// language. (Phase F: the + Figure and Onion buttons that
+/// used to sit here were removed — they duplicated the
+/// figures panel's add-figure button and the onion panel's
+/// onion-toggle.)
 pub fn app_bar(s: &State, t: &Theme) -> El {
     let core = &s.core;
     row()
@@ -97,22 +102,6 @@ pub fn app_bar(s: &State, t: &Theme) -> El {
         .child(btn("redo", &i18n_wire::tr(core, "redo"), false, t, |s| {
             s.core.redo()
         }))
-        .child(btn(
-            "add-figure",
-            &i18n_wire::tr(core, "add_figure"),
-            false,
-            t,
-            |s| s.core.add_figure(),
-        ))
-        .child(btn(
-            "onion",
-            &i18n_wire::tr(core, "onion_skin"),
-            core.onion,
-            t,
-            |s| {
-                s.core.onion = !s.core.onion;
-            },
-        ))
 }
 
 /// Transport + frame ops row: Prev / Play-Pause / Next (frame
@@ -252,8 +241,6 @@ mod tests {
             "load",
             "undo",
             "redo",
-            "add_figure",
-            "onion_skin",
             "prev_frame",
             "play",
             "pause",
@@ -267,14 +254,12 @@ mod tests {
     }
 
     /// With the default language (English) the wired labels are
-    /// exactly the table's English text — the two documented
-    /// changes from the Phase C literals included.
+    /// exactly the table's English text — the documented
+    /// change from the Phase C literals included.
     #[test]
     fn english_labels_match_the_table() {
         let core = EditorCore::new();
         assert_eq!(i18n_wire::tr(&core, "save"), "Save");
-        assert_eq!(i18n_wire::tr(&core, "add_figure"), "+ Figure");
-        assert_eq!(i18n_wire::tr(&core, "onion_skin"), "Onion skin");
         assert_eq!(i18n_wire::tr(&core, "prev_frame"), "Previous frame");
         assert_eq!(i18n_wire::tr(&core, "next_frame"), "Next frame");
         assert_eq!(i18n_wire::tr(&core, "delete_frame"), "Delete");

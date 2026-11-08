@@ -8,10 +8,10 @@
 //! engine library.
 //!
 //! Shows the selected figure (`EditorCore::selected_figure`):
-//! its name as a heading, a 16-colour swatch grid, an opacity
-//! stepper, and the Flip / Duplicate / Delete actions. Every
-//! control dispatches to the engine exactly the way the
-//! engine's own surfaces do:
+//! its name as a heading, a rename field, a 16-colour swatch
+//! grid, an opacity stepper, and the Flip / Duplicate /
+//! Delete actions. Every control dispatches to the engine
+//! exactly the way the engine's own surfaces do:
 //!
 //! * Colour swatches → `EditorCore::set_figure_color(fi,
 //!   rgb)` (src/figure_ops.rs) — the Phase E engine op for
@@ -47,11 +47,25 @@
 //!   key `fig-del` (the GPUI sidebar's tuple-id root),
 //!   danger-styled; the op itself refuses to delete the
 //!   last figure with a status message.
+//! * Rename → the Name field + Rename button (Enter in the
+//!   field submits too): [`rename_selected_figure`] writes
+//!   `project.figures[fi].name` directly. There is no
+//!   rename op in the core, and figure names are plain
+//!   field writes everywhere (the project rename,
+//!   `project_tools::apply_project_name`, is the same
+//!   shape), so — like `set_figure_color` — it takes **no
+//!   undo snapshot**. Empty (all-whitespace) names are
+//!   refused with a status line. The field's buffer lives
+//!   in [`InspectorFigureEditState`] (shell `State` field
+//!   `inspector_figure`) and is kept seeded with the
+//!   selected figure's name by [`sync_figure_name_edit`],
+//!   the focus-guarded sync the integrator calls from
+//!   `poll()` — `project_tools::sync_name_edit`'s pattern,
+//!   plus a selection-change trigger. Keys `fig-name` /
+//!   `fig-rename`.
 //!
 //! When the project has no figures — or the selection is
-//! stale — the panel is one muted line. This section needs
-//! **no new `State` fields**: it reads only `State.core`,
-//! like the segment inspector.
+//! stale — the panel is one muted line.
 //!
 //! ## Integrator wiring (main.rs)
 //!
@@ -59,12 +73,22 @@
 //! mod rune_sec {
 //!     pub mod inspector_figure;
 //! }
+//! // State field + init literal:
+//! pub inspector_figure: rune_sec::inspector_figure::InspectorFigureEditState,
+//! //     inspector_figure:
+//! //         rune_sec::inspector_figure::InspectorFigureEditState::new(),
 //! // in `view()`, with the other inspector sections:
 //! .child(rune_sec::inspector_figure::inspector_figure(s, &t))
+//! // in `poll()`, every tick (beside
+//! // project_tools::sync_name_edit):
+//! rune_sec::inspector_figure::sync_figure_name_edit(s);
+//! // in `text_focused()`, so global shortcuts do not fire
+//! // while the user types a name:
+//! //     || s.inspector_figure.name.focused
 //! ```
 
 use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, Color, El};
+use rune::{col, el, row, text, text_input, Color, El, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
@@ -136,6 +160,125 @@ pub fn figure_state(core: &EditorCore) -> Option<InspectorFigureState> {
         hidden: fig.hidden,
         locked: fig.locked,
     })
+}
+
+/// Persistent edit state for the rename field — the one
+/// piece of this panel that cannot be derived from the core
+/// each frame (a half-typed name must survive re-renders).
+/// Lives in the shell `State` as `State::inspector_figure`
+/// (integrator wiring in the module docs). Named
+/// `InspectorFigureEditState` because [`InspectorFigureState`]
+/// above is this panel's derived, per-frame view-state.
+#[derive(Debug, Default)]
+pub struct InspectorFigureEditState {
+    /// The rename field's text buffer.
+    pub name: TextEdit,
+    /// The figure index `name` was last synced from, so a
+    /// selection change re-syncs the field even when two
+    /// figures happen to share a name.
+    pub for_figure: Option<usize>,
+}
+
+impl InspectorFigureEditState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Trim a raw rename-field string into the name to store,
+/// or `None` when nothing but whitespace was entered —
+/// `project_tools::clean_project_name` for figures.
+pub fn clean_figure_name(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Rename the selected figure to `raw` (trimmed); returns
+/// true when the name was written. There is no rename op in
+/// the core: figure names are plain field writes everywhere
+/// (`project_tools::apply_project_name` is the same shape),
+/// so this writes `project.figures[fi].name` directly and —
+/// like `set_figure_color` — takes **no undo snapshot**.
+/// Bad input (empty name, stale selection) only sets the
+/// status line, mirroring the figure ops' refusal wording.
+pub fn rename_selected_figure(core: &mut EditorCore, raw: &str) -> bool {
+    let Some(name) = clean_figure_name(raw) else {
+        core.status = "Figure name cannot be empty.".into();
+        return false;
+    };
+    let fi = core.selected_figure;
+    let Some(fig) = core.project.figures.get_mut(fi) else {
+        core.status = "No such figure.".into();
+        return false;
+    };
+    fig.name = name.clone();
+    core.status = format!("Figure {} renamed to \"{name}\".", fi + 1);
+    true
+}
+
+/// Keep the rename field showing the selected figure's
+/// current name — `project_tools::sync_name_edit`'s
+/// focus-guarded pattern, plus a selection-change trigger:
+/// while the field is focused it is never touched (a sync
+/// mid-typing would eat keystrokes); otherwise the field is
+/// re-seeded whenever the selection moved or the figure's
+/// name changed elsewhere (a duplicate selects its copy, a
+/// load replaces the project). The cost, as with the
+/// project name: a selection change that lands while the
+/// user is typing in the field leaves it stale until they
+/// stop editing — deliberate.
+pub fn sync_name_field(core: &EditorCore, edit: &mut InspectorFigureEditState) {
+    if edit.name.focused {
+        return;
+    }
+    let Some(st) = figure_state(core) else {
+        edit.for_figure = None;
+        return;
+    };
+    if edit.for_figure != Some(st.figure) || edit.name.text != st.name {
+        edit.name.replace_text(st.name);
+        edit.for_figure = Some(st.figure);
+    }
+}
+
+/// `State`-level wrapper the integrator calls from `poll()`
+/// every tick (the same arrangement as
+/// `project_tools::sync_name_edit`).
+pub fn sync_figure_name_edit(s: &mut State) {
+    sync_name_field(&s.core, &mut s.inspector_figure);
+}
+
+/// "Rename" (and Enter in the field): apply the field's
+/// text to the selected figure.
+fn apply_figure_name(s: &mut State) {
+    let raw = s.inspector_figure.name.text.clone();
+    rename_selected_figure(&mut s.core, &raw);
+}
+
+/// The rename row: Name label, the field, and the Rename
+/// button. The field binds `State::inspector_figure`'s
+/// buffer; [`sync_figure_name_edit`] (from `poll`) keeps it
+/// seeded with the selected figure's name.
+fn name_field_row(s: &State, t: &Theme) -> El {
+    row()
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(text("Name").font(type_::LABEL).color(t.text_secondary))
+        .child(
+            text_input(&s.inspector_figure.name, type_::BODY)
+                .key("fig-name")
+                .single_line()
+                .grow(1.0)
+                .color(t.text)
+                .on_edit(|s: &mut State| &mut s.inspector_figure.name)
+                .on_submit(|s: &mut State, _tx: &mut Tx| apply_figure_name(s)),
+        )
+        .child(btn("fig-rename", "Rename", false, t, apply_figure_name))
 }
 
 /// One read-only label/value row.
@@ -223,7 +366,8 @@ fn swatch(rgb: u32, selected: bool) -> El {
 }
 
 /// The Figure inspector panel. Mount it wherever the shell
-/// shows selection details; it reads only `State.core`.
+/// shows selection details; it reads `State.core` plus the
+/// rename field's buffer in `State::inspector_figure`.
 pub fn inspector_figure(s: &State, t: &Theme) -> El {
     let panel = col()
         .key("inspector-figure")
@@ -245,6 +389,7 @@ pub fn inspector_figure(s: &State, t: &Theme) -> El {
                 .font(type_::LABEL)
                 .color(t.text),
         )
+        .child(name_field_row(s, t))
         .child(readout_row("Colour", format!("#{:06X}", st.color), t))
         .child(readout_row("Segments", format!("{}", st.segments), t));
     if st.hidden || st.locked {
@@ -357,6 +502,100 @@ mod tests {
     }
 
     #[test]
+    fn clean_figure_name_trims_and_rejects_empty() {
+        assert_eq!(clean_figure_name("  Hero  "), Some("Hero".to_string()));
+        assert_eq!(clean_figure_name("Hero"), Some("Hero".to_string()));
+        assert_eq!(clean_figure_name(""), None);
+        assert_eq!(clean_figure_name("   "), None);
+    }
+
+    #[test]
+    fn rename_writes_the_selected_figures_name() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        assert!(rename_selected_figure(&mut core, "  Captain  "));
+        assert_eq!(core.project.figures[fi].name, "Captain");
+        assert!(
+            core.status.contains("renamed"),
+            "status should report the rename: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn rename_rejects_empty_and_keeps_the_old_name() {
+        let mut core = EditorCore::new();
+        let fi = core.selected_figure;
+        let before = core.project.figures[fi].name.clone();
+        assert!(!rename_selected_figure(&mut core, "   "));
+        assert_eq!(core.project.figures[fi].name, before);
+        assert_eq!(core.status, "Figure name cannot be empty.");
+    }
+
+    #[test]
+    fn rename_guards_a_stale_selection() {
+        let mut core = EditorCore::new();
+        core.selected_figure = 999;
+        assert!(!rename_selected_figure(&mut core, "New"));
+        assert_eq!(core.status, "No such figure.");
+    }
+
+    #[test]
+    fn sync_seeds_the_field_and_follows_selection() {
+        let mut core = EditorCore::new();
+        let mut edit = InspectorFigureEditState::new();
+        sync_name_field(&core, &mut edit);
+        assert_eq!(
+            edit.name.text,
+            core.project.figures[core.selected_figure].name
+        );
+        assert_eq!(edit.for_figure, Some(core.selected_figure));
+        // A second figure with a distinct name: selecting it
+        // re-seeds the field.
+        core.add_figure();
+        let last = core.project.figures.len() - 1;
+        core.project.figures[last].name = "Second".into();
+        core.select_figure(last);
+        sync_name_field(&core, &mut edit);
+        assert_eq!(edit.name.text, "Second");
+        assert_eq!(edit.for_figure, Some(last));
+    }
+
+    #[test]
+    fn sync_picks_up_an_external_rename() {
+        let mut core = EditorCore::new();
+        let mut edit = InspectorFigureEditState::new();
+        sync_name_field(&core, &mut edit);
+        let fi = core.selected_figure;
+        core.project.figures[fi].name = "Renamed elsewhere".into();
+        sync_name_field(&core, &mut edit);
+        assert_eq!(edit.name.text, "Renamed elsewhere");
+    }
+
+    #[test]
+    fn sync_never_touches_a_focused_field() {
+        let mut core = EditorCore::new();
+        let mut edit = InspectorFigureEditState::new();
+        edit.name.replace_text("half-typed");
+        edit.name.focused = true;
+        sync_name_field(&core, &mut edit);
+        assert_eq!(edit.name.text, "half-typed", "sync must not eat keystrokes");
+        // Even a selection change leaves a focused field
+        // alone...
+        core.add_figure();
+        let last = core.project.figures.len() - 1;
+        core.select_figure(last);
+        sync_name_field(&core, &mut edit);
+        assert_eq!(edit.name.text, "half-typed");
+        // ...and the next unfocused sync catches up to the
+        // new selection.
+        edit.name.focused = false;
+        sync_name_field(&core, &mut edit);
+        assert_eq!(edit.name.text, core.project.figures[last].name);
+        assert_eq!(edit.for_figure, Some(last));
+    }
+
+    #[test]
     fn panel_builds_with_and_without_figures() {
         let t = rune::tok::theme(true);
         let with_figures = State {
@@ -379,6 +618,7 @@ mod tests {
             export_use_range: false,
             fx_selected: None,
             pose_clipboard: None,
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
             last_status: String::new(),
             toast_now: 0.0,
             last_dark: true,
@@ -388,6 +628,10 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            was_playing: false,
         };
         let _ = inspector_figure(&with_figures, &t);
         let mut bare_core = EditorCore::new();
@@ -412,6 +656,7 @@ mod tests {
             export_use_range: false,
             fx_selected: None,
             pose_clipboard: None,
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
             last_status: String::new(),
             toast_now: 0.0,
             last_dark: true,
@@ -421,6 +666,10 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            was_playing: false,
         };
         let _ = inspector_figure(&bare, &t);
     }

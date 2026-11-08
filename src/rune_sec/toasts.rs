@@ -5,9 +5,15 @@
 //! A toast is a one-line status echo (the text of
 //! `EditorCore::status` after an op) shown briefly in a
 //! floating stack at the window's bottom-right corner, then
-//! gone. This module owns the model ([`ToastsState`]) and a
-//! pure builder ([`toasts_view`]); it has no handlers and no
-//! engine knowledge.
+//! gone. This module owns the model ([`ToastsState`]) and
+//! the builder ([`toasts_view`]).
+//!
+//! Phase F gives the stack one action: when the core has an
+//! undo step available at render time, the *newest* live
+//! toast carries an Undo button (`toast-undo`) that runs
+//! `core.undo()` and dismisses that toast. That is why
+//! [`toasts_view`] takes the whole shell `State`, not just
+//! the toast model.
 //!
 //! Why hand-rolled instead of rune-kit's `Toast` /
 //! `ToastRegion` (read at `crates/rune-kit/src/toast.rs` in the
@@ -26,7 +32,8 @@
 //! - Kit `Toast` is a rich notification (title + description +
 //!   action buttons + a close button wired to app-state
 //!   handlers); these toasts are single-line status echoes
-//!   with no actions and no dismissal but time.
+//!   whose only action is the newest toast's Undo button and
+//!   whose only dismissal besides it is time.
 //! - What IS borrowed: `ToastRegion`'s proven placement —
 //!   pinned 32 pt from the right, 48 pt from the bottom, 12 pt
 //!   apart, 320 pt wide cards, 8 pt radius, 12 pt padding.
@@ -41,9 +48,20 @@
 //! the `AppSpec::poll` clock (`f64` there, cast to `f32`).
 //! Mount [`toasts_view`] as a direct child of the root element
 //! so the pin anchors to the window box.
+//!
+//! Cards are capped at 320 pt wide (the column carries the
+//! same `max_w`), and the status text wraps *anywhere*: a
+//! long export recap contains unbroken file paths whose
+//! min-content width would otherwise stretch the card past
+//! its fixed width.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, oklch, row, text, Color, El};
+use stykanimate_rs::editor::EditorCore;
+
+use crate::chrome_view::btn;
+use crate::rune_sec::i18n_wire;
+use crate::State;
 
 /// Most toasts on screen at once; a push past the cap drops
 /// the oldest toast.
@@ -179,6 +197,32 @@ impl ToastsState {
     pub fn clear(&mut self) {
         self.items.clear();
     }
+
+    /// Remove the toast at `index` in `items` (the items
+    /// index, not the live position — an expired toast that
+    /// `expire` has not yet collected still occupies its
+    /// slot). Out-of-range is a no-op. The newest toast's
+    /// Undo action dismisses exactly its own toast this way
+    /// after running the undo.
+    pub fn dismiss(&mut self, index: usize) {
+        if index < self.items.len() {
+            self.items.remove(index);
+        }
+    }
+
+    /// The items index of the newest toast alive at `now` —
+    /// the one that carries the Undo action — or `None` when
+    /// nothing is live.
+    pub fn newest_live_index(&self, now: f32) -> Option<usize> {
+        self.items.iter().rposition(|t| !t.expired(now))
+    }
+}
+
+/// True when the core has at least one undo step — the
+/// render-time condition for the newest toast's Undo
+/// action.
+pub fn undo_available(core: &EditorCore) -> bool {
+    core.undo_depth() > 0
 }
 
 /// The floating toast column: pinned to the bottom-right of
@@ -186,24 +230,57 @@ impl ToastsState {
 /// `ToastRegion` placement), newest toast nearest the
 /// corner. An empty stack builds an empty pinned column,
 /// which paints nothing.
-pub fn toasts_view(state: &ToastsState, now: f32) -> El {
+///
+/// When [`undo_available`] holds, the newest live toast
+/// carries the Undo action (see [`toast_row`]); the
+/// predicate is read at render time, so the button appears
+/// and disappears with the core's undo stack.
+pub fn toasts_view(s: &State, now: f32) -> El {
     let t = tok::theme(true);
     let mut column = col()
         .key("toasts")
         .pin(None, None, Some(32.0), Some(48.0))
+        .max_w(320.0)
         .gap(12.0);
-    for (i, toast) in state.live(now).enumerate() {
-        column = column.child(toast_row(toast, i, &t, now));
+    let action_index = if undo_available(&s.core) {
+        s.toasts.newest_live_index(now)
+    } else {
+        None
+    };
+    let undo_label = i18n_wire::tr(&s.core, "undo");
+    for (index, toast) in s
+        .toasts
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, toast)| !toast.expired(now))
+    {
+        column = column.child(toast_row(
+            toast,
+            index,
+            &t,
+            now,
+            action_index == Some(index),
+            &undo_label,
+        ));
     }
     column
 }
 
 /// One toast card: a severity dot and the status text on the
-/// theme card surface, fading over its last second.
-fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32) -> El {
-    row()
+/// theme card surface, fading over its last second. `index`
+/// is the toast's items index — it keys the card (stable for
+/// the toast's whole life, unlike a live position) and the
+/// Undo action dismisses by it. When `action` holds — this
+/// is the newest live toast and the core can undo — the card
+/// also carries the Undo button: pressing it undoes once and
+/// dismisses this toast (the undo's own status change feeds
+/// a fresh toast through the poll hook, as for any op).
+fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32, action: bool, undo_label: &str) -> El {
+    let mut card = row()
         .key(format!("toast-{index}"))
         .w(320.0)
+        .max_w(320.0)
         .padding(12.0)
         .gap(10.0)
         .items_center()
@@ -221,9 +298,16 @@ fn toast_row(toast: &Toast, index: usize, t: &Theme, now: f32) -> El {
             text(toast.text.clone())
                 .font(type_::LABEL)
                 .color(t.text)
-                .wrap()
+                .wrap_anywhere()
                 .grow(1.0),
-        )
+        );
+    if action {
+        card = card.child(btn("toast-undo", undo_label, false, t, move |s: &mut State| {
+            s.core.undo();
+            s.toasts.dismiss(index);
+        }));
+    }
+    card
 }
 
 #[cfg(test)]
@@ -384,14 +468,73 @@ mod tests {
 
     #[test]
     fn view_builds_for_empty_live_and_all_expired_states() {
-        let empty = ToastsState::new();
-        let _ = toasts_view(&empty, 0.0);
-        let mut s = state_with(&["one", "two"], 0.0);
+        let mut s = crate::init();
+        let _ = toasts_view(&s, 0.0);
+        s.toasts.push("one", Severity::Info, 0.0);
+        s.toasts.push("two", Severity::Info, 0.0);
         let _ = toasts_view(&s, 1.0);
         // Nothing alive at t=100: the builder must still
         // produce the (empty) pinned column, not panic.
         let _ = toasts_view(&s, 100.0);
-        s.clear();
-        assert!(s.is_empty());
+        s.toasts.clear();
+        assert!(s.toasts.is_empty());
+    }
+
+    #[test]
+    fn view_builds_with_the_undo_action_available() {
+        // A live toast plus an undoable core exercises the
+        // action branch (the button attaches to the newest
+        // live row; presence in the tree is the Runtime
+        // tests' job, not this smoke build's).
+        let mut s = crate::init();
+        s.core.add_frame();
+        s.toasts.push("Frame added.", Severity::Info, 0.0);
+        let _ = toasts_view(&s, 0.5);
+    }
+
+    #[test]
+    fn dismiss_removes_only_the_addressed_toast() {
+        let mut s = state_with(&["one", "two", "three"], 0.0);
+        s.dismiss(1);
+        let texts: Vec<&str> = s.items.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["one", "three"]);
+        s.dismiss(0);
+        assert_eq!(s.items.len(), 1);
+        assert_eq!(s.items[0].text, "three");
+    }
+
+    #[test]
+    fn dismiss_out_of_range_is_a_noop() {
+        let mut s = state_with(&["one"], 0.0);
+        s.dismiss(1);
+        s.dismiss(usize::MAX);
+        assert_eq!(s.items.len(), 1);
+        let mut empty = ToastsState::new();
+        empty.dismiss(0);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn newest_live_index_skips_an_expired_tail() {
+        let mut s = ToastsState::new();
+        s.items.push(Toast::new("old", Severity::Info, 0.0));
+        s.items.push(Toast::new("newer", Severity::Info, 4.0));
+        s.items.push(Toast::new("stale", Severity::Info, 0.0));
+        // At t=6 the first and third are expired (age 6 >
+        // TTL); only "newer" (age 2) is live, at items
+        // index 1 — not the last slot.
+        assert_eq!(s.newest_live_index(6.0), Some(1));
+        assert_eq!(s.newest_live_index(100.0), None);
+        assert_eq!(ToastsState::new().newest_live_index(0.0), None);
+    }
+
+    #[test]
+    fn undo_available_tracks_the_core_undo_depth() {
+        let mut core = EditorCore::new();
+        assert!(!undo_available(&core), "a fresh core has nothing to undo");
+        core.add_frame();
+        assert!(undo_available(&core), "add_frame snapshots first, so undo is available");
+        core.undo();
+        assert!(!undo_available(&core), "the only step is spent");
     }
 }

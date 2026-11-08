@@ -29,6 +29,25 @@
 //!   which reaches the target mode through the one loop op
 //!   the core exposes, `EditorCore::cycle_clip_loop`
 //!   (editor.rs:3473).
+//! * Per-row "Dup" -> `duplicate_clip` in this module
+//!   (Phase F). The core has NO duplicate/rename movieclip
+//!   op (its clip ops are make/insert/enter/exit/frame-edit/
+//!   cycle only), so these two are field writes mirroring
+//!   the snapshot discipline of `cycle_clip_loop` exactly:
+//!   an out-of-range index only sets the status line ("No
+//!   such clip.", no snapshot); otherwise exactly one
+//!   `core.snapshot()`, the write, and a status line.
+//!   Duplicate APPENDS the clone (named `"<name> copy"`,
+//!   like `duplicate_figure`), so no stored clip index
+//!   shifts — figures keep playing the original and the
+//!   copy starts unused.
+//! * Per-row "Rename" -> `begin_rename` loads the clip's
+//!   name into the rename field; "Apply" (or Enter in the
+//!   field) writes it back through `rename_clip`, which
+//!   resolves the typed text via `resolved_clip_name`
+//!   (trimmed; blank falls back to the current name) and
+//!   treats a rename to the same name as a no-op with no
+//!   snapshot.
 //! * The clip-edit session section (Phase E) -> the core's
 //!   Wave-7 session ops: "Edit clip" enters the session for
 //!   the panel-selected clip via `EditorCore::enter_clip`
@@ -45,11 +64,24 @@
 //! `State` has no clips field yet, so the panel keeps its
 //! selection in a thread-local cell — the Rune shell's view
 //! and handlers all run on the one UI thread.
+//!
+//! The rename field is the one piece of panel state that
+//! cannot live in that cell: a `rune::TextEdit` is not
+//! `Copy`, and `text_input`'s `on_edit` needs a
+//! `&mut TextEdit` path into the shell `State` (the audio
+//! panel's name field works the same way). It lives in
+//! `ClipRenameState` (declared below), which the integrator
+//! homes in `State` with exactly these lines — field:
+//! `pub clips_rename: rune_sec::clips_panel::ClipRenameState,`
+//! and init: `clips_rename: rune_sec::clips_panel::ClipRenameState::new(),`.
+//! `main.rs`'s `text_focused` must also gain
+//! `|| s.clips_rename.field.focused`, or global shortcuts
+//! (Space, N, Delete…) would fire while typing a name.
 
 use std::cell::RefCell;
 
 use rune::tok::{type_, Theme};
-use rune::{col, row, text, El};
+use rune::{col, row, text, text_input, El, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{ClipDef, ClipLoop, FigureInstance};
 
@@ -87,6 +119,34 @@ impl ClipsPanelState {
 thread_local! {
     static CLIPS_PANEL: RefCell<ClipsPanelState> =
         RefCell::new(ClipsPanelState::default());
+}
+
+/// Rename-field state for the movieclips panel: which clip
+/// is being renamed and the name being typed. Unlike the
+/// selection (see the module docs) this cannot live in the
+/// thread-local cell — a `TextEdit` is not `Copy`, and
+/// `text_input`'s `on_edit` needs a `&mut TextEdit` path
+/// into the shell `State`. The integrator homes this in
+/// `State` (the exact field + init lines are in the module
+/// docs).
+pub struct ClipRenameState {
+    /// Index into `Project::clips` of the clip being
+    /// renamed, or `None` while the rename row is closed.
+    /// May go stale (undo can shrink the clip list);
+    /// readers bounds-check before use.
+    pub target: Option<usize>,
+    /// The in-progress name, loaded from the target clip
+    /// by `begin_rename`.
+    pub field: TextEdit,
+}
+
+impl ClipRenameState {
+    pub fn new() -> Self {
+        ClipRenameState {
+            target: None,
+            field: TextEdit::new(""),
+        }
+    }
 }
 
 /// Read the panel state (a copy — it is one word).
@@ -140,6 +200,101 @@ pub fn apply_loop_mode(core: &mut EditorCore, clip_idx: usize, target: ClipLoop)
     for _ in 0..steps {
         core.cycle_clip_loop(clip_idx);
     }
+}
+
+/// The name a rename applies: the field text trimmed, with
+/// the clip's current name as the fallback when nothing
+/// usable was typed. Clip names are printed by the list
+/// rows, the session label and the core's own status
+/// lines, so a clip must never end up nameless.
+pub fn resolved_clip_name(field_text: &str, current: &str) -> String {
+    let trimmed = field_text.trim();
+    if trimmed.is_empty() {
+        current.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Duplicate clip `clip_idx` (the per-row "Dup" button's
+/// dispatch). No core op exists for this, so it is a field
+/// write mirroring `cycle_clip_loop`'s discipline exactly:
+/// an out-of-range index only sets the status line ("No
+/// such clip.", no snapshot); otherwise exactly one
+/// `snapshot()`, the write, and a status line. The clone
+/// is APPENDED (named `"<name> copy"`, like
+/// `duplicate_figure`), so no stored clip index shifts:
+/// figures keep playing the original and the copy starts
+/// unused. Returns the copy's index.
+pub fn duplicate_clip(core: &mut EditorCore, clip_idx: usize) -> Option<usize> {
+    let Some(clip) = core.project.clips.get(clip_idx) else {
+        core.status = "No such clip.".into();
+        return None;
+    };
+    core.snapshot();
+    let mut copy = clip.clone();
+    copy.name = format!("{} copy", copy.name);
+    core.project.clips.push(copy);
+    let new_index = core.project.clips.len() - 1;
+    core.status = format!(
+        "Duplicated clip {} as clip {}.",
+        clip_idx + 1,
+        new_index + 1
+    );
+    Some(new_index)
+}
+
+/// Rename clip `clip_idx` to the resolved field text (the
+/// rename row's "Apply" dispatch). Field-write discipline
+/// as `duplicate_clip`; a rename that resolves to the
+/// current name is a no-op — no snapshot, no status churn
+/// (the `apply_loop_mode` precedent of not calling the op
+/// when already at the target). Returns true when the name
+/// actually changed (exactly one undo step).
+pub fn rename_clip(core: &mut EditorCore, clip_idx: usize, field_text: &str) -> bool {
+    let Some(current) = core.project.clips.get(clip_idx).map(|c| c.name.clone()) else {
+        core.status = "No such clip.".into();
+        return false;
+    };
+    let name = resolved_clip_name(field_text, &current);
+    if name == current {
+        return false;
+    }
+    core.snapshot();
+    core.project.clips[clip_idx].name = name.clone();
+    core.status = format!("Clip {} renamed to {name}.", clip_idx + 1);
+    true
+}
+
+/// Load clip `clip_idx`'s name into the rename field and
+/// aim the field at it (the per-row "Rename" button's
+/// dispatch). The fresh field claims keyboard focus (the
+/// command palette's open pattern), so typing goes to the
+/// name at once. An out-of-range index only sets the
+/// core's status line and leaves the field closed.
+pub fn begin_rename(s: &mut State, clip_idx: usize) {
+    let Some(name) = s.core.project.clips.get(clip_idx).map(|c| c.name.clone()) else {
+        s.core.status = "No such clip.".into();
+        return;
+    };
+    let mut field = TextEdit::new(name);
+    field.focused = true;
+    s.clips_rename.field = field;
+    s.clips_rename.target = Some(clip_idx);
+}
+
+/// Write the rename field back to its target clip (the
+/// "Apply" button's and the field's Enter dispatch). The
+/// editor closes either way: `rename_clip` refuses a stale
+/// target with a status line only, and a successful or
+/// no-op rename is done.
+pub fn apply_rename(s: &mut State) {
+    let Some(target) = s.clips_rename.target else {
+        return;
+    };
+    let text = s.clips_rename.field.text.clone();
+    rename_clip(&mut s.core, target, &text);
+    s.clips_rename.target = None;
 }
 
 /// Whether a clip-editing session is active on the core
@@ -270,6 +425,61 @@ fn clip_row(s: &State, t: &Theme, index: usize, selected: bool) -> El {
                 .font(type_::LABEL)
                 .color(t.text_secondary),
         )
+        .child(btn(
+            &format!("clip-dup-{index}"),
+            "Dup",
+            false,
+            t,
+            move |s: &mut State| {
+                if let Some(new_index) = duplicate_clip(&mut s.core, index) {
+                    update_panel_state(|p| p.select(new_index));
+                }
+            },
+        ))
+        .child(btn(
+            &format!("clip-rename-{index}"),
+            "Rename",
+            false,
+            t,
+            move |s: &mut State| {
+                update_panel_state(|p| p.select(index));
+                begin_rename(s, index);
+            },
+        ))
+}
+
+/// The rename editor row, mounted under the clip list
+/// while a rename is in progress (`ClipRenameState::target`
+/// set and still naming an existing clip): the loaded name
+/// field plus "Apply"; Enter in the field applies too.
+/// Closed — or a target gone stale — it renders an empty
+/// keyed row, so the panel never shows a dead field.
+fn rename_row(s: &State, t: &Theme) -> El {
+    let open = s
+        .clips_rename
+        .target
+        .is_some_and(|i| i < s.core.project.clips.len());
+    if !open {
+        return row().key("clip-rename-row").w_full();
+    }
+    row()
+        .key("clip-rename-row")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(
+            text_input(&s.clips_rename.field, type_::BODY)
+                .key("clip-rename-field")
+                .single_line()
+                .grow(1.0)
+                .color(t.text)
+                .placeholder("Clip name", t.text_secondary)
+                .on_edit(|s: &mut State| &mut s.clips_rename.field)
+                .on_submit(|s: &mut State, _tx: &mut Tx| apply_rename(s)),
+        )
+        .child(btn("clip-rename-apply", "Apply", false, t, |s: &mut State| {
+            apply_rename(s)
+        }))
 }
 
 /// The loop-mode segmented control for the selected clip:
@@ -415,8 +625,10 @@ fn clip_edit_section(s: &State, t: &Theme) -> El {
 }
 
 /// The movieclips panel: header + count, the Make/Insert
-/// actions, the clip list, the selected clip's loop-mode
-/// segmented control, and the clip-edit session section
+/// actions, the clip list (each row with Dup and Rename
+/// buttons), the rename editor row while a rename is in
+/// progress, the selected clip's loop-mode segmented
+/// control, and the clip-edit session section
 /// (`clip_edit_section`: enter/frame-step/add/delete/exit over
 /// the core's `enter_clip`/`clip_goto`/`clip_add_frame`/
 /// `clip_delete_frame`/`exit_clip` session ops).
@@ -472,6 +684,7 @@ pub fn clips_panel(s: &State, t: &Theme) -> El {
         panel = panel.child(clip_row(s, t, i, selected == Some(i)));
     }
     panel
+        .child(rename_row(s, t))
         .child(loop_mode_row(s, t, selected))
         .child(clip_edit_section(s, t))
 }
@@ -604,6 +817,11 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            was_playing: false,
+            clips_rename: ClipRenameState::new(),
         };
         let _ = clips_panel(&state, &t);
         // Populated + selected: exercises the rows and the
@@ -723,6 +941,11 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            was_playing: false,
+            clips_rename: ClipRenameState::new(),
         };
         state.core.make_clip_from_figure();
         // Entry state (no session): the Edit clip entry row.
@@ -732,5 +955,132 @@ mod tests {
         let _ = clips_panel(&state, &t);
         state.core.exit_clip();
         let _ = clips_panel(&state, &t);
+    }
+
+    #[test]
+    fn resolved_clip_name_trims_and_falls_back() {
+        assert_eq!(resolved_clip_name("Walk cycle", "Old"), "Walk cycle");
+        assert_eq!(resolved_clip_name("  Walk cycle  ", "Old"), "Walk cycle");
+        // Blank (or whitespace-only) input keeps the current
+        // name — a clip must never end up nameless.
+        assert_eq!(resolved_clip_name("", "Old"), "Old");
+        assert_eq!(resolved_clip_name("   ", "Old"), "Old");
+    }
+
+    #[test]
+    fn duplicate_clip_appends_a_named_copy_in_one_undo_step() {
+        let mut core = EditorCore::new();
+        core.make_clip_from_figure();
+        let original = core.project.clips[0].clone();
+        let depth = core.undo_depth();
+        let new_index = duplicate_clip(&mut core, 0).expect("copy index");
+        assert_eq!(new_index, 1);
+        assert_eq!(core.project.clips.len(), 2);
+        let copy = &core.project.clips[1];
+        assert_eq!(copy.name, format!("{} copy", original.name));
+        assert_eq!(copy.frames.len(), original.frames.len());
+        assert_eq!(copy.loop_mode, original.loop_mode);
+        // The original is untouched (appending shifted no
+        // stored index, so figures keep playing it).
+        assert_eq!(core.project.clips[0].name, original.name);
+        // Exactly one snapshot: one undo removes the copy.
+        assert_eq!(core.undo_depth(), depth + 1);
+        core.undo();
+        assert_eq!(core.project.clips.len(), 1);
+        // Out of range: refusal via the status line, no copy.
+        assert_eq!(duplicate_clip(&mut core, 9), None);
+        assert_eq!(core.project.clips.len(), 1);
+        assert_eq!(core.status, "No such clip.");
+    }
+
+    #[test]
+    fn rename_clip_writes_once_and_no_ops_without_change() {
+        let mut core = EditorCore::new();
+        core.make_clip_from_figure();
+        let old = core.project.clips[0].name.clone();
+        let depth = core.undo_depth();
+        // Blank field falls back to the current name: no-op,
+        // no snapshot.
+        assert!(!rename_clip(&mut core, 0, "   "));
+        assert_eq!(core.project.clips[0].name, old);
+        assert_eq!(core.undo_depth(), depth);
+        // Same name after trimming: also a no-op.
+        assert!(!rename_clip(&mut core, 0, &old));
+        assert_eq!(core.undo_depth(), depth);
+        // A real rename: trimmed, exactly one undo step, and
+        // undo restores the old name.
+        assert!(rename_clip(&mut core, 0, "  Walk cycle "));
+        assert_eq!(core.project.clips[0].name, "Walk cycle");
+        assert_eq!(core.undo_depth(), depth + 1);
+        core.undo();
+        assert_eq!(core.project.clips[0].name, old);
+        // Out of range: refusal via the status line.
+        assert!(!rename_clip(&mut core, 9, "Nope"));
+        assert_eq!(core.status, "No such clip.");
+    }
+
+    #[test]
+    fn rename_round_trip_through_the_panel_state() {
+        let t = rune::tok::theme(true);
+        let mut state = State {
+            core: EditorCore::new(),
+            last_poll: None,
+            wheel_zoom: 0.0,
+            figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
+            figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
+            library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
+            frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
+            graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
+            audio_panel: crate::rune_sec::audio_panel::AudioPanelState::new(),
+            menus: crate::rune_sec::menus::MenusState::default(),
+            palette: crate::rune_sec::command_palette::PaletteState::new(),
+            settings: crate::rune_sec::settings_popover::SettingsState::default(),
+            toasts: crate::rune_sec::toasts::ToastsState::new(),
+            text_tool: crate::rune_sec::text_tool::TextToolState::new(),
+            name_edit: rune::TextEdit::new(""),
+            export_use_range: false,
+            fx_selected: None,
+            pose_clipboard: None,
+            last_status: String::new(),
+            toast_now: 0.0,
+            last_dark: true,
+            workspace: crate::rune_sec::workspaces::Workspace::Animate,
+            guides: false,
+            show_left: true,
+            show_right: true,
+            key_clipboard: None,
+            export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            was_playing: false,
+            clips_rename: ClipRenameState::new(),
+        };
+        state.core.make_clip_from_figure();
+        let old = state.core.project.clips[0].name.clone();
+        // Closed by default; the panel builds with the row shut.
+        assert_eq!(state.clips_rename.target, None);
+        let _ = clips_panel(&state, &t);
+        // Rename loads the field with the clip's name + focus.
+        begin_rename(&mut state, 0);
+        assert_eq!(state.clips_rename.target, Some(0));
+        assert_eq!(state.clips_rename.field.text, old);
+        assert!(state.clips_rename.field.focused);
+        let _ = clips_panel(&state, &t);
+        // Apply writes the typed name and closes the editor.
+        state.clips_rename.field.text = "Hero walk".to_string();
+        apply_rename(&mut state);
+        assert_eq!(state.core.project.clips[0].name, "Hero walk");
+        assert_eq!(state.clips_rename.target, None);
+        // An out-of-range Rename press never opens the field.
+        begin_rename(&mut state, 9);
+        assert_eq!(state.clips_rename.target, None);
+        // A target gone stale closes without renaming.
+        state.clips_rename.target = Some(9);
+        apply_rename(&mut state);
+        assert_eq!(state.clips_rename.target, None);
+        assert_eq!(state.core.project.clips[0].name, "Hero walk");
+        update_panel_state(|p| *p = ClipsPanelState::default());
     }
 }

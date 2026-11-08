@@ -17,6 +17,23 @@
 //!   the root, exactly as the GPUI inspector omitted it.
 //! * Thickness −/+ → `adjust_thickness(∓1.0)` (editor.rs:475)
 //!   — keys `insp-th-dn` / `insp-th-up`.
+//! * Rotate −5°/−1°/+1°/+5° → `rotate_selected` (this
+//!   module) — keys `seg-rot-m5` / `seg-rot-m1` /
+//!   `seg-rot-p1` / `seg-rot-p5`. The core has no
+//!   node-rotate op: a node's angle at a frame IS its pose
+//!   angle (`frames[current].poses[fi].angles[ni]`, degrees
+//!   — the value `key_graph_angle` keys and drag posing
+//!   solves into), so the steppers write the current
+//!   frame's pose directly, in the core ops' own pattern
+//!   (validate → `snapshot()` → mutate → status, as
+//!   `mirror_pose` does): one press = exactly one undo
+//!   step. Pose semantics, not a graph key — an `Angle(ni)`
+//!   graph channel still overrides the sampled pose at
+//!   render (`positions_f`, editor.rs:1060). The stored
+//!   angle is not normalised (the engine keeps unbounded
+//!   degrees); the Angle readout normalises for display
+//!   and shows one decimal via `format_deg` — the same
+//!   formatter the Rotate row's value uses.
 //! * Cycle bend → `cycle_bend()` (editor.rs:1106) — key
 //!   `cycle-bend`. There is no ± bend op in the core; bend
 //!   steps 0 → +0.35 → +0.7 → −0.35 → −0.7 rad per frame.
@@ -102,6 +119,52 @@ pub fn norm_deg_360(a: f32) -> f32 {
     } else {
         r
     }
+}
+
+/// Format an angle in degrees with one decimal place. The
+/// single formatter behind the Angle readout and the Rotate
+/// row's value, so the two can never disagree.
+pub fn format_deg(deg: f32) -> String {
+    format!("{deg:.1}°")
+}
+
+/// Rotate the selected node's angle at the current frame by
+/// `delta_deg` degrees (see the module docs for why this is
+/// a pose write and what its undo semantics are). Refusals
+/// are status-only — no snapshot, no edit — exactly like
+/// the core ops' guards.
+pub fn rotate_selected(core: &mut EditorCore, delta_deg: f32) {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a segment first, then rotate it.".into();
+        return;
+    };
+    let fi = core.selected_figure;
+    let has_angle = core
+        .project
+        .frames
+        .get(core.current)
+        .and_then(|f| f.poses.get(fi))
+        .and_then(|p| p.angles.get(ni))
+        .is_some();
+    if !has_angle {
+        core.status = format!(
+            "Figure {} has no pose angle for segment {} on frame {}.",
+            fi + 1,
+            ni,
+            core.current + 1
+        );
+        return;
+    }
+    core.snapshot();
+    let pose = &mut core.project.frames[core.current].poses[fi];
+    pose.angles[ni] += delta_deg;
+    let new = pose.angles[ni];
+    core.status = format!(
+        "Segment {} angle {} on frame {}.",
+        ni,
+        format_deg(new),
+        core.current + 1
+    );
 }
 
 /// Label for a node shape, naming the polygons `cycle_shape`
@@ -275,7 +338,7 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
         )
         .child(readout_row("Length", format!("{:.0}", st.length), t))
         .child(readout_row("Thickness", format!("{:.0}", st.thickness), t))
-        .child(readout_row("Angle", format!("{:.0}°", st.angle_deg), t))
+        .child(readout_row("Angle", format_deg(st.angle_deg), t))
         .child(readout_row("Bend", format!("{:.0}°", st.bend_deg), t))
         .child(readout_row("Shape", st.shape_label.clone(), t));
     // The origin has no segment to lengthen (the op no-ops);
@@ -301,6 +364,31 @@ pub fn inspector_segment(s: &State, t: &Theme) -> El {
             |s| s.core.adjust_thickness(-THICKNESS_STEP),
             |s| s.core.adjust_thickness(THICKNESS_STEP),
         ))
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(8.0)
+                .child(
+                    text("Rotate")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .grow(1.0),
+                )
+                .child(text(format_deg(st.angle_deg)).font(type_::LABEL).color(t.text))
+                .child(btn("seg-rot-m5", "−5°", false, t, |s| {
+                    rotate_selected(&mut s.core, -5.0)
+                }))
+                .child(btn("seg-rot-m1", "−1°", false, t, |s| {
+                    rotate_selected(&mut s.core, -1.0)
+                }))
+                .child(btn("seg-rot-p1", "+1°", false, t, |s| {
+                    rotate_selected(&mut s.core, 1.0)
+                }))
+                .child(btn("seg-rot-p5", "+5°", false, t, |s| {
+                    rotate_selected(&mut s.core, 5.0)
+                })),
+        )
         .child(
             row()
                 .w_full()
@@ -424,6 +512,69 @@ mod tests {
     }
 
     #[test]
+    fn format_deg_shows_one_decimal() {
+        assert_eq!(format_deg(0.0), "0.0°");
+        assert_eq!(format_deg(45.5), "45.5°");
+        assert_eq!(format_deg(270.0), "270.0°");
+        assert_eq!(format_deg(12.34), "12.3°");
+        assert_eq!(format_deg(12.36), "12.4°");
+    }
+
+    #[test]
+    fn rotate_selected_steps_the_pose_angle_exactly() {
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        let frame = core.current;
+        let before = core.project.frames[frame].poses[fi].angles[1];
+        rotate_selected(&mut core, 5.0);
+        assert_eq!(core.project.frames[frame].poses[fi].angles[1], before + 5.0);
+        rotate_selected(&mut core, -1.0);
+        rotate_selected(&mut core, -1.0);
+        assert_eq!(core.project.frames[frame].poses[fi].angles[1], before + 3.0);
+    }
+
+    #[test]
+    fn rotate_selected_is_one_undo_step_per_press() {
+        let mut core = core_with_selection(Some(1));
+        let fi = core.selected_figure;
+        let frame = core.current;
+        let before = core.project.frames[frame].poses[fi].angles[1];
+        let depth = core.undo_depth();
+        rotate_selected(&mut core, 1.0);
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot per press");
+        core.undo();
+        assert_eq!(
+            core.project.frames[frame].poses[fi].angles[1], before,
+            "undo restores the pre-press angle"
+        );
+    }
+
+    #[test]
+    fn rotate_selected_without_selection_is_status_only() {
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        rotate_selected(&mut core, 5.0);
+        assert_eq!(core.undo_depth(), depth, "no snapshot without a selection");
+        assert!(
+            core.status.contains("Select a segment"),
+            "refusal explains itself: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn rotate_selected_moves_the_readout_by_the_same_step() {
+        // The readout is the solved world angle; a local
+        // +5° step moves it by exactly +5° (mod 360).
+        let mut core = core_with_selection(Some(1));
+        let before = segment_state(&core).unwrap().angle_deg;
+        rotate_selected(&mut core, 5.0);
+        let after = segment_state(&core).unwrap().angle_deg;
+        let moved = norm_deg_360(after - before);
+        assert!((moved - 5.0).abs() < 0.01, "readout moved {moved}, want 5");
+    }
+
+    #[test]
     fn panel_builds_with_and_without_selection() {
         let t = rune::tok::theme(true);
         let bare = State {
@@ -455,6 +606,11 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            was_playing: false,
         };
         let _ = inspector_segment(&bare, &t);
         let selected = State {
@@ -486,6 +642,11 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            was_playing: false,
         };
         let _ = inspector_segment(&selected, &t);
         let root = State {
@@ -517,6 +678,11 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            was_playing: false,
         };
         let _ = inspector_segment(&root, &t);
     }

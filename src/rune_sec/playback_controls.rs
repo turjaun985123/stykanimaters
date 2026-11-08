@@ -30,6 +30,24 @@
 //!   `loop-clear` calls `EditorCore::clear_loop_range`
 //!   (`editor.rs:752`). Playback wraps inside the range in
 //!   `advance_play` (`editor.rs:687`).
+//! * **Restart / Play range** (Phase F) — `pb-restart`
+//!   goes to frame 0 and plays; `pb-play-range` goes to the
+//!   loop range's start and plays (frame 0 when no range
+//!   is set — the Restart behaviour). Both compose
+//!   `EditorCore::goto` (`editor.rs:681`, sets `current` +
+//!   `playhead`) with the `playing` field (`editor.rs:38`)
+//!   set true — the same field the chrome transport flips.
+//!   Audio start is NOT called here: the shell's poll hooks
+//!   playback start (Phase F audio glue); these buttons
+//!   only set the state it observes.
+//! * **No loop toggle** (Phase F, checked in `editor.rs`)
+//!   — `advance_play` (`editor.rs:698`) wraps
+//!   unconditionally: at the timeline end, or at the loop
+//!   range's end when one is set. No loop on/off field or
+//!   op exists for a switch to honour, so this panel
+//!   deliberately ships none rather than a dead control;
+//!   the loop-range buttons below are the loop control
+//!   the engine actually has.
 //! * **Frame duration** — the `dur-dn` / `dur-up` steppers
 //!   call `EditorCore::adjust_frame_duration`
 //!   (`editor.rs:1675`) with the GPUI factors 0.5 / 2.0
@@ -51,6 +69,7 @@ use rune::{col, row, text, El};
 
 use crate::chrome_view::btn;
 use crate::State;
+use stykanimate_rs::editor::EditorCore;
 
 /// The GPUI fps cycler's preset frame rates, ascending
 /// (old `app.rs`, `fps-preset` handler: `[6, 12, 24, 30,
@@ -100,6 +119,25 @@ pub fn loop_range_text(range: Option<(usize, usize)>) -> String {
         Some((a, b)) => format!("Looping frames {}–{}", a + 1, b + 1),
         None => "No loop range — whole timeline loops".to_string(),
     }
+}
+
+/// The frame **Play range** starts from: the loop range's
+/// start when a range is set, else frame 0 — which is
+/// exactly Restart's behaviour, so Play range degrades to
+/// Restart on a timeline with no range.
+pub fn play_range_start(loop_range: Option<(usize, usize)>) -> usize {
+    loop_range.map(|(a, _)| a).unwrap_or(0)
+}
+
+/// Go to `frame` and make sure playback is running — the
+/// shared body of the Restart and Play range buttons.
+/// `goto` also resets the fractional `playhead`, so a
+/// restart mid-tween starts cleanly on the frame. Only the
+/// `playing` field is set: audio start is the shell poll's
+/// business (Phase F audio glue), not a button's.
+fn start_playback_at(core: &mut EditorCore, frame: usize) {
+    core.goto(frame);
+    core.playing = true;
 }
 
 /// Readout for the current frame's duration multiplier, in
@@ -155,8 +193,9 @@ fn section(label: String, t: &Theme) -> El {
 /// full panel for the current core state. Element keys carry
 /// the old GPUI control ids where one existed (`fps-dn`,
 /// `fps-up`, `tween`, `loop-start`, `loop-end`, `loop-clear`,
-/// `dur-dn`, `dur-up`), so headless `--tree` checks can find
-/// every control.
+/// `dur-dn`, `dur-up`); the Phase F transport buttons are
+/// `pb-restart` / `pb-play-range`, so headless `--tree`
+/// checks can find every control.
 pub fn playback_controls(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let fps = core.project.fps;
@@ -175,6 +214,28 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
         .fill(t.card)
         .radius(8.0)
         .child(text("Playback").font(type_::TITLE).color(t.text));
+
+    // ---- Transport basics: restart from the top, or play
+    // from the loop range's start (frame 0 without a range).
+    panel = panel.child(section("Transport".to_string(), t));
+    panel = panel.child(
+        row()
+            .gap(6.0)
+            .center_y()
+            .child(btn("pb-restart", "Restart", false, t, |s| {
+                start_playback_at(&mut s.core, 0);
+            }))
+            .child(btn(
+                "pb-play-range",
+                "Play range",
+                loop_range.is_some(),
+                t,
+                |s| {
+                    let start = play_range_start(s.core.loop_range);
+                    start_playback_at(&mut s.core, start);
+                },
+            )),
+    );
 
     // ---- Frame rate: stepper + current-rate readout.
     panel = panel.child(section(format!("Frame rate — now {}", fps_text(fps)), t));
@@ -297,6 +358,7 @@ pub fn playback_controls(s: &State, t: &Theme) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stykanimate_rs::editor::EditorCore;
 
     #[test]
     fn presets_are_the_gpui_cycler_list_ascending() {
@@ -375,5 +437,51 @@ mod tests {
     fn timecode_label_falls_back_to_1fps_for_bad_rates() {
         assert_eq!(timecode_label(30, 60, 0.0), "0:30.0 / 1:00.0");
         assert_eq!(timecode_label(30, 60, -12.0), "0:30.0 / 1:00.0");
+    }
+
+    #[test]
+    fn play_range_start_is_the_range_start_or_zero() {
+        assert_eq!(play_range_start(Some((2, 4))), 2);
+        assert_eq!(play_range_start(Some((0, 3))), 0);
+        // No range: Play range falls back to Restart's frame.
+        assert_eq!(play_range_start(None), 0);
+    }
+
+    #[test]
+    fn restart_goes_to_frame_zero_and_plays() {
+        // The demo project has 5 frames; start mid-timeline,
+        // paused, as a user pressing Restart would find it.
+        let mut core = EditorCore::new();
+        core.goto(3);
+        core.playing = false;
+        start_playback_at(&mut core, 0);
+        assert_eq!(core.current, 0);
+        // goto resets the fractional playhead too.
+        assert_eq!(core.playhead, 0.0);
+        assert!(core.playing, "Restart ensures playback runs");
+    }
+
+    #[test]
+    fn play_range_starts_at_the_range_start_and_plays() {
+        let mut core = EditorCore::new();
+        core.set_loop_range(2, 4);
+        core.goto(0);
+        core.playing = false;
+        // The pb-play-range handler's exact composition.
+        let start = play_range_start(core.loop_range);
+        start_playback_at(&mut core, start);
+        assert_eq!(core.current, 2);
+        assert!(core.playing);
+    }
+
+    #[test]
+    fn start_playback_at_keeps_playing_when_already_playing() {
+        // Pressing Restart mid-playback restarts, never pauses.
+        let mut core = EditorCore::new();
+        core.goto(2);
+        core.playing = true;
+        start_playback_at(&mut core, 0);
+        assert!(core.playing);
+        assert_eq!(core.current, 0);
     }
 }

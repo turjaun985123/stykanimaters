@@ -29,6 +29,20 @@
 //!   `goto(frame)` then `camera_clear_key()`, because the op
 //!   removes the key at the *current* frame only — see
 //!   [`clear_key_at`].
+//! * Key-list Prev/Next → `goto` the nearest key frame
+//!   strictly before/after the current frame ([`prev_key_frame`]
+//!   / [`next_key_frame`] over `Project::camera`); with no
+//!   neighbour the jump is status-only, the panel's existing
+//!   convention for a refused op.
+//! * Key-list Copy/Paste → a panel-local clipboard (below).
+//!   The panel has no state struct — `panel` takes `&State`
+//!   and every other control is stateless — so the clipboard
+//!   lives in a `thread_local`, the same pattern `clips_panel`
+//!   uses for its selection. Paste composes the public parts
+//!   of `rotate_camera` (editor.rs:1100) with the copied
+//!   values: exactly one `snapshot()` (editor.rs:202), then
+//!   `Project::set_camera_key`, then the angle fix-up the op
+//!   itself applies — one paste is exactly one undo step.
 //! * Follow → `toggle_camera_follow` (editor.rs:1699); its
 //!   active state is `project.camera_follow ==
 //!   Some(selected_figure)` (model.rs:699), the same condition
@@ -52,6 +66,8 @@
 //! (Fit / Centre / 1:1 / zoom steppers + % readout). Element
 //! keys reuse the GPUI-era ids where they existed (`view-fit`,
 //! `view-centre`, `view-actual`).
+
+use std::cell::RefCell;
 
 use rune::tok::{self, type_, Theme};
 use rune::{canvas, col, el, row, text, Drag, El, LineCap, Phase, Shape, Tx};
@@ -198,6 +214,132 @@ pub fn key_rows(core: &EditorCore) -> Vec<CamKeyRow> {
 pub fn clear_key_at(core: &mut EditorCore, frame: usize) {
     core.goto(frame);
     core.camera_clear_key();
+}
+
+// ----------------------------------------------------------------
+// Key navigation + copy/paste
+// ----------------------------------------------------------------
+
+/// The frame of the nearest camera key strictly before the
+/// current frame, or `None` when there is none. Pure read
+/// over `Project::camera` (unsorted storage is fine — this
+/// is a max over matching frames).
+pub fn prev_key_frame(core: &EditorCore) -> Option<usize> {
+    core.project
+        .camera
+        .iter()
+        .map(|k| k.frame)
+        .filter(|&f| f < core.current)
+        .max()
+}
+
+/// The frame of the nearest camera key strictly after the
+/// current frame, or `None` when there is none.
+pub fn next_key_frame(core: &EditorCore) -> Option<usize> {
+    core.project
+        .camera
+        .iter()
+        .map(|k| k.frame)
+        .filter(|&f| f > core.current)
+        .min()
+}
+
+/// Prev-key button: jump the playhead to [`prev_key_frame`]
+/// via `goto`. With no earlier key, status-only (the op
+/// convention `camera_clear_key` uses for a refused clear) —
+/// the playhead does not move.
+pub fn goto_prev_key(core: &mut EditorCore) {
+    match prev_key_frame(core) {
+        Some(frame) => core.goto(frame),
+        None => core.status = "No camera key before this frame.".into(),
+    }
+}
+
+/// Next-key button: jump the playhead to [`next_key_frame`].
+pub fn goto_next_key(core: &mut EditorCore) {
+    match next_key_frame(core) {
+        Some(frame) => core.goto(frame),
+        None => core.status = "No camera key after this frame.".into(),
+    }
+}
+
+/// A copied camera key's values (everything but the frame —
+/// paste retargets it to the then-current frame).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CamKeyClip {
+    pub x: f32,
+    pub y: f32,
+    pub zoom: f32,
+    pub angle: f32,
+}
+
+thread_local! {
+    /// The panel's key clipboard. Panel-local by necessity:
+    /// the camera panel has no state struct (see the module
+    /// docs), so — like `clips_panel`'s selection — the one
+    /// piece of panel-owned state lives in a `thread_local`.
+    /// It survives workspace switches and panel remounts for
+    /// the life of the process, which is what a clipboard
+    /// should do; it is not persisted.
+    static CAMERA_CLIPBOARD: RefCell<Option<CamKeyClip>> = RefCell::new(None);
+}
+
+/// The clipboard's current contents, if a key was copied.
+pub fn clipboard_key() -> Option<CamKeyClip> {
+    CAMERA_CLIPBOARD.with(|c| *c.borrow())
+}
+
+/// Store `clip` as the clipboard's contents.
+fn store_clipboard(clip: Option<CamKeyClip>) {
+    CAMERA_CLIPBOARD.with(|c| *c.borrow_mut() = clip);
+}
+
+/// The stored values of the camera key on the current frame,
+/// if the current frame has one. Pure read — the copy
+/// button's source value.
+pub fn key_here(core: &EditorCore) -> Option<CamKeyClip> {
+    core.project
+        .camera
+        .iter()
+        .find(|k| k.frame == core.current)
+        .map(|k| CamKeyClip { x: k.x, y: k.y, zoom: k.zoom, angle: k.angle })
+}
+
+/// Copy-key button: store the key on the current frame in
+/// the clipboard. With no key here, status-only with
+/// `camera_clear_key`'s own no-key wording, and any earlier
+/// copy is left untouched.
+pub fn copy_key_here(core: &mut EditorCore) {
+    match key_here(core) {
+        Some(clip) => {
+            store_clipboard(Some(clip));
+            core.status = format!("Camera key copied from frame {}.", core.current + 1);
+        }
+        None => core.status = "No camera key on this frame.".into(),
+    }
+}
+
+/// Paste-key button: upsert the clipboard's key at the
+/// current frame. The write composes the public parts of
+/// `rotate_camera` (editor.rs:1100) — the editor-level
+/// upsert `set_camera_key_here` is private, and
+/// `Project::set_camera_key` alone would zero a fresh key's
+/// angle — so: one `snapshot()`, `set_camera_key` with the
+/// copied pan/zoom, then the copied angle written onto the
+/// upserted key. One paste is exactly one undo step. With an
+/// empty clipboard, status-only: no snapshot, no key.
+pub fn paste_key_here(core: &mut EditorCore) {
+    let Some(clip) = clipboard_key() else {
+        core.status = "No camera key copied yet.".into();
+        return;
+    };
+    let frame = core.current;
+    core.snapshot();
+    core.project.set_camera_key(frame, clip.x, clip.y, clip.zoom);
+    if let Some(k) = core.project.camera.iter_mut().find(|k| k.frame == frame) {
+        k.angle = clip.angle;
+    }
+    core.status = format!("Camera key pasted at frame {}.", frame + 1);
 }
 
 // ----------------------------------------------------------------
@@ -388,12 +530,17 @@ fn angle_readout(core: &EditorCore, t: &Theme) -> El {
         .child(text(angle_label(core)).font(type_::LABEL).color(t.text))
 }
 
-/// The camera-key list section: a "Keys" header, then one row
-/// per key — a goto button labelled with the key's frame,
-/// zoom and angle (accent-filled when the key is on the
-/// current frame) and a per-row Clear button (the goto-then-
-/// clear composition in [`clear_key_at`]). With no keys, an
-/// explanatory empty line instead of rows.
+/// The camera-key list section: a "Keys" header, the
+/// navigation row (Prev key / Next key — jumps to the
+/// nearest key either side of the playhead) and the
+/// clipboard row (Copy key / Paste key for the key on the
+/// current frame), then one row per key — a goto button
+/// labelled with the key's frame, zoom and angle
+/// (accent-filled when the key is on the current frame) and
+/// a per-row Clear button (the goto-then-clear composition
+/// in [`clear_key_at`]). With no keys, an explanatory empty
+/// line instead of rows; the nav/clipboard rows stay, since
+/// Paste is exactly how a first key can arrive.
 fn key_list(core: &EditorCore, t: &Theme) -> El {
     let rows = key_rows(core);
     let mut list = col().key("cam-key-list").gap(4.0);
@@ -402,6 +549,29 @@ fn key_list(core: &EditorCore, t: &Theme) -> El {
             .font(type_::LABEL)
             .color(t.text_secondary),
     );
+    list = list
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(btn("cam-prev-key", "Prev key", false, t, |s: &mut State| {
+                    goto_prev_key(&mut s.core)
+                }))
+                .child(btn("cam-next-key", "Next key", false, t, |s: &mut State| {
+                    goto_next_key(&mut s.core)
+                })),
+        )
+        .child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(btn("cam-copy-key", "Copy key", false, t, |s: &mut State| {
+                    copy_key_here(&mut s.core)
+                }))
+                .child(btn("cam-paste-key", "Paste key", false, t, |s: &mut State| {
+                    paste_key_here(&mut s.core)
+                })),
+        );
     if rows.is_empty() {
         list = list.child(
             text("No camera keys yet.")
@@ -661,6 +831,123 @@ mod tests {
         assert_eq!(rows[0].frame, 2);
     }
 
+    // ---- Key navigation + copy/paste ----
+
+    /// Pin a key with fully specified stored values,
+    /// field-level (no snapshot — undo-depth measurements in
+    /// these tests stay attributable to the op under test).
+    fn pin_key(core: &mut EditorCore, frame: usize, x: f32, y: f32, zoom: f32, angle: f32) {
+        core.project.set_camera_key(frame, x, y, zoom);
+        if let Some(k) = core.project.camera.iter_mut().find(|k| k.frame == frame) {
+            k.angle = angle;
+        }
+    }
+
+    #[test]
+    fn prev_next_key_frames_find_the_nearest_neighbours() {
+        let mut core = EditorCore::new();
+        assert_eq!(prev_key_frame(&core), None);
+        assert_eq!(next_key_frame(&core), None);
+        pin_key(&mut core, 0, 0.0, 0.0, 1.0, 0.0);
+        pin_key(&mut core, 2, 0.0, 0.0, 1.0, 0.0);
+        pin_key(&mut core, 4, 0.0, 0.0, 1.0, 0.0);
+        core.goto(3);
+        assert_eq!(prev_key_frame(&core), Some(2));
+        assert_eq!(next_key_frame(&core), Some(4));
+        // Strictly before/after: standing ON a key skips it.
+        core.goto(2);
+        assert_eq!(prev_key_frame(&core), Some(0));
+        assert_eq!(next_key_frame(&core), Some(4));
+        // The ends of the key range have no neighbour.
+        core.goto(0);
+        assert_eq!(prev_key_frame(&core), None);
+        core.goto(4);
+        assert_eq!(next_key_frame(&core), None);
+    }
+
+    #[test]
+    fn prev_next_buttons_move_the_playhead_or_report() {
+        let mut core = EditorCore::new();
+        pin_key(&mut core, 0, 0.0, 0.0, 1.0, 0.0);
+        pin_key(&mut core, 4, 0.0, 0.0, 1.0, 0.0);
+        core.goto(2);
+        goto_next_key(&mut core);
+        assert_eq!(core.current, 4);
+        // Stranded at the last key: status only, no move.
+        goto_next_key(&mut core);
+        assert_eq!(core.current, 4);
+        assert_eq!(core.status, "No camera key after this frame.");
+        goto_prev_key(&mut core);
+        assert_eq!(core.current, 0);
+        goto_prev_key(&mut core);
+        assert_eq!(core.current, 0);
+        assert_eq!(core.status, "No camera key before this frame.");
+    }
+
+    #[test]
+    fn copy_paste_round_trip_lands_the_stored_values_with_one_snapshot() {
+        let mut core = EditorCore::new();
+        pin_key(&mut core, 0, 111.0, 222.0, 1.5, 30.0);
+        core.goto(0);
+        copy_key_here(&mut core);
+        assert_eq!(core.status, "Camera key copied from frame 1.");
+        assert_eq!(
+            clipboard_key(),
+            Some(CamKeyClip { x: 111.0, y: 222.0, zoom: 1.5, angle: 30.0 })
+        );
+        core.goto(3);
+        let depth0 = core.undo_depth();
+        paste_key_here(&mut core);
+        assert_eq!(core.status, "Camera key pasted at frame 4.");
+        assert_eq!(core.undo_depth(), depth0 + 1);
+        let pasted = core
+            .project
+            .camera
+            .iter()
+            .find(|k| k.frame == 3)
+            .expect("the pasted key exists");
+        assert_eq!(
+            (pasted.x, pasted.y, pasted.zoom, pasted.angle),
+            (111.0, 222.0, 1.5, 30.0)
+        );
+        // The source key is untouched, and the paste's one
+        // undo step removes exactly the pasted key.
+        assert_eq!(key_rows(&core).len(), 2);
+        core.undo();
+        assert_eq!(key_rows(&core).len(), 1);
+        assert_eq!(key_rows(&core)[0].frame, 0);
+    }
+
+    #[test]
+    fn paste_over_an_existing_key_replaces_it_in_place() {
+        let mut core = EditorCore::new();
+        pin_key(&mut core, 0, 10.0, 20.0, 2.0, -45.0);
+        pin_key(&mut core, 3, 0.0, 0.0, 1.0, 0.0);
+        core.goto(0);
+        copy_key_here(&mut core);
+        core.goto(3);
+        paste_key_here(&mut core);
+        assert_eq!(key_rows(&core).len(), 2);
+        let k = core.project.camera.iter().find(|k| k.frame == 3).unwrap();
+        assert_eq!((k.x, k.y, k.zoom, k.angle), (10.0, 20.0, 2.0, -45.0));
+    }
+
+    #[test]
+    fn copy_without_a_key_and_paste_without_a_copy_are_status_only() {
+        // The clipboard is a per-thread `thread_local` and
+        // each test runs on its own thread, so it starts
+        // empty here.
+        let mut core = EditorCore::new();
+        let depth0 = core.undo_depth();
+        paste_key_here(&mut core);
+        assert_eq!(core.status, "No camera key copied yet.");
+        copy_key_here(&mut core);
+        assert_eq!(core.status, "No camera key on this frame.");
+        assert_eq!(clipboard_key(), None);
+        assert!(core.project.camera.is_empty());
+        assert_eq!(core.undo_depth(), depth0);
+    }
+
     // ---- Rotation dial ----
 
     #[test]
@@ -778,6 +1065,11 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            was_playing: false,
         };
         let _ = panel(&s, &t);
         let _ = overlay(&s.core);

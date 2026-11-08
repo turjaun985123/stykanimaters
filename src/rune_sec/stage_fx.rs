@@ -85,8 +85,16 @@
 //! 6. **Scope:** the one-shot `project.particles` events
 //!    (`export::particles_at`, export.rs:120) are not FX
 //!    clips and are not included here.
+//! 7. **Gizmo layer:** `gizmo_geometry` has no rasterizer
+//!    counterpart at all — it is an editor aid marking where
+//!    one `project.particles` event is anchored, drawn by
+//!    the shell only for the selected event. Its two
+//!    deliberate un-render-like choices (live anchor
+//!    resolution, no frame gating) are documented on the
+//!    function itself.
 
 use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::model::ParticleEvent;
 use stykanimate_rs::vfx::{clip_particles, weather_particles, ClipKind};
 
 /// One drawable particle primitive in stage coordinates.
@@ -215,10 +223,115 @@ pub fn fx_geometry(core: &EditorCore) -> Vec<ParticlePrim> {
     lines
 }
 
+/// Gizmo accent colour: the 2.0 palette's primary accent,
+/// fixed for every event regardless of the event's own
+/// colour, so the selection marker reads the same everywhere.
+pub const GIZMO_COLOR: u32 = 0x6D8CFF;
+/// Gizmo blend alpha (crosshair and ring alike).
+const GIZMO_ALPHA: f32 = 0.9;
+/// Crosshair half-arm length, in stage units.
+const GIZMO_ARM: f32 = 12.0;
+/// Radius of the ring of dots around the anchor, stage units.
+const GIZMO_RING_R: f32 = 17.0;
+/// Radius of each ring dot, in stage units.
+const GIZMO_DOT_R: f32 = 2.2;
+/// Number of dots in the ring.
+const GIZMO_RING_DOTS: usize = 8;
+
+/// Where a `project.particles` event is anchored, resolved
+/// live: through `EditorCore::positions_f` at the display
+/// frame — the same positions path `fx_geometry` uses — when
+/// the event names a figure (node `None` means the figure's
+/// root, node 0). When the event is free (`figure` is `None`)
+/// or its anchor no longer resolves (figure deleted, node
+/// out of range), the fallback is the event's stored stage
+/// point `[x, y]` — for a free event that point *is* the
+/// anchor; for a dangling one it is the creation-time joint
+/// position `add_particle` captured, and exactly where the
+/// rasterizer's `particles_at` would draw the event anyway.
+fn event_anchor(core: &EditorCore, ev: &ParticleEvent) -> [f32; 2] {
+    if let Some(fi) = ev.figure {
+        if fi < core.project.figures.len() {
+            let pos = core.positions_f(core.display_frame(), fi);
+            if let Some(&p) = pos.get(ev.node.unwrap_or(0)) {
+                return p;
+            }
+        }
+    }
+    [ev.x, ev.y]
+}
+
+/// Anchor gizmo for the `project.particles` event at
+/// `clip_index`: a crosshair (two `Line` prims through the
+/// anchor, half-arm [`GIZMO_ARM`]) plus a ring of
+/// [`GIZMO_RING_DOTS`] `Disc` prims on a circle of radius
+/// [`GIZMO_RING_R`] around it, all in the fixed accent
+/// [`GIZMO_COLOR`] at alpha 0.9. Lines come before discs,
+/// the same prim order `fx_geometry` returns. Stage space,
+/// unscaled, like everything in this file — the consumer
+/// applies its view transform. An out-of-range `clip_index`
+/// returns an empty vec.
+///
+/// This is an **editor gizmo, not a render layer**, and two
+/// choices follow from that:
+///
+/// - **No frame gating.** `particles_at` only draws an
+///   event inside its live window `[frame, frame +
+///   0.7 * fps]`; the gizmo ignores that window and shows
+///   the anchor at *any* display frame. A marker that
+///   vanished whenever you scrubbed away from the event's
+///   frame could never be used to find, select or move the
+///   event — locating it is the gizmo's whole job.
+///   `fx_geometry` / `weather_geometry` remain the
+///   frame-accurate layers.
+/// - **Live anchor.** An anchored event is marked at the
+///   joint's solved position *now* (via `positions_f`, so
+///   graph channels apply, exactly as the stage draws the
+///   figure), not at the frozen `[x, y]` the event captured
+///   at creation and the rasterizer renders from. Scrubbing
+///   or re-posing moves the marker with the joint, which is
+///   what "where is this anchored" means while editing.
+///
+/// Further deltas from the render path, by the same logic:
+/// a hidden figure's anchor still resolves (`positions_f`
+/// is visibility-independent, unlike `fx_geometry`'s hidden
+/// guard) — a hidden anchor is precisely when the marker is
+/// needed.
+pub fn gizmo_geometry(core: &EditorCore, clip_index: usize) -> Vec<ParticlePrim> {
+    let Some(ev) = core.project.particles.get(clip_index) else {
+        return Vec::new();
+    };
+    let anchor = event_anchor(core, ev);
+    let [ax, ay] = anchor;
+    let mut prims = Vec::with_capacity(2 + GIZMO_RING_DOTS);
+    prims.push(ParticlePrim::Line {
+        a: [ax - GIZMO_ARM, ay],
+        b: [ax + GIZMO_ARM, ay],
+        color: GIZMO_COLOR,
+        alpha: GIZMO_ALPHA,
+    });
+    prims.push(ParticlePrim::Line {
+        a: [ax, ay - GIZMO_ARM],
+        b: [ax, ay + GIZMO_ARM],
+        color: GIZMO_COLOR,
+        alpha: GIZMO_ALPHA,
+    });
+    for i in 0..GIZMO_RING_DOTS {
+        let a = i as f32 * std::f32::consts::TAU / GIZMO_RING_DOTS as f32;
+        prims.push(ParticlePrim::Disc {
+            pos: [ax + a.cos() * GIZMO_RING_R, ay + a.sin() * GIZMO_RING_R],
+            radius: GIZMO_DOT_R,
+            color: GIZMO_COLOR,
+            alpha: GIZMO_ALPHA,
+        });
+    }
+    prims
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stykanimate_rs::model::FxClipEntry;
+    use stykanimate_rs::model::{FxClipEntry, ParticleEvent, ParticleKind};
     use stykanimate_rs::vfx::{ParticleClip, Weather, WeatherKind};
 
     fn core_with_weather(kind: WeatherKind, amount: f32, wind: f32) -> EditorCore {
@@ -345,5 +458,109 @@ mod tests {
         core.project.fx_clips.push(burst_entry(0.0, 4.0));
         core.goto(2);
         assert_eq!(fx_geometry(&core), fx_geometry(&core));
+    }
+
+    fn free_event(x: f32, y: f32) -> ParticleEvent {
+        ParticleEvent {
+            frame: 0,
+            figure: None,
+            node: None,
+            x,
+            y,
+            kind: ParticleKind::Sparkle,
+            color: 0xFF5D5D,
+            seed: 5,
+        }
+    }
+
+    /// The full marker contract: 2 crosshair lines through
+    /// `centre` (one horizontal, one vertical, each
+    /// `2 * GIZMO_ARM` long), then `GIZMO_RING_DOTS` discs on
+    /// the ring around it — everything in `GIZMO_COLOR`.
+    fn assert_gizmo_at(prims: &[ParticlePrim], centre: [f32; 2]) {
+        assert_eq!(prims.len(), 2 + GIZMO_RING_DOTS, "crosshair + ring: {prims:?}");
+        let (lines, dots) = prims.split_at(2);
+        let mut saw_horizontal = false;
+        let mut saw_vertical = false;
+        for prim in lines {
+            let ParticlePrim::Line { a, b, color, .. } = prim else {
+                panic!("crosshair arms must be lines, got {prim:?}");
+            };
+            assert_eq!(*color, GIZMO_COLOR);
+            let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+            assert_eq!(mid, centre, "crosshair arm not centred on the anchor");
+            if a[1] == b[1] {
+                saw_horizontal = true;
+                assert_eq!((b[0] - a[0]).abs(), 2.0 * GIZMO_ARM);
+            } else {
+                saw_vertical = true;
+                assert_eq!((b[1] - a[1]).abs(), 2.0 * GIZMO_ARM);
+            }
+        }
+        assert!(saw_horizontal && saw_vertical, "one arm per axis: {lines:?}");
+        for prim in dots {
+            let ParticlePrim::Disc { pos, radius, color, .. } = prim else {
+                panic!("ring must be discs, got {prim:?}");
+            };
+            assert_eq!(*color, GIZMO_COLOR);
+            assert_eq!(*radius, GIZMO_DOT_R);
+            let d = ((pos[0] - centre[0]).powi(2) + (pos[1] - centre[1]).powi(2)).sqrt();
+            assert!((d - GIZMO_RING_R).abs() < 0.01, "dot off the ring: {pos:?}");
+        }
+    }
+
+    #[test]
+    fn gizmo_missing_index_is_empty() {
+        let core = EditorCore::new();
+        assert!(gizmo_geometry(&core, 0).is_empty());
+        let mut core = EditorCore::new();
+        core.project.particles.push(free_event(10.0, 10.0));
+        assert!(gizmo_geometry(&core, 1).is_empty());
+        assert!(!gizmo_geometry(&core, 0).is_empty());
+    }
+
+    #[test]
+    fn gizmo_anchored_event_marks_the_solved_joint() {
+        let mut core = EditorCore::new();
+        // The stored x/y is deliberately wrong: the gizmo
+        // must follow the live anchor (the joint's solved
+        // position via positions_f), not the creation-time
+        // snapshot the rasterizer renders from.
+        let mut ev = free_event(-999.0, -999.0);
+        ev.figure = Some(0);
+        ev.node = Some(1);
+        core.project.particles.push(ev);
+        let anchor = core.positions_f(core.display_frame(), 0)[1];
+        assert_gizmo_at(&gizmo_geometry(&core, 0), anchor);
+    }
+
+    #[test]
+    fn gizmo_free_event_marks_its_stage_point() {
+        let mut core = EditorCore::new();
+        core.project.particles.push(free_event(123.0, 456.0));
+        assert_gizmo_at(&gizmo_geometry(&core, 0), [123.0, 456.0]);
+    }
+
+    #[test]
+    fn gizmo_ignores_the_events_live_window() {
+        // The event fires at frame 40 while the display frame
+        // is 0 — long outside its [frame, frame + 0.7*fps]
+        // render window. The gizmo shows the anchor anyway:
+        // locating the event is its job (see the fn docs).
+        let mut core = EditorCore::new();
+        let mut ev = free_event(50.0, 60.0);
+        ev.frame = 40;
+        core.project.particles.push(ev);
+        assert_gizmo_at(&gizmo_geometry(&core, 0), [50.0, 60.0]);
+    }
+
+    #[test]
+    fn gizmo_dangling_anchor_falls_back_to_the_stored_point() {
+        let mut core = EditorCore::new();
+        let mut ev = free_event(70.0, 80.0);
+        ev.figure = Some(99);
+        ev.node = Some(3);
+        core.project.particles.push(ev);
+        assert_gizmo_at(&gizmo_geometry(&core, 0), [70.0, 80.0]);
     }
 }

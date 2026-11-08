@@ -170,6 +170,41 @@ impl Workspace {
             Workspace::Home => "ws-home",
         }
     }
+
+    /// One sentence saying what this workspace is for —
+    /// the same summaries that head the gating-table
+    /// lists below, exposed for surfaces that describe
+    /// the workspaces without mounting them (the help
+    /// panel, the status strip). Keep each to a single
+    /// sentence ending in a period.
+    pub fn blurb(self) -> &'static str {
+        match self {
+            Workspace::Animate => {
+                "Pose figures and build the animation frame by frame, with the inspectors, camera, playback and frame tools."
+            }
+            Workspace::Draw => {
+                "Draw freehand strokes, shapes and text over the figures."
+            }
+            Workspace::Graph => {
+                "Edit the motion curves and easing of the selected figure's keys."
+            }
+            Workspace::Effects => {
+                "Add and edit particle and visual-effects clips anchored to the scene."
+            }
+            Workspace::Audio => {
+                "Place sound clips and line them up against the animation."
+            }
+            Workspace::Build3D => {
+                "Pose the 3D figure and frame it with the camera."
+            }
+            Workspace::Export => {
+                "Render and export the project to images, video and other formats."
+            }
+            Workspace::Home => {
+                "Open, create and manage projects, and check project stats."
+            }
+        }
+    }
 }
 
 /// Parse a persisted workspace name (from
@@ -258,7 +293,11 @@ impl Section {
 // least one list (proven by the coverage test below);
 // Animate is deliberately the richest — it is the
 // default workspace and the GPUI app's Animate set was
-// likewise its largest.
+// likewise its largest. Each list's doc comment opens
+// with the one-sentence summary of what that workspace
+// is for; the same sentences are exposed at runtime as
+// [`Workspace::blurb`] for the help/status surfaces —
+// keep the two in step.
 
 /// Animate: the core animating set — figures, library,
 /// layers, project, all three inspectors, pose and
@@ -367,12 +406,31 @@ pub fn section_visible(ws: Workspace, section: Section) -> bool {
 /// `ws-*`, the active workspace rendered active. A press
 /// runs [`select_workspace`] (switch + persist). Mount
 /// it as its own row under the menu bar.
+///
+/// Each chip's text carries its keyboard shortcut as a
+/// quiet suffix — `Animate · Alt+1` … `Home · Alt+8`,
+/// matching the `Alt+1..8` bindings in `main.rs`'s
+/// `on_key` (chip position in [`Workspace::all`] + 1).
+/// The suffix is composed here, at the call site, rather
+/// than folded into [`Workspace::label`]: `label()` is
+/// also the persisted name and is pinned by tests, and
+/// the kit's `btn` renders a single plain text run — it
+/// has no muted/secondary span — so the middle-dot
+/// suffix in the same label is the least noisy rendering
+/// available.
 pub fn workspace_row(s: &State, t: &Theme) -> El {
     let mut bar = row().key("workspace-row").gap(4.0).center_y();
-    for ws in Workspace::all() {
-        bar = bar.child(btn(ws.key(), ws.label(), s.workspace == ws, t, move |s: &mut State| {
-            select_workspace(s, ws);
-        }));
+    for (i, ws) in Workspace::all().into_iter().enumerate() {
+        let chip_label = format!("{} · Alt+{}", ws.label(), i + 1);
+        bar = bar.child(btn(
+            ws.key(),
+            &chip_label,
+            s.workspace == ws,
+            t,
+            move |s: &mut State| {
+                select_workspace(s, ws);
+            },
+        ));
     }
     bar
 }
@@ -406,6 +464,19 @@ mod tests {
                 assert_ne!(a.label(), b.label());
                 assert_ne!(a.name(), b.name());
                 assert_ne!(a.key(), b.key());
+            }
+        }
+    }
+
+    #[test]
+    fn every_workspace_has_a_unique_one_sentence_blurb() {
+        let all = Workspace::all();
+        for (i, ws) in all.iter().enumerate() {
+            let b = ws.blurb();
+            assert!(!b.is_empty(), "{ws:?} has an empty blurb");
+            assert!(b.ends_with('.'), "{ws:?} blurb is not one sentence: {b}");
+            for other in &all[i + 1..] {
+                assert_ne!(b, other.blurb(), "blurbs must be unique");
             }
         }
     }

@@ -200,14 +200,43 @@ pub fn is_recovery_entry(info: &ProjectInfo) -> bool {
         .unwrap_or(false)
 }
 
-/// The rows the panel lists: library entries (recovery
-/// snapshot excluded) whose name matches `query`, via
-/// `projects::filter_projects` (projects.rs:149 —
-/// case-insensitive substring; empty query lists all).
+/// True for a file the shell itself owns inside the
+/// projects dir — never a user project, so never a library
+/// row. The shell keeps three files beside the saved
+/// projects (shell.rs's `default_dir` is `./projects`):
+/// the layout prefs (`.layout.json`), the recovery
+/// snapshot (`.recovery.json`) and the recents list
+/// (`recents.json`). The snapshot parses as a `Project`
+/// and reaches the scan; the prefs and recents normally
+/// fail the parse — but the exclusion must not depend on
+/// that accident: any dotfile, and any file carrying one
+/// of the shell's names, is shell-owned. (A user project
+/// saved under the name "Layout" slugs to `layout.json` —
+/// no dot, not a shell name — and stays listed.)
+pub fn is_shell_owned_entry(info: &ProjectInfo) -> bool {
+    let Some(name) = info.path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    name.starts_with('.')
+        || name == shell::LAYOUT_FILE
+        || name == shell::RECOVERY_FILE
+        || name == shell::RECENTS_FILE
+}
+
+/// The rows the panel lists: library entries whose name
+/// matches `query`, via `projects::filter_projects`
+/// (projects.rs:149 — case-insensitive substring; empty
+/// query lists all). Shell-owned files are excluded here,
+/// at the single choke point every row (and the row
+/// count) flows through: the recovery snapshot, which the
+/// banner owns, and the shell's other files in the
+/// projects dir (`.layout.json`, `recents.json`, any
+/// dotfile) — the layout prefs surfaced as a ".layout"
+/// row on a real screen before this filter existed.
 pub fn visible_projects(entries: &[ProjectInfo], query: &str) -> Vec<ProjectInfo> {
     let library: Vec<ProjectInfo> = entries
         .iter()
-        .filter(|info| !is_recovery_entry(info))
+        .filter(|info| !is_recovery_entry(info) && !is_shell_owned_entry(info))
         .cloned()
         .collect();
     projects::filter_projects(&library, query)
@@ -705,6 +734,73 @@ mod tests {
         assert_eq!(filtered[0].name, "Alpha");
         assert_eq!(filtered[1].name, "Alpha Two");
         assert!(visible_projects(&entries, "gamma").is_empty());
+    }
+
+    #[test]
+    fn shell_owned_entry_matches_shell_files_and_dotfiles_only() {
+        // The shell's own files in the projects dir.
+        assert!(is_shell_owned_entry(&info(
+            "Animate",
+            "projects/.layout.json"
+        )));
+        assert!(is_shell_owned_entry(&info(
+            "Untitled",
+            "projects/.recovery.json"
+        )));
+        assert!(is_shell_owned_entry(&info(
+            "recents",
+            "projects/recents.json"
+        )));
+        // Any other dotfile is shell-owned by the same rule.
+        assert!(is_shell_owned_entry(&info(
+            "Hidden",
+            "projects/.hidden.json"
+        )));
+        // Ordinary projects are not, wherever they live.
+        assert!(!is_shell_owned_entry(&info(
+            "Alpha",
+            "projects/alpha.json"
+        )));
+        // A user project *named* Layout slugs to
+        // `layout.json` — no dot, not a shell constant —
+        // and must stay listed.
+        assert!(!is_shell_owned_entry(&info(
+            "Layout",
+            "projects/layout.json"
+        )));
+        assert!(!is_shell_owned_entry(&info(
+            "Recovery",
+            "projects/recovery.json"
+        )));
+    }
+
+    #[test]
+    fn visible_projects_drops_shell_owned_files() {
+        // Scan-shaped entries as the shell's own files
+        // would produce them if they parsed as projects
+        // (the recovery snapshot really does; the layout
+        // prefs are the row the user saw on screen).
+        let entries = vec![
+            info("Alpha", "projects/alpha.json"),
+            info("Animate", "projects/.layout.json"),
+            info("Untitled", "projects/.recovery.json"),
+            info("recents", "projects/recents.json"),
+            info("Beta", "projects/beta.json"),
+        ];
+        let all = visible_projects(&entries, "");
+        assert_eq!(
+            all.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["Alpha", "Beta"],
+            "only real projects are rows"
+        );
+        // A search cannot resurrect a shell file either:
+        // the exclusion runs before the name filter.
+        assert!(visible_projects(&entries, "recents").is_empty());
+        assert!(visible_projects(&entries, "Animate").is_empty());
+        // The recovery exclusion from the banner's side is
+        // unchanged by the wider filter.
+        assert!(is_recovery_entry(&entries[2]));
+        assert_eq!(visible_projects(&entries, "Untitled").len(), 0);
     }
 
     #[test]

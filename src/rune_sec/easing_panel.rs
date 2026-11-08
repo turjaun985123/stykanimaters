@@ -19,7 +19,10 @@
 //!   (`Project.easing`, `model.rs:696`). One button per
 //!   value, calling the direct setter
 //!   `EditorCore::set_project_easing` (added in Phase E),
-//!   with the current easing shown active. (Phase D shipped
+//!   with the current easing shown active. Above the
+//!   buttons, the Phase F curve picker draws the four
+//!   project curves in pressable cells (see `picker_cell`
+//!   for the click design). (Phase D shipped
 //!   a single Cycle button here because `cycle_easing` was
 //!   the only op then; the direct setter superseded it and
 //!   the cycle button was removed rather than kept as a
@@ -40,7 +43,7 @@
 //! `Channel::value_at` — the same curve the engine will play.
 
 use rune::tok::{self, type_, Theme};
-use rune::{canvas, col, row, text, Color, El, Shape};
+use rune::{canvas, col, el, row, text, Color, El, Shape};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::graph::TangentPreset;
 use stykanimate_rs::model::Easing;
@@ -53,6 +56,12 @@ pub const CURVE_W: f32 = 44.0;
 pub const CURVE_H: f32 = 28.0;
 /// Samples taken along each preview curve.
 pub const CURVE_SAMPLES: usize = 24;
+
+/// Width / height (points) of each project-picker cell's
+/// curve box. Four padded cells plus gaps span ≈306pt
+/// wide and ≈63pt tall — the picker's ~300×64 strip.
+pub const PICK_W: f32 = 64.0;
+pub const PICK_H: f32 = 38.0;
 
 /// The four tween easings, in the engine's own cycle order
 /// (`Easing::next`, `model.rs:574`).
@@ -106,6 +115,16 @@ pub fn easing_curve(easing: Easing, samples: usize) -> Vec<f32> {
     (0..samples)
         .map(|i| easing.apply(i as f32 / (samples - 1) as f32))
         .collect()
+}
+
+/// The project picker's data: the four tween easings in
+/// display order, each paired with its sampled curve — the
+/// same `easing_curve` samples (from the engine's own
+/// `Easing::apply`, `model.rs:566`) that the per-row preview
+/// chips draw. Factored out of the builder so tests can pin
+/// the strip's contents without a `State`.
+pub fn picker_curves() -> [(Easing, Vec<f32>); 4] {
+    TWEEN_EASINGS.map(|e| (e, easing_curve(e, CURVE_SAMPLES)))
 }
 
 /// Sample a graph tangent preset's curve via the engine's
@@ -168,6 +187,71 @@ pub fn curve_shape(samples: &[f32], w: f32, h: f32, color: Color) -> Shape {
 /// One preset row: the curve preview chip beside its button.
 fn preset_row(preview: El, button: El) -> El {
     row().gap(6.0).center_y().child(preview).child(button)
+}
+
+/// One project-picker cell: a pressable card carrying its
+/// easing's curve above its label.
+///
+/// Click design (Phase F): a Rune canvas has no per-region
+/// clicks, but none are needed — `on_press` is a generic
+/// `El` method (rune `el/handlers.rs:6`) and the shell's
+/// own `chrome_view::btn` is exactly
+/// `el().on_press(..).child(text)`. A cell built the same
+/// way, with a canvas and a label as its children, is a
+/// real button: its whole area applies the preset through
+/// the same `set_project_preset` dispatch as the text
+/// buttons below it. (The fallback — one wide display-only
+/// canvas with the text buttons doing the applying — was
+/// not needed; per-cell buttons are genuinely supported
+/// and give the strip real per-curve clicks.) Active
+/// styling mirrors `btn`: accent fill with white content;
+/// inactive cells keep the card fill with a muted curve.
+fn picker_cell(e: Easing, samples: &[f32], active: bool, t: &Theme) -> El {
+    let accent = tok::accent(0, true);
+    let curve_color = if active { Color::WHITE } else { t.text_secondary };
+    el()
+        .key(match e {
+            Easing::Linear => "ease-pick-linear",
+            Easing::Smooth => "ease-pick-smooth",
+            Easing::EaseIn => "ease-pick-ease-in",
+            Easing::EaseOut => "ease-pick-ease-out",
+        })
+        .px(4.0)
+        .py(5.0)
+        .radius(6.0)
+        .fill(if active { accent } else { t.card })
+        .hover(if active { accent } else { t.control_track })
+        .press(if active { accent } else { t.control_off })
+        .on_press(move |s: &mut State| set_project_preset(&mut s.core, e))
+        .child(
+            col()
+                .gap(3.0)
+                .center_y()
+                .child(
+                    canvas(curve_shape(samples, PICK_W, PICK_H, curve_color))
+                        .size(PICK_W, PICK_H),
+                )
+                .child(
+                    text(tween_label(e))
+                        .font(type_::LABEL)
+                        .color(if active { Color::WHITE } else { t.text }),
+                ),
+        )
+}
+
+/// The project curve picker strip: the four picker cells
+/// in a row, the active cell following the project easing.
+fn picker_strip(core: &EditorCore, t: &Theme) -> El {
+    let mut strip = row().key("ease-picker").gap(6.0);
+    for (e, samples) in picker_curves() {
+        strip = strip.child(picker_cell(
+            e,
+            &samples,
+            project_preset_active(core, e),
+            t,
+        ));
+    }
+    strip
 }
 
 /// A curve preview chip: the sampled curve on a card fill.
@@ -246,6 +330,7 @@ pub fn easing_panel(s: &State, t: &Theme) -> El {
         "Project tween (default for all frames)".to_string(),
         t,
     ));
+    panel = panel.child(picker_strip(core, t));
     for e in TWEEN_EASINGS {
         panel = panel.child(preset_row(
             preview(&easing_curve(e, CURVE_SAMPLES), accent, t),
@@ -397,5 +482,58 @@ mod tests {
                 .collect();
             assert_eq!(active, vec![e], "after dispatching {}", e.label());
         }
+    }
+
+    #[test]
+    fn picker_curves_come_in_tween_display_order() {
+        for (i, (e, _)) in picker_curves().into_iter().enumerate() {
+            assert_eq!(e, TWEEN_EASINGS[i]);
+        }
+    }
+
+    #[test]
+    fn picker_curves_hit_the_endpoints_exactly() {
+        // `Easing::apply` (model.rs:566) is exact at the ends
+        // for all four formulas, so the strip's curves start
+        // at exactly 0.0 and end at exactly 1.0 — assert_eq,
+        // not a tolerance.
+        for (e, curve) in picker_curves() {
+            assert_eq!(curve.first().copied(), Some(0.0), "{} start", e.label());
+            assert_eq!(curve.last().copied(), Some(1.0), "{} end", e.label());
+        }
+    }
+
+    #[test]
+    fn picker_ease_in_sits_below_and_ease_out_above_the_diagonal() {
+        // The diagonal is the Linear curve itself (index 0
+        // in display order): at every interior sample the
+        // engine's t² sits strictly below it and 1−(1−t)²
+        // strictly above it.
+        let curves = picker_curves();
+        let linear = &curves[0].1;
+        let ease_in = &curves[2].1;
+        let ease_out = &curves[3].1;
+        assert_eq!(curves[0].0, Easing::Linear);
+        assert_eq!(curves[2].0, Easing::EaseIn);
+        assert_eq!(curves[3].0, Easing::EaseOut);
+        for i in 1..linear.len() - 1 {
+            assert!(ease_in[i] < linear[i], "ease-in sample {i} not below diagonal");
+            assert!(ease_out[i] > linear[i], "ease-out sample {i} not above diagonal");
+        }
+    }
+
+    #[test]
+    fn picker_cells_and_strip_build_for_every_preset() {
+        // Builder smoke: every cell constructs in both the
+        // active and inactive styling, and the strip builds
+        // against a bare core (no State needed — the cells'
+        // press closures are only exercised by the runtime).
+        let t = tok::theme(true);
+        for (e, samples) in picker_curves() {
+            let _ = picker_cell(e, &samples, true, &t);
+            let _ = picker_cell(e, &samples, false, &t);
+        }
+        let core = EditorCore::new();
+        let _ = picker_strip(&core, &t);
     }
 }

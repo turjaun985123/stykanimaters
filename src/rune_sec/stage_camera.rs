@@ -25,6 +25,14 @@
 //!    `settings_popover.rs` / `menus.rs`); this file is the
 //!    geometry half of that follow-up.
 //!
+//! Phase F extends the guides family with two more
+//! stage-space overlays in the same style, drawn by the
+//! same guides pass (step 4 below — no new wiring, no new
+//! flag): [`frustum_geometry`] outlines the region the
+//! *current camera* frames, and [`safe_frame_geometry`]
+//! draws the broadcast action-safe / title-safe rectangles
+//! of the stage itself.
+//!
 //! ## Sign convention — proven parity with export, not taste
 //!
 //! `export::camera_rotate_offset` (export.rs:178-195)
@@ -257,10 +265,10 @@ pub fn rotated_points(rt: &RotTransform, pts: &[[f32; 2]]) -> Vec<[f32; 2]> {
 }
 
 /// One guides primitive, in stage coordinates. Only lines
-/// exist today (cross, thirds, border are all straight);
-/// the enum leaves room for a future circle/safe-area
-/// primitive without changing [`guides_geometry`]'s
-/// signature.
+/// exist today (cross, thirds, border, camera frustum and
+/// safe-area rectangles are all straight); the enum leaves
+/// room for a future circle primitive without changing any
+/// geometry function's signature.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GuidePrim {
     /// A straight guide line from `a` to `b` (stage space).
@@ -305,6 +313,111 @@ pub fn guides_geometry(stage: [f32; 2]) -> Vec<GuidePrim> {
         line([w / 2.0, 0.0], [w / 2.0, h]),
         line([0.0, h / 2.0], [w, h / 2.0]),
     ]
+}
+
+/// The four sides of an axis-aligned rectangle as guide
+/// lines, in the same winding [`guides_geometry`]'s border
+/// uses (top-left → top-right → bottom-right → bottom-left).
+fn rect_lines(x0: f32, y0: f32, x1: f32, y1: f32) -> [GuidePrim; 4] {
+    [
+        GuidePrim::Line { a: [x0, y0], b: [x1, y0] },
+        GuidePrim::Line { a: [x1, y0], b: [x1, y1] },
+        GuidePrim::Line { a: [x1, y1], b: [x0, y1] },
+        GuidePrim::Line { a: [x0, y1], b: [x0, y0] },
+    ]
+}
+
+/// The camera frustum as a stage-space outline: the
+/// rectangle (4 lines, closed loop) bounding exactly the
+/// region the camera in effect at the display frame frames
+/// — in other words, the footprint of an exported frame on
+/// the stage. Pan/zoom (follow included) come from
+/// `camera_at` and the angle from `camera_angle_at`, both
+/// sampled at `core.display_frame()` via
+/// [`RotTransform::for_display`] — the same camera the
+/// stage drawing uses, so the outline can never disagree
+/// with the view it annotates.
+///
+/// ## How the rectangle is computed
+///
+/// The transform is built at the stage's own size
+/// (`el_size = project.stage`, so `fit = 1` and
+/// `scale = zoom`), and the four element corners are
+/// inverse-mapped with [`RotTransform::to_stage`]. Building
+/// at the stage's size makes the frustum a property of the
+/// *camera*, not of the window: a real window with a
+/// different aspect ratio letterboxes, showing more of the
+/// stage on one axis, but the camera's own frame — what an
+/// export at the stage's aspect contains — is this
+/// rectangle. At the default camera (stage centre, zoom 1,
+/// angle 0) it *is* the stage rectangle and coincides with
+/// [`guides_geometry`]'s border; zooming in shrinks it
+/// toward the camera centre, panning moves it (it may
+/// extend past the stage edges — the camera can frame
+/// off-stage space, and the outline says so), and a rotated
+/// camera rotates it into a true rotated rectangle, still
+/// emitted as four straight lines in element-corner order
+/// (top-left first, the border's winding).
+///
+/// A stage with a non-positive axis yields no frustum, the
+/// same degenerate rule as [`guides_geometry`]. The
+/// integrator draws the lines through `rt.to_screen` with
+/// the rest of the guides pass; see the module docs.
+pub fn frustum_geometry(core: &EditorCore) -> Vec<GuidePrim> {
+    let stage = core.project.stage;
+    let (w, h) = (stage[0], stage[1]);
+    if !(w > 0.0 && h > 0.0) {
+        return Vec::new();
+    }
+    let rt = RotTransform::for_display(core, stage);
+    let corners = [
+        rt.to_stage([0.0, 0.0]),
+        rt.to_stage([w, 0.0]),
+        rt.to_stage([w, h]),
+        rt.to_stage([0.0, h]),
+    ];
+    vec![
+        GuidePrim::Line { a: corners[0], b: corners[1] },
+        GuidePrim::Line { a: corners[1], b: corners[2] },
+        GuidePrim::Line { a: corners[2], b: corners[3] },
+        GuidePrim::Line { a: corners[3], b: corners[0] },
+    ]
+}
+
+/// The broadcast safe areas of the stage itself, in stage
+/// coordinates — camera-independent (unlike
+/// [`frustum_geometry`], nothing here moves when the camera
+/// does):
+///
+/// 1. **action-safe** — the stage inset by 5% of each axis
+///    on every side (`w/20`, `h/20`); action inside it
+///    survives overscan/cropping (4 lines);
+/// 2. **title-safe** — the stage inset by 10% of each axis
+///    on every side (`w/10`, `h/10`); text and titles
+///    belong inside it (4 lines).
+///
+/// The insets are per-axis percentages — 5% of the *width*
+/// horizontally, 5% of the *height* vertically — the
+/// broadcast convention, so on a non-square stage the two
+/// margins differ in absolute units. 8 primitives for any
+/// non-degenerate stage, action-safe first (the larger
+/// rect) then title-safe; a stage with a non-positive axis
+/// yields none, matching [`guides_geometry`]. Drawn through
+/// `rt.to_screen` with the guides pass, like every overlay
+/// in this file.
+pub fn safe_frame_geometry(stage: [f32; 2]) -> Vec<GuidePrim> {
+    let (w, h) = (stage[0], stage[1]);
+    if !(w > 0.0 && h > 0.0) {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(8);
+    // Action-safe: 5% of each axis per side.
+    let (ax, ay) = (w / 20.0, h / 20.0);
+    out.extend(rect_lines(ax, ay, w - ax, h - ay));
+    // Title-safe: 10% of each axis per side.
+    let (tx, ty) = (w / 10.0, h / 10.0);
+    out.extend(rect_lines(tx, ty, w - tx, h - ty));
+    out
 }
 
 #[cfg(test)]
@@ -489,5 +602,137 @@ mod tests {
         assert!(guides_geometry([0.0, 720.0]).is_empty());
         assert!(guides_geometry([960.0, 0.0]).is_empty());
         assert!(guides_geometry([-10.0, -10.0]).is_empty());
+    }
+
+    /// A fresh core whose only camera key sits at frame 0
+    /// (the fresh core's display frame) centred on the demo
+    /// stage, with the given zoom and angle.
+    fn keyed_core(zoom: f32, angle: f32) -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.camera.push(stykanimate_rs::model::CameraKey {
+            frame: 0,
+            x: 480.0,
+            y: 360.0,
+            zoom,
+            angle,
+        });
+        core
+    }
+
+    #[test]
+    fn frustum_at_rest_is_the_stage_rect() {
+        // A fresh core's camera is the default (stage
+        // centre, zoom 1, angle 0), so the frustum is the
+        // stage rectangle itself — the same four lines as
+        // guides_geometry's border, in the same order.
+        let core = EditorCore::new();
+        let prims = frustum_geometry(&core);
+        assert_eq!(
+            prims,
+            vec![
+                GuidePrim::Line { a: [0.0, 0.0], b: [960.0, 0.0] },
+                GuidePrim::Line { a: [960.0, 0.0], b: [960.0, 720.0] },
+                GuidePrim::Line { a: [960.0, 720.0], b: [0.0, 720.0] },
+                GuidePrim::Line { a: [0.0, 720.0], b: [0.0, 0.0] },
+            ]
+        );
+    }
+
+    #[test]
+    fn frustum_zoom_two_halves_the_span() {
+        // Zoom 2 about the stage centre: the framed span
+        // halves on both axes — 480×360 centred on
+        // (480, 360), i.e. corners (240, 180)…(720, 540).
+        // All values exact in f32 (angle 0, scale 2).
+        let core = keyed_core(2.0, 0.0);
+        let prims = frustum_geometry(&core);
+        assert_eq!(
+            prims,
+            vec![
+                GuidePrim::Line { a: [240.0, 180.0], b: [720.0, 180.0] },
+                GuidePrim::Line { a: [720.0, 180.0], b: [720.0, 540.0] },
+                GuidePrim::Line { a: [720.0, 540.0], b: [240.0, 540.0] },
+                GuidePrim::Line { a: [240.0, 540.0], b: [240.0, 180.0] },
+            ]
+        );
+    }
+
+    #[test]
+    fn frustum_rotates_with_the_camera() {
+        // Angle +90°, zoom 1, camera at the stage centre.
+        // Hand-computed via to_stage: each element corner
+        // first turns +90° about the element centre
+        // (480, 360) — (dx, dy) → (−dy, dx) — then unmaps
+        // at scale 1 about the same centre:
+        //   TL (0, 0)     → (840, −120)
+        //   TR (960, 0)   → (840, 840)
+        //   BR (960, 720) → (120, 840)
+        //   BL (0, 720)   → (120, −120)
+        // The span swaps axes: 720 wide × 960 tall. f32
+        // sin/cos at 90° is not exact, hence the 1e-3
+        // tolerance every rotation test here uses.
+        let core = keyed_core(1.0, 90.0);
+        let prims = frustum_geometry(&core);
+        let want = [
+            ([840.0, -120.0], [840.0, 840.0]),
+            ([840.0, 840.0], [120.0, 840.0]),
+            ([120.0, 840.0], [120.0, -120.0]),
+            ([120.0, -120.0], [840.0, -120.0]),
+        ];
+        assert_eq!(prims.len(), want.len());
+        for (prim, (a, b)) in prims.iter().zip(want) {
+            let GuidePrim::Line { a: ga, b: gb } = *prim;
+            assert!(
+                close(ga, a, 1e-3) && close(gb, b, 1e-3),
+                "frustum side {ga:?}→{gb:?}, want {a:?}→{b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn frustum_rejects_a_degenerate_stage() {
+        let mut core = EditorCore::new();
+        core.project.stage = [0.0, 720.0];
+        assert!(frustum_geometry(&core).is_empty());
+        core.project.stage = [960.0, -5.0];
+        assert!(frustum_geometry(&core).is_empty());
+    }
+
+    #[test]
+    fn safe_frames_are_exact_insets() {
+        // 960×720: action-safe = 5% per axis → inset
+        // (48, 36), rect (48, 36)…(912, 684); title-safe
+        // = 10% → inset (96, 72), rect (96, 72)…(864, 648).
+        // w/20, h/20, w/10, h/10 are all exact in f32 at
+        // this size, so the lines compare exactly.
+        let prims = safe_frame_geometry([960.0, 720.0]);
+        assert_eq!(
+            prims,
+            vec![
+                // Action-safe first.
+                GuidePrim::Line { a: [48.0, 36.0], b: [912.0, 36.0] },
+                GuidePrim::Line { a: [912.0, 36.0], b: [912.0, 684.0] },
+                GuidePrim::Line { a: [912.0, 684.0], b: [48.0, 684.0] },
+                GuidePrim::Line { a: [48.0, 684.0], b: [48.0, 36.0] },
+                // Then title-safe.
+                GuidePrim::Line { a: [96.0, 72.0], b: [864.0, 72.0] },
+                GuidePrim::Line { a: [864.0, 72.0], b: [864.0, 648.0] },
+                GuidePrim::Line { a: [864.0, 648.0], b: [96.0, 648.0] },
+                GuidePrim::Line { a: [96.0, 648.0], b: [96.0, 72.0] },
+            ]
+        );
+        // A second size pins the per-axis percentages (not
+        // absolute margins): 1000×500 → action inset
+        // (50, 25), title inset (100, 50).
+        let prims = safe_frame_geometry([1000.0, 500.0]);
+        assert_eq!(prims.len(), 8);
+        assert!(has_line(&prims, [50.0, 25.0], [950.0, 25.0]));
+        assert!(has_line(&prims, [950.0, 475.0], [50.0, 475.0]));
+        assert!(has_line(&prims, [100.0, 50.0], [900.0, 50.0]));
+        assert!(has_line(&prims, [900.0, 450.0], [100.0, 450.0]));
+        // Degenerate stages get no safe frames.
+        assert!(safe_frame_geometry([0.0, 720.0]).is_empty());
+        assert!(safe_frame_geometry([960.0, 0.0]).is_empty());
+        assert!(safe_frame_geometry([-10.0, -10.0]).is_empty());
     }
 }

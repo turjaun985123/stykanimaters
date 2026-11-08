@@ -16,19 +16,122 @@
 //!   `delete_figure`'s bookkeeping (editor.rs) run in
 //!   reverse, plus the index shifts an insertion requires.
 //!
-//! Bookkeeping scope, stated plainly: duplication inserts
-//! cloned pose rows (and bend rows, where a frame stores
-//! them) into every frame, shifts particle anchors and the
-//! session's solo target above the insertion point, and
-//! selects the copy. It does **not** remap FX-clip anchors
-//! (`Project::fx_clips`) or graph channels that name a
-//! figure — neither did the shell helper, and neither does
-//! `delete_figure`, so all three figure-structure ops share
-//! the same scope. Widening it belongs in one deliberate
-//! pass over all of them, not in this promotion.
+//! Bookkeeping scope: duplication inserts cloned pose rows
+//! (and bend rows, where a frame stores them) into every
+//! frame, remaps every stored figure index in the project
+//! (see [`remap_figures_after_insert`]), shifts the session's
+//! solo target above the insertion point, and selects the
+//! copy. The remap helpers below are the one deliberate pass
+//! over the whole census of figure-index-bearing fields:
+//!
+//! * `Project::particles` — `ParticleEvent::figure: Option<usize>`;
+//! * `Project::fx_clips` — `FxClipEntry::figure: usize`
+//!   (model.rs; the anchor lives on the entry, not inside
+//!   `vfx::ParticleClip`);
+//! * `Project::channels` — `graph::Channel::figure: usize`;
+//! * `Project::camera_follow: Option<usize>`.
+//!
+//! Fields checked and found NOT to carry a figure index:
+//! `FigureInstance::clip` (a movieclip id), `ClipDef`
+//! (self-contained def), `SpriteInstance::asset` (an asset
+//! index), `TextInstance`, `AudioClip`, `Stroke`. Session
+//! state is not the helpers' business: `EditorCore::solo`
+//! is shifted by the ops themselves, and `selected_figure`
+//! is set explicitly. `delete_figure` (editor.rs) wires the
+//! removal helper with a one-line call — see
+//! [`remap_figures_after_remove`].
 
 use crate::editor::EditorCore;
-use crate::model::Pose;
+use crate::model::{Pose, Project};
+
+/// Remap every stored figure index in `project` after a new
+/// figure was inserted at `new_index` (the index the new
+/// figure now occupies). References at or above `new_index`
+/// named the figure that used to sit there — and everything
+/// above it — so they shift up by one; references below it
+/// are untouched. In particular a reference equal to the
+/// *duplicated* figure's own index (`new_index - 1` for
+/// `duplicate_figure`, which inserts the copy right after
+/// the original) keeps naming the original.
+pub fn remap_figures_after_insert(project: &mut Project, new_index: usize) {
+    for e in &mut project.particles {
+        if let Some(f) = e.figure {
+            if f >= new_index {
+                e.figure = Some(f + 1);
+            }
+        }
+    }
+    for entry in &mut project.fx_clips {
+        if entry.figure >= new_index {
+            entry.figure += 1;
+        }
+    }
+    for ch in &mut project.channels {
+        if ch.figure >= new_index {
+            ch.figure += 1;
+        }
+    }
+    if let Some(f) = project.camera_follow {
+        if f >= new_index {
+            project.camera_follow = Some(f + 1);
+        }
+    }
+}
+
+/// Remap every stored figure index in `project` after the
+/// figure at `removed` was deleted. References above
+/// `removed` shift down by one. References TO the removed
+/// figure are resolved per type, because their anchor is
+/// gone:
+///
+/// * particle events anchored to it are dropped (the same
+///   rule `delete_figure` already applied to particles);
+/// * FX clip entries anchored to it are dropped —
+///   `FxClipEntry::figure` is a plain `usize`, so there is
+///   no "unanchored" value to fall back to, and a clip whose
+///   anchor node no longer exists has no position to draw
+///   at;
+/// * graph channels targeting it are dropped — the channel
+///   drove that figure's property and has nothing left to
+///   drive (the graph evaluator tolerates stale channels,
+///   but keeping dead ones would silently accumulate);
+/// * `camera_follow` becomes `None` — following nothing is
+///   the field's own "off" state.
+///
+/// Integrator note: `delete_figure` (editor.rs) gains the
+/// full remap by replacing its `particles.retain(...)` block
+/// with `crate::figure_ops::remap_figures_after_remove(&mut
+/// self.project, fi);` after the figure/pose removal (plus
+/// the session solo shift: `if self.solo == Some(fi) {
+/// self.solo = None } else if let Some(s) = self.solo { if
+/// s > fi { self.solo = Some(s - 1) } }`).
+pub fn remap_figures_after_remove(project: &mut Project, removed: usize) {
+    project.particles.retain(|e| e.figure != Some(removed));
+    for e in &mut project.particles {
+        if let Some(f) = e.figure {
+            if f > removed {
+                e.figure = Some(f - 1);
+            }
+        }
+    }
+    project.fx_clips.retain(|entry| entry.figure != removed);
+    for entry in &mut project.fx_clips {
+        if entry.figure > removed {
+            entry.figure -= 1;
+        }
+    }
+    project.channels.retain(|ch| ch.figure != removed);
+    for ch in &mut project.channels {
+        if ch.figure > removed {
+            ch.figure -= 1;
+        }
+    }
+    match project.camera_follow {
+        Some(f) if f == removed => project.camera_follow = None,
+        Some(f) if f > removed => project.camera_follow = Some(f - 1),
+        _ => {}
+    }
+}
 
 impl EditorCore {
     /// Set figure `fi`'s colour directly (the colour picker
@@ -91,18 +194,12 @@ impl EditorCore {
                 frame.bends.insert(fi + 1, b);
             }
         }
-        // Stored figure indices above the insertion point
-        // shift by one, so anchors keep pointing at the same
-        // figure: particle anchors in the project, and the
-        // session's solo target. (`delete_figure` performs
-        // the mirror bookkeeping for its removal.)
-        for e in &mut self.project.particles {
-            if let Some(f) = e.figure {
-                if f > fi {
-                    e.figure = Some(f + 1);
-                }
-            }
-        }
+        // Every stored figure index in the project remaps
+        // (particles, FX-clip anchors, graph channels,
+        // camera follow), so anchors keep pointing at the
+        // same figure; the session's solo target shifts here
+        // because it is editor state, not project data.
+        remap_figures_after_insert(&mut self.project, fi + 1);
         if let Some(solo) = self.solo {
             if solo > fi {
                 self.solo = Some(solo + 1);
@@ -185,6 +282,114 @@ mod tests {
         assert_eq!(core.duplicate_figure(999), None);
         assert_eq!(core.project.figures.len(), n);
         assert_eq!(core.status, "No figure to duplicate.");
+    }
+
+    fn fx_entry(figure: usize) -> crate::model::FxClipEntry {
+        crate::model::FxClipEntry {
+            clip: crate::vfx::ParticleClip {
+                start: 0.0,
+                duration: 6.0,
+                kind: crate::vfx::ClipKind::Burst,
+                color: 0xFFCC33,
+                color2: None,
+                seed: 7,
+                angle: 0.0,
+                length: 130.0,
+            },
+            figure,
+            node: 0,
+        }
+    }
+
+    fn channel(figure: usize) -> crate::graph::Channel {
+        crate::graph::Channel {
+            figure,
+            target: crate::graph::ChannelTarget::Angle(0),
+            keys: Vec::new(),
+        }
+    }
+
+    fn particle(figure: Option<usize>) -> ParticleEvent {
+        ParticleEvent {
+            frame: 0,
+            figure,
+            node: None,
+            x: 0.0,
+            y: 0.0,
+            kind: ParticleKind::Burst,
+            color: 0xFFFFFF,
+            seed: 0,
+        }
+    }
+
+    #[test]
+    fn duplicate_figure_remaps_fx_channels_and_camera_follow() {
+        let mut core = EditorCore::new();
+        core.add_figure();
+        assert_eq!(core.project.figures.len(), 2);
+        // Anchors on the later figure (shift), on the
+        // duplicated figure itself (stay).
+        core.project.fx_clips = vec![fx_entry(1), fx_entry(0)];
+        core.project.channels = vec![channel(1), channel(0)];
+        core.project.camera_follow = Some(1);
+        assert_eq!(core.duplicate_figure(0), Some(1));
+        assert_eq!(core.project.fx_clips[0].figure, 2);
+        assert_eq!(core.project.fx_clips[1].figure, 0);
+        assert_eq!(core.project.channels[0].figure, 2);
+        assert_eq!(core.project.channels[1].figure, 0);
+        assert_eq!(core.project.camera_follow, Some(2));
+        // Following the duplicated figure itself stays put.
+        core.project.camera_follow = Some(0);
+        assert_eq!(core.duplicate_figure(0), Some(1));
+        assert_eq!(core.project.camera_follow, Some(0));
+    }
+
+    #[test]
+    fn remap_after_remove_drops_dead_anchors_and_shifts_the_rest() {
+        let mut project = Project::new_demo();
+        let fig = project.figures[0].clone();
+        project.figures.push(fig.clone());
+        project.figures.push(fig);
+        project.particles = vec![
+            particle(Some(0)),
+            particle(Some(1)),
+            particle(Some(2)),
+            particle(None),
+        ];
+        project.fx_clips = vec![fx_entry(0), fx_entry(1), fx_entry(2)];
+        project.channels = vec![channel(0), channel(1), channel(2)];
+        project.camera_follow = Some(2);
+        remap_figures_after_remove(&mut project, 1);
+        // Anchored to the removed figure: dropped everywhere.
+        // Above it: shifted down. Below / unanchored: untouched.
+        let pfigs: Vec<Option<usize>> = project.particles.iter().map(|e| e.figure).collect();
+        assert_eq!(pfigs, vec![Some(0), Some(1), None]);
+        let fxfigs: Vec<usize> = project.fx_clips.iter().map(|e| e.figure).collect();
+        assert_eq!(fxfigs, vec![0, 1]);
+        let chfigs: Vec<usize> = project.channels.iter().map(|c| c.figure).collect();
+        assert_eq!(chfigs, vec![0, 1]);
+        assert_eq!(project.camera_follow, Some(1));
+        // Following the removed figure itself: follow turns off.
+        project.camera_follow = Some(1);
+        remap_figures_after_remove(&mut project, 1);
+        assert_eq!(project.camera_follow, None);
+    }
+
+    #[test]
+    fn remap_after_insert_shifts_at_and_above_only() {
+        let mut project = Project::new_demo();
+        project.particles = vec![particle(Some(0)), particle(Some(1))];
+        project.fx_clips = vec![fx_entry(0), fx_entry(1)];
+        project.channels = vec![channel(0), channel(1)];
+        project.camera_follow = Some(0);
+        remap_figures_after_insert(&mut project, 1);
+        assert_eq!(project.particles[0].figure, Some(0));
+        assert_eq!(project.particles[1].figure, Some(2));
+        assert_eq!(project.fx_clips[0].figure, 0);
+        assert_eq!(project.fx_clips[1].figure, 2);
+        assert_eq!(project.channels[0].figure, 0);
+        assert_eq!(project.channels[1].figure, 2);
+        assert_eq!(project.camera_follow, Some(0));
     }
 
     #[test]

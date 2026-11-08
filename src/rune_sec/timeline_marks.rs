@@ -56,6 +56,40 @@
 //!   no snapshot to restore; a selection is view state, and
 //!   the next press starts a fresh one.
 //!
+//! ## Loop edge dragging
+//!
+//! When a loop range exists, a press within [`EDGE_PX`]
+//! points of the range's start-chip left edge or end-chip
+//! right edge ([`edge_at`]) starts a loop edge drag instead
+//! of the selection gesture: Move rewrites the dragged
+//! endpoint to the chip under the pointer
+//! ([`loop_after_edge_drag`] / `apply_loop_edge`), Up posts
+//! the core's own status line once. The range selection is
+//! not touched by an edge press, and a cancelled edge drag
+//! leaves the range as last drawn — the same discipline as
+//! the selection gesture above.
+//!
+//! The core convention this mirrors (editor.rs): the range
+//! is one `EditorCore::loop_range: Option<(usize, usize)>`
+//! field, written through `set_loop_range`, which orders
+//! the endpoints and clamps them to the timeline; endpoints
+//! meeting is a valid single-frame loop, **not** a clear —
+//! clearing is `clear_loop_range`'s job alone. The field is
+//! documented in the core as runtime state that is never
+//! snapshotted for undo, so the drag takes no snapshots.
+//! Because `set_loop_range` also writes `core.status` on
+//! every call (and the shell toasts status changes), Move
+//! writes the field directly with exactly
+//! `set_loop_range`'s normalisation, and Up calls
+//! `set_loop_range` once with the final endpoints to post
+//! its status line — the frame_ops Loop start/end buttons'
+//! write, once per gesture instead of once per move.
+//!
+//! Which gesture a press started is carried in the drag's
+//! scratch `data`, like the selection anchor: non-negative
+//! is the anchor frame; `-1.0` / `-2.0` are the start /
+//! end edge sentinels (`edge_scratch`).
+//!
 //! Coordinates: `Drag` points are in the dragged element's
 //! own layout points "from its top-left as drawn (after
 //! scrolling and live offsets)" (rune `el.rs`, `Drag` docs).
@@ -132,6 +166,121 @@ pub fn chip_label(frame: usize, duration: f32) -> String {
     }
 }
 
+/// Half-width, in points, of the grab zone around a loop
+/// edge: a press this close to the start chip's left edge
+/// or the end chip's right edge starts a loop edge drag
+/// (see the module docs). Small next to the 30-point chip,
+/// so the zones of a one-frame loop never overlap.
+pub const EDGE_PX: f32 = 8.0;
+
+/// A loop range endpoint a press can grab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    /// The range's first frame: its chip's left edge.
+    Start,
+    /// The range's last frame: its chip's right edge.
+    End,
+}
+
+/// Which loop edge, if any, a press at content x `x` grabs:
+/// within [`EDGE_PX`] of the start chip's left edge or the
+/// end chip's right edge, in the same chip geometry
+/// [`frame_at_x`] uses (chip `i`'s left is `i * (chip_w +
+/// gap)`, its right that plus `chip_w`). When both zones
+/// match (impossible at the shell's geometry — a chip is
+/// wider than two zones — but possible for a caller's), the
+/// nearer edge wins and a tie goes to Start. `None` when
+/// there is no loop range, no frames, a degenerate stride,
+/// or `x` is NaN. Hand-built endpoints past the timeline
+/// clamp to the last frame first, as [`in_loop`] does.
+pub fn edge_at(
+    x: f32,
+    chip_w: f32,
+    gap: f32,
+    loop_range: Option<(usize, usize)>,
+    count: usize,
+) -> Option<Edge> {
+    let (a, b) = loop_range?;
+    if count == 0 || x.is_nan() {
+        return None;
+    }
+    let stride = chip_w + gap;
+    if stride <= 0.0 {
+        return None;
+    }
+    let (a, b) = (a.min(b).min(count - 1), a.max(b).min(count - 1));
+    let start_x = a as f32 * stride;
+    let end_x = b as f32 * stride + chip_w;
+    let d_start = (x - start_x).abs();
+    let d_end = (x - end_x).abs();
+    match (d_start <= EDGE_PX, d_end <= EDGE_PX) {
+        (true, true) if d_end < d_start => Some(Edge::End),
+        (true, _) => Some(Edge::Start),
+        (_, true) => Some(Edge::End),
+        _ => None,
+    }
+}
+
+/// The loop range after dragging `edge` to `frame`: the
+/// dragged endpoint replaced, then normalised with exactly
+/// `EditorCore::set_loop_range`'s maths — endpoints
+/// ordered, end clamped to the timeline, start clamped to
+/// the end. Endpoints meeting yields a single-frame loop
+/// (the core's convention), never a clear. `None` only
+/// when there is no range to drag or no frames.
+pub fn loop_after_edge_drag(
+    range: Option<(usize, usize)>,
+    edge: Edge,
+    frame: usize,
+    count: usize,
+) -> Option<(usize, usize)> {
+    let (a, b) = range?;
+    if count == 0 {
+        return None;
+    }
+    let (a, b) = match edge {
+        Edge::Start => (frame, b),
+        Edge::End => (a, frame),
+    };
+    let (a, b) = if a <= b { (a, b) } else { (b, a) };
+    let b = b.min(count - 1);
+    let a = a.min(b);
+    Some((a, b))
+}
+
+/// Write one edge-drag move into the core: the field only,
+/// no status (see the module docs — `set_loop_range` runs
+/// once on release and posts the status line then). The
+/// core never snapshots `loop_range`, so there is no undo
+/// bookkeeping to mirror.
+fn apply_loop_edge(core: &mut EditorCore, edge: Edge, frame: usize) {
+    if let Some(next) = loop_after_edge_drag(core.loop_range, edge, frame, core.frame_count()) {
+        core.loop_range = Some(next);
+    }
+}
+
+/// The drag-scratch sentinel for an edge gesture (the
+/// anchor frames the selection gesture stores are all
+/// non-negative, so negatives are free).
+fn edge_scratch(edge: Edge) -> f32 {
+    match edge {
+        Edge::Start => -1.0,
+        Edge::End => -2.0,
+    }
+}
+
+/// The edge a drag's scratch value encodes, if it encodes
+/// one (see `edge_scratch`).
+fn edge_from_scratch(data: f32) -> Option<Edge> {
+    if data == -1.0 {
+        Some(Edge::Start)
+    } else if data == -2.0 {
+        Some(Edge::End)
+    } else {
+        None
+    }
+}
+
 /// Is frame `i` inside the loop range? Endpoints are
 /// inclusive; the core keeps them ordered
 /// (`EditorCore::set_loop_range`), and this normalises
@@ -158,8 +307,10 @@ pub fn in_sel(range_sel: Option<(usize, usize)>, i: usize) -> bool {
 }
 
 /// The row's drag gesture (see the module docs for the exact
-/// semantics). `d.data` carries the anchor across phases as
-/// a fallback; the selection itself is the primary record.
+/// semantics). `d.data` records which gesture the press
+/// started: the selection anchor across phases as a fallback
+/// (the selection itself is the primary record), or a loop
+/// edge sentinel for an edge drag.
 fn timeline_drag(s: &mut State, d: &mut Drag) {
     let n = s.core.frame_count();
     let Some(f) = frame_at_x(d.x, CHIP_W, CHIP_GAP, n) else {
@@ -167,10 +318,21 @@ fn timeline_drag(s: &mut State, d: &mut Drag) {
     };
     match d.phase {
         Phase::Down => {
+            // A press on a loop edge starts an edge drag and
+            // leaves the range selection untouched; anywhere
+            // else is the selection gesture.
+            if let Some(edge) = edge_at(d.x, CHIP_W, CHIP_GAP, s.core.loop_range, n) {
+                d.data = edge_scratch(edge);
+                return;
+            }
             d.data = f as f32;
             s.frame_ops.range_sel = Some((f, f));
         }
         Phase::Move => {
+            if let Some(edge) = edge_from_scratch(d.data) {
+                apply_loop_edge(&mut s.core, edge, f);
+                return;
+            }
             let anchor = s
                 .frame_ops
                 .range_sel
@@ -181,6 +343,18 @@ fn timeline_drag(s: &mut State, d: &mut Drag) {
             }
         }
         Phase::Up => {
+            if edge_from_scratch(d.data).is_some() {
+                // The range as last drawn stands either way
+                // (a cancelled edge drag restores nothing,
+                // like the selection gesture); a clean
+                // release posts the core's status line once.
+                if !d.cancelled() {
+                    if let Some((a, b)) = s.core.loop_range {
+                        s.core.set_loop_range(a, b);
+                    }
+                }
+                return;
+            }
             if d.cancelled() {
                 return;
             }
@@ -343,6 +517,133 @@ mod tests {
         assert!(!in_sel(Some((3, 1)), 4));
     }
 
+    // ---- edge_at (chip geometry: stride 34; the range
+    // (1, 3) over 5 frames has its start edge at x = 34 and
+    // its end edge at x = 3 * 34 + 30 = 132) ----
+
+    #[test]
+    fn edge_at_needs_a_range_frames_and_a_real_x() {
+        assert_eq!(edge_at(34.0, CHIP_W, CHIP_GAP, None, 5), None);
+        assert_eq!(edge_at(34.0, CHIP_W, CHIP_GAP, Some((1, 3)), 0), None);
+        assert_eq!(edge_at(f32::NAN, CHIP_W, CHIP_GAP, Some((1, 3)), 5), None);
+        assert_eq!(edge_at(0.0, 0.0, 0.0, Some((0, 0)), 4), None);
+    }
+
+    #[test]
+    fn edge_at_grabs_within_the_zone_of_each_edge() {
+        let range = Some((1, 3));
+        // Start edge at 34, zone [26, 42].
+        assert_eq!(edge_at(34.0, CHIP_W, CHIP_GAP, range, 5), Some(Edge::Start));
+        assert_eq!(edge_at(26.0, CHIP_W, CHIP_GAP, range, 5), Some(Edge::Start));
+        assert_eq!(edge_at(42.0, CHIP_W, CHIP_GAP, range, 5), Some(Edge::Start));
+        // End edge at 132, zone [124, 140].
+        assert_eq!(edge_at(132.0, CHIP_W, CHIP_GAP, range, 5), Some(Edge::End));
+        assert_eq!(edge_at(124.0, CHIP_W, CHIP_GAP, range, 5), Some(Edge::End));
+        assert_eq!(edge_at(140.0, CHIP_W, CHIP_GAP, range, 5), Some(Edge::End));
+    }
+
+    #[test]
+    fn edge_at_misses_away_from_the_edges() {
+        let range = Some((1, 3));
+        // Just outside both zones.
+        assert_eq!(edge_at(43.0, CHIP_W, CHIP_GAP, range, 5), None);
+        assert_eq!(edge_at(141.0, CHIP_W, CHIP_GAP, range, 5), None);
+        // Deep inside the start chip, far from its left edge.
+        assert_eq!(edge_at(54.0, CHIP_W, CHIP_GAP, range, 5), None);
+        // The middle chip's centre.
+        assert_eq!(edge_at(83.0, CHIP_W, CHIP_GAP, range, 5), None);
+    }
+
+    #[test]
+    fn edge_at_single_frame_loop_has_two_distinct_edges() {
+        // Range (2, 2): start edge at 68, end edge at 98,
+        // centre 83 is 15pt from both — outside both zones.
+        let range = Some((2, 2));
+        assert_eq!(edge_at(68.0, CHIP_W, CHIP_GAP, range, 5), Some(Edge::Start));
+        assert_eq!(edge_at(98.0, CHIP_W, CHIP_GAP, range, 5), Some(Edge::End));
+        assert_eq!(edge_at(83.0, CHIP_W, CHIP_GAP, range, 5), None);
+    }
+
+    #[test]
+    fn edge_at_normalises_hand_built_ranges() {
+        // Unordered endpoints read as (1, 3).
+        assert_eq!(edge_at(34.0, CHIP_W, CHIP_GAP, Some((3, 1)), 5), Some(Edge::Start));
+        // An end past the timeline clamps to the last chip:
+        // (0, 99) over 5 frames ends at chip 4, edge 166.
+        assert_eq!(edge_at(0.0, CHIP_W, CHIP_GAP, Some((0, 99)), 5), Some(Edge::Start));
+        assert_eq!(edge_at(166.0, CHIP_W, CHIP_GAP, Some((0, 99)), 5), Some(Edge::End));
+    }
+
+    // ---- loop_after_edge_drag ----
+
+    #[test]
+    fn loop_after_edge_drag_moves_one_endpoint() {
+        assert_eq!(loop_after_edge_drag(Some((1, 3)), Edge::Start, 2, 5), Some((2, 3)));
+        assert_eq!(loop_after_edge_drag(Some((1, 3)), Edge::End, 2, 5), Some((1, 2)));
+        assert_eq!(loop_after_edge_drag(Some((1, 3)), Edge::Start, 0, 5), Some((0, 3)));
+    }
+
+    #[test]
+    fn loop_after_edge_drag_crossing_swaps_the_endpoints() {
+        // The core orders endpoints, so dragging an edge
+        // past the other one hands the range over.
+        assert_eq!(loop_after_edge_drag(Some((1, 3)), Edge::Start, 4, 5), Some((3, 4)));
+        assert_eq!(loop_after_edge_drag(Some((1, 3)), Edge::End, 0, 5), Some((0, 1)));
+    }
+
+    #[test]
+    fn loop_after_edge_drag_meeting_is_a_single_frame_loop_not_a_clear() {
+        assert_eq!(loop_after_edge_drag(Some((1, 3)), Edge::Start, 3, 5), Some((3, 3)));
+        assert_eq!(loop_after_edge_drag(Some((1, 3)), Edge::End, 1, 5), Some((1, 1)));
+    }
+
+    #[test]
+    fn loop_after_edge_drag_clamps_and_needs_a_range() {
+        assert_eq!(loop_after_edge_drag(Some((1, 3)), Edge::End, 99, 5), Some((1, 4)));
+        assert_eq!(loop_after_edge_drag(None, Edge::Start, 2, 5), None);
+        assert_eq!(loop_after_edge_drag(Some((1, 3)), Edge::Start, 2, 0), None);
+    }
+
+    // ---- edge scratch sentinels ----
+
+    #[test]
+    fn edge_scratch_roundtrips_and_frames_are_not_edges() {
+        assert_eq!(edge_from_scratch(edge_scratch(Edge::Start)), Some(Edge::Start));
+        assert_eq!(edge_from_scratch(edge_scratch(Edge::End)), Some(Edge::End));
+        assert_eq!(edge_from_scratch(0.0), None);
+        assert_eq!(edge_from_scratch(3.0), None);
+    }
+
+    // ---- the gesture's core writes, end to end on a real
+    // core (the handler's exact call sequence, minus the
+    // runtime-only `Drag`) ----
+
+    #[test]
+    fn edge_drag_writes_the_field_per_move_and_posts_status_on_release() {
+        let mut core = EditorCore::new();
+        core.set_loop_range(1, 3);
+        // Down: a press on the start edge grabs it.
+        assert_eq!(
+            edge_at(34.0, CHIP_W, CHIP_GAP, core.loop_range, core.frame_count()),
+            Some(Edge::Start)
+        );
+        // Move: the field moves, the status line does not
+        // (it is rewritten once, on release).
+        let status_before = core.status.clone();
+        apply_loop_edge(&mut core, Edge::Start, 2);
+        assert_eq!(core.loop_range, Some((2, 3)));
+        assert_eq!(core.status, status_before);
+        // Up: the handler's single set_loop_range posts the
+        // core's own status for the final range.
+        let (a, b) = core.loop_range.unwrap();
+        core.set_loop_range(a, b);
+        assert_eq!(core.status, "Looping frames 3–4.");
+        // Dragging the end onto the start leaves a
+        // single-frame loop, not a cleared range.
+        apply_loop_edge(&mut core, Edge::End, 2);
+        assert_eq!(core.loop_range, Some((2, 2)));
+    }
+
     // ---- builder smoke test (the drag handler itself is
     // untestable from here: `Drag` has crate-private fields,
     // so only the real runtime can construct one — the
@@ -378,6 +679,11 @@ mod tests {
             show_right: true,
             key_clipboard: None,
             export_recap: String::new(),
+            inspector_figure: crate::rune_sec::inspector_figure::InspectorFigureEditState::new(),
+            clips_rename: crate::rune_sec::clips_panel::ClipRenameState::new(),
+            fx_browser: crate::rune_sec::fx_browser::FxBrowserState::default(),
+            draw_tools: crate::rune_sec::draw_tools::DrawToolsState::default(),
+            was_playing: false,
         }
     }
 

@@ -36,6 +36,18 @@
 //!   media. "Add text" therefore treats empty field content
 //!   as a status-only no-op and never commits an empty
 //!   buffer.
+//!
+//! The section also lists the project's **free-standing
+//! text instances** (`Project.texts`, `model.rs:636`) —
+//! the stage labels `stage_text` draws. No `EditorCore`
+//! op reads or writes that vec (`grep "texts"` over
+//! `editor.rs` finds no instance authoring), so the list's
+//! Delete removes the instance by writing the project
+//! field directly under exactly one `snapshot()` — the
+//! same mutation idiom as the segment paths above — and a
+//! row click loads the instance's content back into the
+//! field above for re-stamping (a pure `TextToolState`
+//! copy; the project is untouched).
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, text_input, El, TextEdit as FieldEdit, Tx};
@@ -113,6 +125,97 @@ pub fn text_segments(core: &EditorCore) -> Vec<TextSegmentRow> {
             _ => None,
         })
         .collect()
+}
+
+/// How many characters of a text instance's content the
+/// "Existing texts" list shows before truncating.
+pub const PREVIEW_CHARS: usize = 18;
+
+/// The list preview of a text instance's content: the
+/// content itself when it fits in [`PREVIEW_CHARS`]
+/// characters, otherwise its first `PREVIEW_CHARS`
+/// characters plus an ellipsis. Counts characters, never
+/// bytes, so multi-byte text truncates cleanly. Pure.
+pub fn preview(content: &str) -> String {
+    if content.chars().count() <= PREVIEW_CHARS {
+        return content.to_string();
+    }
+    let head: String = content.chars().take(PREVIEW_CHARS).collect();
+    format!("{head}…")
+}
+
+/// One free-standing text instance (`Project.texts`), for
+/// the "Existing texts" list: its real index in the vec
+/// (the row's buttons act on the instance it names, even
+/// as deletions shift the indices of the rest), a content
+/// preview, how many transform keys it carries, and its
+/// glyph height.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextInstanceRow {
+    pub index: usize,
+    pub preview: String,
+    pub keys: usize,
+    pub size: f32,
+}
+
+/// All free-standing text instances in the project, in
+/// vec order.
+pub fn text_instances(core: &EditorCore) -> Vec<TextInstanceRow> {
+    core.project
+        .texts
+        .iter()
+        .enumerate()
+        .map(|(index, inst)| TextInstanceRow {
+            index,
+            preview: preview(&inst.content),
+            keys: inst.keys.len(),
+            size: inst.size,
+        })
+        .collect()
+}
+
+/// Delete a free-standing text instance: remove index
+/// `index` from `Project.texts`. No editor op exists for
+/// text instances (see the module docs), so the panel
+/// writes the project field directly under exactly one
+/// `snapshot()` — this section's established mutation
+/// idiom (see [`add_text_to_core`]) — making a delete a
+/// single undo step. An out-of-range index is a
+/// status-only no-op: nothing is snapshotted or removed.
+pub fn delete_text_instance(core: &mut EditorCore, index: usize) {
+    if index >= core.project.texts.len() {
+        core.status = "No such text.".into();
+        return;
+    }
+    core.snapshot();
+    core.project.texts.remove(index);
+    core.status = "Text deleted.".into();
+}
+
+/// The full (untruncated) content of the text instance at
+/// `index` — what a list-row click loads into the tool's
+/// field.
+pub fn instance_content(core: &EditorCore, index: usize) -> Option<String> {
+    core.project
+        .texts
+        .get(index)
+        .map(|inst| inst.content.clone())
+}
+
+/// Row-click handler: load the instance's content (and
+/// its glyph height) into the tool, ready to be
+/// re-stamped with Add text. A pure copy into
+/// `TextToolState` — the project is not touched, nothing
+/// is snapshotted, and the size is clamped to the
+/// stepper's range like every other size the tool holds.
+fn load_instance(s: &mut State, index: usize) {
+    let Some(inst) = s.core.project.texts.get(index) else {
+        return;
+    };
+    let content = inst.content.clone();
+    let size = inst.size;
+    s.text_tool.field.replace_text(content);
+    s.text_tool.size = size.clamp(SIZE_MIN, SIZE_MAX);
 }
 
 /// Glyph height of the selected node's text segment, if
@@ -244,11 +347,59 @@ fn step_from_button(s: &mut State, dir: i32) {
 }
 
 /// The Text section: field + Add text, the size stepper,
-/// and the selected figure's existing text segments.
+/// the selected figure's existing text segments, and the
+/// project's free-standing text instances.
 pub fn text_tool(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let rows = text_segments(core);
     let shown_size = display_size(core, s.text_tool.size);
+
+    // Free-standing text instances: one row per instance —
+    // a load button carrying the content preview (clicking
+    // loads it into the field above for re-stamping), its
+    // key count and glyph height, and a Delete button.
+    // Both buttons carry the instance's real vec index.
+    let instances = text_instances(core);
+    let mut texts_list = col().key("text-instances").gap(2.0);
+    texts_list = texts_list.child(
+        text("Existing texts")
+            .font(type_::LABEL)
+            .color(t.text_secondary),
+    );
+    if instances.is_empty() {
+        texts_list = texts_list.child(
+            text("No free-standing texts.")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    } else {
+        for r in &instances {
+            let i = r.index;
+            texts_list = texts_list.child(
+                row()
+                    .key(format!("text-row-{i}"))
+                    .w_full()
+                    .gap(8.0)
+                    .center_y()
+                    .child(btn(&format!("text-load-{i}"), &r.preview, false, t, move |s: &mut State| {
+                        load_instance(s, i)
+                    }))
+                    .child(
+                        text(format!(
+                            "{} key{} · {:.0}",
+                            r.keys,
+                            if r.keys == 1 { "" } else { "s" },
+                            r.size
+                        ))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary),
+                    )
+                    .child(btn(&format!("text-del-{i}"), "Delete", false, t, move |s: &mut State| {
+                        delete_text_instance(&mut s.core, i)
+                    })),
+            );
+        }
+    }
 
     let mut list = col().key("text-list").gap(2.0);
     if rows.is_empty() {
@@ -314,11 +465,30 @@ pub fn text_tool(s: &State, t: &Theme) -> El {
                 })),
         )
         .child(list)
+        .child(texts_list)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stykanimate_rs::model::{InstanceKey, TextInstance};
+
+    fn push_instance(core: &mut EditorCore, content: &str, size: f32, keys: usize) {
+        core.project.texts.push(TextInstance {
+            content: content.into(),
+            size,
+            color: 0xFF_FFFF,
+            keys: (0..keys)
+                .map(|k| InstanceKey {
+                    frame: k as f32,
+                    x: 0.0,
+                    y: 0.0,
+                    scale: 1.0,
+                    angle: 0.0,
+                })
+                .collect(),
+        });
+    }
 
     fn core_with_node(node: usize) -> EditorCore {
         let mut core = EditorCore::new();
@@ -418,6 +588,98 @@ mod tests {
         assert_eq!(rows[1].node, 2);
         assert_eq!(rows[1].content, "Second");
         assert!(!rows[0].name.is_empty(), "node name carried through");
+    }
+
+    #[test]
+    fn preview_keeps_short_and_exact_fit_content_whole() {
+        assert_eq!(preview(""), "");
+        assert_eq!(preview("Hello"), "Hello");
+        let exact = "a".repeat(PREVIEW_CHARS);
+        assert_eq!(preview(&exact), exact, "exactly at the cap is not truncated");
+    }
+
+    #[test]
+    fn preview_truncates_long_content_with_an_ellipsis() {
+        let long = "a".repeat(PREVIEW_CHARS + 5);
+        let shown = preview(&long);
+        assert_eq!(shown, format!("{}…", "a".repeat(PREVIEW_CHARS)));
+        assert_eq!(shown.chars().count(), PREVIEW_CHARS + 1);
+    }
+
+    #[test]
+    fn preview_counts_characters_not_bytes() {
+        // Each é is two bytes in UTF-8: a byte-based cut at
+        // 18 would split or miscount; the char-based one
+        // keeps 18 whole characters.
+        let long = "é".repeat(PREVIEW_CHARS + 2);
+        let shown = preview(&long);
+        assert_eq!(shown, format!("{}…", "é".repeat(PREVIEW_CHARS)));
+    }
+
+    #[test]
+    fn text_instances_rows_carry_real_index_preview_keys_and_size() {
+        let mut core = EditorCore::new();
+        push_instance(&mut core, "First label", 24.0, 2);
+        push_instance(&mut core, "A much longer second label", 48.0, 1);
+        let rows = text_instances(&core);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].index, 0);
+        assert_eq!(rows[0].preview, "First label");
+        assert_eq!(rows[0].keys, 2);
+        assert_eq!(rows[0].size, 24.0);
+        assert_eq!(rows[1].index, 1);
+        assert_eq!(rows[1].preview, preview("A much longer second label"));
+        assert_eq!(rows[1].keys, 1);
+        assert_eq!(rows[1].size, 48.0);
+    }
+
+    #[test]
+    fn delete_text_instance_removes_the_addressed_instance() {
+        let mut core = EditorCore::new();
+        push_instance(&mut core, "A", 20.0, 1);
+        push_instance(&mut core, "B", 20.0, 1);
+        push_instance(&mut core, "C", 20.0, 1);
+        delete_text_instance(&mut core, 1);
+        assert_eq!(core.status, "Text deleted.");
+        let contents: Vec<Option<String>> = (0..3)
+            .map(|i| instance_content(&core, i))
+            .collect();
+        assert_eq!(
+            contents,
+            vec![Some("A".to_string()), Some("C".to_string()), None],
+            "B is gone, A and C keep their order"
+        );
+    }
+
+    #[test]
+    fn delete_text_instance_is_one_undo_step() {
+        let mut core = EditorCore::new();
+        push_instance(&mut core, "Keep me", 20.0, 1);
+        delete_text_instance(&mut core, 0);
+        assert!(core.project.texts.is_empty());
+        core.undo();
+        assert_eq!(core.project.texts.len(), 1, "one undo restores the delete");
+        assert_eq!(core.project.texts[0].content, "Keep me");
+    }
+
+    #[test]
+    fn delete_text_instance_out_of_range_is_status_only_noop() {
+        let mut core = EditorCore::new();
+        push_instance(&mut core, "A", 20.0, 1);
+        let depth_before = core.undo_depth();
+        delete_text_instance(&mut core, 7);
+        assert_eq!(core.status, "No such text.");
+        assert_eq!(core.project.texts.len(), 1, "nothing was removed");
+        assert_eq!(core.undo_depth(), depth_before, "nothing was snapshotted");
+    }
+
+    #[test]
+    fn instance_content_returns_full_text_and_none_out_of_range() {
+        let mut core = EditorCore::new();
+        let full = "A much longer second label";
+        push_instance(&mut core, full, 48.0, 1);
+        assert_eq!(instance_content(&core, 0), Some(full.to_string()));
+        assert_eq!(instance_content(&core, 1), None);
     }
 
     #[test]

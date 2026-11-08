@@ -177,10 +177,49 @@ fn particle_prim(
     }
 }
 
+/// Sub-segments a gradient segment is split into on the canvas.
+/// The exporters blend continuously (per pixel / SVG gradient);
+/// the canvas has no gradient stroke, so it approximates with
+/// this many flat-coloured pieces — enough that the steps are
+/// hard to see at stage zoom, cheap enough to rebuild per frame.
+const GRADIENT_STEPS: usize = 6;
+
+/// Colour at parameter `t` along a gradient segment, in the
+/// exporters' convention (export.rs `StyledSeg`, svg.rs
+/// `linearGradient`): `t = 0` at the parent joint is the node's
+/// own colour, `t = 1` at the node's joint is its `color2`,
+/// blended per channel with `style::lerp_color` — the exact
+/// function both exporters call (export.rs:102, style.rs:25).
+fn gradient_color(near: u32, far: u32, t: f32) -> u32 {
+    stykanimate_rs::style::lerp_color(near, far, t)
+}
+
+/// The per-piece colours for a segment from hex `near` to the
+/// node's `color2`, or `None` when the node has no `color2` —
+/// the caller then keeps the single flat line, unchanged.
+/// Each piece is coloured at its midpoint (`t = (k + 0.5) / n`),
+/// the sample that minimises the worst error against the
+/// exporters' continuous blend.
+fn gradient_steps(near: u32, color2: Option<u32>) -> Option<Vec<u32>> {
+    let far = color2?;
+    Some(
+        (0..GRADIENT_STEPS)
+            .map(|k| gradient_color(near, far, (k as f32 + 0.5) / GRADIENT_STEPS as f32))
+            .collect(),
+    )
+}
+
+/// Point at parameter `t` along the stage-space segment `a`→`b`.
+fn point_at(a: V2, b: V2, t: f32) -> V2 {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+}
+
 /// The whole stage as one vector `Shape` in canvas-element
 /// points: onion skins (under), then every visible figure at the
 /// display frame — segments in per-node colour at real thickness
-/// with round caps, shape-node rings/polygons, head rings — plus
+/// with round caps (a node with a `color2` gradient draws as
+/// [`GRADIENT_STEPS`] blended sub-segments, mirroring the
+/// exporters), shape-node rings/polygons, head rings — plus
 /// joint handles on the selected figure. Mirrors the GPUI stage's
 /// `draw_data`/`paint_stage` decisions (opacity fades toward the
 /// background; solo/hidden figures skipped via
@@ -197,6 +236,17 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], guides: bool) -> Shape 
     if guides {
         let guide_color = Color::WHITE.alpha(0.22);
         for prim in crate::rune_sec::stage_camera::guides_geometry(project.stage) {
+            let crate::rune_sec::stage_camera::GuidePrim::Line { a, b } = prim;
+            shape = shape.line(rt.to_screen(a), rt.to_screen(b), 1.0, LineCap::Round, guide_color);
+        }
+        // Camera frustum + safe frames (Phase F stage_camera):
+        // what an export frames, and the action/title-safe
+        // insets, in the same ink as the thirds grid.
+        for prim in crate::rune_sec::stage_camera::frustum_geometry(core) {
+            let crate::rune_sec::stage_camera::GuidePrim::Line { a, b } = prim;
+            shape = shape.line(rt.to_screen(a), rt.to_screen(b), 1.0, LineCap::Round, guide_color);
+        }
+        for prim in crate::rune_sec::stage_camera::safe_frame_geometry(project.stage) {
             let crate::rune_sec::stage_camera::GuidePrim::Line { a, b } = prim;
             shape = shape.line(rt.to_screen(a), rt.to_screen(b), 1.0, LineCap::Round, guide_color);
         }
@@ -259,13 +309,37 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], guides: bool) -> Shape 
         };
         for (i, node) in fig.def.nodes.iter().enumerate() {
             if let Some(p) = node.parent {
-                shape = shape.line(
-                    rt.to_screen(pos[p]),
-                    rt.to_screen(pos[i]),
-                    node.thickness * s,
-                    LineCap::Round,
-                    node_color(node),
-                );
+                // Gradient segments (node.style.color2 set) draw
+                // as GRADIENT_STEPS sub-segments blending node
+                // colour → color2, parent joint → node joint —
+                // the exporters' direction and lerp. The near
+                // hex is exactly the colour the flat path draws
+                // (node colour, else the faded figure colour), so
+                // the gradient starts where the flat segment did;
+                // color2 is used raw, as export.rs uses it.
+                match gradient_steps(node.color.unwrap_or(faded), node.style.color2) {
+                    Some(steps) => {
+                        for (k, hex) in steps.iter().enumerate() {
+                            let n = GRADIENT_STEPS as f32;
+                            shape = shape.line(
+                                rt.to_screen(point_at(pos[p], pos[i], k as f32 / n)),
+                                rt.to_screen(point_at(pos[p], pos[i], (k + 1) as f32 / n)),
+                                node.thickness * s,
+                                LineCap::Round,
+                                hex_color(*hex).unwrap_or(Color::WHITE),
+                            );
+                        }
+                    }
+                    None => {
+                        shape = shape.line(
+                            rt.to_screen(pos[p]),
+                            rt.to_screen(pos[i]),
+                            node.thickness * s,
+                            LineCap::Round,
+                            node_color(node),
+                        );
+                    }
+                }
             }
         }
         // Shape segments: circle rings and regular polygons
@@ -322,9 +396,9 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], guides: bool) -> Shape 
         shape = particle_prim(shape, &rt, s, prim);
     }
     for prim in crate::rune_sec::stage_text::text_geometry(core) {
-        let crate::rune_sec::stage_text::TextPrim::GlyphBox { corners, color } = prim;
+        let crate::rune_sec::stage_text::TextPrim::GlyphBox { corners, color, alpha } = prim;
         let screen: Vec<[f32; 2]> = corners.iter().map(|p| rt.to_screen(*p)).collect();
-        shape = shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE));
+        shape = shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE).alpha(alpha));
     }
     for prim in crate::rune_sec::stage_fx::weather_geometry(core) {
         shape = particle_prim(shape, &rt, s, prim);
@@ -394,5 +468,56 @@ mod tests {
         assert!((pts[0][0] - 10.0).abs() < 1e-4 && (pts[0][1] - 15.0).abs() < 1e-4);
         // Fewer than 3 sides clamp to a triangle.
         assert_eq!(ngon([0.0, 0.0], 1.0, 2).len(), 3);
+    }
+
+    #[test]
+    fn gradient_color_endpoints_are_exact() {
+        // t = 0 is the node colour, t = 1 is color2 — the
+        // exporters' endpoints, reproduced exactly.
+        assert_eq!(gradient_color(0xFF0000, 0x0000FF, 0.0), 0xFF0000);
+        assert_eq!(gradient_color(0xFF0000, 0x0000FF, 1.0), 0x0000FF);
+        assert_eq!(gradient_color(0x000000, 0xFFFFFF, 0.0), 0x000000);
+        assert_eq!(gradient_color(0x000000, 0xFFFFFF, 1.0), 0xFFFFFF);
+    }
+
+    #[test]
+    fn gradient_color_midpoint_matches_the_export_lerp() {
+        // The same values style.rs pins for lerp_color itself:
+        // 255 * 0.5 = 127.5 rounds to 128 per channel.
+        assert_eq!(gradient_color(0xFF0000, 0x0000FF, 0.5), 0x800080);
+        assert_eq!(gradient_color(0x000000, 0xFFFFFF, 0.5), 0x808080);
+    }
+
+    #[test]
+    fn gradient_steps_passthrough_without_color2() {
+        // No color2 → None → the caller keeps the flat line.
+        assert_eq!(gradient_steps(0x123456, None), None);
+    }
+
+    #[test]
+    fn gradient_steps_samples_six_midpoints() {
+        let steps = gradient_steps(0x000000, Some(0xFFFFFF)).expect("color2 set");
+        assert_eq!(steps.len(), GRADIENT_STEPS);
+        assert_eq!(steps.len(), 6);
+        // Piece k is coloured at t = (k + 0.5) / 6 along
+        // black → white (255 * t, rounded, per channel):
+        // t = 1/12 → 21, t = 5/12 → 106, t = 7/12 → 149,
+        // t = 11/12 → 234.
+        assert_eq!(steps[0], 0x151515);
+        assert_eq!(steps[2], 0x6A6A6A);
+        assert_eq!(steps[3], 0x959595);
+        assert_eq!(steps[5], 0xEAEAEA);
+        // Strictly brightening piece by piece.
+        for w in steps.windows(2) {
+            assert!(w[0] < w[1], "gradient not monotonic: {steps:?}");
+        }
+    }
+
+    #[test]
+    fn point_at_endpoints_and_midpoint() {
+        let (a, b) = ([0.0, 0.0], [10.0, 20.0]);
+        assert_eq!(point_at(a, b, 0.0), a);
+        assert_eq!(point_at(a, b, 1.0), b);
+        assert_eq!(point_at(a, b, 0.5), [5.0, 10.0]);
     }
 }

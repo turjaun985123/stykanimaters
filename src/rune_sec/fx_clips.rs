@@ -36,6 +36,12 @@
 //! * duration stepper — `EditorCore::fx_resize_clip(index,
 //!   delta)` (frame delta, `f32`; the backend clamps the
 //!   resulting duration to >= 0.1)
+//! * nudge row (Phase F) — start ±1/±10 frames through
+//!   the same guarded move path as the steppers, and
+//!   duration ±0.1 s through `fx_resize_clip`. The op's
+//!   delta is FRAMES (fx_ops.rs), so the seconds step is
+//!   converted at the project fps by
+//!   [`seconds_to_frames`] before the call
 //! * duplicate — `EditorCore::fx_duplicate_clip(index)`,
 //!   returning the copy's index (the copy is inserted right
 //!   after the original, in list and in time)
@@ -92,6 +98,19 @@ pub fn frame_label(frame: f32) -> String {
     } else {
         format!("{frame:.1}")
     }
+}
+
+/// Frames spanned by `seconds` at `fps` — the conversion
+/// the nudge row's duration buttons need: they are
+/// labelled in seconds (±0.1 s) but
+/// `EditorCore::fx_resize_clip` takes a FRAME delta
+/// (fx_ops.rs: the new duration is `duration + delta`
+/// frames, clamped to >= 0.1). A degenerate fps falls
+/// back the way the shell's playback clock does
+/// (`project.fps.max(1.0)` in `main.rs`), so the step
+/// never collapses to zero.
+pub fn seconds_to_frames(seconds: f32, fps: f32) -> f32 {
+    seconds * fps.max(1.0)
 }
 
 /// The 1-based frame range a clip covers, e.g. `frames
@@ -273,6 +292,15 @@ fn nudge_duration(s: &mut State, delta: f32) {
         return;
     };
     s.core.fx_resize_clip(i, delta);
+}
+
+/// Nudge the selected clip's duration by `seconds`
+/// seconds (the nudge row's ±0.1 s buttons), converted
+/// to the frame delta `fx_resize_clip` takes at the
+/// project's fps ([`seconds_to_frames`]).
+fn nudge_duration_seconds(s: &mut State, seconds: f32) {
+    let delta = seconds_to_frames(seconds, s.core.project.fps);
+    nudge_duration(s, delta);
 }
 
 /// Duplicate the selected clip via
@@ -476,22 +504,73 @@ pub fn fx_lane(s: &State, t: &Theme) -> El {
         .child(list.scroll(ScrollSpec { stick_bottom: false }).min_h(0.0))
 }
 
+/// The nudge row (Phase F): precise small moves for the
+/// selected clip alongside the steppers — start
+/// −10/−1/+1/+10 frames through the same guarded
+/// [`nudge_start`] path as the steppers and
+/// earlier/later buttons (so the frame-0 no-snapshot
+/// guard still applies), and duration −0.1 s/+0.1 s via
+/// [`nudge_duration_seconds`]. With no valid selection
+/// it renders the inspector's no-selection guidance
+/// line instead of dead buttons, mirroring
+/// `fx_inspector`'s own empty state.
+pub fn nudge_row(s: &State, t: &Theme) -> El {
+    if valid_selection(s.fx_selected, s.core.project.fx_clips.len()).is_none() {
+        return row().key("fx-nudge").w_full().child(
+            text("Select an FX clip to edit it.")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    }
+    row()
+        .key("fx-nudge")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(
+            text("Nudge")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(btn("fx-nudge-l10", "-10", false, t, |s| {
+            nudge_start(s, -10)
+        }))
+        .child(btn("fx-nudge-l", "-1", false, t, |s| {
+            nudge_start(s, -1)
+        }))
+        .child(btn("fx-nudge-r", "+1", false, t, |s| {
+            nudge_start(s, 1)
+        }))
+        .child(btn("fx-nudge-r10", "+10", false, t, |s| {
+            nudge_start(s, 10)
+        }))
+        .child(
+            text("Dur")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(btn("fx-dur-dn", "-0.1s", false, t, |s| {
+            nudge_duration_seconds(s, -0.1)
+        }))
+        .child(btn("fx-dur-up", "+0.1s", false, t, |s| {
+            nudge_duration_seconds(s, 0.1)
+        }))
+}
+
 /// The clip inspector for the selected FX clip: kind and
 /// anchor summary, start/duration steppers (move/resize),
 /// earlier/later nudge buttons (the GPUI panel's
-/// `fx-earlier`/`fx-later`), colour + end-colour swatch
-/// rows, a re-anchor button, and duplicate/delete.
-/// With no valid selection it shows a hint line instead.
+/// `fx-earlier`/`fx-later`), a nudge row (fine start
+/// moves and ±0.1 s duration steps), colour + end-colour
+/// swatch rows, a re-anchor button, and
+/// duplicate/delete. With no valid selection it shows
+/// the nudge row's guidance line instead.
 pub fn fx_inspector(s: &State, t: &Theme) -> El {
     let Some(data) = inspector_data(&s.core, s.fx_selected) else {
         return col()
             .key("fx-inspector")
             .w_full()
-            .child(
-                text("Select an FX clip to edit it.")
-                    .font(type_::LABEL)
-                    .color(t.text_secondary),
-            );
+            .child(nudge_row(s, t));
     };
     let i = data.index;
     let mut panel = col()
@@ -579,6 +658,9 @@ pub fn fx_inspector(s: &State, t: &Theme) -> El {
                     delete_selected(s)
                 })),
         )
+        // Nudge row: fine start moves (±1/±10 frames)
+        // and ±0.1 s duration steps.
+        .child(nudge_row(s, t))
         // Colours: primary, then gradient end colour
         // (with a Solid chip clearing color2 to None).
         .child(
@@ -770,6 +852,39 @@ mod tests {
         let mut core = core_with(vec![entry(0.5, 10.0, ClipKind::Burst, 0xFF5D5D)]);
         assert!(nudge_clip_start(&mut core, 0, -1));
         assert_eq!(core.project.fx_clips[0].clip.start, 0.0);
+    }
+
+    #[test]
+    fn seconds_to_frames_scales_with_the_project_fps() {
+        // The ±0.1 s duration nudge at the frame rates
+        // projects actually use: 12 fps (the demo) ->
+        // 1.2 frames, 24 -> 2.4, 30 -> 3.0.
+        let eps = 1e-4;
+        assert!((seconds_to_frames(0.1, 12.0) - 1.2).abs() < eps);
+        assert!((seconds_to_frames(0.1, 24.0) - 2.4).abs() < eps);
+        assert!((seconds_to_frames(0.1, 30.0) - 3.0).abs() < eps);
+        // The negative step mirrors the positive one.
+        assert!((seconds_to_frames(-0.1, 24.0) + 2.4).abs() < eps);
+        // A degenerate fps never collapses the step to 0
+        // (the `fps.max(1.0)` fallback).
+        assert!((seconds_to_frames(0.1, 0.0) - 0.1).abs() < eps);
+    }
+
+    #[test]
+    fn duration_nudge_step_resizes_by_the_converted_delta() {
+        // The op-level effect of the +0.1 s button at
+        // 30 fps: the frame delta is 3, so a 10-frame
+        // clip grows to 13 frames.
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        core.fx_resize_clip(0, seconds_to_frames(0.1, 30.0));
+        let duration = core.project.fx_clips[0].clip.duration;
+        assert!((duration - 13.0).abs() < 1e-4, "duration {duration}");
+        // And the -0.1 s button at 12 fps removes
+        // 1.2 frames.
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        core.fx_resize_clip(0, seconds_to_frames(-0.1, 12.0));
+        let duration = core.project.fx_clips[0].clip.duration;
+        assert!((duration - 8.8).abs() < 1e-4, "duration {duration}");
     }
 
     #[test]

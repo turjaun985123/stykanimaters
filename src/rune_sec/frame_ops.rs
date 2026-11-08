@@ -17,13 +17,28 @@
 //! range. Reverse follows the GPUI rule exactly — the loop
 //! range when one is set, the whole timeline otherwise.
 //!
+//! The "This frame" row (Phase F) sets ONE frame's duration —
+//! the current frame's `model::Frame::duration` hold-time
+//! multiplier. The model carries no allowed range; the only
+//! clamp in the engine is the one `adjust_frame_duration`
+//! applies, [0.25, 8.0], mirrored by [`clamp_duration`]. The
+//! ×0.5 / ×2 buttons write through that op (relative factors,
+//! clamped, status line). No core op sets an absolute duration,
+//! so Reset 1.0 writes through [`set_duration_here`], which
+//! performs the same field write the MCP `set_frame_duration`
+//! tool performs (`core.project.frames[i].duration = value`,
+//! mcp_tools.rs), passed through [`clamp_duration`] and given
+//! the op's status wording. Neither path snapshots — duration
+//! edits are not undoable in this core, exactly like the
+//! steppers and the MCP tools.
+//!
 //! Integrator wiring (main.rs, not edited here): declare the
 //! module, add `pub frame_ops: FrameOpsState` to `State`
 //! (initialised with `FrameOpsState::default()`), and add
 //! `.child(frame_ops::frames_section(s, &t))` to the view.
 
 use rune::tok::{self, type_, Theme};
-use rune::{el, row, text, Color, El};
+use rune::{col, el, row, text, Color, El};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::State;
@@ -129,6 +144,21 @@ pub fn can_smooth(core: &EditorCore) -> bool {
     core.frame_count() >= 3 && !core.project.figures.is_empty()
 }
 
+/// Clamp a duration multiplier to the engine's allowed range,
+/// [0.25, 8.0] — the clamp `EditorCore::adjust_frame_duration`
+/// applies (the model itself carries no range). Pure mirror so
+/// the absolute write in [`set_duration_here`] lands in the
+/// same range the relative op would produce.
+pub fn clamp_duration(d: f32) -> f32 {
+    d.clamp(DUR_MIN, DUR_MAX)
+}
+
+/// Format a duration multiplier for a readout, e.g. `1.00×`.
+/// The single format source for every duration label here.
+pub fn format_duration(d: f32) -> String {
+    format!("{d:.2}×")
+}
+
 /// The current frame's hold-time multiplier, if there is a
 /// current frame.
 pub fn duration_here(core: &EditorCore) -> Option<f32> {
@@ -149,9 +179,42 @@ pub fn can_duration_up(core: &EditorCore) -> bool {
 /// (`model::Frame::duration` is a hold-time multiplier).
 pub fn duration_label(core: &EditorCore) -> String {
     match duration_here(core) {
-        Some(d) => format!("{d:.2}×"),
+        Some(d) => format_duration(d),
         None => "—".to_string(),
     }
+}
+
+/// Reset changes nothing when the current frame already sits
+/// at 1.0 (or there is no current frame).
+pub fn can_duration_reset(core: &EditorCore) -> bool {
+    duration_here(core)
+        .map(|d| (d - 1.0).abs() > f32::EPSILON)
+        .unwrap_or(false)
+}
+
+/// Set the current frame's duration to an absolute multiplier —
+/// the write the "This frame" row's Reset button performs. No
+/// core op sets an absolute duration (`adjust_frame_duration`
+/// only multiplies), so this performs the field write the MCP
+/// `set_frame_duration` tool performs, with two shell-side
+/// refinements: the value passes through [`clamp_duration`]
+/// (the MCP tool validates positive-only; the row stays inside
+/// the range the relative op enforces) and the status line
+/// mirrors `adjust_frame_duration`'s wording. Like both of
+/// those paths it takes no snapshot — the edit is not undoable.
+/// A missing current frame reports via the status line instead
+/// of indexing blindly (the op would panic on an empty project).
+pub fn set_duration_here(core: &mut EditorCore, value: f32) {
+    let Some(frame) = core.project.frames.get_mut(core.current) else {
+        core.status = "No frame to set a duration on.".into();
+        return;
+    };
+    frame.duration = clamp_duration(value);
+    core.status = format!(
+        "Frame {} duration {:.2}x.",
+        core.current + 1,
+        frame.duration
+    );
 }
 
 /// Which range the range ops will act on, for the section's
@@ -210,10 +273,12 @@ fn fbtn(
         .child(text(label).font(type_::LABEL).color(ink))
 }
 
-/// The "Frames" toolbar section: one row, GPUI tool-group
-/// order — Inbetween / Shift / Reverse / Smooth path, the
-/// clipboards, the loop endpoints, then the duration steppers
-/// with their readout.
+/// The "Frames" toolbar section: the main row in GPUI
+/// tool-group order — Inbetween / Shift / Reverse / Smooth
+/// path, the clipboards, the loop endpoints, then the duration
+/// steppers with their readout — over a second row, "This
+/// frame", carrying the current frame's duration multiplier
+/// with ×0.5 / ×2 / Reset 1.0 controls (Phase F).
 pub fn frames_section(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let ops = &s.frame_ops;
@@ -317,7 +382,45 @@ pub fn frames_section(s: &State, t: &Theme) -> El {
     if let Some(label) = range_label(core, ops) {
         section = section.child(text(label).font(type_::LABEL).color(t.text_secondary));
     }
-    section
+
+    // "This frame" row: the current frame's duration as an
+    // absolute control (the main row's steppers only multiply
+    // from wherever the value happens to be). ×0.5 / ×2 write
+    // through the core's relative op; Reset writes the
+    // absolute 1.0 via set_duration_here (see its docs).
+    let this_frame = row()
+        .key("frames-this")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(
+            text("This frame")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(
+            text(duration_label(core))
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(fbtn("fop-dur-half", "×0.5", false, !can_duration_down(core), t, |s| {
+            s.core.adjust_frame_duration(DUR_DOWN_FACTOR);
+        }))
+        .child(fbtn("fop-dur-double", "×2", false, !can_duration_up(core), t, |s| {
+            s.core.adjust_frame_duration(DUR_UP_FACTOR);
+        }))
+        .child(fbtn(
+            "fop-dur-reset",
+            "Reset 1.0",
+            false,
+            !can_duration_reset(core),
+            t,
+            |s| {
+                set_duration_here(&mut s.core, 1.0);
+            },
+        ));
+
+    col().w_full().gap(6.0).child(section).child(this_frame)
 }
 
 #[cfg(test)]
@@ -432,6 +535,77 @@ mod tests {
         assert!(can_duration_down(&core));
         assert!(!can_duration_up(&core));
         assert_eq!(duration_label(&core), "8.00×");
+    }
+
+    #[test]
+    fn clamp_duration_mirrors_the_core_ops_range() {
+        assert_eq!(clamp_duration(1.0), 1.0);
+        assert_eq!(clamp_duration(0.5), 0.5);
+        assert_eq!(clamp_duration(0.1), DUR_MIN, "below the floor clamps up");
+        assert_eq!(clamp_duration(0.0), DUR_MIN);
+        assert_eq!(clamp_duration(100.0), DUR_MAX, "above the ceiling clamps down");
+        assert_eq!(clamp_duration(DUR_MIN), DUR_MIN);
+        assert_eq!(clamp_duration(DUR_MAX), DUR_MAX);
+    }
+
+    #[test]
+    fn format_duration_is_two_decimals_with_a_times_sign() {
+        assert_eq!(format_duration(1.0), "1.00×");
+        assert_eq!(format_duration(0.25), "0.25×");
+        assert_eq!(format_duration(2.5), "2.50×");
+        assert_eq!(format_duration(8.0), "8.00×");
+        // duration_label routes through the same format.
+        let core = EditorCore::new();
+        assert_eq!(duration_label(&core), format_duration(1.0));
+    }
+
+    #[test]
+    fn reset_availability_tracks_distance_from_one() {
+        let mut core = EditorCore::new();
+        assert!(!can_duration_reset(&core), "a fresh frame sits at 1.0");
+        core.project.frames[core.current].duration = 2.0;
+        assert!(can_duration_reset(&core));
+        core.project.frames[core.current].duration = 0.5;
+        assert!(can_duration_reset(&core));
+        core.project.frames[core.current].duration = 1.0;
+        assert!(!can_duration_reset(&core));
+    }
+
+    #[test]
+    fn set_duration_here_writes_only_the_current_frame() {
+        let mut core = EditorCore::new();
+        core.goto(1);
+        core.project.frames[1].duration = 4.0;
+        set_duration_here(&mut core, 1.0);
+        assert_eq!(core.project.frames[1].duration, 1.0, "reset lands on 1.0");
+        assert_eq!(
+            core.project.frames[0].duration, 1.0,
+            "neighbouring frames are untouched"
+        );
+        assert_eq!(core.status, "Frame 2 duration 1.00x.");
+        // It is an absolute set, not a factor: from 0.25 the
+        // same call still lands exactly on the requested value.
+        core.project.frames[1].duration = 0.25;
+        set_duration_here(&mut core, 3.0);
+        assert_eq!(core.project.frames[1].duration, 3.0);
+    }
+
+    #[test]
+    fn set_duration_here_clamps_like_the_relative_op() {
+        let mut core = EditorCore::new();
+        set_duration_here(&mut core, 100.0);
+        assert_eq!(core.project.frames[core.current].duration, DUR_MAX);
+        set_duration_here(&mut core, 0.01);
+        assert_eq!(core.project.frames[core.current].duration, DUR_MIN);
+        // And the row's full gesture composes: double to the
+        // ceiling through the op, then reset back to 1.0.
+        core.project.frames[core.current].duration = 4.0;
+        core.adjust_frame_duration(DUR_UP_FACTOR);
+        assert_eq!(core.project.frames[core.current].duration, DUR_MAX);
+        assert!(can_duration_reset(&core));
+        set_duration_here(&mut core, 1.0);
+        assert_eq!(core.project.frames[core.current].duration, 1.0);
+        assert!(!can_duration_reset(&core));
     }
 
     #[test]

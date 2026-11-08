@@ -29,12 +29,23 @@
 //! below); the panel builder reads it and the header toggle
 //! writes it. Nothing else in `State` is touched — all figure
 //! state lives in `EditorCore`, as before.
+//!
+//! Phase F (section 18/40) adds a live thumbnail to each
+//! row's first line: a [`THUMB_SIZE`]-point canvas drawing
+//! the figure's rig at the current display frame — the same
+//! `EditorCore::positions_f` evaluation the stage draws —
+//! fitted into the box by [`thumb_fit`] and built by the
+//! pure [`thumb_shape`] helper. The thumbnail is an identity
+//! preview, so it draws every figure in its own colour
+//! regardless of hidden/solo state (the row's name dimming
+//! and eye toggle already carry visibility).
 
 use rune::tok::{self, type_, Theme};
-use rune::{col, el, row, text, Color, El};
+use rune::{canvas, col, el, row, text, Color, El, LineCap, Shape};
 use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::model::V2;
 
-use crate::stage_view::hex_color;
+use crate::stage_view::{hex_color, ngon};
 use crate::State;
 
 /// View-local state for the figures panel. The engine tracks
@@ -91,6 +102,151 @@ pub fn figure_rows(core: &EditorCore) -> Vec<FigureRow> {
             opacity_pct: opacity_pct(fig.opacity),
         })
         .collect()
+}
+
+/// Edge length (points) of a figure row's thumbnail canvas.
+pub const THUMB_SIZE: f32 = 44.0;
+
+/// Inset (points) kept between the fitted silhouette and the
+/// thumbnail's edge.
+const THUMB_MARGIN: f32 = 4.0;
+
+/// Stroke width (points) of thumbnail segments and head
+/// rings — one hairline weight for the whole miniature.
+const THUMB_WIDTH: f32 = 1.5;
+
+/// Head-ring radius in stage units: the stage's own radius
+/// (`stage_shape` draws head rings at 17 stage units), so
+/// the miniature keeps the stage's proportions.
+const HEAD_RING_R: f32 = 17.0;
+
+/// Sides of the thumbnail head-ring polygon (the stage uses
+/// 24 at full size; 16 is smooth at 44 points).
+const HEAD_RING_SIDES: usize = 16;
+
+/// One piece of thumbnail geometry in canvas points: a rig
+/// segment between two mapped joints, or a head ring as a
+/// polygon around a mapped head joint. `thumb_shape` turns
+/// these into a `Shape`; keeping them separate makes the
+/// geometry unit-testable (a built `Shape`'s ops are
+/// crate-private to rune).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ThumbPrim {
+    Segment { a: [f32; 2], b: [f32; 2] },
+    Ring { pts: Vec<[f32; 2]> },
+}
+
+/// The bounding-box fit of a thumbnail: stage points map to
+/// canvas points centred in the `size` square.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThumbFit {
+    /// Canvas points per stage unit.
+    pub scale: f32,
+    /// Stage-space centre of the fitted box.
+    pub centre: [f32; 2],
+    /// Canvas edge length the fit targets.
+    pub size: f32,
+}
+
+impl ThumbFit {
+    /// Stage point → canvas point under this fit.
+    pub fn map(&self, p: V2) -> [f32; 2] {
+        [
+            (p[0] - self.centre[0]) * self.scale + self.size / 2.0,
+            (p[1] - self.centre[1]) * self.scale + self.size / 2.0,
+        ]
+    }
+}
+
+/// Fit the bounding box of `positions` into a `size` square,
+/// keeping [`THUMB_MARGIN`] to spare on the limiting axis.
+/// When the figure has a head node the box first grows by
+/// the head-ring radius on every side, so the ring stays
+/// inside the canvas instead of clipping at the box edge.
+/// Degenerate boxes (one point, a straight vertical line)
+/// clamp their extents to 1 stage unit so the scale stays
+/// finite and the content lands centred.
+pub fn thumb_fit(positions: &[V2], has_head: bool, size: f32) -> ThumbFit {
+    let mut lo = [f32::INFINITY; 2];
+    let mut hi = [f32::NEG_INFINITY; 2];
+    for p in positions {
+        lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+        hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+    }
+    if positions.is_empty() {
+        lo = [0.0, 0.0];
+        hi = [0.0, 0.0];
+    }
+    if has_head {
+        lo = [lo[0] - HEAD_RING_R, lo[1] - HEAD_RING_R];
+        hi = [hi[0] + HEAD_RING_R, hi[1] + HEAD_RING_R];
+    }
+    let extents = [(hi[0] - lo[0]).max(1.0), (hi[1] - lo[1]).max(1.0)];
+    let avail = (size - 2.0 * THUMB_MARGIN).max(1.0);
+    ThumbFit {
+        scale: (avail / extents[0]).min(avail / extents[1]),
+        centre: [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0],
+        size,
+    }
+}
+
+/// The thumbnail geometry for figure `fi` at the current
+/// display frame: one segment per parented node, then one
+/// ring per head node, all fitted into the `size` box by
+/// [`thumb_fit`]. Positions come from
+/// `EditorCore::positions_f` at `EditorCore::display_frame`
+/// — the stage's own evaluation, graph channels included.
+/// Empty when `fi` is out of range or the figure has no
+/// nodes.
+pub fn thumb_prims(core: &EditorCore, fi: usize, size: f32) -> Vec<ThumbPrim> {
+    let Some(fig) = core.project.figures.get(fi) else {
+        return Vec::new();
+    };
+    if fig.def.nodes.is_empty() {
+        return Vec::new();
+    }
+    let pos = core.positions_f(core.display_frame(), fi);
+    let has_head = fig.def.nodes.iter().any(|n| n.head);
+    let fit = thumb_fit(&pos, has_head, size);
+    let mut prims = Vec::new();
+    for (i, node) in fig.def.nodes.iter().enumerate() {
+        if let Some(p) = node.parent {
+            prims.push(ThumbPrim::Segment {
+                a: fit.map(pos[p]),
+                b: fit.map(pos[i]),
+            });
+        }
+    }
+    for (i, node) in fig.def.nodes.iter().enumerate() {
+        if node.head {
+            prims.push(ThumbPrim::Ring {
+                pts: ngon(fit.map(pos[i]), HEAD_RING_R * fit.scale, HEAD_RING_SIDES),
+            });
+        }
+    }
+    prims
+}
+
+/// Figure `fi`'s rig at the current display frame as a
+/// miniature `Shape` for a `size`-point square canvas:
+/// segments as [`THUMB_WIDTH`]-point round-capped lines in
+/// the figure's colour, plus a head ring per head node.
+/// An out-of-range `fi` yields an empty shape.
+pub fn thumb_shape(core: &EditorCore, fi: usize, size: f32) -> Shape {
+    let Some(fig) = core.project.figures.get(fi) else {
+        return Shape::new();
+    };
+    let color = hex_color(fig.color).unwrap_or(Color::WHITE);
+    let mut shape = Shape::new();
+    for prim in thumb_prims(core, fi, size) {
+        shape = match prim {
+            ThumbPrim::Segment { a, b } => shape.line(a, b, THUMB_WIDTH, LineCap::Round, color),
+            ThumbPrim::Ring { pts } => {
+                shape.stroke_with(pts, true, THUMB_WIDTH, LineCap::Round, color)
+            }
+        };
+    }
+    shape
 }
 
 /// A compact row toggle in the chrome button style (same
@@ -153,16 +309,17 @@ fn delete_row(core: &mut EditorCore, fi: usize) {
     core.delete_figure();
 }
 
-/// One figure row, as a two-line card: line 1 is the colour
-/// dot + name (press selects), the opacity readout, then the
-/// lock / solo / opacity-stepper / eye toggles — the GPUI
-/// row's trailing cluster; line 2 (Phase E) carries the
-/// remaining GPUI row controls, right-aligned under the
+/// One figure row, as a two-line card: line 1 is the live
+/// thumbnail canvas (`fig-thumb-{fi}`, Phase F), then the
+/// colour dot + name (press selects), the opacity readout,
+/// then the lock / solo / opacity-stepper / eye toggles —
+/// the GPUI row's trailing cluster; line 2 (Phase E) carries
+/// the remaining GPUI row controls, right-aligned under the
 /// cluster: reorder up/down (`fig-up-{fi}` / `fig-dn-{fi}`),
 /// opacity cycle (`fig-opac-{fi}`) and delete (`fig-del-{fi}`).
 /// Two lines keep every control at the same compact toggle
 /// size instead of squeezing nine onto one line.
-fn figure_row(r: &FigureRow, t: &Theme) -> El {
+fn figure_row(r: &FigureRow, core: &EditorCore, t: &Theme) -> El {
     let fi = r.index;
     let accent = tok::accent(0, true);
     let dot = hex_color(r.color).unwrap_or(Color::WHITE);
@@ -184,6 +341,14 @@ fn figure_row(r: &FigureRow, t: &Theme) -> El {
                 .w_full()
                 .gap(6.0)
                 .center_y()
+                .child(
+                    // Live silhouette of this figure's rig at
+                    // the display frame (Phase F); a pure view
+                    // element — no press handler, no op.
+                    canvas(thumb_shape(core, fi, THUMB_SIZE))
+                        .key(format!("fig-thumb-{fi}"))
+                        .size(THUMB_SIZE, THUMB_SIZE),
+                )
                 .child(
                     // Leading cluster: dot + name; pressing it selects
                     // the figure (old `fig-sel`).
@@ -324,7 +489,7 @@ pub fn figures_panel(s: &State, t: &Theme) -> El {
         return panel;
     }
     for r in figure_rows(core) {
-        panel = panel.child(figure_row(&r, t));
+        panel = panel.child(figure_row(&r, core, t));
     }
     // Bulk visibility footer: the layers ops own the `hidden`
     // flags; each handler also clears solo so the bulk result
@@ -468,5 +633,107 @@ mod tests {
         delete_row(&mut core, 0);
         assert_eq!(core.project.figures.len(), 1);
         assert_eq!(core.status, "Keep at least one figure.");
+    }
+
+    #[test]
+    fn thumb_prims_match_the_demo_figures_rig() {
+        let core = EditorCore::new();
+        assert!(!core.project.figures.is_empty());
+        for (fi, fig) in core.project.figures.iter().enumerate() {
+            let prims = thumb_prims(&core, fi, THUMB_SIZE);
+            let segments = prims
+                .iter()
+                .filter(|p| matches!(p, ThumbPrim::Segment { .. }))
+                .count();
+            let rings = prims
+                .iter()
+                .filter(|p| matches!(p, ThumbPrim::Ring { .. }))
+                .count();
+            // One segment per parented node, one ring per
+            // head node — the stage's draw list, miniaturised.
+            assert_eq!(
+                segments,
+                fig.def.nodes.iter().filter(|n| n.parent.is_some()).count(),
+                "segment count for figure {fi}"
+            );
+            assert_eq!(
+                rings,
+                fig.def.nodes.iter().filter(|n| n.head).count(),
+                "ring count for figure {fi}"
+            );
+            assert!(!prims.is_empty(), "demo figure {fi} draws something");
+        }
+    }
+
+    #[test]
+    fn thumb_points_stay_inside_the_box() {
+        let core = EditorCore::new();
+        for fi in 0..core.project.figures.len() {
+            for prim in thumb_prims(&core, fi, THUMB_SIZE) {
+                let pts: Vec<[f32; 2]> = match &prim {
+                    ThumbPrim::Segment { a, b } => vec![*a, *b],
+                    ThumbPrim::Ring { pts } => pts.clone(),
+                };
+                assert!(!pts.is_empty());
+                for p in pts {
+                    assert!(
+                        p[0] >= -1e-3 && p[0] <= THUMB_SIZE + 1e-3,
+                        "x of {p:?} outside the {THUMB_SIZE} box (figure {fi})"
+                    );
+                    assert!(
+                        p[1] >= -1e-3 && p[1] <= THUMB_SIZE + 1e-3,
+                        "y of {p:?} outside the {THUMB_SIZE} box (figure {fi})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn thumb_shape_builds_scales_and_guards_range() {
+        let core = EditorCore::new();
+        let shape = thumb_shape(&core, 0, THUMB_SIZE);
+        assert!(!shape.is_empty(), "the demo figure draws a thumbnail");
+        // A bigger box produces a different drawing.
+        assert_ne!(shape, thumb_shape(&core, 0, THUMB_SIZE * 2.0));
+        // Out-of-range figure: empty results, no panic.
+        assert!(thumb_shape(&core, 999, THUMB_SIZE).is_empty());
+        assert!(thumb_prims(&core, 999, THUMB_SIZE).is_empty());
+    }
+
+    #[test]
+    fn thumb_fit_centres_and_contains_the_bbox() {
+        // A 100×50 rig in a 44 box: the width limits
+        // (avail 36 / 100 = 0.36), the bbox centre lands on
+        // the box centre, and the corners sit on or inside
+        // the margin on the limiting axis.
+        let pos = vec![[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]];
+        let fit = thumb_fit(&pos, false, THUMB_SIZE);
+        assert!((fit.scale - 0.36).abs() < 1e-6);
+        assert_eq!(fit.map([50.0, 25.0]), [22.0, 22.0]);
+        for p in pos {
+            let m = fit.map(p);
+            assert!(m[0] >= THUMB_MARGIN - 1e-4 && m[0] <= THUMB_SIZE - THUMB_MARGIN + 1e-4);
+            assert!(m[1] >= THUMB_MARGIN - 1e-4 && m[1] <= THUMB_SIZE - THUMB_MARGIN + 1e-4);
+        }
+        // A single point maps to the centre at a finite scale.
+        let dot = thumb_fit(&[[7.0, 9.0]], false, THUMB_SIZE);
+        assert!(dot.scale.is_finite() && dot.scale > 0.0);
+        assert_eq!(dot.map([7.0, 9.0]), [22.0, 22.0]);
+        // No points at all: still a finite, positive scale.
+        let empty = thumb_fit(&[], true, THUMB_SIZE);
+        assert!(empty.scale.is_finite() && empty.scale > 0.0);
+    }
+
+    #[test]
+    fn thumb_fit_grows_the_box_for_the_head_ring() {
+        // Same rig with and without a head: the head fit must
+        // zoom out (the ring needs 17 stage units of room on
+        // every side) yet still centre the rig.
+        let pos = vec![[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]];
+        let plain = thumb_fit(&pos, false, THUMB_SIZE);
+        let headed = thumb_fit(&pos, true, THUMB_SIZE);
+        assert!(headed.scale < plain.scale);
+        assert_eq!(headed.map([50.0, 25.0]), [22.0, 22.0]);
     }
 }

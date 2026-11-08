@@ -56,6 +56,18 @@
 //!   keys (`export` is asserted, never tapped; the Edit
 //!   item tapped is `copy-frame`) — `save`/`load`/`undo`
 //!   also live in the app bar, earlier in the tree.
+//!
+//! Round 3 (Phase F, section 39) adds four tests over the
+//! Phase E surfaces rounds 1–2 only touched indirectly:
+//! workspace gating (panel keys against the `workspaces`
+//! table), the View menu's sidebar toggles, the settings
+//! guides toggle, and a transport playback pass asserted
+//! on `core.current`. Their extra discipline: a test that
+//! depends on the workspace seeds it explicitly through
+//! the chips (the persisted prefs are shared across the
+//! test process), and structural unmounts are given a
+//! bounded settle loop before an absence assert, the
+//! same courtesy the dropdown's presence fade needed.
 
 use std::collections::BTreeSet;
 
@@ -127,7 +139,13 @@ fn type_char(rt: &mut Runtime<State>, c: char) {
 
 #[test]
 fn shell_mounts_stage_chrome_and_timeline() {
-    let rt = editor();
+    let mut rt = editor();
+    // Seed the Animate workspace through its chip (the
+    // persisted prefs are shared across the test process):
+    // the panel-sourced keys below mount only where their
+    // sections are gated visible.
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
     let keys = presented_keys(&rt);
     for want in [
         // The stage canvas and the chrome rows.
@@ -135,13 +153,16 @@ fn shell_mounts_stage_chrome_and_timeline() {
         "app-bar",
         "transport",
         "timeline",
-        // App bar controls.
+        // App bar controls, plus the panel homes of the
+        // controls the app bar used to duplicate (Phase F):
+        // add-figure lives on the figures panel, onion-toggle
+        // on the onion panel.
         "save",
         "load",
         "undo",
         "redo",
         "add-figure",
-        "onion",
+        "onion-toggle",
         // Transport + frame ops.
         "prev",
         "play",
@@ -481,5 +502,186 @@ fn workspace_chip_switches_the_workspace_field() {
         rt.state.workspace,
         Workspace::Animate,
         "Animate chip switches back"
+    );
+}
+
+// ----------------------------------------------------------------
+// Round 3 (Phase F, section 39): workspace gating, View
+// menu column toggles, settings guides, transport playback.
+// ----------------------------------------------------------------
+
+#[test]
+fn workspace_gating_hides_and_shows_panels() {
+    use crate::rune_sec::workspaces::Workspace;
+
+    let mut rt = editor();
+    // Seed the workspace explicitly: `init` restores it
+    // from the persisted layout prefs, which every test in
+    // this process shares, so the starting workspace is
+    // whatever a sibling test last persisted. The chips
+    // are permanent furniture — use them to force Animate
+    // before asserting anything about its panel set.
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+
+    // The gating table (workspaces.rs): Animate mounts
+    // Figures and FrameOps but not DrawTools. Panel root
+    // keys verified in their section files: figures_panel
+    // roots at `figures-panel`, frame_ops at `frames`,
+    // draw_tools at `draw-tools` — each key exists exactly
+    // once in the shell, so presence here means the panel
+    // is mounted, absence that gating left it out.
+    let keys = presented_keys(&rt);
+    assert!(keys.contains("figures-panel"), "Animate mounts Figures");
+    assert!(keys.contains("frames"), "Animate mounts FrameOps");
+    assert!(
+        !keys.contains("draw-tools"),
+        "Animate gates DrawTools out"
+    );
+
+    // Switch to Draw: its set is DrawTools + StrokeInspector
+    // + TextTool + Figures. The Draw-only panel appears,
+    // the Animate-only one leaves, and Figures — listed in
+    // both workspaces — stays: gating is per-section, not
+    // a whole-tree swap.
+    tap(&mut rt, "ws-draw");
+    rt.frame(DT);
+    assert_eq!(rt.state.workspace, Workspace::Draw);
+    let keys = presented_keys(&rt);
+    assert!(keys.contains("draw-tools"), "Draw mounts DrawTools");
+    assert!(!keys.contains("frames"), "Draw gates FrameOps out");
+    assert!(
+        keys.contains("figures-panel"),
+        "Figures is in both workspaces and stays"
+    );
+
+    // Restore Animate for the shared prefs, as round 2 did.
+    tap(&mut rt, "ws-animate");
+    assert_eq!(rt.state.workspace, Workspace::Animate);
+}
+
+#[test]
+fn view_menu_toggles_hide_columns() {
+    let mut rt = editor();
+    // Fresh shell state: both sidebars shown (the flags are
+    // shell state, not persisted, so `init` defaults them).
+    assert!(rt.state.show_left, "left sidebar starts shown");
+    assert!(
+        presented_keys(&rt).contains("figures-panel"),
+        "left column content is presented"
+    );
+
+    // Open the View menu. The dropdown is anchored, so a
+    // settling frame before reading the tree (round 2's
+    // lesson); `view-toggle-left` is dropdown-unique.
+    tap(&mut rt, "menu-view");
+    rt.frame(DT);
+    assert_eq!(
+        rt.state.menus.open,
+        Some(crate::rune_sec::menus::VIEW),
+        "View trigger opens the View menu"
+    );
+    assert!(
+        presented_keys(&rt).contains("view-toggle-left"),
+        "View dropdown lists the sidebar toggle"
+    );
+
+    // Selecting the item flips the flag and closes the
+    // menu (the shared `item` wrapper), and the whole left
+    // column unmounts. The unmount is structural, but give
+    // it the same bounded settle as the presence fades
+    // before asserting absence.
+    tap(&mut rt, "view-toggle-left");
+    assert_eq!(rt.state.menus.open, None, "selecting the item closes the menu");
+    assert!(!rt.state.show_left, "the toggle flipped show_left");
+    for _ in 0..30 {
+        if !presented_keys(&rt).contains("figures-panel") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    let keys = presented_keys(&rt);
+    assert!(!keys.contains("side-left"), "left column unmounted");
+    assert!(
+        !keys.contains("figures-panel"),
+        "left column content left the tree"
+    );
+
+    // Toggle back through the same menu path: the column
+    // and its panels return.
+    tap(&mut rt, "menu-view");
+    rt.frame(DT);
+    tap(&mut rt, "view-toggle-left");
+    assert!(rt.state.show_left, "the toggle restored show_left");
+    rt.frame(DT);
+    assert!(
+        presented_keys(&rt).contains("figures-panel"),
+        "left column content is back"
+    );
+}
+
+#[test]
+fn guides_toggle_flips_state() {
+    let mut rt = editor();
+
+    // The guides button lives inside the settings card,
+    // which starts closed — open it first (round 2's
+    // pattern). The settings section is ungated, so this
+    // holds in whatever workspace the prefs seeded.
+    tap(&mut rt, "settings-toggle");
+    assert!(rt.state.settings.open, "Settings toggle opens the card");
+
+    // State-level only, by design: the guides are drawn
+    // into the stage canvas `Shape`, whose pixels the
+    // Runtime cannot read back — the flag flip through
+    // the real button handler (`toggle_guides`, the same
+    // fn the View menu item calls) is the provable part.
+    // Value-agnostic, like round 2's theme test: whatever
+    // the flag starts at, each tap must invert it.
+    let before = rt.state.guides;
+    tap(&mut rt, "settings-guides");
+    assert_eq!(rt.state.guides, !before, "Guides tap flips the flag");
+    tap(&mut rt, "settings-guides");
+    assert_eq!(rt.state.guides, before, "second tap flips it back");
+}
+
+#[test]
+fn playback_advances_and_pauses() {
+    let mut rt = editor();
+    assert!(!rt.state.core.playing);
+    assert_eq!(rt.state.core.current, 0);
+
+    // The transport Play button (chrome_view's `play` key;
+    // its label flips to Pause while playing, the key does
+    // not). Round 1 proved the playhead maths on this same
+    // path; this pass asserts the frame counter itself.
+    tap(&mut rt, "play");
+    assert!(rt.state.core.playing, "Play flips core.playing");
+
+    // Twelve virtual frames is a fifth of a second — over
+    // two frame intervals at the demo's 12 fps — so the
+    // playhead must have carried `current` off frame 0.
+    for _ in 0..12 {
+        rt.frame(DT);
+    }
+    assert!(
+        rt.state.core.current >= 1,
+        "current frame advanced while playing: {}",
+        rt.state.core.current
+    );
+    assert!(rt.state.core.playing, "still playing (loops, no end stop)");
+
+    // The same button is now Pause: playing flips off and
+    // the frame counter freezes where it stopped.
+    tap(&mut rt, "play");
+    assert!(!rt.state.core.playing, "Pause flips core.playing off");
+    let stopped = rt.state.core.current;
+    for _ in 0..10 {
+        rt.frame(DT);
+    }
+    assert_eq!(
+        rt.state.core.current, stopped,
+        "paused frame counter is frozen"
     );
 }

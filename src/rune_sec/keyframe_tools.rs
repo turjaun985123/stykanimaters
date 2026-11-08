@@ -59,6 +59,31 @@
 //!   `graph_keys::channel_index_of` for the selected
 //!   figure's `Angle(selected_node)` target — the same
 //!   lookup `delete_key_here_core` uses.
+//! * Nudge left / right → NO `EditorCore` op moves a graph
+//!   key (verified: the core's graph family is
+//!   key/smooth/preset/interp/bake/clear only). The handler
+//!   composes the public graph API the way delete does:
+//!   resolve the channel via
+//!   `selected_angle_channel_index`, plan the move with
+//!   `nudge_plan`, `snapshot()` (editor.rs:202) only when
+//!   the plan lands, then apply through
+//!   `Channel::move_key` (graph.rs:159) passing the key's
+//!   own value, so only its frame changes and its tangents
+//!   travel with it. Collision rule: if another key sits
+//!   within 0.5 frames of the target frame (the engine's
+//!   nearest-key window), the nudge is REFUSED with a
+//!   status line — the plan runs before any snapshot, and
+//!   it never lets `move_key`'s replace-at-target path
+//!   silently destroy the occupying key. A target before
+//!   frame 0 is refused the same way.
+//! * "Clear channel keys" → also a composition: no
+//!   per-channel clear op exists (`clear_graph`,
+//!   editor.rs:1239, clears EVERY channel in the project).
+//!   One `snapshot()`, then `clear_channel_keys` empties
+//!   just the selected channel's key list, and the status
+//!   line reports how many keys were removed. The channel
+//!   itself stays — figure/target pairing intact — so the
+//!   joint remains a paste target.
 //!
 //! The keyed-frame indicator is a read-only graph query over
 //! `core.project.channels` — the same channel
@@ -252,6 +277,186 @@ pub fn paste_keys_here(s: &mut State) {
     paste_keys_here_core(&mut s.core, s.key_clipboard.as_deref());
 }
 
+/// What nudging the key at the playhead by `delta` frames
+/// does — the read-only plan the nudge helpers share.
+/// Computed without touching any keys: the core wrapper
+/// must know the nudge will land before it may snapshot
+/// (this file's rule — no snapshot for a no-op), and the
+/// collision rule lives here, in one place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NudgeOutcome {
+    /// A key moves (or would move) `from` one frame `to`
+    /// another.
+    Moved { from: f32, to: f32 },
+    /// No key sits at the playhead frame (within the
+    /// engine's 0.5-frame key window).
+    NoKeyHere,
+    /// Another key already occupies the target frame `at`
+    /// (within 0.5 frames) — the nudge is refused rather
+    /// than letting `Channel::move_key` silently replace
+    /// the occupant.
+    Blocked { at: f32 },
+    /// The key sits at `from` and the target lies before
+    /// frame 0 — keys never live at negative frames.
+    BeforeStart { from: f32 },
+}
+
+/// Index of the key nearest to `frame`, when one is within
+/// the engine's 0.5-frame tolerance — the public twin of
+/// `Channel`'s private `nearest_key_index` (graph.rs),
+/// over a bare key slice.
+pub fn key_index_near(keys: &[Key], frame: f32) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, k) in keys.iter().enumerate() {
+        let d = (k.frame - frame).abs();
+        if d <= 0.5 && best.map_or(true, |(_, bd)| d < bd) {
+            best = Some((i, d));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Plan a nudge of the key at `frame` (the playhead) by
+/// `delta` frames over a bare key slice: which key moves,
+/// where to, or why not. Pure — shared by
+/// [`nudge_key_in_channel`] (which applies the plan) and
+/// [`nudge_key_here_core`] (which snapshots only when the
+/// plan says `Moved`).
+pub fn nudge_plan(keys: &[Key], frame: f32, delta: i32) -> NudgeOutcome {
+    let Some(idx) = key_index_near(keys, frame) else {
+        return NudgeOutcome::NoKeyHere;
+    };
+    let from = keys[idx].frame;
+    let to = from + delta as f32;
+    if to < 0.0 {
+        return NudgeOutcome::BeforeStart { from };
+    }
+    if keys
+        .iter()
+        .enumerate()
+        .any(|(i, k)| i != idx && (k.frame - to).abs() <= 0.5)
+    {
+        return NudgeOutcome::Blocked { at: to };
+    }
+    NudgeOutcome::Moved { from, to }
+}
+
+/// Apply a nudge to a bare channel: move the key at
+/// `frame` by `delta` frames via `Channel::move_key`
+/// (graph.rs:159 — keeps the key's tangents and the
+/// sorted order), passing the key's own value so only its
+/// frame changes. Refusals leave the channel untouched.
+/// Because the plan already refused every key within 0.5
+/// frames of the target, `move_key`'s replace-at-target
+/// path (a 0.01 window) can never fire from here — a
+/// nudge never destroys another key.
+pub fn nudge_key_in_channel(ch: &mut Channel, frame: f32, delta: i32) -> NudgeOutcome {
+    let plan = nudge_plan(&ch.keys, frame, delta);
+    if let NudgeOutcome::Moved { from, to } = plan {
+        let idx = key_index_near(&ch.keys, frame).expect("a Moved plan found the key");
+        let value = ch.keys[idx].value;
+        let moved = ch.move_key(from, to, value);
+        debug_assert!(moved, "a Moved plan always moves: {plan:?}");
+    }
+    plan
+}
+
+/// Nudge the key at the current frame on the selected
+/// angle channel by `delta` frames (−1 left, +1 right),
+/// as one undo step. Returns whether a key moved. See
+/// the module docs for why this is a composition: the
+/// plan is checked first, and only a `Moved` plan
+/// snapshots — refusals are status-only, like every
+/// other no-op in this section.
+pub fn nudge_key_here_core(core: &mut EditorCore, delta: i32) -> bool {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a joint first, then Nudge.".into();
+        return false;
+    };
+    let fi = core.selected_figure;
+    let Some(ci) = selected_angle_channel_index(core) else {
+        core.status = format!("No graph keys for figure {} joint {} to nudge.", fi + 1, ni);
+        return false;
+    };
+    let frame = core.current as f32;
+    match nudge_plan(&core.project.channels[ci].keys, frame, delta) {
+        NudgeOutcome::Moved { from, to } => {
+            core.snapshot();
+            let applied = nudge_key_in_channel(&mut core.project.channels[ci], frame, delta);
+            debug_assert_eq!(applied, NudgeOutcome::Moved { from, to });
+            core.status = format!(
+                "Moved graph key from frame {} to frame {}.",
+                from + 1.0,
+                to + 1.0
+            );
+            true
+        }
+        NudgeOutcome::NoKeyHere => {
+            core.status = format!("No key at frame {} to nudge.", core.current + 1);
+            false
+        }
+        NudgeOutcome::Blocked { at } => {
+            core.status = format!("Frame {} already has a key on this channel.", at + 1.0);
+            false
+        }
+        NudgeOutcome::BeforeStart { from } => {
+            core.status = format!("Key at frame {} cannot move earlier.", from + 1.0);
+            false
+        }
+    }
+}
+
+/// `State` wrapper for [`nudge_key_here_core`].
+pub fn nudge_key_here(s: &mut State, delta: i32) {
+    nudge_key_here_core(&mut s.core, delta);
+}
+
+/// Remove every key from a bare channel, returning how
+/// many keys it held. The channel itself stays — an
+/// emptied channel still carries the figure/target
+/// pairing (and still counts as "keyed once", so Paste
+/// keeps a home in it).
+pub fn clear_channel_keys(ch: &mut Channel) -> usize {
+    let n = ch.keys.len();
+    ch.keys.clear();
+    n
+}
+
+/// Clear every key on the selected angle channel, as one
+/// undo step; returns the number of keys removed. Every
+/// no-op — no joint selected, no channel on the joint, an
+/// already-empty channel — returns 0 with a status line
+/// and NO snapshot, matching this section's discipline.
+/// The status line reports the count on success.
+pub fn clear_channel_keys_core(core: &mut EditorCore) -> usize {
+    let Some(ni) = core.selected_node else {
+        core.status = "Select a joint first, then Clear channel.".into();
+        return 0;
+    };
+    let fi = core.selected_figure;
+    let Some(ci) = selected_angle_channel_index(core) else {
+        core.status = format!("No graph keys for figure {} joint {} to clear.", fi + 1, ni);
+        return 0;
+    };
+    if core.project.channels[ci].keys.is_empty() {
+        core.status = format!("No graph keys for figure {} joint {} to clear.", fi + 1, ni);
+        return 0;
+    }
+    core.snapshot();
+    let n = clear_channel_keys(&mut core.project.channels[ci]);
+    core.status = format!(
+        "Cleared {n} graph key(s) from figure {} joint {}.",
+        fi + 1,
+        ni
+    );
+    n
+}
+
+/// `State` wrapper for [`clear_channel_keys_core`].
+pub fn clear_channel_keys_here(s: &mut State) {
+    clear_channel_keys_core(&mut s.core);
+}
+
 /// One clipboard button, in the chrome's metrics
 /// (`chrome_view::btn`). When `enabled` is false the button
 /// renders muted (off fill, secondary text) and carries NO
@@ -279,7 +484,8 @@ fn kbtn(
 
 /// The keyframe tools section: header, selection target,
 /// keyed-frame indicator, the key/delete/auto buttons, the
-/// copy/paste-keys clipboard row, and the five tangent
+/// copy/paste-keys clipboard row (with Clear channel
+/// keys), the nudge row, and the five tangent
 /// preset buttons (scoped by the op to the selected
 /// figure). Buttons highlight with real state: Delete is
 /// accent-filled exactly when a key sits at this frame;
@@ -344,7 +550,21 @@ pub fn keyframe_section(s: &State, t: &Theme) -> El {
                     s.key_clipboard.as_ref().is_some_and(|k| !k.is_empty()),
                     t,
                     |s| paste_keys_here(s),
-                )),
+                ))
+                .child(btn("key-clear-channel", "Clear channel keys", false, t, |s| {
+                    clear_channel_keys_here(s)
+                })),
+        )
+        .child(
+            row()
+                .key("keyframe-nudge")
+                .gap(6.0)
+                .child(btn("key-nudge-l", "Nudge left", false, t, |s| {
+                    nudge_key_here(s, -1)
+                }))
+                .child(btn("key-nudge-r", "Nudge right", false, t, |s| {
+                    nudge_key_here(s, 1)
+                })),
         )
         .child(presets)
 }
@@ -511,5 +731,202 @@ mod tests {
         let keys = [Key::flat(0.0, 10.0)];
         assert!(!paste_keys_here_core(&mut core, Some(&keys)));
         assert!(core.status.contains("key it once first"));
+    }
+
+    #[test]
+    fn key_index_near_takes_the_nearest_key_within_half_a_frame() {
+        let keys = [Key::flat(0.0, 10.0), Key::flat(4.0, 20.0), Key::flat(9.0, 30.0)];
+        assert_eq!(key_index_near(&keys, 0.0), Some(0));
+        assert_eq!(key_index_near(&keys, 4.4), Some(1));
+        assert_eq!(key_index_near(&keys, 8.6), Some(2));
+        assert_eq!(key_index_near(&keys, 2.0), None, "2 frames from any key");
+        assert_eq!(key_index_near(&[], 0.0), None);
+    }
+
+    #[test]
+    fn nudge_plan_moves_the_playhead_key_one_frame_either_way() {
+        let keys = [Key::flat(0.0, 10.0), Key::flat(2.0, 30.0), Key::flat(5.0, 50.0)];
+        assert_eq!(
+            nudge_plan(&keys, 2.0, 1),
+            NudgeOutcome::Moved { from: 2.0, to: 3.0 }
+        );
+        assert_eq!(
+            nudge_plan(&keys, 2.0, -1),
+            NudgeOutcome::Moved { from: 2.0, to: 1.0 }
+        );
+        assert_eq!(
+            nudge_plan(&keys, 5.0, 1),
+            NudgeOutcome::Moved { from: 5.0, to: 6.0 },
+            "no upper clamp: channels may outlive the timeline"
+        );
+    }
+
+    #[test]
+    fn nudge_plan_refuses_collisions_edges_and_empty_spots() {
+        let keys = [Key::flat(0.0, 10.0), Key::flat(1.0, 20.0), Key::flat(4.0, 40.0)];
+        // Adjacent keys block each other in both directions.
+        assert_eq!(nudge_plan(&keys, 0.0, 1), NudgeOutcome::Blocked { at: 1.0 });
+        assert_eq!(nudge_plan(&keys, 1.0, -1), NudgeOutcome::Blocked { at: 0.0 });
+        // A key 0.4 frames from the target occupies it too —
+        // the refusal window is the engine's 0.5 nearest-key
+        // window, not an exact-frame match.
+        let frac = [Key::flat(2.0, 10.0), Key::flat(3.4, 20.0)];
+        assert_eq!(nudge_plan(&frac, 2.0, 1), NudgeOutcome::Blocked { at: 3.0 });
+        // Frame 0 cannot move earlier; bare frames have no key.
+        assert_eq!(
+            nudge_plan(&keys, 0.0, -1),
+            NudgeOutcome::BeforeStart { from: 0.0 }
+        );
+        assert_eq!(nudge_plan(&keys, 3.0, 1), NudgeOutcome::NoKeyHere);
+        assert_eq!(nudge_plan(&[], 0.0, 1), NudgeOutcome::NoKeyHere);
+    }
+
+    #[test]
+    fn nudge_key_in_channel_moves_the_key_and_keeps_its_shape() {
+        let mut shaped = Key::flat(2.0, 30.0);
+        shaped.in_tan = 1.5;
+        shaped.out_tan = -2.0;
+        let mut ch = Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![Key::flat(0.0, 10.0), shaped, Key::flat(5.0, 50.0)],
+        };
+        let out = nudge_key_in_channel(&mut ch, 2.0, 1);
+        assert_eq!(out, NudgeOutcome::Moved { from: 2.0, to: 3.0 });
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![0.0, 3.0, 5.0], "the moved key stays sorted");
+        let moved = ch.keys[1];
+        assert_eq!(moved.value, 30.0, "a frame nudge never changes the value");
+        assert_eq!(
+            (moved.in_tan, moved.out_tan),
+            (1.5, -2.0),
+            "tangents travel with the key"
+        );
+        // A refused nudge changes nothing at all.
+        let before = ch.keys.clone();
+        assert_eq!(
+            nudge_key_in_channel(&mut ch, 5.0, -2),
+            NudgeOutcome::Blocked { at: 3.0 }
+        );
+        assert_eq!(ch.keys, before, "the occupant survived the refused nudge");
+    }
+
+    #[test]
+    fn nudge_key_here_core_moves_the_playhead_key_as_one_undo_step() {
+        let mut core = core_with_angle_keys(); // keys at 0 (10) and 2 (30)
+        core.current = 0;
+        let edits_before = core.edits_since_autosave();
+        assert!(nudge_key_here_core(&mut core, 1));
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before + 1,
+            "exactly one snapshot"
+        );
+        assert!(
+            core.status.contains("Moved graph key from frame 1 to frame 2"),
+            "status reports the move: {}",
+            core.status
+        );
+        let ch = selected_angle_channel(&core).unwrap();
+        let frames: Vec<f32> = ch.keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![1.0, 2.0]);
+        assert_eq!(ch.keys[0].value, 10.0, "the moved key kept its value");
+        core.undo();
+        let ch = selected_angle_channel(&core).unwrap();
+        assert_eq!(ch.keys[0].frame, 0.0, "undo restores the key's frame");
+    }
+
+    #[test]
+    fn nudge_key_here_core_refuses_a_collision_without_snapshotting() {
+        let mut core = core_with_angle_keys();
+        core.project.channels[0].keys.push(Key::flat(1.0, 99.0));
+        core.project.channels[0].sort_keys();
+        core.current = 0;
+        let edits_before = core.edits_since_autosave();
+        assert!(!nudge_key_here_core(&mut core, 1));
+        assert!(core.status.contains("already has a key"), "status: {}", core.status);
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before,
+            "a refused nudge never snapshots"
+        );
+        let ch = selected_angle_channel(&core).unwrap();
+        assert_eq!(ch.keys.len(), 3, "no key moved and none was destroyed");
+        assert!(keyed_here(&ch.keys, 0) && keyed_here(&ch.keys, 1));
+    }
+
+    #[test]
+    fn nudge_key_here_core_noops_cleanly() {
+        let mut core = core_with_angle_keys();
+        // Playhead on a frame with no key.
+        core.current = 4;
+        assert!(!nudge_key_here_core(&mut core, 1));
+        assert!(core.status.contains("No key at frame 5 to nudge"));
+        // The frame-0 key cannot move earlier.
+        core.current = 0;
+        assert!(!nudge_key_here_core(&mut core, -1));
+        assert!(core.status.contains("cannot move earlier"));
+        // No channel on the selected joint.
+        let mut bare = EditorCore::new();
+        bare.selected_node = Some(1);
+        assert!(!nudge_key_here_core(&mut bare, 1));
+        assert!(bare.status.contains("No graph keys"));
+        // No joint selected at all.
+        bare.selected_node = None;
+        assert!(!nudge_key_here_core(&mut bare, 1));
+        assert!(bare.status.contains("Select a joint"));
+    }
+
+    #[test]
+    fn clear_channel_keys_empties_a_bare_channel_and_counts() {
+        let mut ch = Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![Key::flat(0.0, 10.0), Key::flat(2.0, 30.0)],
+        };
+        assert_eq!(clear_channel_keys(&mut ch), 2);
+        assert!(ch.keys.is_empty());
+        assert_eq!(
+            clear_channel_keys(&mut ch),
+            0,
+            "clearing an empty channel counts zero"
+        );
+    }
+
+    #[test]
+    fn clear_channel_keys_core_clears_as_one_undo_step_and_reports_the_count() {
+        let mut core = core_with_angle_keys();
+        let edits_before = core.edits_since_autosave();
+        assert_eq!(clear_channel_keys_core(&mut core), 2);
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before + 1,
+            "exactly one snapshot"
+        );
+        assert!(
+            core.status.contains("Cleared 2 graph key(s)"),
+            "status reports the count: {}",
+            core.status
+        );
+        let ch = selected_angle_channel(&core).expect("the channel itself survives");
+        assert!(ch.keys.is_empty());
+        // Clearing again is a status-only no-op.
+        assert_eq!(clear_channel_keys_core(&mut core), 0);
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before + 1,
+            "no second snapshot for the no-op"
+        );
+        // Undo restores the cleared keys.
+        core.undo();
+        assert_eq!(selected_angle_channel(&core).map(|c| c.keys.len()), Some(2));
+    }
+
+    #[test]
+    fn clear_channel_keys_core_noops_without_a_selection() {
+        let mut core = EditorCore::new();
+        core.selected_node = None;
+        assert_eq!(clear_channel_keys_core(&mut core), 0);
+        assert!(core.status.contains("Select a joint"));
     }
 }

@@ -57,17 +57,56 @@
 //! only report an error, and the GPUI save buttons likewise
 //! existed only on clip rows.
 //!
+//! Phase F adds two view-state conveniences, both held in
+//! [`FxBrowserState`] (declared in this file; the shell
+//! integrator owns the `State` field):
+//!
+//! * **Filter** — a text field at the panel top. Its text
+//!   substring-filters the kind buttons across all five
+//!   categories through [`visible_categories`] (case-
+//!   insensitive, matching the snake-case name and the
+//!   humanised label); a category with no match left is
+//!   hidden entirely, and a filter matching nothing at all
+//!   shows a muted "No effects match the filter" line
+//!   instead of a silently empty grid. Presets are not
+//!   filtered.
+//! * **Recent** — a row under the filter showing the last
+//!   [`MAX_RECENT`] kinds added from this panel, most
+//!   recent first, no duplicates ([`record_recent`] is the
+//!   bookkeeping). A kind is recorded when its add button
+//!   fires — before the op runs, so a press that the op
+//!   refuses (no joint selected) still counts as "the user
+//!   picked this kind". Recent buttons re-add their kind
+//!   (and move it back to the front). The list is
+//!   in-memory only: it lives in the shell state, is never
+//!   written to disk, and starts empty every launch. It is
+//!   deliberately NOT filtered — it is a shortcut row, not
+//!   part of the grid.
+//!
+//! Integrator wiring for the state: add
+//! `pub fx_browser: rune_sec::fx_browser::FxBrowserState`
+//! to `State`, initialise it with
+//! `fx_browser: Default::default(),`, and add
+//! `s.fx_browser.query.focused` to the shell's
+//! `text_focused` check so global shortcuts stay out of
+//! the filter field while typing (the library search got
+//! the same treatment in Phase E).
+//!
 //! Element keys reuse the GPUI control ids: the kind
 //! buttons keep their `fxclip-*` ids verbatim, so headless
 //! `--tree` checks written against the old UI still find
-//! them.
+//! them. The Phase F additions are new keys: `fx-filter`
+//! (the field), `fx-filter-row`, and `fx-recent-<name>`
+//! for the Recent buttons (kept distinct from the grid's
+//! `fxclip-*` ids so a kind never has two elements with
+//! the same key on screen at once).
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
-use rune::{col, row, text, El};
+use rune::{col, row, text, text_input, El, TextEdit};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::vfx::ClipKind;
 
@@ -151,6 +190,100 @@ fn section(label: &str, t: &Theme) -> El {
     text(label.to_string())
         .font(type_::LABEL)
         .color(t.text_secondary)
+}
+
+// ----------------------------------------------------------------
+// Panel view-state (Phase F): the filter field and the
+// recently-added kinds. Everything about clips themselves
+// lives in `EditorCore`; this is shell state only.
+// ----------------------------------------------------------------
+
+/// How many kinds the Recent row remembers.
+pub const MAX_RECENT: usize = 3;
+
+/// View-state for this section: the filter field's contents
+/// and the recently-added kinds. Owned by `State` (see the
+/// module docs for the exact integrator wiring); nothing
+/// here is persisted — the recents list in particular is
+/// in-memory only and starts empty every launch.
+///
+/// The derive drops `Eq` because Rune's `TextEdit` is
+/// `PartialEq` but not `Eq` (rune `edit.rs`:
+/// `#[derive(Clone, Default, PartialEq)]`) — the
+/// `library_panel` state hit the same fact in Phase E.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct FxBrowserState {
+    /// Filter box contents (Rune core text edit). The kind
+    /// grid filters through [`visible_categories`] on this
+    /// text every render; typing is the only writer.
+    pub query: TextEdit,
+    /// The last kinds added from this panel, most recent
+    /// first, no duplicates, capped at [`MAX_RECENT`].
+    /// Written only by [`record_recent`], from the kind
+    /// buttons' handlers.
+    pub recent: Vec<ClipKind>,
+}
+
+/// True when `entry` matches the filter `query`:
+/// case-insensitive substring against the kind's
+/// snake-case name and its humanised label (so "ring"
+/// finds Shock ring either way). An empty (or
+/// whitespace-only) query matches everything — the
+/// `library_panel::name_matches` rule, mirrored.
+pub fn kind_matches(entry: &FxKindEntry, query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    q.is_empty()
+        || entry.name.to_lowercase().contains(&q)
+        || kind_label(entry.name).to_lowercase().contains(&q)
+}
+
+/// The categories the grid should show for `query`, in
+/// [`FX_CATEGORIES`] order, each with its matching kinds
+/// in table order. A category whose kinds all fail the
+/// filter is dropped entirely (its heading hides with
+/// it). An empty query yields all five categories at
+/// full size; a query matching nothing yields an empty
+/// vec, which the builder turns into a "no match" line.
+pub fn visible_categories(
+    query: &str,
+) -> Vec<(&'static str, Vec<&'static FxKindEntry>)> {
+    FX_CATEGORIES
+        .iter()
+        .filter_map(|cat| {
+            let kinds: Vec<&'static FxKindEntry> = kinds_in(cat)
+                .into_iter()
+                .filter(|e| kind_matches(e, query))
+                .collect();
+            if kinds.is_empty() {
+                None
+            } else {
+                Some((*cat, kinds))
+            }
+        })
+        .collect()
+}
+
+/// Record `kind` as the most recently added: it moves to
+/// the front, any earlier occurrence is removed (no
+/// duplicates), and the list is truncated to
+/// [`MAX_RECENT`]. Pure bookkeeping over the state vec —
+/// no core access — so the buttons' handlers stay thin.
+pub fn record_recent(recent: &mut Vec<ClipKind>, kind: ClipKind) {
+    recent.retain(|&k| k != kind);
+    recent.insert(0, kind);
+    recent.truncate(MAX_RECENT);
+}
+
+/// The table entries for the recents list, in list order
+/// (most recent first), for the Recent row's buttons.
+/// Kinds always resolve — recents are only ever recorded
+/// from table buttons — but an unresolvable kind is
+/// skipped rather than panicking.
+pub fn recent_entries(recent: &[ClipKind]) -> Vec<&'static FxKindEntry> {
+    recent
+        .iter()
+        .filter_map(|k| FX_KINDS.iter().find(|e| e.kind == *k))
+        .collect()
 }
 
 // ----------------------------------------------------------------
@@ -239,9 +372,11 @@ pub fn preset_names_cached(core: &EditorCore) -> Vec<String> {
 
 /// The effects browser body. Mounting (and any show/hide
 /// state) is the caller's business; this builds the full
-/// panel for the current core state.
+/// panel for the current core state and the panel's own
+/// [`FxBrowserState`] (filter text, recents).
 pub fn fx_browser(s: &State, t: &Theme) -> El {
     let core = &s.core;
+    let query = s.fx_browser.query.text.clone();
 
     let mut panel = col()
         .key("fx-browser")
@@ -251,10 +386,59 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
         .radius(8.0)
         .child(text("Effects").font(type_::TITLE).color(t.text));
 
-    // ---- Kinds, grouped by category.
-    for cat in FX_CATEGORIES {
+    // ---- Filter field (Phase F): substring-filters the
+    // kind grid below through `visible_categories`.
+    panel = panel.child(
+        row()
+            .key("fx-filter-row")
+            .gap(8.0)
+            .center_y()
+            .child(
+                text_input(&s.fx_browser.query, type_::BODY.lh(26.0))
+                    .key("fx-filter")
+                    .single_line()
+                    .grow(1.0)
+                    .color(t.text)
+                    .placeholder("Filter effects", t.text_secondary)
+                    .on_edit(|s: &mut State| &mut s.fx_browser.query),
+            ),
+    );
+
+    // ---- Recent kinds (Phase F): the last kinds added
+    // from this panel, most recent first. Shown whenever
+    // the list is non-empty, independent of the filter.
+    if !s.fx_browser.recent.is_empty() {
+        panel = panel.child(section("Recent", t));
+        let mut recent_row = row().gap(6.0);
+        for entry in recent_entries(&s.fx_browser.recent) {
+            let kind = entry.kind;
+            recent_row = recent_row.child(btn(
+                &format!("fx-recent-{}", entry.name),
+                &kind_label(entry.name),
+                false,
+                t,
+                move |s| {
+                    record_recent(&mut s.fx_browser.recent, kind);
+                    s.core.add_fx_clip(kind);
+                },
+            ));
+        }
+        panel = panel.child(recent_row);
+    }
+
+    // ---- Kinds, grouped by category, filtered by the
+    // query (empty categories hide with their headings).
+    let visible = visible_categories(&query);
+    if visible.is_empty() {
+        panel = panel.child(
+            text("No effects match the filter")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    }
+    for (cat, entries) in &visible {
         panel = panel.child(section(cat, t));
-        for chunk in kinds_in(cat).chunks(PER_ROW) {
+        for chunk in entries.chunks(PER_ROW) {
             let mut kinds_row = row().gap(6.0);
             for entry in chunk {
                 let kind = entry.kind;
@@ -263,7 +447,10 @@ pub fn fx_browser(s: &State, t: &Theme) -> El {
                     &kind_label(entry.name),
                     false,
                     t,
-                    move |s| s.core.add_fx_clip(kind),
+                    move |s| {
+                        record_recent(&mut s.fx_browser.recent, kind);
+                        s.core.add_fx_clip(kind);
+                    },
                 ));
             }
             panel = panel.child(kinds_row);
@@ -422,6 +609,105 @@ mod tests {
         assert_eq!(kind_label("shock_ring"), "Shock ring");
         assert_eq!(kind_label("fireworks"), "Fireworks");
         assert_eq!(kind_label(""), "");
+    }
+
+    // ---- Filter + recents (Phase F) ----
+
+    fn entry_of(kind: ClipKind) -> &'static FxKindEntry {
+        FX_KINDS.iter().find(|e| e.kind == kind).expect("kind is in the table")
+    }
+
+    #[test]
+    fn kind_matches_is_case_insensitive_substring_on_name_and_label() {
+        let shock = entry_of(ClipKind::ShockRing);
+        assert!(kind_matches(shock, "shock"));
+        assert!(kind_matches(shock, "SHOCK"));
+        assert!(kind_matches(shock, "Shock Ring"), "the humanised label matches too");
+        assert!(kind_matches(shock, "ring"));
+        assert!(kind_matches(shock, "  ring  "), "the query is trimmed");
+        assert!(!kind_matches(shock, "beam"));
+        // Empty and whitespace-only queries are "no filter".
+        assert!(kind_matches(shock, ""));
+        assert!(kind_matches(shock, "   "));
+        assert!(kind_matches(entry_of(ClipKind::Beam), ""));
+    }
+
+    #[test]
+    fn visible_categories_with_empty_query_is_the_full_grid() {
+        let visible = visible_categories("");
+        let names: Vec<&str> = visible.iter().map(|(cat, _)| *cat).collect();
+        assert_eq!(names, FX_CATEGORIES);
+        let sizes: Vec<usize> = visible.iter().map(|(_, kinds)| kinds.len()).collect();
+        assert_eq!(sizes, vec![4, 4, 6, 4, 9]);
+    }
+
+    #[test]
+    fn visible_categories_drops_categories_with_no_matches() {
+        // One match: only its category survives, with only it.
+        let visible = visible_categories("beam");
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].0, "Energy");
+        assert_eq!(visible[0].1.len(), 1);
+        assert_eq!(visible[0].1[0].kind, ClipKind::Beam);
+
+        // Matches across three categories: all survive, in
+        // category order, each holding only its matches in
+        // table order. ("or" is a substring of orbit,
+        // vortex and fireworks — Magic; aurora — Nature;
+        // meteor — Particles. Verified against the table.)
+        let visible = visible_categories("or");
+        let names: Vec<&str> = visible.iter().map(|(cat, _)| *cat).collect();
+        assert_eq!(names, vec!["Magic", "Nature", "Particles"]);
+        let magic: Vec<ClipKind> = visible[0].1.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            magic,
+            vec![ClipKind::Orbit, ClipKind::Vortex, ClipKind::Fireworks]
+        );
+        let nature: Vec<ClipKind> = visible[1].1.iter().map(|e| e.kind).collect();
+        assert_eq!(nature, vec![ClipKind::Aurora]);
+        let particles: Vec<ClipKind> = visible[2].1.iter().map(|e| e.kind).collect();
+        assert_eq!(particles, vec![ClipKind::Meteor]);
+
+        // Nothing matches: no categories at all (the
+        // builder renders the "no match" line for this).
+        assert!(visible_categories("zzz-no-such-effect").is_empty());
+    }
+
+    #[test]
+    fn record_recent_is_most_recent_first_deduped_and_capped() {
+        let mut recent: Vec<ClipKind> = Vec::new();
+        record_recent(&mut recent, ClipKind::Burst);
+        assert_eq!(recent, vec![ClipKind::Burst]);
+        record_recent(&mut recent, ClipKind::Beam);
+        assert_eq!(recent, vec![ClipKind::Beam, ClipKind::Burst]);
+        // Re-adding an existing kind moves it to the front
+        // instead of duplicating it.
+        record_recent(&mut recent, ClipKind::Burst);
+        assert_eq!(recent, vec![ClipKind::Burst, ClipKind::Beam]);
+        record_recent(&mut recent, ClipKind::Aura);
+        assert_eq!(recent, vec![ClipKind::Aura, ClipKind::Burst, ClipKind::Beam]);
+        // A fourth distinct kind pushes the oldest out —
+        // the cap is MAX_RECENT (3).
+        record_recent(&mut recent, ClipKind::Smoke);
+        assert_eq!(recent, vec![ClipKind::Smoke, ClipKind::Aura, ClipKind::Burst]);
+        assert_eq!(recent.len(), MAX_RECENT);
+    }
+
+    #[test]
+    fn recent_entries_maps_back_to_table_entries_in_order() {
+        let recent = vec![ClipKind::Wave, ClipKind::Burst];
+        let entries = recent_entries(&recent);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].key, "fxclip-wave");
+        assert_eq!(entries[1].key, "fxclip-burst");
+        assert!(recent_entries(&[]).is_empty());
+    }
+
+    #[test]
+    fn browser_state_defaults_to_empty_query_and_no_recents() {
+        let state = FxBrowserState::default();
+        assert!(state.query.text.is_empty());
+        assert!(state.recent.is_empty());
     }
 
     // ---- Preset-name cache ----

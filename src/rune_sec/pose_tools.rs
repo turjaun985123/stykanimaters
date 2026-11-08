@@ -56,6 +56,26 @@
 //!   is pose-adjacent: it writes graph-evaluated poses into
 //!   real frames, after which they are ordinary editable
 //!   poses.
+//! - **Save pose** (pose library, Phase F) → writes the
+//!   selected figure's current pose to the on-disk library
+//!   `./library/poses/<slug>.json`, mirroring the 3D panel's
+//!   library (`fig3d::save_pose_library`, fig3d.rs:1544)
+//!   convention for convention: same `{name, pose}` file
+//!   envelope, same slug sanitising, same save/scan/load
+//!   `_in` split, the 2D directory standing where
+//!   `./library3d/poses` stands for 3D. The save name is the
+//!   figure's display name, so saving the same figure again
+//!   OVERWRITES its earlier entry — one library slot per
+//!   figure name (the 3D library's collision behaviour too).
+//! - **Pose library Apply buttons** → load a saved entry and
+//!   write it over the selected figure's current-frame pose
+//!   through the exact path Paste pose uses (one `snapshot`,
+//!   one write, the same angle-count refusal — a pose from a
+//!   differently-rigged figure would panic
+//!   `model::evaluate`). The saved-name list is read through
+//!   an mtime-keyed thread-local cache (the fx_browser /
+//!   home_panel pattern): a save bumps the directory mtime,
+//!   so a new entry appears on the very next build.
 //!
 //! Buttons whose op would no-op on the current state render
 //! muted (secondary text, no press handler — inert, not fake):
@@ -63,8 +83,13 @@
 //! copied pose *and* a target pose, copy-to needs both poses,
 //! bake needs at least one graph channel and one frame.
 
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
 use rune::tok::{type_, Theme};
 use rune::{col, el, row, text, El};
+use serde::{Deserialize, Serialize};
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::Pose;
 
@@ -184,14 +209,23 @@ pub fn paste_pose(core: &mut EditorCore, clip: &Option<Pose>) {
         return;
     }
     let clip = clip.clone();
-    core.snapshot();
     let (fi, fr) = (core.selected_figure, core.current);
-    core.project.frames[fr].poses[fi] = clip;
+    write_current_pose(core, clip);
     core.status = format!(
         "Pose pasted onto figure {} on frame {}.",
         fi + 1,
         fr + 1
     );
+}
+
+/// Snapshot once and write `pose` over the selected figure's
+/// current-frame pose — the single write path Paste pose and
+/// library Apply share, so both are exactly one undo step.
+/// Callers guard pose existence and angle count first.
+fn write_current_pose(core: &mut EditorCore, pose: Pose) {
+    core.snapshot();
+    let (fi, fr) = (core.selected_figure, core.current);
+    core.project.frames[fr].poses[fi] = pose;
 }
 
 /// Reset the selected figure's current-frame pose to its
@@ -209,6 +243,281 @@ pub fn reset_pose(core: &mut EditorCore) {
         fi + 1,
         fr + 1
     );
+}
+
+
+// ----------------------------------------------------------------
+// Pose library (Phase F): the clipboard's persistent sibling.
+// Mirrors the 3D pose library in `fig3d` (fig3d.rs:1497-1597)
+// convention for convention — see the module docs.
+// ----------------------------------------------------------------
+
+/// Sanitise a display name into a file-safe slug: lowercase
+/// alphanumerics kept, every other run collapsed to one `-`,
+/// no leading or trailing dash, `"figure"` when nothing
+/// usable remains. A verbatim mirror of `fig3d::library_slug`
+/// (fig3d.rs:1412), which is private to the engine crate;
+/// like `fx_browser::PRESET_DIR`, this copy is the one
+/// maintenance hazard — if the 3D slug rules ever change,
+/// this must change with them, or the two libraries' files
+/// stop following one convention.
+pub fn pose_slug(name: &str) -> String {
+    let mut slug = String::new();
+    let mut dash = false;
+    for ch in name.chars() {
+        if ch.is_alphanumeric() {
+            if dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            dash = false;
+            slug.extend(ch.to_lowercase());
+        } else {
+            dash = true;
+        }
+    }
+    if slug.is_empty() {
+        slug.push_str("figure");
+    }
+    slug
+}
+
+/// The file stem the pose of a figure called `figure_name`
+/// is stored under: the slug itself (the file is
+/// `<stem>.json` in the pose library directory).
+pub fn pose_file_stem(figure_name: &str) -> String {
+    pose_slug(figure_name)
+}
+
+/// File name a library pose called `name` is stored under:
+/// `<slug>.json`, where the slug comes from [`pose_slug`] —
+/// the same sanitising the 3D library applies (mirrors
+/// `fig3d::pose_file_name`).
+fn pose_file_name(name: &str) -> String {
+    format!("{}.json", pose_slug(name))
+}
+
+/// One pose library file's contents: a pose under the name
+/// it was saved by (mirrors `fig3d::PoseLibraryEntry` for
+/// the 3D library).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PoseLibraryEntry {
+    name: String,
+    pose: Pose,
+}
+
+/// The directory the 2D pose library lives in:
+/// `./library/poses`, inside the 2D figure library's own
+/// directory — where the 3D mirror keeps `./library3d/poses`
+/// beside its figure library.
+fn pose_library_dir() -> PathBuf {
+    PathBuf::from("library").join("poses")
+}
+
+/// Save `pose` into pose library directory `dir` (created
+/// if missing) under `name`, returning the file's path. The
+/// file is `<dir>/<slug>.json` (see [`pose_file_name`])
+/// holding `{name, pose}` as JSON. Saving under a name that
+/// already has an entry overwrites that file.
+fn save_pose_library_in(
+    dir: &Path,
+    pose: &Pose,
+    name: &str,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(pose_file_name(name));
+    let entry = PoseLibraryEntry {
+        name: name.to_string(),
+        pose: pose.clone(),
+    };
+    let text = serde_json::to_string_pretty(&entry).map_err(std::io::Error::other)?;
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
+/// Save `pose` into the 2D pose library (`./library/poses`)
+/// under `name`, returning the file's path. See
+/// [`save_pose_library_in`].
+pub fn save_pose_library(pose: &Pose, name: &str) -> std::io::Result<PathBuf> {
+    save_pose_library_in(&pose_library_dir(), pose, name)
+}
+
+/// Load the pose saved under `name` from pose library
+/// directory `dir`. An error is returned when no readable,
+/// well-formed entry exists for that name (missing file,
+/// invalid JSON, wrong shape).
+fn load_pose_library_in(dir: &Path, name: &str) -> std::io::Result<Pose> {
+    let path = dir.join(pose_file_name(name));
+    let text = std::fs::read_to_string(&path)?;
+    let entry: PoseLibraryEntry =
+        serde_json::from_str(&text).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+        })?;
+    Ok(entry.pose)
+}
+
+/// Load the pose saved under `name` from the 2D pose
+/// library (`./library/poses`). See [`load_pose_library_in`].
+pub fn load_pose_library(name: &str) -> std::io::Result<Pose> {
+    load_pose_library_in(&pose_library_dir(), name)
+}
+
+/// The display names of every pose saved in pose library
+/// directory `dir`, sorted. Files that are not readable
+/// pose entries are skipped; a missing directory yields an
+/// empty list.
+fn scan_pose_library_in(dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_pose_file = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with(".json"))
+                .unwrap_or(false);
+            if is_pose_file {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(parsed) =
+                        serde_json::from_str::<PoseLibraryEntry>(&text)
+                    {
+                        names.push(parsed.name);
+                    }
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The display names of every pose saved in the 2D pose
+/// library (`./library/poses`), sorted. See
+/// [`scan_pose_library_in`].
+pub fn scan_pose_library() -> Vec<String> {
+    scan_pose_library_in(&pose_library_dir())
+}
+
+/// A directory's modification time, swallowing every error
+/// into `None` — `fx_browser`'s helper, same rule: a
+/// missing/unreadable dir is a state, not a failure
+/// (`scan_pose_library` yields an empty list for it).
+/// Callers treat `None` as "no trustworthy cache key", not
+/// as a key.
+fn dir_mtime(dir: &Path) -> Option<SystemTime> {
+    std::fs::metadata(dir).and_then(|m| m.modified()).ok()
+}
+
+/// One pose-name cache slot: the dir-mtime key the names
+/// were read under, plus the names themselves.
+type PoseNameCache = Option<(Option<SystemTime>, Vec<String>)>;
+
+thread_local! {
+    /// The saved-pose name cache (fx_browser's design).
+    /// Thread-local because Rune builds the view and runs
+    /// its handlers on the UI thread (so this panel's own
+    /// Save press and the next build share one cache), and
+    /// because every test thread then starts with an empty
+    /// cache.
+    static POSE_NAME_CACHE: RefCell<PoseNameCache> = RefCell::new(None);
+}
+
+/// The cache state machine, pure over its inputs so tests
+/// can drive it with a counting reader: serve the stored
+/// names when `key` matches the key they were read under,
+/// otherwise call `read`, store its result under `key`, and
+/// return it. (fx_browser's `cached_names`, same contract.)
+fn cached_pose_names(
+    cache: &mut PoseNameCache,
+    key: Option<SystemTime>,
+    read: impl FnOnce() -> Vec<String>,
+) -> Vec<String> {
+    if let Some((cached_key, names)) = cache.as_ref() {
+        if *cached_key == key {
+            return names.clone();
+        }
+    }
+    let names = read();
+    *cache = Some((key, names.clone()));
+    names
+}
+
+/// The saved pose names for the panel, cached behind the
+/// library directory's mtime (the fx_browser contract: the
+/// cache can only go stale on NAMES, and a save through
+/// this panel's own button bumps the directory mtime, so a
+/// new entry is visible on the very next build). Falls back
+/// to a live scan — caching nothing — when the directory
+/// cannot be statted (usually: nothing saved yet, so the
+/// directory doesn't exist; the live scan returns the same
+/// empty list the cache would hold).
+pub fn saved_pose_names() -> Vec<String> {
+    let Some(key) = dir_mtime(&pose_library_dir()) else {
+        return scan_pose_library();
+    };
+    POSE_NAME_CACHE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        cached_pose_names(&mut slot, Some(key), scan_pose_library)
+    })
+}
+
+/// Save the selected figure's current-frame pose into the
+/// pose library under the figure's display name. Not an
+/// undo step — it writes a file, exactly as Copy pose (also
+/// not an undo step) writes the clipboard. Saving the same
+/// figure again overwrites its earlier entry.
+pub fn save_current_pose(core: &mut EditorCore) {
+    let Some(pose) = selected_pose(core).cloned() else {
+        core.status = no_pose_status(core);
+        return;
+    };
+    let name = figure_label(core, core.selected_figure);
+    match save_pose_library(&pose, &name) {
+        Ok(_) => {
+            core.status = format!("Pose saved to the library as '{name}'.");
+        }
+        Err(e) => {
+            core.status = format!("Save pose failed: {e}");
+        }
+    }
+}
+
+/// Load the library pose `name` and write it over the
+/// selected figure's current-frame pose, through the same
+/// path Paste pose uses ([`write_current_pose`]: one
+/// snapshot, one write — one undo step), with Paste's
+/// guards: no target pose or an angle count that does not
+/// match this figure's rig is a status-only refusal.
+pub fn apply_library_pose(core: &mut EditorCore, name: &str) {
+    apply_library_pose_in(core, &pose_library_dir(), name)
+}
+
+fn apply_library_pose_in(core: &mut EditorCore, dir: &Path, name: &str) {
+    let Some(cur) = selected_pose(core) else {
+        core.status = no_pose_status(core);
+        return;
+    };
+    let cur_len = cur.angles.len();
+    let pose = match load_pose_library_in(dir, name) {
+        Ok(p) => p,
+        Err(e) => {
+            core.status =
+                format!("Apply pose failed: '{name}' could not be loaded ({e}).");
+            return;
+        }
+    };
+    if pose.angles.len() != cur_len {
+        core.status = format!(
+            "Apply pose failed: saved pose has {} angles, figure {} has {} segments.",
+            pose.angles.len(),
+            core.selected_figure + 1,
+            cur_len
+        );
+        return;
+    }
+    let (fi, fr) = (core.selected_figure + 1, core.current + 1);
+    write_current_pose(core, pose);
+    core.status = format!("Pose '{name}' applied to figure {fi} on frame {fr}.");
 }
 
 /// One pose-tools button, in the chrome's metrics
@@ -307,7 +616,37 @@ pub fn pose_tools(s: &State, t: &Theme) -> El {
                         s.core.bake_graph_channels(0, last);
                     },
                 )),
+        )
+        .child(
+            row().gap(4.0).child(pbtn(
+                "pose-save-lib".to_string(),
+                "Save pose",
+                has_pose,
+                t,
+                |s| save_current_pose(&mut s.core),
+            )),
         );
+    let saved = saved_pose_names();
+    if !saved.is_empty() {
+        body = body.child(
+            text("Pose library")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+        let mut lrow = row().gap(4.0);
+        for (i, name) in saved.iter().enumerate() {
+            let label = name.clone();
+            let entry_name = name.clone();
+            lrow = lrow.child(pbtn(
+                format!("pose-lib-apply-{i}"),
+                &label,
+                has_pose,
+                t,
+                move |s: &mut State| apply_library_pose(&mut s.core, &entry_name),
+            ));
+        }
+        body = body.child(lrow.scroll_x().w_full());
+    }
     let targets = pose_targets(core);
     if !targets.is_empty() {
         body = body.child(
@@ -440,4 +779,137 @@ mod tests {
             c.status
         );
     }
+
+    // ---- Pose library (Phase F) ----
+
+    /// A fresh per-test library directory under the OS temp
+    /// dir (fig3d's test pattern), removed on entry so a
+    /// previous run's leftovers cannot leak in.
+    fn temp_library(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "stykr-pose-tools-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn pose_file_stem_slugs_like_the_3d_library() {
+        assert_eq!(pose_file_stem("Styk"), "styk");
+        assert_eq!(pose_file_stem("Figure 1"), "figure-1");
+        assert_eq!(pose_file_stem("  Wave Pose!! "), "wave-pose");
+        assert_eq!(pose_file_stem("BOSS Fight"), "boss-fight");
+        // Nothing usable falls back to "figure", exactly as
+        // fig3d::library_slug does.
+        assert_eq!(pose_file_stem(""), "figure");
+        assert_eq!(pose_file_stem("!!!"), "figure");
+    }
+
+    #[test]
+    fn pose_serialise_round_trips_through_the_library() {
+        let dir = temp_library("roundtrip");
+        let c = core();
+        let pose = selected_pose(&c).unwrap().clone();
+        // A directory that does not exist yet scans empty,
+        // and loading a name that was never saved is an
+        // error (fig3d's round-trip test pins the same).
+        assert!(scan_pose_library_in(&dir).is_empty());
+        assert!(load_pose_library_in(&dir, "Styk").is_err());
+        let path = save_pose_library_in(&dir, &pose, "Styk").unwrap();
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            "styk.json"
+        );
+        assert_eq!(scan_pose_library_in(&dir), vec!["Styk".to_string()]);
+        let back = load_pose_library_in(&dir, "Styk").unwrap();
+        assert_eq!(back.angles, pose.angles);
+        assert_eq!(back.root, pose.root);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_the_same_name_twice_overwrites() {
+        let dir = temp_library("overwrite");
+        let mut c = core();
+        let first = selected_pose(&c).unwrap().clone();
+        save_pose_library_in(&dir, &first, "Styk").unwrap();
+        c.mirror_selected_pose();
+        let second = selected_pose(&c).unwrap().clone();
+        save_pose_library_in(&dir, &second, "Styk").unwrap();
+        // One slot per name: the list still has one entry
+        // and it holds the newer pose.
+        assert_eq!(scan_pose_library_in(&dir).len(), 1);
+        let back = load_pose_library_in(&dir, "Styk").unwrap();
+        assert_eq!(back.angles, second.angles);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_library_pose_is_exactly_one_undo_step() {
+        let dir = temp_library("apply");
+        let mut c = core();
+        c.mirror_selected_pose();
+        let mirrored = selected_pose(&c).unwrap().clone();
+        save_pose_library_in(&dir, &mirrored, "Styk").unwrap();
+        c.mirror_selected_pose(); // back to the original pose
+        let orig = selected_pose(&c).unwrap().clone();
+        apply_library_pose_in(&mut c, &dir, "Styk");
+        assert_eq!(selected_pose(&c).unwrap().angles, mirrored.angles);
+        assert!(
+            c.status.contains("applied to figure"),
+            "unexpected status: {}",
+            c.status
+        );
+        c.undo();
+        assert_eq!(selected_pose(&c).unwrap().angles, orig.angles);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_library_pose_refuses_a_mismatched_rig() {
+        let dir = temp_library("mismatch");
+        let mut c = core();
+        let mut short = selected_pose(&c).unwrap().clone();
+        short.angles.clear();
+        save_pose_library_in(&dir, &short, "Short").unwrap();
+        let before = selected_pose(&c).unwrap().clone();
+        apply_library_pose_in(&mut c, &dir, "Short");
+        assert_eq!(selected_pose(&c).unwrap().angles, before.angles);
+        assert!(
+            c.status.contains("Apply pose failed"),
+            "unexpected status: {}",
+            c.status
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_pose_names_serves_until_the_key_changes() {
+        let mut cache: PoseNameCache = None;
+        let reads = std::cell::Cell::new(0usize);
+        let read = || {
+            reads.set(reads.get() + 1);
+            vec!["A".to_string()]
+        };
+        let key1 = Some(SystemTime::UNIX_EPOCH);
+        let key2 = Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1));
+        assert_eq!(
+            cached_pose_names(&mut cache, key1, read),
+            vec!["A".to_string()]
+        );
+        // Same key: served from the slot, no second read.
+        assert_eq!(
+            cached_pose_names(&mut cache, key1, read),
+            vec!["A".to_string()]
+        );
+        assert_eq!(reads.get(), 1);
+        // A changed key (the directory was touched) re-reads.
+        assert_eq!(
+            cached_pose_names(&mut cache, key2, read),
+            vec!["A".to_string()]
+        );
+        assert_eq!(reads.get(), 2);
+    }
 }
+

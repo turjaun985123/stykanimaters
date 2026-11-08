@@ -34,13 +34,40 @@
 //!   `layers::set_opacity` (layers.rs:126) — clamped to
 //!   `MIN_OPACITY..=MAX_OPACITY` (0.05..=1.0, layers.rs:34-36),
 //!   so a figure can be faint but never invisible via opacity.
+//! * Opacity drag slider (Phase F) → the same write for the
+//!   *selected* figure, at an absolute value: the backing
+//!   [`set_figure_opacity`] rounds to the stepper's whole-
+//!   percent grid and calls `layers::set_opacity` exactly as
+//!   `step_figure_opacity` does, with the op's own status
+//!   string — but only on release (see below).
+//!
+//! The slider follows the scene panel's weather sliders
+//! (Phase E): the Rune settings example's `speed_control`
+//! shape — `on_drag` with the press value stored in
+//! `Drag::data`, a write on every Move, `tx.instant()` while
+//! scrubbing, and a cancelled drag restoring the press
+//! value. The value comes from the pure [`opacity_at`]
+//! mapping over the element's own width (no grab offset —
+//! a track click jumps, as in the example), and the status
+//! line updates **only on release** — mid-drag writes stay
+//! silent so a scrub does not spam the status line or the
+//! toasts fed from it. The per-row steppers stay for fine
+//! control.
+//!
+//! No undo snapshots, on purpose: opacity writes were never
+//! snapshotted — `step_figure_opacity` and
+//! `layers::set_opacity` never call `EditorCore::snapshot()`,
+//! so a stepper press costs zero undo entries, and the
+//! slider mirrors that exactly: a whole drag also costs
+//! zero. (Contrast the camera dial, whose backing op *does*
+//! snapshot; this one does not.)
 //!
 //! Rows are listed in draw order with the front figure on
 //! top (reverse index order). The selected figure's row name
 //! renders active (accent), matching `core.selected_figure`.
 
-use rune::tok::{type_, Theme};
-use rune::{col, el, row, text, El};
+use rune::tok::{self, type_, Theme};
+use rune::{col, el, row, text, Drag, El, Phase, Tx};
 use stykanimate_rs::editor::EditorCore;
 
 use crate::chrome_view::btn;
@@ -114,6 +141,127 @@ pub fn rows(core: &EditorCore) -> Vec<LayerRow> {
         .collect()
 }
 
+/// Slider track width in points (the scene panel's slider
+/// geometry, so every drag slider in the shell feels the
+/// same).
+const SLIDER_W: f32 = 200.0;
+/// Slider track height in points.
+const SLIDER_H: f32 = 22.0;
+/// Slider knob diameter in points.
+const KNOB: f32 = 16.0;
+
+/// Slider mapping: the opacity at local `x` on a track `w`
+/// points wide — 0.0 at the left edge, 1.0 at the right,
+/// linear between, clamped outside. A zero-width track (no
+/// layout yet) maps to 0.0 rather than dividing by zero.
+/// The engine's 0.05 floor is *not* applied here — it lives
+/// in `layers::set_opacity`, the one write path, exactly as
+/// a stepper press can also request a below-floor value.
+pub fn opacity_at(x: f32, w: f32) -> f32 {
+    if w <= 0.0 {
+        return 0.0;
+    }
+    (x / w).clamp(0.0, 1.0)
+}
+
+/// Track fill fraction for an opacity — the inverse of
+/// [`opacity_at`], so the knob sits where a press at the
+/// same fraction would land.
+pub fn opacity_frac(opacity: f32) -> f32 {
+    opacity.clamp(0.0, 1.0)
+}
+
+/// Slider backing: set figure `fi`'s opacity to an absolute
+/// `value`, through the stepper's own write — rounded to
+/// the whole-percent grid `step_figure_opacity` computes,
+/// then `layers::set_opacity` (which clamps to
+/// 0.05..=1.0). No snapshot, like the op. `report` is true
+/// only on drag release: a reporting write posts the op's
+/// own status string (or its "No such figure." refusal);
+/// mid-drag writes stay silent.
+pub fn set_figure_opacity(core: &mut EditorCore, fi: usize, value: f32, report: bool) {
+    let next = (value * 100.0).round() / 100.0;
+    if stykanimate_rs::layers::set_opacity(&mut core.project, fi, next) {
+        if report {
+            let o = core.project.figures[fi].opacity;
+            core.status = format!("Figure {} opacity {:.0}%.", fi + 1, o * 100.0);
+        }
+    } else if report {
+        core.status = "No such figure.".into();
+    }
+}
+
+/// Opacity slider drag (the settings example's shape, via
+/// the scene panel): Down stores the selected figure's
+/// opacity in `Drag::data` and jumps to the pressed point,
+/// Move rewrites the opacity and asks for an instant
+/// redraw, Up reports — or, when the gesture was cancelled,
+/// restores the press value (silently, through the same
+/// backing write).
+fn opacity_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
+    let core = &mut s.core;
+    let fi = core.selected_figure;
+    match d.phase {
+        Phase::Down => {
+            d.data = core
+                .project
+                .figures
+                .get(fi)
+                .map(|f| f.opacity)
+                .unwrap_or(1.0);
+            set_figure_opacity(core, fi, opacity_at(d.x, d.w), false);
+        }
+        Phase::Move => {
+            set_figure_opacity(core, fi, opacity_at(d.x, d.w), false);
+            tx.instant();
+        }
+        Phase::Up => {
+            if d.cancelled() {
+                set_figure_opacity(core, fi, d.data, false);
+            } else {
+                set_figure_opacity(core, fi, opacity_at(d.x, d.w), true);
+            }
+        }
+    }
+}
+
+/// The selected figure's opacity slider (the scene panel's
+/// `weather_slider` shape): a fixed-size track element with
+/// track, fill and knob children drawn absolutely inside
+/// it. The fill runs from the left knob centre to the
+/// current value's knob centre. All gesture logic lives in
+/// [`opacity_drag`].
+fn opacity_slider(frac: f32, t: &Theme) -> El {
+    let frac = frac.clamp(0.0, 1.0);
+    let travel = SLIDER_W - KNOB;
+    let knob_cx = KNOB / 2.0 + frac * travel;
+    el()
+        .key("layers-opacity-slider")
+        .size(SLIDER_W, SLIDER_H)
+        .on_drag(opacity_drag)
+        .child(
+            el()
+                .size(SLIDER_W, 4.0)
+                .absolute(0.0, (SLIDER_H - 4.0) / 2.0)
+                .radius(2.0)
+                .fill(t.control_off),
+        )
+        .child(
+            el()
+                .size((knob_cx - KNOB / 2.0).max(4.0), 4.0)
+                .absolute(KNOB / 2.0, (SLIDER_H - 4.0) / 2.0)
+                .radius(2.0)
+                .fill(tok::accent(0, true)),
+        )
+        .child(
+            el()
+                .size(KNOB, KNOB)
+                .absolute(frac * travel, (SLIDER_H - KNOB) / 2.0)
+                .radius(KNOB / 2.0)
+                .fill(t.text),
+        )
+}
+
 /// Move handler shared by the up/down buttons: select the
 /// row's figure, then reorder it with the full layers engine.
 /// `dir` is +1 toward the front, -1 toward the back.
@@ -179,8 +327,11 @@ fn layer_row(r: &LayerRow, t: &Theme) -> El {
 }
 
 /// The full layers panel: a "Layers" header, one row per
-/// figure in draw order (front on top), and the ordering
-/// note. With no figures the panel is just header + note.
+/// figure in draw order (front on top), the selected
+/// figure's opacity slider with its % readout, and the
+/// ordering note. With no figures the panel is just
+/// header + note (no slider — there is no selected figure
+/// to fade).
 pub fn panel(s: &State, t: &Theme) -> El {
     let mut body = col()
         .key("layers-panel")
@@ -188,6 +339,23 @@ pub fn panel(s: &State, t: &Theme) -> El {
         .child(text("Layers").font(type_::LABEL).color(t.text_secondary));
     for r in rows(&s.core) {
         body = body.child(layer_row(&r, t));
+    }
+    if let Some(fig) = s.core.project.figures.get(s.core.selected_figure) {
+        body = body
+            .child(
+                row()
+                    .key("layers-opacity-row")
+                    .gap(6.0)
+                    .center_y()
+                    .child(text("Opacity").font(type_::LABEL).color(t.text_secondary))
+                    .child(el().grow(1.0))
+                    .child(
+                        text(opacity_label(fig.opacity))
+                            .font(type_::LABEL)
+                            .color(t.text),
+                    ),
+            )
+            .child(opacity_slider(opacity_frac(fig.opacity), t));
     }
     body.child(
         text(ORDER_NOTE)
@@ -270,5 +438,81 @@ mod tests {
         // Stepping above 1.0 clamps to fully opaque.
         core.step_figure_opacity(0, 5.0);
         assert_eq!(core.project.figures[0].opacity, 1.0);
+    }
+
+    #[test]
+    fn opacity_at_maps_edges_middle_and_clamps() {
+        assert_eq!(opacity_at(0.0, 200.0), 0.0);
+        assert_eq!(opacity_at(200.0, 200.0), 1.0);
+        assert_eq!(opacity_at(100.0, 200.0), 0.5);
+        assert_eq!(opacity_at(50.0, 200.0), 0.25);
+        assert_eq!(opacity_at(-30.0, 200.0), 0.0);
+        assert_eq!(opacity_at(260.0, 200.0), 1.0);
+        // A zero-width track maps to 0, never NaN.
+        assert_eq!(opacity_at(10.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn opacity_frac_is_the_inverse_of_opacity_at() {
+        for x in [0.0, 25.0, 50.0, 100.0, 150.0, 200.0] {
+            assert_eq!(opacity_frac(opacity_at(x, 200.0)), x / 200.0);
+        }
+        // Out-of-range stored values clamp onto the track.
+        assert_eq!(opacity_frac(1.4), 1.0);
+        assert_eq!(opacity_frac(-0.2), 0.0);
+        assert_eq!(opacity_frac(0.05), 0.05);
+    }
+
+    #[test]
+    fn slider_set_writes_percent_grid_and_reports_only_on_release() {
+        let mut core = EditorCore::new();
+        core.status = "untouched".into();
+        set_figure_opacity(&mut core, 0, 0.456, false);
+        // Same whole-percent grid the stepper writes.
+        assert_eq!(core.project.figures[0].opacity, 0.46);
+        assert_eq!(core.status, "untouched", "mid-drag writes stay silent");
+        set_figure_opacity(&mut core, 0, 0.5, true);
+        assert_eq!(core.project.figures[0].opacity, 0.5);
+        assert_eq!(core.status, "Figure 1 opacity 50%.");
+        // The layers floor and ceiling apply on release too.
+        set_figure_opacity(&mut core, 0, 0.0, true);
+        assert_eq!(core.project.figures[0].opacity, 0.05);
+        assert_eq!(core.status, "Figure 1 opacity 5%.");
+        set_figure_opacity(&mut core, 0, 2.0, true);
+        assert_eq!(core.project.figures[0].opacity, 1.0);
+    }
+
+    #[test]
+    fn slider_set_matches_the_stepper_ops_status_and_grid() {
+        // The release report is the op's own string: drive
+        // both write paths to the same value and compare.
+        let mut via_op = EditorCore::new();
+        via_op.step_figure_opacity(0, -0.5);
+        let mut via_slider = EditorCore::new();
+        set_figure_opacity(&mut via_slider, 0, 0.5, true);
+        assert_eq!(
+            via_slider.project.figures[0].opacity,
+            via_op.project.figures[0].opacity
+        );
+        assert_eq!(via_slider.status, via_op.status);
+    }
+
+    #[test]
+    fn slider_set_is_a_silent_no_op_for_a_missing_figure() {
+        let mut core = EditorCore::new();
+        core.status = "untouched".into();
+        set_figure_opacity(&mut core, 9, 0.5, false);
+        assert_eq!(core.status, "untouched");
+        set_figure_opacity(&mut core, 9, 0.5, true);
+        assert_eq!(core.status, "No such figure.");
+        assert_eq!(core.project.figures.len(), 1);
+    }
+
+    #[test]
+    fn slider_builds_at_the_track_ends() {
+        let t = tok::theme(true);
+        let _ = opacity_slider(0.0, &t);
+        let _ = opacity_slider(0.05, &t);
+        let _ = opacity_slider(1.0, &t);
     }
 }

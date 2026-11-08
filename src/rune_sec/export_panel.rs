@@ -48,6 +48,20 @@
 //! every failure wording in `editor.rs` contains "failed"
 //! (see `export_failed`).
 //!
+//! Under the recap sits a "Recent exports" list: the
+//! newest files in the two roots the panel writes to
+//! (`./export/` and `out/` — see `history_roots`), newest
+//! first, at most eight, each row a name, a size and a
+//! relative age, or a single "No exports yet" line when
+//! there is nothing to show. It is a read-only glance at
+//! what is on disk — there are deliberately no open/reveal
+//! buttons, because the shell has no file opener to call.
+//! The scan is cached behind the roots' mtimes (the
+//! fx_browser/home pattern, see `recent_exports_cached`)
+//! and lists only the top level of each root, so the
+//! per-frame files inside `export/svg/` and `out/jpeg/`
+//! do not appear individually.
+//!
 //! Panel state: the toggle position lives in
 //! `State::export_use_range` and the recap line in
 //! `State::export_recap` (see the integration report —
@@ -57,7 +71,9 @@
 //! `loop_range`, set in the timeline; this panel only
 //! reads it.
 
-use std::path::PathBuf;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -460,6 +476,218 @@ fn export_webm_action(s: &mut State) {
     note_single(s, ExportOp::Webm);
 }
 
+// ---- Recent exports history -------------------------------
+// The newest files in the two output roots, as a read-only
+// list under the recap. The row model and its formatting
+// are pure; the filesystem touch is one thin scan, cached
+// behind the roots' mtimes.
+
+/// How many rows the Recent exports list shows at most.
+pub const HISTORY_LIMIT: usize = 8;
+
+/// The two output roots every export in this panel writes
+/// into: `./export/` (PNG sequence frames, SVG,
+/// spritesheet, GIF, MP4, WebM, .piv v2–v4, .stk, .nodes,
+/// .stknds) and `out/` (JPEG sequences, APNG, .piv v5) —
+/// see `ExportOp::dest` and the range actions. The history
+/// scan reads exactly these two directories, nothing else.
+pub fn history_roots() -> Vec<PathBuf> {
+    let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    vec![base.join("export"), base.join("out")]
+}
+
+/// One row of the Recent exports list: a file an export
+/// wrote, with its size in bytes and its modification
+/// time. The display name keeps the output root as a
+/// prefix ("export/animation.mp4", "out/animation.apng")
+/// because the two roots are both in play and a bare file
+/// name does not say which one the file came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportRow {
+    pub name: String,
+    pub size: u64,
+    pub mtime: SystemTime,
+}
+
+/// One raw scan result — (path, size in bytes, mtime) —
+/// the plain-data input the row model is built from, so
+/// the model builders stay pure and testable.
+pub type FileTriple = (PathBuf, u64, SystemTime);
+
+/// The display name for a scanned file: the last two path
+/// components ("export/animation.mp4") when a parent
+/// directory name exists, the bare file name otherwise.
+pub fn display_name(path: &Path) -> String {
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match path.parent().and_then(|p| p.file_name()) {
+        Some(dir) => format!("{}/{file}", dir.to_string_lossy()),
+        None => file,
+    }
+}
+
+/// Build the Recent exports rows from raw scan triples:
+/// newest first (name ascending breaks mtime ties, so the
+/// order is deterministic), capped at `HISTORY_LIMIT`.
+pub fn rows_from_triples(triples: &[FileTriple]) -> Vec<ExportRow> {
+    let mut rows: Vec<ExportRow> = triples
+        .iter()
+        .map(|(path, size, mtime)| ExportRow {
+            name: display_name(path),
+            size: *size,
+            mtime: *mtime,
+        })
+        .collect();
+    rows.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.name.cmp(&b.name)));
+    rows.truncate(HISTORY_LIMIT);
+    rows
+}
+
+/// A file size for the history rows: plain bytes under
+/// 1 KB, then one-decimal KB / MB / GB.
+pub fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if bytes < KB {
+        format!("{bytes} B")
+    } else if bytes < MB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else if bytes < GB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    }
+}
+
+/// How long ago a history file was written, in the
+/// coarsest bucket that fits: "just now" under a minute
+/// (and for future mtimes — clock skew is not the user's
+/// problem to read), then whole minutes, hours, days.
+pub fn age_label(now: SystemTime, mtime: SystemTime) -> String {
+    let secs = now.duration_since(mtime).map(|d| d.as_secs()).unwrap_or(0);
+    if secs < 60 {
+        "just now".into()
+    } else if secs < 60 * 60 {
+        format!("{} min ago", secs / 60)
+    } else if secs < 24 * 60 * 60 {
+        format!("{} h ago", secs / (60 * 60))
+    } else {
+        format!("{} d ago", secs / (24 * 60 * 60))
+    }
+}
+
+/// One Recent exports line: name, size, age.
+pub fn row_line(row: &ExportRow, now: SystemTime) -> String {
+    format!(
+        "{} · {} · {}",
+        row.name,
+        format_size(row.size),
+        age_label(now, row.mtime)
+    )
+}
+
+/// The thin filesystem half of the history: read the top
+/// level of each root and collect a `FileTriple` for every
+/// regular file in it. Missing/unreadable roots and
+/// entries whose metadata fails are skipped — an absent
+/// export directory is the normal "nothing exported yet"
+/// state, not an error. Subdirectories (`export/svg/`,
+/// `out/jpeg/`) are not entered: their per-frame files are
+/// not listed individually (see the module docs).
+fn scan_triples(roots: &[PathBuf]) -> Vec<FileTriple> {
+    let mut out = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let Ok(md) = entry.metadata() else {
+                continue;
+            };
+            if !md.is_file() {
+                continue;
+            }
+            let Ok(mtime) = md.modified() else {
+                continue;
+            };
+            out.push((entry.path(), md.len(), mtime));
+        }
+    }
+    out
+}
+
+/// A directory's modification time, swallowing every
+/// error into `None` — the fx_browser/home_panel helper,
+/// same rule: a missing/unreadable dir is a state, not a
+/// failure. Callers treat `None` as "no trustworthy cache
+/// key", not as a key.
+fn dir_mtime(dir: &Path) -> Option<SystemTime> {
+    std::fs::metadata(dir).and_then(|m| m.modified()).ok()
+}
+
+/// One history-cache slot: the roots' mtimes the rows were
+/// scanned under, plus the rows themselves.
+type HistoryCache = Option<(Vec<Option<SystemTime>>, Vec<ExportRow>)>;
+
+thread_local! {
+    /// The Recent exports cache. Thread-local for the same
+    /// reasons as the fx preset cache: Rune builds the view
+    /// on the UI thread (so an export press and the next
+    /// build share one cache), and every test thread then
+    /// starts with an empty cache.
+    static HISTORY_CACHE: RefCell<HistoryCache> = RefCell::new(None);
+}
+
+/// The cache state machine, pure over its inputs (the
+/// fx_browser `cached_names` shape): serve the stored rows
+/// when `key` matches the key they were scanned under,
+/// otherwise call `read`, store its result under `key`,
+/// and return it. The "unstattable roots bypass the cache"
+/// policy lives in [`recent_exports_cached`], not here.
+fn cached_history(
+    cache: &mut HistoryCache,
+    key: Vec<Option<SystemTime>>,
+    read: impl FnOnce() -> Vec<ExportRow>,
+) -> Vec<ExportRow> {
+    if let Some((cached_key, rows)) = cache.as_ref() {
+        if *cached_key == key {
+            return rows.clone();
+        }
+    }
+    let rows = read();
+    *cache = Some((key, rows.clone()));
+    rows
+}
+
+/// The Recent exports rows, cached behind the two roots'
+/// mtimes (the Phase E fx_browser/home scan pattern):
+/// building the panel costs two `stat`s instead of two
+/// directory scans, and any export that creates or deletes
+/// a file in a root bumps that root's mtime, so the next
+/// build rescans. The honest limit, the same class as the
+/// preset cache's documented contract: overwriting an
+/// existing file in place (re-exporting the same format
+/// to the same name) changes neither root's mtime, so
+/// that row's size/age can be one scan stale until some
+/// create/delete lands in a root. When neither root can
+/// be statted (no exports yet, usually) the cache is
+/// bypassed and the scan runs live — it returns empty,
+/// which the panel renders as "No exports yet".
+pub fn recent_exports_cached() -> Vec<ExportRow> {
+    let roots = history_roots();
+    let keys: Vec<Option<SystemTime>> = roots.iter().map(|d| dir_mtime(d)).collect();
+    if keys.iter().all(|k| k.is_none()) {
+        return rows_from_triples(&scan_triples(&roots));
+    }
+    HISTORY_CACHE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        cached_history(&mut slot, keys, || rows_from_triples(&scan_triples(&roots)))
+    })
+}
+
 // ---- Rows and sections ------------------------------------
 
 /// A section column: the category label, then one row per
@@ -542,8 +770,9 @@ fn bundle_row(
 /// range is set), the All frames / Loop range toggle with
 /// its effective-behaviour line, the four category sections
 /// with all 15 `xc-*` rows, the Bundles section (two
-/// `xc-bundle-*` rows), and — once anything has been
-/// exported — the recap line showing the last export.
+/// `xc-bundle-*` rows), — once anything has been exported —
+/// the recap line showing the last export, and the Recent
+/// exports list closing the panel.
 pub fn export_panel(s: &State, t: &Theme) -> El {
     let core = &s.core;
     let use_range = s.export_use_range;
@@ -737,6 +966,29 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
         );
     }
 
+    // Recent exports: what is actually on disk in the two
+    // output roots, newest first — read-only rows, no
+    // open/reveal buttons (the shell has no file opener).
+    let mut recent = section("Recent exports", t).key("xc-history");
+    let history = recent_exports_cached();
+    if history.is_empty() {
+        recent = recent.child(
+            text("No exports yet")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        );
+    } else {
+        let now = SystemTime::now();
+        for r in &history {
+            recent = recent.child(
+                text(row_line(r, now))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary),
+            );
+        }
+    }
+    panel = panel.child(recent);
+
     panel
 }
 
@@ -891,5 +1143,136 @@ mod tests {
         assert_eq!(ExportOp::Apng.dest(), "out/animation.apng");
         assert_eq!(ExportOp::Png.dest(), "./export/");
         assert_eq!(ExportOp::Spritesheet.dest(), "./export/spritesheet.png");
+    }
+
+    // ---- Recent exports history ----
+
+    /// A fixed clock for the history tests: `secs` after
+    /// the Unix epoch.
+    fn at(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn history_roots_are_the_two_output_directories() {
+        let roots = history_roots();
+        assert_eq!(roots.len(), 2);
+        assert!(roots[0].ends_with("export"), "first root: {:?}", roots[0]);
+        assert!(roots[1].ends_with("out"), "second root: {:?}", roots[1]);
+    }
+
+    #[test]
+    fn format_size_uses_bytes_then_one_decimal_units() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1023), "1023 B");
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1536), "1.5 KB");
+        assert_eq!(format_size(1024 * 1024 - 1), "1024.0 KB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MB");
+        assert_eq!(format_size(5 * 1024 * 1024 + 512 * 1024), "5.5 MB");
+        assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
+
+    #[test]
+    fn age_label_buckets_by_coarsest_unit() {
+        let now = at(10 * 24 * 60 * 60);
+        assert_eq!(age_label(now, now), "just now");
+        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 59)), "just now");
+        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 60)), "1 min ago");
+        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 45 * 60)), "45 min ago");
+        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 60 * 60)), "1 h ago");
+        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 23 * 60 * 60)), "23 h ago");
+        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 24 * 60 * 60)), "1 d ago");
+        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 - 3 * 24 * 60 * 60)), "3 d ago");
+        // A future mtime (clock skew) reads as "just now",
+        // never as a negative age.
+        assert_eq!(age_label(now, at(10 * 24 * 60 * 60 + 3600)), "just now");
+    }
+
+    #[test]
+    fn display_name_keeps_the_output_root_as_prefix() {
+        assert_eq!(
+            display_name(Path::new("/home/u/export/animation.mp4")),
+            "export/animation.mp4"
+        );
+        assert_eq!(
+            display_name(Path::new("/home/u/out/animation.apng")),
+            "out/animation.apng"
+        );
+        assert_eq!(display_name(Path::new("animation.gif")), "animation.gif");
+    }
+
+    #[test]
+    fn rows_from_triples_sorts_newest_first_with_name_tie_break() {
+        let triples = vec![
+            (PathBuf::from("/x/export/old.gif"), 10, at(100)),
+            (PathBuf::from("/x/export/b.png"), 10, at(300)),
+            (PathBuf::from("/x/out/a.apng"), 10, at(300)),
+            (PathBuf::from("/x/export/new.mp4"), 10, at(500)),
+        ];
+        let rows = rows_from_triples(&triples);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["export/new.mp4", "export/b.png", "out/a.apng", "export/old.gif"]
+        );
+        // Sizes and mtimes ride along untouched.
+        assert_eq!(rows[0].size, 10);
+        assert_eq!(rows[0].mtime, at(500));
+    }
+
+    #[test]
+    fn rows_from_triples_caps_at_the_history_limit() {
+        let triples: Vec<FileTriple> = (0..12)
+            .map(|i| (PathBuf::from(format!("/x/export/f{i}.png")), 1, at(1000 + i)))
+            .collect();
+        let rows = rows_from_triples(&triples);
+        assert_eq!(rows.len(), HISTORY_LIMIT);
+        assert_eq!(rows.first().unwrap().name, "export/f11.png", "newest kept");
+        assert_eq!(rows.last().unwrap().name, "export/f4.png", "oldest four dropped");
+    }
+
+    #[test]
+    fn rows_from_no_triples_is_empty() {
+        // The empty scan — missing roots, or roots with no
+        // files — is what the panel turns into its single
+        // "No exports yet" line.
+        assert!(rows_from_triples(&[]).is_empty());
+    }
+
+    #[test]
+    fn row_line_combines_name_size_and_age() {
+        let row = ExportRow {
+            name: "export/animation.mp4".into(),
+            size: 1536,
+            mtime: at(1000),
+        };
+        assert_eq!(
+            row_line(&row, at(1000 + 2 * 60 * 60)),
+            "export/animation.mp4 · 1.5 KB · 2 h ago"
+        );
+    }
+
+    #[test]
+    fn cached_history_reads_once_per_key() {
+        let mut cache: HistoryCache = None;
+        let key = vec![Some(at(7)), None];
+        let mut reads = 0;
+        let first = cached_history(&mut cache, key.clone(), || {
+            reads += 1;
+            Vec::new()
+        });
+        let second = cached_history(&mut cache, key.clone(), || {
+            reads += 1;
+            Vec::new()
+        });
+        assert_eq!(first, second);
+        assert_eq!(reads, 1, "same key must be served from the cache");
+        let _ = cached_history(&mut cache, vec![Some(at(8)), None], || {
+            reads += 1;
+            Vec::new()
+        });
+        assert_eq!(reads, 2, "a changed root mtime must rescan");
     }
 }
