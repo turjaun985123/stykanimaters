@@ -1181,15 +1181,19 @@ fn project_section_key_coverage() {
     }
 
     // The Phase G §12 audit map's static keys (the map
-    // lives in project_tools' module docs). Every one is
-    // emitted unconditionally by `project_section` — the
-    // section root, the name field's wrapper, its Set
-    // button, the New/Save/Recover row and the selector
-    // list (which renders its empty text when ./projects
-    // holds nothing) — so all of them must be in the
-    // presented tree. The dynamic `open-proj-{i}` rows
-    // need a saved project on disk, so they are NOT
-    // asserted here.
+    // lives in project_tools' module docs). The section
+    // root, the name field's wrapper, its Set button and
+    // the New/Save/Recover row are emitted unconditionally
+    // by `project_section`, so all of them must be in the
+    // presented tree. `proj-list` is NOT asserted: it is
+    // the non-empty branch's container — with no saved
+    // projects the section renders its "No saved projects"
+    // text instead (project_tools.rs, the `rows.is_empty()`
+    // branch), and writing a project file from a Runtime
+    // test would pollute the shared on-disk ./projects for
+    // every sibling test. The dynamic `open-proj-{i}` rows
+    // need a saved project on disk for the same reason, so
+    // they are NOT asserted here either.
     let keys = presented_keys(&rt);
     for want in [
         "project-tools",
@@ -1198,7 +1202,6 @@ fn project_section_key_coverage() {
         "new-proj",
         "save-proj",
         "recover",
-        "proj-list",
     ] {
         assert!(keys.contains(want), "missing audit-map key {want:?}");
     }
