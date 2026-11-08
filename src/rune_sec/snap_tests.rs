@@ -364,15 +364,18 @@ fn file_menu_opens_lists_items_and_scrim_closes() {
     assert!(!keys.contains("menu-file-dropdown"), "dropdown dismissed");
     assert!(!keys.contains("export"), "dropdown items dismissed");
 
-    // Close-on-select: Edit ▸ Copy frame runs its op and
-    // dismisses the menu (every item goes through the
-    // menus section's closing wrapper). `copy-frame` is
-    // dropdown-unique — `find` returns the first key match
-    // in tree order, and the app bar's `undo` would shadow
-    // the Edit menu's.
-    tap(&mut rt, "menu-edit");
-    assert_eq!(rt.state.menus.open, Some(crate::rune_sec::menus::EDIT));
-    tap(&mut rt, "copy-frame");
+    // Close-on-select: File ▸ Export PNG runs its op and
+    // dismisses the menu (every item goes through the menus
+    // section's closing `item` wrapper). `export` is the
+    // provably dropdown-unique item key (see the opening
+    // asserts); the Edit menu's items cannot drive this —
+    // `find` returns the first key match in tree order, and
+    // `undo` is shadowed by the app bar while `copy-frame`
+    // and `paste-frame` are shadowed by the frame-ops panel.
+    tap(&mut rt, "menu-file");
+    rt.frame(DT);
+    assert_eq!(rt.state.menus.open, Some(crate::rune_sec::menus::FILE));
+    tap(&mut rt, "export");
     assert_eq!(rt.state.menus.open, None, "selecting an item closes the menu");
 }
 
