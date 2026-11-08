@@ -631,10 +631,20 @@ fn guides_toggle_flips_state() {
     // holds in whatever workspace the prefs seeded.
     tap(&mut rt, "settings-toggle");
     assert!(rt.state.settings.open, "Settings toggle opens the card");
-    // Settle two frames so the opened card's layout is the
-    // presented one before pressing inside it.
-    rt.frame(DT);
-    rt.frame(DT);
+    // The opened card's children presence-fade/flight in:
+    // settle (bounded) until the Guides button is fully
+    // presented before pressing it — the same courtesy the
+    // menu dropdown needed in round 2.
+    let mut settled = None;
+    for _ in 0..90 {
+        rt.frame(DT);
+        if let Some((rect, opacity)) = rt.presented("settings-guides") {
+            if opacity > 0.99 {
+                settled = Some((rect, opacity));
+                break;
+            }
+        }
+    }
 
     // State-level only, by design: the guides are drawn
     // into the stage canvas `Shape`, whose pixels the
@@ -644,11 +654,12 @@ fn guides_toggle_flips_state() {
     // Value-agnostic, like round 2's theme test: whatever
     // the flag starts at, each tap must invert it.
     let before = rt.state.guides;
-    let rect = rt.presented("settings-guides");
+    let theme_rect = rt.presented("settings-theme-light");
+    let guides_rect = rt.presented("settings-guides");
     tap(&mut rt, "settings-guides");
     assert_eq!(
         rt.state.guides, !before,
-        "Guides tap flips the flag (button rect: {rect:?})"
+        "Guides tap flips the flag (settled: {settled:?}, theme: {theme_rect:?}, guides: {guides_rect:?})"
     );
     tap(&mut rt, "settings-guides");
     assert_eq!(rt.state.guides, before, "second tap flips it back");
