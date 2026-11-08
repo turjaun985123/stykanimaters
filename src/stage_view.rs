@@ -1221,8 +1221,15 @@ mod tests {
         let folded = with_view_nav(base);
         // The camera centre sits at the element centre under
         // the base transform; the fold keeps it there, shifted
-        // by exactly the pan.
-        assert_eq!(folded.to_screen([400.0, 300.0]), [413.0, 293.0]);
+        // by the pan (tolerance form: the fold divides by the
+        // fit scale 800/960, which is inexact in binary, so the
+        // result lands within 1e-3 of the exact point — the
+        // same tolerance the roundtrip test above uses).
+        let centre = folded.to_screen([400.0, 300.0]);
+        assert!(
+            (centre[0] - 413.0).abs() < 1e-3 && (centre[1] - 293.0).abs() < 1e-3,
+            "expected [413, 293], got {centre:?}"
+        );
         // A point 100 element points right of centre doubles
         // its offset under the 2x view zoom, plus the pan.
         let right = base.to_stage([500.0, 300.0]);
