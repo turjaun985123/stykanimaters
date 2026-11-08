@@ -23,7 +23,8 @@ barely used.
 > The verification wave was still landing when this
 > census ran, so the final-CI and headless cells in
 > §8 are marked **_integrator_** for the integrator
-> to fill from the final run, as in Phase M. Where
+> to fill from the final run, as in Phase M
+> (filled at close-out; see §7). Where
 > a number comes from a plan rather than the tree,
 > the plan is named.
 
@@ -397,8 +398,9 @@ string and the rendered key are byte-identical
   `#[test]`s at this census (39 at Phase M's close:
   the 9 firm tests + the help-panel conditional,
   whose precondition the copy pass landed) —
-  **_integrator_** to confirm against the final CI
-  log. The stage (the centre column's grow
+  confirmed against the final CI log: run
+  42488645714 on `ebdda27`, bin 1,486 passed /
+  0 failed, round 11's 49 tests among them. The stage (the centre column's grow
   element) absorbs the timeline card's +18pt, and
   round 11 asserts relations rather than re-pinned
   Phase M numbers, per P17.
@@ -501,9 +503,34 @@ CI verdicts: foundation **GREEN — run 42482498164
 on `5dfed00`, 2,475 tests**; adoption **GREEN —
 run 42484494999 on `a570d60`, 2,478 tests (996 lib
 + 1,472 bin + 10 integration), 0 failed**. Final
-integration CI: **_integrator_**. Headless
-re-dispatch (13 tree probes + 10 snaps, pixel-read
-against P17's checklist): **_integrator_**.
+integration CI: **GREEN — run 42488645714 on
+`ebdda27`, 2,492 tests (996 lib + 1,486 bin + 10
+integration), 0 failed**. The loop from the V tree
+(`a9f4013`) took five fix commits: a sweep-test
+compile deref, three rounds on the timeline test's
+geometry relations (edge abutment and displacement
+are unsound for a mid-session-mounted canvas —
+`Runtime::presented` returns the drawn box, which
+rests up to its own height above the layout slot;
+the test now asserts presence, centre order and the
+shared left edge, and the layout truth is proven by
+the headless tree dump: timeline 732..786,
+timeline-clips 788..798, loop row 800..825, exact
+2 pt gaps), the figures-panel overflow fix (§8),
+and two headless probe-isolation fixes (§8).
+Headless re-dispatch: **run 42488647081 — all 23
+probes exit 0 (13 trees + 10 snaps), every snap
+pixel-read by the integrator against P17's
+checklist**: cards read as cards with hairlines,
+columns 300/744/340 hold, the fig3 grid stays
+inside the rounded stage on the three-d-stage
+snap, palette kbd chips legible on the accent
+0.85 selected row, the File dropdown and the
+settings card unclipped. Default tree: **1,018
+elements** (Phase M 942, **+8.1%** — inside P19's
++8–11% budget); stage rect **[328, 157, 744,
+485]** (Phase M height 522; −13 hairline/root
+spacing, −18 timeline card, −6 root spacing).
 
 ## 8. Honest remainders after Phase N
 
@@ -556,16 +583,39 @@ against P17's checklist): **_integrator_**.
   segment/figure inspectors' no-selection lines.
   They are follow-up candidates with a glyph
   decision attached, not oversights.
-- **Element growth is unmeasured at this writing.**
-  P19 budgeted +8–11% over the default tree's 942
-  elements if adoption restyled roots instead of
-  nesting wrappers (it did); the re-measure from a
-  headless tree dump is integrator work owed with
-  the §7 headless run.
-- **The look itself is pixel-proven only when the
-  integrator reads the §7 snaps.** Runtime tests
-  and the gate prove keys, structure, containment
-  and kit use; fills, hairlines and radii exist
-  only in snap pixels (P17 §0). Until that read,
-  this document claims the structure, not the
-  beauty.
+- **Element growth, measured at close-out:**
+  1,018 elements on the final default tree vs
+  Phase M's 942 — **+8.1%**, inside P19's +8–11%
+  budget (adoption restyled roots instead of
+  nesting wrappers, as budgeted).
+- **The look is pixel-proven** (integrator read of
+  the §7 snaps, run 42488647081): cards, hairlines,
+  radii, kit steppers/swatches/toggles and the
+  danger Delete all read as designed. The pixel
+  pass also caught three things the gate cannot
+  see. (1) **Figures-panel overflow — FIXED**
+  (fix 5, `b637864`): the header row measured
+  ~127 pt wider than the card (fig-duplicate
+  entirely off-card at x 320..412; fig-eye past
+  the row edge at 299.5..325.5 — the white
+  half-disc in the snaps); Recolour + Duplicate
+  now sit on their own actions row and the eye
+  rides row line 2; the final tree reads
+  fig-duplicate x 125.6..217.5, fig-eye-0
+  238..264. Pre-existing since Phase M, found by
+  this phase's pixel pass. (2) **Headless probes
+  leaked prefs between processes — FIXED**
+  (fixes 4 + 6): layout prefs persist to
+  `./projects/.layout.json` (CWD-relative,
+  shell.rs), so snap-default inherited the Draw
+  workspace from the draw-open probe and rendered
+  byte-identical to snap-draw-open in runs
+  42487139921 and 42488210880; probe() now wipes
+  `./projects` (and takes a fresh HOME) per
+  invocation. (3) Two minor pre-existing items
+  left as remainders: the settings language rows
+  can run past the card's right edge at 1440 pt
+  (the last chip in a row clips at the window
+  edge), and the fx browser's "No presets saved
+  yet" line is bare text rather than the kit
+  empty_state — neither was in any plan's scope.
