@@ -213,7 +213,7 @@ fn save_clip_preset_in(
         ));
     }
     std::fs::create_dir_all(dir)
-        .map_err(|e| format!("could not create FX preset directory {}: {e}\", dir.display()))?;
+        .map_err(|e| format!("could not create FX preset directory {}: {e}", dir.display()))?;
     let text = serde_json::to_string_pretty(clip)
         .map_err(|e| format!("could not serialise FX preset '{name}': {e}"))?;
     // Wave 10 (C7): never silently destroy a different
