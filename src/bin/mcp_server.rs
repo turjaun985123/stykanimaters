@@ -120,7 +120,7 @@ fn read_line_capped<R: BufRead>(input: &mut R, cap: usize) -> std::io::Result<Li
 fn panic_response(id: serde_json::Value, payload: &(dyn std::any::Any + Send)) -> serde_json::Value {
     let detail = payload
         .downcast_ref::<&str>()
-        .map(str::to_string)
+        .map(|s| s.to_string())
         .or_else(|| payload.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "unknown panic".to_string());
     serde_json::json!({
