@@ -1816,7 +1816,6 @@ mod tests {
     // ---- Wave 12: asset-table MCP handlers ----
 
     use crate::editor::EditorCore;
-    use crate::model::{ClipDef, ClipLoop};
     use serde_json::json;
 
     fn asset_core() -> EditorCore {

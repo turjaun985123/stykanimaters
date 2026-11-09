@@ -249,7 +249,10 @@ fn assert_refused_no_spend(
 ) {
     let before = core.undo_depth();
     let outcome = call(core);
-    let err = outcome.unwrap_or_else(|_| panic!("{what}: the call must be refused"));
+    let err = match outcome {
+        Ok(_) => panic!("{what}: the call must be refused"),
+        Err(e) => e,
+    };
     assert!(
         err.contains(needle),
         "{what}: refusal must contain {needle:?}, got {err:?}"

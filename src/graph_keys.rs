@@ -2708,6 +2708,42 @@ mod mcp_graph_tool_tests {
         (a - b).abs() < 1e-4
     }
 
+    // The Wave 14 A4 tool tests below were written against
+    // `mod tests`' fixture helpers; they live in this
+    // sibling module, so the two helpers are defined here
+    // too (same shapes as in `mod tests`).
+    fn key(frame: f32, value: f32, in_tan: f32, out_tan: f32, interp: Interp) -> Key {
+        Key {
+            frame,
+            value,
+            in_tan,
+            out_tan,
+            interp,
+        }
+    }
+
+    /// A core whose project carries two channels: index 0 is
+    /// figure 0's RootX with three tangent-carrying keys at
+    /// frames 10/14/20, index 1 is figure 0's RootY, empty.
+    fn core_with_channels() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![
+                key(10.0, 100.0, 1.5, -2.0, Interp::Linear),
+                key(14.0, 140.0, 0.5, 0.25, Interp::Hermite),
+                key(20.0, 90.0, -1.0, 3.0, Interp::Step),
+            ],
+        });
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::RootY,
+            keys: Vec::new(),
+        });
+        core
+    }
+
     /// Two DUPLICATE (figure 0, RootX) channels told apart
     /// by their keys — twin 0 holds values 100/140, twin 1
     /// holds a single key 42 — plus an empty RootY channel.
