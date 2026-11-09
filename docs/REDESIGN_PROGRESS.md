@@ -479,26 +479,45 @@ struct the MCP `fx_list` tool serves had no such
 field, so no MCP client could read the flag (Squad B
 owns the fix).
 
-**Verification**: «FILL AT CLOSE: gate result —
-checks passed / total incl. the new check 9 MCP
-census, keys lost vs the Wave 10 close commit,
-census totals». CI run «FILL AT CLOSE: run id» on
-«FILL AT CLOSE: commit»: «FILL AT CLOSE: test counts
-— lib + bin + integration = total, GREEN or the
-failures named». Headless run «FILL AT CLOSE: run
-id»: «FILL AT CLOSE: probes exit 0 / total, overflow
-scan verdict and tree count, the live-MCP probe's
-result against a running editor». End-to-end suites:
-«FILL AT CLOSE: tests/wave11_e2e_*.rs suite count and
-test count, WAVE11-GAP markers remaining and where».
-Closing census: «FILL AT CLOSE: MCP total = registry
-+ io + built-ins, palette, scenes, help, i18n, icons
-— each as counted by the gate». At the time of
-writing none of this exists yet: the wave's edits are
-in flight, nothing is integrated, and no gate, CI or
-headless verdict is claimed for Wave 11. The
-placeholders above are to be replaced only with run
-evidence, never with agent reports.
+**Verification** (run evidence only, gathered at
+close): the pre-commit gate passes **9/9** on the
+closing tree, including the new check 9 MCP census —
+**277 tools** (224 registry + 9 io + 44 built-ins),
+zero duplicates, zero unregistered or orphan
+handlers, and `docs/MCP.md`'s catalogue in exact
+two-direction sync; **894 unique keys, zero lost**
+vs the Wave 10 close. CI run **42548006376** on
+`d3f77ba` is **GREEN: 3,033 tests passed, 0 failed**
+(Wave 10 closed at 2,852). Getting there took 14
+fix rounds after the first integration push — two
+borrow errors, a `&&str` map, a missing `PartialEq`
+derive, and the rest pre-wave tests reconciled with
+this wave's deliberate contracts (the undo-step
+ruling, `set_node` clamping, `add_audio_clip` file
+validation, `clear_graph` snapshotting); two snap
+assertions were also made sound per the standing
+presented-box doctrine. One honest discovery from
+those rounds: cargo's fail-fast had silently skipped
+the D-suite binaries behind earlier failures in
+several runs, so the undo/selection suite's first
+real CI execution came late — its two wrong entering
+expectations (add-figure node clearing, the f32
+rest root) are now pinned to the true contracts.
+Headless run **42548380654**: every probe exit 0;
+the **live-MCP probe PASSES end to end** (health,
+`tools/list` == health count, an `add_frame` mutation
+visible in a fresh `get_state` and in the live undo
+history); the **overflow scan is CLEAN on all 27
+trees**. End-to-end suites: **10 suites, 39 tests**,
+all green; the 8 remaining `WAVE11-GAP` tokens in the
+tree are historical wording in comments (what *was*
+missing), not open gaps. Closing census, as counted
+by the gate: MCP **277** (224 + 9 + 44), palette
+**114**, scenes **24**, help **58** (one row added),
+i18n **99 × 28**, icons **163**, keys **894**. The
+entering gap is closed: `fx_list` now serves the
+full `FxInfo`, `hidden` included. Snaps from the
+headless run are in `your_files/stykanimate-wave11-*.png`.
 
 Honest remainders — standing items this wave does
 **not** close (checked against the five squad remits
@@ -507,11 +526,41 @@ fidelity** gap §6.5 named as a headline candidate —
 the stage still ignores style cap/taper/opacity that
 both exporters honour — is not an MCP item and no
 squad's remit touches stage rendering, so it carries
-over untouched; **sound remains user-verified only**
-(no squad can listen to playback); **Home project
-rows and thumbnails are still not pixel-proven**
-(the home-populated scene missing since Wave 4 is
-not in any squad's remit). Also standing, from §6.5:
-the dopesheet columns' constant 124 pt gutter offset,
+over untouched (it is now also disclosed in
+`docs/MCP.md`'s notes); **sound remains
+user-verified only** (no squad can listen to
+playback); the **Home workspace is now snapped**
+(`snap-home`), but with an empty projects dir — **rows
+and thumbnails of a populated Home are still not
+pixel-proven**. Also standing, from §6.5: the
+dopesheet columns' constant 124 pt gutter offset,
 and white-on-accent contrast, which remains the
 user's open decision.
+
+Wave 11's own remainders, named at close: the
+**sprites/assets subsystem has no MCP surface** and
+was not audited this wave (E7 deferred it — no panel
+audit, no tools); the **core project-swap contracts
+are inconsistent** (load clears undo but not redo,
+`.piv` import clears both, New/open clear neither) —
+unifying them is a product call for the user, not a
+fix a wave should smuggle in; the **`project_files`
+cache is not refreshed when an MCP save creates a
+file** (A5 I3 — the saved-projects list can lag until
+the next GUI refresh); the **panel trims audio in
+seconds where MCP's indexed trim also speaks
+seconds** — verified consistent, but the panel's own
+seconds-trim has no frame readout (cosmetic);
+`set_loop_range` with an out-of-order range answers
+Ok with a null range (cosmetic); the GUI's
+follow/tween toggles are non-undoable session state
+(mirrored by their tools, deliberately); MCP-driven
+edits surface in the editor as toasts with **at most
+one tick of latency**, and multiple drain errors in
+one tick report the last status only; the **SVG
+exporter still ignores figure opacity, draws bends
+straight, loses taper without a gradient, and emits
+no media/text/sprite content** (E8's design gaps,
+documented, untouched); `STYLE_PRESETS` remains
+duplicated between `style.rs` and the panel table,
+guarded by a pin test rather than unified.
