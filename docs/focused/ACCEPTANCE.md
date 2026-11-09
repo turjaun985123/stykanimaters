@@ -598,13 +598,54 @@ render sites)**
 
 ## 8. Close-out verdict (integrator fills at close-out)
 
-TODO-AT-CLOSE: what actually landed per squad against
-§§1–5, the run evidence from §7, the closing census,
-and the honest remainders — each remainder either
-closed by a ticked box above or carried by name into
-§6.10. The verdict must also record the §1 bookkeeping
-correction (the rename's zero-undo-step file-operation
-contract vs the roster's A3 phrase) and §2's G7 outcome
-by name, so neither survives as an ambiguity. Do not
-write ACCEPTED while any §1–§5 box is unticked without
-a named remainder explaining it.
+**ACCEPTED** (2026-11-09, integrator close-out).
+
+Per squad, against §§1–5: **A** — `figure_library_rename`
+landed over `EditorCore::rename_library_entry`
+(`src/library_ops.rs`); the panel is a wrapper and its
+helpers delegate to the lib copies; the MCP-only e2e
+suite pins the happy path, all four refusals as isError
+results, and the bookkeeping contract. **Bookkeeping
+correction, recorded as instructed:** the roster's A3
+phrase "exactly-one-undo-step" was wrong — a library
+rename is a file operation spending **zero** undo steps
+and no dirty mark (the `pose_library_rename` precedent);
+§1 is ticked against the zero-step contract, and the
+suite proves Undo does not revert a rename.
+**B** — `shell_select_graph_channel` landed (the
+panel's own `select_channel`); `shell_get_selection`
+reports the pick and the drawn channel. **G7 outcome,
+by name: (a) — the read tool landed**
+(`shell_get_recent_colours`, session-only, cap 8);
+the no-write-tool reasoning is in the handler's module
+docs and §2's branch (a) boxes are the ticked ones.
+**C** — one weather defaults source
+(`editor::eds_kind_preset`), five kinds pinned through
+the tool. **D** — both prefs wired
+(`State.frame_ops.timeline_collapsed`; `sidebar_visible`
+as the left column's mirror), `shell_set_timeline`
+landed, both `…_wired` flags report true; the two
+argued deviations (sub-state field, no GUI toggle
+invented) are recorded in §6.10's Delivered.
+**E** — check 10's tables deliberately unmoved with
+the disposition recorded (§5's accounting rule); MCP.md
+rows + counts exact (gate check 9 derives them);
+probe step 9 landed in the headless workflow and
+passed live.
+
+Run evidence (§7): gate **10/10**; **CI 42578449523
+GREEN, 3,539 tests, 0 failed** (1,437 lib + 8
+mcp_server + 1,997 bin + 97 integration; A3's suite
+appears with its own `test result: ok` line);
+**headless 42579538663 SUCCESS** — all probes 0,
+MCP PROBE PASS incl. step 9, overflow CLEAN on 32
+trees. Closing census: **MCP 370** (registry 317 +
+io 9 + built-ins 44), shell 38, palette 134, keys
+940 zero lost, scenes 29, help 61.
+
+Remainders, each carried by name into §6.10's Honest
+remainders: the shared-layout-file test race (two
+snap tests normalise), `shell_get_state`'s one-tick
+timeline lag, MCP-applied colours not entering the
+Recent list, sound user-verified only. No §1–§5 box
+stands unticked without one of those names.

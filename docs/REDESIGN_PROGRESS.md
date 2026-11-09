@@ -1409,25 +1409,137 @@ shell steps, overflow CLEAN on 32 trees). HEAD
 at launch: `4af7d85`, the Wave 14 close-out
 commit.
 
-**Delivered** — TODO-AT-CLOSE: the integrator
-fills this in at close-out with what actually
-landed, squad by squad, against the remits
-above — including §2's G7 outcome by name
-(read tool landed, or session-only declared)
-and any deviation from the remits, argued.
+**Delivered** — all four remainders closed.
+**A (G5):** `figure_library_rename` landed —
+`EditorCore::rename_library_entry` +
+`tool_figure_library_rename` in the new
+`src/library_ops.rs`; the panel's `rename_saved`
+is a one-line wrapper and its four pure helpers
+now delegate to the lib copies (the panel const
+is an alias of the lib's), so one implementation
+exists. The e2e suite
+(`tests/focused_e2e_library_rename.rs`, 3 tests)
+drives it through MCP dispatch only. One
+bookkeeping correction, recorded per the
+acceptance's instruction: a library rename
+spends **zero** undo steps and no dirty mark —
+it is a file operation, the
+`pose_library_rename` precedent — so the
+roster's "exactly-one-undo-step" shorthand for
+A3 was wrong and the suite pins the true
+contract (undo depth unchanged; Undo does not
+revert a rename). **B (G6/G7):**
+`shell_select_graph_channel` landed, calling
+the graph panel's own `select_channel` (pick +
+target sync + figure switch are the row press
+exactly; it is the only handle that can name
+the second of two duplicate channels);
+`shell_get_selection` reports `graph_channel`
+and `graph_channel_drawn`. G7's outcome, by
+name: **(a) — the read tool landed**:
+`shell_get_recent_colours` reads the style
+panel's session Recent list (cap 8, most
+recent first); no write tool, by design —
+applying a colour is `set_node_style`, and a
+push tool would fabricate history. **C:**
+`tool_set_weather` now reads
+`editor::eds_kind_preset` for omitted
+amount/wind — one defaults table for panel
+and tool (rain 90/25, snow 90/12, fireflies
+60/4, fog 60/0, storm 140/30), pinned by a
+tool-level test over all five kinds.
+**D:** both prefs wired. The timeline flag
+lives in the timeline's own sub-state
+(`State.frame_ops.timeline_collapsed`, seeded
+in `init`, mirrored back by poll's
+load-modify-save); the collapsed card renders
+frame-chips-only with the chips' keys and
+geometry untouched. `sidebar_visible` is the
+**left column's** persisted mirror
+(`show_left` seeds from it, flips persist
+back); `show_right` has no pref in any era
+and stays session-only. `shell_set_timeline`
+landed; `shell_get_layout` reports
+`timeline_collapse_wired: true` and
+`sidebar_pref_wired: true`. Two deviations
+from the charter text, argued: the flag is a
+sub-state field, not a top-level `State`
+field (the ~30 literal `State` constructions
+made a new field the expensive option, and
+D2's handler was repointed to the real field
+at integration); and **no GUI timeline
+toggle exists** in the Rune shell (the GPUI
+one was lost in the rewrite) — none was
+invented; the writers are the startup pref
+and the shell tool. **E:** gate check 10's
+tables deliberately did **not** move — G5/G6/
+G7 were never palette commands, so there were
+no rows to move and inventing keys would have
+fabricated coverage (E1's premise correction);
+the dispositions live in the gate's comments
+and the `docs/wave14/PARITY_CENSUS.md`
+Focused-Wave addendum. `docs/MCP.md` carries
+every new row and the corrected counts; the
+headless probe gained step 9
+(`shell_set_timeline` round-trip) in
+`.github/workflows/headless.yml` — the probe
+is inline there, not a scripts/ file — and
+its `TOOL_FLOOR` rose 366 → 370.
 
-**Verification** — TODO-AT-CLOSE: run evidence
-only (gate result, CI run id and test count,
-headless run id, live-MCP probe and overflow
-verdicts, snap list) goes here at close-out.
+**Verification** — gate **10/10 PASS** on
+the closing tree (`scripts/phase_j_checks.py`,
+full foreground run; check 9 derives registry
+317 / surface 370 with exact doc sync, check
+10 parity unchanged at 134 commands via 94
+tools). **CI 42578449523 GREEN** on `d311b58`:
+**3,539 tests, 0 failed** (1,437 lib + 8
+mcp_server bin + 1,997 bin + 97 integration;
+Wave 14: 3,519 — the +3 integration tests are
+A3's suite, and the fail-fast lesson held:
+each suite's own `test result: ok` line is in
+the log). Three fix rounds, all test-side:
+the registry count pin (313 → 317) and the
+two gating snap tests normalised for the
+shared-layout-file race D1's wiring made live
+(see Honest remainders). **Headless
+42579538663 SUCCESS**: all probes exit 0,
+**MCP PROBE: PASS** including step 9's three
+assertions (`shell_set_timeline` collapses on
+the live shell, `shell_get_layout` shows it
+collapsed and wired, expand restores), health
+tool count ≥ floor 370, **overflow CLEAN on
+32 trees**, 27 snaps (copied to the user's
+files as `stykanimate-focused-wave-*.png`).
 
-**Closing census** — TODO-AT-CLOSE: MCP,
-palette, scenes, help, i18n, icons and keys as
-counted by the gate on the closing tree,
-against the entering baseline above.
+**Closing census** — MCP **370 tools**
+(registry **317** + io 9 + built-ins 44; shell
+tools **38**, `SHELL_TOOL_NAMES` 34), against
+366/313/35 entering — the delta is exactly the
+four landed tools, each named above. Palette
+**134** (unchanged, deliberately — see E);
+keys **940, zero lost** (no element keys were
+added or removed; D1's collapsed form reuses
+the chips' existing keys); scenes **29**;
+help **61**; layout facts **31**; icons
+**163**; i18n **99 × 28** — all gate-derived
+on the closing tree.
 
-**Honest remainders** — TODO-AT-CLOSE: what
-this wave did not close, named at close-out.
+**Honest remainders** — (1) Wiring the prefs
+into `init` made the bin test binary's shared
+layout file a live input: two snap tests now
+normalise the pref-seeded fields after boot
+(the race is documented in the tests; a
+per-test layout file would remove it, at
+larger churn). (2) `shell_get_state` reads
+the timeline pref from disk, so it can trail
+a `shell_set_timeline` write by one tick;
+`shell_get_layout` reads the live field and
+is always current. (3) Colours applied
+through MCP tools are not recorded in the
+Recent list — only the style panel's own
+handlers note colours (B2's stated limit,
+in the tool's description). (4) Sound
+remains user-verified only, as below.
 
 Standing user decisions this wave carries but
 does **not** settle — none of them is in any
