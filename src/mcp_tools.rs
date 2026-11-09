@@ -6243,7 +6243,7 @@ Tool {
   },
 Tool {
             name: "graph_key_interp",
-            description: "Read the interpolation mode of the key at 'frame' on the channel at 'channel' index \u2014 the graph panel's interp-control readout (the nearest key within 0.5 frames). The reply's 'interp' is \"hermite\"/\"linear\"/\"step\", or null with 'keyed': false when no key sits at that frame. Read-only.",
+            description: "Read the interpolation mode of the key at 'frame' on the channel at 'channel' index — the graph panel's interp-control readout (the nearest key within 0.5 frames). The reply's 'interp' is \"hermite\"/\"linear\"/\"step\", or null with 'keyed': false when no key sits at that frame. Read-only.",
             schema: obj_schema(
                 json!({
                     "channel": { "type": "integer" },
@@ -6255,7 +6255,7 @@ Tool {
         },
 Tool {
             name: "graph_count_keys_in_range",
-            description: "Count the keys of the channel at 'channel' index whose frames fall inside [from, to], both ends inclusive \u2014 the read-only pre-flight for graph_delete_keys_in_range (addressed by index, so a duplicate channel counts itself). Read-only.",
+            description: "Count the keys of the channel at 'channel' index whose frames fall inside [from, to], both ends inclusive — the read-only pre-flight for graph_delete_keys_in_range (addressed by index, so a duplicate channel counts itself). Read-only.",
             schema: obj_schema(
                 json!({
                     "channel": { "type": "integer" },
@@ -6268,7 +6268,7 @@ Tool {
         },
 Tool {
             name: "graph_set_interp_at_playhead",
-            description: "Set the interpolation mode of the graph key nearest the current frame on the SELECTED figure's angle channel for the selected joint: \"hermite\", \"linear\" or \"step\" \u2014 the graph panel interp control's fallback when no channel is drawn. set_key_interp addresses any key by channel + key index instead. One undo step when it sets.",
+            description: "Set the interpolation mode of the graph key nearest the current frame on the SELECTED figure's angle channel for the selected joint: \"hermite\", \"linear\" or \"step\" — the graph panel interp control's fallback when no channel is drawn. set_key_interp addresses any key by channel + key index instead. One undo step when it sets.",
             schema: obj_schema(
                 json!({
                     "interp": { "type": "string", "enum": ["hermite", "linear", "step"] }
