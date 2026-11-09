@@ -524,6 +524,26 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
                 s.fx_selected = None;
                 s.confirm_action = None;
             }
+            // Wave 12 (E7): refresh the core's cached project
+            // list through B3's seam (`projects::
+            // refresh_project_files`) once per drained batch.
+            // The GUI's save paths refresh the list inside the
+            // core op (or insert the new row at once, for a
+            // copy), but the MCP file writers could not — the
+            // Wave 11 §6.6 remainder: an MCP save, save-a-copy
+            // or duplicate that created a file left
+            // `project_files` stale, so the selector and
+            // Home's current-project marking missed the file.
+            // This block is the one choke point every live
+            // file write passes through, and the refresh is
+            // deliberately NOT gated on the swap counter
+            // alone: save-a-copy and duplicate write files
+            // without bumping it. The seam preserves the
+            // selection by file identity and is a no-op when
+            // ./projects is missing, so an unrelated
+            // mutation's drain can only add rows for files
+            // that genuinely exist on disk.
+            stykanimate_rs::projects::refresh_project_files(&mut s.core);
             // Errors the drain buffered (protocol errors and
             // refusals that never wrote the status line) toast
             // here with the same MCP attribution; errors that

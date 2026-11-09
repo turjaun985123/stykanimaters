@@ -89,6 +89,41 @@ unchanged (the self-test pins this).
    holds only the kit empty state, no fixed-geometry
    content to judge).
 
+Wave 12 audit -- the two populated scenes. Wave 12 adds
+the first trees whose Home card and stroke inspector
+carry live rows (scenes `home-populated` and
+`strokes-populated`): project rows with 56 pt
+thumbnails, metadata lines and wrapping button rows
+under `home-panel`, and per-stroke rows (swatch,
+truncated summary, Delete) under `stroke-inspector`.
+No rule needed generalising, and none was weakened:
+
+- Both panels are ordinary side-column card roots --
+  in the Wave 11 dumps `home-panel` sits at
+  #0/main-row/side-left/home-panel ([16, 157, 300, 49],
+  the closed card) and `stroke-inspector` at
+  #0/main-row/side-right/stroke-inspector
+  ([1084, 786.5, 340, 501.13]) -- so rules 1-2 already
+  judge every populated descendant horizontally,
+  including a row escaping its card (the Wave 9 clips
+  failure mode). Neither panel contains a scroll_x
+  subtree, so no new exemption was needed.
+- No rule assumes a single column, a fixed row
+  height, or the empty-Home structure: the checks are
+  per-element x-range tests, and populated lists only
+  add vertical extent, which the side columns absorb
+  by scrolling (the draw-open inspector card already
+  ends past y=1287 in a 900 pt window, legitimately).
+- The Home rows are a vertical list, not a grid --
+  one thumbnail per row, inside the row -- so no
+  tiling exception arises; the thumbnail is judged
+  like any other element.
+
+The self-test pins both shapes: conforming populated
+trees (rows running below the window's bottom edge
+included) scan clean, and one planted row escape per
+scene is caught by the content and card rules.
+
 Checks considered and NOT added (they would
 false-positive or judge what rects cannot show):
 
@@ -377,9 +412,13 @@ def scan_file(path):
 # Self-test: synthetic fixtures proving (a) the generalised
 # edges reduce EXACTLY to the original constants at W=1440,
 # (b) a violation that only exists at 1280 is caught at 1280,
-# and (c) the timeline-card rule (rule 4) stays silent on a
+# (c) the timeline-card rule (rule 4) stays silent on a
 # conforming card -- including scrolled content far past the
-# window -- and catches each of its violation classes.
+# window -- and catches each of its violation classes, and
+# (d) the Wave 12 populated-scene fixtures (home-populated,
+# strokes-populated) stay silent on conforming trees -- rows
+# below the window's bottom edge included -- and catch one
+# planted row escape per scene.
 # ------------------------------------------------------------------
 
 def _el(path, rect, key=None):
@@ -478,6 +517,107 @@ def _timeline_fixture(win_w, win_h, loop_dx=0.0, dope_dy=0.0,
             _el(base + "/timeline-loop-row/loop-clear",
                 [inner_x + inner_w - 60.0 + loop_dx, card_y + 89.0, 60.0, 20.0],
                 "loop-clear"),
+        ]
+    }
+
+
+def _home_populated_fixture(win_w, win_h, meta_dx=0.0):
+    """A minimal populated-Home tree (Wave 12 scene
+    `home-populated`): the `home-panel` card root in the
+    left column, open, holding the inner `home-card`
+    column with two project rows and the totals footer.
+
+    Geometry follows the real layout (the Wave 11 `home`
+    dump + home_panel.rs): card x=16, width 300, with
+    12 pt padding, so content is x=28, width 276, right
+    edge 304; each row is a `home-row-{i}` list row
+    (w_full) leading with the 56 pt thumbnail (16:9
+    stage aspect, so 31.5 pt tall) beside a text column
+    (truncated name, wrapped `home-proj-meta-{i}` line,
+    wrapping button row). Row 1 and the totals footer
+    sit below the window's bottom edge -- legitimate,
+    because the left column scrolls vertically; the
+    scan must stay silent on them. meta_dx shifts row
+    1's metadata line right: the planted escape (past
+    the 304 content edge and the 316 card edge).
+    """
+    base = "#0/main-row/side-left/home-panel"
+    return {
+        "elements": [
+            _el("#0", [0.0, 0.0, win_w, win_h]),
+            _el("#0/main-row", [16.0, 141.0, win_w - 32.0, win_h - 157.0]),
+            _el("#0/main-row/side-left", [16.0, 157.0, 300.0, 1000.0]),
+            _el(base, [16.0, 157.0, 300.0, 900.0], "home-panel"),
+            _el(base + "/home", [28.0, 169.0, 276.0, 25.0], "home"),
+            _el(base + "/home-card", [28.0, 202.0, 276.0, 843.0], "home-card"),
+            # Row 0: thumbnail + text column, all inside
+            # the content edge.
+            _el(base + "/home-card/home-row-0",
+                [28.0, 210.0, 276.0, 66.0], "home-row-0"),
+            _el(base + "/home-card/home-row-0/#0",
+                [36.0, 218.0, 56.0, 31.5]),  # the thumbnail
+            _el(base + "/home-card/home-row-0/#1/home-proj-meta-0",
+                [100.0, 226.0, 196.0, 15.0], "home-proj-meta-0"),
+            _el(base + "/home-card/home-row-0/#1/home-open-0",
+                [100.0, 245.0, 86.0, 25.0], "home-open-0"),
+            # Row 1: below the window's bottom edge (the
+            # column scrolls); its metadata line is the
+            # planted escape when meta_dx > 0.
+            _el(base + "/home-card/home-row-1",
+                [28.0, 940.0, 276.0, 66.0], "home-row-1"),
+            _el(base + "/home-card/home-row-1/#0",
+                [36.0, 948.0, 56.0, 31.5]),  # the thumbnail
+            _el(base + "/home-card/home-row-1/#1/home-proj-meta-1",
+                [100.0 + meta_dx, 956.0, 196.0, 15.0], "home-proj-meta-1"),
+            _el(base + "/home-card/home-totals",
+                [28.0, 1014.0, 276.0, 15.0], "home-totals"),
+        ]
+    }
+
+
+def _strokes_populated_fixture(win_w, win_h, del_dx=0.0):
+    """A minimal populated stroke-inspector tree (Wave 12
+    scene `strokes-populated`): the `stroke-inspector`
+    card root in the right column with two per-stroke
+    rows on the current frame.
+
+    Geometry follows the real layout (the Wave 11
+    draw-open dump + stroke_inspector.rs): card
+    x=W-356, width 340, with 12 pt padding, so content
+    is x=W-344, width 316, right edge W-28; each row is
+    an unkeyed row shell holding a 14 pt swatch, the
+    truncated summary text and the row's Delete button
+    (`stroke-del-{idx}`), which ends exactly at the
+    content edge. The card and its second row run
+    below the window's bottom edge -- legitimate,
+    because the right column scrolls vertically (the
+    real draw-open card ends past y=1287 in a 900 pt
+    window). del_dx shifts row 0's Delete button
+    right: the planted escape, the Wave 9 clips-row
+    failure mode in this card.
+    """
+    card_x = win_w - 356.0
+    cx = card_x + 12.0   # content x (W-344)
+    edge = win_w - 28.0  # content right edge
+    base = "#0/main-row/side-right/stroke-inspector"
+    return {
+        "elements": [
+            _el("#0", [0.0, 0.0, win_w, win_h]),
+            _el("#0/main-row", [16.0, 141.0, win_w - 32.0, win_h - 157.0]),
+            _el("#0/main-row/side-right", [card_x, 157.0, 340.0, 1100.0]),
+            _el(base, [card_x, 157.0, 340.0, 1050.0], "stroke-inspector"),
+            _el(base + "/strokes-header",
+                [cx, 600.0, 316.0, 25.0], "strokes-header"),
+            # Row 0 (unkeyed shell, as in the panel).
+            _el(base + "/#7", [cx, 633.0, 316.0, 33.0]),
+            _el(base + "/#7/#0", [cx + 8.0, 642.0, 14.0, 14.0]),   # swatch
+            _el(base + "/#7/#1", [cx + 30.0, 642.0, 180.0, 15.0]),  # summary
+            _el(base + "/#7/stroke-del-0",
+                [edge - 64.0 + del_dx, 637.0, 64.0, 25.0], "stroke-del-0"),
+            # Row 1: below the window's bottom edge.
+            _el(base + "/#8", [cx, 1000.0, 316.0, 33.0]),
+            _el(base + "/#8/stroke-del-1",
+                [edge - 64.0, 1004.0, 64.0, 25.0], "stroke-del-1"),
         ]
     }
 
@@ -583,6 +723,43 @@ def self_test():
     check("timeline-card" in by_key.get("(unkeyed #3)", {}).get("rules", "")
           and abs(by_key.get("(unkeyed #3)", {}).get("overflow", 0) - 20.0) < 1e-9,
           "card root overflow measures 20.0 pt")
+
+    # Wave 12: the populated scenes. Conforming trees
+    # are silent at both window sizes -- including rows
+    # below the window's bottom edge (the side columns
+    # scroll vertically) and a Delete button ending
+    # exactly at the content edge.
+    for win_w, win_h in ((1440.0, 900.0), (1280.0, 720.0)):
+        hits = scan_tree(_home_populated_fixture(win_w, win_h))
+        check(len(hits) == 0,
+              "home-populated W=%d: conforming populated Home is clean (got %d hit(s))"
+              % (win_w, len(hits)))
+        hits = scan_tree(_strokes_populated_fixture(win_w, win_h))
+        check(len(hits) == 0,
+              "strokes-populated W=%d: conforming populated inspector is clean (got %d hit(s))"
+              % (win_w, len(hits)))
+
+    # One planted row escape per scene: caught by the
+    # content and card rules, with the measured overflow.
+    hits = scan_tree(_home_populated_fixture(1440.0, 900.0, meta_dx=40.0))
+    by_key = {h["key"]: h for h in hits}
+    check(len(hits) == 1 and "home-proj-meta-1" in by_key,
+          "home-populated: metadata line pushed past the card is caught")
+    check("content" in by_key.get("home-proj-meta-1", {}).get("rules", "")
+          and "card" in by_key.get("home-proj-meta-1", {}).get("rules", ""),
+          "home-populated: the escape names the content and card rules")
+    check(abs(by_key.get("home-proj-meta-1", {}).get("overflow", 0) - 32.0) < 1e-9,
+          "home-populated: overflow measures 32.0 pt")
+
+    hits = scan_tree(_strokes_populated_fixture(1440.0, 900.0, del_dx=18.0))
+    by_key = {h["key"]: h for h in hits}
+    check(len(hits) == 1 and "stroke-del-0" in by_key,
+          "strokes-populated: Delete button pushed past the card is caught")
+    check("content" in by_key.get("stroke-del-0", {}).get("rules", "")
+          and "card" in by_key.get("stroke-del-0", {}).get("rules", ""),
+          "strokes-populated: the escape names the content and card rules")
+    check(abs(by_key.get("stroke-del-0", {}).get("overflow", 0) - 18.0) < 1e-9,
+          "strokes-populated: overflow measures 18.0 pt")
 
     if failures:
         print("SELF-TEST: %d failure(s)" % len(failures))

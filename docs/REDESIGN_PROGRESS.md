@@ -564,3 +564,124 @@ no media/text/sprite content** (E8's design gaps,
 documented, untouched); `STYLE_PRESETS` remains
 duplicated between `style.rs` and the panel table,
 guarded by a pin test rather than unified.
+
+### 6.7 Wave 12 — stage style fidelity + Wave 11 remainders (2026-11-09)
+
+A sixth improvement wave, launched 2026-11-09
+(08:52 +06) from the proactive Wave 12 offer: the
+user tapped "Launch Wave 12 — all 50 agents as
+planned" rather than answering the two standing
+decisions first. Same shape as Waves 9–11: 50
+agents, five squads of ten, one owner per file, the
+session integrator wiring the shared files (roster:
+`~/workspace/wave12-roster.md`). The scope, as
+offered: the **stage style fidelity** headline §6.6
+carried over — the stage honouring the style
+cap/taper/opacity both exporters already respect;
+a **sprites/assets MCP surface** where none exists,
+plus the `project_files` cache refresh Wave 11's A5
+I3 named; **SVG exporter fidelity** (figure opacity,
+bend arcs, taper without a gradient, media/text/
+sprite emission) and the **`STYLE_PRESETS`
+unification**; **pixel-proof coverage** — a
+populated-Home scene and a strokes-populated scene,
+so Home rows/thumbnails and the stroke inspector
+are proven in headless trees, not just unit-tested;
+and **QA/cosmetics** — `set_loop_range` erroring on
+an out-of-order range instead of answering Ok with
+a null range, the audio panel's seconds-trim
+gaining a frame readout, and gate/census upkeep.
+
+The squads: **A, stage style fidelity** — shared
+styled-segment math in `paint.rs` (bend split,
+gradient and taper lerps, caps, alpha), adopted by
+`stage_view.rs` and refactored onto by `export.rs`;
+one effective-style resolver in `style.rs`; the
+strokes layer's single alpha model; segment text
+and media following styled segments; an MCP truth
+audit of node/style replies against what the stage
+now draws; and the field × surface matrix in
+`docs/STAGE_STYLE.md`. **B, sprites/assets MCP** —
+asset handlers in `media.rs` (list, info, import,
+remove, rename) with panel parity across the
+inspector, scene and export panels; the
+`projects.rs` refresh seam for the `project_files`
+cache, wired into `editor.rs` save paths; asset
+integrity across swaps and undo; `.piv` and Stick
+Nodes asset truth; and an end-to-end asset session
+suite. **C, SVG fidelity + presets** — `svg.rs`
+figure opacity, taper emitted as a filled path,
+bends as arc paths; the panel's duplicate preset
+table deleted in favour of `style.rs`'s
+`STYLE_PRESETS`; serde census pins in `model.rs`;
+palette parity; and anchored specs for media/text/
+sprite and stroke-width-profile SVG emission. **D,
+pixel-proof coverage** — populated-Home correctness
+in `home_panel.rs`; two new scenes (home-populated,
+strokes-populated) taking scenes 24 → 26; the
+stroke inspector populated and proven; both scenes
+in the headless tree/snap loops; library and
+figure-card thumbnail audits; save-time thumbnail
+generation; and the coverage ledger in
+`docs/wave12/PIXEL_PROOF.md`. **E, QA/tooling** —
+gate check 8/9 and census upkeep for the new counts,
+`set_loop_range` erroring on out-of-order ranges,
+the audio trim's frame readout, snap coverage of
+the new state, live-MCP swap invalidation, toast
+attribution for the asset tools, overflow rules for
+the new tree shapes, and this section.
+
+Entering counts, as recorded at the Wave 11 close
+(§6.6) and re-stated here so the closing census has
+its baseline: MCP **277 tools** (224 registry + 9
+io + 44 built-ins, per `scripts/mcp_census.py`);
+**3,033 tests** (CI run **42548006376** on
+`d3f77ba`, GREEN); **894 unique keys**, zero lost;
+palette **114**; scenes **24**; help **58**; i18n
+**99 × 28**; icons **163**; gate **9/9**
+(`scripts/phase_j_checks.py` on the closing tree);
+headless run **42548380654** (all probes 0, live-MCP
+probe PASS, overflow CLEAN on 27 trees). HEAD at
+launch: `3f04667`, the Wave 11 close-out commit.
+
+**Delivered** — TODO-AT-CLOSE: the integrator fills
+this in at close-out with what actually landed,
+squad by squad, against the remits above.
+
+**Verification** — TODO-AT-CLOSE: run evidence only
+(gate result, CI run id and test count, headless
+run id, live-MCP probe and overflow verdicts, snap
+list) goes here at close-out.
+
+**Closing census** — TODO-AT-CLOSE: MCP, palette,
+scenes, help, i18n, icons and keys as counted by
+the gate on the closing tree, against the entering
+baseline above.
+
+**Honest remainders** — TODO-AT-CLOSE: what this
+wave did not close, named at close-out.
+
+Standing user decisions this wave carries but does
+**not** settle — none of them is in any squad's
+remit, and they are recorded here so they are not
+lost: the **project-swap undo canonical behaviour**
+(load clears undo but not redo, `.piv` import clears
+both, New/open clear neither — a product call, not
+a fix); **white-on-accent contrast** (the
+white-text carrier is upstream rune `tok::accent`
+**#4392F7 at 3.14:1** in both themes; darkening the
+accent-filled call sites to ~**#2072D5 (4.72:1)**
+fixes it, darkening the app token alone does not —
+the user's open decision since the Wave 10
+close-out); the **two "New project" results** that
+still disagree; the **C5 waveform call** (a deleted
+audio file's stale waveform vs a "(missing file)"
+badge); and **sound remains user-verified only** —
+no squad can listen to playback.
+
+The wave works under two exclusions, stated plainly:
+**no project-swap undo/redo semantics change**, and
+**no accent colour change**. The user chose "launch
+as planned" over "answer the two decisions first",
+so both stay exactly as they are until the user
+rules on them.

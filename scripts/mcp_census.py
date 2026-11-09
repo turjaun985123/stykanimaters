@@ -25,11 +25,19 @@ The three tool families, in `all_tools()` composition order
                inside the constructor.
   - registry — the `Tool { ... }` literals in
                `pub fn tools()` in src/mcp_tools.rs;
-               handlers are named `fn tool_*` functions in
-               the same file.
+               handlers are named `fn tool_*` functions —
+               in the same file, or in a DOMAIN file,
+               referenced by bare name or by a `crate::…`
+               path (the Wave 11 splice pattern: at the
+               Wave 12 opening, 113 of 224 registry
+               handlers live outside src/mcp_tools.rs).
   - io       — the `Tool { ... }` literals in
                `pub fn tools()` in src/mcp_io.rs; handlers
-               likewise named, same file.
+               likewise named, same file (all 9 today).
+
+The report prints per-family subtotals — the text
+`[family counts]` block and the JSON `totals` object —
+so wave close-outs never hand-count the surface.
 
 VERIFICATION (the Wave 9/10 lesson, applied): a counter
 that misses a new declaration pattern lies quietly, so
@@ -69,17 +77,48 @@ WHAT IT CANNOT SEE (named blind spots):
   - Handler-shaped `pub fn tool_*` functions in DOMAIN
     files (paint, draw_ops, fig3d, audio_ops, graph_keys,
     figure_ops, fx_ops, particle_ops, frame_swap, style,
-    text_edit) are NOT callable until the integrator
-    splices a `Tool` entry into `mcp_tools::tools()`.
-    They are listed separately as UNREGISTERED HANDLERS
-    — the splice checklist — and never counted in the
-    totals. Two cautions ride with that list: a domain
-    handler's fn name can collide with a registered
-    handler's (draw_ops::tool_draw_stroke vs the
-    registry's own) without being the same function, and
-    two domain files can carry the same fn name
-    (tool_list_brushes in draw_ops and paint); duplicate
-    symbols in the list are flagged in the output.
+    text_edit, media) are NOT callable until the
+    integrator splices a `Tool` entry into
+    `mcp_tools::tools()`. They are listed separately as
+    UNREGISTERED HANDLERS — the splice checklist — and
+    never counted in the totals. The scan set is every
+    `src/**/*.rs` file (plus `tests/*.rs` for the
+    invocation map), so a domain file joins the census
+    the moment it gains handlers — src/media.rs did in
+    Wave 12, and its six asset handlers appear on the
+    checklist and resolve through the same code path as
+    every earlier domain file. Two cautions ride with
+    that list: a domain handler's fn name can collide
+    with a registered handler's (draw_ops::tool_draw_stroke
+    vs the registry's own) without being the same
+    function, and two domain files can carry the same
+    fn name (tool_list_brushes in draw_ops and paint);
+    duplicate symbols in the list are flagged in the
+    output.
+  - The checklist's signature pattern accepts `pub fn`
+    and restricted visibilities (`pub(crate) fn`, …).
+    A handler-shaped fn with NO visibility modifier in a
+    domain file would be missed by the checklist — it
+    also cannot be referenced from src/mcp_tools.rs
+    until it gains one, and the definition index used
+    for resolution (`all_handler_defs`) is
+    visibility-agnostic, so a splice after such a fix
+    still resolves. A handler whose SIGNATURE shape
+    differs (no `&mut EditorCore` parameter, or a return
+    type other than `Result<Value, String>`) is
+    deliberately not checklist-shaped: the `Tool`
+    struct's handler field is a plain fn pointer of
+    exactly that type, so such a fn cannot be a handler
+    without a type change the census would see elsewhere.
+  - Resolution is first-definition-wins over the scan
+    order, and the definition index does not exclude
+    `mod tests` regions: a same-named `fn tool_*` inside
+    a test block could shadow a production definition in
+    the census's answer. (The gate's check 9 is stricter
+    — it requires exactly one production definition per
+    referenced handler.) No such collision exists today:
+    every referenced handler name has exactly one
+    definition in the production tree.
   - Tool names are all static literals today; there is no
     dynamically constructed tool name anywhere in the tree
     (no `name: format!`, no `name: <variable>` in any
@@ -664,8 +703,13 @@ def extract_transports_and_map(
 # Unregistered handlers (informational — never in the totals)
 # ---------------------------------------------------------------------
 
+# `pub fn`, or a restricted visibility — `pub(crate) fn`,
+# `pub(super) fn`, … — so a domain handler declared with
+# one is not silently missing from the splice checklist.
+# (No such declaration exists today; this keeps it that
+# way loudly instead of blind.)
 _HANDLER_SIG = re.compile(
-    r"pub\s+fn\s+(tool_\w+)\s*\(", re.M
+    r"pub(?:\s*\([^)]*\))?\s+fn\s+(tool_\w+)\s*\(", re.M
 )
 
 
@@ -748,6 +792,12 @@ def build(root: str) -> dict:
             fail(f"duplicate tool name {t['name']!r} in families {seen[t['name']]} and {t['family']}")
         seen[t["name"]] = t["family"]
     checks.append(f"global: {len(tools)} tool names, no duplicates across families")
+    n_src = sum(1 for r in sources if r.startswith("src/"))
+    checks.append(
+        f"sources: {len(sources)} files in the scan set "
+        f"({n_src} under src/, {len(sources) - n_src} under tests/) — "
+        "handler definitions resolve across all of them"
+    )
 
     dispatch, c = extract_dispatch(sources["src/mcp.rs"])
     checks += c
@@ -794,6 +844,12 @@ def render_text(data: dict) -> str:
         f"Totals: {t['total']} callable tools "
         f"(builtin {t['builtin']} + registry {t['registry']} + io {t['io']})"
     )
+    # One greppable line per family, so a close-out can
+    # lift a subtotal without parsing the combined line.
+    lines.append("[family counts]")
+    for fam in FAMILY_ORDER:
+        lines.append(f"  {fam}: {t[fam]}")
+    lines.append(f"  total: {t['total']}")
     lines.append("")
     for fam in FAMILY_ORDER:
         lines.append(f"[{fam}] ({t[fam]})")

@@ -76,8 +76,11 @@
 //!   read.
 //! - A queued request whose reply never comes (the app wedged
 //!   before draining) is given up on after [`REPLY_TIMEOUT`]
-//!   with HTTP 504; the edit, if it later runs, still lands —
-//!   only the answer is lost.
+//!   with HTTP 504 and marked cancelled; if the app later
+//!   drains it, the request is discarded rather than applied
+//!   to whatever project happens to be current by then. A
+//!   request already executing when the timeout fires cannot
+//!   be recalled.
 //!
 //! ## Synchronisation
 //!
@@ -134,7 +137,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -168,6 +171,16 @@ const MAX_BODY: usize = 4 * 1024 * 1024;
 /// Largest request head (request line + headers) accepted.
 const MAX_HEAD: usize = 16 * 1024;
 
+/// Maximum parsed requests waiting for the UI thread. This
+/// matches the shell's current per-poll drain batch, so a
+/// healthy editor can clear a full queue in one poll. The
+/// listener normally has only one request in flight because
+/// it blocks on that request's reply; the bound matters when
+/// earlier requests timed out and were left cancelled in the
+/// queue — without it, a wedged app could accumulate request
+/// bodies (each up to [`MAX_BODY`]) without limit.
+const MAX_QUEUED_REQUESTS: usize = 8;
+
 /// How long a single socket read or write may block before
 /// the listener gives up on it — the listener serves
 /// connections one at a time, so a stuck client must not
@@ -189,9 +202,11 @@ const READ_DEADLINE: Duration = Duration::from_secs(30);
 /// tool's runtime (a full export can take minutes), and this
 /// bound exists only so a wedged app — one whose poll loop
 /// never drains again — cannot hold the listener forever.
-/// The request itself is not cancelled: if the app recovers
-/// and drains it, the edit still lands and only the reply
-/// send fails, harmlessly.
+/// At the timeout the listener marks the request cancelled:
+/// if the app recovers and reaches it in the queue, `drain`
+/// discards it instead of applying a stale edit to whatever
+/// project is current then. A request already executing
+/// when the timeout fires cannot be recalled.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The URL an MCP client should be pointed at while live
@@ -213,6 +228,28 @@ pub fn endpoint() -> String {
 pub struct LiveRequest {
     pub msg: Value,
     pub reply: SyncSender<Option<Value>>,
+    /// Set by the listener when it stops waiting for the
+    /// reply (reply timeout, or the bridge is switched off).
+    /// `drain` checks this before routing: a cancelled
+    /// request must not execute later against a different
+    /// project than the one its client was talking to.
+    pub cancelled: Arc<AtomicBool>,
+}
+
+/// Discard a request the listener has already given up on,
+/// returning the request unchanged when it is still live.
+/// A discarded request gets the notification-shaped `None`
+/// reply defensively; in practice its listener has already
+/// left the wait loop (that is why it was cancelled), so the
+/// send simply lands in the buffered reply channel and is
+/// dropped with it.
+fn discard_if_cancelled(req: LiveRequest) -> Option<LiveRequest> {
+    if req.cancelled.load(Ordering::SeqCst) {
+        let _ = req.reply.send(None);
+        None
+    } else {
+        Some(req)
+    }
 }
 
 /// The live bridge: the request queue the UI thread drains,
@@ -241,7 +278,7 @@ impl LiveBridge {
         // between accepts instead of parking inside accept()
         // forever, which is what makes a clean join possible.
         listener.set_nonblocking(true)?;
-        let (tx, rx) = channel::<LiveRequest>();
+        let (tx, rx) = sync_channel::<LiveRequest>(MAX_QUEUED_REQUESTS);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
@@ -381,6 +418,15 @@ pub fn is_enabled() -> bool {
 /// Routing goes through `router.handle_on(core, &msg)` — the
 /// `McpServer` is only a dispatcher here; the tools execute
 /// against `core`, never against the router's own core.
+///
+/// Nothing in the queue is a project snapshot or any other
+/// project-derived cache: each entry is one client's parsed
+/// message, routed against the caller's live core at drain
+/// time. That is also why a request the listener has given
+/// up on is discarded here (see [`LiveRequest::cancelled`])
+/// rather than executed — by the time a wedged app recovers,
+/// a load or save through this same path may have replaced
+/// the project the request was aimed at.
 pub fn drain(core: &mut EditorCore, router: &mut McpServer, max: usize) -> usize {
     let guard = lock_bridge();
     let Some(bridge) = guard.as_ref() else {
@@ -391,6 +437,14 @@ pub fn drain(core: &mut EditorCore, router: &mut McpServer, max: usize) -> usize
         let req = match bridge.requests.try_recv() {
             Ok(req) => req,
             Err(_) => break, // empty, or the listener is gone
+        };
+        // A request whose client already got a 504 (or whose
+        // bridge was switched off mid-wait) is discarded, not
+        // routed: it was aimed at the project that was live
+        // when it was sent, and that project may be gone.
+        let Some(req) = discard_if_cancelled(req) else {
+            done += 1;
+            continue;
         };
         // Snapshot the status line so an error that never
         // wrote it can be told apart from an ordinary refusal
@@ -435,10 +489,24 @@ pub fn drain(core: &mut EditorCore, router: &mut McpServer, max: usize) -> usize
 /// Accept connections one at a time until the stop flag is
 /// raised. Sequential by design: it keeps ordering trivial and
 /// the queue is the only hand-off to the UI thread.
-fn listener_loop(listener: TcpListener, tx: Sender<LiveRequest>, stop: Arc<AtomicBool>) {
+fn listener_loop(listener: TcpListener, tx: SyncSender<LiveRequest>, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
-            Ok((stream, _)) => handle_connection(stream, &tx, &stop),
+            Ok((stream, _)) => {
+                // One connection must never be able to kill
+                // the only listener thread: `handle_connection`
+                // is written to answer malformed input rather
+                // than panic (see its docs), and this catch is
+                // the belt to those braces — an unforeseen panic
+                // while serving one client drops that connection
+                // and the loop accepts the next one.
+                let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    handle_connection(stream, &tx, &stop);
+                }));
+                if served.is_err() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -457,7 +525,7 @@ fn listener_loop(listener: TcpListener, tx: Sender<LiveRequest>, stop: Arc<Atomi
 /// the HTTP response, close. Every early return is a client or
 /// transport failure that has already been answered (or needs
 /// no answer); this function never panics on bad input.
-fn handle_connection(mut stream: TcpStream, tx: &Sender<LiveRequest>, stop: &Arc<AtomicBool>) {
+fn handle_connection(mut stream: TcpStream, tx: &SyncSender<LiveRequest>, stop: &Arc<AtomicBool>) {
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
     // The accept loop is non-blocking; accepted sockets are
@@ -595,11 +663,30 @@ fn handle_connection(mut stream: TcpStream, tx: &Sender<LiveRequest>, stop: &Arc
     //     This wait IS the synchronisation: the reply lands
     //     when poll() next drains the queue (see module docs).
     let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel::<Option<Value>>(1);
-    if tx.send(LiveRequest { msg, reply: reply_tx }).is_err() {
-        // The queue's receiver is gone: the bridge is being
-        // torn down under this connection.
-        write_response(&mut stream, 500, "Internal Server Error", "text/plain", b"editor not draining\n");
-        return;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let request = LiveRequest {
+        msg,
+        reply: reply_tx,
+        cancelled: Arc::clone(&cancelled),
+    };
+    match tx.try_send(request) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            // The queue is bounded (see MAX_QUEUED_REQUESTS):
+            // a full queue means the app fell a whole drain
+            // batch behind — stale cancelled requests not yet
+            // discarded, or a wedged poll loop. Refuse plainly
+            // rather than block the one listener thread behind
+            // a queue that may never move.
+            write_response(&mut stream, 503, "Service Unavailable", "text/plain", b"editor request queue is full\n");
+            return;
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            // The queue's receiver is gone: the bridge is being
+            // torn down under this connection.
+            write_response(&mut stream, 500, "Internal Server Error", "text/plain", b"editor not draining\n");
+            return;
+        }
     }
     // The request is queued: nudge the event loop so poll
     // drains it promptly (the 100 ms heartbeat in the shell
@@ -623,14 +710,20 @@ fn handle_connection(mut stream: TcpStream, tx: &Sender<LiveRequest>, stop: &Arc
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if stop.load(Ordering::SeqCst) {
-                    return; // bridge switched off mid-request
+                    // Bridge switched off mid-request: cancel
+                    // the queued request so a later restart's
+                    // drain cannot apply it out of context.
+                    cancelled.store(true, Ordering::SeqCst);
+                    return;
                 }
                 if wait_start.elapsed() >= REPLY_TIMEOUT {
                     // The app is alive enough to keep us
                     // waiting but never drained: answer 504
-                    // and free the listener. The request is
-                    // still queued — if it is drained later,
-                    // its reply send simply fails (see drain).
+                    // and free the listener. The request stays
+                    // in the queue but is marked cancelled, so
+                    // a later drain discards it instead of
+                    // applying a stale edit (see drain).
+                    cancelled.store(true, Ordering::SeqCst);
                     write_response(&mut stream, 504, "Gateway Timeout", "text/plain", b"editor did not answer in time\n");
                     return;
                 }
@@ -947,6 +1040,49 @@ mod tests {
     #[test]
     fn body_cap_is_four_mib() {
         assert_eq!(MAX_BODY, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn request_queue_is_bounded_to_one_drain_batch() {
+        // The shell drains at most 8 requests per poll
+        // (main.rs); the queue bound matches that batch so a
+        // healthy editor clears a full queue in one poll,
+        // while a wedged one cannot accumulate requests
+        // without limit.
+        assert_eq!(MAX_QUEUED_REQUESTS, 8);
+    }
+
+    #[test]
+    fn cancelled_request_is_discarded_before_routing() {
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel::<Option<Value>>(1);
+        let req = LiveRequest {
+            msg: json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }),
+            reply: reply_tx,
+            cancelled: Arc::new(AtomicBool::new(true)),
+        };
+        assert!(
+            discard_if_cancelled(req).is_none(),
+            "a request the listener gave up on must not reach the router"
+        );
+        // The defensive None reply is delivered so nothing
+        // can wait on this request ever again.
+        assert_eq!(reply_rx.recv(), Ok(None));
+    }
+
+    #[test]
+    fn live_request_passes_the_drain_gate_untouched() {
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel::<Option<Value>>(1);
+        let req = LiveRequest {
+            msg: json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }),
+            reply: reply_tx,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        let req = discard_if_cancelled(req).expect("a live request passes through");
+        assert_eq!(req.msg["id"], json!(2));
+        assert!(
+            reply_rx.try_recv().is_err(),
+            "no reply is fabricated for a request still awaiting routing"
+        );
     }
 
     #[test]

@@ -214,6 +214,31 @@
 //! readout, kit empty states, row widths against the
 //! 316 pt budget — was verified clean at source and is
 //! unchanged.
+//!
+//! Wave 12 (E4) adds the frame readout the Wave 11
+//! §6.6 remainder asked for. Source finding first: this
+//! panel has NO seconds trim control — its only trim
+//! is the one-click Trim silence (a sample-threshold
+//! op, no user seconds value). The seconds trim
+//! (`EditorCore::audio_trim`, start/end in seconds)
+//! is engine + MCP only — `audio_ops.rs` says so
+//! verbatim ("an engine op with no panel button") —
+//! so there is no trim field here to annotate, and
+//! inventing one would be a new control, out of E4's
+//! display-only scope. What the panel DOES show in
+//! seconds is each clip's probed duration (the rows'
+//! suffix and the readout's segment) — the value a
+//! user times a trim against. Both now carry the
+//! duration's span in timeline frames beside the
+//! seconds (`secs_to_timeline_frames`), computed from
+//! the UNROUNDED probed duration with the engine's
+//! own conversion, so the number printed is the
+//! number the engine's trim/split ops will produce.
+//! Display only: no key, control or handler changed;
+//! the readout keeps `audio-readout`, the rows keep
+//! `audio-clip-{i}`, and both lines already carry the
+//! Wave 9 wrap/truncate treatment, so the longer text
+//! cannot spill the card.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -457,6 +482,15 @@ pub fn clip_file_name(path: &str) -> &str {
 /// the readout states WHY a clip has no duration. A
 /// `None` probe (no probe taken) renders the Phase I
 /// line, as before.
+///
+/// Wave 12 (E4): the duration segment gains the
+/// duration's timeline-frame span in parentheses —
+/// ` · {d:.1}s (12 frames)` — from the core's own
+/// `project.fps` at build time (see
+/// `duration_frames_suffix`), so the seconds a trim
+/// is timed against and the frames they land on read
+/// on one line, and the span moves when the project's
+/// fps changes.
 pub fn clip_readout(
     core: &EditorCore,
     selected: Option<usize>,
@@ -473,7 +507,11 @@ pub fn clip_readout(
         clip.gain
     );
     if let Some(d) = probe.and_then(|p| p.duration_secs) {
-        line += &format!(" · {d:.1}s");
+        // Wave 12 (E4): the frame span rides inside the
+        // duration segment, converted at the project's
+        // fps — read from the core on every build, so a
+        // fps change re-reads on the next render.
+        line += &format!(" · {d:.1}s{}", duration_frames_suffix(d, core.project.fps));
     }
     if clip.muted {
         line += " · muted";
@@ -523,17 +561,62 @@ pub fn clip_row_label(clip: &AudioClip) -> String {
     )
 }
 
-/// `" · {d:.1} s"` — the clip's duration — when its
-/// probe resolved one (the file read back as a WAV with
-/// frames), `""` when it did not (the row then shows
-/// name + start, plus the health suffix when the probe
-/// found a problem). Wave 4: probe-fed, no filesystem
-/// access of its own — the pre-Wave-4 form decoded the
-/// file with `audio_edit::read_wav` on every render
-/// (audit D4).
-pub fn probe_duration_suffix(probe: &ClipProbe) -> String {
+/// Wave 12 (E4): a seconds value as a count of
+/// TIMELINE frames at the project's fps — the engine's
+/// own seconds→frames conversion, mirrored exactly.
+/// The evidence chain: `Project.fps` (`model.rs:742`,
+/// default 12.0) is read from the core at render time,
+/// so the readout tracks fps changes with no stored
+/// state; `EditorCore::audio_trim` advances a trimmed
+/// clip's start frame by `(start_secs * fps).round()`
+/// with `fps = project.fps.max(1.0)`
+/// (`editor.rs:3440-3442`), and a clip's length in
+/// frames is the same shape — the split op's
+/// `dur_frames = (duration_secs * fps).round()`
+/// (`editor.rs:3484`), the waveform strip's
+/// `clip_len_frames` (`waveform_view.rs:482-486`).
+/// The rule is ROUND (half away from zero), never
+/// floor: at 12 fps a 0.05 s value is 0.6 frames,
+/// which the engine rounds to frame 1 — a floor or
+/// truncation readout would print 0 and disagree with
+/// the trim the engine then performs. Non-positive
+/// seconds read as 0 frames (the `.max(0.0)` clamp
+/// the trim shift itself applies).
+pub fn secs_to_timeline_frames(secs: f32, fps: f32) -> usize {
+    (secs * fps.max(1.0)).round().max(0.0) as usize
+}
+
+/// `" (12 frames)"` — the frame span a duration in
+/// seconds covers at the project's fps (see
+/// `secs_to_timeline_frames`) — or `" (1 frame)"` for
+/// a span of exactly one. The parenthetical rides
+/// INSIDE the duration segment it annotates, on both
+/// surfaces that print a duration (the rows' suffix
+/// and the readout), so the seconds and the frames
+/// they land on are never shown apart.
+pub fn duration_frames_suffix(duration_secs: f32, fps: f32) -> String {
+    match secs_to_timeline_frames(duration_secs, fps) {
+        1 => " (1 frame)".to_string(),
+        n => format!(" ({n} frames)"),
+    }
+}
+
+/// `" · {d:.1} s (12 frames)"` — the clip's duration
+/// in seconds plus its timeline-frame span at the
+/// project's fps (Wave 12, E4: see
+/// `duration_frames_suffix`) — when its probe resolved
+/// one (the file read back as a WAV with frames), `""`
+/// when it did not (the row then shows name + start,
+/// plus the health suffix when the probe found a
+/// problem). Wave 4: probe-fed, no filesystem access
+/// of its own — the pre-Wave-4 form decoded the file
+/// with `audio_edit::read_wav` on every render (audit
+/// D4). The frame span is computed from the UNROUNDED
+/// probed duration — the same input the engine's own
+/// conversions take — not from the 0.1 s display value.
+pub fn probe_duration_suffix(probe: &ClipProbe, fps: f32) -> String {
     match probe.duration_secs {
-        Some(d) => format!(" · {d:.1} s"),
+        Some(d) => format!(" · {d:.1} s{}", duration_frames_suffix(d, fps)),
         None => String::new(),
     }
 }
@@ -1138,7 +1221,11 @@ pub fn audio_panel(s: &State, t: &Theme) -> El {
                     text(format!(
                         "{}{}{}",
                         clip_row_label(clip),
-                        probe_duration_suffix(probe),
+                        // Wave 12 (E4): fps from the core,
+                        // so the row's frame span tracks
+                        // the project's fps like the
+                        // readout's does.
+                        probe_duration_suffix(probe, core.project.fps),
                         health_suffix(probe.health)
                     ))
                     .font(type_::BODY)
@@ -1636,12 +1723,15 @@ mod tests {
         core.project.audio.push(clip(&path.to_string_lossy(), 4, 0.5));
         // The probe resolves, so the line gains the
         // duration segment: start frame 4 shows as frame
-        // 5, and 44 100 samples at 44.1 kHz is 1.0 s. A
-        // healthy clip gains NO health segment.
+        // 5, and 44 100 samples at 44.1 kHz is 1.0 s.
+        // Wave 12 (E4): the segment carries the frame
+        // span too — 1.0 s at the demo project's 12 fps
+        // is 12 frames. A healthy clip gains NO health
+        // segment.
         assert_eq!(
             clip_readout(&core, Some(0), Some(&probe_at(&core, 0))),
             Some(format!(
-                "Clip 1: {} · starts frame 5 · gain 0.50 · 1.0s",
+                "Clip 1: {} · starts frame 5 · gain 0.50 · 1.0s (12 frames)",
                 path.file_name().unwrap().to_string_lossy()
             ))
         );
@@ -1710,12 +1800,13 @@ mod tests {
         let mut core = EditorCore::new();
         core.project.audio.clear();
         core.project.audio.push(muted_clip(&path.to_string_lossy(), 4, 0.5));
-        // Healthy file: duration, then muted, and NO
-        // health segment.
+        // Healthy file: duration (with its Wave 12
+        // frame span), then muted, and NO health
+        // segment.
         assert_eq!(
             clip_readout(&core, Some(0), Some(&probe_at(&core, 0))),
             Some(format!(
-                "Clip 1: {} · starts frame 5 · gain 0.50 · 1.0s · muted",
+                "Clip 1: {} · starts frame 5 · gain 0.50 · 1.0s (12 frames) · muted",
                 path.file_name().unwrap().to_string_lossy()
             ))
         );
@@ -1789,9 +1880,11 @@ mod tests {
         // (plus the health suffix, tested separately).
         let cache = RefCell::new(ProbeCache::new());
         let missing = probe_clip(&cache, &clip("no/such/file.wav", 0, 1.0));
-        assert_eq!(probe_duration_suffix(&missing), "");
+        assert_eq!(probe_duration_suffix(&missing, 12.0), "");
         // One second of silence at 44.1 kHz, written with
         // the engine's own WAV writer, probes 1.0 s.
+        // Wave 12 (E4): at 12 fps the suffix carries the
+        // frame span beside the seconds.
         let wav = audio_edit::WavData {
             sample_rate: 44_100,
             channels: 1,
@@ -1804,7 +1897,79 @@ mod tests {
         std::fs::write(&path, audio_edit::write_wav(&wav)).unwrap();
         let c = clip(&path.to_string_lossy(), 4, 1.0);
         let healthy = probe_clip(&cache, &c);
-        assert_eq!(probe_duration_suffix(&healthy), " · 1.0 s");
+        assert_eq!(probe_duration_suffix(&healthy, 12.0), " · 1.0 s (12 frames)");
+        assert_eq!(probe_duration_suffix(&healthy, 24.0), " · 1.0 s (24 frames)");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn secs_to_timeline_frames_uses_the_engines_round_rule() {
+        // Wave 12 (E4): the conversion is the engine
+        // trim's own — `(secs * fps.max(1.0)).round()`
+        // (`editor.rs:3440-3442`) — NOT a floor. The
+        // discriminating cases are the sub-frame ones:
+        // 0.05 s at 12 fps is 0.6 frames, which the
+        // engine rounds to frame 1; a floor/truncation
+        // readout would print 0 and disagree with the
+        // trim the engine then performs.
+        assert_eq!(secs_to_timeline_frames(1.0, 12.0), 12);
+        assert_eq!(secs_to_timeline_frames(0.1, 12.0), 1);
+        assert_eq!(secs_to_timeline_frames(0.05, 12.0), 1);
+        // The half-frame mark rounds away from zero,
+        // like `f32::round`: 0.125 s at 12 fps is
+        // exactly 1.5 frames → 2.
+        assert_eq!(secs_to_timeline_frames(0.125, 12.0), 2);
+        // The span tracks the fps it is given.
+        assert_eq!(secs_to_timeline_frames(1.0, 24.0), 24);
+        assert_eq!(secs_to_timeline_frames(2.5, 24.0), 60);
+        // The trim's own clamps: fps is floored at 1.0
+        // (`max(1.0)`), and a non-positive seconds value
+        // reads as 0 frames (`.max(0.0)`).
+        assert_eq!(secs_to_timeline_frames(2.0, 0.0), 2);
+        assert_eq!(secs_to_timeline_frames(0.0, 12.0), 0);
+        assert_eq!(secs_to_timeline_frames(-0.5, 12.0), 0);
+    }
+
+    #[test]
+    fn duration_frames_suffix_singularises_one_frame() {
+        assert_eq!(duration_frames_suffix(1.0, 12.0), " (12 frames)");
+        assert_eq!(duration_frames_suffix(0.05, 12.0), " (1 frame)");
+        assert_eq!(duration_frames_suffix(0.0, 12.0), " (0 frames)");
+    }
+
+    #[test]
+    fn clip_readout_frame_span_tracks_the_project_fps() {
+        // Wave 12 (E4): the readout converts at the
+        // core's fps on every build — the same 1.0 s
+        // clip reads 12 frames in a 12 fps project and
+        // 24 in a 24 fps one, with no stored state.
+        let wav = audio_edit::WavData {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: vec![0.0; 44_100],
+        };
+        let path = std::env::temp_dir().join(format!(
+            "stykanimate-rune-audio-panel-readout-fps-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, audio_edit::write_wav(&wav)).unwrap();
+        let mut core = EditorCore::new();
+        core.project.audio.clear();
+        core.project.audio.push(clip(&path.to_string_lossy(), 0, 1.0));
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            clip_readout(&core, Some(0), Some(&probe_at(&core, 0))),
+            Some(format!(
+                "Clip 1: {name} · starts frame 1 · gain 1.00 · 1.0s (12 frames)"
+            ))
+        );
+        core.project.fps = 24.0;
+        assert_eq!(
+            clip_readout(&core, Some(0), Some(&probe_at(&core, 0))),
+            Some(format!(
+                "Clip 1: {name} · starts frame 1 · gain 1.00 · 1.0s (24 frames)"
+            ))
+        );
         let _ = std::fs::remove_file(&path);
     }
 

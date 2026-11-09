@@ -207,8 +207,8 @@
 //! just now`, `Autosaved {n}m ago` or `Autosaved
 //! {n}h ago` ([`autosave_segment`]). The snapshot is
 //! written by `EditorCore::maybe_autosave`
-//! (`editor.rs:1622`), which the shell's poll calls
-//! every tick (`main.rs:284`); it lands as
+//! (`editor.rs:1929`), which the shell's poll calls
+//! every tick (`main.rs:478`); it lands as
 //! `./projects/.recovery.json` and its mtime is the
 //! last-autosave time.
 //!
@@ -223,18 +223,17 @@
 //!
 //! The mtime reaches this module through one lib
 //! call, `stykanimate_rs::shell::recovery_modified()
-//! -> Option<SystemTime>`. That accessor does not
-//! exist yet: `shell.rs` keeps both its projects-dir
-//! constructor (`default_dir`, shell.rs:41) and its
-//! mtime reader (`file_mtime`, shell.rs:149) private,
-//! and the only recovery query it publishes is the
-//! boolean `recovery_is_newer_than_last_project`
-//! (shell.rs:177) the Home panel's recovery offer
-//! reads. Adding the accessor to `shell.rs` is an
-//! integrator item; this module is written against
-//! its contract (snapshot mtime, `None` when no
-//! snapshot exists or cannot be stat'ed — the same
-//! error-swallowing as `file_mtime`).
+//! -> Option<SystemTime>`. (Phase J wrote this
+//! module against that accessor's contract before
+//! it existed; it has since landed in `shell.rs`,
+//! over the same private `default_dir` / `file_mtime`
+//! pair the boolean
+//! `recovery_is_newer_than_last_project` query the
+//! Home panel's recovery offer reads is built on.)
+//! The contract is the one stated here: snapshot
+//! mtime, `None` when no snapshot exists or cannot
+//! be stat'ed — the same error-swallowing as
+//! `file_mtime`.
 //!
 //! Placement and width follow the Phase G pattern:
 //! the segment is composed by
@@ -739,6 +738,93 @@
 //! segment, floor or yielding rung here: the Wave 10
 //! yield ladder and its 555 pt proven bound stand
 //! exactly as derived.
+//!
+//! ## Wave 12 — the strip audited against its sources
+//!
+//! Wave 12 re-read every segment against the field
+//! it renders, with Wave 11's rename/save-copy tools
+//! and Wave 12's `project_files` refresh (B3) in
+//! view. Three verdicts, all about the SOURCES, not
+//! the rendering — this module still caches nothing
+//! and reads every value live:
+//!
+//! - **The project name is the session's, and that
+//!   is the truthful choice.** The segment reads
+//!   `core.project.name`, never a file name, and
+//!   this module never reads `core.project_files`
+//!   at all — so B3's refresh of that list cannot
+//!   change anything the strip shows. Wave 11's
+//!   `project_rename` handler sets the session name
+//!   in the same call that moves the file
+//!   (`tool_project_rename`, mcp_tools.rs), so the
+//!   strip follows an MCP rename immediately
+//!   (pinned by
+//!   `strip_project_name_follows_a_live_mcp_rename`).
+//!   The divergence to know about is on the other
+//!   surface: `projects::rename_project` moves the
+//!   file only — the name stored INSIDE the file is
+//!   unchanged until the next save (its own
+//!   documented contract), and `projects::scan`
+//!   lists library projects by that stored name, so
+//!   Home can list the old name for the project the
+//!   strip already calls by the new one. Both
+//!   surfaces are faithful to their sources; the
+//!   stored name's staleness is `projects.rs`'s
+//!   contract to change, not this module's.
+//!   `save_project_copy` is the mirror case: the
+//!   session keeps editing the original, so the
+//!   strip correctly keeps the original's name.
+//! - **The dirty dot counts snapshots, and some
+//!   real edits never snapshot.** `edit_count` —
+//!   the counter behind both the dot and the undo
+//!   segment — increments in exactly one place,
+//!   `EditorCore::snapshot()` (editor.rs). Every
+//!   snapshotting MCP tool therefore moves the dot
+//!   (the Wave 11 pin above), but the sanctioned
+//!   non-snapshotting writes of serialised project
+//!   data move neither the counter nor the autosave
+//!   cadence: `figure_rename` and `figure_set_color`
+//!   (figure_ops.rs), the `layers` tool's locked /
+//!   hidden / opacity writes (mcp_tools.rs),
+//!   `clip_set_angle` / `clip_set_root` (editor.rs;
+//!   `exit_clip` does not snapshot either), and the
+//!   MCP `project_rename`'s session-name write —
+//!   where the panel's own Set-name snapshots first
+//!   (Wave 10), an MCP/GUI asymmetry worth the
+//!   handler owner's eye. These are panel-parity
+//!   behaviours, identical from the GUI, so the
+//!   strip under-reports exactly the edits the
+//!   counter itself cannot see, from either driver;
+//!   the fix belongs to those handlers and ops
+//!   (the built-ins' Wave 11 self-snapshot pattern
+//!   in mcp.rs is the template), not to this module,
+//!   which has no second signal to render instead.
+//! - **A manual recovery write leaves the dot
+//!   unstamped.** The GUI's Save
+//!   (`save_named_pressed`, project_tools.rs) and
+//!   Home's open (`toggle_open`, home_panel.rs)
+//!   write the recovery snapshot directly, bypassing
+//!   `maybe_autosave`, so `last_autosave_count` is
+//!   not stamped: right after a save the autosave
+//!   segment can read `Autosaved just now` (the
+//!   mtime is fresh — true) while the dot still
+//!   shows (the counter is unstamped — also true,
+//!   of the counter). The project panel's autosave
+//!   line carries the same overstatement, documented
+//!   at its source (project_tools.rs). The repair
+//!   is a stamp the core's owners expose for manual
+//!   recovery writes; until then both of the strip's
+//!   save-state signals stay exactly as sourced.
+//!
+//! The autosave segment itself is untouched by
+//! B3: its source is the recovery file's mtime via
+//! `shell::recovery_modified()`, independent of the
+//! `project_files` list B3 refreshes, and
+//! `maybe_autosave` still runs on the shell's poll
+//! tick against the same live core the MCP queue
+//! drains into — so MCP edits meet the autosave on
+//! exactly the GUI's terms. No segment, floor or
+//! yielding rung changes in this wave either.
 
 use std::time::{Duration, SystemTime};
 
@@ -819,13 +905,18 @@ pub fn runtime_label(core: &EditorCore) -> String {
 /// [`runtime_label`]), plus a ` ●` suffix while the
 /// project is dirty. The dirty signal is the core's
 /// public edit counter, `edits_since_autosave()`
-/// (`editor.rs:1587`) — edits counted since the core's
+/// (`editor.rs:1914`) — edits counted since the core's
 /// last autosave stamp (the autosave writes a recovery
 /// snapshot every so many edits and re-stamps; the
 /// project section's autosave line reads the same
 /// counter). Dirty is exactly `edits_since_autosave() >
 /// 0`; no other channel (status text, file mtimes) is
-/// consulted.
+/// consulted. The counter counts `snapshot()` calls
+/// only — the writes it cannot see, and the manual
+/// recovery writes that leave it unstamped, are the
+/// module docs' Wave 12 section; this fn renders the
+/// counter faithfully either way, and the name is the
+/// session's (`core.project.name`), never the file's.
 ///
 /// The runtime rides inside this segment instead of
 /// becoming a new one: [`segment`] floors the segment
@@ -1912,6 +2003,66 @@ mod tests {
         // And the strip builds whole in the post-MCP
         // state, tail included.
         let _ = status_strip(&core);
+    }
+
+    #[test]
+    fn strip_project_name_follows_a_live_mcp_rename() {
+        // Wave 12 (E8 audit): the project segment reads
+        // the SESSION name (`core.project.name`), never
+        // the file name — and Wave 11's `project_rename`
+        // handler sets that name in the same call that
+        // moves the file (`tool_project_rename`,
+        // mcp_tools.rs), so the strip follows an MCP
+        // rename in the same tick, showing the typed
+        // name rather than the moved file's slug. (The
+        // name stored INSIDE the moved file stays the
+        // old one until the next save —
+        // `projects::rename_project`'s documented
+        // contract — so the Home library, which
+        // `projects::scan` names from the stored name,
+        // can still list the old name; that divergence
+        // is the file layer's, and the module docs'
+        // Wave 12 section records it. This pin covers
+        // the strip's half: the session name, at once.)
+        let dir = std::env::temp_dir().join(format!(
+            "stykanimate-strip-rename-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut core = EditorCore::new();
+        let old_path = dir.join("untitled.json");
+        std::fs::write(
+            &old_path,
+            serde_json::to_string(&core.project).unwrap(),
+        )
+        .unwrap();
+        core.project_files = vec![old_path];
+        core.project_index = 0;
+        assert_eq!(project_text(&core), "Untitled · 0:00");
+
+        let mut router = stykanimate_rs::mcp::McpServer::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "project_rename",
+                "arguments": { "new_name": "Renamed Project" }
+            }
+        });
+        let reply = router
+            .handle_on(&mut core, &msg)
+            .expect("a tools/call carrying an id always replies");
+        assert_eq!(
+            reply["result"]["isError"], false,
+            "the project_rename call succeeded: {reply}"
+        );
+        // The segment names the session's new name at
+        // once — the typed name, not the file's slug
+        // ("renamed-project").
+        assert_eq!(project_text(&core), "Renamed Project · 0:00");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- Width discipline (Phase F) ----

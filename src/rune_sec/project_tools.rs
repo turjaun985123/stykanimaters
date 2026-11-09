@@ -915,6 +915,7 @@ fn save_named_pressed(s: &mut State) {
     let saved = s.core.save_named_project();
     if after_save(saved) == AfterSave::SyncRecoveryAndRecents {
         let _ = stykanimate_rs::shell::write_recovery(&s.core.project);
+        s.core.note_recovery_written();
         stykanimate_rs::shell::touch_recent(&s.core.project.name);
     }
 }

@@ -318,6 +318,60 @@ Wave 11 additions (same gate, check 9):
   registry must read as a broken census, never as
   a silent zero.
 
+Wave 12 additions (same gate, NO new check — an audit
+wave for the gate itself):
+
+- The Wave 12 deltas are all absorbed by the existing
+  live derivations; no check logic changed, and no
+  Wave 11 number was hard-coded anywhere to update
+  (audited: the only numerals in this file are the
+  historical phase narratives above, check 6's design
+  charter constants, and structural rules like check
+  7's 6/8-digit hex test). (a) Scenes 24 -> 26:
+  check 5 counts and check 8 cross-references the
+  scenes() vec live, so home-populated and
+  strokes-populated need no gate edit. D4's
+  headless.yml loops landed first, so mid-wave
+  check 8 fails in the REVERSE direction (the loops
+  name scenes scenes() does not register yet) until
+  D2 registers them; both directions go green
+  together on the integrated tree, and a scene
+  registered without loop coverage still fails in
+  the forward direction. (b) The asset tools:
+  check 9's handler census scans the production
+  region of EVERY src/**/*.rs file — there is no
+  file list that could omit a domain file — so
+  B1's handlers in src/media.rs (tool_assets_list,
+  tool_asset_info, tool_asset_import,
+  tool_asset_rename, tool_asset_remove,
+  tool_asset_attach; each verified defined exactly
+  once, in media.rs's production region ahead of
+  its trailing `mod tests`) resolve the moment the
+  integrator splices their Tool literals into
+  mcp_tools::tools() and adds their docs/MCP.md
+  catalogue rows. (c) Palette and help: check 5's
+  palette count is a live read of
+  command_palette.rs — it printed 129 mid-wave, not
+  Wave 11's 114, the moment the new COMMANDS entries
+  landed, the derivation proving itself. Help rows
+  are NOT censused by this gate and never have been:
+  no expected help count exists anywhere in this
+  script, so B9's 58 -> 61 delta can neither pass
+  nor fail a check; that number lives in the docs
+  only.
+- Check 9 self-test (E1, on a disposable copy of the
+  tree — the real tree was never planted): a
+  `Tool { name: "assets_list", handler:
+  media::tool_assets_list }` literal spliced into
+  the copy's mcp_tools::tools() plus its catalogue
+  row read registry 225 / surface 278 / handler
+  integrity 234 with doc sync exact (PASS); deleting
+  just the catalogue row then failed check 9 with
+  "tool `assets_list` (registry family) is
+  registered but missing from docs/MCP.md's
+  catalogue — existing-but-undocumented". The copy
+  was deleted afterwards.
+
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
 blanked source (the repo's established scan idiom), and
@@ -1382,6 +1436,16 @@ LITERAL_LINE_EXCEPTIONS = [
         "text_tool.rs",
         r"&\s*0xFF_FFFF",
         "24-bit channel mask on a text instance colour (not a colour value)",
+    ),
+    (
+        "scenes.rs",
+        r"0x(?:33_66_CC|CC_55_33|FF_CC_66|22_88_55|77_33_AA)",
+        "project-content default (Wave 12 populated-scene fixture figure/stroke colours)",
+    ),
+    (
+        "library_panel.rs",
+        r"unwrap_or\(0xFF_FFFF\)",
+        "parse fallback in color_hex_u32 (white if the theme colour's hex fails to parse; not a drawn colour)",
     ),
 ]
 

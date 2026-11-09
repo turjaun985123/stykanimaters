@@ -563,9 +563,17 @@ fn tool_swap_frames() -> Tool {
 fn tool_copy_frame() -> Tool {
     Tool {
         name: "copy_frame",
-        description: "Copy the current frame to the single-frame clipboard (the Edit menu's Copy frame). Not an undoable edit.",
+        description: "Copy the current frame to the single-frame clipboard (the Edit menu's Copy frame). Not an undoable edit. Errors when the project has no frames.",
         schema: empty_args_schema(),
         handler: |core, _args| {
+            // Wave 12 (E3 remainder): the set_loop_range
+            // guard's shape — on a zero-frame project the
+            // core only reports through its status line, so
+            // this tool used to answer Ok having copied
+            // nothing. Refuse up front, core untouched.
+            if core.project.frames.is_empty() {
+                return Err("the project has no frames to copy".to_string());
+            }
             core.copy_frame();
             Ok(json!({ "ok": true, "frame": core.current, "status": core.status }))
         },
@@ -780,7 +788,7 @@ fn tool_paste_range() -> Tool {
 fn tool_set_loop_range() -> Tool {
     Tool {
         name: "set_loop_range",
-        description: "Set the inclusive playback loop range [start, end] (0-based; the timeline's Set loop row). Endpoints are ordered and clamped to the timeline; start == end loops a single frame. Editor runtime state, like the playhead — not an undoable edit.",
+        description: "Set the inclusive playback loop range [start, end] (0-based; the timeline's Set loop row). Endpoints are ordered and clamped to the timeline; start == end loops a single frame. Errors when the project has no frames. Editor runtime state, like the playhead — not an undoable edit.",
         schema: json!({
             "type": "object",
             "properties": {
@@ -793,6 +801,20 @@ fn tool_set_loop_range() -> Tool {
         handler: |core, args| {
             let start = arg_usize(args, "start")?;
             let end = arg_usize(args, "end")?;
+            // Wave 12 (E3): on a zero-frame project the
+            // core stores None and reports only through its
+            // status line, so this tool used to answer Ok
+            // with a null range — a caller could not tell
+            // the range was refused. Refuse up front (the
+            // set_playback guard's shape) and leave the
+            // core untouched. Out-of-order endpoints are
+            // NOT an error: the timeline's loop row hands
+            // the core raw pairs on purpose and the core
+            // orders them (see timeline_marks'
+            // loop_after_step), so the tool mirrors that.
+            if core.project.frames.is_empty() {
+                return Err("the project has no frames to loop".to_string());
+            }
             core.set_loop_range(start, end);
             let loop_range = match core.loop_range {
                 Some((a, b)) => json!([a, b]),
@@ -826,7 +848,7 @@ fn tool_clear_loop_range() -> Tool {
 fn tool_set_frame_easing() -> Tool {
     Tool {
         name: "set_frame_easing",
-        description: "Set one frame's easing override (the easing panel's frame picker): \"linear\", \"smooth\", \"ease-in\" or \"ease-out\", or null for the project default. Applies to the current frame unless 'frame' names another. One undo step.",
+        description: "Set one frame's easing override (the easing panel's frame picker): \"linear\", \"smooth\", \"ease-in\" or \"ease-out\", or null for the project default. Applies to the current frame unless 'frame' names another. One undo step. Errors when the project has no frames.",
         schema: json!({
             "type": "object",
             "properties": {
@@ -840,6 +862,14 @@ fn tool_set_frame_easing() -> Tool {
             "additionalProperties": false,
         }),
         handler: |core, args| {
+            // Wave 12 (E3 remainder): the set_loop_range
+            // guard's shape — on a zero-frame project the
+            // core spends an undo snapshot and changes
+            // nothing, so this tool used to answer Ok with a
+            // null easing. Refuse up front, core untouched.
+            if core.project.frames.is_empty() {
+                return Err("the project has no frames to set easing on".to_string());
+            }
             let easing = match args.get("easing") {
                 None => return Err("missing required argument 'easing'".to_string()),
                 Some(Value::Null) => None,
@@ -2335,6 +2365,35 @@ mod tests {
         let (_out, is_error) =
             call_payload(&mut server, "set_frame_easing", json!({ "easing": "bounce" }));
         assert!(is_error, "an unknown easing name refuses");
+    }
+
+    #[test]
+    fn set_loop_range_refuses_an_empty_project() {
+        // Wave 12 (E3): a zero-frame project (reachable
+        // via MCP load_project) made the core store None,
+        // and the tool answered Ok with a null range — the
+        // refusal was invisible to the caller. The tool
+        // now errors and leaves the core untouched.
+        let mut server = McpServer::new();
+        server.core.project.frames.clear();
+        let status_before = server.core.status.clone();
+        let (out, is_error) =
+            call_payload(&mut server, "set_loop_range", json!({ "start": 0, "end": 0 }));
+        assert!(is_error, "no frames means no loop range");
+        assert_eq!(out, json!("the project has no frames to loop"));
+        assert_eq!(server.core.loop_range, None);
+        assert_eq!(server.core.status, status_before);
+        assert_eq!(server.core.undo_depth(), 0);
+        // Out-of-order endpoints still order, exactly as
+        // before: the timeline's steppers rely on the
+        // core swapping the roles (loop_range_and_frame_
+        // easing_tools_dispatch pins the populated case).
+        let mut server = McpServer::new();
+        let (out, is_error) =
+            call_payload(&mut server, "set_loop_range", json!({ "start": 1, "end": 1 }));
+        assert!(!is_error, "start == end is a valid single-frame loop");
+        assert_eq!(out["loop_range"], json!([1, 1]));
+        assert_eq!(server.core.loop_range, Some((1, 1)));
     }
 
     #[test]

@@ -473,6 +473,48 @@
 //!   right edge when off, 8 pt when on; the gap is
 //!   translation-invariant, so the card's entrance
 //!   transition cannot move the reading).
+//!
+//! Round 13 (Wave 12) adds three tests over the state
+//! this wave made visible in the shell. Facts they
+//! rest on, verified against the tree:
+//! * The stage draws EVERY figure segment through
+//!   `paint::styled_segment_pieces` (stage_view.rs —
+//!   the one construction the stage and both exporters
+//!   now share), so a node's `NodeStyle` (model.rs:
+//!   taper, `CapKind`, opacity) reaches the canvas
+//!   pieces directly. The pieces are canvas draws, not
+//!   elements: the Runtime tree cannot see their
+//!   widths or alphas, so the styled-stage test pins
+//!   what the Runtime CAN prove — the style state the
+//!   core ops write (through round 12's `mcp_call`,
+//!   the registered `set_node_taper` / `set_node_style`
+//!   tools), the stage mounted at real size over the
+//!   styled project across settled frames, and joint
+//!   press selection still landing on the styled
+//!   figure. Piece geometry itself is the lib's own
+//!   unit-test surface (paint.rs, stage_view.rs).
+//! * The segment inspector's Media section
+//!   (inspector_segment.rs) renders for the selected
+//!   node: readout `seg-media-readout` (its text is
+//!   `media_label` — `Sprite: {name}` for an attached
+//!   sprite), one `seg-media-attach-{i}` button per
+//!   asset in `project.assets`, and `seg-media-clear`
+//!   only while media is attached. The attach press
+//!   calls the module's pub `attach_asset`.
+//! * The Home panel's rows come from a DISK scan of
+//!   `./projects` (`HomePanelState::projects` —
+//!   `projects::scan`), not from core state, so the
+//!   populated-Home test seeds through the app's own
+//!   write path — `EditorCore::save_named_project`,
+//!   twice under two names — exactly as the scene
+//!   seeding must, then removes its two files again.
+//!   Rows key as `home-row-{i}` under `home-rows`,
+//!   with the `home-totals` footer in the non-empty
+//!   branch only, and the empty branch's line ("No
+//!   saved projects yet — …") absent. The panel's
+//!   `open` flag starts false without a recovery
+//!   offer, so the test sets it directly (a State
+//!   write, with the file's invalidate discipline).
 
 use std::collections::BTreeSet;
 
@@ -4633,4 +4675,332 @@ fn settings_live_mcp_toggle_shows_the_persisted_state_for_both_prefs_values() {
     // Leave the process as the test found it.
     save_layout(&orig_prefs);
     let _ = crate::live_mcp::set_enabled(orig_bridge);
+}
+
+// ----------------------------------------------------------------
+// Round 13 (Wave 12): the styled stage, the segment
+// inspector's attached-media state, and the populated
+// Home library. See the file header's round 13 note for
+// the facts these tests rest on; each test names the
+// Wave 12 guarantee it pins and the agent change it
+// depends on, so a failure triages to one owner.
+// ----------------------------------------------------------------
+
+/// A real, decodable 4×2 PNG (solid green), built the
+/// way the lib's own fixtures build one (pivot.rs's
+/// `test_png`): an asset's bytes must decode wherever
+/// the render paths ask for dimensions, so a dummy byte
+/// string would silently exercise only the failure
+/// path.
+fn tiny_png() -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(4, 2, image::Rgba([0, 200, 0, 255]));
+    let mut buf = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .expect("encoding a 4x2 PNG cannot fail");
+    buf
+}
+
+#[test]
+fn stage_renders_a_tapered_point_cap_translucent_segment() {
+    // Wave 12 guarantee: a segment whose node carries a
+    // non-default style — taper ≠ 1, a Point cap,
+    // opacity < 1 — is what the stage draws, because the
+    // stage's segment pass now runs through
+    // `paint::styled_segment_pieces` (stage_view.rs),
+    // the shared construction both exporters already
+    // used. Depends on: A-squad's stage adoption of the
+    // styled pieces. The pieces are canvas draws, not
+    // elements, so this test pins the Runtime-visible
+    // contract honestly: the style state lands through
+    // the registered core ops (via round 12's `mcp_call`
+    // — the writes a live MCP client would make), the
+    // stage stays mounted at real size over the styled
+    // project across settled frames (the styled draw
+    // path executes every frame; a panic in it fails
+    // here), and joint pressing still selects on the
+    // styled figure. Piece widths/alphas are proven at
+    // the lib level (paint.rs's styled-pieces tests),
+    // not here.
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+
+    // Premise: the demo figure's node 2 ("head", parent
+    // node 1 — a real segment) carries the default
+    // style.
+    let style = rt.state.core.project.figures[0].def.nodes[2].style;
+    assert_eq!(style.taper, 1.0, "demo segment starts untapered");
+    assert_eq!(
+        style.cap,
+        stykanimate_rs::model::CapKind::Round,
+        "demo segment starts round-capped"
+    );
+    assert_eq!(style.opacity, 1.0, "demo segment starts opaque");
+
+    // The writes, through the real dispatcher: taper by
+    // its own tool, cap + opacity by the atomic style
+    // tool (the style panel's write path, mcp_tools.rs).
+    let resp = mcp_call(
+        &mut rt,
+        "set_node_taper",
+        serde_json::json!({ "figure": 0, "node": 2, "taper": 0.3 }),
+    );
+    assert_eq!(
+        mcp_payload(&resp)["ok"], true,
+        "the taper write reports success: {resp}"
+    );
+    let resp = mcp_call(
+        &mut rt,
+        "set_node_style",
+        serde_json::json!({
+            "figure": 0, "node": 2,
+            "color": 0x3366CC, "cap": "point", "opacity": 0.5,
+        }),
+    );
+    let payload = mcp_payload(&resp);
+    assert_eq!(payload["ok"], true, "the style write reports success: {payload}");
+    assert_eq!(payload["cap"], "point", "the write names the cap it stored");
+
+    // The state the stage will read on its next frame.
+    let style = rt.state.core.project.figures[0].def.nodes[2].style;
+    assert!(
+        (style.taper - 0.3).abs() < 1e-6,
+        "taper stored as written: {}",
+        style.taper
+    );
+    assert_eq!(
+        style.cap,
+        stykanimate_rs::model::CapKind::Point,
+        "the Point cap is stored"
+    );
+    assert!(
+        (style.opacity - 0.5).abs() < 1e-6,
+        "opacity stored as written: {}",
+        style.opacity
+    );
+    assert_eq!(
+        rt.state.core.selected_node,
+        Some(2),
+        "the style writes select the styled node (sty_select_node)"
+    );
+
+    rt.invalidate();
+    rt.frame(DT);
+
+    // The stage mounts over the styled project and the
+    // styled draw path runs, frame after frame.
+    let (rect, _opacity) = rt.presented("stage").expect("stage is presented");
+    assert!(
+        rect[2] > 100.0 && rect[3] > 100.0,
+        "stage has a real size over the styled project: {rect:?}"
+    );
+    for _ in 0..10 {
+        rt.frame(DT);
+    }
+    assert!(
+        presented_keys(&rt).contains("stage"),
+        "the stage stays mounted across settled frames"
+    );
+
+    // Joint pressing still lands on the styled figure:
+    // aim at the root joint exactly as round 1's drag
+    // test does, and watch the selection move OFF the
+    // styled node onto the root.
+    let core = &rt.state.core;
+    let frame = core.current;
+    let root = core.positions(frame, 0)[0];
+    let vt = view_transform([rect[2], rect[3]], core.project.stage, core.camera_here());
+    let local = to_screen(&vt, root);
+    rt.pointer_down(rect[0] + local[0], rect[1] + local[1]);
+    rt.frame(DT);
+    assert_eq!(
+        rt.state.core.selected_node,
+        Some(0),
+        "a press on the styled figure's root joint selects it"
+    );
+    rt.pointer_up(rect[0] + local[0], rect[1] + local[1]);
+    rt.frame(DT);
+}
+
+#[test]
+fn segment_inspector_media_section_shows_an_attached_sprite() {
+    // Wave 12 guarantee: a segment with a sprite
+    // attached shows that attachment in the segment
+    // inspector — the readout names the sprite, the
+    // per-asset picker offers the project's assets, and
+    // Clear renders because media is attached. Depends
+    // on: B2 (the inspector's Media section,
+    // inspector_segment.rs — before this wave the panel
+    // had no media surface at all). Construction is
+    // direct model state plus the panel's own attach
+    // press: B2's MCP handlers exist in media.rs but
+    // their Tool entries are the integrator's splice,
+    // so the registered-dispatch path cannot attach yet
+    // — the button press below IS the panel path a user
+    // takes (its handler is the module's `attach_asset`).
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+
+    // Seed: one asset in the project's table, and the
+    // demo figure's node 2 selected (the inspector's
+    // full form renders for a selected node).
+    rt.state.core.project.assets.push(stykanimate_rs::model::ImageAsset {
+        name: "badge.png".into(),
+        png: tiny_png(),
+    });
+    rt.state.core.selected_node = Some(2);
+    rt.invalidate();
+    rt.frame(DT);
+
+    // Before the attach: the section renders its empty
+    // state — readout names nothing, the picker offers
+    // the one asset, and Clear is absent (it renders
+    // only while media is attached).
+    let keys = presented_keys(&rt);
+    assert!(
+        keys.contains("inspector-segment"),
+        "the segment inspector is mounted"
+    );
+    assert!(
+        keys.contains("seg-media-readout"),
+        "the media readout renders for the selected segment"
+    );
+    assert!(
+        keys.contains("seg-media-attach-0"),
+        "the picker offers the project's one asset"
+    );
+    assert!(
+        !keys.contains("seg-media-clear"),
+        "no Clear button before anything is attached"
+    );
+    let texts = element_texts(&rt);
+    assert!(
+        texts.iter().any(|t| t == "No media attached"),
+        "the readout names the empty slot: {texts:?}"
+    );
+
+    // The attach press — the picker's own button, deep
+    // in the right column, so round 6's scroll discipline
+    // brings it into view first.
+    scroll_into_view(&mut rt, "seg-media-attach-0");
+    tap(&mut rt, "seg-media-attach-0");
+    assert_eq!(
+        rt.state.core.project.figures[0].def.nodes[2].media,
+        Some(stykanimate_rs::model::SegmentMedia::Image { asset: 0 }),
+        "the press attached asset 0 to the selected segment"
+    );
+
+    rt.invalidate();
+    rt.frame(DT);
+
+    // The attached state renders: the readout names the
+    // sprite (`media_label`'s Sprite form) and Clear is
+    // now on the panel.
+    let keys = presented_keys(&rt);
+    assert!(
+        keys.contains("seg-media-clear"),
+        "Clear renders once media is attached"
+    );
+    assert!(
+        keys.contains("seg-media-attach-0"),
+        "the picker still offers the asset (its button now renders active)"
+    );
+    let texts = element_texts(&rt);
+    assert!(
+        texts.iter().any(|t| t == "Sprite: badge.png"),
+        "the readout names the attached sprite: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t == "No media attached"),
+        "the empty-slot line is gone"
+    );
+}
+
+#[test]
+fn home_workspace_lists_the_seeded_projects() {
+    // Wave 12 guarantee: with saved projects on disk the
+    // Home workspace renders the library ROWS — the
+    // populated state D2's home-populated scene pins for
+    // the headless snaps — not the empty message. The
+    // rows come from a disk scan of ./projects
+    // (home_panel.rs `projects()`), so the seed goes
+    // through the app's own write path:
+    // `save_named_project` twice under two names (the
+    // state-form mirror of the scene's seeding), and the
+    // test removes its two files again afterwards, the
+    // restore discipline round 12's settings test set
+    // for this directory. Depends on: D2 (the populated
+    // library rendering itself) and the panel's row keys
+    // (`home-row-{i}` under `home-rows`, `home-totals`
+    // in the non-empty branch only).
+    let mut rt = editor();
+
+    // --- Seed: two saves under two names. ---
+    rt.state.core.project.name = "Wave12 Alpha".into();
+    assert!(
+        rt.state.core.save_named_project(),
+        "the first seed save writes its file: {}",
+        rt.state.core.status
+    );
+    let alpha_path =
+        rt.state.core.project_files[rt.state.core.project_index].clone();
+    rt.state.core.project.name = "Wave12 Beta".into();
+    assert!(
+        rt.state.core.save_named_project(),
+        "the second seed save writes its file: {}",
+        rt.state.core.status
+    );
+    let beta_path =
+        rt.state.core.project_files[rt.state.core.project_index].clone();
+    assert_ne!(alpha_path, beta_path, "the two saves are two files");
+
+    // --- Mount Home, panel open. ---
+    tap(&mut rt, "ws-home");
+    rt.state.home_panel.open = true;
+    rt.invalidate();
+    rt.frame(DT);
+    // The scan (and its per-file thumbnail renders) is
+    // the panel's first-render cost; give the mount the
+    // bounded settle the file's structural asserts use.
+    for _ in 0..30 {
+        if presented_keys(&rt).contains("home-rows") {
+            break;
+        }
+        rt.frame(DT);
+    }
+
+    let keys = presented_keys(&rt);
+    assert!(keys.contains("home-panel"), "the Home panel is mounted");
+    assert!(
+        keys.contains("home-rows"),
+        "the row list renders for a populated library"
+    );
+    assert!(
+        keys.contains("home-row-0") && keys.contains("home-row-1"),
+        "at least the two seeded projects render as rows"
+    );
+    assert!(
+        keys.contains("home-totals"),
+        "the totals footer renders (non-empty branch only)"
+    );
+    let texts = element_texts(&rt);
+    assert!(
+        texts.iter().any(|t| t == "Wave12 Alpha"),
+        "the first seeded project names its row: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == "Wave12 Beta"),
+        "the second seeded project names its row: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t
+            == "No saved projects yet — use \"Save project\" to add one."),
+        "the empty-library line is absent from a populated library"
+    );
+
+    // Leave the directory as the test found it.
+    let _ = std::fs::remove_file(&alpha_path);
+    let _ = std::fs::remove_file(&beta_path);
 }
