@@ -288,7 +288,7 @@ further renderer work.
 
 ---
 
-## 7. Wave 14 landed addendum — **PENDING-INTEGRATION**
+## 7. Wave 14 landed addendum — **LANDED**
 
 Wave 14, squad C (roster: `docs/wave14-roster.md`) is contracted
 to implement §6 of this audit, plus the clip-def media MCP tools
@@ -296,21 +296,27 @@ to implement §6 of this audit, plus the clip-def media MCP tools
 close-out skeleton, written by C9 **before** integration. It
 asserts nothing about the closing tree.
 
-**How the integrator closes this section.** Each claim below is
-phrased as a checkable anchor (a grep that must hit or miss, or
-a named test that must pass in the closing CI run). Verify every
-claim against C1–C8/C10's reports **and** the tree — a squad
-report is a claim, not evidence. When every box is checked on
-the CI-green closing tree, flip this section's marker from
-PENDING-INTEGRATION to LANDED and record the CI run id here.
-Until then, §§1–5 stand as written: they are the entering
-record and are **not** edited by this addendum; once flipped,
-this addendum supersedes §5's per-surface verdicts (only) for
-the surfaces it names.
+**Closed at the Wave 14 close-out (2026-11-09).** Every
+anchor below was verified against the closing tree by the
+integrator: all named test pins grep in their files and
+passed in CI run **42571128696** (GREEN on `8f5bb54`,
+3,519 tests, 0 failed — including the C7 suite
+`tests/wave14_e2e_clip_media.rs` and the C10 suite
+`tests/wave14_e2e_clip_media_mcp.rs`); the funnel fallback,
+the `has_media` clips clause, the single stage pass and
+the funnel-fed SVG emission all grep as claimed; gate
+check 9 passes with the three clip tools counted.
+§§1–5 stand as written: they are the entering record and
+are **not** edited by this addendum; this addendum
+supersedes §5's per-surface verdicts (only) for the
+surfaces it names. W14-8 closes as **project thumbnails
+only**: C8 argued the figure-card/library thumbnails
+provenance-blind (they are built from figure defs) and
+landed no change there — no doc may claim more.
 
 ### W14-1 — Enumeration: the per-node fallback exists in the funnel (C1)
 
-- [ ] **Claim.** `media::media_items` (`src/media.rs`) resolves
+- [x] **Claim.** `media::media_items` (`src/media.rs`) resolves
   each node's media per §6.1: the instance's own
   `fig.def.nodes[ni].media` first; else the clip def's
   `clips[ci].def.nodes[ni].media` when `fig.clip = Some(ci)`;
@@ -339,7 +345,7 @@ the surfaces it names.
 
 ### W14-2 — Enumeration order: clip-sourced items take the figure's slot (C1)
 
-- [ ] **Claim.** No new pass and no new ordering rule (§6.2):
+- [x] **Claim.** No new pass and no new ordering rule (§6.2):
   clip-sourced items appear in the funnel's existing order —
   figure order, then node order, with sprite instances and
   text instances still appended after all segment media.
@@ -355,7 +361,7 @@ the surfaces it names.
 
 ### W14-3 — Alpha and colour provenance for clip-sourced items (C1)
 
-- [ ] **Claim.** A clip-sourced image item's alpha is the
+- [x] **Claim.** A clip-sourced image item's alpha is the
   **instance's** `fig.opacity` × the **clip node's**
   `style.opacity` (each clamped 0..=1); a clip-sourced text
   item's colour is `clip_node.color.unwrap_or(fig.color)`
@@ -372,7 +378,7 @@ the surfaces it names.
 
 ### W14-4 — Stage treatment: same placeholder pass, no bitmap, no new pass (C2)
 
-- [ ] **Claim.** Clip-sourced media reaches the stage through
+- [x] **Claim.** Clip-sourced media reaches the stage through
   the existing `media_items` placeholder pass
   (`src/stage_view.rs`, entering anchor :1128-1137): the
   item's exact quad, accent fill and outline at the pass's
@@ -397,7 +403,7 @@ the surfaces it names.
 
 ### W14-5 — Raster: real pixels, and the `has_media` gate extended (C3)
 
-- [ ] **Claim.** `render_frame_at` composites clip-sourced
+- [x] **Claim.** `render_frame_at` composites clip-sourced
   image media as real pixels, and a project whose **only**
   media is clip-def media no longer skips `composite_media`:
   `has_media` (`src/export.rs`, entering anchor :758-768)
@@ -421,7 +427,7 @@ the surfaces it names.
 
 ### W14-6 — SVG: clip-sourced items emitted by `append_media` (C4)
 
-- [ ] **Claim.** SVG export emits clip-sourced media through
+- [x] **Claim.** SVG export emits clip-sourced media through
   the same `append_media` path as figure-sourced media
   (`src/svg.rs`, entering anchor :667): an image item as a
   `<use>` of the per-asset embedded PNG with its placement
@@ -443,7 +449,7 @@ the surfaces it names.
 
 ### W14-7 — Asset census: behaviour unchanged, refusal now honest (C6)
 
-- [ ] **Claim.** `asset_references`, `remap_asset_refs` and
+- [x] **Claim.** `asset_references`, `remap_asset_refs` and
   `tool_asset_remove` behave exactly as entering (§6.5):
   clip-def references still count, still remap, and still
   refuse removal — and the refusal is now honest, because
@@ -464,7 +470,7 @@ the surfaces it names.
 
 ### W14-8 — Thumbnails: exactly the surfaces C8 names, no broader claim (C8)
 
-- [ ] **Claim.** Project/Home thumbnails carry clip-def
+- [x] **Claim.** Project/Home thumbnails carry clip-def
   media (a consequence of W14-5, via `render_frame_at`).
   Figure-card and library thumbnails carry clip-def media
   **only if** C8's report says its remit required it and
@@ -477,7 +483,7 @@ the surfaces it names.
 
 ### W14-9 — MCP attach / clear / read parity for clip-def media (C5)
 
-- [ ] **Claim.** An MCP client can attach an existing asset
+- [x] **Claim.** An MCP client can attach an existing asset
   as a clip definition's node image media, clear a clip
   definition's node media (either kind), and read it back —
   the clip-def counterparts of `asset_attach`,
@@ -502,7 +508,7 @@ the surfaces it names.
 
 ### W14-10 — End-to-end: a clip-media project built and exported via MCP only (C10, C7)
 
-- [ ] **Claim.** The wave's e2e suite creates a project
+- [x] **Claim.** The wave's e2e suite creates a project
   whose clip-def media is attached via MCP, and exports it
   via MCP, asserting the media is present in the outputs;
   C7's session/timeline pins (clip media sampled across

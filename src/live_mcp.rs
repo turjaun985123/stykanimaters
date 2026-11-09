@@ -1044,15 +1044,16 @@ fn body_too_large_body() -> String {
 /// atomic read, or static registry data, so the document
 /// answers even while the app's poll loop is busy.
 ///
-/// Deliberately ABSENT (Wave 14, D4): a `shell_control`
-/// field. It may be added only when Squad B's shell-control
-/// plumbing gives it a truthful source readable here
-/// without a lock — an atomic availability flag in the
-/// shell-control module, set when the shell wires its
-/// command drain into the poll loop. Until that source
-/// exists in this crate, the field is omitted rather than
-/// faked; the integrator's splice is then one line here
-/// plus the pin in `health_body_names_the_live_server`.
+/// The `shell_control` field (Wave 14, D4): D4 specced
+/// it absent until Squad B's plumbing landed, on the
+/// grounds that a runtime availability flag would need
+/// a lock-free source readable here. As landed, no
+/// flag is needed: the shell-control channel is
+/// compiled into this binary and its drain runs in the
+/// poll loop unconditionally, so availability is a
+/// constant truth about the build — the field below
+/// reports `true` outright, and
+/// `health_body_names_the_live_server` pins it.
 fn health_body() -> Value {
     json!({
         // Wave 14 (D7): the server's identity comes from

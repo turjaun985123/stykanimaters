@@ -1008,3 +1008,41 @@ they must refuse honestly (B1/B10).
 No row in this census asks for: project-swap undo/redo semantics,
 accent colours, MCP-save write_recovery (note_recovery_written is
 marked EXCLUDED), the waveform badge, or the stored-name divergence.
+
+---
+
+## Wave 14 close-out addendum (integrator, 2026-11-09)
+
+This census is the wave's LAUNCH ledger: its GAP rows record
+what was true when it was taken and are not rewritten. Their
+dispositions at close-out, each enforced from source by gate
+check 10 (PARITY) rather than by this table:
+
+- **G1/G2 (project-file cycling/opening)** — CLOSED:
+  `cycle_project_file` and `open_project_file` landed as core
+  registry tools over the existing EditorCore ops (project-swap
+  undo semantics untouched, per the standing exclusion).
+- **G3 (`cycle_onion_frames`)** — DELIBERATELY UNTOOLED: the
+  legacy op writes a field the stage no longer reads, so a
+  tool for it would be a fake control. The real depths are
+  tooled by `shell_set_onion_depths`.
+- **G4 (stroke selection stepping)** — CLOSED:
+  `shell_select_stroke` landed (with `shell_select_particle`
+  and `shell_select_clip`); gate check 10 maps the palette's
+  stroke-select commands to it plus `shell_get_selection`.
+- **G5 (figure-library entry rename)** — REMAINS OPEN, named:
+  the panel's rename is file-backed shell logic with no lib
+  op beneath it; pose-side rename has a tool, library-entry
+  rename does not. A future wave must first give the shell
+  logic a lib home.
+- **G6 (graph channel selection)** — REMAINS OPEN, named:
+  channel selection is GUI cursor state; the graph tools
+  address channels by explicit index, which is the same
+  reach by a different handle.
+- **Recent-colours list (inspector_style)** — panel-local
+  list state; applying a colour is `set_node_style`. The
+  list itself stays shell state by the G6 argument.
+
+Gate check 10's PARITY_PENDING list is empty on the closing
+tree: every one of the 134 palette commands maps to at least
+one of 94 distinct tools or to a named exclusion above.

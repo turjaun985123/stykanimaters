@@ -485,6 +485,19 @@ def all_handler_defs(sources: dict[str, Source]) -> dict[str, dict]:
                 m.group(1),
                 {"file": rel, "line": src.line_of(m.start()), "symbol": m.group(1)},
             )
+        # Wave 14: the 31 live-only shell stubs are stamped
+        # by the `shell_unavailable_fn!` macro in
+        # src/mcp_tools.rs (capturing closures do not
+        # coerce to the registry's fn-pointer handler
+        # type). Each invocation expands to exactly one
+        # `fn <name>(...)` definition, so an invocation
+        # registers as that handler's definition site —
+        # the same extension the gate's check 9 carries.
+        for m in re.finditer(r"shell_unavailable_fn!\(\s*(tool_\w+)\s*,", src.masked):
+            defs.setdefault(
+                m.group(1),
+                {"file": rel, "line": src.line_of(m.start()), "symbol": m.group(1)},
+            )
     _HANDLER_DEF_CACHE.update(defs)
     return defs
 

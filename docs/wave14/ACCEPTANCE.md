@@ -583,65 +583,72 @@ trace to it.
 ## 7. Integrator re-run list (close-out)
 
 **Gate + censuses**
-- [ ] `python3 scripts/phase_j_checks.py`, full
+- [x] `python3 scripts/phase_j_checks.py`, full
       foreground run read from the top: **10/10 PASS**
       (with E2's parity check) or **9/9 PASS** plus the
       parity check passing standalone — recorded here:
-      ____________.
-- [ ] `python3 scripts/mcp_census.py`: registry
-      ______ (entering 235), io **9**, built-ins **44**,
-      total ______ (entering 288), unregistered **0**,
-      duplicates **0**; gate check 9 agrees and
+      **10/10 PASS** — full foreground run on the closing
+      tree, read from the top (check 10 PARITY included).
+- [x] `python3 scripts/mcp_census.py`: registry
+      **313** (entering 235), io **9**, built-ins **44**,
+      total **366** (entering 288), unregistered **0**,
+      duplicates **0** — `scripts/mcp_census.py` agrees
+      after gaining the same macro-stamp definition rule
+      the gate carries; gate check 9 agrees and
       `docs/MCP.md` syncs both directions.
-- [ ] Counts re-derived against the entering baseline:
-      MCP 288 → ______; palette **134** (any change
-      itself censused in §1); scenes **28**; layout
-      facts **31**; help **61** (or E4's named delta);
-      keys 940 → ______ with **zero lost**; icons 163;
-      i18n 99 × 28; tests 3,319 → ______ (CI's exact
-      figure, not a rounding).
+- [x] Counts re-derived against the entering baseline:
+      MCP 288 → **366**; palette **134** (unchanged —
+      coverage changed, not the command set); scenes
+      **28 → 29** (+settings-open-error); layout facts
+      **31** (unchanged); help **61** (rows rewritten,
+      count unchanged per E4); keys 940 → **940** with
+      **zero lost**; icons 163; i18n 99 × 28; tests
+      3,319 → **3,519** (CI's exact figure).
 
 **Spot-greps per squad (the census's claims, sampled)**
-- [ ] A: three PARITY_CENSUS rows chosen at random —
+- [x] A: three PARITY_CENSUS rows chosen at random —
       each named handler greps in its domain file and
       each named tool greps in the registry.
-- [ ] B: `src/shell_control.rs` present; every B1-table
+- [x] B: `src/shell_control.rs` present; every B1-table
       name greps in the registry; the stdio refusal
       text greps in the dispatch path B1/B2 name.
-- [ ] C: the `clips.get` fallback greps inside
+- [x] C: the `clips.get` fallback greps inside
       `media_items`; `clips` greps inside the
       `has_media` gate; the §6.6 test names grep in
       `src/media.rs`'s tests.
-- [ ] D: `LAST_START_ERROR` greps in
+- [x] D: `LAST_START_ERROR` greps in
       `src/live_mcp.rs` (absent at launch); the
       "Deliberately ABSENT" health comment is either
       rewritten (flag landed) or §6.9 carries the field
       as a named remainder.
-- [ ] E: the MCP-only suite's build path greps clean
+- [x] E: the MCP-only suite's build path greps clean
       of direct core mutation calls outside fixture
       setup.
 
 **Run evidence (fill at close-out)**
-- [ ] CI run ____________ on sha ____________:
-      **______ tests passed, 0 failed** across all
+- [x] CI run **42571128696** on sha **8f5bb54**:
+      **3,519 tests passed, 0 failed** across all
       binaries — including the wave's new suites listed
       by name in the log (B10 shell-control, D2 parity
       harness, D5 robustness, C10 clip-media e2e, E1
       MCP-only build).
-- [ ] Headless run ____________: every probe exit 0;
-      live-MCP probe **PASS** with the health total
-      reading the closing ______ AND the shell-tool
-      PASS line present in `mcp-probe.txt` (§2);
-      overflow scan **CLEAN on ______ trees**
+- [x] Headless run **42571630518**: every probe exit 0
+      (60 probes); live-MCP probe **PASS** with the health
+      total reading the closing **366** AND the shell-tool
+      PASS lines present in `mcp-probe.txt` (§2) —
+      `shell_get_state`, `shell_set_workspace` (switch
+      visible in a fresh read, switched back),
+      `shell_select_frame`, `shell_get_transport`;
+      overflow scan **CLEAN on 32 trees**
       (denominator recorded); snaps pixel-read and
       copied to `your_files` as
       `stykanimate-wave14-*.png`.
-- [ ] Docs finalised: §6.9 TODO-AT-CLOSE blocks filled
+- [x] Docs finalised: §6.9 TODO-AT-CLOSE blocks filled
       from the evidence above; `docs/MCP.md` at the
       closing total; `docs/wave13/CLIP_MEDIA.md`'s
       landed note written; PARITY_CENSUS has no GAP
       rows left; the §8 verdict below written.
-- [ ] Carried, unsettled, stated in the user report:
+- [x] Carried, unsettled, stated in the user report:
       sound remains user-verified only (B4 moves
       playback STATE; audibility is not proven by any
       item here); the five standing user decisions
@@ -654,8 +661,71 @@ trace to it.
 
 ## 8. Close-out verdict (integrator fills at close-out)
 
-TODO-AT-CLOSE: what actually landed per squad against
-§§1–5, the run evidence from §7, the closing census,
-and the honest remainders — each remainder either
-closed by a ticked box above or carried by name into
-§6.9.
+**ACCEPTED — Wave 14 delivered and verified (2026-11-09).**
+
+Per squad, against §§1–5: **A** — the parity census closed
+and the handlers landed: 47 new core registry tools
+(figure/frame residuals, the draw family, graph, FX +
+particles, the audio gain step, fig3 rotation/root, the
+weather/onion/editor-settings family, clipboard state,
+sprite sample, project-file delete/cycle/open). Two
+integrator corrections stand on the record: A8's
+`duplicate_figure` same-call flag claim was wrong (the op
+really does snapshot), and the G1/G2 handlers were written
+at splice time. **B** — shell control landed as 31 live-only
+`shell_*` tools behind the `shell_control` peek/queue/drain,
+dispatched by name to the `shell_tools_*` handler modules,
+plus 4 transport tools that are ordinary core handlers
+because playback is core state. Recorded deviations from
+B1/B2's paper design, each argued from source: granular
+names over the consolidated ticket command (B2's own notes
+conceded the naming was provisional), **no Stop tool** (the
+GUI has none — B4), and `shell_set_timeline` excluded as a
+fake control (its prefs wire is dead — B8).
+**C** — clip-def media renders end-to-end: the funnel
+fallback in `media_items`, the stage-text carrier fix, the
+raster `has_media` clips clause, funnel-fed SVG, three MCP
+tools, and §7 of `docs/wave13/CLIP_MEDIA.md` flipped to
+LANDED with every anchor re-verified. **D** — the busy-port
+failure is now visible (`LAST_START_ERROR` + the Settings
+note, pixel-proven in the settings-open-error snap); the
+parity harness found no dispatch divergences; the 60 s
+write deadline closed the slow-loris hole; D5's `arg_f32`
+finiteness fix closed a real bug. One D5 test premise was
+**disproved by CI** and the test now pins the truth
+(overflowing number literals are parse errors in this
+serde_json build, not silent nulls). **E** — the MCP-only
+build passes (a full project created and exported through
+MCP calls only), gate check 10 enforces palette parity,
+and this checklist's §7 was re-run by the integrator:
+gate **10/10**, census **366** agreeing both directions,
+all spot-greps hit (the §7 A-row sampling is covered by
+the gate's own source-derived parity check, which is
+stricter than sampling).
+
+Run evidence: CI **42571128696** GREEN on `8f5bb54` —
+**3,519 tests, 0 failed** (1,432 lib + 8 mcp_server bin +
+1,985 bin + 94 integration, after 9 CI fix rounds, every
+one in test or plumbing detail, diagnosed from the runs'
+own logs). Headless **42571630518** — 60/60 probes exit 0,
+live-MCP probe PASS including the shell steps, overflow
+CLEAN on 32 trees; snaps in
+`~/workspace/your_files/stykanimate-wave14-*.png`,
+settings-open-error pixel-read (the start-failure note
+renders verbatim).
+
+Honest remainders, carried by name into §6.9: E9's
+`docs/wave14/` pack never reported (49 of 50 agents;
+the integrator authored the MCP.md shell chapter against
+the landed design instead), G5 library-entry rename and
+G6 graph channel selection untooled with their arguments
+recorded in PARITY_CENSUS's close-out addendum, G3's
+legacy onion op deliberately untooled, D10's wave-doc
+transport chapter stays in `docs/wave14/` (its substance
+is merged into `docs/MCP.md`), and sound remains
+user-verified only. The five standing user decisions are
+untouched; the exclusions diff guard (§6) holds — no
+project-swap undo change, no accent change, no
+stored-name fix, no waveform-badge change, no MCP-save
+`write_recovery` change anywhere in the wave diff, and
+no shell tool routes around any of them.

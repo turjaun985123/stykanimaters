@@ -1,5 +1,18 @@
 # Wave 14 — Shell control design (B1)
 
+> **Status: LANDED with recorded deviations (Wave 14
+> close-out, 2026-11-09).** The shipped design differs
+> from this document in three argued ways (see
+> `docs/wave14/ACCEPTANCE.md` §8): tool names are
+> granular per-action names, not the consolidated
+> ticket command below (B2's own notes conceded the
+> naming was provisional); there is no Stop tool (the
+> GUI has none); and the queue carries named requests
+> dispatched to `shell_tools_*` handler modules rather
+> than a `ShellCommand` enum. This document stands as
+> the design record the deviations were measured
+> against.
+
 **What this is.** The complete design the B squad builds
 to so the live MCP endpoint can drive the GUI *shell* —
 workspace, transport, view, shell-side selections, theme,

@@ -1149,22 +1149,132 @@ live-MCP probe PASS, overflow CLEAN on 31 trees).
 HEAD at launch: `92c5d95`, the Wave 13 close-out
 commit.
 
-**Delivered** — TODO-AT-CLOSE: the integrator fills
-this in at close-out with what actually landed,
-squad by squad, against the remits above.
+**Delivered** — all three charter thrusts landed.
+**Parity (A):** the census
+(`docs/wave14/PARITY_CENSUS.md`, 764 capabilities
+classified) drove 47 new core registry tools —
+figure/frame residuals, the draw family's
+nib/spray/scatter completion, graph selection-state
+reads/writes and channel reads, FX + particle
+completion, the audio gain step, fig3 rotation and
+root placement (plus the fig3 camera yaw/pitch fix),
+scene weather, the full camera-key set, onion-skin
+master and depths, clipboard state, sprite frame
+sampling, and project-file delete/cycle/open; its
+close-out addendum records each true-gap mechanism's
+disposition. **Shell control (B):** 31 live-only
+`shell_*` tools behind the new `src/shell_control.rs`
+peek/queue/drain (bounded 8, drained in the main poll
+loop after replies are sent), dispatched by name to
+`shell_tools_*` handler modules — workspace + shell
+state, view navigation, selection (frame, figure,
+node, sprite, stroke, particle, clip), theme,
+settings (with the Live-MCP-off deferred-intent
+bridge: a setting that would kill the very endpoint
+serving the call applies only after the reply is
+delivered), layout (sections and timeline per the
+workspace rules), and the File menu's non-dialog
+actions — plus 4 transport tools implemented as
+ordinary core handlers, because playback is core
+state. Two design deviations are recorded in
+`docs/wave14/ACCEPTANCE.md` §8: granular tool names
+won over the ticket design, and there is **no Stop
+tool** — the GUI has none. On stdio every shell tool
+refuses with one canonical sentence naming the live
+endpoint. **Clip-def media (C):** the
+`media_items` per-node fallback (instance wins,
+clip def fills gaps, alpha = instance × carrier,
+colour falls back to the figure), the stage-text
+carrier fix, the raster `has_media` clips clause,
+funnel-fed SVG, three MCP tools
+(`clip_asset_attach`, `clip_clear_node_media`,
+`clip_get_node_media`), and
+`docs/wave13/CLIP_MEDIA.md` §7 flipped to LANDED
+with every anchor re-verified. **Transport (D):**
+`LAST_START_ERROR` + `last_start_error()` with the
+Settings start-failure note (the busy port is no
+longer invisible), a 60 s connection write
+deadline, health gains `port`, `enabled` and
+`shell_control: true`, one server-identity const
+set, the `arg_f32` finiteness fix, and the
+stdio↔live parity harness (no divergences found).
+**Proof (E):** the MCP-only build suite (a complete
+project created and exported through MCP calls
+only), gate check 10 (PARITY), the MCP audit and
+this section. `docs/MCP.md` documents all 366
+tools; the gate counts the 31 macro-stamped shell
+stubs as the real handler definitions they expand
+to, and `scripts/mcp_census.py` carries the same
+rule.
 
-**Verification** — TODO-AT-CLOSE: run evidence only
-(gate result, CI run id and test count, headless
-run id, live-MCP probe and overflow verdicts, snap
-list) goes here at close-out.
+**Verification** — gate **10/10 PASS**
+(`scripts/phase_j_checks.py`, full foreground run
+on the closing tree, read from the top). CI run
+**42571128696** GREEN on `8f5bb54`: **3,519 tests
+passed, 0 failed** (1,432 lib + 8 mcp_server bin +
+1,985 bin + 94 integration), after 9 CI fix rounds
+— every one in test or plumbing detail (spec-escape
+literals, an mpsc path, test-module imports, two
+float-tolerance reconciliations, the three-test
+bridge-port serialisation, two e2e payload-shape
+corrections, one cross-id comparison), each
+diagnosed from the failing run's own logs; no
+production behaviour was reversed by any fix.
+Headless run **42571630518** SUCCESS: all 60
+probes exit 0; the live-MCP probe **PASS**
+end-to-end, its new step 8 driving
+`shell_get_state`, `shell_set_workspace` (the
+switch visible in a fresh read, then switched
+back), `shell_select_frame` and
+`shell_get_transport` over HTTP against the real
+running editor; overflow scan **CLEAN on 32
+trees**. Snaps pixel-read and copied to
+`your_files/stykanimate-wave14-*.png` — the new
+`settings-open-error` scene shows the D1 note
+verbatim: "Live MCP did not start: Address already
+in use (os error 98). Turn the toggle on to
+retry." 
 
-**Closing census** — TODO-AT-CLOSE: MCP, palette,
-scenes, help, i18n, icons and keys as counted by
-the gate on the closing tree, against the entering
-baseline above.
+**Closing census** — MCP **366 tools** (313
+registry + 9 io + 44 built-ins; entering 288;
+`scripts/mcp_census.py` and gate check 9 agree,
+unregistered 0, duplicates 0); palette **134**
+(unchanged — coverage changed, not the command
+set; gate check 10 maps all 134 via 94 distinct
+tools with PARITY_PENDING empty); scenes **29**
+(+settings-open-error); help **61** (rows
+rewritten to the full-control truth, count
+unchanged); keys **940** (827 static + 113
+dynamic), **zero lost**; icons **163**; i18n
+**99 × 28**; layout facts **31** (the
+start-failure note adds no layout fact); gate
+**10/10** with the new check 10.
 
-**Honest remainders** — TODO-AT-CLOSE: what this
-wave did not close, named at close-out.
+**Honest remainders** — E9's
+`docs/wave14/` doc pack never reported (49 of 50
+agents reported; the integrator authored the
+`docs/MCP.md` shell chapter against the landed
+design in its place, and B10's chapter draft —
+written against the superseded ticket design —
+was not used). Two parity items stay untooled
+with their arguments recorded in
+`docs/wave14/PARITY_CENSUS.md`'s close-out
+addendum: figure-library entry rename (G5 — the
+panel rename is file-backed shell logic with no
+lib op beneath it) and graph channel selection
+(G6 — GUI cursor state; the graph tools address
+channels by explicit index). The legacy
+`cycle_onion_frames` op (G3) is deliberately
+untooled: it writes a field the stage no longer
+reads, so a tool for it would be a fake control;
+the real depths are `shell_set_onion_depths`.
+The pre-existing `tool_set_weather` /
+`tool_clear_weather` defaults still differ from
+the panel's presets (disclosed by A9, untouched).
+D10's transport chapter remains in
+`docs/wave14/` as the survey record; its
+substance is merged into `docs/MCP.md`. Sound
+remains user-verified only, as in every wave.
 
 Standing user decisions this wave carries but does
 **not** settle — none of them is in any squad's
