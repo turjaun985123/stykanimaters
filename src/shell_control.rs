@@ -75,7 +75,8 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, SyncSender};
+use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 

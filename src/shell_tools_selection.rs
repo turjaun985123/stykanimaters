@@ -507,7 +507,6 @@ pub fn tool_shell_get_selection(
         "playhead": core.playhead,
         "frame_range": view
             .frame_range_sel
-            .copied()
             .map(|(anchor, focus)| json!([anchor, focus])),
         "figure_count": core.project.figures.len(),
         "sprite_count": core.project.sprites.len(),
