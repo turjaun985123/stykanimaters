@@ -491,7 +491,7 @@ pub struct SprayMark {
 }
 
 /// A freehand brush stroke drawn on one frame.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
     pub frame: usize,
     pub points: Vec<V2>,
