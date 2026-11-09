@@ -168,6 +168,23 @@ pub struct FrameOpsState {
     /// [`INSERT_COUNT_DEFAULT`]. Not part of the project —
     /// a view-side preference like the range selection.
     pub insert_count: usize,
+    /// Whether the timeline card is collapsed to its
+    /// frame-chips row (Focused Wave, D1). The timeline
+    /// section's chrome state: `timeline_marks` reads it
+    /// on every build — collapsed hides the ruler, the
+    /// marker row, the clips lane, the dopesheet lane
+    /// and the loop row, and keeps the chips, the old
+    /// GPUI shell's collapsed form (the status strip is
+    /// a separate centre child and always renders). Its
+    /// persisted mirror is
+    /// `LayoutPrefs::timeline_collapsed`: `main.rs`'s
+    /// `init` seeds this field from the prefs and `poll`
+    /// writes changes back, so this field is the live
+    /// source of truth and the prefs field never leads.
+    /// It lives here, not on `State`, because the
+    /// timeline section already owns this struct and the
+    /// `State` field census is integrator-gated.
+    pub timeline_collapsed: bool,
 }
 
 impl Default for FrameOpsState {
@@ -177,6 +194,7 @@ impl Default for FrameOpsState {
             frame_copied: false,
             range_copied: false,
             insert_count: INSERT_COUNT_DEFAULT,
+            timeline_collapsed: false,
         }
     }
 }
@@ -896,6 +914,21 @@ mod tests {
             ops.insert_count, INSERT_COUNT_DEFAULT,
             "the Insert-N stepper starts at the documented default"
         );
+    }
+
+    #[test]
+    fn default_state_has_expanded_timeline() {
+        // Focused Wave (D1): the collapsed flag starts
+        // false — a State built without prefs seeding
+        // (every test literal in the tree) renders the
+        // timeline exactly as before the wiring.
+        assert!(!FrameOpsState::default().timeline_collapsed);
+        let seeded = FrameOpsState {
+            timeline_collapsed: true,
+            ..Default::default()
+        };
+        assert!(seeded.timeline_collapsed);
+        assert_eq!(seeded.insert_count, INSERT_COUNT_DEFAULT);
     }
 
     #[test]

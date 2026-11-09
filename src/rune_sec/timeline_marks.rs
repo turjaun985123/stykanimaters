@@ -20,6 +20,16 @@
 //! timeline_marks(s, &t))`. No new `State` fields — the drag
 //! writes the existing `s.frame_ops.range_sel`.
 //!
+//! Focused Wave (D1): the card has a collapsed form —
+//! `s.frame_ops.timeline_collapsed` (a `FrameOpsState`
+//! field, seeded from and written back to
+//! `LayoutPrefs::timeline_collapsed` by main.rs's
+//! init/poll) reduces the card to its frame-chips row:
+//! ruler, marker row, clips lane, dopesheet lane and
+//! loop row all stay unmounted. There is no GUI toggle
+//! for it in this shell; the writers are the persisted
+//! prefs at startup and the shell layout tool.
+//!
 //! ## Keys (preservation)
 //!
 //! `timeline` on the outer row and `frame-{n}` (1-based) on
@@ -1175,6 +1185,18 @@ fn timeline_drag(s: &mut State, d: &mut Drag) {
 /// survives the accent fill).
 pub fn timeline_marks(s: &State, t: &Theme) -> El {
     let core = &s.core;
+    // Focused Wave (D1): the collapsed form — the card
+    // keeps only the frame-chips row (the old GPUI
+    // shell's collapsed timeline; the status strip is a
+    // separate centre child and always renders). The
+    // flag is the timeline section's own state
+    // (`FrameOpsState::timeline_collapsed`), seeded from
+    // and written back to
+    // `LayoutPrefs::timeline_collapsed` by main.rs's
+    // init/poll; nothing else about the card changes,
+    // and every key below still exists in the expanded
+    // form exactly as before.
+    let collapsed = s.frame_ops.timeline_collapsed;
     let accent = tok::accent(0, true);
     let loop_fill = t.card.mix(accent, 0.35);
     // The time ruler: one fixed-width slot per frame in
@@ -1189,18 +1211,22 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
         .key("timeline-ruler")
         .gap(CHIP_GAP)
         .on_drag(|s: &mut State, d: &mut Drag, _tx: &mut Tx| ruler_drag(s, d));
-    for label in ruler_ticks(core.frame_count(), core.project.fps) {
-        let mut cell = row().size(CHIP_W, RULER_H).center();
-        cell = match label {
-            Some(label) => cell.child(
-                text(label)
-                    .font(RULER_LABEL_STYLE)
-                    .color(t.text_secondary)
-                    .truncate(),
-            ),
-            None => cell.child(el().size(1.0, 5.0).fill(t.text_secondary)),
-        };
-        ruler = ruler.child(cell);
+    // Collapsed: the ruler is not mounted (see the
+    // assembly below), so its tick cells are not built.
+    if !collapsed {
+        for label in ruler_ticks(core.frame_count(), core.project.fps) {
+            let mut cell = row().size(CHIP_W, RULER_H).center();
+            cell = match label {
+                Some(label) => cell.child(
+                    text(label)
+                        .font(RULER_LABEL_STYLE)
+                        .color(t.text_secondary)
+                        .truncate(),
+                ),
+                None => cell.child(el().size(1.0, 5.0).fill(t.text_secondary)),
+            };
+            ruler = ruler.child(cell);
+        }
     }
     let mut chips = row()
         .key("timeline-chips")
@@ -1264,9 +1290,20 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // viewport, so they translate together: the ruler stays
     // above its chips and the markers stay under theirs at
     // any scroll offset.
-    let mut content = col().gap(2.0).child(ruler).child(chips);
-    if let Some(markers_row) = marker_row(core, t) {
-        content = content.child(markers_row);
+    // Focused Wave (D1): collapsed, the column is the
+    // chips row alone — ruler, markers, clips lane and
+    // dopesheet all stay unmounted, so the chips keep
+    // their exact geometry (and drag coordinates) in
+    // both forms.
+    let mut content = col().gap(2.0);
+    if !collapsed {
+        content = content.child(ruler);
+    }
+    content = content.child(chips);
+    if !collapsed {
+        if let Some(markers_row) = marker_row(core, t) {
+            content = content.child(markers_row);
+        }
     }
     // UI mission Wave 5 (audit D1/T1): the clips lane is
     // the scrolled column's last row, so it shares the
@@ -1282,8 +1319,10 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // no existing row's content coordinates — the ruler,
     // chips and marker rows keep the exact geometry their
     // drag handlers read.
-    if let Some(clips) = clips_lane(core) {
-        content = content.child(clips);
+    if !collapsed {
+        if let Some(clips) = clips_lane(core) {
+            content = content.child(clips);
+        }
     }
     // Wave 10 (dopesheet rebuild): the dopesheet lane is
     // the scrolled column's last row in the Animate
@@ -1297,7 +1336,7 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
     // (it is centre-column chrome), so the Animate gate
     // sits here at the call site; the lane builder is
     // workspace-agnostic. See docs/DOPESHEET.md.
-    if s.workspace == crate::rune_sec::workspaces::Workspace::Animate {
+    if !collapsed && s.workspace == crate::rune_sec::workspaces::Workspace::Animate {
         content = content.child(crate::rune_sec::dopesheet::dopesheet_lane(s, t));
     }
     let timeline = row().key("timeline").child(content).scroll_x().w_full();
@@ -1341,8 +1380,17 @@ pub fn timeline_marks(s: &State, t: &Theme) -> El {
         ));
     } else {
         card = card.child(timeline);
-        if let Some(loop_row) = loop_row(s, t) {
-            card = card.child(loop_row);
+        // The loop row is part of the expanded form
+        // (Focused Wave, D1): collapsed, the card is
+        // the chips strip alone. The empty-project
+        // branch above still wins in both forms — with
+        // no frames there are no chips to keep, and the
+        // empty state's next-action message matters
+        // more than the saved collapse preference.
+        if !collapsed {
+            if let Some(loop_row) = loop_row(s, t) {
+                card = card.child(loop_row);
+            }
         }
     }
     card
@@ -2173,6 +2221,28 @@ mod tests {
         state.core.goto(frame);
         assert_eq!(state.core.current, 1);
         assert!(!state.core.playing);
+    }
+
+    #[test]
+    fn timeline_marks_builds_in_both_collapse_forms() {
+        // Focused Wave (D1) builder smoke: the card
+        // builds expanded (the default every existing
+        // literal carries) and collapsed (chips row
+        // only), on the demo and on an empty project —
+        // the empty state's precedence over the
+        // collapsed form must not panic either. Key-level
+        // proof of which rows mount is the Runtime/snap
+        // layer's job (D2's round-trip tests); this pins
+        // that both assembly paths construct.
+        let t = rune::tok::theme(true);
+        let mut state = demo_state();
+        let _expanded = timeline_marks(&state, &t);
+        state.frame_ops.timeline_collapsed = true;
+        let _collapsed = timeline_marks(&state, &t);
+        state.core.project.frames.clear();
+        let _collapsed_empty = timeline_marks(&state, &t);
+        state.frame_ops.timeline_collapsed = false;
+        let _expanded_empty = timeline_marks(&state, &t);
     }
 
     #[test]

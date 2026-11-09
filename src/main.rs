@@ -26,6 +26,7 @@ mod shell_tools_layout;
 mod shell_tools_selection;
 mod shell_tools_settings;
 mod shell_tools_state;
+mod shell_tools_style;
 mod shell_tools_view;
 mod stage_sprites;
 mod stage_view;
@@ -76,6 +77,26 @@ thread_local! {
     /// ever polls, so the router lives where it is used.
     static MCP_ROUTER: std::cell::RefCell<stykanimate_rs::mcp::McpServer> =
         std::cell::RefCell::new(stykanimate_rs::mcp::McpServer::new());
+}
+
+thread_local! {
+    /// The layout-prefs shadow for the two persisted view
+    /// toggles `poll` writes back (Focused Wave, D1):
+    /// `(timeline_collapsed, sidebar_visible)` as last
+    /// persisted to `LayoutPrefs`. `init` seeds it from
+    /// the loaded prefs; `poll` compares the live values
+    /// (`State::frame_ops.timeline_collapsed`,
+    /// `State::show_left`) against it and load-modify-saves
+    /// on divergence — the same shadow-compare discipline
+    /// as `State::last_dark`, with the shadow in a
+    /// thread-local because the `State` field census is
+    /// integrator-gated (see MCP_ROUTER above). Every
+    /// writer of the two toggles — the View menu, the
+    /// palette's panel commands, the shell layout tools —
+    /// mutates `State` only; this shadow is how `poll`
+    /// notices.
+    static LAYOUT_PREFS_SHADOW: std::cell::Cell<(bool, bool)> =
+        const { std::cell::Cell::new((false, true)) };
 }
 
 /// How often `poll` re-wakes the event loop while live MCP
@@ -199,6 +220,11 @@ pub struct State {
     /// Stage guides overlay on/off (settings section).
     pub guides: bool,
     /// Left/right column visibility (View menu toggles).
+    /// `show_left` is the figures sidebar: its persisted
+    /// mirror is `LayoutPrefs::sidebar_visible` — seeded
+    /// from the prefs in `init`, written back by `poll`
+    /// (Focused Wave, D1). `show_right` (the inspector
+    /// sidebar) has no persisted mirror and never did.
     pub show_left: bool,
     pub show_right: bool,
     /// Graph-key clipboard (keyframe_tools section).
@@ -302,6 +328,14 @@ fn init() -> State {
             },
         );
     }
+    // Focused Wave (D1): the two persisted view toggles
+    // seed their live State mirrors from the same prefs
+    // (timeline_collapsed -> frame_ops below,
+    // sidebar_visible -> show_left below), and the poll
+    // shadow starts at the persisted pair so the first
+    // poll does not write the file back unchanged.
+    LAYOUT_PREFS_SHADOW
+        .with(|c| c.set((layout.timeline_collapsed, layout.sidebar_visible)));
     if let Some(msg) = rune_sec::home_panel::startup_status() {
         core.status = msg;
     }
@@ -316,7 +350,13 @@ fn init() -> State {
         library_panel: Default::default(),
         sprites_panel: Default::default(),
         home_panel: rune_sec::home_panel::initial_state(),
-        frame_ops: Default::default(),
+        frame_ops: rune_sec::frame_ops::FrameOpsState {
+            // Focused Wave (D1): seeded from the
+            // persisted prefs; `poll` writes changes
+            // back (see LAYOUT_PREFS_SHADOW).
+            timeline_collapsed: layout.timeline_collapsed,
+            ..Default::default()
+        },
         graph_panel: Default::default(),
         audio_panel: rune_sec::audio_panel::AudioPanelState::new(),
         menus: Default::default(),
@@ -330,7 +370,10 @@ fn init() -> State {
         pose_clipboard: None,
         workspace: rune_sec::workspaces::from_prefs(&layout),
         guides: false,
-        show_left: true,
+        // Focused Wave (D1): the figures sidebar starts
+        // where the persisted prefs left it; `poll`
+        // writes View-menu / palette flips back.
+        show_left: layout.sidebar_visible,
         show_right: true,
         key_clipboard: None,
         export_recap: String::new(),
@@ -613,6 +656,27 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
         s.last_dark = dark;
         let mut prefs = stykanimate_rs::shell::load_layout();
         prefs.dark = dark;
+        stykanimate_rs::shell::save_layout(&prefs);
+    }
+    // Focused Wave (D1): the two persisted view toggles
+    // ride the same shadow-compare discipline — the
+    // timeline's collapsed flag (frame_ops, mirrored by
+    // LayoutPrefs::timeline_collapsed) and the figures
+    // sidebar's visibility (show_left, mirrored by
+    // LayoutPrefs::sidebar_visible). Every writer — the
+    // View menu, the palette's panel toggles, the shell
+    // layout tools through the drain above, which runs
+    // earlier in this same poll — mutates State only;
+    // when the live pair diverges from the shadow,
+    // load-modify-save BOTH fields so the prefs file
+    // carries the pair the shell is actually showing,
+    // preserving every other field.
+    let layout_pair = (s.frame_ops.timeline_collapsed, s.show_left);
+    if LAYOUT_PREFS_SHADOW.with(|c| c.get()) != layout_pair {
+        LAYOUT_PREFS_SHADOW.with(|c| c.set(layout_pair));
+        let mut prefs = stykanimate_rs::shell::load_layout();
+        prefs.timeline_collapsed = layout_pair.0;
+        prefs.sidebar_visible = layout_pair.1;
         stykanimate_rs::shell::save_layout(&prefs);
     }
     // Playback audio follows the playing flag (Phase F): the

@@ -1215,11 +1215,15 @@ fn tool_set_weather(core: &mut EditorCore, args: &Value) -> Result<Value, String
             ))
         }
     };
-    // Storm is heavier by default: more particles, stronger drift.
-    let (default_amount, default_wind) =
-        if wk == WeatherKind::Storm { (140.0, 30.0) } else { (90.0, 20.0) };
-    let amount = opt_f32(args, "amount")?.unwrap_or(default_amount).clamp(0.0, 200.0);
-    let wind = opt_f32(args, "wind")?.unwrap_or(default_wind);
+    // Defaults come from the one preset table — the Scene
+    // panel's per-kind presets in editor.rs (Focused Wave,
+    // C1: this tool used to carry its own table, which had
+    // drifted — every non-storm kind defaulted to wind 20
+    // and fireflies/fog to amount 90). Explicit arguments
+    // still win; the amount clamp is unchanged.
+    let preset = crate::editor::eds_kind_preset(wk);
+    let amount = opt_f32(args, "amount")?.unwrap_or(preset.amount).clamp(0.0, 200.0);
+    let wind = opt_f32(args, "wind")?.unwrap_or(preset.wind);
     // Wave 13 (B9, dirty census): as the "off" branch — a
     // settings write that changes the stored weather marks
     // dirty; re-setting the identical weather marks nothing.
@@ -3233,6 +3237,7 @@ shell_unavailable_fn!(tool_shell_unavailable_select_frame, "shell_select_frame")
 shell_unavailable_fn!(tool_shell_unavailable_select_stroke, "shell_select_stroke");
 shell_unavailable_fn!(tool_shell_unavailable_select_particle, "shell_select_particle");
 shell_unavailable_fn!(tool_shell_unavailable_select_clip, "shell_select_clip");
+shell_unavailable_fn!(tool_shell_unavailable_select_graph_channel, "shell_select_graph_channel");
 shell_unavailable_fn!(tool_shell_unavailable_get_selection, "shell_get_selection");
 shell_unavailable_fn!(tool_shell_unavailable_set_theme, "shell_set_theme");
 shell_unavailable_fn!(tool_shell_unavailable_get_settings, "shell_get_settings");
@@ -3240,6 +3245,8 @@ shell_unavailable_fn!(tool_shell_unavailable_set_setting, "shell_set_setting");
 shell_unavailable_fn!(tool_shell_unavailable_set_section, "shell_set_section");
 shell_unavailable_fn!(tool_shell_unavailable_set_column_widths, "shell_set_column_widths");
 shell_unavailable_fn!(tool_shell_unavailable_get_layout, "shell_get_layout");
+shell_unavailable_fn!(tool_shell_unavailable_set_timeline, "shell_set_timeline");
+shell_unavailable_fn!(tool_shell_unavailable_get_recent_colours, "shell_get_recent_colours");
 shell_unavailable_fn!(tool_shell_unavailable_list_recents, "shell_list_recents");
 shell_unavailable_fn!(tool_shell_unavailable_open_recent, "shell_open_recent");
 shell_unavailable_fn!(tool_shell_unavailable_reload_project, "shell_reload_project");
@@ -4435,6 +4442,18 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["name", "new_name"],
             ),
             handler: crate::figure_ops::tool_pose_library_rename,
+        },
+        Tool {
+            name: "figure_library_rename",
+            description: "Rename a saved figure-library entry (the library panel's per-row Rename): renames the entry's backing file in ./library and updates the entry in place, addressed by its library index. The new name is sanitised to a file stem (trimmed, spaces and path separators become '-', lowercased). Refuses built-in entries, a name that sanitises to empty, a name another entry already owns, and a target file that already exists in the library folder. Renaming to the entry's own current name succeeds with renamed=false. A file operation, not an undo step.",
+            schema: obj_schema(
+                json!({
+                    "index": { "type": "integer" },
+                    "new_name": { "type": "string" }
+                }),
+                &["index", "new_name"],
+            ),
+            handler: crate::library_ops::tool_figure_library_rename,
         },
         Tool {
             name: "layers_set_all_visible",
@@ -6390,6 +6409,12 @@ Tool {
             handler: tool_shell_unavailable_select_clip,
         },
 Tool {
+            name: "shell_select_graph_channel",
+            description: "Select a graph channel in the GUI — 'channel' (0-based, an index into the project's channels) becomes the graph panel's drawn channel, exactly as pressing that channel's row in the channel list does: the pick is recorded, the panel target syncs to the channel, and if the channel belongs to another figure that figure becomes selected. This is the selection the panel's and palette's drawn-channel operations (delete, duplicate, shift, fill keys) act on — and the only way to point them at the second of two duplicate channels for the same figure and target. Shell selection only — no undo step, never marks the project dirty. Live endpoint only.",
+            schema: obj_schema(json!({ "channel": { "type": "integer" } }), &["channel"]),
+            handler: tool_shell_unavailable_select_graph_channel,
+        },
+Tool {
             name: "shell_get_selection",
             description: "Read back every GUI selection: the selected figure and node, the selected sprite, FX clip and audio clip, the playhead frame, and the timeline range selection if one is active, each with the live count it indexes into. Read-only.",
             schema: obj_schema(json!({}), &[]),
@@ -6438,11 +6463,28 @@ Tool {
       handler: tool_shell_unavailable_set_column_widths,
   },
 Tool {
+      name: "shell_set_timeline",
+      description: "Collapse ('collapsed': true) or expand the timeline in the live editor. The write lands on the shell's own timeline_collapsed state (State.frame_ops), so the timeline card switches between its full form and its frame-chips-only form immediately, and persists through the layout prefs (load-modify-save, as a workspace switch persists), so a restart restores it; the reply echoes the live value and the persisted read-back. No undo step. Live endpoint only.",
+      schema: obj_schema(
+          json!({
+              "collapsed": { "type": "boolean" }
+          }),
+          &["collapsed"],
+      ),
+      handler: tool_shell_unavailable_set_timeline,
+  },
+Tool {
       name: "shell_get_layout",
-      description: "Read the live editor layout: the active workspace, its sections in panel order (each with 'collapsible' and, for Figures/Library, 'collapsed'; the rest report null), the sections the workspace hides, the left/right column visibility (show_left / show_right) and widths, and the persisted timeline_collapsed / sidebar_visible prefs — each with a 'wired' flag, currently false: those prefs round-trip but the shell does not read them yet. Read-only. Live endpoint only.",
+      description: "Read the live editor layout: the active workspace, its sections in panel order (each with 'collapsible' and, for Figures/Library, 'collapsed'; the rest report null), the sections the workspace hides, the left/right column visibility (show_left / show_right) and widths, the timeline_collapsed state ('timeline_collapse_wired': true — the shell reads and writes it, see shell_set_timeline), and the sidebar_visible pref ('sidebar_pref_wired': true — the left column's persisted mirror: show_left seeds from it at startup and flips persist back). Read-only. Live endpoint only.",
       schema: obj_schema(json!({}), &[]),
       handler: tool_shell_unavailable_get_layout,
   },
+Tool {
+            name: "shell_get_recent_colours",
+            description: "Read the style inspector's Recent colours list — the colours the user has applied to a node from the style panel this session, most recent first (max 8), each as a '#RRGGBB' hex string and the numeric value the colour tools take. Session-only shell state: not persisted, and colours applied through MCP tools are not recorded in it. Read-only. Live endpoint only — on stdio this name returns the shell-refusal error.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_shell_unavailable_get_recent_colours,
+        },
 Tool {
             name: "shell_list_recents",
             description: "List the running editor's recent projects — the File menu's Open recent entries, most recent first, at most five: each with its menu index, its display name, the project file it resolves to (exact stored-name match, then file-stem fallback, against the Home library scan) or null with missing: true when the file is gone. Read-only; no undo step. Live endpoint only — the stdio server refuses this tool.",
@@ -6611,6 +6653,43 @@ mod tests {
         assert_eq!(core.edits_since_autosave(), edits + 2);
         core.undo();
         assert!(core.project.weather.is_none());
+    }
+
+    #[test]
+    fn set_weather_defaults_match_the_panel_presets() {
+        let tools = tools();
+        // (kind, amount, wind): the Scene panel presets from
+        // editor::eds_kind_preset — the single source the
+        // editor-settings handlers and this tool now share
+        // (Focused Wave, C1; this tool's own table used to
+        // default every non-storm kind to 90/20).
+        for (kind, amount, wind) in [
+            ("rain", 90.0, 25.0),
+            ("snow", 90.0, 12.0),
+            ("fireflies", 60.0, 4.0),
+            ("fog", 60.0, 0.0),
+            ("storm", 140.0, 30.0),
+        ] {
+            let mut core = EditorCore::new();
+            let r = call(&mut core, &tools, "set_weather", json!({ "kind": kind })).unwrap();
+            assert_eq!(r["weather"]["amount"], amount, "{kind} default amount");
+            assert_eq!(r["weather"]["wind"], wind, "{kind} default wind");
+            let w = core.project.weather.unwrap();
+            assert_eq!((w.amount, w.wind), (amount, wind), "{kind} stored default");
+        }
+        // Explicit arguments still win over the preset.
+        let mut core = EditorCore::new();
+        let r = call(
+            &mut core,
+            &tools,
+            "set_weather",
+            json!({ "kind": "rain", "amount": 50.0, "wind": -7.0 }),
+        )
+        .unwrap();
+        assert_eq!(r["weather"]["amount"], 50.0);
+        assert_eq!(r["weather"]["wind"], -7.0);
+        let w = core.project.weather.unwrap();
+        assert_eq!((w.amount, w.wind), (50.0, -7.0));
     }
 
     #[test]

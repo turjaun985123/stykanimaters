@@ -537,7 +537,7 @@ jobs:
           # the tools/list length are read from the same registry
           # by two different code paths (listener thread vs UI
           # thread dispatch) and must agree.
-          TOOL_FLOOR = 366
+          TOOL_FLOOR = 370
 
           lines = []
           failures = []
@@ -710,6 +710,24 @@ jobs:
               check(not is_err, "shell_select_frame executes on the live shell", sel_text[:200])
               is_err, tr, tr_text = call_tool(12, "shell_get_transport")
               check(not is_err and tr is not None, "shell_get_transport answers", tr_text[:200])
+
+              # 9. Focused Wave: shell_set_timeline is a REAL
+              #    control now (its prefs wire is wired — the
+              #    Wave 14 exclusion is lifted). Collapse the
+              #    timeline on the live shell, read the layout
+              #    back (collapsed AND wired), then expand it
+              #    again so the app is left as the probe
+              #    found it.
+              is_err, tl, tl_text = call_tool(13, "shell_set_timeline", {"collapsed": True})
+              check(not is_err and (tl or {}).get("collapsed") is True,
+                    "shell_set_timeline collapses the timeline on the live shell", tl_text[:200])
+              is_err, lay, lay_text = call_tool(14, "shell_get_layout")
+              check(not is_err and (lay or {}).get("timeline_collapsed") is True
+                    and (lay or {}).get("timeline_collapse_wired") is True,
+                    "shell_get_layout shows the timeline collapsed and wired", lay_text[:200])
+              is_err, tl2, tl2_text = call_tool(15, "shell_set_timeline", {"collapsed": False})
+              check(not is_err and (tl2 or {}).get("collapsed") is False,
+                    "shell_set_timeline expands the timeline back", tl2_text[:200])
 
           try:
               main()

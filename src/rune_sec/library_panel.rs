@@ -60,20 +60,27 @@
 //!   marks the row in [`LibraryPanelState::renaming`];
 //!   an editor row (field + Apply + Cancel) renders
 //!   under that row. Apply ([`apply_rename`] →
-//!   [`rename_saved`]) sanitises the typed name into a
-//!   file stem ([`sanitize_stem`] — the save path's own
-//!   slug), refuses empty stems and collisions (another
-//!   entry's name, via [`name_taken`], or an existing
-//!   file at the target path), renames the backing file
-//!   FIRST with `std::fs::rename`, and only then updates
-//!   the vec entry's name — the delete contract mirrored:
-//!   any fs error keeps the entry under its old name and
-//!   reports on `core.status`. The entry keeps its slot,
-//!   so `library_index` needs no clamp. A refused or
-//!   failed rename keeps the editor open so the name can
-//!   be fixed; a settled one closes it. Deleting the row
-//!   being renamed cancels the rename session first, so
-//!   `renaming` can never point at a shifted entry.
+//!   [`rename_saved`]) delegates to the rename op in
+//!   the engine library
+//!   (`stykanimate_rs::library_ops` — [`rename_saved`]
+//!   itself is now only a thin wrapper over it, kept
+//!   under its long-standing name and signature for
+//!   this panel and its tests). The lib op sanitises
+//!   the typed name into a file stem ([`sanitize_stem`]
+//!   — the save path's own slug), refuses empty stems
+//!   and collisions (another entry's name, via
+//!   [`name_taken`], or an existing file at the target
+//!   path), renames the backing file FIRST with
+//!   `std::fs::rename`, and only then updates the vec
+//!   entry's name — the delete contract mirrored: any
+//!   fs error keeps the entry under its old name and
+//!   reports on `core.status`. The entry keeps its
+//!   slot, so `library_index` needs no clamp. A refused
+//!   or failed rename keeps the editor open so the name
+//!   can be fixed; a settled one closes it. Deleting
+//!   the row being renamed cancels the rename session
+//!   first, so `renaming` can never point at a shifted
+//!   entry.
 //!
 //! ## Phase H additions (section 31/40)
 //!
@@ -347,7 +354,7 @@ use crate::State;
 /// entries (editor.rs:164-166). It is the only separation
 /// the core keeps between built-ins and saved figures, so
 /// the grouping below is derived from it.
-pub const BUILTIN_PREFIX: &str = "Built-in: ";
+pub const BUILTIN_PREFIX: &str = stykanimate_rs::library_ops::LIBRARY_BUILTIN_PREFIX;
 
 /// Height of one library entry row, in points: the
 /// [`THUMB_SIZE`] thumbnail line (44 — the name text
@@ -456,7 +463,7 @@ pub struct LibraryRow {
 /// True when a library entry is one of `load_library`'s
 /// built-ins (name carries [`BUILTIN_PREFIX`]).
 pub fn is_builtin(name: &str) -> bool {
-    name.starts_with(BUILTIN_PREFIX)
+    stykanimate_rs::library_ops::is_builtin(name)
 }
 
 /// True when `name` matches the search `query`:
@@ -605,10 +612,7 @@ pub fn sort_rows(rows: Vec<LibraryRow>, by_name: bool) -> Vec<LibraryRow> {
 /// is the precise inverse. Only meaningful for saved
 /// entries; built-ins have no file.
 pub fn library_file_for(name: &str) -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("library")
-        .join(format!("{name}.json"))
+    stykanimate_rs::library_ops::library_file_for(name)
 }
 
 /// Pure index clamp: keep a library selection valid for a
@@ -670,11 +674,7 @@ pub fn delete_saved(core: &mut EditorCore, i: usize) {
 /// outside `./library`. May return an empty string
 /// (blank input); the caller refuses that case.
 pub fn sanitize_stem(raw: &str) -> String {
-    raw.trim()
-        .replace(' ', "-")
-        .replace('/', "-")
-        .replace('\\', "-")
-        .to_lowercase()
+    stykanimate_rs::library_ops::sanitize_stem(raw)
 }
 
 /// True when library slot `except` may NOT take the stem
@@ -686,17 +686,23 @@ pub fn sanitize_stem(raw: &str) -> String {
 /// never actually equal a `Built-in: ` name (the slug
 /// lowercases and dashes the prefix away).
 pub fn name_taken(core: &EditorCore, stem: &str, except: usize) -> bool {
-    core.library
-        .iter()
-        .enumerate()
-        .any(|(j, (name, _))| j != except && name == stem)
+    stykanimate_rs::library_ops::name_taken(core, stem, except)
 }
 
 /// Rename saved library entry `i` to the stem sanitised
-/// from `raw_new`: rename the backing file FIRST
-/// (`std::fs::rename`), then update the vec entry — the
-/// [`delete_saved`] contract mirrored. The entry keeps
-/// its slot, so `library_index` needs no clamp.
+/// from `raw_new` — a thin wrapper over the rename op in
+/// the engine library
+/// (`EditorCore::rename_library_entry` in
+/// `stykanimate_rs::library_ops`), which owns the logic
+/// now: it sanitises the typed name,
+/// renames the backing file FIRST (`std::fs::rename`),
+/// then updates the vec entry — the [`delete_saved`]
+/// contract mirrored. The entry keeps its slot, so
+/// `library_index` needs no clamp. This wrapper keeps the
+/// panel's long-standing name and signature: the rename
+/// session ([`apply_rename`]) and this module's tests call
+/// it, and panel behaviour is the lib op's behaviour,
+/// unchanged.
 ///
 /// Returns whether the rename session is settled:
 /// `true` when the editor should close (renamed, the
@@ -712,45 +718,7 @@ pub fn name_taken(core: &EditorCore, stem: &str, except: usize) -> bool {
 /// skipped) is also a refusal: `fs::rename` would
 /// silently overwrite it on Unix.
 pub fn rename_saved(core: &mut EditorCore, i: usize, raw_new: &str) -> bool {
-    let Some((name, _)) = core.library.get(i) else {
-        return true;
-    };
-    let old = name.clone();
-    if is_builtin(&old) {
-        core.status = format!("\"{old}\" is built in and can't be renamed.");
-        return false;
-    }
-    let new_stem = sanitize_stem(raw_new);
-    if new_stem.is_empty() {
-        core.status = "Type a new name for the library figure first.".to_string();
-        return false;
-    }
-    if new_stem == old {
-        core.status = format!("\"{old}\" already has that name.");
-        return true;
-    }
-    if name_taken(core, &new_stem, i) {
-        core.status = format!("A library figure named \"{new_stem}\" already exists.");
-        return false;
-    }
-    let old_path = library_file_for(&old);
-    let new_path = library_file_for(&new_stem);
-    if new_path.exists() {
-        core.status =
-            format!("A file named \"{new_stem}.json\" already exists in the library folder.");
-        return false;
-    }
-    match std::fs::rename(&old_path, &new_path) {
-        Ok(()) => {
-            core.library[i].0 = new_stem.clone();
-            core.status = format!("Renamed \"{old}\" to \"{new_stem}\".");
-            true
-        }
-        Err(e) => {
-            core.status = format!("Library rename failed for \"{old}\": {e}");
-            false
-        }
-    }
+    core.rename_library_entry(i, raw_new)
 }
 
 /// Insert library slot `i` into the project: point

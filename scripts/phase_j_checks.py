@@ -469,6 +469,28 @@ Wave 14 additions (same gate, check 10):
   ledger at integration, and any disagreement is a
   finding, not a silent edit.
 
+Focused Wave (post-Wave 14) note: that wave closed
+census gaps that were never palette rows — G5 (the
+library panel's per-row rename, a panel action with
+no palette command) closed by the core tool
+`figure_library_rename`; G6 (graph channel
+selection), G7 (the style inspector's
+recent-colours list) and the timeline-collapse
+preference are shell state, likewise command-less,
+closed by the shell tools
+`shell_select_graph_channel`,
+`shell_get_recent_colours` (read-only — G7's argued
+outcome) and `shell_set_timeline`. The palette gained
+no commands and no command changed coverage, so
+the three tables below deliberately do not move:
+a row keyed by anything but a real palette command
+fails this check's own hygiene, and inventing one
+would fabricate coverage. Those tools join the
+surface this check derives live from check 9's
+extractors; their accounting home is the
+PARITY_CENSUS close-out addendum and check 9's
+two-direction documentation sync.
+
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
 blanked source (the repo's established scan idiom), and
@@ -2446,6 +2468,14 @@ PARITY_EXCLUSIONS: dict[str, str] = {
     # selection had no tool at all. An exclusion must
     # argue that no capability is lost; nothing here
     # currently needs that argument.
+    # Still EMPTY after the Focused Wave (post-Wave
+    # 14): its G5/G6/G7 items were weighed for this
+    # table and do not belong in it — they are panel
+    # and shell capabilities with no palette command
+    # (see the Focused Wave note in this script's
+    # header), so there is no command key to exclude;
+    # their dispositions live in the PARITY_CENSUS
+    # close-out addendum.
 }
 
 _PALETTE_CMD_RE = re.compile(r'Command\s*\{\s*key:\s*"([^"]+)"')

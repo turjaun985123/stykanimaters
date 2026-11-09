@@ -1046,3 +1046,50 @@ check 10 (PARITY) rather than by this table:
 Gate check 10's PARITY_PENDING list is empty on the closing
 tree: every one of the 134 palette commands maps to at least
 one of 94 distinct tools or to a named exclusion above.
+
+---
+
+## Focused Wave addendum (post-Wave 14, 2026-11-09) — G5/G6/G7 CLOSED
+
+The three remainders named above were closed by the Focused
+Wave (11 agents, 5 squads; acceptance in
+`docs/focused/ACCEPTANCE.md`):
+
+- **G5 — CLOSED by `figure_library_rename`.** The rename
+  logic moved to a lib home, `EditorCore::rename_library_entry`
+  in `src/library_ops.rs` (the panel's `rename_saved` is now
+  a one-line wrapper; the panel's pure helpers delegate to
+  the lib copies). The tool is index-addressed
+  (`{index, new_name}`), mirrors the panel's refusal strings
+  verbatim, and — like `pose_library_rename` — is a file
+  operation spending NO undo step and no dirty mark.
+  MCP-only e2e: `tests/focused_e2e_library_rename.rs`.
+- **G6 — CLOSED by `shell_select_graph_channel`** (live
+  endpoint only): calls the graph panel's own
+  `select_channel`, so the pick, target sync and figure
+  switch are the row press exactly; it is the only handle
+  that can name the second of two duplicate
+  `(figure, target)` channels. `shell_get_selection` now
+  also reports `graph_channel` (the pick) and
+  `graph_channel_drawn` (what the panel actually draws).
+- **G7 — CLOSED by `shell_get_recent_colours`** (live
+  endpoint only, read-only): the style panel's session
+  Recent list (thread-local, cap 8, not persisted). No
+  write tool by design: applying a colour is
+  `set_node_style`; a push tool would fabricate history.
+  Honest limit: colours applied through MCP are not
+  recorded in the list — only the panel's handlers note
+  colours.
+
+Also in the Focused Wave: the layout prefs D squad found
+dead were wired for real — `timeline_collapsed` (new
+`shell_set_timeline`; the timeline card renders
+frame-chips-only while collapsed) and `sidebar_visible`
+(the left column's persisted mirror; `sidebar_pref_wired`
+now reports true) — and `set_weather`'s omitted
+amount/wind now read the panel's one preset table
+(`editor::eds_kind_preset`). Closing surface: **370
+tools** (registry 317 + io 9 + built-ins 44); palette
+parity unchanged (134 commands, all mapped — these gaps
+were never palette commands, so gate check 10's tables
+deliberately do not move).

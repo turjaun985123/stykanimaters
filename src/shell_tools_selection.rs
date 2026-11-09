@@ -40,6 +40,35 @@
 //!   `project.audio`. The clip-row press writes
 //!   `s.audio_panel.selected = Some(i)`
 //!   (`src/rune_sec/audio_panel.rs:1218`).
+//! * **Graph channel** — shell state: `State::graph_panel`
+//!   (`src/main.rs:178`; `GraphPanelState`,
+//!   `src/rune_sec/graph_panel.rs:564`) carries two fields
+//!   a channel-list row press writes together through
+//!   `select_channel` (`src/rune_sec/graph_panel.rs:871-886`):
+//!   `selected_channel: Option<usize>` (the row pick, an
+//!   index into `project.channels`) and `target` (kept in
+//!   sync with that channel's target). Every drawn-channel
+//!   consumer resolves through `effective_channel_index`
+//!   (`src/rune_sec/graph_panel.rs:717-727`) — the canvas,
+//!   the list's active row, the stats highlight, canvas
+//!   drags, and the panel/palette operations that act on
+//!   the drawn channel (delete, duplicate, shift,
+//!   fill-keys; palette shims at
+//!   `src/rune_sec/command_palette.rs:777,802`) — so the
+//!   pick steers real operations, and it is the ONLY state
+//!   that can name the second of two duplicate
+//!   `(figure, target)` channels: the core graph tools
+//!   resolve a target to its FIRST match
+//!   (`graph_keys::channel_index_of`, `src/graph_keys.rs:113`).
+//!   A row press on another figure's channel also switches
+//!   the selected figure (only when it differs, so a
+//!   same-figure pick preserves the node selection). The
+//!   handler below calls `select_channel` itself, so the
+//!   tool reproduces the press exactly — figure switch and
+//!   target sync included. Chip (target) presses clear the
+//!   pick (`src/rune_sec/graph_panel.rs:1811`); no tool
+//!   reproduces that gesture, as with the frame range
+//!   drag. Focused Wave (B1) — this closes census gap G6.
 //! * **Frame** — the playhead is core state:
 //!   `EditorCore::current` + `EditorCore::playhead`
 //!   (`src/editor.rs:33,63`), moved together by
@@ -106,14 +135,20 @@
 //!     frame_range_sel: &mut state.frame_ops.range_sel,
 //!     stroke_selected: &mut state.stroke_selected,
 //!     particle_selected: &mut state.particle_selected,
+//!     graph_panel: &mut state.graph_panel,
 //! };
 //! ```
 //!
-//!   (All four fields are `pub` at their definitions —
+//!   (Every target field is `pub` at its definition —
 //!   `sprites_panel.rs:173`, `main.rs:180`,
-//!   `audio_panel.rs:277`, `frame_ops.rs:152`.) For
+//!   `audio_panel.rs:277`, `frame_ops.rs:152`,
+//!   `main.rs:178` for `graph_panel`.) For
 //!   `shell_get_selection`, build `ShellSelectionView` the
-//!   same way with shared references.
+//!   same way with shared references. In
+//!   `shell_control::dispatch`, `shell_select_graph_channel`
+//!   joins the arm group that builds `ShellSelectionTargets`,
+//!   and the `shell_get_selection` view construction gains
+//!   `graph_panel: &state.graph_panel`.
 //! * These are shell tools: on the stdio server there is no
 //!   GUI, so dispatch must refuse them with the honest
 //!   no-shell error from the SHELL_CONTROL design rather
@@ -153,6 +188,13 @@ pub struct ShellSelectionTargets<'a> {
     /// `State::particle_selected` — index into
     /// `project.particles` (same addition).
     pub particle_selected: &'a mut Option<usize>,
+    /// `State::graph_panel` — the graph panel's whole
+    /// state struct: a channel row press writes two of
+    /// its fields together (`selected_channel` and
+    /// `target`, via `graph_panel::select_channel`), so
+    /// the handle is the struct, not one field
+    /// (Focused Wave, B1).
+    pub graph_panel: &'a mut crate::rune_sec::graph_panel::GraphPanelState,
 }
 
 /// Shared-reference twin of [`ShellSelectionTargets`] for
@@ -170,6 +212,9 @@ pub struct ShellSelectionView<'a> {
     pub stroke_selected: &'a Option<usize>,
     /// `State::particle_selected`.
     pub particle_selected: &'a Option<usize>,
+    /// `State::graph_panel` (see
+    /// [`ShellSelectionTargets::graph_panel`]).
+    pub graph_panel: &'a crate::rune_sec::graph_panel::GraphPanelState,
 }
 
 /// Required index argument, with the registry helpers'
@@ -474,6 +519,50 @@ pub fn tool_shell_select_clip(core: &mut EditorCore, args: &Value) -> Result<Val
     }))
 }
 
+// TOOL ENTRY SPEC: shell_select_graph_channel
+//   name: "shell_select_graph_channel"
+//   description: "Select a graph channel in the GUI — 'channel' (0-based, an index into the project's channels) becomes the graph panel's drawn channel, exactly as pressing that channel's row in the channel list does: the pick is recorded, the panel target syncs to the channel, and if the channel belongs to another figure that figure becomes selected. This is the selection the panel's and palette's drawn-channel operations (delete, duplicate, shift, fill keys) act on — and the only way to point them at the second of two duplicate channels for the same figure and target. Shell selection only — no undo step, never marks the project dirty. Live endpoint only."
+//   schema: obj_schema(json!({ "channel": { "type": "integer" } }), &["channel"])
+//   handler: crate::shell_tools_selection::tool_shell_select_graph_channel
+//     (takes &mut ShellSelectionTargets — dispatched by the
+//     shell-control drain, not registrable in all_tools()).
+//   MCP.md row:
+//   | `shell_select_graph_channel` | Select a graph channel in the GUI exactly as pressing its row in the graph panel's channel list (the drawn channel changes; another figure's channel selects that figure). The selection the drawn-channel operations act on. Shell selection only: no undo step, never marks dirty. Live endpoint only. | `channel` | — |
+/// Select a graph channel, exactly as a channel-list row
+/// press writes it: through the panel's own
+/// `select_channel` (`src/rune_sec/graph_panel.rs:871-886`),
+/// which records the pick in
+/// `GraphPanelState::selected_channel`, syncs
+/// `GraphPanelState::target`, and switches the selected
+/// figure first when the channel belongs to another one.
+/// No snapshot, no dirty mark — `select_channel` performs
+/// neither. The range refusal is this file's; the second
+/// refusal is `select_channel`'s own `false`: after the
+/// range check it can only mean the channel's figure
+/// names no figure in the project (stale hand-edited
+/// data), and nothing was written.
+pub fn tool_shell_select_graph_channel(
+    core: &mut EditorCore,
+    targets: &mut ShellSelectionTargets,
+    args: &Value,
+) -> Result<Value, String> {
+    let channel = req_index(args, "channel")?;
+    check_index(channel, core.project.channels.len(), "graph channel", "the project")?;
+    if !crate::rune_sec::graph_panel::select_channel(core, targets.graph_panel, channel) {
+        let figure = core.project.channels[channel].figure;
+        return Err(format!(
+            "graph channel {channel} cannot be selected: it belongs to figure {figure}, \
+             but the project has {} figure(s)",
+            core.project.figures.len()
+        ));
+    }
+    Ok(json!({
+        "graph_channel": channel,
+        "figure": core.selected_figure,
+        "graph_channel_count": core.project.channels.len(),
+    }))
+}
+
 // TOOL ENTRY SPEC: shell_get_selection
 //   name: "shell_get_selection"
 //   description: "Read back every GUI selection: the selected figure and node, the selected sprite, FX clip and audio clip, the playhead frame, and the timeline range selection if one is active, each with the live count it indexes into. Read-only."
@@ -489,6 +578,16 @@ pub fn tool_shell_select_clip(core: &mut EditorCore, args: &Value) -> Result<Val
 /// frame are always live values. Read-only: nothing is
 /// written, so no undo step and no dirty mark by
 /// construction.
+///
+/// The graph channel is reported as the pair the GUI
+/// itself keeps: the raw row pick (`graph_channel`,
+/// `null` when no row was picked) and the channel the
+/// panel actually draws and its operations act on
+/// (`graph_channel_drawn`, resolved by
+/// `graph_panel::effective_channel_index` — with no
+/// pick it falls back to the first channel matching
+/// the panel target, so it can be non-null while the
+/// pick is null).
 pub fn tool_shell_get_selection(
     core: &EditorCore,
     view: &ShellSelectionView,
@@ -503,6 +602,10 @@ pub fn tool_shell_get_selection(
         "stroke": view.stroke_selected,
         "particle": view.particle_selected,
         "clip": crate::rune_sec::clips_panel::clip_selection(),
+        "graph_channel": view.graph_panel.selected_channel,
+        "graph_channel_drawn": crate::rune_sec::graph_panel::effective_channel_index(
+            core, view.graph_panel
+        ),
         "frame": core.current,
         "playhead": core.playhead,
         "frame_range": view
@@ -515,6 +618,7 @@ pub fn tool_shell_get_selection(
         "stroke_count": core.project.strokes.len(),
         "particle_count": core.project.particles.len(),
         "clip_count": core.project.clips.len(),
+        "graph_channel_count": core.project.channels.len(),
         "frame_count": core.project.frames.len(),
     }))
 }
@@ -525,7 +629,7 @@ mod tests {
     use stykanimate_rs::model::{AudioClip, FxClipEntry, SpriteInstance};
     use stykanimate_rs::vfx::{ClipKind, ParticleClip};
 
-    /// The four shell-side selection slots as standalone
+    /// The shell-side selection slots as standalone
     /// locals, wired into a targets struct per call.
     struct Slots {
         sprite: Option<usize>,
@@ -534,6 +638,7 @@ mod tests {
         range: Option<(usize, usize)>,
         stroke: Option<usize>,
         particle: Option<usize>,
+        graph: crate::rune_sec::graph_panel::GraphPanelState,
     }
 
     impl Slots {
@@ -545,6 +650,7 @@ mod tests {
                 range: None,
                 stroke: None,
                 particle: None,
+                graph: crate::rune_sec::graph_panel::GraphPanelState::default(),
             }
         }
 
@@ -556,6 +662,7 @@ mod tests {
                 frame_range_sel: &mut self.range,
                 stroke_selected: &mut self.stroke,
                 particle_selected: &mut self.particle,
+                graph_panel: &mut self.graph,
             }
         }
 
@@ -567,7 +674,18 @@ mod tests {
                 frame_range_sel: &self.range,
                 stroke_selected: &self.stroke,
                 particle_selected: &self.particle,
+                graph_panel: &self.graph,
             }
+        }
+    }
+
+    /// Graph channel fixture: an empty RootX channel for
+    /// `figure` (the `Channel` shape, `src/graph.rs:102`).
+    fn channel(figure: usize) -> stykanimate_rs::graph::Channel {
+        stykanimate_rs::graph::Channel {
+            figure,
+            target: stykanimate_rs::graph::ChannelTarget::RootX,
+            keys: Vec::new(),
         }
     }
 
@@ -731,6 +849,101 @@ mod tests {
         tool_shell_select_audio_clip(&mut core, &mut slots.targets(), &json!({ "clip": 0 }))
             .expect("audio clip 0 now exists");
         assert_eq!(slots.audio, Some(0));
+    }
+
+    #[test]
+    fn select_graph_channel_refuses_an_empty_project_then_selects() {
+        let mut core = EditorCore::new();
+        let mut slots = Slots::new();
+        let err = tool_shell_select_graph_channel(
+            &mut core,
+            &mut slots.targets(),
+            &json!({ "channel": 0 }),
+        )
+        .expect_err("the demo project has no graph channels");
+        assert!(err.contains("has no graph channels to select"), "err: {err}");
+        core.project.channels.push(channel(0));
+        let undo_before = core.undo_depth();
+        let out = tool_shell_select_graph_channel(
+            &mut core,
+            &mut slots.targets(),
+            &json!({ "channel": 0 }),
+        )
+        .expect("channel 0 now exists");
+        assert_eq!(slots.graph.selected_channel, Some(0));
+        assert_eq!(
+            slots.graph.target,
+            Some(stykanimate_rs::graph::ChannelTarget::RootX),
+            "the row press keeps the panel target in sync"
+        );
+        assert_eq!(out["graph_channel"].as_u64(), Some(0));
+        assert_eq!(core.undo_depth(), undo_before, "selection spends no undo step");
+    }
+
+    #[test]
+    fn select_graph_channel_picks_the_second_duplicate() {
+        // The G6 point: two channels share (figure, target);
+        // target resolution can only ever name the first,
+        // the row pick names either — and the panel's
+        // drawn-channel operations follow the pick.
+        let mut core = EditorCore::new();
+        let mut slots = Slots::new();
+        core.project.channels.push(channel(0));
+        core.project.channels.push(channel(0));
+        tool_shell_select_graph_channel(
+            &mut core,
+            &mut slots.targets(),
+            &json!({ "channel": 1 }),
+        )
+        .expect("the duplicate channel exists");
+        assert_eq!(slots.graph.selected_channel, Some(1));
+        assert_eq!(
+            crate::rune_sec::graph_panel::effective_channel_index(&core, &slots.graph),
+            Some(1),
+            "the drawn channel is the picked duplicate"
+        );
+        let out = tool_shell_get_selection(&core, &slots.view(), &json!({}))
+            .expect("read-back cannot fail");
+        assert_eq!(out["graph_channel"].as_u64(), Some(1));
+        assert_eq!(out["graph_channel_drawn"].as_u64(), Some(1));
+        assert_eq!(out["graph_channel_count"].as_u64(), Some(2));
+    }
+
+    #[test]
+    fn select_graph_channel_same_figure_keeps_the_node_selection() {
+        // The row press switches figure only when the
+        // channel's figure differs, so a same-figure pick
+        // never clears the node selection.
+        let mut core = EditorCore::new();
+        let mut slots = Slots::new();
+        core.project.channels.push(channel(0));
+        core.selected_node = Some(0);
+        tool_shell_select_graph_channel(
+            &mut core,
+            &mut slots.targets(),
+            &json!({ "channel": 0 }),
+        )
+        .expect("channel 0 exists");
+        assert_eq!(core.selected_node, Some(0));
+    }
+
+    #[test]
+    fn select_graph_channel_refuses_a_channel_whose_figure_is_missing() {
+        // Stale hand-edited data: the channel exists but
+        // its figure does not — `select_channel`'s own
+        // refusal path, and nothing is written.
+        let mut core = EditorCore::new();
+        let mut slots = Slots::new();
+        core.project.channels.push(channel(99));
+        let err = tool_shell_select_graph_channel(
+            &mut core,
+            &mut slots.targets(),
+            &json!({ "channel": 0 }),
+        )
+        .expect_err("a channel on a missing figure cannot be selected");
+        assert!(err.contains("cannot be selected"), "err: {err}");
+        assert_eq!(slots.graph.selected_channel, None);
+        assert_eq!(slots.graph.target, None);
     }
 
     #[test]

@@ -5441,12 +5441,14 @@ fn eds_parse_weather_kind(name: &str) -> Result<Option<WeatherKind>, String> {
 /// The preset applied when a kind is enabled from off —
 /// the Scene panel's `kind_preset` values, duplicated
 /// here because the panel lives in the bin crate and a
-/// library handler cannot call it (the same reason
-/// `tool_set_weather` carries its own defaults; NOTE
-/// these panel presets differ from that tool's: rain
-/// wind 25 not 20, snow 90/12, fireflies 60/4, fog
-/// 60/0 — storm 140/30 agrees).
-fn eds_kind_preset(kind: WeatherKind) -> Weather {
+/// library handler cannot call it. This table is the
+/// ONE source for per-kind weather defaults: the MCP
+/// `set_weather` tool in `mcp_tools.rs` also takes its
+/// omitted amount/wind defaults from here (Focused
+/// Wave, C1 — that tool used to carry its own table,
+/// which had drifted: every non-storm kind defaulted
+/// to wind 20 and fireflies/fog to amount 90).
+pub(crate) fn eds_kind_preset(kind: WeatherKind) -> Weather {
     match kind {
         WeatherKind::Rain => Weather { kind, amount: 90.0, wind: 25.0 },
         WeatherKind::Snow => Weather { kind, amount: 90.0, wind: 12.0 },

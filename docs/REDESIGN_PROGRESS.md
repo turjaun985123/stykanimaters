@@ -1311,3 +1311,161 @@ writes beyond what the editor itself writes. The
 user chose "launch as planned" over "answer the
 decisions first", so all five stay exactly as they
 are until the user rules on them.
+
+### 6.10 Focused Wave — Wave 14's named remainders (2026-11-09)
+
+A focused follow-on wave, launched 2026-11-09
+(12:49 +06): the user tapped "Launch the focused
+wave" on the proposal prepared from Wave 14's
+close-out. It is deliberately **not** called
+Wave 15 — `docs/QA_WAVE15.md` names a different,
+older wave (the 2026-11-08 2.0 workspace-gating
+wave) — and it is deliberately small: **11 agents,
+five squads**, one owner per file, the session
+integrator wiring the shared files (roster:
+`~/workspace/focused-wave-roster.md`). The scope
+is exactly Wave 14's named remainders and nothing
+else — padding it to a round number would be
+dishonest about the agent count. The charter:
+**close the four remainders Wave 14 carried by
+name** — the figure-library entry rename (G5),
+the graph channel selection (G6) and
+recent-colours list (G7) shell-state decisions,
+the weather-defaults divergence, and the unwired
+layout prefs — with the same discipline as every
+wave: CI-only verification, the gate deriving its
+claims from source, and no fake controls.
+
+The squads: **A, G5 library rename** — the
+panel's file-backed rename logic
+(`library_panel.rs::rename_saved`) moves into a
+lib `EditorCore` op in a new `src/library_ops.rs`
+(the `pose_library_rename` pattern), preserving
+every refusal rule verbatim (built-in, empty
+stem, same name, name taken, target file exists,
+fs error) and the status-message voice; the panel
+becomes a thin wrapper; `tool_figure_library_rename`
+makes it a core MCP tool; an MCP-dispatch-only
+e2e suite pins the happy path and each refusal.
+**B, G6/G7 shell-state decisions** — graph
+channel selection is traced to its storage
+(`State::graph_panel.selected_channel`, shell
+state of the same class Wave 14 tooled for
+sprite/stroke/particle/clip) and lands as
+`shell_select_graph_channel` with
+`shell_get_selection` extended to report it; the
+recent-colours list is decided from the code —
+a read tool (`shell_get_recent_colours`) if the
+list is shell state, else a written session-only
+declaration for the gate's exclusion record; no
+fake writes either way (applying a colour is
+already `set_node_style`). **C, weather
+defaults** — `tool_set_weather`'s drifted
+defaults (storm 140/30, everything else 90/20)
+are replaced by the panel presets from ONE
+source (`eds_kind_preset`: rain 90/25, snow
+90/12, fireflies 60/4, fog 60/0, storm 140/30);
+tests pin each kind's default through the tool;
+the editor comment that recorded the divergence
+is updated to the new truth. **D, layout
+wiring** — `LayoutPrefs.timeline_collapsed` and
+`sidebar_visible` become real: startup applies
+them as it already applies dark / `live_mcp`,
+the UI toggles write them back, rendering reads
+the wired state; `shell_set_timeline` — excluded
+in Wave 14 as a fake control while its prefs
+wire was dead — lands as a real control, and
+`shell_get_layout`'s `timeline_collapse_wired` /
+`sidebar_pref_wired` flags flip to true, proven
+by Runtime tests that round-trip the prefs into
+the rendered timeline. **E, proof & close** —
+gate check 10's parity map gains the landed
+tools and the G5/G6/G7 dispositions leave the
+exclusion record only where a tool actually
+landed; `docs/MCP.md` rows for every new tool
+plus the weather and layout truths; the
+acceptance checklist (`docs/focused/ACCEPTANCE.md`);
+the headless live-MCP probe gains a
+`shell_set_timeline` step if D lands it; and
+this section.
+
+Entering counts, as recorded at the Wave 14
+close (§6.9) and re-stated here so the closing
+census has its baseline: MCP **366 tools** (313
+registry + 9 io + 44 built-ins, per
+`scripts/mcp_census.py`); **3,519 tests** (CI run
+**42571128696** on `8f5bb54`, GREEN — 1,432 lib +
+8 mcp_server bin + 1,985 bin + 94 integration;
+the Wave 14 docs close-out commit's CI run
+**42572280451** also GREEN); **940 unique keys**
+(827 static + 113 dynamic patterns), zero lost;
+palette **134**; scenes **29**; help **61**;
+layout facts **31**; icons **163**; i18n
+**99 × 28**; gate **10/10**
+(`scripts/phase_j_checks.py` on the closing
+tree); headless run **42571630518** (all 60
+probes 0, live-MCP probe PASS including the
+shell steps, overflow CLEAN on 32 trees). HEAD
+at launch: `4af7d85`, the Wave 14 close-out
+commit.
+
+**Delivered** — TODO-AT-CLOSE: the integrator
+fills this in at close-out with what actually
+landed, squad by squad, against the remits
+above — including §2's G7 outcome by name
+(read tool landed, or session-only declared)
+and any deviation from the remits, argued.
+
+**Verification** — TODO-AT-CLOSE: run evidence
+only (gate result, CI run id and test count,
+headless run id, live-MCP probe and overflow
+verdicts, snap list) goes here at close-out.
+
+**Closing census** — TODO-AT-CLOSE: MCP,
+palette, scenes, help, i18n, icons and keys as
+counted by the gate on the closing tree,
+against the entering baseline above.
+
+**Honest remainders** — TODO-AT-CLOSE: what
+this wave did not close, named at close-out.
+
+Standing user decisions this wave carries but
+does **not** settle — none of them is in any
+squad's remit, and they are recorded here so
+they are not lost: the **project-swap undo
+canonical behaviour** (load clears undo but not
+redo, `.piv` import clears both, New/open clear
+neither — a product call, not a fix);
+**white-on-accent contrast** (the white-text
+carrier is upstream rune `tok::accent` **#4392F7
+at 3.14:1** in both themes; darkening the
+accent-filled call sites to ~**#2072D5 (4.72:1)**
+fixes it, darkening the app token alone does
+not — the user's open decision since the Wave 10
+close-out); the **two "New project" results**
+that still disagree; the **C5 waveform call** (a
+deleted audio file's stale waveform vs a
+"(missing file)" badge); and **sound remains
+user-verified only** — no squad can listen to
+playback, and nothing in this wave touches
+playback audio.
+
+The wave works under six exclusions, stated
+plainly: **no project-swap undo/redo semantics
+change**, **no accent colour change**, **no
+stored-name-after-rename divergence fix**, **no
+waveform-badge change**, **no MCP-save
+`write_recovery` change**, and **no tool for G3
+`cycle_onion_frames`** — the legacy op writes a
+field the stage no longer reads, so a tool for
+it would be a fake control; the real depths
+remain `shell_set_onion_depths`. The Wave 14
+side-door guard stands unchanged: **shell
+control must not become a side door around any
+of them** — a new shell tool writes only the
+shell state or prefs its name claims, a theme or
+style tool changes no accent value, and no shell
+or parity tool may alter what an MCP save writes
+beyond what the editor itself writes. The five
+standing decisions stay exactly as they are
+until the user rules on them.

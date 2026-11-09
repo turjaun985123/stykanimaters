@@ -112,6 +112,7 @@ pub const SHELL_TOOL_NAMES: &[&str] = &[
     "shell_select_stroke",
     "shell_select_particle",
     "shell_select_clip",
+    "shell_select_graph_channel",
     "shell_get_selection",
     // shell_tools_settings — theme + the settings card.
     "shell_set_theme",
@@ -121,6 +122,9 @@ pub const SHELL_TOOL_NAMES: &[&str] = &[
     "shell_set_section",
     "shell_set_column_widths",
     "shell_get_layout",
+    "shell_set_timeline",
+    // shell_tools_style — the style inspector's shell state.
+    "shell_get_recent_colours",
     // shell_tools_file — menus, recents, project files.
     "shell_list_recents",
     "shell_open_recent",
@@ -350,7 +354,8 @@ fn dispatch(state: &mut State, name: &str, args: &Value) -> Result<Value, String
         | "shell_select_audio_clip"
         | "shell_select_frame"
         | "shell_select_stroke"
-        | "shell_select_particle" => {
+        | "shell_select_particle"
+        | "shell_select_graph_channel" => {
             let mut targets = sel::ShellSelectionTargets {
                 sprite_selected: &mut state.sprites_panel.selected,
                 fx_selected: &mut state.fx_selected,
@@ -358,6 +363,7 @@ fn dispatch(state: &mut State, name: &str, args: &Value) -> Result<Value, String
                 frame_range_sel: &mut state.frame_ops.range_sel,
                 stroke_selected: &mut state.stroke_selected,
                 particle_selected: &mut state.particle_selected,
+                graph_panel: &mut state.graph_panel,
             };
             match name {
                 "shell_select_sprite" => {
@@ -375,6 +381,9 @@ fn dispatch(state: &mut State, name: &str, args: &Value) -> Result<Value, String
                 "shell_select_stroke" => {
                     sel::tool_shell_select_stroke(&mut state.core, &mut targets, args)
                 }
+                "shell_select_graph_channel" => {
+                    sel::tool_shell_select_graph_channel(&mut state.core, &mut targets, args)
+                }
                 _ => sel::tool_shell_select_particle(&mut state.core, &mut targets, args),
             }
         }
@@ -386,6 +395,7 @@ fn dispatch(state: &mut State, name: &str, args: &Value) -> Result<Value, String
                 frame_range_sel: &state.frame_ops.range_sel,
                 stroke_selected: &state.stroke_selected,
                 particle_selected: &state.particle_selected,
+                graph_panel: &state.graph_panel,
             };
             sel::tool_shell_get_selection(&state.core, &view, args)
         }
@@ -399,6 +409,11 @@ fn dispatch(state: &mut State, name: &str, args: &Value) -> Result<Value, String
             crate::shell_tools_layout::tool_shell_set_column_widths(state, args)
         }
         "shell_get_layout" => crate::shell_tools_layout::tool_shell_get_layout(state, args),
+        "shell_set_timeline" => crate::shell_tools_layout::tool_shell_set_timeline(state, args),
+        // -- shell_tools_style --------------------------------
+        "shell_get_recent_colours" => {
+            crate::shell_tools_style::tool_shell_get_recent_colours(state, args)
+        }
         // -- shell_tools_file ---------------------------------
         "shell_list_recents" => crate::shell_tools_file::tool_shell_list_recents(state, args),
         "shell_open_recent" => crate::shell_tools_file::tool_shell_open_recent(state, args),

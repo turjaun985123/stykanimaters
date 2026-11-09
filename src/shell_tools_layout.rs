@@ -49,30 +49,35 @@
 //!   reports the widths read back after the save, so a
 //!   clamped request truthfully reports the clamped
 //!   value.
-//! * **Timeline collapse — EXCLUDED, with the reason.**
-//!   `LayoutPrefs.timeline_collapsed` exists and
-//!   round-trips (shell.rs:409 + the salvage reader),
-//!   but nothing in the running shell reads it: there is
-//!   no `State` field, no toggle control, and the
-//!   timeline card in `main.rs`'s view renders
-//!   unconditionally. A `shell_set_timeline_collapsed`
-//!   tool could only write a prefs field the GUI
-//!   ignores — a fake control — so it is NOT provided.
-//!   `shell_get_layout` reports the prefs value with
-//!   `timeline_collapse_wired: false` so the gap is
-//!   visible to clients. Wiring it for real is a shell
-//!   change (a `State` field seeded from the prefs in
-//!   `init`, the timeline card gated on it in the view,
-//!   a toggle that load-modify-saves the prefs) and
-//!   belongs to the integrator / a future wave, not to
-//!   this handler file. `LayoutPrefs.sidebar_visible`
-//!   is in the same state (the live shell uses the
-//!   ephemeral `State.show_left` / `show_right`,
-//!   `src/main.rs:191-192`, View-menu toggles) and is
-//!   reported the same way, as `sidebar_visible_pref`
-//!   with `sidebar_pref_wired: false`; the live column
-//!   visibility itself is `show_left` / `show_right` in
-//!   the same reply.
+//! * **Timeline collapse — WIRED (Focused Wave, D).**
+//!   In Wave 14 this tool was excluded: the pref
+//!   round-tripped but nothing in the running shell read
+//!   it, so a setter could only have been a fake control.
+//!   The shell now wires it for real (D1): the flag
+//!   lives in the timeline's own sub-state,
+//!   `State.frame_ops.timeline_collapsed`, seeded from
+//!   `LayoutPrefs.timeline_collapsed` in `init`, and
+//!   the timeline builder gates the card on it. (The
+//!   Rune shell has no GUI collapse toggle — the GPUI
+//!   one was lost in the rewrite — so the writers are
+//!   the startup pref and this tool.)
+//!   `shell_set_timeline` below drives that one field —
+//!   never a private copy — and persists it through the
+//!   layout prefs' load-modify-save, the write the
+//!   workspace switch uses, so a restart restores it.
+//!   `shell_get_layout` reports the live field with
+//!   `timeline_collapse_wired: true`.
+//! * **Sidebar pref — WIRED (Focused Wave, D1).**
+//!   `LayoutPrefs.sidebar_visible` is the persisted
+//!   mirror of the LEFT column only (`State.show_left`,
+//!   per the pref's own doc in `src/shell.rs`): `init`
+//!   seeds `show_left` from it, and poll's layout mirror
+//!   writes View-menu / palette flips back. The right
+//!   column (`show_right`) has no pref in any era and
+//!   stays session-only. `shell_get_layout` reports
+//!   `sidebar_pref_wired: true`; the live visibility
+//!   itself is `show_left` / `show_right` in the same
+//!   reply.
 //!
 //! ---- The shell-control seam (as landed) --------------
 //!
@@ -104,13 +109,21 @@
 //!   220..=420, right 260..=480), then reply from a
 //!   FRESH `load_layout()`:
 //!   `{"left": w, "right": w}` — the read-back widths.
+//! * `shell_set_timeline`: write the shell's
+//!   `timeline_collapsed` field (the field the view
+//!   gates the timeline card on and the UI toggle
+//!   writes), persist it by load-modify-save of the
+//!   layout prefs, and reply with the live value plus
+//!   the persisted read-back:
+//!   `{"collapsed": b, "timeline_collapsed": b}`.
 //! * `shell_get_layout`: live state + one
 //!   `load_layout()`: the workspace, its sections in
 //!   table order (`collapsed` the field's value for
 //!   Figures/Library, `null` for the rest), the hidden
 //!   sections, `show_left` / `show_right`, the column
-//!   widths, and the two unwired prefs with their
-//!   `wired: false` flags.
+//!   widths, the wired timeline state with
+//!   `timeline_collapse_wired: true`, and the wired
+//!   sidebar pref with `sidebar_pref_wired: true`.
 
 use serde_json::{json, Value};
 
@@ -286,7 +299,7 @@ fn lay_check_collapsible(name: &str) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------
-// Handlers. All three ignore the registry's `core`
+// Handlers. All four ignore the registry's `core`
 // parameter: shell state is not project state (see the
 // module doc). Each returns the applier's reply
 // verbatim once its arguments validate.
@@ -412,10 +425,66 @@ pub fn tool_shell_set_column_widths(
     Ok(json!({ "left": back.col_left_w, "right": back.col_right_w }))
 }
 
+/// Collapse or expand the timeline — the timeline
+/// header's collapse toggle, by target state. This
+/// tool was excluded in Wave 14, when the pref it would
+/// have written was read by nothing; the Focused Wave
+/// wired the pref into the shell (see the module doc),
+/// so the tool now drives the real state.
+//
+// TOOL ENTRY SPEC: for the integrator's registry splice
+// in `mcp_tools::tools()`, in the shell-control group,
+// after `shell_set_column_widths`:
+//
+//   Tool {
+//       name: "shell_set_timeline",
+//       description: "Collapse ('collapsed': true) or expand the timeline in the live editor — the timeline header's collapse toggle. The write lands on the shell's own timeline_collapsed state, so the timeline card hides or shows immediately, and persists through the layout prefs (load-modify-save, as a workspace switch persists), so a restart restores it; the reply echoes the live value and the persisted read-back. No undo step. Live endpoint only.",
+//       schema: obj_schema(
+//           json!({
+//               "collapsed": { "type": "boolean" }
+//           }),
+//           &["collapsed"],
+//       ),
+//       handler: crate::shell_tools_layout::tool_shell_set_timeline,
+//   }
+//
+// MCP.md ROW SPEC: for the shell-control table, after
+// the `shell_set_column_widths` row:
+//
+//   | `shell_set_timeline` | Collapse or expand the timeline (the header collapse toggle). Writes the shell's live `timeline_collapsed` state and persists it via the layout prefs; the reply echoes the live value and the persisted read-back. No undo step. Live endpoint only. | `collapsed` | — |
+/// Parse + validate a `shell_set_timeline` call (the
+/// pure half of the handler — see
+/// [`parse_set_section`]).
+fn parse_set_timeline(args: &Value) -> Result<bool, String> {
+    lay_req_bool(args, "collapsed")
+}
+
+pub fn tool_shell_set_timeline(s: &mut State, args: &Value) -> Result<Value, String> {
+    let collapsed = parse_set_timeline(args)?;
+    // The one wired field: the timeline builder gates
+    // the card on it — the tool writes the same field,
+    // never a private copy.
+    s.frame_ops.timeline_collapsed = collapsed;
+    // Persist through the layout prefs' load-modify-save
+    // — the workspace switch's own write — so a restart
+    // restores the choice (`init` seeds the field from
+    // the prefs). The reply reads the persisted value
+    // back from a fresh load, like the column widths do.
+    let mut prefs = stykanimate_rs::shell::load_layout();
+    prefs.timeline_collapsed = collapsed;
+    stykanimate_rs::shell::save_layout(&prefs);
+    let back = stykanimate_rs::shell::load_layout();
+    Ok(json!({
+        "collapsed": s.frame_ops.timeline_collapsed,
+        "timeline_collapsed": back.timeline_collapsed,
+    }))
+}
+
 /// Read the live layout back: workspace, the visible
 /// sections with their collapse state, the column
-/// visibility and widths, and the two prefs fields the
-/// GUI does not currently wire (reported as such).
+/// visibility and widths, the wired timeline state,
+/// and the sidebar pref the GUI does not wire yet
+/// (reported as such).
 //
 // TOOL ENTRY SPEC: for the integrator's registry splice
 // in `mcp_tools::tools()`, in the shell-control group,
@@ -423,7 +492,7 @@ pub fn tool_shell_set_column_widths(
 //
 //   Tool {
 //       name: "shell_get_layout",
-//       description: "Read the live editor layout: the active workspace, its sections in panel order (each with 'collapsible' and, for Figures/Library, 'collapsed'; the rest report null), the sections the workspace hides, the left/right column visibility (show_left / show_right) and widths, and the persisted timeline_collapsed / sidebar_visible prefs — each with a 'wired' flag, currently false: those prefs round-trip but the shell does not read them yet. Read-only. Live endpoint only.",
+//       description: "Read the live editor layout: the active workspace, its sections in panel order (each with 'collapsible' and, for Figures/Library, 'collapsed'; the rest report null), the sections the workspace hides, the left/right column visibility (show_left / show_right) and widths, the timeline_collapsed state (with 'timeline_collapse_wired': true — the shell reads and writes it, see shell_set_timeline), and the persisted sidebar_visible pref (with 'sidebar_pref_wired': true — it is the left column's persisted mirror: show_left seeds from it and flips persist back; live column visibility is show_left / show_right). Read-only. Live endpoint only.",
 //       schema: obj_schema(json!({}), &[]),
 //       handler: crate::shell_tools_layout::tool_shell_get_layout,
 //   }
@@ -431,7 +500,7 @@ pub fn tool_shell_set_column_widths(
 // MCP.md ROW SPEC: for the shell-control table, after
 // the `shell_set_column_widths` row:
 //
-//   | `shell_get_layout` | Read the live layout: active workspace, visible sections + collapse state, hidden sections, column visibility and widths, and the (currently unwired) timeline/sidebar prefs with their `wired` flags. Read-only. Live endpoint only. | — | — |
+//   | `shell_get_layout` | Read the live layout: active workspace, visible sections + collapse state, hidden sections, column visibility and widths, the wired `timeline_collapsed` state (`timeline_collapse_wired: true`) and the wired `sidebar_visible` pref (`sidebar_pref_wired: true` — the left column's persisted mirror). Read-only. Live endpoint only. | — | — |
 pub fn tool_shell_get_layout(s: &State, _args: &Value) -> Result<Value, String> {
     let prefs = stykanimate_rs::shell::load_layout();
     let ws_name = s.workspace.name();
@@ -468,14 +537,18 @@ pub fn tool_shell_get_layout(s: &State, _args: &Value) -> Result<Value, String> 
         "show_right": s.show_right,
         "col_left_w": prefs.col_left_w,
         "col_right_w": prefs.col_right_w,
-        // Two prefs fields round-trip through the layout
-        // file but no shell code reads them yet — the
-        // honest report carries that as a flag, not a
-        // fake success (see the module doc).
-        "timeline_collapsed": prefs.timeline_collapsed,
-        "timeline_collapse_wired": false,
+        // Both prefs are wired (Focused Wave, D1):
+        // the timeline state is the live shell field
+        // (seeded from the prefs at startup, written
+        // back on change), and the sidebar pref is the
+        // persisted mirror of `show_left` — seeded from
+        // it in `init`, written back by poll's layout
+        // mirror whenever the field diverges. The flags
+        // say so (see the module doc).
+        "timeline_collapsed": s.frame_ops.timeline_collapsed,
+        "timeline_collapse_wired": true,
         "sidebar_visible": prefs.sidebar_visible,
-        "sidebar_pref_wired": false,
+        "sidebar_pref_wired": true,
     }))
 }
 
@@ -600,5 +673,67 @@ mod tests {
         let err = parse_set_column_widths(&json!({ "right": "wide" }))
             .expect_err("a string width must be refused");
         assert!(err.contains("must be a number"), "{err}");
+    }
+
+    #[test]
+    fn set_timeline_validates_its_arguments() {
+        let err = parse_set_timeline(&json!({}))
+            .expect_err("a missing collapsed flag must be refused");
+        assert!(
+            err.contains("missing required argument 'collapsed'"),
+            "{err}"
+        );
+        let err = parse_set_timeline(&json!({ "collapsed": "yes" }))
+            .expect_err("a non-boolean collapsed flag must be refused");
+        assert!(err.contains("must be a boolean"), "{err}");
+        assert_eq!(parse_set_timeline(&json!({ "collapsed": true })), Ok(true));
+        assert_eq!(parse_set_timeline(&json!({ "collapsed": false })), Ok(false));
+    }
+
+    #[test]
+    fn set_timeline_flips_the_state_and_get_layout_reports_it_wired() {
+        // Handler-level, on a real shell `State` (the
+        // `shell_tools_file` tests' `crate::init()`
+        // precedent). The handler persists through the
+        // shared layout prefs, so the test restores the
+        // recorded prefs value before it leaves.
+        let mut s = crate::init();
+        let original = stykanimate_rs::shell::load_layout().timeline_collapsed;
+        let target = !original;
+        let out = tool_shell_set_timeline(&mut s, &json!({ "collapsed": target }))
+            .expect("the timeline set succeeds");
+        assert_eq!(s.frame_ops.timeline_collapsed, target, "the live field flipped");
+        assert_eq!(out["collapsed"], json!(target), "the reply echoes the live value");
+        assert_eq!(
+            out["timeline_collapsed"],
+            json!(target),
+            "the reply's persisted read-back agrees"
+        );
+        // The prefs round-trip: a fresh load sees the
+        // written value — this is what a restart's
+        // `init` would seed the field from.
+        assert_eq!(
+            stykanimate_rs::shell::load_layout().timeline_collapsed,
+            target,
+            "the choice persisted to the layout prefs"
+        );
+        let layout = tool_shell_get_layout(&s, &json!({}))
+            .expect("the layout read succeeds");
+        assert_eq!(layout["timeline_collapsed"], json!(target));
+        assert_eq!(
+            layout["timeline_collapse_wired"],
+            json!(true),
+            "the timeline pref is wired now"
+        );
+        assert_eq!(
+            layout["sidebar_pref_wired"],
+            json!(true),
+            "the sidebar pref is wired to the left column (D1)"
+        );
+        // Restore the prefs (and the field) for the next
+        // test/process that reads them.
+        tool_shell_set_timeline(&mut s, &json!({ "collapsed": original }))
+            .expect("the restore succeeds");
+        assert_eq!(s.frame_ops.timeline_collapsed, original);
     }
 }

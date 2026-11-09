@@ -19,16 +19,16 @@ shell; 31 of them take effect only through live control (on
 stdio they answer an error result), and the 4 transport tools
 execute on stdio against its own core.
 
-## Tool count — 366, and how to check it
+## Tool count — 370, and how to check it
 
-At the time of writing the registry holds **366 tools**:
+At the time of writing the registry holds **370 tools**:
 
 | Source | Count | Where they are defined |
 |---|---|---|
 | Built-ins | 44 | `fn tool_*` constructors assembled in `all_tools()`, `src/mcp.rs` |
-| Editing registry | 313 | `pub fn tools()`, `src/mcp_tools.rs` |
+| Editing registry | 317 | `pub fn tools()`, `src/mcp_tools.rs` |
 | File IO / export | 9 | `pub fn tools()`, `src/mcp_io.rs` |
-| **Total** | **366** | `all_tools()` = built-ins, then `mcp_tools`, then `mcp_io` |
+| **Total** | **370** | `all_tools()` = built-ins, then `mcp_tools`, then `mcp_io` |
 
 Runtime cross-check: call the `server_info` tool — it returns
 `all_tools().len()` — or count the entries of a `tools/list`
@@ -393,7 +393,7 @@ true` with the reason as text and leaves the session usable.
 | `goto_next_key` | Move the playhead to the next key strictly after the current frame (the transport's Next key button, pb-next-key): the keys are the sorted union of the camera keys and every graph channel's keys — not any one figure's pose keys (for those, goto_next_keyframe). Like the button, the jump only moves the playhead — playback state is untouched. An error when no key follows (the button renders inert in that state). | — | — |
 | `goto_prev_key` | Move the playhead to the previous key strictly before the current frame (the transport's Prev key button, pb-prev-key): the keys are the sorted union of the camera keys and every graph channel's keys — not any one figure's pose keys (for those, goto_prev_keyframe). Like the button, the jump only moves the playhead — playback state is untouched. An error when no key precedes (the button renders inert in that state). | — | — |
 
-### Editing registry (313, `src/mcp_tools.rs`)
+### Editing registry (317, `src/mcp_tools.rs`)
 
 | Tool | Purpose | Required | Optional |
 |---|---|---|---|
@@ -440,7 +440,7 @@ true` with the reason as text and leaves the session usable.
 | `particle_duplicate_event` | Duplicate a particle event (one of the project's timed particle bursts, listed in the stats' particle count): the copy is INSERTED immediately after the original (at index + 1, not appended to the end), events after it shift up one index, and the copy's index is returned. One undo step. | `index` | — |
 | `particle_set_kind` | Set a particle event's kind by name: burst, sparkle or smoke (case-insensitive; the shapes the Particles panel cycles). One undo step. | `index`, `kind` | — |
 | `particle_set_color` | Set a particle event's colour (0xRRGGBB) — the tint every particle of the event is drawn in. One undo step. | `index`, `color` | — |
-| `set_weather` | Set continuous weather over the whole timeline, or turn it off. | `kind` | `amount`, `wind` |
+| `set_weather` | Set continuous weather over the whole timeline, or turn it off. Omitted amount/wind take the Scene panel's per-kind preset — one table both surfaces read: rain 90/25, snow 90/12, fireflies 60/4, fog 60/0, storm 140/30. | `kind` | `amount`, `wind` |
 | `set_weather_kind` | Set the scene weather kind (the Scene panel's kind picker): switching kinds keeps the tuned amount/wind; enabling from off applies the panel's per-kind preset. A project-settings tweak — not an undo step; a real change marks the project dirty. | `kind` | — |
 | `cycle_weather` | Cycle the scene weather (the Scene group's Cycle weather button): off → rain → snow → fireflies → off, each kind's preset applied wholesale; fog and storm are not in the cycle (cycling from either turns weather off). Not an undo step; a real change marks the project dirty. | — | — |
 | `set_weather_amount` | Set the weather's particle amount absolutely (the Scene panel's Amount stepper/slider), clamped to 0..=200. Errors when the weather is off. Not an undo step; a real change marks the project dirty. | `amount` | — |
@@ -632,6 +632,7 @@ true` with the reason as text and leaves the session usable.
 | `figure_library_save` | Save a figure's definition to the 2D figure library under the figure's name (the library panel's Save). 'figure' defaults to the selected figure and selects it first. A file write, not an undo step. | — | `figure` |
 | `figure_library_insert` | Insert a figure from the 2D figure library into the project (the library panel's Insert). Choose the entry with 'index' or 'name'; with neither, the session's current library index is used. The inserted figure gets a palette colour (the library stores the definition — including its node colours and styles — not the instance colour) and becomes the selection. One undo step. | — | `index`, `name` |
 | `figure_library_cycle` | Cycle the 2D figure library selection to the next entry (the library panel's cycle). Selection only — inserts nothing. Errors when the library is empty. | — | — |
+| `figure_library_rename` | Rename a saved figure-library entry (the library panel's per-row Rename): the backing file in ./library is renamed first, then the entry takes the new name. 'new_name' is sanitised to a file stem (trimmed; spaces and path separators become dashes; lowercased). Refuses built-in entries, an empty sanitised name, a name another entry already owns, and a target file that already exists in ./library — including one no loaded entry owns; a failed file rename is reported and the entry keeps its old name. Renaming to the entry's own name succeeds with renamed=false. A file operation, not an undo step. | `index`, `new_name` | — |
 | `fig3_set_camera` | — / `distance`, `target`, `fov_deg` | `yaw`, `pitch`, `distance`, `target`, `fov_deg` | ✗ → §4 |
 | `fig3_set_rotation` | Set a 3D joint's Euler rotation absolutely, in degrees: 'joint' (defaults to the selected joint) and any of 'x', 'y', 'z'; omitted axes keep their values. At least one axis is required. The absolute complement of fig3_rotate. No undo step (session pose). Requires an active 3D session. | — | `joint`, `x`, `y`, `z` |
 | `fig3_set_root` | Set the 3D pose's root position from 'position' [x, y, z] — the value fig3_get reports as pose_root; bakes project from the root. No undo step (session pose). Requires an active 3D session. | `position` | — |
@@ -675,7 +676,7 @@ true` with the reason as text and leaves the session usable.
 | `sprite_delete_key` | Delete sprite 'sprite''s key at 'frame' (0-based, a whole frame number; clamped to the project's last frame). A frame with no key is refused before any change, so no undo step is spent. Deleting the last remaining key is allowed — the instance then draws nothing. One undo step on success. | `sprite`, `frame` | — |
 | `sprite_sample` | Read sprite 'sprite''s sampled transform at 'frame' (fractional frames allowed): the interpolated key between its authored keys, clamped outside the keyed range — the transform the stage and exports draw. Read-only; no undo step. | `sprite`, `frame` | — |
 
-### Shell control — live endpoint only (35, `src/shell_tools_*.rs`, registered in `src/mcp_tools.rs`)
+### Shell control — live endpoint only (38, `src/shell_tools_*.rs`, registered in `src/mcp_tools.rs`)
 
 The shell family drives the running editor's window itself — see "Shell control — driving the window itself" below for how it works and the security posture. Thirty-one of the thirty-five are live-only in effect: registered on both transports, but on stdio each answers an `isError` result saying it needs the live editor. The four transport tools are the exception — playback state is editor-core state, so they execute on stdio too, against the stdio server's own core (nothing advances it there).
 
@@ -698,17 +699,19 @@ The shell family drives the running editor's window itself — see "Shell contro
 | `shell_select_fx_clip` | Select an FX clip in the GUI exactly as pressing its FX-lane bar or panel row. Shell selection only: no undo step, never marks dirty. | `clip` | — |
 | `shell_select_audio_clip` | Select an audio clip in the GUI exactly as pressing its Audio-panel row (the operations toolbar's target). Shell selection only: no undo step, never marks dirty. | `clip` | — |
 | `shell_select_frame` | Move the GUI playhead to a frame exactly as a plain timeline-chip click (any range selection is cleared). Shell selection only: no undo step, never marks dirty. | `frame` | — |
-| `shell_get_selection` | Read back every GUI selection (figure, node, sprite, FX clip, audio clip, playhead frame, timeline range) with the live counts. Read-only. | — | — |
+| `shell_get_selection` | Read back every GUI selection (figure, node, sprite, FX clip, audio clip, playhead frame, timeline range, graph channel — both the row pick and the channel actually drawn) with the live counts. Read-only. | — | — |
 | `shell_set_theme` | Set the editor theme outright ('dark' or 'light') — the Settings card's Dark/Light buttons as a tool. Applies immediately and persists via the shell's layout-prefs write-back; accent colours untouched. Live endpoint only. No undo step (shell state). | `theme` | — |
 | `shell_get_settings` | Read every user-facing setting the Settings card exposes, from its real home: theme, live-MCP (on/off, endpoint, persisted preference, pending stop, last start outcome), language, default easing, guides flags, loop/speed, workspaces, stage size, autosave status. Read-only. Live endpoint only. | — | — |
 | `shell_set_setting` | Set one Settings-card boolean/enum setting by name (theme, live_mcp, language, default_easing, guides, camera_frame, safe_frames, loop_playback, playback_speed). Persists exactly as the card persists it; session-only flags say so. All immediate, no restart; live_mcp=false is applied just after the reply is delivered. Non-settable names are refused with the reason. Live endpoint only. No undo step. | `setting`, `value` | — |
 | `shell_set_section` | Collapse or expand a panel section (the header Hide/Show control). Only Figures and Library are collapsible; a section outside the active workspace is refused. No undo step; session-only. Live endpoint only. | `section`, `collapsed` | — |
 | `shell_set_column_widths` | Set the side-column widths (the splitters, by target). At least one of `left` / `right` is required; clamped to 220–420 / 260–480 and persisted via the layout prefs; the reply reports the read-back widths. No undo step. Live endpoint only. | — | `left`, `right` |
-| `shell_get_layout` | Read the live layout: active workspace, visible sections + collapse state, hidden sections, column visibility and widths, and the (currently unwired) timeline/sidebar prefs with their `wired` flags. Read-only. Live endpoint only. | — | — |
+| `shell_get_layout` | Read the live layout: active workspace, visible sections + collapse state, hidden sections, column visibility and widths, the wired `timeline_collapsed` state (`timeline_collapse_wired: true` — see `shell_set_timeline`) and the wired `sidebar_visible` pref (`sidebar_pref_wired: true` — the left column's persisted mirror: `show_left` seeds from it and flips persist back; the right column has no pref). Read-only. Live endpoint only. | — | — |
+| `shell_set_timeline` | Collapse or expand the timeline in the live editor. The write lands on the shell's own timeline state, so the timeline card switches between its full form and its frame-chips-only form at once, and persists through the layout prefs so a restart restores it; the reply echoes the live value and the persisted read-back. No undo step. Live endpoint only. | `collapsed` | — |
 | `shell_set_onion_depths` | Set the onion-skin ghost depths in the live editor — 'prev' and/or 'next' (0-3 each), the Onion section's steppers by target value. Shell view state: no undo step, never marks the project dirty, session-only exactly like the steppers. Live endpoint only. | — | `prev`, `next` |
 | `shell_select_stroke` | Select a stroke in the GUI — 'stroke' (0-based, an index into the project's stroke list, the index delete_stroke consumes) becomes the shell's stroke selection, the one the Edit menu's Delete stroke acts on. Shell selection only: no undo step, never marks dirty. Live endpoint only. | `stroke` | — |
 | `shell_select_particle` | Select a particle event in the GUI (the Edit menu's selection). Shell selection only: no undo step, never marks dirty. Live endpoint only. | `particle` | — |
 | `shell_select_clip` | Select a movieclip in the GUI — 'clip' (0-based, an index into the project's clips) becomes the clips panel's selection. Shell selection only: no undo step, never marks dirty. Live endpoint only. | `clip` | — |
+| `shell_select_graph_channel` | Select a graph channel in the GUI exactly as pressing its row in the graph panel's channel list (the drawn channel changes; another figure's channel selects that figure). The selection the drawn-channel operations act on. Shell selection only: no undo step, never marks dirty. Live endpoint only. | `channel` | — |
 | `shell_list_recents` | List the File menu's Open recent entries (at most five, most recent first): index, display name, resolved project file or `missing: true` when the file is gone. Read-only. Live endpoint only. | — | — |
 | `shell_open_recent` | Open a recent project by its File menu index (0-based; see `shell_list_recents`): the menu's own press — scan resolution, the shell open path and its follow-ups (stale-solo guard, name re-sync, stroke selection cleared). Unresolved entries and out-of-range indices are refused, quoting the value. Replaces the session without a discard confirm, like the menu. Not an undo step. Live endpoint only. | `index` | — |
 | `shell_reload_project` | Reload the current project from its saved file (the Project section's Reload from disk), discarding unsaved changes. Two-press gate: on a dirty session the first call arms (`armed: true`) and the second runs. Refused when the project has no saved file. Not an undo step. Live endpoint only. | — | — |
@@ -716,6 +719,7 @@ The shell family drives the running editor's window itself — see "Shell contro
 | `shell_duplicate_project_file` | Duplicate any saved project file from the Home library, addressed by its stored name: the copy lands beside the source as `<stem>-copy.json` (incrementing if taken), as the row's Duplicate button does it. The session is untouched. An unknown name is refused, quoting it. Not an undo step. Live endpoint only. | `name` | — |
 | `shell_delete_project_file` | Delete any saved project file from the Home library, addressed by its stored name. Two calls over the panel's own arm state: the first arms (`armed: true`, no file touched), the second with `confirm: true` deletes — only while the arm for that name stands. Shell-owned files are refused by the shell's guard. Deleting the open project's file leaves the session's copy untouched. Not an undo step. Live endpoint only. | `name` | `confirm` |
 | `shell_set_sidebar` | Show or hide a side column — the View menu's Figures sidebar (`side: "left"`) and Inspector sidebar (`side: "right"`) items, flipping the same shell fields. Contents and widths untouched (see `shell_get_layout` / `shell_set_column_widths`). An unknown side is refused, quoting it. Session state only: no undo step. Live endpoint only. | `side`, `visible` | — |
+| `shell_get_recent_colours` | Read the style inspector's recent-colours list, most recent first: each colour as {hex: "#RRGGBB", value: 0xRRGGBB}, plus `count` and the list's `cap` (8). The list is the panel's own session history — colours applied through the style panel, deduplicated and fronted on re-use; it is not persisted, and there is deliberately no write side (applying a colour is `set_node_style`). An empty list is a successful `count: 0` reply, not an error. Read-only. Live endpoint only. | — | — |
 
 ### File IO and export (9, `src/mcp_io.rs`)
 

@@ -22,6 +22,7 @@ pub mod graph_panel;
 pub mod i18n;
 pub mod icon_path;
 pub mod layers;
+pub mod library_ops;
 pub mod mcp;
 pub mod mcp_io;
 pub mod mcp_tools;
