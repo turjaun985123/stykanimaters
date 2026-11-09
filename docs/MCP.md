@@ -15,16 +15,16 @@ Both transports route through the same JSON-RPC router
 the same registry (`all_tools()` in `src/mcp.rs`). A tool behaves
 identically on both; only the session it edits differs.
 
-## Tool count — 277, and how to check it
+## Tool count — 283, and how to check it
 
-At the time of writing the registry holds **277 tools**:
+At the time of writing the registry holds **283 tools**:
 
 | Source | Count | Where they are defined |
 |---|---|---|
 | Built-ins | 44 | `fn tool_*` constructors assembled in `all_tools()`, `src/mcp.rs` |
-| Editing registry | 224 | `pub fn tools()`, `src/mcp_tools.rs` |
+| Editing registry | 230 | `pub fn tools()`, `src/mcp_tools.rs` |
 | File IO / export | 9 | `pub fn tools()`, `src/mcp_io.rs` |
-| **Total** | **277** | `all_tools()` = built-ins, then `mcp_tools`, then `mcp_io` |
+| **Total** | **283** | `all_tools()` = built-ins, then `mcp_tools`, then `mcp_io` |
 
 Runtime cross-check: call the `server_info` tool — it returns
 `all_tools().len()` — or count the entries of a `tools/list`
@@ -221,16 +221,16 @@ true` with the reason as text and leaves the session usable.
 | `set_frame` | Move the playhead to a 0-based frame index of the current project. | `frame` | — |
 | `duplicate_frame` | Duplicate the current frame in place (the timeline's Duplicate button): the copy becomes the current frame. One undo step. | — | — |
 | `swap_frames` | Swap the CONTENT of two frames (0-based a and b): poses, durations and easings trade places and frame-pinned data (camera keys, particles, strokes, audio/FX starts, graph keys) follows its frame. Indices, playhead and loop range stay put. One undo step. | `a`, `b` | — |
-| `copy_frame` | Copy the current frame to the single-frame clipboard (the Edit menu's Copy frame). Not an undoable edit. | — | — |
+| `copy_frame` | Copy the current frame to the single-frame clipboard (the Edit menu's Copy frame). Not an undoable edit. Errors when the project has no frames. | — | — |
 | `paste_frame` | Paste the single-frame clipboard (see copy_frame) as a new frame after the current one, which becomes current. One undo step. Errors when nothing was copied or the copied frame's figure count no longer matches. | — | — |
 | `shift_frames` | Move a block of frames to a new position in the timeline (frame-range ops): 'count' frames starting at 'from' shift by 'delta' slots (negative moves earlier). One undo step. | `from`, `count`, `delta` | — |
 | `reverse_range` | Reverse a block of frames in place (frame-range ops): 'count' frames starting at 'from' (clamped to the timeline end) play backwards. One undo step. | `from`, `count` | — |
 | `delete_range` | Delete a block of frames (frame-range ops): 'count' frames starting at 'from' (clamped to the timeline end). Refuses to delete every frame — a project always keeps at least one. One undo step. | `from`, `count` | — |
 | `copy_range` | Copy a block of frames into the range clipboard (frame-range ops): 'count' frames starting at 'from' (clamped to the timeline end), ready for paste_range. Not an undoable edit. | `from`, `count` | — |
 | `paste_range` | Insert the range clipboard's frames (see copy_range) at 0-based index 'at' (clamped to the timeline, so a large 'at' appends), shifting later frames. One undo step. Errors when the range clipboard is empty. | `at` | — |
-| `set_loop_range` | Set the inclusive playback loop range [start, end] (0-based; the timeline's Set loop row). Endpoints are ordered and clamped to the timeline; start == end loops a single frame. Editor runtime state, like the playhead — not an undoable edit. | `start`, `end` | — |
+| `set_loop_range` | Set the inclusive playback loop range [start, end] (0-based; the timeline's Set loop row). Endpoints are ordered and clamped to the timeline; start == end loops a single frame. Errors when the project has no frames. Editor runtime state, like the playhead — not an undoable edit. | `start`, `end` | — |
 | `clear_loop_range` | Clear the playback loop range (the timeline's loop Clear), so playback wraps at the timeline end again. | — | — |
-| `set_frame_easing` | Set one frame's easing override (the easing panel's frame picker): "linear", "smooth", "ease-in" or "ease-out", or null for the project default. Applies to the current frame unless 'frame' names another. One undo step. | `easing` | `frame` |
+| `set_frame_easing` | Set one frame's easing override (the easing panel's frame picker): "linear", "smooth", "ease-in" or "ease-out", or null for the project default. Applies to the current frame unless 'frame' names another. One undo step. Errors when the project has no frames. | `easing` | `frame` |
 | `delete_figure` | Delete a figure (0-based 'figure'; the figures panel's Delete): its pose rows go with it and every figure-indexed reference (particles, FX clips, graph channels, camera follow) is remapped. Refuses to delete the last figure. One undo step. | `figure` | — |
 | `move_figure` | Move a figure in the draw order (the figures/layers panels' up/down controls): 'direction' steps the figure later (positive, drawn on top) or earlier (negative), clamped at the ends; poses, bends and every figure-indexed reference are remapped. 'figure' defaults to the selected figure. One undo step. | `direction` | `figure` |
 | `delete_camera_key` | Delete the camera key at a 0-based frame (the camera panel's per-key Delete). One undo step. Errors when the frame holds no camera key. | `frame` | — |
@@ -261,7 +261,7 @@ true` with the reason as text and leaves the session usable.
 | `goto_next_key` | Move the playhead to the next key strictly after the current frame (the transport's Next key button, pb-next-key): the keys are the sorted union of the camera keys and every graph channel's keys — not any one figure's pose keys (for those, goto_next_keyframe). Like the button, the jump only moves the playhead — playback state is untouched. An error when no key follows (the button renders inert in that state). | — | — |
 | `goto_prev_key` | Move the playhead to the previous key strictly before the current frame (the transport's Prev key button, pb-prev-key): the keys are the sorted union of the camera keys and every graph channel's keys — not any one figure's pose keys (for those, goto_prev_keyframe). Like the button, the jump only moves the playhead — playback state is untouched. An error when no key precedes (the button renders inert in that state). | — | — |
 
-### Editing registry (224, `src/mcp_tools.rs`)
+### Editing registry (230, `src/mcp_tools.rs`)
 
 | Tool | Purpose | Required | Optional |
 |---|---|---|---|
@@ -284,7 +284,7 @@ true` with the reason as text and leaves the session usable.
 | `set_node` | Edit a figure definition's segment: length (clamped to 4..=220), thickness (clamped to 1..=18), colour override, or shape ("line" \| "circle" \| "polygon" \| side count 3-12). Pass "color": null to CLEAR the colour override (an absent 'color' leaves it unchanged). One undo step. | `figure`, `node` | `length`, `thickness`, `color`, `shape` |
 | `set_node_cap` | Set a segment's end cap directly: "round", "square" or "point" (the style panel's cap control). One undo step. | `figure`, `node`, `cap` | — |
 | `set_node_color2` | Set a segment's gradient end colour (0xRRGGBB; the segment blends its own colour -> color2). Omit 'color2' (or pass null) to clear the gradient back to a solid colour. One undo step. | `figure`, `node` | `color2` |
-| `set_node_opacity` | Set a segment's opacity (the style panel's opacity stepper; clamped to 0.05-1.0 so a segment can never be made fully invisible). One undo step. | `figure`, `node`, `opacity` | — |
+| `set_node_opacity` | Set a segment's opacity (the style panel's opacity stepper). Opacity below 0 is refused; any other value is clamped to 0.05-1.0 and read back as stored. One undo step. | `figure`, `node`, `opacity` | — |
 | `add_node` | Append a segment under the given parent node of a figure; returns the new node index. | `figure`, `parent`, `length` | `thickness` |
 | `delete_node` | Delete a leaf segment of a figure (the root and segments with children are refused). | `figure`, `node` | — |
 | `set_camera` | Upsert a camera key at a frame: centre (x, y), zoom factor (1.0 = neutral, must be positive), optional rotation angle in degrees — stored wrapped to -180..180, the panel's convention. One undo step. | `frame`, `x`, `y`, `zoom` | `angle` |
@@ -387,9 +387,9 @@ true` with the reason as text and leaves the session usable.
 | `cycle_brush` | Cycle to the next brush preset in the library, wrapping (the Draw panel's brush-cycle button). Returns the new active preset. | — | — |
 | `set_draw_tool` | Set the active draw tool: 'brush' or 'eraser' (the Draw panel's tool toggle, as an idempotent set). Affects subsequent interactive drawing and eraser sizing; draws nothing itself. | `tool` | — |
 | `get_node_style` | Read a segment's complete style: colour override (null = inherits the figure colour), effective colour, gradient end colour, cap, taper and opacity. | `figure`, `node` | — |
-| `cycle_node_taper` | Step a segment's taper one step (1.0 -> 0.6 -> 0.3 -> 0.0 -> 1.0), exactly the style panel's taper Step button. One undo step. | `figure`, `node` | — |
+| `cycle_node_taper` | Step a segment's taper one step (1.0 -> 0.6 -> 0.3 -> 0.0 -> 1.0), exactly the style panel's taper Step button. A taper set directly snaps to the next step down. One undo step. | `figure`, `node` | — |
 | `set_node_taper` | Set a segment's taper directly (0.0-1.0; 1.0 = uniform width, lower = sharper point). Values outside 0.0-1.0 are refused, not clamped. One undo step. | `figure`, `node`, `taper` | — |
-| `set_node_style` | Write a segment's complete style (colour, gradient end, cap, opacity) in exactly one undo step — the write half of the style panel's copy/paste; pair with get_node_style to copy a style between segments. Omit 'color2' (or pass null) to clear the gradient. Taper is not part of this write; use set_node_taper. Opacity is clamped to 0.05-1.0 and read back as stored. | `figure`, `node`, `color`, `cap`, `opacity` | `color2` |
+| `set_node_style` | Write a segment's complete style (colour, gradient end, cap, opacity) in exactly one undo step — the write half of the style panel's copy/paste; pair with get_node_style to copy a style between segments. Omit 'color2' (or pass null) to clear the gradient. Taper is not part of this write; use set_node_taper. Opacity below 0 is refused; any other value is clamped to 0.05-1.0 and read back as stored. | `figure`, `node`, `color`, `cap`, `opacity` | `color2` |
 | `apply_style_preset` | Apply one of the style panel's six curated presets (Ink, Crimson, Ocean, Forest, Violet, Amber) to a segment: the preset's colour and cap are set, the segment's gradient end and opacity are left untouched. One undo step. | `figure`, `node`, `preset` | — |
 | `list_texts` | List every text in the project: segment texts (figure, node, content, size) and free-standing text instances in draw order (index, content, size, colour, transform keys). | — | — |
 | `set_segment_text` | Set (or replace) the text on a figure's segment — the text panel's Add text. Optional 'size' (glyph height) is clamped to 4-160; without it an existing size is preserved and a fresh text gets 28. Empty or control-only content is refused. The response reads back what actually stored (the text session drops control characters such as newlines). One undo step. | `figure`, `node`, `content` | `size` |
@@ -462,10 +462,10 @@ true` with the reason as text and leaves the session usable.
 | `fx_preset_delete` | Delete a saved FX clip preset by name (the file in ./fx-presets/). A missing preset is an error naming it. A file operation, not an undo step. | `name` | — |
 | `figure_cycle_opacity` | Cycle a figure's opacity one step through the inspector's steps (1.0 -> 0.6 -> 0.3 -> 1.0). 'figure' defaults to the selected figure. Like the panel cycler, this takes NO undo snapshot. | — | `figure` |
 | `get_figure` | Read one figure in full: name, colour (0xRRGGBB), hidden/locked flags, opacity, node count, movieclip link, solo state, and the drawn bounding box on the current frame (null when the figure has no pose there). Read-only. | `figure` | — |
-| `get_node` | Read one node in full: definition (name, parent, length, thickness, colour override, shape, head flag), the segment style (colour override + effective colour, color2, cap, taper, opacity), and pose facts at 'frame' (default: current) — the stored parent-relative angle in degrees, the solved world direction of the bone ending at this joint in degrees [0, 360) (null for a root node), and the frame's bend in radians and degrees. Note: get_pose returns stored parent-relative angles; the segment inspector shows this same world direction. Read-only. | `figure`, `node` | `frame` |
+| `get_node` | Read one node in full: definition (name, parent, length, thickness, colour override, shape, head flag), the segment style (colour override + effective colour, color2, cap, taper, opacity), the segment's attached media ('media': null, or {kind: 'image', asset} / {kind: 'text', content, size}), and pose facts at 'frame' (default: current) — the stored parent-relative angle in degrees, the solved world direction of the bone ending at this joint in degrees [0, 360) (null for a root node), and the frame's bend in radians and degrees. Note: get_pose returns stored parent-relative angles; the segment inspector shows this same world direction. Read-only. | `figure`, `node` | `frame` |
 | `figure_library_list` | List the 2D figure library (definitions saved in ./library): index, name and node count per entry, plus the session's current library index. The library stores FigureDef only — an entry's colour is NOT stored; inserting assigns a palette colour. Read-only. | — | — |
 | `figure_library_save` | Save a figure's definition to the 2D figure library under the figure's name (the library panel's Save). 'figure' defaults to the selected figure and selects it first. A file write, not an undo step. | — | `figure` |
-| `figure_library_insert` | Insert a figure from the 2D figure library into the project (the library panel's Insert). Choose the entry with 'index' or 'name'; with neither, the session's current library index is used. The inserted figure gets a palette colour (definitions carry no colour) and becomes the selection. One undo step. | — | `index`, `name` |
+| `figure_library_insert` | Insert a figure from the 2D figure library into the project (the library panel's Insert). Choose the entry with 'index' or 'name'; with neither, the session's current library index is used. The inserted figure gets a palette colour (the library stores the definition — including its node colours and styles — not the instance colour) and becomes the selection. One undo step. | — | `index`, `name` |
 | `figure_library_cycle` | Cycle the 2D figure library selection to the next entry (the library panel's cycle). Selection only — inserts nothing. Errors when the library is empty. | — | — |
 | `fig3_set_camera` | Set the 3D session camera absolutely: any of 'distance' (clamped to 40..=4000), 'target' [x, y, z] and 'fov_deg'; omitted fields keep their values. At least one field is required. The absolute complement of fig3_orbit/fig3_camera_zoom. No undo step (session camera, like orbit/zoom). Requires an active 3D session. | — | `distance`, `target`, `fov_deg` |
 | `fig3_rename` | Rename the 3D session figure — the name a later fig3_save_to_library files it under. Trimmed; a blank name is refused. A session field write, not an undo step. Requires an active 3D session. | `name` | — |
@@ -489,6 +489,12 @@ true` with the reason as text and leaves the session usable.
 | `project_rename` | Rename the current project's saved file to 'new_name' (a target that already exists is refused, leaving both files untouched). The session project's name follows and the file selector is repointed at the renamed file; the name stored inside the file updates on the next save. Errors when the current project has no saved file. Note there is deliberately no delete_project tool: no GUI surface deletes project files either. | `new_name` | — |
 | `attach_image_to_node` | Attach a sprite image to the SELECTED joint of the selected figure (the segment inspector's Attach image). Selection-scoped: steer the selection with set_selection first. The op takes the first PNG found in ./import — there is no path argument, matching the GUI op exactly. One undo step (inside the op). | — | — |
 | `clear_node_media` | Clear the media (sprite) attached to the SELECTED joint of the selected figure (the segment inspector's Clear media). Selection-scoped: steer the selection with set_selection first. One undo step. | — | — |
+| `assets_list` | List the project's image asset table: for each asset its index, name, stored byte size, decoded pixel width/height (null when the stored bytes do not decode) and live reference counts split by kind (figure segment images, movieclip-def segment images, sprite instances). Read-only. | — | — |
+| `asset_info` | One asset's assets_list entry, addressed by its table index. Read-only. | `index` | — |
+| `asset_import` | Import a PNG file from disk into the asset table (appended; its index is returned). The file must start with the PNG magic bytes, decode as an image and be at most 8388608 bytes (8 MiB) — anything else is refused before any change. The stored name defaults to the file's name; the optional 'name' argument overrides it. One undo step. (Unlike attach_image_to_node, this never touches ./import and attaches nothing.) | `path` | `name` |
+| `asset_rename` | Rename the asset at 'index' to 'name' (trimmed; empty is refused). Renaming to the current name is a no-op that reports changed: false and spends no undo step; a real rename is one undo step. | `index`, `name` | — |
+| `asset_remove` | Remove the asset at 'index' from the table. REFUSED, with the live counts, while anything still references it (a figure segment image, a movieclip-def segment image, or a sprite instance) — removal never orphans a reference; clear segment references first with clear_node_media or re-point them with asset_attach (sprite instances have no delete op, so an asset referenced only by sprites stays refused until the project changes). When it does remove, every reference to a higher index is remapped down by one in the same undo step, so references keep naming the same image. One undo step. | `index` | — |
+| `asset_attach` | Attach the EXISTING asset at index 'asset' to figure 'figure', node 'node' as that segment's image media, replacing whatever media the segment carried (the by-index counterpart of attach_image_to_node, which reads ./import and works on the selection). One undo step. | `figure`, `node`, `asset` | — |
 
 ### File IO and export (9, `src/mcp_io.rs`)
 
