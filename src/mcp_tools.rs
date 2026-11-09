@@ -6361,7 +6361,7 @@ mod tests {
         }))
         .unwrap();
         call(&mut core, &tools, "add_audio_clip", json!({
-            "path": b_wav, "start_frame": 2
+            "path": b_wav.clone(), "start_frame": 2
         }))
         .unwrap();
         let r = call(&mut core, &tools, "audio_move_clip", json!({ "start_frame": 7 })).unwrap();
@@ -6370,7 +6370,7 @@ mod tests {
         assert_eq!(core.project.audio[0].start_frame, 0, "the first clip stayed");
         let r = call(&mut core, &tools, "audio_delete_clip", json!({ "index": 0 })).unwrap();
         assert_eq!(r["count"], 1);
-        assert_eq!(core.project.audio[0].path, "b.wav");
+        assert_eq!(core.project.audio[0].path, b_wav);
         assert!(call(&mut core, &tools, "audio_delete_clip", json!({ "index": 4 })).is_err());
     }
 
