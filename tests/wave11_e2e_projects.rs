@@ -313,8 +313,9 @@ fn project_and_library_lifecycle_over_mcp() {
     assert_eq!(saved["project"], "Wave11 Lifecycle");
 
     // The promised file: the slug of the project name, inside
-    // the temp projects dir, and the ONLY thing in the temp
-    // tree.
+    // the temp projects dir. The only other entry is
+    // recents.json — a named save records the project in the
+    // recents list, exactly like the GUI's Save.
     let main_path = projects_dir.join("wave11-lifecycle.json");
     assert!(
         saved["status"]
@@ -327,8 +328,12 @@ fn project_and_library_lifecycle_over_mcp() {
     assert!(main_path.exists(), "named save wrote {main_path:?}");
     assert_eq!(
         relative_tree(&root),
-        ["projects/", "projects/wave11-lifecycle.json"],
-        "the temp tree holds exactly the named save"
+        [
+            "projects/",
+            "projects/recents.json",
+            "projects/wave11-lifecycle.json",
+        ],
+        "the temp tree holds exactly the named save (+ recents)"
     );
 
     // The written bytes are the edited project, not the
@@ -425,6 +430,7 @@ fn project_and_library_lifecycle_over_mcp() {
         relative_tree(&root),
         [
             "projects/",
+            "projects/recents.json",
             "projects/wave11-lifecycle-copy-2.json",
             "projects/wave11-lifecycle-copy.json",
             "projects/wave11-lifecycle.json",
@@ -605,6 +611,7 @@ fn project_and_library_lifecycle_over_mcp() {
             "library/",
             "library/lifecycle-partner.json",
             "projects/",
+            "projects/recents.json",
             "projects/wave11-lifecycle-copy-2.json",
             "projects/wave11-lifecycle-copy.json",
             "projects/wave11-lifecycle.json",
@@ -652,6 +659,7 @@ fn project_and_library_lifecycle_over_mcp() {
             "library/",
             "library/lifecycle-partner.json",
             "projects/",
+            "projects/recents.json",
             "projects/------escape-attempt.json",
             "projects/wave11-lifecycle-copy-2.json",
             "projects/wave11-lifecycle-copy.json",
