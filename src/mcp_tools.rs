@@ -5626,11 +5626,14 @@ mod tests {
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
-        assert_eq!(tools.len(), 224);
+        // 224 entering Wave 12; +6 for the asset surface
+        // (assets_list, asset_info, asset_import,
+        // asset_rename, asset_remove, asset_attach).
+        assert_eq!(tools.len(), 230);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 224, "tool names must be unique");
+        assert_eq!(names.len(), 230, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
