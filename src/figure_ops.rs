@@ -563,6 +563,11 @@ fn fop_target_frame(core: &EditorCore, args: &Value) -> Result<usize, String> {
 /// MCP `figure_recolor`: the figure inspector's Recolour —
 /// [`EditorCore::recolor_figure`] (every node's own colour
 /// under one snapshot). A refusal is the op's status line.
+/// The reply's `color` is the stored override read back
+/// from the model (the first node's — the op writes the
+/// same value to every node), not the argument echoed:
+/// the MCP-truth rule is that a reply states what the
+/// model holds.
 pub fn tool_figure_recolor(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let fi = fop_req_usize(args, "figure")?;
     fop_check_figure(core, fi)?;
@@ -570,10 +575,14 @@ pub fn tool_figure_recolor(core: &mut EditorCore, args: &Value) -> Result<Value,
     if !core.recolor_figure(fi, color) {
         return Err(core.status.clone());
     }
+    // A successful recolour means the figure has nodes
+    // (the op refuses an empty figure), so node 0's stored
+    // override exists and is every node's.
+    let stored = core.project.figures[fi].def.nodes[0].color;
     Ok(json!({
         "ok": true,
         "figure": fi,
-        "color": color,
+        "color": stored,
         "status": core.status,
     }))
 }
@@ -1370,6 +1379,21 @@ pub fn tool_get_node(core: &mut EditorCore, args: &Value) -> Result<Value, Strin
         "world_angle": world_angle,
         "bend_radians": bend,
         "bend_degrees": bend.to_degrees(),
+        // The segment's attached media (Wave 12, B10 splice):
+        // null when the segment carries none, otherwise an
+        // object — {kind: "image", asset} naming the asset
+        // table index, or {kind: "text", content, size}.
+        // Additive: readers written before this field existed
+        // simply never look at it.
+        "media": match &node.media {
+            Some(crate::model::SegmentMedia::Image { asset }) => {
+                json!({ "kind": "image", "asset": asset })
+            }
+            Some(crate::model::SegmentMedia::Text { content, size }) => {
+                json!({ "kind": "text", "content": content, "size": size })
+            }
+            None => Value::Null,
+        },
     }))
 }
 
@@ -1521,6 +1545,105 @@ mod tests {
         let err = tool_figure_rename(&mut core, &json!({ "figure": 0, "name": "   " }))
             .expect_err("blank names are refused");
         assert!(err.contains("cannot be empty"), "{err}");
+    }
+
+    #[test]
+    fn mcp_figure_recolor_reports_stored_colour_and_leaves_the_style_fields() {
+        let mut core = EditorCore::new();
+        // Give node 1 a non-default style. A recolour writes
+        // node colours only, so every NodeStyle field must
+        // survive untouched, and the reply must state the
+        // stored override (read back), per the MCP-truth rule.
+        {
+            let node = &mut core.project.figures[0].def.nodes[1];
+            node.style.taper = 0.45;
+            node.style.cap = crate::model::CapKind::Point;
+            node.style.color2 = Some(0x112233);
+            node.style.opacity = 0.5;
+        }
+        let out = tool_figure_recolor(&mut core, &json!({ "figure": 0, "color": 0x224466 }))
+            .expect("recolor succeeds");
+        let stored = core.project.figures[0].def.nodes[1].color;
+        assert_eq!(stored, Some(0x224466));
+        assert_eq!(out["color"], json!(stored), "the reply reads the model back");
+        let node = &core.project.figures[0].def.nodes[1];
+        assert_eq!(node.style.taper, 0.45);
+        assert_eq!(node.style.cap, crate::model::CapKind::Point);
+        assert_eq!(node.style.color2, Some(0x112233));
+        assert_eq!(node.style.opacity, 0.5);
+    }
+
+    #[test]
+    fn mcp_get_node_style_block_is_the_style_read_verbatim() {
+        let mut core = EditorCore::new();
+        {
+            let node = &mut core.project.figures[0].def.nodes[1];
+            node.color = Some(0x334455);
+            node.style.taper = 0.45;
+            node.style.cap = crate::model::CapKind::Point;
+            node.style.color2 = Some(0x667788);
+            node.style.opacity = 0.5;
+        }
+        let full = tool_get_node(&mut core, &json!({ "figure": 0, "node": 1 }))
+            .expect("get_node succeeds");
+        let direct = crate::style::tool_get_node_style(
+            &mut core,
+            &json!({ "figure": 0, "node": 1 }),
+        )
+        .expect("get_node_style succeeds");
+        // No normalisation in the passthrough: every style
+        // field get_node reports is the style read's own
+        // value, and both are the stored values.
+        for key in ["color", "effective_color", "color2", "cap", "taper", "opacity"] {
+            assert_eq!(full["style"][key], direct[key], "field {key}");
+        }
+        assert!(
+            (full["style"]["taper"].as_f64().unwrap() - 0.45).abs() < 1e-6,
+            "stored taper reads back unclamped and unrounded: {full}"
+        );
+        assert_eq!(full["style"]["cap"], json!("point"));
+        assert_eq!(full["style"]["opacity"], json!(0.5));
+        assert_eq!(full["style"]["color2"], json!(0x667788));
+    }
+
+    #[test]
+    fn mcp_figure_cycle_opacity_reports_the_stored_value() {
+        let mut core = EditorCore::new();
+        let out = tool_figure_cycle_opacity(&mut core, &json!({ "figure": 0 }))
+            .expect("cycle succeeds");
+        assert_eq!(core.project.figures[0].opacity, 0.6, "1.0 cycles to 0.6");
+        assert_eq!(
+            out["opacity"],
+            json!(core.project.figures[0].opacity),
+            "the reply is the stored value"
+        );
+        // From an off-ladder value the cycle snaps down
+        // (layers::cycle_opacity) and the reply still states
+        // the stored value, not a ladder assumption.
+        core.project.figures[0].opacity = 0.5;
+        let out = tool_figure_cycle_opacity(&mut core, &json!({ "figure": 0 }))
+            .expect("cycle succeeds");
+        assert_eq!(core.project.figures[0].opacity, 0.3);
+        assert_eq!(out["opacity"], json!(core.project.figures[0].opacity));
+        assert!(tool_figure_cycle_opacity(&mut core, &json!({ "figure": 9 })).is_err());
+    }
+
+    #[test]
+    fn duplicate_figure_preserves_node_styles_verbatim() {
+        let mut core = EditorCore::new();
+        {
+            let node = &mut core.project.figures[0].def.nodes[1];
+            node.style.taper = 0.45;
+            node.style.cap = crate::model::CapKind::Point;
+            node.style.color2 = Some(0x112233);
+            node.style.opacity = 0.5;
+        }
+        assert_eq!(core.duplicate_figure(0), Some(1));
+        assert_eq!(
+            core.project.figures[1].def.nodes[1].style,
+            core.project.figures[0].def.nodes[1].style,
+            "the copy's styles are the original's, unnormalised"
+        );
     }
 
     #[test]

@@ -47,6 +47,66 @@ pub fn blend_over(dst: [u8; 3], src: [u8; 3], opacity: f32) -> [u8; 3] {
 }
 
 // ---------------------------------------------------------------------
+// Wave 12 (A4): ONE effective-style resolution for every render
+// surface. A node's stored `NodeStyle` is only half of what a
+// surface draws: the figure carries its own layer opacity
+// (`FigureInstance::opacity`), and before this section each
+// surface combined the two its own way — or not at all:
+//
+// * the rasterizer (`export.rs`) multiplied them for segments
+//   (`style.opacity * fig.opacity.clamp(0.0, 1.0)`) and faded
+//   heads/rings/polys toward the background by figure opacity
+//   alone;
+// * the SVG exporter (`svg.rs`) used the node opacity alone and
+//   ignored the figure opacity entirely;
+// * the stage (`stage_view.rs`) faded the figure colour toward
+//   the background by figure opacity alone (floor 0.05) and
+//   ignored the node opacity entirely.
+//
+// `effective_style` is the single resolution all three adopt:
+// the stored style with its `opacity` replaced by the effective
+// alpha (node × figure, clamped to 0..=1); taper, cap and the
+// gradient end pass through untouched, so a surface that swaps
+// `node.style` for `effective_style(node.style, fig.opacity)`
+// changes nothing except the alpha it reads. `faded_color` is
+// the companion for the parts of a drawing with no alpha
+// plumbing (the stage's canvas lines, the rasterizer's
+// heads/rings/polys): the colour pre-blended toward the
+// background by that same effective alpha.
+//
+// Figure *visibility* is deliberately NOT resolved here: it is
+// already shared (`layers::visible_figures` for the stage; the
+// exporters skip `fig.hidden`, and solo is editor-session state
+// exporters must not see).
+// ---------------------------------------------------------------------
+
+/// Resolve a node's stored style against its figure's layer
+/// opacity: the same style with `opacity` set to the effective
+/// alpha, `(style.opacity * figure_opacity)` with the figure
+/// opacity clamped to 0..=1 first and the product clamped to
+/// 0..=1 after — the rasterizer's existing segment rule, so
+/// adopting this changes the rasterizer's output not at all.
+/// Every other field passes through unchanged, and at figure
+/// opacity 1.0 the style passes through unchanged. Callers with
+/// a surface-specific floor (the stage keeps a 0.05 floor so a
+/// fully faded figure stays faintly visible while editing) pass
+/// the figure opacity pre-clamped; the floor stays their call.
+pub fn effective_style(style: NodeStyle, figure_opacity: f32) -> NodeStyle {
+    let alpha = (style.opacity * figure_opacity.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    NodeStyle { opacity: alpha, ..style }
+}
+
+/// The colour a no-alpha surface should draw for a segment (or
+/// a head/ring/poly belonging to that node) whose true rendering
+/// is `color` at the node's effective alpha: `color` blended
+/// toward `background` by [`effective_style`]'s alpha. At
+/// effective alpha 1.0 this returns `color` exactly; at 0.0 it
+/// returns `background` exactly.
+pub fn faded_color(background: u32, color: u32, style: NodeStyle, figure_opacity: f32) -> u32 {
+    lerp_color(background, color, effective_style(style, figure_opacity).opacity)
+}
+
+// ---------------------------------------------------------------------
 // Wave 11 (B10): MCP style parity — presets, the taper write the
 // engine never had, a whole-style read, and the atomic whole-style
 // write (the panel's paste path), as `tool_*` handlers for the MCP
@@ -67,14 +127,18 @@ pub struct StylePreset {
 
 /// The six style presets, in the style panel's display order.
 ///
-/// **Copied verbatim** from `rune_sec/inspector_style.rs`
-/// (`STYLE_PRESETS`, lines 218–225 at the time of writing): the
-/// panel's table lives in the bin crate, which the library
-/// cannot import, so the MCP side carries its own copy. The two
-/// tables must be edited together — the unit test
-/// `style_presets_match_the_panel_table` pins these triples so
-/// at least this copy cannot drift silently. Integrator note:
-/// the durable fix is for the panel to consume this table.
+/// This is the ONE canonical table (Wave 12, C2): the style
+/// panel used to carry a verbatim copy in
+/// `rune_sec/inspector_style.rs` because the library could
+/// not import the bin crate's table; the copy was verified
+/// value-identical and deleted, and the panel now re-exports
+/// this table (`pub use stykanimate_rs::style::{StylePreset,
+/// STYLE_PRESETS}`), so the panel chips and the MCP preset
+/// tools read the same six entries by construction and the
+/// tables cannot drift. The unit test
+/// `style_preset_lookup_by_name` pins the lookup the tools
+/// expose; the panel-side test pins the six entries'
+/// distinct colours and valid caps against this same table.
 pub const STYLE_PRESETS: [StylePreset; 6] = [
     StylePreset { name: "Ink", color: 0x20_242C, cap: CapKind::Round },
     StylePreset { name: "Crimson", color: 0xD2_3B3B, cap: CapKind::Round },
@@ -460,6 +524,71 @@ mod tests {
         assert_eq!(blend_over([200, 100, 0], [0, 100, 200], 0.5), [100, 100, 100]);
     }
 
+    // ---- Wave 12 (A4): effective-style resolution ----
+
+    #[test]
+    fn effective_style_passes_the_default_through_unchanged() {
+        // The brief's first case: default style at figure
+        // opacity 1.0 is exactly the default style.
+        assert_eq!(effective_style(NodeStyle::default(), 1.0), NodeStyle::default());
+        // And ANY style passes through unchanged at figure
+        // opacity 1.0 — adoption must be invisible for the
+        // projects every surface already renders alike.
+        let styled = NodeStyle {
+            taper: 0.3,
+            cap: CapKind::Point,
+            color2: Some(0x445566),
+            opacity: 0.7,
+        };
+        assert_eq!(effective_style(styled, 1.0), styled);
+    }
+
+    #[test]
+    fn effective_style_multiplies_node_and_figure_opacity() {
+        // The brief's second case: the alphas multiply.
+        let styled = NodeStyle { opacity: 0.5, ..NodeStyle::default() };
+        assert_eq!(effective_style(styled, 0.5).opacity, 0.25);
+        // Non-opacity fields are never the resolver's business.
+        let fancy = NodeStyle {
+            taper: 0.3,
+            cap: CapKind::Square,
+            color2: Some(0x010203),
+            opacity: 0.8,
+        };
+        let out = effective_style(fancy, 0.5);
+        assert_eq!(out.opacity, 0.4);
+        assert_eq!(out.taper, 0.3);
+        assert_eq!(out.cap, CapKind::Square);
+        assert_eq!(out.color2, Some(0x010203));
+    }
+
+    #[test]
+    fn effective_style_clamps_at_the_unit_range() {
+        // The brief's third case: figure opacity above 1 acts
+        // as 1, below 0 acts as 0, and a stored node opacity
+        // above 1 (reachable only from a hand-edited file —
+        // every write op clamps) still lands at 1.
+        let styled = NodeStyle { opacity: 0.5, ..NodeStyle::default() };
+        assert_eq!(effective_style(styled, 2.0).opacity, 0.5);
+        assert_eq!(effective_style(styled, -0.5).opacity, 0.0);
+        let hot = NodeStyle { opacity: 1.5, ..NodeStyle::default() };
+        assert_eq!(effective_style(hot, 1.0).opacity, 1.0);
+        assert_eq!(effective_style(NodeStyle::default(), 0.0).opacity, 0.0);
+    }
+
+    #[test]
+    fn faded_color_blends_by_the_effective_alpha() {
+        // Fully effective: the colour itself. Fully faded: the
+        // background itself.
+        assert_eq!(faded_color(0x000000, 0xFFFFFF, NodeStyle::default(), 1.0), 0xFFFFFF);
+        assert_eq!(faded_color(0x000000, 0xFFFFFF, NodeStyle::default(), 0.0), 0x000000);
+        // The fade uses the PRODUCT: node 0.5 × figure 1.0 and
+        // node 1.0 × figure 0.5 land on the same blend.
+        let half_node = NodeStyle { opacity: 0.5, ..NodeStyle::default() };
+        assert_eq!(faded_color(0x000000, 0xFFFFFF, half_node, 1.0), 0x808080);
+        assert_eq!(faded_color(0x000000, 0xFFFFFF, NodeStyle::default(), 0.5), 0x808080);
+    }
+
     // ---- Wave 11 (B10): MCP style parity ----
 
     use crate::editor::EditorCore;
@@ -471,27 +600,21 @@ mod tests {
     }
 
     #[test]
-    fn style_presets_match_the_panel_table() {
-        // Pins this copy of the table against the values the
-        // panel ships (inspector_style.rs STYLE_PRESETS). If
-        // the panel table changes, this test is the reminder
-        // that the MCP copy must change with it.
-        let triples: Vec<(&str, u32, CapKind)> =
-            STYLE_PRESETS.iter().map(|p| (p.name, p.color, p.cap)).collect();
-        assert_eq!(
-            triples,
-            vec![
-                ("Ink", 0x20242C, CapKind::Round),
-                ("Crimson", 0xD23B3B, CapKind::Round),
-                ("Ocean", 0x2B6FD2, CapKind::Square),
-                ("Forest", 0x2E9E5B, CapKind::Round),
-                ("Violet", 0x7A4FD0, CapKind::Square),
-                ("Amber", 0xE8A33D, CapKind::Square),
-            ]
-        );
+    fn style_preset_lookup_by_name() {
+        // Wave 12 (C2): the panel's duplicate table is gone
+        // (it re-exports this one), so the old
+        // match-the-panel-table pin compared the table
+        // against itself. What remains worth pinning here is
+        // the by-name lookup the MCP tools expose: exact
+        // names resolve case-insensitively with surrounding
+        // whitespace ignored, unknown names resolve to None.
         assert_eq!(style_preset_by_name("ocean").map(|p| p.name), Some("Ocean"));
         assert_eq!(style_preset_by_name(" Amber ").map(|p| p.name), Some("Amber"));
         assert!(style_preset_by_name("pointy").is_none());
+        // Every table entry resolves under its own name.
+        for p in STYLE_PRESETS {
+            assert_eq!(style_preset_by_name(p.name).map(|q| q.name), Some(p.name));
+        }
     }
 
     #[test]

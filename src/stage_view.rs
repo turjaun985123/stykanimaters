@@ -359,12 +359,26 @@ pub fn ngon(centre: [f32; 2], r: f32, n: usize) -> Vec<[f32; 2]> {
         .collect()
 }
 
-/// Onion-skin segment sets around the current frame, mirroring
+/// Onion-skin piece sets around the current frame, mirroring
 /// the GPUI stage's colours and falloff: previous frames keep
 /// each figure's own colour (alpha `0x4D` for the nearest,
 /// `0x26` for older), next frames share one green tint
-/// (`0x7BE495`) with the same falloff. Returns `(segments,
-/// colour, alpha)` entries in draw order.
+/// (`0x7BE495`) with the same falloff. Returns `(pieces,
+/// side base colour, ghost alpha)` entries in draw order; the
+/// base colour is the hex every piece's near colour fell back
+/// to (a node's own colour wins over it, per piece).
+///
+/// Wave 12 (SPEC-ONION): the skins are built from the same
+/// `paint::styled_segment_pieces` the main figure pass uses,
+/// so a ghost now carries its nodes' taper, gradient and
+/// style opacity instead of stroking every segment at one
+/// flat 5.0 width — the named behaviour change: ghost width
+/// is the per-node thickness at the node's own style. Two
+/// standing decisions hold: the bend is always 0.0 (ghosts
+/// stay unbended — the pose at a neighbouring frame is the
+/// point of the skin, and the rasterizer draws no ghosts to
+/// mirror), and the ghost alpha multiplies each piece's own
+/// alpha at draw time rather than replacing it.
 ///
 /// The depths are per-side shell state (Phase G,
 /// `State::onion_ui`), not the core's single `onion_frames`
@@ -373,13 +387,17 @@ pub fn ngon(centre: [f32; 2], r: f32, n: usize) -> Vec<[f32; 2]> {
 /// falloff is a function of the step distance only (step 1 is
 /// always `0x4D`, steps ≥ 2 always `0x26`), so widening one
 /// side never changes the other side's skins.
-fn onion_skins(core: &EditorCore, prev: u8, next: u8) -> Vec<(Vec<(V2, V2)>, u32, f32)> {
+fn onion_skins(
+    core: &EditorCore,
+    prev: u8,
+    next: u8,
+) -> Vec<(Vec<stykanimate_rs::paint::StylePiece>, u32, f32)> {
     let mut out = Vec::new();
     if !core.onion {
         return out;
     }
     let project = &core.project;
-    let segs_at = |frame: usize, fi: usize| -> Vec<(V2, V2)> {
+    let pieces_at = |frame: usize, fi: usize, base: u32| -> Vec<stykanimate_rs::paint::StylePiece> {
         // Wave 10: a figure need not appear in every frame
         // (its poses slot is simply absent — the engine's
         // presence idiom, `fi < frame.poses.len()`). The
@@ -392,18 +410,28 @@ fn onion_skins(core: &EditorCore, prev: u8, next: u8) -> Vec<(Vec<(V2, V2)>, u32
         }
         let pos = core.positions(frame, fi);
         let def = &project.figures[fi].def;
-        def.nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, node)| node.parent.map(|p| (pos[p], pos[i])))
-            .collect()
+        let mut pieces = Vec::new();
+        for (i, node) in def.nodes.iter().enumerate() {
+            if let Some(p) = node.parent {
+                pieces.extend(stykanimate_rs::paint::styled_segment_pieces(
+                    pos[p],
+                    pos[i],
+                    0.0,
+                    node.thickness,
+                    &node.style,
+                    node.color.unwrap_or(base),
+                ));
+            }
+        }
+        pieces
     };
     if prev > 0 && core.current > 0 {
         for fi in 0..project.figures.len() {
             if project.figures[fi].hidden {
                 continue;
             }
-            out.push((segs_at(core.current - 1, fi), project.figures[fi].color, 0x4D as f32 / 255.0));
+            let base = project.figures[fi].color;
+            out.push((pieces_at(core.current - 1, fi, base), base, 0x4D as f32 / 255.0));
         }
         for back in 2..=(prev as usize) {
             if core.current < back {
@@ -413,7 +441,8 @@ fn onion_skins(core: &EditorCore, prev: u8, next: u8) -> Vec<(Vec<(V2, V2)>, u32
                 if project.figures[fi].hidden {
                     continue;
                 }
-                out.push((segs_at(core.current - back, fi), project.figures[fi].color, 0x26 as f32 / 255.0));
+                let base = project.figures[fi].color;
+                out.push((pieces_at(core.current - back, fi, base), base, 0x26 as f32 / 255.0));
             }
         }
     }
@@ -427,7 +456,7 @@ fn onion_skins(core: &EditorCore, prev: u8, next: u8) -> Vec<(Vec<(V2, V2)>, u32
             if project.figures[fi].hidden {
                 continue;
             }
-            out.push((segs_at(frame, fi), 0x7BE495, alpha));
+            out.push((pieces_at(frame, fi, 0x7BE495), 0x7BE495, alpha));
         }
     }
     out
@@ -574,123 +603,6 @@ fn particle_prim(
             shape.line(rt.to_screen(a), rt.to_screen(b), (1.5 * s).max(1.0), LineCap::Round, c)
         }
     }
-}
-
-/// Sub-segments a gradient segment is split into on the canvas.
-/// The exporters blend continuously (per pixel / SVG gradient);
-/// the canvas has no gradient stroke, so it approximates with
-/// this many flat-coloured pieces — enough that the steps are
-/// hard to see at stage zoom, cheap enough to rebuild per frame.
-const GRADIENT_STEPS: usize = 6;
-
-/// Colour at parameter `t` along a gradient segment, in the
-/// exporters' convention (export.rs `StyledSeg`, svg.rs
-/// `linearGradient`): `t = 0` at the parent joint is the node's
-/// own colour, `t = 1` at the node's joint is its `color2`,
-/// blended per channel with `style::lerp_color` — the exact
-/// function both exporters call (export.rs:102, style.rs:25).
-fn gradient_color(near: u32, far: u32, t: f32) -> u32 {
-    stykanimate_rs::style::lerp_color(near, far, t)
-}
-
-/// The per-piece colours for a segment from hex `near` to the
-/// node's `color2`, or `None` when the node has no `color2` —
-/// the caller then keeps the single flat line, unchanged.
-/// Each piece is coloured at its midpoint (`t = (k + 0.5) / n`),
-/// the sample that minimises the worst error against the
-/// exporters' continuous blend.
-fn gradient_steps(near: u32, color2: Option<u32>) -> Option<Vec<u32>> {
-    let far = color2?;
-    Some(
-        (0..GRADIENT_STEPS)
-            .map(|k| gradient_color(near, far, (k as f32 + 0.5) / GRADIENT_STEPS as f32))
-            .collect(),
-    )
-}
-
-/// Point at parameter `t` along the stage-space segment `a`→`b`.
-fn point_at(a: V2, b: V2, t: f32) -> V2 {
-    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
-}
-
-/// The line pieces one figure segment draws as, in stage
-/// space: `(from, to, colour)` triples the caller strokes at
-/// the node's thickness. This is the stage's copy of the
-/// rasterizer's segment construction (export.rs
-/// `render_frame_at`, the `StyledSeg` split):
-///
-/// * `bend == 0.0` — the pre-bend construction, unchanged:
-///   one flat line, or [`GRADIENT_STEPS`] gradient pieces
-///   along the straight segment when the node has a `color2`.
-/// * `bend != 0.0` — the segment arcs through
-///   `model::bend_mid(a, b, bend)` and draws as two pieces
-///   meeting there, exactly as export splits its segment.
-///   A gradient segment splits EACH piece again into
-///   [`GRADIENT_STEPS`] sub-steps along that piece, coloured
-///   over that piece's own colour range — export's first
-///   piece runs `near` → the t = 0.5 mid colour, its second
-///   the mid colour → `color2` — so the blend stays
-///   continuous across the arc joint.
-///
-/// `near` is the hex the flat path starts from (node colour,
-/// else the faded figure colour) and `flat` that same colour
-/// as a `Color` (the caller's `node_color` result); the
-/// gradient derives from the hex pair, as the exporters
-/// derive theirs.
-fn segment_pieces(
-    a: V2,
-    b: V2,
-    bend: f32,
-    near: u32,
-    color2: Option<u32>,
-    flat: Color,
-) -> Vec<(V2, V2, Color)> {
-    // One run of drawing along `from`→`to`: gradient
-    // sub-steps at the usual midpoint samples when `steps`
-    // carries them, else the run's single flat line.
-    fn run(
-        out: &mut Vec<(V2, V2, Color)>,
-        from: V2,
-        to: V2,
-        steps: Option<Vec<u32>>,
-        flat: Color,
-    ) {
-        match steps {
-            Some(steps) => {
-                let n = GRADIENT_STEPS as f32;
-                for (k, hex) in steps.iter().enumerate() {
-                    out.push((
-                        point_at(from, to, k as f32 / n),
-                        point_at(from, to, (k + 1) as f32 / n),
-                        hex_color(*hex).unwrap_or(Color::WHITE),
-                    ));
-                }
-            }
-            None => out.push((from, to, flat)),
-        }
-    }
-    let mut out = Vec::new();
-    if bend == 0.0 {
-        run(&mut out, a, b, gradient_steps(near, color2), flat);
-    } else {
-        let mid = model::bend_mid(a, b, bend);
-        match color2 {
-            Some(far) => {
-                // Export's two-piece colour split: the first
-                // piece's far colour is the whole segment's
-                // t = 0.5 blend, and the second piece starts
-                // from that same blend.
-                let mid_hex = gradient_color(near, far, 0.5);
-                run(&mut out, a, mid, gradient_steps(near, Some(mid_hex)), flat);
-                run(&mut out, mid, b, gradient_steps(mid_hex, Some(far)), flat);
-            }
-            None => {
-                run(&mut out, a, mid, None, flat);
-                run(&mut out, mid, b, None, flat);
-            }
-        }
-    }
-    out
 }
 
 /// The shell's selection accent, `0xRRGGBB` — the 2.0 primary
@@ -879,16 +791,17 @@ fn fig3_screen_segments(
 
 /// The whole stage as one vector `Shape` in canvas-element
 /// points: onion skins (under), then every visible figure at the
-/// display frame — segments in per-node colour at real thickness
-/// with round caps (a node with a `color2` gradient draws as
-/// [`GRADIENT_STEPS`] blended sub-segments, mirroring the
+/// display frame — segments drawn from
+/// `paint::styled_segment_pieces` (per-node colour, taper, cap
+/// geometry and style opacity per piece; a node with a `color2`
+/// gradient draws as blended sub-segments, mirroring the
 /// exporters; a node with a nonzero bend at the display frame
 /// arcs through `model::bend_mid` as two pieces, again
-/// mirroring the exporters — see [`segment_pieces`]),
-/// shape-node rings/polygons, head rings — plus
+/// mirroring the exporters), shape-node rings/polygons at the
+/// nodes' style opacity, head rings — plus
 /// joint handles on the selected figure. Mirrors the GPUI stage's
-/// `draw_data`/`paint_stage` decisions (opacity fades toward the
-/// background; solo/hidden figures skipped via
+/// `draw_data`/`paint_stage` decisions (figure opacity fades
+/// toward the background; solo/hidden figures skipped via
 /// `layers::visible_figures`).
 ///
 /// `overlays` carries the shell-side choices (see
@@ -984,10 +897,23 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         }
     }
 
-    for (segs, color_hex, alpha) in onion_skins(core, overlays.onion_prev, overlays.onion_next) {
-        let color = hex_color(color_hex).unwrap_or(Color::WHITE).alpha(alpha);
-        for (a, b) in segs {
-            shape = shape.line(rt.to_screen(a), rt.to_screen(b), 5.0 * s, LineCap::Round, color);
+    // Onion skins (Wave 12, SPEC-ONION): styled pieces, drawn
+    // per piece at the piece's own width; the colour is the
+    // piece's colour with its alpha composed as piece alpha ×
+    // ghost falloff (multiplication, never replacement — the
+    // hex colours are opaque, so the product is set directly).
+    for (pieces, _base, ghost_alpha) in onion_skins(core, overlays.onion_prev, overlays.onion_next) {
+        for piece in pieces {
+            let color = hex_color(piece.color)
+                .unwrap_or(Color::WHITE)
+                .alpha(piece.alpha * ghost_alpha);
+            shape = shape.line(
+                rt.to_screen(piece.a),
+                rt.to_screen(piece.b),
+                piece.width * s,
+                LineCap::Round,
+                color,
+            );
         }
     }
 
@@ -1051,7 +977,8 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         // Per-node bends at the display frame (export.rs makes
         // the same per-figure fetch); empty when the project
         // carries no bend data, and every segment then takes
-        // the straight path in `segment_pieces` unchanged.
+        // the straight path in `paint::styled_segment_pieces`
+        // unchanged.
         // Bends apply to this main figure pass only: the onion
         // skins above and the joint handles below stay
         // unbended, exactly as they were before bends reached
@@ -1074,33 +1001,56 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         };
         for (i, node) in fig.def.nodes.iter().enumerate() {
             if let Some(p) = node.parent {
-                // Segment pieces from `segment_pieces`: flat,
-                // gradient (GRADIENT_STEPS sub-segments blending
-                // node colour → color2, parent joint → node
-                // joint — the exporters' direction and lerp), and
-                // arced through `model::bend_mid` when this node's
-                // bend at the display frame is nonzero — the
+                // Styled pieces from
+                // `paint::styled_segment_pieces` (Wave 12): the
+                // one segment construction the stage and both
+                // exporters now share, so taper widths, cap
+                // geometry, the `color2` gradient steps and the
+                // style opacity all arrive encoded per piece
+                // instead of the stage stroking every segment at
+                // uniform thickness with a round cap and no
+                // opacity. Gradient pieces blend node colour to
+                // `color2`, parent joint to node joint — the
+                // exporters' direction and lerp — and a nonzero
+                // bend at the display frame arcs through
+                // `model::bend_mid` as two pieces, with the
                 // indexing export uses (`bends` is per node; the
-                // segment to node `i` takes node `i`'s bend). The
-                // near hex is exactly the colour the flat path
-                // draws (node colour, else the faded figure
+                // segment to node `i` takes node `i`'s bend).
+                // The near hex is exactly the colour the flat
+                // path drew (node colour, else the faded figure
                 // colour), so the gradient starts where the flat
-                // segment did; color2 is used raw, as export.rs
-                // uses it.
+                // segment did; `color2` is read from the style by
+                // paint, raw, as export.rs reads it.
+                //
+                // Alpha composition: a piece's alpha is the style
+                // opacity, and it is MULTIPLIED by the alpha this
+                // pass composes — which is 1.0, because this pass
+                // composes figure opacity into the colour itself
+                // (the `faded` lerp toward the background above;
+                // the rasterizer multiplies true alpha instead —
+                // export.rs's `style.opacity * fig.opacity` —
+                // where the stage keeps the GPUI stage's
+                // colour-fade decision). The colours this pass
+                // builds are opaque, so the product is the piece
+                // alpha itself: applied by multiplication, never
+                // added to or replaced by a stage-side constant.
                 let bend = bends.get(i).copied().unwrap_or(0.0);
-                let pieces = segment_pieces(
+                let pieces = stykanimate_rs::paint::styled_segment_pieces(
                     pos[p],
                     pos[i],
                     bend,
+                    node.thickness,
+                    &node.style,
                     node.color.unwrap_or(faded),
-                    node.style.color2,
-                    node_color(node),
                 );
-                for (a, b, color) in pieces {
+                for piece in pieces {
+                    let color = hex_color(piece.color)
+                        .unwrap_or(Color::WHITE)
+                        .alpha(piece.alpha);
                     shape = shape.line(
-                        rt.to_screen(a),
-                        rt.to_screen(b),
-                        node.thickness * s,
+                        rt.to_screen(piece.a),
+                        rt.to_screen(piece.b),
+                        piece.width * s,
                         LineCap::Round,
                         color,
                     );
@@ -1109,6 +1059,13 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
         }
         // Shape segments: circle rings and regular polygons
         // centred on the node (rasterizer + GPUI parity).
+        // Wave 12: the node's style opacity applies to their
+        // colours the same way it applies to the segment
+        // pieces above — multiplied into the colour's alpha
+        // (the colours `node_color` builds are opaque, so the
+        // product lands as the style opacity itself). Until
+        // now the shape pass ignored `style.opacity` entirely,
+        // like the segment pass did.
         for (i, node) in fig.def.nodes.iter().enumerate() {
             let centre = rt.to_screen(pos[i]);
             let r = node.length / 2.0 * s;
@@ -1119,11 +1076,14 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
                         true,
                         node.thickness * s,
                         LineCap::Round,
-                        node_color(node),
+                        node_color(node).alpha(node.style.opacity),
                     );
                 }
                 model::Shape::Polygon(sides) => {
-                    shape = shape.fill(ngon(centre, r, sides as usize), node_color(node));
+                    shape = shape.fill(
+                        ngon(centre, r, sides as usize),
+                        node_color(node).alpha(node.style.opacity),
+                    );
                 }
                 model::Shape::Line => {}
             }
@@ -1160,6 +1120,29 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
             }
         }
     }
+    // Image media placeholders (Wave 12, A6 §3b): Rune's
+    // `Shape` has no bitmap primitive, so the stage cannot
+    // draw the PNGs the export composites — the hard limit
+    // A6 named R1. Instead, every image item gets a
+    // geometry-exact placeholder: the item's own quad from
+    // `media::media_items` (the export's placement, evaluated
+    // at the same display frame the figure pass used), filled
+    // translucently and outlined at the item's alpha (§3a's
+    // figure × style product for segment media). The slot is
+    // A6's ruling: over the figures, under the 3D session
+    // figure and the FX/text/weather passes — a documented
+    // divergence from the raster, where media composites over
+    // everything. Text items are not drawn here; stage_text
+    // owns them later in this same shape.
+    for item in stykanimate_rs::media::media_items(&core.project, display) {
+        if let stykanimate_rs::media::MediaItem::Image { corners, alpha, .. } = item {
+            let pts: Vec<[f32; 2]> = corners.iter().map(|p| rt.to_screen(*p)).collect();
+            let accent = hex_color(SELECTION_ACCENT).unwrap_or(Color::WHITE);
+            shape = shape.fill(pts.clone(), accent.alpha(0.16 * alpha));
+            shape = shape.stroke_with(pts, true, 1.0, LineCap::Round, accent.alpha(0.7 * alpha));
+        }
+    }
+
     // The 3D session's figure on the stage (Phase M): the
     // projected prims from `stage_fig3` — stage coordinates,
     // already clipped to the stage rect — drawn over the
@@ -1450,57 +1433,6 @@ mod tests {
         assert!((pts[0][0] - 10.0).abs() < 1e-4 && (pts[0][1] - 15.0).abs() < 1e-4);
         // Fewer than 3 sides clamp to a triangle.
         assert_eq!(ngon([0.0, 0.0], 1.0, 2).len(), 3);
-    }
-
-    #[test]
-    fn gradient_color_endpoints_are_exact() {
-        // t = 0 is the node colour, t = 1 is color2 — the
-        // exporters' endpoints, reproduced exactly.
-        assert_eq!(gradient_color(0xFF0000, 0x0000FF, 0.0), 0xFF0000);
-        assert_eq!(gradient_color(0xFF0000, 0x0000FF, 1.0), 0x0000FF);
-        assert_eq!(gradient_color(0x000000, 0xFFFFFF, 0.0), 0x000000);
-        assert_eq!(gradient_color(0x000000, 0xFFFFFF, 1.0), 0xFFFFFF);
-    }
-
-    #[test]
-    fn gradient_color_midpoint_matches_the_export_lerp() {
-        // The same values style.rs pins for lerp_color itself:
-        // 255 * 0.5 = 127.5 rounds to 128 per channel.
-        assert_eq!(gradient_color(0xFF0000, 0x0000FF, 0.5), 0x800080);
-        assert_eq!(gradient_color(0x000000, 0xFFFFFF, 0.5), 0x808080);
-    }
-
-    #[test]
-    fn gradient_steps_passthrough_without_color2() {
-        // No color2 → None → the caller keeps the flat line.
-        assert_eq!(gradient_steps(0x123456, None), None);
-    }
-
-    #[test]
-    fn gradient_steps_samples_six_midpoints() {
-        let steps = gradient_steps(0x000000, Some(0xFFFFFF)).expect("color2 set");
-        assert_eq!(steps.len(), GRADIENT_STEPS);
-        assert_eq!(steps.len(), 6);
-        // Piece k is coloured at t = (k + 0.5) / 6 along
-        // black → white (255 * t, rounded, per channel):
-        // t = 1/12 → 21, t = 5/12 → 106, t = 7/12 → 149,
-        // t = 11/12 → 234.
-        assert_eq!(steps[0], 0x151515);
-        assert_eq!(steps[2], 0x6A6A6A);
-        assert_eq!(steps[3], 0x959595);
-        assert_eq!(steps[5], 0xEAEAEA);
-        // Strictly brightening piece by piece.
-        for w in steps.windows(2) {
-            assert!(w[0] < w[1], "gradient not monotonic: {steps:?}");
-        }
-    }
-
-    #[test]
-    fn point_at_endpoints_and_midpoint() {
-        let (a, b) = ([0.0, 0.0], [10.0, 20.0]);
-        assert_eq!(point_at(a, b, 0.0), a);
-        assert_eq!(point_at(a, b, 1.0), b);
-        assert_eq!(point_at(a, b, 0.5), [5.0, 10.0]);
     }
 
     #[test]
@@ -1833,83 +1765,176 @@ mod tests {
         assert_eq!(skins[0].1, 0x7BE495);
     }
 
-    #[test]
-    fn segment_pieces_straight_flat_is_one_line() {
-        let pieces = segment_pieces([0.0, 0.0], [80.0, 40.0], 0.0, 0x123456, None, Color::WHITE);
-        assert_eq!(pieces, vec![([0.0, 0.0], [80.0, 40.0], Color::WHITE)]);
+    /// The pre-Wave-12 flat segment as a style: taper 1.0,
+    /// round cap, no `color2`, opacity 1.0 — `NodeStyle`'s
+    /// own default, shared by the styled-pieces tests below.
+    fn flat_style() -> model::NodeStyle {
+        model::NodeStyle::default()
     }
 
     #[test]
-    fn segment_pieces_zero_bend_matches_the_straight_construction() {
-        // The pre-bend drawing, built by hand: gradient pieces
-        // coloured at the (k + 0.5) / 6 samples along the
-        // straight segment, endpoints walking k/6 → (k+1)/6.
-        // A zero bend must reproduce it exactly, so bend-less
-        // and all-zero projects draw not one line differently.
+    fn styled_segment_pieces_straight_flat_is_one_piece() {
+        // Ported from the retired local
+        // `segment_pieces_straight_flat_is_one_line`: one
+        // piece spanning the whole segment in the flat
+        // colour — now with the piece's width and alpha
+        // pinned too (the full thickness; the default
+        // style's opacity, 1.0).
+        let pieces = stykanimate_rs::paint::styled_segment_pieces(
+            [0.0, 0.0],
+            [80.0, 40.0],
+            0.0,
+            6.0,
+            &flat_style(),
+            0x123456,
+        );
+        assert_eq!(pieces.len(), 1);
+        assert_eq!((pieces[0].a, pieces[0].b), ([0.0, 0.0], [80.0, 40.0]));
+        assert_eq!(pieces[0].color, 0x123456);
+        assert_eq!(pieces[0].width, 6.0);
+        assert_eq!(pieces[0].alpha, 1.0);
+    }
+
+    #[test]
+    fn styled_segment_pieces_zero_bend_matches_the_straight_construction() {
+        // Ported from the retired local
+        // `segment_pieces_zero_bend_matches_the_straight_construction`,
+        // re-derived at Wave 12 integration against the shared
+        // generator's arithmetic (the port's first draft kept
+        // the old local construction's 6 midpoint steps; the
+        // generator subdivides a varying span into 4 pieces
+        // sampled at their START joints — the convention
+        // export.rs's byte-identical straight path requires).
+        // Gradient pieces coloured at the k / 4 start samples
+        // along the straight segment (the exporters' own
+        // `style::lerp_color`, called directly here), endpoints
+        // walking k/4 to (k+1)/4; the first piece carries the
+        // pure near colour. A zero bend must reproduce it
+        // exactly, so bend-less and all-zero projects draw not
+        // one line differently.
         let (a, b) = ([10.0, 20.0], [110.0, 60.0]);
         let (near, far) = (0x102030u32, 0xE0D0C0u32);
-        let n = GRADIENT_STEPS as f32;
-        let expect: Vec<(V2, V2, Color)> = (0..GRADIENT_STEPS)
-            .map(|k| {
-                (
-                    point_at(a, b, k as f32 / n),
-                    point_at(a, b, (k + 1) as f32 / n),
-                    hex_color(gradient_color(near, far, (k as f32 + 0.5) / n))
-                        .unwrap_or(Color::WHITE),
-                )
-            })
-            .collect();
-        assert_eq!(segment_pieces(a, b, 0.0, near, Some(far), Color::WHITE), expect);
+        let style = model::NodeStyle { color2: Some(far), ..flat_style() };
+        let pieces =
+            stykanimate_rs::paint::styled_segment_pieces(a, b, 0.0, 6.0, &style, near);
+        assert_eq!(pieces.len(), 4);
+        let n = 4.0f32;
+        for (k, piece) in pieces.iter().enumerate() {
+            let at = |t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+            assert_eq!(piece.a, at(k as f32 / n));
+            assert_eq!(piece.b, at((k + 1) as f32 / n));
+            assert_eq!(
+                piece.color,
+                stykanimate_rs::style::lerp_color(near, far, k as f32 / n)
+            );
+            assert_eq!(piece.width, 6.0);
+            assert_eq!(piece.alpha, 1.0);
+        }
     }
 
     #[test]
-    fn segment_pieces_bent_flat_splits_at_bend_mid() {
+    fn styled_segment_pieces_bent_flat_splits_at_bend_mid() {
+        // Ported from the retired local
+        // `segment_pieces_bent_flat_splits_at_bend_mid`.
         let (a, b) = ([0.0, 0.0], [80.0, 40.0]);
         let bend = 0.6;
-        let pieces = segment_pieces(a, b, bend, 0x123456, None, Color::WHITE);
-        // Two lines where the straight segment drew one, both
-        // in the flat colour, meeting exactly at bend_mid's
-        // output (computed here by the model itself).
+        let pieces = stykanimate_rs::paint::styled_segment_pieces(
+            a,
+            b,
+            bend,
+            6.0,
+            &flat_style(),
+            0x123456,
+        );
+        // Two pieces where the straight segment drew one,
+        // both in the flat colour, meeting exactly at
+        // bend_mid's output (computed here by the model
+        // itself).
         assert_eq!(pieces.len(), 2);
         let mid = model::bend_mid(a, b, bend);
-        assert_eq!(pieces[0], (a, mid, Color::WHITE));
-        assert_eq!(pieces[1], (mid, b, Color::WHITE));
+        assert_eq!((pieces[0].a, pieces[0].b), (a, mid));
+        assert_eq!((pieces[1].a, pieces[1].b), (mid, b));
+        assert!(pieces.iter().all(|piece| piece.color == 0x123456));
         // The joint really leaves the straight midpoint —
         // bend_mid's whole point for a nonzero bend.
-        assert_ne!(mid, point_at(a, b, 0.5));
+        assert_ne!(mid, [40.0, 20.0]);
     }
 
     #[test]
-    fn segment_pieces_bent_gradient_splits_each_half() {
+    fn styled_segment_pieces_bent_gradient_splits_each_half() {
+        // Ported from the retired local
+        // `segment_pieces_bent_gradient_splits_each_half`,
+        // re-derived at Wave 12 integration against the shared
+        // generator's arithmetic (4 start-sampled pieces per
+        // varying span; the width/colour parameter runs
+        // continuously across the bend split — it does NOT
+        // restart on the second half).
         let (a, b) = ([0.0, 0.0], [90.0, 0.0]);
         let (near, far) = (0x000000u32, 0xFFFFFFu32);
-        // Straight gradient: GRADIENT_STEPS pieces. Bent:
-        // each half gets its own GRADIENT_STEPS sub-steps.
-        let straight = segment_pieces(a, b, 0.0, near, Some(far), Color::WHITE);
-        assert_eq!(straight.len(), GRADIENT_STEPS);
-        let bent = segment_pieces(a, b, 0.5, near, Some(far), Color::WHITE);
-        assert_eq!(bent.len(), 2 * GRADIENT_STEPS);
+        let style = model::NodeStyle { color2: Some(far), ..flat_style() };
+        // Straight gradient: 4 pieces. Bent: each half gets
+        // its own 4 sub-steps.
+        let straight =
+            stykanimate_rs::paint::styled_segment_pieces(a, b, 0.0, 6.0, &style, near);
+        assert_eq!(straight.len(), 4);
+        let bent =
+            stykanimate_rs::paint::styled_segment_pieces(a, b, 0.5, 6.0, &style, near);
+        assert_eq!(bent.len(), 8);
         // The halves meet exactly at the bend midpoint.
         let mid = model::bend_mid(a, b, 0.5);
-        assert_eq!(bent[GRADIENT_STEPS - 1].1, mid);
-        assert_eq!(bent[GRADIENT_STEPS].0, mid);
-        // Export's colour split: the second half is coloured
-        // over [mid blend, color2], so its first piece takes
-        // that range's first midpoint sample.
-        let mid_hex = gradient_color(near, far, 0.5);
-        let expect = gradient_color(mid_hex, far, 0.5 / GRADIENT_STEPS as f32);
-        assert_eq!(bent[GRADIENT_STEPS].2, hex_color(expect).unwrap_or(Color::WHITE));
-        // And the first half over [near, mid blend]: its last
-        // piece takes that range's last midpoint sample.
-        let expect_first = gradient_color(
-            near,
-            mid_hex,
-            (GRADIENT_STEPS as f32 - 0.5) / GRADIENT_STEPS as f32,
+        assert_eq!(bent[3].b, mid);
+        assert_eq!(bent[4].a, mid);
+        // Continuous parameter, start samples: the second
+        // half's first piece starts AT the split, so it
+        // carries the whole-segment lerp at t = 0.5 exactly;
+        // the first half's last piece starts at t = 3/8 (its
+        // span runs 0 → 1/2 in 4 steps). The blends are
+        // `style::lerp_color` itself, as the exporters call
+        // it.
+        let mid_hex = stykanimate_rs::style::lerp_color(near, far, 0.5);
+        assert_eq!(bent[4].color, mid_hex);
+        let expect_first = stykanimate_rs::style::lerp_color(near, far, 0.375);
+        assert_eq!(bent[3].color, expect_first);
+    }
+
+    #[test]
+    fn styled_segment_pieces_encode_taper_cap_and_opacity() {
+        // The Wave 12 point of the adoption: what the old
+        // local construction could not express at all.
+        let (a, b) = ([0.0, 0.0], [80.0, 0.0]);
+        // Taper: the widths step down from the full
+        // thickness at the near end toward thickness *
+        // taper at the far end, and every piece carries the
+        // style opacity as its alpha.
+        let style = model::NodeStyle { taper: 0.25, opacity: 0.5, ..flat_style() };
+        let pieces =
+            stykanimate_rs::paint::styled_segment_pieces(a, b, 0.0, 8.0, &style, 0x123456);
+        assert!(pieces.len() > 1, "a tapered segment needs steps to draw");
+        assert_eq!(pieces[0].width, 8.0);
+        for w in pieces.windows(2) {
+            assert!(w[0].width > w[1].width, "widths must fall along the taper");
+        }
+        let last = pieces[pieces.len() - 1].width;
+        assert!(
+            last < 8.0 && last >= 8.0 * 0.25 - 1e-4,
+            "far width approaches thickness * taper, got {last}"
         );
-        assert_eq!(
-            bent[GRADIENT_STEPS - 1].2,
-            hex_color(expect_first).unwrap_or(Color::WHITE)
-        );
+        assert!(pieces.iter().all(|piece| piece.alpha == 0.5));
+        assert!(pieces.iter().all(|piece| piece.color == 0x123456));
+        // Point cap: the far width is forced to zero
+        // whatever the taper says — export.rs's StyledSeg
+        // rule (`half_far = 0.0` for a point cap). Pieces
+        // carry START samples, so the terminal 0 belongs to
+        // the far joint itself and no piece carries it: the
+        // last of the 4 pieces starts at t = 3/4 and carries
+        // thickness * (1 - 3/4) = thickness / 4. (The port's
+        // first draft asserted 0.0 — the old local
+        // construction's terminal-piece convention, which
+        // the shared generator does not share.)
+        let style = model::NodeStyle { cap: model::CapKind::Point, ..flat_style() };
+        let pieces =
+            stykanimate_rs::paint::styled_segment_pieces(a, b, 0.0, 8.0, &style, 0x123456);
+        assert_eq!(pieces[pieces.len() - 1].width, 8.0 / 4.0);
     }
 
     #[test]
@@ -1946,16 +1971,16 @@ mod tests {
         assert_eq!(bends[ni], 0.5);
         let pos = core.positions_f(display, 0);
         let node = &core.project.figures[0].def.nodes[ni];
-        let pieces = segment_pieces(
+        let pieces = stykanimate_rs::paint::styled_segment_pieces(
             pos[parent],
             pos[ni],
             bends.get(ni).copied().unwrap_or(0.0),
+            node.thickness,
+            &node.style,
             0xE8E8EC,
-            node.style.color2,
-            Color::WHITE,
         );
         assert_eq!(pieces.len(), 2);
-        assert_eq!(pieces[0].1, model::bend_mid(pos[parent], pos[ni], 0.5));
-        assert_eq!(pieces[1].0, model::bend_mid(pos[parent], pos[ni], 0.5));
+        assert_eq!(pieces[0].b, model::bend_mid(pos[parent], pos[ni], 0.5));
+        assert_eq!(pieces[1].a, model::bend_mid(pos[parent], pos[ni], 0.5));
     }
 }

@@ -354,54 +354,125 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
             let half = node.thickness / 2.0 * zoom * ss as f32;
             if let Some(p) = node.parent {
                 let style = node.style;
-                // A point cap forces the far width to zero whatever
-                // the taper says.
+                // Wave 12: figure segments are built from the
+                // shared piece generator in `paint` — the one
+                // source of truth for how a `NodeStyle` becomes
+                // geometry, shared with the stage. The generator
+                // returns the segment as a chain of pieces (split
+                // at `model::bend_mid` when this node's bend is
+                // nonzero), each piece carrying the width/colour
+                // sample at its start joint and the style's
+                // opacity as alpha. The raster re-expresses the
+                // chain as `StyledSeg`s whose far values are the
+                // NEXT piece's samples, so the per-pixel
+                // interpolation in `styled_seg_color` traces the
+                // generator's own lerp end to end.
+                //
+                // Two things the piece list cannot carry stay
+                // derived here, from the same inputs the
+                // generator received:
+                //  - the terminal far width/colour (the lerp's
+                //    end): a piece carries the sample at its
+                //    start, so the last piece's far end has no
+                //    carrier. The width keeps this module's
+                //    exact historical expression — a point cap
+                //    forces zero, else `half * taper` with the
+                //    taper floored at 0 — so the far half-width
+                //    is bit-identical to the pre-generator
+                //    construction.
+                //  - for a square cap, the outer endpoints: the
+                //    generator expresses the cap by extending
+                //    the piece endpoints, but `styled_seg_color`
+                //    extends analytically from the true joints
+                //    (its width/colour parameter lives on the
+                //    unextended axis), so the raster keeps the
+                //    joints as the outer endpoints and lets the
+                //    coverage test do the extending — adopting
+                //    the extended endpoints too would extend
+                //    twice and re-parameterise the taper across
+                //    the extension.
+                let bend = bends.get(i).copied().unwrap_or(0.0);
+                let pieces = crate::paint::styled_segment_pieces(
+                    pos[p],
+                    pos[i],
+                    bend,
+                    node.thickness,
+                    &style,
+                    color_hex,
+                );
+                let fig_opacity = fig.opacity.clamp(0.0, 1.0);
+                // A point cap forces the far width to zero
+                // whatever the taper says.
                 let half_far = if style.cap == CapKind::Point {
                     0.0
                 } else {
                     half * style.taper.max(0.0)
                 };
-                let seg = StyledSeg {
-                    a: view(pos[p]),
-                    b: view(pos[i]),
-                    half_near: half,
-                    half_far,
-                    color_near: color_hex,
-                    color_far: style.color2.unwrap_or(color_hex),
-                    opacity: style.opacity * fig.opacity.clamp(0.0, 1.0),
-                    cap: style.cap,
-                };
-                // Wave 7: a bent segment draws as two pieces
-                // through the arc midpoint (`model::bend_mid`);
-                // the joint positions themselves don't move. The
-                // mid width/colour are the t = 0.5 interpolations
-                // of the segment's taper/gradient, and the first
-                // piece's far cap is Round so the arc joint stays
-                // smooth whatever the segment's own cap is. Zero
-                // bend — and bend-less projects, whose `bends_at`
-                // is empty — take the single-segment path above
-                // unchanged.
-                let bend = bends.get(i).copied().unwrap_or(0.0);
+                let color_far = style.color2.unwrap_or(color_hex);
                 if bend == 0.0 {
-                    segments.push(seg);
+                    // Straight segment: one analytic `StyledSeg`
+                    // from the first piece's near sample to the
+                    // lerp's end — the same single segment this
+                    // module has always built (zero bend, and
+                    // bend-less projects whose `bends_at` is
+                    // empty, take this path unchanged). Merging
+                    // the chain here keeps the gradient's
+                    // interpolation in one `lerp_color` sweep, so
+                    // no intermediate rounding creeps in at piece
+                    // joints the coverage test never needed.
+                    if let Some(first) = pieces.first() {
+                        segments.push(StyledSeg {
+                            a: view(pos[p]),
+                            b: view(pos[i]),
+                            half_near: first.width / 2.0 * zoom * ss as f32,
+                            half_far,
+                            color_near: first.color,
+                            color_far,
+                            opacity: first.alpha * fig_opacity,
+                            cap: style.cap,
+                        });
+                    }
                 } else {
-                    let mid = view(crate::model::bend_mid(pos[p], pos[i], bend));
-                    let half_mid = (seg.half_near + seg.half_far) / 2.0;
-                    let color_mid =
-                        crate::style::lerp_color(seg.color_near, seg.color_far, 0.5);
-                    segments.push(StyledSeg {
-                        b: mid,
-                        half_far: half_mid,
-                        color_far: color_mid,
-                        cap: CapKind::Round,
-                        ..seg
-                    });
-                    segments.push(StyledSeg {
-                        a: mid,
-                        half_near: half_mid,
-                        color_near: color_mid,
-                        ..seg
-                    });
+                    // Bent segment: one `StyledSeg` per piece,
+                    // chained through the bend midpoint (wave 7's
+                    // two-piece arc, generalised to the chain the
+                    // generator returns). Every piece but the
+                    // last gets a Round cap so the arc joint
+                    // stays smooth whatever the segment's own cap
+                    // is; the last piece keeps the style's cap
+                    // and — for square — the true far joint as
+                    // its endpoint, per the note above.
+                    let last = pieces.len().saturating_sub(1);
+                    for (k, piece) in pieces.iter().enumerate() {
+                        let (far_half, far_color) = if k < last {
+                            (
+                                pieces[k + 1].width / 2.0 * zoom * ss as f32,
+                                pieces[k + 1].color,
+                            )
+                        } else {
+                            (half_far, color_far)
+                        };
+                        let a = if k == 0 && style.cap == CapKind::Square {
+                            view(pos[p])
+                        } else {
+                            view(piece.a)
+                        };
+                        let b = if k == last && style.cap == CapKind::Square {
+                            view(pos[i])
+                        } else {
+                            view(piece.b)
+                        };
+                        segments.push(StyledSeg {
+                            a,
+                            b,
+                            half_near: piece.width / 2.0 * zoom * ss as f32,
+                            half_far: far_half,
+                            color_near: piece.color,
+                            color_far: far_color,
+                            opacity: piece.alpha * fig_opacity,
+                            cap: if k < last { CapKind::Round } else { style.cap },
+                        });
+                    }
                 }
             }
             if node.head {
@@ -445,7 +516,14 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                 let radius = (stroke.width * 0.5).max(1.0);
                 let color = rgb(stroke.color);
                 for (centre, alpha) in crate::paint::spray_dots(&stroke.points, mark) {
-                    spray.push((centre, radius, color, alpha));
+                    // Wave 12 (A5 parity): a stored mark's
+                    // opacity is unclamped on load, so a dot
+                    // alpha can exceed 1; the stage clamps
+                    // (stage_layers' dot_alpha) and the SVG
+                    // writer clamps at emission — clamp here
+                    // too, or the disc blend below
+                    // extrapolates past both colours.
+                    spray.push((centre, radius, color, alpha.clamp(0.0, 1.0)));
                 }
                 continue;
             }

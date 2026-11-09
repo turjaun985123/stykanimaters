@@ -121,7 +121,12 @@
 //!   strokes. Belt and braces, the spray branch never
 //!   reads `Stroke::opacity` at all, so even a
 //!   hand-edited project with a translucent spray stroke
-//!   sprays exactly as before.
+//!   sprays exactly as before. The mark's alpha itself
+//!   is clamped to `[0.0, 1.0]` at the point of use
+//!   (`dot_alpha`), like the stroke field: `SprayMark::
+//!   opacity` is a stored `f32` nothing else clamps, and
+//!   an out-of-range mark must not push a prim's alpha
+//!   past 1 (or below 0) either.
 //! * **Highlight** ([`highlight_geometry`]): the prims
 //!   carry the *same* opacity values as the base layer
 //!   (the stroke's for plain/filled, the mark's for
@@ -386,6 +391,23 @@ fn stroke_alpha(stroke: &Stroke) -> f32 {
     stroke.opacity.clamp(0.0, 1.0)
 }
 
+/// The alpha a spray dot's prim carries: the mark's
+/// per-dot alpha from `paint::spray_dots`, clamped to
+/// `[0.0, 1.0]` — the same point-of-use clamp
+/// [`stroke_alpha`] applies to the stroke field,
+/// extended to the mark's field. `SprayMark::opacity`
+/// is a stored `f32` nothing else clamps, so without
+/// this a hand-edited mark opacity of 1.4 would emit
+/// dots at alpha 1.4 — the one path by which a prim
+/// could leave this layer outside the unit range. A
+/// no-op for every recorder-produced mark (brush
+/// opacity is in range, and `paint::spray_dots` scales
+/// it by at most 1.0), so valid projects spray
+/// byte-identically to before.
+fn dot_alpha(alpha: f32) -> f32 {
+    alpha.clamp(0.0, 1.0)
+}
+
 /// Geometry for the current frame's drawing strokes, in
 /// stage coordinates and stored stroke order. Pure: reads
 /// only `core.project.strokes` and the display frame, so the
@@ -408,7 +430,9 @@ pub fn stroke_geometry(core: &EditorCore) -> Vec<StrokePrim> {
         // dots' alpha already comes from the spray mark —
         // scaling by the stroke field as well would fade
         // spray twice (see the module docs, "Stroke
-        // opacity").
+        // opacity"). The mark's own per-dot alpha IS
+        // clamped at the point of use ([`dot_alpha`]),
+        // like every other alpha this layer emits.
         if let Some(mark) = &stroke.spray {
             let radius = (stroke.width * 0.5).max(1.0);
             for (centre, alpha) in paint::spray_dots(&stroke.points, mark) {
@@ -416,7 +440,7 @@ pub fn stroke_geometry(core: &EditorCore) -> Vec<StrokePrim> {
                     pts: vec![centre],
                     radius,
                     color: stroke.color,
-                    opacity: alpha,
+                    opacity: dot_alpha(alpha),
                 });
             }
             continue;
@@ -552,7 +576,7 @@ pub fn highlight_geometry(core: &EditorCore, project_index: usize) -> Vec<Stroke
                 pts: vec![centre],
                 radius,
                 color: stroke.color,
-                opacity: alpha,
+                opacity: dot_alpha(alpha),
             })
             .collect();
     }
@@ -1593,5 +1617,177 @@ mod tests {
         let core = core_with(vec![plain(0, &[[30.0, 30.0]], 0x111111, 4.0)]);
         assert_eq!(stroke_at_point(&core, [30.0, 40.0], PICK_TOLERANCE), Some(0));
         assert_eq!(stroke_at_point(&core, [30.0, 44.0], PICK_TOLERANCE), None);
+    }
+
+    #[test]
+    fn opacity_055_strokes_carry_alpha_055_for_every_kind() {
+        // Wave 12 alpha audit pin: a stroke recorded at
+        // opacity 0.55 yields prims at alpha 0.55 for
+        // every kind this layer emits — exactly once,
+        // never scaled twice, never dropped.
+        let pts = [[10.0, 20.0], [30.0, 40.0], [50.0, 20.0]];
+        // Plain polyline: exactly 0.55.
+        let mut p = plain(0, &pts, 0x2686E8, 6.0);
+        p.opacity = 0.55;
+        // Filled: exactly 0.55 (fills are the usual place
+        // an alpha gets dropped — not here).
+        let mut f = plain(0, &pts, 0x445566, 3.0);
+        f.fill = Some(0x112233);
+        f.opacity = 0.55;
+        // Scatter dabs: every dab exactly 0.55.
+        let mut sc = plain(0, &[[0.0, 0.0], [60.0, 0.0]], 0x3366CC, 6.0);
+        sc.scatter = 8.0;
+        sc.opacity = 0.55;
+        let core = core_with(vec![p, f, sc]);
+        let geo = stroke_geometry(&core);
+        match &geo[0] {
+            StrokePrim::Polyline { opacity, .. } => {
+                assert!((opacity - 0.55).abs() < 1e-6, "polyline at 0.55, got {opacity}")
+            }
+            other => panic!("expected a polyline, got {other:?}"),
+        }
+        match &geo[1] {
+            StrokePrim::Filled { opacity, .. } => {
+                assert!((opacity - 0.55).abs() < 1e-6, "fill at 0.55, got {opacity}")
+            }
+            other => panic!("expected a filled prim, got {other:?}"),
+        }
+        let dabs = &geo[2..];
+        assert!(!dabs.is_empty(), "scatter stroke must emit dabs");
+        for prim in dabs {
+            assert!(
+                (prim_opacity(prim) - 0.55).abs() < 1e-6,
+                "every dab at 0.55, got {}",
+                prim_opacity(prim)
+            );
+        }
+        // Spray dots: the stroke's alpha language is the
+        // mark's, not the stroke field's (the recorder
+        // stores 1.0 in the field for spray strokes —
+        // src/editor.rs). A mark at 0.55 yields dots at
+        // the mark's own falloff, unchanged and unscaled:
+        // each prim alpha equals paint::spray_dots' alpha
+        // for that dot, inside [0.55 * 0.45, 0.55].
+        let spray_pts = [[100.0, 100.0], [160.0, 100.0]];
+        let mark = SprayMark {
+            seed: 7,
+            radius: 10.0,
+            opacity: 0.55,
+        };
+        let mut sp = plain(0, &spray_pts, 0xE8862E, 6.0);
+        sp.spray = Some(mark);
+        let want = stykanimate_rs::paint::spray_dots(&spray_pts, &mark);
+        let core = core_with(vec![sp]);
+        let geo = stroke_geometry(&core);
+        assert_eq!(geo.len(), want.len());
+        for (prim, (_, raw_alpha)) in geo.iter().zip(want.iter()) {
+            let a = prim_opacity(prim);
+            assert!(
+                (a - raw_alpha).abs() < 1e-6,
+                "dot alpha is the mark's, exactly once: got {a}, raw {raw_alpha}"
+            );
+            assert!(
+                a >= 0.55 * 0.45 - 1e-6 && a <= 0.55,
+                "dot alpha inside the mark's falloff band, got {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn spray_mark_alpha_is_clamped_to_the_unit_range() {
+        // Wave 12 alpha audit: SprayMark::opacity is a
+        // stored f32 nothing else clamps. A hand-edited
+        // mark at 1.4 must not emit dots past alpha 1.0
+        // (before the dot_alpha clamp, rim dots reached
+        // 1.4), and a negative mark must not emit
+        // negative alphas — in the base layer and in the
+        // highlight alike.
+        let build = |mark_opacity: f32| {
+            let mut s = plain(0, &[[100.0, 100.0], [160.0, 100.0]], 0xE8862E, 6.0);
+            s.spray = Some(SprayMark {
+                seed: 7,
+                radius: 10.0,
+                opacity: mark_opacity,
+            });
+            core_with(vec![s])
+        };
+        let core = build(1.4);
+        for prim in stroke_geometry(&core) {
+            let a = prim_opacity(&prim);
+            assert!((0.0..=1.0).contains(&a), "base dot alpha in range, got {a}");
+        }
+        for prim in highlight_geometry(&core, 0) {
+            let a = prim_opacity(&prim);
+            assert!((0.0..=1.0).contains(&a), "highlight dot alpha in range, got {a}");
+        }
+        let core = build(-0.5);
+        for prim in stroke_geometry(&core) {
+            assert_eq!(prim_opacity(&prim), 0.0, "negative mark clamps to 0");
+        }
+    }
+
+    #[test]
+    fn out_of_range_opacity_clamps_for_filled_and_scatter_too() {
+        // The unit-range clamp pinned for plain strokes
+        // by stroke_opacity_is_clamped_to_the_unit_range
+        // covers the other stroke_alpha paths as well:
+        // filled prims and scatter dabs read the same
+        // helper, so the same hand-edited values clamp
+        // the same way.
+        let pts = [[0.0, 0.0], [40.0, 0.0], [40.0, 30.0]];
+        let mut f = plain(0, &pts, 0x445566, 3.0);
+        f.fill = Some(0x112233);
+        f.opacity = 1.4;
+        let mut sc = plain(0, &[[0.0, 0.0], [60.0, 0.0]], 0x3366CC, 6.0);
+        sc.scatter = 8.0;
+        sc.opacity = -0.25;
+        let core = core_with(vec![f, sc]);
+        let geo = stroke_geometry(&core);
+        match &geo[0] {
+            StrokePrim::Filled { opacity, .. } => assert_eq!(*opacity, 1.0),
+            other => panic!("expected a filled prim, got {other:?}"),
+        }
+        let dabs = &geo[1..];
+        assert!(!dabs.is_empty());
+        for prim in dabs {
+            assert_eq!(prim_opacity(prim), 0.0, "dab alpha clamps to 0");
+        }
+    }
+
+    #[test]
+    fn no_prim_alpha_ever_leaves_the_unit_range() {
+        // The layer-boundary invariant behind "opacity
+        // never exceeds 1 after composition": the base
+        // consumer applies the carried value verbatim
+        // (stage_view sets it as the colour's alpha), so
+        // if every prim this layer emits sits in [0, 1],
+        // the composed alpha does too — for every kind,
+        // at hostile stored values, in the base layer and
+        // the highlight alike.
+        let pts = [[10.0, 20.0], [30.0, 40.0], [50.0, 20.0]];
+        let mut p = plain(0, &pts, 0x111111, 4.0);
+        p.opacity = 2.0;
+        let mut f = plain(0, &pts, 0x222222, 3.0);
+        f.fill = Some(0x333333);
+        f.opacity = -1.0;
+        let mut sc = plain(0, &[[0.0, 0.0], [60.0, 0.0]], 0x444444, 6.0);
+        sc.scatter = 8.0;
+        sc.opacity = 1.7;
+        let mut sp = plain(0, &pts, 0x555555, 6.0);
+        sp.spray = Some(SprayMark {
+            seed: 3,
+            radius: 10.0,
+            opacity: 1.9,
+        });
+        let core = core_with(vec![p, f, sc, sp]);
+        let mut all = stroke_geometry(&core);
+        for idx in 0..4 {
+            all.extend(highlight_geometry(&core, idx));
+        }
+        assert!(!all.is_empty());
+        for prim in &all {
+            let a = prim_opacity(prim);
+            assert!((0.0..=1.0).contains(&a), "prim alpha {a} outside [0, 1]: {prim:?}");
+        }
     }
 }

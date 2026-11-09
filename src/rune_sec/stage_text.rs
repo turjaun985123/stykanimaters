@@ -29,6 +29,43 @@
 //!   and non-solo figures draw no segments, so their text
 //!   must not float alone). `media_items` skips hidden
 //!   figures only; under solo the difference is visible.
+//!
+//! ## Bent segments: the label stays on the chord (export's rule)
+//!
+//! Both segment renderers arc a bent segment through
+//! `model::bend_mid` as two pieces — the rasterizer at
+//! export.rs:388, the stage at stage_view.rs:676
+//! (`segment_pieces`). But the rasterizer's TEXT placement
+//! has no bend term at all: `media_items` computes the
+//! label's anchor and angle from the straight parent→node
+//! chord over joint positions that bends never move
+//! (export.rs's own comment at its bend split: "the joint
+//! positions themselves don't move"). So in the shipped
+//! output a label on a bent segment sits on the chord,
+//! inside the arc — one rigid label, not two half-labels.
+//! The stage mirrors that exactly (Wave 12, A7): segment
+//! text does NOT follow `bend_mid` here, deliberately, so
+//! stage and export place the label at the same point.
+//! `bent_segment_text_stays_on_the_export_chord` pins it.
+//!
+//! ## Opacity: segment text carries the node's style opacity
+//!
+//! Segment-text glyph boxes carry the node's
+//! `style.opacity` (clamped to 0..=1) as their prim alpha,
+//! applied exactly once — here, in [`label_boxes_alpha`];
+//! the stage painter applies a prim's alpha verbatim
+//! (stage_view.rs:1196) and nothing else multiplies it.
+//! This is a DELIBERATE divergence from the rasterizer,
+//! which stamps text fully opaque (`composite_text` builds
+//! `Rgba([…, 255])`, media.rs:326) — the stage fades a
+//! segment's label with its segment, per the Wave 12
+//! stage-fidelity directive. Figure opacity is NOT
+//! multiplied in: export multiplies it into SEGMENT alpha
+//! only, never into text, and the stage's figure fade is a
+//! colour blend, not an alpha. Free-standing texts have no
+//! node style (model.rs:675-680) and keep alpha 1.0. The
+//! backing plates are unaffected — they stay at
+//! [`BACKING_ALPHA`] whatever the glyph alpha.
 //! - **Free-standing texts** (`Project.texts`, media.rs:180-
 //!   200): the instance key is sampled with
 //!   `InstanceKey::sample` (model.rs:645) — linear interp,
@@ -90,8 +127,9 @@ pub enum TextPrim {
     /// image quads — starting at the local (−x, −y) corner and
     /// walking the local +x edge first — filled with `color`
     /// (a `0xRRGGBB` engine colour) at opacity `alpha`
-    /// (`1.0` = fully opaque, which every real glyph box
-    /// carries; the backing plates `text_geometry`
+    /// (`1.0` = fully opaque; segment-text glyphs carry
+    /// their node's `style.opacity`, free-standing texts
+    /// carry 1.0, and the backing plates `text_geometry`
     /// interleaves carry [`BACKING_COLOR`]/[`BACKING_ALPHA`]
     /// instead — see the module docs).
     GlyphBox { corners: [V2; 4], color: u32, alpha: f32 },
@@ -124,8 +162,26 @@ pub const BACKING_SCALE: f32 = 1.5;
 /// with glyph height `size` stage units, in `color`. Empty
 /// content, a non-positive size, and all-blank glyphs (e.g.
 /// spaces) yield no boxes — the same early-outs
-/// `composite_text` makes (media.rs:307).
+/// `composite_text` makes (media.rs:307). The glyph boxes
+/// are fully opaque; [`label_boxes_alpha`] is the same
+/// layout with a caller-chosen glyph alpha.
 pub fn label_boxes(pos: V2, angle_deg: f32, content: &str, size: f32, color: u32) -> Vec<TextPrim> {
+    label_boxes_alpha(pos, angle_deg, content, size, color, 1.0)
+}
+
+/// [`label_boxes`] with every glyph box at opacity `alpha`
+/// (clamped to 0..=1): the segment-text path passes the
+/// node's `style.opacity` here — the single place that
+/// opacity enters a text prim (see the module docs).
+pub fn label_boxes_alpha(
+    pos: V2,
+    angle_deg: f32,
+    content: &str,
+    size: f32,
+    color: u32,
+    alpha: f32,
+) -> Vec<TextPrim> {
+    let alpha = alpha.clamp(0.0, 1.0);
     let chars: Vec<char> = content.chars().collect();
     if chars.is_empty() || size <= 0.0 {
         return Vec::new();
@@ -172,7 +228,7 @@ pub fn label_boxes(pos: V2, angle_deg: f32, content: &str, size: f32, color: u32
                         centre[1] - u[1] * half + v[1] * half,
                     ],
                 ];
-                out.push(TextPrim::GlyphBox { corners, color, alpha: 1.0 });
+                out.push(TextPrim::GlyphBox { corners, color, alpha });
             }
         }
     }
@@ -222,7 +278,9 @@ fn with_backing(boxes: Vec<TextPrim>) -> Vec<TextPrim> {
 /// rasterizer also draws last, on top). Each label's glyph
 /// boxes carry the shell-only backing plates described in
 /// the module docs (see [`with_backing`]); the glyph boxes
-/// themselves are exactly [`label_boxes`]' output.
+/// themselves are exactly [`label_boxes`]' output, except
+/// segment-text glyphs, which carry their node's
+/// `style.opacity` as alpha (see the module docs).
 pub fn text_geometry(core: &EditorCore) -> Vec<TextPrim> {
     let project = &core.project;
     let display = core.display_frame();
@@ -247,10 +305,19 @@ pub fn text_geometry(core: &EditorCore) -> Vec<TextPrim> {
             if len <= f32::EPSILON {
                 continue;
             }
+            // Chord midpoint and chord angle, whatever this
+            // node's bend: the rasterizer's placement rule,
+            // mirrored deliberately (see "Bent segments" in
+            // the module docs). The glyph alpha is the node's
+            // style opacity — its one application (the painter
+            // applies prim alpha verbatim).
             let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
             let angle_deg = ab[1].atan2(ab[0]).to_degrees();
             let color = node.color.unwrap_or(fig.color);
-            out.extend(with_backing(label_boxes(mid, angle_deg, content, *size, color)));
+            let alpha = node.style.opacity.clamp(0.0, 1.0);
+            out.extend(with_backing(label_boxes_alpha(
+                mid, angle_deg, content, *size, color, alpha,
+            )));
         }
     }
 
@@ -675,5 +742,103 @@ mod tests {
         assert!(colours(&glyphs(&prims)).iter().all(|c| *c == fig_color));
         // Empty labels stay empty: no plates without glyphs.
         assert!(with_backing(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn bent_segment_text_stays_on_the_export_chord() {
+        // The bend-aware position of a segment label is the
+        // export rasterizer's: media_items places it on the
+        // straight chord (module docs, "Bent segments"), even
+        // though the segment itself arcs through bend_mid.
+        // A bend on the frame must not move, rotate or
+        // re-alpha a single glyph box.
+        let (mut core, _ni, a, b) = core_with_segment_text("HI", 25.0);
+        let straight = text_geometry(&core);
+        assert!(!straight.is_empty());
+        let node_count = core.project.figures[0].def.nodes.len();
+        core.project.frames[0].bends = vec![vec![0.7; node_count]];
+        // The fixture's bend is real: bend_mid leaves the
+        // chord by several units on this segment, so a
+        // bend-following label WOULD move measurably.
+        let arc_mid = stykanimate_rs::model::bend_mid(a, b, 0.7);
+        let chord_mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        let off = ((arc_mid[0] - chord_mid[0]).powi(2)
+            + (arc_mid[1] - chord_mid[1]).powi(2))
+        .sqrt();
+        assert!(off > 1.0, "bend_mid only {off} from the chord — fixture bend too weak");
+        assert_eq!(text_geometry(&core), straight, "a bend must not change segment text");
+        // And the anchor is the chord midpoint (plus the
+        // half-cell quirk), exactly as in the unbent case.
+        let prims = glyphs(&straight);
+        let (lo, hi) = bbox(&prims);
+        let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+        let ang = (b[1] - a[1]).atan2(b[0] - a[0]);
+        let expected = [
+            chord_mid[0] - ang.sin() * 2.5,
+            chord_mid[1] + ang.cos() * 2.5,
+        ];
+        assert!(
+            (centre[0] - expected[0]).abs() < 0.01 && (centre[1] - expected[1]).abs() < 0.01,
+            "bent label centre {centre:?} vs chord expectation {expected:?}"
+        );
+    }
+
+    #[test]
+    fn segment_text_alpha_is_the_node_style_opacity_applied_once() {
+        let (mut core, ni, _, _) = core_with_segment_text("H", 25.0);
+        // A free-standing text in the same project: it has no
+        // node style, so its glyphs must stay opaque whatever
+        // the segment's opacity does.
+        core.project.texts.push(TextInstance {
+            content: "A".into(),
+            size: 20.0,
+            color: 0xABCDEF,
+            keys: vec![InstanceKey { frame: 0.0, x: 50.0, y: 60.0, scale: 1.0, angle: 0.0 }],
+        });
+        let seg_color = core.project.figures[0].def.nodes[ni]
+            .color
+            .unwrap_or(core.project.figures[0].color);
+        // Glyph alphas for one label colour: glyphs are the
+        // second prim of each (plate, glyph) pair.
+        let alphas_for = |prims: &[TextPrim], color: u32| -> Vec<f32> {
+            prims
+                .chunks_exact(2)
+                .map(|pair| &pair[1])
+                .filter(|p| matches!(p, TextPrim::GlyphBox { color: c, .. } if *c == color))
+                .map(|p| {
+                    let TextPrim::GlyphBox { alpha, .. } = p;
+                    *alpha
+                })
+                .collect()
+        };
+        // Default style: opaque.
+        let prims = text_geometry(&core);
+        let seg_alphas = alphas_for(&prims, seg_color);
+        assert!(!seg_alphas.is_empty());
+        assert!(seg_alphas.iter().all(|a| *a == 1.0), "default alphas {seg_alphas:?}");
+        // Opacity 0.5: every segment glyph at exactly 0.5 —
+        // not 0.25 (applied twice) and not 1.0 (dropped).
+        core.project.figures[0].def.nodes[ni].style.opacity = 0.5;
+        let prims = text_geometry(&core);
+        let seg_alphas = alphas_for(&prims, seg_color);
+        assert!(!seg_alphas.is_empty());
+        assert!(seg_alphas.iter().all(|a| *a == 0.5), "segment alphas {seg_alphas:?}");
+        // The free-standing text is untouched.
+        let free_alphas = alphas_for(&prims, 0xABCDEF);
+        assert!(!free_alphas.is_empty());
+        assert!(free_alphas.iter().all(|a| *a == 1.0), "free-text alphas {free_alphas:?}");
+        // Plates keep their own alpha throughout.
+        assert!(prims.chunks_exact(2).all(|pair| matches!(
+            &pair[0],
+            TextPrim::GlyphBox { alpha, .. } if *alpha == BACKING_ALPHA
+        )));
+        // Out-of-range stored opacity clamps, as the segment
+        // renderers clamp theirs.
+        core.project.figures[0].def.nodes[ni].style.opacity = 1.4;
+        let prims = text_geometry(&core);
+        assert!(alphas_for(&prims, seg_color).iter().all(|a| *a == 1.0));
+        core.project.figures[0].def.nodes[ni].style.opacity = -0.2;
+        let prims = text_geometry(&core);
+        assert!(alphas_for(&prims, seg_color).iter().all(|a| *a == 0.0));
     }
 }

@@ -5,7 +5,7 @@
 //! adapts these helpers to strokes. Everything is deterministic
 //! and unit-tested below.
 
-use crate::model::{SprayMark, Stroke, V2};
+use crate::model::{CapKind, NodeStyle, SprayMark, Stroke, V2};
 
 fn distance(a: V2, b: V2) -> f32 {
     ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt()
@@ -665,6 +665,158 @@ pub fn stroke_dabs(stroke: &Stroke, index: usize, spacing: f32) -> Vec<V2> {
 /// spacing.
 pub fn stroke_dab_spacing(stroke: &Stroke) -> f32 {
     (stroke.width * 0.5).max(1.0)
+}
+
+/// One uniform-width piece of a styled figure segment, as
+/// produced by [`styled_segment_pieces`]: draw the span `a`→`b`
+/// as a plain line of width `width` in colour `color`, blended
+/// at opacity `alpha`. Consecutive pieces share endpoints
+/// exactly, so a renderer that draws the pieces in order with
+/// round joints reproduces the styled segment's silhouette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StylePiece {
+    pub a: V2,
+    pub b: V2,
+    /// Full width of the piece (not a half-width).
+    pub width: f32,
+    /// `0xRRGGBB`.
+    pub color: u32,
+    /// Opacity to blend at, already clamped to `0.0..=1.0`.
+    pub alpha: f32,
+}
+
+/// Expand one styled figure segment into uniform-width pieces:
+/// THE shared styled-segment geometry for the stage and the
+/// raster exporter, mirroring the semantics `export.rs`'s
+/// `StyledSeg` construction implements per-pixel (and `svg.rs`
+/// with a continuous gradient):
+///
+/// * The segment's full width lerps from `thickness` at `from`
+///   to `thickness * style.taper.max(0.0)` at `to` along the
+///   WHOLE segment — except a `CapKind::Point` cap, which
+///   forces the far width to 0 whatever the taper says.
+/// * When `style.color2` is `Some`, the colour lerps `color`
+///   → `color2` along the same parameter, via
+///   `style::lerp_color` (the exporters' own interpolation);
+///   `None` keeps every piece at `color`.
+/// * A nonzero `bend` splits the segment at
+///   `model::bend_mid(from, to, bend)` — that point is a piece
+///   boundary verbatim — and each half is then treated as its
+///   own span for subdivision; the width/colour parameter does
+///   NOT restart at the split, matching the exporter, whose
+///   mid width/colour are the whole-segment lerp at t = 0.5.
+/// * `CapKind::Square` extends the FINAL piece's `b` by half
+///   that piece's width along the final piece's own direction
+///   (for an unbent segment, the segment direction). Only the
+///   far end is extended: a piece chain's near end is covered
+///   by the parent joint, and the rasterizer's extra near-end
+///   extension in its coverage test has no piece-level effect
+///   beyond the joint. A zero-length final piece has no
+///   direction and is left unextended. Round caps need no
+///   geometry here — roundness is the renderer's joint/cap
+///   drawing, as in the exporters.
+///
+/// Sampling and subdivision (the documented choice): each
+/// piece's `width` and `color` are the segment's lerp values
+/// at the piece's START joint — the value the segment carries
+/// INTO the piece. Start samples are what make the pieces a
+/// chain of exact joint values: the first piece carries the
+/// true near width/colour, consecutive pieces hand the joint
+/// value at their shared endpoint to each other, and a
+/// consumer that interpolates between neighbouring samples
+/// (the rasterizer's `StyledSeg` reconstruction in export.rs)
+/// reproduces the exporters' continuous lerp exactly instead
+/// of shifting it by half a step. (Wave 12 integration amended
+/// the original midpoint sampling to start samples for
+/// exactly this reason: export.rs's guard tests pin the near
+/// end's value, which only a start sample carries.) A span is
+/// cut into 4 pieces when the width or colour actually varies
+/// along the segment — the far width differs from `thickness`
+/// (a taper other than 1, or a Point cap) or a gradient is
+/// present — and stays 1 piece otherwise, so a flat solid
+/// segment is exactly one piece.
+/// (Neither exporter subdivides: the rasterizer interpolates
+/// per pixel and SVG fills one gradient trapezoid; 4 pieces
+/// per span is the floor at which a piecewise-uniform
+/// renderer's steps stop reading as steps.)
+///
+/// `alpha` is `style.opacity` clamped to `0.0..=1.0`, the
+/// same value on every piece. Callers pass `thickness` and
+/// coordinates in their own render space (the exporter scales
+/// by zoom × supersampling before it styles a segment) and
+/// apply any FIGURE opacity themselves, exactly as the
+/// exporter multiplies it in outside the segment style.
+pub fn styled_segment_pieces(
+    from: V2,
+    to: V2,
+    bend: f32,
+    thickness: f32,
+    style: &NodeStyle,
+    color: u32,
+) -> Vec<StylePiece> {
+    let alpha = style.opacity.clamp(0.0, 1.0);
+    // A point cap forces the far width to zero whatever the
+    // taper says (export.rs / svg.rs rule).
+    let far_width = if style.cap == CapKind::Point {
+        0.0
+    } else {
+        thickness * style.taper.max(0.0)
+    };
+    let far_color = style.color2.unwrap_or(color);
+    // Spans as (start, end, global t at start, global t at
+    // end): one span, or two split at the bend midpoint with
+    // the lerp parameter running continuously across the join.
+    let spans: [(V2, V2, f32, f32); 2] = if bend != 0.0 {
+        let mid = crate::model::bend_mid(from, to, bend);
+        [(from, mid, 0.0, 0.5), (mid, to, 0.5, 1.0)]
+    } else {
+        [(from, to, 0.0, 1.0), (to, to, 1.0, 1.0)]
+    };
+    let span_count = if bend != 0.0 { 2 } else { 1 };
+    let varying = far_width != thickness || style.color2.is_some();
+    let subdiv = if varying { 4 } else { 1 };
+    let mut pieces: Vec<StylePiece> = Vec::with_capacity(span_count * subdiv);
+    for &(sa, sb, t0, t1) in &spans[..span_count] {
+        for k in 0..subdiv {
+            let f0 = k as f32 / subdiv as f32;
+            let f1 = (k + 1) as f32 / subdiv as f32;
+            // Span endpoints are used verbatim at the ends, so
+            // the first piece starts exactly at `from`, the
+            // bend midpoint is a boundary exactly, and the last
+            // piece ends exactly at `to`.
+            let point_at = |f: f32| -> V2 {
+                if f <= 0.0 {
+                    sa
+                } else if f >= 1.0 {
+                    sb
+                } else {
+                    [sa[0] + (sb[0] - sa[0]) * f, sa[1] + (sb[1] - sa[1]) * f]
+                }
+            };
+            let t_start = t0 + (t1 - t0) * f0;
+            pieces.push(StylePiece {
+                a: point_at(f0),
+                b: point_at(f1),
+                width: thickness + (far_width - thickness) * t_start,
+                color: crate::style::lerp_color(color, far_color, t_start),
+                alpha,
+            });
+        }
+    }
+    if style.cap == CapKind::Square {
+        if let Some(last) = pieces.last_mut() {
+            let d = [last.b[0] - last.a[0], last.b[1] - last.a[1]];
+            let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+            if len > 0.0 {
+                let ext = last.width * 0.5;
+                last.b = [
+                    last.b[0] + d[0] / len * ext,
+                    last.b[1] + d[1] / len * ext,
+                ];
+            }
+        }
+    }
+    pieces
 }
 
 /// The eraser: remove every point within `radius` of `centre`
@@ -2887,5 +3039,170 @@ mod stroke_dabs_tests {
         assert_eq!(out["widths"], Value::Null, "empty widths read back as uniform (null)");
         // An unknown index is an honest error, never a panic.
         assert!(tool_get_stroke_style(&mut core, &json!({ "index": 9999 })).is_err());
+    }
+
+    #[test]
+    fn styled_segment_flat_straight_is_one_exact_piece() {
+        // Default style: taper 1, round cap, solid, opaque —
+        // the exporters' uniform segment, so exactly one piece
+        // carrying the inputs verbatim.
+        let pieces = styled_segment_pieces(
+            [0.0, 0.0],
+            [100.0, 0.0],
+            0.0,
+            10.0,
+            &NodeStyle::default(),
+            0xFF0000,
+        );
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(
+            pieces[0],
+            StylePiece {
+                a: [0.0, 0.0],
+                b: [100.0, 0.0],
+                width: 10.0,
+                color: 0xFF0000,
+                alpha: 1.0,
+            }
+        );
+    }
+
+    #[test]
+    fn styled_segment_taper_widths_lerp_between_the_endpoints() {
+        // Taper 0.5 on thickness 20: the width lerp runs
+        // 20 → 10 along the whole segment; the 4 pieces sample
+        // it at their start joints (t = 0, 1/4, 1/2, 3/4), so
+        // the first piece carries the true near width.
+        let style = NodeStyle {
+            taper: 0.5,
+            ..NodeStyle::default()
+        };
+        let pieces =
+            styled_segment_pieces([0.0, 0.0], [100.0, 0.0], 0.0, 20.0, &style, 0x112233);
+        assert_eq!(pieces.len(), 4);
+        let widths: Vec<f32> = pieces.iter().map(|p| p.width).collect();
+        assert_eq!(widths, vec![20.0, 17.5, 15.0, 12.5]);
+        // The chain is continuous and spans the segment exactly.
+        assert_eq!(pieces[0].a, [0.0, 0.0]);
+        assert_eq!(pieces[3].b, [100.0, 0.0]);
+        for w in pieces.windows(2) {
+            assert_eq!(w[0].b, w[1].a, "consecutive pieces share endpoints");
+        }
+        // Solid colour and full opacity ride along untouched.
+        assert!(pieces.iter().all(|p| p.color == 0x112233 && p.alpha == 1.0));
+    }
+
+    #[test]
+    fn styled_segment_point_cap_forces_the_far_width_to_zero() {
+        // Taper 0.8 alone would lerp 20 → 16; the Point cap
+        // forces the far width to 0, so the pieces lerp
+        // 20 → 0 (start samples t = 0, 1/4, 1/2, 3/4).
+        let style = NodeStyle {
+            taper: 0.8,
+            cap: CapKind::Point,
+            ..NodeStyle::default()
+        };
+        let pieces =
+            styled_segment_pieces([0.0, 0.0], [100.0, 0.0], 0.0, 20.0, &style, 0x112233);
+        assert_eq!(pieces.len(), 4);
+        let widths: Vec<f32> = pieces.iter().map(|p| p.width).collect();
+        assert_eq!(widths, vec![20.0, 15.0, 10.0, 5.0]);
+        assert_eq!(pieces[3].b, [100.0, 0.0], "the point still reaches the far joint");
+    }
+
+    #[test]
+    fn styled_segment_gradient_colours_are_the_export_lerp() {
+        // Red → blue sampled at the piece start joints
+        // (t = 0, 1/4, 1/2, 3/4) through style::lerp_color —
+        // the exporters' own interpolation, whose endpoints
+        // are exact (t = 0 → near, t = 1 → far; pinned by
+        // style.rs's own tests). Values hand-computed from
+        // its round-to-nearest rule; the first piece carries
+        // the pure near colour.
+        let style = NodeStyle {
+            color2: Some(0x0000FF),
+            ..NodeStyle::default()
+        };
+        let pieces =
+            styled_segment_pieces([0.0, 0.0], [100.0, 0.0], 0.0, 10.0, &style, 0xFF0000);
+        assert_eq!(pieces.len(), 4, "a gradient forces subdivision");
+        let colors: Vec<u32> = pieces.iter().map(|p| p.color).collect();
+        assert_eq!(colors, vec![0xFF0000, 0xBF0040, 0x800080, 0x4000BF]);
+        // No taper: the widths stay at the full thickness.
+        assert!(pieces.iter().all(|p| p.width == 10.0));
+    }
+
+    #[test]
+    fn styled_segment_bend_splits_exactly_at_bend_mid() {
+        let (from, to) = ([100.0, 150.0], [300.0, 150.0]);
+        let pieces = styled_segment_pieces(
+            from,
+            to,
+            0.7,
+            10.0,
+            &NodeStyle::default(),
+            0x00FF00,
+        );
+        assert_eq!(pieces.len(), 2, "one piece per half for a flat solid style");
+        let mid = crate::model::bend_mid(from, to, 0.7);
+        assert_ne!(mid, [200.0, 150.0], "the bend actually bulges off the chord");
+        assert_eq!(pieces[0].a, from);
+        assert_eq!(pieces[0].b, mid, "first half ends at bend_mid verbatim");
+        assert_eq!(pieces[1].a, mid, "second half starts at bend_mid verbatim");
+        assert_eq!(pieces[1].b, to);
+        assert!(pieces.iter().all(|p| p.width == 10.0 && p.color == 0x00FF00));
+    }
+
+    #[test]
+    fn styled_segment_alpha_passes_through_and_clamps() {
+        let style = NodeStyle {
+            opacity: 0.35,
+            taper: 0.5,
+            ..NodeStyle::default()
+        };
+        let pieces =
+            styled_segment_pieces([0.0, 0.0], [100.0, 0.0], 0.0, 20.0, &style, 0x112233);
+        assert_eq!(pieces.len(), 4);
+        assert!(pieces.iter().all(|p| p.alpha == 0.35), "every piece carries the opacity");
+        // Out-of-range opacity clamps to the 0..=1 the
+        // exporters blend with.
+        let hot = NodeStyle {
+            opacity: 1.4,
+            ..NodeStyle::default()
+        };
+        let pieces =
+            styled_segment_pieces([0.0, 0.0], [100.0, 0.0], 0.0, 20.0, &hot, 0x112233);
+        assert!(pieces.iter().all(|p| p.alpha == 1.0));
+        let cold = NodeStyle {
+            opacity: -0.2,
+            ..NodeStyle::default()
+        };
+        let pieces =
+            styled_segment_pieces([0.0, 0.0], [100.0, 0.0], 0.0, 20.0, &cold, 0x112233);
+        assert!(pieces.iter().all(|p| p.alpha == 0.0));
+    }
+
+    #[test]
+    fn styled_segment_square_cap_extends_the_final_piece() {
+        // Flat segment, thickness 10: the single piece's end
+        // extends by half its width (5) along the segment
+        // direction — the exporter's square-cap reach.
+        let style = NodeStyle {
+            cap: CapKind::Square,
+            ..NodeStyle::default()
+        };
+        let pieces =
+            styled_segment_pieces([0.0, 0.0], [100.0, 0.0], 0.0, 10.0, &style, 0x112233);
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].a, [0.0, 0.0], "the near end is not extended");
+        assert_eq!(pieces[0].b, [105.0, 0.0], "extended by half the width");
+        assert_eq!(distance(pieces[0].b, [100.0, 0.0]), 5.0);
+        // A zero-length segment has no direction: no extension,
+        // no NaN.
+        let pieces =
+            styled_segment_pieces([7.0, 7.0], [7.0, 7.0], 0.0, 10.0, &style, 0x112233);
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].b, [7.0, 7.0]);
+        assert!(pieces[0].b[0].is_finite() && pieces[0].b[1].is_finite());
     }
 }
