@@ -1114,6 +1114,18 @@ fn workspace_gating_hides_and_shows_panels() {
     use crate::rune_sec::workspaces::Workspace;
 
     let mut rt = editor();
+    // Normalise the layout-pref-seeded fields (Focused
+    // Wave D1 wired them): `init` seeds `show_left` from
+    // the persisted `sidebar_visible` and the timeline
+    // flag from `timeline_collapsed`, both in the layout
+    // file every test in this process shares — a sibling
+    // test's persisted sidebar-off would otherwise hide
+    // the Figures column this test asserts on. Force the
+    // defaults, then render once with them in place.
+    rt.state.show_left = true;
+    rt.state.show_right = true;
+    rt.state.frame_ops.timeline_collapsed = false;
+    rt.frame(DT);
     // Seed the workspace explicitly: `init` restores it
     // from the persisted layout prefs, which every test in
     // this process shares, so the starting workspace is
@@ -3402,6 +3414,18 @@ fn workspace_card_roots_sweep() {
     use crate::rune_sec::workspaces::Workspace;
 
     let mut rt = editor();
+    // Normalise the layout-pref-seeded fields (Focused
+    // Wave D1 wired them): `init` seeds `show_left` from
+    // the persisted `sidebar_visible` and the timeline
+    // flag from `timeline_collapsed`, both in the layout
+    // file every test in this process shares — a sibling
+    // test's persisted sidebar-off would otherwise hide
+    // the Figures column this test asserts on. Force the
+    // defaults, then render once with them in place.
+    rt.state.show_left = true;
+    rt.state.show_right = true;
+    rt.state.frame_ops.timeline_collapsed = false;
+    rt.frame(DT);
     // One row per workspace chip: the workspace it
     // selects, two or three card roots that must mount
     // there, and one root that must be gated out. Rows
