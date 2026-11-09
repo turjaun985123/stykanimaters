@@ -1757,6 +1757,14 @@ mod tests {
     #[test]
     fn sprite_set_key_inserts_then_replaces_and_fills_from_the_sample() {
         let mut core = sprite_core();
+        // Wave 13 (integrator): the fixture project has one
+        // frame and A1's op clamps keys to the timeline
+        // (its pinned contract), so grow the timeline past
+        // frame 10 for the insert/replace below.
+        let f0 = core.project.frames[0].clone();
+        while core.project.frames.len() <= 10 {
+            core.project.frames.push(f0.clone());
+        }
         tool_sprite_add(&mut core, &json!({ "asset": 0 })).expect("add succeeds");
         let key0 = core.project.sprites[0].keys[0];
         let undo_before = core.undo_depth();
@@ -1814,6 +1822,12 @@ mod tests {
     #[test]
     fn sprite_delete_key_removes_it_and_refuses_a_missing_frame() {
         let mut core = sprite_core();
+        // Wave 13 (integrator): as the set_key test above —
+        // grow the one-frame fixture past frame 5.
+        let f0 = core.project.frames[0].clone();
+        while core.project.frames.len() <= 5 {
+            core.project.frames.push(f0.clone());
+        }
         tool_sprite_add(&mut core, &json!({ "asset": 0 })).expect("add succeeds");
         tool_sprite_set_key(&mut core, &json!({ "sprite": 0, "frame": 5, "x": 10.0 }))
             .expect("set_key succeeds");
