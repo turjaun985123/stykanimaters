@@ -179,7 +179,7 @@ fn run<R: BufRead, W: Write>(server: &mut McpServer, input: &mut R, out: &mut W,
                 let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
                 match catch_unwind(AssertUnwindSafe(|| server.handle(&msg))) {
                     Ok(response) => response,
-                    Err(payload) => Some(panic_response(id, &payload)),
+                    Err(payload) => Some(panic_response(id, &*payload)),
                 }
             }
             Err(err) => Some(serde_json::json!({
@@ -273,7 +273,7 @@ mod tests {
         input.push(b'\n');
         input.extend_from_slice(ping(5).as_bytes());
         input.push(b'\n');
-        let responses = serve(&input, 16);
+        let responses = serve(&input, 48);
         assert_eq!(responses.len(), 2, "{responses:?}");
         let refusal: serde_json::Value = serde_json::from_str(&responses[0]).unwrap();
         assert_eq!(refusal["error"]["code"], -32600);
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn panic_response_names_the_id_and_the_panic() {
         let payload = catch_unwind(|| panic!("boom in a tool")).unwrap_err();
-        let resp = panic_response(serde_json::json!(42), &payload);
+        let resp = panic_response(serde_json::json!(42), &*payload);
         assert_eq!(resp["id"], 42);
         assert_eq!(resp["error"]["code"], -32603);
         assert!(
