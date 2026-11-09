@@ -849,6 +849,96 @@ pub fn solve_leg_ik(
     solve_two_bone_ik(fig, pose, upper, fore, end, target)
 }
 
+/// Finite f32 argument reader for the integrator-authored
+/// fig3 handlers below (the fig3mcp family pattern, with the
+/// Wave 11 finiteness rule).
+fn fig3mcp_opt_f32(args: &Value, key: &str) -> Result<Option<f32>, String> {
+    match fig3mcp_get(args, key) {
+        Some(v) => match v.as_f64() {
+            Some(f) => {
+                let x = f as f32;
+                if f.is_finite() && x.is_finite() {
+                    Ok(Some(x))
+                } else {
+                    Err(format!("argument '{key}' must be a finite number"))
+                }
+            }
+            None => Err(format!("argument '{key}' must be a number")),
+        },
+        None => Ok(None),
+    }
+}
+
+/// Set the 3D session camera absolutely (Wave 11, C8 D4 —
+/// the absolute complement of fig3_orbit / fig3_camera_zoom):
+/// any of distance (clamped to the zoom range 40..=4000),
+/// target [x, y, z] and fov_deg may be given; omitted fields
+/// keep their values. No snapshot — camera moves are session
+/// state, exactly as the orbit/zoom tools treat them.
+/// Integrator-authored.
+pub fn tool_fig3_set_camera(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    let distance = fig3mcp_opt_f32(args, "distance")?;
+    let fov = fig3mcp_opt_f32(args, "fov_deg")?;
+    let target = match fig3mcp_get(args, "target") {
+        Some(v) => {
+            let arr = v
+                .as_array()
+                .filter(|a| a.len() == 3)
+                .ok_or_else(|| "argument 'target' must be an [x, y, z] array".to_string())?;
+            let mut t = [0.0f32; 3];
+            for (i, c) in arr.iter().enumerate() {
+                let f = c
+                    .as_f64()
+                    .ok_or_else(|| format!("argument 'target[{i}]' must be a number"))?;
+                let x = f as f32;
+                if !f.is_finite() || !x.is_finite() {
+                    return Err(format!("argument 'target[{i}]' must be a finite number"));
+                }
+                t[i] = x;
+            }
+            Some(t)
+        }
+        None => None,
+    };
+    if distance.is_none() && fov.is_none() && target.is_none() {
+        return Err("fig3_set_camera needs at least one of 'distance', 'target' or 'fov_deg'".into());
+    }
+    if let Some(st) = &mut core.fig3 {
+        if let Some(d) = distance {
+            st.camera.distance = d.clamp(40.0, 4000.0);
+        }
+        if let Some(f) = fov {
+            st.camera.fov_deg = f;
+        }
+        if let Some(t) = target {
+            st.camera.target = t;
+        }
+    }
+    core.status = "3D camera set.".into();
+    Ok(fig3mcp_summary(core))
+}
+
+/// Rename the 3D session figure (Wave 11, D10 gap 3): the
+/// name a later fig3_save_to_library files it under — before
+/// this tool a session figure could never be named from MCP,
+/// so library entries were stuck with the default name.
+/// Trimmed; a blank name is refused, like figure_rename.
+/// A session field write, not an undo step. Integrator-
+/// authored.
+pub fn tool_fig3_rename(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    let name = fig3mcp_req_str(args, "name")?.trim();
+    if name.is_empty() {
+        return Err("argument 'name' must not be blank".into());
+    }
+    if let Some(st) = &mut core.fig3 {
+        st.figure.name = name.to_string();
+    }
+    core.status = format!("3D figure renamed to {name}.");
+    Ok(fig3mcp_summary(core))
+}
+
 #[cfg(test)]
 mod ik_tests {
     use super::{
@@ -1770,6 +1860,525 @@ fn scan_pose_library_in(dir: &Path) -> Vec<String> {
 /// (`./library3d/poses`), sorted. See [`scan_pose_library_in`].
 pub fn scan_pose_library() -> Vec<String> {
     scan_pose_library_in(&pose_library_dir())
+}
+
+// ---------------------------------------------------------------------
+// MCP tool handlers (Wave 11, B9): the 3D-panel operations that
+// had no MCP surface. These live here — not in `mcp_tools` —
+// because the panel's own implementations of several of them
+// (`apply_camera_preset`, `apply_ik`, `save_current_pose`, …)
+// live in the Rune shell (the binary crate), which the library
+// cannot call back into; the operations are therefore expressed
+// directly over `fig3d` + `EditorCore`, replicating the panel's
+// status wording at the cited lines of
+// `rune_sec/three_d_panel.rs`. Handlers never panic: a missing
+// session, a bad argument and a missing chain are all `Err`.
+// The integrator splices the matching `Tool { … }` entries into
+// `mcp_tools::tools()` (handler: crate::fig3d::tool_*).
+// ---------------------------------------------------------------------
+
+use crate::editor::EditorCore;
+use serde_json::{json, Value};
+
+fn fig3mcp_get<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
+    args.get(key).filter(|v| !v.is_null())
+}
+
+fn fig3mcp_req_i32(args: &Value, key: &str) -> Result<i32, String> {
+    match fig3mcp_get(args, key) {
+        Some(v) => {
+            if let Some(i) = v.as_i64() {
+                return i32::try_from(i)
+                    .map_err(|_| format!("argument '{key}' is out of range"));
+            }
+            if let Some(f) = v.as_f64() {
+                if f.fract() == 0.0 && f >= i32::MIN as f64 && f <= i32::MAX as f64 {
+                    return Ok(f as i32);
+                }
+            }
+            Err(format!("argument '{key}' must be an integer"))
+        }
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+fn fig3mcp_req_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
+    match fig3mcp_get(args, key) {
+        Some(v) => v
+            .as_str()
+            .ok_or_else(|| format!("argument '{key}' must be a string")),
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+fn fig3mcp_opt_str<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, String> {
+    match fig3mcp_get(args, key) {
+        Some(v) => v.as_str().map(Some).ok_or_else(|| {
+            format!("argument '{key}' must be a string")
+        }),
+        None => Ok(None),
+    }
+}
+
+fn fig3mcp_require_session(core: &EditorCore) -> Result<(), String> {
+    if core.fig3.is_some() {
+        Ok(())
+    } else {
+        Err("no active 3D session; call fig3_enter first".into())
+    }
+}
+
+/// The full 3D session state as JSON: figure, joints, selection
+/// (with the selected joint's solved world position), pose root,
+/// and the whole camera — a superset of the compact summary the
+/// wave-7 fig3 tools return from `mcp_tools::fig3_summary`
+/// (which carries only yaw/pitch, yaw raw). `yaw_wrapped`
+/// applies the panel readout's one-turn wrap
+/// (`three_d_panel::camera_readout_text`) alongside the stored
+/// value, so neither is hidden.
+fn fig3mcp_summary(core: &EditorCore) -> Value {
+    match &core.fig3 {
+        Some(st) => {
+            // Wave 11 (C8 D9): every joint's evaluated world
+            // position rides along — clients could previously
+            // read only the selected joint's position.
+            let world = evaluate3(&st.figure, &st.pose);
+            let joints: Vec<Value> = st
+                .figure
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| {
+                    json!({
+                        "index": i,
+                        "name": n.name,
+                        "parent": n.parent,
+                        "head": n.head,
+                        "position": world.get(i),
+                    })
+                })
+                .collect();
+            let selected_pos = world.get(st.selected).copied();
+            json!({
+                "ok": true,
+                "active": true,
+                "figure": st.figure.name,
+                "color": st.figure.color,
+                "joints": joints,
+                "joint_count": st.figure.nodes.len(),
+                "selected": st.selected,
+                "selected_name": st.figure.nodes.get(st.selected).map(|n| n.name.clone()),
+                "selected_position": selected_pos,
+                "pose_root": st.pose.root,
+                "pose_b_marked": st.pose_b.is_some(),
+                "camera": {
+                    "yaw": st.camera.yaw,
+                    "yaw_wrapped": crate::model::norm_deg(st.camera.yaw),
+                    "pitch": st.camera.pitch,
+                    "distance": st.camera.distance,
+                    "fov_deg": st.camera.fov_deg,
+                    "target": st.camera.target,
+                },
+                "status": core.status,
+            })
+        }
+        None => json!({ "ok": true, "active": false, "status": core.status }),
+    }
+}
+
+/// Exit 3D mode (`EditorCore::exit_3d`, editor.rs — the panel's
+/// mode-3d toggle and the palette's Exit 3D mode command).
+/// Baked 2D figures stay in the project.
+pub fn tool_fig3_exit(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    core.exit_3d();
+    Ok(json!({ "ok": true, "active": false, "status": core.status }))
+}
+
+/// Read the full 3D session state (see [`fig3mcp_summary`]).
+/// Without a session this is `Ok` with `"active": false`, the
+/// `mcp_tools::fig3_summary` precedent.
+pub fn tool_fig3_get(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    Ok(fig3mcp_summary(core))
+}
+
+/// Cycle the selected joint to the next node
+/// (`EditorCore::fig3_select_next` — the panel's Joint>
+/// button).
+pub fn tool_fig3_select_next(
+    core: &mut EditorCore,
+    _args: &Value,
+) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    if core.fig3.as_ref().is_some_and(|st| st.figure.nodes.is_empty()) {
+        return Err("the 3D figure has no joints to select".into());
+    }
+    core.fig3_select_next();
+    Ok(fig3mcp_summary(core))
+}
+
+/// Load the next 3D library figure, cycling the library
+/// (`EditorCore::fig3_cycle_library` — a core op with no panel
+/// button; the panel loads by name instead, which
+/// `fig3_load_from_library` already covers).
+pub fn tool_fig3_cycle_library(
+    core: &mut EditorCore,
+    _args: &Value,
+) -> Result<Value, String> {
+    if core.fig3_library_list().is_empty() {
+        return Err("3D library is empty — save a 3D figure first.".into());
+    }
+    core.fig3_cycle_library();
+    Ok(fig3mcp_summary(core))
+}
+
+/// Apply a named camera preset — `"front"`, `"side"`,
+/// `"three-quarter"`, `"top"` ([`camera_preset`] — the panel's
+/// Camera row, three_d_panel.rs `apply_camera_preset`).
+pub fn tool_fig3_camera_preset(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    let name = fig3mcp_req_str(args, "name")?;
+    let Some(cam) = camera_preset(name) else {
+        return Err(format!(
+            "unknown camera preset '{name}' (expected \"front\", \"side\", \"three-quarter\" or \"top\")"
+        ));
+    };
+    if let Some(st) = &mut core.fig3 {
+        st.camera = cam;
+    }
+    core.status = format!("3D camera preset: {name}.");
+    Ok(fig3mcp_summary(core))
+}
+
+/// Frame the session figure on the stage ([`frame_camera`] —
+/// the panel's Frame camera button, three_d_panel.rs
+/// `apply_frame_camera`): replaces the camera with a front
+/// camera targeted on the figure's centroid, fitted to the
+/// project stage's central 80%.
+pub fn tool_fig3_frame_camera(
+    core: &mut EditorCore,
+    _args: &Value,
+) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    let stage = core.project.stage;
+    if let Some(st) = &mut core.fig3 {
+        st.camera = frame_camera(&st.figure, &st.pose, stage);
+    }
+    core.status = "3D camera framed on the figure.".into();
+    Ok(fig3mcp_summary(core))
+}
+
+/// Frame the session figure in the panel preview
+/// ([`frame_camera_points`] — the panel's Frame button,
+/// three_d_panel.rs `apply_frame_preview`): keeps the
+/// camera's yaw/pitch/FOV and writes back only the fitted
+/// target and distance, at the preview viewport's aspect
+/// (308×220 — see [`preview_camera`]).
+pub fn tool_fig3_frame_preview(
+    core: &mut EditorCore,
+    _args: &Value,
+) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    if let Some(st) = &mut core.fig3 {
+        let points = evaluate3(&st.figure, &st.pose);
+        let framed = frame_camera_points(
+            &points,
+            st.camera.fov_deg,
+            308.0 / 220.0,
+            st.camera.yaw,
+            st.camera.pitch,
+        );
+        st.camera.target = framed.target;
+        st.camera.distance = framed.distance;
+    }
+    core.status = "3D preview framed on the figure.".into();
+    Ok(fig3mcp_summary(core))
+}
+
+/// One preview-zoom step on the camera distance (the panel's
+/// − / + steppers, three_d_panel.rs `apply_preview_zoom`):
+/// `dir > 0` zooms in (distance ÷ 1.25), `dir < 0` out
+/// (× 1.25), clamped to 40..=4000 — the panel's ZOOM_FACTOR /
+/// ZOOM_DISTANCE_MIN / ZOOM_DISTANCE_MAX / ZOOM_FALLBACK_DISTANCE
+/// constants, duplicated here because the panel lives in the
+/// binary crate and cannot be called from the library.
+pub fn tool_fig3_camera_zoom(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    let dir = fig3mcp_req_i32(args, "dir")?;
+    if dir == 0 {
+        return Err("argument 'dir' must be non-zero (+1 zooms in, -1 zooms out)".into());
+    }
+    const ZOOM_FACTOR: f32 = 1.25;
+    const ZOOM_DISTANCE_MIN: f32 = 40.0;
+    const ZOOM_DISTANCE_MAX: f32 = 4000.0;
+    const ZOOM_FALLBACK_DISTANCE: f32 = 300.0;
+    let mut distance = None;
+    if let Some(st) = &mut core.fig3 {
+        let cur = st.camera.distance;
+        let stepped = if !cur.is_finite() {
+            ZOOM_FALLBACK_DISTANCE
+        } else if dir > 0 {
+            (cur / ZOOM_FACTOR).clamp(ZOOM_DISTANCE_MIN, ZOOM_DISTANCE_MAX)
+        } else {
+            (cur * ZOOM_FACTOR).clamp(ZOOM_DISTANCE_MIN, ZOOM_DISTANCE_MAX)
+        };
+        st.camera.distance = stepped;
+        distance = Some(stepped);
+    }
+    let d = distance.expect("session checked above");
+    core.status = format!("3D camera distance {d:.2}.");
+    Ok(fig3mcp_summary(core))
+}
+
+/// Solve two-bone IK for one limb toward its natural-hang
+/// target (the panel's IK row, three_d_panel.rs `apply_ik`):
+/// `"arm_l"`, `"arm_r"`, `"leg_l"` or `"leg_r"`. The target
+/// formula is the panel's `ik_target`: from the chain's
+/// anchor, along a fixed hang direction scaled by the
+/// chain's full reach — arms (±0.35, −0.55, +0.45), legs
+/// (±0.18, −0.96, +0.12) — with the outward sign read from
+/// the live pose, never from a naming convention. The chain
+/// indices are [`humanoid3`]'s layout constants, exactly as
+/// [`solve_arm_ik`] / [`solve_leg_ik`] resolve them.
+pub fn tool_fig3_ik(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    let limb = fig3mcp_req_str(args, "limb")?;
+    let (upper, fore, end, is_arm, is_left, label) = match limb {
+        "arm_l" => (3usize, 4usize, 5usize, true, true, "arm L"),
+        "arm_r" => (6, 7, 8, true, false, "arm R"),
+        "leg_l" => (9, 10, 11, false, true, "leg L"),
+        "leg_r" => (12, 13, 14, false, false, "leg R"),
+        other => {
+            return Err(format!(
+                "unknown limb '{other}' (expected \"arm_l\", \"arm_r\", \"leg_l\" or \"leg_r\")"
+            ))
+        }
+    };
+    let mut target = None;
+    if let Some(st) = &mut core.fig3 {
+        if end < st.figure.nodes.len() {
+            let world = evaluate3(&st.figure, &st.pose);
+            let anchor = world[upper];
+            let off1 = st.figure.nodes[fore].offset;
+            let off2 = st.figure.nodes[end].offset;
+            let reach = (off1[0] * off1[0] + off1[1] * off1[1] + off1[2] * off1[2]).sqrt()
+                + (off2[0] * off2[0] + off2[1] * off2[1] + off2[2] * off2[2]).sqrt();
+            let outward = if anchor[0] >= st.pose.root[0] {
+                1.0
+            } else {
+                -1.0
+            };
+            let (fx, fy, fz) = if is_arm {
+                (0.35, -0.55, 0.45)
+            } else {
+                (0.18, -0.96, 0.12)
+            };
+            let t = [
+                anchor[0] + outward * fx * reach,
+                anchor[1] + fy * reach,
+                anchor[2] + fz * reach,
+            ];
+            st.pose = if is_arm {
+                solve_arm_ik(&st.figure, &st.pose, is_left, t)
+            } else {
+                solve_leg_ik(&st.figure, &st.pose, is_left, t)
+            };
+            target = Some(t);
+        }
+    }
+    let Some(t) = target else {
+        return Err("that limb's chain is missing on this figure".into());
+    };
+    core.status = format!("IK solved: {label}.");
+    let mut out = fig3mcp_summary(core);
+    out["limb"] = json!(limb);
+    out["target"] = json!(t);
+    Ok(out)
+}
+
+/// Mirror the session pose across the YZ plane
+/// ([`mirror_pose`] — the panel's Mirror pose button,
+/// three_d_panel.rs `apply_mirror_pose`). An exact
+/// involution: calling it twice restores the pose.
+pub fn tool_fig3_pose_mirror(
+    core: &mut EditorCore,
+    _args: &Value,
+) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    if let Some(st) = &mut core.fig3 {
+        st.pose = mirror_pose(&st.figure, &st.pose);
+    }
+    core.status = "3D pose mirrored.".into();
+    Ok(fig3mcp_summary(core))
+}
+
+/// List the 3D pose library ([`scan_pose_library`] — the
+/// panel's Pose library section). No session needed: the
+/// panel shows the list without one.
+pub fn tool_fig3_pose_library_list(
+    core: &mut EditorCore,
+    _args: &Value,
+) -> Result<Value, String> {
+    let _ = core;
+    Ok(json!({ "ok": true, "poses": scan_pose_library() }))
+}
+
+/// Save the session pose to the 3D pose library
+/// ([`save_pose_library`] — the panel's Save pose button,
+/// three_d_panel.rs `save_current_pose`). `name` defaults
+/// to the panel's convention, `"<figure> pose"`.
+pub fn tool_fig3_pose_save(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    let name = match fig3mcp_opt_str(args, "name")? {
+        Some(n) => n.to_string(),
+        None => {
+            let st = core.fig3.as_ref().expect("session checked above");
+            format!("{} pose", st.figure.name)
+        }
+    };
+    let pose = core
+        .fig3
+        .as_ref()
+        .expect("session checked above")
+        .pose
+        .clone();
+    match save_pose_library(&pose, &name) {
+        Ok(path) => {
+            core.status = format!("Saved 3D pose '{name}'.");
+            Ok(json!({
+                "ok": true,
+                "name": name,
+                "path": path.display().to_string(),
+                "status": core.status,
+            }))
+        }
+        Err(e) => Err(format!("3D pose '{name}' failed to save: {e}")),
+    }
+}
+
+/// Apply a saved pose-library entry to the session figure
+/// ([`load_pose_library`] — the panel's pose Apply buttons,
+/// three_d_panel.rs `apply_pose`).
+pub fn tool_fig3_pose_apply(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    let name = fig3mcp_req_str(args, "name")?.to_string();
+    match load_pose_library(&name) {
+        Ok(pose) => {
+            if let Some(st) = &mut core.fig3 {
+                st.pose = pose;
+            }
+            core.status = format!("Applied 3D pose '{name}'.");
+            Ok(fig3mcp_summary(core))
+        }
+        Err(e) => Err(format!("3D pose '{name}' failed to load: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod mcp_tool_tests {
+    use super::{
+        tool_fig3_camera_preset, tool_fig3_exit, tool_fig3_get, tool_fig3_ik,
+        tool_fig3_pose_mirror, tool_fig3_pose_save, tool_fig3_pose_apply,
+        tool_fig3_select_next,
+    };
+    use crate::editor::EditorCore;
+    use serde_json::json;
+
+    fn session_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.enter_3d();
+        core
+    }
+
+    #[test]
+    fn session_tools_refuse_without_a_session() {
+        let mut core = EditorCore::new();
+        assert!(tool_fig3_exit(&mut core, &json!({})).is_err());
+        assert!(tool_fig3_select_next(&mut core, &json!({})).is_err());
+        assert!(tool_fig3_pose_mirror(&mut core, &json!({})).is_err());
+        assert!(tool_fig3_ik(&mut core, &json!({ "limb": "arm_l" })).is_err());
+        // The read, by contrast, reports inactivity honestly.
+        let out = tool_fig3_get(&mut core, &json!({})).unwrap();
+        assert_eq!(out["active"], json!(false));
+    }
+
+    #[test]
+    fn exit_ends_the_session_and_get_reports_it() {
+        let mut core = session_core();
+        let out = tool_fig3_get(&mut core, &json!({})).unwrap();
+        assert_eq!(out["active"], json!(true));
+        assert_eq!(out["joint_count"], json!(15));
+        assert_eq!(out["camera"]["distance"], json!(400.0));
+        tool_fig3_exit(&mut core, &json!({})).unwrap();
+        assert!(core.fig3.is_none());
+    }
+
+    #[test]
+    fn select_next_cycles_the_selection() {
+        let mut core = session_core();
+        let out = tool_fig3_select_next(&mut core, &json!({})).unwrap();
+        assert_eq!(out["selected"], json!(1));
+        assert_eq!(out["selected_name"], json!("chest"));
+    }
+
+    #[test]
+    fn camera_preset_validates_the_name() {
+        let mut core = session_core();
+        let err = tool_fig3_camera_preset(&mut core, &json!({ "name": "back" }))
+            .unwrap_err();
+        assert!(err.contains("unknown camera preset"), "{err}");
+        let out = tool_fig3_camera_preset(&mut core, &json!({ "name": "side" }))
+            .unwrap();
+        assert_eq!(out["camera"]["yaw"], json!(90.0));
+        // A non-finite angle can never arrive through JSON, but
+        // a wrong-typed argument is a clean error, not a panic.
+        assert!(tool_fig3_camera_preset(&mut core, &json!({ "name": 3 })).is_err());
+    }
+
+    #[test]
+    fn ik_moves_the_left_hand_and_mirror_is_an_involution() {
+        let mut core = session_core();
+        let before = core.fig3.as_ref().unwrap().pose.clone();
+        let out = tool_fig3_ik(&mut core, &json!({ "limb": "arm_l" })).unwrap();
+        assert_eq!(out["limb"], json!("arm_l"));
+        assert_ne!(core.fig3.as_ref().unwrap().pose, before);
+        assert!(tool_fig3_ik(&mut core, &json!({ "limb": "tail" })).is_err());
+        let posed = core.fig3.as_ref().unwrap().pose.clone();
+        tool_fig3_pose_mirror(&mut core, &json!({})).unwrap();
+        tool_fig3_pose_mirror(&mut core, &json!({})).unwrap();
+        assert_eq!(core.fig3.as_ref().unwrap().pose, posed);
+    }
+
+    #[test]
+    fn pose_save_and_apply_roundtrip_under_an_explicit_name() {
+        let mut core = session_core();
+        core.fig3_rotate(2, 40.0);
+        let saved = core.fig3.as_ref().unwrap().pose.clone();
+        let name = "B9 Wave11 Roundtrip Pose";
+        tool_fig3_pose_save(&mut core, &json!({ "name": name })).unwrap();
+        core.fig3_rotate(2, 15.0);
+        assert_ne!(core.fig3.as_ref().unwrap().pose, saved);
+        tool_fig3_pose_apply(&mut core, &json!({ "name": name })).unwrap();
+        assert_eq!(core.fig3.as_ref().unwrap().pose, saved);
+        let err = tool_fig3_pose_apply(
+            &mut core,
+            &json!({ "name": "B9 no such pose exists" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("failed to load"), "{err}");
+    }
 }
 
 #[cfg(test)]

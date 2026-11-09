@@ -701,6 +701,688 @@ pub fn channel_stats(core: &EditorCore) -> Vec<ChannelStat> {
         .collect()
 }
 
+// ---------------------------------------------------------------------
+// MCP handlers (Wave 11, agent B8): the graph/easing parity
+// tools that had no MCP surface. They live here, next to the
+// ops they wrap, because `mcp_tools.rs`'s registry is the
+// integrator's file: each handler below is a plain
+// `pub fn tool_*` with the registry's handler signature
+// (`fn(&mut EditorCore, &Value) -> Result<Value, String>`),
+// ready to be named by a `Tool { .. }` entry in `tools()`.
+//
+// Why these exist — the gaps they close, all verified at
+// source (see the parity audit in the Wave 11 report):
+// * The registry's index-addressed tools
+//   (duplicate/delete/set_key_interp) were blind: no tool
+//   listed the channels, so an agent could not learn which
+//   index names which channel. `tool_graph_list_channels`
+//   and `tool_graph_get_channel` close that, built on
+//   [`channel_stats`] plus the raw target.
+// * The (figure, target)-addressed tools
+//   (mirror/scale/copy/paste in the registry) resolve the
+//   FIRST matching channel (`channel_index` in
+//   `mcp_tools.rs`), so a duplicate `(figure, target)`
+//   channel — which the graph panel CAN select, draw and
+//   edit by row index (Phase J) — was unreachable. The
+//   `*_channel` tools below address channels by the same
+//   project-list index the panel's rows use
+//   (`channel_rows` in `rune_sec/graph_panel.rs` enumerates
+//   `core.project.channels` in order), so MCP channel N
+//   IS the panel's row N.
+// * `shift_keys`, `fill_keys_in_range` and
+//   `delete_keys_in_range` had panel/palette surfaces but
+//   no MCP tool at all; neither did single-key delete /
+//   move / tangent edits (the panel's drags and the
+//   keyframe tools' nudge/delete), `graph::reduce_keys`
+//   (the panel's Reduce keys button), clearing one
+//   channel's keys, keying every channel, keying the
+//   selected joint's angle, or clearing all channels.
+//
+// Argument helpers are LOCAL copies (the `gk_` prefix):
+// `mcp_tools.rs`'s helpers are private to that file, and
+// the small parsers duplicated here (`gk_key_json`,
+// `gk_interp_name`, the target spellings) follow the
+// file's existing precedent — [`target_label`] duplicates
+// the graph panel's `channel_label` string-for-string and
+// the two must be kept in step. Every handler validates
+// ALL of its arguments before touching the project, and
+// every numeric argument must be finite: a JSON number
+// like 1e400 arrives as f64 infinity (or null, which the
+// null-filtered getter reads as missing), and neither may
+// reach a channel.
+// ---------------------------------------------------------------------
+
+use serde_json::{json, Value};
+
+/// Null-filtered argument lookup, mirroring `mcp_tools`'
+/// private `get`: a JSON null reads as "not supplied".
+fn gk_get<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
+    args.get(key).filter(|v| !v.is_null())
+}
+
+/// The `mcp_tools::as_usize` rule, copied: a non-negative
+/// integer, as a JSON integer or an integral JSON float.
+fn gk_as_usize(v: &Value, key: &str) -> Result<usize, String> {
+    if let Some(u) = v.as_u64() {
+        return usize::try_from(u).map_err(|_| format!("argument '{key}' is too large"));
+    }
+    if let Some(f) = v.as_f64() {
+        if f >= 0.0 && f.fract() == 0.0 && f <= usize::MAX as f64 {
+            return Ok(f as usize);
+        }
+    }
+    Err(format!("argument '{key}' must be a non-negative integer"))
+}
+
+fn gk_req_usize(args: &Value, key: &str) -> Result<usize, String> {
+    match gk_get(args, key) {
+        Some(v) => gk_as_usize(v, key),
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+fn gk_req_f32(args: &Value, key: &str) -> Result<f32, String> {
+    let v = gk_opt_f32(args, key)?.ok_or_else(|| format!("missing required argument '{key}'"))?;
+    Ok(v)
+}
+
+fn gk_opt_f32(args: &Value, key: &str) -> Result<Option<f32>, String> {
+    match gk_get(args, key) {
+        Some(v) => {
+            let f = v
+                .as_f64()
+                .ok_or_else(|| format!("argument '{key}' must be a number"))?
+                as f32;
+            if !f.is_finite() {
+                return Err(format!("argument '{key}' must be a finite number"));
+            }
+            Ok(Some(f))
+        }
+        None => Ok(None),
+    }
+}
+
+fn gk_req_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
+    match gk_get(args, key) {
+        Some(v) => v
+            .as_str()
+            .ok_or_else(|| format!("argument '{key}' must be a string")),
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+/// A required frame coordinate: finite and not negative,
+/// the `graph_key` tool's own rule for its `frame` argument.
+fn gk_req_frame(args: &Value, key: &str) -> Result<f32, String> {
+    let f = gk_req_f32(args, key)?;
+    if f < 0.0 {
+        return Err(format!("argument '{key}' must not be negative"));
+    }
+    Ok(f)
+}
+
+/// Index of graph channel `idx`, or the clean error the
+/// registry's own graph tools share (`check_graph_channel`
+/// in `mcp_tools.rs`, wording copied so every graph tool
+/// refuses a bad index in the same words).
+fn gk_check_channel(core: &EditorCore, idx: usize) -> Result<usize, String> {
+    if idx >= core.project.channels.len() {
+        Err(format!("no graph channel at index {idx}"))
+    } else {
+        Ok(idx)
+    }
+}
+
+/// Lower-case mode name for JSON output — the same strings
+/// `mcp_tools`' private `interp_name` returns, so a key
+/// read through any graph tool spells its mode identically.
+fn gk_interp_name(interp: Interp) -> &'static str {
+    match interp {
+        Interp::Hermite => "hermite",
+        Interp::Linear => "linear",
+        Interp::Step => "step",
+    }
+}
+
+/// One key as JSON, in the exact shape `graph_copy_keys`
+/// returns and `graph_paste_keys` accepts
+/// ({frame, value, in_tan, out_tan, interp}) — copied from
+/// `mcp_tools`' private `key_json`; keep the two in step.
+fn gk_key_json(key: &Key) -> Value {
+    json!({
+        "frame": key.frame,
+        "value": key.value,
+        "in_tan": key.in_tan,
+        "out_tan": key.out_tan,
+        "interp": gk_interp_name(key.interp),
+    })
+}
+
+/// A channel target as JSON: `target` in the spelling
+/// `graph_key` accepts ("root_x", "root_y", "angle",
+/// "length" — with `node` alongside for the last two),
+/// plus the UI `target_label` for display.
+fn gk_target_json(target: ChannelTarget) -> Value {
+    match target {
+        ChannelTarget::RootX => json!({ "target": "root_x", "node": null, "target_label": "Root X" }),
+        ChannelTarget::RootY => json!({ "target": "root_y", "node": null, "target_label": "Root Y" }),
+        ChannelTarget::Angle(n) => json!({ "target": "angle", "node": n, "target_label": target_label(target) }),
+        ChannelTarget::Length(n) => json!({ "target": "length", "node": n, "target_label": target_label(target) }),
+    }
+}
+
+/// Parse a tangent preset name with the registry's
+/// `graph_tangent_preset` spellings and error wording.
+fn gk_parse_preset(name: &str) -> Result<crate::graph::TangentPreset, String> {
+    use crate::graph::TangentPreset;
+    match name {
+        "smooth" => Ok(TangentPreset::Smooth),
+        "ease-in" => Ok(TangentPreset::EaseIn),
+        "ease-out" => Ok(TangentPreset::EaseOut),
+        "ease-inout" => Ok(TangentPreset::EaseInOut),
+        "linear" => Ok(TangentPreset::Linear),
+        other => Err(format!(
+            "unknown tangent preset '{other}' (expected \"smooth\", \"ease-in\", \"ease-out\", \"ease-inout\" or \"linear\")"
+        )),
+    }
+}
+
+/// List every graph channel: its project-list index (the
+/// index the panel's channel rows show and the
+/// index-addressed tools take), figure, target and the
+/// [`channel_stats`] numbers. Read-only.
+pub fn tool_graph_list_channels(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let stats = channel_stats(core);
+    let channels: Vec<Value> = core
+        .project
+        .channels
+        .iter()
+        .enumerate()
+        .map(|(i, ch)| {
+            let st = &stats[i];
+            json!({
+                "channel": i,
+                "figure": ch.figure,
+                "figure_name": st.figure_name,
+                "target": gk_target_json(ch.target),
+                "keys": st.keys,
+                "min": st.min,
+                "max": st.max,
+                "first_frame": st.first_frame,
+                "last_frame": st.last_frame,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "ok": true,
+        "channels": channels,
+        "count": core.project.channels.len(),
+    }))
+}
+
+/// Read one channel in full by its project-list index:
+/// every key (the shape `graph_paste_keys` accepts), plus
+/// the channel's value at `frame` when one is supplied —
+/// the graph panel's value readout, over
+/// `Channel::value_at`. Read-only.
+pub fn tool_graph_get_channel(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    let frame = gk_opt_f32(args, "frame")?;
+    let ch = &core.project.channels[idx];
+    let mut out = json!({
+        "ok": true,
+        "channel": idx,
+        "figure": ch.figure,
+        "target": gk_target_json(ch.target),
+        "keys": ch.keys.iter().map(gk_key_json).collect::<Vec<_>>(),
+        "key_count": ch.keys.len(),
+    });
+    if let Some(f) = frame {
+        out["frame"] = json!(f);
+        out["value_at"] = json!(ch.value_at(f));
+    }
+    Ok(out)
+}
+
+/// Remove the key nearest `frame` (within 0.5 frames — the
+/// engine's key window) from the channel at
+/// `channel_index`, as one undo step; `false` — no
+/// snapshot — when the channel or such a key does not
+/// exist. This is the library form of the keyframe tools'
+/// "Delete key here" composition (`Channel::remove_key`
+/// under one snapshot), generalised to any channel.
+pub fn remove_key_at(core: &mut EditorCore, channel_index: usize, frame: f32) -> bool {
+    let Some(channel) = core.project.channels.get(channel_index) else {
+        core.status = format!("No graph channel {} to delete a key from.", channel_index + 1);
+        return false;
+    };
+    if !channel.keys.iter().any(|k| (k.frame - frame).abs() <= 0.5) {
+        core.status = format!("No key at frame {} to delete.", frame_label(frame + 1.0));
+        return false;
+    }
+    core.snapshot();
+    let removed = core.project.channels[channel_index].remove_key(frame);
+    if removed {
+        core.status = format!("Deleted graph key at frame {}.", frame_label(frame + 1.0));
+    }
+    removed
+}
+
+pub fn tool_graph_delete_key(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    let frame = gk_req_frame(args, "frame")?;
+    if !remove_key_at(core, idx, frame) {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "status": core.status,
+        "channel_keys": core.project.channels[idx].keys.len(),
+    }))
+}
+
+/// Move the key nearest `from_frame` (within 0.5 frames)
+/// of the channel at `channel_index` to `to_frame`,
+/// keeping its tangents; its value travels unless
+/// `to_value` overrides it. One undo step; `false` — no
+/// snapshot — when the channel or such a key does not
+/// exist. The move itself is `Channel::move_key`, so a
+/// key already sitting at `to_frame` (within 0.01) is
+/// replaced — the graph canvas drag's semantics, NOT the
+/// keyframe nudge's refusal (that panel guards its own
+/// collision rule before ever calling `move_key`).
+pub fn move_key_at(
+    core: &mut EditorCore,
+    channel_index: usize,
+    from_frame: f32,
+    to_frame: f32,
+    to_value: Option<f32>,
+) -> bool {
+    let Some(channel) = core.project.channels.get(channel_index) else {
+        core.status = format!("No graph channel {} to move a key on.", channel_index + 1);
+        return false;
+    };
+    let Some(key) = channel
+        .keys
+        .iter()
+        .filter(|k| (k.frame - from_frame).abs() <= 0.5)
+        .min_by(|a, b| {
+            (a.frame - from_frame)
+                .abs()
+                .partial_cmp(&(b.frame - from_frame).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    else {
+        core.status = format!("No key at frame {} to move.", frame_label(from_frame + 1.0));
+        return false;
+    };
+    let value = to_value.unwrap_or(key.value);
+    core.snapshot();
+    let moved = core.project.channels[channel_index].move_key(from_frame, to_frame, value);
+    if moved {
+        core.status = format!(
+            "Moved graph key from frame {} to frame {}.",
+            frame_label(from_frame + 1.0),
+            frame_label(to_frame + 1.0)
+        );
+    }
+    moved
+}
+
+pub fn tool_graph_move_key(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    let from_frame = gk_req_frame(args, "from_frame")?;
+    let to_frame = gk_req_frame(args, "to_frame")?;
+    let value = gk_opt_f32(args, "value")?;
+    if !move_key_at(core, idx, from_frame, to_frame, value) {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "status": core.status,
+        "channel_keys": core.project.channels[idx].keys.len(),
+    }))
+}
+
+/// Set both tangents of the key nearest `frame` (within
+/// 0.5 frames) on the channel at `channel_index`, through
+/// `Channel::set_tangents` — the value form of the graph
+/// panel's tangent-handle drag. One undo step; `false` —
+/// no snapshot — when the channel or such a key does not
+/// exist.
+pub fn set_key_tangents_at(
+    core: &mut EditorCore,
+    channel_index: usize,
+    frame: f32,
+    in_tan: f32,
+    out_tan: f32,
+) -> bool {
+    let Some(channel) = core.project.channels.get(channel_index) else {
+        core.status = format!("No graph channel {} to set tangents on.", channel_index + 1);
+        return false;
+    };
+    if !channel.keys.iter().any(|k| (k.frame - frame).abs() <= 0.5) {
+        core.status = format!("No key at frame {} to set tangents on.", frame_label(frame + 1.0));
+        return false;
+    }
+    let label = target_label(channel.target);
+    core.snapshot();
+    let set = core.project.channels[channel_index].set_tangents(frame, in_tan, out_tan);
+    if set {
+        core.status = format!(
+            "Set tangents on {label} key at frame {}: in {in_tan}, out {out_tan}.",
+            frame_label(frame + 1.0)
+        );
+    }
+    set
+}
+
+pub fn tool_graph_set_tangents(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    let frame = gk_req_frame(args, "frame")?;
+    let in_tan = gk_req_f32(args, "in_tan")?;
+    let out_tan = gk_req_f32(args, "out_tan")?;
+    if !set_key_tangents_at(core, idx, frame, in_tan, out_tan) {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "status": core.status,
+    }))
+}
+
+pub fn tool_graph_shift_keys(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    let delta = gk_req_f32(args, "delta")?;
+    if !shift_keys(core, idx, delta) {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "status": core.status,
+        "channel_keys": core.project.channels[idx].keys.len(),
+    }))
+}
+
+pub fn tool_graph_fill_keys(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    let from = gk_req_usize(args, "from")?;
+    let to = gk_req_usize(args, "to")?;
+    let filled = fill_keys_in_range(core, idx, from, to);
+    if filled == 0 {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "filled": filled,
+        "status": core.status,
+        "channel_keys": core.project.channels[idx].keys.len(),
+    }))
+}
+
+/// Clear every key of the channel at `channel_index`
+/// whose frame lies inside `[from, to]`, both ends
+/// inclusive — the index twin of [`delete_keys_in_range`],
+/// which resolves its channel by (figure, target) FIRST
+/// match and so can never name a duplicate channel. Same
+/// discipline: one snapshot on success, 0 and a status
+/// line when nothing is in the range.
+pub fn delete_keys_in_range_at(
+    core: &mut EditorCore,
+    channel_index: usize,
+    from: f32,
+    to: f32,
+) -> usize {
+    let range = format!("{}–{}", frame_label(from + 1.0), frame_label(to + 1.0));
+    let Some(channel) = core.project.channels.get(channel_index) else {
+        core.status = format!("No graph channel {} to clear keys from.", channel_index + 1);
+        return 0;
+    };
+    let count = channel
+        .keys
+        .iter()
+        .filter(|k| (from..=to).contains(&k.frame))
+        .count();
+    if count == 0 {
+        core.status = format!("No keys to clear in frames {range}.");
+        return 0;
+    }
+    core.snapshot();
+    core.project.channels[channel_index]
+        .keys
+        .retain(|k| !(from..=to).contains(&k.frame));
+    core.status = format!("Cleared {count} key(s) in frames {range}.");
+    count
+}
+
+pub fn tool_graph_delete_keys_in_range(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    let from = gk_req_frame(args, "from")?;
+    let to = gk_req_frame(args, "to")?;
+    if from > to {
+        return Err("argument 'from' must not be after 'to'".into());
+    }
+    let cleared = delete_keys_in_range_at(core, idx, from, to);
+    if cleared == 0 {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "cleared": cleared,
+        "status": core.status,
+        "channel_keys": core.project.channels[idx].keys.len(),
+    }))
+}
+
+/// Remove EVERY key of the channel at `channel_index`,
+/// leaving the channel itself in place — the index form
+/// of the keyframe tools' "Clear channel keys"
+/// composition. One undo step; returns 0 — no snapshot —
+/// when the channel is missing or already empty.
+pub fn clear_channel_keys_at(core: &mut EditorCore, channel_index: usize) -> usize {
+    let Some(channel) = core.project.channels.get(channel_index) else {
+        core.status = format!("No graph channel {} to clear.", channel_index + 1);
+        return 0;
+    };
+    if channel.keys.is_empty() {
+        core.status = format!("No graph keys on channel {} to clear.", channel_index + 1);
+        return 0;
+    }
+    let label = target_label(channel.target);
+    let n = channel.keys.len();
+    core.snapshot();
+    core.project.channels[channel_index].keys.clear();
+    core.status = format!("Cleared {n} graph key(s) from channel {} ({label}).", channel_index + 1);
+    n
+}
+
+pub fn tool_graph_clear_channel_keys(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    if clear_channel_keys_at(core, idx) == 0 {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "status": core.status,
+        "channel_keys": 0,
+    }))
+}
+
+pub fn tool_graph_reduce_keys(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    // The graph panel's Reduce keys button tolerance
+    // (`REDUCE_TOLERANCE`, rune_sec/graph_panel.rs) is the
+    // default, so a bare call matches the panel exactly.
+    let tolerance = gk_opt_f32(args, "tolerance")?.unwrap_or(0.5);
+    if tolerance < 0.0 {
+        return Err("argument 'tolerance' must not be negative".into());
+    }
+    core.snapshot();
+    let removed = crate::graph::reduce_keys(&mut core.project.channels[idx], tolerance);
+    core.status = format!("Reduced graph channel: removed {removed} key(s).");
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "removed": removed,
+        "status": core.status,
+        "channel_keys": core.project.channels[idx].keys.len(),
+    }))
+}
+
+pub fn tool_graph_mirror_channel(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    let centre = match gk_opt_f32(args, "centre")? {
+        Some(c) => Some(c),
+        None => gk_opt_f32(args, "center")?,
+    }
+    .unwrap_or_else(|| (core.project.frames.len().saturating_sub(1)) as f32 / 2.0);
+    core.snapshot();
+    let ch = &mut core.project.channels[idx];
+    crate::graph::mirror_keys_time(&mut ch.keys, centre);
+    ch.sort_keys();
+    let keys = ch.keys.len();
+    core.status = format!("Mirrored graph channel time around frame {centre}.");
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "centre": centre,
+        "keys": keys,
+        "status": core.status,
+    }))
+}
+
+pub fn tool_graph_scale_channel(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    let factor = gk_req_f32(args, "factor")?;
+    let pivot = gk_opt_f32(args, "pivot")?.unwrap_or(0.0);
+    core.snapshot();
+    let ch = &mut core.project.channels[idx];
+    crate::graph::scale_key_values(&mut ch.keys, factor, pivot);
+    let keys = ch.keys.len();
+    core.status = format!("Scaled graph channel values by {factor} around {pivot}.");
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "factor": factor,
+        "pivot": pivot,
+        "keys": keys,
+        "status": core.status,
+    }))
+}
+
+pub fn tool_graph_tangent_preset_channel(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    let preset = gk_parse_preset(gk_req_str(args, "preset")?)?;
+    core.snapshot();
+    let ch = &mut core.project.channels[idx];
+    ch.sort_keys();
+    let angular = matches!(ch.target, ChannelTarget::Angle(_));
+    crate::graph::apply_tangent_preset(&mut ch.keys, preset, angular);
+    core.status = format!(
+        "Applied {preset:?} preset to graph channel {} ({}).",
+        idx + 1,
+        target_label(core.project.channels[idx].target)
+    );
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "preset": format!("{preset:?}"),
+        "status": core.status,
+    }))
+}
+
+/// Key EVERY channel in the project at `frame`, each
+/// holding its own evaluated value there — the library
+/// form of the keyframe tools' "Key all here" composition
+/// (`key_all_here_core`, which lives in the shell crate
+/// and cannot be called from here): read
+/// `Channel::value_at`, insert with `Channel::add_key`,
+/// ONE snapshot for the whole project. Returns how many
+/// channels were keyed; a project with no channels is a
+/// status-only no-op (0, no snapshot).
+pub fn key_all_channels_at(core: &mut EditorCore, frame: f32) -> usize {
+    let n = core.project.channels.len();
+    if n == 0 {
+        core.status = "No graph channels to key.".into();
+        return 0;
+    }
+    core.snapshot();
+    for ch in &mut core.project.channels {
+        let value = ch.value_at(frame);
+        ch.add_key(frame, value);
+    }
+    core.status = format!("Keyed {n} channels at frame {}.", frame_label(frame + 1.0));
+    n
+}
+
+pub fn tool_graph_key_all_channels(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let frame = match gk_opt_f32(args, "frame")? {
+        Some(f) => {
+            if f < 0.0 {
+                return Err("argument 'frame' must not be negative".into());
+            }
+            f
+        }
+        None => core.current as f32,
+    };
+    let keyed = key_all_channels_at(core, frame);
+    if keyed == 0 {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "keyed": keyed,
+        "frame": frame,
+        "status": core.status,
+    }))
+}
+
+pub fn tool_graph_key_angle(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    // The core op owns every refusal (no joint selected)
+    // and reports it on the status line; like the
+    // registry's other direct core-op tools
+    // (smooth_graph_tangents, mirror_pose) the handler
+    // returns the status rather than re-deriving the
+    // refusal.
+    core.key_graph_angle();
+    Ok(json!({
+        "ok": true,
+        "status": core.status,
+        "channels": core.project.channels.len(),
+    }))
+}
+
+pub fn tool_graph_clear_channels(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    // TRUTH NOTE: `EditorCore::clear_graph` — the graph
+    // panel's "Clear all channels" op — takes NO snapshot,
+    // so this is not an undo step, exactly as in the
+    // panel. The description in the registry entry must
+    // say so.
+    let cleared = core.project.channels.len();
+    core.clear_graph();
+    Ok(json!({
+        "ok": true,
+        "cleared": cleared,
+        "status": core.status,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1809,5 +2491,305 @@ mod tests {
         );
         assert_eq!(core.undo_depth(), undo_before, "no snapshot for a no-op fill");
         assert_eq!(core.project.channels[0].keys.len(), 3, "no key duplicated");
+    }
+}
+
+#[cfg(test)]
+mod mcp_graph_tool_tests {
+    use super::*;
+    use crate::graph::Channel;
+    use serde_json::{json, Value};
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    /// Two DUPLICATE (figure 0, RootX) channels told apart
+    /// by their keys — twin 0 holds values 100/140, twin 1
+    /// holds a single key 42 — plus an empty RootY channel.
+    /// Index-addressed MCP tools must be able to name the
+    /// second twin, exactly as the graph panel's rows can.
+    fn twin_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.channels = vec![
+            Channel {
+                figure: 0,
+                target: ChannelTarget::RootX,
+                keys: vec![Key::flat(0.0, 100.0), Key::flat(4.0, 140.0)],
+            },
+            Channel {
+                figure: 0,
+                target: ChannelTarget::RootX,
+                keys: vec![Key::flat(2.0, 42.0)],
+            },
+            Channel {
+                figure: 0,
+                target: ChannelTarget::RootY,
+                keys: Vec::new(),
+            },
+        ];
+        core
+    }
+
+    #[test]
+    fn list_channels_reports_every_channel_in_project_order() {
+        let mut core = twin_core();
+        core.project.figures[0].name = "Hero".to_string();
+        let out = tool_graph_list_channels(&mut core, &json!({})).unwrap();
+        assert_eq!(out["count"], 3);
+        let rows = out["channels"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        // Row i IS project channel i — the panel's rows
+        // (channel_rows) enumerate the same list in order.
+        assert_eq!(rows[0]["channel"], 0);
+        assert_eq!(rows[0]["figure"], 0);
+        assert_eq!(rows[0]["figure_name"], "Hero");
+        assert_eq!(rows[0]["target"]["target"], "root_x");
+        assert_eq!(rows[0]["keys"], 2);
+        assert!(approx(rows[0]["min"].as_f64().unwrap() as f32, 100.0));
+        assert!(approx(rows[0]["max"].as_f64().unwrap() as f32, 140.0));
+        assert!(approx(rows[0]["first_frame"].as_f64().unwrap() as f32, 0.0));
+        assert!(approx(rows[0]["last_frame"].as_f64().unwrap() as f32, 4.0));
+        // The second twin is listed as itself, not merged.
+        assert_eq!(rows[1]["channel"], 1);
+        assert_eq!(rows[1]["keys"], 1);
+        assert!(approx(rows[1]["min"].as_f64().unwrap() as f32, 42.0));
+        // The empty channel reports the stats zeroes.
+        assert_eq!(rows[2]["target"]["target"], "root_y");
+        assert_eq!(rows[2]["keys"], 0);
+    }
+
+    #[test]
+    fn get_channel_reads_the_named_twin_and_samples_it() {
+        let mut core = twin_core();
+        let out = tool_graph_get_channel(&mut core, &json!({ "channel": 1, "frame": 2.0 })).unwrap();
+        assert_eq!(out["channel"], 1);
+        assert_eq!(out["key_count"], 1);
+        assert_eq!(out["keys"][0]["value"], 42.0);
+        assert_eq!(out["keys"][0]["interp"], "hermite");
+        assert!(approx(out["value_at"].as_f64().unwrap() as f32, 42.0));
+        // Without a frame, no sample is reported.
+        let out = tool_graph_get_channel(&mut core, &json!({ "channel": 0 })).unwrap();
+        assert!(out.get("value_at").is_none());
+        assert_eq!(out["keys"][1]["value"], 140.0);
+    }
+
+    #[test]
+    fn index_tools_edit_the_second_twin_not_the_first() {
+        let mut core = twin_core();
+        // Mirror twin 1 around the timeline middle (frame
+        // 2 of the 5-frame demo): its single key at frame 2
+        // stays at frame 2, but the call must touch ONLY
+        // twin 1's keys array identity — prove via a scale
+        // that changes values visibly instead.
+        let out = tool_graph_scale_channel(
+            &mut core,
+            &json!({ "channel": 1, "factor": 3.0 }),
+        )
+        .unwrap();
+        assert_eq!(out["channel"], 1);
+        assert!(approx(core.project.channels[1].keys[0].value, 126.0), "twin 1 scaled");
+        assert!(approx(core.project.channels[0].keys[0].value, 100.0), "twin 0 untouched");
+        // Delete twin 1's only key by index.
+        tool_graph_delete_key(&mut core, &json!({ "channel": 1, "frame": 2.0 })).unwrap();
+        assert!(core.project.channels[1].keys.is_empty());
+        assert_eq!(core.project.channels[0].keys.len(), 2, "twin 0 keeps its keys");
+    }
+
+    #[test]
+    fn delete_move_and_tangent_tools_follow_snapshot_discipline() {
+        let mut core = twin_core();
+        let depth = core.undo_depth();
+        // Tangents on twin 0's frame-0 key.
+        tool_graph_set_tangents(
+            &mut core,
+            &json!({ "channel": 0, "frame": 0.0, "in_tan": 1.5, "out_tan": -2.0 }),
+        )
+        .unwrap();
+        assert_eq!(core.undo_depth(), depth + 1, "one snapshot");
+        let k = core.project.channels[0].keys[0];
+        assert!(approx(k.in_tan, 1.5) && approx(k.out_tan, -2.0));
+        // Move the frame-4 key to frame 6, value travelling.
+        tool_graph_move_key(
+            &mut core,
+            &json!({ "channel": 0, "from_frame": 4.0, "to_frame": 6.0 }),
+        )
+        .unwrap();
+        let frames: Vec<f32> = core.project.channels[0].keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![0.0, 6.0]);
+        assert!(approx(core.project.channels[0].keys[1].value, 140.0));
+        // Refusals (no key near the frame) take no snapshot.
+        let depth = core.undo_depth();
+        assert!(tool_graph_delete_key(&mut core, &json!({ "channel": 0, "frame": 3.0 })).is_err());
+        assert!(tool_graph_move_key(
+            &mut core,
+            &json!({ "channel": 0, "from_frame": 3.0, "to_frame": 8.0 })
+        )
+        .is_err());
+        assert!(tool_graph_set_tangents(
+            &mut core,
+            &json!({ "channel": 0, "frame": 3.0, "in_tan": 0.0, "out_tan": 0.0 })
+        )
+        .is_err());
+        assert_eq!(core.undo_depth(), depth, "no refusal snapshots");
+    }
+
+    #[test]
+    fn shift_fill_and_range_clear_tools_delegate_to_the_ops() {
+        let mut core = twin_core();
+        // Fill needs a key AT the playhead: park it on
+        // twin 1's key (current = 2) — fill twin 1 across
+        // 0..=4: frames 0,1,3,4 are keyless.
+        core.goto(2);
+        let out = tool_graph_fill_keys(&mut core, &json!({ "channel": 1, "from": 0, "to": 4 })).unwrap();
+        assert_eq!(out["filled"], 4);
+        assert_eq!(core.project.channels[1].keys.len(), 5);
+        // Shift everything one frame later.
+        tool_graph_shift_keys(&mut core, &json!({ "channel": 1, "delta": 1.0 })).unwrap();
+        let frames: Vec<f32> = core.project.channels[1].keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        // A shift that would cross frame 0 is refused whole.
+        assert!(tool_graph_shift_keys(&mut core, &json!({ "channel": 1, "delta": -2.0 })).is_err());
+        // Clear the middle of the range by index.
+        let out = tool_graph_delete_keys_in_range(
+            &mut core,
+            &json!({ "channel": 1, "from": 2.0, "to": 4.0 }),
+        )
+        .unwrap();
+        assert_eq!(out["cleared"], 3);
+        let frames: Vec<f32> = core.project.channels[1].keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![1.0, 5.0]);
+        // Reversed range is an argument error, not a no-op.
+        assert!(tool_graph_delete_keys_in_range(
+            &mut core,
+            &json!({ "channel": 1, "from": 4.0, "to": 2.0 })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn clear_channel_keys_keeps_the_channel_itself() {
+        let mut core = twin_core();
+        tool_graph_clear_channel_keys(&mut core, &json!({ "channel": 0 })).unwrap();
+        assert_eq!(core.project.channels.len(), 3, "channel survives, keys go");
+        assert!(core.project.channels[0].keys.is_empty());
+        // Clearing an already-empty channel is an error.
+        assert!(tool_graph_clear_channel_keys(&mut core, &json!({ "channel": 0 })).is_err());
+        assert!(tool_graph_clear_channel_keys(&mut core, &json!({ "channel": 2 })).is_err());
+    }
+
+    #[test]
+    fn reduce_and_preset_channel_tools_shape_one_channel() {
+        let mut core = EditorCore::new();
+        core.project.channels = vec![Channel {
+            figure: 0,
+            target: ChannelTarget::RootX,
+            keys: vec![
+                Key::flat(0.0, 0.0),
+                Key::flat(5.0, 50.0),
+                Key::flat(10.0, 100.0),
+            ],
+        }];
+        // The middle key sits exactly on the line: the
+        // panel-default tolerance (0.5) removes it.
+        let out = tool_graph_reduce_keys(&mut core, &json!({ "channel": 0 })).unwrap();
+        assert_eq!(out["removed"], 1);
+        assert_eq!(core.project.channels[0].keys.len(), 2);
+        // Per-channel preset: ease-in on the remaining ramp
+        // gives the first key a 0.1-scaled out-tangent
+        // (secant 10 -> out 1.0), exactly as
+        // graph::apply_tangent_preset defines it.
+        tool_graph_tangent_preset_channel(
+            &mut core,
+            &json!({ "channel": 0, "preset": "ease-in" }),
+        )
+        .unwrap();
+        let k = core.project.channels[0].keys[0];
+        assert!(approx(k.out_tan, 1.0), "ease-in out-tangent: {}", k.out_tan);
+        assert!(approx(k.in_tan, 10.0), "endpoint in-tangent reuses the secant");
+        assert!(tool_graph_tangent_preset_channel(
+            &mut core,
+            &json!({ "channel": 0, "preset": "bouncy" })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn mirror_channel_tool_defaults_to_the_timeline_middle() {
+        let mut core = twin_core();
+        // 5-frame demo: middle is frame 2. Twin 0's keys at
+        // 0 and 4 mirror onto each other, values travelling.
+        tool_graph_mirror_channel(&mut core, &json!({ "channel": 0 })).unwrap();
+        let keys = &core.project.channels[0].keys;
+        assert!(approx(keys[0].frame, 0.0) && approx(keys[0].value, 140.0));
+        assert!(approx(keys[1].frame, 4.0) && approx(keys[1].value, 100.0));
+    }
+
+    #[test]
+    fn key_all_and_key_angle_and_clear_channels_tools() {
+        let mut core = twin_core();
+        // Key all at frame 2 (the default would be the
+        // playhead; pass it explicitly): every channel
+        // gains a key holding its evaluated value there.
+        let out = tool_graph_key_all_channels(&mut core, &json!({ "frame": 2.0 })).unwrap();
+        assert_eq!(out["keyed"], 3);
+        assert_eq!(core.project.channels[0].keys.len(), 3);
+        assert_eq!(core.project.channels[2].keys.len(), 1, "even the empty channel is keyed");
+        // Key angle with no joint selected reports the
+        // core op's refusal on the status line.
+        let out = tool_graph_key_angle(&mut core, &json!({})).unwrap();
+        assert!(
+            out["status"].as_str().unwrap().contains("Select a joint"),
+            "status: {}",
+            out["status"]
+        );
+        // With a joint selected it authors the angle key.
+        core.selected_node = Some(0);
+        core.key_graph_angle();
+        let before = core.project.channels.len();
+        tool_graph_key_angle(&mut core, &json!({})).unwrap();
+        assert!(core.project.channels.len() >= before);
+        // Clear all: every channel goes, and (the core
+        // op's documented truth) the undo depth does not
+        // grow — clear_graph takes no snapshot.
+        let depth = core.undo_depth();
+        let n_channels = core.project.channels.len();
+        let out = tool_graph_clear_channels(&mut core, &json!({})).unwrap();
+        assert_eq!(out["cleared"], n_channels as u64);
+        assert!(core.project.channels.is_empty());
+        assert_eq!(core.undo_depth(), depth, "clear_graph is not an undo step");
+    }
+
+    #[test]
+    fn adversarial_arguments_error_and_never_panic() {
+        let mut core = twin_core();
+        // Channel index far past the list, on every
+        // index-addressed tool.
+        for out in [
+            tool_graph_get_channel(&mut core, &json!({ "channel": 99 })),
+            tool_graph_delete_key(&mut core, &json!({ "channel": 99, "frame": 0.0 })),
+            tool_graph_shift_keys(&mut core, &json!({ "channel": 99, "delta": 1.0 })),
+            tool_graph_reduce_keys(&mut core, &json!({ "channel": 99 })),
+            tool_graph_clear_channel_keys(&mut core, &json!({ "channel": 99 })),
+        ] {
+            let err = out.expect_err("out-of-range channel must error");
+            assert_eq!(err, "no graph channel at index 99");
+        }
+        // Negative / wrongly-typed / missing arguments.
+        assert!(tool_graph_delete_key(&mut core, &json!({ "channel": 0, "frame": -1.0 })).is_err());
+        assert!(tool_graph_delete_key(&mut core, &json!({ "channel": -1, "frame": 0.0 })).is_err());
+        assert!(tool_graph_delete_key(&mut core, &json!({ "channel": "0", "frame": 0.0 })).is_err());
+        assert!(tool_graph_delete_key(&mut core, &json!({ "channel": 0 })).is_err());
+        assert!(tool_graph_shift_keys(&mut core, &json!({ "channel": 0, "delta": 0.0 })).is_err());
+        assert!(tool_graph_move_key(
+            &mut core,
+            &json!({ "channel": 0, "from_frame": 0.0, "to_frame": -3.0 })
+        )
+        .is_err());
+        // A JSON null reads as missing, never as zero.
+        assert!(tool_graph_delete_key(&mut core, &json!({ "channel": 0, "frame": null })).is_err());
+        // Nothing above touched the project.
+        assert_eq!(core.project.channels.len(), 3);
+        assert_eq!(core.project.channels[0].keys.len(), 2);
     }
 }

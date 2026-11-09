@@ -70,6 +70,7 @@
 
 use crate::editor::EditorCore;
 use crate::model::{ParticleEvent, ParticleKind};
+use serde_json::{json, Value};
 
 impl EditorCore {
     /// Clamp a frame argument to the project's last frame
@@ -330,6 +331,359 @@ impl EditorCore {
             index + 1
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// MCP handlers (Wave 11, agent B7): the particle-event
+// tools the registry in `mcp_tools.rs` was missing.
+//
+// The registry already carried `particle_duplicate_event`,
+// `particle_set_kind` and `particle_set_color`, and the
+// `mcp.rs` built-ins carry `particle_add_event` (free,
+// unanchored) and `clear_particles` — but the panel's
+// delete / frame / anchor / position ops and any way to
+// LIST the events had no MCP surface at all. These
+// handlers close that gap. They follow the `mcp_tools.rs`
+// conventions (0-based indices, arguments validated and
+// indices pre-checked BEFORE the op runs, the outcome
+// reported through `core.status`, never a panic) but are
+// self-contained: the arg helpers are local, distinctly
+// named copies, because `mcp_tools.rs`'s helpers are
+// private to that module. The integrator registers them
+// in `tools()` with the `Tool { .. }` entries in B7's
+// report (handler: crate::particle_ops::tool_*).
+// ---------------------------------------------------------------------
+
+/// `args[key]`, treating JSON null as absent (the
+/// `mcp_tools.rs` `get` convention).
+fn particle_mcp_get<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
+    args.get(key).filter(|v| !v.is_null())
+}
+
+/// A JSON value as a non-negative integer (the
+/// `mcp_tools.rs` `as_usize` contract: unsigned ints, or
+/// floats with no fraction, in range).
+fn particle_mcp_value_usize(v: &Value, key: &str) -> Result<usize, String> {
+    if let Some(u) = v.as_u64() {
+        return usize::try_from(u).map_err(|_| format!("argument '{key}' is too large"));
+    }
+    if let Some(f) = v.as_f64() {
+        if f >= 0.0 && f.fract() == 0.0 && f <= usize::MAX as f64 {
+            return Ok(f as usize);
+        }
+    }
+    Err(format!("argument '{key}' must be a non-negative integer"))
+}
+
+/// Required non-negative integer argument.
+fn particle_mcp_usize(args: &Value, key: &str) -> Result<usize, String> {
+    match particle_mcp_get(args, key) {
+        Some(v) => particle_mcp_value_usize(v, key),
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+/// Optional non-negative integer argument: absent or
+/// null yields `None` (for `particle_set_anchor`, a null
+/// `figure` is how the anchor is cleared).
+fn particle_mcp_opt_usize(args: &Value, key: &str) -> Result<Option<usize>, String> {
+    match particle_mcp_get(args, key) {
+        Some(v) => particle_mcp_value_usize(v, key).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Required integer argument in `i32` range (frame
+/// nudge deltas may be negative).
+fn particle_mcp_i32(args: &Value, key: &str) -> Result<i32, String> {
+    match particle_mcp_get(args, key) {
+        Some(v) => {
+            if let Some(i) = v.as_i64() {
+                return i32::try_from(i)
+                    .map_err(|_| format!("argument '{key}' is out of range"));
+            }
+            if let Some(f) = v.as_f64() {
+                if f.fract() == 0.0 && f >= i32::MIN as f64 && f <= i32::MAX as f64 {
+                    return Ok(f as i32);
+                }
+            }
+            Err(format!("argument '{key}' must be an integer"))
+        }
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+/// Required finite number argument (stage coordinates):
+/// NaN / infinity are refused — serde_json cannot even
+/// carry them (they arrive as null, i.e. "missing"), and
+/// a non-finite stored point would poison the
+/// rasterizer's geometry.
+fn particle_mcp_f32(args: &Value, key: &str) -> Result<f32, String> {
+    match particle_mcp_get(args, key) {
+        Some(v) => match v.as_f64() {
+            Some(f) if f.is_finite() => Ok(f as f32),
+            _ => Err(format!("argument '{key}' must be a finite number")),
+        },
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+/// Index of particle event `idx`, or a clean error when
+/// the project has no event there (the same wording as
+/// `mcp_tools.rs`'s private `check_particle_index`, so
+/// both halves of the surface refuse identically).
+fn particle_mcp_index(core: &EditorCore, idx: usize) -> Result<usize, String> {
+    if idx >= core.project.particles.len() {
+        Err(format!("no particle event at index {idx}"))
+    } else {
+        Ok(idx)
+    }
+}
+
+/// Snake-case kind name — the export/MCP vocabulary for
+/// the three kinds (the same strings the particles
+/// panel's `kind_name` uses; that helper is bin-crate
+/// code, so the mapping is restated here).
+fn particle_mcp_kind_name(kind: ParticleKind) -> &'static str {
+    match kind {
+        ParticleKind::Burst => "burst",
+        ParticleKind::Sparkle => "sparkle",
+        ParticleKind::Smoke => "smoke",
+    }
+}
+
+/// Parse a particle kind name, case-insensitively (the
+/// same contract and error shape as `mcp_tools.rs`'s
+/// private `parse_particle_kind`).
+fn particle_mcp_parse_kind(name: &str) -> Result<ParticleKind, String> {
+    match name.to_ascii_lowercase().as_str() {
+        "burst" => Ok(ParticleKind::Burst),
+        "sparkle" => Ok(ParticleKind::Sparkle),
+        "smoke" => Ok(ParticleKind::Smoke),
+        other => Err(format!(
+            "unknown particle kind '{other}' (expected \"burst\", \"sparkle\" or \"smoke\")"
+        )),
+    }
+}
+
+/// One event as JSON, for `particle_list_events`: every
+/// stored field, so an MCP client can address, retime or
+/// re-anchor events without guessing (before this tool
+/// the surface exposed only the event COUNT, via the
+/// project stats).
+fn particle_mcp_event_json(index: usize, ev: &ParticleEvent) -> Value {
+    json!({
+        "index": index,
+        "frame": ev.frame,
+        "kind": particle_mcp_kind_name(ev.kind),
+        "color": ev.color,
+        "seed": ev.seed,
+        "x": ev.x,
+        "y": ev.y,
+        "figure": ev.figure,
+        "node": ev.node,
+    })
+}
+
+/// MCP `particle_list_events`: every particle event in
+/// the project, in list order, with every stored field.
+/// Read-only — no snapshot, no status change.
+pub fn tool_particle_list_events(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let events: Vec<Value> = core
+        .project
+        .particles
+        .iter()
+        .enumerate()
+        .map(|(i, ev)| particle_mcp_event_json(i, ev))
+        .collect();
+    Ok(json!({ "ok": true, "count": events.len(), "events": events }))
+}
+
+/// MCP `particle_delete_event`: delete the event at
+/// `index` (the Particles panel's Delete, the Delete
+/// key and the palette's `delete-particle`). Events
+/// after the deleted one shift down one index — the
+/// same positional-index contract as the FX and audio
+/// tools; call `particle_list_events` again to re-read
+/// the list. One undo step.
+pub fn tool_particle_delete_event(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = particle_mcp_index(core, particle_mcp_usize(args, "index")?)?;
+    core.particle_delete_event(idx);
+    Ok(json!({
+        "ok": true,
+        "particle_index": idx,
+        "status": core.status,
+        "particles": core.project.particles.len(),
+    }))
+}
+
+/// MCP `particle_set_frame`: move the event at `index`
+/// to 0-based `frame`, clamped to the project's last
+/// frame (the op's contract, so an event can never be
+/// parked past the end of the timeline); the returned
+/// `frame` is where the event actually landed. The
+/// panel's frame stepper and its "To playhead" action
+/// are both this op. One undo step.
+pub fn tool_particle_set_frame(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = particle_mcp_index(core, particle_mcp_usize(args, "index")?)?;
+    let frame = particle_mcp_usize(args, "frame")?;
+    core.particle_set_frame(idx, frame);
+    Ok(json!({
+        "ok": true,
+        "particle_index": idx,
+        "frame": core.project.particles[idx].frame,
+        "status": core.status,
+        "particles": core.project.particles.len(),
+    }))
+}
+
+/// MCP `particle_nudge_frame`: move the event at
+/// `index` by signed `delta` frames, clamped at both
+/// ends of the timeline; the returned `frame` is where
+/// the event actually landed. One undo step.
+pub fn tool_particle_nudge_frame(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = particle_mcp_index(core, particle_mcp_usize(args, "index")?)?;
+    let delta = particle_mcp_i32(args, "delta")?;
+    core.particle_nudge_frame(idx, delta);
+    Ok(json!({
+        "ok": true,
+        "particle_index": idx,
+        "frame": core.project.particles[idx].frame,
+        "status": core.status,
+        "particles": core.project.particles.len(),
+    }))
+}
+
+/// MCP `particle_set_position`: move the event at
+/// `index`'s stored stage point to (`x`, `y`) — the
+/// point the rasterizer renders the effect from,
+/// independent of the anchor (the panel's nudge pad is
+/// this op in 4-unit steps). One undo step.
+pub fn tool_particle_set_position(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = particle_mcp_index(core, particle_mcp_usize(args, "index")?)?;
+    let x = particle_mcp_f32(args, "x")?;
+    let y = particle_mcp_f32(args, "y")?;
+    core.particle_set_position(idx, x, y);
+    let ev = &core.project.particles[idx];
+    Ok(json!({
+        "ok": true,
+        "particle_index": idx,
+        "x": ev.x,
+        "y": ev.y,
+        "status": core.status,
+        "particles": core.project.particles.len(),
+    }))
+}
+
+/// MCP `particle_set_anchor`: anchor the event at
+/// `index` to figure `figure`, joint `node` (the
+/// panel's "Anchor to figure" / "Anchor to joint"), or
+/// clear the anchor back to a free stage event by
+/// passing `figure` as null or omitting it (the panel's
+/// "Clear anchor"; a `node` passed without a figure is
+/// ignored, exactly as the op treats it). A figure with
+/// no `node` anchors to the figure's root. The figure
+/// (and node, when given) are validated BEFORE the op
+/// runs — the panel refuses a stale figure selection
+/// the same way — so a bad anchor is a clean error,
+/// never a stored dangling reference. One undo step.
+pub fn tool_particle_set_anchor(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = particle_mcp_index(core, particle_mcp_usize(args, "index")?)?;
+    let figure = particle_mcp_opt_usize(args, "figure")?;
+    let node = particle_mcp_opt_usize(args, "node")?;
+    if let Some(fi) = figure {
+        let def = core
+            .project
+            .figures
+            .get(fi)
+            .map(|f| &f.def)
+            .ok_or_else(|| format!("no figure at index {fi}"))?;
+        if let Some(ni) = node {
+            if ni >= def.nodes.len() {
+                return Err(format!("figure {fi} has no node at index {ni}"));
+            }
+        }
+    }
+    core.particle_set_anchor(idx, figure, node);
+    let ev = &core.project.particles[idx];
+    Ok(json!({
+        "ok": true,
+        "particle_index": idx,
+        "figure": ev.figure,
+        "node": ev.node,
+        "status": core.status,
+        "particles": core.project.particles.len(),
+    }))
+}
+
+/// MCP `particle_add_anchored`: add a particle event
+/// anchored to the SELECTED figure's selected joint (or
+/// its root when no joint is selected), on the current
+/// frame, with the joint's current position captured as
+/// the event's stored point — `EditorCore::add_particle`,
+/// the command palette's "Add particle: Burst /
+/// Sparkle" commands. (`particle_add_event` is the other
+/// creation shape: a FREE event at an explicit frame and
+/// point.) `kind` is "burst", "sparkle" or "smoke"
+/// (default "burst"). The selection the op reads is
+/// validated first, so a project with no figures — or a
+/// stale selection — is a clean error, not a panic in
+/// the op's direct indexing. One undo step.
+pub fn tool_particle_add_anchored(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let kind = match particle_mcp_get(args, "kind") {
+        Some(v) => {
+            let name = v
+                .as_str()
+                .ok_or_else(|| "argument 'kind' must be a string".to_string())?;
+            particle_mcp_parse_kind(name)?
+        }
+        None => ParticleKind::Burst,
+    };
+    if core.project.figures.is_empty() {
+        return Err("project has no figures to anchor a particle event to".to_string());
+    }
+    let fi = core.selected_figure;
+    let fig = core
+        .project
+        .figures
+        .get(fi)
+        .ok_or_else(|| format!("no figure at index {fi}"))?;
+    if let Some(ni) = core.selected_node {
+        if ni >= fig.def.nodes.len() {
+            return Err(format!("figure {fi} has no node at index {ni}"));
+        }
+    }
+    // `add_particle` reads the figure's pose on the
+    // current frame by direct indexing; a project whose
+    // current frame carries no pose for the figure (an
+    // import mid-repair) would panic there, so refuse
+    // first — the editor's own presence idiom.
+    let frame = core
+        .project
+        .frames
+        .get(core.current)
+        .ok_or_else(|| "project has no current frame".to_string())?;
+    if fi >= frame.poses.len() {
+        return Err(format!(
+            "figure {fi} has no pose on the current frame to anchor to"
+        ));
+    }
+    // The op's own kind table (editor.rs PARTICLE_KINDS)
+    // is indexed in enum declaration order.
+    let kind_idx = match kind {
+        ParticleKind::Burst => 0,
+        ParticleKind::Sparkle => 1,
+        ParticleKind::Smoke => 2,
+    };
+    core.add_particle(kind_idx);
+    let idx = core.project.particles.len() - 1;
+    Ok(json!({
+        "ok": true,
+        "particle_index": idx,
+        "kind": particle_mcp_kind_name(kind),
+        "status": core.status,
+        "particles": core.project.particles.len(),
+    }))
 }
 
 #[cfg(test)]
@@ -714,5 +1068,159 @@ mod tests {
         );
         assert_eq!(project_json(&core), before, "project untouched");
         assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+    }
+
+    // ---- Wave 11 MCP handlers (B7) -----------------------------
+
+    #[test]
+    fn mcp_list_events_reports_every_stored_field() {
+        let mut anchored = event(2, 40.0, 7);
+        anchored.figure = Some(1);
+        anchored.node = Some(3);
+        anchored.kind = ParticleKind::Smoke;
+        anchored.color = 0x123456;
+        let mut core = core_with(vec![event(0, 10.0, 1), anchored]);
+        let edits = core.edits_since_autosave();
+        let r = tool_particle_list_events(&mut core, &serde_json::json!({})).unwrap();
+        assert_eq!(r["count"].as_u64().unwrap(), 2);
+        assert_eq!(r["events"][0]["index"].as_u64().unwrap(), 0);
+        assert_eq!(r["events"][0]["frame"].as_u64().unwrap(), 0);
+        assert_eq!(r["events"][0]["kind"], "burst");
+        assert_eq!(r["events"][0]["figure"], serde_json::Value::Null);
+        assert_eq!(r["events"][1]["frame"].as_u64().unwrap(), 2);
+        assert_eq!(r["events"][1]["kind"], "smoke");
+        assert_eq!(r["events"][1]["color"].as_u64().unwrap(), 0x123456);
+        assert_eq!(r["events"][1]["seed"].as_u64().unwrap(), 7);
+        assert_eq!(r["events"][1]["figure"].as_u64().unwrap(), 1);
+        assert_eq!(r["events"][1]["node"].as_u64().unwrap(), 3);
+        // Read-only: no snapshot.
+        assert_eq!(core.edits_since_autosave(), edits);
+    }
+
+    #[test]
+    fn mcp_delete_event_shifts_later_indices_down() {
+        let mut core = core_with(vec![
+            event(0, 10.0, 1),
+            event(1, 20.0, 2),
+            event(2, 30.0, 3),
+        ]);
+        let r = tool_particle_delete_event(&mut core, &serde_json::json!({ "index": 0 }))
+            .unwrap();
+        assert_eq!(r["particles"].as_u64().unwrap(), 2);
+        // The old index 1 is now index 0: positional
+        // indices, exactly what the tool description says.
+        assert_eq!(core.project.particles[0].seed, 2);
+        assert_eq!(core.project.particles[1].seed, 3);
+        // Out-of-range and missing args are clean errors.
+        let err = tool_particle_delete_event(&mut core, &serde_json::json!({ "index": 2 }))
+            .unwrap_err();
+        assert_eq!(err, "no particle event at index 2");
+        assert!(tool_particle_delete_event(&mut core, &serde_json::json!({})).is_err());
+        assert_eq!(core.project.particles.len(), 2, "failed calls changed nothing");
+    }
+
+    #[test]
+    fn mcp_set_frame_and_nudge_report_the_landing_frame() {
+        let mut core = core_with(vec![event(0, 0.0, 1)]);
+        let last = core.frame_count() - 1;
+        let r = tool_particle_set_frame(
+            &mut core,
+            &serde_json::json!({ "index": 0, "frame": 9999 }),
+        )
+        .unwrap();
+        assert_eq!(r["frame"].as_u64().unwrap(), last as u64, "the op clamps; the tool reports the landing");
+        let r = tool_particle_nudge_frame(
+            &mut core,
+            &serde_json::json!({ "index": 0, "delta": -2 }),
+        )
+        .unwrap();
+        assert_eq!(r["frame"].as_u64().unwrap(), (last - 2) as u64);
+        // A negative frame / fractional delta are errors,
+        // not panics or wraps.
+        assert!(tool_particle_set_frame(
+            &mut core,
+            &serde_json::json!({ "index": 0, "frame": -1 })
+        )
+        .is_err());
+        assert!(tool_particle_nudge_frame(
+            &mut core,
+            &serde_json::json!({ "index": 0, "delta": 1.5 })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn mcp_set_position_validates_and_lands() {
+        let mut core = core_with(vec![event(0, 0.0, 1)]);
+        let r = tool_particle_set_position(
+            &mut core,
+            &serde_json::json!({ "index": 0, "x": 12.5, "y": -4.0 }),
+        )
+        .unwrap();
+        assert_eq!(r["x"].as_f64().unwrap(), 12.5);
+        assert_eq!((core.project.particles[0].x, core.project.particles[0].y), (12.5, -4.0));
+        // A string coordinate is a clean error.
+        assert!(tool_particle_set_position(
+            &mut core,
+            &serde_json::json!({ "index": 0, "x": "left", "y": 0 })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn mcp_set_anchor_sets_clears_and_validates_first() {
+        let mut core = core_with(vec![event(0, 0.0, 1)]);
+        let edits = core.edits_since_autosave();
+        // A figure index the project does not have is an
+        // error BEFORE the op runs: no snapshot, no write.
+        let err = tool_particle_set_anchor(
+            &mut core,
+            &serde_json::json!({ "index": 0, "figure": 9, "node": 0 }),
+        )
+        .unwrap_err();
+        assert_eq!(err, "no figure at index 9");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+        assert_eq!(core.project.particles[0].figure, None);
+        // A valid anchor lands (figure 0 is the demo
+        // figure; node 2 exists on the humanoid rig).
+        let r = tool_particle_set_anchor(
+            &mut core,
+            &serde_json::json!({ "index": 0, "figure": 0, "node": 2 }),
+        )
+        .unwrap();
+        assert_eq!(r["figure"].as_u64().unwrap(), 0);
+        assert_eq!(r["node"].as_u64().unwrap(), 2);
+        // Clearing: figure null clears the node too.
+        let r = tool_particle_set_anchor(
+            &mut core,
+            &serde_json::json!({ "index": 0, "figure": null }),
+        )
+        .unwrap();
+        assert_eq!(r["figure"], serde_json::Value::Null);
+        assert_eq!(r["node"], serde_json::Value::Null);
+        assert_eq!(core.project.particles[0].node, None);
+    }
+
+    #[test]
+    fn mcp_add_anchored_uses_the_selection_and_kind() {
+        let mut core = EditorCore::new();
+        let r = tool_particle_add_anchored(
+            &mut core,
+            &serde_json::json!({ "kind": "sparkle" }),
+        )
+        .unwrap();
+        assert_eq!(r["particle_index"].as_u64().unwrap(), 0);
+        assert_eq!(r["kind"], "sparkle");
+        let ev = &core.project.particles[0];
+        assert_eq!(ev.kind, ParticleKind::Sparkle);
+        assert_eq!(ev.figure, Some(core.selected_figure), "anchored, not free");
+        assert_eq!(ev.frame, core.current);
+        // An unknown kind is a clean error, nothing added.
+        assert!(tool_particle_add_anchored(
+            &mut core,
+            &serde_json::json!({ "kind": "laser" })
+        )
+        .is_err());
+        assert_eq!(core.project.particles.len(), 1);
     }
 }

@@ -955,6 +955,408 @@ impl EditorCore {
     }
 }
 
+// ---------------------------------------------------------------------
+// Wave 11 (B6): MCP parity handlers for the audio surface.
+//
+// These are `pub fn tool_*` handlers in the exact registry
+// shape (`fn(&mut EditorCore, &Value) -> Result<Value,
+// String>`, the `crate::mcp::Tool` handler type) for the
+// integrator to register in `mcp_tools::tools()`. They
+// close the audio parity gaps the Wave 11 audit found in
+// this file's domain:
+//
+// - NO read surface existed at all: no tool listed the
+//   clips, and none exposed the duration / sample-rate /
+//   health facts the audio panel shows per clip (its
+//   Wave-4 `ClipProbe`: healthy / missing / unsupported /
+//   unreadable). `tool_audio_list_clips` and
+//   `tool_audio_clip_info` are those reads; the info tool
+//   also returns waveform peaks from [`clip_peaks`].
+// - The panel can aim Fade / Reverse / gain / move at the
+//   SELECTED clip (the indexed `*_at` ops), but the
+//   registry's tools for those four ops only ever hit the
+//   LAST clip. The `tool_audio_clip_*` handlers are the
+//   indexed forms.
+// - Per-clip Normalise (`EditorCore::audio_normalize`),
+//   per-clip Trim (`EditorCore::audio_trim`), Duplicate
+//   ([`EditorCore::audio_duplicate_clip_at`]) and the
+//   mute TOGGLE (`audio_toggle_muted_at`) had panel (or
+//   palette) surfaces but no MCP tool at all.
+//
+// Honesty rules these handlers follow, stricter than the
+// older registry handlers they sit beside: a materialising
+// op that reports "… failed: …" through the status line
+// (missing / unreadable file) becomes an `Err`, never an
+// `ok: true` carrying a failure string; and
+// `tool_audio_clip_set_gain` reports the gain read back
+// from the clip after the op's 0.0..=2.0 clamp, not the
+// value that was requested. Argument helpers are LOCAL to
+// this section with `aop_`-prefixed names — `mcp_tools`'
+// helpers are private to that module.
+// ---------------------------------------------------------------------
+
+use serde_json::{json, Value};
+
+/// Local arg accessor (the `mcp_tools::get` shape): the
+/// named member of the arguments object, if present.
+fn aop_get<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
+    args.get(key)
+}
+
+/// Local `usize` argument parser (the `mcp_tools` shape):
+/// accepts a JSON unsigned int, or a float with no
+/// fractional part; everything else is a clean error.
+fn aop_as_usize(v: &Value, key: &str) -> Result<usize, String> {
+    if let Some(u) = v.as_u64() {
+        return usize::try_from(u).map_err(|_| format!("argument '{key}' is too large"));
+    }
+    if let Some(f) = v.as_f64() {
+        if f >= 0.0 && f.fract() == 0.0 && f <= usize::MAX as f64 {
+            return Ok(f as usize);
+        }
+    }
+    Err(format!("argument '{key}' must be a non-negative integer"))
+}
+
+fn aop_req_usize(args: &Value, key: &str) -> Result<usize, String> {
+    match aop_get(args, key) {
+        Some(v) => aop_as_usize(v, key),
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+fn aop_opt_usize(args: &Value, key: &str) -> Result<Option<usize>, String> {
+    match aop_get(args, key) {
+        Some(v) => aop_as_usize(v, key).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn aop_req_f32(args: &Value, key: &str) -> Result<f32, String> {
+    match aop_get(args, key) {
+        Some(v) => v
+            .as_f64()
+            .map(|f| f as f32)
+            .ok_or_else(|| format!("argument '{key}' must be a number")),
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+/// Pre-check the clip index (the registry's
+/// `check_audio_index` shape): a clean `Err`, never a
+/// status-only refusal the caller could mistake for
+/// success.
+fn aop_check_index(core: &EditorCore, idx: usize) -> Result<usize, String> {
+    if idx >= core.project.audio.len() {
+        Err(format!("no audio clip at index {idx}"))
+    } else {
+        Ok(idx)
+    }
+}
+
+/// Turn a materialising op's outcome into the handler
+/// result: the ops report failures through `core.status`
+/// ("… failed: …") without a return value, so a status
+/// containing "failed" becomes an `Err` carrying that
+/// line (the `mcp.rs` built-in convention), and anything
+/// else is a success reporting the status.
+fn aop_status_result(core: &EditorCore, extra: Value) -> Result<Value, String> {
+    if core.status.contains("failed") {
+        return Err(core.status.clone());
+    }
+    let mut out = json!({
+        "ok": true,
+        "status": core.status,
+    });
+    if let (Some(dst), Some(src)) = (out.as_object_mut(), extra.as_object()) {
+        for (k, v) in src {
+            dst.insert(k.clone(), v.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a path names a WAV by extension
+/// (case-insensitive) — the panel probe's rule
+/// (`rune_sec/audio_panel.rs` `is_wav_path`): every
+/// decoder in the app is WAV-only.
+fn aop_is_wav_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+}
+
+/// One clip's probe facts, classified exactly as the
+/// audio panel's Wave-4 probe classifies them: a file
+/// that cannot be statted is `missing` (and is never
+/// decoded); a non-WAV extension is `unsupported`
+/// (classified without decoding); a WAV the decoder
+/// rejects is `unreadable`; a WAV it accepts is
+/// `healthy`. Duration follows the [`clip_duration_secs`]
+/// rule — `None` for a zero sample rate or zero frames —
+/// computed here from the single decode this probe makes,
+/// rather than by re-decoding through the public probes.
+struct AopProbe {
+    health: &'static str,
+    duration_secs: Option<f32>,
+    duration_frames: Option<usize>,
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
+    peak: Option<f32>,
+}
+
+fn aop_probe(core: &EditorCore, index: usize) -> AopProbe {
+    let empty = AopProbe {
+        health: "missing",
+        duration_secs: None,
+        duration_frames: None,
+        sample_rate: None,
+        channels: None,
+        peak: None,
+    };
+    let Some(clip) = core.project.audio.get(index) else {
+        return empty;
+    };
+    if std::fs::metadata(&clip.path).is_err() {
+        return empty;
+    }
+    if !aop_is_wav_path(&clip.path) {
+        return AopProbe {
+            health: "unsupported",
+            ..empty
+        };
+    }
+    match crate::audio_edit::read_wav(&clip.path) {
+        Ok(data) => {
+            let duration_secs = if data.sample_rate == 0 || data.frames() == 0 {
+                None
+            } else {
+                Some(data.frames() as f32 / data.sample_rate as f32)
+            };
+            AopProbe {
+                health: "healthy",
+                duration_secs,
+                duration_frames: duration_secs
+                    .map(|secs| (secs * core.project.fps).round() as usize),
+                sample_rate: Some(data.sample_rate),
+                channels: Some(data.channels),
+                peak: Some(crate::audio_edit::peak(&data)),
+            }
+        }
+        Err(_) => AopProbe {
+            health: "unreadable",
+            ..empty
+        },
+    }
+}
+
+/// The JSON description of clip `index`: the stored
+/// fields verbatim (path, start frame, gain, mute flag)
+/// plus the probed facts and the clip's placement against
+/// the project's frame count, so a client can see a clip
+/// that starts — or runs — past the project end without
+/// guessing. `None` when the index is out of range.
+fn aop_clip_json(core: &EditorCore, index: usize) -> Option<Value> {
+    let clip = core.project.audio.get(index)?;
+    let probe = aop_probe(core, index);
+    let project_frames = core.project.frames.len();
+    let end_frame = probe
+        .duration_frames
+        .map(|d| clip.start_frame.saturating_add(d));
+    Some(json!({
+        "index": index,
+        "path": clip.path,
+        "start_frame": clip.start_frame,
+        "gain": clip.gain,
+        "muted": clip.muted,
+        "health": probe.health,
+        "duration_secs": probe.duration_secs,
+        "duration_frames": probe.duration_frames,
+        "end_frame": end_frame,
+        "sample_rate": probe.sample_rate,
+        "channels": probe.channels,
+        "peak": probe.peak,
+        "starts_past_project_end": project_frames > 0 && clip.start_frame >= project_frames,
+        "ends_past_project_end": end_frame.map(|e| project_frames > 0 && e > project_frames),
+    }))
+}
+
+/// MCP handler: list every audio clip with its stored
+/// fields and probed health/duration (the read the panel's
+/// rows show and no tool exposed). Read-only: takes no
+/// snapshot and writes no status.
+pub fn tool_audio_list_clips(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let clips: Vec<Value> = (0..core.project.audio.len())
+        .filter_map(|i| aop_clip_json(core, i))
+        .collect();
+    Ok(json!({
+        "ok": true,
+        "count": clips.len(),
+        "clips": clips,
+    }))
+}
+
+/// MCP handler: one clip's full facts, plus its waveform
+/// peaks at `buckets` buckets (default 64, the
+/// [`clip_peaks`] reduction; an empty peaks array means
+/// the file could not be decoded — see `health` for why).
+/// Read-only.
+pub fn tool_audio_clip_info(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = aop_check_index(core, aop_req_usize(args, "index")?)?;
+    let buckets = aop_opt_usize(args, "buckets")?.unwrap_or(64);
+    if buckets == 0 || buckets > 4096 {
+        return Err("argument 'buckets' must be in the range 1..=4096".into());
+    }
+    let mut out = aop_clip_json(core, idx).unwrap_or_else(|| json!({}));
+    out["peaks"] = json!(clip_peaks(core, idx, buckets));
+    out["peaks_buckets"] = json!(buckets);
+    Ok(out)
+}
+
+/// MCP handler: fade the clip at `index` (0.25 s in/out,
+/// the indexed [`EditorCore::audio_fade_at`] op) — the
+/// selected-clip form the panel has and the registry's
+/// last-clip `audio_fade` tool cannot express. A clip
+/// whose file cannot be read is an `Err`, not `ok: true`.
+pub fn tool_audio_clip_fade(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = aop_check_index(core, aop_req_usize(args, "index")?)?;
+    core.audio_fade_at(idx);
+    aop_status_result(core, json!({ "audio_index": idx }))
+}
+
+/// MCP handler: reverse the clip at `index`
+/// ([`EditorCore::audio_reverse_at`]) — the indexed form
+/// of the registry's last-clip `audio_reverse`.
+pub fn tool_audio_clip_reverse(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = aop_check_index(core, aop_req_usize(args, "index")?)?;
+    core.audio_reverse_at(idx);
+    aop_status_result(core, json!({ "audio_index": idx }))
+}
+
+/// MCP handler: set the clip at `index`'s gain
+/// ([`EditorCore::audio_set_gain_at`]) — the indexed form
+/// of the registry's last-clip `audio_set_gain`. The
+/// result reports the gain read back from the clip after
+/// the op's clamp (0.0..=2.0), so a request for 5.0
+/// truthfully reports 2.0.
+pub fn tool_audio_clip_set_gain(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = aop_check_index(core, aop_req_usize(args, "index")?)?;
+    let gain = aop_req_f32(args, "gain")?;
+    if !gain.is_finite() || gain < 0.0 {
+        return Err("argument 'gain' must be a finite, non-negative number".into());
+    }
+    core.audio_set_gain_at(idx, gain);
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "gain": core.project.audio[idx].gain,
+        "status": core.status,
+    }))
+}
+
+/// MCP handler: move the clip at `index` so it starts at
+/// the absolute `start_frame` ([`EditorCore::audio_move_at`]
+/// moves by delta; the delta is derived from the clip's
+/// current start, the registry `audio_move_clip`
+/// convention, and the result reports the actual start).
+pub fn tool_audio_clip_move(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = aop_check_index(core, aop_req_usize(args, "index")?)?;
+    let start_frame = aop_req_usize(args, "start_frame")?;
+    let current = core.project.audio[idx].start_frame as i64;
+    let delta = (start_frame as i64 - current).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    core.audio_move_at(idx, delta);
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "start_frame": core.project.audio[idx].start_frame,
+        "status": core.status,
+    }))
+}
+
+/// MCP handler: duplicate the clip at `index`
+/// ([`EditorCore::audio_duplicate_clip_at`] — the panel's
+/// Duplicate button, which had no MCP tool). The copy is
+/// inserted immediately after the original at the same
+/// start frame; the result names its index.
+pub fn tool_audio_clip_duplicate(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = aop_check_index(core, aop_req_usize(args, "index")?)?;
+    let Some(new_idx) = core.audio_duplicate_clip_at(idx) else {
+        return Err(core.status.clone());
+    };
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "new_index": new_idx,
+        "count": core.project.audio.len(),
+        "status": core.status,
+    }))
+}
+
+/// MCP handler: normalise the clip at `index`'s FILE to
+/// peak 0.9 (`EditorCore::audio_normalize` — the panel's
+/// per-row Norm button, which had no MCP tool; distinct
+/// from the gain-based `audio_normalise_all`). The
+/// processed copy is written beside the source and the
+/// clip repointed.
+pub fn tool_audio_clip_normalise(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = aop_check_index(core, aop_req_usize(args, "index")?)?;
+    core.audio_normalize(idx);
+    aop_status_result(core, json!({ "audio_index": idx }))
+}
+
+/// MCP handler: trim the clip at `index`'s file to
+/// `[start_secs, end_secs)` in SECONDS
+/// (`EditorCore::audio_trim` — an engine op with no panel
+/// button and, until now, no MCP tool). A positive start
+/// advances the clip's start frame by
+/// `round(start_secs * fps)`, preserving the surviving
+/// audio's timeline position; the result reports the new
+/// start frame.
+pub fn tool_audio_clip_trim(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = aop_check_index(core, aop_req_usize(args, "index")?)?;
+    let start_secs = aop_req_f32(args, "start_secs")?;
+    let end_secs = aop_req_f32(args, "end_secs")?;
+    if !start_secs.is_finite() || !end_secs.is_finite() {
+        return Err("arguments 'start_secs' and 'end_secs' must be finite numbers".into());
+    }
+    if start_secs < 0.0 {
+        return Err("argument 'start_secs' must not be negative".into());
+    }
+    if end_secs <= start_secs {
+        return Err("argument 'end_secs' must be greater than 'start_secs'".into());
+    }
+    core.audio_trim(idx, start_secs, end_secs);
+    aop_status_result(
+        core,
+        json!({
+            "audio_index": idx,
+            "start_frame": core.project.audio[idx].start_frame,
+        }),
+    )
+}
+
+/// MCP handler: toggle the clip at `index`'s mute flag
+/// ([`audio_toggle_muted_at`] — the panel toolbar's Mute
+/// toggle; the registry's `audio_set_muted` covers the
+/// absolute form). The result reports the flag's new
+/// value, read back from the clip.
+pub fn tool_audio_clip_toggle_muted(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let idx = aop_check_index(core, aop_req_usize(args, "index")?)?;
+    if !audio_toggle_muted_at(core, idx) {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "muted": core.project.audio[idx].muted,
+        "status": core.status,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2077,5 +2479,124 @@ mod tests {
         assert_eq!(core.status, "Audio mute failed: no clip 5.");
         assert_eq!(project_json(&core), before, "project untouched");
         assert_eq!(core.undo_depth(), depth, "no snapshot taken");
+    }
+
+    // ---- Wave 11 (B6): MCP parity handlers ----
+
+    #[test]
+    fn mcp_list_clips_reports_missing_files_honestly() {
+        // Fake paths: the field facts come from the project,
+        // the probe fact is "missing" (the files do not
+        // exist) — never "healthy", never a panic.
+        let mut core = core_with(vec![clip("gone.wav", 0), clip("also-gone.mp3", 4)]);
+        core.project.audio[1].muted = true;
+        let r = tool_audio_list_clips(&mut core, &serde_json::json!({})).unwrap();
+        assert_eq!(r["count"], 2);
+        assert_eq!(r["clips"][0]["health"], "missing");
+        assert_eq!(r["clips"][0]["duration_secs"], serde_json::Value::Null);
+        assert_eq!(r["clips"][1]["muted"], true);
+        assert_eq!(r["clips"][1]["start_frame"], 4);
+    }
+
+    #[test]
+    fn mcp_list_clips_probes_a_real_wav() {
+        let dir = temp_dir("mcp-list");
+        let a = write_ramp_wav(&dir, "a.wav");
+        let mut core = core_with(vec![clip(&a, 0)]);
+        let r = tool_audio_list_clips(&mut core, &serde_json::json!({})).unwrap();
+        assert_eq!(r["clips"][0]["health"], "healthy");
+        assert_eq!(r["clips"][0]["sample_rate"], 8000);
+        assert_eq!(r["clips"][0]["channels"], 1);
+        assert_eq!(r["clips"][0]["duration_secs"], 1.0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mcp_clip_info_returns_peaks_and_validates() {
+        let dir = temp_dir("mcp-info");
+        let a = write_ramp_wav(&dir, "a.wav");
+        let mut core = core_with(vec![clip(&a, 0)]);
+        let r = tool_audio_clip_info(&mut core, &serde_json::json!({ "index": 0, "buckets": 8 }))
+            .unwrap();
+        assert_eq!(r["peaks"].as_array().unwrap().len(), 8);
+        assert!(tool_audio_clip_info(&mut core, &serde_json::json!({ "index": 3 })).is_err());
+        assert!(
+            tool_audio_clip_info(&mut core, &serde_json::json!({ "index": 0, "buckets": 0 }))
+                .is_err()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mcp_clip_fade_on_a_missing_file_is_an_error_not_ok() {
+        // The op reports the failure through the status
+        // line; the handler must surface it as Err, not as
+        // an `ok: true` carrying a failure string.
+        let mut core = core_with(vec![clip("gone.wav", 0)]);
+        let err = tool_audio_clip_fade(&mut core, &serde_json::json!({ "index": 0 }))
+            .unwrap_err();
+        assert!(err.contains("failed"), "error carries the op's line: {err}");
+        assert!(tool_audio_clip_fade(&mut core, &serde_json::json!({ "index": 9 })).is_err());
+    }
+
+    #[test]
+    fn mcp_clip_set_gain_reports_the_clamped_gain() {
+        let mut core = core_with(vec![clip("a.wav", 0)]);
+        let r = tool_audio_clip_set_gain(
+            &mut core,
+            &serde_json::json!({ "index": 0, "gain": 5.0 }),
+        )
+        .unwrap();
+        assert_eq!(r["gain"], 2.0, "the clamped value, not the request");
+        assert_eq!(core.project.audio[0].gain, 2.0);
+        assert!(tool_audio_clip_set_gain(
+            &mut core,
+            &serde_json::json!({ "index": 0, "gain": -1.0 })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn mcp_clip_move_duplicate_and_toggle() {
+        let mut core = core_with(vec![clip("a.wav", 3), clip("b.wav", 9)]);
+        let r = tool_audio_clip_move(
+            &mut core,
+            &serde_json::json!({ "index": 1, "start_frame": 20 }),
+        )
+        .unwrap();
+        assert_eq!(r["start_frame"], 20);
+        let r = tool_audio_clip_duplicate(&mut core, &serde_json::json!({ "index": 0 }))
+            .unwrap();
+        assert_eq!(r["new_index"], 1);
+        assert_eq!(core.project.audio.len(), 3);
+        let r = tool_audio_clip_toggle_muted(
+            &mut core,
+            &serde_json::json!({ "index": 0 }),
+        )
+        .unwrap();
+        assert_eq!(r["muted"], true);
+    }
+
+    #[test]
+    fn mcp_clip_trim_validates_its_seconds() {
+        let mut core = core_with(vec![clip("a.wav", 0)]);
+        // Bad ranges are refused before the op runs.
+        assert!(tool_audio_clip_trim(
+            &mut core,
+            &serde_json::json!({ "index": 0, "start_secs": 0.5, "end_secs": 0.5 })
+        )
+        .is_err());
+        assert!(tool_audio_clip_trim(
+            &mut core,
+            &serde_json::json!({ "index": 0, "start_secs": -1.0, "end_secs": 0.5 })
+        )
+        .is_err());
+        // A valid range on a missing file is the op's own
+        // failure, surfaced as Err.
+        assert!(tool_audio_clip_trim(
+            &mut core,
+            &serde_json::json!({ "index": 0, "start_secs": 0.0, "end_secs": 0.5 })
+        )
+        .is_err());
     }
 }

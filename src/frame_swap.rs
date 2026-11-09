@@ -58,7 +58,8 @@
 //! frames and every remapped collection together.
 
 use crate::editor::EditorCore;
-use crate::model::InstanceKey;
+use crate::model::{Frame, InstanceKey};
+use serde_json::{json, Value};
 
 /// Trade a `usize` frame index between `a` and `b`: an index
 /// equal to `a` becomes `b`, one equal to `b` becomes `a`,
@@ -216,6 +217,215 @@ pub fn swap_frame_with_neighbour(core: &mut EditorCore, dir: i32) -> bool {
         return false;
     }
     swap_frames(core, current, target as usize)
+}
+
+// ---------------------------------------------------------------------
+// Wave 11 (B2): MCP frame/timeline parity — the operations the
+// frame-ops panel and the command palette expose that had no MCP
+// surface, plus the timeline read side. Handlers follow the
+// registry idioms of `mcp_tools` / the `mcp.rs` built-ins:
+// explicit index arguments, the same argument-error wording,
+// refusals surfaced as `Err(core.status)` where the operation
+// reports them through the status line, and an `ok` object on
+// success. None of them can panic: indices are validated or
+// read through `get`, and the one arithmetic input (a count) is
+// clamped before it sizes an allocation.
+// ---------------------------------------------------------------------
+
+/// Largest batch [`insert_frames_after_current`] will insert —
+/// the frame-ops panel's `INSERT_COUNT_MAX`
+/// (`rune_sec/frame_ops.rs`), mirrored: a whole minute of
+/// frames at the demo's 12 fps is 720; 60 keeps one accidental
+/// call recoverable in one undo.
+pub const INSERT_FRAMES_MAX: usize = 60;
+
+/// Argument helper mirroring `mcp::arg_usize` (a JSON null
+/// counts as absent; integral floats are accepted). Local to
+/// this module because neither `mcp`'s nor `mcp_tools`' helper
+/// is public.
+fn fs_arg_usize(args: &Value, key: &str) -> Result<usize, String> {
+    let Some(v) = args.get(key).filter(|v| !v.is_null()) else {
+        return Err(format!("missing required argument '{key}'"));
+    };
+    if let Some(u) = v.as_u64() {
+        return usize::try_from(u).map_err(|_| format!("argument '{key}' is too large"));
+    }
+    if let Some(f) = v.as_f64() {
+        if f >= 0.0 && f.fract() == 0.0 && f <= usize::MAX as f64 {
+            return Ok(f as usize);
+        }
+    }
+    Err(format!("argument '{key}' must be a non-negative integer"))
+}
+
+/// Figure-index guard mirroring `mcp::check_figure`'s wording.
+fn fs_check_figure(core: &EditorCore, fi: usize) -> Result<(), String> {
+    if fi < core.project.figures.len() {
+        Ok(())
+    } else {
+        Err(format!(
+            "figure index {fi} out of range (project has {} figure(s))",
+            core.project.figures.len()
+        ))
+    }
+}
+
+/// Insert `count` blank frames directly after the current
+/// frame, as ONE undo step, leaving `current` on the original
+/// frame — the library twin of the frame-ops panel's batch
+/// insert (`rune_sec::frame_ops::insert_frames_after_current`,
+/// Phase G), which the binary crate keeps locally because the
+/// shell cannot call back into a panel-shaped helper either
+/// way. The semantics are the panel's, exactly:
+///
+/// * "Blank" is the frame one press of `EditorCore::add_frame`
+///   creates — `poses` and `duration` cloned from the current
+///   frame, `easing: None`, `bends` emptied — repeated, so the
+///   result is content-identical to N single presses and
+///   differs only in undo granularity and in `current` staying
+///   put. Frame-pinned collections (camera keys, particles,
+///   …) are NOT remapped, matching `add_frame`.
+/// * `count` is clamped to `1..=INSERT_FRAMES_MAX`, the
+///   panel's `clamp_insert_count` range.
+///
+/// Returns how many frames were inserted: 0 — no snapshot,
+/// status line set — when there is no current frame (an empty
+/// project, or a stale playhead past the end).
+pub fn insert_frames_after_current(core: &mut EditorCore, count: usize) -> usize {
+    let n = count.clamp(1, INSERT_FRAMES_MAX);
+    let Some(source) = core.project.frames.get(core.current) else {
+        core.status = "No frame to insert after.".into();
+        return 0;
+    };
+    // Exactly the Frame value `add_frame` constructs (see the
+    // doc comment): poses and duration cloned from the current
+    // frame, easing reset to None, bends emptied.
+    let blank = Frame {
+        poses: source.poses.clone(),
+        duration: source.duration,
+        easing: None,
+        bends: Vec::new(),
+    };
+    let at = core.current + 1;
+    let after = core.current;
+    core.snapshot();
+    let blanks: Vec<Frame> = (0..n).map(|_| blank.clone()).collect();
+    // Collecting the Splice forces the replacement to
+    // complete; the replaced range is empty, so nothing is
+    // removed.
+    let _removed: Vec<Frame> = core.project.frames.splice(at..at, blanks).collect();
+    core.status = format!("Inserted {n} frames after frame {}.", after + 1);
+    n
+}
+
+/// MCP handler for [`swap_frame_with_neighbour`]: the Frames
+/// panel's "Swap with previous" / "Swap with next" buttons and
+/// the palette's swap-frame-prev / swap-frame-next commands —
+/// until now reachable only as a two-step `swap_frames` call
+/// (read the playhead, then swap the pair), with none of this
+/// op's own end-of-timeline refusals. Registered by the
+/// integrator as `swap_frame_with_neighbour`.
+pub fn tool_swap_frame_with_neighbour(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let dir = match args.get("direction").filter(|v| !v.is_null()) {
+        None => return Err("missing required argument 'direction'".to_string()),
+        Some(v) => match v.as_str() {
+            Some("previous") => -1,
+            Some("next") => 1,
+            Some(other) => {
+                return Err(format!(
+                    "unknown direction '{other}' (expected \"previous\" or \"next\")"
+                ));
+            }
+            None => {
+                return Err("argument 'direction' must be a string".to_string());
+            }
+        },
+    };
+    if !swap_frame_with_neighbour(core, dir) {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "current_frame": core.current,
+        "status": core.status,
+    }))
+}
+
+/// MCP handler for [`insert_frames_after_current`]: the
+/// frame-ops panel's Insert-N row. Registered by the
+/// integrator as `insert_frames`.
+pub fn tool_insert_frames(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let count = fs_arg_usize(args, "count")?;
+    if count == 0 {
+        return Err("argument 'count' must be at least 1".to_string());
+    }
+    let inserted = insert_frames_after_current(core, count);
+    if inserted == 0 {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "inserted": inserted,
+        "frame_count": core.project.frames.len(),
+        "current_frame": core.current,
+        "status": core.status,
+    }))
+}
+
+/// MCP read handler: one figure's keyframe list — the exact
+/// data the dopesheet lane draws (`stats::figure_keyframes`).
+/// The `goto_next_keyframe` / `goto_prev_keyframe` built-ins
+/// only reveal the list after a jump that succeeds; this is
+/// the read on its own. Read-only: no snapshot, no mutation.
+/// Registered by the integrator as `get_keyframes`.
+pub fn tool_get_keyframes(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = fs_arg_usize(args, "figure")?;
+    fs_check_figure(core, fi)?;
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "key_frames": crate::stats::figure_keyframes(&core.project, fi),
+        "current_frame": core.current,
+        "frame_count": core.project.frames.len(),
+    }))
+}
+
+/// MCP read handler: the timeline's per-frame timing table —
+/// every frame's hold-time multiplier and easing override,
+/// plus the playhead and loop range. The write side
+/// (`set_frame_duration`, `set_frame_durations`,
+/// `set_frame_easing`) had no read counterpart: a client
+/// could set durations blind but never read them back.
+/// Read-only: no snapshot, no mutation. Registered by the
+/// integrator as `list_frames`.
+pub fn tool_list_frames(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let frames: Vec<Value> = core
+        .project
+        .frames
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            json!({
+                "frame": i,
+                "duration": f.duration,
+                "easing": f.easing.map(|e| e.label()),
+            })
+        })
+        .collect();
+    let loop_range = match core.loop_range {
+        Some((a, b)) => json!([a, b]),
+        None => Value::Null,
+    };
+    Ok(json!({
+        "ok": true,
+        "frame_count": core.project.frames.len(),
+        "current_frame": core.current,
+        "loop_range": loop_range,
+        "frames": frames,
+    }))
 }
 
 #[cfg(test)]
@@ -598,5 +808,183 @@ mod tests {
         assert_eq!(core.project.frames[1].duration, 1.0);
         assert_eq!(core.status, "Swapped frames 2 and 1.");
         assert_eq!(core.current, 1);
+    }
+
+    // ---- Wave 11 (B2): MCP parity handlers ---------------------------
+
+    /// A three-frame project for one figure whose root moves
+    /// on frames 0 and 2 only — the keyframe census is
+    /// therefore [0, 2], frame 1 holding frame 0's pose.
+    fn keyed_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.figures = vec![crate::model::FigureInstance {
+            name: "Solo".into(),
+            color: 0xFFFFFF,
+            def: crate::model::FigureDef::humanoid(),
+            hidden: false,
+            locked: false,
+            opacity: 1.0,
+            clip: None,
+        }];
+        let pose = |x: f32| crate::model::Pose { root: [x, 0.0], angles: vec![0.0] };
+        core.project.frames = vec![
+            Frame { poses: vec![pose(0.0)], duration: 1.0, easing: None, bends: Vec::new() },
+            Frame { poses: vec![pose(0.0)], duration: 2.0, easing: None, bends: Vec::new() },
+            Frame { poses: vec![pose(40.0)], duration: 1.0, easing: None, bends: Vec::new() },
+        ];
+        core.current = 1;
+        core
+    }
+
+    #[test]
+    fn insert_frames_after_current_matches_add_frame_shape_and_one_undo() {
+        let mut core = staged_core();
+        core.current = 1;
+        let undo_before = core.undo_depth();
+
+        assert_eq!(insert_frames_after_current(&mut core, 3), 3);
+        assert_eq!(core.undo_depth(), undo_before + 1, "the batch is ONE snapshot");
+        assert_eq!(core.current, 1, "the playhead stays on the original frame");
+        assert_eq!(core.status, "Inserted 3 frames after frame 2.");
+        assert_eq!(core.project.frames.len(), 7);
+        // The inserted frames are add_frame's shape: poses and
+        // duration cloned from frame 1 (duration 2.0), easing
+        // reset and bends emptied — NOT whole-frame clones
+        // (frame 1 carries EaseIn and a bend row).
+        for inserted in &core.project.frames[2..5] {
+            assert_eq!(inserted.duration, 2.0, "duration cloned from the source frame");
+            assert_eq!(inserted.easing, None, "easing reset, like add_frame");
+            assert!(inserted.bends.is_empty(), "bends emptied, like add_frame");
+            assert_eq!(inserted.poses.len(), 0, "poses cloned from the source frame");
+        }
+        assert_eq!(core.project.frames[5].duration, 1.5, "later frames shifted, untouched");
+
+        // One undo removes the whole batch.
+        core.undo();
+        assert_eq!(core.project.frames.len(), 4, "one undo removes the batch");
+    }
+
+    #[test]
+    fn insert_frames_after_current_clamps_and_refuses_without_a_frame() {
+        let mut core = staged_core();
+        core.current = 0;
+        assert_eq!(
+            insert_frames_after_current(&mut core, 500),
+            INSERT_FRAMES_MAX,
+            "counts above the panel cap clamp to it"
+        );
+        assert_eq!(core.project.frames.len(), 4 + INSERT_FRAMES_MAX);
+
+        // No current frame: an empty project refuses with the
+        // status line and takes no snapshot.
+        let mut empty = EditorCore::new();
+        empty.project.frames = Vec::new();
+        let undo_before = empty.undo_depth();
+        assert_eq!(insert_frames_after_current(&mut empty, 4), 0);
+        assert_eq!(empty.status, "No frame to insert after.");
+        assert_eq!(empty.undo_depth(), undo_before, "refusal took no snapshot");
+        assert!(empty.project.frames.is_empty());
+    }
+
+    #[test]
+    fn tool_insert_frames_validates_count_and_reports_the_batch() {
+        let mut core = staged_core();
+        core.current = 0;
+
+        let err = tool_insert_frames(&mut core, &json!({})).unwrap_err();
+        assert!(err.contains("missing required argument 'count'"), "err: {err}");
+        let err = tool_insert_frames(&mut core, &json!({ "count": 0 })).unwrap_err();
+        assert!(err.contains("at least 1"), "err: {err}");
+        let err = tool_insert_frames(&mut core, &json!({ "count": -2 })).unwrap_err();
+        assert!(err.contains("non-negative integer"), "err: {err}");
+        assert_eq!(core.project.frames.len(), 4, "no error path inserted anything");
+
+        let out = tool_insert_frames(&mut core, &json!({ "count": 2 })).unwrap();
+        assert_eq!(out["ok"], json!(true));
+        assert_eq!(out["inserted"], json!(2));
+        assert_eq!(out["frame_count"], json!(6));
+        assert_eq!(out["current_frame"], json!(0));
+
+        // Empty project: the op's refusal surfaces as the error.
+        let mut empty = EditorCore::new();
+        empty.project.frames = Vec::new();
+        let err = tool_insert_frames(&mut empty, &json!({ "count": 2 })).unwrap_err();
+        assert!(err.contains("No frame to insert after."), "err: {err}");
+    }
+
+    #[test]
+    fn tool_swap_frame_with_neighbour_swaps_and_surfaces_refusals() {
+        let mut core = staged_core();
+        core.current = 1;
+
+        let out = tool_swap_frame_with_neighbour(&mut core, &json!({ "direction": "next" }))
+            .unwrap();
+        assert_eq!(out["ok"], json!(true));
+        assert_eq!(out["status"], json!("Swapped frames 2 and 3."));
+        assert_eq!(core.project.frames[1].duration, 1.5, "frame 2's content moved in");
+        assert_eq!(core.current, 1, "the playhead index does not move");
+
+        // At the first frame, "previous" is the op's own
+        // refusal, carried on the status line.
+        core.current = 0;
+        let err = tool_swap_frame_with_neighbour(&mut core, &json!({ "direction": "previous" }))
+            .unwrap_err();
+        assert!(err.contains("no neighbour to swap with"), "err: {err}");
+
+        // Bad arguments are argument errors, never panics.
+        let err = tool_swap_frame_with_neighbour(&mut core, &json!({})).unwrap_err();
+        assert!(err.contains("missing required argument 'direction'"), "err: {err}");
+        let err = tool_swap_frame_with_neighbour(&mut core, &json!({ "direction": "up" }))
+            .unwrap_err();
+        assert!(err.contains("unknown direction 'up'"), "err: {err}");
+        let err = tool_swap_frame_with_neighbour(&mut core, &json!({ "direction": 1 }))
+            .unwrap_err();
+        assert!(err.contains("must be a string"), "err: {err}");
+    }
+
+    #[test]
+    fn tool_get_keyframes_reads_the_dopesheet_census() {
+        let mut core = keyed_core();
+        let out = tool_get_keyframes(&mut core, &json!({ "figure": 0 })).unwrap();
+        assert_eq!(out["key_frames"], json!([0, 2]), "pose changes at frames 0 and 2");
+        assert_eq!(out["current_frame"], json!(1));
+        assert_eq!(out["frame_count"], json!(3));
+
+        let err = tool_get_keyframes(&mut core, &json!({ "figure": 1 })).unwrap_err();
+        assert!(err.contains("figure index 1 out of range"), "err: {err}");
+        let err = tool_get_keyframes(&mut core, &json!({})).unwrap_err();
+        assert!(err.contains("missing required argument 'figure'"), "err: {err}");
+
+        // Read-only: no snapshot, no mutation.
+        let undo_before = core.undo_depth();
+        let _ = tool_get_keyframes(&mut core, &json!({ "figure": 0 })).unwrap();
+        assert_eq!(core.undo_depth(), undo_before, "a read takes no snapshot");
+    }
+
+    #[test]
+    fn tool_list_frames_reports_the_timing_table() {
+        let mut core = staged_core();
+        core.set_loop_range(1, 2);
+        let out = tool_list_frames(&mut core, &json!({})).unwrap();
+        assert_eq!(out["frame_count"], json!(4));
+        assert_eq!(out["current_frame"], json!(2));
+        assert_eq!(out["loop_range"], json!([1, 2]));
+        let frames = out["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 4);
+        assert_eq!(frames[0]["duration"], json!(1.0));
+        assert_eq!(frames[1]["duration"], json!(2.0));
+        assert_eq!(frames[1]["easing"], json!("ease-in"));
+        assert_eq!(frames[2]["easing"], Value::Null);
+        assert_eq!(frames[3]["duration"], json!(5.0));
+        assert_eq!(frames[3]["easing"], json!("ease-out"));
+
+        // An empty project lists zero frames instead of
+        // panicking.
+        let mut empty = EditorCore::new();
+        empty.project.frames = Vec::new();
+        let out = tool_list_frames(&mut empty, &json!({})).unwrap();
+        assert_eq!(out["frame_count"], json!(0));
+        assert_eq!(out["frames"], json!([]));
+        assert_eq!(out["loop_range"], Value::Null);
     }
 }

@@ -36,10 +36,25 @@
 //! Integrator wiring: declare `pub mod fx_ops;` in
 //! `lib.rs`. Nothing else is needed — this file only adds
 //! an inherent `impl EditorCore` block.
+//!
+//! Wave 11 (MCP end-to-end) adds two things here:
+//! [`EditorCore::fx_set_hidden`], the op the panel's
+//! Hide/Show toggle always lacked (the panel snapshots
+//! and writes the flag inline, `rune_sec/fx_clips.rs`'s
+//! `toggle_selected_hidden`), and the MCP handlers for
+//! the two FX surfaces the `mcp_tools.rs` registry was
+//! missing — `tool_fx_set_hidden` and
+//! `tool_fx_preset_list` — written in this file so their
+//! `Tool` entries can point at `crate::fx_ops::tool_*`.
+//! The handlers follow the Phase J indexed-tool pattern:
+//! every argument is validated (and the clip index
+//! pre-checked) before anything mutates, and bad input
+//! is a clean `Err`, never a panic.
 
 use crate::editor::EditorCore;
 use crate::fx_edit;
 use crate::vfx::ClipKind;
+use serde_json::{json, Value};
 
 /// Display text for a frame position, mirroring the FX
 /// panel's `frame_label`: whole frames render without a
@@ -341,6 +356,134 @@ impl EditorCore {
             fx_edit::kind_name(kind)
         );
     }
+
+    /// Set FX clip `index`'s hidden flag — the op the
+    /// panel's Hide/Show toggle never had: the panel
+    /// follows this same no-backend pattern inline
+    /// (`toggle_selected_hidden` in `rune_sec/fx_clips.rs`
+    /// snapshots, writes `entry.hidden`, sets the status),
+    /// and this op gives the MCP `fx_set_hidden` tool the
+    /// one implementation to delegate to. A hidden clip is
+    /// skipped by the stage and by export renderers but
+    /// stays in the list, editable — hiding is not
+    /// deleting. The success status is the panel toggle's
+    /// exact wording ("FX clip N hidden." / "FX clip N
+    /// shown."). One undo step; an out-of-range index only
+    /// sets the status.
+    pub fn fx_set_hidden(&mut self, index: usize, hidden: bool) {
+        if self.project.fx_clips.get(index).is_none() {
+            self.status = format!("FX clip visibility failed: no FX clip {}.", index + 1);
+            return;
+        }
+        self.snapshot();
+        self.project.fx_clips[index].hidden = hidden;
+        self.status = format!(
+            "FX clip {} {}.",
+            index + 1,
+            if hidden { "hidden" } else { "shown" }
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Wave 11 MCP handlers: the FX surfaces the mcp_tools.rs
+// registry was missing — setting a clip's hidden flag and
+// listing the saved presets. The argument helpers are
+// LOCAL copies of the mcp_tools.rs conventions (same
+// messages, same null-means-absent rule) with fx_ names,
+// because the originals are private to that module; keep
+// the two in step. Both handlers validate everything
+// before anything mutates and return Err on bad input —
+// never a panic, whatever JSON arrives.
+// ---------------------------------------------------------------------
+
+/// One argument of the MCP call: `null` counts as absent,
+/// exactly as in `mcp_tools.rs`.
+fn fx_arg<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
+    args.get(key).filter(|v| !v.is_null())
+}
+
+/// Required non-negative integer argument, MCP convention:
+/// a JSON `u64`, or an integral `f64` >= 0.
+fn fx_arg_usize(args: &Value, key: &str) -> Result<usize, String> {
+    let Some(v) = fx_arg(args, key) else {
+        return Err(format!("missing required argument '{key}'"));
+    };
+    if let Some(u) = v.as_u64() {
+        return usize::try_from(u).map_err(|_| format!("argument '{key}' is too large"));
+    }
+    if let Some(f) = v.as_f64() {
+        if f >= 0.0 && f.fract() == 0.0 && f <= usize::MAX as f64 {
+            return Ok(f as usize);
+        }
+    }
+    Err(format!("argument '{key}' must be a non-negative integer"))
+}
+
+/// Required boolean argument, MCP convention.
+fn fx_arg_bool(args: &Value, key: &str) -> Result<bool, String> {
+    match fx_arg(args, key) {
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| format!("argument '{key}' must be a boolean")),
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+/// MCP handler for `fx_set_hidden`: set FX clip `index`'s
+/// hidden flag to `hidden`. The index is pre-checked (the
+/// Phase J `check_fx_index` convention — a bad index is a
+/// clean Err, not just a status line), both arguments are
+/// read before the op runs, and the reply reads the flag
+/// back from the project.
+pub fn tool_fx_set_hidden(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = fx_arg_usize(args, "index")?;
+    if idx >= core.project.fx_clips.len() {
+        return Err(format!("no FX clip at index {idx}"));
+    }
+    let hidden = fx_arg_bool(args, "hidden")?;
+    core.fx_set_hidden(idx, hidden);
+    Ok(json!({
+        "ok": true,
+        "fx_index": idx,
+        "hidden": core.project.fx_clips[idx].hidden,
+        "status": core.status,
+    }))
+}
+
+/// MCP handler for `fx_preset_list`: the slugs of every
+/// FX preset saved in `./fx-presets/`, sorted — the read
+/// side of `fx_preset_save` / `fx_preset_add` that the
+/// registry never had (the panel lists them through
+/// `EditorCore::fx_preset_names`; an MCP client had no
+/// way to discover a preset's name). Read-only: nothing
+/// mutates, no snapshot.
+pub fn tool_fx_preset_list(_core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let presets = fx_edit::list_clip_presets();
+    Ok(json!({
+        "ok": true,
+        "count": presets.len(),
+        "presets": presets,
+    }))
+}
+
+/// MCP handler for `fx_preset_delete`: remove a saved FX
+/// clip preset by name (the CRUD corner — `fx_preset_save`
+/// could create them and nothing could delete one). A file
+/// operation, not an undo step. Wave 11 (C4), integrator-
+/// authored in this file's style.
+pub fn tool_fx_preset_delete(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let _ = core;
+    let name = match args.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n,
+        _ => return Err("missing required argument 'name'".to_string()),
+    };
+    let path = crate::fx_edit::delete_clip_preset(name)?;
+    Ok(json!({
+        "ok": true,
+        "preset": name,
+        "path": path.to_string_lossy(),
+    }))
 }
 
 #[cfg(test)]
@@ -727,5 +870,112 @@ mod tests {
             kind = fx_kind_cycle(kind, 1);
         }
         assert_eq!(kind, FX_KIND_ORDER[0], "a full turn returns to the start");
+    }
+
+    #[test]
+    fn set_hidden_writes_the_flag_and_snapshots_once() {
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let edits = core.edits_since_autosave();
+        core.fx_set_hidden(0, true);
+        assert!(core.project.fx_clips[0].hidden);
+        // The panel toggle's exact wording.
+        assert_eq!(core.status, "FX clip 1 hidden.");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        core.fx_set_hidden(0, false);
+        assert!(!core.project.fx_clips[0].hidden);
+        assert_eq!(core.status, "FX clip 1 shown.");
+        assert_eq!(core.edits_since_autosave(), edits + 2, "one snapshot per op");
+        // The one snapshot is a real undo step.
+        core.undo();
+        assert!(core.project.fx_clips[0].hidden, "undo restores the hidden flag");
+    }
+
+    #[test]
+    fn set_hidden_out_of_range_is_status_only() {
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        core.fx_set_hidden(9, true);
+        assert_eq!(core.status, "FX clip visibility failed: no FX clip 10.");
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+        // Same on an empty list.
+        let mut empty = core_with(vec![]);
+        empty.fx_set_hidden(0, true);
+        assert_eq!(empty.status, "FX clip visibility failed: no FX clip 1.");
+    }
+
+    #[test]
+    fn tool_set_hidden_sets_reads_back_and_is_undoable() {
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let r = tool_fx_set_hidden(&mut core, &json!({ "index": 0, "hidden": true })).unwrap();
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["fx_index"], 0);
+        assert_eq!(r["hidden"], true);
+        assert_eq!(r["status"], "FX clip 1 hidden.");
+        assert!(core.project.fx_clips[0].hidden);
+        let r = tool_fx_set_hidden(&mut core, &json!({ "index": 0, "hidden": false })).unwrap();
+        assert_eq!(r["hidden"], false);
+        assert!(!core.project.fx_clips[0].hidden);
+    }
+
+    #[test]
+    fn tool_set_hidden_rejects_bad_input_without_panicking() {
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let before = project_json(&core);
+        // Missing arguments.
+        assert_eq!(
+            tool_fx_set_hidden(&mut core, &json!({ "hidden": true })).unwrap_err(),
+            "missing required argument 'index'"
+        );
+        assert_eq!(
+            tool_fx_set_hidden(&mut core, &json!({ "index": 0 })).unwrap_err(),
+            "missing required argument 'hidden'"
+        );
+        // Wrong types: a string flag, a fractional index, a
+        // negative index, a null index (null = absent).
+        assert_eq!(
+            tool_fx_set_hidden(&mut core, &json!({ "index": 0, "hidden": "yes" })).unwrap_err(),
+            "argument 'hidden' must be a boolean"
+        );
+        assert_eq!(
+            tool_fx_set_hidden(&mut core, &json!({ "index": 0.5, "hidden": true })).unwrap_err(),
+            "argument 'index' must be a non-negative integer"
+        );
+        assert_eq!(
+            tool_fx_set_hidden(&mut core, &json!({ "index": -1, "hidden": true })).unwrap_err(),
+            "argument 'index' must be a non-negative integer"
+        );
+        assert_eq!(
+            tool_fx_set_hidden(&mut core, &json!({ "index": null, "hidden": true })).unwrap_err(),
+            "missing required argument 'index'"
+        );
+        // Out-of-range indices, including an absurd one, are
+        // the pre-check's clean error.
+        assert_eq!(
+            tool_fx_set_hidden(&mut core, &json!({ "index": 1, "hidden": true })).unwrap_err(),
+            "no FX clip at index 1"
+        );
+        assert_eq!(
+            tool_fx_set_hidden(&mut core, &json!({ "index": 999999, "hidden": true })).unwrap_err(),
+            "no FX clip at index 999999"
+        );
+        assert_eq!(project_json(&core), before, "no rejected call changed the project");
+        assert!(!core.project.fx_clips[0].hidden);
+    }
+
+    #[test]
+    fn tool_preset_list_reports_an_array_and_its_count() {
+        // The handler reads ./fx-presets/ relative to the
+        // process working directory, whose contents the
+        // test does not control — so this asserts the
+        // reply's shape, not its contents: an ok flag, a
+        // presets array, and a count that matches it.
+        let mut core = core_with(vec![]);
+        let r = tool_fx_preset_list(&mut core, &json!({})).unwrap();
+        assert_eq!(r["ok"], true);
+        let presets = r["presets"].as_array().expect("presets is an array");
+        assert_eq!(r["count"], presets.len());
+        assert!(presets.iter().all(|p| p.is_string()), "every preset is a slug string");
     }
 }

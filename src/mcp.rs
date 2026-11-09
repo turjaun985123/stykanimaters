@@ -18,8 +18,11 @@
 //! Supported methods: `initialize`, `ping`, `tools/list`,
 //! `tools/call`. Unknown methods get a `-32601` error; unroutable
 //! requests get `-32600`; bad `tools/call` params get `-32602`.
-//! Tool-level failures are reported inside the result as
-//! `isError: true`, per the MCP spec, not as protocol errors.
+//! Tool-level failures (a handler's `Err`) are reported inside
+//! the result as `isError: true`, per the MCP spec, not as
+//! protocol errors — the one exception is an unknown tool name,
+//! which never reaches a handler and is a `-32602` protocol
+//! error, again per the spec's own example.
 //!
 //! Tools come from three places: the built-ins defined here
 //! (`server_info`, `get_state`, `set_frame`, plus the Wave-9
@@ -80,6 +83,11 @@ pub fn all_tools() -> Vec<Tool> {
         tool_delete_figure(),
         tool_move_figure(),
         tool_delete_camera_key(),
+        // Wave-11 camera built-ins (C2): the first camera read,
+        // the panel's Set-key-here, and Hold.
+        tool_get_camera(),
+        tool_set_camera_key_here(),
+        tool_hold_camera(),
         tool_frame_all_figures(),
         tool_centre_on_selection(),
         tool_save_named_project(),
@@ -242,9 +250,32 @@ impl McpServer {
         let args = params.get("arguments").unwrap_or(&empty);
         let tools = all_tools();
         let Some(tool) = tools.iter().find(|t| t.name == name) else {
-            return tool_result(id, Err(format!("unknown tool: {name}")));
+            // An unknown tool name is a PROTOCOL error
+            // (-32602), not a tool result: the MCP spec's own
+            // tools/call error example is `-32602` for a tool
+            // that does not exist, while `isError` results are
+            // for failures of a tool that ran. The message
+            // text stays byte-identical to the historical
+            // result text — the shell's toast classifier
+            // (rune_sec/toasts.rs, rule 0) matches the
+            // literal `unknown tool` prefix when the live
+            // path forwards this message.
+            return error_response(id, -32602, &format!("unknown tool: {name}"));
         };
-        tool_result(id, (tool.handler)(core, args))
+        // Wave 11 (A5 I1): a panicking handler on the LIVE
+        // transport would unwind into the GUI's poll loop and
+        // take the editor down with it. Convert a panic into
+        // an isError result naming the tool — the edit may be
+        // partial, but the editor survives. The stdio binary
+        // keeps its own -32603 net as a second layer.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (tool.handler)(core, args)
+        }));
+        let outcome = match outcome {
+            Ok(r) => r,
+            Err(_) => Err(format!("tool panicked: {name}")),
+        };
+        tool_result(id, outcome)
     }
 }
 
@@ -303,7 +334,7 @@ fn tool_server_info() -> Tool {
 fn tool_get_state() -> Tool {
     Tool {
         name: "get_state",
-        description: "Snapshot of the current project: name, figures, frame count, current frame, fps, stage size and weather state.",
+        description: "Snapshot of the current project: name, figures, frame count, current frame, fps, stage size, background colour (0xRRGGBB) and weather state (kind, amount, wind).",
         schema: empty_args_schema(),
         handler: |core, _args| {
             let project = &core.project;
@@ -333,8 +364,16 @@ fn tool_get_state() -> Tool {
                 "current_frame": core.current,
                 "fps": project.fps,
                 "stage": project.stage,
+                // Wave 11 (E7): the stage background colour
+                // was write-only-nowhere and read-nowhere;
+                // surface it (set_project_background writes it).
+                "background": project.background,
                 "weather": project.weather.is_some(),
                 "weather_kind": weather_kind,
+                // Wave 11 (E7): the weather's amount/wind ride
+                // along — previously only its kind was visible.
+                "weather_amount": project.weather.as_ref().map(|w| w.amount),
+                "weather_wind": project.weather.as_ref().map(|w| w.wind),
             }))
         },
     }
@@ -577,10 +616,14 @@ fn tool_shift_frames() -> Tool {
                 return Err("argument 'count' must be at least 1".to_string());
             }
             check_frame(core, from)?;
-            if from + count > n {
+            // Wave 11 (E6 residual): a hostile count (up to
+            // usize::MAX) must not overflow the range sum.
+            let Some(end) = from.checked_add(count) else {
+                return Err("frame range exceeds the timeline".to_string());
+            };
+            if end > n {
                 return Err(format!(
-                    "frame range {from}..{} exceeds the timeline ({n} frame(s))",
-                    from + count
+                    "frame range {from}..{end} exceeds the timeline ({n} frame(s))"
                 ));
             }
             if delta == 0 {
@@ -589,8 +632,7 @@ fn tool_shift_frames() -> Tool {
             let target = from as i64 + delta as i64;
             if target < 0 || target as usize + count > n {
                 return Err(format!(
-                    "shifting frames {from}..{} by {delta} would leave the timeline",
-                    from + count
+                    "shifting frames {from}..{end} by {delta} would leave the timeline"
                 ));
             }
             if !core.shift_frames(from, count, delta) {
@@ -824,8 +866,13 @@ fn tool_set_frame_easing() -> Tool {
             Ok(json!({
                 "ok": true,
                 "frame": core.current,
-                "easing": core.project.frames[core.current]
-                    .easing
+                // Wave 11 (B2 I-2): read fallibly — on a
+                // zero-frame project the direct index panicked.
+                "easing": core
+                    .project
+                    .frames
+                    .get(core.current)
+                    .and_then(|f| f.easing)
                     .map(|e| e.label()),
                 "status": core.status,
             }))
@@ -925,6 +972,136 @@ fn tool_delete_camera_key() -> Tool {
     }
 }
 
+/// Wave 11 (C2 GAP-1): the first camera READ on the MCP
+/// surface — the interpolated camera at a frame, the follow
+/// target, and the full key list. Keys are reported VERBATIM
+/// in frame order, stale keys (at/past the frame count)
+/// flagged rather than dropped or clamped: a read must not
+/// silently launder state the client may need to repair.
+/// Angles are RAW as stored; compare modulo `norm_deg`.
+fn tool_get_camera() -> Tool {
+    Tool {
+        name: "get_camera",
+        description: "Read the camera (the camera panel, as data): the interpolated camera {x, y, zoom} and raw angle at 'frame' (default: the current frame), the follow target (figure index or null), and every camera key sorted by frame — each verbatim with a 'stale' flag when its frame is at/past the project's frame count. Angles are raw as stored; compare modulo 360. Read-only.",
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "frame": int_schema("Optional 0-based frame to evaluate at (default: the current frame)"),
+            },
+            "required": [],
+            "additionalProperties": false,
+        }),
+        handler: |core, args| {
+            let at = opt_usize(args, "frame")?.unwrap_or(core.current);
+            let (x, y, zoom) = core.project.camera_at(at as f32);
+            let angle = core.project.camera_angle_at(at as f32);
+            let frame_count = core.project.frames.len();
+            let mut keys: Vec<&crate::model::CameraKey> = core.project.camera.iter().collect();
+            keys.sort_by_key(|k| k.frame);
+            let keys: Vec<Value> = keys
+                .iter()
+                .map(|k| {
+                    json!({
+                        "frame": k.frame,
+                        "x": k.x,
+                        "y": k.y,
+                        "zoom": k.zoom,
+                        "angle": k.angle,
+                        "stale": k.frame >= frame_count,
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "ok": true,
+                "frame_count": frame_count,
+                "at_frame": at,
+                "camera": { "x": x, "y": y, "zoom": zoom, "angle": angle },
+                "follow": core.project.camera_follow,
+                "keys": keys,
+            }))
+        },
+    }
+}
+
+/// Wave 11 (C2 GAP-2): the camera panel's Set key button —
+/// upsert a key at the current frame holding the camera
+/// exactly as it stands. The write is `rotate_camera(0.0)`,
+/// the panel's own path (angle stored wrapped, one snapshot
+/// inside the op).
+fn tool_set_camera_key_here() -> Tool {
+    Tool {
+        name: "set_camera_key_here",
+        description: "Set a camera key at the current frame with the camera exactly as it stands (the camera panel's Set key). One undo step.",
+        schema: empty_args_schema(),
+        handler: |core, _args| {
+            core.rotate_camera(0.0);
+            let key = core
+                .project
+                .camera
+                .iter()
+                .find(|k| k.frame == core.current);
+            Ok(json!({
+                "ok": true,
+                "frame": core.current,
+                "camera": key.map(|k| json!({ "x": k.x, "y": k.y, "zoom": k.zoom, "angle": k.angle })),
+                "status": core.status,
+            }))
+        },
+    }
+}
+
+/// Wave 11 (C2 GAP-3): the camera panel's Hold — stamp the
+/// current camera onto every frame of a span (default: the
+/// loop range when set, else the whole timeline) under one
+/// undo step. Explicit 'from'/'to' (0-based, inclusive)
+/// override the default span.
+fn tool_hold_camera() -> Tool {
+    Tool {
+        name: "hold_camera",
+        description: "Hold the camera: stamp the camera in effect at the current frame onto every frame of a span (the camera panel's Hold). The span is 'from'..'to' (0-based, inclusive) when both are given, else the loop range when set, else the whole timeline. One undo step. Errors when the project has no frames.",
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "from": int_schema("Optional 0-based first frame of the span"),
+                "to": int_schema("Optional 0-based last frame of the span (inclusive)"),
+            },
+            "required": [],
+            "additionalProperties": false,
+        }),
+        handler: |core, args| {
+            let frame_count = core.project.frames.len();
+            if frame_count == 0 {
+                return Err("No frames to hold the camera over.".to_string());
+            }
+            let (from, to) = match (opt_usize(args, "from")?, opt_usize(args, "to")?) {
+                (Some(a), Some(b)) => (a, b),
+                (None, None) => match core.loop_range {
+                    Some((a, b)) => (a, b),
+                    None => (0, frame_count - 1),
+                },
+                _ => {
+                    return Err(
+                        "arguments 'from' and 'to' must be given together".to_string()
+                    )
+                }
+            };
+            if from > to || to >= frame_count {
+                return Err(format!(
+                    "span {from}..{to} is outside the timeline ({frame_count} frame(s))"
+                ));
+            }
+            core.hold_camera(from, to);
+            Ok(json!({
+                "ok": true,
+                "from": from,
+                "to": to,
+                "frames": to - from + 1,
+                "status": core.status,
+            }))
+        },
+    }
+}
+
 fn tool_frame_all_figures() -> Tool {
     Tool {
         name: "frame_all_figures",
@@ -936,9 +1113,12 @@ fn tool_frame_all_figures() -> Tool {
             }
             core.frame_all_figures();
             let (x, y, zoom) = core.camera_here();
+            // Wave 11 (C2 GAP-5): the resulting key's angle,
+            // raw — clients compare modulo norm_deg.
+            let angle = core.project.camera_angle_at(core.current as f32);
             Ok(json!({
                 "ok": true,
-                "camera": { "x": x, "y": y, "zoom": zoom },
+                "camera": { "x": x, "y": y, "zoom": zoom, "angle": angle },
                 "status": core.status,
             }))
         },
@@ -956,10 +1136,11 @@ fn tool_centre_on_selection() -> Tool {
             }
             core.centre_on_selection();
             let (x, y, zoom) = core.camera_here();
+            let angle = core.project.camera_angle_at(core.current as f32);
             Ok(json!({
                 "ok": true,
                 "figure": core.selected_figure,
-                "camera": { "x": x, "y": y, "zoom": zoom },
+                "camera": { "x": x, "y": y, "zoom": zoom, "angle": angle },
                 "status": core.status,
             }))
         },
@@ -975,6 +1156,9 @@ fn tool_save_named_project() -> Tool {
             if !core.save_named_project() {
                 return Err(core.status.clone());
             }
+            // Wave 11 (E9): recents parity with the GUI save —
+            // an MCP save is a use of the project too.
+            crate::shell::touch_recent(&core.project.name);
             Ok(json!({
                 "ok": true,
                 "saved": true,
@@ -988,18 +1172,25 @@ fn tool_save_named_project() -> Tool {
 fn tool_audio_split() -> Tool {
     Tool {
         name: "audio_split",
-        description: "Split an audio clip at a frame (the audio panel's Split): clip 'clip' (0-based) is cut at 0-based 'at_frame' into two clips. Errors when the clip does not exist or its file cannot be read.",
+        description: "Split an audio clip at a frame (the audio panel's Split): clip 'index' (0-based; the legacy name 'clip' is also accepted) is cut at 0-based 'at_frame' into two clips. Errors when the clip does not exist or its file cannot be read.",
         schema: json!({
             "type": "object",
             "properties": {
-                "clip": int_schema("0-based index of the audio clip"),
+                "index": int_schema("0-based index of the audio clip"),
+                "clip": int_schema("Legacy alias of 'index'"),
                 "at_frame": int_schema("0-based frame to split at"),
             },
-            "required": ["clip", "at_frame"],
+            "required": ["at_frame"],
             "additionalProperties": false,
         }),
         handler: |core, args| {
-            let clip = arg_usize(args, "clip")?;
+            // Wave 11 (C5 N1): every other audio tool takes
+            // 'index'; accept it here too, with the historical
+            // 'clip' as a fallback so old clients keep working.
+            let clip = match opt_usize(args, "index")? {
+                Some(i) => i,
+                None => arg_usize(args, "clip")?,
+            };
             let at_frame = arg_usize(args, "at_frame")?;
             if clip >= core.project.audio.len() {
                 return Err(format!("Audio split failed: no clip {}.", clip + 1));
@@ -1021,17 +1212,22 @@ fn tool_audio_split() -> Tool {
 fn tool_audio_crossfade() -> Tool {
     Tool {
         name: "audio_crossfade",
-        description: "Crossfade an audio clip into the following one (the audio panel's Crossfade): clip 'clip' (0-based) blends with clip 'clip'+1. Errors when the clip has no following clip or a file cannot be read.",
+        description: "Crossfade an audio clip into the following one (the audio panel's Crossfade): clip 'index' (0-based; the legacy name 'clip' is also accepted) blends with the following clip. Errors when the clip has no following clip or a file cannot be read.",
         schema: json!({
             "type": "object",
             "properties": {
-                "clip": int_schema("0-based index of the first audio clip"),
+                "index": int_schema("0-based index of the first audio clip"),
+                "clip": int_schema("Legacy alias of 'index'"),
             },
-            "required": ["clip"],
+            "required": [],
             "additionalProperties": false,
         }),
         handler: |core, args| {
-            let clip = arg_usize(args, "clip")?;
+            // Wave 11 (C5 N1): 'index', with legacy 'clip' fallback.
+            let clip = match opt_usize(args, "index")? {
+                Some(i) => i,
+                None => arg_usize(args, "clip")?,
+            };
             if clip + 1 >= core.project.audio.len() {
                 return Err(format!(
                     "Audio crossfade failed: clip {} has no following clip.",
@@ -1054,7 +1250,7 @@ fn tool_audio_crossfade() -> Tool {
 fn tool_audio_mixdown() -> Tool {
     Tool {
         name: "audio_mixdown",
-        description: "Mix all audio clips down into a single mixed clip (the audio panel's Mixdown). Errors when the project has no audio clips or the mix fails.",
+        description: "Mix all audio clips down to a single WAV file (out/mixdown.wav; the audio panel's Mixdown button runs the same operation). The project's clips are left in place — the mix is a rendered file, not a new clip. Errors when the project has no audio clips or the mix fails.",
         schema: empty_args_schema(),
         handler: |core, _args| {
             if core.project.audio.is_empty() {
@@ -1193,7 +1389,7 @@ fn tool_smooth_path_roots() -> Tool {
 fn tool_set_camera_follow() -> Tool {
     Tool {
         name: "set_camera_follow",
-        description: "Set which figure the camera follows during playback (the camera panel's Follow toggle): 'figure' is a 0-based figure index, or null to turn following off. Stored in the project.",
+        description: "Set which figure the camera follows during playback (the camera panel's Follow toggle): 'figure' is a 0-based figure index, or null to turn following off. Stored in the project. One undo step when the follow target actually changes.",
         schema: json!({
             "type": "object",
             "properties": {
@@ -1207,13 +1403,25 @@ fn tool_set_camera_follow() -> Tool {
             "additionalProperties": false,
         }),
         handler: |core, args| {
-            // The layers tool's precedent: project fields may be
-            // set directly; the status strings are the toggle
-            // operation's own.
+            // The status strings are the toggle operation's
+            // own. The write itself is direct (the engine's
+            // `toggle_camera_follow` also writes the field
+            // without snapshotting), but a tool call is a
+            // deliberate edit arriving from outside the GUI:
+            // when the value actually changes it takes a
+            // snapshot first (Wave 11), so the change is one
+            // undo step and counts toward the dirty/autosave
+            // counters like every other MCP mutation,
+            // instead of landing in the project invisibly.
+            // A no-change call takes no snapshot — no phantom
+            // undo step.
             match args.get("figure") {
                 None => Err("missing required argument 'figure'".to_string()),
                 Some(Value::Null) => {
-                    core.project.camera_follow = None;
+                    if core.project.camera_follow.is_some() {
+                        core.snapshot();
+                        core.project.camera_follow = None;
+                    }
                     core.status = "Camera follow off.".to_string();
                     Ok(json!({
                         "ok": true,
@@ -1224,7 +1432,10 @@ fn tool_set_camera_follow() -> Tool {
                 Some(_) => {
                     let fi = arg_usize(args, "figure")?;
                     check_figure(core, fi)?;
-                    core.project.camera_follow = Some(fi);
+                    if core.project.camera_follow != Some(fi) {
+                        core.snapshot();
+                        core.project.camera_follow = Some(fi);
+                    }
                     core.status = format!(
                         "Camera follows {}.",
                         core.project.figures[fi].name
@@ -1243,7 +1454,7 @@ fn tool_set_camera_follow() -> Tool {
 fn tool_set_tween_playback() -> Tool {
     Tool {
         name: "set_tween_playback",
-        description: "Turn tweened (interpolated) playback on or off (the Tween playback toggle). Stored in the project.",
+        description: "Turn tweened (interpolated) playback on or off (the Tween playback toggle). Stored in the project. One undo step when the value actually changes.",
         schema: json!({
             "type": "object",
             "properties": {
@@ -1260,6 +1471,12 @@ fn tool_set_tween_playback() -> Tool {
                 return Err("argument 'enabled' must be a boolean".to_string());
             };
             if core.project.tween_playback != enabled {
+                // Wave 11: the engine's toggle writes the
+                // project field without snapshotting; as with
+                // set_camera_follow above, the MCP call takes
+                // the snapshot itself so the change is one
+                // undo step and a counted edit.
+                core.snapshot();
                 core.toggle_tween_playback();
             }
             Ok(json!({
@@ -1301,6 +1518,24 @@ fn tool_get_editor_status() -> Tool {
                 Some((a, b)) => json!([a, b]),
                 None => Value::Null,
             };
+            // Wave 11 session facts the surface could not see:
+            // the solo target (C1), the draw state (C7), the
+            // clip-edit session (C6 — null, or the session with
+            // an `intact` verdict against the name it captured),
+            // and the autosave distance (D8).
+            let clip_edit = match &core.clip_edit {
+                Some(s) => {
+                    let clip = core.project.clips.get(s.clip);
+                    json!({
+                        "clip": s.clip,
+                        "name": s.name,
+                        "frame": s.frame,
+                        "frames": clip.map(|c| c.frames.len()),
+                        "intact": clip.map(|c| c.name == s.name),
+                    })
+                }
+                None => Value::Null,
+            };
             Ok(json!({
                 "playing": core.playing,
                 "current_frame": core.current,
@@ -1308,6 +1543,15 @@ fn tool_get_editor_status() -> Tool {
                 "loop_range": loop_range,
                 "selected_figure": core.selected_figure,
                 "selected_node": core.selected_node,
+                "solo_figure": core.solo,
+                "brush_index": core.brush_index,
+                "draw_mode": core.draw_mode,
+                "draw_tool": match core.draw_tool {
+                    crate::editor::DrawTool::Brush => "brush",
+                    crate::editor::DrawTool::Eraser => "eraser",
+                },
+                "clip_edit": clip_edit,
+                "edits_since_autosave": core.edits_since_autosave(),
                 "can_undo": core.undo_depth() > 0,
                 "can_redo": core.redo_depth() > 0,
                 "undo_depth": core.undo_depth(),
@@ -1760,7 +2004,15 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tool_is_an_error_result_not_a_protocol_error() {
+    fn unknown_tool_is_an_invalid_params_protocol_error() {
+        // Wave 11: an unknown tool name never reaches a
+        // handler, so it is a protocol error (-32602, the
+        // MCP spec's own tools/call example), NOT an
+        // `isError` result — that channel is for failures
+        // of tools that ran. The message text is unchanged
+        // ("unknown tool: …"): the shell's toast classifier
+        // matches that literal prefix when the live path
+        // forwards the message.
         let mut server = McpServer::new();
         let resp = server
             .handle(&request(
@@ -1769,10 +2021,32 @@ mod tests {
                 json!({ "name": "does_not_exist", "arguments": {} }),
             ))
             .expect("tools/call must be answered");
-        assert!(resp.get("error").is_none());
-        assert_eq!(resp["result"]["isError"], true);
-        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("does_not_exist"));
+        assert!(resp.get("result").is_none(), "no result on a protocol error");
+        assert_eq!(resp["error"]["code"], -32602);
+        assert_eq!(resp["id"], 3);
+        let message = resp["error"]["message"].as_str().unwrap();
+        assert!(message.contains("does_not_exist"));
+    }
+
+    #[test]
+    fn tools_call_param_shape_errors_are_invalid_params() {
+        let mut server = McpServer::new();
+        // No params member at all.
+        let resp = server
+            .handle(&json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call" }))
+            .expect("tools/call must be answered");
+        assert_eq!(resp["error"]["code"], -32602);
+        // Params present, tool name missing.
+        let resp = server
+            .handle(&request(5, "tools/call", json!({ "arguments": {} })))
+            .expect("tools/call must be answered");
+        assert_eq!(resp["error"]["code"], -32602);
+        // A request with no method member is an Invalid
+        // Request (-32600), distinct from a bad-params call.
+        let resp = server
+            .handle(&json!({ "jsonrpc": "2.0", "id": 6, "params": {} }))
+            .expect("a request with an id must be answered");
+        assert_eq!(resp["error"]["code"], -32600);
     }
 
     #[test]
@@ -2627,5 +2901,225 @@ mod tests {
             json!({ "figure": 99, "frame": 2 }),
         );
         assert!(is_error);
+    }
+
+    #[test]
+    fn mutating_builtins_take_exactly_one_undo_step() {
+        // Wave 11: every built-in that mutates the project
+        // must land as exactly one snapshot — that is what
+        // makes the edit undoable from the GUI (Ctrl+Z) and
+        // counted for the autosave/dirty indicator
+        // (snapshot() is those counters' only writer). Each
+        // case runs on a fresh server over the demo project.
+        let cases: &[(&str, Value)] = &[
+            ("duplicate_frame", json!({})),
+            ("set_frame_easing", json!({ "easing": "smooth" })),
+            (
+                "particle_add_event",
+                json!({ "frame": 0, "x": 10.0, "y": 20.0 }),
+            ),
+            ("clear_particles", json!({})),
+            ("reverse_range", json!({ "from": 0, "count": 2 })),
+            (
+                "shift_frames",
+                json!({ "from": 0, "count": 1, "delta": 1 }),
+            ),
+            ("delete_range", json!({ "from": 0, "count": 1 })),
+        ];
+        for (name, args) in cases {
+            let mut server = McpServer::new();
+            let before = server.core.undo_depth();
+            let (_out, is_error) = call_payload(&mut server, name, args.clone());
+            assert!(!is_error, "{name} succeeds on the demo project");
+            assert_eq!(
+                server.core.undo_depth(),
+                before + 1,
+                "{name} takes exactly one undo step"
+            );
+        }
+        // Clipboard pastes: the copy is not an edit (no
+        // step), the paste is exactly one step.
+        let mut server = McpServer::new();
+        let (_o, e) = call_payload(&mut server, "copy_frame", json!({}));
+        assert!(!e);
+        assert_eq!(server.core.undo_depth(), 0, "copy is not an edit");
+        let (_o, e) = call_payload(&mut server, "paste_frame", json!({}));
+        assert!(!e);
+        assert_eq!(server.core.undo_depth(), 1, "paste is one step");
+        let mut server = McpServer::new();
+        let (_o, e) =
+            call_payload(&mut server, "copy_range", json!({ "from": 0, "count": 2 }));
+        assert!(!e);
+        assert_eq!(server.core.undo_depth(), 0, "copy is not an edit");
+        let (_o, e) = call_payload(&mut server, "paste_range", json!({ "at": 0 }));
+        assert!(!e);
+        assert_eq!(server.core.undo_depth(), 1, "paste is one step");
+        // frame_all_figures plants a camera key in one
+        // step; deleting that key is a second step.
+        let mut server = McpServer::new();
+        let (_o, e) = call_payload(&mut server, "frame_all_figures", json!({}));
+        assert!(!e);
+        assert_eq!(server.core.undo_depth(), 1);
+        let frame = server.core.current;
+        let (_o, e) = call_payload(
+            &mut server,
+            "delete_camera_key",
+            json!({ "frame": frame }),
+        );
+        assert!(!e);
+        assert_eq!(server.core.undo_depth(), 2);
+    }
+
+    #[test]
+    fn project_toggles_snapshot_only_on_change_and_undo_restores() {
+        // Wave 11: set_camera_follow / set_tween_playback
+        // write project fields that the engine's own
+        // toggles write without snapshotting. The MCP
+        // handlers take the snapshot themselves — on
+        // change only, so a repeated call adds no phantom
+        // step — which makes the edit undoable through the
+        // core's own undo, like every other MCP mutation.
+        let mut server = McpServer::new();
+        let (_o, e) =
+            call_payload(&mut server, "set_tween_playback", json!({ "enabled": true }));
+        assert!(!e);
+        assert!(server.core.project.tween_playback);
+        assert_eq!(server.core.undo_depth(), 1);
+        let (_o, e) =
+            call_payload(&mut server, "set_tween_playback", json!({ "enabled": true }));
+        assert!(!e);
+        assert_eq!(server.core.undo_depth(), 1, "no change, no second step");
+        server.core.undo();
+        assert!(
+            !server.core.project.tween_playback,
+            "undo restores the toggle"
+        );
+
+        let mut server = McpServer::new();
+        let (_o, e) =
+            call_payload(&mut server, "set_camera_follow", json!({ "figure": 0 }));
+        assert!(!e);
+        assert_eq!(server.core.project.camera_follow, Some(0));
+        assert_eq!(server.core.undo_depth(), 1);
+        let (_o, e) =
+            call_payload(&mut server, "set_camera_follow", json!({ "figure": 0 }));
+        assert!(!e);
+        assert_eq!(server.core.undo_depth(), 1, "no change, no second step");
+        server.core.undo();
+        assert_eq!(
+            server.core.project.camera_follow, None,
+            "undo restores the follow"
+        );
+        // Turning off an already-off follow is step-free.
+        let (_o, e) =
+            call_payload(&mut server, "set_camera_follow", json!({ "figure": null }));
+        assert!(!e);
+        assert_eq!(server.core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn builtin_sweep_is_identical_on_handle_and_handle_on() {
+        // Wave 11: the parity contract, proven for the
+        // whole built-in family at once. One scripted
+        // conversation — protocol methods, reads,
+        // mutations, refusals, an unknown tool, an unknown
+        // method, a notification — runs through `handle`
+        // on one server and through `handle_on` against a
+        // caller-owned core on another. Every reply must
+        // be identical, and the two edit-target cores must
+        // end in identical states.
+        let call = |name: &str, args: Value| {
+            request(1, "tools/call", json!({ "name": name, "arguments": args }))
+        };
+        let script: Vec<Value> = vec![
+            request(1, "initialize", json!({})),
+            request(2, "ping", json!({})),
+            request(3, "tools/list", json!({})),
+            call("server_info", json!({})),
+            call("get_state", json!({})),
+            call("get_editor_status", json!({})),
+            call("get_selection", json!({})),
+            call("set_frame", json!({ "frame": 2 })),
+            call("goto_next_key", json!({})),
+            call("goto_prev_key", json!({})),
+            call("duplicate_frame", json!({})),
+            call("copy_frame", json!({})),
+            call("paste_frame", json!({})),
+            call("copy_range", json!({ "from": 0, "count": 2 })),
+            call("paste_range", json!({ "at": 99 })),
+            call("swap_frames", json!({ "a": 0, "b": 1 })),
+            call("shift_frames", json!({ "from": 0, "count": 1, "delta": 1 })),
+            call("reverse_range", json!({ "from": 0, "count": 2 })),
+            call("set_loop_range", json!({ "start": 3, "end": 1 })),
+            call("set_playback", json!({ "action": "play_range" })),
+            call("set_playback", json!({ "action": "pause" })),
+            call("set_frame_easing", json!({ "easing": "smooth" })),
+            call("set_frame_easing", json!({ "frame": 0, "easing": null })),
+            call("frame_all_figures", json!({})),
+            call("centre_on_selection", json!({})),
+            call("delete_camera_key", json!({ "frame": 0 })),
+            call("set_selection", json!({ "figure": 0, "node": 0 })),
+            call("goto_next_keyframe", json!({ "figure": 0 })),
+            call("goto_prev_keyframe", json!({ "figure": 0 })),
+            call("delete_keyframe", json!({ "figure": 0, "frame": 2 })),
+            call("particle_add_event", json!({ "frame": 0, "x": 10.0, "y": 20.0 })),
+            call("clear_particles", json!({})),
+            call("smooth_path_roots", json!({ "figure": 0 })),
+            call("set_camera_follow", json!({ "figure": 0 })),
+            call("set_camera_follow", json!({ "figure": null })),
+            call("set_tween_playback", json!({ "enabled": true })),
+            call("audio_split", json!({ "clip": 0, "at_frame": 1 })),
+            call("audio_crossfade", json!({ "clip": 0 })),
+            call("audio_mixdown", json!({})),
+            call("fig3_library_list", json!({})),
+            call("fig3_load_from_library", json!({ "name": "no-such-figure" })),
+            call("fig3_save_to_library", json!({})),
+            call("delete_figure", json!({ "figure": 0 })),
+            call("move_figure", json!({ "direction": 1 })),
+            call("delete_range", json!({ "from": 0, "count": 1 })),
+            call("clear_loop_range", json!({})),
+            call("save_named_project", json!({})),
+            call("does_not_exist", json!({})),
+            request(9, "resources/list", json!({})),
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        ];
+        let mut own = McpServer::new();
+        let mut host = McpServer::new();
+        let mut external = crate::editor::EditorCore::new();
+        // The same project name on both edit targets, so
+        // the named save writes the same file from both
+        // routes with identical contents.
+        own.core.project.name = "MCP Parity Sweep".to_string();
+        external.project.name = "MCP Parity Sweep".to_string();
+        let mut own_replies = Vec::new();
+        let mut live_replies = Vec::new();
+        for msg in &script {
+            own_replies.push(own.handle(msg));
+            live_replies.push(host.handle_on(&mut external, msg));
+        }
+        assert_eq!(
+            own_replies, live_replies,
+            "every reply identical on the stdio and live routes"
+        );
+        // The host server's own core was never the target.
+        assert_eq!(host.core.current, 0);
+        assert_eq!(host.core.undo_depth(), 0);
+        assert_eq!(host.core.project.frames.len(), 5);
+        // The two edit targets end in identical states.
+        let (a, b) = (&own.core, &external);
+        assert_eq!(
+            serde_json::to_string(&a.project).unwrap(),
+            serde_json::to_string(&b.project).unwrap(),
+            "identical project bytes after the sweep"
+        );
+        assert_eq!(a.current, b.current);
+        assert_eq!(a.selected_figure, b.selected_figure);
+        assert_eq!(a.selected_node, b.selected_node);
+        assert_eq!(a.loop_range, b.loop_range);
+        assert_eq!(a.playing, b.playing);
+        assert_eq!(a.undo_depth(), b.undo_depth());
+        assert_eq!(a.redo_depth(), b.redo_depth());
+        assert_eq!(a.status, b.status);
+        let _ = std::fs::remove_file("./projects/mcp-parity-sweep.json");
     }
 }

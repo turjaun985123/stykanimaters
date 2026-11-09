@@ -19,8 +19,10 @@
 //! contract is index-exactness, so a broken vector is left
 //! exactly as found rather than normalised (see its docs).
 
+use crate::editor::EditorCore;
 use crate::model::{Project, Stroke, V2};
 use crate::paint::{erase_at, mirror_points_x, nib_widths, simplify_points, smooth_path, Nib};
+use serde_json::{json, Value};
 
 fn distance(a: V2, b: V2) -> f32 {
     ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt()
@@ -396,6 +398,799 @@ pub fn simplify_stroke_at(project: &mut Project, index: usize, epsilon: f32) -> 
         stroke.widths = widths;
     }
     true
+}
+
+
+// ---------------------------------------------------------------------
+// MCP handlers (Wave 11, B3): the drawing domain's tool surface,
+// written against `EditorCore` with the registry handlers'
+// standard signature so `mcp_tools::tools()` can register them
+// directly (`handler: crate::draw_ops::tool_*`).
+//
+// The argument helpers are LOCAL to this section (`dops_`
+// prefix) because `mcp_tools`' helpers are private to that
+// file. They differ from those helpers in one deliberate way:
+// every number is checked `is_finite` BEFORE and AFTER the
+// f64 -> f32 cast. A JSON text cannot write NaN literally, but
+// an overflowing literal (for example `1e999`) can surface as
+// an infinite f64, and the plain `as f32` cast would carry
+// infinity (or a finite-but-huge f64) into the project, where
+// the renderers' dab/spray geometry turns it into NaN
+// positions. A non-finite argument is refused here instead.
+// ---------------------------------------------------------------------
+
+fn dops_get<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
+    args.get(key).filter(|v| !v.is_null())
+}
+
+fn dops_opt_f32(args: &Value, key: &str) -> Result<Option<f32>, String> {
+    match dops_get(args, key) {
+        Some(v) => {
+            let raw = v
+                .as_f64()
+                .ok_or_else(|| format!("argument '{key}' must be a number"))?;
+            let f = raw as f32;
+            if !raw.is_finite() || !f.is_finite() {
+                return Err(format!("argument '{key}' must be a finite number"));
+            }
+            Ok(Some(f))
+        }
+        None => Ok(None),
+    }
+}
+
+fn dops_req_f32(args: &Value, key: &str) -> Result<f32, String> {
+    dops_opt_f32(args, key)?.ok_or_else(|| format!("missing required argument '{key}'"))
+}
+
+fn dops_as_usize(v: &Value, key: &str) -> Result<usize, String> {
+    if let Some(u) = v.as_u64() {
+        return usize::try_from(u).map_err(|_| format!("argument '{key}' is too large"));
+    }
+    if let Some(f) = v.as_f64() {
+        if f >= 0.0 && f.fract() == 0.0 && f <= usize::MAX as f64 {
+            return Ok(f as usize);
+        }
+    }
+    Err(format!("argument '{key}' must be a non-negative integer"))
+}
+
+fn dops_opt_usize(args: &Value, key: &str) -> Result<Option<usize>, String> {
+    match dops_get(args, key) {
+        Some(v) => dops_as_usize(v, key).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn dops_req_usize(args: &Value, key: &str) -> Result<usize, String> {
+    dops_opt_usize(args, key)?.ok_or_else(|| format!("missing required argument '{key}'"))
+}
+
+fn dops_opt_bool(args: &Value, key: &str) -> Result<Option<bool>, String> {
+    match dops_get(args, key) {
+        Some(v) => v
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| format!("argument '{key}' must be a boolean")),
+        None => Ok(None),
+    }
+}
+
+fn dops_opt_str<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, String> {
+    match dops_get(args, key) {
+        Some(v) => v
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| format!("argument '{key}' must be a string")),
+        None => Ok(None),
+    }
+}
+
+/// Colours travel as `0xRRGGBB` integers, as in `mcp_tools`.
+fn dops_opt_color(args: &Value, key: &str) -> Result<Option<u32>, String> {
+    match dops_get(args, key) {
+        Some(v) => {
+            let n = dops_as_usize(v, key)?;
+            u32::try_from(n)
+                .map(Some)
+                .map_err(|_| format!("argument '{key}' is too large for a colour"))
+        }
+        None => Ok(None),
+    }
+}
+
+fn dops_check_frame(core: &EditorCore, frame: usize) -> Result<(), String> {
+    if frame < core.project.frames.len() {
+        Ok(())
+    } else {
+        Err(format!(
+            "frame index {frame} out of range (project has {} frame(s))",
+            core.project.frames.len()
+        ))
+    }
+}
+
+/// A point list with every coordinate finite-checked, the
+/// hardened counterpart of `mcp_tools::req_points`.
+fn dops_req_points(args: &Value, key: &str) -> Result<Vec<V2>, String> {
+    let v = dops_get(args, key).ok_or_else(|| format!("missing required argument '{key}'"))?;
+    let arr = v
+        .as_array()
+        .ok_or_else(|| format!("argument '{key}' must be an array of [x, y] points"))?;
+    let mut points = Vec::with_capacity(arr.len());
+    for (i, p) in arr.iter().enumerate() {
+        let pair = p
+            .as_array()
+            .filter(|a| a.len() == 2)
+            .ok_or_else(|| format!("argument '{key}[{i}]' must be an [x, y] pair"))?;
+        let mut pt = [0.0f32; 2];
+        for (axis, slot) in pt.iter_mut().enumerate() {
+            let raw = pair[axis]
+                .as_f64()
+                .ok_or_else(|| format!("argument '{key}[{i}][{axis}]' must be a number"))?;
+            let f = raw as f32;
+            if !raw.is_finite() || !f.is_finite() {
+                return Err(format!(
+                    "argument '{key}[{i}][{axis}]' must be a finite number"
+                ));
+            }
+            *slot = f;
+        }
+        points.push(pt);
+    }
+    Ok(points)
+}
+
+/// One stroke as JSON: every stored field, so an MCP client
+/// can see exactly what the panel's stroke list shows (and
+/// what `set_stroke_style` can change). `points` carries the
+/// full polyline only when `include_points` is set; otherwise
+/// the count alone travels, under `points`.
+fn dops_stroke_json(stroke: &Stroke, index: usize, include_points: bool) -> Value {
+    let points_json = if include_points {
+        json!(stroke.points)
+    } else {
+        json!(stroke.points.len())
+    };
+    let spray_json = stroke.spray.map(|m| {
+        json!({
+            "seed": m.seed,
+            "radius": m.radius,
+            "opacity": m.opacity,
+        })
+    });
+    json!({
+        "index": index,
+        "frame": stroke.frame,
+        "points": points_json,
+        "color": stroke.color,
+        "width": stroke.width,
+        "widths": stroke.widths.len(),
+        "fill": stroke.fill,
+        "spray": spray_json,
+        "opacity": stroke.opacity,
+        "scatter": stroke.scatter,
+    })
+}
+
+/// Read parity for the panel's stroke list (the shell's
+/// `stroke_inspector::stroke_rows`): without this, MCP could
+/// write strokes but never enumerate them — `delete_stroke`'s
+/// index space was undiscoverable. Read-only: no snapshot,
+/// no status change.
+pub fn tool_list_strokes(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let frame = dops_opt_usize(args, "frame")?;
+    if let Some(f) = frame {
+        dops_check_frame(core, f)?;
+    }
+    let include_points = dops_opt_bool(args, "points")?.unwrap_or(false);
+    let strokes: Vec<Value> = core
+        .project
+        .strokes
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| frame.is_none() || frame == Some(s.frame))
+        .map(|(i, s)| dops_stroke_json(s, i, include_points))
+        .collect();
+    Ok(json!({
+        "ok": true,
+        "count": strokes.len(),
+        "total": core.project.strokes.len(),
+        "strokes": strokes,
+    }))
+}
+
+/// The Draw panel's readout line (`draw_tools::drawing_stats`)
+/// as data: totals over every stroke in the project.
+pub fn tool_get_drawing_stats(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let mut points = 0usize;
+    let mut total_length = 0.0f32;
+    let mut spray_strokes = 0usize;
+    for stroke in &core.project.strokes {
+        points += stroke.points.len();
+        if stroke.spray.is_some() {
+            spray_strokes += 1;
+        }
+        for pair in stroke.points.windows(2) {
+            let dx = pair[1][0] - pair[0][0];
+            let dy = pair[1][1] - pair[0][1];
+            total_length += (dx * dx + dy * dy).sqrt();
+        }
+    }
+    Ok(json!({
+        "ok": true,
+        "strokes": core.project.strokes.len(),
+        "points": points,
+        "total_length": total_length,
+        "spray_strokes": spray_strokes,
+        "strokes_on_current_frame": stroke_count(&core.project, core.current),
+        "current_frame": core.current,
+    }))
+}
+
+/// Hardened replacement for `mcp_tools`' `draw_stroke`
+/// handler (same tool name and response shape; the integrator
+/// swaps the handler and merges the `opacity` property into
+/// the existing schema). Differences from the current
+/// handler, each deliberate:
+///
+/// * every number is finite-checked (`dops_req_points` /
+///   `dops_opt_f32`) — the current handler casts unchecked,
+///   and its `scatter < 0.0` test alone passes both NaN and
+///   +infinity through into the project;
+/// * `opacity` is settable (the current handler hard-codes
+///   1.0, so MCP could never record the translucent stroke
+///   the Pencil preset draws);
+/// * the append is one undo step (`core.snapshot()`), like
+///   the editor's own stamps — the current handler's strokes
+///   cannot be undone.
+pub fn tool_draw_stroke(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let frame = dops_req_usize(args, "frame")?;
+    dops_check_frame(core, frame)?;
+    let points = dops_req_points(args, "points")?;
+    if points.is_empty() {
+        return Err("argument 'points' must contain at least one point".into());
+    }
+    // Defaults mirror the editor's own pen: light grey, width 4.
+    let color = dops_opt_color(args, "color")?.unwrap_or(0xE8E8EC);
+    let width = dops_opt_f32(args, "width")?.unwrap_or(4.0);
+    if width <= 0.0 {
+        return Err("argument 'width' must be positive".into());
+    }
+    // Dab scatter in stage units (Wave 10): 0 (the default)
+    // draws a clean line; a positive radius jitters the
+    // stroke's dabs via paint::stroke_dabs in every renderer.
+    // Negative values are refused — the model treats them as
+    // "no scatter", and accepting one would record a lie.
+    let scatter = dops_opt_f32(args, "scatter")?.unwrap_or(0.0);
+    if scatter < 0.0 {
+        return Err("argument 'scatter' must be zero or positive".into());
+    }
+    let opacity = dops_opt_f32(args, "opacity")?.unwrap_or(1.0);
+    if !(0.0..=1.0).contains(&opacity) {
+        return Err("argument 'opacity' must be between 0 and 1".into());
+    }
+    let n_points = points.len();
+    let index = core.project.strokes.len();
+    core.snapshot();
+    core.project.strokes.push(Stroke {
+        frame,
+        points,
+        color,
+        width,
+        widths: Vec::new(),
+        fill: None,
+        spray: None,
+        opacity,
+        scatter,
+    });
+    Ok(json!({
+        "ok": true,
+        "index": index,
+        "frame": frame,
+        "points": n_points,
+        "strokes_on_frame": stroke_count(&core.project, frame),
+    }))
+}
+
+/// The Draw panel's Arrow stamp (`draw_tools`' `stamp-arrow`
+/// button, `EditorCore::stamp_arrow`) had no MCP counterpart —
+/// `draw_shape` / `draw_polygon` / `draw_star` cover the other
+/// stamps. Geometry is `paint::arrow_points`, the generator
+/// both editor paths use. One undo step, like a stamp.
+pub fn tool_draw_arrow(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let frame = dops_opt_usize(args, "frame")?.unwrap_or(core.current);
+    dops_check_frame(core, frame)?;
+    let x1 = dops_req_f32(args, "x1")?;
+    let y1 = dops_req_f32(args, "y1")?;
+    let x2 = dops_req_f32(args, "x2")?;
+    let y2 = dops_req_f32(args, "y2")?;
+    if [x1, y1] == [x2, y2] {
+        return Err("arrow tail and tip must differ (a zero-length arrow has no direction)".into());
+    }
+    // The editor's stamp head length (editor.rs `stamp_arrow`).
+    let head = dops_opt_f32(args, "head")?.unwrap_or(22.0);
+    if head <= 0.0 {
+        return Err("argument 'head' must be positive".into());
+    }
+    let color = dops_opt_color(args, "color")?.unwrap_or(0xE8E8EC);
+    let width = dops_opt_f32(args, "width")?.unwrap_or_else(|| core.active_brush().width);
+    if width <= 0.0 {
+        return Err("argument 'width' must be positive".into());
+    }
+    let points = crate::paint::arrow_points([x1, y1], [x2, y2], head);
+    let n_points = points.len();
+    let index = core.project.strokes.len();
+    core.snapshot();
+    core.project.strokes.push(Stroke {
+        frame,
+        points,
+        color,
+        width,
+        widths: Vec::new(),
+        fill: None,
+        spray: None,
+        opacity: 1.0,
+        scatter: 0.0,
+    });
+    Ok(json!({
+        "ok": true,
+        "index": index,
+        "frame": frame,
+        "points": n_points,
+        "strokes_on_frame": stroke_count(&core.project, frame),
+    }))
+}
+
+/// Per-stroke style editing: the absolute-value counterpart
+/// of the stroke panel's Width / Opacity steppers
+/// (`stroke_inspector::set_selected_stroke_width` /
+/// `set_selected_stroke_opacity`), extended to the fields the
+/// panel exposes only at draw time (`color`, `scatter`,
+/// `fill`). Panel discipline is kept:
+///
+/// * width must lie in the panel's stepper range
+///   [0.5, 40] (`MIN_STROKE_WIDTH` / `MAX_STROKE_WIDTH`
+///   there), and a per-point `widths` taper is scaled by the
+///   same new/old ratio the panel's press applies;
+/// * a spray stroke's visible opacity lives on its spray
+///   mark and its rendering never reaches `stroke_dabs`, so
+///   `opacity` and `scatter` writes to a spray stroke are
+///   refused instead of recorded as lies;
+/// * exactly one snapshot — one undo step — and only when
+///   every argument validated.
+pub fn tool_set_stroke_style(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = dops_req_usize(args, "index")?;
+    let Some(stroke) = core.project.strokes.get(index) else {
+        return Err(format!("no stroke at index {index}"));
+    };
+    let is_spray = stroke.spray.is_some();
+    let color = dops_opt_color(args, "color")?;
+    let width = dops_opt_f32(args, "width")?;
+    let opacity = dops_opt_f32(args, "opacity")?;
+    let scatter = dops_opt_f32(args, "scatter")?;
+    let fill = dops_opt_color(args, "fill")?;
+    let clear_fill = dops_opt_bool(args, "clear_fill")?.unwrap_or(false);
+    if color.is_none()
+        && width.is_none()
+        && opacity.is_none()
+        && scatter.is_none()
+        && fill.is_none()
+        && !clear_fill
+    {
+        return Err(
+            "nothing to set: pass at least one of 'color', 'width', 'opacity', \
+             'scatter', 'fill' or 'clear_fill'"
+                .into(),
+        );
+    }
+    if fill.is_some() && clear_fill {
+        return Err("pass either 'fill' or 'clear_fill', not both".into());
+    }
+    if let Some(w) = width {
+        if !(0.5..=40.0).contains(&w) {
+            return Err(
+                "argument 'width' must be between 0.5 and 40 (the stroke panel's range)".into(),
+            );
+        }
+    }
+    if let Some(o) = opacity {
+        if !(0.0..=1.0).contains(&o) {
+            return Err("argument 'opacity' must be between 0 and 1".into());
+        }
+        if is_spray {
+            return Err(format!(
+                "stroke {index} is a spray stroke: its opacity lives on its spray \
+                 mark, not on the stroke — refusing to record a value nothing renders"
+            ));
+        }
+    }
+    if let Some(sc) = scatter {
+        if sc < 0.0 {
+            return Err("argument 'scatter' must be zero or positive".into());
+        }
+        if is_spray {
+            return Err(format!(
+                "stroke {index} is a spray stroke: it renders from its spray mark \
+                 and never reaches the scatter dab path — refusing to record a \
+                 value nothing renders"
+            ));
+        }
+    }
+    let old_width = core.project.strokes[index].width;
+    core.snapshot();
+    let stroke = &mut core.project.strokes[index];
+    if let Some(c) = color {
+        stroke.color = c;
+    }
+    if let Some(w) = width {
+        stroke.width = w;
+        // The panel's taper rule: a parallel per-point profile
+        // scales by the same ratio, preserving its shape; the
+        // scaling is skipped when the old width cannot form a
+        // ratio (zero, negative or non-finite in a loaded file).
+        if old_width.is_finite() && old_width > 0.0 && !stroke.widths.is_empty() {
+            let scale = w / old_width;
+            for entry in &mut stroke.widths {
+                *entry *= scale;
+            }
+        }
+    }
+    if let Some(o) = opacity {
+        stroke.opacity = o;
+    }
+    if let Some(sc) = scatter {
+        stroke.scatter = sc;
+    }
+    if let Some(f) = fill {
+        stroke.fill = Some(f);
+    }
+    if clear_fill {
+        stroke.fill = None;
+    }
+    core.status = format!("Stroke {} style updated.", index + 1);
+    let stroke = &core.project.strokes[index];
+    Ok(json!({
+        "ok": true,
+        "status": core.status,
+        "stroke": dops_stroke_json(stroke, index, false),
+    }))
+}
+
+/// Single-stroke simplify: the stroke panel's Simplify press
+/// (`stroke_inspector::simplify_selected`, epsilon 2.0 there)
+/// for one named stroke — MCP previously had only the
+/// frame-wide `simplify_strokes`. Honesty rule from the
+/// panel: when the stroke is already simple at the epsilon,
+/// NO snapshot is taken, so the undo history never gains a
+/// step for a change that does not exist.
+pub fn tool_simplify_stroke(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = dops_req_usize(args, "index")?;
+    let epsilon = dops_opt_f32(args, "epsilon")?.unwrap_or(2.0);
+    if epsilon <= 0.0 {
+        return Err("argument 'epsilon' must be positive".into());
+    }
+    let Some(stroke) = core.project.strokes.get(index) else {
+        return Err(format!("no stroke at index {index}"));
+    };
+    let before = stroke.points.len();
+    let kept = douglas_peucker_indices(&stroke.points, epsilon);
+    if kept.len() >= before {
+        core.status = format!("Stroke {} is already simple.", index + 1);
+        return Ok(json!({
+            "ok": true,
+            "simplified": false,
+            "index": index,
+            "points": before,
+            "status": core.status,
+        }));
+    }
+    core.snapshot();
+    simplify_stroke_at(&mut core.project, index, epsilon);
+    let after = core.project.strokes[index].points.len();
+    core.status = format!("Stroke {} simplified to {} points.", index + 1, after);
+    Ok(json!({
+        "ok": true,
+        "simplified": true,
+        "index": index,
+        "points_before": before,
+        "points_after": after,
+        "status": core.status,
+    }))
+}
+
+/// Fill the most recent stroke on the current frame
+/// (`EditorCore::fill_current_stroke`): sets its `fill` to
+/// its own colour and appends the scanline fill as a
+/// companion stroke. The op reports refusal on its status
+/// line instead of returning a result; a "Nothing to fill"
+/// status is surfaced as the tool error it is.
+pub fn tool_fill_stroke(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    core.fill_current_stroke();
+    if core.status.starts_with("Nothing to fill") {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "status": core.status,
+        "frame": core.current,
+        "strokes_on_frame": stroke_count(&core.project, core.current),
+        "count": core.project.strokes.len(),
+    }))
+}
+
+/// Erase the current frame's strokes lying mostly inside a
+/// lasso polygon (`EditorCore::lasso_erase`). The op had NO
+/// caller anywhere — no shell surface and no MCP tool (the
+/// stroke inspector's module docs record exactly that) — so
+/// this tool is its first reachable surface. The op
+/// snapshots itself when it removes something; its refusal
+/// statuses surface as errors.
+pub fn tool_lasso_erase(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let poly = dops_req_points(args, "points")?;
+    if poly.len() < 3 {
+        return Err("argument 'points' must contain at least 3 points (a lasso polygon)".into());
+    }
+    let before = core.project.strokes.len();
+    core.lasso_erase(&poly);
+    if core.status.starts_with("Lasso needs") || core.status.starts_with("Lasso erased nothing") {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "status": core.status,
+        "frame": core.current,
+        "removed": before - core.project.strokes.len(),
+        "count": core.project.strokes.len(),
+    }))
+}
+
+/// Mirror the current frame's strokes across the stage's
+/// vertical centre — the Draw panel's Mirror strokes button
+/// (`EditorCore::mirror_strokes_x`, one undo step taken by
+/// the op itself). An empty frame is an error, not a
+/// silent success.
+pub fn tool_mirror_strokes(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    core.mirror_strokes_x();
+    if core.status.starts_with("No strokes to mirror") {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "status": core.status,
+        "frame": core.current,
+        "strokes_on_frame": stroke_count(&core.project, core.current),
+    }))
+}
+
+/// Clear the current frame's strokes — the stroke list
+/// header's Clear button (`EditorCore::clear_frame_drawings`).
+/// The core op takes no snapshot, so this handler takes the
+/// one undo step itself, and only when the frame actually
+/// carries strokes (the panel bulk ops' discipline: no undo
+/// step for a change that does not exist).
+pub fn tool_clear_frame_strokes(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let frame = dops_opt_usize(args, "frame")?.unwrap_or(core.current);
+    dops_check_frame(core, frame)?;
+    if frame != core.current {
+        return Err(format!(
+            "clear_frame_strokes acts on the current frame (frame {}); \
+             move the playhead to frame {} first",
+            core.current + 1,
+            frame + 1
+        ));
+    }
+    let n = stroke_count(&core.project, frame);
+    if n > 0 {
+        core.snapshot();
+    }
+    core.clear_frame_drawings();
+    Ok(json!({
+        "ok": true,
+        "status": core.status,
+        "frame": frame,
+        "cleared": n,
+        "count": core.project.strokes.len(),
+    }))
+}
+
+/// Delete every stroke in the project — the stroke panel's
+/// bulk Delete all press, whose composition
+/// (`stroke_inspector::delete_all_strokes`) is one snapshot
+/// and a clear; looping `delete_stroke` over MCP would cost
+/// one undo step (and one round trip) per stroke.
+pub fn tool_delete_all_strokes(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let n = core.project.strokes.len();
+    if n == 0 {
+        core.status = "No strokes to delete.".into();
+        return Ok(json!({
+            "ok": true,
+            "deleted": 0,
+            "status": core.status,
+        }));
+    }
+    core.snapshot();
+    core.project.strokes.clear();
+    core.status = format!("Deleted {n} stroke{}.", if n == 1 { "" } else { "s" });
+    Ok(json!({
+        "ok": true,
+        "deleted": n,
+        "status": core.status,
+    }))
+}
+
+/// Recolour strokes to an explicit colour — the stroke
+/// panel's bulk Recolour / Frame Recolour presses, except
+/// that the panel's target colour is implicit (the selected
+/// figure's colour) while an MCP caller has no selection to
+/// imply it from, so the colour is a required argument.
+/// `scope` is "frame" (the current frame, the default) or
+/// "all". One snapshot, taken only when strokes match.
+pub fn tool_recolor_strokes(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let color = dops_opt_color(args, "color")?
+        .ok_or_else(|| "missing required argument 'color'".to_string())?;
+    let scope = dops_opt_str(args, "scope")?.unwrap_or("frame");
+    if scope != "frame" && scope != "all" {
+        return Err(format!(
+            "unknown scope '{scope}' (expected \"frame\" or \"all\")"
+        ));
+    }
+    let frame = core.current;
+    let targets: Vec<usize> = core
+        .project
+        .strokes
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| scope == "all" || s.frame == frame)
+        .map(|(i, _)| i)
+        .collect();
+    let n = targets.len();
+    if n == 0 {
+        core.status = if scope == "all" {
+            "No strokes to recolour.".into()
+        } else {
+            format!("No strokes on frame {} to recolour.", frame + 1)
+        };
+        return Ok(json!({
+            "ok": true,
+            "recolored": 0,
+            "scope": scope,
+            "status": core.status,
+        }));
+    }
+    core.snapshot();
+    for i in targets {
+        core.project.strokes[i].color = color;
+    }
+    core.status = if scope == "all" {
+        format!("Recoloured {n} stroke{}.", if n == 1 { "" } else { "s" })
+    } else {
+        format!(
+            "Recoloured {n} stroke{} on frame {}.",
+            if n == 1 { "" } else { "s" },
+            frame + 1
+        )
+    };
+    Ok(json!({
+        "ok": true,
+        "recolored": n,
+        "scope": scope,
+        "status": core.status,
+    }))
+}
+
+/// The brush preset library (`paint::brush_library`) as
+/// data, with the active selection — the read side of the
+/// Draw panel's brush chips. Read-only.
+pub fn tool_list_brushes(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let lib = crate::paint::brush_library();
+    let brushes: Vec<Value> = lib
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            json!({
+                "index": i,
+                "name": b.name,
+                "width": b.width,
+                "nib": match b.nib {
+                    crate::paint::Nib::Round => "round",
+                    crate::paint::Nib::Square => "square",
+                    crate::paint::Nib::Calligraphy => "calligraphy",
+                },
+                "nib_angle": b.nib_angle,
+                "smoothing": b.smoothing,
+                "opacity": b.opacity,
+                "scatter": b.scatter,
+            })
+        })
+        .collect();
+    let active = core.active_brush();
+    Ok(json!({
+        "ok": true,
+        "count": brushes.len(),
+        "brushes": brushes,
+        "active_index": core.brush_index.min(lib.len().saturating_sub(1)),
+        "active_name": active.name,
+    }))
+}
+
+/// Select the active brush preset by `name` (exact, then
+/// case-insensitive) or `index` — the Draw panel's brush
+/// chips. The write is the panel's own: `brush_index` plus
+/// the status string `cycle_brush` sets. Selection only —
+/// nothing is drawn.
+pub fn tool_set_brush(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let lib = crate::paint::brush_library();
+    let index = if let Some(name) = dops_opt_str(args, "name")? {
+        lib.iter()
+            .position(|b| b.name == name)
+            .or_else(|| lib.iter().position(|b| b.name.eq_ignore_ascii_case(name)))
+            .ok_or_else(|| {
+                let names: Vec<&str> = lib.iter().map(|b| b.name).collect();
+                format!("unknown brush '{name}' (library: {})", names.join(", "))
+            })?
+    } else if let Some(i) = dops_opt_usize(args, "index")? {
+        if i >= lib.len() {
+            return Err(format!(
+                "brush index {i} out of range (library has {} brushes)",
+                lib.len()
+            ));
+        }
+        i
+    } else {
+        return Err("pass 'name' or 'index' to select a brush".into());
+    };
+    core.brush_index = index;
+    let b = lib[index];
+    core.status = format!("Brush: {} (width {:.0}).", b.name, b.width);
+    Ok(json!({
+        "ok": true,
+        "index": index,
+        "name": b.name,
+        "status": core.status,
+    }))
+}
+
+/// Cycle to the next brush preset, wrapping — the Draw
+/// panel's brush-cycle button (`EditorCore::cycle_brush`).
+pub fn tool_cycle_brush(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    core.cycle_brush();
+    Ok(json!({
+        "ok": true,
+        "index": core.brush_index,
+        "name": core.active_brush().name,
+        "status": core.status,
+    }))
+}
+
+/// Set the active draw tool — the Draw panel's tool toggle
+/// (`EditorCore::toggle_draw_tool` flips; this sets, so an
+/// MCP caller can state the tool it wants idempotently).
+/// Affects subsequent interactive drawing and the eraser's
+/// sizing only; it draws nothing itself.
+pub fn tool_set_draw_tool(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let tool = dops_opt_str(args, "tool")?
+        .ok_or_else(|| "missing required argument 'tool'".to_string())?;
+    match tool {
+        "brush" => {
+            core.draw_tool = crate::editor::DrawTool::Brush;
+            core.status = format!("Draw tool: Brush ({}).", core.active_brush().name);
+        }
+        "eraser" => {
+            core.draw_tool = crate::editor::DrawTool::Eraser;
+            core.status = "Draw tool: Eraser.".into();
+        }
+        other => {
+            return Err(format!(
+                "unknown draw tool '{other}' (expected \"brush\" or \"eraser\")"
+            ));
+        }
+    }
+    Ok(json!({
+        "ok": true,
+        "tool": tool,
+        "status": core.status,
+    }))
 }
 
 #[cfg(test)]
@@ -1025,5 +1820,321 @@ mod simplify_at_tests {
             }),
             "the spray mark itself is untouched"
         );
+    }
+}
+
+#[cfg(test)]
+mod mcp_handler_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn draw_line(core: &mut EditorCore, scatter: f32) -> Value {
+        tool_draw_stroke(
+            core,
+            &json!({
+                "frame": 0,
+                "points": [[0.0, 0.0], [40.0, 0.0], [80.0, 0.0]],
+                "scatter": scatter,
+            }),
+        )
+        .expect("draw_stroke succeeds")
+    }
+
+    #[test]
+    fn draw_stroke_records_scatter_and_the_dabs_follow() {
+        let mut core = EditorCore::new();
+        let out = draw_line(&mut core, 5.0);
+        assert_eq!(out["index"], 0);
+        let stroke = &core.project.strokes[0];
+        assert_eq!(stroke.scatter, 5.0);
+        // The placements every renderer uses displace at
+        // least one dab off the unscattered resample.
+        let dabs = crate::paint::stroke_dabs(
+            stroke,
+            0,
+            crate::paint::stroke_dab_spacing(stroke),
+        );
+        let plain = crate::paint::resample(&stroke.points, crate::paint::stroke_dab_spacing(stroke));
+        assert_eq!(dabs.len(), plain.len());
+        assert!(dabs != plain, "scatter 5 must move dabs: {dabs:?}");
+        assert!(
+            dabs.iter().all(|p| p[0].is_finite() && p[1].is_finite()),
+            "dab positions stay finite"
+        );
+    }
+
+    #[test]
+    fn draw_stroke_refuses_negative_scatter_and_bad_width() {
+        let mut core = EditorCore::new();
+        let err = tool_draw_stroke(
+            &mut core,
+            &json!({"frame": 0, "points": [[0.0, 0.0]], "scatter": -1.0}),
+        )
+        .unwrap_err();
+        assert!(err.contains("scatter"), "{err}");
+        let err = tool_draw_stroke(
+            &mut core,
+            &json!({"frame": 0, "points": [[0.0, 0.0]], "width": 0.0}),
+        )
+        .unwrap_err();
+        assert!(err.contains("width"), "{err}");
+        assert!(core.project.strokes.is_empty(), "refusals record nothing");
+    }
+
+    #[test]
+    fn draw_stroke_refuses_non_finite_numbers() {
+        // `1e999` overflows f64 on the way in; if the JSON
+        // parser itself refuses it, the value can never reach
+        // a handler and there is nothing to prove here.
+        let Ok(args) = serde_json::from_str::<Value>(
+            "{\"frame\": 0, \"points\": [[0.0, 0.0], [10.0, 0.0]], \"scatter\": 1e999}",
+        ) else {
+            return;
+        };
+        if args["scatter"].as_f64().map(|f| f.is_finite()).unwrap_or(true) {
+            return; // parser normalised it away; nothing reaches the handler
+        }
+        let mut core = EditorCore::new();
+        let err = tool_draw_stroke(&mut core, &args).unwrap_err();
+        assert!(err.contains("finite"), "{err}");
+        assert!(core.project.strokes.is_empty());
+
+        let Ok(args) = serde_json::from_str::<Value>(
+            "{\"frame\": 0, \"points\": [[1e999, 0.0], [10.0, 0.0]]}",
+        ) else {
+            return;
+        };
+        if args["points"][0][0]
+            .as_f64()
+            .map(|f| f.is_finite())
+            .unwrap_or(true)
+        {
+            return;
+        }
+        let err = tool_draw_stroke(&mut core, &args).unwrap_err();
+        assert!(err.contains("finite"), "{err}");
+        assert!(core.project.strokes.is_empty());
+    }
+
+    #[test]
+    fn list_strokes_reports_every_field_and_filters_by_frame() {
+        let mut core = EditorCore::new();
+        draw_line(&mut core, 3.0);
+        let out = tool_list_strokes(&mut core, &json!({})).unwrap();
+        assert_eq!(out["count"], 1);
+        let s = &out["strokes"][0];
+        assert_eq!(s["index"], 0);
+        assert_eq!(s["frame"], 0);
+        assert_eq!(s["points"], 3, "count travels when points are not requested");
+        assert_eq!(s["scatter"], 3.0);
+        assert_eq!(s["opacity"], 1.0);
+        assert!(s["spray"].is_null());
+        let out = tool_list_strokes(&mut core, &json!({"points": true})).unwrap();
+        assert_eq!(out["strokes"][0]["points"][1], json!([40.0, 0.0]));
+        let out = tool_list_strokes(&mut core, &json!({"frame": 1})).unwrap();
+        assert_eq!(out["count"], 0);
+        assert_eq!(out["total"], 1);
+    }
+
+    #[test]
+    fn set_stroke_style_sets_fields_and_scales_the_taper() {
+        let mut core = EditorCore::new();
+        draw_line(&mut core, 0.0);
+        core.project.strokes[0].widths = vec![4.0, 4.0, 4.0];
+        let out = tool_set_stroke_style(
+            &mut core,
+            &json!({"index": 0, "color": 0xFF0000u32, "width": 8.0, "opacity": 0.5, "scatter": 2.0, "fill": 0x00FF00u32}),
+        )
+        .unwrap();
+        let stroke = &core.project.strokes[0];
+        assert_eq!(stroke.color, 0xFF0000);
+        assert_eq!(stroke.width, 8.0);
+        assert_eq!(stroke.widths, vec![8.0, 8.0, 8.0], "taper scales by the ratio");
+        assert_eq!(stroke.opacity, 0.5);
+        assert_eq!(stroke.scatter, 2.0);
+        assert_eq!(stroke.fill, Some(0x00FF00));
+        assert_eq!(out["stroke"]["width"], 8.0);
+        // And clear_fill removes it again.
+        tool_set_stroke_style(&mut core, &json!({"index": 0, "clear_fill": true})).unwrap();
+        assert_eq!(core.project.strokes[0].fill, None);
+    }
+
+    #[test]
+    fn set_stroke_style_refuses_lies() {
+        let mut core = EditorCore::new();
+        draw_line(&mut core, 0.0);
+        // Width outside the panel's range.
+        assert!(tool_set_stroke_style(&mut core, &json!({"index": 0, "width": 41.0})).is_err());
+        assert!(tool_set_stroke_style(&mut core, &json!({"index": 0, "width": 0.1})).is_err());
+        // Nothing to set.
+        assert!(tool_set_stroke_style(&mut core, &json!({"index": 0})).is_err());
+        // Bad index.
+        assert!(tool_set_stroke_style(&mut core, &json!({"index": 9, "width": 4.0})).is_err());
+        // A spray stroke's opacity/scatter live elsewhere.
+        core.project.strokes[0].spray = Some(crate::model::SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        });
+        let err = tool_set_stroke_style(&mut core, &json!({"index": 0, "opacity": 0.5}))
+            .unwrap_err();
+        assert!(err.contains("spray"), "{err}");
+        let err = tool_set_stroke_style(&mut core, &json!({"index": 0, "scatter": 2.0}))
+            .unwrap_err();
+        assert!(err.contains("spray"), "{err}");
+        // But its colour and width remain editable.
+        assert!(tool_set_stroke_style(&mut core, &json!({"index": 0, "color": 1u32})).is_ok());
+    }
+
+    #[test]
+    fn simplify_stroke_reduces_and_stays_honest_when_already_simple() {
+        let mut core = EditorCore::new();
+        tool_draw_stroke(
+            &mut core,
+            &json!({
+                "frame": 0,
+                "points": [[0.0, 0.0], [10.0, 0.4], [20.0, -0.3], [30.0, 0.2], [40.0, 0.0]],
+            }),
+        )
+        .unwrap();
+        let undo_before = core.undo_depth();
+        let out = tool_simplify_stroke(&mut core, &json!({"index": 0, "epsilon": 1.0})).unwrap();
+        assert_eq!(out["simplified"], true);
+        assert_eq!(core.project.strokes[0].points.len(), 2);
+        assert_eq!(core.undo_depth(), undo_before + 1, "one undo step");
+        // Already simple now: no further snapshot.
+        let out = tool_simplify_stroke(&mut core, &json!({"index": 0, "epsilon": 1.0})).unwrap();
+        assert_eq!(out["simplified"], false);
+        assert_eq!(core.undo_depth(), undo_before + 1, "no phantom undo step");
+    }
+
+    #[test]
+    fn draw_arrow_stamps_the_paint_geometry_and_refuses_degenerate() {
+        let mut core = EditorCore::new();
+        let out = tool_draw_arrow(
+            &mut core,
+            &json!({"x1": 10.0, "y1": 20.0, "x2": 110.0, "y2": 20.0}),
+        )
+        .unwrap();
+        assert_eq!(out["points"], 5);
+        assert_eq!(
+            core.project.strokes[0].points,
+            crate::paint::arrow_points([10.0, 20.0], [110.0, 20.0], 22.0),
+            "the paint generator's points, exactly"
+        );
+        let err = tool_draw_arrow(
+            &mut core,
+            &json!({"x1": 5.0, "y1": 5.0, "x2": 5.0, "y2": 5.0}),
+        )
+        .unwrap_err();
+        assert!(err.contains("differ"), "{err}");
+    }
+
+    #[test]
+    fn fill_stroke_fills_the_latest_closed_stroke() {
+        let mut core = EditorCore::new();
+        let err = tool_fill_stroke(&mut core, &json!({})).unwrap_err();
+        assert!(err.contains("Nothing to fill"), "{err}");
+        tool_draw_stroke(
+            &mut core,
+            &json!({
+                "frame": 0,
+                "points": [[0.0, 0.0], [100.0, 0.0], [50.0, 80.0], [0.0, 0.0]],
+            }),
+        )
+        .unwrap();
+        let out = tool_fill_stroke(&mut core, &json!({})).unwrap();
+        assert_eq!(out["ok"], true);
+        assert_eq!(core.project.strokes[0].fill, Some(core.project.strokes[0].color));
+        assert_eq!(core.project.strokes.len(), 2, "the scanline companion was appended");
+    }
+
+    #[test]
+    fn lasso_erase_removes_mostly_inside_strokes_only() {
+        let mut core = EditorCore::new();
+        draw_line(&mut core, 0.0);
+        let out = tool_lasso_erase(
+            &mut core,
+            &json!({"points": [[-10.0, -10.0], [200.0, -10.0], [200.0, 200.0], [-10.0, 200.0]]}),
+        )
+        .unwrap();
+        assert_eq!(out["removed"], 1);
+        assert!(core.project.strokes.is_empty());
+        let err = tool_lasso_erase(
+            &mut core,
+            &json!({"points": [[0.0, 0.0], [1.0, 1.0]]}),
+        )
+        .unwrap_err();
+        assert!(err.contains("at least 3"), "{err}");
+    }
+
+    #[test]
+    fn mirror_recolor_clear_and_delete_all_compose() {
+        let mut core = EditorCore::new();
+        let err = tool_mirror_strokes(&mut core, &json!({})).unwrap_err();
+        assert!(err.contains("No strokes to mirror"), "{err}");
+        draw_line(&mut core, 0.0);
+        let cx = core.project.stage[0];
+        tool_mirror_strokes(&mut core, &json!({})).unwrap();
+        assert_eq!(core.project.strokes[0].points[0], [cx - 0.0, 0.0]);
+        assert_eq!(core.project.strokes[0].points[2], [cx - 80.0, 0.0]);
+
+        let out = tool_recolor_strokes(&mut core, &json!({"color": 0x112233u32})).unwrap();
+        assert_eq!(out["recolored"], 1);
+        assert_eq!(core.project.strokes[0].color, 0x112233);
+
+        let out = tool_clear_frame_strokes(&mut core, &json!({})).unwrap();
+        assert_eq!(out["cleared"], 1);
+        assert!(core.project.strokes.is_empty());
+
+        draw_line(&mut core, 0.0);
+        let out = tool_delete_all_strokes(&mut core, &json!({})).unwrap();
+        assert_eq!(out["deleted"], 1);
+        let out = tool_delete_all_strokes(&mut core, &json!({})).unwrap();
+        assert_eq!(out["deleted"], 0);
+    }
+
+    #[test]
+    fn brush_tools_list_select_and_cycle() {
+        let mut core = EditorCore::new();
+        let out = tool_list_brushes(&mut core, &json!({})).unwrap();
+        assert_eq!(out["count"], 10);
+        assert_eq!(out["active_name"], "Pen");
+        let out = tool_set_brush(&mut core, &json!({"name": "spray"})).unwrap();
+        assert_eq!(out["index"], 9);
+        assert_eq!(core.active_brush().name, "Spray");
+        let out = tool_cycle_brush(&mut core, &json!({})).unwrap();
+        assert_eq!(out["index"], 0, "cycle wraps past the last preset");
+        assert!(tool_set_brush(&mut core, &json!({"name": "Nope"})).is_err());
+        assert!(tool_set_brush(&mut core, &json!({"index": 99})).is_err());
+        assert!(tool_set_brush(&mut core, &json!({})).is_err());
+    }
+
+    #[test]
+    fn draw_tool_selection_sets_and_reports() {
+        let mut core = EditorCore::new();
+        let out = tool_set_draw_tool(&mut core, &json!({"tool": "eraser"})).unwrap();
+        assert_eq!(out["status"], "Draw tool: Eraser.");
+        assert!(core.draw_tool_is_eraser());
+        let out = tool_set_draw_tool(&mut core, &json!({"tool": "brush"})).unwrap();
+        assert!(out["status"].as_str().unwrap().starts_with("Draw tool: Brush"));
+        assert!(tool_set_draw_tool(&mut core, &json!({"tool": "laser"})).is_err());
+    }
+
+    #[test]
+    fn drawing_stats_counts_strokes_points_and_spray() {
+        let mut core = EditorCore::new();
+        draw_line(&mut core, 0.0);
+        core.project.strokes[0].spray = Some(crate::model::SprayMark {
+            seed: 1,
+            radius: 6.0,
+            opacity: 1.0,
+        });
+        let out = tool_get_drawing_stats(&mut core, &json!({})).unwrap();
+        assert_eq!(out["strokes"], 1);
+        assert_eq!(out["points"], 3);
+        assert_eq!(out["total_length"], 80.0);
+        assert_eq!(out["spray_strokes"], 1);
+        assert_eq!(out["strokes_on_current_frame"], 1);
     }
 }

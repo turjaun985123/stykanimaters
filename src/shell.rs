@@ -20,7 +20,20 @@
 //! timeline collapse, sidebar visibility, column widths)
 //! so the app shell can restore them on startup. New
 //! fields are added with serde defaults so older
-//! `.layout.json` files keep loading.
+//! `.layout.json` files keep loading. A file the
+//! whole-struct parse rejects is salvaged field by field
+//! ([`salvage_layout`]): one mistyped value loses only
+//! its own field, never every other preference with it.
+//!
+//! The module also keeps the session's live-MCP start
+//! record ([`LiveMcpStartOutcome`]): whether the most
+//! recent attempt to start the editor-hosted MCP bridge
+//! actually got it listening. The bridge module reports
+//! start failure as a bare `false` and keeps no reason,
+//! so without this record a failed start (in practice:
+//! another editor instance already holds the port) is
+//! invisible everywhere except the settings toggle's
+//! position.
 //!
 //! Every write in this module goes through the same
 //! atomic replace ([`write_file_atomic`]): the new
@@ -38,7 +51,7 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::SystemTime;
 
 /// File name of the recovery snapshot inside the projects dir.
@@ -426,8 +439,10 @@ impl Default for LayoutPrefs {
 }
 
 /// Load the layout preferences from `./projects/.layout.json`.
-/// A missing or corrupt file yields the default preferences —
-/// a broken prefs file must never block startup.
+/// A missing file yields the default preferences, and a
+/// corrupt one is salvaged field by field (see
+/// [`load_layout_in`]) — a broken prefs file must never
+/// block startup.
 pub fn load_layout() -> LayoutPrefs {
     load_layout_in(&default_dir())
 }
@@ -449,12 +464,64 @@ pub fn load_layout_in(dir: &Path) -> LayoutPrefs {
     let Ok(text) = std::fs::read_to_string(dir.join(LAYOUT_FILE)) else {
         return LayoutPrefs::default();
     };
-    let mut prefs: LayoutPrefs = serde_json::from_str(&text).unwrap_or_default();
+    let mut prefs: LayoutPrefs = serde_json::from_str(&text)
+        .unwrap_or_else(|_| salvage_layout(&text));
     prefs.col_left_w =
         clamp_col_width(prefs.col_left_w, default_col_left_w(), 220.0, 420.0);
     prefs.col_right_w =
         clamp_col_width(prefs.col_right_w, default_col_right_w(), 260.0, 480.0);
     prefs
+}
+
+/// Field-by-field salvage for a `.layout.json` the
+/// whole-struct parse rejected.
+///
+/// Serde's struct parse is all-or-nothing: one field
+/// with a mistyped value (a hand edit's `"dark": "yes"`,
+/// a `"live_mcp"` written as a string) fails the whole
+/// document, and the loader used to fall back to the
+/// full default — silently resetting *every* preference,
+/// and worse, the shell's load-modify-save writers (the
+/// settings toggles, the workspace switch, palette
+/// recents) would then cement that reset back to disk on
+/// their next save. The salvage pass instead re-reads
+/// the document as untyped JSON and adopts each field
+/// that individually deserialises to its declared type,
+/// defaulting only the fields that do not. A document
+/// that is not JSON at all, or not a JSON object, has
+/// nothing salvageable and still yields the full
+/// default. Only ever called after the strict parse
+/// failed, so a well-formed file's behaviour is
+/// unchanged — including its serde-default handling of
+/// fields the file predates.
+fn salvage_layout(text: &str) -> LayoutPrefs {
+    let defaults = LayoutPrefs::default();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return defaults;
+    };
+    let Some(obj) = value.as_object() else {
+        return defaults;
+    };
+    fn field<T: serde::de::DeserializeOwned>(
+        obj: &serde_json::Map<String, serde_json::Value>,
+        key: &str,
+    ) -> Option<T> {
+        obj.get(key)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+    LayoutPrefs {
+        workspace: field(obj, "workspace").unwrap_or(defaults.workspace),
+        dark: field(obj, "dark").unwrap_or(defaults.dark),
+        timeline_collapsed: field(obj, "timeline_collapsed")
+            .unwrap_or(defaults.timeline_collapsed),
+        sidebar_visible: field(obj, "sidebar_visible")
+            .unwrap_or(defaults.sidebar_visible),
+        palette_recents: field(obj, "palette_recents")
+            .unwrap_or(defaults.palette_recents),
+        live_mcp: field(obj, "live_mcp").unwrap_or(defaults.live_mcp),
+        col_left_w: field(obj, "col_left_w").unwrap_or(defaults.col_left_w),
+        col_right_w: field(obj, "col_right_w").unwrap_or(defaults.col_right_w),
+    }
 }
 
 /// Save the layout preferences to `./projects/.layout.json`.
@@ -480,6 +547,95 @@ pub fn save_layout_in(dir: &Path, prefs: &LayoutPrefs) {
             let _ = write_file_atomic(&dir.join(LAYOUT_FILE), &text);
         }
     }
+}
+
+// ---- Live MCP start record ----
+
+/// The outcome of the most recent attempt to start (or
+/// stop) the live-MCP bridge, as recorded by
+/// [`note_live_mcp_start`].
+///
+/// Why this exists: the bridge module's start API reports
+/// failure as a bare `false` and keeps no reason — the
+/// bind error is swallowed at the start call — so when a
+/// start fails (in practice: another editor instance
+/// already holds port 32117) the only trace anywhere is
+/// the settings toggle sitting in the off position, and
+/// the persisted preference still says "on". That makes a
+/// port-busy startup indistinguishable from a user who
+/// turned live control off. This record is the shell-side
+/// fact a settings surface (or a future status line) can
+/// read to say *which* happened. It is session state,
+/// deliberately not persisted: the preference already
+/// records the user's wish across restarts, and each
+/// launch makes a fresh attempt with a fresh outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveMcpStartOutcome {
+    /// No start was attempted yet this session (the
+    /// preference was off at launch, or nothing has
+    /// touched the toggle).
+    NotAttempted,
+    /// The last start attempt succeeded — the bridge is
+    /// listening. (The bridge's own enabled flag remains
+    /// the live truth; this records the attempt's result
+    /// at the moment it was made.)
+    Listening,
+    /// The last start attempt failed — the bridge did
+    /// not come up. The start API does not say why; a
+    /// port already held by another editor instance is
+    /// the known cause.
+    FailedToStart,
+    /// Live control was on and the last action stopped
+    /// it deliberately — distinct from `FailedToStart`,
+    /// so a stale failure is never presented after a
+    /// deliberate stop.
+    Stopped,
+}
+
+/// Backing store for the start record: the outcome's
+/// discriminant as a byte (`WRITE_TMP_SEQ`'s atomic
+/// idiom — the record is written from press handlers and
+/// read from view code, and must never need a lock).
+static LIVE_MCP_START_OUTCOME: AtomicU8 = AtomicU8::new(0);
+
+impl LiveMcpStartOutcome {
+    fn to_byte(self) -> u8 {
+        match self {
+            LiveMcpStartOutcome::NotAttempted => 0,
+            LiveMcpStartOutcome::Listening => 1,
+            LiveMcpStartOutcome::FailedToStart => 2,
+            LiveMcpStartOutcome::Stopped => 3,
+        }
+    }
+
+    fn from_byte(byte: u8) -> LiveMcpStartOutcome {
+        match byte {
+            1 => LiveMcpStartOutcome::Listening,
+            2 => LiveMcpStartOutcome::FailedToStart,
+            3 => LiveMcpStartOutcome::Stopped,
+            // 0, and anything unexpected, is "no attempt
+            // recorded" — the record must never invent an
+            // outcome.
+            _ => LiveMcpStartOutcome::NotAttempted,
+        }
+    }
+}
+
+/// Record the outcome of a live-MCP start/stop attempt.
+/// Callers are the shell's bridge touch-points (startup
+/// init, the settings toggle): each attempt notes its
+/// RESULTING state, the same discipline the toggle uses
+/// when persisting `LayoutPrefs.live_mcp`.
+pub fn note_live_mcp_start(outcome: LiveMcpStartOutcome) {
+    LIVE_MCP_START_OUTCOME.store(outcome.to_byte(), Ordering::SeqCst);
+}
+
+/// The recorded outcome of the most recent live-MCP
+/// start/stop attempt this session
+/// ([`LiveMcpStartOutcome::NotAttempted`] until the
+/// first one is noted).
+pub fn live_mcp_start_outcome() -> LiveMcpStartOutcome {
+    LiveMcpStartOutcome::from_byte(LIVE_MCP_START_OUTCOME.load(Ordering::SeqCst))
 }
 
 // ---- Command-palette recents ----
@@ -1115,5 +1271,79 @@ mod tests {
             .expect_err("a missing file must be an error");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_one_bad_field_does_not_reset_the_others() {
+        let dir = temp_dir("layout-salvage");
+        // A hand-edited file with two mistyped values
+        // (`sidebar_visible` and `live_mcp` as strings)
+        // among valid ones. The whole-struct parse
+        // rejects this document outright; before the
+        // salvage pass the load fell back to the FULL
+        // default, silently resetting the workspace,
+        // theme and widths along with the bad fields —
+        // and a load-modify-save writer (a settings
+        // toggle, a workspace switch) would then cement
+        // that reset back to disk.
+        std::fs::write(
+            dir.join(LAYOUT_FILE),
+            "{\"workspace\":\"Draw\",\"dark\":false,\
+             \"timeline_collapsed\":true,\"sidebar_visible\":\"yes\",\
+             \"live_mcp\":\"off\",\"col_left_w\":252.0}",
+        )
+        .unwrap();
+        let prefs = load_layout_in(&dir);
+        // Every valid field survives...
+        assert_eq!(prefs.workspace, "Draw");
+        assert!(!prefs.dark);
+        assert!(prefs.timeline_collapsed);
+        assert_eq!(prefs.col_left_w, 252.0);
+        // ...and only the mistyped fields take defaults.
+        assert!(prefs.sidebar_visible, "mistyped bool defaults on");
+        assert!(prefs.live_mcp, "mistyped bool defaults on");
+        // A missing required field is salvaged the same
+        // way: `dark` alone keeps its value instead of
+        // condemning the file.
+        std::fs::write(dir.join(LAYOUT_FILE), "{\"dark\":false}").unwrap();
+        let prefs = load_layout_in(&dir);
+        assert!(!prefs.dark);
+        assert_eq!(prefs.workspace, "Animate", "missing field defaults");
+        // But a document that is not a JSON object still
+        // has nothing to salvage.
+        std::fs::write(dir.join(LAYOUT_FILE), "[1, 2, 3]").unwrap();
+        assert_eq!(load_layout_in(&dir), LayoutPrefs::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_mcp_start_outcome_records_each_attempt() {
+        // The record is one process-wide atomic; this is
+        // the only test that touches it, and its writes
+        // are sequential, so no cross-test coordination
+        // is needed. (The value a fresh process starts
+        // with is NotAttempted by construction — the
+        // static's initial byte is 0 — which the first
+        // assertion relies on only if no earlier code in
+        // this process noted an outcome; nothing in the
+        // library does, by design: noting is the shell
+        // glue's job.)
+        assert_eq!(
+            live_mcp_start_outcome(),
+            LiveMcpStartOutcome::NotAttempted
+        );
+        note_live_mcp_start(LiveMcpStartOutcome::FailedToStart);
+        assert_eq!(
+            live_mcp_start_outcome(),
+            LiveMcpStartOutcome::FailedToStart
+        );
+        // A later successful attempt replaces the failure
+        // — the record always names the MOST RECENT one.
+        note_live_mcp_start(LiveMcpStartOutcome::Listening);
+        assert_eq!(live_mcp_start_outcome(), LiveMcpStartOutcome::Listening);
+        // And a deliberate stop clears the stage for a
+        // truthful "off" instead of a stale outcome.
+        note_live_mcp_start(LiveMcpStartOutcome::Stopped);
+        assert_eq!(live_mcp_start_outcome(), LiveMcpStartOutcome::Stopped);
     }
 }

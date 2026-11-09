@@ -7,13 +7,28 @@
 //! targets; the `jpeg`/`svg` render formats treat `path` as a
 //! directory and create it). Handlers never panic: every failure
 //! is a descriptive `Err(String)` the agent can act on.
+//!
+//! Wave 11 (A5): two parity/atomicity passes over this file.
+//! Writes the tools perform themselves go through
+//! [`write_atomic`] (temp sibling + rename), so a failed save
+//! never truncates an existing project file. And the project
+//! swaps below mirror the editor's own session bookkeeping per
+//! format — `note_project_swapped` where the editor calls it,
+//! a pre-swap `snapshot()` where the editor snapshots — see
+//! [`replace_project`] and the per-format notes in
+//! `tool_import_file`. Two editor bookkeeping steps have no
+//! public API and stay integrator items: clearing the undo
+//! history on a `.piv` import (editor.rs `import_piv` clears
+//! both stacks; the stacks are private) and refreshing
+//! `core.project_files` after a save (editor.rs
+//! `list_project_files` is private).
 
 use crate::editor::EditorCore;
 use crate::mcp::Tool;
 use crate::model::Project;
 use image::{ImageBuffer, Rgb};
 use serde_json::{json, Value};
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 use std::path::Path;
 
 /// Palette the editor cycles through for figures added by import
@@ -65,8 +80,77 @@ fn ensure_parent(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A sibling temp path for an atomic write to `path`: same
+/// directory (so the rename never crosses filesystems), same
+/// extension (so writers that infer format from the extension
+/// behave identically), and a process-unique marker so two
+/// saves in one process can never collide.
+fn temp_sibling(path: &Path) -> std::path::PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "out".to_string());
+    let marker = format!("{stem}.tmp-{}", std::process::id());
+    match path.extension() {
+        Some(ext) => path.with_file_name(format!("{marker}.{}", ext.to_string_lossy())),
+        None => path.with_file_name(marker),
+    }
+}
+
+/// Move a fully written temp file over its target. On Unix the
+/// rename replaces atomically; the remove-then-rename fallback
+/// only runs where rename refuses an existing target
+/// (Windows), where a direct overwrite was never atomic anyway.
+fn rename_over(tmp: &Path, path: &Path) -> Result<(), String> {
+    match std::fs::rename(tmp, path) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            if path.exists() {
+                let _ = std::fs::remove_file(path);
+                std::fs::rename(tmp, path).map_err(|e| {
+                    let _ = std::fs::remove_file(tmp);
+                    format!("could not write {}: {e}", path.display())
+                })
+            } else {
+                let _ = std::fs::remove_file(tmp);
+                Err(format!("could not write {}: {first}", path.display()))
+            }
+        }
+    }
+}
+
+/// Write `bytes` to `path` atomically: serialise to a temp
+/// sibling, flush it to disk, then rename it over the target.
+/// Any failure leaves a pre-existing target byte-for-byte
+/// intact and no temp file behind — a crashed or failed save
+/// can never truncate the user's only copy of a project. (The
+/// editor's own `save_named_project_to` writes in place, so
+/// this is strictly stronger than the GUI's save; the export
+/// and render writers inside export.rs keep their own write
+/// paths and are out of this file's reach.)
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = temp_sibling(path);
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("could not write {}: {e}", path.display()));
+    }
+    rename_over(&tmp, path)
+}
+
 /// Replace the session project and reset selection/playhead the
-/// same way the editor does when it opens a project file.
+/// same way the editor does when it opens a project file. The
+/// two wrappers below add the per-path session bookkeeping the
+/// editor pairs with the swap; callers pick the one matching
+/// their editor analogue. (The editor also leaves `solo` reset
+/// and the playhead rewound in every swap path — both are done
+/// here.)
 fn replace_project(core: &mut EditorCore, project: Project) {
     core.project = project;
     core.current = 0;
@@ -74,6 +158,35 @@ fn replace_project(core: &mut EditorCore, project: Project) {
     core.selected_figure = 0;
     core.selected_node = None;
     core.solo = None;
+    // Wave 11 (E9): count the swap and repair the clip-edit
+    // session against the new project — the GUI shell's poll
+    // watches the counter to drop stale shell-side selection
+    // state after an MCP-driven swap.
+    core.note_project_replaced();
+}
+
+/// The swap as an OPEN: mirrors `EditorCore::open_project_file` /
+/// `open_via_dialog` — the dirty baseline restarts with the
+/// newly opened project (`note_project_swapped`, so the session
+/// no longer reads dirty for the previous project's unsaved
+/// edits) and the status line names the file, which is also how
+/// a live-control user sees that MCP replaced their project.
+/// Like the editor's open, the undo history is left in place.
+fn replace_project_open(core: &mut EditorCore, project: Project, path: &str) {
+    replace_project(core, project);
+    core.note_project_swapped();
+    core.status = format!("Opened {path}");
+}
+
+/// The swap as a `.piv` IMPORT: mirrors `EditorCore::import_piv`
+/// — same baseline restart, same status wording, and the same
+/// undo-history clear (`EditorCore::clear_history`, added for
+/// exactly this parity in Wave 11).
+fn replace_project_import(core: &mut EditorCore, project: Project, path: &str) {
+    replace_project(core, project);
+    core.clear_history();
+    core.note_project_swapped();
+    core.status = format!("Imported {path}");
 }
 
 fn summary(core: &EditorCore) -> Value {
@@ -103,7 +216,22 @@ fn tool_save_project(core: &mut EditorCore, args: &Value) -> Result<Value, Strin
     ensure_parent(path)?;
     let text = serde_json::to_string_pretty(&core.project)
         .map_err(|e| format!("could not serialise project: {e}"))?;
-    std::fs::write(path, &text).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    // Atomic: a failed save never truncates an existing file.
+    write_atomic(path, text.as_bytes())?;
+    // Save bookkeeping, mirroring `save_named_project_to`'s
+    // success arm: the saved state IS the dirty baseline, so
+    // the session stops reading dirty for work that is on
+    // disk, and the status line names the file (how a
+    // live-control user sees the save). The core exposes no
+    // save-baseline setter — `note_project_swapped` zeroes
+    // both edit counters, which is observably identical here
+    // because every reader of the counters
+    // (`edits_since_autosave`, the autosave threshold) is
+    // difference-based. The one editor step not mirrored is
+    // the `project_files` refresh: `list_project_files` is
+    // private (Wave 11 A5 integrator item).
+    core.note_project_swapped();
+    core.status = format!("Project saved to {}", path.display());
     Ok(json!({
         "path": path.display().to_string(),
         "bytes": text.len(),
@@ -116,7 +244,13 @@ fn tool_load_project(core: &mut EditorCore, args: &Value) -> Result<Value, Strin
     let text = std::fs::read_to_string(&path).map_err(|e| format!("could not read {path}: {e}"))?;
     let project: Project = serde_json::from_str(&text)
         .map_err(|e| format!("{path} is not a valid project JSON: {e}"))?;
-    replace_project(core, project);
+    replace_project_open(core, project, &path);
+    // Wave 11 (E9): point the file selector at the opened file
+    // and record the open in the recents list, as a GUI open
+    // does — without these, Home's current-marking and Reopen
+    // suppression lied after every MCP load.
+    core.note_project_loaded(Path::new(&path));
+    crate::shell::touch_recent(&core.project.name);
     let mut out = summary(core);
     out["path"] = json!(path);
     Ok(out)
@@ -134,38 +268,63 @@ fn tool_import_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
         .unwrap_or("")
         .to_ascii_lowercase();
     let bytes = std::fs::read(&path).map_err(|e| format!("could not read {path}: {e}"))?;
+    // Per-format session bookkeeping mirrors the editor's own
+    // import op for that format (Wave 11 A5 parity pass):
+    // `import_piv` restarts the dirty baseline, the Stick
+    // Nodes imports snapshot first so the import is a single
+    // undoable edit, and `.json` is an open, not an import.
     match ext.as_str() {
         "piv" => {
             let project = crate::pivot::import_piv(&bytes)?;
-            replace_project(core, project);
+            replace_project_import(core, project, &path);
+            core.note_project_loaded(Path::new(&path));
+            crate::shell::touch_recent(&core.project.name);
         }
         "nodemc" | "stknds" => {
             let project = crate::nodes_anim::import_nodes_animation(&bytes)?;
+            // editor.rs `import_nodes_anim_file`: snapshot
+            // first (the swap is one undo step), no baseline
+            // restart — the snapshot counts as an edit.
+            core.snapshot();
             replace_project(core, project);
+            core.status = format!("Imported {path}.");
         }
         "nodes" => {
             // nodes::import_nodes wraps import_nodes_figure into a
-            // one-figure project, exactly as the editor imports it.
+            // one-figure project, exactly as the editor imports it
+            // (`import_nodes_file`: snapshot first, same rule as
+            // the animation import above).
             let project = crate::nodes::import_nodes(&bytes)?;
+            core.snapshot();
             replace_project(core, project);
+            core.status = format!("Imported {path} as a figure.");
         }
         "json" => {
             let text =
                 String::from_utf8(bytes).map_err(|_| format!("{path} is not valid UTF-8 JSON"))?;
             let project: Project = serde_json::from_str(&text)
                 .map_err(|e| format!("{path} is not a valid project JSON: {e}"))?;
-            replace_project(core, project);
+            replace_project_open(core, project, &path);
+            core.note_project_loaded(Path::new(&path));
+            crate::shell::touch_recent(&core.project.name);
         }
         "stk" => {
             // A .stk is a single figure: like the editor, it is
             // added to the current project rather than replacing it.
             let (def, name) = crate::pivot::import_stk(&bytes)?;
+            // editor.rs `import_stk`: snapshot first (adding
+            // the figure is undoable), and the figure lands at
+            // the editor's fixed import root [320, 450] — NOT
+            // the stage centre this tool used before, which put
+            // MCP-imported figures in a different place than
+            // GUI-imported ones.
+            core.snapshot();
             let idx = core.project.figures.len();
             let color = FIGURE_COLORS[idx % FIGURE_COLORS.len()];
             let label = if name.is_empty() { "Imported figure".to_string() } else { name };
-            let root = [core.project.stage[0] / 2.0, core.project.stage[1] / 2.0];
-            core.project.add_figure_with(def, &label, color, root);
+            core.project.add_figure_with(def, &label, color, [320.0, 450.0]);
             core.selected_figure = idx;
+            core.status = format!("Imported figure from {path}");
             let mut out = summary(core);
             out["imported_format"] = json!("stk");
             out["added_figure"] = json!(label);
@@ -254,7 +413,7 @@ fn tool_export_file(core: &mut EditorCore, args: &Value) -> Result<Value, String
     };
     let path_ref = Path::new(&path);
     ensure_parent(path_ref)?;
-    std::fs::write(path_ref, &bytes).map_err(|e| format!("could not write {path}: {e}"))?;
+    write_atomic(path_ref, &bytes)?;
     Ok(json!({
         "path": path,
         "format": format,
@@ -322,6 +481,41 @@ fn render_png_bytes(
     Ok((encode_png(&img)?, w, h))
 }
 
+/// An optional frame range from 'from'/'to' arguments: both
+/// or neither (Wave 11, C9 G1) — a lone bound is almost
+/// certainly a caller mistake, so it is an error rather than
+/// a silent half-range. Indices are 0-based and inclusive;
+/// the engine's range exporters clamp them to the timeline.
+fn arg_range(args: &Value) -> Result<Option<(usize, usize)>, String> {
+    let from = match args.get("from") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .map(|n| n as usize)
+                .ok_or_else(|| "argument 'from' must be a non-negative integer".to_string())?,
+        ),
+    };
+    let to = match args.get("to") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .map(|n| n as usize)
+                .ok_or_else(|| "argument 'to' must be a non-negative integer".to_string())?,
+        ),
+    };
+    match (from, to) {
+        (Some(f), Some(t)) => {
+            if t < f {
+                Err("argument 'to' must not be less than 'from'".to_string())
+            } else {
+                Ok(Some((f, t)))
+            }
+        }
+        (None, None) => Ok(None),
+        _ => Err("arguments 'from' and 'to' must be given together".to_string()),
+    }
+}
+
 fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let path = arg_path(args)?;
     let format = args
@@ -332,6 +526,16 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     if project.frames.is_empty() {
         return Err("project has no frames to render".to_string());
     }
+    let range = arg_range(args)?;
+    if range.is_some() && matches!(format, "png" | "mp4" | "webm") {
+        // 'png' is a single frame by definition; video ranges
+        // already exist as export_file's mp4_range/webm_range.
+        return Err(format!(
+            "arguments 'from'/'to' are not supported for format '{format}' \
+             (ranges: gif, apng, spritesheet, svg, jpeg, png_sequence; \
+             for video ranges use export_file with mp4_range/webm_range)"
+        ));
+    }
     let path_ref = Path::new(&path);
     let frames = match format {
         "png" => {
@@ -339,8 +543,7 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
             let scale = args.get("scale").and_then(Value::as_f64).unwrap_or(1.0);
             let (bytes, w, h) = render_png_bytes(core, frame, scale)?;
             ensure_parent(path_ref)?;
-            std::fs::write(path_ref, &bytes)
-                .map_err(|e| format!("could not write {path}: {e}"))?;
+            write_atomic(path_ref, &bytes)?;
             return Ok(json!({
                 "path": path,
                 "format": "png",
@@ -352,7 +555,10 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
         }
         "gif" => {
             ensure_parent(path_ref)?;
-            crate::export::export_gif(project, path_ref)
+            match range {
+                Some((f, t)) => crate::export::export_gif_range(project, f, t, path_ref),
+                None => crate::export::export_gif(project, path_ref),
+            }
         }
         "mp4" => {
             ensure_parent(path_ref)?;
@@ -364,28 +570,52 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
         }
         "apng" => {
             ensure_parent(path_ref)?;
-            crate::export::export_apng(project, path_ref)
+            match range {
+                Some((f, t)) => crate::export::export_apng_range(project, f, t, path_ref),
+                None => crate::export::export_apng(project, path_ref),
+            }
         }
         "spritesheet" => {
             ensure_parent(path_ref)?;
-            crate::export::export_spritesheet(project, path_ref)
+            match range {
+                Some((f, t)) => crate::export::export_sheet_range(project, f, t, path_ref),
+                None => crate::export::export_spritesheet(project, path_ref),
+            }
         }
         "svg" => {
             // svg::export_svg writes one .svg per authored frame
             // into a directory; `path` names that directory.
             std::fs::create_dir_all(path_ref)
                 .map_err(|e| format!("could not create directory {path}: {e}"))?;
-            crate::svg::export_svg(project, path_ref)
+            match range {
+                Some((f, t)) => crate::svg::export_svg_range(project, f, t, path_ref),
+                None => crate::svg::export_svg(project, path_ref),
+            }
         }
         "jpeg" => {
             // export_jpeg_sequence writes frame-NNNN.jpg files into
             // a directory (creating it); `path` names that directory.
-            crate::export::export_jpeg_sequence(project, path_ref)
+            match range {
+                Some((f, t)) => {
+                    crate::export::export_jpeg_sequence_range(project, f, t, path_ref)
+                }
+                None => crate::export::export_jpeg_sequence(project, path_ref),
+            }
+        }
+        "png_sequence" => {
+            // export_png_sequence writes frame-NNNN.png files into
+            // a directory (creating it); `path` names that directory.
+            match range {
+                Some((f, t)) => {
+                    crate::export::export_png_sequence_range(project, f, t, path_ref)
+                }
+                None => crate::export::export_png_sequence(project, path_ref),
+            }
         }
         _ => {
             return Err(format!(
                 "unknown render format '{format}' \
-                 (supported: png, gif, mp4, webm, apng, svg, spritesheet, jpeg)"
+                 (supported: png, png_sequence, gif, mp4, webm, apng, svg, spritesheet, jpeg)"
             ));
         }
     }
@@ -395,8 +625,14 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
         "format": format,
         "frames": frames,
     });
-    if matches!(format, "svg" | "jpeg") {
+    if matches!(format, "svg" | "jpeg" | "png_sequence") {
         out["directory"] = json!(path);
+    }
+    // The range is echoed only when one was passed, so the
+    // no-range reply shapes stay byte-identical (D1's pins).
+    if let Some((f, t)) = range {
+        out["from"] = json!(f);
+        out["to"] = json!(t);
     }
     Ok(out)
 }
@@ -460,15 +696,33 @@ fn tool_render_contact_sheet(core: &mut EditorCore, args: &Value) -> Result<Valu
     }
     // Frame selection: an explicit list (out-of-range indices are
     // clamped to the last frame and reported in a note) or, by
-    // default, up to 12 evenly spaced frames across the timeline.
+    // default, up to 12 evenly spaced frames across the timeline
+    // — or across the 'from'/'to' window when one is given
+    // (Wave 11, C9 G4). 'frames' and 'from'/'to' are two ways of
+    // saying the same thing, so passing both is an error.
+    let range = arg_range(args)?;
+    if range.is_some() && !matches!(args.get("frames"), None | Some(Value::Null)) {
+        return Err("pass either 'frames' or 'from'/'to', not both".to_string());
+    }
     let mut clamped = 0usize;
     let frames: Vec<usize> = match args.get("frames") {
-        None | Some(Value::Null) => {
-            let n = total.min(12);
-            (0..n)
-                .map(|i| if n == 1 { 0 } else { i * (total - 1) / (n - 1) })
-                .collect()
-        }
+        None | Some(Value::Null) => match range {
+            Some((f, t)) => {
+                let lo = f.min(total - 1);
+                let hi = t.min(total - 1);
+                let span = hi - lo + 1;
+                let n = span.min(12);
+                (0..n)
+                    .map(|i| if n == 1 { lo } else { lo + i * (span - 1) / (n - 1) })
+                    .collect()
+            }
+            None => {
+                let n = total.min(12);
+                (0..n)
+                    .map(|i| if n == 1 { 0 } else { i * (total - 1) / (n - 1) })
+                    .collect()
+            }
+        },
         Some(v) => {
             let arr = v
                 .as_array()
@@ -493,9 +747,15 @@ fn tool_render_contact_sheet(core: &mut EditorCore, args: &Value) -> Result<Valu
     let (width, height) = (sheet.width(), sheet.height());
     let path_ref = Path::new(&path);
     ensure_parent(path_ref)?;
-    sheet
-        .save(path_ref)
-        .map_err(|e| format!("could not write {path}: {e}"))?;
+    // Same atomicity as the byte writers: encode to the temp
+    // sibling (same extension, so the image crate infers the
+    // same format), then rename over the target.
+    let tmp = temp_sibling(path_ref);
+    if let Err(e) = sheet.save(&tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("could not write {path}: {e}"));
+    }
+    rename_over(&tmp, path_ref)?;
     let mut out = json!({
         "path": path,
         "width": width,
@@ -512,6 +772,118 @@ fn tool_render_contact_sheet(core: &mut EditorCore, args: &Value) -> Result<Valu
     Ok(out)
 }
 
+/// One member of an export bundle: a display name, the file
+/// or directory written, and the engine result (frame/file
+/// count or the failure's reason).
+struct BundleMember {
+    name: &'static str,
+    target: String,
+    result: Result<usize, String>,
+}
+
+fn tool_export_bundle(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    // Wave 11 (C9 G3): the export panel's two bundles as one
+    // call — kind 'images' runs PNG sequence + JPEG sequence +
+    // SVG + spritesheet, kind 'video' runs MP4 + WebM, always
+    // over the WHOLE timeline (the panel's bundles deliberately
+    // ignore ranges, and so does this). Every member is
+    // attempted; a member's failure is reported WITH its
+    // reason in the reply and never fails the call itself —
+    // only an unknown kind or an empty project does.
+    let kind = args
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing required string argument: kind".to_string())?;
+    if !matches!(kind, "images" | "video") {
+        return Err(format!(
+            "unknown bundle kind '{kind}' (supported: images, video)"
+        ));
+    }
+    let path = arg_path(args)?;
+    let project = &core.project;
+    if project.frames.is_empty() {
+        return Err("project has no frames to render".to_string());
+    }
+    let dir = Path::new(&path);
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("could not create directory {path}: {e}"))?;
+    // Video members are named after the project (slugified the
+    // file-name way); sequence members get their own
+    // subdirectories so the four image formats never collide.
+    let stem = crate::projects::file_stem_for(&project.name)
+        .unwrap_or_else(|| "project".to_string());
+    let engine = |r: std::io::Result<usize>| r.map_err(|e| e.to_string());
+    let members: Vec<BundleMember> = if kind == "images" {
+        let png_dir = dir.join("png");
+        let jpeg_dir = dir.join("jpeg");
+        let svg_dir = dir.join("svg");
+        let sheet = dir.join("spritesheet.png");
+        vec![
+            BundleMember {
+                name: "png_sequence",
+                target: png_dir.display().to_string(),
+                result: engine(crate::export::export_png_sequence(project, &png_dir)),
+            },
+            BundleMember {
+                name: "jpeg_sequence",
+                target: jpeg_dir.display().to_string(),
+                result: engine(crate::export::export_jpeg_sequence(project, &jpeg_dir)),
+            },
+            BundleMember {
+                name: "svg",
+                target: svg_dir.display().to_string(),
+                result: engine(crate::svg::export_svg(project, &svg_dir)),
+            },
+            BundleMember {
+                name: "spritesheet",
+                target: sheet.display().to_string(),
+                result: engine(crate::export::export_spritesheet(project, &sheet)),
+            },
+        ]
+    } else {
+        let mp4 = dir.join(format!("{stem}.mp4"));
+        let webm = dir.join(format!("{stem}.webm"));
+        vec![
+            BundleMember {
+                name: "mp4",
+                target: mp4.display().to_string(),
+                result: engine(crate::export::export_mp4(project, &mp4)),
+            },
+            BundleMember {
+                name: "webm",
+                target: webm.display().to_string(),
+                result: engine(crate::export::export_webm(project, &webm)),
+            },
+        ]
+    };
+    let member_json: Vec<Value> = members
+        .iter()
+        .map(|m| match &m.result {
+            Ok(frames) => json!({
+                "format": m.name,
+                "path": m.target,
+                "ok": true,
+                "frames": frames,
+            }),
+            Err(reason) => json!({
+                "format": m.name,
+                "path": m.target,
+                "ok": false,
+                "error": reason,
+            }),
+        })
+        .collect();
+    let succeeded = members.iter().filter(|m| m.result.is_ok()).count();
+    Ok(json!({
+        "ok": true,
+        "kind": kind,
+        "directory": path,
+        "members": member_json,
+        "succeeded": succeeded,
+        "failed": members.len() - succeeded,
+    }))
+}
+
 fn tool_project_summary(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
     Ok(summary(core))
 }
@@ -524,7 +896,7 @@ pub fn tools() -> Vec<Tool> {
     vec![
         Tool {
             name: "save_project",
-            description: "Save the current project as StykAnimate project JSON (.styk.json format) at the given path. Parent directories are created.",
+            description: "Save the current project as StykAnimate project JSON (.styk.json format) at the given path. The write is atomic (temp file + rename), so a failed save never truncates an existing file; like the editor's save, it restarts the session's dirty baseline. Parent directories are created.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -536,7 +908,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "load_project",
-            description: "Load a StykAnimate project JSON file, replacing the current session project. Selection and playhead reset to the start. Returns the project summary.",
+            description: "Load a StykAnimate project JSON file, replacing the current session project, with the editor's open bookkeeping (selection and playhead reset to the start, dirty baseline restarted). Returns the project summary.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -548,7 +920,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "import_file",
-            description: "Import a file by extension: .piv (Pivot animation), .nodemc/.stknds (Stick Nodes animation) and .nodes (Stick Nodes figure) replace the project; .stk (Pivot figure) adds the figure to the current project; .json loads project JSON. Returns the project summary.",
+            description: "Import a file by extension: .piv (Pivot animation), .nodemc/.stknds (Stick Nodes animation) and .nodes (Stick Nodes figure) replace the project; .stk (Pivot figure) adds the figure to the current project; .json loads project JSON. Session bookkeeping matches the editor's own import for each format (the Stick Nodes and .stk imports are single undoable edits; .piv and .json restart the dirty baseline). Returns the project summary.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -576,18 +948,33 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "render",
-            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg' and 'jpeg' write one file per frame into the DIRECTORY at 'path' (created if needed). Parent directories are created for file targets.",
+            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg', 'jpeg' and 'png_sequence' write one file per frame into the DIRECTORY at 'path' (created if needed). The sequence/animation formats 'gif', 'apng', 'spritesheet', 'svg', 'jpeg' and 'png_sequence' accept an optional frame range: args 'from' and 'to' (0-based, inclusive, given together, clamped to the timeline; echoed in the reply). Video ranges are export_file's mp4_range/webm_range. Parent directories are created for file targets.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Output file path (a directory path for formats svg and jpeg)" },
-                    "format": { "type": "string", "enum": ["png", "gif", "mp4", "webm", "apng", "svg", "spritesheet", "jpeg"] },
+                    "format": { "type": "string", "enum": ["png", "png_sequence", "gif", "mp4", "webm", "apng", "svg", "spritesheet", "jpeg"] },
                     "frame": { "type": "integer", "minimum": 0, "description": "Frame index for format 'png' (default: current frame)" },
+                    "from": { "type": "integer", "minimum": 0, "description": "First frame of an inclusive range (with 'to'); sequence/animation formats only" },
+                    "to": { "type": "integer", "minimum": 0, "description": "Last frame of an inclusive range (with 'from'); sequence/animation formats only" },
                     "scale": { "type": "number", "exclusiveMinimum": 0, "description": "Output scale for format 'png' relative to the stage size (default 1.0)" }
                 },
                 "required": ["path", "format"]
             }),
             handler: tool_render,
+        },
+        Tool {
+            name: "export_bundle",
+            description: "Export a whole bundle of formats into the DIRECTORY at 'path' in one call (the export panel's two bundle buttons). kind 'images': a PNG sequence (png/ subdir), a JPEG sequence (jpeg/), one SVG per frame (svg/) and a spritesheet (spritesheet.png). kind 'video': '<project>.mp4' and '<project>.webm'. Bundles always cover the WHOLE timeline — they deliberately ignore frame ranges, matching the panel. Every member is attempted: the reply lists each member with ok + frame count, or ok:false + the failure's reason; member failures never fail the call itself.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Destination directory (created if needed)" },
+                    "kind": { "type": "string", "enum": ["images", "video"], "description": "Which bundle to export" }
+                },
+                "required": ["path", "kind"]
+            }),
+            handler: tool_export_bundle,
         },
         Tool {
             name: "render_frame_base64",
@@ -602,12 +989,14 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "render_contact_sheet",
-            description: "Render a contact sheet (grid of frame thumbnails) as a PNG file at 'path'. 'frames' is an optional array of frame indices (default: up to 12 evenly spaced frames; out-of-range indices are clamped and reported in a note). 'cols' is the grid column count (default 4, at least 1); 'thumb_width' is each thumbnail's width in pixels (default 240, 16..=1024). Returns {path, width, height, frames, cols, thumb_width}. Parent directories are created.",
+            description: "Render a contact sheet (grid of frame thumbnails) as a PNG file at 'path'. Frame selection: 'frames' is an optional array of frame indices (out-of-range indices are clamped and reported in a note); or pass 'from'/'to' (0-based, inclusive, together) to draw the picks from that window; with neither, the default is up to 12 evenly spaced frames across the timeline — NOT one tile per frame (the export panel's sheet differs: it tiles every frame). 'frames' and 'from'/'to' together are an error. 'cols' is the grid column count (default 4, at least 1); 'thumb_width' is each thumbnail's width in pixels (default 240, 16..=1024). Returns {path, width, height, frames, cols, thumb_width}. Parent directories are created.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Destination PNG file path" },
                     "frames": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "description": "Frame indices to include (default: up to 12 evenly spaced)" },
+                    "from": { "type": "integer", "minimum": 0, "description": "Window start for the evenly spaced picks (with 'to'; not with 'frames')" },
+                    "to": { "type": "integer", "minimum": 0, "description": "Window end for the evenly spaced picks (with 'from'; not with 'frames')" },
                     "cols": { "type": "integer", "minimum": 1, "description": "Grid columns (default 4)" },
                     "thumb_width": { "type": "integer", "minimum": 16, "maximum": 1024, "description": "Thumbnail width in pixels (default 240)" }
                 },
@@ -1005,5 +1394,115 @@ mod tests {
             json!({ "path": "/tmp/x.mp4", "format": "mp4_range", "from": 0.5, "to": 2 })
         )
         .is_err());
+    }
+
+    // ---- Wave 11 (A5): bookkeeping parity + atomic save ----
+
+    #[test]
+    fn save_project_is_atomic_shaped_and_resets_the_dirty_baseline() {
+        let dir = temp_dir("atomic-save");
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        let path = dir.join("scene.styk.json");
+
+        // One counted edit: the session reads dirty.
+        core.snapshot();
+        assert_eq!(core.edits_since_autosave(), 1);
+        call("save_project", &mut core, json!({ "path": path.to_string_lossy() }))
+            .expect("save failed");
+        assert_eq!(core.edits_since_autosave(), 0, "a save is the new dirty baseline");
+        assert_eq!(core.status, format!("Project saved to {}", path.display()));
+
+        // The file is the complete serialised project, and no
+        // temp sibling is left behind by the atomic write.
+        let text = std::fs::read_to_string(&path).expect("saved file missing");
+        let parsed: Project = serde_json::from_str(&text).expect("saved file does not parse");
+        assert_eq!(parsed.name, core.project.name);
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+
+        // Saving over an existing file replaces it wholesale.
+        core.project.name = "Second Save".to_string();
+        call("save_project", &mut core, json!({ "path": path.to_string_lossy() }))
+            .expect("second save failed");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let parsed: Project = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed.name, "Second Save");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_project_restarts_the_dirty_baseline() {
+        let dir = temp_dir("load-baseline");
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        let path = dir.join("other.styk.json");
+        call("save_project", &mut core, json!({ "path": path.to_string_lossy() })).unwrap();
+
+        // Dirty the session, then load: the opened project
+        // must not inherit the previous project's edit count.
+        core.snapshot();
+        assert_eq!(core.edits_since_autosave(), 1);
+        call("load_project", &mut core, json!({ "path": path.to_string_lossy() }))
+            .expect("load failed");
+        assert_eq!(core.edits_since_autosave(), 0, "open restarts the dirty baseline");
+        assert_eq!(core.status, format!("Opened {}", path.display()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn piv_import_restarts_the_dirty_baseline() {
+        let mut core = EditorCore::new();
+        core.snapshot();
+        assert_eq!(core.edits_since_autosave(), 1);
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-v3.piv");
+        call("import_file", &mut core, json!({ "path": fixture })).expect("piv import failed");
+        assert_eq!(
+            core.edits_since_autosave(),
+            0,
+            "piv import mirrors import_piv's baseline restart"
+        );
+    }
+
+    #[test]
+    fn nodes_import_is_a_single_undoable_edit_like_the_gui() {
+        let mut core = EditorCore::new();
+        let frames_before = core.project.frames.len();
+        let depth_before = core.undo_depth();
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/figure.nodes");
+        call("import_file", &mut core, json!({ "path": fixture })).expect("nodes import failed");
+        assert_eq!(core.undo_depth(), depth_before + 1, "the import snapshots exactly once");
+        assert_eq!(
+            core.edits_since_autosave(),
+            1,
+            "the snapshot counts as an edit, as in the GUI"
+        );
+        core.undo();
+        assert_eq!(
+            core.project.frames.len(),
+            frames_before,
+            "one undo restores the pre-import project"
+        );
+    }
+
+    #[test]
+    fn stk_import_lands_at_the_gui_root_and_is_undoable() {
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        let before = core.project.figures.len();
+        let depth_before = core.undo_depth();
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/figure.stk");
+        call("import_file", &mut core, json!({ "path": fixture })).expect("stk import failed");
+        assert_eq!(core.project.figures.len(), before + 1);
+        assert_eq!(core.undo_depth(), depth_before + 1, "adding the figure snapshots once");
+        // editor.rs import_stk's fixed root, recorded on the
+        // added figure's frame-0 pose.
+        assert_eq!(core.project.frames[0].poses[before].root, [320.0, 450.0]);
+        core.undo();
+        assert_eq!(core.project.figures.len(), before, "one undo removes the imported figure");
     }
 }

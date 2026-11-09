@@ -24,9 +24,32 @@
 //! Two unauthenticated probes exist so a client can tell this
 //! live endpoint apart from the stdio server (which has no HTTP
 //! at all): `GET /` and `GET /health` answer a small JSON
-//! identity document (server name/version, `"live": true`).
+//! identity document (server name/version, `"live": true`, and
+//! the registered tool count — the same number the `server_info`
+//! tool reports, read from the same registry).
 //! The JSON-RPC `ping` method also works — it is answered by
 //! the shared router, like every other method.
+//!
+//! Method parity with the stdio shell is by construction:
+//! both transports hand the parsed message to the one
+//! `McpServer` dispatch, so `initialize`, `ping`,
+//! `tools/list`, `tools/call`, unknown methods (`-32601`),
+//! unroutable requests (`-32600`), bad `tools/call` params
+//! (`-32602`) and parse failures (`-32700`) produce identical
+//! bodies. Two shapes deserve naming:
+//!
+//! - **Batch arrays** are not unrolled by the shared dispatch
+//!   (it expects one object), so a batch gets the same single
+//!   `-32600` error over HTTP as over stdio — an honest
+//!   protocol error, never a hang or a dropped connection.
+//! - **Notifications** (a JSON object with no `id` member)
+//!   are answered `202 Accepted` with an empty body
+//!   *immediately*, without queueing: dispatch checks for an
+//!   `id` before it routes any method, so a notification is
+//!   guaranteed to execute nothing and produce no response —
+//!   the fast path is behaviour-identical, minus a pointless
+//!   wait on the UI thread (and a pointless 504 risk if the
+//!   app is wedged).
 //!
 //! ## Framing discipline (Wave 10 hardening)
 //!
@@ -39,6 +62,12 @@
 //!   indefinitely. Expiry is a clean close.
 //! - A `Content-Length` header that is present but not a plain
 //!   number, or duplicated with differing values, is HTTP 400.
+//! - A `Content-Type` header that is present but is not
+//!   `application/json` (parameters like `; charset=utf-8` are
+//!   fine) is HTTP 415. An absent header is tolerated — the
+//!   minimal hand-rolled clients this endpoint also serves do
+//!   not always send one, and the body is parsed as JSON
+//!   either way, so leniency costs nothing.
 //! - `Transfer-Encoding` is refused with HTTP 501 rather than
 //!   being silently misread as an empty body.
 //! - An oversized body is refused with HTTP 413 whose body is
@@ -175,6 +204,12 @@ pub fn endpoint() -> String {
 /// with the channel its response must be sent back on.
 /// `Some(value)` is the JSON-RPC response; `None` means the
 /// message was a notification and gets no body (HTTP 202).
+/// HTTP notifications are in fact answered by the listener
+/// before queueing (see `handle_connection`), so a `None`
+/// reaching the wait loop is only a defensive fallback —
+/// the drain contract keeps it because `handle_on` can
+/// still return `None` for a notification handed to it by
+/// any other caller.
 pub struct LiveRequest {
     pub msg: Value,
     pub reply: SyncSender<Option<Value>>,
@@ -249,6 +284,55 @@ impl Drop for LiveBridge {
 static BRIDGE: Mutex<Option<LiveBridge>> = Mutex::new(None);
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// The event-loop waker the app hands over at startup
+/// (`AppSpec::setup` — the type is Rune's `Waker`, an
+/// `Arc<dyn Fn() + Send + Sync>`; spelled structurally here so
+/// this module stays std-only). The listener calls it after a
+/// request lands in the queue, so the UI thread's next `poll`
+/// — where [`drain`] runs — happens promptly instead of at
+/// the next unrelated wake. The shell ALSO keeps a 100 ms
+/// poll heartbeat (Wave 11, A3): the waker is additive, and
+/// the heartbeat remains the proven floor until the waker has
+/// a live track record.
+static WAKER: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>> = Mutex::new(None);
+
+/// Store the event-loop waker (called once from the app's
+/// setup hook).
+pub fn set_waker(waker: std::sync::Arc<dyn Fn() + Send + Sync>) {
+    *WAKER.lock().unwrap_or_else(|p| p.into_inner()) = Some(waker);
+}
+
+fn wake() {
+    let slot = WAKER.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(waker) = slot.as_ref() {
+        waker();
+    }
+}
+
+/// Errors from drained requests that never wrote
+/// `core.status` — protocol errors (an unknown tool, a
+/// malformed call) and tool refusals whose handler returned
+/// without touching the status line. Ordinary refusals DO
+/// write the status, and the shell already toasts those from
+/// the status line itself; buffering these separately is what
+/// keeps them visible without double-toasting (Wave 11, A3
+/// request B). Drained by [`take_drain_errors`].
+static DRAIN_ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Take the buffered drain errors (oldest first), clearing
+/// the buffer. The shell calls this after each drain and
+/// toasts each entry with the `MCP: ` attribution prefix.
+pub fn take_drain_errors() -> Vec<String> {
+    std::mem::take(&mut *DRAIN_ERRORS.lock().unwrap_or_else(|p| p.into_inner()))
+}
+
+fn record_drain_error(text: String) {
+    DRAIN_ERRORS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(text);
+}
+
 fn lock_bridge() -> std::sync::MutexGuard<'static, Option<LiveBridge>> {
     // A poisoned mutex here only means a previous holder
     // panicked; the bridge state is still coherent enough to
@@ -308,7 +392,34 @@ pub fn drain(core: &mut EditorCore, router: &mut McpServer, max: usize) -> usize
             Ok(req) => req,
             Err(_) => break, // empty, or the listener is gone
         };
+        // Snapshot the status line so an error that never
+        // wrote it can be told apart from an ordinary refusal
+        // (which writes the status and is toasted from there).
+        let status_before = core.status.clone();
         let response = router.handle_on(core, &req.msg);
+        if core.status == status_before {
+            if let Some(resp) = &response {
+                if let Some(msg) = resp
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                {
+                    record_drain_error(msg.to_string());
+                } else if resp
+                    .get("result")
+                    .and_then(|r| r.get("isError"))
+                    .and_then(|b| b.as_bool())
+                    == Some(true)
+                {
+                    if let Some(text) = resp
+                        .pointer("/result/content/0/text")
+                        .and_then(|t| t.as_str())
+                    {
+                        record_drain_error(text.to_string());
+                    }
+                }
+            }
+        }
         // A send failure only means the client hung up while
         // waiting — the edit still happened; nothing to undo.
         let _ = req.reply.send(response);
@@ -416,6 +527,14 @@ fn handle_connection(mut stream: TcpStream, tx: &Sender<LiveRequest>, stop: &Arc
         write_response(&mut stream, 501, "Not Implemented", "text/plain", b"chunked transfer encoding not supported; send Content-Length\n");
         return;
     }
+    if !content_type_acceptable(&head) {
+        // A JSON-RPC body under a non-JSON media type is a
+        // client error, not something to guess at: MCP
+        // clients send application/json. (An ABSENT header is
+        // accepted — see the helper.)
+        write_response(&mut stream, 415, "Unsupported Media Type", "text/plain", b"Content-Type must be application/json\n");
+        return;
+    }
 
     // --- Read exactly Content-Length bytes of body. A length
     //     header that is present but unusable (not a number,
@@ -459,6 +578,19 @@ fn handle_connection(mut stream: TcpStream, tx: &Sender<LiveRequest>, stop: &Arc
         }
     };
 
+    // --- Notifications are answered here, never queued. The
+    //     shared dispatch checks for an `id` before routing
+    //     any method (mcp.rs), so a notification is guaranteed
+    //     to execute nothing and earn no response; queueing it
+    //     would only make the client wait for the UI thread —
+    //     and, if the app were wedged, wait out the whole
+    //     REPLY_TIMEOUT for a message that needs no answer.
+    //     202 with an empty body is the HTTP acknowledgement.
+    if is_notification(&msg) {
+        write_response(&mut stream, 202, "Accepted", "application/json", b"");
+        return;
+    }
+
     // --- Forward to the UI thread and block on the reply.
     //     This wait IS the synchronisation: the reply lands
     //     when poll() next drains the queue (see module docs).
@@ -469,6 +601,10 @@ fn handle_connection(mut stream: TcpStream, tx: &Sender<LiveRequest>, stop: &Arc
         write_response(&mut stream, 500, "Internal Server Error", "text/plain", b"editor not draining\n");
         return;
     }
+    // The request is queued: nudge the event loop so poll
+    // drains it promptly (the 100 ms heartbeat in the shell
+    // remains as the floor).
+    wake();
     let wait_start = Instant::now();
     loop {
         match reply_rx.recv_timeout(Duration::from_millis(25)) {
@@ -477,9 +613,11 @@ fn handle_connection(mut stream: TcpStream, tx: &Sender<LiveRequest>, stop: &Arc
                 return;
             }
             Ok(None) => {
-                // Notification: JSON-RPC says never answer —
-                // the HTTP layer still needs a status, so 202
-                // with an empty body.
+                // Notification (defensive fallback — the
+                // listener answers HTTP notifications before
+                // queueing, above): JSON-RPC says never
+                // answer, but the HTTP layer still needs a
+                // status, so 202 with an empty body.
                 write_response(&mut stream, 202, "Accepted", "application/json", b"");
                 return;
             }
@@ -544,7 +682,10 @@ fn body_too_large_body() -> String {
 /// both transports; `transport`/`live` are the fields that
 /// tell this endpoint apart from the stdio server, and
 /// `auth` states the v1 security posture plainly, matching
-/// the settings card's wording.
+/// the settings card's wording. `tools` is the registered
+/// tool count, read from the same `all_tools()` registry
+/// the `server_info` tool reports — knowable in this layer
+/// because the registry is static data, no core needed.
 fn health_body() -> Value {
     json!({
         "server": "stykanimate-rs",
@@ -553,6 +694,7 @@ fn health_body() -> Value {
         "live": true,
         "endpoint": endpoint(),
         "auth": "none",
+        "tools": stykanimate_rs::mcp::all_tools().len(),
     })
 }
 
@@ -669,6 +811,41 @@ fn has_transfer_encoding(head: &str) -> bool {
         line.split_once(':')
             .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("transfer-encoding"))
     })
+}
+
+/// Whether a parsed message is a JSON-RPC notification,
+/// mirroring the shared dispatch's rule exactly (mcp.rs):
+/// a JSON **object** with no `id` member. Note the two
+/// exclusions the rule implies — an explicit `"id": null`
+/// is a request (it earns an answer, with a `null` id), and
+/// a non-object (batch array, scalar) is not a notification
+/// either: dispatch answers it `-32600`, so it must still
+/// be queued, not fast-pathed.
+fn is_notification(msg: &Value) -> bool {
+    msg.is_object() && msg.get("id").is_none()
+}
+
+/// Whether the request's `Content-Type` framing is one this
+/// server will parse a JSON-RPC body under. A present header
+/// must name the `application/json` media type — parameters
+/// (`; charset=utf-8`) and case are irrelevant. An ABSENT
+/// header is accepted: the header is a claim about the body,
+/// not the body itself, and minimal hand-rolled clients do
+/// not always send one; the body is parsed as JSON either
+/// way, so a missing claim costs nothing while a false one
+/// is refused (HTTP 415) rather than silently parsed past.
+fn content_type_acceptable(head: &str) -> bool {
+    for line in head.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("content-type") {
+            continue;
+        }
+        let media = value.split(';').next().unwrap_or("").trim();
+        return media.eq_ignore_ascii_case("application/json");
+    }
+    true
 }
 
 /// The request target of the request line (`/mcp`, `/`, …):
@@ -844,6 +1021,56 @@ mod tests {
         assert_eq!(body["live"], true);
         assert_eq!(body["endpoint"], endpoint());
         assert_eq!(body["auth"], "none");
+        // The tool count is the registry's own number — the
+        // same value the `server_info` tool reports — not a
+        // literal that can drift as tools are added.
+        assert_eq!(
+            body["tools"],
+            json!(stykanimate_rs::mcp::all_tools().len()),
+            "health names the live tool count"
+        );
+        assert!(body["tools"].as_u64().is_some_and(|n| n > 0));
+    }
+
+    #[test]
+    fn is_notification_mirrors_the_dispatch_rule() {
+        // Object without an `id` member: the only notification.
+        assert!(is_notification(&json!({ "jsonrpc": "2.0", "method": "ping" })));
+        assert!(is_notification(&json!({ "method": "notifications/initialized" })));
+        // An explicit null id is a REQUEST — dispatch answers
+        // it (with id null) on both transports.
+        assert!(!is_notification(&json!({ "id": null, "method": "ping" })));
+        assert!(!is_notification(&json!({ "id": 0, "method": "ping" })));
+        assert!(!is_notification(&json!({ "id": "abc", "method": "ping" })));
+        // Non-objects earn a -32600 from dispatch, so they are
+        // requests to be queued, not notifications.
+        assert!(!is_notification(&json!([{ "id": 1, "method": "ping" }])));
+        assert!(!is_notification(&json!(42)));
+        assert!(!is_notification(&json!("ping")));
+        assert!(!is_notification(&Value::Null));
+    }
+
+    #[test]
+    fn content_type_acceptance_is_json_or_absent() {
+        assert!(content_type_acceptable(SAMPLE_HEAD));
+        assert!(content_type_acceptable(
+            "POST /mcp HTTP/1.1\r\nContent-Type: application/json; charset=utf-8"
+        ));
+        assert!(content_type_acceptable(
+            "POST /mcp HTTP/1.1\r\ncontent-type: Application/JSON"
+        ));
+        // Absent is tolerated (minimal clients); a false claim
+        // is not.
+        assert!(content_type_acceptable("POST /mcp HTTP/1.1\r\nHost: x"));
+        assert!(!content_type_acceptable(
+            "POST /mcp HTTP/1.1\r\nContent-Type: text/plain"
+        ));
+        assert!(!content_type_acceptable(
+            "POST /mcp HTTP/1.1\r\nContent-Type: text/json"
+        ));
+        assert!(!content_type_acceptable(
+            "POST /mcp HTTP/1.1\r\nContent-Type: application/json2"
+        ));
     }
 
     #[test]
@@ -887,10 +1114,11 @@ mod tests {
 
     /// POST one JSON-RPC message to the live endpoint over a
     /// raw socket (the HTTP request built by hand, like a
-    /// minimal MCP client would) and parse the response
-    /// body. Every operation carries a timeout, so a broken
-    /// bridge fails this test instead of hanging CI.
-    fn post_json(msg: &Value) -> Result<Value, String> {
+    /// minimal MCP client would) and return the response's
+    /// HTTP status code and raw body. Every operation
+    /// carries a timeout, so a broken bridge fails this test
+    /// instead of hanging CI.
+    fn post_raw(msg: &Value) -> Result<(u16, String), String> {
         use std::io::{Read, Write};
         let body = msg.to_string();
         let mut stream = TcpStream::connect(("127.0.0.1", PORT))
@@ -914,16 +1142,25 @@ mod tests {
         stream
             .read_to_string(&mut raw)
             .map_err(|e| format!("read: {e}"))?;
-        if !raw.starts_with("HTTP/1.1 200") {
-            return Err(format!(
-                "unexpected response status: {}",
-                raw.lines().next().unwrap_or("")
-            ));
-        }
+        let status: u16 = raw
+            .split_whitespace()
+            .nth(1)
+            .and_then(|token| token.parse().ok())
+            .ok_or_else(|| format!("response had no status line: {}", raw.lines().next().unwrap_or("")))?;
         let (_, resp_body) = raw
             .split_once("\r\n\r\n")
             .ok_or("response had no header/body split")?;
-        serde_json::from_str(resp_body).map_err(|e| format!("response was not JSON: {e}"))
+        Ok((status, resp_body.to_string()))
+    }
+
+    /// [`post_raw`] specialised to the normal JSON-RPC case:
+    /// HTTP 200 with a JSON response body.
+    fn post_json(msg: &Value) -> Result<Value, String> {
+        let (status, resp_body) = post_raw(msg)?;
+        if status != 200 {
+            return Err(format!("unexpected response status: {status}"));
+        }
+        serde_json::from_str(&resp_body).map_err(|e| format!("response was not JSON: {e}"))
     }
 
     /// Run one request/response exchange: the client thread
@@ -942,6 +1179,34 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let client = std::thread::spawn(move || {
             let res = post_json(&msg);
+            let _ = done_tx.send(());
+            res
+        });
+        let start = std::time::Instant::now();
+        while done_rx.try_recv().is_err() {
+            if start.elapsed() > deadline {
+                return Err("client exchange timed out".to_string());
+            }
+            drain(core, router, 8);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        client
+            .join()
+            .map_err(|_| "client thread panicked".to_string())?
+    }
+
+    /// [`exchange`] over [`post_raw`]: for the exchanges
+    /// whose expected outcome is an HTTP status rather than
+    /// a JSON-RPC body (the notification's 202).
+    fn exchange_raw(
+        core: &mut EditorCore,
+        router: &mut McpServer,
+        msg: Value,
+        deadline: Duration,
+    ) -> Result<(u16, String), String> {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let client = std::thread::spawn(move || {
+            let res = post_raw(&msg);
             let _ = done_tx.send(());
             res
         });
@@ -1049,6 +1314,73 @@ mod tests {
         //    core, never at the dispatcher's own.
         if router.core.current != 0 {
             return Err("the router's own core moved — dispatch hit the wrong core".to_string());
+        }
+
+        // 4. Protocol parity over the wire — the same shapes
+        //    the stdio shell produces, because both transports
+        //    share the one dispatch:
+        //    a string id is echoed verbatim, and `ping`
+        //    answers an empty result object.
+        let ping = exchange(
+            &mut core,
+            &mut router,
+            json!({ "jsonrpc": "2.0", "id": "abc-1", "method": "ping" }),
+            Duration::from_secs(10),
+        )?;
+        if ping["id"] != json!("abc-1") || ping["result"] != json!({}) {
+            return Err(format!("ping over HTTP diverged from dispatch: {ping}"));
+        }
+        //    An explicit null id is a request, not a
+        //    notification: it must be answered, with id null.
+        let null_id = exchange(
+            &mut core,
+            &mut router,
+            json!({ "jsonrpc": "2.0", "id": null, "method": "ping" }),
+            Duration::from_secs(10),
+        )?;
+        if null_id["id"] != Value::Null || null_id["result"] != json!({}) {
+            return Err(format!("null-id request was not answered as a request: {null_id}"));
+        }
+        //    An unknown method earns -32601, same as stdio.
+        let unknown = exchange(
+            &mut core,
+            &mut router,
+            json!({ "jsonrpc": "2.0", "id": 7, "method": "no/such" }),
+            Duration::from_secs(10),
+        )?;
+        if unknown.pointer("/error/code").and_then(Value::as_i64) != Some(-32601) {
+            return Err(format!("unknown method did not earn -32601: {unknown}"));
+        }
+        //    A batch array is not unrolled by dispatch: one
+        //    -32600 object with a null id — an honest protocol
+        //    error over HTTP, never a hang or a dropped socket.
+        let batch = exchange(
+            &mut core,
+            &mut router,
+            json!([
+                { "jsonrpc": "2.0", "id": 9, "method": "ping" },
+                { "jsonrpc": "2.0", "id": 10, "method": "ping" },
+            ]),
+            Duration::from_secs(10),
+        )?;
+        if batch.is_array()
+            || batch.pointer("/error/code").and_then(Value::as_i64) != Some(-32600)
+            || batch["id"] != Value::Null
+        {
+            return Err(format!("batch was not the single -32600 dispatch gives stdio: {batch}"));
+        }
+        //    A notification earns no JSON-RPC body at all:
+        //    HTTP 202 with an empty body.
+        let (status, body) = exchange_raw(
+            &mut core,
+            &mut router,
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+            Duration::from_secs(10),
+        )?;
+        if status != 202 || !body.is_empty() {
+            return Err(format!(
+                "notification earned HTTP {status} with body {body:?}, expected 202 and empty"
+            ));
         }
         Ok(())
     }

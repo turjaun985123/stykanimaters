@@ -24,6 +24,14 @@ pub struct FxInfo {
     pub figure: usize,
     /// Node of that figure the clip is anchored to.
     pub node: usize,
+    /// Whether the clip is hidden: hidden clips are
+    /// skipped by the stage and by export renderers but
+    /// stay in the list, editable. Wave 11: this field
+    /// closes the known gap where the MCP `fx_list` tool
+    /// was blind to the flag the panel's Hide/Show toggle
+    /// sets (`FxClipEntry::hidden` had no counterpart
+    /// here, so no MCP client could read it).
+    pub hidden: bool,
     /// Snake-case kind name, matching the MCP tool vocabulary.
     pub kind: &'static str,
     /// First frame the clip covers.
@@ -33,6 +41,21 @@ pub struct FxInfo {
     /// `start + duration`: the first frame the clip no longer
     /// covers.
     pub end: f32,
+    /// Primary particle colour, `0xRRGGBB`. Wave 11: the
+    /// render fields below complete the summary — before
+    /// them, an MCP client could set a clip's colour but
+    /// never read any of them back (the panel's lane rows
+    /// worked around the same hole by re-reading the
+    /// entry beside this summary).
+    pub color: u32,
+    /// Gradient end colour, if any (`None` = solid).
+    pub color2: Option<u32>,
+    /// Particle random seed.
+    pub seed: u32,
+    /// Emission angle in degrees.
+    pub angle: f32,
+    /// Beam reach / trail span in stage units.
+    pub length: f32,
 }
 
 /// Snake-case name of a clip kind (the same vocabulary the MCP
@@ -79,10 +102,16 @@ pub fn list(project: &Project) -> Vec<FxInfo> {
             index,
             figure: entry.figure,
             node: entry.node,
+            hidden: entry.hidden,
             kind: kind_name(entry.clip.kind),
             start: entry.clip.start,
             duration: entry.clip.duration,
             end: entry.clip.start + entry.clip.duration,
+            color: entry.clip.color,
+            color2: entry.clip.color2,
+            seed: entry.clip.seed,
+            angle: entry.clip.angle,
+            length: entry.clip.length,
         })
         .collect()
 }
@@ -338,6 +367,32 @@ pub fn list_clip_presets() -> Vec<String> {
     list_clip_presets_in(std::path::Path::new(PRESET_DIR))
 }
 
+/// Delete the preset called `name` from `dir` (the same slug
+/// rule as [`save_clip_preset_in`]); returns the removed
+/// file's path. A missing preset is an error naming it —
+/// Wave 11 (C4): MCP could create presets but never delete
+/// one, the CRUD corner of the preset surface.
+fn delete_clip_preset_in(
+    dir: &std::path::Path,
+    name: &str,
+) -> Result<std::path::PathBuf, String> {
+    let slug = preset_slug(name);
+    if slug.is_empty() {
+        return Err(format!(
+            "cannot delete FX preset '{name}': the name produces an empty file slug"
+        ));
+    }
+    let path = dir.join(format!("{slug}.json"));
+    std::fs::remove_file(&path)
+        .map_err(|e| format!("could not delete FX preset '{name}': {e}"))?;
+    Ok(path)
+}
+
+/// Delete the preset called `name` from `./fx-presets/`.
+pub fn delete_clip_preset(name: &str) -> Result<std::path::PathBuf, String> {
+    delete_clip_preset_in(std::path::Path::new(PRESET_DIR), name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,10 +438,16 @@ mod tests {
                 index: 0,
                 figure: 2,
                 node: 5,
+                hidden: false,
                 kind: "burst",
                 start: 4.0,
                 duration: 10.0,
                 end: 14.0,
+                color: 0xFFC65D,
+                color2: None,
+                seed: 1,
+                angle: 90.0,
+                length: 160.0,
             }
         );
         assert_eq!(infos[1].kind, "lightning");
@@ -394,6 +455,26 @@ mod tests {
         assert_eq!(infos[2].kind, "leaves");
         // Empty project lists nothing.
         assert!(list(&project_with(vec![])).is_empty());
+    }
+
+    #[test]
+    fn list_reports_hidden_and_the_render_fields() {
+        // Wave 11: FxInfo carries the whole clip, not just
+        // its window — a hidden entry reports hidden, and
+        // the colour / seed / angle / length the panel
+        // inspector shows are readable from the summary.
+        let mut hidden_entry = entry(4.0, 10.0, ClipKind::Burst, 9);
+        hidden_entry.hidden = true;
+        hidden_entry.clip.color = 0x112233;
+        hidden_entry.clip.color2 = Some(0x445566);
+        let project = project_with(vec![hidden_entry]);
+        let infos = list(&project);
+        assert!(infos[0].hidden, "the hidden flag is reported");
+        assert_eq!(infos[0].color, 0x112233);
+        assert_eq!(infos[0].color2, Some(0x445566));
+        assert_eq!(infos[0].seed, 9);
+        assert_eq!(infos[0].angle, 90.0);
+        assert_eq!(infos[0].length, 160.0);
     }
 
     #[test]

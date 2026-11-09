@@ -723,12 +723,31 @@ pub struct FxClipEntry {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
+    // Wave 11 (E7 serde census): the six original fields
+    // below carried no serde default — every other field
+    // in this struct (and every later-added field in the
+    // nested structs) has one. A project file missing any
+    // of them failed to load at all, even though three of
+    // them (`name`, `fps`, `stage`) are directly settable
+    // through MCP tools (`new_project`, `set_project_fps`,
+    // `set_stage_size`), so a hand-trimmed or partially
+    // written MCP-authored file was a load-breaking
+    // landmine. The defaults mirror the values both
+    // project constructors already use (`Project::new_demo`
+    // and the MCP `new_project` handler): "Untitled",
+    // 12 fps, 960x720 stage, background 0x232830.
+    #[serde(default = "default_project_name")]
     pub name: String,
+    #[serde(default = "default_fps")]
     pub fps: f32,
     /// Logical stage size the poses were authored in.
+    #[serde(default = "default_stage")]
     pub stage: [f32; 2],
+    #[serde(default = "default_background")]
     pub background: u32,
+    #[serde(default)]
     pub figures: Vec<FigureInstance>,
+    #[serde(default)]
     pub frames: Vec<Frame>,
     #[serde(default)]
     pub camera: Vec<CameraKey>,
@@ -773,6 +792,22 @@ pub struct Project {
 
 fn default_head_ring_scale() -> f32 {
     1.0
+}
+
+fn default_project_name() -> String {
+    "Untitled".to_string()
+}
+
+fn default_fps() -> f32 {
+    12.0
+}
+
+fn default_stage() -> [f32; 2] {
+    [960.0, 720.0]
+}
+
+fn default_background() -> u32 {
+    0x232830
 }
 
 impl Project {
@@ -1578,5 +1613,356 @@ mod scatter_wave10_tests {
             project.strokes.iter().all(|s| s.scatter == 0.0),
             "every demo-project stroke has scatter 0.0"
         );
+    }
+}
+
+// ---- Wave 11 MCP-authored project round trip ----
+//
+// Separate module on purpose: exact-name imports only, never a
+// glob. Wave 11's stress case is a project built ENTIRELY
+// through MCP calls: every field an MCP tool can set must
+// survive a save -> load round trip with the value intact.
+// This module plants non-default values in every MCP-settable
+// field of the document model (plus the file-level fields no
+// tool sets, for completeness), serialises, deserialises, and
+// asserts field by field — `Project` has no `PartialEq`, and
+// a whole-struct assert could not name the lost field anyway.
+#[cfg(test)]
+mod mcp_roundtrip_wave11_tests {
+    use crate::graph::{Channel, ChannelTarget, Interp, Key};
+    use crate::model::{
+        AudioClip, CameraKey, CapKind, ClipDef, ClipLoop, Easing, FigureDef, Frame, FxClipEntry,
+        ImageAsset, InstanceKey, ParticleEvent, ParticleKind, Pose, Project, SegmentMedia, Shape,
+        SprayMark, SpriteInstance, Stroke, TextInstance,
+    };
+    use crate::vfx::{ClipKind, ParticleClip, Weather, WeatherKind};
+
+    /// A project with a non-default value in every field the
+    /// MCP surface can write (tool names in the E7 census),
+    /// built the way the tools build it: from the demo shape,
+    /// then mutated field by field.
+    fn mcp_authored_project() -> Project {
+        let mut project = Project::new_demo();
+        // Project scalars: new_project / set_project_fps /
+        // set_stage_size / set_head_ring_scale /
+        // set_tween_playback / set_project_easing.
+        project.name = "MCP Authored".to_string();
+        project.fps = 24.0;
+        project.stage = [800.0, 600.0];
+        project.background = 0x101418;
+        project.head_ring_scale = 2.5;
+        project.tween_playback = true;
+        project.easing = Easing::EaseIn;
+        project.camera_follow = Some(0);
+        // Camera: set_camera (incl. the angle arg).
+        project.camera.push(CameraKey {
+            frame: 2,
+            x: 300.0,
+            y: 250.0,
+            zoom: 1.5,
+            angle: 33.0,
+        });
+        // Figure flags: layers (hidden / locked / opacity),
+        // figure_set_color, clip assignment.
+        project.figures[0].hidden = true;
+        project.figures[0].locked = true;
+        project.figures[0].opacity = 0.5;
+        project.figures[0].clip = Some(0);
+        // Node fields: set_node (length / thickness / color /
+        // shape), set_node_cap / set_node_color2 /
+        // set_node_opacity (style), plus a media value for
+        // file-level completeness (no MCP setter exists).
+        {
+            let node = &mut project.figures[0].def.nodes[1];
+            node.length = 52.0;
+            node.thickness = 7.5;
+            node.color = Some(0x00FF00);
+            node.shape = Shape::Circle;
+            node.style.taper = 0.5;
+            node.style.cap = CapKind::Point;
+            node.style.color2 = Some(0x0000FF);
+            node.style.opacity = 0.75;
+            node.media = Some(SegmentMedia::Text {
+                content: "hi".to_string(),
+                size: 14.0,
+            });
+        }
+        // Frame fields: set_frame_duration (duration),
+        // set_frame_easing (easing), set_bend (bends),
+        // set_pose (poses).
+        project.frames[0].duration = 2.5;
+        project.frames[0].easing = Some(Easing::Smooth);
+        let node_count = project.figures[0].def.nodes.len();
+        project.frames[0].bends = vec![vec![0.25; node_count]];
+        project.frames[1].poses[0].root = [111.0, 222.0];
+        project.frames[1].poses[0].angles[1] = 42.0;
+        // Stroke fields: draw_stroke (frame / points / color /
+        // width / scatter); widths, fill, spray and opacity
+        // planted too — serde must carry them even though the
+        // MCP draw tools cannot set them today (E7 census).
+        project.strokes.push(Stroke {
+            frame: 1,
+            points: vec![[10.0, 20.0], [30.0, 40.0]],
+            color: 0xFF0000,
+            width: 6.0,
+            widths: vec![2.0, 6.0],
+            fill: Some(0x00FF00),
+            spray: Some(SprayMark {
+                seed: 99,
+                radius: 8.0,
+                opacity: 0.5,
+            }),
+            opacity: 0.5,
+            scatter: 12.0,
+        });
+        // Audio fields: add_audio_clip (path / start_frame),
+        // audio_set_gain (gain), audio_set_muted (muted).
+        project.audio.push(AudioClip {
+            path: "song.wav".to_string(),
+            start_frame: 3,
+            gain: 0.25,
+            muted: true,
+        });
+        // FX entry: add_fx_clip + fx_set_color2 (clip fields),
+        // hidden planted (serde-carried; MCP had no setter or
+        // reader when this census was taken — the known
+        // entering gap of Wave 11).
+        project.fx_clips.push(FxClipEntry {
+            clip: ParticleClip {
+                start: 1.0,
+                duration: 16.0,
+                kind: ClipKind::Sparkle,
+                color: 0xFFC65D,
+                color2: Some(0x112233),
+                seed: 77,
+                angle: 15.0,
+                length: 140.0,
+            },
+            figure: 0,
+            node: 2,
+            hidden: true,
+        });
+        // Particle event: particle_add_event (frame / x / y)
+        // + particle_set_kind / particle_set_color; figure /
+        // node / seed planted for serde completeness.
+        project.particles.push(ParticleEvent {
+            frame: 2,
+            figure: Some(0),
+            node: Some(4),
+            x: 200.0,
+            y: 150.0,
+            kind: ParticleKind::Smoke,
+            color: 0xABCDEF,
+            seed: 1234,
+        });
+        // Movieclip: clip_create (name / def / frames),
+        // set_clip_loop (loop_mode).
+        let clip_def = FigureDef::simple();
+        project.clips.push(ClipDef {
+            name: "wave".to_string(),
+            def: clip_def.clone(),
+            frames: vec![
+                clip_def.rest_pose([10.0, 0.0]),
+                clip_def.rest_pose([20.0, 0.0]),
+            ],
+            loop_mode: ClipLoop::PingPong,
+        });
+        // Graph channel: graph_key (frame / value / tangents),
+        // set_key_interp (interp).
+        project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(1),
+            keys: vec![
+                Key {
+                    frame: 0.0,
+                    value: 1.0,
+                    in_tan: 0.5,
+                    out_tan: -0.25,
+                    interp: Interp::Linear,
+                },
+                Key::flat(2.0, 44.0).with_interp(Interp::Step),
+            ],
+        });
+        // Weather: set_weather (kind / amount / wind).
+        project.weather = Some(Weather {
+            kind: WeatherKind::Storm,
+            amount: 140.0,
+            wind: 30.0,
+        });
+        // Assets / sprites / texts: no MCP setter exists (E7
+        // census) — planted so the file-level round trip is
+        // proven for the fields an imported project carries.
+        project.assets.push(ImageAsset {
+            name: "dot.png".to_string(),
+            png: vec![0x89, 0x50, 0x4E, 0x47],
+        });
+        project.sprites.push(SpriteInstance {
+            asset: 0,
+            keys: vec![InstanceKey {
+                frame: 1.0,
+                x: 50.0,
+                y: 60.0,
+                scale: 1.5,
+                angle: 10.0,
+            }],
+        });
+        project.texts.push(TextInstance {
+            content: "Title".to_string(),
+            size: 28.0,
+            color: 0xFFFFFF,
+            keys: vec![InstanceKey {
+                frame: 0.0,
+                x: 100.0,
+                y: 80.0,
+                scale: 1.0,
+                angle: 0.0,
+            }],
+        });
+        project
+    }
+
+    #[test]
+    fn mcp_authored_project_round_trips_field_by_field() {
+        let project = mcp_authored_project();
+        let json = serde_json::to_string(&project).expect("project serialises");
+        let back: Project = serde_json::from_str(&json).expect("project parses back");
+
+        // Project scalars.
+        assert_eq!(back.name, "MCP Authored");
+        assert_eq!(back.fps, 24.0);
+        assert_eq!(back.stage, [800.0, 600.0]);
+        assert_eq!(back.background, 0x101418);
+        assert_eq!(back.head_ring_scale, 2.5);
+        assert!(back.tween_playback);
+        assert_eq!(back.easing, Easing::EaseIn);
+        assert_eq!(back.camera_follow, Some(0));
+        // Camera key, angle included.
+        assert_eq!(back.camera.len(), 1);
+        let key = &back.camera[0];
+        assert_eq!(
+            (key.frame, key.x, key.y, key.zoom, key.angle),
+            (2, 300.0, 250.0, 1.5, 33.0)
+        );
+        // Figure flags + node fields.
+        let fig = &back.figures[0];
+        assert!(fig.hidden && fig.locked);
+        assert_eq!(fig.opacity, 0.5);
+        assert_eq!(fig.clip, Some(0));
+        let node = &fig.def.nodes[1];
+        assert_eq!(node.length, 52.0);
+        assert_eq!(node.thickness, 7.5);
+        assert_eq!(node.color, Some(0x00FF00));
+        assert_eq!(node.shape, Shape::Circle);
+        assert_eq!(node.style.taper, 0.5);
+        assert_eq!(node.style.cap, CapKind::Point);
+        assert_eq!(node.style.color2, Some(0x0000FF));
+        assert_eq!(node.style.opacity, 0.75);
+        assert_eq!(
+            node.media,
+            Some(SegmentMedia::Text {
+                content: "hi".to_string(),
+                size: 14.0
+            })
+        );
+        // Frame fields.
+        assert_eq!(back.frames[0].duration, 2.5);
+        assert_eq!(back.frames[0].easing, Some(Easing::Smooth));
+        assert_eq!(back.frames[0].bends.len(), 1);
+        assert!(back.frames[0].bends[0].iter().all(|b| *b == 0.25));
+        assert_eq!(back.frames[1].poses[0].root, [111.0, 222.0]);
+        assert_eq!(back.frames[1].poses[0].angles[1], 42.0);
+        // Stroke: whole-struct equality (Stroke is PartialEq)
+        // covers widths / fill / spray / opacity / scatter.
+        assert_eq!(back.strokes.len(), 1);
+        assert_eq!(back.strokes[0], project.strokes[0]);
+        // Audio.
+        let clip = &back.audio[0];
+        assert_eq!(
+            (clip.path.as_str(), clip.start_frame, clip.gain, clip.muted),
+            ("song.wav", 3, 0.25, true)
+        );
+        // FX entry + nested clip.
+        let entry = &back.fx_clips[0];
+        assert!(entry.hidden, "fx hidden survives the round trip");
+        assert_eq!((entry.figure, entry.node), (0, 2));
+        assert_eq!(entry.clip.kind, ClipKind::Sparkle);
+        assert_eq!(entry.clip.color2, Some(0x112233));
+        assert_eq!(
+            (entry.clip.start, entry.clip.duration, entry.clip.seed, entry.clip.angle, entry.clip.length),
+            (1.0, 16.0, 77, 15.0, 140.0)
+        );
+        // Particle event.
+        let event = &back.particles[0];
+        assert_eq!(
+            (event.frame, event.figure, event.node, event.kind, event.color, event.seed),
+            (2, Some(0), Some(4), ParticleKind::Smoke, 0xABCDEF, 1234)
+        );
+        assert_eq!((event.x, event.y), (200.0, 150.0));
+        // Movieclip.
+        let clip = &back.clips[0];
+        assert_eq!(clip.name, "wave");
+        assert_eq!(clip.loop_mode, ClipLoop::PingPong);
+        assert_eq!(clip.frames.len(), 2);
+        assert_eq!(clip.frames[1].root, [20.0, 0.0]);
+        // Graph channel + keys (Channel and Key are PartialEq).
+        assert_eq!(back.channels.len(), 1);
+        assert_eq!(back.channels[0], project.channels[0]);
+        // Weather.
+        let weather = back.weather.expect("weather survives");
+        assert_eq!(
+            (weather.kind, weather.amount, weather.wind),
+            (WeatherKind::Storm, 140.0, 30.0)
+        );
+        // Assets / sprites / texts.
+        assert_eq!(back.assets[0].name, "dot.png");
+        assert_eq!(back.assets[0].png, vec![0x89, 0x50, 0x4E, 0x47]);
+        assert_eq!(back.sprites[0].asset, 0);
+        assert_eq!(back.sprites[0].keys[0].scale, 1.5);
+        assert_eq!(back.texts[0].content, "Title");
+        assert_eq!(back.texts[0].keys[0].x, 100.0);
+    }
+
+    #[test]
+    fn project_json_missing_the_original_six_fields_loads_with_defaults() {
+        // Wave 11 (E7): the six original Project fields were
+        // the last ones in the document model without a serde
+        // default. Strip them from a serialised project whose
+        // values differ from the defaults, so the defaults —
+        // not the planted values — are what can come back.
+        let mut project = Project::new_demo();
+        project.name = "Custom Name".to_string();
+        project.fps = 24.0;
+        project.stage = [800.0, 600.0];
+        project.background = 0x101010;
+        let mut value = serde_json::to_value(&project).unwrap();
+        let object = value.as_object_mut().unwrap();
+        for field in ["name", "fps", "stage", "background", "figures", "frames"] {
+            assert!(
+                object.remove(field).is_some(),
+                "serialised project carries {field}"
+            );
+        }
+        let restored: Project = serde_json::from_value(value)
+            .expect("a project file missing the original six fields must load");
+        assert_eq!(restored.name, "Untitled");
+        assert_eq!(restored.fps, 12.0);
+        assert_eq!(restored.stage, [960.0, 720.0]);
+        assert_eq!(restored.background, 0x232830);
+        assert!(restored.figures.is_empty());
+        assert!(restored.frames.is_empty());
+    }
+
+    #[test]
+    fn pose_round_trips_root_and_angles() {
+        // set_pose / get_pose move whole poses; pin the
+        // smallest unit they exchange.
+        let pose = Pose {
+            root: [123.0, 456.0],
+            angles: vec![0.0, 90.0, -45.5, 180.0],
+        };
+        let json = serde_json::to_string(&pose).unwrap();
+        let back: Pose = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.root, pose.root);
+        assert_eq!(back.angles, pose.angles);
     }
 }

@@ -66,6 +66,33 @@ thread_local! {
         std::cell::RefCell::new(stykanimate_rs::mcp::McpServer::new());
 }
 
+/// How often `poll` re-wakes the event loop while live MCP
+/// control is enabled (Wave 11). Rune's desktop loop sleeps
+/// in `ControlFlow::Wait` whenever nothing is animating and
+/// no wake deadline exists (crates/rune/src/window.rs,
+/// `about_to_wait`), and `poll` runs only at the start of a
+/// frame — so without a self-scheduled wake, a request the
+/// listener thread has queued sits undrained until the
+/// user's next input event, and its client waits with it
+/// (the bridge's reply timeout is 600 s). While the bridge
+/// is on, `poll` therefore always leaves a wake this far
+/// out: queued requests drain within one heartbeat of
+/// arriving, however idle the window is. The wake is one
+/// more deadline among the ones `Tx::wake_after` already
+/// collects — the earliest always wins — so it can never
+/// postpone the playback (1/fps) or toast (500 ms) wakes;
+/// it only bounds the silence when nothing else is
+/// scheduled. The cost is one cheap `poll` per heartbeat
+/// that finds an empty queue and returns false (no view
+/// rebuild). The framework's designed path — `AppSpec::setup`'s
+/// `Waker` handed to the listener thread — LANDED in
+/// Wave 11 (see `live_mcp::set_waker` and the `setup` hook
+/// in `main`): the listener now wakes the loop the moment a
+/// request lands. The heartbeat stays anyway, deliberately:
+/// it is cheap, proven, and bounds the damage if the waker
+/// path ever regresses. Retiring it is a later decision.
+const MCP_POLL_HEARTBEAT: Duration = Duration::from_millis(100);
+
 /// A destructive session action armed and awaiting its
 /// confirm press (UI mission Wave 4, audit S16 D2): the
 /// actions these variants name replace the live project —
@@ -86,13 +113,18 @@ thread_local! {
 /// signal: `core.edits_since_autosave() > 0`, the same
 /// counter the app bar's modified dot and the Project
 /// section's autosave line read. It counts edits the
-/// recovery snapshot has not captured. Its known limit,
-/// inherited from the core: the counter is not reset by
-/// a project swap (New / Open / Load leave it alone), so
-/// shortly after a confirmed swap it can still read
-/// dirty until the next autosave (every 25 counted
-/// edits) catches up — an arm that asks once more, never
-/// a discard that happens silently.
+/// recovery snapshot has not captured. Since Wave 10 the
+/// swap paths themselves restart the counters
+/// (`EditorCore::note_project_swapped`, called by the
+/// project-tools and Home swap actions, the core's own
+/// load paths and the MCP io tools), so a confirmed swap
+/// reads clean immediately rather than staying dirty
+/// until the next autosave — the paragraph that used to
+/// sit here described the pre-Wave-10 behaviour. The
+/// counter's remaining limit is the core's: it counts
+/// snapshot-taking ops only, so an edit path that
+/// mutates without a snapshot is invisible to it — a
+/// limit GUI and MCP edits share alike.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfirmAction {
     /// Replace the session with a blank/demo project
@@ -244,7 +276,17 @@ fn init() -> State {
     // toggle reads the bridge's real state, so the user
     // sees it off and can retry once the port is free.
     if layout.live_mcp {
-        let _ = live_mcp::set_enabled(true);
+        let on = live_mcp::set_enabled(true);
+        // Wave 11 (A4): record how the start went so the
+        // Settings card can say so — a failed bind (port in
+        // use) otherwise looked identical to "never tried".
+        stykanimate_rs::shell::note_live_mcp_start(
+            if on {
+                stykanimate_rs::shell::LiveMcpStartOutcome::Listening
+            } else {
+                stykanimate_rs::shell::LiveMcpStartOutcome::FailedToStart
+            },
+        );
     }
     if let Some(msg) = rune_sec::home_panel::startup_status() {
         core.status = msg;
@@ -407,7 +449,14 @@ fn stage_wheel(s: &mut State, e: WheelEvent) -> bool {
 /// live the shell wakes twice a second so they fade on time),
 /// theme flips persist to the layout prefs, and queued
 /// live-MCP requests drain against the live core (see
-/// `live_mcp`). Playback:
+/// `live_mcp`). While live control is enabled the loop also
+/// re-wakes on [`MCP_POLL_HEARTBEAT`] so a queued request
+/// never waits for unrelated user input, and a status a
+/// drained call wrote is toasted with the toasts module's
+/// `MCP: ` attribution prefix — stamped here, at the push
+/// site only, never written into `core.status` itself (the
+/// status text is also an MCP API return value; see
+/// `rune_sec::toasts` module docs, Wave 11). Playback:
 /// while `core.playing`, advance the playhead by the real
 /// elapsed time (clamped so a long stall doesn't jump) and
 /// schedule the next frame at the project fps interval — the
@@ -439,18 +488,71 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     // status line toasts in the same tick it was written,
     // and capped per tick so a request burst cannot stall
     // the frame; the queue keeps the rest for the next one.
+    //
+    // Wave 11 (A3): two additions. (1) The heartbeat wake —
+    // see `MCP_POLL_HEARTBEAT`: while the bridge is on,
+    // this poll always schedules the next one, so a queued
+    // request drains even when the window is otherwise
+    // idle. (2) Attribution: the status is snapshotted
+    // before the drain and compared after it, so the
+    // status check below can tell a status the DRAIN wrote
+    // (stamp the toast with the MCP prefix) from one
+    // written earlier in this same tick by the autosave
+    // check above (no stamp — it was not the client's
+    // doing). The comparison is drain-window-exact for the
+    // same reason: nothing else in `poll` writes
+    // `core.status` after this block.
+    let mut mcp_status_changed = false;
     if live_mcp::is_enabled() {
+        let status_before_drain = s.core.status.clone();
+        // Wave 11 (E9): watch the core's project-swap counter
+        // across the drain — an MCP load/import replaces the
+        // project under the shell, and shell-side selection
+        // state (a selected stroke/particle/FX row, an armed
+        // destructive confirm) would otherwise point into a
+        // project that no longer exists.
+        let swaps_before_drain = s.core.project_swaps();
         let drained = MCP_ROUTER.with(|router| {
             live_mcp::drain(&mut s.core, &mut router.borrow_mut(), 8)
         });
         if drained > 0 {
             redraw = true;
+            mcp_status_changed = s.core.status != status_before_drain;
+            if s.core.project_swaps() != swaps_before_drain {
+                s.stroke_selected = None;
+                s.particle_selected = None;
+                s.fx_selected = None;
+                s.confirm_action = None;
+            }
+            // Errors the drain buffered (protocol errors and
+            // refusals that never wrote the status line) toast
+            // here with the same MCP attribution; errors that
+            // DID write the status are already on the status
+            // path below and are not repeated.
+            for err in live_mcp::take_drain_errors() {
+                s.toasts.push_status(
+                    format!("{}{}", rune_sec::toasts::MCP_STATUS_PREFIX, err),
+                    now,
+                );
+            }
         }
+        tx.wake_after(MCP_POLL_HEARTBEAT);
     }
     if s.core.status != s.last_status {
         s.last_status = s.core.status.clone();
         if !s.last_status.is_empty() {
-            s.toasts.push_status(s.last_status.clone(), now);
+            if mcp_status_changed {
+                s.toasts.push_status(
+                    format!(
+                        "{}{}",
+                        rune_sec::toasts::MCP_STATUS_PREFIX,
+                        s.last_status
+                    ),
+                    now,
+                );
+            } else {
+                s.toasts.push_status(s.last_status.clone(), now);
+            }
         }
     }
     if !s.toasts.is_empty() {
@@ -1111,6 +1213,12 @@ fn main() {
         scenes: Box::leak(rune_sec::scenes::scenes().into_boxed_slice()),
         poll: Some(poll),
         on_key: Some(on_key),
+        // Wave 11 (A3 request A): the listener thread wakes
+        // the event loop when a live-MCP request lands, so a
+        // queued request drains promptly even in an idle
+        // window. The 100 ms poll heartbeat stays as the
+        // proven floor; the waker is additive.
+        setup: Some(|_: &mut State, waker| live_mcp::set_waker(waker)),
         ..AppSpec::new("StykAnimate RS", (1440.0, 900.0), init, view)
     });
 }

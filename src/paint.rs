@@ -981,6 +981,267 @@ pub fn simplify_points(points: &[[f32; 2]], epsilon: f32) -> Vec<[f32; 2]> {
         .collect()
 }
 
+// ---------------------------------------------------------------------
+// MCP handlers (Wave 11): the paint model's slice of the MCP
+// surface — the brush library, direct spray-mark creation and
+// stroke style readback. The registry lives in `mcp_tools.rs`
+// (read-only for this section); these handlers are spliced
+// into it as `crate::paint::tool_*`.
+//
+// Conventions mirror `mcp_tools.rs` exactly (its helpers are
+// private to that module, so this section carries its own,
+// distinctly named): arguments are one JSON object, indices
+// are 0-based, colours are `0xRRGGBB` integers, every handler
+// validates its arguments and returns `Err(String)` on bad
+// input — never panics — and returns a small JSON summary.
+// ---------------------------------------------------------------------
+
+use crate::editor::EditorCore;
+use serde_json::{json, Value};
+
+fn paint_arg<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
+    args.get(key).filter(|v| !v.is_null())
+}
+
+fn paint_as_usize(v: &Value, key: &str) -> Result<usize, String> {
+    if let Some(u) = v.as_u64() {
+        return usize::try_from(u).map_err(|_| format!("argument '{key}' is too large"));
+    }
+    if let Some(f) = v.as_f64() {
+        if f >= 0.0 && f.fract() == 0.0 && f <= usize::MAX as f64 {
+            return Ok(f as usize);
+        }
+    }
+    Err(format!("argument '{key}' must be a non-negative integer"))
+}
+
+fn paint_req_usize(args: &Value, key: &str) -> Result<usize, String> {
+    match paint_arg(args, key) {
+        Some(v) => paint_as_usize(v, key),
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+fn paint_opt_usize(args: &Value, key: &str) -> Result<Option<usize>, String> {
+    match paint_arg(args, key) {
+        Some(v) => paint_as_usize(v, key).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn paint_opt_f32(args: &Value, key: &str) -> Result<Option<f32>, String> {
+    match paint_arg(args, key) {
+        Some(v) => v
+            .as_f64()
+            .map(|f| Some(f as f32))
+            .ok_or_else(|| format!("argument '{key}' must be a number")),
+        None => Ok(None),
+    }
+}
+
+/// Colours travel as `0xRRGGBB` integers (the `mcp_tools`
+/// convention).
+fn paint_opt_color(args: &Value, key: &str) -> Result<Option<u32>, String> {
+    match paint_arg(args, key) {
+        Some(v) => {
+            let n = paint_as_usize(v, key)?;
+            u32::try_from(n)
+                .map(Some)
+                .map_err(|_| format!("argument '{key}' is too large for a colour"))
+        }
+        None => Ok(None),
+    }
+}
+
+fn paint_req_points(args: &Value, key: &str) -> Result<Vec<V2>, String> {
+    let v = paint_arg(args, key).ok_or_else(|| format!("missing required argument '{key}'"))?;
+    let arr = v
+        .as_array()
+        .ok_or_else(|| format!("argument '{key}' must be an array of [x, y] points"))?;
+    let mut points = Vec::with_capacity(arr.len());
+    for (i, p) in arr.iter().enumerate() {
+        let pair = p
+            .as_array()
+            .filter(|a| a.len() == 2)
+            .ok_or_else(|| format!("argument '{key}[{i}]' must be an [x, y] pair"))?;
+        let x = pair[0]
+            .as_f64()
+            .ok_or_else(|| format!("argument '{key}[{i}][0]' must be a number"))? as f32;
+        let y = pair[1]
+            .as_f64()
+            .ok_or_else(|| format!("argument '{key}[{i}][1]' must be a number"))? as f32;
+        points.push([x, y]);
+    }
+    Ok(points)
+}
+
+fn paint_check_frame(core: &EditorCore, frame: usize) -> Result<(), String> {
+    if frame < core.project.frames.len() {
+        Ok(())
+    } else {
+        Err(format!(
+            "frame index {frame} out of range (project has {} frame(s))",
+            core.project.frames.len()
+        ))
+    }
+}
+
+/// The wire name of a nib kind (the `apply_nib` tool's enum).
+fn paint_nib_name(nib: Nib) -> &'static str {
+    match nib {
+        Nib::Round => "round",
+        Nib::Square => "square",
+        Nib::Calligraphy => "calligraphy",
+    }
+}
+
+/// The `Spray` preset's parameters, the defaults for
+/// [`tool_draw_spray`]: looked up in the library by name so
+/// the tool can never drift from the preset it mirrors. The
+/// fallbacks are the preset's current values, used only if
+/// the preset is ever renamed away.
+fn spray_preset() -> Brush {
+    brush_library()
+        .into_iter()
+        .find(|b| b.name == "Spray")
+        .unwrap_or(Brush {
+            name: "Spray",
+            width: 14.0,
+            nib: Nib::Round,
+            nib_angle: 0.0,
+            smoothing: 0,
+            opacity: 0.5,
+            scatter: 12.0,
+        })
+}
+
+/// Append a spray-mark stroke (the MCP `draw_spray`
+/// handler): the direct-creation counterpart of drawing
+/// with the Spray brush, which `draw_stroke` cannot express
+/// (it records `spray: None` unconditionally). The stroke
+/// is recorded exactly as `EditorCore::begin_draw` records
+/// a spray-brush stroke — the brush's opacity rides on the
+/// mark and `Stroke::opacity` stays 1.0 so no renderer
+/// double-applies it, and the seed, when not supplied,
+/// derives by begin_draw's own formula
+/// (`0x5EED_0000 + frame * 131 + index`, the pushed
+/// stroke's project-wide index), so an MCP spray renders
+/// identically to the same spray drawn by hand.
+pub fn tool_draw_spray(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let frame = paint_req_usize(args, "frame")?;
+    paint_check_frame(core, frame)?;
+    let points = paint_req_points(args, "points")?;
+    if points.is_empty() {
+        return Err("argument 'points' must contain at least one point".into());
+    }
+    let preset = spray_preset();
+    let color = paint_opt_color(args, "color")?.unwrap_or(0xE8E8EC);
+    let width = paint_opt_f32(args, "width")?.unwrap_or(preset.width);
+    if width <= 0.0 {
+        return Err("argument 'width' must be positive".into());
+    }
+    let radius = paint_opt_f32(args, "radius")?.unwrap_or(preset.scatter);
+    if radius <= 0.0 {
+        return Err("argument 'radius' must be positive".into());
+    }
+    let opacity = paint_opt_f32(args, "opacity")?.unwrap_or(preset.opacity);
+    if !(0.0..=1.0).contains(&opacity) {
+        return Err("argument 'opacity' must be between 0 and 1".into());
+    }
+    let index = core.project.strokes.len();
+    let seed = match paint_opt_usize(args, "seed")? {
+        Some(s) => s as u64,
+        None => 0x5EED_0000u64 + (frame as u64) * 131 + index as u64,
+    };
+    let n_points = points.len();
+    core.project.strokes.push(Stroke {
+        frame,
+        points,
+        color,
+        width,
+        widths: Vec::new(),
+        fill: None,
+        spray: Some(SprayMark {
+            seed,
+            radius,
+            opacity,
+        }),
+        // The mark carries the opacity; 1.0 here is
+        // begin_draw's rule, so the dots are not faded
+        // twice (see the `Brush` docs on the Spray preset).
+        opacity: 1.0,
+        // The spray mark carries the spread; the stroke's
+        // own dab scatter stays off (begin_draw's rule).
+        scatter: 0.0,
+    });
+    Ok(json!({
+        "ok": true,
+        "index": index,
+        "frame": frame,
+        "points": n_points,
+        "dots": n_points * 6,
+        "seed": seed,
+        "strokes_on_frame": core
+            .project
+            .strokes
+            .iter()
+            .filter(|s| s.frame == frame)
+            .count(),
+    }))
+}
+
+/// Read one stroke's style back (the MCP `get_stroke_style`
+/// handler): the stored fields verbatim, plus the effective
+/// render form the renderers will use — `render` follows
+/// the stage's own precedence (spray, then fill, then
+/// scatter dabs, then the plain polyline) and `render_dots`
+/// counts the dots/dabs for the two dot forms. `index` is
+/// the project-wide stroke index, the addressing
+/// `delete_stroke` uses.
+pub fn tool_get_stroke_style(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = paint_req_usize(args, "index")?;
+    let Some(stroke) = core.project.strokes.get(index) else {
+        return Err(format!("no stroke at index {index}"));
+    };
+    let (render, render_dots) = if stroke.spray.is_some() {
+        ("spray", Some(stroke.points.len() * 6))
+    } else if stroke.fill.is_some() && stroke.points.len() >= 3 {
+        ("filled", None)
+    } else if stroke.scatter > 0.0 && !stroke.points.is_empty() {
+        (
+            "scatter-dabs",
+            Some(stroke_dabs(stroke, index, stroke_dab_spacing(stroke)).len()),
+        )
+    } else {
+        ("polyline", None)
+    };
+    Ok(json!({
+        "index": index,
+        "frame": stroke.frame,
+        "points": stroke.points.len(),
+        "color": stroke.color,
+        "width": stroke.width,
+        "widths": if stroke.widths.is_empty() {
+            Value::Null
+        } else {
+            json!(stroke.widths)
+        },
+        "fill": stroke.fill,
+        "opacity": stroke.opacity,
+        "scatter": stroke.scatter,
+        "spray": match &stroke.spray {
+            Some(mark) => json!({
+                "seed": mark.seed,
+                "radius": mark.radius,
+                "opacity": mark.opacity,
+            }),
+            None => Value::Null,
+        },
+        "render": render,
+        "render_dots": render_dots,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2511,5 +2772,120 @@ mod stroke_dabs_tests {
         let out = erase_at(&[s], [50.0, 0.0], 15.0);
         assert_eq!(out.len(), 2, "one cut, two pieces");
         assert!(out.iter().all(|p| p.scatter == 12.0));
+    }
+
+
+    #[test]
+    fn mcp_draw_spray_records_a_mark_exactly_like_the_recorder() {
+        let mut core = crate::editor::EditorCore::new();
+        let before = core.project.strokes.len();
+        let out = tool_draw_spray(
+            &mut core,
+            &json!({ "frame": 0, "points": [[10.0, 10.0], [20.0, 12.0]] }),
+        )
+        .unwrap();
+        assert_eq!(out["index"], json!(before));
+        assert_eq!(out["dots"], json!(12), "6 dots per point");
+        let stroke = &core.project.strokes[before];
+        let mark = stroke.spray.expect("a spray mark is recorded");
+        // Defaults are the Spray preset's own parameters.
+        assert_eq!(mark.radius, 12.0);
+        assert_eq!(mark.opacity, 0.5);
+        assert_eq!(stroke.width, 14.0);
+        // The derived seed is begin_draw's formula — the same
+        // value `stroke_scatter_seed` derives for the stroke.
+        assert_eq!(mark.seed, stroke_scatter_seed(0, before));
+        assert_eq!(out["seed"], json!(mark.seed));
+        // begin_draw's opacity discipline: the mark carries
+        // it, the stroke field stays 1.0, own scatter off.
+        assert_eq!(stroke.opacity, 1.0);
+        assert_eq!(stroke.scatter, 0.0);
+    }
+
+    #[test]
+    fn mcp_draw_spray_honours_an_explicit_seed_and_parameters() {
+        let mut core = crate::editor::EditorCore::new();
+        tool_draw_spray(
+            &mut core,
+            &json!({
+                "frame": 1,
+                "points": [[0.0, 0.0]],
+                "seed": 42,
+                "radius": 5.0,
+                "opacity": 0.25,
+                "width": 8.0,
+                "color": 0xFF0000u32,
+            }),
+        )
+        .unwrap();
+        let stroke = core.project.strokes.last().unwrap();
+        let mark = stroke.spray.unwrap();
+        assert_eq!(mark.seed, 42);
+        assert_eq!(mark.radius, 5.0);
+        assert_eq!(mark.opacity, 0.25);
+        assert_eq!(stroke.width, 8.0);
+        assert_eq!(stroke.color, 0xFF0000);
+    }
+
+    #[test]
+    fn mcp_draw_spray_refuses_bad_input_without_mutating() {
+        let mut core = crate::editor::EditorCore::new();
+        let before = core.project.strokes.len();
+        for args in [
+            json!({ "frame": 999, "points": [[0.0, 0.0]] }), // no such frame
+            json!({ "frame": 0, "points": [] }),             // no points
+            json!({ "frame": 0, "points": [[0.0, 0.0]], "radius": 0.0 }),
+            json!({ "frame": 0, "points": [[0.0, 0.0]], "radius": -3.0 }),
+            json!({ "frame": 0, "points": [[0.0, 0.0]], "opacity": 1.5 }),
+            json!({ "frame": 0, "points": [[0.0, 0.0]], "width": 0.0 }),
+            json!({ "frame": 0, "points": [[0.0, 0.0]], "seed": -1 }),
+            json!({ "points": [[0.0, 0.0]] }), // missing frame
+        ] {
+            assert!(tool_draw_spray(&mut core, &args).is_err(), "refused: {args}");
+        }
+        assert_eq!(
+            core.project.strokes.len(),
+            before,
+            "a refused call pushes nothing"
+        );
+    }
+
+    #[test]
+    fn mcp_get_stroke_style_reads_back_what_will_render() {
+        let mut core = crate::editor::EditorCore::new();
+        // A spray stroke reports the spray form and dot count.
+        let sprayed = tool_draw_spray(
+            &mut core,
+            &json!({ "frame": 0, "points": [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]] }),
+        )
+        .unwrap();
+        let idx = sprayed["index"].as_u64().unwrap() as usize;
+        let out = tool_get_stroke_style(&mut core, &json!({ "index": idx })).unwrap();
+        assert_eq!(out["render"], json!("spray"));
+        assert_eq!(out["render_dots"], json!(18));
+        assert_eq!(out["spray"]["radius"], json!(12.0));
+        assert_eq!(out["points"], json!(3));
+        // A scattered plain stroke reports the dab form; the
+        // dab count is the renderers' own count.
+        core.project.strokes.push(Stroke {
+            frame: 0,
+            points: vec![[0.0, 0.0], [30.0, 0.0]],
+            color: 0x112233,
+            width: 4.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+            opacity: 0.8,
+            scatter: 6.0,
+        });
+        let idx2 = core.project.strokes.len() - 1;
+        let out = tool_get_stroke_style(&mut core, &json!({ "index": idx2 })).unwrap();
+        assert_eq!(out["render"], json!("scatter-dabs"));
+        let want = stroke_dabs(&core.project.strokes[idx2], idx2, stroke_dab_spacing(&core.project.strokes[idx2])).len();
+        assert_eq!(out["render_dots"], json!(want));
+        assert_eq!(out["spray"], Value::Null);
+        assert_eq!(out["widths"], Value::Null, "empty widths read back as uniform (null)");
+        // An unknown index is an honest error, never a panic.
+        assert!(tool_get_stroke_style(&mut core, &json!({ "index": 9999 })).is_err());
     }
 }
