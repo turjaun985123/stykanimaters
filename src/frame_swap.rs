@@ -46,6 +46,27 @@
 //!   `assets` (bare image data), `camera_follow` (a figure
 //!   index) and `weather` (continuous over the whole
 //!   timeline). None of those are touched.
+//! * **Media references cannot be scrambled by a swap**
+//!   (Wave 12, C8 audit; pinned by
+//!   `swap_preserves_media_and_table_references`). The only
+//!   fields this module ever writes are frame pins —
+//!   `frame` / `start_frame` / `start` / `Key.frame` /
+//!   `InstanceKey.frame` — and the [`Frame`] values
+//!   themselves. A sprite's `asset` index
+//!   (`SpriteInstance.asset`), a particle's or FX clip's
+//!   `figure` / `node` indices, a graph channel's `figure`
+//!   and `camera_follow` are never written, and the tables
+//!   they index (`assets`, `figures`, `clips`) never move,
+//!   so every such index means the same thing after the swap
+//!   as before. Segment media (`SegmentMedia::Image`) lives
+//!   on figure DEFS (`NodeDef.media`, on `FigureInstance.def`
+//!   and `ClipDef.def`), not on frames, so it is outside the
+//!   swap entirely; a movieclip's own `ClipDef.frames` are a
+//!   clip-local pose sequence holding no asset references at
+//!   all. And because `Frame.bends` (outer index = figure)
+//!   travels inside the same [`Frame`] value as
+//!   `Frame.poses`, a frame's bend rows can never be
+//!   separated from the poses they belong to.
 //!
 //! ## Undo discipline
 //!
@@ -433,7 +454,8 @@ mod tests {
     use super::*;
     use crate::graph::{Channel, ChannelTarget, Key};
     use crate::model::{
-        AudioClip, CameraKey, Easing, Frame, FxClipEntry, ParticleEvent, ParticleKind,
+        AudioClip, CameraKey, ClipDef, ClipLoop, Easing, FigureDef, FigureInstance, Frame,
+        FxClipEntry, ImageAsset, ParticleEvent, ParticleKind, Pose, SegmentMedia,
         SpriteInstance, Stroke, TextInstance,
     };
     use crate::vfx::{ClipKind, ParticleClip};
@@ -986,5 +1008,203 @@ mod tests {
         assert_eq!(out["frame_count"], json!(0));
         assert_eq!(out["frames"], json!([]));
         assert_eq!(out["loop_range"], Value::Null);
+    }
+
+    // ---- Wave 12 (C8): media / table reference integrity ----------
+
+    /// A two-figure project exercising every project-table
+    /// reference a swap passes near: sprite instances pointing
+    /// into `assets`, segment media on a figure DEF pointing
+    /// into `assets`, a movieclip (figure 1 plays clip 0, whose
+    /// own frames are a clip-local pose sequence), a particle
+    /// and an FX entry anchored to figure/node indices, a graph
+    /// channel owned by figure 1, and `camera_follow` naming
+    /// figure 1. Frames A and B carry two-figure poses and
+    /// TWO-row bends, so bend-row ↔ pose alignment per figure
+    /// is observable.
+    fn media_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.assets = vec![
+            ImageAsset { name: "a.png".into(), png: vec![1, 2, 3] },
+            ImageAsset { name: "b.png".into(), png: vec![4, 5, 6] },
+        ];
+        let mut def_with_media = FigureDef::humanoid();
+        def_with_media.nodes[3].media = Some(SegmentMedia::Image { asset: 1 });
+        def_with_media.nodes[4].media =
+            Some(SegmentMedia::Text { content: "hi".into(), size: 12.0 });
+        core.project.figures = vec![
+            FigureInstance {
+                name: "Media".into(),
+                color: 0xFFFFFF,
+                def: def_with_media,
+                hidden: false,
+                locked: false,
+                opacity: 1.0,
+                clip: None,
+            },
+            FigureInstance {
+                name: "Clipper".into(),
+                color: 0x00FF00,
+                def: FigureDef::humanoid(),
+                hidden: false,
+                locked: false,
+                opacity: 1.0,
+                clip: Some(0),
+            },
+        ];
+        core.project.clips = vec![ClipDef {
+            name: "wave".into(),
+            def: FigureDef::humanoid(),
+            frames: vec![
+                Pose { root: [1.0, 2.0], angles: vec![0.0] },
+                Pose { root: [3.0, 4.0], angles: vec![0.5] },
+            ],
+            loop_mode: ClipLoop::Loop,
+        }];
+        let two_pose_frame = |r0: f32, r1: f32, b0: f32, b1: f32, duration: f32| Frame {
+            poses: vec![
+                Pose { root: [r0, 0.0], angles: vec![0.0] },
+                Pose { root: [r1, 0.0], angles: vec![0.0] },
+            ],
+            duration,
+            easing: None,
+            bends: vec![vec![b0], vec![b1]],
+        };
+        core.project.frames = vec![
+            frame(1.0, None, 0.0),
+            two_pose_frame(10.0, 20.0, 0.11, 0.22, 2.0),
+            frame(1.5, None, 0.0),
+            two_pose_frame(30.0, 40.0, 0.33, 0.44, 5.0),
+        ];
+        core.project.sprites = vec![
+            SpriteInstance {
+                asset: 0,
+                keys: vec![instance_key(A as f32, 5.0), instance_key(B as f32, 7.0)],
+            },
+            SpriteInstance { asset: 1, keys: vec![instance_key(A as f32, 9.0)] },
+        ];
+        core.project.particles = vec![ParticleEvent {
+            frame: A,
+            figure: Some(1),
+            node: Some(2),
+            x: 0.0,
+            y: 0.0,
+            kind: ParticleKind::Burst,
+            color: 0xAAAA,
+            seed: 1,
+        }];
+        let mut fx = fx_entry(A as f32, 0x3333);
+        fx.figure = 1;
+        fx.node = 3;
+        core.project.fx_clips = vec![fx];
+        core.project.channels = vec![Channel {
+            figure: 1,
+            target: ChannelTarget::RootX,
+            keys: vec![Key::flat(A as f32, 10.0), Key::flat(B as f32, 30.0)],
+        }];
+        core.project.camera_follow = Some(1);
+        core
+    }
+
+    #[test]
+    fn swap_preserves_media_and_table_references() {
+        let mut core = media_core();
+
+        assert!(swap_frames(&mut core, A, B));
+        let project = &core.project;
+
+        // Sprite instances: the KEYS followed their frames
+        // (that is the swap's job) but the `asset` index each
+        // sprite points into `Project::assets` with was not
+        // rewritten — and the assets table itself is
+        // byte-for-byte where it was.
+        assert_eq!(project.sprites[0].asset, 0, "sprite 0 still names asset 0");
+        assert_eq!(project.sprites[1].asset, 1, "sprite 1 still names asset 1");
+        let sprite0_frame_of = |x: f32| {
+            project.sprites[0].keys.iter().find(|k| k.x == x).map(|k| k.frame)
+        };
+        assert_eq!(sprite0_frame_of(5.0), Some(B as f32), "sprite key followed its frame");
+        assert_eq!(sprite0_frame_of(7.0), Some(A as f32));
+        assert_eq!(
+            project.sprites[1].keys[0].frame, B as f32,
+            "sprite 1's only key followed its frame"
+        );
+        assert_eq!(project.assets.len(), 2, "assets table did not move");
+        assert_eq!(project.assets[0].name, "a.png");
+        assert_eq!(project.assets[0].png, vec![1, 2, 3]);
+        assert_eq!(project.assets[1].name, "b.png");
+        assert_eq!(project.assets[1].png, vec![4, 5, 6]);
+
+        // Segment media lives on figure DEFS, not frames: the
+        // swap never reaches it, so the def's asset reference
+        // and its text label are exactly as authored.
+        assert_eq!(
+            project.figures[0].def.nodes[3].media,
+            Some(SegmentMedia::Image { asset: 1 }),
+            "def-level image media untouched, asset index intact"
+        );
+        assert_eq!(
+            project.figures[0].def.nodes[4].media,
+            Some(SegmentMedia::Text { content: "hi".into(), size: 12.0 }),
+            "def-level text media untouched"
+        );
+
+        // Movieclip integrity: figure 1 still plays clip 0,
+        // and the clip's own clip-local pose sequence is
+        // untouched — the timeline swap has no business inside
+        // a clip.
+        assert_eq!(project.figures[1].clip, Some(0), "figure still indexes clip 0");
+        assert_eq!(project.figures[0].clip, None);
+        assert_eq!(project.clips.len(), 1);
+        assert_eq!(project.clips[0].name, "wave");
+        assert_eq!(project.clips[0].frames.len(), 2, "clip frames are clip-local");
+        assert_eq!(project.clips[0].frames[0].root, [1.0, 2.0]);
+        assert_eq!(project.clips[0].frames[1].root, [3.0, 4.0]);
+
+        // Bends ↔ poses alignment per figure: frame A now
+        // holds frame B's poses AND frame B's two bend rows —
+        // row 0 still belongs to figure 0's pose, row 1 to
+        // figure 1's, because both arrays travel inside the
+        // one Frame value.
+        assert_eq!(project.frames[A].poses[0].root, [30.0, 0.0]);
+        assert_eq!(project.frames[A].poses[1].root, [40.0, 0.0]);
+        assert_eq!(
+            project.frames[A].bends,
+            vec![vec![0.33], vec![0.44]],
+            "B's bend rows travelled with B's poses"
+        );
+        assert_eq!(project.frames[B].poses[0].root, [10.0, 0.0]);
+        assert_eq!(project.frames[B].poses[1].root, [20.0, 0.0]);
+        assert_eq!(
+            project.frames[B].bends,
+            vec![vec![0.11], vec![0.22]],
+            "A's bend rows travelled with A's poses"
+        );
+
+        // Figure/node indices on frame-pinned entries: the
+        // frame pins traded, the table indices did not — the
+        // figures table never moves, so they still name the
+        // same figure and node.
+        assert_eq!(project.particles[0].frame, B, "particle followed its frame");
+        assert_eq!(project.particles[0].figure, Some(1));
+        assert_eq!(project.particles[0].node, Some(2));
+        assert_eq!(project.fx_clips[0].clip.start, B as f32, "FX start followed its frame");
+        assert_eq!(project.fx_clips[0].figure, 1);
+        assert_eq!(project.fx_clips[0].node, 3);
+        assert_eq!(project.channels[0].figure, 1, "channel still owned by figure 1");
+        let key_frame_of = |value: f32| {
+            project.channels[0].keys.iter().find(|k| k.value == value).map(|k| k.frame)
+        };
+        assert_eq!(key_frame_of(10.0), Some(B as f32));
+        assert_eq!(key_frame_of(30.0), Some(A as f32));
+        assert_eq!(project.camera_follow, Some(1), "camera still follows figure 1");
+
+        // One undo restores the traded frames and keys; the
+        // references asserted above were never written, so
+        // there is nothing for undo to restore there.
+        core.undo();
+        assert_eq!(core.project.frames[A].bends, vec![vec![0.11], vec![0.22]]);
+        assert_eq!(core.project.sprites[0].keys[0].frame, A as f32);
+        assert_eq!(core.project.sprites[0].asset, 0);
     }
 }

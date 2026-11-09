@@ -1966,3 +1966,252 @@ mod mcp_roundtrip_wave11_tests {
         assert_eq!(back.angles, pose.angles);
     }
 }
+
+#[cfg(test)]
+mod wave12_c4_serde_pins {
+    //! Wave 12 (C4): saved-file meaning pins for the style /
+    //! media / asset types. Wave 12 unifies the STYLE_PRESETS
+    //! tables (C2) and adds an asset surface (B1); neither may
+    //! change what an existing project file means. Preset
+    //! values are stored inline per node (`NodeDef.style`), so
+    //! files are insulated from table edits — the two things
+    //! that CAN silently shift meaning are the `Default` impl
+    //! below (used by the serde default on `NodeDef.style` and
+    //! by `FigureDef::humanoid`) and the asset index space
+    //! (`SegmentMedia::Image` / `SpriteInstance.asset` index
+    //! into `Project.assets`, so order is semantics). Both are
+    //! pinned here.
+    use super::*;
+
+    #[test]
+    fn wave12_node_style_default_values_are_pinned_literally() {
+        // The exact values Wave 12's refactors must not drift:
+        // taper 1.0, Round cap, no gradient colour, opacity 1.0.
+        let style = NodeStyle::default();
+        assert_eq!(style.taper, 1.0);
+        assert_eq!(style.cap, CapKind::Round);
+        assert_eq!(style.color2, None);
+        assert_eq!(style.opacity, 1.0);
+        assert_eq!(CapKind::default(), CapKind::Round);
+        // The wire shape of the default is pinned too: a saved
+        // default-styled node must keep serialising identically.
+        let json = serde_json::to_string(&style).unwrap();
+        assert_eq!(
+            json,
+            r#"{"taper":1.0,"cap":"Round","color2":null,"opacity":1.0}"#
+        );
+    }
+
+    #[test]
+    fn wave12_node_style_round_trips_every_field_combination() {
+        // Every CapKind x color2 (None / black / coloured) x
+        // taper extreme x opacity extreme must survive JSON
+        // unchanged — these are the values panel presets write
+        // inline into saved files.
+        let caps = [CapKind::Round, CapKind::Square, CapKind::Point];
+        let color2s = [None, Some(0x000000), Some(0xFF8800)];
+        let tapers = [0.0f32, 0.2, 1.0];
+        let opacities = [0.0f32, 0.35, 1.0];
+        for cap in caps {
+            for color2 in color2s {
+                for taper in tapers {
+                    for opacity in opacities {
+                        let style = NodeStyle { taper, cap, color2, opacity };
+                        let json = serde_json::to_string(&style).unwrap();
+                        let back: NodeStyle = serde_json::from_str(&json).unwrap();
+                        assert_eq!(back, style, "round trip changed {style:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wave12_node_without_style_or_media_loads_the_defaults() {
+        // The real back-compatibility path: files saved before
+        // per-node style/media existed carry neither key, and
+        // `NodeDef`'s serde defaults must supply exactly the
+        // pinned default style and no media.
+        let node: NodeDef = serde_json::from_str(
+            r#"{"name":"n","parent":null,"length":10.0,"rest_angle":0.0,"head":false,"bend":1.0}"#,
+        )
+        .unwrap();
+        assert_eq!(node.style, NodeStyle::default());
+        assert_eq!(node.media, None);
+    }
+
+    #[test]
+    fn wave12_node_style_partial_object_is_rejected_today() {
+        // Pins CURRENT behaviour, deliberately: NodeStyle's
+        // fields carry no individual serde defaults, so a
+        // partial style object fails to load rather than
+        // silently filling from defaults. Serde always writes
+        // all four fields, so no saved file can be partial —
+        // but if a future change adds per-field defaults, this
+        // test fails and forces that to be a conscious,
+        // reviewed change to saved-file meaning.
+        let partial = serde_json::from_str::<NodeStyle>(r#"{"taper":0.5}"#);
+        assert!(partial.is_err(), "partial NodeStyle unexpectedly loaded");
+    }
+
+    #[test]
+    fn wave12_image_asset_png_bytes_round_trip_byte_identically() {
+        // PNG magic + every byte value + a longer pseudo-random
+        // run: asset bytes are payload, any mutation corrupts
+        // the image a saved index points at.
+        let mut png: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend(0u8..=255);
+        let mut state: u32 = 0x12345678;
+        for _ in 0..4096 {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            png.push((state >> 24) as u8);
+        }
+        let asset = ImageAsset { name: "hero.png".to_string(), png: png.clone() };
+        let json = serde_json::to_string(&asset).unwrap();
+        let back: ImageAsset = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "hero.png");
+        assert_eq!(back.png.len(), png.len());
+        assert_eq!(back.png, png, "PNG bytes changed in round trip");
+        // An empty payload is degenerate but must also survive.
+        let empty = ImageAsset { name: "empty.png".to_string(), png: Vec::new() };
+        let back: ImageAsset =
+            serde_json::from_str(&serde_json::to_string(&empty).unwrap()).unwrap();
+        assert_eq!(back.name, "empty.png");
+        assert!(back.png.is_empty());
+    }
+
+    #[test]
+    fn wave12_segment_media_round_trips_both_variants() {
+        // The variant tag and field names are the wire format
+        // every saved file uses; the asset index must come back
+        // exactly, including index 0 (the first asset).
+        for media in [
+            SegmentMedia::Image { asset: 0 },
+            SegmentMedia::Image { asset: 7 },
+            SegmentMedia::Text { content: "héllo \"world\"".to_string(), size: 14.5 },
+        ] {
+            let json = serde_json::to_string(&media).unwrap();
+            let back: SegmentMedia = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, media, "round trip changed {media:?}");
+        }
+        let json = serde_json::to_string(&SegmentMedia::Image { asset: 2 }).unwrap();
+        assert_eq!(json, r#"{"Image":{"asset":2}}"#);
+    }
+
+    #[test]
+    fn wave12_project_with_assets_media_and_sprites_round_trips_in_order() {
+        // Assets order is index meaning: segment media and
+        // sprite instances refer to assets BY INDEX, so the
+        // table must come back in the same order with the same
+        // bytes, and every reference must still point at the
+        // same asset. Serialised with to_string_pretty — the
+        // exact format project files are saved in
+        // (projects.rs `save_project`).
+        let mut project = Project::new_demo();
+        project.assets = vec![
+            ImageAsset { name: "first.png".to_string(), png: vec![1, 2, 3] },
+            ImageAsset { name: "second.png".to_string(), png: vec![4, 5] },
+            ImageAsset { name: "third.png".to_string(), png: vec![6, 7, 8, 9] },
+        ];
+        // A non-default style and both media kinds, stored
+        // inline on nodes as the panel writes them.
+        let styled = NodeStyle {
+            taper: 0.2,
+            cap: CapKind::Square,
+            color2: Some(0x00FF00),
+            opacity: 0.5,
+        };
+        project.figures[0].def.nodes[1].style = styled;
+        project.figures[0].def.nodes[1].media =
+            Some(SegmentMedia::Image { asset: 2 });
+        project.figures[0].def.nodes[2].media = Some(SegmentMedia::Text {
+            content: "label".to_string(),
+            size: 12.0,
+        });
+        // Sprites reference assets in non-table order on
+        // purpose: reordering either side breaks the pairing.
+        project.sprites = vec![
+            SpriteInstance {
+                asset: 2,
+                keys: vec![InstanceKey {
+                    frame: 0.0,
+                    x: 10.0,
+                    y: 20.0,
+                    scale: 1.5,
+                    angle: 30.0,
+                }],
+            },
+            SpriteInstance {
+                asset: 0,
+                keys: vec![
+                    InstanceKey {
+                        frame: 0.0,
+                        x: 0.0,
+                        y: 0.0,
+                        scale: 1.0,
+                        angle: 0.0,
+                    },
+                    InstanceKey {
+                        frame: 9.0,
+                        x: 50.0,
+                        y: 60.0,
+                        scale: 2.0,
+                        angle: -45.0,
+                    },
+                ],
+            },
+        ];
+
+        let json = serde_json::to_string_pretty(&project).unwrap();
+        let back: Project = serde_json::from_str(&json).unwrap();
+        // Project has no PartialEq; a byte-identical second
+        // serialisation is the full structural equality proof.
+        let json2 = serde_json::to_string_pretty(&back).unwrap();
+        assert_eq!(json, json2, "project changed across a save/load cycle");
+
+        // Targeted semantic pins on top of the byte proof.
+        assert_eq!(back.assets.len(), 3);
+        let names: Vec<&str> = back.assets.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["first.png", "second.png", "third.png"]);
+        assert_eq!(back.assets[0].png, [1, 2, 3]);
+        assert_eq!(back.assets[1].png, [4, 5]);
+        assert_eq!(back.assets[2].png, [6, 7, 8, 9]);
+        assert_eq!(back.figures[0].def.nodes[1].style, styled);
+        assert_eq!(
+            back.figures[0].def.nodes[1].media,
+            Some(SegmentMedia::Image { asset: 2 })
+        );
+        assert_eq!(
+            back.assets[2].name, "third.png",
+            "node media index 2 must still mean the third asset"
+        );
+        assert_eq!(
+            back.figures[0].def.nodes[2].media,
+            Some(SegmentMedia::Text { content: "label".to_string(), size: 12.0 })
+        );
+        assert_eq!(back.sprites.len(), 2);
+        assert_eq!(back.sprites[0].asset, 2);
+        assert_eq!(back.sprites[1].asset, 0);
+        assert_eq!(back.sprites[1].keys.len(), 2);
+        assert_eq!(back.sprites[1].keys[1].frame, 9.0);
+        assert_eq!(back.sprites[1].keys[1].x, 50.0);
+        assert_eq!(back.sprites[0].keys[0].scale, 1.5);
+    }
+
+    #[test]
+    fn wave12_empty_project_loads_with_empty_asset_tables() {
+        // Default/empty behaviour pinned: a bare object (every
+        // Project field defaulted) and a fresh demo project
+        // both carry no assets, sprites or texts — B1's asset
+        // surface starts from this empty state and must not
+        // invent entries.
+        let bare: Project = serde_json::from_str("{}").unwrap();
+        assert!(bare.assets.is_empty());
+        assert!(bare.sprites.is_empty());
+        assert!(bare.texts.is_empty());
+        let demo = Project::new_demo();
+        assert!(demo.assets.is_empty());
+        assert!(demo.sprites.is_empty());
+        assert!(demo.texts.is_empty());
+    }
+}

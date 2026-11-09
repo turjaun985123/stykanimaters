@@ -196,6 +196,30 @@
 //!   only in the lib's i18n strings and a stats doc
 //!   reference to the original app's rule), so the
 //!   command would have nothing real to run.
+//! * Wave 12 (C5) appended fifteen commands closing the
+//!   style domain, which the palette could not reach at
+//!   all while MCP gained it in Wave 11: the six style
+//!   presets (`style-preset-*`, forwarding to the style
+//!   panel's own `apply_preset` over the ONE canonical
+//!   table, `stykanimate_rs::style::STYLE_PRESETS` — the
+//!   panel consumes the same table through its `pub use`
+//!   re-export since C2, so no second copy exists to
+//!   drift), the three direct cap setters, the taper
+//!   cycle, the opacity stepper pair (the panel's
+//!   `step_opacity`), style copy/paste (the panel's
+//!   clipboard handlers) and `open-style-inspector`
+//!   (Animate is the only workspace whose section list
+//!   carries `Section::InspectorStyle`, and the right
+//!   column renders only while `State::show_right`
+//!   holds — the command does exactly those two real
+//!   writes). The asset domain was audited in the same
+//!   pass and deliberately NOT added: B2's segment-
+//!   inspector Media section (attach-by-asset / cycle /
+//!   clear) had not landed as callable handlers at this
+//!   edit time, so its three entries are specced for the
+//!   integrator in the Wave 12 notes rather than added
+//!   against a panel path that does not exist yet — the
+//!   Wave 9 save-copy discipline.
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -230,6 +254,7 @@ use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, text_input, Color, El, Key, KeyEvent, TextEdit, Transition, Tx};
 use stykanimate_rs::audio_ops;
 use stykanimate_rs::graph_keys;
+use stykanimate_rs::model::CapKind;
 use stykanimate_rs::vfx::ClipKind;
 
 use crate::rune_sec::design;
@@ -839,6 +864,194 @@ fn cmd_next_keyframe(s: &mut State) {
     }
 }
 
+// -- Wave 12 shims (C5): the style domain. Until this
+// -- wave the palette had NO path to the segment style
+// -- inspector's actions — no preset, no cap setter, no
+// -- taper, no copy/paste — while MCP gained the whole
+// -- domain in Wave 11 (style.rs B10). Every shim below
+// -- forwards to the style panel's own handler or the
+// -- core op the panel's control presses, so the palette
+// -- can never apply a style the panel would not.
+//
+// -- The presets read the ONE canonical table,
+// -- `stykanimate_rs::style::STYLE_PRESETS`: the panel
+// -- consumes the same table through its `pub use`
+// -- re-export (inspector_style.rs, Wave 12 C2) and
+// -- MCP's `apply_style_preset` reads it too. The
+// -- palette carries no preset names, colours or caps
+// -- of its own beyond the static titles, and the
+// -- Wave 12 test below pins each title to its table
+// -- entry, so a renamed preset breaks the test instead
+// -- of drifting silently.
+
+/// Wave 12: open the segment style inspector. The
+/// panel mounts in the right column under
+/// `Section::InspectorStyle`, which only the Animate
+/// workspace's section list carries (workspaces.rs),
+/// and the right column itself renders only while
+/// `State::show_right` holds (main.rs) — so opening
+/// the inspector is exactly: jump to Animate through
+/// the workspace chips' own switch fn (the Phase I
+/// go-* path, persistence included) and make sure the
+/// right column is shown. With no segment selected the
+/// panel renders its own select-a-joint state; the
+/// command fakes nothing.
+fn cmd_open_style_inspector(s: &mut State) {
+    crate::rune_sec::workspaces::select_workspace(s, Workspace::Animate);
+    s.show_right = true;
+}
+
+/// Wave 12: apply the style preset at `index` in the
+/// canonical table to the selected segment — forwards
+/// to the style panel's own `apply_preset` (one atomic
+/// undo step; colour + cap change, gradient end and
+/// opacity pass through; the status names the preset;
+/// the colour joins the panel's recent-colours list).
+/// `apply_preset` is the one panel handler that
+/// refuses SILENTLY — it returns false and writes no
+/// status, because its chips only render with a
+/// selection — so the shim supplies the style setters'
+/// own refusal wording, the Phase J stand-down
+/// discipline.
+fn apply_style_preset_at(s: &mut State, index: usize) {
+    let preset = &stykanimate_rs::style::STYLE_PRESETS[index];
+    if !crate::rune_sec::inspector_style::apply_preset(&mut s.core, preset) {
+        s.core.status = "Select a joint first.".into();
+    }
+}
+
+fn cmd_style_preset_ink(s: &mut State) {
+    apply_style_preset_at(s, 0);
+}
+
+fn cmd_style_preset_crimson(s: &mut State) {
+    apply_style_preset_at(s, 1);
+}
+
+fn cmd_style_preset_ocean(s: &mut State) {
+    apply_style_preset_at(s, 2);
+}
+
+fn cmd_style_preset_forest(s: &mut State) {
+    apply_style_preset_at(s, 3);
+}
+
+fn cmd_style_preset_violet(s: &mut State) {
+    apply_style_preset_at(s, 4);
+}
+
+fn cmd_style_preset_amber(s: &mut State) {
+    apply_style_preset_at(s, 5);
+}
+
+/// Wave 12: set the selected segment's cap directly —
+/// the style panel's segmented control, whose chips
+/// call `set_node_cap` with exactly their own kind.
+/// The op owns the snapshot, the status and the
+/// no-selection refusal, so each shim is a pure
+/// forward with its chip's argument.
+fn cmd_style_cap_round(s: &mut State) {
+    s.core.set_node_cap(CapKind::Round);
+}
+
+/// Wave 12: set the cap to Square; same forward as
+/// [`cmd_style_cap_round`] with the Square chip's
+/// argument.
+fn cmd_style_cap_square(s: &mut State) {
+    s.core.set_node_cap(CapKind::Square);
+}
+
+/// Wave 12: set the cap to Point; same forward as
+/// [`cmd_style_cap_round`] with the Point chip's
+/// argument.
+fn cmd_style_cap_point(s: &mut State) {
+    s.core.set_node_cap(CapKind::Point);
+}
+
+/// Wave 12: cycle the selected segment's taper one
+/// step (1.0 → 0.6 → 0.3 → 0.0 → 1.0) — the style
+/// panel's Taper Step button, which calls the same
+/// core op; the op owns the status and the refusal.
+fn cmd_cycle_taper(s: &mut State) {
+    s.core.cycle_node_taper();
+}
+
+/// Wave 12: one opacity stepper press against the
+/// selected segment, through the style panel's own
+/// `step_opacity` (its ±0.05 step, percent rounding
+/// and the `set_node_opacity` write). `step_opacity`
+/// no-ops silently with no selection — its stepper
+/// only renders with one — so the shim answers the
+/// refusal in the style setters' wording first.
+fn step_opacity_guarded(s: &mut State, dir: i32) {
+    if crate::rune_sec::inspector_style::selected_style(&s.core).is_none() {
+        s.core.status = "Select a joint first.".into();
+        return;
+    }
+    crate::rune_sec::inspector_style::step_opacity(&mut s.core, dir);
+}
+
+/// Wave 12: opacity + one step; see
+/// [`step_opacity_guarded`].
+fn cmd_style_opacity_up(s: &mut State) {
+    step_opacity_guarded(s, 1);
+}
+
+/// Wave 12: opacity − one step; see
+/// [`step_opacity_guarded`].
+fn cmd_style_opacity_down(s: &mut State) {
+    step_opacity_guarded(s, -1);
+}
+
+/// Wave 12: copy the selected segment's style into
+/// the style panel's clipboard — names the panel's
+/// own Copy handler, which owns the capture, the
+/// clipboard write and both status lines.
+fn cmd_copy_style(s: &mut State) {
+    crate::rune_sec::inspector_style::copy_style(&mut s.core);
+}
+
+/// Wave 12: paste the style panel's clipboard onto
+/// the selected segment — names the panel's own Paste
+/// handler (one atomic undo step through
+/// `set_node_style_atomic`); it owns the empty-
+/// clipboard and no-selection refusals, so the
+/// returned bool is the panel's business.
+fn cmd_paste_style(s: &mut State) {
+    let _ = crate::rune_sec::inspector_style::paste_style(&mut s.core);
+}
+
+/// Wave 12 (C5 asset spec, applied at integration): attach
+/// a sprite from the ./import folder to the selected
+/// segment — the segment inspector's "Attach from import"
+/// press, i.e. the core op itself.
+fn cmd_attach_media_import(s: &mut State) {
+    s.core.attach_image_to_node();
+}
+
+/// Wave 12: clear the selected segment's media — the
+/// segment inspector's "Clear media" press (the core op;
+/// its selection check runs before its snapshot, so a
+/// refusal spends no undo step).
+fn cmd_clear_node_media(s: &mut State) {
+    s.core.clear_node_media();
+}
+
+/// Wave 12: attach the NEXT asset in the table to the
+/// selected segment — the segment inspector's "Next
+/// sprite" press, resolved through the panel's own named
+/// helpers (the same composition its button closure runs:
+/// `next_asset_target` over `attached_asset`, then
+/// `attach_asset`).
+fn cmd_cycle_attached_sprite(s: &mut State) {
+    if let Some(a) = crate::rune_sec::inspector_segment::next_asset_target(
+        crate::rune_sec::inspector_segment::attached_asset(&s.core),
+        s.core.project.assets.len(),
+    ) {
+        crate::rune_sec::inspector_segment::attach_asset(&mut s.core, a);
+    }
+}
+
 fn cmd_add_frame(s: &mut State) {
     s.core.add_frame();
 }
@@ -1106,6 +1319,9 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "cycle-shape", title: "Cycle segment shape", group: "Segments", run: cmd_cycle_shape },
     Command { key: "cycle-bend", title: "Cycle segment bend", group: "Segments", run: cmd_cycle_bend },
     Command { key: "cycle-node-color", title: "Cycle segment colour", group: "Segments", run: cmd_cycle_node_color },
+    Command { key: "attach-media-import", title: "Attach sprite from import folder", group: "Segments", run: cmd_attach_media_import },
+    Command { key: "clear-node-media", title: "Clear segment media", group: "Segments", run: cmd_clear_node_media },
+    Command { key: "cycle-attached-sprite", title: "Attach next sprite in table", group: "Segments", run: cmd_cycle_attached_sprite },
     // -- Camera ---------------------------------------------------
     Command { key: "cam-zoom-in", title: "Camera zoom in", group: "Camera", run: cmd_zoom_in },
     Command { key: "cam-zoom-out", title: "Camera zoom out", group: "Camera", run: cmd_zoom_out },
@@ -1200,6 +1416,29 @@ pub static COMMANDS: &[Command] = &[
     // -- place) ------------------------------------------
     Command { key: "prev-keyframe", title: "Go to previous keyframe", group: "Transport", run: cmd_prev_keyframe },
     Command { key: "next-keyframe", title: "Go to next keyframe", group: "Transport", run: cmd_next_keyframe },
+    // -- Wave 12 (appended: every entry above keeps its
+    // -- place) — the style domain; see the Wave 12
+    // -- shims above for each forward's target. The six
+    // -- preset titles repeat the canonical table's
+    // -- names verbatim (stykanimate_rs::style::
+    // -- STYLE_PRESETS); the Wave 12 test pins the
+    // -- pairing so a rename breaks the test, never the
+    // -- palette's honesty. -----------------------------
+    Command { key: "open-style-inspector", title: "Open style inspector", group: "Style", run: cmd_open_style_inspector },
+    Command { key: "style-preset-ink", title: "Style preset: Ink", group: "Style", run: cmd_style_preset_ink },
+    Command { key: "style-preset-crimson", title: "Style preset: Crimson", group: "Style", run: cmd_style_preset_crimson },
+    Command { key: "style-preset-ocean", title: "Style preset: Ocean", group: "Style", run: cmd_style_preset_ocean },
+    Command { key: "style-preset-forest", title: "Style preset: Forest", group: "Style", run: cmd_style_preset_forest },
+    Command { key: "style-preset-violet", title: "Style preset: Violet", group: "Style", run: cmd_style_preset_violet },
+    Command { key: "style-preset-amber", title: "Style preset: Amber", group: "Style", run: cmd_style_preset_amber },
+    Command { key: "style-cap-round", title: "Set segment cap: Round", group: "Style", run: cmd_style_cap_round },
+    Command { key: "style-cap-square", title: "Set segment cap: Square", group: "Style", run: cmd_style_cap_square },
+    Command { key: "style-cap-point", title: "Set segment cap: Point", group: "Style", run: cmd_style_cap_point },
+    Command { key: "cycle-taper", title: "Cycle segment taper", group: "Style", run: cmd_cycle_taper },
+    Command { key: "style-opacity-up", title: "Increase segment opacity", group: "Style", run: cmd_style_opacity_up },
+    Command { key: "style-opacity-down", title: "Decrease segment opacity", group: "Style", run: cmd_style_opacity_down },
+    Command { key: "copy-style", title: "Copy segment style", group: "Style", run: cmd_copy_style },
+    Command { key: "paste-style", title: "Paste segment style", group: "Style", run: cmd_paste_style },
 ];
 
 // ----------------------------------------------------------------
@@ -1841,8 +2080,23 @@ mod tests {
         // in the camera panel's wording family. A
         // toggle-dopesheet candidate was skipped: the
         // shell has no dopesheet lane or visibility state
-        // for a command to flip).
-        assert_eq!(total, 114, "palette should cover 114 commands, has {total}");
+        // for a command to flip), +15 in Wave 12
+        // (open-style-inspector, the six style-preset-*
+        // commands over the canonical STYLE_PRESETS
+        // table, style-cap-round / -square / -point,
+        // cycle-taper, style-opacity-up / -down,
+        // copy-style, paste-style — every one forwarding
+        // to the style panel's own handler or the core
+        // op its control presses), +3 at Wave 12
+        // integration (attach-media-import,
+        // clear-node-media, cycle-attached-sprite — the
+        // asset entries C5 specced, added once B2's
+        // segment-inspector Media handlers had landed as
+        // callable fns: the first two name the core ops
+        // the panel's buttons press, the third composes
+        // the panel's own next_asset_target / attach_asset
+        // helpers exactly as its Next sprite closure does).
+        assert_eq!(total, 132, "palette should cover 132 commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }
@@ -2439,6 +2693,125 @@ mod tests {
         // before it (standing on a key is not a target).
         (COMMANDS[idx_of("prev-keyframe")].run)(&mut s);
         assert_eq!(s.core.current, 3);
+    }
+
+    #[test]
+    fn wave_12_style_commands_are_present_and_wired() {
+        use stykanimate_rs::style::STYLE_PRESETS;
+        // All fifteen Wave 12 keys resolve (idx_of panics if not).
+        for key in [
+            "open-style-inspector",
+            "style-preset-ink",
+            "style-preset-crimson",
+            "style-preset-ocean",
+            "style-preset-forest",
+            "style-preset-violet",
+            "style-preset-amber",
+            "style-cap-round",
+            "style-cap-square",
+            "style-cap-point",
+            "cycle-taper",
+            "style-opacity-up",
+            "style-opacity-down",
+            "copy-style",
+            "paste-style",
+        ] {
+            idx_of(key);
+        }
+        // Preset pairing: entry i is titled with the
+        // canonical table's name i — verbatim, so the
+        // palette can never advertise a preset the table
+        // does not hold — and running it applies exactly
+        // that preset through the panel's apply_preset:
+        // the preset's colour and cap, and the status
+        // naming the preset.
+        let preset_keys = [
+            "style-preset-ink",
+            "style-preset-crimson",
+            "style-preset-ocean",
+            "style-preset-forest",
+            "style-preset-violet",
+            "style-preset-amber",
+        ];
+        for (i, key) in preset_keys.iter().enumerate() {
+            let cmd = &COMMANDS[idx_of(key)];
+            assert_eq!(
+                cmd.title,
+                format!("Style preset: {}", STYLE_PRESETS[i].name),
+                "{key} title must name canonical preset {i}"
+            );
+            let mut s = crate::init();
+            s.core.selected_node = Some(1);
+            (cmd.run)(&mut s);
+            let node = &s.core.project.figures[0].def.nodes[1];
+            assert_eq!(node.color, Some(STYLE_PRESETS[i].color), "{key} colour");
+            assert_eq!(node.style.cap, STYLE_PRESETS[i].cap, "{key} cap");
+            assert_eq!(
+                s.core.status,
+                format!("Style preset: {}.", STYLE_PRESETS[i].name),
+                "{key} status"
+            );
+        }
+        // Findability: the plain word reaches the presets
+        // (it sits whole in every preset title).
+        let got = filter_commands("preset");
+        for key in preset_keys {
+            assert!(
+                got.iter().any(|&i| COMMANDS[i].key == key),
+                "query \"preset\" should find {key}, got {:?}",
+                got.iter().map(|&i| COMMANDS[i].key).collect::<Vec<_>>()
+            );
+        }
+        // No selection (the core's default): a preset
+        // command stands down with the style setters'
+        // refusal and changes nothing — apply_preset
+        // itself refuses silently, so this status is the
+        // shim's, and the node's colour stays unset.
+        let mut s = crate::init();
+        assert_eq!(s.core.selected_node, None);
+        (COMMANDS[idx_of("style-preset-ink")].run)(&mut s);
+        assert_eq!(s.core.status, "Select a joint first.");
+        assert_eq!(s.core.project.figures[0].def.nodes[1].color, None);
+        // Cap setters set exactly their own kind, like
+        // the panel's segmented-control chips.
+        let mut s = crate::init();
+        s.core.selected_node = Some(1);
+        (COMMANDS[idx_of("style-cap-point")].run)(&mut s);
+        assert_eq!(s.core.project.figures[0].def.nodes[1].style.cap, CapKind::Point);
+        (COMMANDS[idx_of("style-cap-square")].run)(&mut s);
+        assert_eq!(s.core.project.figures[0].def.nodes[1].style.cap, CapKind::Square);
+        (COMMANDS[idx_of("style-cap-round")].run)(&mut s);
+        assert_eq!(s.core.project.figures[0].def.nodes[1].style.cap, CapKind::Round);
+        // Taper cycles the panel's step: 1.0 -> 0.6.
+        (COMMANDS[idx_of("cycle-taper")].run)(&mut s);
+        assert_eq!(s.core.project.figures[0].def.nodes[1].style.taper, 0.6);
+        // Opacity steps through the panel's stepper:
+        // down from 1.0 lands on 0.95, up returns to 1.0.
+        (COMMANDS[idx_of("style-opacity-down")].run)(&mut s);
+        let opacity = s.core.project.figures[0].def.nodes[1].style.opacity;
+        assert!((opacity - 0.95).abs() < 1e-6, "opacity after one step down: {opacity}");
+        (COMMANDS[idx_of("style-opacity-up")].run)(&mut s);
+        assert_eq!(s.core.project.figures[0].def.nodes[1].style.opacity, 1.0);
+        // Copy/paste round-trips through the panel's own
+        // clipboard: node 1's Point cap lands on node 2,
+        // with the panel handlers' own status lines.
+        (COMMANDS[idx_of("style-cap-point")].run)(&mut s);
+        (COMMANDS[idx_of("copy-style")].run)(&mut s);
+        assert_eq!(s.core.status, "Style copied.");
+        s.core.selected_node = Some(2);
+        (COMMANDS[idx_of("paste-style")].run)(&mut s);
+        assert_eq!(s.core.status, "Style pasted.");
+        assert_eq!(s.core.project.figures[0].def.nodes[2].style.cap, CapKind::Point);
+        // Open style inspector: parked on Home with the
+        // right column hidden, the command lands on
+        // Animate — the only workspace whose section list
+        // carries InspectorStyle — with the column shown.
+        let mut s = crate::init();
+        s.workspace = Workspace::Home;
+        s.show_right = false;
+        (COMMANDS[idx_of("open-style-inspector")].run)(&mut s);
+        assert_eq!(s.workspace, Workspace::Animate);
+        assert!(s.show_right);
     }
 
     // -- command_hint (Phase N, P14 §4.4) -----------------------

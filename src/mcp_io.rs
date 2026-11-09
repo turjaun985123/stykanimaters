@@ -22,6 +22,22 @@
 //! both stacks; the stacks are private) and refreshing
 //! `core.project_files` after a save (editor.rs
 //! `list_project_files` is private).
+//!
+//! Wave 12 (C6) io-truth audit: no handler in this file formats
+//! rendered output itself — every render/export below delegates
+//! to the engine writers (`export::*` for the raster and video
+//! formats, `svg::*` for SVG, `pivot::*` / `nodes*::*` for the
+//! interchange formats), and save/load serialise the whole
+//! [`Project`] with the same `serde_json::to_string_pretty`
+//! call the editor's own save uses (projects.rs), so renderer
+//! and model changes reach MCP output with no io-side pin to
+//! drift. The two places this file touches rendered bytes at
+//! all are encoders, not renderers: [`encode_png`] (the png
+//! crate over the rasterizer's buffer) and the contact sheet's
+//! extension-inferred `save`. The tool descriptions state
+//! exactly what each output contains today; where the SVG
+//! writer's fidelity is still behind the rasterizer's, the
+//! `render` description says so rather than implying parity.
 
 use crate::editor::EditorCore;
 use crate::mcp::Tool;
@@ -227,10 +243,12 @@ fn tool_save_project(core: &mut EditorCore, args: &Value) -> Result<Value, Strin
     // both edit counters, which is observably identical here
     // because every reader of the counters
     // (`edits_since_autosave`, the autosave threshold) is
-    // difference-based. The one editor step not mirrored is
-    // the `project_files` refresh: `list_project_files` is
-    // private (Wave 11 A5 integrator item).
+    // difference-based. The `project_files` refresh — the
+    // step Wave 11 could not mirror (`list_project_files`
+    // was private then) — is mirrored as of Wave 12 through
+    // the `projects::refresh_project_files` seam (B3).
     core.note_project_swapped();
+    crate::projects::refresh_project_files(core);
     core.status = format!("Project saved to {}", path.display());
     Ok(json!({
         "path": path.display().to_string(),
@@ -638,7 +656,7 @@ fn tool_render(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
 }
 
 /// Standard-alphabet base64 with padding (no external crate).
-fn base64_encode(data: &[u8]) -> String {
+pub(crate) fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
@@ -896,7 +914,7 @@ pub fn tools() -> Vec<Tool> {
     vec![
         Tool {
             name: "save_project",
-            description: "Save the current project as StykAnimate project JSON (.styk.json format) at the given path. The write is atomic (temp file + rename), so a failed save never truncates an existing file; like the editor's save, it restarts the session's dirty baseline. Parent directories are created.",
+            description: "Save the current project as StykAnimate project JSON (.styk.json format) at the given path. The COMPLETE project is serialised with the same serialiser the editor's own save uses — including the asset table (each image's PNG bytes embedded), sprite and text instances, audio clips and FX — so a save/load round-trip preserves assets byte-for-byte (pinned by a test in this module). The write is atomic (temp file + rename), so a failed save never truncates an existing file; like the editor's save, it restarts the session's dirty baseline. Parent directories are created.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -908,7 +926,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "load_project",
-            description: "Load a StykAnimate project JSON file, replacing the current session project, with the editor's open bookkeeping (selection and playhead reset to the start, dirty baseline restarted). Returns the project summary.",
+            description: "Load a StykAnimate project JSON file, replacing the current session project, with the editor's open bookkeeping (selection and playhead reset to the start, dirty baseline restarted). The whole file is restored, including its asset table (embedded image bytes), sprite and text instances. Returns the project summary.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -920,7 +938,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "import_file",
-            description: "Import a file by extension: .piv (Pivot animation), .nodemc/.stknds (Stick Nodes animation) and .nodes (Stick Nodes figure) replace the project; .stk (Pivot figure) adds the figure to the current project; .json loads project JSON. Session bookkeeping matches the editor's own import for each format (the Stick Nodes and .stk imports are single undoable edits; .piv and .json restart the dirty baseline). Returns the project summary.",
+            description: "Import a file by extension: .piv (Pivot animation), .nodemc/.stknds (Stick Nodes animation) and .nodes (Stick Nodes figure) replace the project; .stk (Pivot figure) adds the figure to the current project; .json loads a complete project JSON (asset table, sprites and texts included, exactly as load_project). Session bookkeeping matches the editor's own import for each format (the Stick Nodes and .stk imports are single undoable edits; .piv and .json restart the dirty baseline). Returns the project summary.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -932,7 +950,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "export_file",
-            description: "Export the project: 'piv2', 'piv3', 'piv4' or 'piv5' write the whole animation as .piv bytes; 'stk' writes a single figure as Pivot .stk bytes and 'nodes' writes it as a Stick Nodes .nodes figure (both take the 'figure' index, defaulting to the selected figure); 'stknds' writes the whole animation as a Stick Nodes project; 'mp4_range' and 'webm_range' render only frames 'from'..='to' (both required, integer frame indices) to a video file (needs ffmpeg). Parent directories are created.",
+            description: "Export the project: 'piv2', 'piv3', 'piv4' or 'piv5' write the whole animation as .piv bytes; 'stk' writes a single figure as Pivot .stk bytes and 'nodes' writes it as a Stick Nodes .nodes figure (both take the 'figure' index, defaulting to the selected figure); 'stknds' writes the whole animation as a Stick Nodes project; 'mp4_range' and 'webm_range' render only frames 'from'..='to' (both required, integer frame indices) to a video file (needs ffmpeg) with the same frame content as the render tool's raster output — composited sprite/text instances and segment media included. 'mp4_range' also muxes the range's share of the project's audio (and fails rather than writing a silent file when audio is present but unusable); 'webm_range' never carries audio — the WebM path has no audio support at any range. The .piv/.stk/.nodes/.stknds formats are data interchange: they carry only what those formats hold, not the asset table, sprites, texts or audio. Parent directories are created.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -948,11 +966,11 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "render",
-            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg', 'jpeg' and 'png_sequence' write one file per frame into the DIRECTORY at 'path' (created if needed). The sequence/animation formats 'gif', 'apng', 'spritesheet', 'svg', 'jpeg' and 'png_sequence' accept an optional frame range: args 'from' and 'to' (0-based, inclusive, given together, clamped to the timeline; echoed in the reply). Video ranges are export_file's mp4_range/webm_range. Parent directories are created for file targets.",
+            description: "Render the animation. Formats: 'png' renders ONE frame (arg 'frame', default current; arg 'scale', default 1.0 = stage size) to a PNG file; 'gif', 'mp4' (needs ffmpeg), 'webm', 'apng' and 'spritesheet' render the whole timeline to the file at 'path'; 'svg', 'jpeg' and 'png_sequence' write one file per frame into the DIRECTORY at 'path' (created if needed). The sequence/animation formats 'gif', 'apng', 'spritesheet', 'svg', 'jpeg' and 'png_sequence' accept an optional frame range: args 'from' and 'to' (0-based, inclusive, given together, clamped to the timeline; echoed in the reply). Video ranges are export_file's mp4_range/webm_range. Parent directories are created for file targets. CONTENT — the raster formats (png, png_sequence, gif, mp4, webm, apng, spritesheet, jpeg) draw the full frame: camera (pan/zoom/rotation), figures with segment styling (cap, taper, colour gradient, segment opacity AND figure opacity) and bent segments, drawing strokes, FX/particles and weather, with sprite instances, text instances and segment media (images/text attached to segments) composited in. 'mp4' also muxes the project's audio when an unmuted clip's file exists (and fails if that mux fails); 'webm' never carries audio — the WebM path has no audio support. 'svg' is the vector writer: it draws figures (segment taper, gradients, segment opacity AND figure opacity, bent segments arced through the bend midpoint), strokes (a pressured stroke as per-segment lines at its baked widths), FX/particles and weather through the same camera, and it emits sprite instances, text instances and segment media (images embedded once per asset as PNG data with a placement matrix; an image item's figure×style opacity rides as an opacity attribute). Two divergences from the raster remain: SVG draws strokes UNDER the figures where the raster paints them over, and SVG text is a monospace font run where the raster stamps 3×5 bitmap glyphs (the content and centre agree; the advance width does not).",
             schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Output file path (a directory path for formats svg and jpeg)" },
+                    "path": { "type": "string", "description": "Output file path (a directory path for formats svg, jpeg and png_sequence)" },
                     "format": { "type": "string", "enum": ["png", "png_sequence", "gif", "mp4", "webm", "apng", "svg", "spritesheet", "jpeg"] },
                     "frame": { "type": "integer", "minimum": 0, "description": "Frame index for format 'png' (default: current frame)" },
                     "from": { "type": "integer", "minimum": 0, "description": "First frame of an inclusive range (with 'to'); sequence/animation formats only" },
@@ -965,7 +983,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "export_bundle",
-            description: "Export a whole bundle of formats into the DIRECTORY at 'path' in one call (the export panel's two bundle buttons). kind 'images': a PNG sequence (png/ subdir), a JPEG sequence (jpeg/), one SVG per frame (svg/) and a spritesheet (spritesheet.png). kind 'video': '<project>.mp4' and '<project>.webm'. Bundles always cover the WHOLE timeline — they deliberately ignore frame ranges, matching the panel. Every member is attempted: the reply lists each member with ok + frame count, or ok:false + the failure's reason; member failures never fail the call itself.",
+            description: "Export a whole bundle of formats into the DIRECTORY at 'path' in one call (the export panel's two bundle buttons). kind 'images': a PNG sequence (png/ subdir), a JPEG sequence (jpeg/), one SVG per frame (svg/) and a spritesheet (spritesheet.png). kind 'video': '<project>.mp4' and '<project>.webm'. Member content matches the render tool per format: the image members are full raster frames (composited media included) and the SVG member matches the render tool's SVG (media included; strokes under the figures and text as font glyphs are its standing divergences); the mp4 member muxes usable project audio, the webm member is silent. Bundles always cover the WHOLE timeline — they deliberately ignore frame ranges, matching the panel. Every member is attempted: the reply lists each member with ok + frame count, or ok:false + the failure's reason; member failures never fail the call itself.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -978,7 +996,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "render_frame_base64",
-            description: "Render one frame (default: current) as a PNG at exact stage size and return it base64-encoded, so you can SEE the frame. Returns {frame, width, height, png_base64}.",
+            description: "Render one frame (default: current) as a PNG at exact stage size and return it base64-encoded, so you can SEE the frame. The PNG is the full raster frame — the same content as render format 'png', with sprite/text instances and segment media composited in. Returns {frame, width, height, png_base64}.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -989,7 +1007,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "render_contact_sheet",
-            description: "Render a contact sheet (grid of frame thumbnails) as a PNG file at 'path'. Frame selection: 'frames' is an optional array of frame indices (out-of-range indices are clamped and reported in a note); or pass 'from'/'to' (0-based, inclusive, together) to draw the picks from that window; with neither, the default is up to 12 evenly spaced frames across the timeline — NOT one tile per frame (the export panel's sheet differs: it tiles every frame). 'frames' and 'from'/'to' together are an error. 'cols' is the grid column count (default 4, at least 1); 'thumb_width' is each thumbnail's width in pixels (default 240, 16..=1024). Returns {path, width, height, frames, cols, thumb_width}. Parent directories are created.",
+            description: "Render a contact sheet (grid of frame thumbnails) to the file at 'path' — each thumbnail is a full raster render of its frame (composited media included), and the written file's format follows the path's extension (use a .png path for a PNG; the image writer infers the format from it). Frame selection: 'frames' is an optional array of frame indices (out-of-range indices are clamped and reported in a note); or pass 'from'/'to' (0-based, inclusive, together) to draw the picks from that window; with neither, the default is up to 12 evenly spaced frames across the timeline — NOT one tile per frame (the export panel's sheet differs: it tiles every frame). 'frames' and 'from'/'to' together are an error. 'cols' is the grid column count (default 4, at least 1); 'thumb_width' is each thumbnail's width in pixels (default 240, 16..=1024). Returns {path, width, height, frames, cols, thumb_width}. Parent directories are created.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -1504,5 +1522,84 @@ mod tests {
         assert_eq!(core.project.frames[0].poses[before].root, [320.0, 450.0]);
         core.undo();
         assert_eq!(core.project.figures.len(), before, "one undo removes the imported figure");
+    }
+
+    // ---- Wave 12 (C6): assets survive io save/load byte-identically ----
+
+    #[test]
+    fn save_load_roundtrip_preserves_assets_byte_identically() {
+        let dir = temp_dir("assets-roundtrip");
+        let mut core = EditorCore::new();
+        core.project = Project::new_demo();
+        // Every possible byte value in the asset payload: any
+        // lossy step (a text encoding, a base64 slip, a dropped
+        // field) breaks the equality below. A sprite instance
+        // and a text instance ride along so the instance tables
+        // are pinned by the same round-trip.
+        let png_bytes: Vec<u8> = (0u16..=255).map(|b| b as u8).collect();
+        core.project.assets.push(crate::model::ImageAsset {
+            name: "dot.png".to_string(),
+            png: png_bytes.clone(),
+        });
+        core.project.sprites.push(crate::model::SpriteInstance {
+            asset: 0,
+            keys: vec![crate::model::InstanceKey {
+                frame: 0.0,
+                x: 100.0,
+                y: 120.0,
+                scale: 1.5,
+                angle: 30.0,
+            }],
+        });
+        core.project.texts.push(crate::model::TextInstance {
+            content: "Assets ride along".to_string(),
+            size: 24.0,
+            color: 0xFFC65D,
+            keys: vec![crate::model::InstanceKey {
+                frame: 0.0,
+                x: 200.0,
+                y: 90.0,
+                scale: 1.0,
+                angle: 0.0,
+            }],
+        });
+        let assets_before = core.project.assets.clone();
+        let sprites_before = serde_json::to_value(&core.project.sprites).unwrap();
+        let texts_before = serde_json::to_value(&core.project.texts).unwrap();
+
+        let path = dir.join("with-assets.styk.json");
+        call("save_project", &mut core, json!({ "path": path.to_string_lossy() }))
+            .expect("save failed");
+        let first_bytes = std::fs::read(&path).expect("saved file missing");
+        // The asset bytes are in the file as the embedded table,
+        // not dropped or rewritten: the parsed file's asset
+        // payload equals the in-memory bytes exactly.
+        let parsed: Project =
+            serde_json::from_slice(&first_bytes).expect("saved file does not parse");
+        assert_eq!(parsed.assets, assets_before);
+
+        // Wipe the session's copies, then load through the tool:
+        // the restored project carries the same tables.
+        core.project.assets.clear();
+        core.project.sprites.clear();
+        core.project.texts.clear();
+        call("load_project", &mut core, json!({ "path": path.to_string_lossy() }))
+            .expect("load failed");
+        assert_eq!(core.project.assets.len(), 1);
+        assert_eq!(core.project.assets[0].name, "dot.png");
+        assert_eq!(core.project.assets[0].png, png_bytes);
+        assert_eq!(core.project.assets, assets_before);
+        assert_eq!(serde_json::to_value(&core.project.sprites).unwrap(), sprites_before);
+        assert_eq!(serde_json::to_value(&core.project.texts).unwrap(), texts_before);
+
+        // Saving the reloaded project reproduces the first
+        // save byte-for-byte (the serialiser is deterministic:
+        // fixed struct field order, no maps in the model).
+        let path2 = dir.join("with-assets-again.styk.json");
+        call("save_project", &mut core, json!({ "path": path2.to_string_lossy() }))
+            .expect("second save failed");
+        let second_bytes = std::fs::read(&path2).expect("second saved file missing");
+        assert_eq!(second_bytes, first_bytes, "save/load/save must be byte-identical");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

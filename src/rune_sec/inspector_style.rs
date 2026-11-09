@@ -200,29 +200,22 @@ use crate::State;
 /// engine's historical cycle order, Round → Square → Point).
 pub const CAP_ORDER: [CapKind; 3] = [CapKind::Round, CapKind::Square, CapKind::Point];
 
-/// One curated style preset: a name, a colour and a cap.
-/// Applying a preset changes exactly those two fields of
-/// the selected node's style (see [`preset_application`]).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct StylePreset {
-    pub name: &'static str,
-    pub color: u32,
-    pub cap: CapKind,
-}
-
-/// The six style presets the panel offers, in display
-/// order (two rows of three chips). Every cap is a real
-/// [`CapKind`] variant — the model has Round, Square and
-/// Point only, so Violet's briefed Butt cap is Square, the
-/// other flat-ended cap (Point tapers to a tip).
-pub const STYLE_PRESETS: [StylePreset; 6] = [
-    StylePreset { name: "Ink", color: 0x20_242C, cap: CapKind::Round },
-    StylePreset { name: "Crimson", color: 0xD2_3B3B, cap: CapKind::Round },
-    StylePreset { name: "Ocean", color: 0x2B_6FD2, cap: CapKind::Square },
-    StylePreset { name: "Forest", color: 0x2E_9E5B, cap: CapKind::Round },
-    StylePreset { name: "Violet", color: 0x7A_4FD0, cap: CapKind::Square },
-    StylePreset { name: "Amber", color: 0xE8_A33D, cap: CapKind::Square },
-];
+/// The style presets are the engine library's single
+/// table, re-exported: this panel and the MCP preset tool
+/// (`stykanimate_rs::style::tool_apply_style_preset`) read
+/// the SAME six entries — name, colour and cap, in the
+/// display order below (two rows of three chips) — so a
+/// preset press here and a preset call over MCP write
+/// byte-identical values through the same atomic op (see
+/// [`preset_application`]). Wave 12 (C2) deleted the
+/// panel's own copy of the table and of the `StylePreset`
+/// struct: the copy was value-identical to the library's,
+/// but two tables can drift and one cannot. Every cap in
+/// the table is a real [`CapKind`] variant — the model
+/// has Round, Square and Point only, so Violet's briefed
+/// Butt cap is Square, the other flat-ended cap (Point
+/// tapers to a tip).
+pub use stykanimate_rs::style::{StylePreset, STYLE_PRESETS};
 
 /// The selected node's current style, if a node is selected.
 /// Pure read of the core's public selection fields — the same

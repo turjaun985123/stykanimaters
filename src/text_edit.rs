@@ -14,6 +14,13 @@
 //! All positions are **char indices, never byte indices**, so
 //! multi-byte characters (e.g. `λ`, `é`) insert, delete and are
 //! stepped over atomically.
+//!
+//! The Wave 12 (C7) section near the end of this file collects
+//! the shared emitter helpers built on top of this model —
+//! [`xml_escape`], [`normalise_text_content`] and the raster
+//! text metrics ([`raster_text_metrics`]) — so the SVG writer
+//! (and any future emitter) places and escapes text exactly
+//! the way the rasterizer does.
 
 use crate::editor::EditorCore;
 use crate::model::{InstanceKey, Project, SegmentMedia, TextInstance};
@@ -561,6 +568,297 @@ pub fn set_segment_text_size(core: &mut EditorCore, fi: usize, ni: usize, size: 
     }
     core.status = format!("Text size {next:.0}.");
     true
+}
+
+// ---------------------------------------------------------------------
+// Wave 12 (C7): shared text helpers for emitters.
+//
+// Everything an exporter needs to write text that agrees with
+// the rasterizer, collected in one place:
+//
+// - [`xml_escape`] — XML-safe text content (see its docs for
+//   the control-character rule and how it differs from the
+//   older five-character helper pinned in `svg.rs`).
+// - [`normalise_text_content`] — the content normalisation
+//   the editing session applies, which emitters must respect
+//   (and the storage paths that do NOT apply it).
+// - [`raster_text_metrics`] / [`glyph_cell_centre`] /
+//   [`rotate_text_offset`] — the raster's placement math,
+//   reproduced exactly (see the metrics docs: these are the
+//   raster's fixed-grid conventions, NOT real font metrics).
+// - [`text_color_hex`] — the stored colour as `#RRGGBB`.
+//
+// Colour and rotation conventions (from `media.rs`, the
+// raster path `export.rs` composites through
+// `media::composite_media` at `export.rs:666-690`): colours
+// are stored as `u32` `0xRRGGBB` with NO alpha — the raster
+// paints text fully opaque (`media.rs:328-333`). A segment
+// text's colour is `node.color.unwrap_or(fig.color)`
+// (`media.rs:143`); a text instance carries its own `color`
+// (`media.rs:193`). Angles are DEGREES in the y-down stage
+// space, positive = clockwise on screen; a segment text runs
+// along `atan2(dy, dx)` of its segment (`media.rs:140`), a
+// text instance uses its key's `angle` verbatim
+// (`media.rs:190`). Because SVG's coordinate space is also
+// y-down, an SVG `rotate(angle cx cy)` transform turns the
+// same way as the raster's rotation — no sign flip.
+// ---------------------------------------------------------------------
+
+/// Glyph grid width, in glyph pixels: the raster's built-in
+/// font is a 3×5 bitmap (`media.rs:364`, glyph loops at
+/// `media.rs:336-341`; the stage mirrors it at
+/// `rune_sec/stage_text.rs:139`).
+pub const GLYPH_COLS: usize = 3;
+
+/// Glyph grid height, in glyph pixels — also the divisor
+/// that turns a text `size` (glyph height, stage units) into
+/// the raster's cell size (`media.rs:321`;
+/// `rune_sec/stage_text.rs:140,189`).
+pub const GLYPH_ROWS: usize = 5;
+
+/// Horizontal advance per character, in cells: 3 glyph
+/// columns + 1 gap column, the same for EVERY character
+/// (`media.rs:322`; `rune_sec/stage_text.rs:143`).
+pub const GLYPH_ADVANCE_CELLS: f32 = 4.0;
+
+/// Escape `text` for interpolation into XML text content or
+/// a quoted attribute value (SVG emission is the first
+/// consumer).
+///
+/// The five XML-significant characters escape as entities,
+/// `&` first in effect (it introduces every other entity, so
+/// a pre-written `&lt;` double-escapes to `&amp;lt;`):
+/// `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`,
+/// `"` → `&quot;`, `'` → `&apos;`.
+///
+/// **Control characters are replaced by a single space
+/// each** (never dropped, never passed through raw):
+///
+/// - XML 1.0 forbids most C0 controls outright — even as
+///   character references — so one raw control byte would
+///   make the whole SVG file unparseable. Passing them
+///   through is not an option. (This is where this helper
+///   deliberately differs from `svg::xml_escape`, which
+///   escapes the same five characters but passes controls
+///   through verbatim; that helper was pinned before any
+///   user text was emitted. Emitters of user text should
+///   use THIS one.)
+/// - Tab / LF / CR are legal XML, but they are controls
+///   too and get the same treatment for uniformity: stored
+///   text is single-line by model rule (see
+///   [`normalise_text_content`]), so a newline in stored
+///   content is import residue, not a line break — and SVG
+///   `<text>` would not break a line for it anyway.
+/// - A space specifically — rather than dropping the char
+///   or substituting U+FFFD — because the raster gives a
+///   control character a BLANK glyph of full advance
+///   (`media.rs:431-434` paints nothing, while
+///   `media.rs:322` counts it in the width): a space
+///   reproduces both the raster's blank look and its exact
+///   width, and preserves the character count, so
+///   [`raster_text_metrics`] on the escaped string still
+///   measures the string that was stored. U+FFFD would
+///   paint a visible replacement glyph the raster never
+///   shows; dropping would shift every later glyph left.
+///
+/// "Control" is [`char::is_control`] (Unicode category Cc:
+/// U+0000–U+001F and U+007F–U+009F) — the same predicate
+/// the editing session drops on input ([`TextEdit::push_char`]).
+/// All other characters, including multi-byte ones, pass
+/// through unchanged.
+pub fn xml_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out += "&amp;",
+            '<' => out += "&lt;",
+            '>' => out += "&gt;",
+            '"' => out += "&quot;",
+            '\'' => out += "&apos;",
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The content normalisation the model applies on edit —
+/// what an emitter can assume about session-authored text,
+/// and what it must defensively handle everywhere else.
+///
+/// The editing session ([`TextEdit::push_char`]) **drops
+/// every control character** ([`char::is_control`]: newline,
+/// tab, DEL, …) and keeps everything else verbatim,
+/// including spaces and multi-byte characters. Stored text
+/// is therefore single-line: there are NO line breaks in
+/// this model, and an emitter must never split content into
+/// multiple lines. This fn reproduces that filter exactly,
+/// for emitters (or importers) that want session semantics
+/// on a raw string.
+///
+/// The empty-text rule: an EMPTY result means "no text".
+/// Committing an empty buffer REMOVES the node's media
+/// ([`TextEdit::commit`]), and the text ops refuse empty
+/// content outright ("Type some text first." —
+/// [`update_text_instance`], [`txt_check_content`]). An
+/// emitter should skip empty content rather than emit an
+/// empty element.
+///
+/// Paths that do NOT normalise — an emitter WILL meet
+/// control characters in stored content from these, which
+/// is why [`xml_escape`] handles them instead of assuming
+/// them away:
+///
+/// - [`add_text_instance`] stores its `content` argument
+///   verbatim (the handlers only require it to be non-empty
+///   with at least one printable character).
+/// - [`update_text_instance`] likewise stores verbatim.
+/// - Text instances arriving via Stick Nodes / .piv import
+///   are stored as decoded, never passed through a session.
+pub fn normalise_text_content(raw: &str) -> String {
+    raw.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// The raster's text placement metrics for one string at one
+/// glyph height, reproduced EXACTLY from
+/// `media::composite_text` (`media.rs:307-362`) — the
+/// rasterizer path `export.rs` composites text through.
+///
+/// **These are the raster's conventions, not real font
+/// metrics.** The raster draws a built-in 3×5 bitmap font:
+/// every character — wide, narrow, multi-byte, even a
+/// control character — occupies exactly
+/// [`GLYPH_ADVANCE_CELLS`] cells of advance, lowercase folds
+/// to uppercase, and any character outside the small bitmap
+/// charset renders as `?` (`media.rs:364-367,429-435`). An
+/// SVG `<text>` in a real font will NOT match these metrics
+/// glyph-for-glyph; what they give an emitter is the same
+/// anchor geometry the raster uses — total width, height
+/// and centre — so a `<text>` placed with `text-anchor=
+/// "middle"` at the item position, at font-size `size`,
+/// sits where the raster's label sits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RasterTextMetrics {
+    /// Characters in the content, counted with
+    /// `chars().count()` — the raster collects
+    /// `content.chars()` and measures that (`media.rs:317`).
+    pub char_count: usize,
+    /// Stage units per glyph pixel: `size / 5`
+    /// (`media.rs:321`).
+    pub cell: f32,
+    /// Total advance width in stage units:
+    /// `(char_count * 4 - 1) * cell` (`media.rs:322`). Zero
+    /// for empty content (the formula's `- 1` must not make
+    /// it negative — the raster draws nothing at all for an
+    /// empty string, `media.rs:318`).
+    pub width: f32,
+    /// Glyph height in stage units: exactly `size` (5 cells
+    /// × `size / 5`). Zero for empty content, which the
+    /// raster does not draw.
+    pub height: f32,
+    /// X of the first glyph cell's left edge, in CELL units,
+    /// relative to the text centre: `-(char_count * 4 - 1)
+    /// / 2` (`media.rs:323` — the raster centres the string
+    /// on its position). Multiply by [`Self::cell`] for
+    /// stage units; equals `-width / 2` there.
+    pub start_cells: f32,
+}
+
+/// Measure `content` at glyph height `size` with the
+/// raster's formula (see [`RasterTextMetrics`]). A
+/// non-positive `size` draws nothing in the raster
+/// (`media.rs:318`); the metrics are still returned by
+/// formula, so callers that care should check `size > 0.0`
+/// exactly as the raster does.
+pub fn raster_text_metrics(content: &str, size: f32) -> RasterTextMetrics {
+    let char_count = content.chars().count();
+    let cell = size / GLYPH_ROWS as f32;
+    if char_count == 0 {
+        return RasterTextMetrics {
+            char_count,
+            cell,
+            width: 0.0,
+            height: 0.0,
+            start_cells: 0.0,
+        };
+    }
+    let total_cells = char_count as f32 * GLYPH_ADVANCE_CELLS - 1.0;
+    RasterTextMetrics {
+        char_count,
+        cell,
+        width: total_cells * cell,
+        height: size,
+        start_cells: -total_cells / 2.0,
+    }
+}
+
+/// Just the raster's advance width for `content` at glyph
+/// height `size` — [`raster_text_metrics`]'s `width` field,
+/// for callers that need nothing else.
+pub fn raster_text_width(content: &str, size: f32) -> f32 {
+    raster_text_metrics(content, size).width
+}
+
+/// The centre of one glyph cell, in the text's LOCAL frame
+/// (stage units, relative to the text centre, before
+/// rotation) — `media.rs:341-342` verbatim:
+///
+/// ```text
+/// lx = (start_cells + char_index * 4 + col + 0.5) * cell
+/// ly = (row - 2 + 0.5) * cell
+/// ```
+///
+/// Note the vertical asymmetry, reproduced deliberately:
+/// row centres run from `-1.5 * cell` (row 0) to
+/// `+2.5 * cell` (row 4), so the glyph box spans
+/// `-2 * cell..3 * cell` — half a cell BELOW centre. That
+/// is the raster's (and the stage's) shared convention, not
+/// a bug to fix in an emitter. `col` is `0..GLYPH_COLS`,
+/// `row` is `0..GLYPH_ROWS`; out-of-range indices are not
+/// checked, exactly as the raster's loops never produce
+/// them.
+pub fn glyph_cell_centre(
+    metrics: &RasterTextMetrics,
+    char_index: usize,
+    col: usize,
+    row: usize,
+) -> [f32; 2] {
+    let lx = (metrics.start_cells
+        + char_index as f32 * GLYPH_ADVANCE_CELLS
+        + col as f32
+        + 0.5)
+        * metrics.cell;
+    // (GLYPH_ROWS - 1) / 2 == 2.0, the raster's literal.
+    let ly = (row as f32 - (GLYPH_ROWS as f32 - 1.0) / 2.0 + 0.5) * metrics.cell;
+    [lx, ly]
+}
+
+/// Rotate a local text offset by `angle_deg` into stage
+/// space — `media.rs:324-325,346-349` verbatim: the angle
+/// is degrees, converted with `to_radians()`, applied as
+/// `[lx·cos − ly·sin, lx·sin + ly·cos]` in the y-down stage
+/// space (positive angles turn clockwise on screen). Add
+/// the text item's position to the result for the stage-
+/// space point. For SVG, a `rotate(angle cx cy)` transform
+/// about the item position performs this same rotation —
+/// both spaces are y-down, so the sign already agrees.
+pub fn rotate_text_offset(local: [f32; 2], angle_deg: f32) -> [f32; 2] {
+    let rad = angle_deg.to_radians();
+    let (cs, sn) = (rad.cos(), rad.sin());
+    [
+        local[0] * cs - local[1] * sn,
+        local[0] * sn + local[1] * cs,
+    ]
+}
+
+/// A stored text colour (`0xRRGGBB`, alpha never stored —
+/// the raster paints fully opaque, `media.rs:328-333`) as
+/// an SVG/CSS `#RRGGBB` string: the value masked to 24 bits
+/// and formatted uppercase, byte-for-byte the output of
+/// `svg.rs`'s private `hex()` (`svg.rs:33-35`), shared here
+/// so text emission formats colours identically.
+pub fn text_color_hex(color: u32) -> String {
+    format!("#{:06X}", color & 0xFF_FFFF)
 }
 
 // ---------------------------------------------------------------------
@@ -1536,5 +1834,115 @@ mod tests {
         assert_eq!(out["segment_texts"][0]["size"], 33.0);
         assert_eq!(out["instances"][0]["content"], "Label");
         assert_eq!(out["instances"][0]["keys"][0]["x"], 10.0);
+    }
+
+    // ---- Wave 12 (C7): emitter helpers ----
+
+    #[test]
+    fn xml_escape_covers_the_five_significant_characters() {
+        assert_eq!(xml_escape("plain text 123"), "plain text 123");
+        assert_eq!(
+            xml_escape("a<b>c&d\"e'f"),
+            "a&lt;b&gt;c&amp;d&quot;e&apos;f"
+        );
+        // `&` escapes first: a pre-written entity double-escapes
+        // instead of passing through as markup.
+        assert_eq!(xml_escape("&lt;"), "&amp;lt;");
+        assert_eq!(xml_escape(""), "");
+    }
+
+    #[test]
+    fn xml_escape_replaces_controls_with_spaces_preserving_count() {
+        // XML 1.0 forbids most C0 controls outright; the raster
+        // gives each a blank glyph of full advance, so a space
+        // keeps both the look and the measured width — and the
+        // character count, which the metrics count.
+        let raw = "A\nB\tC\u{0}\u{7}\u{7f}\u{85}D";
+        let escaped = xml_escape(raw);
+        assert_eq!(escaped, "A B C    D");
+        assert_eq!(escaped.chars().count(), raw.chars().count());
+        assert!(!escaped.chars().any(|c| c.is_control()));
+        // Multi-byte characters pass through untouched.
+        assert_eq!(xml_escape("λé—"), "λé—");
+    }
+
+    #[test]
+    fn normalise_text_content_matches_the_session_filter() {
+        // push_char drops controls, keeps everything else —
+        // including spaces and multi-byte characters.
+        assert_eq!(normalise_text_content("A\nB\tC\u{7}"), "ABC");
+        assert_eq!(normalise_text_content(" λ é "), " λ é ");
+        // Control-only and empty input normalise to the
+        // model's "no text" state.
+        assert_eq!(normalise_text_content("\n\t"), "");
+        assert_eq!(normalise_text_content(""), "");
+        // And a session fed the raw string stores exactly the
+        // normalised form.
+        let p = Project::new_demo();
+        let mut e = TextEdit::begin(&p, 0, 0).unwrap();
+        for c in "A\nB\tC".chars() {
+            e.push_char(c);
+        }
+        assert_eq!(e.buffer, normalise_text_content("A\nB\tC"));
+    }
+
+    #[test]
+    fn raster_metrics_reproduce_the_raster_formula() {
+        // size 25 -> cell = 25 / 5 = 5 stage units.
+        let m = raster_text_metrics("A", 25.0);
+        assert_eq!(m.char_count, 1);
+        assert_eq!(m.cell, 5.0);
+        assert_eq!(m.width, 15.0, "one char: (1*4 - 1) cells * 5");
+        assert_eq!(m.height, 25.0, "height is exactly the size");
+        assert_eq!(m.start_cells, -1.5);
+        let m = raster_text_metrics("ABC", 25.0);
+        assert_eq!(m.width, 55.0, "three chars: (3*4 - 1) cells * 5");
+        assert_eq!(m.start_cells, -5.5);
+        assert_eq!(raster_text_width("ABC", 25.0), 55.0);
+        // Every char counts equally — multi-byte, spaces and
+        // even control characters (the raster counts them in
+        // the width and paints them blank).
+        assert_eq!(raster_text_metrics("λ λ", 25.0).char_count, 3);
+        assert_eq!(raster_text_width("A\nB", 25.0), 55.0);
+        // Empty content: the raster draws nothing; width must
+        // not go negative from the formula's -1.
+        let m = raster_text_metrics("", 25.0);
+        assert_eq!(m.char_count, 0);
+        assert_eq!(m.width, 0.0);
+        assert_eq!(m.height, 0.0);
+    }
+
+    #[test]
+    fn glyph_cell_centre_matches_the_raster_offsets() {
+        let m = raster_text_metrics("A", 25.0); // cell 5, start -1.5
+        // Top-left cell centre: (-1.5 + 0 + 0 + 0.5) * 5,
+        // (0 - 2 + 0.5) * 5.
+        assert_eq!(glyph_cell_centre(&m, 0, 0, 0), [-5.0, -7.5]);
+        // Bottom-right cell: x symmetric, y at +2.5 cells —
+        // the raster's half-cell downward bias, pinned.
+        assert_eq!(glyph_cell_centre(&m, 0, 2, 4), [5.0, 12.5]);
+        // Second character starts 4 cells after the first:
+        // start -3.5 cells, so (-3.5 + 4 + 0 + 0.5) * 5 = 5.
+        let m2 = raster_text_metrics("AB", 25.0);
+        assert_eq!(glyph_cell_centre(&m2, 1, 0, 2)[0], 5.0);
+    }
+
+    #[test]
+    fn rotate_text_offset_is_the_y_down_rotation() {
+        assert_eq!(rotate_text_offset([3.0, -4.0], 0.0), [3.0, -4.0]);
+        // +90 degrees in y-down space turns +x onto +y
+        // (clockwise on screen), as media.rs applies it.
+        let r = rotate_text_offset([1.0, 0.0], 90.0);
+        assert!(r[0].abs() < 1e-6 && (r[1] - 1.0).abs() < 1e-6, "{r:?}");
+        let r = rotate_text_offset([0.0, 1.0], 90.0);
+        assert!((r[0] + 1.0).abs() < 1e-6 && r[1].abs() < 1e-6, "{r:?}");
+    }
+
+    #[test]
+    fn text_color_hex_masks_and_formats_like_svg_hex() {
+        assert_eq!(text_color_hex(0x112233), "#112233");
+        assert_eq!(text_color_hex(0xFF112233), "#112233", "alpha bits masked off");
+        assert_eq!(text_color_hex(0x00FF00), "#00FF00");
+        assert_eq!(text_color_hex(0), "#000000");
     }
 }
