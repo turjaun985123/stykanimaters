@@ -402,7 +402,16 @@ fn status_selection_and_playback_track_each_mcp_mutation() {
     // see the undo-step tests below — so no depth is asserted
     // here.)
     let rest_root = pose_root(&mut server, 0, 0);
-    assert_eq!(rest_root, json!([480.0, 468.0]));
+    // The default figure's rest root is [480, 468] by
+    // construction, computed in f32 — the read-back carries
+    // the f32 rounding (467.99997), so compare with a
+    // tolerance rather than exact JSON equality.
+    let rr = rest_root.as_array().expect("root is an array");
+    assert!(
+        (rr[0].as_f64().unwrap() - 480.0).abs() < 0.01
+            && (rr[1].as_f64().unwrap() - 468.0).abs() < 0.01,
+        "rest root near [480, 468]: {rest_root}"
+    );
     let out = call_ok(
         &mut server,
         "set_pose",
