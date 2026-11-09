@@ -2537,6 +2537,14 @@ fn fx_split_button_cuts_the_selected_clip_at_the_playhead() {
     // root joint the way round 1's drag test aims: a
     // press on the stage at the joint's drawn point —
     // press only, no move, so the pose stays put.
+    // Settle first: `presented` returns the DRAWN box,
+    // which still moves while the stage's entrance runs
+    // — a press aimed from an unsettled rect can land
+    // off the joint (the flake this settle removes; the
+    // same settle the clips-lane block below uses).
+    for _ in 0..30 {
+        rt.frame(DT);
+    }
     let (rect, _) = rt.presented("stage").expect("stage is presented");
     let [sx, sy, sw, sh] = rect;
     let root = rt.state.core.positions(rt.state.core.current, 0)[0];
