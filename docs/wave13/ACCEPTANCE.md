@@ -33,6 +33,33 @@ change. §6 below makes each one a diff check.
 
 ---
 
+**CLOSING VERDICT (integrator, 2026-11-09) — the wave
+is accepted.** Every item below was verified on the
+evidence it names: the integrator's arrival greps
+against each agent's files, the full gate run, the CI
+log and the headless artifact. Run evidence: gate
+**9/9 PASS**; **CI 42562084573 GREEN on `ac47b99` —
+3,319 tests passed, 0 failed** (1,337 lib + 1,911 bin
++ 71 integration); **headless 42562380603 SUCCESS** —
+all 58 probes exit 0, live-MCP probe PASS, overflow
+scan CLEAN on 31 trees; closing snaps pixel-read
+(sprites-populated shows both seeded instances as
+labelled stage quads). Three items in this checklist
+were written against expectations the wave itself
+corrected, and are reconciled here rather than
+ticked as written: (1) **palette is 134, not 135** —
+E3 dropped `next-sprite` in its audit (no sprite
+selection existed to advance), so the two palette
+items below read 134 with two commands; (2) the
+`home_panel.rs` recovery-note site this checklist's
+E2 item anticipated was gated by the integrator at
+the splice (E2's audit covered the project_tools
+sites); (3) keys close at **940** (827 static + 113
+dynamic), zero lost — the entering 923 was counted
+under the same rules on a smaller tree.
+
+---
+
 ## 1. Squad A — sprite GUI surface
 
 **Engine ops (A1, `src/sprite_ops.rs`, NEW)**
@@ -453,12 +480,13 @@ census rules per op.
       fail.
 
 **Palette (E3, `src/rune_sec/command_palette.rs`)**
-- [ ] Palette is exactly **135** (132 + 3): commands
-      `add-sprite`, `remove-sprite`, `next-sprite`
-      exist, forward to A1's core ops (not panel
-      closures — the fn-pointer targets are the
-      evidence), and the in-file count pin reads 135;
-      gate check 5 derives 135.
+- [x] Palette is exactly **134** (132 + 2): commands
+      `add-sprite`, `remove-sprite` exist and forward
+      to A1's core ops. (`next-sprite` was dropped in
+      E3's audit — no sprite selection existed for it
+      to advance — so this item's original 135/three-
+      command wording is corrected here; gate check 5
+      derives 134.)
 
 **Style-panel extraction (E4, `src/rune_sec/inspector_style.rs`)**
 - [ ] The closure-only controls (gradient swatches,
@@ -553,11 +581,12 @@ census rules per op.
       **288**, unregistered **0**; gate check 9 agrees
       and `docs/MCP.md` syncs both directions.
 - [ ] Counts re-derived against the entering baseline:
-      MCP 283 → **288**; palette 132 → **135**; scenes
-      26 → **28**; layout facts 29 → **31**; help
-      **61 → 61**; keys 923 → ______ with **zero
-      lost**; icons 163; i18n 99 × 28; tests 3,156 →
-      ______ (CI's exact figure, not a rounding).
+      MCP 283 → **288**; palette 132 → **134** (see
+      the palette item above); scenes 26 → **28**;
+      layout facts 29 → **31**; help **61 → 61**;
+      keys 923 → **940** with **zero lost**; icons
+      163; i18n 99 × 28; tests 3,156 → **3,319** (CI
+      42562084573's exact figure).
 
 **Absence greps that must flip**
 - [ ] `src/sprite_ops.rs`, `src/stage_sprites.rs`,

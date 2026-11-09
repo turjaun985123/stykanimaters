@@ -264,3 +264,38 @@ the assertion transcript `mcp-probe.txt` (§6.7: PASS end to
 end at Wave 12 close). It proves the live control path, not
 layout; it is listed here only so the artifact's contents
 are fully accounted for in this ledger.
+
+---
+
+## Closing reconciliation (integrator, 2026-11-09)
+
+**Headless run 42562380603 (closing tree `ac47b99`):
+SUCCESS.** All 58 probe `.exit` files read 0. The
+**live-MCP probe PASS** (transcript `mcp-probe.txt`,
+all 21 assertions). The **overflow scan is CLEAN
+(0 hits) on all 31 tree dumps** — the 28 scenes'
+trees plus the size/theme/stage variants. Scenes
+close at **28** (library-populated + sprites-populated
+landed as D1 specified them; layout facts 30/31 in
+the Runtime suite pin the two new panels' first
+rows and list geometry).
+
+**Pixel read of the closing snaps** (in the user's
+files as `stykanimate-wave13-*.png`): the
+**sprites-populated** snap shows both seeded
+instances ON STAGE as labelled placeholder quads at
+their keyed transforms — BADGE.PNG rotated −12°
+upper-left of the figure, MARKER.PNG rotated +12°
+to its right — the A2 prims + A6 labels drawing for
+real. The **library-populated** snap shows the
+Library panel expanded with its 2 seeded figures;
+the rows and their thumbnail canvases sit below
+the 900px fold in the PNG, and are proven instead
+by the tree dump (`library-thumb-0/1` present, fact
+30 geometry) and D3's Round 14 Runtime test — the
+same tree-proof standard earlier waves used for
+below-fold panels. Gap #1 from the entering ledger
+(library thumbnails unproven) is therefore closed
+at tree + Runtime level, and remains open only at
+the strict pixels-in-the-PNG level, recorded here
+rather than smoothed over.

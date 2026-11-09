@@ -872,7 +872,9 @@ QA + parity** — the status strip's dirty-dot and
 autosave read path verified against the B
 contract; the GUI save-path audit (every
 `after_save` path calling `note_recovery_written`);
-three palette sprite commands (palette 132 → 135);
+palette sprite commands (two landed of three
+scoped — `next-sprite` dropped in E3's audit;
+palette 132 → 134);
 the style panel's closure-only controls extracted
 to named fns in `inspector_style.rs`; the
 movieclip-def media audit (`docs/wave13/CLIP_MEDIA.md`
@@ -900,22 +902,84 @@ live-MCP probe PASS, overflow CLEAN on 29 trees).
 HEAD at launch: `374e873`, the Wave 12 close-out
 commit.
 
-**Delivered** — TODO-AT-CLOSE: the integrator fills
-this in at close-out with what actually landed,
-squad by squad, against the remits above.
+**Delivered** — **A, sprite surface:** engine ops
+(`src/sprite_ops.rs` — add/remove instance, set/delete
+key; one snapshot per mutation, frame clamped to the
+timeline), stage prims (`src/stage_sprites.rs`) painted
+by a new `stage_view` pass (the generic placeholder
+skips sprite items; fills/outlines at the family's
+alpha factors, corner marks on the panel-selected
+sprite, name labels via `stage_text::sprite_label_boxes`),
+the Sprites panel (`src/rune_sec/sprites_panel.rs`,
+Animate only, `Section::Sprites`), five MCP sprite
+tools (registry 230 → 235), `.stknds` export now
+carries the sprite library + type-2 instances
+(round-trip pinned; groups return as member images,
+texts still dropped). **B, dirty-marking:** the
+`mark_dirty()` seam in `editor.rs` + a 31-row census
+(`docs/wave13/DIRTY_CENSUS.md`) executed across the
+core, the MCP handlers and the panels — including
+the integrator rows (camera clear-key, clip pose
+tweaks, the `begin_draw` snapshot a hand-drawn
+stroke never had, `clear_frame_drawings` restructured
+to own its snapshot, weather/stage/background panel
+marks, slider drags marking once per gesture) and
+the `redo` `selected_figure` clamp. **C, fidelity:**
+SVG z-order now matches the raster (figures, strokes,
+media last) and node opacity composes on heads /
+rings / polygons in BOTH exporters (S10 + S21
+closed); stage pressured strokes render per-segment;
+figure-card thumbnails rebuilt on the shared styled
+generator. **D, pixel-proof:** scenes 26 → 28
+(library-populated, sprites-populated), layout facts
+30/31, Round 14 snap tests, library list five-row
+viewport. **E, QA/parity:** status-strip read path
+pinned against the dirty contract; toast classifier
+extended so MCP handler refusals (sprite + asset
+import families) read Error, never Info; clip-def
+media audit (`docs/wave13/CLIP_MEDIA.md` — stored,
+counted, removal-blocking, but never rendered; fix
+spec anchored for a future wave).
 
-**Verification** — TODO-AT-CLOSE: run evidence only
-(gate result, CI run id and test count, headless
-run id, live-MCP probe and overflow verdicts, snap
-list) goes here at close-out.
+**Verification** — Gate **9/9 PASS** on the closing
+tree (`scripts/phase_j_checks.py`). **CI run
+42562084573 GREEN on `ac47b99`: 3,319 tests passed,
+0 failed** (1,337 lib + 1,911 bin + 71 integration;
+three fix rounds: a `Shape::Line` variant path, the
+sprite handler tests' one-frame fixture, one
+presence-settle assert). **Headless run 42562380603
+SUCCESS: all 58 probes exit 0, live-MCP probe PASS,
+overflow scan CLEAN (0 hits) on all 31 trees.**
+Snaps: `stykanimate-wave13-{default,library-populated,sprites-populated}.png`
+in the user's files — the sprites snap shows both
+seeded instances as labelled placeholder quads on
+stage at their keyed rotations; the library rows and
+thumbnails are proven in the tree dump and the
+Round 14 Runtime test (in the PNG they sit below
+the fold).
 
-**Closing census** — TODO-AT-CLOSE: MCP, palette,
-scenes, help, i18n, icons and keys as counted by
-the gate on the closing tree, against the entering
-baseline above.
+**Closing census** — MCP **288** (235 registry + 9
+io + 44 built-ins); palette **134** (E3 shipped two
+sprite commands, not three — `next-sprite` was
+dropped in its audit because no sprite selection
+existed to advance; the skeleton above said 135 and
+is corrected here); scenes **28**; help **61**;
+layout facts **31**; icons **163**; keys **940**
+(827 static + 113 dynamic), zero lost; State 46
+fields in 22 full literals.
 
-**Honest remainders** — TODO-AT-CLOSE: what this
-wave did not close, named at close-out.
+**Honest remainders** — the clip-def media fix
+(E5's anchored spec) is the headline future-wave
+candidate, unbuilt. Sprite keys can only be authored
+within the timeline (A1's clamped op contract,
+owner-pinned; imported out-of-range keys still
+render and survive). The stage still cannot draw
+real sprite pixels (Rune has no bitmap primitive) —
+placeholders are geometry-exact, appearance is not.
+Library thumbnails remain unit- + tree-proven, not
+visible in a snap (below the fold). Sound is still
+user-verified only. The five standing user decisions
+below are unchanged.
 
 Standing user decisions this wave carries but does
 **not** settle — none of them is in any squad's

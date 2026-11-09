@@ -221,7 +221,7 @@ end — they are part of the contract.
 |---|---|---|---|
 | E1 | Dirty dot + autosave line read path matches the B-squad contract | src/rune_sec/status_strip.rs | The strip reads the same counters B2's seam advances; a pin test ties a `mark_dirty()` write to the strip's dirty state |
 | E2 | Every GUI `after_save` path calls `note_recovery_written` | src/rune_sec/project_tools.rs (+ callers) | Grep every after-save arm: none reaches a saved state without the note call |
-| E3 | Palette sprite commands `add-sprite`, `remove-sprite`, `next-sprite` forwarding to A1's ops; count pin 132 → **135** | src/rune_sec/command_palette.rs | Three `Command {` entries + three shim fns calling sprite_ops paths; in-file pin reads 135 |
+| E3 | Palette sprite commands forwarding to A1's ops; count pin 132 → **135** as scoped — **CORRECTED AT CLOSE-OUT: two commands landed (`add-sprite`, `remove-sprite`); `next-sprite` was dropped in E3's own audit (no sprite selection existed to advance), pin and gate read **134** | src/rune_sec/command_palette.rs | Two `Command {` entries + two shim fns calling sprite_ops paths; in-file pin reads 134 |
 | E4 | Closure-only style controls (gradient swatches, RGB steppers, recent colours) extracted to named fns; panel behaviour byte-identical | src/rune_sec/inspector_style.rs | The named `pub fn`s exist; existing panel tests pass unchanged in CI |
 | E5 | Movieclip-def media audit (stored + serialised, never rendered) with anchored fix spec and per-format verdicts | docs/wave13/CLIP_MEDIA.md (NEW) | File exists; names where rendering should sample clip-def media |
 | E6 | Root-clone test oddity verdict: fixed if real and contained, else the truth pinned in the file's docs | src/shell.rs | The oddity is either gone with a test or explained in shell.rs docs — not left ambiguous |
@@ -235,7 +235,7 @@ end — they are part of the contract.
 | Measure | Entering | Closing |
 |---|---|---|
 | MCP total | 283 (230 + 9 + 44) | **288 (235 + 9 + 44)** |
-| Palette commands | 132 | **135** |
+| Palette commands | 132 | **134** (two sprite commands; see the E3 row) |
 | Scenes | 26 | **28** |
 | Layout facts | 29 | **31** |
 | Help rows | 61 | **61** |

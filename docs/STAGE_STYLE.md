@@ -386,17 +386,25 @@ gate 9/9, CI 42557475828 (3,156 tests) and headless
 
 ---
 
-## Wave 13 — in flight (2026-11-09)
+## Wave 13 — landed + verified (2026-11-09)
 
-> **Planned, not verified.** This section is the close-out
-> checklist for the C-squad fidelity flips, written at
-> launch in the same form as the Wave 12 close-out above
-> so the integrator can verify each flip against the
-> evidence named here — and only then mark it landed. A
-> squad report claiming a flip is NOT evidence; the
-> greps, tests and snaps below are. If any check fails,
-> the flip stays a remainder and this section must say
-> so at close-out rather than being quietly edited.
+> **Closed at the Wave 13 close-out.** This section was
+> the close-out checklist for the C-squad fidelity
+> flips, written at launch so the integrator could
+> verify each flip against the evidence named here.
+> Every check below passed: the integrator's greps on
+> arrival (C1: stroke block moved after the figure
+> loop byte-identical, `node_opacity_attr` in svg.rs;
+> C2: `effective_style` + `blend_over` on the raster
+> head/ring/poly path; C3: `pressured_stroke_pieces`
+> called from stage_layers, the old flat-width pin at
+> zero grep hits; C4: `styled_segment_pieces` in
+> figures_panel production code, `THUMB_WIDTH` gone),
+> the named tests green in CI run 42562084573
+> (3,319 passed, 0 failed), and the rebuilt figure
+> card's thumbnail rendering in the closing snaps.
+> The launch-state cells below are kept as the record
+> of what was fixed.
 
 Entering state for all five items is the Wave 12 closing
 tree (gate 9/9, CI 42557475828, 3,156 tests).
