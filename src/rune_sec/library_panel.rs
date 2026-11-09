@@ -1074,6 +1074,26 @@ fn color_hex_u32(c: Color) -> u32 {
 /// from). Piece widths are the stage's widths scaled
 /// by the fit, floored at [`THUMB_MIN_WIDTH`].
 ///
+/// Wave 14 (C8 — clip-def media): no clip-def media
+/// can reach this thumbnail even in principle, and
+/// none is needed for consistency with the stage.
+/// Clip-def media is a relation between a figure
+/// INSTANCE and its clip (`fig.clip` →
+/// `Project::clips[ci].def`), resolved in
+/// `media::media_items` per `docs/wave13/CLIP_MEDIA.md`
+/// §6.1; this fn's whole input is one bare
+/// `FigureDef` — no instance, no clip index, no
+/// project, no asset table — so there is no clip def
+/// to enumerate, and this path does not consume the
+/// funnel in any case. A library entry's own node
+/// media is the only media its def can carry, and it
+/// stays undrawn under the module docs' standing
+/// argument (its asset indices name the project the
+/// entry was saved from, where they may resolve to a
+/// different image or to nothing). The test below
+/// pins it: a media-carrying def thumbs prim-for-prim
+/// identically to the same def without media.
+///
 /// An empty def (no nodes) yields no prims.
 ///
 /// [`thumb_fit`]: crate::rune_sec::figures_panel::thumb_fit
@@ -2510,6 +2530,52 @@ mod tests {
             }
             other => panic!("expected head ring, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn thumb_prims_ignore_segment_media() {
+        // Wave 14 (C8): a library def carrying segment
+        // media — an image on one node, text on another —
+        // thumbs prim-for-prim identically to the same
+        // def without it: own-def media is not drawn on
+        // the card, and clip-def media is not addressable
+        // from a bare def at all (see
+        // `library_thumb_prims`' docs).
+        let n = |parent: Option<usize>, length: f32, rest: f32| model::NodeDef {
+            name: "n".into(),
+            parent,
+            length,
+            rest_angle: rest,
+            head: false,
+            bend: 1.0,
+            thickness: 5.0,
+            color: None,
+            ik_end: false,
+            shape: model::Shape::Line,
+            style: model::NodeStyle::default(),
+            media: None,
+        };
+        let mut nodes = vec![
+            n(None, 0.0, 0.0),       // 0 root
+            n(Some(0), 40.0, 180.0), // 1 head
+            n(Some(1), 30.0, 0.0),   // 2
+        ];
+        nodes[1].head = true;
+        let plain = FigureDef {
+            nodes: nodes.clone(),
+        };
+        nodes[1].media = Some(model::SegmentMedia::Image { asset: 0 });
+        nodes[2].media = Some(model::SegmentMedia::Text {
+            content: "hi".into(),
+            size: 12.0,
+        });
+        let carried = FigureDef { nodes };
+        let plain_prims = library_thumb_prims(&plain, THUMB_SIZE, Color::WHITE);
+        assert!(!plain_prims.is_empty(), "the fixture draws a card");
+        assert_eq!(
+            library_thumb_prims(&carried, THUMB_SIZE, Color::WHITE),
+            plain_prims
+        );
     }
 
     #[test]

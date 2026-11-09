@@ -24,9 +24,13 @@
 //! Two unauthenticated probes exist so a client can tell this
 //! live endpoint apart from the stdio server (which has no HTTP
 //! at all): `GET /` and `GET /health` answer a small JSON
-//! identity document (server name/version, `"live": true`, and
-//! the registered tool count — the same number the `server_info`
-//! tool reports, read from the same registry).
+//! identity document (server name/version, `"live": true`, the
+//! bound port and enabled flag, and the registered tool count
+//! — the same number the `server_info` tool reports, read from
+//! the same registry). The document is built on the listener
+//! thread from constants, atomics and the static registry
+//! alone — no core, no queue, no bridge lock — so it answers
+//! even while the app's drain is busy (see [`health_body`]).
 //! The JSON-RPC `ping` method also works — it is answered by
 //! the shared router, like every other method.
 //!
@@ -81,6 +85,23 @@
 //!   to whatever project happens to be current by then. A
 //!   request already executing when the timeout fires cannot
 //!   be recalled.
+//! - Responses are written under a total [`WRITE_DEADLINE`],
+//!   for the same reason reads have one: a per-write timeout
+//!   alone lets a client that drains a byte at a time hold
+//!   the one listener thread for as long as a response is
+//!   large. Expiry mid-response is a plain close.
+//! - A client that disconnects *after* its request has been
+//!   queued does **not** cancel it. A disconnect is not a
+//!   cancellation signal this transport can trust — it is
+//!   indistinguishable from the half-close (`shutdown(Write)`
+//!   once the request is sent) that simple clients use while
+//!   still reading the reply — so the request executes and
+//!   the dead reply write is silently dropped (see [`drain`]).
+//!   Cancellation exists only where the client can be told
+//!   what happened: the reply timeout (answered 504) and the
+//!   bridge stop flag. A disconnect *before* the request is
+//!   fully read is different — nothing was ever queued, so
+//!   nothing executes.
 //!
 //! ## Synchronisation
 //!
@@ -241,6 +262,20 @@ const MAX_QUEUED_REQUESTS: usize = 8;
 /// starve every later one.
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Total budget for writing one response, head and body
+/// together. [`IO_TIMEOUT`] alone bounds each individual
+/// write syscall, so a client that drains a byte at a time
+/// — always inside the per-write timeout — could hold the
+/// one listener thread for as long as the response is
+/// large: the write-side twin of the slow-dribble read
+/// [`READ_DEADLINE`] exists to close. Responses travel over
+/// loopback to a client that asked for them, so 60 s is
+/// generous for any realistic result size; expiry mid-
+/// response is a plain close (the client is left with a
+/// truncated body under an unsatisfied `Content-Length`,
+/// which no HTTP client mistakes for a complete reply).
+const WRITE_DEADLINE: Duration = Duration::from_secs(60);
+
 /// Total budget for one request to arrive, from accept to
 /// the last body byte. [`IO_TIMEOUT`] alone bounds each
 /// individual read, so a client sending one byte every few
@@ -375,6 +410,41 @@ impl Drop for LiveBridge {
 static BRIDGE: Mutex<Option<LiveBridge>> = Mutex::new(None);
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Why the most recent bridge start failed, in the OS
+/// error's own words (e.g. "Address already in use
+/// (os error 98)") — or `None` when the last start
+/// succeeded, the bridge has been stopped since, or no
+/// start has been attempted in this process. Recorded by
+/// [`set_enabled`], whose callers otherwise only ever see
+/// the resulting bool: above all `main`'s `init`, which
+/// starts the bridge at launch when the persisted
+/// preference says so and has no surface of its own to
+/// report through. Without this memory a busy port at
+/// launch was invisible — the Settings card could show
+/// the toggle off but never say why (Wave 14, D1; the
+/// gap the Wave 11 audit named in `settings_popover`'s
+/// module docs).
+static LAST_START_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+fn record_start_error(err: &std::io::Error) {
+    *LAST_START_ERROR.lock().unwrap_or_else(|p| p.into_inner()) = Some(err.to_string());
+}
+
+fn clear_start_error() {
+    *LAST_START_ERROR.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
+/// The reason the most recent bridge start failed, if it
+/// did — see [`LAST_START_ERROR`]. Set on a failed start,
+/// cleared on a successful start and on any stop. Cheap
+/// enough to call from `view()` (one short lock, no I/O).
+pub fn last_start_error() -> Option<String> {
+    LAST_START_ERROR
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
 /// The event-loop waker the app hands over at startup
 /// (`AppSpec::setup` — the type is Rune's `Waker`, an
 /// `Arc<dyn Fn() + Send + Sync>`; spelled structurally here so
@@ -407,7 +477,8 @@ fn wake() {
 /// write the status, and the shell already toasts those from
 /// the status line itself; buffering these separately is what
 /// keeps them visible without double-toasting (Wave 11, A3
-/// request B). Drained by [`take_drain_errors`].
+/// request B). Drained by [`take_drain_errors`]; capped
+/// at [`MAX_DRAIN_ERRORS`] (Wave 14, D3).
 static DRAIN_ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Take the buffered drain errors (oldest first), clearing
@@ -417,11 +488,35 @@ pub fn take_drain_errors() -> Vec<String> {
     std::mem::take(&mut *DRAIN_ERRORS.lock().unwrap_or_else(|p| p.into_inner()))
 }
 
+/// Upper bound on buffered drain errors (Wave 14, D3).
+/// In the shipped app the buffer can never hold more
+/// than one drain batch: `drain` records at most one
+/// error per processed request (≤ [`MAX_QUEUED_REQUESTS`]
+/// per call) and the shell takes the buffer in the same
+/// poll tick (src/main.rs). The cap is defence for the
+/// static itself — a future drain caller that forgets
+/// the take must not turn this into an unbounded buffer
+/// growing by one string per request forever. When the
+/// cap is reached the OLDEST errors are dropped: they
+/// are toast texts, and the newest refusal is the one
+/// the user still needs to see.
+const MAX_DRAIN_ERRORS: usize = 64;
+
 fn record_drain_error(text: String) {
-    DRAIN_ERRORS
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .push(text);
+    let mut errors = DRAIN_ERRORS.lock().unwrap_or_else(|p| p.into_inner());
+    push_drain_error(&mut errors, text);
+}
+
+/// [`record_drain_error`]'s push, with the
+/// [`MAX_DRAIN_ERRORS`] cap applied (oldest dropped
+/// first). A free function over the buffer so the cap
+/// is unit-testable without touching the shared static.
+fn push_drain_error(errors: &mut Vec<String>, text: String) {
+    if errors.len() >= MAX_DRAIN_ERRORS {
+        let excess = errors.len() + 1 - MAX_DRAIN_ERRORS;
+        errors.drain(..excess);
+    }
+    errors.push(text);
 }
 
 fn lock_bridge() -> std::sync::MutexGuard<'static, Option<LiveBridge>> {
@@ -435,25 +530,46 @@ fn lock_bridge() -> std::sync::MutexGuard<'static, Option<LiveBridge>> {
 /// singleton bridge. Returns the RESULTING state: `true` only
 /// if the bridge is actually listening (a failed bind — port
 /// already taken — reports `false`, never a phantom on).
+/// A failed start also records its OS error for
+/// [`last_start_error`]; a successful start and any stop
+/// clear the record.
 pub fn set_enabled(on: bool) -> bool {
-    if on == is_enabled() {
-        return on;
-    }
-    if on {
-        match LiveBridge::start() {
-            Ok(bridge) => {
-                *lock_bridge() = Some(bridge);
-                ENABLED.store(true, Ordering::SeqCst);
-                true
-            }
-            Err(_) => false,
+    if !on {
+        // Stopping clears any recorded start error first —
+        // even when the bridge is already off: once the user
+        // has switched live control off, a stale failure
+        // note must not outlive the stop.
+        clear_start_error();
+        if !is_enabled() {
+            return false;
         }
-    } else {
         if let Some(mut bridge) = lock_bridge().take() {
             bridge.stop();
         }
         ENABLED.store(false, Ordering::SeqCst);
-        false
+        return false;
+    }
+    if is_enabled() {
+        return true;
+    }
+    match LiveBridge::start() {
+        Ok(bridge) => {
+            *lock_bridge() = Some(bridge);
+            ENABLED.store(true, Ordering::SeqCst);
+            clear_start_error();
+            true
+        }
+        Err(err) => {
+            // Remember WHY (Wave 14, D1): every caller of
+            // this fn — above all `main`'s launch path —
+            // only gets the bool back, so the reason would
+            // vanish with this error value. This match arm
+            // is the one failure point every start the app
+            // ever makes passes through (`LiveBridge::start`
+            // has no other caller).
+            record_start_error(&err);
+            false
+        }
     }
 }
 
@@ -500,6 +616,30 @@ pub fn drain(core: &mut EditorCore, router: &mut McpServer, max: usize) -> usize
             done += 1;
             continue;
         };
+        // Wave 14 (shell control): a call for a shell tool
+        // is intercepted here and handed to the shell
+        // queue — the router cannot execute it (its state
+        // is the GUI shell's, not the core's), and its
+        // registry entry is a stub that would refuse. The
+        // shell drain in poll executes it against the live
+        // State right after this drain and answers through
+        // the request's own reply channel, which travels
+        // with the queued request. This peek is the one
+        // inspection the drain performs on a message: the
+        // name test only, never the arguments (the
+        // handlers own validation, against the live
+        // shell). A queue-full refusal is answered here,
+        // on the request's own channel, in the standard
+        // tool-result shape — never a silent drop.
+        if let Some(shell_req) = crate::shell_control::peek(&req) {
+            if let Err((shell_req, why)) = crate::shell_control::enqueue(shell_req) {
+                let _ = shell_req
+                    .reply
+                    .send(Some(crate::shell_control::respond(shell_req.id.clone(), Err(why))));
+            }
+            done += 1;
+            continue;
+        }
         // Snapshot the status line so an error that never
         // wrote it can be told apart from an ordinary refusal
         // (which writes the status and is toasted from there).
@@ -876,16 +1016,81 @@ fn body_too_large_body() -> String {
 /// tool count, read from the same `all_tools()` registry
 /// the `server_info` tool reports — knowable in this layer
 /// because the registry is static data, no core needed.
+/// `port` is the [`PORT`] constant the listener binds (the
+/// same number `endpoint()` embeds), and `enabled` is the
+/// [`is_enabled`] flag — set only after a successful bind,
+/// so a health answer that exists at all reads it `true`
+/// from the singleton bridge that served it.
+///
+/// This function runs on the listener thread and must stay
+/// lock-free apart from atomics: it takes no core, no queue
+/// and NOT the `BRIDGE` mutex — [`drain`] holds that mutex
+/// across a whole batch, so a health build that locked it
+/// could stall behind a long tool call, defeating the
+/// probe's purpose (it is how a client tells a wedged app
+/// from a dead one). Every field above is a constant, an
+/// atomic read, or static registry data, so the document
+/// answers even while the app's poll loop is busy.
+///
+/// Deliberately ABSENT (Wave 14, D4): a `shell_control`
+/// field. It may be added only when Squad B's shell-control
+/// plumbing gives it a truthful source readable here
+/// without a lock — an atomic availability flag in the
+/// shell-control module, set when the shell wires its
+/// command drain into the poll loop. Until that source
+/// exists in this crate, the field is omitted rather than
+/// faked; the integrator's splice is then one line here
+/// plus the pin in `health_body_names_the_live_server`.
 fn health_body() -> Value {
     json!({
-        "server": "stykanimate-rs",
-        "version": env!("CARGO_PKG_VERSION"),
+        // Wave 14 (D7): the server's identity comes from
+        // the one set of consts the router's initialize
+        // answer and the server_info tool also read — a
+        // literal here would be a second source waiting
+        // to drift.
+        "server": stykanimate_rs::mcp::SERVER_NAME,
+        "version": stykanimate_rs::mcp::SERVER_VERSION,
         "transport": "live-http",
         "live": true,
         "endpoint": endpoint(),
+        "port": PORT,
+        "enabled": is_enabled(),
+        // Wave 14: the shell-control channel is compiled
+        // in and drained by poll unconditionally, so this
+        // endpoint serves the shell_* tools — a constant
+        // truth about this build (D4 specced the field
+        // absent until the plumbing landed; it has).
+        "shell_control": true,
         "auth": "none",
         "tools": stykanimate_rs::mcp::all_tools().len(),
     })
+}
+
+/// Write `bytes` to the socket under a TOTAL deadline (see
+/// [`WRITE_DEADLINE`]): the socket's write timeout is reset
+/// to the remaining budget before every chunk, so progress
+/// cannot refinance the wait the way per-write timeouts
+/// alone allow. Returns `false` when the bytes did not all
+/// make it — peer gone, write error, or deadline spent.
+/// Callers ignore that outcome in the usual socket way: a
+/// client that cannot be written to is gone, and there is
+/// no one left to report the failure to.
+fn write_bounded(stream: &mut TcpStream, bytes: &[u8], deadline: Instant) -> bool {
+    let mut written = 0;
+    while written < bytes.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let _ = stream.set_write_timeout(Some(IO_TIMEOUT.min(remaining)));
+        let end = (written + 64 * 1024).min(bytes.len());
+        match stream.write(&bytes[written..end]) {
+            Ok(0) => return false,
+            Ok(n) => written += n,
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// Write one complete HTTP/1.1 response and let the socket
@@ -896,8 +1101,10 @@ fn write_response(stream: &mut TcpStream, status: u16, reason: &str, content_typ
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(body);
+    let deadline = Instant::now() + WRITE_DEADLINE;
+    if write_bounded(stream, head.as_bytes(), deadline) {
+        let _ = write_bounded(stream, body, deadline);
+    }
     let _ = stream.flush();
 }
 
@@ -911,8 +1118,10 @@ fn write_json(stream: &mut TcpStream, status: u16, value: &Value) {
         "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(body.as_bytes());
+    let deadline = Instant::now() + WRITE_DEADLINE;
+    if write_bounded(stream, head.as_bytes(), deadline) {
+        let _ = write_bounded(stream, body.as_bytes(), deadline);
+    }
     let _ = stream.flush();
 }
 
@@ -1183,6 +1392,85 @@ mod tests {
     }
 
     #[test]
+    fn drain_error_buffer_is_capped_oldest_first() {
+        // Wave 14 (D3): the drain-error static is the one
+        // buffer in the queue path with no intrinsic bound
+        // of its own — the cap keeps the newest refusals
+        // and drops the oldest toast texts.
+        let mut errors: Vec<String> = Vec::new();
+        for i in 0..MAX_DRAIN_ERRORS + 5 {
+            push_drain_error(&mut errors, format!("err {i}"));
+        }
+        assert_eq!(errors.len(), MAX_DRAIN_ERRORS);
+        assert_eq!(
+            errors.first().map(String::as_str),
+            Some("err 5"),
+            "the five oldest were dropped"
+        );
+        let newest = format!("err {}", MAX_DRAIN_ERRORS + 4);
+        assert_eq!(
+            errors.last().map(String::as_str),
+            Some(newest.as_str()),
+            "the newest refusal survives the cap"
+        );
+    }
+
+    #[test]
+    fn full_queue_refuses_the_client_with_503() {
+        // Wave 14 (D3): what happens AT the queue bound,
+        // pinned end to end — a client whose request
+        // cannot be queued is refused with HTTP 503
+        // immediately: not queued, not blocked behind the
+        // wedged queue, not panicked on. Driven through
+        // the real `handle_connection` on an ephemeral
+        // loopback port (NOT the bridge port, and no
+        // singleton state), so the test is parallel-safe.
+        use std::io::{Read, Write};
+        let (tx, _rx) = sync_channel::<LiveRequest>(MAX_QUEUED_REQUESTS);
+        for _ in 0..MAX_QUEUED_REQUESTS {
+            let (reply_tx, _reply_rx) =
+                std::sync::mpsc::sync_channel::<Option<Value>>(1);
+            tx.try_send(LiveRequest {
+                msg: json!({ "jsonrpc": "2.0", "id": 0, "method": "ping" }),
+                reply: reply_tx,
+                cancelled: Arc::new(AtomicBool::new(true)),
+            })
+            .expect("the queue takes requests up to its bound");
+        }
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("ephemeral addr");
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept one connection");
+            handle_connection(stream, &tx, &stop);
+        });
+        let mut client = TcpStream::connect(addr).expect("connect");
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("client read timeout");
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }).to_string();
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        client.write_all(request.as_bytes()).expect("write request");
+        let mut raw = String::new();
+        client.read_to_string(&mut raw).expect("read response");
+        server.join().expect("server thread");
+        assert!(
+            raw.starts_with("HTTP/1.1 503"),
+            "a full queue refuses plainly, got: {}",
+            raw.lines().next().unwrap_or("")
+        );
+        assert!(
+            raw.contains("editor request queue is full"),
+            "the refusal says why: {raw}"
+        );
+    }
+
+    #[test]
     fn request_target_reads_the_second_word() {
         assert_eq!(request_target(SAMPLE_HEAD), "/mcp");
         assert_eq!(request_target("GET /health HTTP/1.1\r\n\r\n"), "/health");
@@ -1253,7 +1541,32 @@ mod tests {
         assert_eq!(body["transport"], "live-http");
         assert_eq!(body["live"], true);
         assert_eq!(body["endpoint"], endpoint());
+        // Wave 14 (D4): endpoint state, from the same
+        // sources the listener itself uses — the PORT
+        // constant it binds and the ENABLED atomic that is
+        // set only after a successful bind. `enabled` is
+        // pinned by self-consistency, not a fixed value:
+        // unit tests never start the bridge, and the field's
+        // contract is that it reports the flag truthfully,
+        // whatever the flag currently reads.
+        assert_eq!(body["port"], json!(PORT), "health names the bound port");
+        assert_eq!(
+            body["enabled"],
+            json!(is_enabled()),
+            "health reports the enabled flag, not a hard-coded state"
+        );
         assert_eq!(body["auth"], "none");
+        // Wave 14 (D4, landed at integration): shell
+        // control exists in this build (the shell queue
+        // drains in poll), so the field is present and
+        // true. D4's original pin held it absent until
+        // the plumbing landed — this pin is that
+        // landing, made deliberate.
+        assert_eq!(
+            body["shell_control"],
+            json!(true),
+            "shell control is compiled in and drained by poll"
+        );
         // The tool count is the registry's own number — the
         // same value the `server_info` tool reports — not a
         // literal that can drift as tools are added.
@@ -1428,6 +1741,41 @@ mod tests {
     }
 
     #[test]
+    fn is_notification_covers_erroring_and_batch_shapes() {
+        // Wave 14 (D6): the HTTP fast path's two edges.
+        //
+        // Erroring notifications are still notifications:
+        // the listener answers them 202 with an empty body
+        // BEFORE queueing (handle_connection), exactly like
+        // well-formed ones — an unknown method, an unknown
+        // tool, a tools/call with no params, even an object
+        // with no method at all. Nothing is queued, so
+        // nothing can execute, and no error body is ever
+        // produced for them (the dispatch-level half of
+        // this truth is pinned in mcp.rs's D6 tests, and
+        // the 202 itself over the wire by the e2e below).
+        assert!(is_notification(&json!({ "jsonrpc": "2.0", "method": "no/such" })));
+        assert!(is_notification(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": { "name": "does_not_exist", "arguments": {} },
+        })));
+        assert!(is_notification(&json!({ "jsonrpc": "2.0", "method": "tools/call" })));
+        assert!(is_notification(&json!({ "jsonrpc": "2.0" })));
+        // Batch arrays are NEVER notifications — not even
+        // an all-notification batch, and not the empty
+        // batch: the array shape is refused by dispatch
+        // with a single -32600, so it must be queued and
+        // answered (HTTP 200 + that error body, as the
+        // e2e pins), never fast-pathed to a silent 202.
+        assert!(!is_notification(&json!([
+            { "jsonrpc": "2.0", "method": "ping" },
+            { "jsonrpc": "2.0", "method": "notifications/initialized" },
+        ])));
+        assert!(!is_notification(&json!([])));
+    }
+
+    #[test]
     fn content_type_acceptance_is_json_or_absent() {
         assert!(content_type_acceptable(SAMPLE_HEAD));
         assert!(content_type_acceptable(
@@ -1477,7 +1825,267 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // End-to-end proof — the suite's ONLY socket-binding test.
+    // Wave 14 (D8) — connection lifecycle pins.
+    //
+    // The pure tests pin the write deadline; the socket
+    // tests run the REAL `handle_connection` on an
+    // ephemeral port against a private request queue this
+    // test drains by hand. Nothing here touches the
+    // singleton bridge or the real PORT, so these run
+    // alongside the socket e2e below without interference.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn write_deadline_is_a_total_bound_not_a_per_write_one() {
+        // At least one full per-write timeout, so a healthy
+        // slow-ish loopback client is never cut off early;
+        // far below the reply wait, so a trickle reader
+        // frees the listener long before its request would
+        // have timed out waiting.
+        assert!(WRITE_DEADLINE >= IO_TIMEOUT);
+        assert!(WRITE_DEADLINE <= Duration::from_secs(300));
+        assert!(WRITE_DEADLINE < REPLY_TIMEOUT);
+    }
+
+    /// A connected pair of streams over an ephemeral
+    /// loopback listener: `(client_end, server_end)`.
+    fn stream_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral bind");
+        let port = listener.local_addr().expect("local addr").port();
+        let client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        (client, server)
+    }
+
+    #[test]
+    fn write_bounded_gives_up_on_an_expired_deadline() {
+        let (mut writer, mut reader) = stream_pair();
+        let past = Instant::now() - Duration::from_secs(1);
+        assert!(
+            !write_bounded(&mut writer, b"hello", past),
+            "an already-spent deadline must refuse the write, not start it"
+        );
+        // And nothing reached the peer.
+        reader
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut byte = [0u8; 1];
+        assert!(
+            !matches!(reader.read(&mut byte), Ok(1)),
+            "no byte may be written under an expired deadline"
+        );
+    }
+
+    #[test]
+    fn write_bounded_reports_a_dead_peer_without_panicking() {
+        let (mut writer, reader) = stream_pair();
+        drop(reader); // the peer is gone before a byte is written
+        let mut failed = false;
+        for _ in 0..100 {
+            let deadline = Instant::now() + WRITE_DEADLINE;
+            if !write_bounded(&mut writer, &[0u8; 8192], deadline) {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed, "writes to a closed peer must fail, never hang or panic");
+    }
+
+    /// Spawn a one-shot server on an ephemeral port: accept
+    /// ONE connection and serve it with the real
+    /// `handle_connection` against a fresh queue. Returns
+    /// the port, the queue receiver the test drains by
+    /// hand, and the server thread (joined by each test —
+    /// a server that does not finish is the failure these
+    /// tests exist to catch).
+    fn spawn_one_shot_server() -> (
+        u16,
+        std::sync::mpsc::Receiver<LiveRequest>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral bind");
+        let port = listener.local_addr().expect("local addr").port();
+        let (tx, rx) = sync_channel::<LiveRequest>(MAX_QUEUED_REQUESTS);
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept one connection");
+            handle_connection(stream, &tx, &stop);
+        });
+        (port, rx, server)
+    }
+
+    fn connect_client(port: u16) -> TcpStream {
+        let stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("client read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .expect("client write timeout");
+        stream
+    }
+
+    fn post_bytes(msg: &Value) -> Vec<u8> {
+        let body = msg.to_string();
+        format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// Read exactly one HTTP response from `client` (head,
+    /// then `Content-Length` body bytes) and return its
+    /// status and body.
+    fn read_one_response(client: &mut TcpStream) -> (u16, String) {
+        let mut raw: Vec<u8> = Vec::new();
+        let mut byte = [0u8; 1];
+        let head_len = loop {
+            if let Some((head, _)) = split_head_body(&raw) {
+                break head.len() + 4;
+            }
+            let n = client.read(&mut byte).expect("read response head");
+            assert_eq!(n, 1, "connection closed inside the response head");
+            raw.push(byte[0]);
+        };
+        let head = String::from_utf8_lossy(&raw[..head_len]).into_owned();
+        let status: u16 = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|t| t.parse().ok())
+            .expect("response has a status");
+        let len = parse_content_length(&head).expect("response carries Content-Length");
+        let mut body: Vec<u8> = raw[head_len..].to_vec();
+        assert!(body.len() <= len, "more body bytes arrived than were framed");
+        let mut rest = vec![0u8; len - body.len()];
+        client.read_exact(&mut rest).expect("read response body");
+        body.extend_from_slice(&rest);
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[test]
+    fn disconnect_mid_head_queues_nothing_and_frees_the_server() {
+        let (port, rx, server) = spawn_one_shot_server();
+        let mut client = connect_client(port);
+        client
+            .write_all(b"POST /mcp HTTP/1.1\r\nContent-Len")
+            .expect("partial head write");
+        drop(client); // gone mid-head: the terminator never arrives
+        server
+            .join()
+            .expect("the server must let go of a client that went away mid-head");
+        assert!(
+            rx.try_recv().is_err(),
+            "a request that never fully arrived must not be queued"
+        );
+    }
+
+    #[test]
+    fn truncated_body_queues_nothing_and_frees_the_server() {
+        let (port, rx, server) = spawn_one_shot_server();
+        let mut client = connect_client(port);
+        // A complete head promising 100 body bytes, then a
+        // tenth of the body, then a disconnect: the framing
+        // fails, so nothing may be queued or executed.
+        client
+            .write_all(
+                b"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"jsonrpc\"",
+            )
+            .expect("head + partial body write");
+        drop(client);
+        server
+            .join()
+            .expect("the server must let go of a truncated body");
+        assert!(
+            rx.try_recv().is_err(),
+            "a truncated body must not be queued"
+        );
+    }
+
+    #[test]
+    fn disconnect_after_sending_does_not_cancel_the_queued_request() {
+        // The Wave 14 (D8) ruling, pinned: a client that
+        // hangs up AFTER its request was queued does not
+        // cancel it. A disconnect is indistinguishable from
+        // a legitimate half-close (a client that shuts down
+        // its write side and keeps reading), so treating it
+        // as cancellation would break real clients; the
+        // transport's cancellations are only the ones the
+        // client can be told about — the reply timeout's 504
+        // and the bridge stop. The edit executes, and the
+        // reply write to the dead socket is dropped quietly.
+        let (port, rx, server) = spawn_one_shot_server();
+        let mut core = EditorCore::new();
+        let mut router = McpServer::new();
+        assert!(core.project.frames.len() >= 2 && core.current == 0);
+        let mut client = connect_client(port);
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "set_frame", "arguments": { "frame": 1 } },
+        });
+        client.write_all(&post_bytes(&msg)).expect("request write");
+        drop(client); // the client is gone before the app drains
+        let req = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a fully sent request is queued even though its client left");
+        let req = discard_if_cancelled(req)
+            .expect("a disconnect is not a cancellation: the request stays live");
+        let response = router.handle_on(&mut core, &req.msg);
+        assert_eq!(
+            core.current, 1,
+            "the mutation executes even though its client hung up while waiting"
+        );
+        // The reply lands in the wait loop, whose write to
+        // the dead socket fails and is ignored.
+        let _ = req.reply.send(response);
+        server
+            .join()
+            .expect("the listener must survive writing a reply to a dead client");
+    }
+
+    #[test]
+    fn one_connection_serves_exactly_one_request() {
+        // Keep-alive is not offered: every response carries
+        // `Connection: close` and the socket is closed after
+        // the first exchange, so a second request on the
+        // same connection gets no answer — the contract
+        // pipelining clients must see, pinned.
+        let (port, rx, server) = spawn_one_shot_server();
+        let mut core = EditorCore::new();
+        let mut router = McpServer::new();
+        let mut client = connect_client(port);
+        let ping = json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" });
+        client.write_all(&post_bytes(&ping)).expect("first request");
+        let req = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first request queued");
+        let req = discard_if_cancelled(req).expect("first request is live");
+        let response = router.handle_on(&mut core, &req.msg);
+        let _ = req.reply.send(response);
+        let (status, body) = read_one_response(&mut client);
+        assert_eq!(status, 200);
+        let resp: Value = serde_json::from_str(&body).expect("first response is JSON");
+        assert_eq!(resp["result"], json!({}), "the first request was answered");
+        // Second request on the SAME connection: never
+        // queued, never answered; the read side sees the
+        // close the first response promised.
+        let _ = client.write_all(&post_bytes(&ping));
+        let queued = rx.recv_timeout(Duration::from_millis(300));
+        assert!(queued.is_err(), "a second request on one connection is not served");
+        let mut byte = [0u8; 1];
+        match client.read(&mut byte) {
+            Ok(0) | Err(_) => {} // FIN or reset: the promised close
+            Ok(n) => panic!("second response byte(s) on a closed connection: {n}"),
+        }
+        server
+            .join()
+            .expect("the server finishes after its one request");
+    }
+
+    // -----------------------------------------------------------------
+    // End-to-end proof — the suite's end-to-end socket test.
     //
     // Everything above tests pure helpers; this one binds
     // the real port, speaks real HTTP from a client thread,
@@ -1772,6 +2380,78 @@ mod tests {
         match verdict {
             Ok(Ok(())) => {}
             Ok(Err(msg)) => panic!("live bridge e2e: {msg}"),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Start-failure memory (Wave 14, D1) — the suite's second
+    // socket-binding test, and a short one: it binds the real
+    // port only to hold it hostage (the busy-port case), never
+    // to speak HTTP. Same singleton discipline as the e2e
+    // above: known state first, cleanup on every path.
+    // -----------------------------------------------------------------
+
+    /// The run proper, returning its verdict so the test
+    /// wrapper can stop the bridge before surfacing any
+    /// failure (the e2e's shape, for the same reason).
+    fn run_start_error_recording() -> Result<(), String> {
+        // Known state first (the e2e opens the same way):
+        // bridge off — and a stop must already have cleared
+        // whatever a previous run recorded.
+        let _ = set_enabled(false);
+        if let Some(err) = last_start_error() {
+            return Err(format!("a stop left a stale start error behind: {err:?}"));
+        }
+        // Hold the port hostage with a listener of our own —
+        // the second-editor-instance case the launch path
+        // hits, forced the honest way.
+        let occupier = TcpListener::bind(("127.0.0.1", PORT))
+            .map_err(|e| format!("the test could not occupy the port itself: {e}"))?;
+        if set_enabled(true) {
+            return Err("a start against an occupied port reported success".to_string());
+        }
+        if is_enabled() {
+            return Err("the bridge claims to be on after a failed start".to_string());
+        }
+        let recorded = last_start_error()
+            .ok_or_else(|| "a failed start recorded no error".to_string())?;
+        if !recorded.contains("in use") {
+            return Err(format!(
+                "the recorded error does not name the cause: {recorded:?}"
+            ));
+        }
+        // A stop clears the record even though nothing was
+        // running — the note must not outlive the user's
+        // decision to switch off.
+        let _ = set_enabled(false);
+        if let Some(err) = last_start_error() {
+            return Err(format!("a stop left the recorded error behind: {err:?}"));
+        }
+        // Free the port and retry: the start succeeds and
+        // the record clears with it.
+        drop(occupier);
+        if !set_enabled(true) {
+            return Err("the retry failed even with the port free".to_string());
+        }
+        if let Some(err) = last_start_error() {
+            return Err(format!(
+                "a successful start left the old error behind: {err:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn failed_start_records_its_error_and_success_or_stop_clears_it() {
+        let verdict = std::panic::catch_unwind(run_start_error_recording);
+        // Cleanup on EVERY path (failure and panic alike),
+        // before the verdict is surfaced.
+        let _ = set_enabled(false);
+        assert!(!is_enabled(), "cleanup must leave the bridge off");
+        match verdict {
+            Ok(Ok(())) => {}
+            Ok(Err(msg)) => panic!("start-error recording: {msg}"),
             Err(payload) => std::panic::resume_unwind(payload),
         }
     }

@@ -550,6 +550,35 @@ fn scene_settings_open(s: &mut State) {
     crate::rune_sec::settings_popover::toggle_open(s);
 }
 
+/// `"settings-open-error"` — the Settings card open on a
+/// GENUINE Live MCP start failure (Wave 14, E8): the D1
+/// failure note under the Live MCP toggle, carrying the
+/// bridge's recorded OS error. The failure is not faked:
+/// the builder stops the bridge `init` started, holds
+/// the endpoint's port with its own listener, and asks
+/// the bridge to start — the bind fails for real, D1's
+/// `LAST_START_ERROR` records the OS reason, and the
+/// outcome is noted exactly as the settings toggle notes
+/// its own attempts. The holder is then dropped and the
+/// card opened; the note the view renders is the
+/// production one, word for word. (Per-process state —
+/// the headless runner invokes one scene per process,
+/// and no snap test names this scene.)
+fn scene_settings_open_error(s: &mut State) {
+    crate::live_mcp::set_enabled(false);
+    let holder = std::net::TcpListener::bind(("127.0.0.1", crate::live_mcp::PORT)).ok();
+    if holder.is_some() {
+        let on = crate::live_mcp::set_enabled(true);
+        stykanimate_rs::shell::note_live_mcp_start(if on {
+            stykanimate_rs::shell::LiveMcpStartOutcome::Listening
+        } else {
+            stykanimate_rs::shell::LiveMcpStartOutcome::FailedToStart
+        });
+    }
+    drop(holder);
+    crate::rune_sec::settings_popover::toggle_open(s);
+}
+
 /// `"draw-open"` — the shell switched to the Draw
 /// workspace, so the snap renders the drawing set
 /// (draw tools, stroke inspector, text tool) with the
@@ -1255,6 +1284,7 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("strokes-populated", scene_strokes_populated),
         ("library-populated", scene_library_populated),
         ("sprites-populated", scene_sprites_populated),
+        ("settings-open-error", scene_settings_open_error),
     ]
 }
 
@@ -1578,9 +1608,9 @@ mod tests {
     /// populated-state scenes (library-populated,
     /// sprites-populated) last.
     #[test]
-    fn scene_table_has_twentyeight_uniquely_named_scenes() {
+    fn scene_table_has_twentynine_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 28, "twenty-eight scenes are registered");
+        assert_eq!(table.len(), 29, "twenty-nine scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();

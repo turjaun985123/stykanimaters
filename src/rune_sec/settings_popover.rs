@@ -141,7 +141,8 @@
 //!   through the core's status line: on names the endpoint,
 //!   a failed start names the busy port. The note under the
 //!   row shows the endpoint and says plainly that while on,
-//!   any program on this computer can drive the editor —
+//!   any program on this computer can control the editor,
+//!   including switching workspaces and pressing play —
 //!   the endpoint has no password in this version (the
 //!   bridge module's own docs carry the full warning).
 //!   At launch the shell attempts the start when the
@@ -149,15 +150,15 @@
 //!   attempt is live, not deferred — and this toggle is
 //!   its runtime switch either way (a press starts or
 //!   stops the listener immediately, no restart).
-//!   One honest gap (Wave 11 audit): a launch attempt
-//!   that fails — the port already held — is silently
-//!   dropped by `init`, and no surface records why; the
-//!   card then truthfully shows the pill off, but the
-//!   reason reaches the user only when they press the
-//!   toggle and the press's own start fails the same
-//!   way. Closing that needs the bridge to remember
-//!   its last start failure (`live_mcp`'s file, not
-//!   this one) — see the Wave 11 report.
+//!   A failed start is no longer invisible (the Wave 11
+//!   audit's gap, closed in two steps): `init` and this
+//!   toggle both record the attempt's outcome in the
+//!   shell's start-outcome record, and the card shows a
+//!   persistent failure note under the row while the
+//!   bridge is off for that reason; since Wave 14 (D1)
+//!   the bridge itself also remembers the OS error of
+//!   its last failed start (`live_mcp::last_start_error`)
+//!   for the note to name.
 //! * **Startup workspace (Phase G)** — a compact picker
 //!   (eight buttons, the language grid's 4-wide layout)
 //!   naming the workspace the shell opens in. Picking one
@@ -678,12 +679,14 @@ pub fn toggle_live_mcp(s: &mut State) {
 /// an MCP client should be pointed at, and the plain-words
 /// warning the bridge's own module docs carry — while live
 /// control is on, any program running on this computer can
-/// drive the editor, because this version has no password.
-/// Shown in both states: the endpoint is where the client
-/// goes as soon as the toggle is flipped on.
+/// control the editor itself, workspaces and playback
+/// included (the live-only shell tools reach the window,
+/// not just the project), because this version has no
+/// password. Shown in both states: the endpoint is where
+/// the client goes as soon as the toggle is flipped on.
 pub fn live_mcp_note() -> String {
     format!(
-        "{} — while on, any program on this computer can drive the editor. No password in this version.",
+        "{} — while on, any program on this computer can control the editor, including switching workspaces and pressing play. No password in this version.",
         crate::live_mcp::endpoint()
     )
 }
@@ -954,17 +957,28 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
         // the status line has faded by the time the user comes
         // back to this card, so without it a dead bridge was
         // indistinguishable from a stopped one.
+        //
+        // Wave 14 (D1, landed at integration): when the
+        // bridge itself recorded a start error, the note
+        // names it — the OS reason it could not bind — in
+        // place of the port guess. The shell-outcome-only
+        // failure (the init-time attempt, which predates
+        // the bridge's own record) keeps the guess as its
+        // fallback wording.
         if stykanimate_rs::shell::live_mcp_start_outcome()
             == stykanimate_rs::shell::LiveMcpStartOutcome::FailedToStart
             && !crate::live_mcp::is_enabled()
         {
-            card = card.child(note_line(
-                t,
-                &format!(
+            let note = match crate::live_mcp::last_start_error() {
+                Some(error) => {
+                    format!("Live MCP did not start: {error}. Turn the toggle on to retry.")
+                }
+                None => format!(
                     "Live MCP did not start — port {} may be in use. Turn it off and on to retry.",
                     crate::live_mcp::PORT
                 ),
-            ));
+            };
+            card = card.child(note_line(t, &note));
         }
 
         // Theme: each button sets its own value outright.
@@ -1614,8 +1628,17 @@ playback_speed: 1.0,
         assert!(note.starts_with(&crate::live_mcp::endpoint()), "{note}");
         assert!(note.contains("http://127.0.0.1:32117/mcp"), "{note}");
         // The plain-words warning rides along: while on,
-        // any local program can drive the editor.
+        // any local program can control the editor — and
+        // since Wave 14's shell control that means the
+        // window itself, so the note names workspaces and
+        // playback outright rather than leaving "control"
+        // to be read as project edits only.
         assert!(note.contains("any program on this computer"), "{note}");
+        assert!(note.contains("can control the editor"), "{note}");
+        assert!(
+            note.contains("including switching workspaces and pressing play"),
+            "{note}"
+        );
         assert!(note.contains("No password in this version."), "{note}");
         // Deliberately NOT tested here: toggle_live_mcp —
         // it starts the real bridge (binds the port), and

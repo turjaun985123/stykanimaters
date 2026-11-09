@@ -551,7 +551,7 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             ),
             (
                 "Project assets",
-                "Scene panel — a Placed media readout counts the project's assets in use; the asset list itself is managed with the MCP tools assets_list, asset_info, asset_import, asset_rename, asset_attach and asset_remove — an asset a segment or sprite still uses cannot be removed, detach it first",
+                "Scene panel — a Placed media readout counts the project's assets in use; the asset list itself is managed with the MCP tools assets_list, asset_info, asset_import, asset_rename, asset_attach and asset_remove — an asset a figure segment, a movieclip definition's segment or a sprite still uses cannot be removed, detach it first (a movieclip definition's segment media is read with clip_get_node_media and detached with clip_clear_node_media)",
             ),
             (
                 "Attach asset to segment",
@@ -563,11 +563,11 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             ),
             (
                 "MCP stdio server",
-                "The mcp_server program serves the same MCP (Model Context Protocol) tools over stdio (JSON-RPC, one message per line) to clients that launch it — it works on its own copy of a project and never sees or drives this editor window",
+                "The mcp_server program serves the same core tools over stdio (JSON-RPC, one message per line) to clients that launch it — it works on its own copy of a project and never sees or drives this editor window",
             ),
             (
                 "Live MCP control",
-                "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor at http://127.0.0.1:32117/mcp — no password, so turn it off here when you do not want that",
+                "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor in full at http://127.0.0.1:32117/mcp: the core tools edit the project, and the live-only shell_* tools drive the window itself — workspace, playback, view, selection, theme and panels (the full tool list is in docs/MCP.md). There is no password: any program on this computer can drive the editor and its window while this is on, so turn it off here when you do not want that",
             ),
         ],
         _ => vec![],
@@ -1155,7 +1155,7 @@ mod tests {
         )));
         assert!(rows.contains(&(
             "Live MCP control",
-            "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor at http://127.0.0.1:32117/mcp — no password, so turn it off here when you do not want that"
+            "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor in full at http://127.0.0.1:32117/mcp: the core tools edit the project, and the live-only shell_* tools drive the window itself — workspace, playback, view, selection, theme and panels (the full tool list is in docs/MCP.md). There is no password: any program on this computer can drive the editor and its window while this is on, so turn it off here when you do not want that"
         )));
         // Placement: View zoom sits with the stage /
         // camera rows, directly after Swap frames; Live
@@ -1233,11 +1233,11 @@ mod tests {
         let rows = shortcut_rows();
         assert!(rows.contains(&(
             "MCP stdio server",
-            "The mcp_server program serves the same MCP (Model Context Protocol) tools over stdio (JSON-RPC, one message per line) to clients that launch it — it works on its own copy of a project and never sees or drives this editor window"
+            "The mcp_server program serves the same core tools over stdio (JSON-RPC, one message per line) to clients that launch it — it works on its own copy of a project and never sees or drives this editor window"
         )));
         assert!(rows.contains(&(
             "Live MCP control",
-            "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor at http://127.0.0.1:32117/mcp — no password, so turn it off here when you do not want that"
+            "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor in full at http://127.0.0.1:32117/mcp: the core tools edit the project, and the live-only shell_* tools drive the window itself — workspace, playback, view, selection, theme and panels (the full tool list is in docs/MCP.md). There is no password: any program on this computer can drive the editor and its window while this is on, so turn it off here when you do not want that"
         )));
         // Placement: the two MCP rows close the
         // Features section as a pair — the stdio row
@@ -1286,7 +1286,7 @@ mod tests {
         let rows = shortcut_rows();
         assert!(rows.contains(&(
             "Project assets",
-            "Scene panel — a Placed media readout counts the project's assets in use; the asset list itself is managed with the MCP tools assets_list, asset_info, asset_import, asset_rename, asset_attach and asset_remove — an asset a segment or sprite still uses cannot be removed, detach it first"
+            "Scene panel — a Placed media readout counts the project's assets in use; the asset list itself is managed with the MCP tools assets_list, asset_info, asset_import, asset_rename, asset_attach and asset_remove — an asset a figure segment, a movieclip definition's segment or a sprite still uses cannot be removed, detach it first (a movieclip definition's segment media is read with clip_get_node_media and detached with clip_clear_node_media)"
         )));
         assert!(rows.contains(&(
             "Attach asset to segment",

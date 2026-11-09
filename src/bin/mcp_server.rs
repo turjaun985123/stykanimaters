@@ -293,6 +293,45 @@ mod tests {
     }
 
     #[test]
+    fn stdio_handshake_serves_the_shared_identity() {
+        // Wave 14 (D7): over the stdio framing, the
+        // initialize answer must carry the SAME identity
+        // the live path serves — asserted against the
+        // library's identity constants (the one source of
+        // truth), not against literals typed here, so a
+        // rename or version bump cannot leave this binary
+        // presenting a stale identity. The client's
+        // requested protocolVersion (a newer revision) is
+        // not negotiated: the answer names the server's
+        // one supported revision. The initialized
+        // notification between the requests is never
+        // answered, so three input lines yield exactly
+        // two responses.
+        let init = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\
+                    \"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{}}}";
+        let note = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}";
+        let input = format!("{init}\n{note}\n{}\n", ping(2));
+        let responses = serve(input.as_bytes(), MAX_LINE_BYTES);
+        assert_eq!(responses.len(), 2, "the notification gets no reply: {responses:?}");
+        let resp: serde_json::Value = serde_json::from_str(&responses[0]).unwrap();
+        assert_eq!(resp["id"], 1);
+        let result = &resp["result"];
+        assert_eq!(
+            result["protocolVersion"],
+            stykanimate_rs::mcp::PROTOCOL_VERSION
+        );
+        assert_eq!(result["serverInfo"]["name"], stykanimate_rs::mcp::SERVER_NAME);
+        assert_eq!(
+            result["serverInfo"]["version"],
+            stykanimate_rs::mcp::SERVER_VERSION
+        );
+        assert!(result["capabilities"]["tools"].is_object());
+        let pong: serde_json::Value = serde_json::from_str(&responses[1]).unwrap();
+        assert_eq!(pong["id"], 2, "ping after the handshake still answers");
+        assert_eq!(pong["result"], serde_json::json!({}));
+    }
+
+    #[test]
     fn panic_response_names_the_id_and_the_panic() {
         let payload = catch_unwind(|| panic!("boom in a tool")).unwrap_err();
         let resp = panic_response(serde_json::json!(42), &*payload);

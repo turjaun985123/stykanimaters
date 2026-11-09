@@ -488,6 +488,34 @@ pub fn thumb_prims(core: &EditorCore, fi: usize, size: f32) -> Vec<ThumbPrim> {
 /// the stage itself can only outline it (Rune `Shape`
 /// has no bitmap primitive), and an identity card does
 /// not claim it.
+///
+/// Wave 14 (C8 — clip-def media): the exclusion covers
+/// clip-def media too, by the same argument, and
+/// deliberately. The clip-media spec
+/// (`docs/wave13/CLIP_MEDIA.md` §6) resolves clip-def
+/// media in the ONE sampling funnel
+/// (`media::media_items`) feeding the raster, SVG, the
+/// stage placeholders and the project thumbnails; it
+/// never names these card thumbnails, which do not
+/// consume the funnel at all. The stage-consistent
+/// choice for the card is provenance-blindness: media
+/// the funnel would source from the figure's clip def
+/// is treated exactly as media on the figure's own
+/// def — not drawn. Anything else would make the card
+/// the one surface where the SAME media shows or hides
+/// depending on which def carries it (the clone-shadow
+/// asymmetry the spec exists to remove); and at 44
+/// points the stage's own placeholder — an outline
+/// plus a fitted text label — cannot be drawn
+/// honestly: the quad would be a few points across,
+/// its label illegible, an unlabelled box a reader
+/// would take for a shape-node glyph. If media ever
+/// comes to the cards, own-def and clip-def media must
+/// arrive together, resolved through the funnel's set.
+/// The tests below pin the invariance: the prims are
+/// identical for a plain figure, an own-def-media
+/// figure, and a clip instance whose media lives only
+/// in its clip def.
 fn thumb_prims_for(
     fig: &model::FigureInstance,
     pos: &[V2],
@@ -1618,6 +1646,101 @@ mod tests {
             }
             other => panic!("expected head ring, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn thumb_prims_ignore_own_def_segment_media() {
+        // Wave 14 (C8): segment media — an image on one
+        // node, text on another — on the figure's OWN def
+        // contributes nothing to the card (see
+        // `thumb_prims_for`'s docs). The prim vectors are
+        // compared whole, not just counted: media must
+        // change nothing at all.
+        let n = |parent: Option<usize>, length: f32, rest: f32| model::NodeDef {
+            name: "n".into(),
+            parent,
+            length,
+            rest_angle: rest,
+            head: false,
+            bend: 1.0,
+            thickness: 5.0,
+            color: None,
+            ik_end: false,
+            shape: model::Shape::Line,
+            style: model::NodeStyle::default(),
+            media: None,
+        };
+        let mut nodes = vec![
+            n(None, 0.0, 0.0),       // 0 root
+            n(Some(0), 40.0, 180.0), // 1 head
+            n(Some(1), 30.0, 0.0),   // 2
+        ];
+        nodes[1].head = true;
+        let plain = model::FigureDef {
+            nodes: nodes.clone(),
+        };
+        nodes[1].media = Some(model::SegmentMedia::Image { asset: 0 });
+        nodes[2].media = Some(model::SegmentMedia::Text {
+            content: "hi".into(),
+            size: 12.0,
+        });
+        let carried = model::FigureDef { nodes };
+        let prims_of = |def: &model::FigureDef| {
+            let fig = model::FigureInstance {
+                name: "Fixture".into(),
+                color: 0xFFFFFF,
+                def: def.clone(),
+                hidden: false,
+                clip: None,
+                locked: false,
+                opacity: 1.0,
+            };
+            let pos = model::evaluate(def, &def.rest_pose([0.0, 0.0]));
+            thumb_prims_for(&fig, &pos, &[], HEAD_RING_R, THUMB_SIZE)
+        };
+        let plain_prims = prims_of(&plain);
+        assert!(!plain_prims.is_empty(), "the fixture draws a card");
+        assert_eq!(prims_of(&carried), plain_prims);
+    }
+
+    #[test]
+    fn thumb_prims_ignore_clip_def_media() {
+        // Wave 14 (C8): the clip-def half of the same
+        // invariance, through the public `thumb_prims`:
+        // a clip instance whose own def is media-free
+        // thumbs identically whether or not its CLIP def
+        // carries media — the funnel's per-node fallback
+        // (CLIP_MEDIA §6.1) does not reach the card. Both
+        // cores carry the same clip with the same single
+        // frame (the figure's own frame-0 pose), so the
+        // evaluated pose — and therefore every prim — is
+        // held constant; only the clip def's media
+        // differs.
+        let build = |with_media: bool| {
+            let mut core = EditorCore::new();
+            let pose0 = core.project.poses_at(0.0)[0].clone();
+            let mut clip_def = core.project.figures[0].def.clone();
+            if with_media {
+                let ni = clip_def
+                    .nodes
+                    .iter()
+                    .position(|nd| nd.parent.is_some())
+                    .expect("the demo def has a parented node");
+                clip_def.nodes[ni].media =
+                    Some(model::SegmentMedia::Image { asset: 0 });
+            }
+            core.project.clips.push(model::ClipDef {
+                name: "clip".into(),
+                def: clip_def,
+                frames: vec![pose0],
+                loop_mode: model::ClipLoop::Loop,
+            });
+            core.project.figures[0].clip = Some(0);
+            core
+        };
+        let plain = thumb_prims(&build(false), 0, THUMB_SIZE);
+        assert!(!plain.is_empty(), "the demo figure draws a card");
+        assert_eq!(thumb_prims(&build(true), 0, THUMB_SIZE), plain);
     }
 
     #[test]

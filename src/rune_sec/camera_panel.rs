@@ -1234,7 +1234,7 @@ fn view_zoom_readout(core: &EditorCore, t: &Theme) -> El {
 /// [`zoom_actual`], which the Camera panel keeps for the
 /// authored camera. No camera key is written and no undo
 /// snapshot is taken.
-fn view_actual(s: &mut State) {
+pub(crate) fn view_actual(s: &mut State) {
     let cam_zoom = s.core.camera_here().2;
     if cam_zoom > 0.0 {
         let nav = crate::stage_view::view_nav();
@@ -1252,7 +1252,7 @@ fn view_actual(s: &mut State) {
 /// When no stage size has been stashed yet there is nothing
 /// to aim with, so it falls back to clearing the view pan
 /// (re-centring on the camera centre).
-fn view_centre(s: &mut State) {
+pub(crate) fn view_centre(s: &mut State) {
     let root = s
         .core
         .project

@@ -2718,6 +2718,13 @@ fn tool_clip_list(core: &mut EditorCore, _args: &Value) -> Result<Value, String>
                 "name": c.name,
                 "frames": c.frames.len(),
                 "nodes": c.def.nodes.len(),
+                // Wave 14 (C5): per-node segment media, so a
+                // clip definition's media is visible in the
+                // list reply — clip_get_node_media is the
+                // addressed read of the same values.
+                "media": c.def.nodes.iter()
+                    .map(|n| crate::media::segment_media_json(&n.media))
+                    .collect::<Vec<_>>(),
                 "loop_mode": match c.loop_mode {
                     crate::model::ClipLoop::Loop => "loop",
                     crate::model::ClipLoop::PingPong => "ping-pong",
@@ -3188,6 +3195,59 @@ fn tool_clear_node_media(core: &mut EditorCore, _args: &Value) -> Result<Value, 
     }))
 }
 
+/// The stdio refusal for one shell tool (Wave 14): shell
+/// tools act on the running GUI, which the stdio server
+/// does not have. One stamped fn per shell tool, because
+/// the registry's handler type is a plain fn pointer —
+/// no closure can capture the tool's name. On the live
+/// endpoint these handlers never run: live_mcp's drain
+/// peeks each call and routes shell names to the shell
+/// queue instead (see `shell_control` in the binary).
+/// The wording is the one canonical refusal
+/// (docs/wave14/SHELL_CONTROL.md section 5).
+macro_rules! shell_unavailable_fn {
+    ($fn_name:ident, $tool:literal) => {
+        fn $fn_name(_core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+            Err(format!(
+                "{} needs the live editor: connect to its live endpoint http://127.0.0.1:32117/mcp instead.",
+                $tool
+            ))
+        }
+    };
+}
+
+shell_unavailable_fn!(tool_shell_unavailable_set_workspace, "shell_set_workspace");
+shell_unavailable_fn!(tool_shell_unavailable_get_state, "shell_get_state");
+shell_unavailable_fn!(tool_shell_unavailable_set_onion_depths, "shell_set_onion_depths");
+shell_unavailable_fn!(tool_shell_unavailable_view_zoom, "shell_view_zoom");
+shell_unavailable_fn!(tool_shell_unavailable_view_fit, "shell_view_fit");
+shell_unavailable_fn!(tool_shell_unavailable_view_centre, "shell_view_centre");
+shell_unavailable_fn!(tool_shell_unavailable_view_reset, "shell_view_reset");
+shell_unavailable_fn!(tool_shell_unavailable_get_view, "shell_get_view");
+shell_unavailable_fn!(tool_shell_unavailable_select_figure, "shell_select_figure");
+shell_unavailable_fn!(tool_shell_unavailable_select_node, "shell_select_node");
+shell_unavailable_fn!(tool_shell_unavailable_select_sprite, "shell_select_sprite");
+shell_unavailable_fn!(tool_shell_unavailable_select_fx_clip, "shell_select_fx_clip");
+shell_unavailable_fn!(tool_shell_unavailable_select_audio_clip, "shell_select_audio_clip");
+shell_unavailable_fn!(tool_shell_unavailable_select_frame, "shell_select_frame");
+shell_unavailable_fn!(tool_shell_unavailable_select_stroke, "shell_select_stroke");
+shell_unavailable_fn!(tool_shell_unavailable_select_particle, "shell_select_particle");
+shell_unavailable_fn!(tool_shell_unavailable_select_clip, "shell_select_clip");
+shell_unavailable_fn!(tool_shell_unavailable_get_selection, "shell_get_selection");
+shell_unavailable_fn!(tool_shell_unavailable_set_theme, "shell_set_theme");
+shell_unavailable_fn!(tool_shell_unavailable_get_settings, "shell_get_settings");
+shell_unavailable_fn!(tool_shell_unavailable_set_setting, "shell_set_setting");
+shell_unavailable_fn!(tool_shell_unavailable_set_section, "shell_set_section");
+shell_unavailable_fn!(tool_shell_unavailable_set_column_widths, "shell_set_column_widths");
+shell_unavailable_fn!(tool_shell_unavailable_get_layout, "shell_get_layout");
+shell_unavailable_fn!(tool_shell_unavailable_list_recents, "shell_list_recents");
+shell_unavailable_fn!(tool_shell_unavailable_open_recent, "shell_open_recent");
+shell_unavailable_fn!(tool_shell_unavailable_reload_project, "shell_reload_project");
+shell_unavailable_fn!(tool_shell_unavailable_recover_snapshot, "shell_recover_snapshot");
+shell_unavailable_fn!(tool_shell_unavailable_duplicate_project_file, "shell_duplicate_project_file");
+shell_unavailable_fn!(tool_shell_unavailable_delete_project_file, "shell_delete_project_file");
+shell_unavailable_fn!(tool_shell_unavailable_set_sidebar, "shell_set_sidebar");
+
 pub fn tools() -> Vec<crate::mcp::Tool> {
     use crate::mcp::Tool;
     vec![
@@ -3464,7 +3524,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "fx_list",
-            description: "List all timed FX clips: index, figure, node, kind, start, duration and end frame.",
+            description: "List all timed FX clips: index, figure, node, kind, start, duration, end frame, hidden, color, color2, seed, angle and length.",
             schema: obj_schema(json!({}), &[]),
             handler: tool_fx_list,
         },
@@ -4195,7 +4255,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "clip_list",
-            description: "List the project's movieclip definitions: index, name, frame count, node count, and which figures loop each clip.",
+            description: "List the project's movieclip definitions: index, name, frame count, node count, per-node segment media, and which figures loop each clip.",
             schema: obj_schema(json!({}), &[]),
             handler: tool_clip_list,
         },
@@ -5412,9 +5472,11 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "fig3_set_camera",
-            description: "Set the 3D session camera absolutely: any of 'distance' (clamped to 40..=4000), 'target' [x, y, z] and 'fov_deg'; omitted fields keep their values. At least one field is required. The absolute complement of fig3_orbit/fig3_camera_zoom. No undo step (session camera, like orbit/zoom). Requires an active 3D session.",
+            description: "Set the 3D session camera absolutely: any of 'yaw', 'pitch' (clamped to +-89.9), 'distance' (clamped to 40..=4000), 'target' [x, y, z] and 'fov_deg'; omitted fields keep their values. At least one field is required. The absolute complement of fig3_orbit/fig3_camera_zoom. No undo step (session camera, like orbit/zoom). Requires an active 3D session.",
             schema: obj_schema(
                 json!({
+                    "yaw": { "type": "number" },
+                    "pitch": { "type": "number" },
                     "distance": { "type": "number" },
                     "target": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] look-at point" },
                     "fov_deg": { "type": "number" }
@@ -5575,7 +5637,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "project_rename",
-            description: "Rename the current project's saved file to 'new_name' (a target that already exists is refused, leaving both files untouched). The session project's name follows and the file selector is repointed at the renamed file; the name stored inside the file updates on the next save. Errors when the current project has no saved file. Note there is deliberately no delete_project tool: no GUI surface deletes project files either.",
+            description: "Rename the current project's saved file to 'new_name' (a target that already exists is refused, leaving both files untouched). The session project's name follows and the file selector is repointed at the renamed file; the name stored inside the file updates on the next save. Errors when the current project has no saved file.",
             schema: obj_schema(
                 json!({ "new_name": { "type": "string" } }),
                 &["new_name"],
@@ -5706,6 +5768,722 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["sprite", "frame"],
             ),
             handler: crate::media::tool_sprite_delete_key,
+        },
+        // ---------------------------------------------------------
+        // Wave 14 — parity fill (Squad A + clip media + transport):
+        // every entry below was an unwired handler until this wave;
+        // each handler's own TOOL ENTRY SPEC is its provenance.
+        // ---------------------------------------------------------
+Tool {
+      name: "audio_clip_gain_step",
+      description: "Step the audio clip at 'index' gain by 'delta' (the audio panel's −/+ gain buttons): the stored gain is clamped to 0.0-2.0 by the op and the reply reports the gain read back after clamping. The relative form of audio_clip_set_gain. One undo step.",
+      schema: obj_schema(
+          json!({
+              "index": { "type": "integer" },
+              "delta": { "type": "number" }
+          }),
+          &["index", "delta"],
+      ),
+      handler: crate::audio_ops::tool_audio_clip_gain_step,
+  },
+Tool {
+      name: "get_brush",
+      description: "Read the ACTIVE brush preset in full (the Draw panel's preset readouts, as data): index, name, width, nib, nib angle, smoothing, opacity and scatter, plus the active draw tool ('brush' or 'eraser'), the eraser radius the preset sizes (twice its width) and the draw-mode flag. Read-only.",
+      schema: obj_schema(json!({}), &[]),
+      handler: crate::draw_ops::tool_get_brush,
+  },
+Tool {
+      name: "set_draw_mode",
+      description: "Set draw mode on or off (the Draw panel's Draw toggle / the palette's draw-mode command, as an idempotent set): in draw mode, dragging on the canvas paints a stroke on the current frame instead of posing. Session state only — not an undo step.",
+      schema: obj_schema(
+          json!({
+              "enabled": { "type": "boolean" }
+          }),
+          &["enabled"],
+      ),
+      handler: crate::draw_ops::tool_set_draw_mode,
+  },
+Tool {
+      name: "step_brush_param",
+      description: "Step the active brush selection by one preset parameter (the stroke inspector's Preset size / opacity / scatter / smoothing steppers): selects the nearest library preset whose value for 'param' is strictly higher ('direction' 1) or lower (-1). Because presets are bundles the other parameters follow the chosen preset. Reports changed: false, with the panel's status text, when no preset steps that way. Session state only — not an undo step.",
+      schema: obj_schema(
+          json!({
+              "param": { "type": "string", "enum": ["size", "width", "opacity", "scatter", "smoothing"] },
+              "direction": { "type": "integer", "description": "1 to step up, -1 to step down" }
+          }),
+          &["param", "direction"],
+      ),
+      handler: crate::draw_ops::tool_step_brush_param,
+  },
+Tool {
+      name: "set_brush_nib",
+      description: "Select the active brush preset by its nib (the stroke inspector's Preset nib segmented control): the first library preset carrying nib 'round', 'square' or 'calligraphy' becomes active. Session state only — not an undo step.",
+      schema: obj_schema(
+          json!({
+              "nib": { "type": "string", "enum": ["round", "square", "calligraphy"] }
+          }),
+          &["nib"],
+      ),
+      handler: crate::draw_ops::tool_set_brush_nib,
+  },
+Tool {
+      name: "apply_nib_stroke",
+      description: "Give ONE stroke, by its project-wide index (see list_strokes), a nib width profile: \"round\" (uniform), \"square\" or \"calligraphy\" (angle-dependent, angle in degrees, default 45) — the single-stroke form of apply_nib, computed from the stroke's own width as the nib size. Replaces any per-point widths the stroke carried. One undo step.",
+      schema: obj_schema(
+          json!({
+              "index": { "type": "integer" },
+              "nib": { "type": "string", "enum": ["round", "square", "calligraphy"] },
+              "angle": { "type": "number", "description": "Nib angle in degrees (default 45)" }
+          }),
+          &["index", "nib"],
+      ),
+      handler: crate::draw_ops::tool_apply_nib_stroke,
+  },
+Tool {
+      name: "smooth_stroke",
+      description: "Chaikin-smooth ONE stroke by its project-wide index (see list_strokes) — the single-stroke form of smooth_strokes: 'subdiv' corner-cutting passes (default 1, at most 4), endpoints pinned, per-point widths resampled onto the new points. Returns smoothed: false — and takes no undo step — when the stroke has fewer than 2 points and cannot change. One undo step when it smooths.",
+      schema: obj_schema(
+          json!({
+              "index": { "type": "integer" },
+              "subdiv": { "type": "integer", "description": "Chaikin passes, 1-4 (default 1)" }
+          }),
+          &["index"],
+      ),
+      handler: crate::draw_ops::tool_smooth_stroke,
+  },
+Tool {
+      name: "mirror_all_strokes",
+      description: "Mirror EVERY stroke in the project, on all frames, across the vertical line x = 'cx' (default: the stage's vertical centre) — the project-wide form of mirror_strokes. Only points change. Errors on a project with no strokes. One undo step.",
+      schema: obj_schema(
+          json!({
+              "cx": { "type": "number", "description": "Mirror line x in stage coordinates (default: stage centre)" }
+          }),
+          &[],
+      ),
+      handler: crate::draw_ops::tool_mirror_all_strokes,
+  },
+Tool {
+      name: "set_stroke_spray",
+      description: "Edit one stroke's spray mark by its project-wide index (see list_strokes) — the field set_stroke_style cannot reach: 'radius' (> 0), 'opacity' (0-1) and/or 'seed' set the mark's fields, creating the mark on a plain stroke (defaults: radius 12, opacity 0.5, the deterministic begin_draw seed); 'clear_spray': true removes the mark instead, returning the stroke to a plain polyline. At least one field is required. Clearing a markless stroke reports changed: false and takes no undo step. One undo step when the mark changes.",
+      schema: obj_schema(
+          json!({
+              "index": { "type": "integer" },
+              "radius": { "type": "number", "description": "Spray radius in stage units" },
+              "opacity": { "type": "number" },
+              "seed": { "type": "integer" },
+              "clear_spray": { "type": "boolean", "description": "Remove the spray mark" }
+          }),
+          &["index"],
+      ),
+      handler: crate::draw_ops::tool_set_stroke_spray,
+  },
+Tool {
+      name: "clear_strokes_on_frame",
+      description: "Remove every stroke on the NAMED frame (the frame-addressed form of clear_frame_strokes, whose core op is current-frame-only): 'frame' is required and may name any frame, including the current one. One undo step when the frame carried strokes.",
+      schema: obj_schema(
+          json!({
+              "frame": { "type": "integer" }
+          }),
+          &["frame"],
+      ),
+      handler: crate::draw_ops::tool_clear_strokes_on_frame,
+  },
+Tool {
+      name: "set_weather_kind",
+      description: "Set the scene weather kind (the Scene panel's kind picker): switching kinds keeps the tuned amount/wind, and enabling a kind from off applies the panel's per-kind preset. \"off\" turns weather off. A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel.",
+      schema: obj_schema(
+          json!({
+              "kind": { "type": "string", "enum": ["rain", "snow", "fireflies", "fog", "storm", "off"] }
+          }),
+          &["kind"],
+      ),
+      handler: crate::editor::tool_set_weather_kind,
+  },
+Tool {
+      name: "cycle_weather",
+      description: "Cycle the scene weather like the Scene group's Cycle weather button: off -> rain -> snow -> fireflies -> off, applying each kind's preset wholesale (fog and storm are not in the cycle; cycling from either turns weather off). A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel.",
+      schema: obj_schema(json!({}), &[]),
+      handler: crate::editor::tool_cycle_weather,
+  },
+Tool {
+      name: "set_weather_amount",
+      description: "Set the weather's particle amount absolutely (the Scene panel's Amount stepper/slider): clamped to 0..=200. Errors when the weather is off — pick a kind first (set_weather_kind). A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel's steppers.",
+      schema: obj_schema(
+          json!({
+              "amount": { "type": "number", "description": "Particles per frame at steady state, 0..=200" }
+          }),
+          &["amount"],
+      ),
+      handler: crate::editor::tool_set_weather_amount,
+  },
+Tool {
+      name: "set_weather_wind",
+      description: "Set the weather's wind (horizontal drift, stage units per second) absolutely (the Scene panel's Wind stepper/slider): clamped to -200..=200. Errors when the weather is off — pick a kind first (set_weather_kind). A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel's steppers.",
+      schema: obj_schema(
+          json!({
+              "wind": { "type": "number", "description": "Horizontal drift in stage units per second, -200..=200" }
+          }),
+          &["wind"],
+      ),
+      handler: crate::editor::tool_set_weather_wind,
+  },
+Tool {
+      name: "clear_camera_key",
+      description: "Remove the camera key at the CURRENT frame without an undo step (the camera panel's 'Clear key (no undo)' button): the removal counts for dirty/autosave but cannot be undone — for the undoable delete at any frame, use delete_camera_key. Errors when the current frame holds no camera key.",
+      schema: obj_schema(json!({}), &[]),
+      handler: crate::editor::tool_clear_camera_key,
+  },
+Tool {
+      name: "camera_zoom_by",
+      description: "Multiply the camera zoom at the current frame by 'factor' (the camera panel's zoom in/out buttons): upserts a camera key at the current frame with the zoom clamped to 0.3..=4.0, preserving the angle in effect. One undo step.",
+      schema: obj_schema(
+          json!({
+              "factor": { "type": "number", "description": "Zoom multiplier (must be positive; 2.0 doubles, 0.5 halves)" }
+          }),
+          &["factor"],
+      ),
+      handler: crate::editor::tool_camera_zoom_by,
+  },
+Tool {
+      name: "rotate_camera",
+      description: "Rotate the camera at the current frame by 'degrees' (the camera panel's rotate buttons): upserts a camera key carrying the pan/zoom in effect plus the new angle, wrapped to -180..180. One undo step. For an absolute angle at any frame, use set_camera with 'angle'.",
+      schema: obj_schema(
+          json!({
+              "degrees": { "type": "number", "description": "Rotation delta in degrees (positive = clockwise on stage)" }
+          }),
+          &["degrees"],
+      ),
+      handler: crate::editor::tool_rotate_camera,
+  },
+Tool {
+      name: "get_onion_skin",
+      description: "Read the onion-skin master switch (the Onion panel's On/Off toggle): 'enabled' is the stage's master switch. The per-side depths are GUI shell state and are NOT reported here — over the live endpoint they are Squad B shell state; 'legacy_prev_frames' is the core's legacy single-side count, which the stage no longer reads. Read-only.",
+      schema: obj_schema(json!({}), &[]),
+      handler: crate::editor::tool_get_onion_skin,
+  },
+Tool {
+      name: "set_onion_skin",
+      description: "Turn the onion-skin master switch on or off (the Onion panel's On/Off toggle). Session view state, not project data: no undo step and no dirty mark, exactly like the panel toggle. The per-side depths are GUI shell state and cannot be set from the core surface.",
+      schema: obj_schema(
+          json!({
+              "enabled": { "type": "boolean", "description": "True to show onion skins, false to hide them" }
+          }),
+          &["enabled"],
+      ),
+      handler: crate::editor::tool_set_onion_skin,
+  },
+Tool {
+      name: "get_editor_settings",
+      description: "Read the editor-settings surface in one call: weather (kind/amount/wind, or \"off\"), background colour (0xRRGGBB), project easing, tween playback, camera follow target, loop range, onion master switch, fps, stage size and head-ring scale. The consolidated read behind the set_weather_kind / set_project_easing / set_project_background family — several of these values previously had no read at all (project easing, tween playback, head-ring scale). Read-only.",
+      schema: obj_schema(json!({}), &[]),
+      handler: crate::editor::tool_get_editor_settings,
+  },
+Tool {
+      name: "get_clipboard_state",
+      description: "Read what the frame clipboards hold: 'frame' is null when the single-frame clipboard is empty, else the copied frame's figure count and duration; 'range_frames' is the range clipboard's frame count. A paste succeeds only against a non-empty matching clipboard, and refuses when the rig changed since the copy. Read-only; no undo step.",
+      schema: obj_schema(json!({}), &[]),
+      handler: crate::editor::tool_clipboard_state,
+  },
+Tool {
+      name: "fig3_set_rotation",
+      description: "Set a 3D joint's Euler rotation
+      absolutely, in degrees: 'joint' (defaults to the
+      selected joint) and any of 'x', 'y', 'z'; omitted
+      axes keep their values. At least one axis is
+      required. The absolute complement of fig3_rotate.
+      No undo step (session pose, like fig3_rotate).
+      Requires an active 3D session.",
+      schema: obj_schema(
+          json!({
+              "joint": { "type": "integer", "description": "Joint index; defaults to the selected joint" },
+              "x": { "type": "number" },
+              "y": { "type": "number" },
+              "z": { "type": "number" }
+          }),
+          &[],
+      ),
+      handler: crate::fig3d::tool_fig3_set_rotation,
+  },
+Tool {
+      name: "fig3_set_root",
+      description: "Set the 3D session pose's root
+      position absolutely: 'position' [x, y, z] in
+      world units (Y up). The write complement of the
+      'pose_root' fig3_get reports; bakes project from
+      the root, so this is how a baked figure is
+      placed. No undo step (session pose). Requires an
+      active 3D session.",
+      schema: obj_schema(
+          json!({
+              "position": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] root position" }
+          }),
+          &["position"],
+      ),
+      handler: crate::fig3d::tool_fig3_set_root,
+  },
+Tool {
+      name: "figure_step_opacity",
+      description: "Step a figure's opacity by 'delta' (the figures/layers panels' opacity −/+ buttons): the target is rounded to whole percent and clamped to 0.05-1.0 by the op, and the reply reports the opacity read back after clamping. The relative form of the layers tool's opacity. Not an undo step (layers-family panel parity); a real change counts for dirty/autosave.",
+      schema: obj_schema(
+          json!({
+              "figure": { "type": "integer", "description": "0-based figure index (default: the selected figure)" },
+              "delta": { "type": "number", "description": "Opacity step, e.g. 0.1 or -0.1 (non-zero, finite)" }
+          }),
+          &["delta"],
+      ),
+      handler: crate::figure_ops::tool_figure_step_opacity,
+  },
+Tool {
+      name: "figure_toggle_hidden",
+      description: "Toggle a figure's hidden flag (the figures panel's hide button / the palette's Toggle figure hidden): the relative form of the layers tool's 'hidden'. Not an undo step (layers-family panel parity); the flip counts for dirty/autosave.",
+      schema: obj_schema(
+          json!({
+              "figure": { "type": "integer", "description": "0-based figure index (default: the selected figure)" }
+          }),
+          &[],
+      ),
+      handler: crate::figure_ops::tool_figure_toggle_hidden,
+  },
+Tool {
+      name: "figure_toggle_lock",
+      description: "Toggle a figure's locked flag (the figures panel's lock button / the palette's Lock selected figure): the relative form of the layers tool's 'locked'. Not an undo step (layers-family panel parity); the flip counts for dirty/autosave.",
+      schema: obj_schema(
+          json!({
+              "figure": { "type": "integer", "description": "0-based figure index (default: the selected figure)" }
+          }),
+          &[],
+      ),
+      handler: crate::figure_ops::tool_figure_toggle_lock,
+  },
+Tool {
+      name: "figure_toggle_solo",
+      description: "Toggle a figure's solo state (the figures panel's solo button / the palette's Solo selected figure): soloing a figure shows it alone; toggling the soloed figure clears solo. The relative form of the layers tool's 'solo'. Session state only — not an undo step and not a project edit.",
+      schema: obj_schema(
+          json!({
+              "figure": { "type": "integer", "description": "0-based figure index (default: the selected figure)" }
+          }),
+          &[],
+      ),
+      handler: crate::figure_ops::tool_figure_toggle_solo,
+  },
+Tool {
+      name: "nudge_path_point",
+      description: "Nudge one figure's motion-path point: move the root of its pose at 'frame' by ('dx', 'dy') stage units (the stage's path-point drag, as data; figure_centre/figure_ground compose this primitive for their specific shifts). 'figure' defaults to the selected figure, 'frame' to the current frame. One undo step.",
+      schema: obj_schema(
+          json!({
+              "figure": { "type": "integer", "description": "0-based figure index (default: the selected figure)" },
+              "frame": { "type": "integer", "description": "0-based frame index (default: the current frame)" },
+              "dx": { "type": "number", "description": "Horizontal shift in stage units (finite)" },
+              "dy": { "type": "number", "description": "Vertical shift in stage units (finite)" }
+          }),
+          &["dx", "dy"],
+      ),
+      handler: crate::figure_ops::tool_nudge_path_point,
+  },
+Tool {
+      name: "adjust_frame_duration",
+      description: "Adjust a frame's duration multiplier by 'factor' (the frame-ops panel's Dur −/+/×0.5/×2 buttons): the stored duration is multiplied and clamped to 0.25-8.0 by the op, and the reply reports the duration read back after clamping. The relative form of set_frame_duration. Applies to the current frame unless 'frame' names another (which moves the playhead there first, the set_frame_easing convention). Not an undo step (timing-tweak panel parity); a real change counts for dirty/autosave.",
+      schema: obj_schema(
+          json!({
+              "factor": { "type": "number", "description": "Duration multiplier (positive, finite); 0.5 halves the hold, 2.0 doubles it" },
+              "frame": { "type": "integer", "description": "0-based frame index (default: the current frame)" }
+          }),
+          &["factor"],
+      ),
+      handler: crate::frame_swap::tool_adjust_frame_duration,
+  },
+Tool {
+      name: "fx_set_seed",
+      description: "Set an FX clip's particle random seed (the value fx_list reports): the same kind with a different seed draws a different particle pattern. One undo step.",
+      schema: obj_schema(
+          json!({
+              "index": { "type": "integer" },
+              "seed": { "type": "integer", "description": "Particle random seed (0 to 4294967295)" }
+          }),
+          &["index", "seed"],
+      ),
+      handler: crate::fx_ops::tool_fx_set_seed,
+  },
+Tool {
+      name: "fx_set_angle",
+      description: "Set an FX clip's emission angle in degrees (the value fx_list reports; the directed kinds — beam, trail, fountain — emit along it). One undo step.",
+      schema: obj_schema(
+          json!({
+              "index": { "type": "integer" },
+              "angle": { "type": "number", "description": "Emission angle in degrees" }
+          }),
+          &["index", "angle"],
+      ),
+      handler: crate::fx_ops::tool_fx_set_angle,
+  },
+Tool {
+      name: "fx_set_length",
+      description: "Set an FX clip's length in stage units — beam reach / trail span (the value add_fx_clip's 'length' sets at creation and fx_list reports). One undo step.",
+      schema: obj_schema(
+          json!({
+              "index": { "type": "integer" },
+              "length": { "type": "number", "description": "Beam reach / trail span in stage units" }
+          }),
+          &["index", "length"],
+      ),
+      handler: crate::fx_ops::tool_fx_set_length,
+  },
+Tool {
+      name: "sprite_sample",
+      description: "Read sprite 'sprite''s sampled transform at 'frame' (fractional frames allowed): the interpolated key between its authored keys, clamped outside the keyed range — the transform the stage and exports draw. Read-only; no undo step. Errors when the sprite has no keys.",
+      schema: obj_schema(
+          json!({
+              "sprite": { "type": "integer" },
+              "frame": { "type": "number", "description": "Frame to sample at; may be fractional" }
+          }),
+          &["sprite", "frame"],
+      ),
+      handler: crate::media::tool_sprite_sample,
+  },
+Tool {
+      name: "clip_asset_attach",
+      description: "Attach the EXISTING asset at index 'asset' to movieclip definition 'clip', node 'node' as that segment's image media, replacing whatever media the definition's segment carried (the clip-def counterpart of asset_attach, which writes a figure's own definition). The media renders on every instance of the clip whose own definition carries no media at that node — an instance's own media wins. One undo step.",
+      schema: obj_schema(
+          json!({
+              "clip": { "type": "integer" },
+              "node": { "type": "integer" },
+              "asset": { "type": "integer" }
+          }),
+          &["clip", "node", "asset"],
+      ),
+      handler: crate::media::tool_clip_asset_attach,
+  },
+Tool {
+      name: "clip_clear_node_media",
+      description: "Clear the media (image or text) attached to movieclip definition 'clip', node 'node' (the clip-def counterpart of clear_node_media, which is selection-scoped to a figure). Clearing a node that carries no media is reported with 'cleared': false, not an error, and spends no undo step; a clear that removes media is one undo step. The reply's 'media' names what was cleared (null when nothing was).",
+      schema: obj_schema(
+          json!({
+              "clip": { "type": "integer" },
+              "node": { "type": "integer" }
+          }),
+          &["clip", "node"],
+      ),
+      handler: crate::media::tool_clip_clear_node_media,
+  },
+Tool {
+      name: "clip_get_node_media",
+      description: "Read the segment media attached to movieclip definition 'clip', node 'node': null, or {kind: 'image', asset} / {kind: 'text', content, size} — the same shape get_node returns for a figure's node. Read-only.",
+      schema: obj_schema(
+          json!({
+              "clip": { "type": "integer" },
+              "node": { "type": "integer" }
+          }),
+          &["clip", "node"],
+      ),
+      handler: crate::media::tool_clip_get_node_media,
+  },
+Tool {
+      name: "particle_set_seed",
+      description: "Set a particle event's random seed (the value particle_list_events reports): the same kind with a different seed draws a different particle pattern. One undo step.",
+      schema: obj_schema(
+          json!({
+              "index": { "type": "integer" },
+              "seed": { "type": "integer", "description": "Particle random seed (0 to 4294967295)" }
+          }),
+          &["index", "seed"],
+      ),
+      handler: crate::particle_ops::tool_particle_set_seed,
+  },
+Tool {
+      name: "delete_project_file",
+      description: "Delete a SAVED project file from ./projects — the Home panel's delete, via MCP. 'path' names the file exactly as list_projects reports it (its full path or its bare file name); anything not in that listing is refused, so the tool cannot be aimed outside the library. The file is removed through the shell's guarded delete (shell-owned files are refused). The currently open project, if this is its file, stays open in memory, exactly as in the panel. No undo step: a file operation, not a project edit (the project_rename / duplicate_project family).",
+      schema: obj_schema(
+          json!({
+              "path": { "type": "string", "description": "Project file to delete, as reported by list_projects (path or bare file name)" }
+          }),
+          &["path"],
+      ),
+      handler: crate::projects::tool_delete_project_file,
+  },
+Tool {
+      name: "cycle_project_file",
+      description: "Advance the project-file selector by one — the command palette's 'Cycle project file'. Moves the selection in the cached ./projects list (wrapping at the end) and reports the newly selected file; opens nothing. Pair with open_project_file to open the selection, or read the list with list_projects. No undo step: selector state, not a project edit.",
+      schema: obj_schema(json!({}), &[]),
+      handler: crate::projects::tool_cycle_project_file,
+  },
+Tool {
+      name: "open_project_file",
+      description: "Open the project file the selector currently names — the palette's Open project file, companion to cycle_project_file. The selected file replaces the in-memory project (the op's own swap discipline applies, exactly as the GUI's open paths behave; load_project remains the by-path route). A failed open keeps the current project and reports the failure in 'status'. No undo step: the project-swap family, like load_project.",
+      schema: obj_schema(json!({}), &[]),
+      handler: crate::projects::tool_open_project_file,
+  },
+Tool {
+      name: "shell_play",
+      description: "Start playback in the live editor (the Play button): the playhead starts from the current frame and the shell poll advances it and starts playback audio, exactly as for a GUI play press. Idempotent — calling it while already playing changes nothing. Not an undo step; does not mark the project dirty. On the stdio server the flag is set but nothing advances it.",
+      schema: obj_schema(json!({}), &[]),
+      handler: crate::shell_tools_transport::tool_shell_play,
+  },
+Tool {
+      name: "shell_pause",
+      description: "Pause playback in the live editor (the Pause button): the playhead stays exactly where it stopped, and the shell poll stops playback audio. Idempotent — calling it while already paused changes nothing. Not an undo step; does not mark the project dirty.",
+      schema: obj_schema(json!({}), &[]),
+      handler: crate::shell_tools_transport::tool_shell_pause,
+  },
+Tool {
+      name: "shell_set_playhead",
+      description: "Move the playhead to a 0-based frame (a timeline click): sets the current frame and snaps the fractional playhead onto it, playing or paused. Out-of-range frames are refused. The shell-family name for the same move the set_frame built-in makes. Not an undo step; does not mark the project dirty; selection is untouched.",
+      schema: obj_schema(
+          json!({
+              "frame": { "type": "integer" }
+          }),
+          &["frame"],
+      ),
+      handler: crate::shell_tools_transport::tool_shell_set_playhead,
+  },
+Tool {
+      name: "shell_get_transport",
+      description: "Read the playback transport state: playing, current frame, fractional playhead, frame count, project fps and the loop range ([start, end] inclusive, or null). Read-only. The loop on/off toggle and playback speed are shell state and are not reported here.",
+      schema: obj_schema(json!({}), &[]),
+      handler: crate::shell_tools_transport::tool_shell_get_transport,
+  },
+Tool {
+            name: "graph_key_interp",
+            description: "Read the interpolation mode of the key at 'frame' on the channel at 'channel' index \u2014 the graph panel's interp-control readout (the nearest key within 0.5 frames). The reply's 'interp' is \"hermite\"/\"linear\"/\"step\", or null with 'keyed': false when no key sits at that frame. Read-only.",
+            schema: obj_schema(
+                json!({
+                    "channel": { "type": "integer" },
+                    "frame": { "type": "number" }
+                }),
+                &["channel", "frame"],
+            ),
+            handler: crate::graph_keys::tool_graph_key_interp,
+        },
+Tool {
+            name: "graph_count_keys_in_range",
+            description: "Count the keys of the channel at 'channel' index whose frames fall inside [from, to], both ends inclusive \u2014 the read-only pre-flight for graph_delete_keys_in_range (addressed by index, so a duplicate channel counts itself). Read-only.",
+            schema: obj_schema(
+                json!({
+                    "channel": { "type": "integer" },
+                    "from": { "type": "number" },
+                    "to": { "type": "number" }
+                }),
+                &["channel", "from", "to"],
+            ),
+            handler: crate::graph_keys::tool_graph_count_keys_in_range,
+        },
+Tool {
+            name: "graph_set_interp_at_playhead",
+            description: "Set the interpolation mode of the graph key nearest the current frame on the SELECTED figure's angle channel for the selected joint: \"hermite\", \"linear\" or \"step\" \u2014 the graph panel interp control's fallback when no channel is drawn. set_key_interp addresses any key by channel + key index instead. One undo step when it sets.",
+            schema: obj_schema(
+                json!({
+                    "interp": { "type": "string", "enum": ["hermite", "linear", "step"] }
+                }),
+                &["interp"],
+            ),
+            handler: crate::graph_keys::tool_graph_set_interp_at_playhead,
+        },
+        // ---------------------------------------------------------
+        // Wave 14 — shell control (Squad B): live endpoint only.
+        // These entries' handlers are the shared stubs below
+        // (tool_shell_unavailable_*): on stdio they refuse with
+        // the live-editor wording; on the live endpoint the
+        // drain's peek intercepts the name before the router
+        // and the shell drain executes the real handler
+        // against the GUI State. tools/list is therefore
+        // identical on both transports.
+        // ---------------------------------------------------------
+Tool {
+            name: "shell_set_workspace",
+            description: "Switch the running editor's workspace by name: one of Animate, Draw, Graph, Effects, Audio, 3D, Export, Home (exact, case-sensitive; '3D' is the merged Build/3D workspace). The switch is the workspace chip's own action — it re-gates which panels mount and persists to the layout prefs. An unknown name is refused, listing the valid set. Shell state only: no undo step. Live endpoint only — the stdio server refuses this tool.",
+            schema: obj_schema( json!({ "workspace": { "type": "string" } }), &["workspace"], ),
+            handler: tool_shell_unavailable_set_workspace,
+        },
+Tool {
+            name: "shell_get_state",
+            description: "Read the running editor's shell state in one call: the active workspace; the transport (playing or paused, current frame and fractional playhead, frame count, fps, loop range and playback toggles); the view (view-layer zoom and pan, kept separate from the authored camera at the current frame, plus the effective on-screen zoom the two compose to); the selections (figure, node, sprite, audio clip, FX clip, and the movieclip edit session if one is open); the theme; and which collapsible panels are collapsed. Read-only; no undo step. Live endpoint only — the stdio server refuses this tool.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_shell_unavailable_get_state,
+        },
+Tool {
+            name: "shell_set_onion_depths",
+            description: "Set the onion-skin ghost depths in the live editor — 'prev' and/or 'next' (0-3 each), the Onion section's steppers by target value. Shell view state: no undo step, never marks the project dirty, session-only exactly like the steppers. Live endpoint only.",
+            schema: obj_schema(json!({ "prev": { "type": "integer" }, "next": { "type": "integer" } }), &[]),
+            handler: tool_shell_unavailable_set_onion_depths,
+        },
+Tool {
+            name: "shell_view_zoom",
+            description: "Set the editor's VIEW zoom without touching the authored camera: 'factor' multiplies the current view zoom (the overlay steppers' operation), 'percent' sets the effective on-screen zoom (camera × view, the overlay readout's number) to that percent. Exactly one of the two is required. The view zoom is clamped to the GUI's own 0.1×–8× range and the reply reports 'clamped' when it is. View navigation only: no camera key is written, it is not an undo step and it does not mark the project dirty.",
+            schema: obj_schema(json!({ "factor": { "type": "number" }, "percent": { "type": "number" } }), &[]),
+            handler: tool_shell_unavailable_view_zoom,
+        },
+Tool {
+            name: "shell_view_fit",
+            description: "Fit the stage view to the authored camera's own framing (the stage pill's Fit): resets the view zoom to 1× and the view pan to zero. View navigation only — unlike the Camera panel's Fit it writes no camera key, is not an undo step and does not mark the project dirty.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_shell_unavailable_view_fit,
+        },
+Tool {
+            name: "shell_view_centre",
+            description: "Centre the stage VIEW on the selected figure's root (the stage pill's Centre), panning the view layer only. Optional 'x' and 'y' (stage units, both together) centre on that stage point instead. Writes no camera key, is not an undo step and does not mark the project dirty.",
+            schema: obj_schema(json!({ "x": { "type": "number" }, "y": { "type": "number" } }), &[]),
+            handler: tool_shell_unavailable_view_centre,
+        },
+Tool {
+            name: "shell_view_reset",
+            description: "The stage pill's 1:1: set the VIEW zoom so the effective on-screen zoom (camera × view) is exactly 100%, leaving the view pan unchanged. Despite the name this is not a reset to the camera framing — that is shell_view_fit. Writes no camera key, is not an undo step and does not mark the project dirty.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_shell_unavailable_view_reset,
+        },
+Tool {
+            name: "shell_get_view",
+            description: "Read the shell view state: the view zoom multiplier and pan (canvas points), 'at_camera_framing' (the view is exactly the authored camera framing), the authored camera zoom at the current frame, the effective on-screen zoom (camera × view) as a factor and a percent, and the stage element/stage sizes. Read-only.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_shell_unavailable_get_view,
+        },
+Tool {
+            name: "shell_select_figure",
+            description: "Select a figure in the GUI exactly as clicking its row in the Figures panel does: 'figure' (0-based) becomes the selected figure and the node selection is cleared. Shell selection only — no undo step, never marks the project dirty.",
+            schema: obj_schema(json!({ "figure": { "type": "integer" } }), &["figure"]),
+            handler: tool_shell_unavailable_select_figure,
+        },
+Tool {
+            name: "shell_select_node",
+            description: "Select node 'node' of figure 'figure' in the GUI exactly as pressing that joint on the stage does: both the figure and the node selection move. Shell selection only — no undo step (the GUI's stage press snapshots for the drag that may follow, not for the selection; see this file's module doc), never marks the project dirty.",
+            schema: obj_schema(json!({ "figure": { "type": "integer" }, "node": { "type": "integer" } }), &["figure", "node"]),
+            handler: tool_shell_unavailable_select_node,
+        },
+Tool {
+            name: "shell_select_sprite",
+            description: "Select sprite instance 'sprite' (0-based) in the GUI exactly as clicking its row in the Sprites panel does. Shell selection only — no undo step, never marks the project dirty.",
+            schema: obj_schema(json!({ "sprite": { "type": "integer" } }), &["sprite"]),
+            handler: tool_shell_unavailable_select_sprite,
+        },
+Tool {
+            name: "shell_select_fx_clip",
+            description: "Select FX clip 'clip' (0-based, an index into the project's FX clips) in the GUI exactly as pressing its bar in the FX lane or its panel row does. Shell selection only — no undo step, never marks the project dirty.",
+            schema: obj_schema(json!({ "clip": { "type": "integer" } }), &["clip"]),
+            handler: tool_shell_unavailable_select_fx_clip,
+        },
+Tool {
+            name: "shell_select_audio_clip",
+            description: "Select audio clip 'clip' (0-based, an index into the project's audio clips) in the GUI exactly as pressing its row in the Audio panel does — the clip the audio operations toolbar targets. Shell selection only — no undo step, never marks the project dirty.",
+            schema: obj_schema(json!({ "clip": { "type": "integer" } }), &["clip"]),
+            handler: tool_shell_unavailable_select_audio_clip,
+        },
+Tool {
+            name: "shell_select_frame",
+            description: "Move the GUI playhead to frame 'frame' (0-based) exactly as a plain click on that frame's timeline chip does: the playhead moves and any timeline range selection is cleared. Shell selection only — no undo step, never marks the project dirty.",
+            schema: obj_schema(json!({ "frame": { "type": "integer" } }), &["frame"]),
+            handler: tool_shell_unavailable_select_frame,
+        },
+Tool {
+            name: "shell_select_stroke",
+            description: "Select a stroke in the GUI — 'stroke' (0-based, an index into the project's stroke list, the index delete_stroke consumes) becomes the shell's stroke selection, the one the Edit menu's Delete stroke acts on. Shell selection only — no undo step, never marks the project dirty. Live endpoint only.",
+            schema: obj_schema(json!({ "stroke": { "type": "integer" } }), &["stroke"]),
+            handler: tool_shell_unavailable_select_stroke,
+        },
+Tool {
+            name: "shell_select_particle",
+            description: "Select a particle event in the GUI — 'particle' (0-based, an index into the project's particle events) becomes the shell's particle selection, the one the Edit menu's Delete particle event acts on. Shell selection only — no undo step, never marks the project dirty. Live endpoint only.",
+            schema: obj_schema(json!({ "particle": { "type": "integer" } }), &["particle"]),
+            handler: tool_shell_unavailable_select_particle,
+        },
+Tool {
+            name: "shell_select_clip",
+            description: "Select a movieclip in the GUI — 'clip' (0-based, an index into the project's clips) becomes the clips panel's selection. Shell selection only — no undo step, never marks the project dirty. Live endpoint only.",
+            schema: obj_schema(json!({ "clip": { "type": "integer" } }), &["clip"]),
+            handler: tool_shell_unavailable_select_clip,
+        },
+Tool {
+            name: "shell_get_selection",
+            description: "Read back every GUI selection: the selected figure and node, the selected sprite, FX clip and audio clip, the playhead frame, and the timeline range selection if one is active, each with the live count it indexes into. Read-only.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_shell_unavailable_get_selection,
+        },
+Tool {
+            name: "shell_set_theme",
+            description: "Set the editor theme: 'dark' or 'light'. Sets the existing theme outright (never a blind toggle) via the same field the Settings card's Dark/Light buttons write; the shell persists it to the layout prefs on the same tick. Applies immediately, no restart. Accent colours are not touched. Live endpoint only — on stdio this name returns the shell-refusal error. No undo step (shell state).",
+            schema: obj_schema(json!({ "theme": { "type": "string", "enum": ["dark", "light"] } }), &["theme"]),
+            handler: tool_shell_unavailable_set_theme,
+        },
+Tool {
+            name: "shell_get_settings",
+            description: "Read the editor's user-facing settings (the Settings card as a tool): theme, live-MCP state with its endpoint and persisted preference, language, the project default easing, the stage-guides flags, loop playback and playback speed, the current and startup workspaces, the stage size, and the autosave status. Read-only. Live endpoint only — on stdio this name returns the shell-refusal error.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_shell_unavailable_get_settings,
+        },
+Tool {
+            name: "shell_set_setting",
+            description: "Set one Settings-card setting by name: 'theme' (\"dark\"/ \"light\"), 'live_mcp' (bool), 'language' (BCP 47 code), 'default_easing' (\"linear\"/\"smooth\"/\"ease-in\"/\"ease-out\"), 'guides', 'camera_frame', 'safe_frames', 'loop_playback' (bools), 'playback_speed' (one of 0.25, 0.5, 1, 1.5, 2). Each persists exactly as the Settings card persists it; guides/loop/speed are session-only, as in the GUI. All apply immediately, no restart — except live_mcp=false, which the shell applies the moment this reply has been delivered, so the reply is never eaten by the shutdown it orders. Names the GUI does not expose as settable (autosave, startup_workspace, stage size, playback_audio) are refused with the reason. Live endpoint only. No undo step.",
+            schema: obj_schema(json!({ "setting": { "type": "string" }, "value": {} }), &["setting", "value"]),
+            handler: tool_shell_unavailable_set_setting,
+        },
+Tool {
+      name: "shell_set_section",
+      description: "Collapse ('collapsed': true) or expand a panel section in the live editor — the panel header's Hide/Show control. Only the Figures and Library sections have a collapse control; any other section is refused by name. A section not shown in the active workspace is refused (sections are workspace-gated). Shell view state only: no undo step, nothing persisted. Live endpoint only.",
+      schema: obj_schema(
+          json!({
+              "section": { "type": "string" },
+              "collapsed": { "type": "boolean" }
+          }),
+          &["section", "collapsed"],
+      ),
+      handler: tool_shell_unavailable_set_section,
+  },
+Tool {
+      name: "shell_set_column_widths",
+      description: "Set the left and/or right panel column widths in points — the draggable splitters, by target width. At least one of 'left' / 'right' is required. Widths persist in the layout prefs exactly as a drag does (load-modify-save) and are clamped to 220-420 (left) / 260-480 (right); the reply reports the widths read back after the save, so a clamped request truthfully reports the clamped value. No undo step. Live endpoint only.",
+      schema: obj_schema(
+          json!({
+              "left": { "type": "number" },
+              "right": { "type": "number" }
+          }),
+          &[],
+      ),
+      handler: tool_shell_unavailable_set_column_widths,
+  },
+Tool {
+      name: "shell_get_layout",
+      description: "Read the live editor layout: the active workspace, its sections in panel order (each with 'collapsible' and, for Figures/Library, 'collapsed'; the rest report null), the sections the workspace hides, the left/right column visibility (show_left / show_right) and widths, and the persisted timeline_collapsed / sidebar_visible prefs — each with a 'wired' flag, currently false: those prefs round-trip but the shell does not read them yet. Read-only. Live endpoint only.",
+      schema: obj_schema(json!({}), &[]),
+      handler: tool_shell_unavailable_get_layout,
+  },
+Tool {
+            name: "shell_list_recents",
+            description: "List the running editor's recent projects — the File menu's Open recent entries, most recent first, at most five: each with its menu index, its display name, the project file it resolves to (exact stored-name match, then file-stem fallback, against the Home library scan) or null with missing: true when the file is gone. Read-only; no undo step. Live endpoint only — the stdio server refuses this tool.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_shell_unavailable_list_recents,
+        },
+Tool {
+            name: "shell_open_recent",
+            description: "Open a recent project by its File menu index (0-based, most recent first; at most five entries — see shell_list_recents). The menu's own press, verbatim: the name resolves against the Home library scan (exact stored name, then file stem), the file opens through the shell's open path (selector insert-or-select, then the core open, recents re-touched), and the shell follow-ups run (stale-solo guard, name field re-sync, stroke selection cleared). An entry whose file is gone is refused with the menu's own not-found wording and changes nothing; an out-of-range index is refused, quoting the index and the entry count. Like the menu press, this replaces the session WITHOUT the Home rows' two-press discard confirm — a client that wants the guard checks the dirty state first (get_editor_status). A project swap is not an undo step (the GUI's opens take none). Live endpoint only — the stdio server refuses this tool.",
+            schema: obj_schema( json!({ "index": { "type": "integer" } }), &["index"], ),
+            handler: tool_shell_unavailable_open_recent,
+        },
+Tool {
+            name: "shell_reload_project",
+            description: "Reload the current project from its saved file, discarding unsaved changes — the Project section's Reload from disk press, verbatim, including its two-press discard gate: on a dirty session the first call only arms the reload (reply ok: false, armed: true, with the button's own arming wording in status) and the identical second call runs it. The target is the file the shell's last-opened record names for this project; with no saved file the call is refused ('No saved file to reload.'). The reload itself is the core open of that file, with the discard named in the resulting status. A project swap is not an undo step. Live endpoint only — the stdio server refuses this tool.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_shell_unavailable_reload_project,
+        },
+Tool {
+            name: "shell_recover_snapshot",
+            description: "Recover the autosave snapshot (./projects/.recovery.json) as the current project — the Project section's / Home banner's Recover press, verbatim, including its two-press discard gate: on a dirty session the first call only arms (reply ok: false, armed: true, with the button's own arming wording in status) and the identical second call runs it. With no snapshot on disk the call is refused ('No recovery snapshot found in ./projects/.'). The recovery file is only READ — this tool never writes it. A project swap is not an undo step. Live endpoint only — the stdio server refuses this tool.",
+            schema: obj_schema(json!({}), &[]),
+            handler: tool_shell_unavailable_recover_snapshot,
+        },
+Tool {
+            name: "shell_duplicate_project_file",
+            description: "Duplicate a saved project file from the Home library — any row, addressed by its stored name (see list_projects): the copy lands beside the source as '<stem>-copy.json', incrementing if taken, exactly as the row's Duplicate button does it, and the session's cached file list is refreshed to name the copy. The current session is untouched (the panel's semantics; distinct from the duplicate_project tool, which duplicates only the current project's file). An unknown name is refused, quoting it. Not an undo step; does not mark the session dirty. Live endpoint only — the stdio server refuses this tool.",
+            schema: obj_schema( json!({ "name": { "type": "string" } }), &["name"], ),
+            handler: tool_shell_unavailable_duplicate_project_file,
+        },
+Tool {
+            name: "shell_delete_project_file",
+            description: "Delete a saved project file from the Home library, addressed by its stored name (see list_projects) — the row's Delete button and its confirm line, as a two-call protocol over the panel's own arm state: the first call (no 'confirm') only arms the deletion (reply ok: false, armed: true) and touches no file; the second call, with 'confirm': true, carries it out — but only if the arm for THIS name is the one standing, otherwise it is refused. A GUI arm and a tool confirm (or the reverse) interoperate, since both use the panel's arm. Shell-owned files (the recovery snapshot, the recents and layout files) are refused by the shell's own guard. Only the file is removed: deleting the currently open project's file leaves the session's in-memory copy exactly as it is, as in the GUI. An unknown name is refused, quoting it. Not an undo step. Live endpoint only — the stdio server refuses this tool.",
+            schema: obj_schema( json!({ "name": { "type": "string" }, "confirm": { "type": "boolean" }, }), &["name"], ),
+            handler: tool_shell_unavailable_delete_project_file,
+        },
+Tool {
+            name: "shell_set_sidebar",
+            description: "Show or hide one of the editor's side columns — the View menu's 'Figures sidebar' (side: 'left') and 'Inspector sidebar' (side: 'right') items: flips the same State fields the menu items flip, nothing else; the columns' contents and widths are untouched (widths are B8's shell_set_column_widths; visibility is read back by B8's shell_get_layout). An unknown side is refused, quoting it. Session state only: no undo step, never marks dirty. Live endpoint only — the stdio server refuses this tool.",
+            schema: obj_schema( json!({ "side": { "type": "string", "enum": ["left", "right"] }, "visible": { "type": "boolean" }, }), &["side", "visible"], ),
+            handler: tool_shell_unavailable_set_sidebar,
         },
     ]
 }

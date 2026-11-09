@@ -20,12 +20,23 @@
 mod chrome_view;
 mod live_mcp;
 mod rune_sec;
+mod shell_control;
+mod shell_tools_file;
+mod shell_tools_layout;
+mod shell_tools_selection;
+mod shell_tools_settings;
+mod shell_tools_state;
+mod shell_tools_view;
 mod stage_sprites;
 mod stage_view;
 
 #[cfg(test)]
 #[path = "rune_sec/snap_tests.rs"]
 mod snap_tests;
+
+#[cfg(test)]
+#[path = "rune_sec/shell_control_tests.rs"]
+mod shell_control_tests;
 
 use std::time::Duration;
 
@@ -561,6 +572,19 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
             }
         }
         tx.wake_after(MCP_POLL_HEARTBEAT);
+    }
+    // Wave 14 (shell control): drain the shell queue the
+    // live drain filled (shell calls intercepted by
+    // live_mcp's peek). This runs whether or not the
+    // bridge is currently enabled: requests only arrive
+    // through the bridge, but if the bridge was switched
+    // off with shell calls still queued, those requests
+    // are cancelled by then and the drain discards them
+    // here instead of leaving them to execute late after
+    // a re-enable. Executed calls answer through their
+    // own reply channels; a productive drain redraws.
+    if shell_control::drain(s) > 0 {
+        redraw = true;
     }
     if s.core.status != s.last_status {
         s.last_status = s.core.status.clone();

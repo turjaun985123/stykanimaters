@@ -305,6 +305,23 @@ fn update_panel_state(f: impl FnOnce(&mut ClipsPanelState)) {
     CLIPS_PANEL.with(|p| f(&mut p.borrow_mut()));
 }
 
+/// Wave 14 (shell control): the clips panel's selection,
+/// exposed for the MCP shell channel — `shell_select_clip`
+/// writes it (after validating the index against the live
+/// project), the shell-state snapshot reads it. Until this
+/// wave the selection was reachable only from inside this
+/// module, which is why the Wave 13 state read could not
+/// report it.
+pub fn set_clip_selection(selected: Option<usize>) {
+    update_panel_state(|p| p.selected = selected);
+}
+
+/// The clips panel's current selection (see
+/// [`set_clip_selection`]).
+pub fn clip_selection() -> Option<usize> {
+    CLIPS_PANEL.with(|p| p.borrow().selected)
+}
+
 /// Display label for a clip loop mode (the GPUI panel's
 /// wording: "Loop" / "Ping-pong" / "Once").
 pub fn loop_label(mode: ClipLoop) -> &'static str {

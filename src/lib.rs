@@ -34,6 +34,7 @@ pub mod particle_ops;
 pub mod pivot;
 pub mod projects;
 pub mod shell;
+pub mod shell_tools_transport;
 pub mod sprite_ops;
 pub mod stats;
 pub mod style;

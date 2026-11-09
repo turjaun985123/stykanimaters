@@ -18,6 +18,20 @@
 //! Supported methods: `initialize`, `ping`, `tools/list`,
 //! `tools/call`. Unknown methods get a `-32601` error; unroutable
 //! requests get `-32600`; bad `tools/call` params get `-32602`.
+//!
+//! The handshake is deliberately stateless (Wave 14, D7):
+//! the router keeps no initialised flag, `initialize` does
+//! not negotiate (it always answers [`PROTOCOL_VERSION`],
+//! whatever the client requested) and every method is
+//! answered before `initialize` exactly as after it — a
+//! spec-tolerant posture both transports share by
+//! construction, because the stdio binary's
+//! [`McpServer::handle`] and the live bridge's
+//! [`McpServer::handle_on`] are the same `dispatch`. The
+//! identity all three surfaces present (`initialize`, the
+//! `server_info` tool, the live health document) comes
+//! from [`SERVER_NAME`] / [`SERVER_VERSION`] — the crate
+//! version — defined once below.
 //! Tool-level failures (a handler's `Err`) are reported inside
 //! the result as `isError: true`, per the MCP spec, not as
 //! protocol errors — the one exception is an unknown tool name,
@@ -119,6 +133,37 @@ pub fn all_tools() -> Vec<Tool> {
     tools
 }
 
+/// The server's name, as served by `initialize`'s
+/// `serverInfo`, by the `server_info` tool and (mirrored)
+/// by the live bridge's health document: ONE literal for
+/// every surface, so the stdio server, the live endpoint
+/// and the tool all present the same identity. Wave 14
+/// (D7): before this constant existed, the name was a
+/// separate bare literal in `initialize_result`, in
+/// `tool_server_info` and in `live_mcp::health_body` —
+/// same text, three places to drift.
+pub const SERVER_NAME: &str = "stykanimate-rs";
+
+/// The server's version: the crate version, baked in at
+/// compile time by `env!` — never a hand-maintained
+/// literal, so a version bump moves every surface at
+/// once.
+pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The one MCP protocol revision this server speaks.
+/// `initialize` does NOT negotiate: whatever revision a
+/// client requests, the answer names this one (see
+/// `initialize_result`). A client that cannot speak it
+/// must disconnect, per the MCP lifecycle spec.
+pub const PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// The `serverInfo` object `initialize` returns, built
+/// from the identity constants above so no second
+/// literal copy can drift from them.
+pub fn server_info() -> Value {
+    json!({ "name": SERVER_NAME, "version": SERVER_VERSION })
+}
+
 /// The MCP server: one editor core plus the JSON-RPC router.
 /// The wrapped core is the edit target for
 /// [`McpServer::handle`]; [`McpServer::handle_on`] routes against
@@ -143,7 +188,14 @@ impl McpServer {
     /// Route one parsed JSON-RPC message against this server's
     /// own core. Returns the response message, or `None` when the
     /// message is a notification (no `id` member) — notifications
-    /// are never answered, known or not.
+    /// are never answered, known or not, and they execute
+    /// nothing either: the id check in `dispatch` runs before
+    /// any method is routed, so a `tools/call` sent as a
+    /// notification is dropped, not applied (Wave 14, D6 — the
+    /// deliberate house rule, pinned by the D6 tests below; raw
+    /// JSON-RPC would let a notification's method run silently,
+    /// which for an editing surface would mean invisible,
+    /// unanswerable mutations).
     ///
     /// A thin delegate over the shared router with
     /// `&mut self.core` as the edit target — the stdio binary's
@@ -186,7 +238,11 @@ impl McpServer {
                 "Invalid Request: expected a JSON-RPC object",
             ));
         }
-        // Notifications have no id: never reply, whatever the method.
+        // Notifications have no id: never reply, whatever the
+        // method — and never execute either (this check runs
+        // before routing, Wave 14 D6). Batch arrays and other
+        // non-objects were refused just above: batches are not
+        // unrolled, so their elements never execute either.
         let Some(id) = msg.get("id").cloned() else {
             return None;
         };
@@ -210,14 +266,21 @@ impl McpServer {
         }
     }
 
+    /// The `initialize` answer. Stateless and identical
+    /// on both transports (the shared `dispatch` builds
+    /// it): the dispatcher keeps no initialised flag, so
+    /// the request's own `params` — including any
+    /// `protocolVersion` the client asked for — are never
+    /// read; the answer always names [`PROTOCOL_VERSION`]
+    /// and the crate identity. `capabilities` advertises
+    /// exactly one thing: the tools surface (an empty
+    /// object — no `listChanged`, no other capability
+    /// families exist here).
     fn initialize_result() -> Value {
         json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": PROTOCOL_VERSION,
             "capabilities": { "tools": {} },
-            "serverInfo": {
-                "name": "stykanimate-rs",
-                "version": env!("CARGO_PKG_VERSION"),
-            },
+            "serverInfo": server_info(),
         })
     }
 
@@ -294,7 +357,12 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 /// Wrap a tool handler outcome as an MCP `tools/call` result: the
 /// value JSON-serialised into a single text content block, with
 /// `isError` distinguishing failure text from result text.
-fn tool_result(id: Value, outcome: Result<Value, String>) -> Value {
+/// Build a `tools/call` response from a handler outcome.
+/// Public for the shell-control channel (Wave 14): shell
+/// replies must be byte-identical to registry replies, so
+/// the shell drain builds them with this same function
+/// rather than a second implementation.
+pub fn tool_result(id: Value, outcome: Result<Value, String>) -> Value {
     let (text, is_error) = match outcome {
         Ok(value) => (value.to_string(), false),
         Err(message) => (message, true),
@@ -322,9 +390,12 @@ fn tool_server_info() -> Tool {
         description: "Identify this MCP server: name, version and how many tools are registered.",
         schema: empty_args_schema(),
         handler: |_core, _args| {
+            // Identity from the same constants
+            // `initialize` serves (Wave 14 D7) — this
+            // handler used to carry its own literal copy.
             Ok(json!({
-                "name": "stykanimate-rs",
-                "version": env!("CARGO_PKG_VERSION"),
+                "name": SERVER_NAME,
+                "version": SERVER_VERSION,
                 "tools": all_tools().len(),
             }))
         },
@@ -480,9 +551,21 @@ fn arg_f32(args: &Value, key: &str) -> Result<f32, String> {
     let Some(v) = args.get(key).filter(|v| !v.is_null()) else {
         return Err(format!("missing required argument '{key}'"));
     };
-    v.as_f64()
-        .map(|f| f as f32)
-        .ok_or_else(|| format!("argument '{key}' must be a number"))
+    let Some(f) = v.as_f64() else {
+        return Err(format!("argument '{key}' must be a number"));
+    };
+    // Wave 14 (D5): refuse a value that overflows f32 to an
+    // infinity on the cast — the Wave 11 finiteness contract
+    // every other float helper already enforces
+    // (`mcp_tools::finite_f32`, `media::ast_as_f32`). This
+    // helper was the one exception: `particle_add_event`
+    // accepted `1e39` and stored an infinite coordinate (one
+    // undo step spent on a corrupt event).
+    let f = f as f32;
+    if !f.is_finite() {
+        return Err(format!("argument '{key}' must be a finite number"));
+    }
+    Ok(f)
 }
 
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -1951,6 +2034,123 @@ mod tests {
         assert!(result["capabilities"]["tools"].is_object());
     }
 
+    // -- Wave 14 (D7): handshake parity pins -------------
+    //
+    // The stdio binary routes through `handle`, the live
+    // bridge through `handle_on`; both are the one
+    // `dispatch`, so the handshake cannot diverge — these
+    // tests pin the shared posture so a future per-path
+    // change has to break one loudly.
+
+    #[test]
+    fn identity_comes_from_the_crate_version() {
+        // The version is the crate's, baked by env! — if
+        // this ever compares against a hand-typed string
+        // instead, the identity has forked again.
+        assert_eq!(SERVER_VERSION, env!("CARGO_PKG_VERSION"));
+        assert_eq!(server_info()["name"], SERVER_NAME);
+        assert_eq!(server_info()["version"], SERVER_VERSION);
+    }
+
+    #[test]
+    fn initialize_does_not_negotiate_the_protocol_version() {
+        // Whatever the client asks for — a newer
+        // revision, an older one, nothing at all — the
+        // answer is byte-identical and names the one
+        // revision the server speaks.
+        let mut server = McpServer::new();
+        let baseline = server
+            .handle(&request(1, "initialize", json!({})))
+            .expect("initialize must be answered");
+        for params in [
+            json!({ "protocolVersion": "2025-03-26", "capabilities": {} }),
+            json!({ "protocolVersion": "2024-10-07", "capabilities": {} }),
+            json!({ "protocolVersion": 42 }),
+        ] {
+            let resp = server
+                .handle(&request(1, "initialize", params))
+                .expect("initialize must be answered");
+            assert_eq!(resp, baseline, "no negotiation, whatever is asked");
+        }
+        // No `params` member at all: same answer.
+        let bare = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
+        assert_eq!(server.handle(&bare), Some(baseline));
+    }
+
+    #[test]
+    fn requests_before_initialize_are_answered_on_both_paths() {
+        // Spec-tolerant posture, pinned: a fresh server
+        // that has seen NO initialize answers ping,
+        // tools/list, tools/call and an unknown method
+        // exactly as an initialised one does — there is
+        // no -32002 "server not initialized" refusal
+        // anywhere in the dispatch.
+        let script: Vec<Value> = vec![
+            request(1, "ping", json!({})),
+            request(2, "tools/list", json!({})),
+            request(
+                3,
+                "tools/call",
+                json!({ "name": "server_info", "arguments": {} }),
+            ),
+            request(4, "resources/list", json!({})),
+        ];
+        let mut own = McpServer::new();
+        let mut host = McpServer::new();
+        let mut external = crate::editor::EditorCore::new();
+        for msg in &script {
+            let a = own.handle(msg);
+            let b = host.handle_on(&mut external, msg);
+            assert!(a.is_some(), "pre-initialize request answered: {msg}");
+            assert_eq!(a, b, "same answer on both paths: {msg}");
+        }
+        // The unknown method in the script is the
+        // standard -32601 on both paths.
+        let resp = own
+            .handle(&request(9, "resources/list", json!({})))
+            .expect("unknown method is answered with an error");
+        assert_eq!(resp["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn initialized_notification_never_answered_and_changes_nothing() {
+        // Before initialize, after initialize, twice:
+        // the notification is dropped silently every
+        // time and the initialize answer is unaffected.
+        let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+        let mut server = McpServer::new();
+        assert!(server.handle(&note).is_none(), "dropped before initialize");
+        let first = server
+            .handle(&request(1, "initialize", json!({})))
+            .expect("initialize must be answered");
+        assert!(server.handle(&note).is_none(), "dropped after initialize");
+        let second = server
+            .handle(&request(1, "initialize", json!({})))
+            .expect("a repeat initialize is answered too");
+        assert_eq!(first, second, "no state, so no changed answer");
+        // The live path drops it the same way.
+        let mut host = McpServer::new();
+        let mut external = crate::editor::EditorCore::new();
+        assert!(host.handle_on(&mut external, &note).is_none());
+    }
+
+    #[test]
+    fn server_info_tool_agrees_with_the_initialize_identity() {
+        // The drift guard for the Wave 14 (D7)
+        // unification: the tool's name/version must equal
+        // initialize's serverInfo, always — both now read
+        // the same constants, and this fails if either
+        // grows a literal copy again.
+        let mut server = McpServer::new();
+        let resp = server
+            .handle(&request(1, "initialize", json!({})))
+            .expect("initialize must be answered");
+        let (info, is_error) = call_payload(&mut server, "server_info", json!({}));
+        assert!(!is_error);
+        assert_eq!(info["name"], resp["result"]["serverInfo"]["name"]);
+        assert_eq!(info["version"], resp["result"]["serverInfo"]["version"]);
+    }
+
     #[test]
     fn notifications_get_no_reply() {
         let mut server = McpServer::new();
@@ -1958,6 +2158,199 @@ mod tests {
         assert!(server.handle(&msg).is_none());
         let unknown = json!({ "jsonrpc": "2.0", "method": "notifications/whatever" });
         assert!(server.handle(&unknown).is_none());
+    }
+
+    // -- Wave 14 (D6): batch + notification semantics --------
+    //
+    // The final audit pins, case by case, the two JSON-RPC
+    // shapes the earlier waves settled but only partially
+    // tested. The house rules, from the dispatch source:
+    //
+    // * A message with no `id` member is a notification. It
+    //   is NEVER answered — and, because the id check runs
+    //   before any method is routed, it EXECUTES NOTHING
+    //   either. Raw JSON-RPC would let a notification's
+    //   method run silently; on an editing surface that
+    //   would mean invisible, unanswerable mutations, so
+    //   the drop-everything rule is deliberate (it is also
+    //   what makes the live transport's notification fast
+    //   path behaviour-identical — see live_mcp.rs).
+    // * Batch arrays are NOT unrolled. Any non-object
+    //   message — batch, empty batch, scalar — earns the
+    //   one `-32600` (id `null`) the dispatch gives, and no
+    //   element of it executes. For an EMPTY batch that
+    //   single error is also what JSON-RPC itself
+    //   prescribes; for non-empty batches it is the
+    //   documented house posture (docs/MCP.md: "JSON-RPC
+    //   batches are not supported") — MCP defines no
+    //   batching, and answering per-element would need a
+    //   second router shape on both transports.
+    // * An explicit `"id": null` is a REQUEST (the member
+    //   is present): it executes and is answered, with a
+    //   `null` id.
+
+    #[test]
+    fn tools_call_notification_executes_nothing_and_is_never_answered() {
+        let mut server = McpServer::new();
+        let frames_before = server.core.project.frames.len();
+        // A playhead move sent as a notification: dropped,
+        // not applied — the playhead is the witness.
+        let move_note = json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": { "name": "set_frame", "arguments": { "frame": 1 } },
+        });
+        assert!(server.handle(&move_note).is_none(), "no reply");
+        assert_eq!(server.core.current, 0, "the notification did not execute");
+        // A mutating, undo-stepping call as a notification:
+        // neither the edit nor its undo step may appear.
+        let dup_note = json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": { "name": "duplicate_frame", "arguments": {} },
+        });
+        assert!(server.handle(&dup_note).is_none(), "no reply");
+        assert_eq!(server.core.project.frames.len(), frames_before);
+        assert_eq!(server.core.undo_depth(), 0, "no undo step was spent");
+        // The live path (`handle_on`, an external core) drops
+        // it identically.
+        let mut host = McpServer::new();
+        let mut external = crate::editor::EditorCore::new();
+        assert!(host.handle_on(&mut external, &move_note).is_none());
+        assert_eq!(external.current, 0, "the live path did not execute it either");
+    }
+
+    #[test]
+    fn erroring_notifications_are_never_answered() {
+        // JSON-RPC: a notification earns no reply EVEN when
+        // it is wrong in a way that would be an error for a
+        // request. Every erroring shape below must come back
+        // `None`, never an error object.
+        let mut server = McpServer::new();
+        let erroring: Vec<Value> = vec![
+            // Unknown method (would be -32601 with an id).
+            json!({ "jsonrpc": "2.0", "method": "no/such" }),
+            // Unknown tool (would be -32602 with an id).
+            json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": { "name": "does_not_exist", "arguments": {} },
+            }),
+            // tools/call with no params at all (would be
+            // -32602 with an id).
+            json!({ "jsonrpc": "2.0", "method": "tools/call" }),
+            // tools/call whose arguments a handler would
+            // refuse (would be an isError result with an id).
+            json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": { "name": "set_frame", "arguments": { "frame": -1 } },
+            }),
+            // No method member at all: the id check runs
+            // before the method check, so this is still the
+            // notification shape, not an Invalid Request.
+            json!({ "jsonrpc": "2.0" }),
+        ];
+        for msg in &erroring {
+            assert!(
+                server.handle(msg).is_none(),
+                "an erroring notification is still never answered: {msg}"
+            );
+        }
+        assert_eq!(server.core.current, 0, "none of them executed");
+        assert_eq!(server.core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn batch_arrays_get_one_invalid_request_error_and_execute_nothing() {
+        let mut server = McpServer::new();
+        let assert_single_refusal = |server: &mut McpServer, msg: &Value| {
+            let resp = server
+                .handle(msg)
+                .expect("a batch is answered — with the single refusal, not silence");
+            assert!(!resp.is_array(), "never a per-element reply array: {resp}");
+            assert_eq!(resp["error"]["code"], -32600, "{resp}");
+            assert_eq!(resp["id"], Value::Null, "{resp}");
+        };
+        // An ordinary batch of requests.
+        assert_single_refusal(
+            &mut server,
+            &json!([
+                { "jsonrpc": "2.0", "id": 1, "method": "ping" },
+                { "jsonrpc": "2.0", "id": 2, "method": "ping" },
+            ]),
+        );
+        // An empty batch (JSON-RPC prescribes this same
+        // single -32600 for it).
+        assert_single_refusal(&mut server, &json!([]));
+        // An all-notification batch: raw JSON-RPC would
+        // answer nothing at all, but the array is refused
+        // before any element is inspected, so the house
+        // answer is the same single -32600 — NOT silence.
+        assert_single_refusal(
+            &mut server,
+            &json!([
+                { "jsonrpc": "2.0", "method": "ping" },
+                { "jsonrpc": "2.0", "method": "notifications/initialized" },
+            ]),
+        );
+        // A mixed batch carrying a mutation: the mutation
+        // element must not execute through the refusal.
+        assert_single_refusal(
+            &mut server,
+            &json!([
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": { "name": "set_frame", "arguments": { "frame": 1 } },
+                },
+                { "jsonrpc": "2.0", "method": "notifications/initialized" },
+            ]),
+        );
+        assert_eq!(server.core.current, 0, "no batch element executed");
+        assert_eq!(server.core.undo_depth(), 0);
+    }
+
+    #[test]
+    fn non_object_messages_are_single_invalid_request_errors() {
+        // Scalars are not batches, but dispatch refuses
+        // them with the same single -32600 (id null) shape;
+        // the array case is pinned by
+        // `non_object_message_is_invalid_request` above.
+        let mut server = McpServer::new();
+        for msg in [json!(42), json!("ping"), json!(true), Value::Null] {
+            let resp = server
+                .handle(&msg)
+                .expect("a non-object message is answered, not dropped");
+            assert_eq!(resp["error"]["code"], -32600, "{msg}");
+            assert_eq!(resp["id"], Value::Null, "{msg}");
+        }
+    }
+
+    #[test]
+    fn explicit_null_id_is_a_request_and_executes() {
+        // The mirror image of the notification rule: `"id":
+        // null` HAS the member, so it is a request — it
+        // executes and is answered, carrying the null id.
+        // (Also pinned over the wire by the live e2e.)
+        let mut server = McpServer::new();
+        let resp = server
+            .handle(&json!({ "jsonrpc": "2.0", "id": null, "method": "ping" }))
+            .expect("a null-id request is answered");
+        assert_eq!(resp["id"], Value::Null);
+        assert_eq!(resp["result"], json!({}));
+        let resp = server
+            .handle(&json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "method": "tools/call",
+                "params": { "name": "set_frame", "arguments": { "frame": 1 } },
+            }))
+            .expect("a null-id tools/call is answered");
+        assert_eq!(resp["id"], Value::Null);
+        assert_eq!(resp["result"]["isError"], false, "{resp}");
+        assert_eq!(server.core.current, 1, "the null-id call executed");
     }
 
     #[test]
@@ -3190,5 +3583,501 @@ mod tests {
         assert_eq!(a.redo_depth(), b.redo_depth());
         assert_eq!(a.status, b.status);
         let _ = std::fs::remove_file("./projects/mcp-parity-sweep.json");
+    }
+
+    // -----------------------------------------------------------------
+    // Wave 14 (D5) — malformed-request robustness.
+    //
+    // The worst inputs a client (or an attacker on the
+    // loopback port) can send, thrown at the shared
+    // dispatch. The contract pinned here, per input class:
+    //   * unparseable bytes never reach dispatch at all —
+    //     the transports map the parse failure to -32700
+    //     (the parse-premise tests below pin that
+    //     `serde_json::from_str` is the failure, so the
+    //     transports' mapping has something to map);
+    //   * a parsed message that is not a well-formed
+    //     request earns -32600 (or -32601 for an unknown
+    //     method), a malformed `tools/call` earns -32602,
+    //     and a well-formed call whose ARGUMENTS are bad
+    //     earns an `isError` tool result — the house split
+    //     the module doc describes;
+    //   * NO input panics, hangs, or partially mutates:
+    //     every mutating case is bracketed by a state
+    //     witness (undo depth + playhead + the project's
+    //     serialised bytes) that must not move.
+    // -----------------------------------------------------------------
+
+    /// The no-mutation witness: undo depth, playhead and
+    /// the project's exact serialised bytes.
+    fn state_witness(server: &McpServer) -> (usize, usize, String) {
+        (
+            server.core.undo_depth(),
+            server.core.current,
+            serde_json::to_string(&server.core.project).expect("the project serialises"),
+        )
+    }
+
+    /// Assert a raw message is answered with a protocol
+    /// error of `code` (and therefore carries no result).
+    fn assert_protocol_error(server: &mut McpServer, msg: &Value, code: i64) -> Value {
+        let resp = server
+            .handle(msg)
+            .expect("a message carrying an id must be answered");
+        assert!(
+            resp.get("result").is_none(),
+            "a protocol error carries no result: {resp}"
+        );
+        assert_eq!(resp["error"]["code"], code, "response: {resp}");
+        resp
+    }
+
+    /// Assert a tools/call to `name` with `args` fails as
+    /// an `isError` tool result (never a protocol error,
+    /// never a panic) and leaves the witness untouched.
+    fn assert_refused_without_mutation(server: &mut McpServer, name: &str, args: Value) {
+        let before = state_witness(server);
+        let (_out, is_error) = call_payload(server, name, args);
+        assert!(is_error, "{name} must refuse the malformed arguments");
+        assert_eq!(
+            state_witness(server),
+            before,
+            "{name} must not mutate on a refused call"
+        );
+    }
+
+    #[test]
+    fn robust_top_level_scalars_are_invalid_request() {
+        let mut server = McpServer::new();
+        for msg in [
+            Value::Null,
+            json!(true),
+            json!(42),
+            json!(-1.5),
+            json!("ping"),
+        ] {
+            let resp = assert_protocol_error(&mut server, &msg, -32600);
+            assert_eq!(resp["id"], Value::Null);
+        }
+    }
+
+    #[test]
+    fn robust_batch_array_is_invalid_request_and_executes_nothing() {
+        // JSON-RPC batches are not routed by this server
+        // (D6 owns the formal semantics); a top-level array
+        // is one Invalid Request, and — critically — the
+        // calls inside it do NOT run.
+        let mut server = McpServer::new();
+        let before = state_witness(&server);
+        let batch = json!([
+            { "jsonrpc": "2.0", "id": 1, "method": "ping" },
+            { "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+              "params": { "name": "add_frame", "arguments": {} } },
+        ]);
+        let resp = assert_protocol_error(&mut server, &batch, -32600);
+        assert_eq!(resp["id"], Value::Null);
+        assert_eq!(state_witness(&server), before, "a batch executes nothing");
+    }
+
+    #[test]
+    fn robust_missing_and_wrong_typed_method_is_invalid_request() {
+        let mut server = McpServer::new();
+        for msg in [
+            json!({ "jsonrpc": "2.0", "id": 1 }),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": 42 }),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": null }),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": true }),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": ["ping"] }),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": { "m": "ping" } }),
+        ] {
+            assert_protocol_error(&mut server, &msg, -32600);
+        }
+        // Method names are case-sensitive: "Ping" is an
+        // unknown method, not a fuzzy match.
+        assert_protocol_error(&mut server, &request(2, "Ping", json!({})), -32601);
+        assert_protocol_error(
+            &mut server,
+            &request(3, "tools/call/extra", json!({ "name": "ping" })),
+            -32601,
+        );
+    }
+
+    #[test]
+    fn robust_exotic_ids_are_echoed_verbatim() {
+        let mut server = McpServer::new();
+        for id in [
+            json!(1.5),
+            json!("req-α"),
+            json!(null),
+            json!([1, 2]),
+            json!({ "tx": 7 }),
+            json!(-0.0),
+        ] {
+            let resp = server
+                .handle(&json!({ "jsonrpc": "2.0", "id": id.clone(), "method": "ping" }))
+                .expect("any id shape is answered");
+            assert_eq!(resp["id"], id, "the id is echoed, never interpreted");
+            assert_eq!(resp["result"], json!({}));
+        }
+    }
+
+    #[test]
+    fn robust_envelope_leniency_is_the_pinned_behaviour() {
+        // Dispatch does not police the `jsonrpc` member: a
+        // request without it, or with a foreign version
+        // string, is still routed. Recorded as the CURRENT
+        // contract (D6 owns any tightening), so a future
+        // change is a deliberate break, not a surprise.
+        let mut server = McpServer::new();
+        let resp = server
+            .handle(&json!({ "id": 1, "method": "ping" }))
+            .expect("answered");
+        assert_eq!(resp["result"], json!({}));
+        let resp = server
+            .handle(&json!({ "jsonrpc": "1.0", "id": 2, "method": "ping" }))
+            .expect("answered");
+        assert_eq!(resp["result"], json!({}));
+        // Non-call methods ignore their params entirely,
+        // however malformed.
+        let resp = server
+            .handle(&request(3, "initialize", json!([1, { "x": 2 }])))
+            .expect("answered");
+        assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
+        let resp = server
+            .handle(&request(4, "tools/list", json!("junk")))
+            .expect("answered");
+        assert!(resp["result"]["tools"].is_array());
+    }
+
+    #[test]
+    fn robust_tools_call_params_wrong_types_are_invalid_params() {
+        let mut server = McpServer::new();
+        for params in [
+            json!(42),
+            json!("call something"),
+            json!(null),
+            json!(true),
+            json!([{ "name": "ping" }]),
+        ] {
+            let msg = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
+            assert_protocol_error(&mut server, &msg, -32602);
+        }
+    }
+
+    #[test]
+    fn robust_tools_call_name_wrong_types_are_invalid_params() {
+        let mut server = McpServer::new();
+        for name in [json!(42), json!(null), json!(true), json!(["ping"]), json!({})] {
+            let msg = request(1, "tools/call", json!({ "name": name, "arguments": {} }));
+            assert_protocol_error(&mut server, &msg, -32602);
+        }
+        // An empty name is well-typed but unknown: the
+        // -32602 unknown-tool arm, message prefix intact.
+        let resp = assert_protocol_error(
+            &mut server,
+            &request(2, "tools/call", json!({ "name": "", "arguments": {} })),
+            -32602,
+        );
+        assert!(
+            resp["error"]["message"].as_str().unwrap().starts_with("unknown tool: "),
+            "message: {resp}"
+        );
+    }
+
+    #[test]
+    fn robust_arguments_wrong_container_types_leave_state_untouched() {
+        let mut server = McpServer::new();
+        for args in [
+            json!([1, 2, 3]),
+            json!("frame=0"),
+            json!(42),
+            json!(null),
+            json!(true),
+        ] {
+            assert_refused_without_mutation(
+                &mut server,
+                "particle_add_event",
+                args,
+            );
+        }
+        // A no-argument tool ignores even garbage argument
+        // containers: the arguments member is only read by
+        // the handler that runs.
+        let (_out, is_error) = call_payload(&mut server, "server_info", json!([1, 2]));
+        assert!(!is_error);
+    }
+
+    #[test]
+    fn robust_wrong_typed_fields_per_helper_family() {
+        let mut server = McpServer::new();
+        // arg_usize family (this module): a string is not
+        // an index, however numeric it looks.
+        assert_refused_without_mutation(
+            &mut server,
+            "set_selection",
+            json!({ "figure": "0" }),
+        );
+        // arg_str family (this module).
+        assert_refused_without_mutation(
+            &mut server,
+            "fig3_load_from_library",
+            json!({ "name": 42 }),
+        );
+        // req_usize + req_str families (mcp_tools).
+        assert_refused_without_mutation(
+            &mut server,
+            "set_node_cap",
+            json!({ "figure": 0, "node": 0, "cap": 42 }),
+        );
+        assert_refused_without_mutation(
+            &mut server,
+            "set_node_cap",
+            json!({ "figure": [0], "node": 0, "cap": "round" }),
+        );
+        // req_f32 family (mcp_tools): an object is not a
+        // number.
+        assert_refused_without_mutation(
+            &mut server,
+            "set_node_opacity",
+            json!({ "figure": 0, "node": 0, "opacity": { "v": 1 } }),
+        );
+        // ast_* family (media): a negative frame and an
+        // array coordinate are refused before any op.
+        assert_refused_without_mutation(
+            &mut server,
+            "sprite_set_key",
+            json!({ "sprite": 0, "frame": -1, "x": 1.0 }),
+        );
+        assert_refused_without_mutation(
+            &mut server,
+            "sprite_set_key",
+            json!({ "sprite": 0, "frame": 0, "x": [1] }),
+        );
+    }
+
+    #[test]
+    fn robust_absurd_numbers_are_refused_without_mutation() {
+        let mut server = McpServer::new();
+        // Index extremes against the built-in playhead.
+        for frame in [
+            json!(u64::MAX),
+            json!(-1),
+            json!(1.5),
+            json!(1e19),
+            json!("0"),
+        ] {
+            let before = state_witness(&server);
+            let label = frame.to_string();
+            let (_out, is_error) =
+                call_payload(&mut server, "set_frame", json!({ "frame": frame }));
+            assert!(is_error, "frame {label} must be refused");
+            assert_eq!(state_witness(&server), before);
+        }
+        // The f32-overflow regression (the D5 fix): 1e39 is
+        // a finite f64 that casts to f32 infinity. The
+        // built-in float helper refused nothing before this
+        // wave, so particle_add_event stored an infinite
+        // coordinate and spent an undo step doing it.
+        for bad in [json!(1e39), json!(-1e39), json!(3.5e38)] {
+            assert_refused_without_mutation(
+                &mut server,
+                "particle_add_event",
+                json!({ "frame": 0, "x": bad, "y": 0.0 }),
+            );
+        }
+        assert!(server.core.project.particles.is_empty());
+        // The same overflow against the other two helper
+        // families, which already refused it (Wave 11) —
+        // pinned so the families cannot drift apart again.
+        assert_refused_without_mutation(
+            &mut server,
+            "set_node_opacity",
+            json!({ "figure": 0, "node": 0, "opacity": 1e39 }),
+        );
+        assert_refused_without_mutation(
+            &mut server,
+            "sprite_set_key",
+            json!({ "sprite": 0, "frame": 0, "scale": 1e39 }),
+        );
+        // A u64-max frame against a key-authoring tool.
+        assert_refused_without_mutation(
+            &mut server,
+            "particle_add_event",
+            json!({ "frame": u64::MAX, "x": 0.0, "y": 0.0 }),
+        );
+    }
+
+    #[test]
+    fn arg_f32_helper_refuses_the_f32_overflow_band() {
+        // Direct unit pin for the hardened helper: finite
+        // f64s inside the f32 range pass; the overflow
+        // band above f32::MAX refuses with the house
+        // finiteness wording.
+        let ok = arg_f32(&json!({ "v": 1e38 }), "v").expect("in range");
+        assert!(ok.is_finite());
+        let err = arg_f32(&json!({ "v": 1e39 }), "v").expect_err("overflow refuses");
+        assert!(err.contains("must be a finite number"), "err: {err}");
+        let err = arg_f32(&json!({ "v": "1.0" }), "v").expect_err("a string refuses");
+        assert!(err.contains("must be a number"), "err: {err}");
+    }
+
+    #[test]
+    fn robust_parse_premise_malformed_bytes_never_parse() {
+        // The transports answer unparseable input with
+        // -32700 WITHOUT dispatch (stdio: bin/mcp_server.rs,
+        // live: live_mcp.rs). That mapping is only sound if
+        // these inputs really do fail to parse into a
+        // Value — pinned here against the actual parser.
+        for text in [
+            "",
+            "   ",
+            "not json",
+            "{",
+            "{\"a\":}",
+            "{'a':1}",
+            "{} {}",
+            "{\"a\":1} trailing",
+            "[1,2",
+            "\"unterminated",
+        ] {
+            assert!(
+                serde_json::from_str::<Value>(text).is_err(),
+                "{text:?} must not parse"
+            );
+        }
+        // Invalid UTF-8 degrades the stdio way: lossy
+        // decode, then the same parse failure.
+        let lossy = String::from_utf8_lossy(&[0xFF, 0xFE, 0x7B]);
+        assert!(serde_json::from_str::<Value>(&lossy).is_err());
+    }
+
+    #[test]
+    fn robust_overflowing_number_literals_degrade_to_null() {
+        // serde_json parses a number beyond f64 range
+        // into Value as Null (Number::from_f64 has no
+        // representation for it). So `1e400` never reaches
+        // a handler AS a number: it arrives as an absent
+        // argument (the helpers count null as missing) or
+        // as a null id — clean refusals, no infinities in
+        // the system. Pinned so a parser upgrade that
+        // changes this is caught here first.
+        let mut server = McpServer::new();
+        let text = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\
+                    \"params\":{\"name\":\"set_frame\",\"arguments\":{\"frame\":1e400}}}";
+        let msg: Value = serde_json::from_str(text).expect("the envelope parses");
+        assert_eq!(msg["params"]["arguments"]["frame"], Value::Null);
+        let before = state_witness(&server);
+        let resp = server.handle(&msg).expect("answered");
+        assert_eq!(
+            resp["result"]["isError"], true,
+            "the null frame is a tool refusal: {resp}"
+        );
+        assert_eq!(state_witness(&server), before, "the playhead never moved");
+        // A 1e400 id degrades to a null id the same way,
+        // and the request is still answered.
+        let msg: Value = serde_json::from_str(
+            "{\"jsonrpc\":\"2.0\",\"id\":1e400,\"method\":\"ping\"}",
+        )
+        .expect("the envelope parses");
+        let resp = server.handle(&msg).expect("answered");
+        assert_eq!(resp["id"], Value::Null);
+        assert_eq!(resp["result"], json!({}));
+    }
+
+    #[test]
+    fn robust_deeply_nested_inputs_fail_at_parse_not_in_dispatch() {
+        // serde_json's default recursion limit (128) is
+        // the stack's protection: a 600-deep nest is a
+        // parse error (→ -32700 at the transports), never
+        // a dispatch-time stack overflow.
+        let deep = format!("{}{}", "[".repeat(600), "]".repeat(600));
+        assert!(serde_json::from_str::<Value>(&deep).is_err());
+        let deep_args = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"get_state\",\"arguments\":{{\"x\":{deep}}}}}}"
+        );
+        assert!(serde_json::from_str::<Value>(&deep_args).is_err());
+        // A nest comfortably under the limit parses and
+        // dispatches normally — depth alone is not an
+        // error, and an unread argument is ignored.
+        let mut server = McpServer::new();
+        let mut v = json!(1);
+        for _ in 0..60 {
+            v = json!([v]);
+        }
+        let (_out, is_error) =
+            call_payload(&mut server, "get_state", json!({ "deep": v }));
+        assert!(!is_error);
+    }
+
+    #[test]
+    fn robust_duplicate_keys_last_one_wins() {
+        // serde_json's object builder keeps the LAST of a
+        // duplicated key. Pinned because dispatch inherits
+        // it: the second id is the one echoed, the second
+        // method is the one routed.
+        let mut server = McpServer::new();
+        let msg: Value = serde_json::from_str(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"id\":2,\"method\":\"ping\",\"method\":\"tools/list\"}",
+        )
+        .expect("duplicates parse");
+        let resp = server.handle(&msg).expect("answered");
+        assert_eq!(resp["id"], 2);
+        assert!(
+            resp["result"]["tools"].is_array(),
+            "tools/list (the last method) was routed: {resp}"
+        );
+    }
+
+    #[test]
+    fn robust_huge_strings_are_handled_without_mutation() {
+        let mut server = McpServer::new();
+        // A 1 MiB tool name: unknown, refused as -32602;
+        // the server neither truncates nor chokes on it.
+        let big_name = "a".repeat(1 << 20);
+        let msg = request(
+            1,
+            "tools/call",
+            json!({ "name": big_name.as_str(), "arguments": {} }),
+        );
+        let resp = assert_protocol_error(&mut server, &msg, -32602);
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("unknown tool: "),
+            "the unknown-tool shape holds at any name length"
+        );
+        // A 1 MiB string argument to a name lookup: a
+        // clean miss, no state change.
+        assert_refused_without_mutation(
+            &mut server,
+            "fig3_load_from_library",
+            json!({ "name": big_name }),
+        );
+    }
+
+    #[test]
+    fn robust_notifications_never_reply_and_never_execute() {
+        let mut server = McpServer::new();
+        // Malformed notifications: no id, so no reply —
+        // however broken the rest of the envelope is.
+        assert!(server.handle(&json!({ "method": 42 })).is_none());
+        assert!(server.handle(&json!({})).is_none());
+        // A mutating tools/call WITHOUT an id is a
+        // notification: it must not run. (Both transports
+        // rely on this — the live one answers 202 without
+        // queueing.)
+        let before = state_witness(&server);
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": { "name": "add_frame", "arguments": {} },
+        });
+        assert!(server.handle(&msg).is_none());
+        assert_eq!(
+            state_witness(&server),
+            before,
+            "a notification executes nothing"
+        );
     }
 }
