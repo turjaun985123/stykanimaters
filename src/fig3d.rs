@@ -2644,9 +2644,12 @@ mod mcp_tool_tests {
         // Untouched fields keep their values.
         assert_eq!(out["camera"]["distance"], json!(400.0));
         // Pitch clamps to the orbit clamp, like fig3_orbit.
+        // The camera stores f32, so the reported value is
+        // 89.9f32 widened — compare within f32 tolerance.
         let out = tool_fig3_set_camera(&mut core, &json!({ "pitch": 200.0 }))
             .unwrap();
-        assert_eq!(out["camera"]["pitch"], json!(89.9));
+        let pitch = out["camera"]["pitch"].as_f64().unwrap();
+        assert!((pitch - 89.9).abs() < 1e-3, "pitch clamps to 89.9, got {pitch}");
         // No field at all is a refusal, not a silent no-op.
         assert!(tool_fig3_set_camera(&mut core, &json!({})).is_err());
         // A value beyond f32 range is refused, never stored

@@ -6536,12 +6536,13 @@ mod tests {
         // asset_rename, asset_remove, asset_attach); +5 in
         // Wave 13 for the sprite surface (sprite_list,
         // sprite_add, sprite_remove, sprite_set_key,
-        // sprite_delete_key).
-        assert_eq!(tools.len(), 235);
+        // sprite_delete_key); +78 in Wave 14 (47 core
+        // parity handlers, 31 live-only shell stubs).
+        assert_eq!(tools.len(), 313);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 235, "tool names must be unique");
+        assert_eq!(names.len(), 313, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }

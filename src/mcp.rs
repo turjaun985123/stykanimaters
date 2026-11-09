@@ -3952,36 +3952,43 @@ mod tests {
     }
 
     #[test]
-    fn robust_overflowing_number_literals_degrade_to_null() {
-        // serde_json parses a number beyond f64 range
-        // into Value as Null (Number::from_f64 has no
-        // representation for it). So `1e400` never reaches
-        // a handler AS a number: it arrives as an absent
-        // argument (the helpers count null as missing) or
-        // as a null id — clean refusals, no infinities in
-        // the system. Pinned so a parser upgrade that
-        // changes this is caught here first.
-        let mut server = McpServer::new();
+    fn robust_overflowing_number_literals_are_parse_errors() {
+        // A number literal beyond f64 range never becomes
+        // a Value at all with this serde_json build:
+        // parsing the envelope fails outright ("number out
+        // of range"), so the value reaches neither a
+        // handler nor the id slot — both transports answer
+        // the raw text with -32700 (parse error) before
+        // dispatch. No infinities can enter the system
+        // this way. (Wave 14 D5's first draft of this test
+        // assumed the literal degrades to Null; CI proved
+        // the parse-error behaviour, which is stronger.
+        // Handler-side finiteness for large FINITE values
+        // is pinned separately, e.g. fig3_set_camera
+        // refusing 1e300.) Pinned so a parser change that
+        // alters this is caught here first.
         let text = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\
                     \"params\":{\"name\":\"set_frame\",\"arguments\":{\"frame\":1e400}}}";
-        let msg: Value = serde_json::from_str(text).expect("the envelope parses");
-        assert_eq!(msg["params"]["arguments"]["frame"], Value::Null);
-        let before = state_witness(&server);
-        let resp = server.handle(&msg).expect("answered");
-        assert_eq!(
-            resp["result"]["isError"], true,
-            "the null frame is a tool refusal: {resp}"
+        assert!(
+            serde_json::from_str::<Value>(text).is_err(),
+            "an overflowing argument literal is a parse error, never a value"
         );
-        assert_eq!(state_witness(&server), before, "the playhead never moved");
-        // A 1e400 id degrades to a null id the same way,
-        // and the request is still answered.
-        let msg: Value = serde_json::from_str(
-            "{\"jsonrpc\":\"2.0\",\"id\":1e400,\"method\":\"ping\"}",
+        // The same holds in the id slot.
+        assert!(
+            serde_json::from_str::<Value>(
+                "{\"jsonrpc\":\"2.0\",\"id\":1e400,\"method\":\"ping\"}"
+            )
+            .is_err(),
+            "an overflowing id literal is a parse error, never a value"
+        );
+        // And a finite literal just inside f64 range
+        // still parses as a number — the boundary is the
+        // range, not the exponent's size.
+        let ok: Value = serde_json::from_str(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":{\"x\":1e308}}",
         )
-        .expect("the envelope parses");
-        let resp = server.handle(&msg).expect("answered");
-        assert_eq!(resp["id"], Value::Null);
-        assert_eq!(resp["result"], json!({}));
+        .expect("a finite 1e308 parses");
+        assert!(ok["params"]["x"].is_number());
     }
 
     #[test]

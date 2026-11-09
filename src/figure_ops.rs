@@ -1802,7 +1802,10 @@ mod tests {
 
         let out = tool_figure_step_opacity(&mut core, &json!({ "figure": 0, "delta": -0.1 }))
             .expect("step succeeds");
-        assert_eq!(out["opacity"], json!(0.9));
+        // Opacity is stored f32: 1.0f32 - 0.1f32 widens to
+        // 0.899999976… — compare within f32 tolerance.
+        let opacity = out["opacity"].as_f64().unwrap();
+        assert!((opacity - 0.9).abs() < 1e-6, "opacity steps to 0.9, got {opacity}");
         assert_eq!(core.undo_depth(), depth, "step takes no snapshot");
         assert_eq!(
             core.edits_since_autosave(),
