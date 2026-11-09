@@ -1306,9 +1306,12 @@ pub fn tool_get_node(core: &mut EditorCore, args: &Value) -> Result<Value, Strin
     let Some(f) = core.project.figures.get(fi) else {
         return Err(format!("no figure at index {fi}"));
     };
-    let Some(node) = f.def.nodes.get(ni) else {
+    // Owned copy: the style read below takes `core` mutably,
+    // so the reply's node facts are extracted up front.
+    let Some(node) = f.def.nodes.get(ni).cloned() else {
         return Err(format!("figure {fi} has no node at index {ni}"));
     };
+    let node = &node;
     if frame >= core.project.frames.len() {
         return Err(format!(
             "frame index {frame} out of range (project has {} frame(s))",

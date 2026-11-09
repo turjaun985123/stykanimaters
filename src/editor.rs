@@ -5025,7 +5025,12 @@ impl EditorCore {
             // figure-wide (the normal case, unchanged),
             // the last entry otherwise.
             let row = &mut self.project.frames[f].poses;
-            if let Some(slot) = row.get_mut(idx).or_else(|| row.last_mut()) {
+            let slot = if idx < row.len() {
+                row.get_mut(idx)
+            } else {
+                row.last_mut()
+            };
+            if let Some(slot) = slot {
                 *slot = pose;
             }
         }
