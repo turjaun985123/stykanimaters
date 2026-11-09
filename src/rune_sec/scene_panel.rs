@@ -137,23 +137,21 @@
 //! Phase L colour-core chip construction. Keys, handlers,
 //! status strings and value formatters are unchanged.
 //!
-//! Placed-media readout (Wave 12, B5): the panel ends with
-//! a read-only "Placed media" section ([`media_readout`] +
-//! [`media_note`]). This panel is NOT the sprite surface —
-//! no sprite surface exists in the shell: there is no
-//! `Section` for sprites/assets (workspaces.rs), no engine
-//! op creates, moves or deletes a free-floating
-//! `SpriteInstance` outside the `.nodes` importer
-//! (nodes_anim.rs), and the Rune stage draws no sprite
-//! instances at all (stage_text.rs covers text only;
-//! sprites composite only in exports, via
-//! `media::composite_media`). A project can therefore
-//! carry sprites that change its exports while looking
-//! exactly like a project without any. The readout makes
-//! that state visible and says plainly that sprites are
-//! export-only today. It is deliberately read-only — no
-//! buttons, nothing that pretends to edit — until the
-//! engine ops exist (spec in the Wave 12 B5 report).
+//! Placed-media readout (Wave 12, B5; Wave 13, A7): the
+//! panel ends with a read-only "Placed media" section
+//! ([`media_readout`] + [`media_note`]). In Wave 12 no
+//! sprite surface existed in the shell, so the readout
+//! was the only place placed sprites were visible at
+//! all, and its note warned that they rendered in
+//! exports only and could not be edited. Wave 13 lands
+//! the real surface — engine ops in `sprite_ops.rs`
+//! (A1) and the Sprites panel (sprites_panel.rs, A3) —
+//! so this section is now the entry point: the counts
+//! stay, and the note points to the Sprites panel
+//! instead of claiming sprites are uneditable. The
+//! section remains deliberately read-only — no buttons,
+//! nothing that pretends to edit here; editing lives in
+//! the Sprites panel.
 
 use rune::tok::{self, type_, Theme};
 use rune::{col, el, row, text, Drag, El, Phase, Tx};
@@ -255,6 +253,10 @@ pub fn weather_summary(weather: Option<Weather>) -> String {
 /// off applies the kind's preset. Status strings are the GPUI
 /// listeners' own.
 pub fn set_weather_kind(core: &mut EditorCore, kind: Option<WeatherKind>) {
+    // Wave 13 (census E3): no undo snapshots (the module's
+    // documented weather discipline), but a real change
+    // counts for dirty/autosave via the seam.
+    let before = core.project.weather;
     match kind {
         None => {
             core.project.weather = None;
@@ -278,6 +280,9 @@ pub fn set_weather_kind(core: &mut EditorCore, kind: Option<WeatherKind>) {
             .into();
         }
     }
+    if core.project.weather != before {
+        core.mark_dirty();
+    }
 }
 
 /// The Scene group's old `weather` button, truthfully: cycle
@@ -299,7 +304,11 @@ pub fn cycle_weather(core: &mut EditorCore) {
             }
         },
     };
-    core.project.weather = next;
+    // Wave 13 (census E3): mark on a real change only.
+    if core.project.weather != next {
+        core.project.weather = next;
+        core.mark_dirty();
+    }
     core.status = label.into();
 }
 
@@ -309,8 +318,14 @@ pub fn cycle_weather(core: &mut EditorCore) {
 pub fn step_weather_amount(core: &mut EditorCore, delta: f32) {
     match core.project.weather {
         Some(mut w) => {
-            w.amount = (w.amount + delta).clamp(0.0, 200.0);
-            core.project.weather = Some(w);
+            // Wave 13 (census E3): a step clamped to the
+            // stored value marks nothing.
+            let stepped = (w.amount + delta).clamp(0.0, 200.0);
+            if stepped != w.amount {
+                w.amount = stepped;
+                core.project.weather = Some(w);
+                core.mark_dirty();
+            }
             core.status = format!("Weather amount: {:.0}.", w.amount);
         }
         None => core.status = "Weather is off — pick a kind first.".into(),
@@ -324,8 +339,13 @@ pub fn step_weather_amount(core: &mut EditorCore, delta: f32) {
 pub fn step_weather_wind(core: &mut EditorCore, delta: f32) {
     match core.project.weather {
         Some(mut w) => {
-            w.wind = (w.wind + delta).clamp(-200.0, 200.0);
-            core.project.weather = Some(w);
+            // Wave 13 (census E3): as `step_weather_amount`.
+            let stepped = (w.wind + delta).clamp(-200.0, 200.0);
+            if stepped != w.wind {
+                w.wind = stepped;
+                core.project.weather = Some(w);
+                core.mark_dirty();
+            }
             core.status = format!("Weather wind: {}.", w.wind);
         }
         None => core.status = "Weather is off — pick a kind first.".into(),
@@ -430,6 +450,16 @@ fn amount_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
                 }
             } else if core.project.weather.is_some() {
                 set_weather_amount(core, amount_at(d.x, d.w), true);
+                // Wave 13 (census E4): one counted edit per
+                // gesture — the setters never mark (a drag
+                // fires them per Move); at Up, a final value
+                // that differs from the press value stashed
+                // in `d.data` marks exactly once. A cancelled
+                // drag restored the press value above and
+                // marks nothing.
+                if core.project.weather.map(|w| w.amount) != Some(d.data) {
+                    core.mark_dirty();
+                }
             }
         }
     }
@@ -462,6 +492,11 @@ fn wind_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
                 }
             } else if core.project.weather.is_some() {
                 set_weather_wind(core, wind_at(d.x, d.w), true);
+                // Wave 13 (census E4): as `amount_drag` —
+                // one mark per gesture, at Up.
+                if core.project.weather.map(|w| w.wind) != Some(d.data) {
+                    core.mark_dirty();
+                }
             }
         }
     }
@@ -471,8 +506,16 @@ fn wind_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
 /// each axis moves by its delta and clamps to 200..=4000,
 /// reporting the new size in the status line.
 pub fn adjust_stage(core: &mut EditorCore, dw: f32, dh: f32) {
+    // Wave 13 (census E5): the settings-tweak family —
+    // no undo step, but a step that actually moves an
+    // axis counts for dirty/autosave; a fully-clamped
+    // step marks nothing.
+    let before = core.project.stage;
     core.project.stage[0] = (core.project.stage[0] + dw).clamp(200.0, 4000.0);
     core.project.stage[1] = (core.project.stage[1] + dh).clamp(200.0, 4000.0);
+    if core.project.stage != before {
+        core.mark_dirty();
+    }
     core.status = format!(
         "Stage size: {} x {}.",
         core.project.stage[0] as i32, core.project.stage[1] as i32
@@ -506,7 +549,11 @@ pub fn stage_matches_preset(stage: [f32; 2], w: f32, h: f32) -> bool {
 /// the project field (the stepper pattern — no op exists)
 /// and report it with [`adjust_stage`]'s status string.
 pub fn set_stage_preset(core: &mut EditorCore, w: f32, h: f32) {
-    core.project.stage = [w, h];
+    // Wave 13 (census E5): mark only when the size differs.
+    if core.project.stage != [w, h] {
+        core.project.stage = [w, h];
+        core.mark_dirty();
+    }
     core.status = format!("Stage size: {} x {}.", w as i32, h as i32);
 }
 
@@ -573,9 +620,10 @@ pub fn stage_readout(core: &EditorCore) -> String {
 /// table and sprite list — `"{s} sprite(s) placed ·
 /// {a} image asset(s)."`, or the empty form when both are
 /// zero. Pure: reads `project.sprites` / `project.assets`,
-/// writes nothing. The counts are the whole truth the
-/// shell can currently show: assets also enter the table
-/// via node media (`EditorCore::attach_image_to_node`),
+/// writes nothing. The counts are this section's whole
+/// job; the instances themselves are listed and edited in
+/// the Sprites panel (Wave 13). Assets also enter the
+/// table via node media (`EditorCore::attach_image_to_node`),
 /// so assets can be nonzero with zero sprites placed.
 pub fn media_readout(core: &EditorCore) -> String {
     let sprites = core.project.sprites.len();
@@ -592,20 +640,23 @@ pub fn media_readout(core: &EditorCore) -> String {
     )
 }
 
-/// The placed-media honesty note (Wave 12, B5): present
-/// only when the project carries at least one free-floating
-/// sprite. Sprites composite into exports
-/// (`media::composite_media`) but the Rune stage does not
-/// draw them and no shell control can select, move or
-/// delete them, so a project with sprites must not look
-/// identical to one without — the note says exactly where
-/// they show up and what cannot be done with them yet.
-/// `None` when there is nothing to warn about.
+/// The placed-media pointer note (Wave 12, B5; Wave 13,
+/// A7): present only when the project carries at least
+/// one free-floating sprite. In Wave 12 this note warned
+/// that sprites render in exports only and cannot be
+/// moved or edited in the app; Wave 13 lands the Sprites
+/// panel (sprites_panel.rs, A3), where instances are
+/// added, selected, deleted and keyframed (position,
+/// rotation, scale), so the note now points there — this
+/// readout is the entry point, the panel is the editor.
+/// `None` when the project carries no sprites to point at.
 pub fn media_note(core: &EditorCore) -> Option<&'static str> {
     if core.project.sprites.is_empty() {
         None
     } else {
-        Some("Sprites render in exports only — they can't be moved or edited in the app yet.")
+        Some(
+            "Sprites are edited in the Sprites panel — move, rotate, scale and keyframe them there.",
+        )
     }
 }
 
@@ -692,7 +743,17 @@ pub const BACKGROUND_SWATCHES: [(&str, u32); 16] = [
 /// Background swatch handler body: set the stage background
 /// colour and report it in the status line.
 pub fn set_background(core: &mut EditorCore, rgb: u32) {
-    core.project.background = rgb & 0xFF_FFFF;
+    // Wave 13 (census E7): the appearance-tweak family —
+    // no undo step in the panel (the MCP sibling
+    // snapshots deliberately; the asymmetry is the
+    // census's recorded call), but a real change counts
+    // for dirty/autosave. This one site covers swatches,
+    // presets and `step_background_channel`.
+    let rgb = rgb & 0xFF_FFFF;
+    if core.project.background != rgb {
+        core.project.background = rgb;
+        core.mark_dirty();
+    }
     core.status = format!("Background: #{:06X}.", core.project.background);
 }
 
@@ -1030,10 +1091,10 @@ pub fn scene_panel(s: &State, t: &Theme) -> El {
 
     // Placed-media readout (Wave 12, B5): a read-only
     // section at the panel's foot — the counts line, and
-    // the honesty note only when sprites are present (see
-    // `media_note`). No controls: nothing in the shell can
-    // edit sprites yet, and this section must not pretend
-    // otherwise.
+    // the pointer note only when sprites are present (see
+    // `media_note`). No controls here by design: this
+    // section is the entry point, and editing lives in
+    // the Sprites panel (Wave 13, A3).
     let mut media_section = col()
         .gap(4.0)
         .child(design::section_label("Placed media", t))
@@ -1835,22 +1896,26 @@ mod tests {
         );
         // Assets without sprites are real state too (node
         // media imports land in the table): counted, and no
-        // sprite warning is raised for them.
+        // pointer note is raised for them.
         let core = core_with_media(2, 0);
         assert_eq!(media_readout(&core), "0 sprites placed · 2 image assets.");
         assert_eq!(media_note(&core), None);
     }
 
     #[test]
-    fn media_note_warns_only_when_sprites_are_present() {
-        // The note exists because sprites change exports
-        // while staying invisible on the stage — with a
-        // sprite placed it must be present and say so.
+    fn media_note_points_to_the_sprites_panel_only_when_sprites_are_present() {
+        // The note is the readout's entry-point pointer:
+        // with a sprite placed it must be present and name
+        // the Sprites panel (Wave 13, A3) as the place
+        // sprites are edited — the Wave 12 claim that they
+        // render in exports only and cannot be moved or
+        // edited is gone. (The no-sprite cases asserting
+        // `None` live in the two readout tests above.)
         let core = core_with_media(1, 1);
         assert_eq!(
             media_note(&core),
             Some(
-                "Sprites render in exports only — they can't be moved or edited in the app yet."
+                "Sprites are edited in the Sprites panel — move, rotate, scale and keyframe them there."
             )
         );
     }

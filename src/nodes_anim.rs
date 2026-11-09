@@ -11,8 +11,9 @@
 //! Both containers are parsed byte-exactly (same strictness as the
 //! original: canonical flags, finite floats, validated references,
 //! exact EOF). `.stknds` export is also provided
-//! (`export_nodes_animation`, 431/117 — figures, frames, poses and
-//! durations; sprites/texts/joins/clips written as absent). Parsed
+//! (`export_nodes_animation`, 431/117 — figures, frames, poses,
+//! durations and model sprite tracks; texts/joins/clips written as
+//! absent). Parsed
 //! projects are mapped onto the model: figure instances become
 //! project figure slots keyed by instance id, pose records become
 //! model poses with the `layoutFigure` accumulation rules, and
@@ -2828,7 +2829,13 @@ impl BeWriter {
 /// header's auto-tween flag is written false: with it set, the
 /// importer adds tween ticks to every non-final tweened frame,
 /// which would corrupt the stored durations.
-fn write_project_header(w: &mut BeWriter, fps: i32, figure_count: usize) {
+fn write_project_header(
+    w: &mut BeWriter,
+    fps: i32,
+    figure_count: usize,
+    sprite_library_count: usize,
+    sprite_track_count: usize,
+) {
     w.flag(false); // editorFlagD (build >= 16)
     w.flag(false); // editorFlagE (v >= 244)
     w.string(""); // projectCredit
@@ -2843,8 +2850,10 @@ fn write_project_header(w: &mut BeWriter, fps: i32, figure_count: usize) {
     w.flag(false); // timelineFlagC
     w.i32(0); // selectedFrame
     w.i32(1); // nextTextId
-    w.i32(figure_count as i32 + 1); // nextInstanceId
-    w.i32(figure_count as i32); // nextLibraryId
+    // Instance ids written by the exporter run 1..=figure_count
+    // for figures, then one per exported sprite track.
+    w.i32((figure_count + sprite_track_count) as i32 + 1); // nextInstanceId
+    w.i32((figure_count + sprite_library_count) as i32); // nextLibraryId
     w.i32(0); // fontUsage count (v >= 400)
     w.i32(0); // editor list 1
     w.i32(0); // editor list 2
@@ -3004,6 +3013,181 @@ fn write_trailer(w: &mut BeWriter) {
     w.i32(0); // editorPairs count
 }
 
+/// One project asset decoded for the `.stknds` sprite library.
+/// The library stores raw pixels; the model stores PNGs, so
+/// export decodes the PNG back to RGBA rows (the layout
+/// `encode_sprite_png` produced on import — a sprite that came
+/// from this format therefore returns with identical pixels).
+struct ExportSpriteImage {
+    name: String,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+/// The sprite half of an `.stknds` export, planned up front:
+/// the library images to write (project assets referenced by
+/// at least one exportable sprite track, in asset order), the
+/// project-asset → library-index map, and the per-track
+/// instance id to write (tracks are re-ided after the figure
+/// slots, exactly as the importer keys figure slots by id).
+struct SpriteExportPlan {
+    library: Vec<ExportSpriteImage>,
+    asset_map: Vec<Option<usize>>,
+    track_ids: Vec<Option<i32>>,
+}
+
+/// The key a sprite track contributes to main frame `frame`,
+/// if it has one the format can carry: the `.stknds` timeline
+/// is a sequence of whole frames, so a key must sit exactly on
+/// an integer frame inside the timeline and carry finite
+/// values (the reader rejects non-finite floats). A track
+/// with duplicate keys on one frame contributes the last one,
+/// mirroring the importer's same-frame replacement rule.
+fn sprite_key_for_frame(track: &SpriteInstance, frame: usize) -> Option<InstanceKey> {
+    track.keys.iter().rev().copied().find(|k| {
+        k.frame.is_finite()
+            && k.frame >= 0.0
+            && k.frame.fract() == 0.0
+            && k.frame <= usize::MAX as f32
+            && k.frame as usize == frame
+            && k.x.is_finite()
+            && k.y.is_finite()
+            && k.scale.is_finite()
+            && k.angle.is_finite()
+    })
+}
+
+/// Decode one project asset's PNG for the sprite library.
+/// `None` when the bytes are not a decodable image, or the
+/// image exceeds the library's own limits (the reader caps
+/// each dimension at 32768 and the pixel count at 64M, and
+/// names at the string reader's 1M count) — such an asset has
+/// no valid library entry, so its tracks are omitted rather
+/// than written as a file the importer would reject.
+fn decode_export_sprite_image(asset: &ImageAsset) -> Option<ExportSpriteImage> {
+    if asset.name.len() > 1024 * 1024 {
+        return None;
+    }
+    let reader = image::ImageReader::new(std::io::Cursor::new(&asset.png[..]))
+        .with_guessed_format()
+        .ok()?;
+    let (width, height) = reader.into_dimensions().ok()?;
+    if width == 0 || height == 0 || width > 32768 || height > 32768 {
+        return None;
+    }
+    if (width as u64) * (height as u64) > 64_000_000 {
+        return None;
+    }
+    let rgba = image::load_from_memory(&asset.png).ok()?.to_rgba8();
+    if rgba.dimensions() != (width, height) {
+        return None;
+    }
+    let pixels = rgba.into_raw();
+    if pixels.len() > MAX_PAYLOAD {
+        return None;
+    }
+    Some(ExportSpriteImage {
+        name: asset.name.clone(),
+        width,
+        height,
+        pixels,
+    })
+}
+
+/// Plan the sprite export: which assets enter the library and
+/// which tracks get instance ids. A track is exportable when
+/// its asset is in range and enters the library, and it has at
+/// least one key [`sprite_key_for_frame`] accepts.
+fn sprite_export_plan(project: &Project) -> SpriteExportPlan {
+    let mut referenced = vec![false; project.assets.len()];
+    let mut has_key = vec![false; project.sprites.len()];
+    for (ti, track) in project.sprites.iter().enumerate() {
+        if track.asset >= project.assets.len() {
+            continue;
+        }
+        if (0..project.frames.len()).any(|f| sprite_key_for_frame(track, f).is_some()) {
+            has_key[ti] = true;
+            referenced[track.asset] = true;
+        }
+    }
+    let mut library = Vec::new();
+    let mut asset_map = vec![None; project.assets.len()];
+    for (ai, asset) in project.assets.iter().enumerate() {
+        if !referenced[ai] || library.len() >= MAX_ASSETS {
+            continue;
+        }
+        if let Some(img) = decode_export_sprite_image(asset) {
+            asset_map[ai] = Some(library.len());
+            library.push(img);
+        }
+    }
+    let mut track_ids = vec![None; project.sprites.len()];
+    let mut next_id = project.figures.len() as i64 + 1;
+    for (ti, track) in project.sprites.iter().enumerate() {
+        if !has_key[ti] || asset_map[track.asset].is_none() || next_id > i32::MAX as i64 {
+            continue;
+        }
+        track_ids[ti] = Some(next_id as i32);
+        next_id += 1;
+    }
+    SpriteExportPlan {
+        library,
+        asset_map,
+        track_ids,
+    }
+}
+
+/// Sprite library image body at 431/117 (field order per
+/// `read_sprite_image_body`). Exported images are always RGBA;
+/// the pivot is the centre, which is where the model anchors
+/// sprite images.
+fn write_sprite_image_body(w: &mut BeWriter, img: &ExportSpriteImage) {
+    w.flag(true); // hasAlpha (pixels are RGBA)
+    w.flag(false); // flag1
+    w.f32(0.5); // pivotX
+    w.f32(0.5); // pivotY
+    w.f32(0.0); // field2
+    w.f32(0.0); // field3
+    w.flag(true); // samplingFlag (build >= 9)
+    w.i32(img.width as i32);
+    w.i32(img.height as i32);
+    w.i32(img.pixels.len() as i32); // pixelBytes
+    w.v.extend_from_slice(&img.pixels);
+}
+
+/// One type-2 (sprite image) instance record at 431/117
+/// (field order per `read_instance`'s sprite branch), carrying
+/// one model key: position and rotation verbatim, uniform
+/// scale `|key.scale|` on both axes (the model stores no
+/// second axis — the importer likewise keeps only |scaleX|),
+/// and every unmodelled field at its neutral default.
+fn write_sprite_instance(w: &mut BeWriter, library_index: usize, id: i32, key: &InstanceKey) {
+    w.i32(2); // instance type: sprite image
+    w.i32(library_index as i32); // asset index
+    w.i32(id); // instance id (importer track key)
+    write_style(w);
+    w.flag(false); // useParentFilters
+    w.f32(1.0); // scaleXYRatio (uniform scale: no second axis)
+    w.f32(key.scale.abs()); // scaleX
+    w.f32(key.scale.abs()); // scaleY
+    for _ in 0..8 {
+        w.f32(0.0); // corner distortions (build >= 110)
+    }
+    w.f32(0.5); // pivotX (centre anchor, as the model)
+    w.f32(0.5); // pivotY
+    w.f32(key.x);
+    w.f32(key.y);
+    w.f32(key.angle); // rotation
+    w.flag(false); // flipX (not modelled)
+    w.flag(false); // flipY (not modelled)
+    w.flag(false); // persistent
+    w.i8(0); // tweenMode (build >= 78)
+    w.flag(true); // visibleInOnionSkin (build >= 15)
+    w.i32(0); // lockState
+    w.i32(0); // smartStretchState (0: no parameter block)
+}
+
 /// Export the project as a Stick Nodes `.stknds` file: version
 /// 431 / build 117 (the newest layout the original's decoder
 /// knows — `KNOWN_PROJECT_LAYOUT` tops out at exactly this
@@ -3021,12 +3205,29 @@ fn write_trailer(w: &mut BeWriter) {
 /// encoded exactly for integer values via the settings delay
 /// (see `write_main_settings`).
 ///
+/// **Sprites are written** (Wave 13 A5): the assets referenced
+/// by sprite tracks are decoded back to raw pixels and written
+/// as sprite-library images, and every track key that sits on
+/// an integer frame inside the timeline is written as a type-2
+/// instance on that frame (see `sprite_export_plan`). A
+/// reimport therefore restores the model tracks — asset and
+/// keys — but not the native detail the importer already
+/// collapsed: group instances return as plain image instances
+/// of their resolved member, and flips, the second scale axis,
+/// pivots, corner distortions and smart-stretch parameters
+/// have no model source and are written at neutral defaults.
+/// Keys the whole-frame grammar cannot address (fractional,
+/// out-of-timeline or non-finite) and assets it cannot hold
+/// (undecodable or over its size limits) are omitted — the
+/// exporter returns bytes, not a `Result`, so it cannot
+/// report them.
+///
 /// Written as absent, because the model-to-format mapping for
 /// them is either unmodelled by the importer or has no faithful
 /// source in a `Project` (each is a real loss on reimport):
 ///
-/// * **Sprites and texts** — the libraries and per-frame counts
-///   are written empty, so sprite/text tracks are dropped.
+/// * **Texts** — the per-frame counts are written empty, so
+///   text tracks are dropped.
 /// * **Joins** — written as none. (Poses that were join-baked
 ///   at import are ordinary poses by now and survive as such.)
 /// * **Movieclips** — the clip library is empty; a figure with
@@ -3052,11 +3253,19 @@ fn write_trailer(w: &mut BeWriter) {
 pub fn export_nodes_animation(project: &Project) -> Vec<u8> {
     let fps = project.fps.round().clamp(1.0, 1000.0);
     let layout = compile_pose_layout(431, 117, false);
+    let sprites = sprite_export_plan(project);
+    let sprite_track_count = sprites.track_ids.iter().flatten().count();
     let mut w = BeWriter { v: Vec::new() };
     w.i32(431); // version
     w.i32(117); // build
     w.string(&project.name);
-    write_project_header(&mut w, fps as i32, project.figures.len());
+    write_project_header(
+        &mut w,
+        fps as i32,
+        project.figures.len(),
+        sprites.library.len(),
+        sprite_track_count,
+    );
     // Figure library.
     w.i32(project.figures.len() as i32);
     for fig in &project.figures {
@@ -3072,7 +3281,14 @@ pub fn export_nodes_animation(project: &Project) -> Vec<u8> {
         w.v.extend_from_slice(&crate::nodes::export_nodes_figure(&def, &fig.name));
     }
     w.i32(0); // sound library (v >= 160): none
-    w.i32(0); // sprite library (v >= 400): none
+    // Sprite library (v >= 400): the images the exported
+    // sprite tracks reference, in project-asset order.
+    w.i32(sprites.library.len() as i32);
+    for img in &sprites.library {
+        w.v.push(0); // type: image
+        w.string(&img.name);
+        write_sprite_image_body(&mut w, img);
+    }
     w.i32(0); // movieclip library (v >= 300): none
     // Pose records are stored per node in the embedded figure's
     // scan order (tree preorder), which the per-figure traversal
@@ -3086,7 +3302,22 @@ pub fn export_nodes_animation(project: &Project) -> Vec<u8> {
     w.i32(project.frames.len() as i32);
     for (fi, frame) in project.frames.iter().enumerate() {
         write_main_settings(&mut w, project.background, frame.duration, fps);
-        w.i32(project.figures.len() as i32); // instance count
+        // This frame's sprite appearances: one type-2 record
+        // per exported track holding a key on exactly this
+        // frame, in track order (the order the importer keys
+        // first appearances by).
+        let sprite_here: Vec<(usize, i32, InstanceKey)> = project
+            .sprites
+            .iter()
+            .enumerate()
+            .filter_map(|(ti, track)| {
+                let id = sprites.track_ids[ti]?;
+                let key = sprite_key_for_frame(track, fi)?;
+                let library_index = sprites.asset_map[track.asset]?;
+                Some((library_index, id, key))
+            })
+            .collect();
+        w.i32((project.figures.len() + sprite_here.len()) as i32); // instance count
         for (fi, fig) in project.figures.iter().enumerate() {
             let pose = frame
                 .poses
@@ -3133,6 +3364,9 @@ pub fn export_nodes_animation(project: &Project) -> Vec<u8> {
                     node.thickness.round() as i32,
                 );
             }
+        }
+        for (library_index, id, key) in &sprite_here {
+            write_sprite_instance(&mut w, *library_index, *id, key);
         }
         w.i32(0); // joins: none
         w.i32(0); // texts: none
@@ -3971,6 +4205,81 @@ mod tests {
         let t1 = &project.texts[1];
         assert_eq!(t1.keys.len(), 1);
         key_eq(&t1.keys[0], 0.0, 267.2, 560.0, 2.0, 0.0);
+    }
+
+    /// Wave 13 A5 verdict, pinned: the `.stknds` grammar DOES
+    /// carry sprite instances — the importer above proves the
+    /// library + type-2/3 instance records exist — so the
+    /// exporter writes model sprite tracks back (it previously
+    /// wrote the sprite library as empty and dropped every
+    /// track). What round-trips is the MODEL: the asset table
+    /// entry (name and pixels; the PNG bytes too, both sides
+    /// being `encode_sprite_png` over the same RGBA rows) and
+    /// each track's keys. What does NOT round-trip is native
+    /// detail the importer already collapsed before export
+    /// ever sees it: the group instance below returns as a
+    /// plain image instance of its resolved member. Texts
+    /// remain dropped (the exporter's documented stance).
+    #[test]
+    fn stknds_sprite_tracks_roundtrip_through_export() {
+        let project = import_nodes_animation(&hand_packed_project_with_sprites_and_text())
+            .expect("hand-packed project imports");
+        assert_eq!(project.sprites.len(), 2);
+        let back = import_nodes_animation(&export_nodes_animation(&project))
+            .expect("exported project re-imports");
+        // The asset survives: same entry, same name, same PNG
+        // bytes (identical pixels through the shared encoder).
+        assert_eq!(back.assets.len(), 1);
+        assert_eq!(back.assets, project.assets);
+        // Both tracks survive with their keys exact: the
+        // two-key image track, and the group track — now an
+        // image track of the same resolved member, same key.
+        assert_eq!(back.sprites.len(), 2);
+        assert_eq!(back.sprites[0].asset, 0);
+        assert_eq!(back.sprites[0].keys.len(), 2);
+        key_eq(&back.sprites[0].keys[0], 0.0, 400.0, 300.0, 2.0, 0.0);
+        key_eq(&back.sprites[0].keys[1], 1.0, 440.0, 300.0, 4.0, 90.0);
+        assert_eq!(back.sprites[1].asset, 0);
+        assert_eq!(back.sprites[1].keys.len(), 1);
+        key_eq(&back.sprites[1].keys[0], 0.0, 100.0, 100.0, 1.0, 45.0);
+        // The boundary of the fix: texts are still written as
+        // absent, so they do not come back.
+        assert!(back.texts.is_empty());
+    }
+
+    /// Wave 13 A5, the format-limit half of the verdict: the
+    /// `.stknds` timeline addresses whole frames only, so a
+    /// sprite key on a fractional frame — or past the end of
+    /// the timeline — has no record to ride on and is omitted
+    /// on export (the exporter returns bytes, not a `Result`,
+    /// so the omission is silent; it is pinned here so it is
+    /// at least a known, tested limit rather than a surprise).
+    #[test]
+    fn stknds_sprite_export_omits_fractional_and_out_of_timeline_keys() {
+        let mut project = import_nodes_animation(&hand_packed_project_with_sprites_and_text())
+            .expect("hand-packed project imports");
+        project.sprites[0].keys.push(InstanceKey {
+            frame: 0.5,
+            x: 1.0,
+            y: 2.0,
+            scale: 1.0,
+            angle: 0.0,
+        });
+        project.sprites[0].keys.push(InstanceKey {
+            frame: 9.0,
+            x: 3.0,
+            y: 4.0,
+            scale: 1.0,
+            angle: 0.0,
+        });
+        let back = import_nodes_animation(&export_nodes_animation(&project))
+            .expect("exported project re-imports");
+        assert_eq!(back.sprites.len(), 2);
+        let frames: Vec<f32> = back.sprites[0].keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, vec![0.0, 1.0]);
+        // The surviving keys are the originals, unmoved.
+        key_eq(&back.sprites[0].keys[0], 0.0, 400.0, 300.0, 2.0, 0.0);
+        key_eq(&back.sprites[0].keys[1], 1.0, 440.0, 300.0, 4.0, 90.0);
     }
 
     #[test]

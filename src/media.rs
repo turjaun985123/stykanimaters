@@ -45,6 +45,15 @@
 //! the stored size; removal refuses while anything references
 //! the asset, and when it does remove, references to higher
 //! indices are remapped down by one inside the same undo step.
+//!
+//! Wave 13 adds the sprite-instance handlers beside them
+//! (`tool_sprite_list`, `tool_sprite_add`, `tool_sprite_remove`,
+//! `tool_sprite_set_key`, `tool_sprite_delete_key`): thin MCP
+//! shells over the `sprite_ops` core ops, which own the
+//! mutation, the single snapshot per op and the status line;
+//! the handlers own argument validation, refusal strings and
+//! the reply shapes, and verify the op's effect from the
+//! resulting state before reporting success.
 
 use crate::editor::EditorCore;
 use crate::model::{evaluate, ImageAsset, InstanceKey, Project, SegmentMedia, V2};
@@ -625,6 +634,263 @@ pub fn tool_asset_attach(core: &mut EditorCore, args: &Value) -> Result<Value, S
         "figure": fi,
         "node": ni,
         "asset": asset,
+        "status": core.status,
+    }))
+}
+
+// ---------------------------------------------------------------------
+// Sprite-instance MCP handlers (Wave 13)
+//
+// `Project.sprites` had no MCP surface before this wave either:
+// instances entered only via .nodes import, and the asset
+// removal census could count sprite references to an asset but
+// no tool could create, move or delete an instance. These five
+// handlers drive the `sprite_ops` core ops (`add_sprite`,
+// `remove_sprite`, `set_sprite_key`, `delete_sprite_key`),
+// which own the mutation, exactly one snapshot per successful
+// op and the status line; an op refusal is status-only and
+// spends no snapshot. The handlers validate every argument up
+// front (so a bad call never reaches the op), then verify the
+// op's effect from the resulting project state — an op that
+// refused despite valid arguments surfaces as its status line,
+// never as a false success.
+// ---------------------------------------------------------------------
+
+/// Check a sprite instance index against the table, with the
+/// same message shape as `ast_check_asset`.
+fn ast_check_sprite(core: &EditorCore, index: usize) -> Result<(), String> {
+    let n = core.project.sprites.len();
+    if index >= n {
+        return Err(format!(
+            "sprite index {index} out of range (project has {n} sprite instance(s))"
+        ));
+    }
+    Ok(())
+}
+
+/// A required finite f32 argument. JSON numbers arrive as f64;
+/// a value that is not a number, or that overflows f32 to an
+/// infinity on the cast, is refused — the Wave 11 finiteness
+/// contract the registry pins.
+fn ast_req_f32(args: &Value, key: &str) -> Result<f32, String> {
+    match ast_get(args, key) {
+        Some(v) => ast_as_f32(v, key),
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+/// An optional finite f32 argument (same refusal rules as
+/// [`ast_req_f32`] when present).
+fn ast_opt_f32(args: &Value, key: &str) -> Result<Option<f32>, String> {
+    match ast_get(args, key) {
+        Some(v) => ast_as_f32(v, key).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn ast_as_f32(v: &Value, key: &str) -> Result<f32, String> {
+    let n = v
+        .as_f64()
+        .ok_or_else(|| format!("argument '{key}' must be a number"))?;
+    let f = n as f32;
+    if !f.is_finite() {
+        return Err(format!("argument '{key}' must be a finite number"));
+    }
+    Ok(f)
+}
+
+fn key_json(key: &InstanceKey) -> Value {
+    json!({
+        "frame": key.frame,
+        "x": key.x,
+        "y": key.y,
+        "scale": key.scale,
+        "angle": key.angle,
+    })
+}
+
+fn sprite_json(project: &Project, index: usize, inst: &crate::model::SpriteInstance) -> Value {
+    json!({
+        "index": index,
+        "asset": inst.asset,
+        "asset_name": project.assets.get(inst.asset).map(|a| a.name.as_str()),
+        "key_count": inst.keys.len(),
+        "keys": inst.keys.iter().map(key_json).collect::<Vec<_>>(),
+    })
+}
+
+/// MCP handler: list the project's sprite instances — index,
+/// asset index and name (null when the instance's asset index
+/// dangles), and every keyframe. Read-only; no undo step.
+pub fn tool_sprite_list(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let sprites: Vec<Value> = core
+        .project
+        .sprites
+        .iter()
+        .enumerate()
+        .map(|(i, s)| sprite_json(&core.project, i, s))
+        .collect();
+    Ok(json!({
+        "ok": true,
+        "count": sprites.len(),
+        "sprites": sprites,
+    }))
+}
+
+/// MCP handler: add a sprite instance for asset `asset` — the
+/// `add_sprite` core op places it at the stage centre with a
+/// single key at frame 0 (scale 1, no rotation). One undo step
+/// (inside the op).
+pub fn tool_sprite_add(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let asset = ast_req_usize(args, "asset")?;
+    ast_check_asset(core, asset)?;
+    let before = core.project.sprites.len();
+    let _ = core.add_sprite(asset);
+    let added = core.project.sprites.get(before);
+    match added {
+        Some(inst) if inst.asset == asset && core.project.sprites.len() == before + 1 => {
+            Ok(json!({
+                "ok": true,
+                "index": before,
+                "sprite": sprite_json(&core.project, before, inst),
+                "status": core.status,
+            }))
+        }
+        _ => Err(core.status.clone()),
+    }
+}
+
+/// MCP handler: remove sprite instance `sprite` from the
+/// project. Later instances shift down one index (the
+/// instance table's own rule — nothing references an instance
+/// by index, so no remapping is owed). One undo step (inside
+/// the op).
+pub fn tool_sprite_remove(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = ast_req_usize(args, "sprite")?;
+    ast_check_sprite(core, index)?;
+    let asset = core.project.sprites[index].asset;
+    let before = core.project.sprites.len();
+    let _ = core.remove_sprite(index);
+    if core.project.sprites.len() == before - 1 {
+        Ok(json!({
+            "ok": true,
+            "index": index,
+            "asset": asset,
+            "count": core.project.sprites.len(),
+            "status": core.status,
+        }))
+    } else {
+        Err(core.status.clone())
+    }
+}
+
+/// MCP handler: write sprite `sprite`'s transform key at
+/// `frame` — insert a new key or replace the one there. `x`,
+/// `y`, `rotation` and `scale` are each optional: an omitted
+/// field takes the value the sprite samples at that frame
+/// (or, for a sprite with no keys, x 0, y 0, rotation 0,
+/// scale 1). `scale` must be greater than 0 — a key at scale
+/// 0 or less never draws. One undo step (inside the op).
+pub fn tool_sprite_set_key(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = ast_req_usize(args, "sprite")?;
+    ast_check_sprite(core, index)?;
+    let frame = ast_req_f32(args, "frame")?;
+    if frame < 0.0 {
+        return Err(format!("argument 'frame' must not be negative (got {frame})"));
+    }
+    if frame.fract() != 0.0 {
+        return Err(format!(
+            "argument 'frame' must be a whole frame number (got {frame})"
+        ));
+    }
+    // Wave 13 splice (integrator): A1's op takes an integral
+    // frame and clamps it to the project's last frame (the
+    // op family's rule). Normalise once here so the sample,
+    // the created check and the stored verification all read
+    // the frame the op will actually write; the refusals
+    // above keep the requested frame.
+    let frame = frame.min(core.frame_count().saturating_sub(1) as f32);
+    let scale = ast_opt_f32(args, "scale")?;
+    if let Some(s) = scale {
+        if s <= 0.0 {
+            return Err(format!(
+                "argument 'scale' must be greater than 0 (got {s}); \
+                 a sprite key at scale 0 or less never draws"
+            ));
+        }
+    }
+    let inst = &core.project.sprites[index];
+    let base = InstanceKey::sample(&inst.keys, frame).unwrap_or(InstanceKey {
+        frame,
+        x: 0.0,
+        y: 0.0,
+        scale: 1.0,
+        angle: 0.0,
+    });
+    let key = InstanceKey {
+        frame,
+        x: ast_opt_f32(args, "x")?.unwrap_or(base.x),
+        y: ast_opt_f32(args, "y")?.unwrap_or(base.y),
+        scale: scale.unwrap_or(base.scale),
+        angle: ast_opt_f32(args, "rotation")?.unwrap_or(base.angle),
+    };
+    let created = !inst.keys.iter().any(|k| k.frame == frame);
+    let _ = core.set_sprite_key(index, frame as usize, key.x, key.y, key.scale, key.angle);
+    let stored = core.project.sprites[index]
+        .keys
+        .iter()
+        .find(|k| k.frame == frame);
+    match stored {
+        Some(k)
+            if k.x == key.x && k.y == key.y && k.scale == key.scale && k.angle == key.angle =>
+        {
+            Ok(json!({
+                "ok": true,
+                "sprite": index,
+                "created": created,
+                "key": key_json(k),
+                "status": core.status,
+            }))
+        }
+        _ => Err(core.status.clone()),
+    }
+}
+
+/// MCP handler: delete sprite `sprite`'s key at `frame`. A
+/// frame the sprite has no key at is refused before the op is
+/// called, so no undo step is spent. One undo step (inside
+/// the op) on success.
+pub fn tool_sprite_delete_key(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = ast_req_usize(args, "sprite")?;
+    ast_check_sprite(core, index)?;
+    let frame = ast_req_f32(args, "frame")?;
+    if frame.fract() != 0.0 {
+        return Err(format!(
+            "argument 'frame' must be a whole frame number (got {frame})"
+        ));
+    }
+    // Wave 13 splice (integrator): as in `tool_sprite_set_key`
+    // — the existence check, the op call and the verification
+    // all read the clamped frame A1's op will act on; the
+    // refusal below keeps the requested frame.
+    let eff = frame.min(core.frame_count().saturating_sub(1) as f32);
+    let inst = &core.project.sprites[index];
+    if !inst.keys.iter().any(|k| k.frame == eff) {
+        return Err(format!(
+            "sprite {index} has no key at frame {frame} (it has {} key(s))",
+            inst.keys.len()
+        ));
+    }
+    let _ = core.delete_sprite_key(index, eff as usize);
+    let inst = &core.project.sprites[index];
+    if inst.keys.iter().any(|k| k.frame == eff) {
+        return Err(core.status.clone());
+    }
+    Ok(json!({
+        "ok": true,
+        "sprite": index,
+        "frame": frame,
+        "key_count": inst.keys.len(),
         "status": core.status,
     }))
 }
@@ -1435,5 +1701,204 @@ mod tests {
         )
         .expect_err("blank name must be refused");
         assert!(err.contains("must not be empty"), "err: {err}");
+    }
+
+    // ---- Wave 13: sprite-instance MCP handlers ----
+
+    fn sprite_core() -> EditorCore {
+        // demo_project(): one asset ("green", index 0), no
+        // sprite instances.
+        asset_core()
+    }
+
+    #[test]
+    fn sprite_list_is_empty_on_a_fresh_project() {
+        let mut core = sprite_core();
+        let out = tool_sprite_list(&mut core, &json!({})).expect("list succeeds");
+        assert_eq!(out["count"].as_u64(), Some(0));
+        assert_eq!(out["sprites"].as_array().map(|a| a.len()), Some(0));
+    }
+
+    #[test]
+    fn sprite_add_places_one_instance_in_one_undo_step() {
+        let mut core = sprite_core();
+        let undo_before = core.undo_depth();
+        let out = tool_sprite_add(&mut core, &json!({ "asset": 0 })).expect("add succeeds");
+        assert_eq!(out["index"].as_u64(), Some(0));
+        assert_eq!(out["sprite"]["asset"].as_u64(), Some(0));
+        assert_eq!(out["sprite"]["asset_name"], json!("green"));
+        assert_eq!(out["sprite"]["key_count"].as_u64(), Some(1));
+        assert_eq!(out["sprite"]["keys"][0]["frame"].as_f64(), Some(0.0));
+        assert_eq!(core.project.sprites.len(), 1);
+        assert_eq!(core.project.sprites[0].asset, 0);
+        assert_eq!(core.project.sprites[0].keys.len(), 1);
+        assert_eq!(
+            core.undo_depth(),
+            undo_before + 1,
+            "the op spends exactly one undo step"
+        );
+        // And the list now reports the same instance.
+        let list = tool_sprite_list(&mut core, &json!({})).expect("list succeeds");
+        assert_eq!(list["count"].as_u64(), Some(1));
+        assert_eq!(list["sprites"][0]["asset_name"], json!("green"));
+    }
+
+    #[test]
+    fn sprite_add_refuses_a_bad_asset_and_spends_nothing() {
+        let mut core = sprite_core();
+        let undo_before = core.undo_depth();
+        let err = tool_sprite_add(&mut core, &json!({ "asset": 99 }))
+            .expect_err("a missing asset must be refused");
+        assert!(err.contains("out of range"), "err: {err}");
+        assert!(core.project.sprites.is_empty());
+        assert_eq!(core.undo_depth(), undo_before, "a refusal spends no undo step");
+    }
+
+    #[test]
+    fn sprite_set_key_inserts_then_replaces_and_fills_from_the_sample() {
+        let mut core = sprite_core();
+        tool_sprite_add(&mut core, &json!({ "asset": 0 })).expect("add succeeds");
+        let key0 = core.project.sprites[0].keys[0];
+        let undo_before = core.undo_depth();
+        // Insert at frame 10 with only x given: the other
+        // fields come from the value sampled at frame 10,
+        // which is key0's (the only key clamps).
+        let out = tool_sprite_set_key(
+            &mut core,
+            &json!({ "sprite": 0, "frame": 10, "x": 42.5 }),
+        )
+        .expect("set_key succeeds");
+        assert_eq!(out["created"].as_bool(), Some(true));
+        assert_eq!(out["key"]["x"].as_f64(), Some(42.5));
+        assert_eq!(out["key"]["y"].as_f64(), Some(key0.y as f64));
+        assert_eq!(out["key"]["scale"].as_f64(), Some(key0.scale as f64));
+        assert_eq!(out["key"]["angle"].as_f64(), Some(key0.angle as f64));
+        assert_eq!(core.project.sprites[0].keys.len(), 2);
+        assert_eq!(core.undo_depth(), undo_before + 1);
+        // Replace the same frame: created flips false, the
+        // stored values change, no new key appears.
+        let out = tool_sprite_set_key(
+            &mut core,
+            &json!({ "sprite": 0, "frame": 10, "scale": 2.0, "rotation": 30.0 }),
+        )
+        .expect("replace succeeds");
+        assert_eq!(out["created"].as_bool(), Some(false));
+        assert_eq!(out["key"]["scale"].as_f64(), Some(2.0));
+        assert_eq!(out["key"]["angle"].as_f64(), Some(30.0));
+        assert_eq!(core.project.sprites[0].keys.len(), 2);
+        assert_eq!(core.undo_depth(), undo_before + 2);
+    }
+
+    #[test]
+    fn sprite_set_key_refuses_bad_values_and_spends_nothing() {
+        let mut core = sprite_core();
+        tool_sprite_add(&mut core, &json!({ "asset": 0 })).expect("add succeeds");
+        let undo_before = core.undo_depth();
+        for (args, needle) in [
+            (json!({ "sprite": 9, "frame": 1 }), "out of range"),
+            (json!({ "sprite": 0, "frame": -1 }), "must not be negative"),
+            (json!({ "sprite": 0, "frame": 1, "scale": 0 }), "greater than 0"),
+            (json!({ "sprite": 0, "frame": 1, "scale": -2 }), "greater than 0"),
+            // 1e300 is a finite f64 that overflows f32.
+            (json!({ "sprite": 0, "frame": 1e300 }), "must be a finite number"),
+            (json!({ "sprite": 0, "frame": 1, "x": "wide" }), "must be a number"),
+        ] {
+            let err = tool_sprite_set_key(&mut core, &args)
+                .expect_err("bad set_key args must be refused");
+            assert!(err.contains(needle), "err: {err} (want '{needle}')");
+        }
+        assert_eq!(core.project.sprites[0].keys.len(), 1, "no key was written");
+        assert_eq!(core.undo_depth(), undo_before, "refusals spend no undo step");
+    }
+
+    #[test]
+    fn sprite_delete_key_removes_it_and_refuses_a_missing_frame() {
+        let mut core = sprite_core();
+        tool_sprite_add(&mut core, &json!({ "asset": 0 })).expect("add succeeds");
+        tool_sprite_set_key(&mut core, &json!({ "sprite": 0, "frame": 5, "x": 10.0 }))
+            .expect("set_key succeeds");
+        assert_eq!(core.project.sprites[0].keys.len(), 2);
+        let undo_before = core.undo_depth();
+        let out = tool_sprite_delete_key(&mut core, &json!({ "sprite": 0, "frame": 5 }))
+            .expect("delete succeeds");
+        assert_eq!(out["key_count"].as_u64(), Some(1));
+        assert_eq!(core.project.sprites[0].keys.len(), 1);
+        assert_eq!(core.undo_depth(), undo_before + 1);
+        // The same frame again: refused up front, no step spent.
+        let err = tool_sprite_delete_key(&mut core, &json!({ "sprite": 0, "frame": 5 }))
+            .expect_err("a missing key must be refused");
+        assert!(err.contains("has no key at frame 5"), "err: {err}");
+        assert_eq!(core.undo_depth(), undo_before + 1);
+    }
+
+    #[test]
+    fn sprite_remove_drops_the_instance_and_undo_restores_it() {
+        let mut core = sprite_core();
+        tool_sprite_add(&mut core, &json!({ "asset": 0 })).expect("first add");
+        tool_sprite_add(&mut core, &json!({ "asset": 0 })).expect("second add");
+        assert_eq!(core.project.sprites.len(), 2);
+        let undo_before = core.undo_depth();
+        let out = tool_sprite_remove(&mut core, &json!({ "sprite": 0 })).expect("remove");
+        assert_eq!(out["asset"].as_u64(), Some(0));
+        assert_eq!(out["count"].as_u64(), Some(1));
+        assert_eq!(core.project.sprites.len(), 1);
+        assert_eq!(core.undo_depth(), undo_before + 1);
+        let err = tool_sprite_remove(&mut core, &json!({ "sprite": 7 }))
+            .expect_err("a missing instance must be refused");
+        assert!(err.contains("out of range"), "err: {err}");
+        assert_eq!(core.undo_depth(), undo_before + 1, "the refusal spent nothing");
+        core.undo();
+        assert_eq!(core.project.sprites.len(), 2, "one undo restores the instance");
+    }
+
+    #[test]
+    fn media_items_order_is_segment_then_sprite_then_text_instances() {
+        // The ordering audit's pin (see this module's docs):
+        // segment media first (figure order, node order),
+        // then sprite instances, then text instances — the
+        // exact sequence composite_media draws in.
+        let mut project = demo_project();
+        project.sprites.push(SpriteInstance {
+            asset: 0,
+            keys: vec![InstanceKey {
+                frame: 0.0,
+                x: 400.0,
+                y: 300.0,
+                scale: 1.0,
+                angle: 0.0,
+            }],
+        });
+        project.texts.push(TextInstance {
+            content: "HEY".into(),
+            size: 20.0,
+            color: 0xFFFFFF,
+            keys: vec![InstanceKey {
+                frame: 0.0,
+                x: 100.0,
+                y: 500.0,
+                scale: 1.0,
+                angle: 0.0,
+            }],
+        });
+        let items = media_items(&project, 0.0);
+        let kinds: Vec<&str> = items
+            .iter()
+            .map(|i| match i {
+                MediaItem::Image { .. } => "image",
+                MediaItem::Text { .. } => "text",
+            })
+            .collect();
+        // demo_project contributes a segment image and a
+        // segment text ("HI"); the instance image and the
+        // instance text follow in that order.
+        assert_eq!(kinds, ["image", "text", "image", "text"]);
+        let texts: Vec<&str> = items
+            .iter()
+            .filter_map(|i| match i {
+                MediaItem::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["HI", "HEY"], "segment text precedes instance text");
     }
 }

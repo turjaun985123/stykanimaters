@@ -338,19 +338,31 @@
 //! squad) over the project's asset table
 //! (`Project.assets` — named PNGs, `model.rs`), with
 //! panel parity in the segment inspector (attach and
-//! clear). Integration correction, recorded honestly:
-//! the wave's audit (B5) proved the Scene panel has no
-//! asset list and no sprite surface — it carries a
-//! read-only Placed media counts readout, and sprite
-//! instances arrive only via .nodes import and cannot
-//! be placed or edited in the app yet — so the Project
-//! assets and Sprites rows below state exactly that
-//! rather than the charter's assumed panels. The
-//! Project assets row states the removal refusal in
-//! plain words: an asset a segment's media or a
-//! sprite instance still references cannot be
-//! removed — detach it first. The panel now holds
-//! 61 rows.
+//! clear). Integration correction, recorded honestly
+//! at the Wave 12 close: the wave's audit (B5) proved
+//! the Scene panel has no asset list and no sprite
+//! surface — it carries a read-only Placed media
+//! counts readout, and sprite instances arrived only
+//! via .nodes import and could not be placed or
+//! edited in the app — so the Project assets and
+//! Sprites rows stated exactly that rather than the
+//! charter's assumed panels. That wording was true
+//! for Wave 12. **Wave 13 changed it:** the sprite
+//! surface the audit specced has landed — a Sprites
+//! panel (add an instance from the assets, select it,
+//! step its position / rotation / scale keys at the
+//! current frame), sprite engine ops behind it, and
+//! the MCP sprite tools (`sprite_list`, `sprite_add`,
+//! `sprite_remove`, `sprite_set_key`,
+//! `sprite_delete_key`) — so the Sprites row below
+//! now states the landed truth. The Scene panel still
+//! has no asset list (that half of the Wave 12
+//! correction stands); its readout now points at the
+//! Sprites panel. The Project assets row states the
+//! removal refusal in plain words: an asset a
+//! segment's media or a sprite instance still
+//! references cannot be removed — detach it first.
+//! The panel now holds 61 rows.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -547,7 +559,7 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
             ),
             (
                 "Sprites",
-                "Free-floating images from the project's assets, placed with keyframed position, rotation and scale — they arrive via .nodes import and render in exports (the stage draws a placeholder outline); they cannot be placed or edited in the app yet. An image fixed to a segment is attached from the segment inspector instead",
+                "Sprites panel — free-floating images from the project's assets, each placed with keyframed position, rotation and scale: add an instance from the panel, select it, and step its transform keys at the current frame (the stage draws an outline and label; exports render the real image). MCP clients use sprite_list, sprite_add, sprite_remove, sprite_set_key and sprite_delete_key. An image fixed to a segment is attached from the segment inspector instead",
             ),
             (
                 "MCP stdio server",
@@ -1263,9 +1275,14 @@ mod tests {
         // the existing `clear_node_media` op). Sprites —
         // the free-standing instances (`Project.sprites`:
         // centre, rotation and scale per `InstanceKey`,
-        // per `media.rs`' docs), import-only and not
-        // editable in the app yet, as distinct from
-        // images fixed to a segment.
+        // per `media.rs`' docs). At the Wave 12 close
+        // this row said — truly, then — that sprites
+        // were import-only and not editable in the app;
+        // Wave 13 landed the Sprites panel, the sprite
+        // engine ops and the five MCP sprite tools, so
+        // the row now names the panel home and the tool
+        // names, as distinct from images fixed to a
+        // segment.
         let rows = shortcut_rows();
         assert!(rows.contains(&(
             "Project assets",
@@ -1277,7 +1294,7 @@ mod tests {
         )));
         assert!(rows.contains(&(
             "Sprites",
-            "Free-floating images from the project's assets, placed with keyframed position, rotation and scale — they arrive via .nodes import and render in exports (the stage draws a placeholder outline); they cannot be placed or edited in the app yet. An image fixed to a segment is attached from the segment inspector instead"
+            "Sprites panel — free-floating images from the project's assets, each placed with keyframed position, rotation and scale: add an instance from the panel, select it, and step its transform keys at the current frame (the stage draws an outline and label; exports render the real image). MCP clients use sprite_list, sprite_add, sprite_remove, sprite_set_key and sprite_delete_key. An image fixed to a segment is attached from the segment inspector instead"
         )));
         // Placement: the three asset rows sit together
         // with the project rows, directly after Range

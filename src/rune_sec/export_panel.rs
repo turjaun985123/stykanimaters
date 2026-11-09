@@ -61,6 +61,25 @@
 //! repeats them at the point of export. Media-free
 //! projects show nothing, so their panel is unchanged.
 //!
+//! Wave 13 adds the sprite half of that honesty for the
+//! remaining project formats, under the figure-file rows
+//! (key `xc-sprite-note`, decision in `sprite_note`):
+//! when the project has sprite instances, a note says
+//! they are left out of the .stk, .nodes and .stknds
+//! exports. The writers prove it from their signatures
+//! and bodies: `.stk` (`pivot::export_stk`) and `.nodes`
+//! (`nodes::export_nodes_figure`) take a single
+//! `FigureDef` — sprite instances are project-level, so
+//! there is nowhere in either file for them to go — and
+//! `.stknds` (`nodes_anim::export_nodes_animation`)
+//! takes the whole project but writes its sprite
+//! library and per-frame sprite counts as empty, so
+//! the instances are dropped from a whole-project
+//! export too. The .piv half of the sprite story is not
+//! repeated here: the Wave 12 note above already names
+//! it. Sprite-free projects show nothing, so their
+//! panel is unchanged.
+//!
 //! Two bundle buttons sit under the categories: "Export
 //! all images" (PNG + JPEG + SVG + spritesheet) and "Export
 //! all video" (MP4 + WebM). A bundle is a composition of the
@@ -386,6 +405,48 @@ pub fn piv_media_note(core: &EditorCore) -> Option<String> {
             "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports."
                 .into(),
         ),
+    }
+}
+
+/// Does the project carry any sprite instances
+/// (`Project::sprites`)? Pure: reads the project only.
+pub fn project_has_sprites(core: &EditorCore) -> bool {
+    !core.project.sprites.is_empty()
+}
+
+/// The sprite note (element key `xc-sprite-note`), shown
+/// under the figure-file rows when the project has sprite
+/// instances a .stk, .nodes or .stknds export would leave
+/// behind. Source truth, checked against the writers:
+///
+/// * `.stk` (`pivot::export_stk`) and `.nodes`
+///   (`nodes::export_nodes_figure`) each take one
+///   `FigureDef` and write that figure only; sprite
+///   instances live on the project, not on a figure, so
+///   no instance can appear in either file.
+/// * `.stknds` (`nodes_anim::export_nodes_animation`)
+///   takes the whole project but writes the sprite
+///   library count and every frame's sprite count as
+///   zero — its own doc comment lists sprites among the
+///   things "written as absent" and "dropped" on
+///   reimport — so a whole-project export loses them
+///   silently too.
+///
+/// The .piv formats drop sprite instances as well, but
+/// that half is already stated by `piv_media_note` under
+/// the .piv rows, so this note does not repeat it. Text
+/// instances are likewise outside this note's scope:
+/// the .piv note names their .piv drop, and this note
+/// exists for the sprite half only. A sprite-free
+/// project shows nothing, so its panel is unchanged.
+pub fn sprite_note(core: &EditorCore) -> Option<String> {
+    if project_has_sprites(core) {
+        Some(
+            "Sprite note: .stk and .nodes carry only the selected figure, so project sprite instances are left out of those two exports. .stknds carries the sprite tracks (on re-import, groups come back as plain images and text instances are not carried)."
+                .into(),
+        )
+    } else {
+        None
     }
 }
 
@@ -1642,6 +1703,21 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             ".stknds",
             "./export/animation.stknds",
         ));
+    // The sprite note sits directly under the three
+    // figure-file rows it describes: a wrapped line
+    // inside the card, the .piv media note's treatment,
+    // present only when the project has sprite instances
+    // those exports would leave behind.
+    if let Some(note) = sprite_note(core) {
+        formats = formats.child(
+            text(note)
+                .key("xc-sprite-note")
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .wrap()
+                .w_full(),
+        );
+    }
     panel = panel.child(formats);
 
     let bundles = col()
@@ -2389,5 +2465,72 @@ mod tests {
                 "Media note: .piv v2/v3/v4 export image and text segments as plain segments (only v5 keeps them), and no .piv version writes sprite or text instances — they are left out of .piv exports."
             )
         );
+    }
+
+    // ---- Sprite note (Wave 13) ----
+
+    /// A sprite-instance fixture (its keys are
+    /// irrelevant — the note only reads that instances
+    /// exist).
+    fn sprite_instance() -> stykanimate_rs::model::SpriteInstance {
+        stykanimate_rs::model::SpriteInstance {
+            asset: 0,
+            keys: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sprite_note_hidden_for_the_demo_project() {
+        // Premise: the demo project has no sprite
+        // instances, so no figure-file export drops any —
+        // the note stays hidden and the panel geometry is
+        // unchanged.
+        let core = EditorCore::new();
+        assert!(!project_has_sprites(&core), "demo premise");
+        assert_eq!(sprite_note(&core), None);
+    }
+
+    #[test]
+    fn sprite_note_hidden_with_only_text_instances() {
+        // The note is the sprite half only: text
+        // instances alone do not trigger it (their .piv
+        // drop is the media note's clause, not this
+        // note's).
+        let mut core = EditorCore::new();
+        core.project.texts.push(text_instance());
+        assert!(!project_has_sprites(&core));
+        assert_eq!(sprite_note(&core), None);
+    }
+
+    #[test]
+    fn sprite_note_hidden_with_only_segment_media() {
+        // Segment media rides on figures, not on the
+        // project, so it is not a sprite instance and
+        // does not trigger the sprite note.
+        let mut core = EditorCore::new();
+        with_segment_media(&mut core);
+        assert!(!project_has_sprites(&core));
+        assert_eq!(sprite_note(&core), None);
+    }
+
+    #[test]
+    fn sprite_note_names_the_figure_file_drops() {
+        // With a sprite instance present the note must
+        // name the figure-file formats that leave it
+        // behind — the two single-figure writers (.stk,
+        // .nodes) — and state the .stknds truth A5 landed
+        // in Wave 13: the whole-project writer carries
+        // the sprite tracks. It must not claim a .piv
+        // drop — the media note under the .piv rows
+        // already states that half.
+        let mut core = EditorCore::new();
+        core.project.sprites.push(sprite_instance());
+        assert!(project_has_sprites(&core));
+        let note = sprite_note(&core).expect("note with a sprite instance present");
+        assert_eq!(
+            note,
+            "Sprite note: .stk and .nodes carry only the selected figure, so project sprite instances are left out of those two exports. .stknds carries the sprite tracks (on re-import, groups come back as plain images and text instances are not carried)."
+        );
+        assert!(!note.contains(".piv"), "the .piv half is the media note's: {note}");
     }
 }

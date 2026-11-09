@@ -115,6 +115,30 @@
 //! output, so exported renders are unchanged and the glyph
 //! boxes themselves (corners, order, colour) are identical
 //! to what `label_boxes` produced before plates existed.
+//!
+//! ## Sprite name labels (shell-only, NOT a rasterizer feature)
+//!
+//! A sprite instance reaches the stage as a placeholder
+//! outline — Rune `Shape` has no bitmap primitive, so the
+//! quad the sprite stage pass draws (the same corners
+//! `media::media_items` computes for the rasterizer) would
+//! be anonymous without a name. [`sprite_label_boxes`] lays
+//! the asset's name over its quad with this module's own
+//! layout — no second text engine: the label is centred on
+//! the quad and runs along its top edge (corners[0] →
+//! corners[1], the quad's local +x, so the name rotates
+//! with the sprite), at a glyph height fitted to the quad
+//! — small enough that the label's run fits inside the top
+//! edge, and never more than
+//! [`SPRITE_LABEL_HEIGHT_FRACTION`] of the quad's height.
+//! Its output is [`text_geometry`]'s stream shape —
+//! backing plates interleaved with fully opaque glyph
+//! boxes (a sprite instance has no opacity channel, the
+//! same 1.0 `media_items` gives its image) — so a painter
+//! can append it to the same prim list. The rasterizer
+//! draws the actual image and no name; the label exists
+//! only so stage placeholders stay identifiable, the same
+//! honesty rule as the segment-media placeholder outlines.
 
 use stykanimate_rs::editor::EditorCore;
 use stykanimate_rs::model::{InstanceKey, SegmentMedia, V2};
@@ -156,6 +180,12 @@ pub const BACKING_ALPHA: f32 = 0.55;
 /// extents wide), so plates of adjacent lit pixels overlap
 /// into one continuous backing.
 pub const BACKING_SCALE: f32 = 1.5;
+
+/// Sprite name-label height cap, as a fraction of the
+/// quad's height (its corners[0] → corners[3] edge): the
+/// label names the quad, it must not fill it — see
+/// [`sprite_label_boxes`].
+pub const SPRITE_LABEL_HEIGHT_FRACTION: f32 = 0.5;
 
 /// Filled boxes for one label: `content` centred at `pos`,
 /// running along `angle_deg` (stage-space degrees, y-down),
@@ -269,6 +299,58 @@ fn with_backing(boxes: Vec<TextPrim>) -> Vec<TextPrim> {
         out.push(prim);
     }
     out
+}
+
+/// The name label for one sprite instance's stage quad:
+/// `name` (the asset's name) centred on `corners`, running
+/// along the quad's top edge — the sprite stage pass's
+/// entry point into this module's label machinery (see
+/// "Sprite name labels" in the module docs).
+///
+/// `corners` are a `media::media_items` image quad:
+/// corners[0] is the local (−x, −y) corner, corners[1]
+/// the (+x, −y) corner, so the top edge corners[0] →
+/// corners[1] is the quad's local +x (the sprite's own
+/// rotation direction) and corners[0] → corners[3] its
+/// height. The glyph height is fitted to the quad: the
+/// label spans `4n − 1` cells at `cell = size / 5`
+/// ([`label_boxes`]' layout), so keeping its run inside
+/// the top edge caps the size at
+/// `5 · top_len / (4n − 1)`, and the height is separately
+/// capped at [`SPRITE_LABEL_HEIGHT_FRACTION`] of the
+/// quad's height — whichever cap is smaller wins. The
+/// colour is the caller's (the sprite pass owns its
+/// placeholder palette); glyph boxes are fully opaque.
+///
+/// Empty names, blank-only names and degenerate quads
+/// (a zero-length top edge or height) yield no prims —
+/// the same early-outs [`label_boxes`] makes, reached
+/// through a fitted size of 0.
+pub fn sprite_label_boxes(corners: [V2; 4], name: &str, color: u32) -> Vec<TextPrim> {
+    let n = name.chars().count();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut centre = [0.0, 0.0];
+    for c in &corners {
+        centre[0] += c[0] / 4.0;
+        centre[1] += c[1] / 4.0;
+    }
+    let run = [
+        corners[1][0] - corners[0][0],
+        corners[1][1] - corners[0][1],
+    ];
+    let top_len = (run[0] * run[0] + run[1] * run[1]).sqrt();
+    let side = [
+        corners[3][0] - corners[0][0],
+        corners[3][1] - corners[0][1],
+    ];
+    let side_len = (side[0] * side[0] + side[1] * side[1]).sqrt();
+    let angle_deg = run[1].atan2(run[0]).to_degrees();
+    let total_units = n as f32 * CHAR_ADVANCE - 1.0;
+    let fit = GLYPH_ROWS as f32 * top_len / total_units;
+    let size = fit.min(side_len * SPRITE_LABEL_HEIGHT_FRACTION);
+    with_backing(label_boxes(centre, angle_deg, name, size, color))
 }
 
 /// Every text label visible at the core's display frame, as
@@ -840,5 +922,132 @@ mod tests {
         core.project.figures[0].def.nodes[ni].style.opacity = -0.2;
         let prims = text_geometry(&core);
         assert!(alphas_for(&prims, seg_color).iter().all(|a| *a == 0.0));
+    }
+
+    /// The `media_items` sprite quad for a 100×50 image
+    /// centred at (150, 100), unrotated (the corner values
+    /// media.rs's own tests pin): corners[0] is the local
+    /// (−x, −y) corner and the top edge runs along +x.
+    const SPRITE_QUAD: [V2; 4] = [[100.0, 75.0], [200.0, 75.0], [200.0, 125.0], [100.0, 125.0]];
+
+    #[test]
+    fn sprite_label_is_the_shared_layout_centred_on_the_quad() {
+        // A = 10 lit pixels, B = 10: 20 glyphs + 20 plates.
+        let prims = sprite_label_boxes(SPRITE_QUAD, "AB", 0x112233);
+        assert_eq!(prims.len(), 40);
+        // The size rule, read back: the width fit
+        // (5 · 100 / 7 ≈ 71.4) loses to the height cap
+        // (50 · 0.5 = 25), so the output is EXACTLY the
+        // shared layout at the quad centre, angle 0 (the
+        // top edge's direction), size 25, plates
+        // interleaved — no second text engine involved.
+        assert_eq!(
+            prims,
+            with_backing(label_boxes([150.0, 100.0], 0.0, "AB", 25.0, 0x112233))
+        );
+        // Geometry read-back over the glyph subset: both
+        // chars touch the label's extremes, so the bbox
+        // centre is the quad centre plus the half-cell
+        // quirk along local +y (down, unrotated).
+        let g = glyphs(&prims);
+        assert_eq!(g.len(), 20);
+        let (lo, hi) = bbox(&g);
+        let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+        assert!(
+            (centre[0] - 150.0).abs() < 0.01 && (centre[1] - 102.5).abs() < 0.01,
+            "label centre {centre:?}"
+        );
+        // Plates interleave exactly as text_geometry's do,
+        // and every glyph carries the caller's colour at
+        // full opacity (a sprite has no opacity channel).
+        for pair in prims.chunks_exact(2) {
+            let TextPrim::GlyphBox { color: pc, alpha: pa, .. } = &pair[0];
+            let TextPrim::GlyphBox { color: gc, alpha: ga, .. } = &pair[1];
+            assert_eq!((*pc, *pa), (BACKING_COLOR, BACKING_ALPHA), "plate first");
+            assert_eq!((*gc, *ga), (0x112233, 1.0), "glyph second, caller's colour, opaque");
+        }
+    }
+
+    #[test]
+    fn sprite_label_rotates_with_the_quad() {
+        // The same 100×50 sprite rotated 90° (y-down) about
+        // its centre: local +x now points down-stage, so
+        // corners[0] → corners[1] is the vertical edge
+        // (175, 50) → (175, 150) and corners[0] →
+        // corners[3] the 50-long height edge.
+        let quad = [[175.0, 50.0], [175.0, 150.0], [125.0, 150.0], [125.0, 50.0]];
+        let prims = sprite_label_boxes(quad, "AB", 0x112233);
+        assert_eq!(prims.len(), 40, "same name, same glyph count");
+        let g = glyphs(&prims);
+        let (lo, hi) = bbox(&g);
+        // The run is vertical now: the label's 7-cell run
+        // (35 units at size 25 — the same two caps as the
+        // unrotated case) spans y, its 5-cell height spans x.
+        assert!((hi[1] - lo[1] - 35.0).abs() < 0.01, "run span {}", hi[1] - lo[1]);
+        assert!((hi[0] - lo[0] - 25.0).abs() < 0.01, "height span {}", hi[0] - lo[0]);
+        // Centre: the quad centre, with the half-cell quirk
+        // rotated along — local +y points along −x at 90°.
+        let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+        assert!(
+            (centre[0] - 147.5).abs() < 0.01 && (centre[1] - 100.0).abs() < 0.01,
+            "rotated centre {centre:?}"
+        );
+    }
+
+    #[test]
+    fn sprite_label_size_fits_a_long_name_inside_the_top_edge() {
+        // A narrow quad (40 wide, 50 tall) and a 10-char
+        // name: the width fit (5 · 40 / 39 ≈ 5.13) beats the
+        // height cap (25), so the glyph size shrinks until
+        // the run exactly spans the top edge — and no more.
+        let quad = [[0.0, 0.0], [40.0, 0.0], [40.0, 50.0], [0.0, 50.0]];
+        let prims = sprite_label_boxes(quad, "AAAAAAAAAA", 0xFF0000);
+        let g = glyphs(&prims);
+        assert_eq!(g.len(), 100, "10 chars × 10 lit pixels");
+        let (lo, hi) = bbox(&g);
+        let span = hi[0] - lo[0];
+        assert!((span - 40.0).abs() < 0.05, "run span {span} vs top edge 40");
+        // 'A' touches both extremes, so the span is the
+        // whole fitted run; the height is the same size's
+        // 5 cells, far under the quad's height.
+        assert!((hi[1] - lo[1] - 5.0 * (40.0 / 39.0)).abs() < 0.05, "height {}", hi[1] - lo[1]);
+    }
+
+    #[test]
+    fn sprite_label_size_is_capped_at_half_the_quad_height() {
+        // A huge quad and a 1-char name: the width fit
+        // (5 · 400 / 3 ≈ 666.7) is no cap at all, so the
+        // height fraction rules — size 50 on a 100-tall
+        // quad, a 30×50 label.
+        let quad = [[0.0, 0.0], [400.0, 0.0], [400.0, 100.0], [0.0, 100.0]];
+        let g = glyphs(&sprite_label_boxes(quad, "A", 0x00FF00));
+        assert_eq!(g.len(), 10);
+        let (lo, hi) = bbox(&g);
+        assert!((hi[1] - lo[1] - 50.0).abs() < 0.01, "height {}", hi[1] - lo[1]);
+        assert!((hi[0] - lo[0] - 30.0).abs() < 0.01, "width {}", hi[0] - lo[0]);
+        // Centred on the quad (200, 50) plus the quirk.
+        let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+        assert!(
+            (centre[0] - 200.0).abs() < 0.01 && (centre[1] - 55.0).abs() < 0.01,
+            "centre {centre:?}"
+        );
+    }
+
+    #[test]
+    fn sprite_label_degenerate_inputs_yield_nothing() {
+        // No name at all, and a blank-only name (advances
+        // but stamps nothing, like label_boxes).
+        assert!(sprite_label_boxes(SPRITE_QUAD, "", 0).is_empty());
+        assert!(sprite_label_boxes(SPRITE_QUAD, "   ", 0).is_empty());
+        // A collapsed quad: no top edge, no height.
+        let point = [[10.0, 10.0]; 4];
+        assert!(sprite_label_boxes(point, "AB", 0).is_empty());
+        // Zero-width quad (top edge has no length): the
+        // fitted size is 0.
+        let no_width = [[100.0, 75.0], [100.0, 75.0], [100.0, 125.0], [100.0, 125.0]];
+        assert!(sprite_label_boxes(no_width, "AB", 0).is_empty());
+        // Zero-height quad: the height cap is 0.
+        let no_height = [[100.0, 75.0], [200.0, 75.0], [200.0, 75.0], [100.0, 75.0]];
+        assert!(sprite_label_boxes(no_height, "AB", 0).is_empty());
     }
 }
