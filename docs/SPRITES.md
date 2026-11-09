@@ -185,11 +185,13 @@ decoded **on every call — no cache** (`src/media.rs:40-41`:
 "fine for export-time compositing, not a per-frame editor hot
 path").
 
-`src/export.rs:744-766` gates the pass: `has_media` is true
+`src/export.rs:768-776` gates the pass: `has_media` is true
 when the project has sprites, texts, or any segment media
 (the sprite/text half of that gate is itself a Wave 11 fix —
 before it, a project whose only media was a free-standing
-instance never composited at all). The gate converts the
+instance never composited at all; the clips clause —
+clip-def segment media — is Wave 14 C3's, per
+`docs/wave13/CLIP_MEDIA.md` §6.4/§7 W14-5). The gate converts the
 rendered frame to RGBA, composites, and converts back.
 
 ---
@@ -198,13 +200,14 @@ rendered frame to RGBA, composites, and converts back.
 
 Sprites are one of the three places an asset index can live.
 The census lives in `src/media.rs` (the asset-table MCP
-handlers' module doc, and `asset_references` at
-`src/media.rs:371-389`):
+handlers' module doc, and `asset_references` with its
+definitive Wave 14 C6 census table at
+`src/media.rs:413-465`):
 
 | Reference kind | Where | Counted |
 |---|---|---|
 | Segment media on figure defs | `figures[].def.nodes[].media` | yes |
-| Segment media on movieclip defs | `clips[].def.nodes[].media` | yes — stored and serialised, but **never rendered** (Wave 12 B8 finding; Wave 13 E5 audits it) |
+| Segment media on movieclip defs | `clips[].def.nodes[].media` | yes — stored and serialised, but **never rendered** (Wave 12 B8 finding; Wave 13 E5 audits it). Wave 14 squad C is contracted to close exactly this — the checkable claim list is `docs/wave13/CLIP_MEDIA.md` §7, marked PENDING-INTEGRATION until the integrator flips it; this cell is only true until that flip |
 | Sprite instances | `sprites[].asset` | yes |
 
 Consequences, all shipped with the Wave 12 asset tools:

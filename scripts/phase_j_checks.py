@@ -429,6 +429,46 @@ only, following the Wave 12 pattern):
   with its exact literal — once the landed source
   shows it, never by guessing from a brief.
 
+Wave 14 additions (same gate, check 10):
+
+- Check 10 is PARITY: every command in the command
+  palette must be accounted for against the MCP
+  tool surface — covered by named tools that exist
+  (PARITY_MAP), pending on a named tool a Wave 14
+  squad has not spliced yet (PARITY_PENDING), or
+  excluded with an argued reason (PARITY_EXCLUSIONS).
+  The command set is derived live from
+  command_palette.rs and the surface from check 9's
+  own family extractors, so the two checks can
+  never disagree about what the surface is. The
+  tables are the accounting, not the semantics: a
+  mapping asserts the named tools exist and are the
+  ones A10's ledger (docs/wave14/PALETTE_PARITY.md)
+  pairs with the command; it does not prove the
+  tool's behaviour matches the command's, which is
+  what the handlers' own tests are for. PENDING is
+  a failure by design on a pre-integration tree
+  (the Phase K UNWIRED precedent): the check going
+  red before Squad B's shell tools and the last
+  A-squad handlers are spliced, and green after, is
+  the proof the check works. A pending entry whose
+  tool has landed is reported RESOLVED and passes;
+  the integrator moves it into PARITY_MAP at
+  close-out so the pending table only ever names
+  tools that do not exist yet. Table hygiene is
+  enforced both ways: an entry naming a command
+  the palette no longer has, a command in two
+  tables, or a mapped tool that has left the
+  surface all fail — parity can shrink only loudly.
+  Seeding note: A1's PARITY_CENSUS.md and A10's
+  PALETTE_PARITY.md had not landed when this check
+  was written, so the tables were seeded from the
+  palette shims' own bodies (each `cmd_*` shim names
+  the core op it drives) and the handlers' source;
+  the integrator reconciles them against A10's
+  ledger at integration, and any disagreement is a
+  finding, not a silent edit.
+
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
 blanked source (the repo's established scan idiom), and
@@ -2056,6 +2096,21 @@ def check_mcp_surface() -> tuple[bool, list[str]]:
             for m in pat.finditer(prod):
                 lineno = prod.count("\n", 0, m.start()) + 1
                 sites.append(f"{rel}:{lineno}")
+        # Wave 14: the 31 live-only shell stubs are stamped by
+        # the `shell_unavailable_fn!` macro in src/mcp_tools.rs
+        # (capturing closures do not coerce to the registry's
+        # fn-pointer handler type). Each invocation
+        # `shell_unavailable_fn!(<ident>, "<tool>");` expands to
+        # exactly one `fn <ident>(...)` definition, so an
+        # invocation counts as that handler's definition site;
+        # the exactly-one-definition invariant is unchanged.
+        mpat = re.compile(
+            rf"shell_unavailable_fn!\(\s*{re.escape(ident)}\s*,"
+        )
+        for rel, prod in prod_by_rel.items():
+            for m in mpat.finditer(prod):
+                lineno = prod.count("\n", 0, m.start()) + 1
+                sites.append(f"{rel}:{lineno} (shell_unavailable_fn! stamp)")
         return sites
 
     resolved = 0
@@ -2177,6 +2232,387 @@ def check_mcp_surface() -> tuple[bool, list[str]]:
 
 
 # ----------------------------------------------------------------
+# Check 10 — parity (Wave 14): every palette command is
+# covered by MCP tools that exist, pending on a named
+# tool a Wave 14 squad has not spliced yet, or excluded
+# with an argued reason. The command set is derived
+# from command_palette.rs (raw text — command keys are
+# string literals, check 9's idiom) and the surface
+# from check 9's family extractors, reused verbatim.
+# ----------------------------------------------------------------
+
+# command -> the tools that cover it. Every named tool
+# must exist in the derived surface. Read-modify-write
+# pairs are listed where the command is a relative
+# step (lengthen, thicken, zoom, the audio "last clip"
+# family): the read tool supplies the current value
+# the step starts from. Selection-relative commands
+# name the tool that takes the index explicitly —
+# the GUI selection itself is shell state (Squad B).
+PARITY_MAP: dict[str, list[str]] = {
+    # Transport
+    "play": ["set_playback"],
+    "prev": ["set_frame"],
+    "next": ["set_frame"],
+    "first-frame": ["set_frame"],
+    "restart-playback": ["set_playback"],
+    "prev-keyframe": ["goto_prev_keyframe"],
+    "next-keyframe": ["goto_next_keyframe"],
+    # Frames
+    "add-frame": ["add_frame"],
+    "dup-frame": ["duplicate_frame"],
+    "del-frame": ["delete_frame"],
+    "inbetween": ["insert_inbetween"],
+    "copy-frame": ["copy_frame"],
+    "paste-frame": ["paste_frame"],
+    "fps-up": ["set_project_fps"],
+    "fps-down": ["set_project_fps"],
+    "swap-frame-prev": ["swap_frame_with_neighbour"],
+    "swap-frame-next": ["swap_frame_with_neighbour"],
+    # Edit
+    "undo": ["undo"],
+    "redo": ["redo"],
+    # Projects
+    "save": ["save_project"],
+    "load": ["load_project"],
+    "save-named": ["save_named_project"],
+    "save-copy": ["save_project_copy"],
+    "cycle-project": ["list_projects", "load_project"],
+    "open-project": ["load_project"],
+    # Figures (hide / solo / lock are the `layers`
+    # tool's figure flags — its handler writes the
+    # same fields the toggle ops write)
+    "add-figure": ["add_figure"],
+    "add-quadruped": ["add_figure"],  # the tool's "quadruped" kind
+    "del-figure": ["delete_figure"],
+    "duplicate-figure": ["figure_duplicate"],
+    "hide-figure": ["layers"],
+    "solo-figure": ["layers"],
+    "lock-figure": ["layers"],
+    "mirror-pose": ["mirror_pose"],
+    "mirror-figure": ["mirror_figure"],
+    "insert-library-figure": ["figure_library_insert"],
+    # Segments (segments are nodes: add_node's handler
+    # calls the same add_segment op the shim calls)
+    "add-segment": ["add_node"],
+    "del-segment": ["delete_node"],
+    "len-up": ["get_node", "set_node"],
+    "len-down": ["get_node", "set_node"],
+    "thick-up": ["get_node", "set_node"],
+    "thick-down": ["get_node", "set_node"],
+    "cycle-shape": ["get_node", "set_node"],
+    "cycle-bend": ["set_bend"],
+    "cycle-node-color": ["get_node", "set_node"],
+    "attach-media-import": ["attach_image_to_node"],
+    "clear-node-media": ["clear_node_media"],
+    "cycle-attached-sprite": ["assets_list", "attach_image_to_node"],
+    "add-sprite": ["sprite_add"],
+    "remove-sprite": ["sprite_list", "sprite_remove"],
+    # Camera (zoom-by is get + set at the current
+    # frame; follow-clear is set_camera_follow null)
+    "cam-zoom-in": ["get_camera", "set_camera"],
+    "cam-zoom-out": ["get_camera", "set_camera"],
+    "cam-frame-all": ["frame_all_figures"],
+    "cam-centre": ["centre_on_selection"],
+    "cam-clear-key": ["delete_camera_key"],
+    "cam-follow": ["set_camera_follow"],
+    "cam-follow-clear": ["set_camera_follow"],
+    # Graph
+    "key-graph-angle": ["graph_key_angle"],
+    "key-all-channels": ["graph_key_all_channels"],
+    "clear-graph": ["graph_clear_channels", "graph_clear_channel_keys"],
+    "shift-channel-right": ["graph_shift_keys"],
+    "fill-keys-range": ["graph_fill_keys"],
+    # View (core-backed only; shell-backed view
+    # commands are in PARITY_PENDING below)
+    "tween-play": ["set_tween_playback"],
+    "cycle-easing": ["set_project_easing"],
+    # Draw
+    "cycle-brush": ["cycle_brush"],
+    "draw-tool": ["set_draw_tool"],
+    "clear-drawings": ["clear_frame_strokes"],
+    "mirror-strokes": ["mirror_strokes"],
+    "stamp-polygon": ["draw_polygon"],
+    "delete-last-stroke": ["list_strokes", "delete_stroke"],
+    "delete-stroke": ["delete_stroke"],
+    # Effects (burst / sparkle are particle_add_event's
+    # anchored sibling: kind + figure/node anchor)
+    "particle-burst": ["particle_add_anchored"],
+    "particle-sparkle": ["particle_add_anchored"],
+    "particle-add-event": ["particle_add_event"],
+    "fx-clip-confetti": ["add_fx_clip"],
+    "fx-clip-lightning": ["add_fx_clip"],
+    "clear-particles": ["clear_particles"],
+    "split-fx-clip": ["fx_split_clip"],
+    "duplicate-particle": ["particle_duplicate_event"],
+    "delete-particle": ["particle_delete_event"],
+    # Audio (the "last clip" commands: list supplies
+    # the last index, the op tool takes it explicitly)
+    "add-audio": ["add_audio_clip"],
+    "mixdown": ["audio_mixdown"],
+    "audio-echo": ["audio_list_clips", "audio_echo"],
+    "audio-lowpass": ["audio_list_clips", "audio_lowpass"],
+    "audio-trim-silence": ["audio_list_clips", "audio_trim_silence"],
+    "audio-split-silences": ["audio_list_clips", "audio_split_silences"],
+    "fade-audio": ["audio_list_clips", "audio_fade"],
+    "reverse-audio": ["audio_list_clips", "audio_reverse"],
+    "delete-audio-clip": ["audio_list_clips", "audio_delete_clip"],
+    "normalise-audio": ["audio_normalise_all"],
+    "mute-audio-clip": ["audio_clip_toggle_muted"],
+    # Export (one format-arg tool covers all six)
+    "export-png": ["export_file"],
+    "export-gif": ["export_file"],
+    "export-mp4": ["export_file"],
+    "export-webm": ["export_file"],
+    "export-piv": ["export_file"],
+    "export-stk": ["export_file"],
+    # 3D
+    "enter-3d": ["fig3_enter"],
+    "exit-3d": ["fig3_exit"],
+    # Style (copy/paste style is a style read applied
+    # to another node: get_node_style + set_node_style)
+    "style-preset-ink": ["apply_style_preset"],
+    "style-preset-crimson": ["apply_style_preset"],
+    "style-preset-ocean": ["apply_style_preset"],
+    "style-preset-forest": ["apply_style_preset"],
+    "style-preset-violet": ["apply_style_preset"],
+    "style-preset-amber": ["apply_style_preset"],
+    "style-cap-round": ["set_node_cap"],
+    "style-cap-square": ["set_node_cap"],
+    "style-cap-point": ["set_node_cap"],
+    "cycle-taper": ["cycle_node_taper"],
+    "style-opacity-up": ["get_node_style", "set_node_opacity"],
+    "style-opacity-down": ["get_node_style", "set_node_opacity"],
+    "copy-style": ["get_node_style"],
+    "paste-style": ["set_node_style"],
+    # Wave 14 — shell control + the last core settings
+    # handlers (moved from PARITY_PENDING at the wave's
+    # integration, under the LANDED tool names).
+    "go-animate": ["shell_set_workspace"],
+    "go-draw": ["shell_set_workspace"],
+    "go-graph": ["shell_set_workspace"],
+    "go-effects": ["shell_set_workspace"],
+    "go-audio": ["shell_set_workspace"],
+    "go-build3d": ["shell_set_workspace"],
+    "go-export": ["shell_set_workspace"],
+    "go-home": ["shell_set_workspace"],
+    # The command selects Animate and forces the right
+    # column open: workspace + sidebar, one each.
+    "open-style-inspector": ["shell_set_workspace", "shell_set_sidebar"],
+    "toggle-loop-playback": ["shell_set_setting"],
+    "theme-light": ["shell_set_theme"],
+    "theme-dark": ["shell_set_theme"],
+    "toggle-guides": ["shell_set_setting"],
+    "toggle-frustum": ["shell_set_setting"],
+    "toggle-safe-frame": ["shell_set_setting"],
+    "toggle-live-mcp": ["shell_set_setting"],
+    "toggle-left-panel": ["shell_set_sidebar"],
+    "toggle-right-panel": ["shell_set_sidebar"],
+    "onion": ["set_onion_skin"],
+    "draw-mode": ["set_draw_mode"],
+    # Stroke selection stepping: the shell selection is
+    # settable by explicit index and readable back, so
+    # stepping composes (read, select ±1) — covered, no
+    # longer an exclusion.
+    "stroke-select-next": ["shell_get_selection", "shell_select_stroke"],
+    "stroke-select-prev": ["shell_get_selection", "shell_select_stroke"],
+}
+
+# command -> (tool that will cover it, owning squad).
+# PENDING IS A FAILURE while the named tool is absent
+# from the surface: these are a wave's splices that
+# have not landed yet. When a tool lands, its entries
+# read RESOLVED and pass; the integrator then moves
+# them into PARITY_MAP above, under the landed names.
+PARITY_PENDING: dict[str, tuple[str, str]] = {
+    # EMPTY at the Wave 14 close: all twenty entering
+    # entries resolved at integration and moved into
+    # PARITY_MAP above under their landed names
+    # (shell_set_workspace, shell_set_setting,
+    # shell_set_theme, shell_set_sidebar, set_onion_skin,
+    # set_draw_mode). A future wave's unlanded splices
+    # belong here, failing until they land.
+}
+
+# command -> why no tool covers it, by design. An
+# exclusion must argue that no capability is lost:
+# the command's effect is a GUI-local cursor whose
+# target every tool already takes explicitly.
+PARITY_EXCLUSIONS: dict[str, str] = {
+    # EMPTY at the Wave 14 close: the two entering
+    # exclusions (stroke-select-next/prev) became
+    # covered when shell_select_stroke landed — the
+    # stepping argument only held while the stroke
+    # selection had no tool at all. An exclusion must
+    # argue that no capability is lost; nothing here
+    # currently needs that argument.
+}
+
+_PALETTE_CMD_RE = re.compile(r'Command\s*\{\s*key:\s*"([^"]+)"')
+
+
+def _palette_commands() -> tuple[list[str], list[str]]:
+    """The palette's command keys, in table order,
+    read from the RAW command_palette.rs (the keys
+    are string literals, which blanking erases).
+    Duplicate keys are census problems, never
+    silently deduplicated."""
+    raw = read("src/rune_sec/command_palette.rs")
+    keys = _PALETTE_CMD_RE.findall(raw)
+    problems: list[str] = []
+    if not keys:
+        problems.append(
+            "  palette derivation: ZERO `Command { key:` entries found in "
+            "src/rune_sec/command_palette.rs — the declaration pattern "
+            "changed; update this check (a silent zero is exactly what "
+            "this census exists to prevent)"
+        )
+    seen: set[str] = set()
+    for key in keys:
+        if key in seen:
+            problems.append(
+                f"  palette derivation: command key `{key}` appears more "
+                "than once in the COMMANDS table — the palette itself "
+                "would list it twice"
+            )
+        seen.add(key)
+    return keys, problems
+
+
+def check_parity() -> tuple[bool, list[str]]:
+    lines: list[str] = []
+    ok = True
+
+    def fail(msg: str) -> None:
+        nonlocal ok
+        ok = False
+        lines.append(msg)
+
+    # The surface, from check 9's own extractors, so
+    # the two checks can never disagree about it.
+    builtin_names, problems = _mcp_builtins()
+    for p in problems:
+        fail(p.replace("built-ins:", "surface (via check 9's extractors):", 1))
+    registry, problems = _mcp_registry_family("src/mcp_tools.rs", "registry (src/mcp_tools.rs)")
+    for p in problems:
+        fail(p)
+    io_tools, problems = _mcp_registry_family("src/mcp_io.rs", "io (src/mcp_io.rs)")
+    for p in problems:
+        fail(p)
+    surface = set(builtin_names) | {n for n, _ in registry} | {n for n, _ in io_tools}
+
+    commands, problems = _palette_commands()
+    for p in problems:
+        fail(p)
+    command_set = set(commands)
+    lines.append(
+        f"  derived from source: {len(commands)} palette commands "
+        f"(command_palette.rs), {len(surface)} MCP tools (check 9's "
+        "family extractors: built-ins + registry + io)"
+    )
+    if not command_set or not surface:
+        lines.append("  parity cannot be assessed on an empty derivation — see above")
+        return ok, lines
+
+    # Table hygiene, both directions: an entry naming
+    # a command the palette no longer has is a stale
+    # table; a command in two tables is ambiguous
+    # accounting. Both fail, by name.
+    tables = (
+        ("PARITY_MAP", set(PARITY_MAP)),
+        ("PARITY_PENDING", set(PARITY_PENDING)),
+        ("PARITY_EXCLUSIONS", set(PARITY_EXCLUSIONS)),
+    )
+    for (name_a, set_a), (name_b, set_b) in (
+        (tables[0], tables[1]),
+        (tables[0], tables[2]),
+        (tables[1], tables[2]),
+    ):
+        for cmd in sorted(set_a & set_b):
+            fail(
+                f"  hygiene: command `{cmd}` is in both {name_a} and "
+                f"{name_b} — a command is covered, pending or excluded, "
+                "never two of those"
+            )
+    for name, keys_in_table in tables:
+        for cmd in sorted(keys_in_table - command_set):
+            fail(
+                f"  hygiene: {name} names command `{cmd}`, which the "
+                "palette does not have — the table is stale; remove the "
+                "entry or restore the command"
+            )
+
+    # Coverage: every command is in exactly one table
+    # (the overlap failures above cover the 'two'
+    # case; this is the 'none' case).
+    accounted = set(PARITY_MAP) | set(PARITY_PENDING) | set(PARITY_EXCLUSIONS)
+    for cmd in commands:
+        if cmd not in accounted:
+            fail(
+                f"  coverage: palette command `{cmd}` is in no parity "
+                "table — map it to the tools that cover it, pend it on "
+                "the tool that will, or exclude it with an argued reason"
+            )
+
+    # Mapped coverage: every tool a mapping names must
+    # exist in the surface. A tool that leaves the
+    # surface takes its commands' coverage with it,
+    # and this is where that gets said.
+    referenced: set[str] = set()
+    for cmd, tools in PARITY_MAP.items():
+        if cmd not in command_set:
+            continue  # already failed as stale above
+        if not tools:
+            fail(f"  mapped: command `{cmd}` maps to an EMPTY tool list — a mapping must name its tools")
+        for tool in tools:
+            referenced.add(tool)
+            if tool not in surface:
+                fail(
+                    f"  mapped: command `{cmd}` is mapped to tool "
+                    f"`{tool}`, which no MCP family registers — the "
+                    "coverage is claimed but the tool does not exist"
+                )
+    if referenced:
+        lines.append(
+            f"  mapped: {len(PARITY_MAP)} commands covered by "
+            f"{len(referenced)} distinct tools, all present in the surface"
+        )
+
+    # Pending: a failure per command until its tool
+    # lands; RESOLVED (and passing) once it has.
+    pending_open = 0
+    for cmd in commands:
+        if cmd not in PARITY_PENDING:
+            continue
+        tool, owner = PARITY_PENDING[cmd]
+        if tool in surface:
+            lines.append(
+                f"  pending RESOLVED: command `{cmd}` — tool `{tool}` "
+                f"({owner}) is now in the surface; move this entry to "
+                "PARITY_MAP at close-out"
+            )
+        else:
+            pending_open += 1
+            fail(
+                f"  pending: command `{cmd}` waits on tool `{tool}` "
+                f"({owner}), which no MCP family registers yet — the "
+                "command is not MCP-reachable until that splice lands"
+            )
+    if pending_open == 0 and PARITY_PENDING:
+        lines.append(
+            f"  pending: all {len(PARITY_PENDING)} pending entries resolved "
+            "(their tools are in the surface)"
+        )
+
+    if PARITY_EXCLUSIONS:
+        lines.append(
+            f"  excluded: {len(PARITY_EXCLUSIONS)} commands excluded with "
+            "argued reasons (see PARITY_EXCLUSIONS in this script)"
+        )
+    return ok, lines
+
+
+# ----------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------
 
@@ -2234,6 +2670,9 @@ def main() -> int:
 
     ok, lines = check_mcp_surface()
     report("9. MCP SURFACE CENSUS & INTEGRITY (Wave 11)", ok, lines)
+
+    ok, lines = check_parity()
+    report("10. PARITY (palette commands <-> MCP tools, Wave 14)", ok, lines)
 
     print()
     if failures:

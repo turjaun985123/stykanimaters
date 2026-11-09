@@ -285,3 +285,232 @@ by the §4 paths — but it renders, which is what makes the asset
 census honest. If a future wave adds clip-def authoring, it
 should write through the same per-node model and will need no
 further renderer work.
+
+---
+
+## 7. Wave 14 landed addendum — **PENDING-INTEGRATION**
+
+Wave 14, squad C (roster: `docs/wave14-roster.md`) is contracted
+to implement §6 of this audit, plus the clip-def media MCP tools
+(C5) that §6.7 left to a future wave. This addendum is the
+close-out skeleton, written by C9 **before** integration. It
+asserts nothing about the closing tree.
+
+**How the integrator closes this section.** Each claim below is
+phrased as a checkable anchor (a grep that must hit or miss, or
+a named test that must pass in the closing CI run). Verify every
+claim against C1–C8/C10's reports **and** the tree — a squad
+report is a claim, not evidence. When every box is checked on
+the CI-green closing tree, flip this section's marker from
+PENDING-INTEGRATION to LANDED and record the CI run id here.
+Until then, §§1–5 stand as written: they are the entering
+record and are **not** edited by this addendum; once flipped,
+this addendum supersedes §5's per-surface verdicts (only) for
+the surfaces it names.
+
+### W14-1 — Enumeration: the per-node fallback exists in the funnel (C1)
+
+- [ ] **Claim.** `media::media_items` (`src/media.rs`) resolves
+  each node's media per §6.1: the instance's own
+  `fig.def.nodes[ni].media` first; else the clip def's
+  `clips[ci].def.nodes[ni].media` when `fig.clip = Some(ci)`;
+  at most **one** item per (figure, node).
+- **Anchor (grep).** Entering this wave, `media_items`
+  contained no `clips` read at all (§2). After C1,
+  `grep -n "clips" src/media.rs` must hit inside the
+  `media_items` figure loop — the fallback — and the function
+  must still be the only sampling site (no second media pass
+  elsewhere: `grep -rn "media_items" src/` lists the same
+  consumers as §2's table, plus any C2/C8 additions C9 has
+  recorded).
+- **Anchor (tests).** The five pins of §6.6 exist in
+  `src/media.rs`'s tests and pass in the closing CI run:
+  clip-def-only image yields one item; clone case yields
+  exactly one item; instance media wins; clip-def text yields
+  a text item; longer/shorter clip defs skip without panic.
+  C1's report names them; a missing name is a failed claim.
+  (Re-dispatch note, C9: C1's pins are in the tree and named —
+  `clip_def_image_media_renders_for_media_free_instance`
+  (:2141), `clip_and_instance_media_never_double_draw`
+  (:2174), `clip_def_text_media_uses_clip_payload_and_colour_fallback`
+  (:2235), `clip_def_longer_and_shorter_than_instance_def_is_safe`
+  (:2277) and `missing_clip_and_media_free_clip_def_change_nothing`
+  (:2308); grep the names, then confirm they pass in CI.)
+
+### W14-2 — Enumeration order: clip-sourced items take the figure's slot (C1)
+
+- [ ] **Claim.** No new pass and no new ordering rule (§6.2):
+  clip-sourced items appear in the funnel's existing order —
+  figure order, then node order, with sprite instances and
+  text instances still appended after all segment media.
+- **Anchor (grep).** The sprite/text append loops in
+  `media_items` still follow the figure loop, and C1 added no
+  second returned collection: `grep -n "pub fn media_items"
+  src/media.rs` shows the same single-funnel signature as
+  entering.
+- **Anchor (test).** If C1 pinned order explicitly, its report
+  names the test; if not, W14-1's one-item pins plus the
+  unchanged consumer table (§2) are the evidence, and this
+  claim is recorded as verified-by-structure, not by test.
+
+### W14-3 — Alpha and colour provenance for clip-sourced items (C1)
+
+- [ ] **Claim.** A clip-sourced image item's alpha is the
+  **instance's** `fig.opacity` × the **clip node's**
+  `style.opacity` (each clamped 0..=1); a clip-sourced text
+  item's colour is `clip_node.color.unwrap_or(fig.color)`
+  (§6.2).
+- **Anchor (test).** §6.6 pin 1 asserts the alpha product with
+  differing instance/clip-node factors (a test where both
+  factors are 1.0 does **not** verify this claim); §6.6 pin 4
+  asserts the text colour fallback. Both pass in CI.
+  (C9 re-dispatch note: the pins are
+  `clip_def_image_media_renders_for_media_free_instance`
+  (media.rs:2141, alpha) and
+  `clip_def_text_media_uses_clip_payload_and_colour_fallback`
+  (media.rs:2235, colour).)
+
+### W14-4 — Stage treatment: same placeholder pass, no bitmap, no new pass (C2)
+
+- [ ] **Claim.** Clip-sourced media reaches the stage through
+  the existing `media_items` placeholder pass
+  (`src/stage_view.rs`, entering anchor :1128-1137): the
+  item's exact quad, accent fill and outline at the pass's
+  standing alpha factors, item label as for figure-def media.
+  Rune still draws no bitmap, and no clip-session media
+  preview was invented (§6.5).
+- **Anchor (grep).** `grep -n "media_items"
+  src/rune_sec/stage_view.rs` (or `src/stage_view.rs`, per the
+  closing tree) still shows the single media pass consuming
+  the funnel; any clip-specific stage code C2 added must be
+  named in C2's report and this claim reworded to match —
+  an unnamed second path fails the claim as written.
+  (C9 re-dispatch note: the pass is at `src/stage_view.rs:1144`
+  under the "Image media placeholders (Wave 12, A6 §3b)"
+  comment; it carries no clip-specific branch — clip-sourced
+  image items arrive through the funnel and are placeholdered
+  like figure-sourced ones, sprite instances still skipped to
+  the Wave 13 sprite pass.)
+- **Anchor (proof).** C7/C10 or a headless scene shows a
+  clip-def-only image as a stage placeholder; the evidence
+  named in C2's report is what the integrator cites here.
+
+### W14-5 — Raster: real pixels, and the `has_media` gate extended (C3)
+
+- [ ] **Claim.** `render_frame_at` composites clip-sourced
+  image media as real pixels, and a project whose **only**
+  media is clip-def media no longer skips `composite_media`:
+  `has_media` (`src/export.rs`, entering anchor :758-768)
+  gained the clips clause of §6.4.
+- **Anchor (grep).** `grep -n "clips" src/export.rs` hits
+  inside `has_media` (the clause iterates
+  `project.clips … def.nodes … media.is_some()` or an
+  equivalent helper). (C9 re-dispatch note: as landed by C3,
+  `has_media` is a `let` binding, not a fn — the gate is at
+  `src/export.rs:768-776` under a "Wave 14 (C3)" comment at
+  :761-767, and the clause reads
+  `project.clips.iter().any(|c| c.def.nodes.iter().any(|n| n.media.is_some()))`.)
+- **Anchor (test).** The §6.6 export pin exists in
+  `src/export.rs`'s tests — a clip-def-only-media project
+  renders the image through `render_frame_at` — and passes
+  in the closing CI run. Project thumbnails (Home) inherit
+  this via `projects::thumbnail` → `render_frame_at` with no
+  separate claim (see W14-8). (Named:
+  `clip_def_only_media_renders_into_rendered_frames`,
+  export.rs:3966, over the `clip_only_project` fixture.)
+
+### W14-6 — SVG: clip-sourced items emitted by `append_media` (C4)
+
+- [ ] **Claim.** SVG export emits clip-sourced media through
+  the same `append_media` path as figure-sourced media
+  (`src/svg.rs`, entering anchor :667): an image item as a
+  `<use>` of the per-asset embedded PNG with its placement
+  matrix (and the opacity attribute under the standing
+  `< 1.0` rule), a text item as a `<text>` element; media
+  still emits last.
+- **Anchor (grep).** `grep -n "media_items" src/svg.rs`
+  shows `append_media` still consuming the funnel, and
+  C4 added no clip-specific emission branch (any such branch
+  must be named in C4's report and this claim reworded).
+- **Anchor (test).** A test in `src/svg.rs`'s tests builds a
+  project with clip-def-only media and asserts the emitted
+  document contains the image `<use>` (and/or `<text>` for
+  the text variant); C4's report names it; it passes in CI.
+  (C9 re-dispatch note: C4's pin is
+  `svg_clip_def_image_emits_def_use_with_matrix_after_strokes`
+  (svg.rs:1986) under a "Wave 14 (C4)" section comment at
+  :1895 stating `append_media` has no clip-specific branch.)
+
+### W14-7 — Asset census: behaviour unchanged, refusal now honest (C6)
+
+- [ ] **Claim.** `asset_references`, `remap_asset_refs` and
+  `tool_asset_remove` behave exactly as entering (§6.5):
+  clip-def references still count, still remap, and still
+  refuse removal — and the refusal is now honest, because
+  the media renders (W14-1…W14-6) and can be detached
+  (W14-9).
+- **Anchor (grep + test).** `grep -n "fn asset_references"
+  src/media.rs` and the entering refusal pin (entering
+  `src/media.rs:1550`, the clip-def-only refusal test) both
+  present; the pin passes unmodified in the closing CI run.
+  C6's report must state whether any census code changed at
+  all — the spec says none should; an unreported change
+  fails this claim. (C9 re-dispatch note: C6's definitive
+  census now documents `asset_references` at
+  `src/media.rs:413-465`, including the forward rule for new
+  writers, and C6 reported **no logic change**; its new pin
+  `asset_remove_remaps_clip_def_references_and_info_counts_them`
+  (media.rs:1767) must also pass in CI.)
+
+### W14-8 — Thumbnails: exactly the surfaces C8 names, no broader claim (C8)
+
+- [ ] **Claim.** Project/Home thumbnails carry clip-def
+  media (a consequence of W14-5, via `render_frame_at`).
+  Figure-card and library thumbnails carry clip-def media
+  **only if** C8's report says its remit required it and
+  names the code that does it — those thumbs are built from
+  figure defs, and §6 promised nothing for them.
+- **Anchor.** C8's report, quoted here at close-out with the
+  surfaces it names. If C8 landed no thumb change, this
+  claim closes as: project thumbnails only — and any doc
+  (including `docs/SPRITES.md`) claiming more is wrong.
+
+### W14-9 — MCP attach / clear / read parity for clip-def media (C5)
+
+- [ ] **Claim.** An MCP client can attach an existing asset
+  as a clip definition's node image media, clear a clip
+  definition's node media (either kind), and read it back —
+  the clip-def counterparts of `asset_attach`,
+  `clear_node_media` and `get_node`'s media field. Mutating
+  tools take exactly one undo step; the read is read-only;
+  refusals quote the offending clip/node/asset index; the
+  read returns the media in `get_node`'s shape (`null`, or
+  `{kind: 'image', asset}` / `{kind: 'text', content,
+  size}`).
+- **Anchor (grep).** The registered names from C5's report
+  hit in `src/mcp_tools.rs` (registry entries) with handlers
+  in the clip/media domain files; the proposed names in
+  `docs/wave14/CLIP_MEDIA_ROWS.md` (`clip_asset_attach`,
+  `clip_clear_node_media`, `clip_get_node_media`) are what
+  the integrator greps for first — a renamed tool is fine,
+  an unrecorded one is not.
+- **Anchor (docs + gate).** The MCP.md rows in
+  `docs/wave14/CLIP_MEDIA_ROWS.md` are merged into
+  `docs/MCP.md` next to `asset_attach`, and gate check 9
+  (registry ↔ MCP.md two-direction sync) passes on the
+  closing tree with the new tools counted.
+
+### W14-10 — End-to-end: a clip-media project built and exported via MCP only (C10, C7)
+
+- [ ] **Claim.** The wave's e2e suite creates a project
+  whose clip-def media is attached via MCP, and exports it
+  via MCP, asserting the media is present in the outputs;
+  C7's session/timeline pins (clip media sampled across
+  frames, one clip def reused by several instances) pass
+  alongside.
+- **Anchor (test).** The test file(s) named in C10's and
+  C7's reports under `tests/` (and `src/media.rs` for C7's
+  unit pins) pass in the closing CI run. The clip editing
+  session still has **no** media preview (§6.5) — if any
+  session media surface appears, it is named here as a
+  scope addition, not silently absorbed.

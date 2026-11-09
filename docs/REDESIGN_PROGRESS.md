@@ -1010,3 +1010,194 @@ its remit, not a swap-semantics change.) The user
 chose "launch as planned" over "answer the
 decisions first", so all five stay exactly as they
 are until the user rules on them.
+
+### 6.9 Wave 14 — complete MCP full control (2026-11-09)
+
+An eighth improvement wave, launched 2026-11-09
+(10:43 +06): the user tapped "Assign next 50
+agents for complete full control mcp". Same shape
+as Waves 9–13: 50 agents, five squads of ten, one
+owner per file, the session integrator wiring the
+shared files (roster: `~/workspace/wave14-roster.md`).
+The charter: **MCP can do EVERYTHING the editor
+can do — no capability reachable only by mouse.**
+Three thrusts: **total parity** — every
+`EditorCore` op, every one of the 134 palette
+commands and every panel action is tool-reachable
+or sits on a named, argued exclusion list, with
+the parity census enforced by the gate rather
+than resting on reports; **shell control** — the
+live endpoint can also drive the GUI shell itself
+(workspace, transport, view, selection, theme,
+panels), which today it cannot touch at all (the
+drain reaches `EditorCore` only); and **clip-def
+media end-to-end**, per the anchored spec in
+`docs/wave13/CLIP_MEDIA.md` — attachable via MCP
+and actually rendering on every surface. Around
+the thrusts: **transport hardening** for the live
+endpoint and the stdio server (including the
+known busy-port invisibility gap), and an
+**MCP-only proof build** — a complete project
+created and exported using nothing but MCP calls.
+
+The squads: **A, parity census & fill** — the
+census (`docs/wave14/PARITY_CENSUS.md`) enumerating
+every pub `EditorCore` op (all `*_ops.rs`,
+`editor.rs`, `projects.rs`), all 134 palette
+commands and all panel actions, each marked
+tool-covered or GAP, as the wave's ledger; the
+missing `tool_*` handlers written in their domain
+files — figure and frame ops, the draw family's
+nib/spray/scatter completion, graph-editor parity,
+FX + particle parity, the audio clip
+trim/fade/gain/normalise family, the 3D figure
+set, media/sprite/project residuals, and the
+editor-settings family (scene weather, the full
+camera-key set, onion-skin, loop/easing defaults)
+— with `Tool` entries prepared for the
+integrator's registry splice; and palette parity
+mapping all 134 commands to a tool, to Squad B's
+shell list, or to a named exclusion. **B, shell
+control** — the design (`docs/wave14/SHELL_CONTROL.md`:
+a `ShellCommand` channel — command enum, request
+queue, drain in the main poll loop, result return
+path, an honest refusal on stdio, and the standing
+security posture stated plainly: loopback, no
+auth, same as today); plumbing in a new
+`src/shell_control.rs` with exact splice specs
+for the hot files (no hot-file edits); workspace
+and shell-state tools; transport tools driving
+the shell's real playback state; view tools
+(view navigation only — never camera authoring,
+the Wave 5 doctrine); selection tools writing
+the shell's selection fields (including
+`sprites_panel.selected`); theme and
+`LayoutPrefs`-backed settings tools; panel tools
+(section collapse/expand, timeline collapse,
+visibility per the workspace rules); non-dialog
+file/menu actions, with honest named refusals for
+the dialog-bound ones; Runtime-level shell-control
+tests; and the shell section of `docs/MCP.md`.
+**C, clip-def media end-to-end** — clip-def media
+joins the `media_items` composite in `media.rs`
+per the anchored spec, draws on the stage, renders
+in the raster exporter and is emitted by the SVG
+exporter; MCP clip-media attach/clear/read parity
+audited against the Wave 11 clip tools and filled;
+`asset_remove`'s reference census updated now
+that clip media renders; movieclip session/timeline
+interplay tests; thumbnails where the spec requires
+them; the doc flips (`CLIP_MEDIA.md` marked landed,
+`docs/MCP.md` rows); and a clip-media end-to-end
+suite driven and exported via MCP only. **D, live
+transport hardening** — the busy-port fix
+(`live_mcp.rs` gains a `LAST_START_ERROR` static
+and `last_start_error()` per the recorded spec,
+with the settings-note splice spec for the
+integrator); a stdio↔live parity harness diffing
+one identical scripted sequence across both
+transports; the queue/backpressure audit against
+the Wave 12/13 bounded-queue + timeout-discard
+discipline; health-endpoint completeness and truth
+(tool count derived from `all_tools`, a
+shell-control awareness flag if Squad B lands one);
+robustness — malformed JSON, wrong types, huge
+payloads and unknown methods answered with clean
+protocol errors and zero panics; batch +
+notification semantics audited against JSON-RPC
+on both transports; stdio handshake parity with
+live; connection lifecycle (disconnect mid-request,
+partial writes, slow clients); settings-UX truth
+pins; and `docs/MCP.md`'s transport chapter
+rewritten to the landed truth. **E, proof &
+gates** — the MCP-only build (an end-to-end suite
+creating a complete project using ONLY MCP calls
+— figures, frames, keys, graph, draw, fx,
+particles, audio, sprites, assets, 3D, clips,
+camera, weather — then exporting PNG + SVG + a
+range via MCP and asserting the outputs exist and
+are sane); the parity gate extended so every op
+and command is covered or on the named exclusion
+list, its failure mode proven on the entering tree
+first; the `docs/MCP.md` full audit (every tool
+documented with args, two-direction sync under
+gate check 9); the MCP help row updated to the
+full-control truth; the wave's acceptance
+checklist and honesty sweep in `docs/wave14/`;
+overflow/snap upkeep for any UI the wave changes;
+the built-ins (44) and io (9) census on both
+transports; contract re-verification across ALL
+new tools (exactly one undo step per mutation,
+−32602 for unknown tools, finiteness on every
+float argument, refusals quoting the offending
+value); and this section.
+
+Entering counts, as recorded at the Wave 13 close
+(§6.8) and re-stated here so the closing census
+has its baseline: MCP **288 tools** (235 registry
++ 9 io + 44 built-ins, per `scripts/mcp_census.py`);
+**3,319 tests** (CI run **42562084573** on
+`ac47b99`, GREEN — 1,337 lib + 1,911 bin + 71
+integration; the docs close-out commit's CI run
+**42562837588** also GREEN); **940 unique keys**
+(827 static + 113 dynamic patterns), zero lost;
+palette **134**; scenes **28**; help **61**;
+layout facts **31**; icons **163**; gate **9/9**
+(`scripts/phase_j_checks.py` on the closing tree);
+headless run **42562380603** (all 58 probes 0,
+live-MCP probe PASS, overflow CLEAN on 31 trees).
+HEAD at launch: `92c5d95`, the Wave 13 close-out
+commit.
+
+**Delivered** — TODO-AT-CLOSE: the integrator fills
+this in at close-out with what actually landed,
+squad by squad, against the remits above.
+
+**Verification** — TODO-AT-CLOSE: run evidence only
+(gate result, CI run id and test count, headless
+run id, live-MCP probe and overflow verdicts, snap
+list) goes here at close-out.
+
+**Closing census** — TODO-AT-CLOSE: MCP, palette,
+scenes, help, i18n, icons and keys as counted by
+the gate on the closing tree, against the entering
+baseline above.
+
+**Honest remainders** — TODO-AT-CLOSE: what this
+wave did not close, named at close-out.
+
+Standing user decisions this wave carries but does
+**not** settle — none of them is in any squad's
+remit, and they are recorded here so they are not
+lost: the **project-swap undo canonical behaviour**
+(load clears undo but not redo, `.piv` import clears
+both, New/open clear neither — a product call, not
+a fix); **white-on-accent contrast** (the
+white-text carrier is upstream rune `tok::accent`
+**#4392F7 at 3.14:1** in both themes; darkening the
+accent-filled call sites to ~**#2072D5 (4.72:1)**
+fixes it, darkening the app token alone does not —
+the user's open decision since the Wave 10
+close-out); the **two "New project" results** that
+still disagree; the **C5 waveform call** (a deleted
+audio file's stale waveform vs a "(missing file)"
+badge); and **sound remains user-verified only** —
+no squad can listen to playback.
+
+The wave works under five exclusions, stated
+plainly: **no project-swap undo/redo semantics
+change**, **no accent colour change**, **no
+stored-name-after-rename divergence fix**, **no
+waveform-badge change**, and **no MCP-save
+`write_recovery` change**. One exclusion guard is
+new in kind this wave and is stated explicitly:
+**shell control must not become a side door
+around any of them** — a shell tool that loads,
+creates or swaps projects inherits the standing
+undo/redo behaviour exactly as the GUI path has
+it, a theme tool changes no accent value, and no
+shell or parity tool may alter what an MCP save
+writes beyond what the editor itself writes. The
+user chose "launch as planned" over "answer the
+decisions first", so all five stay exactly as they
+are until the user rules on them.

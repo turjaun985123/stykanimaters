@@ -186,7 +186,7 @@ jobs:
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
           mkdir -p headless-out
           missing=0
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open default-light settings-open-light export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error; do
             probe 60 "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
               > "headless-out/tree-$scene.log" 2>&1
             echo $? > "headless-out/tree-$scene.exit"
@@ -236,7 +236,7 @@ jobs:
           # CWD-relative, so probe() also wipes ./projects
           # before every invocation.
           probe() { rm -rf ./projects; HOME="$(mktemp -d)" timeout "$@"; }
-          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated; do
+          for scene in default frame-3 selected playing graph-duplicates fx-split-mid three-d loop-range three-d-stage palette-open menu-open settings-open draw-open export-open fx-selected home build-open graph-open effects-open audio-open clips-populated dopesheet-keys home-populated strokes-populated library-populated sprites-populated settings-open-error; do
             if [ ! -f "headless-out/tree-$scene.json" ]; then
               probe 60 xvfb-run -a "$BIN" --tree "headless-out/tree-$scene.json" --scene "$scene" \
                 > "headless-out/tree-$scene-xvfb.log" 2>&1
@@ -362,6 +362,14 @@ jobs:
           probe 120 "$BIN" --snap headless-out/snap-sprites-populated.png --scene sprites-populated --at 0 \
             > headless-out/snap-sprites-populated.log 2>&1
           echo $? > headless-out/snap-sprites-populated.exit
+          # Wave 14 (E8): the settings card on a genuine
+          # Live MCP start failure — the snap shows the D1
+          # failure note (with the recorded OS error) under
+          # the Live MCP toggle; the note has no element
+          # key, so pixels are its proof.
+          probe 120 "$BIN" --snap headless-out/snap-settings-open-error.png --scene settings-open-error --at 0 \
+            > headless-out/snap-settings-open-error.log 2>&1
+          echo $? > headless-out/snap-settings-open-error.exit
           # Two Effects-workspace snaps, because the scene
           # names are historical: the scene NAMED fx-selected
           # selects a particle event (State::particle_selected)
@@ -529,7 +537,7 @@ jobs:
           # the tools/list length are read from the same registry
           # by two different code paths (listener thread vs UI
           # thread dispatch) and must agree.
-          TOOL_FLOOR = 140
+          TOOL_FLOOR = 366
 
           lines = []
           failures = []
@@ -676,6 +684,32 @@ jobs:
                     "live session undo history records the edit", str(sp)[:200])
               check(sp.get("current_frame") == (added or {}).get("current_frame"),
                     "live playhead matches the add_frame reply", str(sp)[:200])
+
+              # 8. Wave 14: SHELL control over the live endpoint.
+              #    A shell_* call is intercepted by the drain's
+              #    peek and executed against the running GUI's
+              #    State (never the router's own core): read the
+              #    shell state, switch the workspace, read it
+              #    back changed, then switch back so the app is
+              #    left as the probe found it.
+              is_err, shell0, shell0_text = call_tool(7, "shell_get_state")
+              check(not is_err and shell0 is not None, "shell_get_state answers over live HTTP", shell0_text[:200])
+              ws_before = (shell0 or {}).get("workspace")
+              check(ws_before == "Animate", "shell state names the default workspace", repr(ws_before))
+              is_err, switched, switched_text = call_tool(8, "shell_set_workspace", {"workspace": "Draw"})
+              check(not is_err, "shell_set_workspace executes on the live shell", switched_text[:200])
+              is_err, shell1, shell1_text = call_tool(9, "shell_get_state")
+              check(not is_err and (shell1 or {}).get("workspace") == "Draw",
+                    "the workspace switch is visible in a fresh shell read", shell1_text[:200])
+              is_err, back, back_text = call_tool(10, "shell_set_workspace", {"workspace": "Animate"})
+              check(not is_err and (back or {}).get("workspace") == "Animate",
+                    "workspace switched back to Animate", back_text[:200])
+              # A shell selection + transport pair, for breadth:
+              # the playhead moves and the transport reads live.
+              is_err, sel, sel_text = call_tool(11, "shell_select_frame", {"frame": 0})
+              check(not is_err, "shell_select_frame executes on the live shell", sel_text[:200])
+              is_err, tr, tr_text = call_tool(12, "shell_get_transport")
+              check(not is_err and tr is not None, "shell_get_transport answers", tr_text[:200])
 
           try:
               main()
