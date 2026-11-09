@@ -5529,6 +5529,25 @@ mod tests {
         (tool.handler)(core, &args)
     }
 
+    /// Write a real half-second WAV into the temp dir and
+    /// return its path: since Wave 11 `add_audio_clip`
+    /// validates the file (nonexistent / non-WAV paths are
+    /// refused, like the e2e audio suite pins), tests that
+    /// place clips must point at a file that exists.
+    fn test_wav(tag: &str) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "mcp-tools-test-{tag}-{}.wav",
+            std::process::id()
+        ));
+        let wav = crate::audio_edit::WavData {
+            sample_rate: 8_000,
+            channels: 1,
+            samples: (0..4_000).map(|i| (i as f32 * 0.01).sin() * 0.5).collect(),
+        };
+        std::fs::write(&path, crate::audio_edit::write_wav(&wav)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
     #[test]
     fn tool_table_is_complete_and_unique() {
         let tools = tools();
@@ -5630,7 +5649,8 @@ mod tests {
         assert_eq!(s["weather"], "storm");
         call(&mut core, &tools, "set_weather", json!({ "kind": "off" })).unwrap();
         assert!(core.project.weather.is_none());
-        call(&mut core, &tools, "add_audio_clip", json!({ "path": "music.wav", "start_frame": 0 })).unwrap();
+        let music = test_wav("music");
+        call(&mut core, &tools, "add_audio_clip", json!({ "path": music, "start_frame": 0 })).unwrap();
         assert_eq!(core.project.audio.len(), 1);
         assert_eq!(core.project.audio[0].start_frame, 0);
 
@@ -6334,12 +6354,14 @@ mod tests {
         for _ in 0..8 {
             call(&mut core, &tools, "add_frame", json!({})).unwrap();
         }
+        let a_wav = test_wav("e-a");
+        let b_wav = test_wav("e-b");
         call(&mut core, &tools, "add_audio_clip", json!({
-            "path": "a.wav", "start_frame": 0
+            "path": a_wav, "start_frame": 0
         }))
         .unwrap();
         call(&mut core, &tools, "add_audio_clip", json!({
-            "path": "b.wav", "start_frame": 2
+            "path": b_wav, "start_frame": 2
         }))
         .unwrap();
         let r = call(&mut core, &tools, "audio_move_clip", json!({ "start_frame": 7 })).unwrap();
@@ -6421,8 +6443,9 @@ mod tests {
         // With one clip on the timeline, index 1 is out of
         // range: the refusal is the delete_clip error, and the
         // clip list is untouched.
+        let a_wav = test_wav("i-a");
         call(&mut core, &tools, "add_audio_clip", json!({
-            "path": "a.wav", "start_frame": 0
+            "path": a_wav, "start_frame": 0
         }))
         .unwrap();
         for name in NAMES {
@@ -6670,10 +6693,13 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, "no particle event at index 4");
 
-        // audio_set_muted: the fake path is enough — muting
-        // touches no file. Mute, then unmute.
+        // audio_set_muted: muting touches no file, but the
+        // clip must still be placed with a real path —
+        // add_audio_clip validates it (Wave 11). Mute, then
+        // unmute.
+        let a_wav = test_wav("m-a");
         call(&mut core, &tools, "add_audio_clip", json!({
-            "path": "a.wav", "start_frame": 0
+            "path": a_wav, "start_frame": 0
         }))
         .unwrap();
         let r = call(&mut core, &tools, "audio_set_muted", json!({
@@ -7177,7 +7203,10 @@ mod tests {
             ("graph_key", json!({ "figure": 0, "target": "spin", "frame": 0.0, "value": 1.0 })),
             ("graph_key", json!({ "figure": 0, "target": { "angle": 99 }, "frame": 0.0, "value": 1.0 })),
             ("layers", json!({ "figure": 7 })),
-            ("set_node", json!({ "figure": 0, "node": 0, "thickness": -2.0 })),
+            // (thickness -2.0 is NOT a bad argument since
+            // Wave 11: set_node clamps to [1, 18], panel-style.
+            // A wrong-typed thickness still errors.)
+            ("set_node", json!({ "figure": 0, "node": 0, "thickness": "thick" })),
             ("set_node", json!({ "figure": 0, "node": 0, "shape": "blob" })),
             ("add_node", json!({ "figure": 0, "parent": 42, "length": 10.0 })),
             ("delete_node", json!({ "figure": 0, "node": 0 })), // root refused

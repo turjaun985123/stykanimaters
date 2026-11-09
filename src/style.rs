@@ -139,7 +139,7 @@ pub fn set_node_taper(core: &mut EditorCore, taper: f32) -> bool {
         node.style.taper = taper;
         taper_label(node.style.taper)
     };
-    core.status = format!("Segment {label}");
+    core.status = format!("Segment {label}.");
     true
 }
 

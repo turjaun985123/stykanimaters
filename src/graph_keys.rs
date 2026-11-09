@@ -2749,15 +2749,21 @@ mod mcp_graph_tool_tests {
         let before = core.project.channels.len();
         tool_graph_key_angle(&mut core, &json!({})).unwrap();
         assert!(core.project.channels.len() >= before);
-        // Clear all: every channel goes, and (the core
-        // op's documented truth) the undo depth does not
-        // grow — clear_graph takes no snapshot.
+        // Clear all: every channel goes, and — since the
+        // Wave 11 undo-discipline pass (editor.rs C3) — the
+        // clear is exactly one undo step, like every other
+        // mutation; entering the wave it took no snapshot
+        // and could not be undone at all.
         let depth = core.undo_depth();
         let n_channels = core.project.channels.len();
         let out = tool_graph_clear_channels(&mut core, &json!({})).unwrap();
         assert_eq!(out["cleared"], n_channels as u64);
         assert!(core.project.channels.is_empty());
-        assert_eq!(core.undo_depth(), depth, "clear_graph is not an undo step");
+        assert_eq!(
+            core.undo_depth(),
+            depth + 1,
+            "clear_graph is one undo step (Wave 11)"
+        );
     }
 
     #[test]
