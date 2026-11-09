@@ -93,6 +93,44 @@
 //! the clip is already muted / audible), so a repeated
 //! mute press cannot bury the undo stack in no-op steps.
 //!
+//! Wave 13 (B6): the dirty-marking audit (the Wave 12 E8
+//! remainder: `edit_count` bumps only in `snapshot()`, so a
+//! mutator that never snapshots never marks the project
+//! dirty and never counts towards the 25-edit autosave).
+//! Every mutator in this file was read against that gap and
+//! the verdict is that THE GAP DOES NOT EXIST HERE: each
+//! indexed primary (fade / reverse / gain / gain-step /
+//! delete / duplicate / move / echo / lowpass /
+//! trim-silence / pitch / compress / split-at-silences)
+//! takes exactly one snapshot after all fallible work and
+//! before its write; `normalise_all_clips` takes one
+//! snapshot for the whole batch, and only when at least
+//! one clip changes; the mute pair write only behind the
+//! setter's snapshot, and its already-in-state path writes
+//! nothing at all. The `*_last` wrappers and
+//! `delete_audio_clip` delegate, and the MCP handlers in
+//! this file delegate to the same ops — no handler writes
+//! project state directly. No op here needs the
+//! `mark_dirty()` seam: there is no non-undoable write in
+//! the file (every write is a project edit that should be
+//! one undo step), so nothing was changed. The behaviour
+//! is pinned per op by the tests below (the
+//! `edits_since_autosave` deltas in each targeting /
+//! refusal / no-op test, plus the Wave 13 pins for the
+//! gain wrappers, field-op undo restoration and the MCP
+//! handlers' one-snapshot cost). Two over-marks are
+//! recorded, deliberately NOT changed: `audio_set_gain_at`
+//! and `audio_move_at` snapshot even when the sanitised /
+//! clamped result equals the current value — a same-value
+//! write behind a snapshot over-marks by one edit rather
+//! than missing one, and making them value-aware (as the
+//! mute setter is) would change established undo
+//! behaviour; B1's census can rule on it. Out of this
+//! file's rows, for the census: clip ADD
+//! (`EditorCore::add_audio_clip`), the seconds trim
+//! (`audio_trim`), the file normalise (`audio_normalize`)
+//! and the `*_last` DSP originals all live in `editor.rs`.
+//!
 //! `audio_derived_path` below is a copy of the private helper
 //! of the same name in `editor.rs`: it is private to that
 //! module, so this file cannot call it — the body is kept
@@ -2598,5 +2636,77 @@ mod tests {
             &serde_json::json!({ "index": 0, "start_secs": 0.0, "end_secs": 0.5 })
         )
         .is_err());
+    }
+
+    // ---- Wave 13 (B6): dirty-marking audit pins ----
+    //
+    // The audit above found no non-snapshot mutator in
+    // this file; these tests pin the three corners the
+    // per-op tests had not covered, so the census
+    // contract — one snapshot per real change, none on a
+    // refusal — is enforced for the whole family.
+
+    #[test]
+    fn gain_last_wrappers_take_exactly_one_snapshot_each() {
+        // The fade and delete wrappers already have
+        // edits-parity pins against their primaries; the
+        // two last-clip gain wrappers were the only ones
+        // without. Each delegates, so each costs exactly
+        // the primary's one snapshot.
+        let mut core = core_with(vec![clip("a.wav", 0), clip("b.wav", 4)]);
+        let edits = core.edits_since_autosave();
+        core.audio_set_gain_last(1.5);
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        core.audio_clip_gain_step(0.25);
+        assert_eq!(core.edits_since_autosave(), edits + 2, "one snapshot per wrapper call");
+        // The empty-project refusals spend nothing.
+        let mut empty = EditorCore::new();
+        let edits = empty.edits_since_autosave();
+        empty.audio_set_gain_last(1.5);
+        empty.audio_clip_gain_step(0.25);
+        assert_eq!(empty.edits_since_autosave(), edits, "no snapshot on a refusal");
+    }
+
+    #[test]
+    fn field_ops_undo_restores_the_prior_project() {
+        // The mute and normalise pins already prove their
+        // snapshots are real undo steps; the move and
+        // delete primaries now prove theirs the same way.
+        let mut core = core_with(vec![clip("a.wav", 0), clip("b.wav", 4), clip("c.wav", 8)]);
+        let before = project_json(&core);
+        core.audio_move_at(1, 10);
+        assert_eq!(core.project.audio[1].start_frame, 14);
+        core.undo();
+        assert_eq!(project_json(&core), before, "undo restores the moved clip");
+        core.delete_audio_clip_at(0);
+        assert_eq!(paths(&core), vec!["b.wav", "c.wav"]);
+        core.undo();
+        assert_eq!(project_json(&core), before, "undo restores the deleted clip");
+    }
+
+    #[test]
+    fn mcp_mutating_handlers_cost_one_snapshot_each() {
+        // The handlers delegate to the ops; this pins
+        // that the delegation itself adds no snapshot and
+        // drops none — three handler calls, three edits.
+        let mut core = core_with(vec![clip("a.wav", 3), clip("b.wav", 9)]);
+        let edits = core.edits_since_autosave();
+        tool_audio_clip_move(
+            &mut core,
+            &serde_json::json!({ "index": 1, "start_frame": 20 }),
+        )
+        .unwrap();
+        assert_eq!(core.edits_since_autosave(), edits + 1, "move: one snapshot");
+        tool_audio_clip_duplicate(&mut core, &serde_json::json!({ "index": 0 })).unwrap();
+        assert_eq!(core.edits_since_autosave(), edits + 2, "duplicate: one snapshot");
+        tool_audio_clip_toggle_muted(&mut core, &serde_json::json!({ "index": 0 })).unwrap();
+        assert_eq!(core.edits_since_autosave(), edits + 3, "toggle mute: one snapshot");
+        // A refused handler call spends nothing.
+        assert!(tool_audio_clip_move(
+            &mut core,
+            &serde_json::json!({ "index": 9, "start_frame": 0 })
+        )
+        .is_err());
+        assert_eq!(core.edits_since_autosave(), edits + 3, "no snapshot on a refusal");
     }
 }

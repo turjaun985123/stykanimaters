@@ -18,6 +18,28 @@
 //! rewrites `widths` unless they are exactly parallel — its
 //! contract is index-exactness, so a broken vector is left
 //! exactly as found rather than normalised (see its docs).
+//!
+//! Snapshot discipline (Wave 13, B8 — the Wave 12 E8 census
+//! applied to this file): the free functions here are pure
+//! over `&mut Project` / `&mut Stroke` and NEVER snapshot —
+//! `EditorCore::snapshot` is the only write that bumps the
+//! edit count behind the dirty dot and the autosave cadence,
+//! so a mutation without one is invisible to both. Every
+//! caller therefore takes exactly one snapshot per user edit
+//! BEFORE calling in: the `tool_*` handlers below do (or
+//! delegate to an `EditorCore` op that does), and the
+//! editor's own gesture compositions do (one snapshot at
+//! eraser-drag start covers every `erase` call in the drag;
+//! smoothing/nib finalisation rides the drawn stroke's own
+//! step). A caller that skips the snapshot ships an
+//! un-undoable, never-dirty edit — the failure this census
+//! exists to catch. The session tools at the bottom
+//! (`tool_set_brush`, `tool_cycle_brush`, `tool_set_draw_tool`)
+//! write editor session state only (`brush_index`,
+//! `draw_tool`), which is not part of the saved project, so
+//! they correctly take no snapshot and mark nothing dirty;
+//! the `dirty_contract_tests` module pins every one of these
+//! verdicts against `undo_depth` / `edits_since_autosave`.
 
 use crate::editor::EditorCore;
 use crate::model::{Project, Stroke, V2};
@@ -147,6 +169,13 @@ pub fn smooth_frame(project: &mut Project, frame: usize, subdiv: usize) -> usize
 /// parallel to the points (empty for an empty stroke, `[width]`
 /// for a single point), converting a uniform stroke into the
 /// per-point form; any previous per-point widths are discarded.
+///
+/// CALLER MUST SNAPSHOT FIRST (Wave 13, B8): like every free
+/// function in this module, this takes no snapshot, so the
+/// caller owns the one undo step / dirty mark for the edit
+/// (see the module docs). This warning sits on this function
+/// in particular because a frame-wide nib rewrite is a large,
+/// silent project mutation when the step is skipped.
 pub fn apply_nib(stroke: &mut Stroke, nib: Nib, nib_angle_deg: f32) {
     stroke.widths = nib_widths(&stroke.points, stroke.width, nib, nib_angle_deg);
 }
@@ -981,9 +1010,10 @@ pub fn tool_clear_frame_strokes(core: &mut EditorCore, args: &Value) -> Result<V
         ));
     }
     let n = stroke_count(&core.project, frame);
-    if n > 0 {
-        core.snapshot();
-    }
+    // Wave 13 (census A17): the core op owns the undo step
+    // now (it snapshots when the frame carries strokes) —
+    // a handler snapshot here would count two edits for
+    // one action.
     core.clear_frame_drawings();
     Ok(json!({
         "ok": true,
@@ -2136,5 +2166,210 @@ mod mcp_handler_tests {
         assert_eq!(out["total_length"], 80.0);
         assert_eq!(out["spray_strokes"], 1);
         assert_eq!(out["strokes_on_current_frame"], 1);
+    }
+}
+
+#[cfg(test)]
+mod dirty_contract_tests {
+    //! Wave 13 (B8): the Wave 12 E8 census applied to this
+    //! file, as executable pins. `EditorCore::snapshot` is
+    //! the only write that bumps the edit count behind the
+    //! dirty dot and the autosave cadence, and it adds
+    //! exactly one undo step — so every mutator's contract
+    //! is a pair of deltas over (undo_depth,
+    //! edits_since_autosave): a real project edit moves
+    //! BOTH by exactly one; a refusal, a no-change call and
+    //! a session-only write move NEITHER. (The pre-existing
+    //! suites pin the geometry and reply shapes; this module
+    //! pins only the dirty/undo bookkeeping, per op.)
+    use super::*;
+    use serde_json::json;
+
+    fn witnesses(core: &EditorCore) -> (usize, u64) {
+        (core.undo_depth(), core.edits_since_autosave())
+    }
+
+    fn draw_line(core: &mut EditorCore) {
+        tool_draw_stroke(
+            core,
+            &json!({"frame": 0, "points": [[0.0, 0.0], [40.0, 0.0], [80.0, 0.0]]}),
+        )
+        .expect("draw_stroke succeeds");
+    }
+
+    #[test]
+    fn draw_and_arrow_spend_exactly_one_step_and_one_edit() {
+        let mut core = EditorCore::new();
+        let before = witnesses(&core);
+        draw_line(&mut core);
+        assert_eq!(witnesses(&core), (before.0 + 1, before.1 + 1), "draw_stroke");
+        let before = witnesses(&core);
+        tool_draw_arrow(
+            &mut core,
+            &json!({"x1": 10.0, "y1": 20.0, "x2": 110.0, "y2": 20.0}),
+        )
+        .unwrap();
+        assert_eq!(witnesses(&core), (before.0 + 1, before.1 + 1), "draw_arrow");
+        // Refusals spend nothing: bad width, negative
+        // scatter, out-of-range frame, degenerate arrow.
+        let before = witnesses(&core);
+        assert!(tool_draw_stroke(
+            &mut core,
+            &json!({"frame": 0, "points": [[0.0, 0.0]], "width": 0.0})
+        )
+        .is_err());
+        assert!(tool_draw_stroke(
+            &mut core,
+            &json!({"frame": 0, "points": [[0.0, 0.0]], "scatter": -1.0})
+        )
+        .is_err());
+        assert!(tool_draw_stroke(
+            &mut core,
+            &json!({"frame": 99, "points": [[0.0, 0.0]]})
+        )
+        .is_err());
+        assert!(tool_draw_arrow(
+            &mut core,
+            &json!({"x1": 5.0, "y1": 5.0, "x2": 5.0, "y2": 5.0})
+        )
+        .is_err());
+        assert_eq!(witnesses(&core), before, "refusals spend nothing");
+    }
+
+    #[test]
+    fn set_stroke_style_spends_one_step_and_refusals_spend_nothing() {
+        let mut core = EditorCore::new();
+        draw_line(&mut core);
+        let before = witnesses(&core);
+        tool_set_stroke_style(&mut core, &json!({"index": 0, "width": 8.0})).unwrap();
+        assert_eq!(witnesses(&core), (before.0 + 1, before.1 + 1));
+        // A mutating call whose value equals the stored one
+        // is still one user edit — exactly one step, never
+        // zero and never two (the census verdict for the
+        // absolute-value setters).
+        let before = witnesses(&core);
+        tool_set_stroke_style(&mut core, &json!({"index": 0, "width": 8.0})).unwrap();
+        assert_eq!(witnesses(&core), (before.0 + 1, before.1 + 1), "same-value set");
+        let before = witnesses(&core);
+        assert!(tool_set_stroke_style(&mut core, &json!({"index": 0, "width": 41.0})).is_err());
+        assert!(tool_set_stroke_style(&mut core, &json!({"index": 0})).is_err());
+        assert!(tool_set_stroke_style(&mut core, &json!({"index": 9, "width": 4.0})).is_err());
+        assert_eq!(witnesses(&core), before, "refusals spend nothing");
+    }
+
+    #[test]
+    fn simplify_stroke_marks_dirty_only_when_it_changes() {
+        let mut core = EditorCore::new();
+        tool_draw_stroke(
+            &mut core,
+            &json!({
+                "frame": 0,
+                "points": [[0.0, 0.0], [10.0, 0.4], [20.0, -0.3], [30.0, 0.2], [40.0, 0.0]],
+            }),
+        )
+        .unwrap();
+        let before = witnesses(&core);
+        let out = tool_simplify_stroke(&mut core, &json!({"index": 0, "epsilon": 1.0})).unwrap();
+        assert_eq!(out["simplified"], true);
+        assert_eq!(witnesses(&core), (before.0 + 1, before.1 + 1), "a real simplify");
+        let before = witnesses(&core);
+        let out = tool_simplify_stroke(&mut core, &json!({"index": 0, "epsilon": 1.0})).unwrap();
+        assert_eq!(out["simplified"], false);
+        assert_eq!(witnesses(&core), before, "already simple: no step, no dirty");
+        assert!(tool_simplify_stroke(&mut core, &json!({"index": 9, "epsilon": 1.0})).is_err());
+        assert_eq!(witnesses(&core), before, "bad index spends nothing");
+    }
+
+    #[test]
+    fn fill_and_lasso_spend_one_step_and_refusals_spend_nothing() {
+        let mut core = EditorCore::new();
+        let before = witnesses(&core);
+        let err = tool_fill_stroke(&mut core, &json!({})).unwrap_err();
+        assert!(err.contains("Nothing to fill"), "{err}");
+        assert_eq!(witnesses(&core), before, "nothing-to-fill spends nothing");
+        tool_draw_stroke(
+            &mut core,
+            &json!({
+                "frame": 0,
+                "points": [[0.0, 0.0], [100.0, 0.0], [50.0, 80.0], [0.0, 0.0]],
+            }),
+        )
+        .unwrap();
+        let before = witnesses(&core);
+        tool_fill_stroke(&mut core, &json!({})).unwrap();
+        assert_eq!(witnesses(&core), (before.0 + 1, before.1 + 1), "fill via the core op");
+        // A lasso around nothing is a refusal, not a step.
+        let before = witnesses(&core);
+        let err = tool_lasso_erase(
+            &mut core,
+            &json!({"points": [[500.0, 500.0], [600.0, 500.0], [600.0, 600.0], [500.0, 600.0]]}),
+        )
+        .unwrap_err();
+        assert!(err.contains("erased nothing"), "{err}");
+        assert_eq!(witnesses(&core), before, "empty lasso spends nothing");
+        let before = witnesses(&core);
+        tool_lasso_erase(
+            &mut core,
+            &json!({"points": [[-10.0, -10.0], [200.0, -10.0], [200.0, 200.0], [-10.0, 200.0]]}),
+        )
+        .unwrap();
+        assert_eq!(witnesses(&core), (before.0 + 1, before.1 + 1), "lasso via the core op");
+    }
+
+    #[test]
+    fn mirror_clear_delete_all_and_recolor_spend_only_on_real_changes() {
+        let mut core = EditorCore::new();
+        // Empty project: every bulk op refuses or reports
+        // zero WITHOUT a step or a dirty mark.
+        let before = witnesses(&core);
+        assert!(tool_mirror_strokes(&mut core, &json!({})).is_err());
+        let out = tool_clear_frame_strokes(&mut core, &json!({})).unwrap();
+        assert_eq!(out["cleared"], 0);
+        let out = tool_delete_all_strokes(&mut core, &json!({})).unwrap();
+        assert_eq!(out["deleted"], 0);
+        let out = tool_recolor_strokes(&mut core, &json!({"color": 0x112233u32})).unwrap();
+        assert_eq!(out["recolored"], 0);
+        assert_eq!(witnesses(&core), before, "empty-project bulk ops spend nothing");
+        // With a stroke present, each is exactly one step.
+        draw_line(&mut core);
+        let before = witnesses(&core);
+        tool_mirror_strokes(&mut core, &json!({})).unwrap();
+        assert_eq!(witnesses(&core), (before.0 + 1, before.1 + 1), "mirror via the core op");
+        let before = witnesses(&core);
+        tool_recolor_strokes(&mut core, &json!({"color": 0x445566u32})).unwrap();
+        assert_eq!(witnesses(&core), (before.0 + 1, before.1 + 1), "recolor");
+        let before = witnesses(&core);
+        tool_clear_frame_strokes(&mut core, &json!({})).unwrap();
+        assert_eq!(witnesses(&core), (before.0 + 1, before.1 + 1), "clear frame");
+        draw_line(&mut core);
+        let before = witnesses(&core);
+        tool_delete_all_strokes(&mut core, &json!({})).unwrap();
+        assert_eq!(witnesses(&core), (before.0 + 1, before.1 + 1), "delete all");
+    }
+
+    #[test]
+    fn session_tools_and_reads_spend_nothing() {
+        // The brush / draw-tool family writes editor session
+        // state (brush_index, draw_tool) — not part of the
+        // saved project — so the writes provably happen
+        // while neither witness moves. The read family
+        // trivially spends nothing.
+        let mut core = EditorCore::new();
+        draw_line(&mut core);
+        let before = witnesses(&core);
+        tool_list_strokes(&mut core, &json!({})).unwrap();
+        tool_get_drawing_stats(&mut core, &json!({})).unwrap();
+        tool_list_brushes(&mut core, &json!({})).unwrap();
+        tool_set_brush(&mut core, &json!({"name": "spray"})).unwrap();
+        assert_eq!(core.active_brush().name, "Spray", "the session write happened");
+        tool_cycle_brush(&mut core, &json!({})).unwrap();
+        assert_eq!(core.active_brush().name, "Pen", "cycle wrapped to the first preset");
+        tool_set_draw_tool(&mut core, &json!({"tool": "eraser"})).unwrap();
+        assert!(core.draw_tool_is_eraser(), "the tool write happened");
+        assert_eq!(
+            witnesses(&core),
+            before,
+            "session writes and reads: no undo step, no dirty mark"
+        );
     }
 }

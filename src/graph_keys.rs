@@ -1369,11 +1369,21 @@ pub fn tool_graph_key_angle(core: &mut EditorCore, _args: &Value) -> Result<Valu
 }
 
 pub fn tool_graph_clear_channels(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
-    // TRUTH NOTE: `EditorCore::clear_graph` — the graph
-    // panel's "Clear all channels" op — takes NO snapshot,
-    // so this is not an undo step, exactly as in the
-    // panel. The description in the registry entry must
-    // say so.
+    // TRUTH NOTE (corrected in Wave 13, B7's dirty-marking
+    // audit): `EditorCore::clear_graph` — the graph panel's
+    // "Clear all channels" op — DOES snapshot: since the
+    // Wave 11 undo-discipline pass (editor.rs C3) a
+    // non-empty clear is exactly one undo step and so marks
+    // the project dirty like every other mutation, and an
+    // empty clear is a status-only no-op that spends
+    // nothing. An earlier version of this note claimed the
+    // opposite (no snapshot, not an undo step) — that was
+    // the pre-Wave-11 behaviour and is no longer true of
+    // the tree; the registry description ("One undo step.")
+    // already matches the current op. The audit's verdict
+    // for B1's census: this handler is COVERED (snapshot,
+    // via the core op) — no `mark_dirty` call is needed
+    // here.
     let cleared = core.project.channels.len();
     core.clear_graph();
     Ok(json!({
@@ -2764,6 +2774,94 @@ mod mcp_graph_tool_tests {
             depth + 1,
             "clear_graph is one undo step (Wave 11)"
         );
+    }
+
+    #[test]
+    fn clear_channels_marks_dirty_once_and_an_empty_clear_spends_nothing() {
+        // Wave 13 (B7, the E8 dirty-marking audit): the
+        // census pin for `graph_clear_channels`. The op it
+        // delegates to (`EditorCore::clear_graph`) snapshots
+        // exactly once on a non-empty clear, so the clear is
+        // one undo step AND one counted edit (the dirty /
+        // autosave witness) — and undoing restores the
+        // channels. On an empty project the same call is a
+        // status-only no-op: no snapshot, no counted edit.
+        let mut core = twin_core();
+        let depth = core.undo_depth();
+        let edits = core.edits_since_autosave();
+
+        let out = tool_graph_clear_channels(&mut core, &json!({})).unwrap();
+        assert_eq!(out["cleared"], 3);
+        assert!(core.project.channels.is_empty());
+        assert_eq!(core.undo_depth(), depth + 1, "the clear is one undo step");
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits + 1,
+            "the clear marks the project dirty exactly once"
+        );
+        core.undo();
+        assert_eq!(core.project.channels.len(), 3, "undo restores the channels");
+
+        // Empty clear: nothing spent, nothing counted.
+        let mut core = EditorCore::new();
+        assert!(core.project.channels.is_empty(), "demo premise");
+        let depth = core.undo_depth();
+        let edits = core.edits_since_autosave();
+        let out = tool_graph_clear_channels(&mut core, &json!({})).unwrap();
+        assert_eq!(out["cleared"], 0);
+        assert_eq!(core.undo_depth(), depth, "an empty clear takes no snapshot");
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits,
+            "an empty clear does not mark dirty"
+        );
+        assert!(
+            core.status.contains("No graph channels to clear."),
+            "the core op's refusal reaches the status line: {}",
+            core.status
+        );
+    }
+
+    #[test]
+    fn channel_wide_tools_each_count_exactly_one_edit() {
+        // Wave 13 (B7): the census pins for the four
+        // channel-wide MCP tools that snapshot in the
+        // handler itself (reduce / mirror / scale / tangent
+        // preset) — each successful call is exactly one undo
+        // step and exactly one counted edit, so every one of
+        // them marks the project dirty precisely once.
+        let mut core = twin_core();
+        // Give twin 0 a straight three-key ramp (100/120/140
+        // at frames 0/2/4) so reduce has a key it really
+        // removes: the middle key sits exactly on the line.
+        core.project.channels[0].keys = vec![
+            Key::flat(0.0, 100.0),
+            Key::flat(2.0, 120.0),
+            Key::flat(4.0, 140.0),
+        ];
+        let depth = core.undo_depth();
+        let edits = core.edits_since_autosave();
+
+        let out = tool_graph_reduce_keys(&mut core, &json!({ "channel": 0 })).unwrap();
+        assert_eq!(out["removed"], 1, "the on-line middle key is reduced away");
+        assert_eq!(core.undo_depth(), depth + 1, "reduce: one snapshot");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "reduce: one counted edit");
+
+        tool_graph_mirror_channel(&mut core, &json!({ "channel": 0 })).unwrap();
+        assert_eq!(core.undo_depth(), depth + 2, "mirror: one snapshot");
+        assert_eq!(core.edits_since_autosave(), edits + 2, "mirror: one counted edit");
+
+        tool_graph_scale_channel(&mut core, &json!({ "channel": 0, "factor": 2.0 })).unwrap();
+        assert_eq!(core.undo_depth(), depth + 3, "scale: one snapshot");
+        assert_eq!(core.edits_since_autosave(), edits + 3, "scale: one counted edit");
+
+        tool_graph_tangent_preset_channel(
+            &mut core,
+            &json!({ "channel": 0, "preset": "smooth" }),
+        )
+        .unwrap();
+        assert_eq!(core.undo_depth(), depth + 4, "preset: one snapshot");
+        assert_eq!(core.edits_since_autosave(), edits + 4, "preset: one counted edit");
     }
 
     #[test]

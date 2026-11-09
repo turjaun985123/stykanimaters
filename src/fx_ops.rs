@@ -50,6 +50,47 @@
 //! every argument is validated (and the clip index
 //! pre-checked) before anything mutates, and bad input
 //! is a clean `Err`, never a panic.
+//!
+//! Wave 13 (B4) — dirty-marking audit of this file's
+//! whole clip-mutator family, against the Squad B
+//! contract (every project mutation takes exactly one
+//! snapshot — one undo step, which is also the dirty /
+//! autosave count — or calls `EditorCore::mark_dirty`
+//! where undoability would be wrong; refusals spend
+//! nothing). Verdict: **every mutator in this file
+//! already complies, and no `mark_dirty` call is
+//! needed here.** `fx_move_clip`, `fx_resize_clip`,
+//! `fx_split_clip`, `fx_duplicate_clip`,
+//! `fx_delete_clip`, `fx_set_color`, `fx_set_color2`,
+//! `fx_set_anchor`, `fx_set_kind` and `fx_set_hidden`
+//! each call `snapshot()` exactly once, after their
+//! refusal checks and before the write, so each is one
+//! undo step and one counted edit; every refusal path
+//! (out-of-range index, invalid split point) returns
+//! before the snapshot and spends nothing. The tests
+//! below pin both halves per op (the family-wide pins
+//! are `every_fx_op_is_exactly_one_undo_step` and
+//! `every_fx_op_refuses_on_an_empty_project_and_spends_nothing`).
+//! The file's non-mutators are correctly outside the
+//! contract: `fx_kind_cycle` is pure,
+//! `tool_fx_preset_list` is read-only, and
+//! `tool_fx_preset_delete` deletes a preset FILE in
+//! `./fx-presets/` — it writes no project state, so it
+//! takes no snapshot and marks nothing dirty.
+//!
+//! Premise correction, stated plainly: the Wave 12 E8
+//! names `clip_set_angle` / `clip_set_root` are **not
+//! in this file and are not FX-clip ops** — they are
+//! the movieclip-session pose-tweak ops in
+//! `src/editor.rs`, documented no-snapshot exceptions
+//! (per-angle tweaks would flood the undo history;
+//! see their MCP catalogue entries). Under the Squad B
+//! contract they are `mark_dirty` candidates, but they
+//! belong to the editor.rs owner's census (B2), not to
+//! this file; nothing about them is changed here. (At
+//! audit time `mark_dirty` did not yet exist in
+//! `editor.rs` — B2's seam was still in flight — and
+//! this file needs no call to it either way.)
 
 use crate::editor::EditorCore;
 use crate::fx_edit;
@@ -905,24 +946,130 @@ mod tests {
         assert_eq!(empty.status, "FX clip visibility failed: no FX clip 1.");
     }
 
+    /// Wave 13 (B4) family pin helper: applying `apply`
+    /// to `core` must take exactly one snapshot (one
+    /// counted edit for the dirty dot / autosave
+    /// cadence), and a single `undo()` must restore the
+    /// project byte-for-byte — together those prove the
+    /// snapshot is a real undo step, not just a counter
+    /// bump.
+    fn assert_single_undo_step(
+        core: &mut EditorCore,
+        label: &str,
+        apply: impl FnOnce(&mut EditorCore),
+    ) {
+        let before = project_json(core);
+        let edits = core.edits_since_autosave();
+        apply(core);
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits + 1,
+            "{label}: exactly one snapshot"
+        );
+        core.undo();
+        assert_eq!(core.status, "Undone.", "{label}: undo is available");
+        assert_eq!(
+            project_json(core),
+            before,
+            "{label}: one undo restores the project exactly"
+        );
+    }
+
+    #[test]
+    fn every_fx_op_is_exactly_one_undo_step() {
+        // The B4 audit as an executable census: every
+        // mutating op in this file, one after another on
+        // the same fixture, each pinned by
+        // `assert_single_undo_step`. (Split, delete and
+        // set-hidden also have dedicated undo tests
+        // above; they are repeated here so the family
+        // pin has no silent exceptions.)
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        assert_single_undo_step(&mut core, "fx_move_clip", |c| c.fx_move_clip(0, 3));
+        assert_single_undo_step(&mut core, "fx_resize_clip", |c| c.fx_resize_clip(0, -4.0));
+        assert_single_undo_step(&mut core, "fx_split_clip", |c| {
+            assert!(c.fx_split_clip(0, 9.0));
+        });
+        assert_single_undo_step(&mut core, "fx_duplicate_clip", |c| {
+            assert_eq!(c.fx_duplicate_clip(0), Some(1));
+        });
+        assert_single_undo_step(&mut core, "fx_delete_clip", |c| c.fx_delete_clip(0));
+        assert_single_undo_step(&mut core, "fx_set_color", |c| c.fx_set_color(0, 0x5DB2FF));
+        assert_single_undo_step(&mut core, "fx_set_color2", |c| {
+            c.fx_set_color2(0, Some(0xFF7BAC));
+        });
+        assert_single_undo_step(&mut core, "fx_set_anchor", |c| c.fx_set_anchor(0, 2, 4));
+        assert_single_undo_step(&mut core, "fx_set_kind", |c| {
+            c.fx_set_kind(0, ClipKind::ShockRing);
+        });
+        assert_single_undo_step(&mut core, "fx_set_hidden", |c| c.fx_set_hidden(0, true));
+        // Every undo landed: the fixture is exactly the
+        // clip it started as.
+        assert_eq!(core.project.fx_clips.len(), 1);
+        assert_eq!(core.project.fx_clips[0].clip.start, 4.0);
+        assert_eq!(core.project.fx_clips[0].clip.duration, 10.0);
+        assert_eq!(core.project.fx_clips[0].clip.kind, ClipKind::Burst);
+        assert!(!core.project.fx_clips[0].hidden);
+    }
+
+    #[test]
+    fn every_fx_op_refuses_on_an_empty_project_and_spends_nothing() {
+        // The refusal half of the B4 contract, family-
+        // wide: on a project with no FX clips, every op
+        // refuses (status-only, `false` or `None` where
+        // the op returns a verdict) and none of them
+        // takes a snapshot — the project JSON and the
+        // edit counter are both untouched after all ten.
+        let mut core = core_with(vec![]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        core.fx_move_clip(0, 1);
+        core.fx_resize_clip(0, 1.0);
+        assert!(!core.fx_split_clip(0, 0.5));
+        assert_eq!(core.fx_duplicate_clip(0), None);
+        core.fx_delete_clip(0);
+        core.fx_set_color(0, 0xFFFFFF);
+        core.fx_set_color2(0, Some(0xFFFFFF));
+        core.fx_set_anchor(0, 0, 0);
+        core.fx_set_kind(0, ClipKind::Wave);
+        core.fx_set_hidden(0, true);
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits,
+            "no refusal took a snapshot"
+        );
+        assert!(core.project.fx_clips.is_empty());
+    }
+
     #[test]
     fn tool_set_hidden_sets_reads_back_and_is_undoable() {
         let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        // Wave 13 (B4): the handler path spends exactly
+        // the op's one snapshot per successful call —
+        // no extra snapshot at the handler layer.
+        let edits = core.edits_since_autosave();
         let r = tool_fx_set_hidden(&mut core, &json!({ "index": 0, "hidden": true })).unwrap();
         assert_eq!(r["ok"], true);
         assert_eq!(r["fx_index"], 0);
         assert_eq!(r["hidden"], true);
         assert_eq!(r["status"], "FX clip 1 hidden.");
         assert!(core.project.fx_clips[0].hidden);
+        assert_eq!(core.edits_since_autosave(), edits + 1, "one snapshot via the handler");
         let r = tool_fx_set_hidden(&mut core, &json!({ "index": 0, "hidden": false })).unwrap();
         assert_eq!(r["hidden"], false);
         assert!(!core.project.fx_clips[0].hidden);
+        assert_eq!(core.edits_since_autosave(), edits + 2, "one snapshot per call");
     }
 
     #[test]
     fn tool_set_hidden_rejects_bad_input_without_panicking() {
         let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
         let before = project_json(&core);
+        // Wave 13 (B4): every rejection below must also
+        // spend nothing on the edit counter (asserted at
+        // the end of the test).
+        let edits = core.edits_since_autosave();
         // Missing arguments.
         assert_eq!(
             tool_fx_set_hidden(&mut core, &json!({ "hidden": true })).unwrap_err(),
@@ -961,6 +1108,11 @@ mod tests {
             "no FX clip at index 999999"
         );
         assert_eq!(project_json(&core), before, "no rejected call changed the project");
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits,
+            "no rejected call took a snapshot"
+        );
         assert!(!core.project.fx_clips[0].hidden);
     }
 

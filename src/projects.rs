@@ -323,6 +323,27 @@ pub fn list_project_files(dir: &Path) -> Vec<PathBuf> {
 /// session's current file and must not enter recents; the
 /// named-save paths, GUI and MCP alike, already touch
 /// recents themselves.
+///
+/// Wave 13 (B5, the dirty-marking census): the seam also
+/// never touches the edit counters (`edit_count` /
+/// `last_autosave_count`, read via
+/// `EditorCore::edits_since_autosave`) — deliberately.
+/// It runs immediately AFTER saves, where the saved
+/// baseline must survive untouched, and inside the MCP
+/// `project_rename` handler, whose own name write
+/// (`core.project.name = …` in `mcp_tools.rs`) is a
+/// project mutation that must mark dirty at ITS call
+/// site, not here: a refresh that bumped or reset the
+/// counters would dirty every just-saved project and
+/// launder every rename. The same audit cleared this
+/// file's other write paths: [`rename_project`] and
+/// [`duplicate_project`] are file primitives with no
+/// core at all, and [`save_copy`] renames a clone — the
+/// live project's name, file association and counters
+/// are untouched by design. The counters are pinned by
+/// `refresh_project_files_never_touches_the_edit_counters`
+/// and `save_copy_leaves_the_sessions_dirty_state_untouched`
+/// in this file's tests.
 pub fn refresh_project_files(core: &mut EditorCore) {
     let dir = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -1274,5 +1295,73 @@ mod tests {
         assert_eq!(core.project_files, vec![alpha]);
         assert_eq!(core.project_index, 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Wave 13 (B5, dirty-marking census): the refresh
+    /// seam is list + selection ONLY — it must never move
+    /// the edit counters in either direction. It runs
+    /// right after saves (a bump would dirty a just-saved
+    /// project; a reset would hide real edits from the
+    /// autosave cadence) and inside the MCP rename, whose
+    /// name write marks dirty at its own call site in
+    /// `mcp_tools.rs` — never here.
+    #[test]
+    fn refresh_project_files_never_touches_the_edit_counters() {
+        let dir = temp_dir("refresh-counters");
+        let mut project = Project::new_demo();
+        project.name = "Alpha".into();
+        let alpha = save(&project, &dir).unwrap();
+        let mut core = core_with_files(vec![alpha], 0);
+
+        // A clean core (the just-saved state: counters
+        // level) stays clean across a refresh.
+        assert_eq!(core.edits_since_autosave(), 0);
+        refresh_project_files_in(&mut core, &dir);
+        assert_eq!(
+            core.edits_since_autosave(),
+            0,
+            "a refresh must not dirty a just-saved project"
+        );
+
+        // A dirty core (one counted edit, via the same
+        // snapshot every mutating op takes) keeps exactly
+        // its count: the refresh neither manufactures a
+        // second edit nor launders the first.
+        core.snapshot();
+        assert_eq!(core.edits_since_autosave(), 1);
+        refresh_project_files_in(&mut core, &dir);
+        assert_eq!(
+            core.edits_since_autosave(),
+            1,
+            "a refresh must not move the autosave cadence"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Wave 13 (B5, dirty-marking census): saving a copy
+    /// renames a CLONE — the session project is not the
+    /// copy's file, so the copy is neither a save of the
+    /// session (it must not clear the dirty baseline) nor
+    /// an edit to it (it must not bump the count). The
+    /// session's name and counters are exactly as they
+    /// were; only the file on disk carries the new name.
+    #[test]
+    fn save_copy_leaves_the_sessions_dirty_state_untouched() {
+        let dir = temp_dir("save-copy-dirty").join("projects");
+        let mut core = EditorCore::new();
+        core.snapshot();
+        assert_eq!(core.edits_since_autosave(), 1);
+
+        let path = save_copy_to(&core, "Session Copy", &dir).unwrap();
+        assert!(path.exists());
+        assert_eq!(load(&path).unwrap().name, "Session Copy");
+
+        assert_eq!(core.project.name, "Untitled");
+        assert_eq!(
+            core.edits_since_autosave(),
+            1,
+            "a copy is not a save of the session file: the baseline must not move"
+        );
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 }

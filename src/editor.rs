@@ -277,6 +277,16 @@ impl EditorCore {
             if let Ok(p) = serde_json::from_str::<Project>(&s) {
                 self.project = p;
                 self.current = self.current.min(self.project.frames.len().saturating_sub(1));
+                // Wave 13 (B2): mirror undo's clamp — a
+                // redone project may hold fewer figures
+                // than the selection names, and every
+                // reader of `selected_figure` assumes it
+                // is in bounds. (A parity bug fix only;
+                // the swap semantics themselves are
+                // untouched.)
+                self.selected_figure = self
+                    .selected_figure
+                    .min(self.project.figures.len().saturating_sub(1));
                 self.repair_clip_session_after_history();
                 self.status = "Redone.".into();
             }
@@ -720,18 +730,38 @@ impl EditorCore {
 
     pub fn adjust_length(&mut self, delta: f32) {
         let Some(ni) = self.selected_node else { return };
-        let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
-        if node.parent.is_some() {
-            node.length = (node.length + delta).clamp(4.0, 220.0);
-            self.status = format!("{} length {:.0}", node.name, node.length);
+        let (name, length, changed) = {
+            let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
+            if node.parent.is_none() {
+                return;
+            }
+            let next = (node.length + delta).clamp(4.0, 220.0);
+            let changed = next != node.length;
+            node.length = next;
+            (node.name.clone(), node.length, changed)
+        };
+        // Wave 13 (B2): a stepper tweak — no snapshot, but
+        // a real change counts for dirty/autosave.
+        if changed {
+            self.mark_dirty();
         }
+        self.status = format!("{} length {:.0}", name, length);
     }
 
     pub fn adjust_thickness(&mut self, delta: f32) {
         let Some(ni) = self.selected_node else { return };
-        let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
-        node.thickness = (node.thickness + delta).clamp(1.0, 18.0);
-        self.status = format!("{} thickness {:.0}", node.name, node.thickness);
+        let (name, thickness, changed) = {
+            let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
+            let next = (node.thickness + delta).clamp(1.0, 18.0);
+            let changed = next != node.thickness;
+            node.thickness = next;
+            (node.name.clone(), node.thickness, changed)
+        };
+        // Wave 13 (B2): as `adjust_length`.
+        if changed {
+            self.mark_dirty();
+        }
+        self.status = format!("{} thickness {:.0}", name, thickness);
     }
 
     const NODE_COLORS: [Option<u32>; 7] = [
@@ -748,33 +778,61 @@ impl EditorCore {
     /// -> square -> pentagon -> line.
     pub fn cycle_shape(&mut self) {
         let Some(ni) = self.selected_node else { return };
-        let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
-        node.shape = match node.shape {
-            crate::model::Shape::Line => crate::model::Shape::Circle,
-            crate::model::Shape::Circle => crate::model::Shape::Polygon(3),
-            crate::model::Shape::Polygon(n) if n < 6 => crate::model::Shape::Polygon(n + 1),
-            crate::model::Shape::Polygon(_) => crate::model::Shape::Line,
+        let (name, shape) = {
+            let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
+            node.shape = match node.shape {
+                crate::model::Shape::Line => crate::model::Shape::Circle,
+                crate::model::Shape::Circle => crate::model::Shape::Polygon(3),
+                crate::model::Shape::Polygon(n) if n < 6 => crate::model::Shape::Polygon(n + 1),
+                crate::model::Shape::Polygon(_) => crate::model::Line,
+            };
+            (node.name.clone(), node.shape)
         };
-        self.status = format!("{} shape: {:?}.", node.name, node.shape);
+        // Wave 13 (B2): a cycler — no snapshot, but the
+        // shape always changes, so it always marks.
+        self.mark_dirty();
+        self.status = format!("{} shape: {:?}.", name, shape);
     }
 
     pub fn cycle_node_color(&mut self) {
         let Some(ni) = self.selected_node else { return };
-        let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
-        let idx = Self::NODE_COLORS
-            .iter()
-            .position(|c| *c == node.color)
-            .unwrap_or(0);
-        node.color = Self::NODE_COLORS[(idx + 1) % Self::NODE_COLORS.len()];
-        self.status = format!("{} colour changed.", node.name);
+        let name = {
+            let node = &mut self.project.figures[self.selected_figure].def.nodes[ni];
+            let idx = Self::NODE_COLORS
+                .iter()
+                .position(|c| *c == node.color)
+                .unwrap_or(0);
+            node.color = Self::NODE_COLORS[(idx + 1) % Self::NODE_COLORS.len()];
+            node.name.clone()
+        };
+        // Wave 13 (B2): as `cycle_shape`.
+        self.mark_dirty();
+        self.status = format!("{} colour changed.", name);
     }
 
     /// Set the selected segment's colour directly (the colour
     /// picker panel). Writes the same `NodeDef.color` the cycle
     /// op steps through, as `Some(rgb)`; like the cycle op it
-    /// does not snapshot.
+    /// does not snapshot — but since Wave 13 (B2) a write that
+    /// actually changes the colour marks dirty. (The shared
+    /// `write_node_color` itself stays unmarked: its other
+    /// caller, `set_node_style_atomic`, snapshots.)
     pub fn set_node_color(&mut self, rgb: u32) {
+        let before = self.selected_node.and_then(|ni| {
+            self.project
+                .figures
+                .get(self.selected_figure)?
+                .def
+                .nodes
+                .get(ni)
+                .map(|n| n.color)
+        });
         self.write_node_color(rgb);
+        if let Some(before) = before {
+            if before != Some(rgb) {
+                self.mark_dirty();
+            }
+        }
     }
 
     /// The colour write itself, without `set_node_color`'s
@@ -804,6 +862,11 @@ impl EditorCore {
 
     pub fn camera_clear_key(&mut self) {
         if self.project.remove_camera_key(self.current) {
+            // Wave 13 (census A6): the camera panel sells
+            // this path as its "Clear key (no undo)" button
+            // — no snapshot, by the label's own contract —
+            // but a real removal counts for dirty/autosave.
+            self.mark_dirty();
             self.status = "Camera key removed.".into();
         } else {
             self.status = "No camera key on this frame.".into();
@@ -1443,6 +1506,10 @@ impl EditorCore {
     pub fn toggle_figure_lock(&mut self, fi: usize) {
         match crate::layers::toggle_lock(&mut self.project, fi) {
             Some(locked) => {
+                // Wave 13 (B2): no snapshot by design
+                // (layers family), but the write counts
+                // for dirty/autosave via the seam.
+                self.mark_dirty();
                 self.status = format!("Figure {} {}.", fi + 1, if locked { "locked" } else { "unlocked" })
             }
             None => self.status = "No such figure.".into(),
@@ -1451,7 +1518,11 @@ impl EditorCore {
 
     pub fn cycle_figure_opacity(&mut self, fi: usize) {
         match crate::layers::cycle_opacity(&mut self.project, fi) {
-            Some(o) => self.status = format!("Figure {} opacity {:.0}%.", fi + 1, o * 100.0),
+            Some(o) => {
+                // Wave 13 (B2): as `toggle_figure_lock`.
+                self.mark_dirty();
+                self.status = format!("Figure {} opacity {:.0}%.", fi + 1, o * 100.0)
+            }
             None => self.status = "No such figure.".into(),
         }
     }
@@ -1460,15 +1531,22 @@ impl EditorCore {
     /// via the layers engine's clamped setter — so the bounds and NaN
     /// handling match every other opacity write. The target is rounded
     /// to two decimals so repeated steps land on clean percentages.
-    /// Like `cycle_figure_opacity`, this does not snapshot.
+    /// Like `cycle_figure_opacity`, this does not snapshot — but
+    /// since Wave 13 (B2) a step that actually changes the value
+    /// marks dirty, so the write is no longer invisible to the
+    /// dirty dot and the autosave cadence.
     pub fn step_figure_opacity(&mut self, fi: usize, delta: f32) {
         let Some(fig) = self.project.figures.get(fi) else {
             self.status = "No such figure.".into();
             return;
         };
+        let before = fig.opacity;
         let next = ((fig.opacity + delta) * 100.0).round() / 100.0;
         if crate::layers::set_opacity(&mut self.project, fi, next) {
             let o = self.project.figures[fi].opacity;
+            if o != before {
+                self.mark_dirty();
+            }
             self.status = format!("Figure {} opacity {:.0}%.", fi + 1, o * 100.0);
         } else {
             self.status = "No such figure.".into();
@@ -1919,6 +1997,36 @@ impl EditorCore {
         self.last_autosave_count = self.edit_count;
     }
 
+    /// Wave 13 (B2): count one edit for the dirty dot and
+    /// the autosave cadence WITHOUT pushing an undo
+    /// snapshot. This bumps the same `edit_count` that
+    /// `snapshot()` bumps — the counter
+    /// `edits_since_autosave` reads, and the one the
+    /// status strip derives its dirty dot from — so a
+    /// marked edit is indistinguishable from a
+    /// snapshot-counted one for both readers, and a later
+    /// `note_recovery_written` covers it exactly the same
+    /// way.
+    ///
+    /// The seam exists for the core ops that mutate the
+    /// project with undoability deliberately OFF (the
+    /// layers family — lock / hide / opacity — and the
+    /// project-settings and segment tweak cyclers and
+    /// steppers: their docs have always said "does not
+    /// snapshot", and the panels are built on a stepper
+    /// press costing zero undo entries). Before this
+    /// seam those writes were invisible to the dirty dot
+    /// and could slip a whole session past the 25-edit
+    /// autosave cadence (the Wave 12 E8 remainder). The
+    /// house rule stands: a mutation either snapshots
+    /// exactly once or calls this — never neither.
+    /// Callers mark only when a value actually changed;
+    /// a refused or clamped-to-same-value call marks
+    /// nothing.
+    pub fn mark_dirty(&mut self) {
+        self.edit_count += 1;
+    }
+
     /// Wave 9: if at least `AUTOSAVE_EVERY` edits have
     /// accumulated since the last autosave, write the recovery
     /// snapshot (`./projects/.recovery.json`, via shell.rs — the
@@ -2015,9 +2123,15 @@ impl EditorCore {
 
     pub fn toggle_figure_hidden(&mut self) {
         let fi = self.selected_figure;
-        let fig = &mut self.project.figures[fi];
-        fig.hidden = !fig.hidden;
-        self.status = format!("{} {}.", fig.name, if fig.hidden { "hidden" } else { "shown" });
+        let (name, hidden) = {
+            let fig = &mut self.project.figures[fi];
+            fig.hidden = !fig.hidden;
+            (fig.name.clone(), fig.hidden)
+        };
+        // Wave 13 (B2): layers family — no snapshot, but
+        // the flip counts for dirty/autosave.
+        self.mark_dirty();
+        self.status = format!("{} {}.", name, if hidden { "hidden" } else { "shown" });
     }
 
     pub fn select_figure(&mut self, fi: usize) {
@@ -2098,13 +2212,29 @@ impl EditorCore {
     }
 
     pub fn adjust_frame_duration(&mut self, factor: f32) {
-        let frame = &mut self.project.frames[self.current];
-        frame.duration = (frame.duration * factor).clamp(0.25, 8.0);
-        self.status = format!("Frame {} duration {:.2}x.", self.current + 1, frame.duration);
+        let (before, after) = {
+            let frame = &mut self.project.frames[self.current];
+            let before = frame.duration;
+            frame.duration = (frame.duration * factor).clamp(0.25, 8.0);
+            (before, frame.duration)
+        };
+        // Wave 13 (B2): a timing tweak — no snapshot, but
+        // a real change counts for dirty/autosave.
+        if after != before {
+            self.mark_dirty();
+        }
+        self.status = format!("Frame {} duration {:.2}x.", self.current + 1, after);
     }
 
     pub fn adjust_fps(&mut self, delta: f32) {
+        let before = self.project.fps;
         self.project.fps = (self.project.fps + delta).clamp(1.0, 60.0);
+        // Wave 13 (B2): as `adjust_frame_duration`. (The
+        // deliberate setter `set_project_fps` snapshots;
+        // this stepper never did.)
+        if self.project.fps != before {
+            self.mark_dirty();
+        }
         self.status = format!("{} fps.", self.project.fps as i32);
     }
 
@@ -2208,20 +2338,32 @@ impl EditorCore {
 
     pub fn cycle_easing(&mut self) {
         self.project.easing = self.project.easing.next();
+        // Wave 13 (B2): a settings cycler — no snapshot,
+        // but the value always changes, so it always
+        // marks dirty.
+        self.mark_dirty();
         self.status = format!("Easing: {}.", self.project.easing.label());
     }
 
     /// Set the project easing directly (the easing picker's
     /// preset buttons). Like `cycle_easing` it does not
     /// snapshot — project-settings tweaks are not undoable
-    /// edits in this core.
+    /// edits in this core — but since Wave 13 (B2) a set
+    /// that changes the value marks dirty.
     pub fn set_project_easing(&mut self, easing: crate::model::Easing) {
+        let changed = self.project.easing != easing;
         self.project.easing = easing;
+        if changed {
+            self.mark_dirty();
+        }
         self.status = format!("Easing: {}.", self.project.easing.label());
     }
 
     pub fn toggle_tween_playback(&mut self) {
         self.project.tween_playback = !self.project.tween_playback;
+        // Wave 13 (B2): a serialized project flag — the
+        // flip always changes it, so it always marks.
+        self.mark_dirty();
         self.status = format!(
             "Tween playback {}.",
             if self.project.tween_playback { "on" } else { "off" }
@@ -2234,6 +2376,9 @@ impl EditorCore {
         } else {
             Some(self.selected_figure)
         };
+        // Wave 13 (B2): a serialized project field — the
+        // toggle always changes it, so it always marks.
+        self.mark_dirty();
         self.status = match self.project.camera_follow {
             // Wave 11 (C2 flag): resolve the name fallibly — a
             // stale selection must not panic the status line.
@@ -3008,6 +3153,15 @@ impl EditorCore {
         }
         let brush = self.active_brush();
         let color = self.project.figures[self.selected_figure].color;
+        // Wave 13 (census A18): one snapshot for the whole
+        // stroke gesture, taken here before the push —
+        // every other stroke-creation path snapshots
+        // (the eraser branch above, stamps, the MCP draw
+        // tools); before this, a hand-drawn stroke was
+        // neither undoable nor counted. Never in
+        // `draw_to`: per-move snapshots would flood the
+        // undo stack.
+        self.snapshot();
         // Wave 13: a scatter brush (scatter > 0) records a spray
         // mark on the stroke. The seed is derived from the frame
         // and the stroke's own index in `project.strokes`, so the
@@ -3137,8 +3291,19 @@ impl EditorCore {
 
     pub fn clear_frame_drawings(&mut self) {
         let before = self.project.strokes.len();
+        let on_frame = self.project.strokes.iter().filter(|s| s.frame == self.current).count();
+        // Wave 13 (census A17, overruling B2's landed
+        // mark): stroke destruction snapshots like every
+        // peer op (`delete_stroke_at`, `fill_current_stroke`,
+        // `lasso_erase`) — the op owns the one undo step,
+        // so the MCP handler takes none of its own. An
+        // empty frame spends nothing.
+        if on_frame > 0 {
+            self.snapshot();
+        }
         self.project.strokes.retain(|s| s.frame != self.current);
-        self.status = format!("Cleared {} stroke(s) on this frame.", before - self.project.strokes.len());
+        let removed = before - self.project.strokes.len();
+        self.status = format!("Cleared {} stroke(s) on this frame.", removed);
     }
 
     /// Fill the most recent stroke on this frame: the stroke's outline
@@ -4172,7 +4337,14 @@ impl EditorCore {
             return;
         }
         self.clip_fit_frame(ci, fi);
-        self.project.clips[ci].frames[fi].angles[node] = degrees;
+        // Wave 13 (census A19): a session pose tweak — no
+        // snapshot (the pose-tweak rule the tool
+        // descriptions pin), but a real change counts for
+        // dirty/autosave via the seam.
+        if self.project.clips[ci].frames[fi].angles[node] != degrees {
+            self.project.clips[ci].frames[fi].angles[node] = degrees;
+            self.mark_dirty();
+        }
     }
 
     /// Set the root position on the session frame's pose.
@@ -4182,7 +4354,12 @@ impl EditorCore {
             return;
         }
         let Some((ci, fi)) = self.clip_session() else { return };
-        self.project.clips[ci].frames[fi].root = root;
+        // Wave 13 (census A20): as `clip_set_angle` — no
+        // snapshot, a real change marks dirty.
+        if self.project.clips[ci].frames[fi].root != root {
+            self.project.clips[ci].frames[fi].root = root;
+            self.mark_dirty();
+        }
     }
 
     /// Joint positions of the edited clip at the session frame —
@@ -5117,6 +5294,15 @@ mod tests {
 
     #[test]
     fn autosave_counter_counts_snapshots_only() {
+        // RENAMED in Wave 13 (B2) — see
+        // `autosave_counter_counts_marked_edits_too` below:
+        // this test's name and second half pinned the
+        // pre-Wave-13 contract, under which the deliberate
+        // non-snapshot mutators did not move the counter
+        // at all. That invisibility was the Wave 12 E8
+        // bug; the counter now counts marked edits too.
+        // What survives of the old test is its first half:
+        // snapshots count, one each.
         let mut core = EditorCore::new();
         assert_eq!(core.edits_since_autosave(), 0);
         core.snapshot();
@@ -5124,12 +5310,170 @@ mod tests {
         core.snapshot();
         core.snapshot();
         assert_eq!(core.edits_since_autosave(), 3);
-        // Ops that deliberately mutate without snapshotting
-        // (non-undoable appearance cyclers) do not move the
-        // counter: autosave counts snapshot-driven edits only.
-        core.cycle_node_color();
-        core.cycle_figure_opacity(0);
+        assert_eq!(core.undo_depth(), 3);
+    }
+
+    #[test]
+    fn autosave_counter_counts_marked_edits_too() {
+        // Wave 13 (B2): the deliberate non-snapshot
+        // mutators (non-undoable appearance cyclers and
+        // the layers family) now move the counter through
+        // `mark_dirty` — one per real change — while the
+        // undo stack stays exactly where the snapshots
+        // left it.
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        core.snapshot();
+        core.snapshot();
+        core.snapshot();
         assert_eq!(core.edits_since_autosave(), 3);
+        core.cycle_node_color();
+        assert_eq!(core.edits_since_autosave(), 4);
+        core.cycle_figure_opacity(0);
+        assert_eq!(core.edits_since_autosave(), 5);
+        assert_eq!(core.undo_depth(), 3, "marked edits are not undo steps");
+    }
+
+    #[test]
+    fn mark_dirty_advances_the_counter_without_an_undo_step() {
+        // Wave 13 (B2): the seam itself — the autosave
+        // counter (and with it the strip's dirty dot,
+        // which reads this counter) advances; neither
+        // history stack moves; and a recovery write
+        // covers marked edits exactly like snapshot ones.
+        let mut core = EditorCore::new();
+        assert_eq!(core.edits_since_autosave(), 0);
+        core.mark_dirty();
+        core.mark_dirty();
+        core.mark_dirty();
+        assert_eq!(core.edits_since_autosave(), 3);
+        assert_eq!(core.undo_depth(), 0);
+        assert_eq!(core.redo_depth(), 0);
+        core.note_recovery_written();
+        assert_eq!(core.edits_since_autosave(), 0);
+    }
+
+    #[test]
+    fn layer_ops_mark_dirty_without_an_undo_step() {
+        // Wave 13 (B2): the E8 family that lives in this
+        // file — lock, opacity cycle/step, hide — each
+        // real change counts once, spends no undo step,
+        // and a refusal or a clamped no-change step
+        // counts nothing.
+        let mut core = EditorCore::new();
+        let edits = core.edits_since_autosave();
+        let depth = core.undo_depth();
+        core.toggle_figure_lock(0);
+        assert_eq!(core.edits_since_autosave(), edits + 1);
+        core.cycle_figure_opacity(0);
+        assert_eq!(core.edits_since_autosave(), edits + 2);
+        core.step_figure_opacity(0, -0.1);
+        assert_eq!(core.edits_since_autosave(), edits + 3);
+        core.toggle_figure_hidden();
+        assert_eq!(core.edits_since_autosave(), edits + 4);
+        assert_eq!(core.undo_depth(), depth, "no undo steps were spent");
+        // Refusals spend nothing.
+        core.toggle_figure_lock(99);
+        core.cycle_figure_opacity(99);
+        core.step_figure_opacity(99, -0.1);
+        assert_eq!(core.edits_since_autosave(), edits + 4);
+        // A step clamped to the current value is not a
+        // change and does not mark: park the opacity at
+        // the layers floor, then step down again.
+        core.project.figures[0].opacity = 0.05;
+        core.step_figure_opacity(0, -0.1);
+        assert_eq!(core.edits_since_autosave(), edits + 4);
+    }
+
+    #[test]
+    fn settings_and_tweak_ops_mark_dirty_on_real_changes_only() {
+        // Wave 13 (B2): a representative pass over the
+        // wider non-snapshot family in this file —
+        // settings setters/cyclers, segment tweaks and
+        // the frame-clear — each real change counts
+        // once, no-change calls count nothing, and no
+        // undo step is spent anywhere.
+        let mut core = EditorCore::new();
+        core.selected_node = Some(1);
+        let depth = core.undo_depth();
+        let mut edits = core.edits_since_autosave();
+        core.cycle_easing();
+        edits += 1;
+        assert_eq!(core.edits_since_autosave(), edits);
+        // Re-setting the current easing changes nothing.
+        let current = core.project.easing;
+        core.set_project_easing(current);
+        assert_eq!(core.edits_since_autosave(), edits);
+        core.set_project_easing(crate::model::Easing::EaseIn);
+        edits += 1;
+        assert_eq!(core.edits_since_autosave(), edits);
+        core.adjust_fps(1.0);
+        edits += 1;
+        assert_eq!(core.edits_since_autosave(), edits);
+        core.toggle_tween_playback();
+        edits += 1;
+        assert_eq!(core.edits_since_autosave(), edits);
+        core.toggle_camera_follow();
+        edits += 1;
+        assert_eq!(core.edits_since_autosave(), edits);
+        core.cycle_shape();
+        edits += 1;
+        assert_eq!(core.edits_since_autosave(), edits);
+        // Segment colour: a change marks, the same
+        // colour again does not.
+        core.set_node_color(0x112233);
+        edits += 1;
+        assert_eq!(core.edits_since_autosave(), edits);
+        core.set_node_color(0x112233);
+        assert_eq!(core.edits_since_autosave(), edits);
+        assert_eq!(core.undo_depth(), depth, "no undo steps were spent");
+        // Clearing an empty frame spends nothing. Plant a
+        // stroke through the draw path (which snapshots
+        // at the gesture start — census A18) and
+        // re-baseline: the clear itself must then count
+        // once and spend exactly one undo step (census
+        // A17 overruled the mark-only pin this test first
+        // carried: the op owns the snapshot, like every
+        // peer stroke-destruction op).
+        core.clear_frame_drawings();
+        assert_eq!(core.edits_since_autosave(), edits);
+        assert_eq!(core.undo_depth(), depth, "an empty clear spends no undo step");
+        core.begin_draw([100.0, 100.0]);
+        core.draw_to([140.0, 120.0]);
+        core.end_draw();
+        assert_eq!(core.project.strokes.len(), 1);
+        let edits = core.edits_since_autosave();
+        let depth = core.undo_depth();
+        core.clear_frame_drawings();
+        assert_eq!(core.edits_since_autosave(), edits + 1);
+        assert_eq!(core.undo_depth(), depth + 1, "the clear's one undo step");
+        assert!(core.project.strokes.is_empty());
+        core.undo();
+        assert_eq!(core.project.strokes.len(), 1, "one undo restores the cleared stroke");
+    }
+
+    #[test]
+    fn redo_clamps_selected_figure_like_undo() {
+        // Wave 13 (B2): undo has always clamped the
+        // selection into the restored project; redo did
+        // not — restoring a project with fewer figures
+        // left `selected_figure` out of bounds. Drive
+        // redo from a hand-built stack entry (the test
+        // module can touch the stacks directly).
+        let mut core = EditorCore::new();
+        core.add_figure();
+        assert_eq!(core.project.figures.len(), 2);
+        core.selected_figure = 1;
+        let mut one_fig = core.project.clone();
+        one_fig.figures.pop();
+        core.redo
+            .push(serde_json::to_string(&one_fig).unwrap());
+        core.redo();
+        assert_eq!(core.project.figures.len(), 1);
+        assert_eq!(
+            core.selected_figure, 0,
+            "redo clamps the selection into the restored project, like undo"
+        );
     }
 
     #[test]
