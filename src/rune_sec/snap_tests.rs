@@ -4630,6 +4630,12 @@ fn open_settings_and_read_knob(rt: &mut Runtime<State>) -> f32 {
 
 #[test]
 fn settings_live_mcp_toggle_shows_the_persisted_state_for_both_prefs_values() {
+    // This test starts and stops the singleton bridge:
+    // serialise against live_mcp's socket tests (Wave 14
+    // CI fix 6).
+    let _bridge_guard = crate::live_mcp::BRIDGE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // Wave 11 guarantee: the Settings card's Live MCP
     // toggle SHOWS the persisted preference — prefs
     // `live_mcp: false` starts the editor with the

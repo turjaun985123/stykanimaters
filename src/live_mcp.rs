@@ -225,6 +225,18 @@ use stykanimate_rs::mcp::McpServer;
 /// The fixed loopback port the live endpoint listens on.
 pub const PORT: u16 = 32117;
 
+/// Serialises the tests that start, stop or port-hold
+/// the singleton bridge — this module's two socket
+/// tests and the Settings snap test
+/// (`settings_live_mcp_toggle_shows_the_persisted_state_for_both_prefs_values`).
+/// Cargo runs tests on parallel threads, and two bridge
+/// tests racing present exactly like a busy port or a
+/// vanished bridge (Wave 14 CI fix 6: the e2e's start
+/// failed against the start-error test's occupier
+/// listener). Hold the guard for the whole test.
+#[cfg(test)]
+pub static BRIDGE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Largest request body accepted: 4 MiB. Bigger bodies are
 /// refused with HTTP 413 before a byte of them is read.
 ///
@@ -2372,6 +2384,8 @@ mod tests {
 
     #[test]
     fn live_bridge_drives_an_external_core_over_http() {
+        let _bridge_guard =
+            super::BRIDGE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let verdict = std::panic::catch_unwind(run_live_bridge_e2e);
         // Cleanup on EVERY path (failure and panic alike),
         // before the verdict is surfaced.
@@ -2444,6 +2458,8 @@ mod tests {
 
     #[test]
     fn failed_start_records_its_error_and_success_or_stop_clears_it() {
+        let _bridge_guard =
+            super::BRIDGE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let verdict = std::panic::catch_unwind(run_start_error_recording);
         // Cleanup on EVERY path (failure and panic alike),
         // before the verdict is surfaced.
