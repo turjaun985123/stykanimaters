@@ -697,6 +697,61 @@ pub fn save_palette_recents_in(dir: &Path, recents: &[String]) {
     save_layout_in(dir, &prefs);
 }
 
+/// Test-module note (Wave 13, E6) — the "root-clone
+/// tests" oddity, pinned to source truth.
+///
+/// A Wave 12 side-report (D9, whose remit added
+/// [`projects_dir`] above) flagged this file as carrying
+/// pre-existing "root-clone" tests that would fail until
+/// "shell clones" are implemented. Checked against the
+/// source, that claim does not correspond to anything in
+/// this file, and this note records what is actually
+/// true so the claim is not chased again:
+///
+/// - The module below holds 28 plain `#[test]` fns.
+///   There is no `#[ignore]`, no feature gate and no
+///   second `cfg` anywhere in the file — `#[cfg(test)]`
+///   on this module is the only conditional compilation
+///   present. Nothing is being skipped.
+/// - No test here names or exercises a root, a clone or
+///   a "shell clone" API (a repo-wide search over `src/`
+///   and `tests/` finds no such identifier). The only
+///   `clone` in the module is `dir.clone()` — a
+///   `PathBuf` handed to the racing writer threads in
+///   `concurrent_layout_saves_never_tear_the_file`.
+/// - Every function under test is defined in this file
+///   (the three stores, [`salvage_layout`],
+///   [`delete_project_file`], the live-MCP start record,
+///   the palette-recents seam, [`projects_dir`]); the
+///   only outside fixture is `Project::new_demo`. There
+///   is no unimplemented dependency for a test to wait
+///   on. `shell` is a library module (`pub mod shell`
+///   in `lib.rs`), so these tests build into the lib
+///   test binary and run in CI's `cargo test --release`
+///   step like every other lib test — which is why CI
+///   is green with them, not despite them.
+///
+/// What *would* make individual tests fail, for the
+/// record: (1)
+/// `live_mcp_start_outcome_records_each_attempt` relies
+/// on being the only writer of the process-wide start
+/// record in the LIB test binary — production code that
+/// notes outcomes lives in the bin crate (a different
+/// test process); a second lib-side writer, or lib
+/// production code learning to note an outcome, breaks
+/// its first assertion. (2)
+/// `projects_dir_is_the_default_store_dir` reads the
+/// real `./projects/recents.json` through both the
+/// accessor and the no-dir entry point and passes
+/// because both resolve the same CWD-relative file,
+/// whatever the working directory is; it fails if
+/// `default_dir` ever stops being the literal
+/// `projects` or the accessor is absolutised (the trap
+/// [`projects_dir`]'s own doc names). (3) The atomicity
+/// pair passes because every write goes through
+/// [`write_file_atomic`]'s rename; reverting any store
+/// to a direct `fs::write` is what would tear the
+/// concurrent-saves file and litter temp files.
 #[cfg(test)]
 mod tests {
     use super::*;

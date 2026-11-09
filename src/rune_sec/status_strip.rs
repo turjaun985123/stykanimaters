@@ -825,6 +825,109 @@
 //! drains into — so MCP edits meet the autosave on
 //! exactly the GUI's terms. No segment, floor or
 //! yielding rung changes in this wave either.
+//!
+//! ## Wave 13 — the read path against the dirty-marking contract
+//!
+//! Squad B's contract this wave: every project
+//! mutation either takes exactly one `snapshot()`
+//! (one undo step) or calls the new
+//! `EditorCore::mark_dirty()` seam — dirty and
+//! autosave counting WITHOUT an undo step, for the
+//! writes the Wave 12 section above caught the
+//! counter missing (figure rename / recolour, the
+//! layer writes, clip angle / root, the MCP
+//! `project_rename` name write). This module's read
+//! path was re-verified end to end against that
+//! contract; the verdict is that it needed no
+//! rendering change, and the reasons are now pinned
+//! by test instead of resting on the module docs'
+//! say-so:
+//!
+//! - **One counter, read live.** The dot is
+//!   `project_parts`' read of
+//!   `core.edits_since_autosave()` —
+//!   `edit_count − last_autosave_count` in the core —
+//!   taken fresh on every build. `snapshot()` bumps
+//!   `edit_count` at its single increment site
+//!   (editor.rs), and the seam's contract is to bump
+//!   THE SAME field (B2 places `mark_dirty` beside
+//!   `edits_since_autosave` / `note_recovery_written`
+//!   for exactly that reason), so a marked edit and
+//!   a snapshotted edit are indistinguishable to
+//!   the dot — by design. The undo segment is a
+//!   DIFFERENT source on purpose (the stacks, via
+//!   `undo_depth()` / `redo_depth()`), so after a
+//!   marked write the strip honestly shows the dot
+//!   beside `Undo 0`: dirty, with nothing to undo.
+//!   That coexistence is pinned by
+//!   `strip_dot_lights_for_a_mark_dirty_write_with_no_undo_step`,
+//!   which drives the seam through a landed B-squad
+//!   op (`EditorCore::set_figure_color`, figure_ops)
+//!   and asserts only through this module's fns and
+//!   the counter accessor — at this audit the seam's
+//!   call sites were in the tree ahead of the
+//!   `editor.rs` definition, so no test here names
+//!   `mark_dirty` itself; if the seam ever bumped a
+//!   different counter, that pin fails loudly.
+//! - **The dot is the counter, not the undo stack.**
+//!   `note_recovery_written()` (the Wave 12 E8 stamp
+//!   for recovery writes made outside
+//!   `maybe_autosave`) sets `last_autosave_count =
+//!   edit_count`, so the accessor returns 0 and the
+//!   dot clears while the undo stack still holds
+//!   its steps — pinned by
+//!   `strip_dot_follows_the_counter_not_the_undo_stack`.
+//!   A strip that sniffed the stack for dirtiness
+//!   would stay lit after every stamped save; this
+//!   one cannot.
+//! - **Nothing here can go stale across a swap.**
+//!   This module holds no state at all — no field,
+//!   no static, no cache; both wrappers are pure
+//!   builders over the core (and, for
+//!   [`status_strip_state`], the shell's `State`)
+//!   handed to them, and `main.rs`'s view rebuilds
+//!   the strip from the live core on every render.
+//!   A project swap replaces `core.project` and
+//!   calls `note_project_swapped()`, which zeroes
+//!   BOTH counters; the next build therefore reads
+//!   the new project's name, runtime and a zeroed
+//!   counter — there is no segment value a swap
+//!   could strand. Pinned end to end, through the
+//!   GUI's own New path, by
+//!   `strip_shows_no_stale_dirty_state_across_a_project_swap`.
+//! - **The MCP rename pin moved — deliberately.**
+//!   Wave 12's `strip_project_name_follows_a_live_mcp_rename`
+//!   asserted the renamed project's text WITHOUT the
+//!   dot, because the rename's session-name write
+//!   then counted nothing. Under the census that
+//!   write marks dirty at its call site (B5's
+//!   verdict, recorded in `projects.rs`:
+//!   `refresh_project_files` itself never touches
+//!   the counters, deliberately, so the mark is the
+//!   handler's alone), so the pin now expects the
+//!   dot and `Undo 0` — the strip showing exactly
+//!   what the census promises, one counted edit and
+//!   no undo step.
+//! - **The autosave segment's source, examined for
+//!   swap staleness.** Its input is the recovery
+//!   FILE's mtime (`shell::recovery_modified()`),
+//!   computed fresh by [`status_strip_state`] on
+//!   every build — again no cache in this module.
+//!   The file is the shell's safety net, not the
+//!   current project's property: after a swap it
+//!   still holds the previous project's snapshot
+//!   until the next autosave writes, so the segment
+//!   can name that snapshot's age over a fresh
+//!   project. That is the file's own semantics —
+//!   Home's recovery offer reads the same file the
+//!   same way — not a stale read in this module,
+//!   and no read-path change is made for it here.
+//!
+//! No segment, floor or yielding rung changes in
+//! this wave either: the fixes all landed in the
+//! counter's writers (Squad B), and this module's
+//! job was to prove the strip already reads the
+//! one counter they all now write.
 
 use std::time::{Duration, SystemTime};
 
@@ -912,11 +1015,18 @@ pub fn runtime_label(core: &EditorCore) -> String {
 /// counter). Dirty is exactly `edits_since_autosave() >
 /// 0`; no other channel (status text, file mtimes) is
 /// consulted. The counter counts `snapshot()` calls
-/// only — the writes it cannot see, and the manual
-/// recovery writes that leave it unstamped, are the
-/// module docs' Wave 12 section; this fn renders the
-/// counter faithfully either way, and the name is the
-/// session's (`core.project.name`), never the file's.
+/// and — since Wave 13's dirty-marking contract —
+/// `mark_dirty()` calls: the two bump the same
+/// `edit_count` in the core, so a non-undoable write
+/// the census assigned to the seam is exactly as
+/// visible here as a snapshotted edit, while
+/// [`undo_text`] keeps reading the stacks alone (the
+/// module docs' Wave 13 section has the verification;
+/// the Wave 12 section records what the counter could
+/// not see before the seam existed). This fn renders
+/// the counter faithfully either way, and the name is
+/// the session's (`core.project.name`), never the
+/// file's.
 ///
 /// The runtime rides inside this segment instead of
 /// becoming a new one: [`segment`] floors the segment
@@ -2061,8 +2171,166 @@ mod tests {
         // The segment names the session's new name at
         // once — the typed name, not the file's slug
         // ("renamed-project").
-        assert_eq!(project_text(&core), "Renamed Project · 0:00");
+        //
+        // Wave 13: the text now carries the dirty dot.
+        // Wave 12's pin expected no dot because the
+        // handler's session-name write counted nothing
+        // then; the dirty-marking census assigns that
+        // write a `mark_dirty` at its call site (B5's
+        // verdict in `projects.rs` — the refresh seam
+        // in the same handler never touches the
+        // counters, so this one counted edit is the
+        // name write's alone), and the strip must show
+        // what the census promises: one counted edit,
+        // and — a mark, not a snapshot — no undo step.
+        assert_eq!(core.edits_since_autosave(), 1);
+        assert_eq!(undo_text(&core), "Undo 0");
+        assert_eq!(project_text(&core), "Renamed Project · 0:00 ●");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Wave 13 dirty-marking read path ----
+
+    #[test]
+    fn strip_dot_follows_the_counter_not_the_undo_stack() {
+        // Wave 13: the dot renders
+        // `edits_since_autosave()` — the counter — and
+        // nothing else. A snapshotted edit lights it;
+        // stamping the counter as autosaved
+        // (`note_recovery_written`, the core's seam
+        // for recovery writes made outside
+        // `maybe_autosave`) clears it again, while the
+        // undo stack keeps its step the whole time. A
+        // strip that inferred dirtiness from the stack
+        // would stay lit after the stamp; this one
+        // follows the counter down as faithfully as up.
+        let mut core = EditorCore::new();
+        assert_eq!(core.edits_since_autosave(), 0);
+        let (_, suffix) = project_parts(&core);
+        assert!(!suffix.contains('●'), "a fresh core is not dirty");
+
+        core.add_frame();
+        assert_eq!(core.edits_since_autosave(), 1);
+        assert_eq!(undo_text(&core), "Undo 1");
+        let (_, suffix) = project_parts(&core);
+        assert_eq!(suffix, " · 0:01 ●");
+
+        core.note_recovery_written();
+        assert_eq!(
+            core.edits_since_autosave(),
+            0,
+            "the stamp zeroes the counter the dot reads"
+        );
+        assert_eq!(
+            undo_text(&core),
+            "Undo 1",
+            "the undo stack is untouched by the stamp"
+        );
+        let (_, suffix) = project_parts(&core);
+        assert_eq!(suffix, " · 0:01", "the dot cleared with the counter");
+        assert_eq!(project_text(&core), "Untitled · 0:01");
+        // And the strip builds whole in the stamped
+        // state.
+        let _ = status_strip(&core);
+    }
+
+    #[test]
+    fn strip_dot_lights_for_a_mark_dirty_write_with_no_undo_step() {
+        // Wave 13 (Squad B contract): a non-undoable
+        // project write the census assigned to the
+        // `mark_dirty` seam must light the dot WITHOUT
+        // moving the undo segment — the two segments
+        // read different sources (counter vs stacks),
+        // and this is the state where they honestly
+        // disagree. The seam is driven through a
+        // landed B-squad op, `set_figure_color`
+        // (figure_ops: no snapshot; an actual colour
+        // change marks dirty exactly once), and every
+        // assertion goes through this module's fns or
+        // the counter accessor — no test in this file
+        // names `mark_dirty` itself (at this audit
+        // its call sites were in the tree ahead of
+        // the editor.rs definition), so the pin fails
+        // loudly if the seam ever bumps a counter
+        // other than the one `snapshot()` bumps.
+        let mut core = EditorCore::new();
+        let stored = core.project.figures[0].color;
+        // Re-selecting the colour already stored
+        // changes nothing and marks nothing: the
+        // strip stays clean and the stacks stay empty.
+        core.set_figure_color(0, stored);
+        assert_eq!(core.edits_since_autosave(), 0);
+        let (_, suffix) = project_parts(&core);
+        assert!(!suffix.contains('●'), "a no-op write is not dirty");
+
+        // An actual colour change: one counted edit,
+        // no undo step, and the dot lit beside
+        // `Undo 0`.
+        let changed = if stored == 0xFF5D5D { 0x5DB2FF } else { 0xFF5D5D };
+        core.set_figure_color(0, changed);
+        assert_eq!(core.project.figures[0].color, changed);
+        assert_eq!(
+            core.edits_since_autosave(),
+            1,
+            "the marked write counts exactly one edit"
+        );
+        assert_eq!(
+            undo_text(&core),
+            "Undo 0",
+            "a marked write is not an undo step"
+        );
+        let (name, suffix) = project_parts(&core);
+        assert_eq!(name, core.project.name);
+        assert_eq!(suffix, " · 0:00 ●");
+        assert_eq!(
+            project_text(&core),
+            format!("{} · 0:00 ●", core.project.name)
+        );
+        // A second marked write counts a second edit
+        // — the cadence the autosave threshold reads
+        // advances per write, not per snapshot.
+        core.set_figure_color(0, stored);
+        assert_eq!(core.edits_since_autosave(), 2);
+        assert_eq!(undo_text(&core), "Undo 0");
+        let _ = status_strip(&core);
+    }
+
+    #[test]
+    fn strip_shows_no_stale_dirty_state_across_a_project_swap() {
+        // Wave 13: this module caches nothing, so a
+        // project swap cannot strand the previous
+        // project's dirty state on the strip. The
+        // swap is driven through the GUI's own New
+        // path (`project_tools::new_project`: replace
+        // the project, `note_project_swapped` zeroes
+        // both edit counters), and the segment is
+        // read back on the other side: new name, new
+        // runtime, no dot — nothing of the dirty
+        // project survives in anything the strip
+        // renders from the counter.
+        let mut core = EditorCore::new();
+        core.project.name = "Before Swap".to_string();
+        core.add_frame();
+        assert_eq!(core.edits_since_autosave(), 1);
+        assert_eq!(project_text(&core), "Before Swap · 0:01 ●");
+
+        crate::rune_sec::project_tools::new_project(&mut core);
+
+        assert_eq!(
+            core.edits_since_autosave(),
+            0,
+            "the swap restarts the dirty baseline"
+        );
+        assert_eq!(
+            project_text(&core),
+            "Untitled · 0:00",
+            "the strip reads the swapped-in project, clean"
+        );
+        let (_, suffix) = project_parts(&core);
+        assert!(!suffix.contains('●'));
+        // And the strip builds whole over the swapped
+        // core.
+        let _ = status_strip(&core);
     }
 
     // ---- Width discipline (Phase F) ----

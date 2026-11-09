@@ -120,6 +120,40 @@
 //! and height are bounded by construction, pinned by
 //! the flood tests below.
 //!
+//! Wave 13 (E7) re-audits the attribution for the wave's
+//! two new write families. **Sprites** (A1's core ops,
+//! A4's MCP handlers): every op outcome already writes
+//! `core.status` — successes are neutral facts
+//! (`"Sprite 1 added (asset 1)."`), op refusals wear
+//! the `" failed"` shape — so the drain's status path
+//! stamps and classifies them exactly like any GUI op,
+//! no change needed. The gap was one layer up: A4's
+//! handlers validate arguments BEFORE the op, and
+//! those refusals never write the status — the drain
+//! buffers them (`live_mcp::drain_attribution_error`)
+//! and they reached the stack as stamped raw validator
+//! text that matched no grammar arm and read Info.
+//! [`classify_status`]'s rule 0 now names the
+//! handler-validation grammar as outright Error (see
+//! its docs); the tests below pin every sprite shape.
+//! **Squad B's dirty seam** changes no toast behaviour,
+//! proven from the drain code path (`main.rs`'s
+//! `poll`, read at this audit): the poll's only toast
+//! inputs are `core.status` changes (stamped iff the
+//! change happened inside the drain window) and the
+//! drain-error buffer — neither `edit_count`, the dirty
+//! flag nor the snapshot count is read there, and
+//! `mark_dirty()` writes none of the toast inputs. One
+//! honest side effect, in the user's favour: an op that
+//! newly snapshots (the B census's snapshot verdicts)
+//! makes the newest toast's render-time Undo button
+//! (`undo_available` = `undo_depth() > 0`) actually
+//! revert THAT op, where before it could only have
+//! reverted an earlier step or been absent; ops the
+//! census gave `mark_dirty()` (e.g. figure rename) gain
+//! no undo step, exactly as their contract says, and
+//! their toasts are unchanged in text and tint.
+//!
 //! Why hand-rolled instead of rune-kit's `Toast` /
 //! `ToastRegion` (read at `crates/rune-kit/src/toast.rs` in the
 //! pinned Rune tree):
@@ -358,6 +392,41 @@ pub const MCP_STATUS_PREFIX: &str = "MCP: ";
 ///    (`"MCP: Frame 2 added."`) classifies exactly as
 ///    its body does — Info — with the prefix left in
 ///    the text the card shows.
+///
+///    Wave 13 (E7) extends the outright-Error arms to
+///    the **handler-validation grammar**: the refusals
+///    an MCP handler returns BEFORE its op runs, which
+///    never write `core.status`, so the live drain
+///    buffers them and the push site stamps the buffer
+///    text (`live_mcp::drain_attribution_error` — only
+///    protocol errors and `isError` results are ever
+///    buffered, never a success). The sprite tools
+///    (Wave 13, A4) inherited this grammar from the
+///    shared `ast_*` validators in `media.rs` (the same
+///    shapes serve the built-ins in `mcp.rs` and
+///    `figure_ops.rs`): a missing or malformed argument
+///    (`"missing required argument '…'"`, `"argument
+///    '…' must …"` / `"argument '…' is too large"`), an
+///    index check (`"… index N out of range (project
+///    has …)"`, `"argument '…' is out of range"`,
+///    `"frame N is out of range: …"`), the sprite
+///    delete-key preflight (`"sprite N has no key at
+///    frame F (…)"` — the same condition the core op's
+///    own status reports in the `" failed"` shape, so
+///    both paths now read Error), and the asset-removal
+///    reference refusal (`"asset N ('…') is still
+///    referenced by …"` — sprite instances are one of
+///    its reference classes since Wave 13). Before
+///    this extension every one of those classified
+///    Info: a refused call wearing the neutral tint.
+///    The arms stay inside this prefix branch, so bare
+///    GUI text is never re-read by them, and each arm
+///    is a shape no op status carries (grep census,
+///    2026-11-09: the only `" out of range"` status in
+///    the tree is `"Copy pose failed: figure index out
+///    of range."` — Error by rule 1 either way; no
+///    status starts with `"argument '"` or
+///    `"missing required argument"`).
 /// 1. **Error** — contains `" failed"`: the engine's
 ///    failure shape (`"Audio fade failed: no clip 1."`,
 ///    `"Audio compress failed: output would overwrite
@@ -414,6 +483,30 @@ pub fn classify_status(status: &str) -> Severity {
         if body.starts_with("unknown tool")
             || body.starts_with("Invalid ")
             || body.starts_with("Method not found")
+            // Wave 13 (E7): the handler-validation grammar —
+            // the status-silent refusals the drain buffers
+            // because they never wrote `core.status` (see
+            // the rule-0 docs above). Each arm is a shape
+            // no op status carries (grep census,
+            // 2026-11-09), so no stamped success or
+            // neutral fact can be caught by them.
+            || body.starts_with("missing required argument")
+            || body.starts_with("argument '")
+            || body.contains(" out of range")
+            || body.contains(" has no key at frame ")
+            || body.contains(" is still referenced by ")
+            // Wave 13 (integrator, E7's residual): the
+            // `asset_import` handler's status-silent
+            // refusals — the same defect class as the
+            // sprite family above, named in E7's report and
+            // fixed here so an import refusal never stamps
+            // as a neutral fact. The shapes are the
+            // handler's own format strings in media.rs.
+            || body.contains(" is not a file")
+            || body.contains("-byte import limit")
+            || body.contains(" is not a PNG")
+            || body.contains(" does not decode as an image")
+            || body.contains(" decodes to an empty image")
         {
             return Severity::Error;
         }
@@ -1531,6 +1624,213 @@ mod tests {
         // them to its caller; the pin is that the new
         // rule is prefix-scoped, not global.)
         assert_eq!(classify_status("unknown tool: frobnicate"), Severity::Info);
+    }
+
+    #[test]
+    fn classify_mcp_sprite_statuses_are_truthful() {
+        // Wave 13 (E7): the sprite family (A1's ops via
+        // A4's handlers) through the stamp. Successes
+        // write neutral-fact statuses — Info, exactly
+        // as their bodies classify unstamped — and every
+        // op refusal wears the engine's `" failed"`
+        // shape, so the body's own rule 1 reads Error.
+        // Strings are `sprite_ops.rs`'s formats rendered
+        // with the values its tests assert.
+        assert_eq!(
+            classify_status("MCP: Sprite 1 added (asset 1)."),
+            Severity::Info
+        );
+        assert_eq!(classify_status("MCP: Sprite 1 deleted."), Severity::Info);
+        assert_eq!(
+            classify_status("MCP: Sprite 1 key set at frame 3."),
+            Severity::Info
+        );
+        assert_eq!(
+            classify_status("MCP: Sprite 1 key at frame 3 deleted."),
+            Severity::Info
+        );
+        assert_eq!(
+            classify_status("MCP: Sprite add failed: no asset 99."),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: Sprite delete failed: no sprite 7."),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: Sprite key failed: no sprite 7."),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: Sprite key failed: values must be finite."),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: Sprite key delete failed: no sprite 7."),
+            Severity::Error
+        );
+        // The same condition the handler preflight
+        // reports without the `" failed"` lead (next
+        // test) — through the op's own status it is
+        // Error, and the two paths must agree.
+        assert_eq!(
+            classify_status(
+                "MCP: Sprite key delete failed: sprite 1 has no key at frame 2."
+            ),
+            Severity::Error
+        );
+    }
+
+    #[test]
+    fn classify_mcp_handler_refusals_are_error_never_info() {
+        // Wave 13 (E7): the status-silent half of the
+        // sprite family — A4's handlers validate before
+        // the op runs, so these refusals never write
+        // `core.status`; the drain buffers them and the
+        // push site stamps the raw text. Every string is
+        // a real validator shape from `media.rs` (the
+        // shared `ast_*` helpers), rendered in. Before
+        // the rule-0 extension each of these fell
+        // through to Info.
+        assert_eq!(
+            classify_status(
+                "MCP: sprite index 7 out of range (project has 2 sprite instance(s))"
+            ),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: asset index 99 out of range (project has 1 asset(s))"),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: missing required argument 'asset'"),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: argument 'asset' must be a non-negative integer"),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: argument 'frame' must be a number"),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: argument 'x' must be a finite number"),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: argument 'frame' must not be negative (got -1)"),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status(
+                "MCP: argument 'scale' must be greater than 0 (got 0); \
+                 a sprite key at scale 0 or less never draws"
+            ),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: sprite 0 has no key at frame 5 (it has 2 key(s))"),
+            Severity::Error
+        );
+        // The asset-removal reference refusal: sprite
+        // instances are one of its reference classes
+        // since Wave 13, so a sprite-blocking removal
+        // refusal is in this family's path too.
+        assert_eq!(
+            classify_status(
+                "MCP: asset 0 ('dot.png') is still referenced by 0 segment image(s), \
+                 0 clip segment(s) and 1 sprite instance(s); \
+                 remove those references first — removal never orphans a reference"
+            ),
+            Severity::Error
+        );
+        // The extension is prefix-scoped, like every
+        // MCP arm: the same words UNSTAMPED keep their
+        // old reading, so no GUI string's classification
+        // moved (bare, these strings never reach the
+        // classifier — the MCP layer returns them to
+        // its caller).
+        assert_eq!(
+            classify_status("sprite index 7 out of range (project has 2 sprite instance(s))"),
+            Severity::Info
+        );
+        assert_eq!(
+            classify_status("missing required argument 'asset'"),
+            Severity::Info
+        );
+    }
+
+    #[test]
+    #[test]
+    fn classify_mcp_asset_import_refusals_are_error_never_info() {
+        // Wave 13 (integrator, E7's residual): the
+        // `asset_import` handler's status-silent refusals,
+        // verbatim shapes from media.rs — stamped, each
+        // must read Error, never the neutral Info they
+        // fell through to before the rule-0 extension.
+        for body in [
+            "'/tmp/x.png' is not a file",
+            "'/tmp/x.png' is 9000000 bytes, over the 8388608-byte import limit",
+            "'/tmp/x.png' is not a PNG (bad magic bytes)",
+            "'/tmp/x.png' does not decode as an image: boom",
+            "'/tmp/x.png' decodes to an empty image",
+        ] {
+            assert_eq!(
+                classify_status(&format!("MCP: {body}")),
+                Severity::Error,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_mcp_dirty_family_statuses_keep_their_gui_reading() {
+        // Wave 13 (E7): Squad B's seam writes no new
+        // status shapes — the newly-dirty and
+        // newly-snapshotting ops keep the status strings
+        // they always wrote (the drain proof is the
+        // module docs'; this pins the classifier's side:
+        // stamped and unstamped, the reading is the
+        // body's own). The rename string is
+        // `figure_ops.rs`'s rendered format; the clip
+        // string is `fx_ops.rs`'s refusal shape.
+        assert_eq!(
+            classify_status("Figure 1 renamed to \"Hero\"."),
+            Severity::Info
+        );
+        assert_eq!(
+            classify_status("MCP: Figure 1 renamed to \"Hero\"."),
+            Severity::Info
+        );
+        assert_eq!(
+            classify_status("MCP: FX clip move failed: no FX clip 3."),
+            Severity::Error
+        );
+    }
+
+    #[test]
+    fn push_status_stamps_sprite_success_and_refusal_as_distinct_toasts() {
+        // The stack-level consequence: a stamped sprite
+        // add and a stamped sprite refusal are two
+        // toasts (attribution in the text, the refusal
+        // at Error), and a repeat of the refusal
+        // refreshes its own toast rather than stacking.
+        let mut s = ToastsState::new();
+        s.push_status("MCP: Sprite 1 added (asset 1).", 0.0);
+        s.push_status(
+            "MCP: sprite index 7 out of range (project has 2 sprite instance(s))",
+            0.0,
+        );
+        assert_eq!(s.items.len(), 2);
+        assert_eq!(s.items[0].severity, Severity::Info);
+        assert_eq!(s.items[1].severity, Severity::Error);
+        s.push_status(
+            "MCP: sprite index 7 out of range (project has 2 sprite instance(s))",
+            2.0,
+        );
+        assert_eq!(s.items.len(), 2);
+        assert_eq!(s.items[1].born, 2.0);
     }
 
     #[test]

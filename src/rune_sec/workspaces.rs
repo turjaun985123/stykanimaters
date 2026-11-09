@@ -138,7 +138,7 @@ impl Default for Workspace {
 /// (inspectors, pose/keyframe tools, camera, scene,
 /// onion, playback, frame ops, graph, easing, draw,
 /// stroke inspector, text, FX browser/clips, audio,
-/// waveform, movieclips, 3D, export, stats).
+/// waveform, movieclips, sprites, 3D, export, stats).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
     Figures,
@@ -166,6 +166,7 @@ pub enum Section {
     Audio,
     Waveform,
     Clips,
+    Sprites,
     ThreeD,
     Export,
     Stats,
@@ -307,10 +308,10 @@ pub fn select_workspace(s: &mut State, ws: Workspace) {
 }
 
 impl Section {
-    /// All 29 gated sections (coverage tests iterate
+    /// All 30 gated sections (coverage tests iterate
     /// this; the integrator's view maps each mounted
     /// panel to one variant).
-    pub fn all() -> [Section; 29] {
+    pub fn all() -> [Section; 30] {
         [
             Section::Figures,
             Section::Library,
@@ -337,6 +338,7 @@ impl Section {
             Section::Audio,
             Section::Waveform,
             Section::Clips,
+            Section::Sprites,
             Section::ThreeD,
             Section::Export,
             Section::Stats,
@@ -395,14 +397,67 @@ impl Section {
 // card's lanes are chrome, not sections — see the
 // module header; the Wave 10 dopesheet lane changes
 // nothing in this table.
+//
+// Wave 13 (E8) — the Sprites panel gets its home:
+// `Section::Sprites` is added to Animate ONLY, taking
+// the union to exactly the 30 variants of
+// `Section::all()` and Animate's list to 17 (the
+// per-workspace counts are pinned by
+// `section_counts_per_workspace_are_pinned`). The
+// decision, argued from this table's own precedents:
+// sprites are asset-backed stage content edited by
+// KEYFRAMING — the panel's per-key steppers (x, y,
+// rotation, scale) write instance keys at the current
+// frame, so the panel belongs with the playhead-centred
+// editing family (KeyframeTools, FrameOps, Playback),
+// all Animate-only or Animate-first here. The closest
+// analogue already in the table is `Section::Clips`:
+// movieclips ride in Animate, NOT in their thematic
+// workspace (Effects), on GPUI precedent — its
+// "Library & Clips" group was an Animate/Build group.
+// Sprites are the same shape of thing (library/asset-
+// backed, keyframed, scene-anchored) and follow the
+// clips home, not the thematic pull. The counter-
+// precedent is `Section::TextTool` in Draw, and it
+// does NOT carry: text lives in Draw because the text
+// tool is a DRAWING tool — its instances are authored
+// by drawing with it, alongside strokes and shapes
+// (Draw's blurb: "Draw freehand strokes, shapes and
+// text over the figures"), and the panel is the tool's
+// own inspector. Sprites have no drawing tool: they
+// are placed from the project's asset table and then
+// keyframed, so placement + keyframing, not drawing,
+// decides the home. Draw was the alternative argued
+// and rejected on exactly that ground; the spot checks
+// pin Sprites absent from Draw so the decision cannot
+// drift silently. The Scene panel's placed-media
+// readout (Wave 13 A7) points at this panel, and Scene
+// itself mounts in Animate, so the pointer's primary
+// home and the panel's home agree. Animate's blurb is
+// NOT extended to name sprites: it does not name
+// movieclips either — Clips was homed here without a
+// blurb change, and the blurb strings stay pinned as
+// they are. Integrator wiring still owed outside this
+// file (not this table's truth): the `sprites_panel`
+// module declaration, the panel's `State` field, and
+// the one mount site in `main.rs`'s view gated on
+// `Sec::Sprites` through the same `vis` closure the
+// other 29 mounts use — until that lands, this entry
+// is the gating truth the mount must follow, and the
+// coverage test below already requires Sprites to be
+// visible somewhere, which Animate satisfies.
 
 /// Animate: the core animating set — figures, library,
 /// layers, project, all three inspectors, pose and
 /// keyframe tools, camera, scene, onion, playback,
-/// frame ops, movieclips and stats. Movieclips ride
-/// here (not Effects) on GPUI precedent: its
+/// frame ops, movieclips, sprites and stats. Movieclips
+/// ride here (not Effects) on GPUI precedent: its
 /// "Library & Clips" group was an Animate/Build group,
-/// and Effects' clips are the FX clips.
+/// and Effects' clips are the FX clips. Sprites ride
+/// here on the same precedent — asset-backed, keyframed
+/// scene content follows the clips home, not the
+/// thematic pull (see the Wave 13 note above the table
+/// for the full argument and the TextTool distinction).
 const ANIMATE_SECTIONS: &[Section] = &[
     Section::Figures,
     Section::Library,
@@ -419,6 +474,7 @@ const ANIMATE_SECTIONS: &[Section] = &[
     Section::Playback,
     Section::FrameOps,
     Section::Clips,
+    Section::Sprites,
     Section::Stats,
 ];
 
@@ -771,6 +827,35 @@ mod tests {
     }
 
     #[test]
+    fn section_counts_per_workspace_are_pinned() {
+        // The census this file maintains, pinned exactly
+        // so a gating change is always a deliberate test
+        // change: 30 sections in `Section::all()`, and
+        // the per-workspace list lengths below (43 list
+        // memberships in total — sections legitimately
+        // repeat ACROSS workspaces; the no-duplicates
+        // test pins them unique WITHIN one list). Wave
+        // 13: Animate 16 → 17 for `Section::Sprites`
+        // (Animate-only; see the Wave 13 note above the
+        // table).
+        use Workspace as W;
+        assert_eq!(Section::all().len(), 30);
+        assert_eq!(sections_of(W::Animate).len(), 17);
+        assert_eq!(sections_of(W::Draw).len(), 4);
+        assert_eq!(sections_of(W::Graph).len(), 4);
+        assert_eq!(sections_of(W::Effects).len(), 5);
+        assert_eq!(sections_of(W::Audio).len(), 4);
+        assert_eq!(sections_of(W::Build3D).len(), 3);
+        assert_eq!(sections_of(W::Export).len(), 3);
+        assert_eq!(sections_of(W::Home).len(), 3);
+        let total: usize = Workspace::all()
+            .into_iter()
+            .map(|ws| sections_of(ws).len())
+            .sum();
+        assert_eq!(total, 43);
+    }
+
+    #[test]
     fn section_lists_have_no_duplicates() {
         for ws in Workspace::all() {
             let list = sections_of(ws);
@@ -854,5 +939,15 @@ mod tests {
         assert!(section_visible(W::Animate, S::FrameOps));
         assert!(!section_visible(W::Draw, S::FrameOps));
         assert!(!section_visible(W::Graph, S::FrameOps));
+        // Wave 13 (E8): Sprites is Animate-only — the
+        // clips precedent, NOT the text precedent (see
+        // the Wave 13 note above the table). Draw is
+        // pinned absent deliberately: it was the argued
+        // alternative home, and this assert is what
+        // keeps the rejection from drifting.
+        assert!(section_visible(W::Animate, S::Sprites));
+        for ws in [W::Draw, W::Graph, W::Effects, W::Audio, W::Build3D, W::Export, W::Home] {
+            assert!(!section_visible(ws, S::Sprites), "{ws:?} must not mount Sprites");
+        }
     }
 }
