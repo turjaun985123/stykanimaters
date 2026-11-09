@@ -415,9 +415,11 @@ fn audio_entries(mcp: &mut Dispatch) -> Vec<Value> {
 }
 
 /// A clip's start frame: `start_frame` or `start`.
-fn entry_start(entry: &Value) -> u64 {
+/// FX starts are fractional frames (f32 in the model),
+/// audio starts are whole frames — read both as f64.
+fn entry_start(entry: &Value) -> f64 {
     key_field(entry, &["start_frame", "start"], "audio/fx entry start")
-        .as_u64()
+        .as_f64()
         .expect("entry start is a frame number")
 }
 
@@ -719,8 +721,8 @@ fn mcp_only_full_project_build() {
     );
     let fx = fx_entries(&mut mcp);
     assert_eq!(fx.len(), 1, "one FX clip after the add: {fx:?}");
-    assert_eq!(entry_start(&fx[0]), 0, "the FX clip starts at frame 0");
-    assert_eq!(fx[0]["duration"].as_u64(), Some(3), "the FX clip's duration reads back");
+    assert_eq!(entry_start(&fx[0]), 0.0, "the FX clip starts at frame 0");
+    assert_eq!(fx[0]["duration"].as_f64(), Some(3.0), "the FX clip's duration reads back");
     let kind = fx[0]["kind"]
         .as_str()
         .unwrap_or_default()
@@ -748,7 +750,7 @@ fn mcp_only_full_project_build() {
     );
     let clips = audio_entries(&mut mcp);
     assert_eq!(clips.len(), 1, "one audio clip after the add: {clips:?}");
-    assert_eq!(entry_start(&clips[0]), 1, "the audio clip starts at frame 1");
+    assert_eq!(entry_start(&clips[0]), 1.0, "the audio clip starts at frame 1");
     assert!(
         clips[0]["path"]
             .as_str()
