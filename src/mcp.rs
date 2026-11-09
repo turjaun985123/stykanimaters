@@ -3993,7 +3993,7 @@ mod tests {
         let deep = format!("{}{}", "[".repeat(600), "]".repeat(600));
         assert!(serde_json::from_str::<Value>(&deep).is_err());
         let deep_args = format!(
-            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"get_state\",\"arguments\":{{\"x\":{deep}}}}}}"
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"get_state\",\"arguments\":{{\"x\":{deep}}}}}}}"
         );
         assert!(serde_json::from_str::<Value>(&deep_args).is_err());
         // A nest comfortably under the limit parses and

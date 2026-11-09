@@ -917,7 +917,8 @@ mod tests {
         core.project.clips[0].def.nodes[ni].color = Some(0x00FF00);
         core.project.clips[0].def.nodes[ni].style.opacity = 0.5;
         core.project.figures[0].def.nodes[ni].color = Some(0xFF0000);
-        let glyphs = glyph_prims(&text_geometry(&core));
+        let geometry = text_geometry(&core);
+        let glyphs = glyph_prims(&geometry);
         assert!(!glyphs.is_empty(), "clip-def text still draws");
         assert!(
             glyphs.iter().all(|p| matches!(p, TextPrim::GlyphBox { color, .. } if *color == 0x00FF00)),
@@ -934,7 +935,8 @@ mod tests {
             content: "HI".into(),
             size: 25.0,
         });
-        let glyphs = glyph_prims(&text_geometry(&core));
+        let geometry = text_geometry(&core);
+        let glyphs = glyph_prims(&geometry);
         assert!(!glyphs.is_empty(), "the instance's text draws again");
         assert!(
             glyphs.iter().all(|p| matches!(p, TextPrim::GlyphBox { color, alpha, .. } if *color == 0xFF0000 && *alpha == 1.0)),
