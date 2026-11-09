@@ -5216,8 +5216,18 @@ fn sprites_panel_adds_and_deletes_an_instance() {
         rt.state.core.status
     );
 
+    // The row leaves the presented set through the
+    // presence settle (bounded loop, the palette card's
+    // pattern at `command_palette_dismisses` above): a
+    // single frame is not the house guarantee for a
+    // leaving element.
     rt.invalidate();
-    rt.frame(DT);
+    for _ in 0..30 {
+        if !presented_keys(&rt).contains("sprite-row-0") {
+            break;
+        }
+        rt.frame(DT);
+    }
     assert!(
         !presented_keys(&rt).contains("sprite-row-0"),
         "the deleted instance's row is gone from the panel"
