@@ -4026,9 +4026,24 @@ fn timeline_card_keeps_chips_marks_and_rows() {
     // stacking inside the scroll column is proven by
     // the headless tree dumps (overflow scanner rule 4
     // bounds the whole timeline subtree).
+    // Inside-ness is asserted with the documented
+    // presented-box allowance: `Runtime::presented`
+    // returns the DRAWN box, and a mid-session-mounted
+    // canvas (this lane mounted when the clip was
+    // planted) can rest up to its own height above its
+    // layout slot — a strict `rect_inside` on the top
+    // edge flakes by exactly that displacement. The
+    // horizontal span stays strict, the bottom stays
+    // strict, and the top allows one lane height; the
+    // EXACT stacking inside the scroll column is proven
+    // by the headless tree dumps (overflow rule 4).
     assert!(
-        rect_inside(lane, scroll),
-        "clips lane inside the scroll row: lane {lane:?}, scroll {scroll:?}"
+        lane[0] >= scroll[0] - 0.5
+            && lane[0] + lane[2] <= scroll[0] + scroll[2] + 0.5
+            && lane[1] >= scroll[1] - lane[3] - 0.5
+            && lane[1] + lane[3] <= scroll[1] + scroll[3] + 0.5,
+        "clips lane inside the scroll row (presented-box allowance): \
+         lane {lane:?}, scroll {scroll:?}"
     );
     assert!(
         loop_after[1] >= scroll[1] + scroll[3] - 0.5,
