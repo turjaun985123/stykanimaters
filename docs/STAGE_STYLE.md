@@ -334,3 +334,41 @@ at launch): MCP coverage of all four fields (above); the
 clamp (deliberate, panel-parity, documented at source); head rings
 and shape nodes ignoring `NodeStyle` on all four surfaces alike
 (scope note, first section).
+
+---
+
+## Close-out (integrator, 2026-11-09) — the in-flight flips, verified
+
+The "Wave 12 in flight" section above is the launch plan;
+this is what the closing tree actually does, verified by
+gate 9/9, CI 42557475828 (3,156 tests) and headless
+42557913977:
+
+- **Stage × taper / cap / opacity: Ignored → Honoured.**
+  The stage figure pass builds every segment from
+  `paint::styled_segment_pieces` — the same generator the
+  raster exporter uses — so taper, cap geometry,
+  gradients, per-node colour and style opacity all draw
+  on stage. The stage's old 6-step gradient approximation
+  and its local segment helpers are retired; pieces are
+  the generator's 4 start-sample pieces per segment.
+  Figure opacity on stage remains the pre-existing colour
+  fade toward the background (0.05 floor) where the
+  raster uses true alpha — a named, standing divergence,
+  not an oversight.
+- **Onion ghosts** carry styled pieces too, with
+  per-piece alpha composed multiplicatively (never
+  replaced) — the A5 trap avoided by construction.
+- **SVG cells flipped** per C1/C3/C9: taper, caps, bends,
+  figure opacity, media, sprites, texts and pressured
+  widths all emit (see `docs/wave12/ACCEPTANCE.md` §7).
+- **Thumbnails** (library rows, figure cards) build from
+  the same generator — library entries gained real
+  thumbnails this wave (none existed at launch).
+- **Remainders that stand** from the launch matrix:
+  node `style.opacity` does not reach heads/rings/polys
+  on any surface; stage pressured strokes keep the
+  flat-width construction (raster + SVG honour baked
+  widths); spray/scatter dab radius uses the flat stroke
+  width everywhere; SVG z-order and text-glyph
+  divergences as recorded in ACCEPTANCE §7.

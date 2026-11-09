@@ -644,22 +644,120 @@ headless run **42548380654** (all probes 0, live-MCP
 probe PASS, overflow CLEAN on 27 trees). HEAD at
 launch: `3f04667`, the Wave 11 close-out commit.
 
-**Delivered** — TODO-AT-CLOSE: the integrator fills
-this in at close-out with what actually landed,
-squad by squad, against the remits above.
+**Delivered** — all five squads landed and were
+integrated the same day (commits `ccecd85`..`1461623`,
+plus CI fixes `4451172` and `5a8403f`). **A (stage
+style fidelity):** `paint::styled_segment_pieces` is
+now the single styled-segment construction — the
+stage figure pass, the raster exporter and both
+thumbnail renderers build from it; onion ghosts carry
+styled pieces with per-piece alpha composed (never
+replaced); segment-media carries figure × style
+opacity into the compositor; the stage draws an
+honest placeholder outline where a segment image
+sits (Rune `Shape` has no bitmap primitive — real
+PNG parity on stage is impossible, named as such).
+**B (assets MCP):** six tools spliced (registry 224
+→ 230): `assets_list`, `asset_info`, `asset_import`,
+`asset_rename`, `asset_remove` (hybrid rule — refuse
+while the target is referenced, remap references
+above it), `asset_attach`; `get_node` gained its
+`media` member; the segment inspector gained a real
+Media section; `projects::refresh_project_files`
+became a free seam wired into the MCP save paths,
+the Home duplicate path and `save_via_dialog`;
+`clear_node_media` resolves its selection before
+spending an undo step; library inserts strip segment
+images the library format cannot carry, and say so.
+**C (SVG fidelity):** figure opacity per element,
+bends arced through the bend midpoint, solid tapers
+as quads, media emitted (images embedded once per
+asset as PNG defs with placement matrices, text as
+escaped centred `<text>`), pressured strokes as
+per-segment lines at baked widths; `STYLE_PRESETS`
+is one canonical table (the panel re-exports it —
+the duplicate was value-identical, no live bug);
+palette 114 → 132 (fifteen style commands plus
+`attach-media-import`, `clear-node-media`,
+`cycle-attached-sprite`). **D (pixel-proof):**
+scenes 24 → 26 — `home-populated` seeds three real
+project files through the app's own save path,
+`strokes-populated` plants four stroke kinds on the
+Draw workspace; library rows gained real per-entry
+thumbnails (there was NO thumbnail before this wave
+— a premise correction, recorded in
+`library_panel.rs`); the File menu's recents now
+resolve like Home's (a renamed project's entry was
+dead). **E (QA):** live-MCP queue bounded with
+cancellation — a request whose caller timed out is
+discarded at drain instead of executing late against
+a swapped project; `copy_frame` / `set_frame_easing`
+refuse honestly on an empty project; audio readouts
+carry frame spans beside seconds; snap tests gained
+Round 13. Two further premise corrections stand as
+recorded: `set_loop_range` endpoint ordering is
+deliberate, test-pinned timeline behaviour (not a
+bug to fix), and the Scene panel has no sprite
+surface — B5's full sprite-GUI spec is the headline
+remainder below, not built this wave.
 
-**Verification** — TODO-AT-CLOSE: run evidence only
-(gate result, CI run id and test count, headless
-run id, live-MCP probe and overflow verdicts, snap
-list) goes here at close-out.
+**Verification** — gate **9/9 PASS** on the closing
+tree (`scripts/phase_j_checks.py`, full foreground
+run). CI run **42557475828** GREEN on `5a8403f`:
+**3,156 tests passed, 0 failed** (1,256 lib + 1,838
+bin + 62 integration across 16 binaries, incl. the
+new 6-test asset e2e suite
+`tests/wave12_e2e_assets.rs`, flipped strict against
+the shipped reply shapes). Headless run
+**42557913977**: every probe exit 0 (the xvfb
+fallback step was skipped — the plain attempt missed
+nothing), **live-MCP probe PASS** end-to-end,
+**overflow scan CLEAN (0 hits) on all 29 trees**.
+Both new scenes are pixel-proven: the
+home-populated snap shows three real project rows
+with rendered thumbnails; the strokes-populated snap
+shows all four stroke kinds with the stroke
+inspector mounted (snaps:
+`stykanimate-wave12-{default,stage,home-populated,strokes-populated}.png`).
 
-**Closing census** — TODO-AT-CLOSE: MCP, palette,
-scenes, help, i18n, icons and keys as counted by
-the gate on the closing tree, against the entering
-baseline above.
+**Closing census** — MCP **283 tools** (230 registry
++ 9 io + 44 built-ins; entering 277); palette
+**132** (entering 114); scenes **26** (entering 24);
+help **61 rows** (entering 58); keys **923 total
+(814 static + 109 dynamic patterns), zero lost**
+(entering 894 gate-basis); layout facts **29**;
+icons **163** (unchanged); i18n **99 × 28**
+(unchanged); gate **9/9** (entering 9/9).
 
-**Honest remainders** — TODO-AT-CLOSE: what this
-wave did not close, named at close-out.
+**Honest remainders** — (1) **No sprite GUI surface
+exists**: sprite instances arrive only via `.nodes`
+import and render in exports (plus stage placeholder
+outlines); B5's full spec (engine ops + a sprites
+panel) is written in `docs/wave12/` and is the
+headline candidate for a future wave. (2) The
+**snapshot-coverage gap** (E8): `edit_count` bumps
+only in `snapshot()`, so figure rename/recolour,
+layer writes, clip angle/root writes and the MCP
+project-rename name write never mark dirty — the
+dirty dot under-reports and the 25-edit autosave
+cadence can miss real changes; the fix changes undo
+semantics of 5+ tools and needs its own decision.
+(3) SVG standing divergences: strokes draw UNDER
+figures in SVG but over them in the raster (z-order),
+SVG text is a font run where the raster stamps
+bitmap glyphs, and node opacity does not reach
+heads/rings/polys in raster or SVG. (4) Stage pressured
+strokes keep the flat-width construction (SVG and
+raster honour baked widths). (5) The figures panel's
+own thumbnail ignores per-node styles (library
+thumbnails now lead it in fidelity). (6) The library
+format carries no image data, so inserts drop
+segment images (with a status saying so). (7) D5's
+library-populated scene was not built — library
+thumbnails are unit-proven, not yet pixel-proven.
+(8) `redo` lacks the `selected_figure` clamp `undo`
+has (skipped by decision). (9) Sound remains
+user-verified only.
 
 Standing user decisions this wave carries but does
 **not** settle — none of them is in any squad's

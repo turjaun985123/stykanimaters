@@ -265,3 +265,39 @@ assertion transcript `mcp-probe.txt` (§6.6: PASS end to end at
 Wave 11 close). It proves the live control path, not layout;
 it is listed here only so the artifact's contents are fully
 accounted for in this ledger.
+
+---
+
+## 5. Close-out (integrator, 2026-11-09) — headless 42557913977
+
+The run landed after this ledger was written; its
+evidence closes the in-flight rows and three gaps:
+
+- **Both Wave 12 scenes are in the run and proven.**
+  Every probe in run 42557913977 exited 0 (the xvfb
+  fallback step was skipped — the plain attempt missed
+  nothing); 29 tree dumps were produced (26 scenes +
+  the explicit size/light probes).
+- **Overflow denominator is now 29 trees, scan CLEAN**
+  (0 hits, `scripts/overflow_scan.py` over the run's
+  artifact at this debrief — G7's standing arrangement).
+- **G1 CLOSED** — the home-populated snap was pixel-read
+  at this debrief: three real project rows (First Steps,
+  Night Train, Harbour Lights) with metadata and
+  Open/Duplicate/Rename/Delete, over a stage showing the
+  selected project's figures.
+- **G2 CLOSED** — the same snap shows rendered figure
+  thumbnails inside all three Home rows.
+- **G3 CLOSED** — the strokes-populated tree carries the
+  stroke inspector's rows (including the new Scatter row
+  keys) and its snap shows the inspector mounted under
+  the Draw workspace with four stroke kinds on stage
+  (plain, faded pressured, filled, spray).
+- **G4, G5, G6 stand** as written (tree-only scenes'
+  canvas state, sound user-verified only, 1280×720
+  pairings not a matrix).
+- New gap opened by this wave, recorded honestly:
+  **library thumbnails are unit-proven only** — D5's
+  library-populated scene was not built (a 27th scene
+  was out of scope), so the library rows' new thumbnails
+  have no snap yet.

@@ -345,3 +345,57 @@ close-out doc by name; silence is not a carry-over.
       test counts — deltas recorded in the close-out.
 - [ ] §5 remainders: each either closed by a landed
       patch or carried by name into the close-out doc.
+
+---
+
+## 7. Close-out verdict (integrator, 2026-11-09)
+
+The wave closed with every §6 item resolved — two of them
+beyond what the checklist dared to expect:
+
+- **C1 landed as specced.** S2 taper (filled quad path,
+  no plain `<line>` for tapered solids; taper = 1.0
+  byte-identical), S4/S5 caps (Point-capped solids are
+  pointed), S7 bends (two pieces through `bend_mid`;
+  zero-bend projects byte-identical), S9 figure opacity
+  (per-element product rule, implemented directly in
+  `svg.rs` via its opacity-attribute helpers rather than
+  by adopting A4's `effective_style` — the helpers serve
+  the stage/raster composition; the SVG rule is the same
+  product), S8's clamp nit closed (spray dot alphas are
+  clamped at SVG emission, on the stage, and — added at
+  integration — in the raster disc pass). All launch
+  tests pass; CI is green on the closing tree.
+- **C3 and C9 landed as CODE, not specs.** The checklist
+  expected anchored specs with post-wave implementation;
+  the integrator promoted both during the splice:
+  `append_media` emits sprites, texts and segment media
+  (images embedded once per asset as PNG defs with
+  placement matrices, text as escaped centred `<text>`),
+  and pressured strokes emit per-segment lines at baked
+  endpoint-averaged widths with degenerate segments as
+  discs. §5.3's four named implementation items are
+  therefore closed, not carried.
+- **C2 landed.** The panel table is a re-export of the
+  canonical `style.rs` table; §4.2's six triples are the
+  shipped values unchanged; the self-comparison pin was
+  converted to `style_preset_lookup_by_name`, and the
+  panel-side test pins the shared table's distinct
+  colours and valid caps.
+- **Absence greps re-run at close-out** (§6's final
+  item): `bend_mid`/`bends_at` 8 hits, `fig_opacity`
+  11, `.media` 1, `project.sprites` 3, `project.texts`
+  3, `.widths` 3 in `src/svg.rs` production code — every
+  launch ABSENT now emits. The matrix summary flips
+  from 9 faithful / 2 approximated / 10 absent to:
+  all 21 rows emit; the standing divergences are the
+  two §5 unowned remainders — **S21 z-order** (SVG
+  strokes under figures, raster over) and the **S10
+  node-opacity half** (node `style.opacity` does not
+  reach heads/rings/polys in raster or SVG) — plus
+  SVG text as a font run vs the raster's bitmap glyphs.
+- **Run evidence:** gate 9/9 on the closing tree; CI
+  **42557475828** GREEN, **3,156 tests, 0 failed**;
+  headless **42557913977** all probes 0, live-MCP PASS,
+  overflow CLEAN on 29 trees. Full record:
+  `docs/REDESIGN_PROGRESS.md` §6.7.
