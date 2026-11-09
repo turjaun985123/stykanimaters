@@ -347,6 +347,25 @@ fn fs_arg_usize(args: &Value, key: &str) -> Result<usize, String> {
     Err(format!("argument '{key}' must be a non-negative integer"))
 }
 
+/// Float argument helper for the Wave 14 handler below,
+/// the finite counterpart of [`fs_arg_usize`]: the value
+/// must be a JSON number whose f32 cast stays finite, so
+/// a huge double (which casts to infinity) is refused up
+/// front, never stored.
+fn fs_arg_f32(args: &Value, key: &str) -> Result<f32, String> {
+    let Some(v) = args.get(key).filter(|v| !v.is_null()) else {
+        return Err(format!("missing required argument '{key}'"));
+    };
+    let f = v
+        .as_f64()
+        .map(|f| f as f32)
+        .ok_or_else(|| format!("argument '{key}' must be a number"))?;
+    if !f.is_finite() {
+        return Err(format!("argument '{key}' must be a finite number"));
+    }
+    Ok(f)
+}
+
 /// Figure-index guard mirroring `mcp::check_figure`'s wording.
 fn fs_check_figure(core: &EditorCore, fi: usize) -> Result<(), String> {
     if fi < core.project.figures.len() {
@@ -463,6 +482,59 @@ pub fn tool_insert_frames(core: &mut EditorCore, args: &Value) -> Result<Value, 
         "inserted": inserted,
         "frame_count": core.project.frames.len(),
         "current_frame": core.current,
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 domain-file block beside insert_frames.
+//   Tool {
+//       name: "adjust_frame_duration",
+//       description: "Adjust a frame's duration multiplier by 'factor' (the frame-ops panel's Dur −/+/×0.5/×2 buttons): the stored duration is multiplied and clamped to 0.25-8.0 by the op, and the reply reports the duration read back after clamping. The relative form of set_frame_duration. Applies to the current frame unless 'frame' names another (which moves the playhead there first, the set_frame_easing convention). Not an undo step (timing-tweak panel parity); a real change counts for dirty/autosave.",
+//       schema: obj_schema(
+//           json!({
+//               "factor": { "type": "number", "description": "Duration multiplier (positive, finite); 0.5 halves the hold, 2.0 doubles it" },
+//               "frame": { "type": "integer", "description": "0-based frame index (default: the current frame)" }
+//           }),
+//           &["factor"],
+//       ),
+//       handler: crate::frame_swap::tool_adjust_frame_duration,
+//   }
+// MCP.md row:
+//   | `adjust_frame_duration` | Adjust a frame's duration multiplier by 'factor' (the frame-ops panel's Dur −/+/×0.5/×2 buttons): the stored duration is multiplied and clamped to 0.25–8.0 by the op; the reply reports the duration read back, so a step past a bound truthfully reports the bound. The relative form of `set_frame_duration`. Applies to the current frame unless 'frame' names another (which moves the playhead there first). Not an undo step (timing-tweak panel parity); a real change counts for dirty/autosave. | `factor` | `frame` |
+/// MCP handler for [`EditorCore::adjust_frame_duration`]
+/// (Wave 14, A2): the frame-ops panel's relative duration
+/// buttons. The op reads `frames[current]` directly, so
+/// the handler refuses an empty project and an
+/// out-of-range frame BEFORE anything runs — the op
+/// itself would index-panic on either. Validation order
+/// is factor, then frame, then the op.
+pub fn tool_adjust_frame_duration(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let factor = fs_arg_f32(args, "factor")?;
+    if factor <= 0.0 {
+        return Err("argument 'factor' must be positive".to_string());
+    }
+    let frame = match args.get("frame").filter(|v| !v.is_null()) {
+        Some(_) => fs_arg_usize(args, "frame")?,
+        None => core.current,
+    };
+    if frame >= core.project.frames.len() {
+        return Err(format!(
+            "frame index {frame} out of range (project has {} frame(s))",
+            core.project.frames.len()
+        ));
+    }
+    if frame != core.current {
+        core.goto(frame);
+    }
+    core.adjust_frame_duration(factor);
+    Ok(json!({
+        "ok": true,
+        "frame": frame,
+        "duration": core.project.frames[frame].duration,
         "status": core.status,
     }))
 }
@@ -1079,6 +1151,79 @@ mod tests {
         assert_eq!(out["frame_count"], json!(0));
         assert_eq!(out["frames"], json!([]));
         assert_eq!(out["loop_range"], Value::Null);
+    }
+
+    #[test]
+    fn tool_adjust_frame_duration_scales_clamps_and_reports_back() {
+        // Wave 14 (A2): the relative duration handler —
+        // the stored duration is multiplied and clamped by
+        // the op, the reply reads the stored value back,
+        // and the timing-tweak contract holds: no undo
+        // step, one dirty edit per real change.
+        let mut core = staged_core();
+        core.current = 2;
+        let depth = core.undo_depth();
+        let edits = core.edits_since_autosave();
+
+        // Current frame (index 2, duration 1.5) doubled.
+        let out = tool_adjust_frame_duration(&mut core, &json!({ "factor": 2.0 })).unwrap();
+        assert_eq!(out["ok"], json!(true));
+        assert_eq!(out["frame"], json!(2));
+        assert_eq!(out["duration"], json!(3.0));
+        assert_eq!(core.project.frames[2].duration, 3.0);
+        assert_eq!(core.undo_depth(), depth, "a timing tweak is not an undo step");
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits + 1,
+            "the real change counts one dirty edit"
+        );
+
+        // An explicit frame moves the playhead there first
+        // (the set_frame_easing convention), then adjusts.
+        let out = tool_adjust_frame_duration(&mut core, &json!({ "factor": 0.5, "frame": 3 }))
+            .unwrap();
+        assert_eq!(core.current, 3, "the playhead followed the frame argument");
+        assert_eq!(out["duration"], json!(2.5), "frame 3's 5.0 halved");
+
+        // The op's clamp binds: 2.5 × 100 lands on 8.0.
+        let out = tool_adjust_frame_duration(&mut core, &json!({ "factor": 100.0 })).unwrap();
+        assert_eq!(out["duration"], json!(8.0));
+    }
+
+    #[test]
+    fn tool_adjust_frame_duration_refuses_bad_input_without_side_effects() {
+        // Wave 14 (A2): factor and frame are validated
+        // BEFORE the op runs (the op indexes
+        // frames[current] directly and would panic on an
+        // empty project), and no refusal moves the
+        // playhead, changes a duration or marks dirty.
+        let mut core = staged_core();
+        core.current = 1;
+        let edits = core.edits_since_autosave();
+
+        let err = tool_adjust_frame_duration(&mut core, &json!({})).unwrap_err();
+        assert!(err.contains("missing required argument 'factor'"), "err: {err}");
+        let err = tool_adjust_frame_duration(&mut core, &json!({ "factor": 0.0 })).unwrap_err();
+        assert!(err.contains("must be positive"), "err: {err}");
+        let err = tool_adjust_frame_duration(&mut core, &json!({ "factor": -2.0 })).unwrap_err();
+        assert!(err.contains("must be positive"), "err: {err}");
+        let err = tool_adjust_frame_duration(&mut core, &json!({ "factor": 1e300 })).unwrap_err();
+        assert!(err.contains("must be a finite number"), "err: {err}");
+        let err =
+            tool_adjust_frame_duration(&mut core, &json!({ "factor": 2.0, "frame": 99 }))
+                .unwrap_err();
+        assert!(err.contains("frame index 99 out of range"), "err: {err}");
+
+        assert_eq!(core.current, 1, "no refusal moved the playhead");
+        assert_eq!(core.project.frames[1].duration, 2.0, "no refusal changed a duration");
+        assert_eq!(core.edits_since_autosave(), edits, "no refusal marked dirty");
+
+        // An empty project is a clean refusal, not the
+        // op's index panic.
+        let mut empty = EditorCore::new();
+        empty.project.frames = Vec::new();
+        let err = tool_adjust_frame_duration(&mut empty, &json!({ "factor": 2.0 })).unwrap_err();
+        assert!(err.contains("frame index 0 out of range"), "err: {err}");
     }
 
     // ---- Wave 12 (C8): media / table reference integrity ----------

@@ -16,6 +16,11 @@
 //! media still composites last), and node style opacity now
 //! reaches head rings and shape outlines, composed with the
 //! figure factor exactly as segments compose it.
+//! Wave 14 (C4): clip-def media — media stored only on a
+//! movieclip's definition — reaches this exporter through
+//! the same `media_items` funnel, via C1's per-node
+//! fallback there; no clip-specific emission exists here
+//! (docs/wave13/CLIP_MEDIA.md §6).
 //!
 //! XML safety: almost no user-controlled string is
 //! interpolated into the document — every `format!` argument
@@ -646,6 +651,16 @@ fn matrix_num(v: f32) -> String {
 /// raster's nearest-neighbour sampling. The MIME type is
 /// fixed `image/png` — the asset table stores PNG bytes
 /// only (imports validate it).
+///
+/// Clip-def media (Wave 14, C4): since C1's per-node
+/// fallback in `media_items` (docs/wave13/CLIP_MEDIA.md
+/// §6.1), an item sourced from a movieclip definition
+/// arrives through this same loop as an ordinary item —
+/// its alpha already carries the instance-figure ×
+/// clip-node-style product and its text colour the
+/// clip-node fallback (§6.2) — so this writer
+/// deliberately has NO clip-specific branch; the C4
+/// tests below pin the equivalence.
 ///
 /// Text: centred at the item position (`text-anchor` +
 /// `dominant-baseline`), font size = glyph height in view
@@ -1874,6 +1889,253 @@ mod tests {
         assert!(
             head.contains("stroke-opacity=\"0.25\""),
             "head ring is not the style x figure product: {head}"
+        );
+    }
+
+    // ---- Wave 14 (C4): clip-def media emission ----
+    //
+    // docs/wave13/CLIP_MEDIA.md §6: clip-def media reaches
+    // every renderer through the ONE funnel — C1's per-node
+    // fallback in `media::media_items` yields clip-sourced
+    // items as ordinary `MediaItem`s, so `append_media`
+    // needs (and has) no clip-specific branch. This section
+    // pins that the emission treats them exactly like
+    // figure-sourced media: same def + <use> + matrix, same
+    // opacity product, same escaped <text>, media still
+    // last in the Wave 13 z-order.
+
+    fn node(
+        name: &str,
+        parent: Option<usize>,
+        length: f32,
+        media: Option<crate::model::SegmentMedia>,
+    ) -> crate::model::NodeDef {
+        crate::model::NodeDef {
+            name: name.into(),
+            parent,
+            length,
+            rest_angle: 0.0,
+            head: false,
+            bend: 1.0,
+            thickness: 5.0,
+            color: None,
+            ik_end: false,
+            shape: Shape::Line,
+            style: crate::model::NodeStyle::default(),
+            media,
+        }
+    }
+
+    /// The media.rs C1 skeleton (root at (100, 100), node 1
+    /// running +x for 100, node 2 running down for 80) as a
+    /// movieclip instance of clip 0: the instance def and
+    /// the clip def are built from the same skeleton with
+    /// independent media, and the clip's single frame pose
+    /// equals the timeline pose, so the geometry is the
+    /// skeleton's own. Asset 0 is the shared 4×2 green PNG
+    /// (aspect 2.0); the view is the identity camera.
+    fn clip_media_project(
+        inst_media: (
+            Option<crate::model::SegmentMedia>,
+            Option<crate::model::SegmentMedia>,
+        ),
+        clip_media: (
+            Option<crate::model::SegmentMedia>,
+            Option<crate::model::SegmentMedia>,
+        ),
+    ) -> Project {
+        let skeleton = |m: (
+            Option<crate::model::SegmentMedia>,
+            Option<crate::model::SegmentMedia>,
+        )| crate::model::FigureDef {
+            nodes: vec![
+                node("root", None, 0.0, None),
+                node("arm", Some(0), 100.0, m.0),
+                node("leg", Some(0), 80.0, m.1),
+            ],
+        };
+        let pose = || crate::model::Pose {
+            root: [100.0, 100.0],
+            angles: vec![0.0, 90.0, 0.0],
+        };
+        let mut project = Project::new_demo();
+        project.set_camera_key(0, 480.0, 360.0, 1.0);
+        project.assets.push(crate::model::ImageAsset {
+            name: "clipdot.png".into(),
+            png: png_bytes(4, 2),
+        });
+        project.figures[0].color = 0xFF0000;
+        project.figures[0].def = skeleton(inst_media);
+        project.figures[0].clip = Some(0);
+        project.frames = vec![crate::model::Frame {
+            poses: vec![pose()],
+            duration: 1.0,
+            easing: None,
+            bends: Vec::new(),
+        }];
+        project.clips = vec![crate::model::ClipDef {
+            name: "clip".into(),
+            def: skeleton(clip_media),
+            frames: vec![pose()],
+            loop_mode: crate::model::ClipLoop::Loop,
+        }];
+        project
+    }
+
+    #[test]
+    fn svg_clip_def_image_emits_def_use_with_matrix_after_strokes() {
+        // The media exists ONLY in the clip def; the
+        // instance's own def is media-free. The funnel's
+        // fallback yields one image item on node 1's
+        // segment — (100,100) to (200,100), length 100,
+        // asset aspect 2, so the quad is (100,75) to
+        // (200,125) and the <use> matrix maps the 4×2
+        // pixel space onto it: (25 0 0 25) about the
+        // first corner.
+        let mut project = clip_media_project(
+            (None, None),
+            (Some(crate::model::SegmentMedia::Image { asset: 0 }), None),
+        );
+        project.strokes.push(crate::model::Stroke {
+            frame: 0,
+            points: vec![[100.0, 600.0], [300.0, 600.0]],
+            color: 0x123456,
+            width: 4.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+            opacity: 1.0,
+            scatter: 0.0,
+        });
+        let dir = std::path::Path::new("/tmp/styk-svg-clip-img-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert!(
+            text.contains("<image id=\"asset0\" width=\"4\" height=\"2\""),
+            "clip asset def missing:\n{text}"
+        );
+        assert!(
+            text.contains("href=\"data:image/png;base64,"),
+            "clip asset bytes not embedded:\n{text}"
+        );
+        assert_eq!(
+            text.matches("<use href=\"#asset0\"").count(),
+            1,
+            "expected exactly one clip media use:\n{text}"
+        );
+        assert!(
+            text.contains("<use href=\"#asset0\" transform=\"matrix(25 0 0 25 100.0 75.0)\"/>"),
+            "clip media placement matrix wrong:\n{text}"
+        );
+        // The asset's NAME is never emitted (as for
+        // figure-sourced media) — bytes and generated
+        // ids only.
+        assert!(!text.contains("clipdot.png"), "asset name leaked:\n{text}");
+        // The Wave 13 z-order holds for clip-sourced
+        // media: figure segment < stroke < media use.
+        let fig_pos = text.find("<line x1=\"").expect("figure segment missing");
+        let stroke_pos = text.find("stroke=\"#123456\"").expect("stroke missing");
+        let media_pos = text.find("<use href=\"#asset0\"").expect("media use missing");
+        assert!(
+            fig_pos < stroke_pos && stroke_pos < media_pos,
+            "clip media broke the z-order:\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_clip_def_image_opacity_composes_instance_and_clip_node_style() {
+        // §6.2's alpha product with the CARRIER's style:
+        // instance figure opacity 0.5 × CLIP node style
+        // 0.5 = 0.25 on the <use>. The instance node's
+        // own style (0.9, a decoy) must not leak in —
+        // its node carries no media, so it is not the
+        // carrier.
+        let mut project = clip_media_project(
+            (None, None),
+            (Some(crate::model::SegmentMedia::Image { asset: 0 }), None),
+        );
+        project.figures[0].opacity = 0.5;
+        project.figures[0].def.nodes[1].style.opacity = 0.9;
+        project.clips[0].def.nodes[1].style.opacity = 0.5;
+        let dir = std::path::Path::new("/tmp/styk-svg-clip-opacity-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        let use_line = text
+            .lines()
+            .find(|l| l.contains("<use href=\"#asset0\""))
+            .expect("clip media use missing");
+        assert!(
+            use_line.contains("transform=\"matrix(25 0 0 25 100.0 75.0)\""),
+            "clip media matrix changed: {use_line}"
+        );
+        assert!(
+            use_line.ends_with(" opacity=\"0.25\"/>"),
+            "clip media opacity is not the instance x clip-node product: {use_line}"
+        );
+    }
+
+    #[test]
+    fn svg_clip_def_text_emits_escaped_with_clip_colour_then_figure_fallback() {
+        // Clip-def text on node 2 (the leg, (100,100) to
+        // (100,180)): centred (100,140), direction 90°.
+        // Content and size are the clip node's; the
+        // colour is the clip node's colour, falling back
+        // to the figure colour when the clip node has
+        // none (§6.2). The content still routes through
+        // xml_escape, as for figure-sourced text.
+        let mut project = clip_media_project(
+            (None, None),
+            (
+                None,
+                Some(crate::model::SegmentMedia::Text {
+                    content: "A<B".into(),
+                    size: 25.0,
+                }),
+            ),
+        );
+        project.clips[0].def.nodes[2].color = Some(0x00FF00);
+        let dir = std::path::Path::new("/tmp/styk-svg-clip-text-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert!(
+            text.contains("<text x=\"100.0\" y=\"140.0\" font-family=\"monospace\" font-size=\"25.0\" fill=\"#00FF00\" text-anchor=\"middle\" dominant-baseline=\"central\" transform=\"rotate(90.0 100.0 140.0)\">A&lt;B</text>"),
+            "clip text element wrong:\n{text}"
+        );
+        project.clips[0].def.nodes[2].color = None;
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert!(
+            text.contains("fill=\"#FF0000\""),
+            "clip text lost the figure-colour fallback:\n{text}"
+        );
+        assert!(
+            !text.contains("#00FF00"),
+            "clip node colour leaked after clearing:\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_media_free_clip_project_is_byte_identical_to_no_clip() {
+        // A clip whose def carries no media (and whose
+        // instance carries none) emits nothing: the
+        // export is byte-identical to the same project
+        // with no clip at all — the fallback only ever
+        // ADDS items for media that exists.
+        let with_clip = clip_media_project((None, None), (None, None));
+        let mut no_clip = clip_media_project((None, None), (None, None));
+        no_clip.figures[0].clip = None;
+        no_clip.clips.clear();
+        let dir_a = std::path::Path::new("/tmp/styk-svg-clip-clean-a-test");
+        let dir_b = std::path::Path::new("/tmp/styk-svg-clip-clean-b-test");
+        export_svg(&with_clip, dir_a).unwrap();
+        export_svg(&no_clip, dir_b).unwrap();
+        let a = std::fs::read_to_string(dir_a.join("frame-0001.svg")).unwrap();
+        let b = std::fs::read_to_string(dir_b.join("frame-0001.svg")).unwrap();
+        assert_eq!(a, b, "a media-free clip changed the SVG bytes");
+        assert!(!a.contains("<use"), "media-free clip gained a <use>:\n{a}");
+        assert!(
+            !a.contains("asset0"),
+            "media-free clip gained an asset def:\n{a}"
         );
     }
 }

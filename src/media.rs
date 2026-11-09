@@ -30,6 +30,10 @@
 //!
 //! Conventions and limits:
 //! - Hidden figures contribute no media (same as the rasterizer).
+//! - Movieclip-def media: a clip instance's node with no media
+//!   of its own samples the same node index on the clip's def
+//!   (payload only — placement stays on the instance's segment;
+//!   see `media_items` and docs/wave13/CLIP_MEDIA.md §6).
 //! - A node with no parent has no segment; its media is placed at
 //!   the joint, extending `length` units along +x. (Media normally
 //!   belongs on real segments.)
@@ -54,6 +58,13 @@
 //! the handlers own argument validation, refusal strings and
 //! the reply shapes, and verify the op's effect from the
 //! resulting state before reporting success.
+//!
+//! Wave 14 adds the movieclip-def media handlers beside them
+//! (`tool_clip_asset_attach`, `tool_clip_clear_node_media`,
+//! `tool_clip_get_node_media`): the clip-def counterparts of
+//! the figure-def media tools, writing the same per-node
+//! model on `clips[].def.nodes[]` — the model the renderer's
+//! clip fallback samples and the asset census counts.
 
 use crate::editor::EditorCore;
 use crate::model::{evaluate, ImageAsset, InstanceKey, Project, SegmentMedia, V2};
@@ -120,6 +131,10 @@ fn png_aspect(project: &Project, idx: usize) -> Option<f32> {
 /// All media items visible at fractional frame time `frame_f`:
 /// segment media in figure order, then node order; then sprite
 /// instances; then text instances (instances draw on top).
+/// A movieclip instance whose own node carries no media falls
+/// back to the same node index on its clip's def (Wave 14, C1;
+/// docs/wave13/CLIP_MEDIA.md §6.1) — the instance's media wins,
+/// the clip fills gaps, never both.
 pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
     let mut out = Vec::new();
     let poses = project.poses_at(frame_f);
@@ -130,7 +145,38 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
         let Some(pose) = poses.get(fi) else { continue };
         let pos = evaluate(&fig.def, pose);
         for (ni, node) in fig.def.nodes.iter().enumerate() {
-            let Some(media) = &node.media else { continue };
+            // Wave 14, C1 — clip-def media fallback
+            // (docs/wave13/CLIP_MEDIA.md §6.1): the instance's
+            // own media wins; when the instance node carries
+            // none and the figure is a movieclip instance, the
+            // same node index on the clip's def supplies the
+            // media instead. At most one item per (figure,
+            // node) — in the normal clone case both defs carry
+            // the same media, and sampling both would draw it
+            // twice. The clip def contributes the payload only:
+            // geometry, item order and the figure-opacity
+            // factor all stay the instance's (§6.2); only the
+            // style opacity / colour are read from the node
+            // that carries the media (`carrier`). A missing
+            // clip or an out-of-range clip node index simply
+            // has no fallback (§6.3) — `get` chains, never an
+            // index.
+            let (media, carrier) = match &node.media {
+                Some(media) => (media, node),
+                None => {
+                    let clip_node = fig
+                        .clip
+                        .and_then(|ci| project.clips.get(ci))
+                        .and_then(|clip| clip.def.nodes.get(ni));
+                    match clip_node {
+                        Some(carrier) => match &carrier.media {
+                            Some(media) => (media, carrier),
+                            None => continue,
+                        },
+                        None => continue,
+                    }
+                }
+            };
             let (a, b) = match node.parent {
                 Some(p) => (pos[p], pos[ni]),
                 None => (pos[ni], add(pos[ni], [node.length, 0.0])),
@@ -159,7 +205,7 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
                         ],
                         asset: *asset,
                         alpha: fig.opacity.clamp(0.0, 1.0)
-                            * node.style.opacity.clamp(0.0, 1.0),
+                            * carrier.style.opacity.clamp(0.0, 1.0),
                     });
                 }
                 SegmentMedia::Text { content, size } => {
@@ -168,7 +214,7 @@ pub fn media_items(project: &Project, frame_f: f32) -> Vec<MediaItem> {
                         angle_deg: d[1].atan2(d[0]).to_degrees(),
                         content: content.clone(),
                         size: *size,
-                        color: node.color.unwrap_or(fig.color),
+                        color: carrier.color.unwrap_or(fig.color),
                     });
                 }
             }
@@ -279,7 +325,10 @@ pub fn composite_media(
 // index can live: segment media on figure defs, segment media
 // on movieclip defs (`ClipDef` carries no asset table of its
 // own, so its nodes' indices name project assets), and
-// free-standing sprite instances.
+// free-standing sprite instances. The definitive census —
+// including the audited storage that is NOT a reference
+// class, and the rule new writers must follow — is the doc
+// comment on `asset_references` (Wave 14, C6).
 // ---------------------------------------------------------------------
 
 /// PNG signature every imported asset must start with.
@@ -374,8 +423,53 @@ fn asset_dims(asset: &ImageAsset) -> Option<(u32, u32)> {
 
 /// Count every reference to asset `asset`, as
 /// (figure segment images, clip-def segment images, sprite
-/// instances). This is the complete census: an asset index can
-/// only be stored in those three places.
+/// instances).
+///
+/// # The definitive asset-reference census (Wave 14, C6)
+///
+/// An asset index can be STORED in exactly three places in a
+/// `Project`, and this fn counts all three; `remap_asset_refs`
+/// shifts the same three on removal, and `tool_asset_remove`
+/// refuses while any of the three is non-zero. Every counted
+/// class also RENDERS, so the refusal never locks an asset
+/// over an image nothing draws (the Wave 13 state of the
+/// clip-def row, closed by Wave 14 C1–C4):
+///
+/// | Class | Stored at | Counted | Renders via |
+/// |---|---|---|---|
+/// | Figure segment image | `figures[].def.nodes[].media = Image` | `segments` | `media_items` figure pass (stage / raster / SVG / thumbnails) |
+/// | Clip-def segment image | `clips[].def.nodes[].media = Image` | `clip_segments` | `media_items` clip fallback (C1) → the same four surfaces |
+/// | Sprite instance | `sprites[].asset` | `sprites` | `media_items` sprite pass + the stage sprite pass |
+///
+/// Audited storage that is NOT a reference class, and why it
+/// must stay uncounted:
+/// - **Figure library** (`EditorCore::library`): not part of
+///   `Project` at all — bare `FigureDef`s loaded from
+///   `./library/*.json`. A library file can carry an image
+///   index, but `insert_library_figure` strips image media
+///   at the project boundary (it would resolve against the
+///   wrong table), so a library entry can never become a
+///   live project reference.
+/// - **3D figures** (`fig3d::Figure3`): name / nodes /
+///   colour only — no media or texture field exists, and
+///   the 3D session state is not stored in `Project`.
+/// - **FX clips and particles** (`FxClipEntry`,
+///   `ParticleEvent`): procedural kinds and colours; no
+///   asset index field.
+/// - **Text** (`SegmentMedia::Text`, `TextInstance`):
+///   self-contained content; no asset index.
+/// - **Audio clips** (`AudioClip`): name a file PATH on
+///   disk, not an asset-table index, so table removal can
+///   never orphan one.
+///
+/// Forward rule for new writers (Wave 14 C5's clip attach
+/// path included): any tool or op that stores
+/// `SegmentMedia::Image` on `clips[].def.nodes[]` is counted
+/// and remapped HERE with no census change — the reference
+/// lands in `clip_segments` by construction. A writer that
+/// introduces a genuinely NEW storage place for an asset
+/// index must extend this fn AND `remap_asset_refs` in the
+/// same change, or removal will silently orphan it.
 fn asset_references(project: &Project, asset: usize) -> (usize, usize, usize) {
     let mut segments = 0;
     for fig in &project.figures {
@@ -895,6 +989,261 @@ pub fn tool_sprite_delete_key(core: &mut EditorCore, args: &Value) -> Result<Val
     }))
 }
 
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 13 sprite block beside sprite_delete_key.
+//   Tool {
+//       name: "sprite_sample",
+//       description: "Read sprite 'sprite''s sampled transform at 'frame' (fractional frames allowed): the interpolated key between its authored keys, clamped outside the keyed range — the transform the stage and exports draw. Read-only; no undo step. Errors when the sprite has no keys.",
+//       schema: obj_schema(
+//           json!({
+//               "sprite": { "type": "integer" },
+//               "frame": { "type": "number", "description": "Frame to sample at; may be fractional" }
+//           }),
+//           &["sprite", "frame"],
+//       ),
+//       handler: crate::media::tool_sprite_sample,
+//   }
+// MCP.md row:
+//   | `sprite_sample` | Read sprite 'sprite''s sampled transform at 'frame' (fractional frames allowed): the interpolated key between its authored keys, clamped outside the keyed range — the transform the stage and exports draw. Read-only; no undo step. | `sprite`, `frame` | — |
+/// MCP handler: sample sprite `sprite`'s transform at
+/// `frame` (fractional allowed) — the read side of
+/// `sprite_set_key`, answering the transform the stage
+/// actually draws without the client reimplementing
+/// `InstanceKey::sample`. Drives the core's
+/// `sprite_sample` read (Wave 13 A1). A sprite with no
+/// keys has nothing to sample and is refused. Read-only;
+/// no undo step.
+pub fn tool_sprite_sample(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = ast_req_usize(args, "sprite")?;
+    ast_check_sprite(core, index)?;
+    let frame = ast_req_f32(args, "frame")?;
+    if frame < 0.0 {
+        return Err(format!(
+            "argument 'frame' must not be negative (got {frame})"
+        ));
+    }
+    match core.sprite_sample(index, frame) {
+        Some(key) => Ok(json!({
+            "ok": true,
+            "sprite": index,
+            "frame": frame,
+            "key": key_json(&key),
+        })),
+        None => Err(format!(
+            "sprite {index} has no keys to sample (it has 0 key(s))"
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Movieclip-def media MCP handlers (Wave 14, C5)
+//
+// The clip family could create, edit and pose movieclip
+// definitions but had no media surface at all: a clip def's
+// node media could only arrive by cloning a media-carrying
+// figure (docs/wave13/CLIP_MEDIA.md §4), and once it existed
+// only in the def it was counted by the asset census while
+// no tool could attach, clear or even read it. These three
+// handlers are the clip-def counterparts of `asset_attach`
+// (which writes a figure's own definition),
+// `clear_node_media` (selection-scoped to a figure) and the
+// `media` field of `get_node` — addressed by (clip, node)
+// indices, because a clip def has no selection to scope to.
+// Attach writes image media only, exactly like
+// `asset_attach` (no MCP tool attaches text media; text
+// arrives via the GUI text path); clear and read cover
+// either kind.
+//
+// The write lands on `clips[ci].def.nodes[ni].media` — the
+// same per-node model the renderer samples (the
+// `media_items` clip fallback) and the asset census counts
+// (`asset_references`' clip-def row): no new storage place
+// is introduced, so removal refusal and remapping cover
+// references created here with no census change.
+// ---------------------------------------------------------------------
+
+/// Check a clip index, and a node index within that clip's
+/// def, against the project, with the same message shapes
+/// as `ast_check_node`.
+fn ast_check_clip_node(core: &EditorCore, ci: usize, ni: usize) -> Result<(), String> {
+    let clips = core.project.clips.len();
+    if ci >= clips {
+        return Err(format!(
+            "clip index {ci} out of range (project has {clips} clip(s))"
+        ));
+    }
+    let n = core.project.clips[ci].def.nodes.len();
+    if ni >= n {
+        return Err(format!(
+            "node index {ni} out of range (clip {ci} has {n} node(s))"
+        ));
+    }
+    Ok(())
+}
+
+/// A node's segment media as JSON, in `get_node`'s shape:
+/// null when the node carries none, otherwise
+/// {kind: "image", asset} or {kind: "text", content, size}.
+/// Shared by `tool_clip_get_node_media` and the integrator's
+/// `clip_list` splice (see the SPLICE SPEC on that handler),
+/// so every clip-def media read speaks the one shape.
+pub fn segment_media_json(media: &Option<SegmentMedia>) -> Value {
+    match media {
+        Some(SegmentMedia::Image { asset }) => json!({ "kind": "image", "asset": asset }),
+        Some(SegmentMedia::Text { content, size }) => {
+            json!({ "kind": "text", "content": content, "size": size })
+        }
+        None => Value::Null,
+    }
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 12 asset block beside asset_attach.
+//   Tool {
+//       name: "clip_asset_attach",
+//       description: "Attach the EXISTING asset at index 'asset' to movieclip definition 'clip', node 'node' as that segment's image media, replacing whatever media the definition's segment carried (the clip-def counterpart of asset_attach, which writes a figure's own definition). The media renders on every instance of the clip whose own definition carries no media at that node — an instance's own media wins. One undo step.",
+//       schema: obj_schema(
+//           json!({
+//               "clip": { "type": "integer" },
+//               "node": { "type": "integer" },
+//               "asset": { "type": "integer" }
+//           }),
+//           &["clip", "node", "asset"],
+//       ),
+//       handler: crate::media::tool_clip_asset_attach,
+//   }
+// MCP.md row (merge beside the asset_attach row):
+//   | `clip_asset_attach` | Attach the EXISTING asset at index 'asset' to movieclip definition 'clip', node 'node' as that segment's image media, replacing whatever media the definition's segment carried (the clip-def counterpart of asset_attach, which writes a figure's own definition). The media renders on every instance of the clip whose own definition carries no media at that node — an instance's own media wins. One undo step. | `clip`, `node`, `asset` | — |
+/// MCP handler: attach an EXISTING asset to a movieclip
+/// definition's segment — `SegmentMedia::Image` on clip
+/// `clip`, node `node`, replacing whatever media the
+/// definition's segment carried (the clip-def counterpart
+/// of `tool_asset_attach`). One undo step.
+pub fn tool_clip_asset_attach(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let ci = ast_req_usize(args, "clip")?;
+    let ni = ast_req_usize(args, "node")?;
+    let asset = ast_req_usize(args, "asset")?;
+    ast_check_clip_node(core, ci, ni)?;
+    ast_check_asset(core, asset)?;
+    core.snapshot();
+    core.project.clips[ci].def.nodes[ni].media = Some(SegmentMedia::Image { asset });
+    core.status = format!(
+        "Sprite attached to clip {} (asset {}).",
+        ci + 1,
+        asset + 1
+    );
+    Ok(json!({
+        "ok": true,
+        "clip": ci,
+        "node": ni,
+        "asset": asset,
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 12 asset block beside asset_attach.
+//   Tool {
+//       name: "clip_clear_node_media",
+//       description: "Clear the media (image or text) attached to movieclip definition 'clip', node 'node' (the clip-def counterpart of clear_node_media, which is selection-scoped to a figure). Clearing a node that carries no media is reported with 'cleared': false, not an error, and spends no undo step; a clear that removes media is one undo step. The reply's 'media' names what was cleared (null when nothing was).",
+//       schema: obj_schema(
+//           json!({
+//               "clip": { "type": "integer" },
+//               "node": { "type": "integer" }
+//           }),
+//           &["clip", "node"],
+//       ),
+//       handler: crate::media::tool_clip_clear_node_media,
+//   }
+// MCP.md row (merge beside the asset_attach row):
+//   | `clip_clear_node_media` | Clear the media (image or text) attached to movieclip definition 'clip', node 'node' (the clip-def counterpart of clear_node_media, which is selection-scoped to a figure). Clearing a node that carries no media is reported, not an error. One undo step when media was actually cleared. | `clip`, `node` | — |
+/// MCP handler: clear the media (image or text) on clip
+/// `clip`, node `node` — the clip-def counterpart of
+/// `clear_node_media`, addressed by index because a clip
+/// def has no selection. Presence is resolved BEFORE the
+/// snapshot (the Wave 12 B2 doctrine): clearing a node
+/// that carries no media changes nothing, so it spends no
+/// phantom undo step and is reported with "cleared":
+/// false; a real clear is exactly one undo step. The
+/// reply's "media" names what was cleared, in
+/// `get_node`'s shape.
+pub fn tool_clip_clear_node_media(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let ci = ast_req_usize(args, "clip")?;
+    let ni = ast_req_usize(args, "node")?;
+    ast_check_clip_node(core, ci, ni)?;
+    let old = core.project.clips[ci].def.nodes[ni].media.clone();
+    let Some(old) = old else {
+        core.status = format!("Clip {} node {} carries no media.", ci + 1, ni + 1);
+        return Ok(json!({
+            "ok": true,
+            "clip": ci,
+            "node": ni,
+            "cleared": false,
+            "media": Value::Null,
+            "status": core.status,
+        }));
+    };
+    core.snapshot();
+    core.project.clips[ci].def.nodes[ni].media = None;
+    core.status = "Segment media cleared.".into();
+    Ok(json!({
+        "ok": true,
+        "clip": ci,
+        "node": ni,
+        "cleared": true,
+        "media": segment_media_json(&Some(old)),
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 12 asset block beside asset_attach.
+//   Tool {
+//       name: "clip_get_node_media",
+//       description: "Read the segment media attached to movieclip definition 'clip', node 'node': null, or {kind: 'image', asset} / {kind: 'text', content, size} — the same shape get_node returns for a figure's node. Read-only.",
+//       schema: obj_schema(
+//           json!({
+//               "clip": { "type": "integer" },
+//               "node": { "type": "integer" }
+//           }),
+//           &["clip", "node"],
+//       ),
+//       handler: crate::media::tool_clip_get_node_media,
+//   }
+// MCP.md row (merge beside the asset_attach row):
+//   | `clip_get_node_media` | Read the segment media attached to movieclip definition 'clip', node 'node': null, or {kind: 'image', asset} / {kind: 'text', content, size} — the same shape get_node returns for a figure's node. Read-only. | `clip`, `node` | — |
+//
+// SPLICE SPEC (integrator): `tool_clip_list`
+// (src/mcp_tools.rs) reports node COUNTS only, so a clip
+// def's media is invisible in the list reply — a read that
+// hides state this wave makes writable. Add the per-node
+// media to its per-clip json!:
+//   "media": c.def.nodes.iter()
+//       .map(|n| crate::media::segment_media_json(&n.media))
+//       .collect::<Vec<_>>(),
+// extend the clip_list registry description with
+// ", per-node segment media", and append the matching
+// clause to docs/MCP.md's clip_list row (the clause text
+// is in docs/wave14/CLIP_MEDIA_ROWS.md §0). The dedicated
+// read above and the list field are complements, not
+// alternatives: the list gives the whole def at a glance,
+// this tool addresses one node.
+/// MCP handler: read the segment media on clip `clip`,
+/// node `node`, in `get_node`'s shape (null, or
+/// {kind: "image", asset} / {kind: "text", content,
+/// size}). Read-only; no undo step.
+pub fn tool_clip_get_node_media(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let ci = ast_req_usize(args, "clip")?;
+    let ni = ast_req_usize(args, "node")?;
+    ast_check_clip_node(core, ci, ni)?;
+    Ok(json!({
+        "ok": true,
+        "clip": ci,
+        "node": ni,
+        "media": segment_media_json(&core.project.clips[ci].def.nodes[ni].media),
+    }))
+}
+
 fn composite_image(
     project: &Project,
     asset: usize,
@@ -1104,8 +1453,8 @@ fn glyph_rows(ch: char) -> [u8; 5] {
 mod tests {
     use super::*;
     use crate::model::{
-        Easing, FigureDef, FigureInstance, Frame, ImageAsset, NodeDef, NodeStyle, Pose, Shape,
-        SpriteInstance, TextInstance,
+        ClipDef, ClipLoop, Easing, FigureDef, FigureInstance, Frame, ImageAsset, NodeDef,
+        NodeStyle, Pose, Shape, SpriteInstance, TextInstance,
     };
     use std::io::Cursor;
 
@@ -1631,6 +1980,58 @@ mod tests {
     }
 
     #[test]
+    fn asset_remove_remaps_clip_def_references_and_info_counts_them() {
+        // Wave 14 (C6): the clip-def row of the reference
+        // census — pinned through the public surface both
+        // ways: `asset_info` reports the clip count, and a
+        // removal below the referenced index shifts the
+        // clip-def reference down with the others. (The
+        // sibling remap test above covers segments +
+        // sprites; the refusal test covers clip blocking.)
+        let mut core = asset_core();
+        core.project.assets.push(ImageAsset {
+            name: "spare".into(),
+            png: png_bytes(2, 2, Rgba([1, 2, 3, 255])),
+        });
+        core.project.assets.push(ImageAsset {
+            name: "hero".into(),
+            png: png_bytes(2, 2, Rgba([4, 5, 6, 255])),
+        });
+        core.project.clips.push(ClipDef {
+            name: "clip".into(),
+            def: FigureDef {
+                nodes: vec![
+                    node("root", None, 0.0, None),
+                    node("img", Some(0), 50.0, Some(SegmentMedia::Image { asset: 2 })),
+                ],
+            },
+            frames: Vec::new(),
+            loop_mode: ClipLoop::Loop,
+        });
+        // The census counts the clip-def reference, in its
+        // own bucket only.
+        let info = tool_asset_info(&mut core, &json!({ "index": 2 }))
+            .expect("info on the clip-referenced asset succeeds");
+        assert_eq!(info["references"]["clip_segments"].as_u64(), Some(1));
+        assert_eq!(info["references"]["segments"].as_u64(), Some(0));
+        assert_eq!(info["references"]["sprites"].as_u64(), Some(0));
+        // Remove the unreferenced spare at index 1: the
+        // clip-def reference follows its image down to 1,
+        // in the same single undo step.
+        let undo_before = core.undo_depth();
+        let out = tool_asset_remove(&mut core, &json!({ "index": 1 }))
+            .expect("unreferenced removal succeeds");
+        assert_eq!(out["remapped"].as_u64(), Some(1));
+        assert_eq!(core.project.assets.len(), 2);
+        assert_eq!(core.project.assets[1].name, "hero");
+        assert_eq!(
+            core.project.clips[0].def.nodes[1].media,
+            Some(SegmentMedia::Image { asset: 1 })
+        );
+        assert_eq!(core.undo_depth(), undo_before + 1, "remove + remap = one undo step");
+    }
+
+    #[test]
     fn asset_attach_uses_an_existing_asset_and_validates_indices() {
         let mut core = asset_core();
         let undo_before = core.undo_depth();
@@ -1717,6 +2118,58 @@ mod tests {
         let out = tool_sprite_list(&mut core, &json!({})).expect("list succeeds");
         assert_eq!(out["count"].as_u64(), Some(0));
         assert_eq!(out["sprites"].as_array().map(|a| a.len()), Some(0));
+    }
+
+    #[test]
+    fn sprite_sample_reads_the_sampled_transform_and_refuses_keyless() {
+        // Wave 14 (A8): the sample read interpolates
+        // between authored keys at fractional frames and
+        // refuses — quoting the sprite — when there is
+        // nothing to sample.
+        let mut core = sprite_core();
+        // Grow the one-frame fixture so key frames 0 and
+        // 4 are both in the timeline (the set_key op
+        // clamps to the last frame).
+        let f0 = core.project.frames[0].clone();
+        while core.project.frames.len() <= 4 {
+            core.project.frames.push(f0.clone());
+        }
+        tool_sprite_add(&mut core, &json!({ "asset": 0 })).expect("add succeeds");
+        // The seed key sits at the stage centre (x 100 in
+        // the fixture's stage); author a second key at
+        // frame 4 with x 200.
+        let seed_x = core.project.sprites[0].keys[0].x;
+        tool_sprite_set_key(
+            &mut core,
+            &json!({ "sprite": 0, "frame": 4, "x": seed_x + 100.0 }),
+        )
+        .expect("set_key succeeds");
+        let undo_before = core.undo_depth();
+        let out = tool_sprite_sample(
+            &mut core,
+            &json!({ "sprite": 0, "frame": 2.0 }),
+        )
+        .expect("sample succeeds");
+        assert_eq!(
+            out["key"]["x"].as_f64(),
+            Some((seed_x + 50.0) as f64),
+            "frame 2 samples halfway between the keys"
+        );
+        assert_eq!(core.undo_depth(), undo_before, "a read spends no undo step");
+        // A keyless sprite (delete the only keys' owner
+        // state by removing all keys via the op) refuses.
+        let _ = core.delete_sprite_key(0, 0);
+        let _ = core.delete_sprite_key(0, 4);
+        let err = tool_sprite_sample(&mut core, &json!({ "sprite": 0, "frame": 0 }))
+            .expect_err("a keyless sprite must be refused");
+        assert!(err.contains("sprite 0 has no keys"), "err: {err}");
+        // Out-of-range sprite and negative frame refuse too.
+        let err = tool_sprite_sample(&mut core, &json!({ "sprite": 9, "frame": 0 }))
+            .expect_err("a missing sprite must be refused");
+        assert!(err.contains("sprite index 9 out of range"), "err: {err}");
+        let err = tool_sprite_sample(&mut core, &json!({ "sprite": 0, "frame": -1 }))
+            .expect_err("a negative frame must be refused");
+        assert!(err.contains("must not be negative"), "err: {err}");
     }
 
     #[test]
@@ -1865,6 +2318,277 @@ mod tests {
         assert_eq!(core.project.sprites.len(), 2, "one undo restores the instance");
     }
 
+    /// Wave 14, C1 — clip-def media fixtures
+    /// (docs/wave13/CLIP_MEDIA.md §6.6). The demo skeleton
+    /// (root at (100, 100), node 1 running +x for 100, node 2
+    /// running down for 80) as a movieclip instance of clip
+    /// 0: the figure's own def and the clip's def are built
+    /// from the same skeleton with independent media, and
+    /// the clip's single frame pose matches the demo pose,
+    /// so geometry expectations are the demo ones.
+    fn clip_project(
+        inst_media: (Option<SegmentMedia>, Option<SegmentMedia>),
+        clip_media: (Option<SegmentMedia>, Option<SegmentMedia>),
+    ) -> Project {
+        let skeleton = |m: (Option<SegmentMedia>, Option<SegmentMedia>)| FigureDef {
+            nodes: vec![
+                node("root", None, 0.0, None),
+                node("arm", Some(0), 100.0, m.0),
+                node("leg", Some(0), 80.0, m.1),
+            ],
+        };
+        let pose = Pose {
+            root: [100.0, 100.0],
+            angles: vec![0.0, 90.0, 0.0],
+        };
+        let mut project = demo_project();
+        project.figures[0].def = skeleton(inst_media);
+        project.figures[0].clip = Some(0);
+        project.clips = vec![ClipDef {
+            name: "clip".into(),
+            def: skeleton(clip_media),
+            frames: vec![pose],
+            loop_mode: ClipLoop::Loop,
+        }];
+        project
+    }
+
+    #[test]
+    fn clip_def_image_media_renders_for_media_free_instance() {
+        // §6.6.1: the media exists only in the clip def; the
+        // instance's own def is media-free. One image item at
+        // the instance's segment quad, alpha = instance
+        // figure opacity × CLIP node's style opacity (§6.2).
+        let mut project = clip_project(
+            (None, None),
+            (Some(SegmentMedia::Image { asset: 0 }), None),
+        );
+        project.figures[0].opacity = 0.5;
+        project.clips[0].def.nodes[1].style.opacity = 0.5;
+        let items = media_items(&project, 0.0);
+        assert_eq!(items.len(), 1, "exactly the clip-sourced image");
+        match &items[0] {
+            MediaItem::Image {
+                corners,
+                asset,
+                alpha,
+            } => {
+                assert_eq!(*asset, 0);
+                assert_eq!(*alpha, 0.25, "0.5 figure × 0.5 clip-node style");
+                assert!(close(corners[0], [100.0, 75.0]), "c0 {:?}", corners[0]);
+                assert!(close(corners[2], [200.0, 125.0]), "c2 {:?}", corners[2]);
+            }
+            other => panic!("expected an image item, got {other:?}"),
+        }
+        // §6.3: a hidden figure stays skipped wholesale,
+        // clip-sourced media included.
+        project.figures[0].hidden = true;
+        assert!(media_items(&project, 0.0).is_empty());
+    }
+
+    #[test]
+    fn clip_and_instance_media_never_double_draw() {
+        // §6.6.2: the normal clone case — identical media on
+        // both defs yields exactly ONE item for the node, and
+        // its style comes from the instance node (the
+        // carrier): instance style 0.5 beats clip style 0.25
+        // in the alpha product even though the payloads are
+        // identical.
+        let mut project = clip_project(
+            (Some(SegmentMedia::Image { asset: 0 }), None),
+            (Some(SegmentMedia::Image { asset: 0 }), None),
+        );
+        project.figures[0].def.nodes[1].style.opacity = 0.5;
+        project.clips[0].def.nodes[1].style.opacity = 0.25;
+        let items = media_items(&project, 0.0);
+        assert_eq!(items.len(), 1, "one item per node, never two");
+        match &items[0] {
+            MediaItem::Image { alpha, .. } => {
+                assert_eq!(*alpha, 0.5, "the instance node's style carries")
+            }
+            other => panic!("expected an image item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn instance_media_wins_over_clip_media() {
+        // §6.6.3: differing media at the same index on both
+        // defs — the instance's item, unchanged, at both an
+        // image node and a text node.
+        let mut project = clip_project(
+            (
+                Some(SegmentMedia::Image { asset: 0 }),
+                Some(SegmentMedia::Text {
+                    content: "MINE".into(),
+                    size: 25.0,
+                }),
+            ),
+            (
+                Some(SegmentMedia::Image { asset: 1 }),
+                Some(SegmentMedia::Text {
+                    content: "CLIP".into(),
+                    size: 25.0,
+                }),
+            ),
+        );
+        project.assets.push(ImageAsset {
+            name: "red".into(),
+            png: png_bytes(2, 2, Rgba([255, 0, 0, 255])),
+        });
+        let items = media_items(&project, 0.0);
+        assert_eq!(items.len(), 2);
+        let images = image_items(&items);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].1, 0, "the instance's asset, not the clip's");
+        let text = items.iter().find_map(|i| match i {
+            MediaItem::Text { content, .. } => Some(content),
+            _ => None,
+        });
+        assert_eq!(text.map(String::as_str), Some("MINE"));
+    }
+
+    #[test]
+    fn clip_def_text_media_uses_clip_payload_and_colour_fallback() {
+        // §6.6.4: clip-def text yields a Text item with the
+        // clip node's content/size; colour is the clip node's
+        // colour, falling back to the figure colour (§6.2).
+        let mut project = clip_project(
+            (None, None),
+            (
+                None,
+                Some(SegmentMedia::Text {
+                    content: "CLIP".into(),
+                    size: 25.0,
+                }),
+            ),
+        );
+        project.clips[0].def.nodes[2].color = Some(0x00FF00);
+        let text_of = |p: &Project| {
+            media_items(p, 0.0)
+                .into_iter()
+                .find_map(|i| match i {
+                    MediaItem::Text {
+                        pos,
+                        angle_deg,
+                        content,
+                        size,
+                        color,
+                    } => Some((pos, angle_deg, content, size, color)),
+                    _ => None,
+                })
+                .expect("a text item")
+        };
+        let (pos, angle, content, size, color) = text_of(&project);
+        assert!(close(pos, [100.0, 140.0]), "pos {pos:?}");
+        assert!((angle - 90.0).abs() < 0.01, "angle {angle}");
+        assert_eq!(content, "CLIP");
+        assert_eq!(size, 25.0);
+        assert_eq!(color, 0x00FF00, "the clip node's own colour wins");
+        project.clips[0].def.nodes[2].color = None;
+        let (_, _, _, _, color) = text_of(&project);
+        assert_eq!(color, 0xFF0000, "else the figure colour, as figures do");
+    }
+
+    #[test]
+    fn clip_def_longer_and_shorter_than_instance_def_is_safe() {
+        // §6.6.5 / §6.3: divergent def lengths skip, never
+        // panic.
+        // Longer clip def: a media-carrying node beyond the
+        // instance's node count has no segment to attach to
+        // and is skipped; the in-range fallback still lands.
+        let mut project = clip_project(
+            (None, None),
+            (Some(SegmentMedia::Image { asset: 0 }), None),
+        );
+        project.clips[0].def.nodes.push(node(
+            "extra",
+            Some(0),
+            50.0,
+            Some(SegmentMedia::Image { asset: 0 }),
+        ));
+        let items = media_items(&project, 0.0);
+        assert_eq!(items.len(), 1, "the extra clip node contributes nothing");
+        // Shorter clip def: trailing instance nodes simply
+        // have no fallback.
+        let mut project = clip_project(
+            (None, None),
+            (Some(SegmentMedia::Image { asset: 0 }), None),
+        );
+        project.clips[0].def.nodes.truncate(2);
+        let items = media_items(&project, 0.0);
+        assert_eq!(items.len(), 1, "node 1's fallback survives truncation");
+        assert!(matches!(items[0], MediaItem::Image { .. }));
+    }
+
+    #[test]
+    fn missing_clip_and_media_free_clip_def_change_nothing() {
+        // §6.3: `clip` naming a missing clip has no fallback —
+        // the instance's own media renders exactly as before
+        // this fix (the demo project's two items).
+        let mut project = demo_project();
+        project.figures[0].clip = Some(0);
+        let items = media_items(&project, 0.0);
+        assert_eq!(items.len(), 2, "own image + own text, no fallback");
+        // A clip that exists but carries no media anywhere
+        // likewise leaves the enumeration untouched.
+        let project = clip_project(
+            (
+                Some(SegmentMedia::Image { asset: 0 }),
+                Some(SegmentMedia::Text {
+                    content: "HI".into(),
+                    size: 25.0,
+                }),
+            ),
+            (None, None),
+        );
+        let items = media_items(&project, 0.0);
+        assert_eq!(items.len(), 2, "the instance's two items only");
+    }
+
+    #[test]
+    fn clip_sourced_media_keeps_the_segment_slot_in_order() {
+        // §6.2: order is unchanged — a clip-sourced segment
+        // item takes its figure's existing slot, ahead of the
+        // free-standing sprite and text instances.
+        let mut project = clip_project(
+            (None, None),
+            (Some(SegmentMedia::Image { asset: 0 }), None),
+        );
+        project.sprites.push(SpriteInstance {
+            asset: 0,
+            keys: vec![InstanceKey {
+                frame: 0.0,
+                x: 400.0,
+                y: 300.0,
+                scale: 1.0,
+                angle: 0.0,
+            }],
+        });
+        project.texts.push(TextInstance {
+            content: "HEY".into(),
+            size: 20.0,
+            color: 0xFFFFFF,
+            keys: vec![InstanceKey {
+                frame: 0.0,
+                x: 100.0,
+                y: 500.0,
+                scale: 1.0,
+                angle: 0.0,
+            }],
+        });
+        let items = media_items(&project, 0.0);
+        assert_eq!(items.len(), 3);
+        match &items[0] {
+            MediaItem::Image { corners, .. } => assert!(
+                close(corners[0], [100.0, 75.0]),
+                "first item is the clip-sourced segment quad: {corners:?}"
+            ),
+            other => panic!("expected the segment image first, got {other:?}"),
+        }
+        assert!(matches!(items[1], MediaItem::Image { .. }), "sprite second");
+        assert!(matches!(items[2], MediaItem::Text { .. }), "text last");
+    }
+
     #[test]
     fn media_items_order_is_segment_then_sprite_then_text_instances() {
         // The ordering audit's pin (see this module's docs):
@@ -1914,5 +2638,221 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, ["HI", "HEY"], "segment text precedes instance text");
+    }
+
+    // ---- Wave 14: clip-def media MCP handlers (C5) ----
+
+    fn clip_media_core() -> EditorCore {
+        // asset_core()'s project (one asset, one figure)
+        // plus one movieclip definition whose def mirrors
+        // the demo skeleton — root, arm (node 1), leg
+        // (node 2) — all media-free.
+        let mut core = asset_core();
+        core.project.clips.push(ClipDef {
+            name: "clip".into(),
+            def: FigureDef {
+                nodes: vec![
+                    node("root", None, 0.0, None),
+                    node("arm", Some(0), 100.0, None),
+                    node("leg", Some(0), 80.0, None),
+                ],
+            },
+            frames: Vec::new(),
+            loop_mode: ClipLoop::Loop,
+        });
+        core
+    }
+
+    #[test]
+    fn clip_asset_attach_writes_the_clip_def_in_one_undo_step() {
+        let mut core = clip_media_core();
+        let undo_before = core.undo_depth();
+        let out = tool_clip_asset_attach(
+            &mut core,
+            &json!({ "clip": 0, "node": 1, "asset": 0 }),
+        )
+        .expect("attach succeeds");
+        assert_eq!(out["clip"].as_u64(), Some(0));
+        assert_eq!(out["node"].as_u64(), Some(1));
+        assert_eq!(out["asset"].as_u64(), Some(0));
+        assert_eq!(
+            core.project.clips[0].def.nodes[1].media,
+            Some(SegmentMedia::Image { asset: 0 })
+        );
+        assert_eq!(core.undo_depth(), undo_before + 1, "exactly one undo step");
+        // Attaching again replaces (the asset_attach
+        // overwrite rule): a second asset takes the node.
+        core.project.assets.push(ImageAsset {
+            name: "spare".into(),
+            png: png_bytes(2, 2, Rgba([1, 2, 3, 255])),
+        });
+        let out = tool_clip_asset_attach(
+            &mut core,
+            &json!({ "clip": 0, "node": 1, "asset": 1 }),
+        )
+        .expect("re-attach succeeds");
+        assert_eq!(out["asset"].as_u64(), Some(1));
+        assert_eq!(
+            core.project.clips[0].def.nodes[1].media,
+            Some(SegmentMedia::Image { asset: 1 })
+        );
+        assert_eq!(core.undo_depth(), undo_before + 2);
+    }
+
+    #[test]
+    fn clip_asset_attach_refuses_bad_indices_without_a_snapshot() {
+        let mut core = clip_media_core();
+        let undo_before = core.undo_depth();
+        let err = tool_clip_asset_attach(
+            &mut core,
+            &json!({ "clip": 4, "node": 1, "asset": 0 }),
+        )
+        .expect_err("missing clip must be refused");
+        assert!(err.contains("clip index 4 out of range"), "err: {err}");
+        let err = tool_clip_asset_attach(
+            &mut core,
+            &json!({ "clip": 0, "node": 9, "asset": 0 }),
+        )
+        .expect_err("missing node must be refused");
+        assert!(
+            err.contains("node index 9 out of range (clip 0 has 3 node(s))"),
+            "err: {err}"
+        );
+        let err = tool_clip_asset_attach(
+            &mut core,
+            &json!({ "clip": 0, "node": 1, "asset": 7 }),
+        )
+        .expect_err("missing asset must be refused");
+        assert!(err.contains("asset index 7 out of range"), "err: {err}");
+        // No refusal wrote anything or spent a step.
+        assert!(
+            core.project.clips[0]
+                .def
+                .nodes
+                .iter()
+                .all(|n| n.media.is_none())
+        );
+        assert_eq!(core.undo_depth(), undo_before);
+    }
+
+    #[test]
+    fn clip_get_node_media_reads_image_text_and_none_in_get_node_shape() {
+        let mut core = clip_media_core();
+        core.project.clips[0].def.nodes[2].media = Some(SegmentMedia::Text {
+            content: "HEY".into(),
+            size: 24.0,
+        });
+        let undo_before = core.undo_depth();
+        let out = tool_clip_get_node_media(&mut core, &json!({ "clip": 0, "node": 1 }))
+            .expect("read succeeds");
+        assert!(out["media"].is_null(), "a media-free node reads null");
+        tool_clip_asset_attach(&mut core, &json!({ "clip": 0, "node": 1, "asset": 0 }))
+            .expect("attach succeeds");
+        let out = tool_clip_get_node_media(&mut core, &json!({ "clip": 0, "node": 1 }))
+            .expect("read succeeds");
+        assert_eq!(out["media"], json!({ "kind": "image", "asset": 0 }));
+        let out = tool_clip_get_node_media(&mut core, &json!({ "clip": 0, "node": 2 }))
+            .expect("read succeeds");
+        assert_eq!(
+            out["media"],
+            json!({ "kind": "text", "content": "HEY", "size": 24.0 })
+        );
+        // The reads spent nothing: only the attach moved
+        // the undo depth.
+        assert_eq!(core.undo_depth(), undo_before + 1);
+        let err = tool_clip_get_node_media(&mut core, &json!({ "clip": 3, "node": 0 }))
+            .expect_err("missing clip must be refused");
+        assert!(err.contains("clip index 3 out of range"), "err: {err}");
+    }
+
+    #[test]
+    fn clip_clear_node_media_clears_either_kind_and_reports_an_empty_node() {
+        let mut core = clip_media_core();
+        core.project.clips[0].def.nodes[1].media =
+            Some(SegmentMedia::Image { asset: 0 });
+        core.project.clips[0].def.nodes[2].media = Some(SegmentMedia::Text {
+            content: "HEY".into(),
+            size: 24.0,
+        });
+        let undo_before = core.undo_depth();
+        let out = tool_clip_clear_node_media(&mut core, &json!({ "clip": 0, "node": 1 }))
+            .expect("clear succeeds");
+        assert_eq!(out["cleared"].as_bool(), Some(true));
+        assert_eq!(out["media"], json!({ "kind": "image", "asset": 0 }));
+        assert_eq!(core.project.clips[0].def.nodes[1].media, None);
+        assert_eq!(core.undo_depth(), undo_before + 1, "one undo step");
+        // Text clears the same way.
+        let out = tool_clip_clear_node_media(&mut core, &json!({ "clip": 0, "node": 2 }))
+            .expect("clear succeeds");
+        assert_eq!(out["cleared"].as_bool(), Some(true));
+        assert_eq!(
+            out["media"],
+            json!({ "kind": "text", "content": "HEY", "size": 24.0 })
+        );
+        assert_eq!(core.project.clips[0].def.nodes[2].media, None);
+        assert_eq!(core.undo_depth(), undo_before + 2);
+        // Clearing an empty node is reported, not an error,
+        // and spends no phantom step.
+        let out = tool_clip_clear_node_media(&mut core, &json!({ "clip": 0, "node": 1 }))
+            .expect("an empty clear is a report, not an error");
+        assert_eq!(out["cleared"].as_bool(), Some(false));
+        assert!(out["media"].is_null());
+        assert_eq!(
+            core.undo_depth(),
+            undo_before + 2,
+            "the empty clear spent nothing"
+        );
+        let err = tool_clip_clear_node_media(&mut core, &json!({ "clip": 0, "node": 8 }))
+            .expect_err("missing node must be refused");
+        assert!(err.contains("node index 8 out of range"), "err: {err}");
+    }
+
+    #[test]
+    fn clip_attached_media_counts_in_the_census_until_cleared() {
+        // The C6 flag, through the public surface: a
+        // reference created by clip_asset_attach lands in
+        // the census's clip-def bucket — the asset's
+        // removal is refused while the reference stands,
+        // and the bucket empties when
+        // clip_clear_node_media detaches it.
+        let mut core = clip_media_core();
+        tool_clip_asset_attach(&mut core, &json!({ "clip": 0, "node": 1, "asset": 0 }))
+            .expect("attach succeeds");
+        let info = tool_asset_info(&mut core, &json!({ "index": 0 }))
+            .expect("info succeeds");
+        assert_eq!(info["references"]["clip_segments"].as_u64(), Some(1));
+        let err = tool_asset_remove(&mut core, &json!({ "index": 0 }))
+            .expect_err("a clip-referenced asset must be refused");
+        assert!(err.contains("1 clip segment(s)"), "err: {err}");
+        tool_clip_clear_node_media(&mut core, &json!({ "clip": 0, "node": 1 }))
+            .expect("clear succeeds");
+        let info = tool_asset_info(&mut core, &json!({ "index": 0 }))
+            .expect("info succeeds");
+        assert_eq!(info["references"]["clip_segments"].as_u64(), Some(0));
+        // The demo figure's own segment still references
+        // asset 0; detach it directly and removal passes.
+        core.project.figures[0].def.nodes[1].media = None;
+        tool_asset_remove(&mut core, &json!({ "index": 0 }))
+            .expect("removal succeeds once nothing references the asset");
+        assert_eq!(core.project.assets.len(), 0);
+    }
+
+    #[test]
+    fn clip_attached_media_is_what_the_renderer_samples() {
+        // The attach path writes the same per-node model
+        // the funnel samples: a media-free clip instance
+        // picks the attached image up through the clip
+        // fallback (C1).
+        let mut core = EditorCore::new();
+        core.project = clip_project((None, None), (None, None));
+        tool_clip_asset_attach(&mut core, &json!({ "clip": 0, "node": 1, "asset": 0 }))
+            .expect("attach succeeds");
+        let items = media_items(&core.project, 0.0);
+        assert_eq!(items.len(), 1, "exactly the clip-attached image");
+        assert!(
+            matches!(&items[0], MediaItem::Image { asset: 0, .. }),
+            "got {:?}",
+            items[0]
+        );
     }
 }

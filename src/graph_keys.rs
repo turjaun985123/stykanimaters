@@ -1393,6 +1393,200 @@ pub fn tool_graph_clear_channels(core: &mut EditorCore, _args: &Value) -> Result
     }))
 }
 
+// ---------------------------------------------------------------------
+// MCP handlers (Wave 14, agent A4): the parity fill the
+// Wave 11 block above left behind — three core capabilities
+// in this file / the core's graph family that still had no
+// tool when the wave's census ran:
+//
+// * [`key_interp_at`] (this file) — the read half of the
+//   interp pair. `set_key_interp` (registry, in
+//   `mcp_tools.rs`) WRITES a key's mode by channel + key
+//   index, but nothing could READ the mode of the key at a
+//   frame — the exact read the graph panel's interp
+//   control highlight (graph_panel.rs, `drawn_interp`) and
+//   the keyframe tools' interp cycle perform.
+// * The counting half of [`delete_keys_in_range`] — the
+//   keyframe tools ask "how much would this clear?"
+//   through `keys_in_range` before committing
+//   (keyframe_tools.rs, `clear_keys_in_range_core`'s
+//   guard); MCP could only learn the count by deleting.
+// * `EditorCore::set_graph_key_interp` — the core's
+//   selection-scoped interp set (selected figure's
+//   `Angle(selected_node)` channel, key nearest the
+//   playhead), which the panel's interp control falls
+//   back to when no channel is drawn. `set_key_interp`
+//   reaches the same key only after the caller resolves
+//   the channel and key indices by hand.
+//
+// The handlers follow the Wave 11 pattern in this file
+// exactly: validate every argument first (finite floats,
+// f32-cast overflow included), read-only tools never
+// snapshot or write the status line, and the one mutating
+// handler delegates its snapshot to the core op, which
+// snapshots exactly once when it sets and spends nothing
+// on a refusal.
+// ---------------------------------------------------------------------
+
+/// Parse an interpolation mode name with the registry's
+/// `set_key_interp` spellings and error wording
+/// (`parse_interp_name` in `mcp_tools.rs`, copied — that
+/// helper is private to its file).
+fn gk_parse_interp(name: &str) -> Result<Interp, String> {
+    match name {
+        "hermite" => Ok(Interp::Hermite),
+        "linear" => Ok(Interp::Linear),
+        "step" => Ok(Interp::Step),
+        other => Err(format!(
+            "unknown interp '{other}' (expected \"hermite\", \"linear\" or \"step\")"
+        )),
+    }
+}
+
+// TOOL ENTRY SPEC: graph_key_interp
+//   handler: crate::graph_keys::tool_graph_key_interp
+//   description: "Read the interpolation mode of the key
+//     at 'frame' on the channel at 'channel' index — the
+//     graph panel's interp-control readout
+//     (graph_keys::key_interp_at: the nearest key within
+//     0.5 frames). The reply's 'interp' is
+//     \"hermite\"/\"linear\"/\"step\", or null with
+//     'keyed': false when no key sits at that frame.
+//     Read-only."
+//   schema: obj_schema(json!({
+//       "channel": { "type": "integer" },
+//       "frame": { "type": "number" }
+//   }), &["channel", "frame"])
+// MCP.md ROW SPEC (the graph_keys handler table, beside
+// graph_get_channel):
+//   | `graph_key_interp` | Read the interpolation mode
+//     of the key at 'frame' on the channel at 'channel'
+//     index (nearest key within 0.5 frames — the graph
+//     panel's interp-control readout). 'interp' is null
+//     when no key sits there. Read-only. | `channel`,
+//     `frame` | — |
+/// Read the [`Interp`] mode of the key at `frame` on the
+/// channel at `channel` index, over [`key_interp_at`].
+/// Read-only: no snapshot, no status write. A frame with
+/// no key on it is a normal answer (`interp: null`,
+/// `keyed: false`), not a refusal — only a channel index
+/// past the end of the list errors, in the shared graph
+/// wording.
+pub fn tool_graph_key_interp(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    let frame = gk_req_frame(args, "frame")?;
+    let interp = key_interp_at(core, idx, frame);
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "frame": frame,
+        "interp": interp.map(gk_interp_name),
+        "keyed": interp.is_some(),
+    }))
+}
+
+// TOOL ENTRY SPEC: graph_count_keys_in_range
+//   handler: crate::graph_keys::tool_graph_count_keys_in_range
+//   description: "Count the keys of the channel at
+//     'channel' index whose frames fall inside [from,
+//     to], both ends inclusive — the read-only pre-flight
+//     for graph_delete_keys_in_range (the keyframe tools'
+//     keys_in_range count, addressed by index so a
+//     duplicate channel counts ITSELF). Read-only."
+//   schema: obj_schema(json!({
+//       "channel": { "type": "integer" },
+//       "from": { "type": "number" },
+//       "to": { "type": "number" }
+//   }), &["channel", "from", "to"])
+// MCP.md ROW SPEC (the graph_keys handler table, beside
+// graph_delete_keys_in_range):
+//   | `graph_count_keys_in_range` | Count the keys of
+//     the channel at 'channel' index inside [from, to],
+//     both ends inclusive — the read-only pre-flight for
+//     graph_delete_keys_in_range. Read-only. |
+//     `channel`, `from`, `to` | — |
+/// Count the keys of the channel at `channel` index
+/// inside `[from, to]`, both ends inclusive. Read-only:
+/// no snapshot, no status write. The count is taken on
+/// the ADDRESSED channel, deliberately NOT through
+/// [`keys_in_range`]: that op resolves its channel by
+/// (figure, target) FIRST match, so on a duplicate
+/// channel it would count the first channel's keys, not
+/// this one's — the same reason
+/// [`delete_keys_in_range_at`] counts in place. The
+/// filter expression is `keys_in_range`'s own.
+pub fn tool_graph_count_keys_in_range(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let idx = gk_check_channel(core, gk_req_usize(args, "channel")?)?;
+    let from = gk_req_frame(args, "from")?;
+    let to = gk_req_frame(args, "to")?;
+    if from > to {
+        return Err("argument 'from' must not be after 'to'".into());
+    }
+    let count = core.project.channels[idx]
+        .keys
+        .iter()
+        .filter(|k| (from..=to).contains(&k.frame))
+        .count();
+    Ok(json!({
+        "ok": true,
+        "channel": idx,
+        "from": from,
+        "to": to,
+        "count": count,
+    }))
+}
+
+// TOOL ENTRY SPEC: graph_set_interp_at_playhead
+//   handler: crate::graph_keys::tool_graph_set_interp_at_playhead
+//   description: "Set the interpolation mode of the
+//     graph key nearest the current frame on the
+//     SELECTED figure's angle channel for the selected
+//     joint: \"hermite\", \"linear\" or \"step\" —
+//     EditorCore::set_graph_key_interp, the graph panel
+//     interp control's fallback when no channel is
+//     drawn. set_key_interp addresses any key by
+//     channel + key index instead. One undo step when
+//     it sets."
+//   schema: obj_schema(json!({
+//       "interp": { "type": "string", "enum": ["hermite", "linear", "step"] }
+//   }), &["interp"])
+// MCP.md ROW SPEC (the core-op graph table, beside
+// set_key_interp):
+//   | `graph_set_interp_at_playhead` | Set the
+//     interpolation mode ("hermite"/"linear"/"step") of
+//     the graph key nearest the current frame on the
+//     selected figure's angle channel for the selected
+//     joint (EditorCore::set_graph_key_interp — the
+//     graph panel interp control's fallback).
+//     set_key_interp addresses any key by index. One
+//     undo step when it sets. | `interp` | — |
+/// Set the [`Interp`] mode of the key nearest the
+/// playhead on the selected figure's angle channel for
+/// the selected joint, through
+/// `EditorCore::set_graph_key_interp`. Like
+/// [`tool_graph_key_angle`] above, the handler returns
+/// the core op's status rather than re-deriving its
+/// refusals: no joint selected, no such channel and no
+/// keys are status-only no-ops in the op (no snapshot),
+/// and a successful set is exactly one undo step (the
+/// op's own snapshot).
+pub fn tool_graph_set_interp_at_playhead(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let interp = gk_parse_interp(gk_req_str(args, "interp")?)?;
+    core.set_graph_key_interp(interp);
+    Ok(json!({
+        "ok": true,
+        "interp": gk_interp_name(interp),
+        "status": core.status,
+        "channels": core.project.channels.len(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2895,5 +3089,125 @@ mod mcp_graph_tool_tests {
         // Nothing above touched the project.
         assert_eq!(core.project.channels.len(), 3);
         assert_eq!(core.project.channels[0].keys.len(), 2);
+    }
+
+    #[test]
+    fn key_interp_tool_reads_the_mode_of_the_key_at_a_frame() {
+        // Wave 14 (A4): the read half of the interp pair.
+        // Channel 0's keys (core_with_channels): frame 10
+        // Linear, 14 Hermite, 20 Step.
+        let mut core = core_with_channels();
+        let depth = core.undo_depth();
+        let edits = core.edits_since_autosave();
+        let out = tool_graph_key_interp(&mut core, &json!({ "channel": 0, "frame": 14.0 })).unwrap();
+        assert_eq!(out["interp"].as_str(), Some("hermite"));
+        assert_eq!(out["keyed"].as_bool(), Some(true));
+        // Within the half-frame window the same key reads.
+        let out = tool_graph_key_interp(&mut core, &json!({ "channel": 0, "frame": 10.4 })).unwrap();
+        assert_eq!(out["interp"].as_str(), Some("linear"));
+        // Between keys (frame 17 is over half a frame from
+        // both 14 and 20) there is no key: null, not an
+        // error.
+        let out = tool_graph_key_interp(&mut core, &json!({ "channel": 0, "frame": 17.0 })).unwrap();
+        assert!(out["interp"].is_null());
+        assert_eq!(out["keyed"].as_bool(), Some(false));
+        // Read-only: no snapshot, no counted edit.
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.edits_since_autosave(), edits);
+        // A channel past the end refuses in the shared
+        // graph wording; a negative frame and an
+        // f32-overflowing frame refuse as non-finite /
+        // negative arguments.
+        let err = tool_graph_key_interp(&mut core, &json!({ "channel": 99, "frame": 0.0 }))
+            .expect_err("bad channel must error");
+        assert_eq!(err, "no graph channel at index 99");
+        assert!(tool_graph_key_interp(&mut core, &json!({ "channel": 0, "frame": -1.0 })).is_err());
+        assert!(tool_graph_key_interp(&mut core, &json!({ "channel": 0, "frame": 1e300 })).is_err());
+    }
+
+    #[test]
+    fn count_keys_in_range_tool_counts_without_touching() {
+        // Wave 14 (A4): the pre-flight count for
+        // graph_delete_keys_in_range. Channel 0's keys sit
+        // at frames 10, 14 and 20.
+        let mut core = core_with_channels();
+        let depth = core.undo_depth();
+        let edits = core.edits_since_autosave();
+        let out = tool_graph_count_keys_in_range(
+            &mut core,
+            &json!({ "channel": 0, "from": 10.0, "to": 20.0 }),
+        )
+        .unwrap();
+        assert_eq!(out["count"], 3, "both ends inclusive");
+        let out = tool_graph_count_keys_in_range(
+            &mut core,
+            &json!({ "channel": 0, "from": 11.0, "to": 19.0 }),
+        )
+        .unwrap();
+        assert_eq!(out["count"], 1);
+        let out = tool_graph_count_keys_in_range(
+            &mut core,
+            &json!({ "channel": 0, "from": 0.0, "to": 5.0 }),
+        )
+        .unwrap();
+        assert_eq!(out["count"], 0, "an empty range is an answer, not a refusal");
+        // Read-only: no snapshot, no counted edit, and the
+        // channel itself is untouched.
+        assert_eq!(core.undo_depth(), depth);
+        assert_eq!(core.edits_since_autosave(), edits);
+        assert_eq!(core.project.channels[0].keys.len(), 3);
+        // A reversed range refuses (the delete twin's own
+        // wording), as does a channel past the end.
+        assert!(tool_graph_count_keys_in_range(
+            &mut core,
+            &json!({ "channel": 0, "from": 20.0, "to": 10.0 })
+        )
+        .is_err());
+        let err = tool_graph_count_keys_in_range(
+            &mut core,
+            &json!({ "channel": 99, "from": 0.0, "to": 1.0 }),
+        )
+        .expect_err("bad channel must error");
+        assert_eq!(err, "no graph channel at index 99");
+    }
+
+    #[test]
+    fn set_interp_at_playhead_tool_drives_the_core_op() {
+        // Wave 14 (A4): EditorCore::set_graph_key_interp
+        // over MCP — the selected figure's Angle(selected
+        // node) channel, key nearest the playhead.
+        let mut core = core_with_channels();
+        core.project.channels.push(Channel {
+            figure: 0,
+            target: ChannelTarget::Angle(0),
+            keys: vec![
+                key(0.0, 10.0, 0.0, 0.0, Interp::Hermite),
+                key(10.0, 40.0, 0.0, 0.0, Interp::Hermite),
+            ],
+        });
+        // No joint selected: the core op refuses on the
+        // status line and spends nothing; the handler
+        // reports the status (tool_graph_key_angle's rule).
+        let depth = core.undo_depth();
+        let out = tool_graph_set_interp_at_playhead(&mut core, &json!({ "interp": "step" })).unwrap();
+        assert!(
+            out["status"].as_str().unwrap().contains("Select a joint"),
+            "status: {}",
+            out["status"]
+        );
+        assert_eq!(core.undo_depth(), depth, "a refused set spends no snapshot");
+        // Joint selected, playhead at frame 0: the frame-0
+        // key's mode is set, the far key is untouched, and
+        // the set is exactly one undo step.
+        core.selected_node = Some(0);
+        let out = tool_graph_set_interp_at_playhead(&mut core, &json!({ "interp": "step" })).unwrap();
+        assert_eq!(out["interp"].as_str(), Some("step"));
+        let ch = &core.project.channels[2];
+        assert_eq!(ch.keys[0].interp, Interp::Step);
+        assert_eq!(ch.keys[1].interp, Interp::Hermite, "only the playhead key is set");
+        assert_eq!(core.undo_depth(), depth + 1, "one undo step");
+        // An unknown mode refuses before the op runs.
+        assert!(tool_graph_set_interp_at_playhead(&mut core, &json!({ "interp": "bouncy" })).is_err());
+        assert_eq!(core.undo_depth(), depth + 1, "the refusal spent nothing");
     }
 }

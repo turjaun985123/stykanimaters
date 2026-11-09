@@ -871,13 +871,50 @@ fn fig3mcp_opt_f32(args: &Value, key: &str) -> Result<Option<f32>, String> {
 
 /// Set the 3D session camera absolutely (Wave 11, C8 D4 —
 /// the absolute complement of fig3_orbit / fig3_camera_zoom):
-/// any of distance (clamped to the zoom range 40..=4000),
-/// target [x, y, z] and fov_deg may be given; omitted fields
-/// keep their values. No snapshot — camera moves are session
-/// state, exactly as the orbit/zoom tools treat them.
-/// Integrator-authored.
+/// any of yaw, pitch, distance (clamped to the zoom range
+/// 40..=4000), target [x, y, z] and fov_deg may be given;
+/// omitted fields keep their values. No snapshot — camera
+/// moves are session state, exactly as the orbit/zoom tools
+/// treat them. Integrator-authored.
+///
+/// Wave 14 (A7) FIX: the Wave 11 form of this handler could
+/// not set yaw or pitch at all — its registry description
+/// promised "set the camera absolutely" while the two orbit
+/// angles were reachable only as relative fig3_orbit deltas,
+/// so the handler did not cover the camera capability it
+/// named. yaw/pitch are accepted now (pitch clamps to
+/// ±89.9°, the fig3_orbit / projector clamp).
+//
+// TOOL ENTRY UPDATE SPEC (integrator: amend the EXISTING
+// fig3_set_camera entry in mcp_tools::tools() — do not add
+// a second entry):
+//   description: "Set the 3D session camera absolutely:
+//   any of 'yaw', 'pitch' (clamped to +-89.9), 'distance'
+//   (clamped to 40..=4000), 'target' [x, y, z] and
+//   'fov_deg'; omitted fields keep their values. At least
+//   one field is required. The absolute complement of
+//   fig3_orbit/fig3_camera_zoom. No undo step (session
+//   camera, like orbit/zoom). Requires an active 3D
+//   session.",
+//   schema properties gain: "yaw": { "type": "number" },
+//   "pitch": { "type": "number" }; the optional-arg list
+//   becomes &[] with properties yaw, pitch, distance,
+//   target, fov_deg (all optional, as today).
+// MCP.md ROW UPDATE SPEC (integrator: amend the existing
+// fig3_set_camera row — do not add a second row):
+//   | `fig3_set_camera` | Set the 3D session camera
+//   absolutely: any of 'yaw', 'pitch' (clamped to
+//   +-89.9), 'distance' (clamped to 40..=4000), 'target'
+//   [x, y, z] and 'fov_deg'; omitted fields keep their
+//   values. At least one field is required. The absolute
+//   complement of fig3_orbit/fig3_camera_zoom. No undo
+//   step (session camera, like orbit/zoom). Requires an
+//   active 3D session. | — | `yaw`, `pitch`, `distance`,
+//   `target`, `fov_deg` |
 pub fn tool_fig3_set_camera(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     fig3mcp_require_session(core)?;
+    let yaw = fig3mcp_opt_f32(args, "yaw")?;
+    let pitch = fig3mcp_opt_f32(args, "pitch")?;
     let distance = fig3mcp_opt_f32(args, "distance")?;
     let fov = fig3mcp_opt_f32(args, "fov_deg")?;
     let target = match fig3mcp_get(args, "target") {
@@ -901,10 +938,16 @@ pub fn tool_fig3_set_camera(core: &mut EditorCore, args: &Value) -> Result<Value
         }
         None => None,
     };
-    if distance.is_none() && fov.is_none() && target.is_none() {
-        return Err("fig3_set_camera needs at least one of 'distance', 'target' or 'fov_deg'".into());
+    if yaw.is_none() && pitch.is_none() && distance.is_none() && fov.is_none() && target.is_none() {
+        return Err("fig3_set_camera needs at least one of 'yaw', 'pitch', 'distance', 'target' or 'fov_deg'".into());
     }
     if let Some(st) = &mut core.fig3 {
+        if let Some(y) = yaw {
+            st.camera.yaw = y;
+        }
+        if let Some(p) = pitch {
+            st.camera.pitch = p.clamp(-89.9, 89.9);
+        }
         if let Some(d) = distance {
             st.camera.distance = d.clamp(40.0, 4000.0);
         }
@@ -1954,11 +1997,29 @@ fn fig3mcp_summary(core: &EditorCore) -> Value {
                         "name": n.name,
                         "parent": n.parent,
                         "head": n.head,
+                        "offset": n.offset,
+                        // Wave 14 (A7): the joint's stored
+                        // Euler rotation rides along — before
+                        // this, fig3_get reported positions
+                        // only, so a client could not read the
+                        // pose it was editing (nor verify an
+                        // absolute rotation it had set).
+                        "rotation": st.pose.rotations.get(i).copied().unwrap_or([0.0; 3]),
                         "position": world.get(i),
                     })
                 })
                 .collect();
             let selected_pos = world.get(st.selected).copied();
+            // The marked pose B in full (root + rotations
+            // padded to the joint count), or null.
+            let pose_b = st.pose_b.as_ref().map(|b| {
+                json!({
+                    "root": b.root,
+                    "rotations": (0..st.figure.nodes.len())
+                        .map(|i| b.rotations.get(i).copied().unwrap_or([0.0; 3]))
+                        .collect::<Vec<_>>(),
+                })
+            });
             json!({
                 "ok": true,
                 "active": true,
@@ -1971,6 +2032,14 @@ fn fig3mcp_summary(core: &EditorCore) -> Value {
                 "selected_position": selected_pos,
                 "pose_root": st.pose.root,
                 "pose_b_marked": st.pose_b.is_some(),
+                "pose_b": pose_b,
+                // Wave 14 (A7): the registry description of
+                // fig3_get has always promised "library
+                // state"; the summary never carried any.
+                // Both libraries are listed now, session or
+                // not (see the None branch below).
+                "figure_library": core.fig3_library_list(),
+                "pose_library": scan_pose_library(),
                 "camera": {
                     "yaw": st.camera.yaw,
                     "yaw_wrapped": crate::model::norm_deg(st.camera.yaw),
@@ -1982,7 +2051,19 @@ fn fig3mcp_summary(core: &EditorCore) -> Value {
                 "status": core.status,
             })
         }
-        None => json!({ "ok": true, "active": false, "status": core.status }),
+        None => json!({
+            "ok": true,
+            "active": false,
+            // Wave 14 (A7): the Some branch's comment has
+            // claimed since the first A7 pass that both
+            // libraries are listed "session or not" — this
+            // branch never carried them. It does now, so a
+            // client can browse both libraries before
+            // entering (or after exiting) a session.
+            "figure_library": core.fig3_library_list(),
+            "pose_library": scan_pose_library(),
+            "status": core.status,
+        }),
     }
 }
 
@@ -2286,12 +2367,180 @@ pub fn tool_fig3_pose_apply(
     }
 }
 
+/// Set one joint's Euler rotation absolutely (Wave 14, A7 —
+/// the absolute complement of `fig3_rotate`, exactly as
+/// `tool_fig3_set_camera` complements `fig3_orbit`): until
+/// now a client could only rotate by deltas, so reaching a
+/// known pose meant reading `fig3_get` and differencing by
+/// hand. `joint` defaults to the selected joint; any of
+/// `x`, `y`, `z` (degrees) may be given and omitted axes
+/// keep their values. A session pose write, not an undo
+/// step — `fig3_rotate` takes none either.
+//
+// TOOL ENTRY SPEC (integrator: add to mcp_tools::tools()
+// beside the other crate::fig3d handlers):
+//   Tool {
+//       name: "fig3_set_rotation",
+//       description: "Set a 3D joint's Euler rotation
+//       absolutely, in degrees: 'joint' (defaults to the
+//       selected joint) and any of 'x', 'y', 'z'; omitted
+//       axes keep their values. At least one axis is
+//       required. The absolute complement of fig3_rotate.
+//       No undo step (session pose, like fig3_rotate).
+//       Requires an active 3D session.",
+//       schema: obj_schema(
+//           json!({
+//               "joint": { "type": "integer", "description": "Joint index; defaults to the selected joint" },
+//               "x": { "type": "number" },
+//               "y": { "type": "number" },
+//               "z": { "type": "number" }
+//           }),
+//           &[],
+//       ),
+//       handler: crate::fig3d::tool_fig3_set_rotation,
+//   },
+// MCP.md ROW SPEC (integrator: add beside the other
+// fig3 rows):
+//   | `fig3_set_rotation` | Set a 3D joint's Euler
+//   rotation absolutely, in degrees: 'joint' (defaults
+//   to the selected joint) and any of 'x', 'y', 'z';
+//   omitted axes keep their values. At least one axis
+//   is required. The absolute complement of
+//   fig3_rotate. No undo step (session pose, like
+//   fig3_rotate). Requires an active 3D session. | — |
+//   `joint`, `x`, `y`, `z` |
+pub fn tool_fig3_set_rotation(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    let joint = match fig3mcp_get(args, "joint") {
+        Some(_) => Some(fig3mcp_req_i32(args, "joint")?),
+        None => None,
+    };
+    let x = fig3mcp_opt_f32(args, "x")?;
+    let y = fig3mcp_opt_f32(args, "y")?;
+    let z = fig3mcp_opt_f32(args, "z")?;
+    if x.is_none() && y.is_none() && z.is_none() {
+        return Err(
+            "fig3_set_rotation needs at least one of 'x', 'y' or 'z'".into(),
+        );
+    }
+    let st = core.fig3.as_mut().expect("session checked above");
+    let n = st.figure.nodes.len();
+    if n == 0 {
+        return Err("the 3D figure has no joints to rotate".into());
+    }
+    let joint = match joint {
+        Some(j) => {
+            if j < 0 || j as usize >= n {
+                return Err(format!(
+                    "joint index {j} out of range (3D figure has {n} joint(s))"
+                ));
+            }
+            j as usize
+        }
+        None => st.selected.min(n - 1),
+    };
+    while st.pose.rotations.len() < n {
+        st.pose.rotations.push([0.0; 3]);
+    }
+    let rot = &mut st.pose.rotations[joint];
+    if let Some(v) = x {
+        rot[0] = v;
+    }
+    if let Some(v) = y {
+        rot[1] = v;
+    }
+    if let Some(v) = z {
+        rot[2] = v;
+    }
+    let rot = st.pose.rotations[joint];
+    let name = st.figure.nodes[joint].name.clone();
+    core.status = format!(
+        "3D {name} rotation set to ({:.1}, {:.1}, {:.1}) deg.",
+        rot[0], rot[1], rot[2]
+    );
+    Ok(fig3mcp_summary(core))
+}
+
+/// Set the session pose's root position absolutely
+/// (Wave 14, A7): `fig3_get` has always reported
+/// `pose_root`, but nothing could write it — `fig3_enter`
+/// fixes the root at the origin and only a pose-library
+/// apply could move it, as a side effect. Bakes project
+/// from the root, so this is also how a client places a
+/// baked figure. A session pose write, not an undo step.
+//
+// TOOL ENTRY SPEC (integrator: add to mcp_tools::tools()
+// beside the other crate::fig3d handlers):
+//   Tool {
+//       name: "fig3_set_root",
+//       description: "Set the 3D session pose's root
+//       position absolutely: 'position' [x, y, z] in
+//       world units (Y up). The write complement of the
+//       'pose_root' fig3_get reports; bakes project from
+//       the root, so this is how a baked figure is
+//       placed. No undo step (session pose). Requires an
+//       active 3D session.",
+//       schema: obj_schema(
+//           json!({
+//               "position": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] root position" }
+//           }),
+//           &["position"],
+//       ),
+//       handler: crate::fig3d::tool_fig3_set_root,
+//   },
+// MCP.md ROW SPEC (integrator: add beside the other
+// fig3 rows):
+//   | `fig3_set_root` | Set the 3D session pose's root
+//   position absolutely: 'position' [x, y, z] in world
+//   units (Y up). The write complement of the
+//   'pose_root' fig3_get reports; bakes project from
+//   the root, so this is how a baked figure is placed.
+//   No undo step (session pose). Requires an active 3D
+//   session. | `position` | — |
+pub fn tool_fig3_set_root(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    fig3mcp_require_session(core)?;
+    let v = fig3mcp_get(args, "position")
+        .ok_or_else(|| "missing required argument 'position'".to_string())?;
+    let arr = v
+        .as_array()
+        .filter(|a| a.len() == 3)
+        .ok_or_else(|| "argument 'position' must be an [x, y, z] array".to_string())?;
+    let mut pos = [0.0f32; 3];
+    for (i, c) in arr.iter().enumerate() {
+        let f = c
+            .as_f64()
+            .ok_or_else(|| format!("argument 'position[{i}]' must be a number"))?;
+        let x = f as f32;
+        if !f.is_finite() || !x.is_finite() {
+            return Err(format!(
+                "argument 'position[{i}]' must be a finite number"
+            ));
+        }
+        pos[i] = x;
+    }
+    if let Some(st) = &mut core.fig3 {
+        st.pose.root = pos;
+    }
+    core.status = format!(
+        "3D root set to ({:.1}, {:.1}, {:.1}).",
+        pos[0], pos[1], pos[2]
+    );
+    Ok(fig3mcp_summary(core))
+}
+
 #[cfg(test)]
 mod mcp_tool_tests {
     use super::{
         tool_fig3_camera_preset, tool_fig3_exit, tool_fig3_get, tool_fig3_ik,
         tool_fig3_pose_mirror, tool_fig3_pose_save, tool_fig3_pose_apply,
-        tool_fig3_select_next,
+        tool_fig3_select_next, tool_fig3_set_camera,
+        tool_fig3_set_root, tool_fig3_set_rotation,
     };
     use crate::editor::EditorCore;
     use serde_json::json;
@@ -2378,6 +2627,149 @@ mod mcp_tool_tests {
         )
         .unwrap_err();
         assert!(err.contains("failed to load"), "{err}");
+    }
+
+    #[test]
+    fn set_camera_sets_yaw_and_pitch_absolutely() {
+        // Wave 14 (A7): pins the first A7 pass's fix — the
+        // Wave 11 handler could not set yaw/pitch at all.
+        let mut core = session_core();
+        let out = tool_fig3_set_camera(
+            &mut core,
+            &json!({ "yaw": 30.0, "pitch": 20.0 }),
+        )
+        .unwrap();
+        assert_eq!(out["camera"]["yaw"], json!(30.0));
+        assert_eq!(out["camera"]["pitch"], json!(20.0));
+        // Untouched fields keep their values.
+        assert_eq!(out["camera"]["distance"], json!(400.0));
+        // Pitch clamps to the orbit clamp, like fig3_orbit.
+        let out = tool_fig3_set_camera(&mut core, &json!({ "pitch": 200.0 }))
+            .unwrap();
+        assert_eq!(out["camera"]["pitch"], json!(89.9));
+        // No field at all is a refusal, not a silent no-op.
+        assert!(tool_fig3_set_camera(&mut core, &json!({})).is_err());
+        // A value beyond f32 range is refused, never stored
+        // as infinity.
+        assert!(
+            tool_fig3_set_camera(&mut core, &json!({ "yaw": 1e300 })).is_err()
+        );
+        let mut bare = EditorCore::new();
+        assert!(
+            tool_fig3_set_camera(&mut bare, &json!({ "yaw": 1.0 })).is_err()
+        );
+    }
+
+    #[test]
+    fn get_reports_rotations_and_both_libraries() {
+        // Wave 14 (A7): pins the first A7 pass's summary
+        // extensions — per-joint rotations, and both
+        // library lists with AND without a session (the
+        // no-session branch originally lacked them despite
+        // its comment).
+        let mut bare = EditorCore::new();
+        let out = tool_fig3_get(&mut bare, &json!({})).unwrap();
+        assert_eq!(out["active"], json!(false));
+        assert!(out["figure_library"].is_array(), "{out}");
+        assert!(out["pose_library"].is_array(), "{out}");
+
+        let mut core = session_core();
+        core.fig3_rotate(2, 40.0);
+        let out = tool_fig3_get(&mut core, &json!({})).unwrap();
+        assert_eq!(
+            out["joints"][0]["rotation"],
+            json!([0.0, 0.0, 40.0]),
+            "{out}"
+        );
+        assert!(out["figure_library"].is_array(), "{out}");
+        assert!(out["pose_library"].is_array(), "{out}");
+    }
+
+    #[test]
+    fn set_rotation_sets_axes_absolutely_and_keeps_the_rest() {
+        let mut core = session_core();
+        // Joint defaults to the selected joint (0).
+        let out = tool_fig3_set_rotation(&mut core, &json!({ "x": 10.0 }))
+            .unwrap();
+        assert_eq!(
+            out["joints"][0]["rotation"],
+            json!([10.0, 0.0, 0.0]),
+            "{out}"
+        );
+        // An explicit joint, one axis at a time: the axis
+        // set earlier survives.
+        tool_fig3_set_rotation(
+            &mut core,
+            &json!({ "joint": 1, "z": -25.0 }),
+        )
+        .unwrap();
+        let out = tool_fig3_set_rotation(
+            &mut core,
+            &json!({ "joint": 1, "y": 5.0 }),
+        )
+        .unwrap();
+        assert_eq!(
+            out["joints"][1]["rotation"],
+            json!([0.0, 5.0, -25.0]),
+            "{out}"
+        );
+        // Absolute, not relative: setting x again replaces.
+        let out = tool_fig3_set_rotation(
+            &mut core,
+            &json!({ "joint": 1, "x": 3.0 }),
+        )
+        .unwrap();
+        assert_eq!(out["joints"][1]["rotation"][0], json!(3.0));
+        // Refusals quote the offending index and spend no
+        // change.
+        let err = tool_fig3_set_rotation(
+            &mut core,
+            &json!({ "joint": 99, "x": 1.0 }),
+        )
+        .unwrap_err();
+        assert!(err.contains("joint index 99 out of range"), "{err}");
+        assert!(tool_fig3_set_rotation(&mut core, &json!({ "joint": 1 }))
+            .is_err());
+        assert!(
+            tool_fig3_set_rotation(&mut core, &json!({ "x": 1e300 }))
+                .is_err()
+        );
+        let mut bare = EditorCore::new();
+        assert!(
+            tool_fig3_set_rotation(&mut bare, &json!({ "x": 1.0 })).is_err()
+        );
+    }
+
+    #[test]
+    fn set_root_moves_the_pose_root() {
+        let mut core = session_core();
+        let out = tool_fig3_set_root(
+            &mut core,
+            &json!({ "position": [10.0, -5.0, 2.5] }),
+        )
+        .unwrap();
+        assert_eq!(out["pose_root"], json!([10.0, -5.0, 2.5]), "{out}");
+        assert_eq!(
+            core.fig3.as_ref().unwrap().pose.root,
+            [10.0, -5.0, 2.5]
+        );
+        // Malformed positions are refused whole.
+        assert!(tool_fig3_set_root(&mut core, &json!({})).is_err());
+        assert!(
+            tool_fig3_set_root(&mut core, &json!({ "position": [1.0, 2.0] }))
+                .is_err()
+        );
+        assert!(tool_fig3_set_root(
+            &mut core,
+            &json!({ "position": [1e300, 0.0, 0.0] })
+        )
+        .is_err());
+        let mut bare = EditorCore::new();
+        assert!(tool_fig3_set_root(
+            &mut bare,
+            &json!({ "position": [0.0, 0.0, 0.0] })
+        )
+        .is_err());
     }
 }
 

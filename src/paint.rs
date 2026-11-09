@@ -1357,6 +1357,11 @@ pub fn tool_draw_spray(core: &mut EditorCore, args: &Value) -> Result<Value, Str
         None => 0x5EED_0000u64 + (frame as u64) * 131 + index as u64,
     };
     let n_points = points.len();
+    // One undo step, exactly as the registry description
+    // promises (Wave 14 audit find: the push below spent
+    // none — every validation above runs first, so a
+    // refused call still spends nothing).
+    core.snapshot();
     core.project.strokes.push(Stroke {
         frame,
         points,

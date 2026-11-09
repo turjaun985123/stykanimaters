@@ -1021,6 +1021,17 @@ impl EditorCore {
 //   mute TOGGLE (`audio_toggle_muted_at`) had panel (or
 //   palette) surfaces but no MCP tool at all.
 //
+// Wave 14 (A6): the parity re-audit of this file and
+// `audio_edit` against the registry, the `mcp.rs`
+// built-ins and the panel found exactly one remaining
+// gap — the panel's −/+ gain buttons
+// (`audio_clip_gain_step_at`) — closed by
+// `tool_audio_clip_gain_step` at the end of this
+// section. Split / crossfade / mixdown were already
+// reachable as `mcp.rs` built-ins, and the waveform
+// read was already served by `tool_audio_clip_info`'s
+// peaks.
+//
 // Honesty rules these handlers follow, stricter than the
 // older registry handlers they sit beside: a materialising
 // op that reports "… failed: …" through the status line
@@ -1072,10 +1083,24 @@ fn aop_opt_usize(args: &Value, key: &str) -> Result<Option<usize>, String> {
 
 fn aop_req_f32(args: &Value, key: &str) -> Result<f32, String> {
     match aop_get(args, key) {
-        Some(v) => v
-            .as_f64()
-            .map(|f| f as f32)
-            .ok_or_else(|| format!("argument '{key}' must be a number")),
+        Some(v) => {
+            let f = v
+                .as_f64()
+                .ok_or_else(|| format!("argument '{key}' must be a number"))?;
+            // Finiteness, including the f32 cast: a finite
+            // f64 beyond f32 range casts to infinity, and
+            // the finiteness contract (Wave 11, enforced
+            // for every other family in Wave 14's E10
+            // audit) refuses it here at the shared helper
+            // rather than at each caller.
+            let f32v = f as f32;
+            if !f.is_finite() || !f32v.is_finite() {
+                return Err(format!(
+                    "argument '{key}' must be a finite number in f32 range, got {v}"
+                ));
+            }
+            Ok(f32v)
+        }
         None => Err(format!("missing required argument '{key}'")),
     }
 }
@@ -1391,6 +1416,60 @@ pub fn tool_audio_clip_toggle_muted(
         "ok": true,
         "audio_index": idx,
         "muted": core.project.audio[idx].muted,
+        "status": core.status,
+    }))
+}
+
+/// MCP handler: step the clip at `index`'s gain by
+/// `delta` ([`EditorCore::audio_clip_gain_step_at`] — the
+/// audio panel's −/+ gain buttons, the one panel audio
+/// control with no MCP tool until Wave 14 (A6)). The
+/// absolute form is [`tool_audio_clip_set_gain`]; this is
+/// its relative twin, for a client that nudges the level
+/// it read from `audio_clip_info` rather than setting it.
+/// The result reports the gain read back from the clip
+/// after the op's 0.0..=2.0 clamp, so a step past the
+/// ceiling truthfully reports 2.0. Exactly one undo step:
+/// the op delegates to the gain setter, which snapshots
+/// once — including for a zero delta, the setter's
+/// documented same-value behaviour (see the Wave 13 note
+/// in the module doc). An out-of-range index is refused
+/// before the op runs, quoting the index; a non-finite
+/// `delta` (including one that overflows the f32 cast) is
+/// refused likewise.
+//
+// TOOL ENTRY SPEC: for the integrator's registry splice
+// in `mcp_tools::tools()`, beside the other
+// `crate::audio_ops` entries (after `audio_clip_set_gain`):
+//
+//   Tool {
+//       name: "audio_clip_gain_step",
+//       description: "Step the audio clip at 'index' gain by 'delta' (the audio panel's −/+ gain buttons): the stored gain is clamped to 0.0-2.0 by the op and the reply reports the gain read back after clamping. The relative form of audio_clip_set_gain. One undo step.",
+//       schema: obj_schema(
+//           json!({
+//               "index": { "type": "integer" },
+//               "delta": { "type": "number" }
+//           }),
+//           &["index", "delta"],
+//       ),
+//       handler: crate::audio_ops::tool_audio_clip_gain_step,
+//   }
+//
+// MCP.md ROW SPEC: for the `audio_clip_*` table, after
+// the `audio_clip_set_gain` row:
+//
+//   | `audio_clip_gain_step` | Step the audio clip at 'index' gain by 'delta' (the audio panel's −/+ gain buttons): the stored gain is clamped to 0.0-2.0 by the op and the reply reports the gain read back after clamping, so a step past the ceiling truthfully reports 2.0 — the relative form of audio_clip_set_gain. One undo step. | `index`, `delta` | — |
+pub fn tool_audio_clip_gain_step(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = aop_check_index(core, aop_req_usize(args, "index")?)?;
+    let delta = aop_req_f32(args, "delta")?;
+    if !delta.is_finite() {
+        return Err("argument 'delta' must be a finite number".into());
+    }
+    core.audio_clip_gain_step_at(idx, delta);
+    Ok(json!({
+        "ok": true,
+        "audio_index": idx,
+        "gain": core.project.audio[idx].gain,
         "status": core.status,
     }))
 }
@@ -2592,6 +2671,55 @@ mod tests {
             &serde_json::json!({ "index": 0, "gain": -1.0 })
         )
         .is_err());
+    }
+
+    #[test]
+    fn mcp_clip_gain_step_is_relative_clamped_and_one_step() {
+        // Wave 14 (A6): the panel's −/+ gain buttons as a
+        // tool. The step is relative to the stored gain,
+        // the reply reads the clamped gain back, and each
+        // call costs exactly one undo step.
+        let mut core = core_with(vec![clip("a.wav", 0), clip("b.wav", 4)]);
+        let depth = core.undo_depth();
+        let r = tool_audio_clip_gain_step(
+            &mut core,
+            &serde_json::json!({ "index": 1, "delta": 0.25 }),
+        )
+        .unwrap();
+        assert_eq!(r["gain"], 1.25, "the stepped gain, read back");
+        assert_eq!(core.project.audio[1].gain, 1.25);
+        assert_eq!(core.project.audio[0].gain, 1.0, "the other clip is untouched");
+        assert_eq!(core.undo_depth(), depth + 1, "exactly one snapshot");
+        // A step past the ceiling clamps, and the reply
+        // says so truthfully.
+        let r = tool_audio_clip_gain_step(
+            &mut core,
+            &serde_json::json!({ "index": 1, "delta": 5.0 }),
+        )
+        .unwrap();
+        assert_eq!(r["gain"], 2.0, "the clamped value, not the request");
+        // Refusals spend no snapshot: a bad index quotes
+        // the index, a missing delta names the argument,
+        // and a delta that overflows the f32 cast is not
+        // finite by the time the op would see it.
+        let depth = core.undo_depth();
+        let err = tool_audio_clip_gain_step(
+            &mut core,
+            &serde_json::json!({ "index": 9, "delta": 0.1 }),
+        )
+        .unwrap_err();
+        assert!(err.contains("index 9"), "error quotes the index: {err}");
+        assert!(tool_audio_clip_gain_step(
+            &mut core,
+            &serde_json::json!({ "index": 0 })
+        )
+        .is_err());
+        assert!(tool_audio_clip_gain_step(
+            &mut core,
+            &serde_json::json!({ "index": 0, "delta": 1e300 })
+        )
+        .is_err());
+        assert_eq!(core.undo_depth(), depth, "no snapshot on a refusal");
     }
 
     #[test]

@@ -758,12 +758,23 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     // instance never composited at all — `media_items` has always
     // included those; the gate just never let them through. Load-
     // bearing now that MCP's text tools author stage texts.
+    // Wave 14 (C3): the clips clause is the raster half of the
+    // clip-def media fix (docs/wave13/CLIP_MEDIA.md §6.4) — the
+    // funnel's per-node fallback (C1, §6.1) samples clip-def media
+    // for clip instances, but a project whose ONLY media lives on
+    // a clip def would still skip the composite entirely without
+    // it. SVG and the stage have no equivalent gate; they call
+    // the funnel unconditionally.
     let has_media = !project.sprites.is_empty()
         || !project.texts.is_empty()
         || project
             .figures
             .iter()
-            .any(|f| f.def.nodes.iter().any(|n| n.media.is_some()));
+            .any(|f| f.def.nodes.iter().any(|n| n.media.is_some()))
+        || project
+            .clips
+            .iter()
+            .any(|c| c.def.nodes.iter().any(|n| n.media.is_some()));
     if has_media {
         let mut rgba = image::DynamicImage::ImageRgb8(out).to_rgba8();
         let ssf = ss as f32;
@@ -3914,6 +3925,121 @@ mod media_integration_tests {
             .filter(|(a, b)| a != b)
             .count();
         assert!(diff > 50, "sprite should change the render ({diff} px)");
+    }
+
+    /// Wave 14 (C3) — a project whose ONLY media is clip-def
+    /// media (docs/wave13/CLIP_MEDIA.md §6.6, export pin; §6.4
+    /// gate): figure 0 is a movieclip instance whose own def is
+    /// media-free; the image lives on the clip's def alone. The
+    /// funnel's fallback (C1) yields the item, and the extended
+    /// `has_media` gate must let `render_frame_at` composite it —
+    /// before the gate clause this render skipped the composite
+    /// entirely and the image never reached the raster. The
+    /// clip's single frame pose is the demo's frame-0 pose, so
+    /// the instance renders exactly where the plain figure does.
+    fn clip_only_project() -> Project {
+        let mut project = Project::new_demo();
+        // 4x2 solid green PNG as the asset (as the test above).
+        let mut png = Vec::new();
+        {
+            let img = image::RgbaImage::from_pixel(4, 2, image::Rgba([0, 200, 0, 255]));
+            let mut cur = std::io::Cursor::new(&mut png);
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut cur, image::ImageFormat::Png)
+                .unwrap();
+        }
+        project.assets.push(crate::model::ImageAsset { name: "g.png".into(), png });
+        let mut clip_def = project.figures[0].def.clone();
+        clip_def.nodes[1].media = Some(crate::model::SegmentMedia::Image { asset: 0 });
+        let pose0 = project.frames[0].poses[0].clone();
+        project.clips = vec![crate::model::ClipDef {
+            name: "clip".into(),
+            def: clip_def,
+            frames: vec![pose0],
+            loop_mode: crate::model::ClipLoop::Loop,
+        }];
+        project.figures[0].clip = Some(0);
+        project
+    }
+
+    #[test]
+    fn clip_def_only_media_renders_into_rendered_frames() {
+        let project = clip_only_project();
+        // Precondition: the project's only media is the clip
+        // def's — no sprites, no texts, no figure-def media.
+        assert!(project.sprites.is_empty() && project.texts.is_empty());
+        assert!(project
+            .figures
+            .iter()
+            .all(|f| f.def.nodes.iter().all(|n| n.media.is_none())));
+        // The funnel yields exactly the one clip-sourced image
+        // (C1's fallback), and its quad centre is the pixel the
+        // composite must paint: the default camera maps stage
+        // units 1:1 onto the output image.
+        let items = crate::media::media_items(&project, 0.0);
+        assert_eq!(items.len(), 1, "exactly the clip-sourced image");
+        let centre = match &items[0] {
+            crate::media::MediaItem::Image { corners, .. } => [
+                (corners[0][0] + corners[2][0]) / 2.0,
+                (corners[0][1] + corners[2][1]) / 2.0,
+            ],
+            other => panic!("expected an image item, got {other:?}"),
+        };
+        let with = render_frame_at(&project, 0.0);
+        assert_eq!((with.width(), with.height()), (960, 720));
+        let px = with.get_pixel(centre[0] as u32, centre[1] as u32);
+        assert!(
+            px[1] > 150 && px[0] < 80 && px[2] < 80,
+            "the media quad's centre pixel is the asset's green, got {px:?}"
+        );
+        // The same project with the clip-def media cleared
+        // renders the plain figure there instead.
+        let mut bare = project.clone();
+        bare.clips[0].def.nodes[1].media = None;
+        let without = render_frame_at(&bare, 0.0);
+        let bare_px = without.get_pixel(centre[0] as u32, centre[1] as u32);
+        assert!(
+            !(bare_px[1] > 150 && bare_px[0] < 80 && bare_px[2] < 80),
+            "without the clip-def media the centre pixel is not the asset's green, got {bare_px:?}"
+        );
+        let diff = with
+            .pixels()
+            .zip(without.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(diff > 50, "clip-def media should change the render ({diff} px)");
+    }
+
+    #[test]
+    fn media_free_clip_defs_leave_the_render_unchanged() {
+        // The §6.4 clause must not flip the gate for clip defs
+        // that carry no media: a project with no media anywhere
+        // renders pixel-identically whether its clip table is
+        // empty, holds an unreferenced media-free clip, or holds
+        // a media-free clip the figure actually instances.
+        let base = Project::new_demo();
+        let plain = render_frame_at(&base, 0.0);
+
+        let mut unreferenced = base.clone();
+        unreferenced.clips = vec![crate::model::ClipDef {
+            name: "unused".into(),
+            def: unreferenced.figures[0].def.clone(),
+            frames: vec![unreferenced.frames[0].poses[0].clone()],
+            loop_mode: crate::model::ClipLoop::Loop,
+        }];
+        assert_eq!(
+            render_frame_at(&unreferenced, 0.0).as_raw(),
+            plain.as_raw(),
+            "an unreferenced media-free clip changes nothing"
+        );
+
+        let mut instanced = unreferenced.clone();
+        instanced.figures[0].clip = Some(0);
+        assert_eq!(
+            render_frame_at(&instanced, 0.0).as_raw(),
+            plain.as_raw(),
+            "a media-free clip instance changes nothing"
+        );
     }
 }
 

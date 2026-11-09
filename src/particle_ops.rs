@@ -331,6 +331,32 @@ impl EditorCore {
             index + 1
         );
     }
+
+    /// Set particle event `index`'s random seed (Wave 14,
+    /// A5) — the value the rasterizer's per-particle
+    /// random draws from, so the same kind with a
+    /// different seed draws a different particle pattern.
+    /// Before this op the seed was the one stored event
+    /// field nothing could write after creation: adds
+    /// and duplicates derive it from the count formula
+    /// (see `particle_add_event`), and no panel control
+    /// or tool could override it — while `particle_list_events`
+    /// reported it, so an MCP client could read a value
+    /// it could never change. The status wording mirrors
+    /// `fx_set_seed` in `fx_ops.rs`. One undo step; an
+    /// out-of-range index only sets the status.
+    pub fn particle_set_seed(&mut self, index: usize, seed: u32) {
+        if self.project.particles.get(index).is_none() {
+            self.status = format!(
+                "Particle event seed failed: no particle event {}.",
+                index + 1
+            );
+            return;
+        }
+        self.snapshot();
+        self.project.particles[index].seed = seed;
+        self.status = format!("Particle event {} seed set to {seed}.", index + 1);
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -352,6 +378,13 @@ impl EditorCore {
 // private to that module. The integrator registers them
 // in `tools()` with the `Tool { .. }` entries in B7's
 // report (handler: crate::particle_ops::tool_*).
+//
+// Wave 14 (A5) adds one more handler at the end of this
+// section, `tool_particle_set_seed`: the seed was the
+// last event property with no write path at all (see
+// `particle_set_seed`), and its TOOL ENTRY SPEC comment
+// carries the registry entry + MCP.md row for the
+// integrator's splice.
 // ---------------------------------------------------------------------
 
 /// `args[key]`, treating JSON null as absent (the
@@ -681,6 +714,43 @@ pub fn tool_particle_add_anchored(core: &mut EditorCore, args: &Value) -> Result
         "ok": true,
         "particle_index": idx,
         "kind": particle_mcp_kind_name(kind),
+        "status": core.status,
+        "particles": core.project.particles.len(),
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 domain-file block beside
+// particle_add_anchored.
+//   Tool {
+//       name: "particle_set_seed",
+//       description: "Set a particle event's random seed (the value particle_list_events reports): the same kind with a different seed draws a different particle pattern. One undo step.",
+//       schema: obj_schema(
+//           json!({
+//               "index": { "type": "integer" },
+//               "seed": { "type": "integer", "description": "Particle random seed (0 to 4294967295)" }
+//           }),
+//           &["index", "seed"],
+//       ),
+//       handler: crate::particle_ops::tool_particle_set_seed,
+//   }
+// MCP.md row:
+//   | `particle_set_seed` | Set a particle event's random seed — the value `particle_list_events` reports; the same kind with a different seed draws a different particle pattern. One undo step. | `index`, `seed` | — |
+/// MCP `particle_set_seed` (Wave 14, A5): set the event
+/// at `index`'s random seed to `seed` — the last event
+/// property to gain a write path. The index is
+/// pre-checked and the seed range-checked BEFORE the
+/// op runs, so a bad call is a clean error and spends
+/// no snapshot. One undo step.
+pub fn tool_particle_set_seed(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = particle_mcp_index(core, particle_mcp_usize(args, "index")?)?;
+    let seed = u32::try_from(particle_mcp_usize(args, "seed")?)
+        .map_err(|_| "argument 'seed' is too large".to_string())?;
+    core.particle_set_seed(idx, seed);
+    Ok(json!({
+        "ok": true,
+        "particle_index": idx,
+        "seed": core.project.particles[idx].seed,
         "status": core.status,
         "particles": core.project.particles.len(),
     }))
@@ -1222,5 +1292,80 @@ mod tests {
         )
         .is_err());
         assert_eq!(core.project.particles.len(), 1);
+    }
+
+    // ---- Wave 14 (A5): seed op + handler ----------------
+
+    #[test]
+    fn set_seed_lands_and_leaves_the_other_fields_alone() {
+        let mut core = core_with(vec![event(2, 40.0, 7)]);
+        let edits = core.edits_since_autosave();
+        core.particle_set_seed(0, 987_654);
+        let ev = &core.project.particles[0];
+        assert_eq!(ev.seed, 987_654);
+        assert_eq!(core.status, "Particle event 1 seed set to 987654.");
+        // Only the seed changed.
+        assert_eq!((ev.frame, ev.x, ev.color), (2, 40.0, 0xFFFFFF));
+        assert_eq!(ev.kind, ParticleKind::Burst);
+        assert_eq!(core.edits_since_autosave(), edits + 1, "exactly one snapshot");
+        // The one snapshot is a real undo step.
+        core.undo();
+        assert_eq!(core.project.particles[0].seed, 7);
+    }
+
+    #[test]
+    fn set_seed_out_of_range_is_status_only() {
+        let mut core = core_with(vec![event(0, 0.0, 1)]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        core.particle_set_seed(3, 5);
+        assert_eq!(
+            core.status,
+            "Particle event seed failed: no particle event 4."
+        );
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+    }
+
+    #[test]
+    fn mcp_set_seed_lands_reads_back_and_validates_first() {
+        let mut core = core_with(vec![event(0, 0.0, 1)]);
+        let edits = core.edits_since_autosave();
+        let r = tool_particle_set_seed(
+            &mut core,
+            &serde_json::json!({ "index": 0, "seed": 42 }),
+        )
+        .unwrap();
+        assert_eq!(r["seed"].as_u64().unwrap(), 42);
+        assert_eq!(r["status"], "Particle event 1 seed set to 42.");
+        assert_eq!(core.project.particles[0].seed, 42);
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits + 1,
+            "exactly one snapshot via the handler"
+        );
+        // Every refusal spends nothing: out-of-range
+        // index, missing seed, negative seed, seed past
+        // the u32 range.
+        let err = tool_particle_set_seed(
+            &mut core,
+            &serde_json::json!({ "index": 1, "seed": 1 }),
+        )
+        .unwrap_err();
+        assert_eq!(err, "no particle event at index 1");
+        assert!(tool_particle_set_seed(&mut core, &serde_json::json!({ "index": 0 })).is_err());
+        assert!(tool_particle_set_seed(
+            &mut core,
+            &serde_json::json!({ "index": 0, "seed": -1 })
+        )
+        .is_err());
+        let err = tool_particle_set_seed(
+            &mut core,
+            &serde_json::json!({ "index": 0, "seed": u64::from(u32::MAX) + 1 }),
+        )
+        .unwrap_err();
+        assert_eq!(err, "argument 'seed' is too large");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "no refusal took a snapshot");
+        assert_eq!(core.project.particles[0].seed, 42);
     }
 }

@@ -473,7 +473,7 @@ pub fn sprite_at_point(quads: &[SpriteQuad], p: V2) -> Option<usize> {
 mod tests {
     use super::*;
     use stykanimate_rs::model::{
-        ImageAsset, InstanceKey, SegmentMedia, SpriteInstance,
+        ClipDef, ClipLoop, ImageAsset, InstanceKey, SegmentMedia, SpriteInstance,
     };
 
     /// A real, decodable 4x2 PNG (solid green), built the
@@ -606,6 +606,131 @@ mod tests {
         assert_eq!(quads.len(), 2, "only the two sprites");
         assert!(close(quads[0].corners[0], [280.0, 190.0]), "{:?}", quads[0].corners);
         assert!(close(quads[1].corners[0], [90.0, 95.0]), "{:?}", quads[1].corners);
+    }
+
+    /// Wave 14, C2 — clip-def media fixture
+    /// (docs/wave13/CLIP_MEDIA.md §6): the demo figure as a
+    /// movieclip instance of clip 0 whose def is a clone of
+    /// the figure's own. `clip_media` is placed on the CLIP
+    /// def's node 1; the instance's own def stays
+    /// media-free. The clip's single frame pose is the
+    /// figure's timeline pose, so the instance evaluates to
+    /// exactly the demo geometry — the same trick C1's
+    /// `media.rs` fixture uses.
+    fn project_with_clip_def_media(clip_media: Option<SegmentMedia>) -> Project {
+        let mut project = Project::new_demo();
+        project.assets.push(ImageAsset {
+            name: "badge.png".into(),
+            png: tiny_png(),
+        });
+        let mut clip_def = project.figures[0].def.clone();
+        clip_def.nodes[1].media = clip_media;
+        let pose = project.frames[0].poses[0].clone();
+        project.clips.push(ClipDef {
+            name: "clip".into(),
+            def: clip_def,
+            frames: vec![pose],
+            loop_mode: ClipLoop::Loop,
+        });
+        project.figures[0].clip = Some(0);
+        project
+    }
+
+    #[test]
+    fn clip_def_image_media_is_a_placeholder_item_not_a_sprite() {
+        // Wave 14, C2 — the stage verdict for clip-sourced
+        // IMAGE media is AUTOMATIC, and this test pins the
+        // two premises of the stage's placeholder pass
+        // (`stage_view::stage_shape`): the pass paints every
+        // `MediaItem::Image` the funnel yields EXCEPT the
+        // ones the sprite pass claims (corner equality with
+        // `sprite_quads`). So a clip item reaches the stage
+        // placeholder exactly like figure-def media iff
+        // (1) the funnel yields it and (2) no sprite quad
+        // claims its corners. The stage draws no bitmap —
+        // Rune has no bitmap primitive; the placeholder is
+        // the stage treatment, real pixels are export-only.
+        let mut project =
+            project_with_clip_def_media(Some(SegmentMedia::Image { asset: 0 }));
+        project.figures[0].opacity = 0.5;
+        project.clips[0].def.nodes[1].style.opacity = 0.5;
+        let items = media::media_items(&project, 0.0);
+        assert_eq!(items.len(), 1, "exactly the clip-sourced image");
+        match &items[0] {
+            MediaItem::Image { asset, alpha, .. } => {
+                assert_eq!(*asset, 0);
+                // The alpha the placeholder pass factors
+                // (0.16 fill / 0.7 outline — stage_view):
+                // instance figure opacity × CLIP node's
+                // style opacity (CLIP_MEDIA §6.2).
+                assert_eq!(*alpha, 0.25, "0.5 figure × 0.5 clip-node style");
+            }
+            other => panic!("expected an image item, got {other:?}"),
+        }
+        // (2) Nothing diverts it to the sprite pass: this
+        // project has no sprites, so no quads and no prims —
+        // the generic placeholder pass paints the item.
+        assert!(sprite_quads(&project, 0.0).is_empty());
+        assert!(sprite_prims(&project, 0.0, None).is_empty());
+        assert!(sprite_prims(&project, 0.0, Some(0)).is_empty());
+    }
+
+    #[test]
+    fn clip_def_media_does_not_disturb_sprite_tail_attribution() {
+        // The funnel's clip fallback grows the SEGMENT
+        // portion of the image stream; the sprite items are
+        // still its tail, so the sprite quads must stay
+        // exactly the two sprites — and the clip item's
+        // corners must match neither sprite quad (the
+        // placeholder pass's skip test is corner equality,
+        // so a match would divert the segment item into
+        // the sprite pass).
+        let mut project = project_with_sprites();
+        let mut clip_def = project.figures[0].def.clone();
+        clip_def.nodes[1].media = Some(SegmentMedia::Image { asset: 0 });
+        let pose = project.frames[0].poses[0].clone();
+        project.clips.push(ClipDef {
+            name: "clip".into(),
+            def: clip_def,
+            frames: vec![pose],
+            loop_mode: ClipLoop::Loop,
+        });
+        project.figures[0].clip = Some(0);
+        let items = media::media_items(&project, 0.0);
+        let images: Vec<&MediaItem> = items
+            .iter()
+            .filter(|i| matches!(i, MediaItem::Image { .. }))
+            .collect();
+        assert_eq!(images.len(), 3, "one clip segment item + two sprite items");
+        let quads = sprite_quads(&project, 0.0);
+        assert_eq!(quads.len(), 2, "only the two sprites");
+        assert!(close(quads[0].corners[0], [280.0, 190.0]), "{:?}", quads[0].corners);
+        assert!(close(quads[1].corners[0], [90.0, 95.0]), "{:?}", quads[1].corners);
+        let MediaItem::Image {
+            corners: clip_corners,
+            ..
+        } = images[0]
+        else {
+            unreachable!("filtered to Image items above");
+        };
+        assert!(
+            quads.iter().all(|q| &q.corners != clip_corners),
+            "the clip item must not be claimed by the sprite pass"
+        );
+    }
+
+    #[test]
+    fn media_free_clip_and_plain_figure_yield_no_stage_media_items() {
+        // The absent side of the pin: a clip instance whose
+        // clip def carries NO media (and whose own def is
+        // media-free) yields no items at all — attaching a
+        // clip alone must not invent stage media.
+        let project = project_with_clip_def_media(None);
+        assert!(media::media_items(&project, 0.0)
+            .iter()
+            .all(|i| !matches!(i, MediaItem::Image { .. })));
+        assert!(sprite_quads(&project, 0.0).is_empty());
+        assert!(sprite_prims(&project, 0.0, None).is_empty());
     }
 
     #[test]

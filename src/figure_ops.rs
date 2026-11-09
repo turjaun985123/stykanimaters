@@ -1309,6 +1309,231 @@ pub fn tool_figure_cycle_opacity(
     }))
 }
 
+// ---------------------------------------------------------------------
+// Wave 14 MCP handlers (A2): the figure panel's relative
+// and toggle controls that had no dedicated tool — the
+// opacity −/+ steppers, the hidden / lock / solo toggle
+// buttons (the figures panel rows and the palette's
+// hide-figure / lock-figure / solo-figure commands), and
+// the motion-path nudge primitive the figure inspector's
+// Centre/Ground compose from. The `layers` tool can SET
+// hidden / locked / opacity / solo absolutely, and
+// `set_pose` can set a root absolutely, but until now
+// each of these panel actions took a read-then-write
+// pair of calls to reproduce. Every handler validates
+// all of its arguments (indices quoted, floats finite)
+// BEFORE the op runs and never panics. The TOOL ENTRY
+// SPEC above each handler is the registry entry + MCP.md
+// row the integrator splices verbatim.
+//
+// Undo discipline, stated plainly because it is the
+// documented exception family: the layers-family ops
+// below (step / toggles) take NO snapshot in the core —
+// panel parity, the same rule the `layers` tool and
+// `figure_cycle_opacity` already document. A real
+// project change counts once for dirty/autosave via
+// `mark_dirty` inside the ops; solo is session state
+// and counts nothing. `nudge_path_point` is the
+// exception's opposite: the op snapshots exactly once.
+// ---------------------------------------------------------------------
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 domain-file block beside
+// figure_cycle_opacity.
+//   Tool {
+//       name: "figure_step_opacity",
+//       description: "Step a figure's opacity by 'delta' (the figures/layers panels' opacity −/+ buttons): the target is rounded to whole percent and clamped to 0.05-1.0 by the op, and the reply reports the opacity read back after clamping. The relative form of the layers tool's opacity. Not an undo step (layers-family panel parity); a real change counts for dirty/autosave.",
+//       schema: obj_schema(
+//           json!({
+//               "figure": { "type": "integer", "description": "0-based figure index (default: the selected figure)" },
+//               "delta": { "type": "number", "description": "Opacity step, e.g. 0.1 or -0.1 (non-zero, finite)" }
+//           }),
+//           &["delta"],
+//       ),
+//       handler: crate::figure_ops::tool_figure_step_opacity,
+//   }
+// MCP.md row:
+//   | `figure_step_opacity` | Step a figure's opacity by 'delta' (the figures/layers panels' −/+ buttons): the target is rounded to whole percent and clamped to 0.05–1.0 by the op; the reply reports the stored opacity read back, so a step past a bound truthfully reports the bound. The relative form of the `layers` tool's opacity. Not an undo step (layers-family panel parity); a real change counts for dirty/autosave. | `delta` | `figure` |
+/// MCP `figure_step_opacity`: the figures/layers panels'
+/// opacity −/+ steppers — [`EditorCore::step_figure_opacity`].
+pub fn tool_figure_step_opacity(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let fi = fop_target_figure(core, args)?;
+    let delta = fop_req_f32(args, "delta")?;
+    if !delta.is_finite() {
+        return Err("argument 'delta' must be a finite number".into());
+    }
+    if delta == 0.0 {
+        return Err("argument 'delta' must be non-zero".into());
+    }
+    core.step_figure_opacity(fi, delta);
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "opacity": core.project.figures[fi].opacity,
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 domain-file block beside
+// figure_cycle_opacity.
+//   Tool {
+//       name: "figure_toggle_hidden",
+//       description: "Toggle a figure's hidden flag (the figures panel's hide button / the palette's Toggle figure hidden): the relative form of the layers tool's 'hidden'. Not an undo step (layers-family panel parity); the flip counts for dirty/autosave.",
+//       schema: obj_schema(
+//           json!({
+//               "figure": { "type": "integer", "description": "0-based figure index (default: the selected figure)" }
+//           }),
+//           &[],
+//       ),
+//       handler: crate::figure_ops::tool_figure_toggle_hidden,
+//   }
+// MCP.md row:
+//   | `figure_toggle_hidden` | Toggle a figure's hidden flag (the figures panel's hide button; the palette's Toggle figure hidden) — the relative form of the `layers` tool's 'hidden'. Not an undo step (layers-family panel parity); the flip counts for dirty/autosave. | — | `figure` |
+/// MCP `figure_toggle_hidden`: the figures panel's hide
+/// button — [`EditorCore::toggle_figure_hidden`], which
+/// acts on the SELECTED figure, so the target is
+/// selected first (the built-in delete/move figure
+/// tools' convention).
+pub fn tool_figure_toggle_hidden(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let fi = fop_target_figure(core, args)?;
+    core.selected_figure = fi;
+    core.toggle_figure_hidden();
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "hidden": core.project.figures[fi].hidden,
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 domain-file block beside
+// figure_cycle_opacity.
+//   Tool {
+//       name: "figure_toggle_lock",
+//       description: "Toggle a figure's locked flag (the figures panel's lock button / the palette's Lock selected figure): the relative form of the layers tool's 'locked'. Not an undo step (layers-family panel parity); the flip counts for dirty/autosave.",
+//       schema: obj_schema(
+//           json!({
+//               "figure": { "type": "integer", "description": "0-based figure index (default: the selected figure)" }
+//           }),
+//           &[],
+//       ),
+//       handler: crate::figure_ops::tool_figure_toggle_lock,
+//   }
+// MCP.md row:
+//   | `figure_toggle_lock` | Toggle a figure's locked flag (the figures panel's lock button; the palette's Lock selected figure) — the relative form of the `layers` tool's 'locked'. Not an undo step (layers-family panel parity); the flip counts for dirty/autosave. | — | `figure` |
+/// MCP `figure_toggle_lock`: the figures panel's lock
+/// button — [`EditorCore::toggle_figure_lock`].
+pub fn tool_figure_toggle_lock(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let fi = fop_target_figure(core, args)?;
+    core.toggle_figure_lock(fi);
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "locked": core.project.figures[fi].locked,
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 domain-file block beside
+// figure_cycle_opacity.
+//   Tool {
+//       name: "figure_toggle_solo",
+//       description: "Toggle a figure's solo state (the figures panel's solo button / the palette's Solo selected figure): soloing a figure shows it alone; toggling the soloed figure clears solo. The relative form of the layers tool's 'solo'. Session state only — not an undo step and not a project edit.",
+//       schema: obj_schema(
+//           json!({
+//               "figure": { "type": "integer", "description": "0-based figure index (default: the selected figure)" }
+//           }),
+//           &[],
+//       ),
+//       handler: crate::figure_ops::tool_figure_toggle_solo,
+//   }
+// MCP.md row:
+//   | `figure_toggle_solo` | Toggle a figure's solo state (the figures panel's solo button; the palette's Solo selected figure) — the relative form of the `layers` tool's 'solo'. Session state only: not an undo step and not a project edit. | — | `figure` |
+/// MCP `figure_toggle_solo`: the figures panel's solo
+/// button — [`EditorCore::toggle_solo`].
+pub fn tool_figure_toggle_solo(
+    core: &mut EditorCore,
+    args: &Value,
+) -> Result<Value, String> {
+    let fi = fop_target_figure(core, args)?;
+    core.toggle_solo(fi);
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "solo": core.solo == Some(fi),
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 domain-file block beside figure_ground.
+//   Tool {
+//       name: "nudge_path_point",
+//       description: "Nudge one figure's motion-path point: move the root of its pose at 'frame' by ('dx', 'dy') stage units (the stage's path-point drag, as data; figure_centre/figure_ground compose this primitive for their specific shifts). 'figure' defaults to the selected figure, 'frame' to the current frame. One undo step.",
+//       schema: obj_schema(
+//           json!({
+//               "figure": { "type": "integer", "description": "0-based figure index (default: the selected figure)" },
+//               "frame": { "type": "integer", "description": "0-based frame index (default: the current frame)" },
+//               "dx": { "type": "number", "description": "Horizontal shift in stage units (finite)" },
+//               "dy": { "type": "number", "description": "Vertical shift in stage units (finite)" }
+//           }),
+//           &["dx", "dy"],
+//       ),
+//       handler: crate::figure_ops::tool_nudge_path_point,
+//   }
+// MCP.md row:
+//   | `nudge_path_point` | Nudge one figure's motion-path point: move the root of its pose at 'frame' by ('dx', 'dy') stage units — the stage's path-point drag as data; `figure_centre`/`figure_ground` compose this same primitive for their specific shifts. 'figure' defaults to the selected figure, 'frame' to the current frame. One undo step. | `dx`, `dy` | `figure`, `frame` |
+/// MCP `nudge_path_point`: the motion-path primitive —
+/// [`EditorCore::nudge_path_point`]. The handler
+/// pre-checks the pose row exists, so the op's own
+/// status-only refusal never spends its snapshot on a
+/// target that cannot move.
+pub fn tool_nudge_path_point(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let fi = fop_target_figure(core, args)?;
+    let frame = fop_target_frame(core, args)?;
+    let dx = fop_req_f32(args, "dx")?;
+    let dy = fop_req_f32(args, "dy")?;
+    if !dx.is_finite() || !dy.is_finite() {
+        return Err("arguments 'dx' and 'dy' must be finite numbers".into());
+    }
+    if dx == 0.0 && dy == 0.0 {
+        return Err("arguments 'dx' and 'dy' must not both be zero".into());
+    }
+    let has_pose = core
+        .project
+        .frames
+        .get(frame)
+        .map(|f| fi < f.poses.len())
+        .unwrap_or(false);
+    if !has_pose {
+        return Err(format!(
+            "Figure {} has no pose on frame {}.",
+            fi + 1,
+            frame + 1
+        ));
+    }
+    core.nudge_path_point(frame, fi, [dx, dy]);
+    Ok(json!({
+        "ok": true,
+        "figure": fi,
+        "frame": frame,
+        "root": core.project.frames[frame].poses[fi].root,
+        "status": core.status,
+    }))
+}
+
 /// MCP handler: read one figure in full (the figures panel
 /// row + figure inspector as data): identity, appearance
 /// flags, node count, clip link, solo state, and the drawn
@@ -1562,6 +1787,168 @@ pub fn tool_figure_library_cycle(
 mod tests {
     use super::*;
     use crate::model::{ParticleEvent, ParticleKind};
+
+    #[test]
+    fn mcp_wave14_step_opacity_and_toggles_follow_the_layers_family_contract() {
+        // Wave 14 (A2): the relative/toggle handlers spend
+        // NO undo step (the core ops are the layers family:
+        // no snapshot by design), a real project change
+        // counts exactly one dirty edit via mark_dirty, and
+        // solo — session state — counts nothing.
+        let mut core = EditorCore::new();
+        let edits = core.edits_since_autosave();
+        let depth = core.undo_depth();
+        assert_eq!(core.project.figures[0].opacity, 1.0);
+
+        let out = tool_figure_step_opacity(&mut core, &json!({ "figure": 0, "delta": -0.1 }))
+            .expect("step succeeds");
+        assert_eq!(out["opacity"], json!(0.9));
+        assert_eq!(core.undo_depth(), depth, "step takes no snapshot");
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits + 1,
+            "the real change counts one dirty edit"
+        );
+
+        // A step at the clamp changes nothing and marks
+        // nothing (the op's own rule).
+        let out = tool_figure_step_opacity(&mut core, &json!({ "figure": 0, "delta": 5.0 }))
+            .expect("step to the ceiling succeeds");
+        assert_eq!(out["opacity"], json!(1.0));
+        let edits_at_ceiling = core.edits_since_autosave();
+        let _ = tool_figure_step_opacity(&mut core, &json!({ "figure": 0, "delta": 0.1 }))
+            .expect("step at the ceiling still answers");
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_at_ceiling,
+            "a no-change step marks nothing"
+        );
+
+        let out = tool_figure_toggle_hidden(&mut core, &json!({ "figure": 0 }))
+            .expect("hide succeeds");
+        assert_eq!(out["hidden"], json!(true));
+        assert!(core.project.figures[0].hidden);
+        let out = tool_figure_toggle_hidden(&mut core, &json!({}))
+            .expect("hide toggles back, defaulting to the selection");
+        assert_eq!(out["hidden"], json!(false));
+
+        let out = tool_figure_toggle_lock(&mut core, &json!({ "figure": 0 }))
+            .expect("lock succeeds");
+        assert_eq!(out["locked"], json!(true));
+
+        let edits_before_solo = core.edits_since_autosave();
+        let out = tool_figure_toggle_solo(&mut core, &json!({ "figure": 0 }))
+            .expect("solo succeeds");
+        assert_eq!(out["solo"], json!(true));
+        assert_eq!(core.solo, Some(0));
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits_before_solo,
+            "solo is session state, not a project edit"
+        );
+        let out = tool_figure_toggle_solo(&mut core, &json!({ "figure": 0 }))
+            .expect("solo toggles off");
+        assert_eq!(out["solo"], json!(false));
+        assert_eq!(core.solo, None);
+    }
+
+    #[test]
+    fn mcp_wave14_figure_handlers_refuse_bad_input_without_side_effects() {
+        // Wave 14 (A2): every refusal is validated BEFORE
+        // the op runs — bad indices quote the index, a
+        // zero or non-finite delta is an argument error,
+        // and nothing mutates.
+        let mut core = EditorCore::new();
+        let edits = core.edits_since_autosave();
+        let depth = core.undo_depth();
+
+        let err = tool_figure_step_opacity(&mut core, &json!({ "figure": 9, "delta": 0.1 }))
+            .expect_err("a missing figure is refused");
+        assert!(err.contains("figure index 9 out of range"), "err: {err}");
+        let err = tool_figure_step_opacity(&mut core, &json!({ "figure": 0, "delta": 0.0 }))
+            .expect_err("a zero step is refused");
+        assert!(err.contains("non-zero"), "err: {err}");
+        let err = tool_figure_step_opacity(&mut core, &json!({ "figure": 0, "delta": 1e300 }))
+            .expect_err("a delta that overflows the f32 cast is refused");
+        assert!(err.contains("finite"), "err: {err}");
+        let err = tool_figure_step_opacity(&mut core, &json!({ "figure": 0 }))
+            .expect_err("delta is required");
+        assert!(err.contains("missing required argument 'delta'"), "err: {err}");
+
+        for handler in [
+            tool_figure_toggle_hidden as fn(&mut EditorCore, &Value) -> Result<Value, String>,
+            tool_figure_toggle_lock,
+            tool_figure_toggle_solo,
+        ] {
+            let err = handler(&mut core, &json!({ "figure": 9 }))
+                .expect_err("a missing figure is refused");
+            assert!(err.contains("figure index 9 out of range"), "err: {err}");
+        }
+
+        assert_eq!(core.edits_since_autosave(), edits, "no refusal marked dirty");
+        assert_eq!(core.undo_depth(), depth, "no refusal took a snapshot");
+        assert!(!core.project.figures[0].hidden);
+        assert!(!core.project.figures[0].locked);
+        assert_eq!(core.solo, None);
+    }
+
+    #[test]
+    fn mcp_wave14_nudge_path_point_moves_one_root_in_one_undo_step() {
+        // Wave 14 (A2): the nudge spends exactly the op's
+        // one snapshot, moves only the target pose's root,
+        // and every refusal (bad index, zero vector,
+        // non-finite component, missing pose row) is
+        // validated before the op and spends nothing.
+        let mut core = EditorCore::new();
+        let depth = core.undo_depth();
+        let root0 = core.project.frames[0].poses[0].root;
+
+        let out = tool_nudge_path_point(
+            &mut core,
+            &json!({ "figure": 0, "frame": 0, "dx": 5.0, "dy": -3.0 }),
+        )
+        .expect("nudge succeeds");
+        assert_eq!(out["root"], json!([root0[0] + 5.0, root0[1] - 3.0]));
+        assert_eq!(core.undo_depth(), depth + 1, "exactly one undo step");
+        core.undo();
+        assert_eq!(core.project.frames[0].poses[0].root, root0, "one undo restores the root");
+
+        let err = tool_nudge_path_point(
+            &mut core,
+            &json!({ "figure": 9, "frame": 0, "dx": 1.0, "dy": 1.0 }),
+        )
+        .expect_err("a missing figure is refused");
+        assert!(err.contains("figure index 9 out of range"), "err: {err}");
+        let err = tool_nudge_path_point(
+            &mut core,
+            &json!({ "figure": 0, "frame": 99, "dx": 1.0, "dy": 1.0 }),
+        )
+        .expect_err("a missing frame is refused");
+        assert!(err.contains("frame index 99 out of range"), "err: {err}");
+        let err = tool_nudge_path_point(
+            &mut core,
+            &json!({ "figure": 0, "frame": 0, "dx": 0.0, "dy": 0.0 }),
+        )
+        .expect_err("a zero nudge is refused");
+        assert!(err.contains("must not both be zero"), "err: {err}");
+        let err = tool_nudge_path_point(
+            &mut core,
+            &json!({ "figure": 0, "frame": 0, "dx": 1e300, "dy": 1.0 }),
+        )
+        .expect_err("a component that overflows the f32 cast is refused");
+        assert!(err.contains("finite"), "err: {err}");
+
+        // A frame whose pose row lacks the figure: refused
+        // by the handler's pre-check, no snapshot spent.
+        core.project.frames[0].poses.clear();
+        let err = tool_nudge_path_point(
+            &mut core,
+            &json!({ "figure": 0, "frame": 0, "dx": 1.0, "dy": 1.0 }),
+        )
+        .expect_err("a missing pose row is refused");
+        assert!(err.contains("has no pose on frame 1"), "err: {err}");
+        assert_eq!(core.undo_depth(), depth, "no refusal took a snapshot");
+    }
 
     #[test]
     fn mcp_figure_recolor_and_rename_validate_and_write() {

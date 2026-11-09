@@ -78,6 +78,23 @@
 //! `./fx-presets/` — it writes no project state, so it
 //! takes no snapshot and marks nothing dirty.
 //!
+//! Wave 14 (A5) — the last three clip properties gain
+//! ops and MCP handlers here: [`EditorCore::fx_set_seed`],
+//! [`EditorCore::fx_set_angle`] and
+//! [`EditorCore::fx_set_length`], with `tool_fx_set_seed`,
+//! `tool_fx_set_angle` and `tool_fx_set_length` below.
+//! Before this wave `seed` and `angle` were readout-only
+//! (the panel inspector prints them as a text line, and
+//! `fx_list` reports them, but nothing — panel, op or
+//! tool — could change them; `add_fx_clip` hardcodes
+//! `angle: 0.0` and derives the seed from the clip
+//! count), and `length` could be set only at creation
+//! (`add_fx_clip`'s `length` argument). The new ops
+//! follow the family contract exactly (bounds check,
+//! one snapshot, status in the family's voice), so the
+//! Wave 13 B4 verdict above extends to them; the family
+//! pins below cover them too.
+//!
 //! Premise correction, stated plainly: the Wave 12 E8
 //! names `clip_set_angle` / `clip_set_root` are **not
 //! in this file and are not FX-clip ops** — they are
@@ -424,6 +441,75 @@ impl EditorCore {
             if hidden { "hidden" } else { "shown" }
         );
     }
+
+    /// Set FX clip `index`'s particle random seed — the
+    /// value `fx_list` reports and the panel inspector
+    /// prints, which before Wave 14 nothing could change
+    /// after creation (creation derives it from the clip
+    /// count). The same kind with a different seed draws
+    /// a different particle pattern, so this is the
+    /// "make it look different" knob. No `fx_edit`
+    /// backend exists for the seed, so — as for colour
+    /// and kind — the field is written after the
+    /// snapshot. One undo step; an out-of-range index
+    /// only sets the status.
+    pub fn fx_set_seed(&mut self, index: usize, seed: u32) {
+        if self.project.fx_clips.get(index).is_none() {
+            self.status = format!("FX clip seed failed: no FX clip {}.", index + 1);
+            return;
+        }
+        self.snapshot();
+        self.project.fx_clips[index].clip.seed = seed;
+        self.status = format!("FX clip {} seed set to {seed}.", index + 1);
+    }
+
+    /// Set FX clip `index`'s emission angle in degrees —
+    /// the directed kinds (beam, trail, fountain, …)
+    /// emit along it. Before Wave 14 the angle was
+    /// readout-only: every creation path hardcoded
+    /// `0.0`, so no clip could ever be aimed. No
+    /// `fx_edit` backend exists for the angle, so the
+    /// field is written after the snapshot, as for
+    /// colour and kind. Any finite angle is stored as
+    /// given (the renderers read it modulo a full turn);
+    /// the handler owns the finiteness check. One undo
+    /// step; an out-of-range index only sets the status.
+    pub fn fx_set_angle(&mut self, index: usize, angle: f32) {
+        if self.project.fx_clips.get(index).is_none() {
+            self.status = format!("FX clip angle failed: no FX clip {}.", index + 1);
+            return;
+        }
+        self.snapshot();
+        self.project.fx_clips[index].clip.angle = angle;
+        self.status = format!(
+            "FX clip {} angle set to {}°.",
+            index + 1,
+            frame_label(angle)
+        );
+    }
+
+    /// Set FX clip `index`'s length in stage units —
+    /// the beam reach / trail span `add_fx_clip` could
+    /// previously set only at creation (its `length`
+    /// argument, default 130). No `fx_edit` backend
+    /// exists for the length, so the field is written
+    /// after the snapshot, as for colour and kind. Stored
+    /// as given, exactly as creation stores it; the
+    /// handler owns the finiteness check. One undo step;
+    /// an out-of-range index only sets the status.
+    pub fn fx_set_length(&mut self, index: usize, length: f32) {
+        if self.project.fx_clips.get(index).is_none() {
+            self.status = format!("FX clip length failed: no FX clip {}.", index + 1);
+            return;
+        }
+        self.snapshot();
+        self.project.fx_clips[index].clip.length = length;
+        self.status = format!(
+            "FX clip {} length set to {}.",
+            index + 1,
+            frame_label(length)
+        );
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -469,6 +555,37 @@ fn fx_arg_bool(args: &Value, key: &str) -> Result<bool, String> {
             .ok_or_else(|| format!("argument '{key}' must be a boolean")),
         None => Err(format!("missing required argument '{key}'")),
     }
+}
+
+/// Required finite `f32` argument, MCP convention
+/// (Wave 14): the value must be a finite number AND
+/// survive the cast to `f32` finite — a finite `f64`
+/// like 1e300 casts to `f32` infinity, which the
+/// standing finiteness contract refuses (the
+/// `mcp_tools.rs` `finite_f32` rule, restated locally).
+fn fx_arg_f32(args: &Value, key: &str) -> Result<f32, String> {
+    match fx_arg(args, key) {
+        Some(v) => match v.as_f64() {
+            Some(f) => {
+                let cast = f as f32;
+                if f.is_finite() && cast.is_finite() {
+                    Ok(cast)
+                } else {
+                    Err(format!("argument '{key}' must be a finite number"))
+                }
+            }
+            None => Err(format!("argument '{key}' must be a number")),
+        },
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+/// Required `u32` argument, MCP convention (Wave 14):
+/// a non-negative integer (the `fx_arg_usize` rule)
+/// that also fits in a `u32`.
+fn fx_arg_u32(args: &Value, key: &str) -> Result<u32, String> {
+    let n = fx_arg_usize(args, key)?;
+    u32::try_from(n).map_err(|_| format!("argument '{key}' is too large"))
 }
 
 /// MCP handler for `fx_set_hidden`: set FX clip `index`'s
@@ -524,6 +641,116 @@ pub fn tool_fx_preset_delete(core: &mut EditorCore, args: &Value) -> Result<Valu
         "ok": true,
         "preset": name,
         "path": path.to_string_lossy(),
+    }))
+}
+
+// ---------------------------------------------------------------------
+// Wave 14 MCP handlers (A5): the three clip properties
+// that were readout-only — seed, angle, length. Each
+// handler validates everything (index pre-checked, the
+// value read and finiteness-checked) before the op
+// runs, spends exactly the op's one snapshot, and
+// reads the stored value back in the reply. The
+// TOOL ENTRY SPEC above each handler is the registry
+// entry + MCP.md row the integrator splices verbatim.
+// ---------------------------------------------------------------------
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 domain-file block beside fx_set_hidden.
+//   Tool {
+//       name: "fx_set_seed",
+//       description: "Set an FX clip's particle random seed (the value fx_list reports): the same kind with a different seed draws a different particle pattern. One undo step.",
+//       schema: obj_schema(
+//           json!({
+//               "index": { "type": "integer" },
+//               "seed": { "type": "integer", "description": "Particle random seed (0 to 4294967295)" }
+//           }),
+//           &["index", "seed"],
+//       ),
+//       handler: crate::fx_ops::tool_fx_set_seed,
+//   }
+// MCP.md row:
+//   | `fx_set_seed` | Set an FX clip's particle random seed — the value `fx_list` reports; the same kind with a different seed draws a different particle pattern. One undo step. | `index`, `seed` | — |
+/// MCP handler for `fx_set_seed`: set FX clip `index`'s
+/// particle random seed to `seed`.
+pub fn tool_fx_set_seed(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = fx_arg_usize(args, "index")?;
+    if idx >= core.project.fx_clips.len() {
+        return Err(format!("no FX clip at index {idx}"));
+    }
+    let seed = fx_arg_u32(args, "seed")?;
+    core.fx_set_seed(idx, seed);
+    Ok(json!({
+        "ok": true,
+        "fx_index": idx,
+        "seed": core.project.fx_clips[idx].clip.seed,
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 domain-file block beside fx_set_hidden.
+//   Tool {
+//       name: "fx_set_angle",
+//       description: "Set an FX clip's emission angle in degrees (the value fx_list reports; the directed kinds — beam, trail, fountain — emit along it). One undo step.",
+//       schema: obj_schema(
+//           json!({
+//               "index": { "type": "integer" },
+//               "angle": { "type": "number", "description": "Emission angle in degrees" }
+//           }),
+//           &["index", "angle"],
+//       ),
+//       handler: crate::fx_ops::tool_fx_set_angle,
+//   }
+// MCP.md row:
+//   | `fx_set_angle` | Set an FX clip's emission angle in degrees — the value `fx_list` reports; the directed kinds (beam, trail, fountain) emit along it. One undo step. | `index`, `angle` | — |
+/// MCP handler for `fx_set_angle`: set FX clip `index`'s
+/// emission angle (degrees) to `angle`.
+pub fn tool_fx_set_angle(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = fx_arg_usize(args, "index")?;
+    if idx >= core.project.fx_clips.len() {
+        return Err(format!("no FX clip at index {idx}"));
+    }
+    let angle = fx_arg_f32(args, "angle")?;
+    core.fx_set_angle(idx, angle);
+    Ok(json!({
+        "ok": true,
+        "fx_index": idx,
+        "angle": core.project.fx_clips[idx].clip.angle,
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 domain-file block beside fx_set_hidden.
+//   Tool {
+//       name: "fx_set_length",
+//       description: "Set an FX clip's length in stage units — beam reach / trail span (the value add_fx_clip's 'length' sets at creation and fx_list reports). One undo step.",
+//       schema: obj_schema(
+//           json!({
+//               "index": { "type": "integer" },
+//               "length": { "type": "number", "description": "Beam reach / trail span in stage units" }
+//           }),
+//           &["index", "length"],
+//       ),
+//       handler: crate::fx_ops::tool_fx_set_length,
+//   }
+// MCP.md row:
+//   | `fx_set_length` | Set an FX clip's length in stage units — beam reach / trail span (the value `add_fx_clip`'s `length` sets at creation and `fx_list` reports). One undo step. | `index`, `length` | — |
+/// MCP handler for `fx_set_length`: set FX clip `index`'s
+/// length (stage units) to `length`.
+pub fn tool_fx_set_length(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let idx = fx_arg_usize(args, "index")?;
+    if idx >= core.project.fx_clips.len() {
+        return Err(format!("no FX clip at index {idx}"));
+    }
+    let length = fx_arg_f32(args, "length")?;
+    core.fx_set_length(idx, length);
+    Ok(json!({
+        "ok": true,
+        "fx_index": idx,
+        "length": core.project.fx_clips[idx].clip.length,
+        "status": core.status,
     }))
 }
 
@@ -1003,6 +1230,9 @@ mod tests {
             c.fx_set_kind(0, ClipKind::ShockRing);
         });
         assert_single_undo_step(&mut core, "fx_set_hidden", |c| c.fx_set_hidden(0, true));
+        assert_single_undo_step(&mut core, "fx_set_seed", |c| c.fx_set_seed(0, 99));
+        assert_single_undo_step(&mut core, "fx_set_angle", |c| c.fx_set_angle(0, 45.0));
+        assert_single_undo_step(&mut core, "fx_set_length", |c| c.fx_set_length(0, 200.0));
         // Every undo landed: the fixture is exactly the
         // clip it started as.
         assert_eq!(core.project.fx_clips.len(), 1);
@@ -1019,7 +1249,7 @@ mod tests {
         // refuses (status-only, `false` or `None` where
         // the op returns a verdict) and none of them
         // takes a snapshot — the project JSON and the
-        // edit counter are both untouched after all ten.
+        // edit counter are both untouched after all thirteen.
         let mut core = core_with(vec![]);
         let before = project_json(&core);
         let edits = core.edits_since_autosave();
@@ -1033,6 +1263,9 @@ mod tests {
         core.fx_set_anchor(0, 0, 0);
         core.fx_set_kind(0, ClipKind::Wave);
         core.fx_set_hidden(0, true);
+        core.fx_set_seed(0, 1);
+        core.fx_set_angle(0, 45.0);
+        core.fx_set_length(0, 200.0);
         assert_eq!(project_json(&core), before, "project untouched");
         assert_eq!(
             core.edits_since_autosave(),
@@ -1114,6 +1347,110 @@ mod tests {
             "no rejected call took a snapshot"
         );
         assert!(!core.project.fx_clips[0].hidden);
+    }
+
+    #[test]
+    fn set_seed_angle_length_write_and_snapshot_once() {
+        // Wave 14 (A5): the three properties that were
+        // readout-only land through their ops.
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let edits = core.edits_since_autosave();
+        core.fx_set_seed(0, 4242);
+        assert_eq!(core.project.fx_clips[0].clip.seed, 4242);
+        assert_eq!(core.status, "FX clip 1 seed set to 4242.");
+        core.fx_set_angle(0, 45.0);
+        assert_eq!(core.project.fx_clips[0].clip.angle, 45.0);
+        assert_eq!(core.status, "FX clip 1 angle set to 45°.");
+        core.fx_set_angle(0, -30.5);
+        assert_eq!(core.project.fx_clips[0].clip.angle, -30.5);
+        assert_eq!(core.status, "FX clip 1 angle set to -30.5°.");
+        core.fx_set_length(0, 200.0);
+        assert_eq!(core.project.fx_clips[0].clip.length, 200.0);
+        assert_eq!(core.status, "FX clip 1 length set to 200.");
+        assert_eq!(core.edits_since_autosave(), edits + 4, "one snapshot per op");
+    }
+
+    #[test]
+    fn set_seed_angle_length_out_of_range_are_status_only() {
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        core.fx_set_seed(9, 1);
+        assert_eq!(core.status, "FX clip seed failed: no FX clip 10.");
+        core.fx_set_angle(9, 45.0);
+        assert_eq!(core.status, "FX clip angle failed: no FX clip 10.");
+        core.fx_set_length(9, 200.0);
+        assert_eq!(core.status, "FX clip length failed: no FX clip 10.");
+        assert_eq!(project_json(&core), before, "project untouched");
+        assert_eq!(core.edits_since_autosave(), edits, "no snapshot taken");
+    }
+
+    #[test]
+    fn tool_set_seed_angle_length_land_and_read_back() {
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Beam, 0xFF5D5D)]);
+        let edits = core.edits_since_autosave();
+        let r = tool_fx_set_seed(&mut core, &json!({ "index": 0, "seed": 77 })).unwrap();
+        assert_eq!(r["seed"], 77);
+        assert_eq!(r["status"], "FX clip 1 seed set to 77.");
+        assert_eq!(core.project.fx_clips[0].clip.seed, 77);
+        let r = tool_fx_set_angle(&mut core, &json!({ "index": 0, "angle": 90.0 })).unwrap();
+        assert_eq!(r["angle"], 90.0);
+        assert_eq!(core.project.fx_clips[0].clip.angle, 90.0);
+        let r = tool_fx_set_length(&mut core, &json!({ "index": 0, "length": 260.0 })).unwrap();
+        assert_eq!(r["length"], 260.0);
+        assert_eq!(core.project.fx_clips[0].clip.length, 260.0);
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits + 3,
+            "exactly one snapshot per handler call"
+        );
+    }
+
+    #[test]
+    fn tool_set_seed_angle_length_reject_bad_input_without_spending() {
+        let mut core = core_with(vec![entry(4.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let before = project_json(&core);
+        let edits = core.edits_since_autosave();
+        // Out-of-range index, in the file's pre-check voice.
+        assert_eq!(
+            tool_fx_set_seed(&mut core, &json!({ "index": 1, "seed": 1 })).unwrap_err(),
+            "no FX clip at index 1"
+        );
+        // Missing and mistyped values.
+        assert_eq!(
+            tool_fx_set_seed(&mut core, &json!({ "index": 0 })).unwrap_err(),
+            "missing required argument 'seed'"
+        );
+        assert_eq!(
+            tool_fx_set_seed(&mut core, &json!({ "index": 0, "seed": -1 })).unwrap_err(),
+            "argument 'seed' must be a non-negative integer"
+        );
+        assert_eq!(
+            tool_fx_set_seed(&mut core, &json!({ "index": 0, "seed": u64::from(u32::MAX) + 1 }))
+                .unwrap_err(),
+            "argument 'seed' is too large"
+        );
+        assert_eq!(
+            tool_fx_set_angle(&mut core, &json!({ "index": 0, "angle": "up" })).unwrap_err(),
+            "argument 'angle' must be a number"
+        );
+        // A finite f64 that overflows the f32 cast is
+        // refused by the finiteness contract.
+        let huge = 1e300f64;
+        assert_eq!(
+            tool_fx_set_angle(&mut core, &json!({ "index": 0, "angle": huge })).unwrap_err(),
+            "argument 'angle' must be a finite number"
+        );
+        assert_eq!(
+            tool_fx_set_length(&mut core, &json!({ "index": 0, "length": huge })).unwrap_err(),
+            "argument 'length' must be a finite number"
+        );
+        assert_eq!(project_json(&core), before, "no rejected call changed the project");
+        assert_eq!(
+            core.edits_since_autosave(),
+            edits,
+            "no rejected call took a snapshot"
+        );
     }
 
     #[test]

@@ -5287,6 +5287,818 @@ impl Default for EditorCore {
     }
 }
 
+// ---------------------------------------------------------------------
+// Wave 14 (A9): MCP parity handlers for the editor-settings
+// surface — scene weather, camera keys, onion skin, and the
+// consolidated settings read.
+//
+// The audit behind this section (against the entering
+// registry, `mcp_tools::tools()` + the `mcp.rs` built-ins):
+//
+// - Weather: `set_weather` (registry) sets kind + amount +
+//   wind in one call, but it is NOT the panel's semantics —
+//   an omitted amount/wind falls back to ITS defaults
+//   (90/20; storm 140/30), so it cannot switch kinds while
+//   keeping tuned values (the Scene panel's
+//   `set_weather_kind`), cannot cycle kinds (the panel's
+//   `cycle_weather`), and cannot set amount or wind alone
+//   without also naming a kind and resending the other
+//   value (the panel's steppers/sliders). Those three are
+//   the first three handlers below.
+// - Camera keys: `set_camera` (registry), `get_camera`,
+//   `delete_camera_key`, `set_camera_key_here`,
+//   `hold_camera`, `frame_all_figures`,
+//   `centre_on_selection` and `set_camera_follow`
+//   (built-ins) cover most of the panel, but the panel's
+//   "Clear key (no undo)" button (`camera_clear_key` —
+//   mark_dirty-only, deliberately NOT undoable), its zoom
+//   buttons (`camera_zoom_by`) and its rotate buttons /
+//   dial (`rotate_camera`) had no tool. Those are the
+//   next three handlers.
+// - Onion skin: NO tool touched `core.onion` at all. The
+//   master toggle is an `EditorCore` field, so it is
+//   handled here; the per-side depths are SHELL state
+//   (`State::onion_ui` in the bin crate) and cannot be
+//   reached from a library handler — they belong to
+//   Wave 14 Squad B's shell control, and the legacy
+//   `core.onion_frames` count is deliberately NOT
+//   exposed: the stage no longer reads it, so a tool for
+//   it would be a fake control.
+// - Loop range: VERIFIED covered — `set_loop_range` /
+//   `clear_loop_range` built-ins write it and
+//   `get_editor_status` reads it. No handler owed.
+// - Tween/easing defaults: VERIFIED covered —
+//   `set_project_easing` (registry; the op marks dirty),
+//   `set_frame_easing` and `set_tween_playback`
+//   (built-ins). The cycle forms (`cycle_easing`,
+//   `cycle_frame_easing`) are palette commands whose
+//   capability the absolute setters cover (Squad A10's
+//   map records them).
+// - Background: VERIFIED covered —
+//   `set_project_background` (registry, one undo step;
+//   the panel's own swatch/stepper path marks dirty
+//   instead — the Wave 13 census recorded the asymmetry)
+//   and `get_state` reads it back.
+//
+// Discipline rule for every handler below: match the
+// PANEL's exact discipline for the same write, and say
+// which was chosen in the handler's own comment —
+// mark_dirty-only where the panel only marks dirty,
+// exactly one undo step where the backing op snapshots,
+// neither where the state is session-only view state.
+// All float arguments pass the Wave 11 finiteness rule
+// (a finite f64 that casts to f32 infinity is refused).
+//
+// These are `pub fn tool_*` handlers in the exact
+// registry shape for the integrator to register in
+// `mcp_tools::tools()`; each carries its
+// `// TOOL ENTRY SPEC:` (the registry entry to add) and
+// its MCP.md catalogue row. Argument helpers are LOCAL
+// to this section with `eds_`-prefixed names —
+// `mcp_tools`' helpers are private to that module (the
+// `aop_` / `ast_` precedent in audio_ops.rs / media.rs).
+// ---------------------------------------------------------------------
+
+use crate::vfx::{Weather, WeatherKind};
+use serde_json::{json, Value};
+
+/// Local arg accessor (the `mcp_tools::get` shape): the
+/// named member of the arguments object, if present and
+/// not null.
+fn eds_get<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
+    args.get(key).filter(|v| !v.is_null())
+}
+
+/// The Wave 11 finiteness rule (see the section header):
+/// refuse a non-finite f64 and a finite f64 whose f32
+/// cast overflows.
+fn eds_finite_f32(f: f64, key: &str) -> Result<f32, String> {
+    let v = f as f32;
+    if f.is_finite() && v.is_finite() {
+        Ok(v)
+    } else {
+        Err(format!("argument '{key}' must be a finite number"))
+    }
+}
+
+fn eds_req_f32(args: &Value, key: &str) -> Result<f32, String> {
+    match eds_get(args, key) {
+        Some(v) => match v.as_f64() {
+            Some(f) => eds_finite_f32(f, key),
+            None => Err(format!("argument '{key}' must be a number")),
+        },
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+fn eds_req_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
+    match eds_get(args, key) {
+        Some(v) => v
+            .as_str()
+            .ok_or_else(|| format!("argument '{key}' must be a string")),
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+fn eds_req_bool(args: &Value, key: &str) -> Result<bool, String> {
+    match eds_get(args, key) {
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| format!("argument '{key}' must be a boolean")),
+        None => Err(format!("missing required argument '{key}'")),
+    }
+}
+
+/// The weather kind's wire name (the `get_state` /
+/// `set_weather` spelling).
+fn eds_weather_kind_name(kind: WeatherKind) -> &'static str {
+    match kind {
+        WeatherKind::Rain => "rain",
+        WeatherKind::Snow => "snow",
+        WeatherKind::Fireflies => "fireflies",
+        WeatherKind::Fog => "fog",
+        WeatherKind::Storm => "storm",
+    }
+}
+
+/// Parse a weather kind argument: the five kinds, or
+/// `"off"` for no weather. The error wording is
+/// `tool_set_weather`'s own.
+fn eds_parse_weather_kind(name: &str) -> Result<Option<WeatherKind>, String> {
+    match name {
+        "off" => Ok(None),
+        "rain" => Ok(Some(WeatherKind::Rain)),
+        "snow" => Ok(Some(WeatherKind::Snow)),
+        "fireflies" => Ok(Some(WeatherKind::Fireflies)),
+        "fog" => Ok(Some(WeatherKind::Fog)),
+        "storm" => Ok(Some(WeatherKind::Storm)),
+        other => Err(format!(
+            "unknown weather kind '{other}' (expected \"rain\", \"snow\", \"fireflies\", \"fog\", \"storm\" or \"off\")"
+        )),
+    }
+}
+
+/// The preset applied when a kind is enabled from off —
+/// the Scene panel's `kind_preset` values, duplicated
+/// here because the panel lives in the bin crate and a
+/// library handler cannot call it (the same reason
+/// `tool_set_weather` carries its own defaults; NOTE
+/// these panel presets differ from that tool's: rain
+/// wind 25 not 20, snow 90/12, fireflies 60/4, fog
+/// 60/0 — storm 140/30 agrees).
+fn eds_kind_preset(kind: WeatherKind) -> Weather {
+    match kind {
+        WeatherKind::Rain => Weather { kind, amount: 90.0, wind: 25.0 },
+        WeatherKind::Snow => Weather { kind, amount: 90.0, wind: 12.0 },
+        WeatherKind::Fireflies => Weather { kind, amount: 60.0, wind: 4.0 },
+        WeatherKind::Fog => Weather { kind, amount: 60.0, wind: 0.0 },
+        WeatherKind::Storm => Weather { kind, amount: 140.0, wind: 30.0 },
+    }
+}
+
+/// The weather as this section's handlers report it:
+/// `"off"`, or the stored `{kind, amount, wind}` object
+/// (the `tool_set_weather` reply shape).
+fn eds_weather_json(weather: Option<Weather>) -> Value {
+    match weather {
+        None => json!("off"),
+        Some(w) => json!({
+            "kind": eds_weather_kind_name(w.kind),
+            "amount": w.amount,
+            "wind": w.wind,
+        }),
+    }
+}
+
+// TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
+//   Tool {
+//       name: "set_weather_kind",
+//       description: "Set the scene weather kind (the Scene panel's kind picker): switching kinds keeps the tuned amount/wind, and enabling a kind from off applies the panel's per-kind preset. \"off\" turns weather off. A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel.",
+//       schema: obj_schema(
+//           json!({
+//               "kind": { "type": "string", "enum": ["rain", "snow", "fireflies", "fog", "storm", "off"] }
+//           }),
+//           &["kind"],
+//       ),
+//       handler: crate::editor::tool_set_weather_kind,
+//   }
+// MCP.md row (registry catalogue, beside `set_weather`):
+//   | `set_weather_kind` | Set the scene weather kind (the Scene panel's kind picker): switching kinds keeps the tuned amount/wind; enabling from off applies the panel's per-kind preset. A project-settings tweak — not an undo step; a real change marks the project dirty. | `kind` | — |
+/// MCP handler: set the weather kind, the Scene panel
+/// picker's exact semantics (its `set_weather_kind` in
+/// `rune_sec/scene_panel.rs`, re-implemented here
+/// because the panel is bin-crate code): switching
+/// kinds keeps the tuned amount/wind, enabling from
+/// off applies the kind's preset, and the status
+/// strings are the panel's own.
+///
+/// Discipline chosen: mark_dirty-only — NO undo step.
+/// The panel never snapshots a weather write (its
+/// module's documented rule); since Wave 13 a real
+/// change marks dirty via the seam, and this handler
+/// matches that exactly.
+pub fn tool_set_weather_kind(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let kind = eds_parse_weather_kind(eds_req_str(args, "kind")?)?;
+    let before = core.project.weather;
+    match kind {
+        None => {
+            core.project.weather = None;
+            core.status = "Weather: off.".into();
+        }
+        Some(kind) => {
+            core.project.weather = Some(match core.project.weather {
+                Some(mut w) => {
+                    w.kind = kind;
+                    w
+                }
+                None => eds_kind_preset(kind),
+            });
+            let label: &'static str = match kind {
+                WeatherKind::Rain => "Weather: rain.",
+                WeatherKind::Snow => "Weather: snow.",
+                WeatherKind::Fireflies => "Weather: fireflies.",
+                WeatherKind::Fog => "Weather: fog.",
+                WeatherKind::Storm => "Weather: storm.",
+            };
+            core.status = label.into();
+        }
+    }
+    if core.project.weather != before {
+        core.mark_dirty();
+    }
+    Ok(json!({
+        "ok": true,
+        "weather": eds_weather_json(core.project.weather),
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
+//   Tool {
+//       name: "cycle_weather",
+//       description: "Cycle the scene weather like the Scene group's Cycle weather button: off -> rain -> snow -> fireflies -> off, applying each kind's preset wholesale (fog and storm are not in the cycle; cycling from either turns weather off). A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel.",
+//       schema: obj_schema(json!({}), &[]),
+//       handler: crate::editor::tool_cycle_weather,
+//   }
+// MCP.md row (registry catalogue, beside `set_weather`):
+//   | `cycle_weather` | Cycle the scene weather (the Scene group's Cycle weather button): off → rain → snow → fireflies → off, each kind's preset applied wholesale; fog and storm are not in the cycle (cycling from either turns weather off). Not an undo step; a real change marks the project dirty. | — | — |
+/// MCP handler: cycle the weather kinds, the Scene
+/// panel's `cycle_weather` semantics (re-implemented
+/// here; the panel is bin-crate code): the cycle is
+/// Off → Rain → Snow → Fireflies → Off with each
+/// kind's preset applied wholesale — unlike the
+/// picker, cycling does NOT keep tuned amount/wind.
+///
+/// Discipline chosen: mark_dirty-only — NO undo step,
+/// on a real change only, exactly like the panel fn.
+pub fn tool_cycle_weather(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let (next, label) = match core.project.weather {
+        None => (Some(eds_kind_preset(WeatherKind::Rain)), "Weather: rain."),
+        Some(w) => match w.kind {
+            WeatherKind::Rain => {
+                (Some(eds_kind_preset(WeatherKind::Snow)), "Weather: snow.")
+            }
+            WeatherKind::Snow => (
+                Some(eds_kind_preset(WeatherKind::Fireflies)),
+                "Weather: fireflies.",
+            ),
+            WeatherKind::Fireflies | WeatherKind::Fog | WeatherKind::Storm => {
+                (None, "Weather: off.")
+            }
+        },
+    };
+    if core.project.weather != next {
+        core.project.weather = next;
+        core.mark_dirty();
+    }
+    core.status = label.into();
+    Ok(json!({
+        "ok": true,
+        "weather": eds_weather_json(core.project.weather),
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
+//   Tool {
+//       name: "set_weather_amount",
+//       description: "Set the weather's particle amount absolutely (the Scene panel's Amount stepper/slider): clamped to 0..=200. Errors when the weather is off — pick a kind first (set_weather_kind). A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel's steppers.",
+//       schema: obj_schema(
+//           json!({
+//               "amount": { "type": "number", "description": "Particles per frame at steady state, 0..=200" }
+//           }),
+//           &["amount"],
+//       ),
+//       handler: crate::editor::tool_set_weather_amount,
+//   }
+// MCP.md row (registry catalogue, beside `set_weather`):
+//   | `set_weather_amount` | Set the weather's particle amount absolutely (the Scene panel's Amount stepper/slider), clamped to 0..=200. Errors when the weather is off. Not an undo step; a real change marks the project dirty. | `amount` | — |
+/// MCP handler: set the weather amount absolutely —
+/// the amount half of the Scene panel's stepper/slider
+/// pair, which `set_weather` cannot express without
+/// also naming a kind and resending the wind.
+///
+/// Discipline chosen: mark_dirty-only — NO undo step.
+/// The panel's STEPPER discipline is the match for a
+/// discrete call: a step that changes the stored value
+/// marks dirty, a fully-clamped step marks nothing.
+/// (The panel's slider setters never mark per Move —
+/// the gesture marks once at release; a single MCP
+/// call is one discrete change, so the stepper rule
+/// applies.) With weather off the panel is status-only;
+/// an MCP call refuses instead, with the panel's own
+/// wording, so no edit is spent.
+pub fn tool_set_weather_amount(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let value = eds_req_f32(args, "amount")?;
+    let Some(mut w) = core.project.weather else {
+        return Err("Weather is off — pick a kind first.".to_string());
+    };
+    let amount = value.clamp(0.0, 200.0);
+    if amount != w.amount {
+        w.amount = amount;
+        core.project.weather = Some(w);
+        core.mark_dirty();
+    }
+    core.status = format!("Weather amount: {:.0}.", w.amount);
+    Ok(json!({
+        "ok": true,
+        "weather": eds_weather_json(core.project.weather),
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
+//   Tool {
+//       name: "set_weather_wind",
+//       description: "Set the weather's wind (horizontal drift, stage units per second) absolutely (the Scene panel's Wind stepper/slider): clamped to -200..=200. Errors when the weather is off — pick a kind first (set_weather_kind). A project-settings tweak — no undo step; a real change marks the project dirty, exactly like the panel's steppers.",
+//       schema: obj_schema(
+//           json!({
+//               "wind": { "type": "number", "description": "Horizontal drift in stage units per second, -200..=200" }
+//           }),
+//           &["wind"],
+//       ),
+//       handler: crate::editor::tool_set_weather_wind,
+//   }
+// MCP.md row (registry catalogue, beside `set_weather`):
+//   | `set_weather_wind` | Set the weather's wind (horizontal drift) absolutely (the Scene panel's Wind stepper/slider), clamped to -200..=200. Errors when the weather is off. Not an undo step; a real change marks the project dirty. | `wind` | — |
+/// MCP handler: set the weather wind absolutely — the
+/// wind half of the Scene panel's stepper/slider pair.
+/// Discipline chosen: mark_dirty-only, exactly as
+/// [`tool_set_weather_amount`] (see its comment for
+/// the stepper-vs-slider reasoning); the clamp is the
+/// panel's −200..=200. (The registry's `set_weather`
+/// deliberately does not clamp wind; this handler
+/// follows the PANEL, not that tool.)
+pub fn tool_set_weather_wind(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let value = eds_req_f32(args, "wind")?;
+    let Some(mut w) = core.project.weather else {
+        return Err("Weather is off — pick a kind first.".to_string());
+    };
+    let wind = value.clamp(-200.0, 200.0);
+    if wind != w.wind {
+        w.wind = wind;
+        core.project.weather = Some(w);
+        core.mark_dirty();
+    }
+    core.status = format!("Weather wind: {}.", w.wind);
+    Ok(json!({
+        "ok": true,
+        "weather": eds_weather_json(core.project.weather),
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
+//   Tool {
+//       name: "clear_camera_key",
+//       description: "Remove the camera key at the CURRENT frame without an undo step (the camera panel's 'Clear key (no undo)' button): the removal counts for dirty/autosave but cannot be undone — for the undoable delete at any frame, use delete_camera_key. Errors when the current frame holds no camera key.",
+//       schema: obj_schema(json!({}), &[]),
+//       handler: crate::editor::tool_clear_camera_key,
+//   }
+// MCP.md row (registry catalogue, beside `set_camera`):
+//   | `clear_camera_key` | Remove the camera key at the current frame WITHOUT an undo step (the camera panel's "Clear key (no undo)" button): counts for dirty/autosave only. For the undoable delete at any frame, use delete_camera_key. Errors when the current frame holds no camera key. | — | — |
+/// MCP handler: the camera panel's "Clear key (no
+/// undo)" button — [`EditorCore::camera_clear_key`] at
+/// the current frame. The undoable sibling is the
+/// `delete_camera_key` built-in (any frame, one undo
+/// step); this is the OTHER removal the panel offers,
+/// and until now it had no tool.
+///
+/// Discipline chosen: mark_dirty-only — the backing
+/// op takes NO snapshot by its own documented
+/// contract ("Clear key (no undo)"), and a real
+/// removal marks dirty inside the op. The existence
+/// check runs first so a keyless frame refuses with
+/// the op's own status wording and spends nothing.
+pub fn tool_clear_camera_key(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    if !core.project.camera.iter().any(|k| k.frame == core.current) {
+        return Err("No camera key on this frame.".to_string());
+    }
+    let frame = core.current;
+    core.camera_clear_key();
+    Ok(json!({
+        "ok": true,
+        "frame": frame,
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
+//   Tool {
+//       name: "camera_zoom_by",
+//       description: "Multiply the camera zoom at the current frame by 'factor' (the camera panel's zoom in/out buttons): upserts a camera key at the current frame with the zoom clamped to 0.3..=4.0, preserving the angle in effect. One undo step.",
+//       schema: obj_schema(
+//           json!({
+//               "factor": { "type": "number", "description": "Zoom multiplier (must be positive; 2.0 doubles, 0.5 halves)" }
+//           }),
+//           &["factor"],
+//       ),
+//       handler: crate::editor::tool_camera_zoom_by,
+//   }
+// MCP.md row (registry catalogue, beside `set_camera`):
+//   | `camera_zoom_by` | Multiply the camera zoom at the current frame by a factor (the camera panel's zoom buttons): upserts a key there, zoom clamped to 0.3..=4.0, angle preserved. One undo step. | `factor` | — |
+/// MCP handler: the camera panel's zoom step buttons —
+/// [`EditorCore::camera_zoom_by`] at the current
+/// frame. (`set_camera` can set an absolute zoom at
+/// any frame, but the panel's relative zoom — and its
+/// angle-preserving upsert — had no tool.)
+///
+/// Discipline chosen: exactly one undo step, taken
+/// inside the backing op (it snapshots once). The
+/// factor is validated first (finite per the section
+/// rule, and positive — a non-positive multiplier is
+/// meaningless and the op would silently clamp the
+/// resulting zoom instead of refusing).
+pub fn tool_camera_zoom_by(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let factor = eds_req_f32(args, "factor")?;
+    if factor <= 0.0 {
+        return Err(format!("argument 'factor' must be positive (got {factor})"));
+    }
+    core.camera_zoom_by(factor);
+    Ok(json!({
+        "ok": true,
+        "frame": core.current,
+        "zoom": core.camera_here().2,
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
+//   Tool {
+//       name: "rotate_camera",
+//       description: "Rotate the camera at the current frame by 'degrees' (the camera panel's rotate buttons): upserts a camera key carrying the pan/zoom in effect plus the new angle, wrapped to -180..180. One undo step. For an absolute angle at any frame, use set_camera with 'angle'.",
+//       schema: obj_schema(
+//           json!({
+//               "degrees": { "type": "number", "description": "Rotation delta in degrees (positive = clockwise on stage)" }
+//           }),
+//           &["degrees"],
+//       ),
+//       handler: crate::editor::tool_rotate_camera,
+//   }
+// MCP.md row (registry catalogue, beside `set_camera`):
+//   | `rotate_camera` | Rotate the camera at the current frame by a degree delta (the camera panel's rotate buttons): upserts a key with the pan/zoom in effect and the angle wrapped to -180..180. One undo step. | `degrees` | — |
+/// MCP handler: the camera panel's rotate step
+/// buttons — [`EditorCore::rotate_camera`] at the
+/// current frame. (The panel's rotation DIAL composes
+/// the same write per gesture with one snapshot of
+/// its own; a discrete MCP call maps to the op's
+/// press form.)
+///
+/// Discipline chosen: exactly one undo step, taken
+/// inside the backing op. The reply's angle is the
+/// stored convention — wrapped via `norm_deg`, as
+/// `get_camera` documents.
+pub fn tool_rotate_camera(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let degrees = eds_req_f32(args, "degrees")?;
+    core.rotate_camera(degrees);
+    Ok(json!({
+        "ok": true,
+        "frame": core.current,
+        "angle": crate::model::norm_deg(
+            core.project.camera_angle_at(core.current as f32)
+        ),
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
+//   Tool {
+//       name: "get_onion_skin",
+//       description: "Read the onion-skin master switch (the Onion panel's On/Off toggle): 'enabled' is the stage's master switch. The per-side depths are GUI shell state and are NOT reported here — over the live endpoint they are Squad B shell state; 'legacy_prev_frames' is the core's legacy single-side count, which the stage no longer reads. Read-only.",
+//       schema: obj_schema(json!({}), &[]),
+//       handler: crate::editor::tool_get_onion_skin,
+//   }
+// MCP.md row (registry catalogue, beside `set_weather`):
+//   | `get_onion_skin` | Read the onion-skin master switch ('enabled'). The per-side depths are GUI shell state, not core state, and are not reported; 'legacy_prev_frames' is the core's legacy count the stage no longer reads. Read-only. | — | — |
+/// MCP handler: read the onion-skin master switch,
+/// `core.onion` — the field the stage's master switch
+/// reads and the Onion panel's toggle flips. No tool
+/// could see it before this one.
+///
+/// Honest scope: the per-side depths the panel's
+/// steppers write are shell state (`State::onion_ui`,
+/// bin crate) — a library handler cannot read them,
+/// so they are not reported (Wave 14 Squad B's shell
+/// control owns them). `legacy_prev_frames` reports
+/// the core's legacy `onion_frames` count for what it
+/// is: a value the stage no longer reads, exposed
+/// read-only so a client is not left guessing — and
+/// deliberately given NO setter (see the section
+/// header: a setter would be a fake control).
+///
+/// Discipline chosen: read-only — no snapshot, no
+/// dirty mark, no status write.
+pub fn tool_get_onion_skin(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    Ok(json!({
+        "ok": true,
+        "enabled": core.onion,
+        "legacy_prev_frames": core.onion_frames,
+    }))
+}
+
+// TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
+//   Tool {
+//       name: "set_onion_skin",
+//       description: "Turn the onion-skin master switch on or off (the Onion panel's On/Off toggle). Session view state, not project data: no undo step and no dirty mark, exactly like the panel toggle. The per-side depths are GUI shell state and cannot be set from the core surface.",
+//       schema: obj_schema(
+//           json!({
+//               "enabled": { "type": "boolean", "description": "True to show onion skins, false to hide them" }
+//           }),
+//           &["enabled"],
+//       ),
+//       handler: crate::editor::tool_set_onion_skin,
+//   }
+// MCP.md row (registry catalogue, beside `set_weather`):
+//   | `set_onion_skin` | Turn the onion-skin master switch on or off (the Onion panel's toggle). Session view state: no undo step, no dirty mark — exactly like the panel toggle. | `enabled` | — |
+/// MCP handler: the Onion panel's On/Off toggle —
+/// a bare write of `core.onion`, exactly the panel's
+/// own handler body (`s.core.onion = !s.core.onion`).
+///
+/// Discipline chosen: NEITHER an undo step NOR a
+/// dirty mark. `onion` is editor session state, not
+/// project data — it is not serialised, and the panel
+/// toggle takes no snapshot and marks nothing. Over
+/// the live endpoint this flips the switch on the
+/// session the user is looking at.
+pub fn tool_set_onion_skin(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let enabled = eds_req_bool(args, "enabled")?;
+    core.onion = enabled;
+    Ok(json!({
+        "ok": true,
+        "enabled": core.onion,
+    }))
+}
+
+// TOOL ENTRY SPEC (integrator: register in mcp_tools::tools()):
+//   Tool {
+//       name: "get_editor_settings",
+//       description: "Read the editor-settings surface in one call: weather (kind/amount/wind, or \"off\"), background colour (0xRRGGBB), project easing, tween playback, camera follow target, loop range, onion master switch, fps, stage size and head-ring scale. The consolidated read behind the set_weather_kind / set_project_easing / set_project_background family — several of these values previously had no read at all (project easing, tween playback, head-ring scale). Read-only.",
+//       schema: obj_schema(json!({}), &[]),
+//       handler: crate::editor::tool_get_editor_settings,
+//   }
+// MCP.md row (registry catalogue, beside `set_weather`):
+//   | `get_editor_settings` | Read the editor-settings surface in one call: weather, background, project easing, tween playback, camera follow, loop range, onion switch, fps, stage size and head-ring scale. Read-only. | — | — |
+/// MCP handler: the consolidated read for this
+/// section's whole domain. `get_state` reports some
+/// of these (weather, background, fps, stage) and
+/// `get_editor_status` the loop range, but the
+/// project easing, tween playback and head-ring
+/// scale had NO read anywhere — a client could set
+/// them only blind. This handler closes that without
+/// touching either built-in.
+///
+/// Discipline chosen: read-only — no snapshot, no
+/// dirty mark, no status write.
+pub fn tool_get_editor_settings(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let loop_range = match core.loop_range {
+        Some((a, b)) => json!([a, b]),
+        None => Value::Null,
+    };
+    Ok(json!({
+        "ok": true,
+        "weather": eds_weather_json(core.project.weather),
+        "background": core.project.background,
+        "easing": core.project.easing.label(),
+        "tween_playback": core.project.tween_playback,
+        "camera_follow": core.project.camera_follow,
+        "loop_range": loop_range,
+        "onion_enabled": core.onion,
+        "fps": core.project.fps,
+        "stage": core.project.stage,
+        "head_ring_scale": core.project.head_ring_scale,
+    }))
+}
+
+#[cfg(test)]
+mod wave14_settings_mcp_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A core whose weather starts off and whose edit
+    /// counters start clean, whatever the demo project
+    /// carries.
+    fn clean_core() -> EditorCore {
+        let mut core = EditorCore::new();
+        core.project.weather = None;
+        core
+    }
+
+    #[test]
+    fn set_weather_kind_from_off_applies_the_panel_preset() {
+        let mut core = clean_core();
+        let edits = core.edits_since_autosave();
+        let out = tool_set_weather_kind(&mut core, &json!({ "kind": "rain" })).unwrap();
+        let w = core.project.weather.expect("weather is on");
+        assert_eq!(w.kind, WeatherKind::Rain);
+        // The PANEL preset (wind 25), not tool_set_weather's 20.
+        assert_eq!((w.amount, w.wind), (90.0, 25.0));
+        assert_eq!(out["weather"]["kind"], "rain");
+        assert_eq!(core.status, "Weather: rain.");
+        // Mark_dirty-only: a counted edit, no undo step.
+        assert_eq!(core.undo_depth(), 0, "no undo step");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "one dirty mark");
+    }
+
+    #[test]
+    fn set_weather_kind_switching_keeps_tuned_values() {
+        let mut core = clean_core();
+        core.project.weather = Some(Weather {
+            kind: WeatherKind::Rain,
+            amount: 33.0,
+            wind: -7.0,
+        });
+        tool_set_weather_kind(&mut core, &json!({ "kind": "snow" })).unwrap();
+        let w = core.project.weather.expect("weather is on");
+        assert_eq!(w.kind, WeatherKind::Snow);
+        assert_eq!((w.amount, w.wind), (33.0, -7.0), "tuned values kept");
+        // Re-setting the same kind changes nothing and marks nothing.
+        let edits = core.edits_since_autosave();
+        tool_set_weather_kind(&mut core, &json!({ "kind": "snow" })).unwrap();
+        assert_eq!(core.edits_since_autosave(), edits, "no change, no mark");
+    }
+
+    #[test]
+    fn set_weather_kind_off_and_unknown_kind() {
+        let mut core = clean_core();
+        tool_set_weather_kind(&mut core, &json!({ "kind": "fog" })).unwrap();
+        let out = tool_set_weather_kind(&mut core, &json!({ "kind": "off" })).unwrap();
+        assert_eq!(core.project.weather, None);
+        assert_eq!(out["weather"], "off");
+        let err = tool_set_weather_kind(&mut core, &json!({ "kind": "hail" }))
+            .expect_err("an unknown kind refuses");
+        assert!(err.contains("unknown weather kind 'hail'"), "err: {err}");
+    }
+
+    #[test]
+    fn cycle_weather_walks_the_panel_cycle() {
+        let mut core = clean_core();
+        tool_cycle_weather(&mut core, &json!({})).unwrap();
+        assert_eq!(core.project.weather.map(|w| w.kind), Some(WeatherKind::Rain));
+        tool_cycle_weather(&mut core, &json!({})).unwrap();
+        assert_eq!(core.project.weather.map(|w| w.kind), Some(WeatherKind::Snow));
+        tool_cycle_weather(&mut core, &json!({})).unwrap();
+        assert_eq!(
+            core.project.weather.map(|w| w.kind),
+            Some(WeatherKind::Fireflies)
+        );
+        tool_cycle_weather(&mut core, &json!({})).unwrap();
+        assert_eq!(core.project.weather, None);
+        // Fog is not in the cycle: cycling from fog turns off.
+        core.project.weather = Some(eds_kind_preset(WeatherKind::Fog));
+        tool_cycle_weather(&mut core, &json!({})).unwrap();
+        assert_eq!(core.project.weather, None);
+        assert_eq!(core.undo_depth(), 0, "cycling never snapshots");
+    }
+
+    #[test]
+    fn set_weather_amount_and_wind_clamp_and_refuse_when_off() {
+        let mut core = clean_core();
+        let err = tool_set_weather_amount(&mut core, &json!({ "amount": 10.0 }))
+            .expect_err("amount with weather off refuses");
+        assert!(err.contains("pick a kind first"), "err: {err}");
+        core.project.weather = Some(eds_kind_preset(WeatherKind::Rain));
+        tool_set_weather_amount(&mut core, &json!({ "amount": 500.0 })).unwrap();
+        assert_eq!(core.project.weather.map(|w| w.amount), Some(200.0));
+        tool_set_weather_wind(&mut core, &json!({ "wind": -999.0 })).unwrap();
+        assert_eq!(core.project.weather.map(|w| w.wind), Some(-200.0));
+        assert_eq!(core.status, "Weather wind: -200.");
+        assert_eq!(core.undo_depth(), 0, "settings writes never snapshot");
+        // A non-finite amount is refused by the finiteness rule.
+        assert!(tool_set_weather_amount(&mut core, &json!({ "amount": 1e300 })).is_err());
+    }
+
+    #[test]
+    fn clear_camera_key_marks_dirty_without_an_undo_step() {
+        let mut core = clean_core();
+        // No key anywhere: refused, nothing spent.
+        let err = tool_clear_camera_key(&mut core, &json!({}))
+            .expect_err("no key on this frame refuses");
+        assert!(err.contains("No camera key on this frame."), "err: {err}");
+        core.project.set_camera_key(core.current, 10.0, 20.0, 1.0);
+        let edits = core.edits_since_autosave();
+        tool_clear_camera_key(&mut core, &json!({})).unwrap();
+        assert!(core.project.camera.is_empty(), "the key is gone");
+        assert_eq!(core.undo_depth(), 0, "clear takes no undo step");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "but it marks dirty");
+    }
+
+    #[test]
+    fn camera_zoom_by_and_rotate_camera_take_one_undo_step_each() {
+        let mut core = clean_core();
+        let depth = core.undo_depth();
+        let out = tool_camera_zoom_by(&mut core, &json!({ "factor": 2.0 })).unwrap();
+        assert_eq!(core.undo_depth(), depth + 1, "zoom is one undo step");
+        assert_eq!(out["zoom"], 2.0);
+        let out = tool_rotate_camera(&mut core, &json!({ "degrees": 30.0 })).unwrap();
+        assert_eq!(core.undo_depth(), depth + 2, "rotate is one undo step");
+        assert_eq!(out["angle"], 30.0);
+        // Refusals spend nothing.
+        let depth = core.undo_depth();
+        assert!(tool_camera_zoom_by(&mut core, &json!({ "factor": 0.0 })).is_err());
+        assert!(tool_camera_zoom_by(&mut core, &json!({ "factor": 1e300 })).is_err());
+        assert!(tool_rotate_camera(&mut core, &json!({ "degrees": 1e300 })).is_err());
+        assert_eq!(core.undo_depth(), depth, "refusals take no snapshot");
+    }
+
+    #[test]
+    fn onion_skin_set_is_session_only_and_reads_back() {
+        let mut core = clean_core();
+        let edits = core.edits_since_autosave();
+        let out = tool_set_onion_skin(&mut core, &json!({ "enabled": false })).unwrap();
+        assert_eq!(out["enabled"], false);
+        assert!(!core.onion);
+        assert_eq!(core.undo_depth(), 0, "no undo step");
+        assert_eq!(core.edits_since_autosave(), edits, "no dirty mark");
+        let out = tool_get_onion_skin(&mut core, &json!({})).unwrap();
+        assert_eq!(out["enabled"], false);
+        assert_eq!(out["legacy_prev_frames"], core.onion_frames);
+        assert!(tool_set_onion_skin(&mut core, &json!({ "enabled": 1 })).is_err());
+    }
+
+    #[test]
+    fn get_editor_settings_reports_the_whole_surface() {
+        let mut core = clean_core();
+        core.project.weather = Some(eds_kind_preset(WeatherKind::Storm));
+        core.set_loop_range(0, 0);
+        let out = tool_get_editor_settings(&mut core, &json!({})).unwrap();
+        assert_eq!(out["weather"]["kind"], "storm");
+        assert_eq!(out["weather"]["amount"], 140.0);
+        assert_eq!(out["easing"], core.project.easing.label());
+        assert_eq!(out["tween_playback"], core.project.tween_playback);
+        assert_eq!(out["loop_range"], json!([0, 0]));
+        assert_eq!(out["onion_enabled"], core.onion);
+        assert_eq!(out["background"], core.project.background);
+    }
+}
+
+
+// ---------------------------------------------------------------------
+// Session-read MCP handlers (Wave 14, A8)
+//
+// One editor-session fact the MCP surface could not see
+// entering this wave: what the frame clipboards currently
+// hold (the copy/paste tools are built-ins in `mcp.rs`
+// and report only through the status line, so a client
+// could not tell whether a paste would succeed before
+// spending the call). The handler is read-only — no undo
+// step, no status change. (The onion-skin read/write
+// pair was A9's settings remit and landed in A9's own
+// editor.rs section: `tool_get_onion_skin` /
+// `tool_set_onion_skin` — A8's duplicate read was
+// removed in favour of A9's, which also reports the
+// legacy-frame-count caveat.)
+// ---------------------------------------------------------------------
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 14 domain-file block.
+//   Tool {
+//       name: "get_clipboard_state",
+//       description: "Read what the frame clipboards hold: 'frame' is null when the single-frame clipboard is empty, else the copied frame's figure count and duration; 'range_frames' is the range clipboard's frame count. A paste succeeds only against a non-empty matching clipboard, and refuses when the rig changed since the copy. Read-only; no undo step.",
+//       schema: obj_schema(json!({}), &[]),
+//       handler: crate::editor::tool_clipboard_state,
+//   }
+// MCP.md row:
+//   | `get_clipboard_state` | Read what the frame clipboards hold: 'frame' is null when the single-frame clipboard is empty, else the copied frame's figure count and duration; 'range_frames' is the range clipboard's frame count. A paste refuses when the clipboard is empty or the rig changed since the copy. Read-only; no undo step. | — | — |
+/// MCP handler: report the frame clipboards' contents —
+/// the single-frame clipboard as an object (figure count
+/// + duration) or null, and the range clipboard's frame
+/// count. Read-only; no undo step.
+pub fn tool_clipboard_state(
+    core: &mut EditorCore,
+    _args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let frame = core.clipboard.as_ref().map(|f| {
+        serde_json::json!({
+            "figures": f.poses.len(),
+            "duration": f.duration,
+        })
+    });
+    Ok(serde_json::json!({
+        "ok": true,
+        "frame": frame,
+        "range_frames": core.frame_clipboard.len(),
+    }))
+}
 
 #[cfg(test)]
 mod tests {
@@ -6104,6 +6916,43 @@ mod tests {
         core.copy_frame();
         core.paste_frame();
         assert_eq!(core.frame_count(), 6);
+    }
+
+    #[test]
+    fn wave14_clipboard_state_read_reports_both_clipboards() {
+        // Wave 14 (A8): the MCP clipboard read starts
+        // empty, then tracks the real clipboard fields
+        // through the copy ops themselves.
+        let mut core = EditorCore::new();
+        let out = tool_clipboard_state(&mut core, &serde_json::json!({})).unwrap();
+        assert_eq!(out["frame"], serde_json::Value::Null);
+        assert_eq!(out["range_frames"], 0);
+
+        core.copy_frame();
+        let out = tool_clipboard_state(&mut core, &serde_json::json!({})).unwrap();
+        assert_eq!(out["frame"]["figures"], 1, "the demo project has one figure");
+        assert_eq!(out["range_frames"], 0, "the single-frame copy leaves the range clipboard alone");
+
+        assert!(core.copy_range(0, 2));
+        let out = tool_clipboard_state(&mut core, &serde_json::json!({})).unwrap();
+        assert_eq!(out["range_frames"], 2);
+    }
+
+    #[test]
+    fn wave14_onion_skin_read_reports_the_core_fields() {
+        // A9's `tool_get_onion_skin` (its own editor.rs
+        // section) is the wave's onion read; this pins
+        // the two fields A8's audit confirmed it reports:
+        // the master switch, and the legacy count under
+        // its honest name.
+        let mut core = EditorCore::new();
+        let out = tool_get_onion_skin(&mut core, &serde_json::json!({})).unwrap();
+        assert_eq!(out["enabled"], true);
+        assert_eq!(out["legacy_prev_frames"], 1);
+
+        core.cycle_onion_frames();
+        let out = tool_get_onion_skin(&mut core, &serde_json::json!({})).unwrap();
+        assert_eq!(out["legacy_prev_frames"], 2);
     }
 
     // ---- Wave 11 (E6): MCP-reachability panic regressions ----

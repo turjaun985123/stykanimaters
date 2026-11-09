@@ -29,6 +29,16 @@
 //!   and non-solo figures draw no segments, so their text
 //!   must not float alone). `media_items` skips hidden
 //!   figures only; under solo the difference is visible.
+//! - **Clip-def fallback** (Wave 14, C2): a movieclip
+//!   instance whose own node carries no media reads the
+//!   same node index on its clip's def — the funnel's
+//!   per-node fallback (`media::media_items`, Wave 14 C1;
+//!   `docs/wave13/CLIP_MEDIA.md` §6.1), mirrored here
+//!   because this pass re-derives segment text instead of
+//!   consuming the funnel (whose text items carry no
+//!   alpha — see "Opacity" below). The carrier node
+//!   supplies the media, the colour and the style
+//!   opacity; placement stays on the instance's segment.
 //!
 //! ## Bent segments: the label stays on the chord (export's rule)
 //!
@@ -355,7 +365,9 @@ pub fn sprite_label_boxes(corners: [V2; 4], name: &str, color: u32) -> Vec<TextP
 
 /// Every text label visible at the core's display frame, as
 /// glyph boxes in stage coordinates: segment text for every
-/// stage-visible figure (in figure, then node order), then
+/// stage-visible figure (in figure, then node order —
+/// including clip-def text via the per-node fallback, see
+/// "Clip-def fallback" in the module docs), then
 /// the free-standing `Project.texts` instances (which the
 /// rasterizer also draws last, on top). Each label's glyph
 /// boxes carry the shell-only backing plates described in
@@ -375,7 +387,24 @@ pub fn text_geometry(core: &EditorCore) -> Vec<TextPrim> {
         }
         let pos = core.positions_f(display, fi);
         for (ni, node) in fig.def.nodes.iter().enumerate() {
-            let Some(SegmentMedia::Text { content, size }) = &node.media else {
+            // Wave 14, C2 — resolve the CARRIER node: the
+            // instance's own node when it carries media,
+            // else the same node index on the clip's def
+            // (the funnel's per-node fallback, mirrored —
+            // see "Clip-def fallback" in the module docs).
+            // A missing clip or an out-of-range clip node
+            // simply has no fallback. A carrier whose media
+            // is an image yields no text below — the image
+            // is the stage placeholder pass's business.
+            let carrier = match &node.media {
+                Some(_) => Some(node),
+                None => fig
+                    .clip
+                    .and_then(|ci| project.clips.get(ci))
+                    .and_then(|clip| clip.def.nodes.get(ni)),
+            };
+            let Some(carrier) = carrier else { continue };
+            let Some(SegmentMedia::Text { content, size }) = &carrier.media else {
                 continue;
             };
             let (a, b) = match node.parent {
@@ -390,13 +419,16 @@ pub fn text_geometry(core: &EditorCore) -> Vec<TextPrim> {
             // Chord midpoint and chord angle, whatever this
             // node's bend: the rasterizer's placement rule,
             // mirrored deliberately (see "Bent segments" in
-            // the module docs). The glyph alpha is the node's
-            // style opacity — its one application (the painter
-            // applies prim alpha verbatim).
+            // the module docs). The glyph alpha is the
+            // CARRIER node's style opacity — its one
+            // application (the painter applies prim alpha
+            // verbatim) — and the colour is the carrier's,
+            // falling back to the figure's (CLIP_MEDIA
+            // §6.2 for clip-sourced text).
             let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
             let angle_deg = ab[1].atan2(ab[0]).to_degrees();
-            let color = node.color.unwrap_or(fig.color);
-            let alpha = node.style.opacity.clamp(0.0, 1.0);
+            let color = carrier.color.unwrap_or(fig.color);
+            let alpha = carrier.style.opacity.clamp(0.0, 1.0);
             out.extend(with_backing(label_boxes_alpha(
                 mid, angle_deg, content, *size, color, alpha,
             )));
@@ -824,6 +856,110 @@ mod tests {
         assert!(colours(&glyphs(&prims)).iter().all(|c| *c == fig_color));
         // Empty labels stay empty: no plates without glyphs.
         assert!(with_backing(Vec::new()).is_empty());
+    }
+
+    /// Wave 14, C2 — turn a `core_with_segment_text` core
+    /// into the clip-def-only arrangement: the figure
+    /// becomes a movieclip instance of a clip whose def is
+    /// a clone of the figure's own (media included), and
+    /// the instance's own node media is then cleared, so
+    /// the text exists ONLY on the clip def. The clip's
+    /// single frame pose is the figure's timeline pose, so
+    /// the instance evaluates to identical geometry.
+    fn move_segment_text_to_clip_def(core: &mut EditorCore, ni: usize) {
+        let def = core.project.figures[0].def.clone();
+        let pose = core.project.frames[0].poses[0].clone();
+        core.project.clips.push(stykanimate_rs::model::ClipDef {
+            name: "clip".into(),
+            def,
+            frames: vec![pose],
+            loop_mode: stykanimate_rs::model::ClipLoop::Loop,
+        });
+        core.project.figures[0].clip = Some(0);
+        core.project.figures[0].def.nodes[ni].media = None;
+    }
+
+    /// The glyph prims of a `text_geometry` output — every
+    /// GlyphBox that is not a backing plate (plates carry
+    /// BACKING_ALPHA; glyphs carry their own alpha, which
+    /// the clip tests below deliberately set to 0.5, so
+    /// the `glyphs` helper's alpha == 1.0 filter cannot
+    /// be reused here).
+    fn glyph_prims(prims: &[TextPrim]) -> Vec<&TextPrim> {
+        prims
+            .iter()
+            .filter(|p| matches!(p, TextPrim::GlyphBox { alpha, .. } if *alpha != BACKING_ALPHA))
+            .collect()
+    }
+
+    #[test]
+    fn clip_def_text_draws_on_stage_exactly_like_figure_def_text() {
+        // Wave 14, C2: clip-def TEXT media was the one
+        // stage gap the funnel fix (C1) could not close —
+        // this pass re-derives segment text from the
+        // figure defs, so the fallback is mirrored in
+        // `text_geometry` itself. Text that exists only
+        // on the clip def must produce the identical prim
+        // stream to the same text on the instance's def.
+        let (mut core, ni, _a, _b) = core_with_segment_text("HI", 25.0);
+        let instance_drawn = text_geometry(&core);
+        assert!(!instance_drawn.is_empty(), "the fixture's label draws");
+        move_segment_text_to_clip_def(&mut core, ni);
+        assert_eq!(
+            text_geometry(&core),
+            instance_drawn,
+            "clip-def text draws glyph-for-glyph like figure-def text"
+        );
+        // The CARRIER supplies colour and alpha (CLIP_MEDIA
+        // §6.2): the clip node's values appear; the
+        // media-free instance node's colour must NOT leak
+        // in, even when set.
+        core.project.clips[0].def.nodes[ni].color = Some(0x00FF00);
+        core.project.clips[0].def.nodes[ni].style.opacity = 0.5;
+        core.project.figures[0].def.nodes[ni].color = Some(0xFF0000);
+        let glyphs = glyph_prims(&text_geometry(&core));
+        assert!(!glyphs.is_empty(), "clip-def text still draws");
+        assert!(
+            glyphs.iter().all(|p| matches!(p, TextPrim::GlyphBox { color, .. } if *color == 0x00FF00)),
+            "every glyph carries the clip node's colour"
+        );
+        assert!(
+            glyphs.iter().all(|p| matches!(p, TextPrim::GlyphBox { alpha, .. } if *alpha == 0.5)),
+            "every glyph carries the clip node's style opacity"
+        );
+        // The instance wins when it carries media again —
+        // the funnel's rule, mirrored (§6.1): its colour
+        // and its own (default) style opacity return.
+        core.project.figures[0].def.nodes[ni].media = Some(SegmentMedia::Text {
+            content: "HI".into(),
+            size: 25.0,
+        });
+        let glyphs = glyph_prims(&text_geometry(&core));
+        assert!(!glyphs.is_empty(), "the instance's text draws again");
+        assert!(
+            glyphs.iter().all(|p| matches!(p, TextPrim::GlyphBox { color, alpha, .. } if *color == 0xFF0000 && *alpha == 1.0)),
+            "the instance node's colour and opacity win"
+        );
+    }
+
+    #[test]
+    fn media_free_clip_adds_no_stage_text() {
+        // The absent side: a plain figure with a media-free
+        // clip attached draws exactly what it drew with no
+        // clip at all — attaching a clip must not invent
+        // stage text.
+        let mut core = EditorCore::new();
+        let clean = text_geometry(&core);
+        let def = core.project.figures[0].def.clone();
+        let pose = core.project.frames[0].poses[0].clone();
+        core.project.clips.push(stykanimate_rs::model::ClipDef {
+            name: "clip".into(),
+            def,
+            frames: vec![pose],
+            loop_mode: stykanimate_rs::model::ClipLoop::Loop,
+        });
+        core.project.figures[0].clip = Some(0);
+        assert_eq!(text_geometry(&core), clean);
     }
 
     #[test]

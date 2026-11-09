@@ -40,6 +40,12 @@
 //! they correctly take no snapshot and mark nothing dirty;
 //! the `dirty_contract_tests` module pins every one of these
 //! verdicts against `undo_depth` / `edits_since_autosave`.
+//! The Wave 14 parity fill below extends the same split:
+//! its session tools (`tool_get_brush`, `tool_set_draw_mode`,
+//! `tool_step_brush_param`, `tool_set_brush_nib`) write only
+//! `brush_index` / `draw_mode` or nothing, and its mutating
+//! tools snapshot exactly once — and only when a change
+//! actually happens.
 
 use crate::editor::EditorCore;
 use crate::model::{Project, Stroke, V2};
@@ -493,6 +499,27 @@ fn dops_opt_usize(args: &Value, key: &str) -> Result<Option<usize>, String> {
 
 fn dops_req_usize(args: &Value, key: &str) -> Result<usize, String> {
     dops_opt_usize(args, key)?.ok_or_else(|| format!("missing required argument '{key}'"))
+}
+
+/// A signed small integer (`direction`, `subdiv`): a JSON
+/// integer, or a float with no fractional part.
+fn dops_opt_i32(args: &Value, key: &str) -> Result<Option<i32>, String> {
+    match dops_get(args, key) {
+        Some(v) => {
+            if let Some(i) = v.as_i64() {
+                return i32::try_from(i)
+                    .map(Some)
+                    .map_err(|_| format!("argument '{key}' is too large"));
+            }
+            if let Some(f) = v.as_f64() {
+                if f.is_finite() && f.fract() == 0.0 && f >= i32::MIN as f64 && f <= i32::MAX as f64 {
+                    return Ok(Some(f as i32));
+                }
+            }
+            Err(format!("argument '{key}' must be an integer"))
+        }
+        None => Ok(None),
+    }
 }
 
 fn dops_opt_bool(args: &Value, key: &str) -> Result<Option<bool>, String> {
@@ -1219,6 +1246,675 @@ pub fn tool_set_draw_tool(core: &mut EditorCore, args: &Value) -> Result<Value, 
     Ok(json!({
         "ok": true,
         "tool": tool,
+        "status": core.status,
+    }))
+}
+
+// ---------------------------------------------------------------------
+// MCP handlers (Wave 14, A3): the draw/stroke parity fill —
+// every draw capability the Wave 11/12 surface left without
+// a tool, each written against the same discipline as the
+// handlers above (validate first, finiteness, refusals quote
+// the offending index/value, exactly one undo step per
+// mutation, no step for a change that does not exist).
+// ---------------------------------------------------------------------
+
+/// The active brush preset in full, plus the draw-session
+/// facts the Draw panel's readouts show (Phase J/K and the
+/// Wave 10 scatter readout in `draw_tools`, and the stroke
+/// inspector's preset header): preset index / name / width /
+/// nib / nib angle / smoothing / opacity / scatter, the
+/// active draw tool, the eraser radius the core derives
+/// from the preset (`active width × 2`, editor.rs
+/// `eraser_radius`) and the draw-mode flag `get_state`
+/// already exposes. `list_brushes` carries the same preset
+/// fields buried in the library array; this is the direct
+/// read of the one preset that is active. Read-only.
+///
+// TOOL ENTRY SPEC: for the integrator's registry splice
+// in `mcp_tools::tools()`, beside the other
+// `crate::draw_ops` entries (after `list_brushes`):
+//
+//   Tool {
+//       name: "get_brush",
+//       description: "Read the ACTIVE brush preset in full (the Draw panel's preset readouts, as data): index, name, width, nib, nib angle, smoothing, opacity and scatter, plus the active draw tool ('brush' or 'eraser'), the eraser radius the preset sizes (twice its width) and the draw-mode flag. Read-only.",
+//       schema: obj_schema(json!({}), &[]),
+//       handler: crate::draw_ops::tool_get_brush,
+//   }
+//
+// MCP.md ROW SPEC: for the draw-tools table, after the
+// `list_brushes` row:
+//
+//   | `get_brush` | Read the ACTIVE brush preset in full (the Draw panel's preset readouts, as data): index, name, width, nib, nib angle, smoothing, opacity and scatter, plus the active draw tool, the eraser radius the preset sizes (twice its width) and the draw-mode flag. Read-only. | — | — |
+pub fn tool_get_brush(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    let lib = crate::paint::brush_library();
+    let index = core.brush_index.min(lib.len().saturating_sub(1));
+    let b = core.active_brush();
+    Ok(json!({
+        "ok": true,
+        "index": index,
+        "name": b.name,
+        "width": b.width,
+        "nib": match b.nib {
+            crate::paint::Nib::Round => "round",
+            crate::paint::Nib::Square => "square",
+            crate::paint::Nib::Calligraphy => "calligraphy",
+        },
+        "nib_angle": b.nib_angle,
+        "smoothing": b.smoothing,
+        "opacity": b.opacity,
+        "scatter": b.scatter,
+        "tool": if core.draw_tool_is_eraser() { "eraser" } else { "brush" },
+        "eraser_radius": b.width * 2.0,
+        "draw_mode": core.draw_mode,
+    }))
+}
+
+/// Set the draw-mode flag — the Draw panel's Draw toggle
+/// and the palette's `draw-mode` command both flip the
+/// public `EditorCore::draw_mode` field (there is no op);
+/// this is the idempotent set form, like `tool_set_draw_tool`
+/// beside it, with the panel button's own status strings.
+/// Session state only: no snapshot, no dirty mark (the
+/// session family `tool_set_brush` belongs to).
+///
+// TOOL ENTRY SPEC: for the integrator's registry splice
+// in `mcp_tools::tools()`, beside the other
+// `crate::draw_ops` entries (after `set_draw_tool`):
+//
+//   Tool {
+//       name: "set_draw_mode",
+//       description: "Set draw mode on or off (the Draw panel's Draw toggle / the palette's draw-mode command, as an idempotent set): in draw mode, dragging on the canvas paints a stroke on the current frame instead of posing. Session state only — not an undo step.",
+//       schema: obj_schema(
+//           json!({
+//               "enabled": { "type": "boolean" }
+//           }),
+//           &["enabled"],
+//       ),
+//       handler: crate::draw_ops::tool_set_draw_mode,
+//   }
+//
+// MCP.md ROW SPEC: for the draw-tools table, after the
+// `set_draw_tool` row:
+//
+//   | `set_draw_mode` | Set draw mode on or off (the Draw panel's Draw toggle / the palette's draw-mode command, as an idempotent set): in draw mode, dragging on the canvas paints a stroke on the current frame instead of posing. Session state only — not an undo step. | `enabled` | — |
+pub fn tool_set_draw_mode(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let enabled = dops_opt_bool(args, "enabled")?
+        .ok_or_else(|| "missing required argument 'enabled'".to_string())?;
+    core.draw_mode = enabled;
+    core.status = if enabled {
+        "Draw mode: drag on the canvas to paint a stroke on this frame.".into()
+    } else {
+        "Pose mode.".into()
+    };
+    Ok(json!({
+        "ok": true,
+        "draw_mode": core.draw_mode,
+        "status": core.status,
+    }))
+}
+
+/// One brush parameter a preset stepper can step, in the
+/// stroke inspector's own vocabulary (`Param` there): the
+/// preset-bundle fields of `paint::Brush`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrushParam {
+    Size,
+    Opacity,
+    Scatter,
+    Smoothing,
+}
+
+impl BrushParam {
+    fn value(self, b: &crate::paint::Brush) -> f32 {
+        match self {
+            BrushParam::Size => b.width,
+            BrushParam::Opacity => b.opacity,
+            BrushParam::Scatter => b.scatter,
+            BrushParam::Smoothing => b.smoothing as f32,
+        }
+    }
+
+    /// The inspector's status text when no preset steps in
+    /// direction `dir` (copied from `Param::no_step_message`).
+    fn no_step_message(self, dir: i32) -> &'static str {
+        match (self, dir > 0) {
+            (BrushParam::Size, true) => "No wider brush in the library.",
+            (BrushParam::Size, false) => "No narrower brush in the library.",
+            (BrushParam::Opacity, true) => "No more opaque brush in the library.",
+            (BrushParam::Opacity, false) => "No fainter brush in the library.",
+            (BrushParam::Scatter, true) => "No broader-scatter brush in the library.",
+            (BrushParam::Scatter, false) => "No tighter-scatter brush in the library.",
+            (BrushParam::Smoothing, true) => "No smoother brush in the library.",
+            (BrushParam::Smoothing, false) => "No rougher brush in the library.",
+        }
+    }
+}
+
+/// Step the active brush selection by one preset parameter
+/// — the stroke inspector's Preset size / opacity / scatter /
+/// smoothing steppers (`stroke_inspector::step_param`):
+/// select the nearest library preset whose value for that
+/// parameter is strictly higher (`direction` 1) or lower
+/// (−1), smallest difference winning, ties to the lowest
+/// library index. The inspector lives in the shell crate, so
+/// its stepping rule is re-stated here against
+/// `paint::brush_library` rather than called. When no preset
+/// steps that way the selection stays put and the reply
+/// reports `changed: false` with the panel's own status
+/// text — a no-op is not an error, exactly as on the panel.
+/// Session state only: no snapshot, no dirty mark.
+///
+// TOOL ENTRY SPEC: for the integrator's registry splice
+// in `mcp_tools::tools()`, beside the other
+// `crate::draw_ops` entries (after `cycle_brush`):
+//
+//   Tool {
+//       name: "step_brush_param",
+//       description: "Step the active brush selection by one preset parameter (the stroke inspector's Preset size / opacity / scatter / smoothing steppers): selects the nearest library preset whose value for 'param' is strictly higher ('direction' 1) or lower (-1). Because presets are bundles the other parameters follow the chosen preset. Reports changed: false, with the panel's status text, when no preset steps that way. Session state only — not an undo step.",
+//       schema: obj_schema(
+//           json!({
+//               "param": { "type": "string", "enum": ["size", "width", "opacity", "scatter", "smoothing"] },
+//               "direction": { "type": "integer", "description": "1 to step up, -1 to step down" }
+//           }),
+//           &["param", "direction"],
+//       ),
+//       handler: crate::draw_ops::tool_step_brush_param,
+//   }
+//
+// MCP.md ROW SPEC: for the draw-tools table, after the
+// `cycle_brush` row:
+//
+//   | `step_brush_param` | Step the active brush selection by one preset parameter (the stroke inspector's Preset size / opacity / scatter / smoothing steppers): selects the nearest library preset whose value for 'param' is strictly higher ('direction' 1) or lower (-1); the other parameters follow the chosen preset, because presets are bundles. Reports changed: false, with the panel's status text, when no preset steps that way. Session state only — not an undo step. | `param`, `direction` | — |
+pub fn tool_step_brush_param(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let param = match dops_opt_str(args, "param")?
+        .ok_or_else(|| "missing required argument 'param'".to_string())?
+    {
+        "size" | "width" => BrushParam::Size,
+        "opacity" => BrushParam::Opacity,
+        "scatter" => BrushParam::Scatter,
+        "smoothing" => BrushParam::Smoothing,
+        other => {
+            return Err(format!(
+                "unknown brush param '{other}' (expected \"size\", \"opacity\", \
+                 \"scatter\" or \"smoothing\")"
+            ))
+        }
+    };
+    let dir = dops_opt_i32(args, "direction")?
+        .ok_or_else(|| "missing required argument 'direction'".to_string())?;
+    if dir != 1 && dir != -1 {
+        return Err(format!(
+            "argument 'direction' must be 1 (step up) or -1 (step down), got {dir}"
+        ));
+    }
+    let lib = crate::paint::brush_library();
+    if lib.is_empty() {
+        return Err("the brush library is empty".into());
+    }
+    let cur = core.brush_index.min(lib.len() - 1);
+    // The inspector's stepping rule (`step_index_by`):
+    // nearest value strictly in the stepped direction,
+    // smallest difference wins, ties keep the lowest index.
+    let cur_value = param.value(&lib[cur]);
+    let mut best: Option<(f32, usize)> = None;
+    for (i, b) in lib.iter().enumerate() {
+        if i == cur {
+            continue;
+        }
+        let v = param.value(b);
+        if (dir > 0 && v <= cur_value) || (dir < 0 && v >= cur_value) {
+            continue;
+        }
+        let d = (v - cur_value).abs();
+        match best {
+            Some((bd, _)) if d >= bd => {}
+            _ => best = Some((d, i)),
+        }
+    }
+    match best {
+        Some((_, i)) => {
+            core.brush_index = i;
+            let b = lib[i];
+            core.status = format!("Brush: {} (width {:.0}).", b.name, b.width);
+            Ok(json!({
+                "ok": true,
+                "changed": true,
+                "index": i,
+                "name": b.name,
+                "status": core.status,
+            }))
+        }
+        None => {
+            core.status = param.no_step_message(dir).into();
+            Ok(json!({
+                "ok": true,
+                "changed": false,
+                "index": cur,
+                "name": lib[cur].name,
+                "status": core.status,
+            }))
+        }
+    }
+}
+
+/// Select the active brush by nib — the stroke inspector's
+/// Preset nib segmented control (`stroke_inspector::select_nib`):
+/// the FIRST library preset carrying the chosen nib (Round →
+/// Pen, Square → Brush, Calligraphy → Calligraphy in the
+/// shipped library). The nib a preset carries was otherwise
+/// only reachable by naming the exact preset to `set_brush`.
+/// Session state only: no snapshot, no dirty mark.
+///
+// TOOL ENTRY SPEC: for the integrator's registry splice
+// in `mcp_tools::tools()`, beside the other
+// `crate::draw_ops` entries (after `step_brush_param`):
+//
+//   Tool {
+//       name: "set_brush_nib",
+//       description: "Select the active brush preset by its nib (the stroke inspector's Preset nib segmented control): the first library preset carrying nib 'round', 'square' or 'calligraphy' becomes active. Session state only — not an undo step.",
+//       schema: obj_schema(
+//           json!({
+//               "nib": { "type": "string", "enum": ["round", "square", "calligraphy"] }
+//           }),
+//           &["nib"],
+//       ),
+//       handler: crate::draw_ops::tool_set_brush_nib,
+//   }
+//
+// MCP.md ROW SPEC: for the draw-tools table, after the
+// `step_brush_param` row:
+//
+//   | `set_brush_nib` | Select the active brush preset by its nib (the stroke inspector's Preset nib segmented control): the first library preset carrying nib 'round', 'square' or 'calligraphy' becomes active. Session state only — not an undo step. | `nib` | — |
+pub fn tool_set_brush_nib(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let nib = match dops_opt_str(args, "nib")?
+        .ok_or_else(|| "missing required argument 'nib'".to_string())?
+    {
+        "round" => crate::paint::Nib::Round,
+        "square" => crate::paint::Nib::Square,
+        "calligraphy" => crate::paint::Nib::Calligraphy,
+        other => {
+            return Err(format!(
+                "unknown nib '{other}' (expected \"round\", \"square\" or \"calligraphy\")"
+            ))
+        }
+    };
+    let lib = crate::paint::brush_library();
+    let Some(index) = lib.iter().position(|b| b.nib == nib) else {
+        return Err("no brush in the library carries that nib".into());
+    };
+    let changed = core.brush_index.min(lib.len().saturating_sub(1)) != index;
+    core.brush_index = index;
+    let b = lib[index];
+    core.status = format!("Brush: {} (width {:.0}).", b.name, b.width);
+    Ok(json!({
+        "ok": true,
+        "changed": changed,
+        "index": index,
+        "name": b.name,
+        "status": core.status,
+    }))
+}
+
+/// Apply a nib width profile to ONE stroke — the
+/// single-stroke form of the frame-wide `apply_nib` tool,
+/// standing to it exactly as `simplify_stroke` stands to
+/// `simplify_strokes`: the same [`apply_nib`] rewrite the
+/// editor's own stroke finalisation runs, addressed by the
+/// stroke's project-wide index instead of by frame. One
+/// undo step.
+///
+// TOOL ENTRY SPEC: for the integrator's registry splice
+// in `mcp_tools::tools()`, beside the other
+// `crate::draw_ops` entries (after `simplify_stroke`):
+//
+//   Tool {
+//       name: "apply_nib_stroke",
+//       description: "Give ONE stroke, by its project-wide index (see list_strokes), a nib width profile: \"round\" (uniform), \"square\" or \"calligraphy\" (angle-dependent, angle in degrees, default 45) — the single-stroke form of apply_nib, computed from the stroke's own width as the nib size. Replaces any per-point widths the stroke carried. One undo step.",
+//       schema: obj_schema(
+//           json!({
+//               "index": { "type": "integer" },
+//               "nib": { "type": "string", "enum": ["round", "square", "calligraphy"] },
+//               "angle": { "type": "number", "description": "Nib angle in degrees (default 45)" }
+//           }),
+//           &["index", "nib"],
+//       ),
+//       handler: crate::draw_ops::tool_apply_nib_stroke,
+//   }
+//
+// MCP.md ROW SPEC: for the draw-tools table, after the
+// `apply_nib` row:
+//
+//   | `apply_nib_stroke` | Give ONE stroke, by its project-wide index (see list_strokes), a nib width profile: "round" (uniform), "square" or "calligraphy" (angle-dependent, angle in degrees, default 45) — the single-stroke form of apply_nib, computed from the stroke's own width as the nib size. Replaces any per-point widths the stroke carried. One undo step. | `index`, `nib` | `angle` |
+pub fn tool_apply_nib_stroke(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = dops_req_usize(args, "index")?;
+    let Some(stroke) = core.project.strokes.get(index) else {
+        return Err(format!("no stroke at index {index}"));
+    };
+    let nib = match dops_opt_str(args, "nib")?
+        .ok_or_else(|| "missing required argument 'nib'".to_string())?
+    {
+        "round" => Nib::Round,
+        "square" => Nib::Square,
+        "calligraphy" => Nib::Calligraphy,
+        other => {
+            return Err(format!(
+                "unknown nib '{other}' (expected \"round\", \"square\" or \"calligraphy\")"
+            ))
+        }
+    };
+    let angle = dops_opt_f32(args, "angle")?.unwrap_or(45.0);
+    let points = stroke.points.len();
+    core.snapshot();
+    apply_nib(&mut core.project.strokes[index], nib, angle);
+    core.status = format!("Stroke {} nib profiled.", index + 1);
+    Ok(json!({
+        "ok": true,
+        "index": index,
+        "points": points,
+        "widths": core.project.strokes[index].widths.len(),
+        "status": core.status,
+    }))
+}
+
+/// Chaikin-smooth ONE stroke — the single-stroke form of
+/// the frame-wide `smooth_strokes` tool, running the same
+/// [`smooth_stroke`] the editor's stroke finalisation runs
+/// with the active brush's smoothing count. `subdiv` is the
+/// number of Chaikin passes (default 1, the frame-wide
+/// tool's count), bounded at 4 — the broadest library preset
+/// smooths 3 times, and each pass roughly doubles the point
+/// count. Honesty rule from `tool_simplify_stroke`: when the
+/// stroke cannot change (fewer than 2 points), NO snapshot
+/// is taken and the reply reports `smoothed: false`. One
+/// undo step when it smooths.
+///
+// TOOL ENTRY SPEC: for the integrator's registry splice
+// in `mcp_tools::tools()`, beside the other
+// `crate::draw_ops` entries (after `apply_nib_stroke`):
+//
+//   Tool {
+//       name: "smooth_stroke",
+//       description: "Chaikin-smooth ONE stroke by its project-wide index (see list_strokes) — the single-stroke form of smooth_strokes: 'subdiv' corner-cutting passes (default 1, at most 4), endpoints pinned, per-point widths resampled onto the new points. Returns smoothed: false — and takes no undo step — when the stroke has fewer than 2 points and cannot change. One undo step when it smooths.",
+//       schema: obj_schema(
+//           json!({
+//               "index": { "type": "integer" },
+//               "subdiv": { "type": "integer", "description": "Chaikin passes, 1-4 (default 1)" }
+//           }),
+//           &["index"],
+//       ),
+//       handler: crate::draw_ops::tool_smooth_stroke,
+//   }
+//
+// MCP.md ROW SPEC: for the draw-tools table, after the
+// `smooth_strokes` row:
+//
+//   | `smooth_stroke` | Chaikin-smooth ONE stroke by its project-wide index (see list_strokes) — the single-stroke form of smooth_strokes: 'subdiv' corner-cutting passes (default 1, at most 4), endpoints pinned, per-point widths resampled onto the new points. Returns smoothed: false — and takes no undo step — when the stroke has fewer than 2 points and cannot change. One undo step when it smooths. | `index` | `subdiv` |
+pub fn tool_smooth_stroke(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = dops_req_usize(args, "index")?;
+    let subdiv = dops_opt_i32(args, "subdiv")?.unwrap_or(1);
+    if !(1..=4).contains(&subdiv) {
+        return Err(format!(
+            "argument 'subdiv' must be between 1 and 4, got {subdiv}"
+        ));
+    }
+    let Some(stroke) = core.project.strokes.get(index) else {
+        return Err(format!("no stroke at index {index}"));
+    };
+    let before_points = stroke.points.clone();
+    if before_points.len() < 2 {
+        core.status = format!("Stroke {} is too short to smooth.", index + 1);
+        return Ok(json!({
+            "ok": true,
+            "smoothed": false,
+            "index": index,
+            "points": before_points.len(),
+            "status": core.status,
+        }));
+    }
+    core.snapshot();
+    smooth_stroke(&mut core.project.strokes[index], subdiv as usize);
+    let after = core.project.strokes[index].points.len();
+    core.status = format!("Stroke {} smoothed to {} points.", index + 1, after);
+    Ok(json!({
+        "ok": true,
+        "smoothed": true,
+        "index": index,
+        "points_before": before_points.len(),
+        "points_after": after,
+        "status": core.status,
+    }))
+}
+
+/// Mirror EVERY stroke in the project — the project-wide
+/// form of the current-frame `mirror_strokes` tool, running
+/// this module's [`mirror_strokes_all`], which until now no
+/// surface could reach (the Draw panel's button and the
+/// existing tool both stop at the current frame). `cx` is
+/// the mirror line's x in stage coordinates, defaulting to
+/// the stage's vertical centre, the frame-wide form's line.
+/// An empty project is an error, not a silent success (the
+/// `mirror_strokes` discipline). One undo step.
+///
+// TOOL ENTRY SPEC: for the integrator's registry splice
+// in `mcp_tools::tools()`, beside the other
+// `crate::draw_ops` entries (after `mirror_strokes`):
+//
+//   Tool {
+//       name: "mirror_all_strokes",
+//       description: "Mirror EVERY stroke in the project, on all frames, across the vertical line x = 'cx' (default: the stage's vertical centre) — the project-wide form of mirror_strokes. Only points change. Errors on a project with no strokes. One undo step.",
+//       schema: obj_schema(
+//           json!({
+//               "cx": { "type": "number", "description": "Mirror line x in stage coordinates (default: stage centre)" }
+//           }),
+//           &[],
+//       ),
+//       handler: crate::draw_ops::tool_mirror_all_strokes,
+//   }
+//
+// MCP.md ROW SPEC: for the draw-tools table, after the
+// `mirror_strokes` row:
+//
+//   | `mirror_all_strokes` | Mirror EVERY stroke in the project, on all frames, across the vertical line x = 'cx' (default: the stage's vertical centre) — the project-wide form of mirror_strokes. Only points change. Errors on a project with no strokes. One undo step. | — | `cx` |
+pub fn tool_mirror_all_strokes(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let cx = dops_opt_f32(args, "cx")?.unwrap_or_else(|| core.project.stage[0] / 2.0);
+    if core.project.strokes.is_empty() {
+        return Err("no strokes to mirror (the project has no strokes)".into());
+    }
+    core.snapshot();
+    let mirrored = mirror_strokes_all(&mut core.project, cx);
+    core.status = format!("Mirrored {mirrored} stroke(s) across x = {cx}.");
+    Ok(json!({
+        "ok": true,
+        "mirrored": mirrored,
+        "cx": cx,
+        "status": core.status,
+    }))
+}
+
+/// Edit one stroke's spray mark — the one rendered stroke
+/// field no tool could write: `set_stroke_style` refuses
+/// `opacity` and `scatter` on a spray stroke precisely
+/// because its visible opacity lives on the mark, and until
+/// now the mark itself (seed / radius / opacity) was
+/// writeable only at creation time, by `draw_spray` or a
+/// scatter brush. This is its editor, in `set_stroke_style`'s
+/// shape: pass `radius` (> 0), `opacity` (0–1) and/or `seed`
+/// to set the mark's fields — on a plain stroke they CREATE
+/// the mark (defaults: the Spray preset's radius 12 and
+/// opacity 0.5, and the deterministic seed `begin_draw`
+/// derives, `0x5EED_0000 + frame × 131 + index`, so an
+/// MCP-made spray renders identically to a hand-drawn one) —
+/// or pass `clear_spray: true` alone to remove the mark and
+/// return the stroke to a plain polyline. Clearing a stroke
+/// that carries no mark is a no-op reported with
+/// `changed: false` and spends no undo step. The stroke's
+/// own `opacity` / `scatter` fields are NOT touched: the
+/// mark takes render precedence over both, exactly as
+/// `begin_draw` records it. One undo step when the mark
+/// changes.
+///
+// TOOL ENTRY SPEC: for the integrator's registry splice
+// in `mcp_tools::tools()`, beside the other
+// `crate::draw_ops` entries (after `set_stroke_style`):
+//
+//   Tool {
+//       name: "set_stroke_spray",
+//       description: "Edit one stroke's spray mark by its project-wide index (see list_strokes) — the field set_stroke_style cannot reach: 'radius' (> 0), 'opacity' (0-1) and/or 'seed' set the mark's fields, creating the mark on a plain stroke (defaults: radius 12, opacity 0.5, the deterministic begin_draw seed); 'clear_spray': true removes the mark instead, returning the stroke to a plain polyline. At least one field is required. Clearing a markless stroke reports changed: false and takes no undo step. One undo step when the mark changes.",
+//       schema: obj_schema(
+//           json!({
+//               "index": { "type": "integer" },
+//               "radius": { "type": "number", "description": "Spray radius in stage units" },
+//               "opacity": { "type": "number" },
+//               "seed": { "type": "integer" },
+//               "clear_spray": { "type": "boolean", "description": "Remove the spray mark" }
+//           }),
+//           &["index"],
+//       ),
+//       handler: crate::draw_ops::tool_set_stroke_spray,
+//   }
+//
+// MCP.md ROW SPEC: for the draw-tools table, after the
+// `set_stroke_style` row:
+//
+//   | `set_stroke_spray` | Edit one stroke's spray mark by its project-wide index (see list_strokes) — the field set_stroke_style cannot reach: 'radius' (> 0), 'opacity' (0-1) and/or 'seed' set the mark's fields, creating the mark on a plain stroke (defaults: radius 12, opacity 0.5, the deterministic begin_draw seed); 'clear_spray': true removes the mark instead, returning the stroke to a plain polyline. At least one field is required. Clearing a markless stroke reports changed: false and takes no undo step. One undo step when the mark changes. | `index` | `radius`, `opacity`, `seed`, `clear_spray` |
+pub fn tool_set_stroke_spray(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let index = dops_req_usize(args, "index")?;
+    let Some(stroke) = core.project.strokes.get(index) else {
+        return Err(format!("no stroke at index {index}"));
+    };
+    let radius = dops_opt_f32(args, "radius")?;
+    let opacity = dops_opt_f32(args, "opacity")?;
+    let seed = dops_opt_usize(args, "seed")?.map(|s| s as u64);
+    let clear = dops_opt_bool(args, "clear_spray")?.unwrap_or(false);
+    if clear && (radius.is_some() || opacity.is_some() || seed.is_some()) {
+        return Err("pass either spray fields or 'clear_spray', not both".into());
+    }
+    if !clear && radius.is_none() && opacity.is_none() && seed.is_none() {
+        return Err(
+            "nothing to set: pass at least one of 'radius', 'opacity', 'seed' \
+             or 'clear_spray'"
+                .into(),
+        );
+    }
+    if let Some(r) = radius {
+        if r <= 0.0 {
+            return Err("argument 'radius' must be positive".into());
+        }
+    }
+    if let Some(o) = opacity {
+        if !(0.0..=1.0).contains(&o) {
+            return Err("argument 'opacity' must be between 0 and 1".into());
+        }
+    }
+    if clear {
+        if stroke.spray.is_none() {
+            core.status = format!("Stroke {} has no spray mark to clear.", index + 1);
+            return Ok(json!({
+                "ok": true,
+                "changed": false,
+                "index": index,
+                "spray": Value::Null,
+                "status": core.status,
+            }));
+        }
+        core.snapshot();
+        core.project.strokes[index].spray = None;
+        core.status = format!("Stroke {} spray mark cleared.", index + 1);
+        return Ok(json!({
+            "ok": true,
+            "changed": true,
+            "index": index,
+            "spray": Value::Null,
+            "status": core.status,
+        }));
+    }
+    let frame = stroke.frame;
+    core.snapshot();
+    let stroke = &mut core.project.strokes[index];
+    let mark = stroke.spray.get_or_insert(crate::model::SprayMark {
+        seed: 0x5EED_0000u64 + (frame as u64) * 131 + index as u64,
+        radius: 12.0,
+        opacity: 0.5,
+    });
+    if let Some(r) = radius {
+        mark.radius = r;
+    }
+    if let Some(o) = opacity {
+        mark.opacity = o;
+    }
+    if let Some(s) = seed {
+        mark.seed = s;
+    }
+    let mark = *mark;
+    core.status = format!("Stroke {} spray mark updated.", index + 1);
+    Ok(json!({
+        "ok": true,
+        "changed": true,
+        "index": index,
+        "spray": json!({
+            "seed": mark.seed,
+            "radius": mark.radius,
+            "opacity": mark.opacity,
+        }),
+        "status": core.status,
+    }))
+}
+
+/// Clear the strokes on ANY frame — the frame-addressed
+/// form of `clear_frame_strokes`, whose core op
+/// (`EditorCore::clear_frame_drawings`) is current-frame-only
+/// and whose handler therefore refuses every other frame.
+/// Every other frame-wide draw tool (`erase_strokes`,
+/// `smooth_strokes`, `simplify_strokes`, `apply_nib`) takes
+/// its frame as an argument; this closes that asymmetry
+/// with the same retain the core op performs, snapshot
+/// first and only when the frame actually carries strokes
+/// (the op's own discipline). The current frame may be
+/// named too — the result is identical there.
+///
+// TOOL ENTRY SPEC: for the integrator's registry splice
+// in `mcp_tools::tools()`, beside the other
+// `crate::draw_ops` entries (after `clear_frame_strokes`):
+//
+//   Tool {
+//       name: "clear_strokes_on_frame",
+//       description: "Remove every stroke on the NAMED frame (the frame-addressed form of clear_frame_strokes, whose core op is current-frame-only): 'frame' is required and may name any frame, including the current one. One undo step when the frame carried strokes.",
+//       schema: obj_schema(
+//           json!({
+//               "frame": { "type": "integer" }
+//           }),
+//           &["frame"],
+//       ),
+//       handler: crate::draw_ops::tool_clear_strokes_on_frame,
+//   }
+//
+// MCP.md ROW SPEC: for the draw-tools table, after the
+// `clear_frame_strokes` row:
+//
+//   | `clear_strokes_on_frame` | Remove every stroke on the NAMED frame (the frame-addressed form of clear_frame_strokes, whose core op is current-frame-only): 'frame' is required and may name any frame, including the current one. One undo step when the frame carried strokes. | `frame` | — |
+pub fn tool_clear_strokes_on_frame(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let frame = dops_req_usize(args, "frame")?;
+    dops_check_frame(core, frame)?;
+    let n = stroke_count(&core.project, frame);
+    if n == 0 {
+        core.status = format!("No strokes on frame {} to clear.", frame + 1);
+        return Ok(json!({
+            "ok": true,
+            "frame": frame,
+            "cleared": 0,
+            "count": core.project.strokes.len(),
+            "status": core.status,
+        }));
+    }
+    core.snapshot();
+    core.project.strokes.retain(|s| s.frame != frame);
+    core.status = format!("Cleared {n} stroke(s) on frame {}.", frame + 1);
+    Ok(json!({
+        "ok": true,
+        "frame": frame,
+        "cleared": n,
+        "count": core.project.strokes.len(),
         "status": core.status,
     }))
 }
@@ -2166,6 +2862,240 @@ mod mcp_handler_tests {
         assert_eq!(out["total_length"], 80.0);
         assert_eq!(out["spray_strokes"], 1);
         assert_eq!(out["strokes_on_current_frame"], 1);
+    }
+
+    // ---- Wave 14 (A3) parity fill ----
+
+    #[test]
+    fn get_brush_reports_the_active_preset_and_session() {
+        let mut core = EditorCore::new();
+        let out = tool_get_brush(&mut core, &json!({})).unwrap();
+        assert_eq!(out["name"], "Pen");
+        assert_eq!(out["width"], 4.0);
+        assert_eq!(out["nib"], "round");
+        assert_eq!(out["tool"], "brush");
+        assert_eq!(out["eraser_radius"], 8.0);
+        assert_eq!(out["draw_mode"], false);
+        tool_set_brush(&mut core, &json!({"name": "spray"})).unwrap();
+        let out = tool_get_brush(&mut core, &json!({})).unwrap();
+        assert_eq!(out["name"], "Spray");
+        assert_eq!(out["scatter"], 12.0);
+        assert_eq!(out["opacity"], 0.5);
+    }
+
+    #[test]
+    fn set_draw_mode_sets_the_flag_and_the_panel_status() {
+        let mut core = EditorCore::new();
+        let undo_before = core.undo_depth();
+        let out = tool_set_draw_mode(&mut core, &json!({"enabled": true})).unwrap();
+        assert_eq!(out["draw_mode"], true);
+        assert!(core.draw_mode);
+        assert!(out["status"].as_str().unwrap().starts_with("Draw mode:"));
+        let out = tool_set_draw_mode(&mut core, &json!({"enabled": false})).unwrap();
+        assert_eq!(out["status"], "Pose mode.");
+        assert!(!core.draw_mode);
+        assert!(tool_set_draw_mode(&mut core, &json!({})).is_err());
+        assert_eq!(core.undo_depth(), undo_before, "session write: no undo step");
+    }
+
+    #[test]
+    fn step_brush_param_walks_the_library_by_value() {
+        let mut core = EditorCore::new();
+        // From Pen (width 4): the nearest wider preset is
+        // Chisel Marker (5), the inspector's stepping rule.
+        let out = tool_step_brush_param(
+            &mut core,
+            &json!({"param": "size", "direction": 1}),
+        )
+        .unwrap();
+        assert_eq!(out["changed"], true);
+        assert_eq!(out["name"], "Chisel Marker");
+        assert_eq!(core.active_brush().name, "Chisel Marker");
+        // Spray is the only scattered preset: stepping
+        // scatter up from Pen lands on it.
+        let mut core = EditorCore::new();
+        let out = tool_step_brush_param(
+            &mut core,
+            &json!({"param": "scatter", "direction": 1}),
+        )
+        .unwrap();
+        assert_eq!(out["name"], "Spray");
+        // Nothing scatters tighter than Pen's 0: an honest
+        // no-step report, not an error, and no move.
+        let mut core = EditorCore::new();
+        let out = tool_step_brush_param(
+            &mut core,
+            &json!({"param": "scatter", "direction": -1}),
+        )
+        .unwrap();
+        assert_eq!(out["changed"], false);
+        assert_eq!(out["status"], "No tighter-scatter brush in the library.");
+        assert_eq!(core.active_brush().name, "Pen");
+        // Bad inputs refuse, quoting the offender.
+        let err = tool_step_brush_param(
+            &mut core,
+            &json!({"param": "size", "direction": 2}),
+        )
+        .unwrap_err();
+        assert!(err.contains("direction"), "{err}");
+        assert!(tool_step_brush_param(
+            &mut core,
+            &json!({"param": "weight", "direction": 1})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn set_brush_nib_selects_the_first_preset_with_that_nib() {
+        let mut core = EditorCore::new();
+        let out = tool_set_brush_nib(&mut core, &json!({"nib": "square"})).unwrap();
+        assert_eq!(out["name"], "Brush", "the first square-nib preset");
+        let out = tool_set_brush_nib(&mut core, &json!({"nib": "calligraphy"})).unwrap();
+        assert_eq!(out["name"], "Calligraphy");
+        let out = tool_set_brush_nib(&mut core, &json!({"nib": "round"})).unwrap();
+        assert_eq!(out["name"], "Pen");
+        assert!(tool_set_brush_nib(&mut core, &json!({"nib": "airbrush"})).is_err());
+    }
+
+    #[test]
+    fn apply_nib_stroke_profiles_only_that_stroke() {
+        let mut core = EditorCore::new();
+        draw_line(&mut core, 0.0);
+        draw_line(&mut core, 0.0);
+        let undo_before = core.undo_depth();
+        let out = tool_apply_nib_stroke(
+            &mut core,
+            &json!({"index": 1, "nib": "calligraphy", "angle": 30.0}),
+        )
+        .unwrap();
+        assert_eq!(out["widths"], 3, "one width per point");
+        assert_eq!(core.project.strokes[1].widths.len(), 3);
+        assert!(
+            core.project.strokes[0].widths.is_empty(),
+            "the other stroke is untouched"
+        );
+        assert_eq!(core.undo_depth(), undo_before + 1, "one undo step");
+        let err = tool_apply_nib_stroke(
+            &mut core,
+            &json!({"index": 9, "nib": "round"}),
+        )
+        .unwrap_err();
+        assert!(err.contains("index 9"), "{err}");
+        assert!(tool_apply_nib_stroke(
+            &mut core,
+            &json!({"index": 0, "nib": "airbrush"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn smooth_stroke_smooths_one_and_stays_honest_when_too_short() {
+        let mut core = EditorCore::new();
+        tool_draw_stroke(
+            &mut core,
+            &json!({"frame": 0, "points": [[0.0, 0.0], [20.0, 10.0], [40.0, 0.0]]}),
+        )
+        .unwrap();
+        let undo_before = core.undo_depth();
+        let out = tool_smooth_stroke(&mut core, &json!({"index": 0})).unwrap();
+        assert_eq!(out["smoothed"], true);
+        assert!(core.project.strokes[0].points.len() > 3, "Chaikin adds points");
+        assert_eq!(core.undo_depth(), undo_before + 1, "one undo step");
+        // A one-point stroke cannot change: no snapshot.
+        tool_draw_stroke(&mut core, &json!({"frame": 0, "points": [[5.0, 5.0]]})).unwrap();
+        let undo_before = core.undo_depth();
+        let out = tool_smooth_stroke(&mut core, &json!({"index": 1})).unwrap();
+        assert_eq!(out["smoothed"], false);
+        assert_eq!(core.undo_depth(), undo_before, "no phantom undo step");
+        assert!(tool_smooth_stroke(&mut core, &json!({"index": 0, "subdiv": 9})).is_err());
+        assert!(tool_smooth_stroke(&mut core, &json!({"index": 7})).is_err());
+    }
+
+    #[test]
+    fn mirror_all_strokes_mirrors_every_frame() {
+        let mut core = EditorCore::new();
+        draw_line(&mut core, 0.0);
+        tool_draw_stroke(
+            &mut core,
+            &json!({"frame": 1, "points": [[0.0, 0.0], [10.0, 0.0]]}),
+        )
+        .unwrap();
+        let cx = core.project.stage[0] / 2.0;
+        let undo_before = core.undo_depth();
+        let out = tool_mirror_all_strokes(&mut core, &json!({})).unwrap();
+        assert_eq!(out["mirrored"], 2);
+        assert_eq!(core.project.strokes[1].points[0], [2.0 * cx, 0.0]);
+        assert_eq!(core.undo_depth(), undo_before + 1, "one undo step");
+        // An empty project is refused, like mirror_strokes.
+        let mut core = EditorCore::new();
+        assert!(tool_mirror_all_strokes(&mut core, &json!({})).is_err());
+    }
+
+    #[test]
+    fn set_stroke_spray_creates_edits_and_clears_the_mark() {
+        let mut core = EditorCore::new();
+        draw_line(&mut core, 0.0);
+        // Create with defaults: the Spray preset's radius /
+        // opacity and the deterministic begin_draw seed
+        // (frame 0, index 0).
+        let undo_before = core.undo_depth();
+        let out = tool_set_stroke_spray(&mut core, &json!({"index": 0, "radius": 9.0})).unwrap();
+        assert_eq!(out["changed"], true);
+        let mark = core.project.strokes[0].spray.expect("mark created");
+        assert_eq!(mark.radius, 9.0);
+        assert_eq!(mark.opacity, 0.5);
+        assert_eq!(mark.seed, 0x5EED_0000u64);
+        assert_eq!(core.undo_depth(), undo_before + 1, "one undo step");
+        // Edit the mark's own opacity — the write
+        // set_stroke_style refuses on a spray stroke.
+        tool_set_stroke_spray(&mut core, &json!({"index": 0, "opacity": 0.25})).unwrap();
+        assert_eq!(core.project.strokes[0].spray.unwrap().opacity, 0.25);
+        // Clear returns the stroke to a plain polyline.
+        tool_set_stroke_spray(&mut core, &json!({"index": 0, "clear_spray": true})).unwrap();
+        assert!(core.project.strokes[0].spray.is_none());
+        // Clearing again is an honest no-op: no undo step.
+        let undo_before = core.undo_depth();
+        let out = tool_set_stroke_spray(&mut core, &json!({"index": 0, "clear_spray": true}))
+            .unwrap();
+        assert_eq!(out["changed"], false);
+        assert_eq!(core.undo_depth(), undo_before, "no phantom undo step");
+        // Refusals: nothing to set, fields + clear together,
+        // bad values, bad index.
+        assert!(tool_set_stroke_spray(&mut core, &json!({"index": 0})).is_err());
+        assert!(tool_set_stroke_spray(
+            &mut core,
+            &json!({"index": 0, "radius": 5.0, "clear_spray": true})
+        )
+        .is_err());
+        assert!(tool_set_stroke_spray(&mut core, &json!({"index": 0, "radius": 0.0})).is_err());
+        assert!(tool_set_stroke_spray(&mut core, &json!({"index": 3, "radius": 5.0})).is_err());
+    }
+
+    #[test]
+    fn clear_strokes_on_frame_clears_any_named_frame() {
+        let mut core = EditorCore::new();
+        draw_line(&mut core, 0.0);
+        tool_draw_stroke(
+            &mut core,
+            &json!({"frame": 1, "points": [[0.0, 0.0], [10.0, 0.0]]}),
+        )
+        .unwrap();
+        // Frame 1 is not the current frame — the case
+        // clear_frame_strokes refuses.
+        let undo_before = core.undo_depth();
+        let out = tool_clear_strokes_on_frame(&mut core, &json!({"frame": 1})).unwrap();
+        assert_eq!(out["cleared"], 1);
+        assert_eq!(core.project.strokes.len(), 1);
+        assert_eq!(core.project.strokes[0].frame, 0);
+        assert_eq!(core.undo_depth(), undo_before + 1, "one undo step");
+        // An already-empty frame spends nothing.
+        let undo_before = core.undo_depth();
+        let out = tool_clear_strokes_on_frame(&mut core, &json!({"frame": 1})).unwrap();
+        assert_eq!(out["cleared"], 0);
+        assert_eq!(core.undo_depth(), undo_before, "no phantom undo step");
+        // Out-of-range frame refuses, quoting it.
+        let err = tool_clear_strokes_on_frame(&mut core, &json!({"frame": 9})).unwrap_err();
+        assert!(err.contains("frame index 9"), "{err}");
     }
 }
 

@@ -40,6 +40,7 @@
 use crate::editor::EditorCore;
 use crate::export::render_frame_at;
 use crate::model::Project;
+use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Write;
@@ -595,6 +596,167 @@ pub fn thumbnail(project: &Project, frame: usize, out: &Path) -> std::io::Result
     }
     let img = render_frame_at(project, frame as f32);
     img.save(out).map_err(std::io::Error::other)
+}
+
+// ---------------------------------------------------------------------
+// Project-file housekeeping MCP handlers (Wave 14)
+//
+// The Home panel's two-step delete is the one project-file
+// capability the MCP surface could not reach: rename,
+// duplicate, save-a-copy and list all landed in Wave 11,
+// but deleting a saved project file was GUI-only. The
+// handler below mirrors the panel exactly — the panel's
+// path is `shell::delete_project_file`, and so is this
+// one; the panel's confirm step is a guard against a
+// mis-tap in the GUI, and the MCP equivalent is that the
+// caller must name the file explicitly (a path or file
+// name `list_projects` reported), never an index into a
+// list that can be re-sorted.
+// ---------------------------------------------------------------------
+
+/// Resolve a caller-supplied project-file reference
+/// against the files [`list_project_files`] reports for
+/// `dir`: the argument may be a listed path verbatim
+/// (the `path` `list_projects` returns) or a bare file
+/// name from that list. Anything else — a path outside
+/// the library, a shell-owned name the listing excludes,
+/// a file that is not there — is refused with the
+/// argument quoted, so this tool can never be aimed at
+/// an arbitrary file on disk. On success returns the
+/// display name (the file's stem) and the listed path.
+fn resolve_project_file(dir: &Path, arg: &str) -> Result<(String, PathBuf), String> {
+    let listed = list_project_files(dir);
+    let wanted = arg.strip_prefix("./").unwrap_or(arg);
+    for path in &listed {
+        let full = path.to_string_lossy();
+        let bare = path.file_name().map(|n| n.to_string_lossy());
+        if full == wanted || bare.as_deref() == Some(wanted) {
+            let display = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| wanted.to_string());
+            return Ok((display, path.clone()));
+        }
+    }
+    Err(format!(
+        "'{arg}' is not a project file in ./projects (see list_projects)"
+    ))
+}
+
+/// Delete a project file from the library directory,
+/// through the shell's guarded helper (which itself
+/// refuses the shell-owned file names as a backstop).
+/// Split from the handler so tests can aim it at a temp
+/// library; the handler adds the session side effects.
+fn delete_project_file_in(dir: &Path, arg: &str) -> Result<(String, PathBuf), String> {
+    let (display, path) = resolve_project_file(dir, arg)?;
+    crate::shell::delete_project_file(&path).map_err(|e| e.to_string())?;
+    Ok((display, path))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 project block beside project_rename.
+//   Tool {
+//       name: "delete_project_file",
+//       description: "Delete a SAVED project file from ./projects — the Home panel's delete, via MCP. 'path' names the file exactly as list_projects reports it (its full path or its bare file name); anything not in that listing is refused, so the tool cannot be aimed outside the library. The file is removed through the shell's guarded delete (shell-owned files are refused). The currently open project, if this is its file, stays open in memory, exactly as in the panel. No undo step: a file operation, not a project edit (the project_rename / duplicate_project family).",
+//       schema: obj_schema(
+//           json!({
+//               "path": { "type": "string", "description": "Project file to delete, as reported by list_projects (path or bare file name)" }
+//           }),
+//           &["path"],
+//       ),
+//       handler: crate::projects::tool_delete_project_file,
+//   }
+// MCP.md row:
+//   | `delete_project_file` | Delete a SAVED project file from ./projects — the Home panel's delete, via MCP. 'path' names the file exactly as list_projects reports it (its full path or its bare file name); anything not in that listing is refused, so the tool cannot be aimed outside the library. The currently open project, if this is its file, stays open in memory, exactly as in the panel. No undo step: a file operation, not a project edit. | `path` | — |
+/// MCP handler: delete the saved project file `path`
+/// names (see [`resolve_project_file`] for the naming
+/// rule). On success the status line takes the panel's
+/// wording and the cached selector list is refreshed
+/// (the rename/duplicate seam), so the deleted file
+/// cannot linger in the selector. No undo step — file
+/// operations sit outside the undo history, as with
+/// `project_rename` and `duplicate_project`; the
+/// in-memory project is untouched.
+pub fn tool_delete_project_file(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
+    let Some(raw) = args.get("path").filter(|v| !v.is_null()) else {
+        return Err("missing required argument 'path'".to_string());
+    };
+    let Some(arg) = raw.as_str() else {
+        return Err(format!(
+            "argument 'path' must be a string (got {raw})"
+        ));
+    };
+    if arg.trim().is_empty() {
+        return Err("argument 'path' must not be blank".to_string());
+    }
+    let (display, path) = delete_project_file_in(Path::new("projects"), arg)?;
+    core.status = format!("Deleted project file {display}.");
+    // The deleted file leaves the cached selector list
+    // (selection preserved by identity; if the deleted
+    // file was the current one, the index clamps, per
+    // the refresh seam's documented fallback).
+    refresh_project_files(core);
+    Ok(json!({
+        "ok": true,
+        "name": display,
+        "path": path.to_string_lossy(),
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 project block beside delete_project_file.
+//   Tool {
+//       name: "cycle_project_file",
+//       description: "Advance the project-file selector by one — the command palette's 'Cycle project file'. Moves the selection in the cached ./projects list (wrapping at the end) and reports the newly selected file; opens nothing. Pair with open_project_file to open the selection, or read the list with list_projects. No undo step: selector state, not a project edit.",
+//       schema: obj_schema(json!({}), &[]),
+//       handler: crate::projects::tool_cycle_project_file,
+//   }
+// MCP.md row:
+//   | `cycle_project_file` | Advance the project-file selector by one (the palette's Cycle project file); reports the newly selected file, opens nothing. No undo step. | — | — |
+/// MCP handler: the palette's Cycle project file,
+/// verbatim — `EditorCore::cycle_project_file` owns the
+/// wrap, the empty-library status and the status line
+/// (Wave 14 integrator addition: A1's census found the
+/// op had no tool). The reply names the selected file
+/// when the library is non-empty.
+pub fn tool_cycle_project_file(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    core.cycle_project_file();
+    Ok(json!({
+        "ok": true,
+        "selected": core
+            .project_files
+            .get(core.project_index)
+            .map(|p| p.to_string_lossy().into_owned()),
+        "status": core.status,
+    }))
+}
+
+// TOOL ENTRY SPEC: add to tools() in src/mcp_tools.rs,
+// in the Wave 11 project block beside cycle_project_file.
+//   Tool {
+//       name: "open_project_file",
+//       description: "Open the project file the selector currently names — the palette's Open project file, companion to cycle_project_file. The selected file replaces the in-memory project (the op's own swap discipline applies, exactly as the GUI's open paths behave; load_project remains the by-path route). A failed open keeps the current project and reports the failure in 'status'. No undo step: the project-swap family, like load_project.",
+//       schema: obj_schema(json!({}), &[]),
+//       handler: crate::projects::tool_open_project_file,
+//   }
+// MCP.md row:
+//   | `open_project_file` | Open the project file the selector currently names (the palette's Open project file; cycle_project_file moves the selector). A failed open keeps the current project. No undo step (project-swap family). | — | — |
+/// MCP handler: the palette's Open project file,
+/// verbatim — `EditorCore::open_project_file` owns the
+/// load, the swap bookkeeping and the status line
+/// (Wave 14 integrator addition: A1's census found the
+/// op had no tool). A failed open is the op's status,
+/// not a tool error — the GUI behaves the same way, and
+/// the current project is untouched either way until a
+/// load succeeds.
+pub fn tool_open_project_file(core: &mut EditorCore, _args: &Value) -> Result<Value, String> {
+    core.open_project_file();
+    Ok(json!({
+        "ok": true,
+        "status": core.status,
+    }))
 }
 
 #[cfg(test)]
@@ -1362,6 +1524,52 @@ mod tests {
             1,
             "a copy is not a save of the session file: the baseline must not move"
         );
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// Wave 14 (A8): the MCP project-file delete resolves
+    /// only files the library listing reports — by listed
+    /// path or by bare file name — and removes exactly
+    /// that file; an unlisted name (including a
+    /// shell-owned dotfile the listing excludes) is
+    /// refused with the argument quoted and deletes
+    /// nothing.
+    #[test]
+    fn delete_project_file_in_resolves_only_listed_files() {
+        let dir = temp_dir("delete-project-file").join("projects");
+        std::fs::create_dir_all(&dir).unwrap();
+        let alpha = dir.join("alpha.json");
+        let bravo = dir.join("bravo.json");
+        std::fs::write(&alpha, "{}").unwrap();
+        std::fs::write(&bravo, "{}").unwrap();
+        let recovery = dir.join(".recovery.json");
+        std::fs::write(&recovery, "{}").unwrap();
+
+        // By bare file name.
+        let (display, path) = delete_project_file_in(&dir, "alpha.json").unwrap();
+        assert_eq!(display, "alpha");
+        assert_eq!(path, alpha);
+        assert!(!alpha.exists(), "the named file is removed");
+        assert!(bravo.exists(), "the other file is untouched");
+
+        // By the listed path verbatim.
+        let listed = bravo.to_string_lossy().into_owned();
+        let (display, _) = delete_project_file_in(&dir, &listed).unwrap();
+        assert_eq!(display, "bravo");
+        assert!(!bravo.exists());
+
+        // Unlisted names refuse and delete nothing: a
+        // missing project, the shell-owned recovery file
+        // (excluded from the listing), and a path aimed
+        // outside the library.
+        for arg in ["charlie.json", ".recovery.json", "../alpha.json"] {
+            let err = delete_project_file_in(&dir, arg).unwrap_err();
+            assert!(
+                err.contains(arg),
+                "the refusal quotes the argument: {err}"
+            );
+        }
+        assert!(recovery.exists(), "the recovery file is never touched");
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 }
