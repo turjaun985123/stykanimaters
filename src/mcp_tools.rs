@@ -482,7 +482,14 @@ fn tool_set_frame_duration(core: &mut EditorCore, args: &Value) -> Result<Value,
     if duration <= 0.0 {
         return Err("argument 'duration' must be positive".into());
     }
-    core.project.frames[frame].duration = duration;
+    // Wave 13 (B9, dirty census): a timing tweak in the
+    // `adjust_frame_duration` family — no undo step, but a
+    // real change counts for dirty/autosave via the seam
+    // (previously this direct write was invisible to both).
+    if core.project.frames[frame].duration != duration {
+        core.project.frames[frame].duration = duration;
+        core.mark_dirty();
+    }
     Ok(json!({ "ok": true, "frame": frame, "duration": duration }))
 }
 
@@ -508,8 +515,18 @@ fn tool_set_frame_durations(core: &mut EditorCore, args: &Value) -> Result<Value
         durations.push(d);
     }
     let updated = durations.len().min(core.project.frames.len());
+    // Wave 13 (B9, dirty census): as `set_frame_duration` —
+    // one counted edit for the call when any applied value
+    // actually changes; identical values mark nothing.
+    let mut changed = false;
     for (i, d) in durations.into_iter().take(updated).enumerate() {
-        core.project.frames[i].duration = d;
+        if core.project.frames[i].duration != d {
+            core.project.frames[i].duration = d;
+            changed = true;
+        }
+    }
+    if changed {
+        core.mark_dirty();
     }
     Ok(json!({ "ok": true, "updated": updated }))
 }
@@ -1176,7 +1193,14 @@ fn tool_fx_preset_add(core: &mut EditorCore, args: &Value) -> Result<Value, Stri
 fn tool_set_weather(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let kind = req_str(args, "kind")?;
     if kind == "off" {
-        core.project.weather = None;
+        // Wave 13 (B9, dirty census): a project-settings
+        // write — no undo step, but a real change counts
+        // for dirty/autosave via the seam (previously this
+        // direct write was invisible to both).
+        if core.project.weather.is_some() {
+            core.project.weather = None;
+            core.mark_dirty();
+        }
         return Ok(json!({ "ok": true, "weather": "off" }));
     }
     let wk = match kind {
@@ -1196,7 +1220,14 @@ fn tool_set_weather(core: &mut EditorCore, args: &Value) -> Result<Value, String
         if wk == WeatherKind::Storm { (140.0, 30.0) } else { (90.0, 20.0) };
     let amount = opt_f32(args, "amount")?.unwrap_or(default_amount).clamp(0.0, 200.0);
     let wind = opt_f32(args, "wind")?.unwrap_or(default_wind);
-    core.project.weather = Some(Weather { kind: wk, amount, wind });
+    // Wave 13 (B9, dirty census): as the "off" branch — a
+    // settings write that changes the stored weather marks
+    // dirty; re-setting the identical weather marks nothing.
+    let new_weather = Weather { kind: wk, amount, wind };
+    if core.project.weather != Some(new_weather) {
+        core.project.weather = Some(new_weather);
+        core.mark_dirty();
+    }
     Ok(json!({
         "ok": true,
         "weather": { "kind": kind, "amount": amount, "wind": wind },
@@ -1831,15 +1862,38 @@ fn tool_graph_key(core: &mut EditorCore, args: &Value) -> Result<Value, String> 
 fn tool_layers(core: &mut EditorCore, args: &Value) -> Result<Value, String> {
     let fi = req_usize(args, "figure")?;
     check_figure(core, fi)?;
+    // Wave 13 (B9, dirty census): the layers family —
+    // lock / hide / opacity — has undoability deliberately
+    // OFF (the core ops `toggle_figure_lock`,
+    // `cycle_figure_opacity` and `step_figure_opacity` set
+    // the pattern: no snapshot, the write counts for
+    // dirty/autosave via the seam). One counted edit for
+    // the call when any project field actually changes;
+    // identical values mark nothing, and `solo` is editor
+    // session state, never a project write.
+    let mut changed = false;
     if let Some(locked) = opt_bool(args, "locked")? {
-        core.project.figures[fi].locked = locked;
+        if core.project.figures[fi].locked != locked {
+            core.project.figures[fi].locked = locked;
+            changed = true;
+        }
     }
     if let Some(hidden) = opt_bool(args, "hidden")? {
-        core.project.figures[fi].hidden = hidden;
+        if core.project.figures[fi].hidden != hidden {
+            core.project.figures[fi].hidden = hidden;
+            changed = true;
+        }
     }
     if let Some(opacity) = opt_f32(args, "opacity")? {
         // layers::set_opacity clamps to the supported 0.05..=1.0 range.
+        let before = core.project.figures[fi].opacity;
         crate::layers::set_opacity(&mut core.project, fi, opacity);
+        if core.project.figures[fi].opacity != before {
+            changed = true;
+        }
+    }
+    if changed {
+        core.mark_dirty();
     }
     if let Some(solo) = opt_bool(args, "solo")? {
         if solo {
@@ -2465,6 +2519,16 @@ fn tool_apply_nib(core: &mut EditorCore, args: &Value) -> Result<Value, String> 
         }
     };
     let angle = opt_f32(args, "angle")?.unwrap_or(45.0);
+    // Wave 13 (B9, dirty census; §7 C6 refinement): one
+    // undo step for the call when the frame carries
+    // strokes, like its draw-family siblings (draw_shape,
+    // erase_strokes, smooth_strokes snapshot the same way)
+    // — previously this direct iter_mut rewrite was
+    // invisible to history and the autosave counter alike.
+    // A frame with no strokes spends nothing.
+    if core.project.strokes.iter().any(|s| s.frame == frame) {
+        core.snapshot();
+    }
     let mut count = 0usize;
     for stroke in core.project.strokes.iter_mut().filter(|s| s.frame == frame) {
         crate::draw_ops::apply_nib(stroke, nib, angle);
@@ -3059,7 +3123,18 @@ fn tool_project_rename(core: &mut EditorCore, args: &Value) -> Result<Value, Str
         return Err("no current project file to rename".into());
     };
     let new_path = crate::projects::rename_project(&path, new_name).map_err(|e| e.to_string())?;
-    core.project.name = new_name.trim().to_string();
+    // Wave 13 (B9, dirty census — the census's project_rename
+    // line, executed here because the session-name write
+    // lives in this handler): no undo step — undo would
+    // restore the old session name against a file that keeps
+    // the new one — but a real change counts for
+    // dirty/autosave via the seam (previously this write
+    // never counted, the Wave 12 E8 remainder).
+    let trimmed = new_name.trim().to_string();
+    if core.project.name != trimmed {
+        core.project.name = trimmed;
+        core.mark_dirty();
+    }
     // Wave 12 (B3): refresh BEFORE note_project_loaded — the
     // rescan drops the dead old path from the cached list
     // (it would otherwise linger forever), and the loaded
@@ -5560,7 +5635,7 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
         },
         Tool {
             name: "asset_remove",
-            description: "Remove the asset at 'index' from the table. REFUSED, with the live counts, while anything still references it (a figure segment image, a movieclip-def segment image, or a sprite instance) — removal never orphans a reference; clear segment references first with clear_node_media or re-point them with asset_attach (sprite instances have no delete op, so an asset referenced only by sprites stays refused until the project changes). When it does remove, every reference to a higher index is remapped down by one in the same undo step, so references keep naming the same image. One undo step.",
+            description: "Remove the asset at 'index' from the table. REFUSED, with the live counts, while anything still references it (a figure segment image, a movieclip-def segment image, or a sprite instance) — removal never orphans a reference; clear segment references first with clear_node_media or re-point them with asset_attach, and remove sprite instances with sprite_remove. When it does remove, every reference to a higher index is remapped down by one in the same undo step, so references keep naming the same image. One undo step.",
             schema: obj_schema(
                 json!({ "index": { "type": "integer" } }),
                 &["index"],
@@ -5579,6 +5654,58 @@ pub fn tools() -> Vec<crate::mcp::Tool> {
                 &["figure", "node", "asset"],
             ),
             handler: crate::media::tool_asset_attach,
+        },
+        Tool {
+            name: "sprite_list",
+            description: "Every sprite instance in the project: index, asset index and asset name, key count, and every transform key (frame, x, y, scale, rotation in degrees). Read-only.",
+            schema: obj_schema(json!({}), &[]),
+            handler: crate::media::tool_sprite_list,
+        },
+        Tool {
+            name: "sprite_add",
+            description: "Place a new sprite instance of the image asset at 'asset': one key at frame 0 puts it at the stage centre, scale 1, no rotation. Returns the new instance's index. One undo step.",
+            schema: obj_schema(
+                json!({ "asset": { "type": "integer" } }),
+                &["asset"],
+            ),
+            handler: crate::media::tool_sprite_add,
+        },
+        Tool {
+            name: "sprite_remove",
+            description: "Remove the sprite instance at 'sprite'. Later instances shift down one index; nothing references an instance by index, so no remapping is owed. One undo step.",
+            schema: obj_schema(
+                json!({ "sprite": { "type": "integer" } }),
+                &["sprite"],
+            ),
+            handler: crate::media::tool_sprite_remove,
+        },
+        Tool {
+            name: "sprite_set_key",
+            description: "Write sprite 'sprite''s transform key at 'frame' (0-based, a whole frame number; clamped to the project's last frame): insert a new key or replace the one there. 'x', 'y', 'rotation' (degrees) and 'scale' are each optional — an omitted field takes the value the sprite samples at that frame (or x 0, y 0, rotation 0, scale 1 for a sprite with no keys). 'scale' must be greater than 0. One undo step.",
+            schema: obj_schema(
+                json!({
+                    "sprite": { "type": "integer" },
+                    "frame": { "type": "number" },
+                    "x": { "type": "number" },
+                    "y": { "type": "number" },
+                    "scale": { "type": "number" },
+                    "rotation": { "type": "number" }
+                }),
+                &["sprite", "frame"],
+            ),
+            handler: crate::media::tool_sprite_set_key,
+        },
+        Tool {
+            name: "sprite_delete_key",
+            description: "Delete sprite 'sprite''s key at 'frame' (0-based, a whole frame number; clamped to the project's last frame). A frame with no key is refused before any change, so no undo step is spent. Deleting the last remaining key is allowed — the instance then draws nothing. One undo step on success.",
+            schema: obj_schema(
+                json!({
+                    "sprite": { "type": "integer" },
+                    "frame": { "type": "number" }
+                }),
+                &["sprite", "frame"],
+            ),
+            handler: crate::media::tool_sprite_delete_key,
         },
     ]
 }
@@ -5628,15 +5755,194 @@ mod tests {
         let tools = tools();
         // 224 entering Wave 12; +6 for the asset surface
         // (assets_list, asset_info, asset_import,
-        // asset_rename, asset_remove, asset_attach).
-        assert_eq!(tools.len(), 230);
+        // asset_rename, asset_remove, asset_attach); +5 in
+        // Wave 13 for the sprite surface (sprite_list,
+        // sprite_add, sprite_remove, sprite_set_key,
+        // sprite_delete_key).
+        assert_eq!(tools.len(), 235);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 230, "tool names must be unique");
+        assert_eq!(names.len(), 235, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Wave 13 (B9): the dirty-census contract for the handlers
+    // that used to write project state directly — tweak/settings
+    // writes count exactly one edit via `mark_dirty` when (and
+    // only when) a value actually changes, and take NO undo
+    // step; the draw-family rewrite (`apply_nib`) takes exactly
+    // one snapshot. `edits_since_autosave` is the observable
+    // counter for both (snapshot bumps it too, so the undo
+    // assertions separate the two).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn set_frame_duration_marks_dirty_only_on_change() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        let edits = core.edits_since_autosave();
+        call(&mut core, &tools, "set_frame_duration", json!({ "frame": 0, "duration": 2.0 }))
+            .unwrap();
+        assert_eq!(core.project.frames[0].duration, 2.0);
+        assert_eq!(core.edits_since_autosave(), edits + 1, "a real change counts one edit");
+        // Same value again: no change, no mark.
+        call(&mut core, &tools, "set_frame_duration", json!({ "frame": 0, "duration": 2.0 }))
+            .unwrap();
+        assert_eq!(core.edits_since_autosave(), edits + 1);
+        // No undo step was recorded: undo leaves the value.
+        core.undo();
+        assert_eq!(core.project.frames[0].duration, 2.0);
+    }
+
+    #[test]
+    fn set_frame_durations_marks_once_for_the_call() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        let edits = core.edits_since_autosave();
+        call(&mut core, &tools, "set_frame_durations", json!({ "durations": [2.0] })).unwrap();
+        assert_eq!(core.edits_since_autosave(), edits + 1);
+        call(&mut core, &tools, "set_frame_durations", json!({ "durations": [2.0] })).unwrap();
+        assert_eq!(core.edits_since_autosave(), edits + 1, "identical values mark nothing");
+        call(&mut core, &tools, "set_frame_durations", json!({ "durations": [3.0] })).unwrap();
+        assert_eq!(core.edits_since_autosave(), edits + 2);
+    }
+
+    #[test]
+    fn set_weather_marks_dirty_on_change_and_on_off() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        assert!(core.project.weather.is_none());
+        let edits = core.edits_since_autosave();
+        call(&mut core, &tools, "set_weather", json!({ "kind": "rain" })).unwrap();
+        assert!(core.project.weather.is_some());
+        assert_eq!(core.edits_since_autosave(), edits + 1);
+        // Identical weather (rain at the defaults) marks nothing.
+        call(&mut core, &tools, "set_weather", json!({ "kind": "rain" })).unwrap();
+        assert_eq!(core.edits_since_autosave(), edits + 1);
+        call(&mut core, &tools, "set_weather", json!({ "kind": "off" })).unwrap();
+        assert!(core.project.weather.is_none());
+        assert_eq!(core.edits_since_autosave(), edits + 2);
+        // Off when already off: no change, no mark, and no
+        // undo step anywhere in the sequence.
+        call(&mut core, &tools, "set_weather", json!({ "kind": "off" })).unwrap();
+        assert_eq!(core.edits_since_autosave(), edits + 2);
+        core.undo();
+        assert!(core.project.weather.is_none());
+    }
+
+    #[test]
+    fn layers_marks_dirty_once_and_never_snapshots() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        let edits = core.edits_since_autosave();
+        // Two project fields in one call = one counted edit.
+        call(
+            &mut core,
+            &tools,
+            "layers",
+            json!({ "figure": 0, "locked": true, "hidden": true }),
+        )
+        .unwrap();
+        assert!(core.project.figures[0].locked && core.project.figures[0].hidden);
+        assert_eq!(core.edits_since_autosave(), edits + 1);
+        // Re-applying the same state changes nothing.
+        call(
+            &mut core,
+            &tools,
+            "layers",
+            json!({ "figure": 0, "locked": true, "hidden": true }),
+        )
+        .unwrap();
+        assert_eq!(core.edits_since_autosave(), edits + 1);
+        // Solo is session state: no project write, no mark.
+        call(&mut core, &tools, "layers", json!({ "figure": 0, "solo": true })).unwrap();
+        assert_eq!(core.edits_since_autosave(), edits + 1);
+        // Opacity through the clamped setter also counts once.
+        call(&mut core, &tools, "layers", json!({ "figure": 0, "opacity": 0.5 })).unwrap();
+        assert_eq!(core.project.figures[0].opacity, 0.5);
+        assert_eq!(core.edits_since_autosave(), edits + 2);
+        // The layers family takes no undo step: undo leaves
+        // every write standing.
+        core.undo();
+        assert!(core.project.figures[0].locked);
+        assert_eq!(core.project.figures[0].opacity, 0.5);
+    }
+
+    #[test]
+    fn apply_nib_takes_exactly_one_undo_step() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        // Arrange a stroke on frame 0 directly (test setup,
+        // not the path under test).
+        core.project.strokes.push(crate::model::Stroke {
+            frame: 0,
+            points: vec![[100.0, 100.0], [160.0, 120.0], [220.0, 100.0]],
+            color: 0xE8E8EC,
+            width: 6.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+            opacity: 1.0,
+            scatter: 0.0,
+        });
+        let edits = core.edits_since_autosave();
+        let r = call(
+            &mut core,
+            &tools,
+            "apply_nib",
+            json!({ "frame": 0, "nib": "calligraphy" }),
+        )
+        .unwrap();
+        assert_eq!(r["strokes"], 1);
+        assert!(
+            !core.project.strokes[0].widths.is_empty(),
+            "the nib baked per-point widths"
+        );
+        assert_eq!(core.edits_since_autosave(), edits + 1, "one snapshot for the call");
+        core.undo();
+        assert!(
+            core.project.strokes[0].widths.is_empty(),
+            "one undo restores the pre-nib stroke"
+        );
+    }
+
+    #[test]
+    fn project_rename_marks_dirty_without_an_undo_step() {
+        let tools = tools();
+        let mut core = EditorCore::new();
+        // Arrange a real saved file for the session (the
+        // handler renames the file on disk).
+        let dir = std::env::temp_dir().join(format!(
+            "mcp-tools-test-rename-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("before.json");
+        std::fs::write(&path, "{}").unwrap();
+        core.project_files = vec![path.clone()];
+        core.project_index = 0;
+        let edits = core.edits_since_autosave();
+        let r = call(
+            &mut core,
+            &tools,
+            "project_rename",
+            json!({ "new_name": "Afterwards" }),
+        )
+        .unwrap();
+        assert_eq!(r["name"], "Afterwards");
+        assert_eq!(core.project.name, "Afterwards");
+        assert_eq!(core.edits_since_autosave(), edits + 1, "the name write counts one edit");
+        assert!(dir.join("afterwards.json").exists(), "the file moved");
+        // No undo step: undo must not resurrect the old
+        // session name against the renamed file.
+        core.undo();
+        assert_eq!(core.project.name, "Afterwards");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -450,7 +450,15 @@ pub fn stepped_stage_size(stage: [f32; 2], dw: f32, dh: f32) -> [f32; 2] {
 /// behaviour. There is no core op for this; the field is
 /// pub and the renderer consumes it directly.
 pub fn apply_stage_step(core: &mut EditorCore, dw: f32, dh: f32) {
-    core.project.stage = stepped_stage_size(core.project.stage, dw, dh);
+    // Wave 13 (census E6): same ruling as the scene
+    // panel's stage steppers (E5) — write + mark only on
+    // a real change, so the count never depends on which
+    // surface stepped the stage.
+    let next = stepped_stage_size(core.project.stage, dw, dh);
+    if next != core.project.stage {
+        core.project.stage = next;
+        core.mark_dirty();
+    }
     core.status = format!(
         "Stage size: {} x {}.",
         core.project.stage[0] as i32, core.project.stage[1] as i32
@@ -1332,6 +1340,7 @@ mod tests {
             figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
             figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
@@ -1395,6 +1404,7 @@ playback_speed: 1.0,
             figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
             figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),

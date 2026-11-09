@@ -20,6 +20,7 @@
 mod chrome_view;
 mod live_mcp;
 mod rune_sec;
+mod stage_sprites;
 mod stage_view;
 
 #[cfg(test)]
@@ -159,6 +160,8 @@ pub struct State {
     pub figures_panel: rune_sec::figures_panel::FiguresPanelState,
     pub figure_add: rune_sec::figure_add::FigureAddState,
     pub library_panel: rune_sec::library_panel::LibraryPanelState,
+    /// Sprite instances panel (Wave 13; Animate workspace).
+    pub sprites_panel: rune_sec::sprites_panel::SpritesPanelState,
     pub home_panel: rune_sec::home_panel::HomePanelState,
     pub frame_ops: rune_sec::frame_ops::FrameOpsState,
     pub graph_panel: rune_sec::graph_panel::GraphPanelState,
@@ -300,6 +303,7 @@ fn init() -> State {
         figures_panel: Default::default(),
         figure_add: Default::default(),
         library_panel: Default::default(),
+        sprites_panel: Default::default(),
         home_panel: rune_sec::home_panel::initial_state(),
         frame_ops: Default::default(),
         graph_panel: Default::default(),
@@ -980,6 +984,9 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     if vis(Sec::Scene) {
         right = right.child(rune_sec::scene_panel::scene_panel(s, &t));
     }
+    if vis(Sec::Sprites) {
+        right = right.child(rune_sec::sprites_panel::sprites_panel(s, &t));
+    }
     if vis(Sec::Export) {
         right = right.child(rune_sec::export_panel::export_panel(s, &t));
     }
@@ -1040,6 +1047,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                             stroke_selected: s.stroke_selected,
                             particle_selected: s.particle_selected,
                             fx_selected: s.fx_selected,
+                            sprite_selected: s.sprites_panel.selected,
                             fig3_stage: s.workspace
                                 == rune_sec::workspaces::Workspace::Build3D
                                 && core.fig3.is_some(),

@@ -15,16 +15,16 @@ Both transports route through the same JSON-RPC router
 the same registry (`all_tools()` in `src/mcp.rs`). A tool behaves
 identically on both; only the session it edits differs.
 
-## Tool count — 283, and how to check it
+## Tool count — 288, and how to check it
 
-At the time of writing the registry holds **283 tools**:
+At the time of writing the registry holds **288 tools**:
 
 | Source | Count | Where they are defined |
 |---|---|---|
 | Built-ins | 44 | `fn tool_*` constructors assembled in `all_tools()`, `src/mcp.rs` |
-| Editing registry | 230 | `pub fn tools()`, `src/mcp_tools.rs` |
+| Editing registry | 235 | `pub fn tools()`, `src/mcp_tools.rs` |
 | File IO / export | 9 | `pub fn tools()`, `src/mcp_io.rs` |
-| **Total** | **283** | `all_tools()` = built-ins, then `mcp_tools`, then `mcp_io` |
+| **Total** | **288** | `all_tools()` = built-ins, then `mcp_tools`, then `mcp_io` |
 
 Runtime cross-check: call the `server_info` tool — it returns
 `all_tools().len()` — or count the entries of a `tools/list`
@@ -261,7 +261,7 @@ true` with the reason as text and leaves the session usable.
 | `goto_next_key` | Move the playhead to the next key strictly after the current frame (the transport's Next key button, pb-next-key): the keys are the sorted union of the camera keys and every graph channel's keys — not any one figure's pose keys (for those, goto_next_keyframe). Like the button, the jump only moves the playhead — playback state is untouched. An error when no key follows (the button renders inert in that state). | — | — |
 | `goto_prev_key` | Move the playhead to the previous key strictly before the current frame (the transport's Prev key button, pb-prev-key): the keys are the sorted union of the camera keys and every graph channel's keys — not any one figure's pose keys (for those, goto_prev_keyframe). Like the button, the jump only moves the playhead — playback state is untouched. An error when no key precedes (the button renders inert in that state). | — | — |
 
-### Editing registry (230, `src/mcp_tools.rs`)
+### Editing registry (235, `src/mcp_tools.rs`)
 
 | Tool | Purpose | Required | Optional |
 |---|---|---|---|
@@ -493,8 +493,13 @@ true` with the reason as text and leaves the session usable.
 | `asset_info` | One asset's assets_list entry, addressed by its table index. Read-only. | `index` | — |
 | `asset_import` | Import a PNG file from disk into the asset table (appended; its index is returned). The file must start with the PNG magic bytes, decode as an image and be at most 8388608 bytes (8 MiB) — anything else is refused before any change. The stored name defaults to the file's name; the optional 'name' argument overrides it. One undo step. (Unlike attach_image_to_node, this never touches ./import and attaches nothing.) | `path` | `name` |
 | `asset_rename` | Rename the asset at 'index' to 'name' (trimmed; empty is refused). Renaming to the current name is a no-op that reports changed: false and spends no undo step; a real rename is one undo step. | `index`, `name` | — |
-| `asset_remove` | Remove the asset at 'index' from the table. REFUSED, with the live counts, while anything still references it (a figure segment image, a movieclip-def segment image, or a sprite instance) — removal never orphans a reference; clear segment references first with clear_node_media or re-point them with asset_attach (sprite instances have no delete op, so an asset referenced only by sprites stays refused until the project changes). When it does remove, every reference to a higher index is remapped down by one in the same undo step, so references keep naming the same image. One undo step. | `index` | — |
+| `asset_remove` | Remove the asset at 'index' from the table. REFUSED, with the live counts, while anything still references it (a figure segment image, a movieclip-def segment image, or a sprite instance) — removal never orphans a reference; clear segment references first with clear_node_media or re-point them with asset_attach, and remove sprite instances with sprite_remove. When it does remove, every reference to a higher index is remapped down by one in the same undo step, so references keep naming the same image. One undo step. | `index` | — |
 | `asset_attach` | Attach the EXISTING asset at index 'asset' to figure 'figure', node 'node' as that segment's image media, replacing whatever media the segment carried (the by-index counterpart of attach_image_to_node, which reads ./import and works on the selection). One undo step. | `figure`, `node`, `asset` | — |
+| `sprite_list` | Every sprite instance in the project: index, asset index and asset name, key count, and every transform key (frame, x, y, scale, rotation in degrees). Read-only. | — | — |
+| `sprite_add` | Place a new sprite instance of the image asset at 'asset': one key at frame 0 puts it at the stage centre, scale 1, no rotation. Returns the new instance's index. One undo step. | `asset` | — |
+| `sprite_remove` | Remove the sprite instance at 'sprite'. Later instances shift down one index; nothing references an instance by index, so no remapping is owed. One undo step. | `sprite` | — |
+| `sprite_set_key` | Write sprite 'sprite''s transform key at 'frame' (0-based, a whole frame number; clamped to the project's last frame): insert a new key or replace the one there. 'x', 'y', 'rotation' (degrees) and 'scale' are each optional — an omitted field takes the value the sprite samples at that frame (or x 0, y 0, rotation 0, scale 1 for a sprite with no keys). 'scale' must be greater than 0. One undo step. | `sprite`, `frame` | `x`, `y`, `scale`, `rotation` |
+| `sprite_delete_key` | Delete sprite 'sprite''s key at 'frame' (0-based, a whole frame number; clamped to the project's last frame). A frame with no key is refused before any change, so no undo step is spent. Deleting the last remaining key is allowed — the instance then draws nothing. One undo step on success. | `sprite`, `frame` | — |
 
 ### File IO and export (9, `src/mcp_io.rs`)
 

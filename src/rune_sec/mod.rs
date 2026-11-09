@@ -49,6 +49,7 @@ pub mod project_tools;
 pub mod scene_panel;
 pub mod scenes;
 pub mod settings_popover;
+pub mod sprites_panel;
 pub mod stage_camera;
 pub mod stage_fx;
 pub mod stage_fig3;

@@ -548,7 +548,18 @@ pub fn rename_selected_figure(core: &mut EditorCore, raw: &str) -> bool {
         core.status = "No such figure.".into();
         return false;
     };
-    fig.name = name.clone();
+    // Wave 13 (census E1): the GUI half of the figure
+    // rename — no undo step (names are plain field writes
+    // by design), but a real change counts for
+    // dirty/autosave via the seam, exactly as the MCP
+    // rename does (B3). An identical name marks nothing.
+    let changed = fig.name != name;
+    if changed {
+        fig.name = name.clone();
+    }
+    if changed {
+        core.mark_dirty();
+    }
     core.status = format!("Figure {} renamed to \"{name}\".", fi + 1);
     true
 }
@@ -1335,6 +1346,7 @@ mod tests {
             figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
             figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
@@ -1385,6 +1397,7 @@ playback_speed: 1.0,
             figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
             figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),

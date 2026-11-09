@@ -220,6 +220,15 @@
 //!   integrator in the Wave 12 notes rather than added
 //!   against a panel path that does not exist yet — the
 //!   Wave 9 save-copy discipline.
+//! * Wave 13 appended two sprite-instance commands:
+//!   `add-sprite` (the first project asset, through A1's
+//!   `add_sprite`) and `remove-sprite` (the last sprite
+//!   instance, through A1's `remove_sprite`). A
+//!   `next-sprite` cycle was NOT added: A1's ops take an
+//!   explicit index, and neither the core nor the shell
+//!   `State` carries a sprite selection for a cycle
+//!   command to advance, so it would have been a dead
+//!   command — the Wave 10 dopesheet discipline.
 //! * [`fuzzy_score`] / [`filter_commands`] are pure and
 //!   thoroughly unit-tested below.
 //! * The view follows the Rune launcher example's field
@@ -1052,6 +1061,39 @@ fn cmd_cycle_attached_sprite(s: &mut State) {
     }
 }
 
+/// Wave 13: add a free-floating sprite instance from
+/// the project's assets — A1's `add_sprite` over the
+/// first asset in the table (asset 0). The palette has
+/// no asset-picker state of its own; choosing a
+/// specific asset is the Sprites panel's picker. The
+/// op owns the snapshot and the status, including the
+/// no-assets refusal (a call with an empty table asks
+/// it for asset 1 and is refused in its own wording).
+fn cmd_add_sprite(s: &mut State) {
+    let _ = s.core.add_sprite(0);
+}
+
+/// Wave 13: remove the LAST free-floating sprite
+/// instance — A1's `remove_sprite` over the final
+/// index. There is no sprite selection in the core or
+/// the shell `State` for the palette to resolve (the
+/// same absence that keeps `next-sprite` out of this
+/// table — see the module docs), so the command names
+/// the last instance, like `delete-last-stroke` names
+/// the last stroke; the op owns the snapshot and the
+/// success status. An empty sprite table stands down
+/// here with its own explanation.
+fn cmd_remove_sprite(s: &mut State) {
+    match s.core.project.sprites.len() {
+        0 => {
+            s.core.status = "No sprite to remove.".into();
+        }
+        n => {
+            s.core.remove_sprite(n - 1);
+        }
+    }
+}
+
 fn cmd_add_frame(s: &mut State) {
     s.core.add_frame();
 }
@@ -1322,6 +1364,8 @@ pub static COMMANDS: &[Command] = &[
     Command { key: "attach-media-import", title: "Attach sprite from import folder", group: "Segments", run: cmd_attach_media_import },
     Command { key: "clear-node-media", title: "Clear segment media", group: "Segments", run: cmd_clear_node_media },
     Command { key: "cycle-attached-sprite", title: "Attach next sprite in table", group: "Segments", run: cmd_cycle_attached_sprite },
+    Command { key: "add-sprite", title: "Add sprite from assets", group: "Segments", run: cmd_add_sprite },
+    Command { key: "remove-sprite", title: "Remove last sprite", group: "Segments", run: cmd_remove_sprite },
     // -- Camera ---------------------------------------------------
     Command { key: "cam-zoom-in", title: "Camera zoom in", group: "Camera", run: cmd_zoom_in },
     Command { key: "cam-zoom-out", title: "Camera zoom out", group: "Camera", run: cmd_zoom_out },
@@ -2095,8 +2139,15 @@ mod tests {
         // callable fns: the first two name the core ops
         // the panel's buttons press, the third composes
         // the panel's own next_asset_target / attach_asset
-        // helpers exactly as its Next sprite closure does).
-        assert_eq!(total, 132, "palette should cover 132 commands, has {total}");
+        // helpers exactly as its Next sprite closure does),
+        // +2 in Wave 13 (add-sprite, remove-sprite — A1's
+        // sprite-instance ops over the first asset and the
+        // last instance respectively. A next-sprite cycle
+        // candidate was skipped: A1's ops take explicit
+        // indices and neither the core nor the shell State
+        // carries a sprite selection for it to advance, so
+        // the command would have nothing real to run).
+        assert_eq!(total, 134, "palette should cover 134 commands, has {total}");
         for c in COMMANDS {
             assert!(!c.title.is_empty() && !c.group.is_empty(), "empty field on {}", c.key);
         }
@@ -2812,6 +2863,66 @@ mod tests {
         (COMMANDS[idx_of("open-style-inspector")].run)(&mut s);
         assert_eq!(s.workspace, Workspace::Animate);
         assert!(s.show_right);
+    }
+
+    #[test]
+    fn wave_13_sprite_commands_are_present_and_wired() {
+        use stykanimate_rs::model::ImageAsset;
+        // Both Wave 13 keys resolve (idx_of panics if not),
+        // in the Segments group beside the Wave 12 media
+        // commands.
+        for key in ["add-sprite", "remove-sprite"] {
+            let cmd = &COMMANDS[idx_of(key)];
+            assert_eq!(cmd.group, "Segments", "{key} group");
+        }
+        // No next-sprite cycle: neither the core nor the
+        // shell State carries a sprite selection for one
+        // to advance (see the module docs), so the key
+        // must not exist.
+        assert!(
+            COMMANDS.iter().all(|c| c.key != "next-sprite"),
+            "next-sprite must stay out until a sprite selection exists"
+        );
+        // Empty project (the demo carries no assets and no
+        // sprites): both commands stand down in words and
+        // change nothing.
+        let mut s = crate::init();
+        assert!(s.core.project.assets.is_empty());
+        assert!(s.core.project.sprites.is_empty());
+        (COMMANDS[idx_of("add-sprite")].run)(&mut s);
+        assert_eq!(s.core.status, "Sprite add failed: no asset 1.");
+        assert!(s.core.project.sprites.is_empty());
+        (COMMANDS[idx_of("remove-sprite")].run)(&mut s);
+        assert_eq!(s.core.status, "No sprite to remove.");
+        assert!(s.core.project.sprites.is_empty());
+        // Add forwards to A1's op over the FIRST asset:
+        // two assets in the table, the instance references
+        // asset 0 and lands at the stage centre (the
+        // 960×720 demo stage) with its single frame-0 key,
+        // in the op's own status wording.
+        for name in ["first.png", "second.png"] {
+            s.core.project.assets.push(ImageAsset {
+                name: name.into(),
+                png: Vec::new(),
+            });
+        }
+        (COMMANDS[idx_of("add-sprite")].run)(&mut s);
+        assert_eq!(s.core.project.sprites.len(), 1);
+        assert_eq!(s.core.project.sprites[0].asset, 0, "the first asset");
+        let key = s.core.project.sprites[0].keys[0];
+        assert_eq!((key.frame, key.x, key.y), (0.0, 480.0, 360.0));
+        assert_eq!(s.core.status, "Sprite 1 added (asset 1).");
+        // A second add, its instance re-pointed at the
+        // second asset so the survivor is identifiable:
+        // remove takes the LAST instance and leaves the
+        // first untouched.
+        (COMMANDS[idx_of("add-sprite")].run)(&mut s);
+        assert_eq!(s.core.project.sprites.len(), 2);
+        s.core.project.sprites[1].asset = 1;
+        (COMMANDS[idx_of("remove-sprite")].run)(&mut s);
+        assert_eq!(s.core.project.sprites.len(), 1);
+        assert_eq!(s.core.project.sprites[0].asset, 0, "the first instance survives");
+        assert_eq!(s.core.status, "Sprite 2 deleted.");
     }
 
     // -- command_hint (Phase N, P14 §4.4) -----------------------

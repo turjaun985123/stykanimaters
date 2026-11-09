@@ -42,7 +42,7 @@
 //! | `proj-current-meta` | "{size} · modified {time}" muted line under `proj-current-file` (conditional — present only when the §31 match holds AND the file resolves and stats) | renders [`current_file_meta`]: the §31 match (via [`current_file_path`]) gates it, the path resolves over `core.project_files` by the crate's slug rule ([`resolve_project_file`]), size via [`human_size`], time via [`modified_label`] | ok — Phase J §27; gated on the §31 decision itself, so the two lines can never disagree about which file the session is on |
 //! | `proj-reload` | "Reload from disk" button (`icon_btn`, "rotate-right" icon — Phase N; p13: rotate-right, not Redo's arrow-rotate-right) | [`reload_pressed`] → [`reload_target`] (the §27 gate as an owned path) → [`reload_from_disk`]: no target → status "No saved file to reload.", open never called; target → the open rows' exact discipline (point `project_index` at the file, `EditorCore::open_project_file` — it takes no path argument and returns `()`, editor.rs:3787 — [`clear_stale_solo`], [`sync_name_edit`]), with the success status overridden to name the discard | ok — Phase K §27; see the reload note below. UI mission Wave 4 (S16 D2): with a target and a dirty session the first press arms instead (`ConfirmAction::ReloadProject`; the button re-renders as the danger "Discard changes?") |
 //! | `new-proj` | "New" button (`icon_btn`, "file" icon) | [`new_pressed`] → [`new_project`] + [`sync_name_edit`]: installs [`blank_project`]`("Untitled")` — field-for-field the MCP `new_project` tool's defaults and reset set (mcp_tools.rs `tool_new_project`) — clears solo, stops playback, no snapshot | ok — UI mission Wave 4 (S16 D2): a dirty session arms first (`ConfirmAction::NewProject`, danger "Discard changes?" re-render); clean, the press runs at once |
-//! | `save-proj` | "Save project" button (`icon_btn`, "floppy-disk" icon) | [`save_named_pressed`] → `EditorCore::save_named_project` (slugifies the name, writes `./projects/<slug>.json`, refreshes `project_files`, sets status), then — only on success — `shell::write_recovery` + `shell::touch_recent` to keep snapshot/recents in step | fixed in Phase H — the Phase G caveat is closed: the op returns `bool` and [`after_save`] gates the recovery/recents sync on it, so a failed save no longer plants a phantom recent |
+//! | `save-proj` | "Save project" button (`icon_btn`, "floppy-disk" icon) | [`save_named_pressed`] → `EditorCore::save_named_project` (slugifies the name, writes `./projects/<slug>.json`, refreshes `project_files`, sets status), then — only on success — `shell::write_recovery` + `shell::touch_recent` to keep snapshot/recents in step, the recovery write noted on the core via [`note_recovery_if_written`] only when the write lands | fixed in Phase H — the Phase G caveat is closed: the op returns `bool` and [`after_save`] gates the recovery/recents sync on it, so a failed save no longer plants a phantom recent. Wave 13 (E2): the note itself is gated on the recovery write's `io::Result` — before, the result was discarded and the counter reset even when the snapshot write failed |
 //! | `save-copy-proj` | "Save a copy" button (`icon_btn`, "copy" icon) on its own row under the New / Save / Recover row | [`save_copy_pressed`] → [`save_project_copy`] → `projects::save_copy` (projects.rs): writes a renamed clone of the current project to `./projects/<slug>.json`, refusing to overwrite; on success the path joins `project_files` at its sorted position ([`insert_sorted_project_file`]) so the copy's selector row appears at once; the session itself — its name, current file and recovery association — is untouched, and recents is deliberately NOT updated (the copy is not the session's file, and the §31 match reads recents) | ok — Wave 9 (D5): the copy's name is derived, not typed: "{project name} copy" ([`copy_project_name`]). A name input would need a second `TextEdit` on `State` (the integrator's field to add, not this section's to invent), and the name field's own buffer is not reusable input — it is the rename draft (see [`save_project_copy`]). A second press therefore collides with the first copy's file and the refusal lands in the status line |
 //! | `recover` | "Recover" button (`icon_btn`, "arrow-rotate-left" icon) | [`recover_pressed`] → [`recover_snapshot`] (`shell::read_recovery` = `./projects/.recovery.json`, shell.rs) → [`apply_recovered_project`] + [`sync_name_edit`] | fixed in Phase G — the reset now also clears solo and stops playback (see the fn). UI mission Wave 4: offered only while the snapshot is newer than the last save (S06-2 — otherwise `icon_btn_inert` under the same key), and a dirty session arms first (S06-3 / S16 D2, `ConfirmAction::RecoverSnapshot`) |
 //! | `proj-list` | selector list (col) | — container, no handler | ok |
@@ -335,9 +335,16 @@ pub fn blank_project(name: &str) -> Project {
 /// refreshes every 25 counted edits; and
 /// (b) a recovery write that bypasses `maybe_autosave` —
 /// "Save project" writes one via `shell::write_recovery` —
-/// does not reset the counter (the core keeps it private and
-/// exposes no "note a manual write" API), so right after a
-/// save the line can overstate how stale the snapshot is.
+/// IS accounted since Wave 12 (E8): the core exposes
+/// `note_recovery_written` for exactly that write, and
+/// [`save_named_pressed`] runs it through
+/// [`note_recovery_if_written`], gated on the write
+/// landing (Wave 13, E2) — so after a successful save the
+/// line reads "up to date", and after a failed snapshot
+/// write it keeps counting, truthfully. (The Phase G
+/// version of this note claimed no such API existed and
+/// the line could overstate staleness after a save; both
+/// halves were true then and neither is now.)
 pub fn autosave_line(edits_since_autosave: u64) -> String {
     match edits_since_autosave {
         0 => "Recovery snapshot up to date.".to_string(),
@@ -764,6 +771,16 @@ pub fn copy_status(copy_name: &str, result: &Result<PathBuf, String>) -> String 
 /// at its sorted position ([`insert_sorted_project_file`]),
 /// so the copy's Open row appears at once. Returns
 /// whether the copy was written.
+///
+/// Counter discipline (Wave 13, E2 audit): this path
+/// writes NO recovery snapshot — `projects::save_copy`
+/// writes only the copy's own file, and the session's
+/// `.recovery.json` keeps whatever it already held — so
+/// it deliberately never calls
+/// `EditorCore::note_recovery_written`. The copy is not
+/// the session's file and not its snapshot; noting would
+/// zero the outstanding-edit counter on coverage that
+/// does not exist.
 pub fn save_project_copy(core: &mut EditorCore) -> bool {
     let copy_name = copy_project_name(&core.project.name);
     let result = stykanimate_rs::projects::save_copy(core, &copy_name);
@@ -901,21 +918,54 @@ pub fn after_save(saved: bool) -> AfterSave {
     }
 }
 
+/// Note a recovery write on the core — but only when the
+/// write actually landed. `recovery_written` is the
+/// success report of the `shell::write_recovery` call the
+/// named save runs as its follow-up; the note
+/// (`EditorCore::note_recovery_written`, Wave 12 E8) zeroes
+/// the outstanding-edit counter on the claim that the
+/// snapshot now covers those edits, so running it after a
+/// FAILED write would state the opposite of the truth:
+/// the counter would read "up to date" while
+/// `./projects/.recovery.json` still holds the older
+/// state, and the autosave cadence would wait a fresh 25
+/// edits before retrying. The core's own autosave holds
+/// exactly this discipline (`maybe_autosave` notes only
+/// on `Ok` and leaves the counter alone on `Err`); this
+/// gate is the same rule for the shell-side write.
+///
+/// Wave 13 (E2) audit: before this gate existed, the one
+/// call site in this file discarded the write's
+/// `io::Result` (`let _ =`) and noted unconditionally.
+/// Factored out of the press handler in the
+/// [`after_save`] idiom, so the gating is testable
+/// without touching the disk.
+pub fn note_recovery_if_written(core: &mut EditorCore, recovery_written: bool) {
+    if recovery_written {
+        core.note_recovery_written();
+    }
+}
+
 /// "Save project": the GPUI `save-proj` listener — save
 /// under the project's name in `./projects/`, then keep the
 /// recovery snapshot and recents list in step with the
 /// explicit save. Phase H gates those follow-ups on the
 /// op's success report ([`after_save`]): on failure the
 /// op's status ("Project save failed: …") is the last word
-/// and recents stays untouched.
+/// and recents stays untouched. The recovery write itself
+/// is noted on the core only when it lands
+/// ([`note_recovery_if_written`] — Wave 13, E2: the write
+/// returns an `io::Result`, and a failed snapshot write
+/// must not zero the outstanding-edit counter).
 fn save_named_pressed(s: &mut State) {
     // Saving is the alternative to discarding: the press
     // stands down any armed discard in this panel.
     s.confirm_action = None;
     let saved = s.core.save_named_project();
     if after_save(saved) == AfterSave::SyncRecoveryAndRecents {
-        let _ = stykanimate_rs::shell::write_recovery(&s.core.project);
-        s.core.note_recovery_written();
+        let recovery_written =
+            stykanimate_rs::shell::write_recovery(&s.core.project).is_ok();
+        note_recovery_if_written(&mut s.core, recovery_written);
         stykanimate_rs::shell::touch_recent(&s.core.project.name);
     }
 }
@@ -1283,6 +1333,7 @@ mod tests {
             figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
             figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),
@@ -1736,6 +1787,73 @@ playback_speed: 1.0,
         // handler runs the sync only on the first arm, so
         // this decision is the whole behaviour.
         assert_eq!(after_save(false), AfterSave::Nothing);
+    }
+
+    #[test]
+    fn recovery_note_follows_the_recovery_write_result() {
+        // Wave 13 (E2): the named save's recovery follow-up
+        // notes the write on the core ONLY when the write
+        // landed — the core's own maybe_autosave discipline
+        // (on Err it leaves the counter alone, so the next
+        // tick retries instead of waiting a fresh 25 edits).
+        // Before the gate, save_named_pressed discarded
+        // write_recovery's io::Result and noted
+        // unconditionally: a failed snapshot write (full
+        // disk, permissions) still zeroed the counter,
+        // claiming coverage the snapshot never had, while
+        // the status strip's dirty read of the same counter
+        // contradicted it.
+        let mut core = EditorCore::new();
+        core.snapshot();
+        assert_eq!(
+            core.edits_since_autosave(),
+            1,
+            "one counted edit outstanding"
+        );
+        note_recovery_if_written(&mut core, false);
+        assert_eq!(
+            core.edits_since_autosave(),
+            1,
+            "a failed recovery write must not reset the counter"
+        );
+        assert!(session_dirty(&core), "the session still reads dirty");
+        note_recovery_if_written(&mut core, true);
+        assert_eq!(
+            core.edits_since_autosave(),
+            0,
+            "a landed recovery write covers the edit"
+        );
+        assert!(!session_dirty(&core));
+    }
+
+    #[test]
+    fn swap_paths_zero_the_counter_by_the_swap_not_by_a_note() {
+        // The swap paths in this file (New, Recover — and
+        // the core's Open/Reload behind the rows) write no
+        // recovery snapshot, so none of them may call
+        // note_recovery_written; their counter still lands
+        // at zero, through the swap itself
+        // (note_project_swapped zeroes both counters in the
+        // core). This pins that the zero is the swap's
+        // doing: a dirty session swapped either way reads
+        // clean without any recovery write having happened.
+        let mut core = EditorCore::new();
+        core.snapshot();
+        assert_eq!(core.edits_since_autosave(), 1);
+        new_project(&mut core);
+        assert_eq!(
+            core.edits_since_autosave(),
+            0,
+            "New zeroes the counter via the swap"
+        );
+        core.snapshot();
+        assert_eq!(core.edits_since_autosave(), 1);
+        apply_recovered_project(&mut core, Project::new_demo());
+        assert_eq!(
+            core.edits_since_autosave(),
+            0,
+            "Recover zeroes the counter via the swap"
+        );
     }
 
     #[test]

@@ -2379,6 +2379,7 @@ mod tests {
             figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
             figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
             frame_ops: FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),

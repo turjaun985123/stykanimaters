@@ -703,7 +703,13 @@ pub fn follow_selected(core: &mut EditorCore) {
     match core.project.figures.get(fi) {
         Some(f) => {
             let name = f.name.clone();
-            core.project.camera_follow = Some(fi);
+            // Wave 13 (census E2): no snapshot (the follow
+            // family's discipline), but a real change
+            // counts for dirty/autosave via the seam.
+            if core.project.camera_follow != Some(fi) {
+                core.project.camera_follow = Some(fi);
+                core.mark_dirty();
+            }
             core.status = format!("Camera follows {name}.");
         }
         None => core.status = "No figure selected to follow.".into(),
@@ -715,7 +721,12 @@ pub fn follow_selected(core: &mut EditorCore) {
 /// index) with `toggle_camera_follow`'s own off wording;
 /// no snapshot, per the module docs.
 pub fn follow_clear(core: &mut EditorCore) {
-    core.project.camera_follow = None;
+    // Wave 13 (census E2): clearing an already-off follow
+    // marks nothing; repairing a stale index IS a change.
+    if core.project.camera_follow.is_some() {
+        core.project.camera_follow = None;
+        core.mark_dirty();
+    }
     core.status = "Camera follow off.".into();
 }
 
@@ -731,7 +742,12 @@ pub fn follow_cycle(core: &mut EditorCore, dir: i32) {
     let count = core.project.figures.len();
     match cycle_follow(core.project.camera_follow, count, dir) {
         Some(fi) => {
-            core.project.camera_follow = Some(fi);
+            // Wave 13 (census E2): as `follow_selected` —
+            // mark only on a real change.
+            if core.project.camera_follow != Some(fi) {
+                core.project.camera_follow = Some(fi);
+                core.mark_dirty();
+            }
             core.status = format!("Camera follows {}.", core.project.figures[fi].name);
         }
         None => core.status = "No figures to follow.".into(),
@@ -1768,6 +1784,7 @@ mod tests {
             figures_panel: crate::rune_sec::figures_panel::FiguresPanelState::default(),
             figure_add: crate::rune_sec::figure_add::FigureAddState::default(),
             library_panel: crate::rune_sec::library_panel::LibraryPanelState::default(),
+            sprites_panel: crate::rune_sec::sprites_panel::SpritesPanelState::default(),
             home_panel: crate::rune_sec::home_panel::HomePanelState::default(),
             frame_ops: crate::rune_sec::frame_ops::FrameOpsState::default(),
             graph_panel: crate::rune_sec::graph_panel::GraphPanelState::default(),

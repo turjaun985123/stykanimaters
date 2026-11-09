@@ -2068,8 +2068,12 @@ pub fn toggle_open(s: &mut State) {
             None
         };
         *s.home_panel.offer_mark.borrow_mut() = mark;
-        let _ = shell::write_recovery(&s.core.project);
-        s.core.note_recovery_written();
+        // Wave 13 (integrator, E2's flag): the note is
+        // gated on the write actually landing, like the
+        // save path — before, a failed snapshot write
+        // still reset the autosave baseline.
+        let written = shell::write_recovery(&s.core.project).is_ok();
+        crate::rune_sec::project_tools::note_recovery_if_written(&mut s.core, written);
     }
 }
 

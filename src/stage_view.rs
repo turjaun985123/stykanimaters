@@ -652,6 +652,11 @@ pub struct StageOverlays {
     /// list from `particle_selected`'s events); `None` — or
     /// a stale index — draws no gizmo.
     pub fx_selected: Option<usize>,
+    /// Selected sprite instance, index into
+    /// `core.project.sprites` (the Sprites panel's
+    /// selection, Wave 13); `None` — or a stale index —
+    /// draws no corner marks and keeps the plain outline.
+    pub sprite_selected: Option<usize>,
     /// Draw the 3D session's figure on the stage (Phase M):
     /// set by the shell only in the Build3D workspace while
     /// a fig3 session is active. Even with the flag set, the
@@ -679,6 +684,7 @@ impl Default for StageOverlays {
             stroke_selected: None,
             particle_selected: None,
             fx_selected: None,
+            sprite_selected: None,
             fig3_stage: false,
             onion_prev: 1,
             onion_next: 1,
@@ -1134,12 +1140,61 @@ pub fn stage_shape(core: &EditorCore, el_size: [f32; 2], overlays: StageOverlays
     // divergence from the raster, where media composites over
     // everything. Text items are not drawn here; stage_text
     // owns them later in this same shape.
+    let sprite_quads = crate::stage_sprites::sprite_quads(&core.project, display);
     for item in stykanimate_rs::media::media_items(&core.project, display) {
         if let stykanimate_rs::media::MediaItem::Image { corners, alpha, .. } = item {
+            // Sprite instances are painted by the sprite
+            // pass below from `stage_sprites`' prim stream
+            // (Wave 13, A2) — same geometry, plus selection
+            // corner marks and name labels — so the generic
+            // placeholder skips them here rather than
+            // double-painting the quad.
+            if sprite_quads.iter().any(|q| q.corners == corners) {
+                continue;
+            }
             let pts: Vec<[f32; 2]> = corners.iter().map(|p| rt.to_screen(*p)).collect();
             let accent = hex_color(SELECTION_ACCENT).unwrap_or(Color::WHITE);
             shape = shape.fill(pts.clone(), accent.alpha(0.16 * alpha));
             shape = shape.stroke_with(pts, true, 1.0, LineCap::Round, accent.alpha(0.7 * alpha));
+        }
+    }
+    // Sprite instances (Wave 13, A2 + A6): the prim stream's
+    // fills/outlines carry the placeholder family's accent
+    // and alpha factors; the panel-selected sprite also gets
+    // corner marks and a full-strength outline, and every
+    // sprite gets its asset name laid over its quad by
+    // `stage_text::sprite_label_boxes` (the fitted in-quad
+    // layout — the integrator's reconciliation of A2's label
+    // spec with A6's shipped layout: the prim decides WHICH
+    // sprites are labelled and with what name; A6's layout
+    // places the glyphs). Same slot as the placeholders:
+    // over the figures, under the 3D session figure.
+    {
+        let accent = hex_color(SELECTION_ACCENT).unwrap_or(Color::WHITE);
+        for prim in crate::stage_sprites::sprite_prims(&core.project, display, overlays.sprite_selected) {
+            use crate::stage_sprites::SpritePrim;
+            match prim {
+                SpritePrim::Fill { corners, alpha, .. } => {
+                    let pts: Vec<[f32; 2]> = corners.iter().map(|p| rt.to_screen(*p)).collect();
+                    shape = shape.fill(pts, accent.alpha(alpha));
+                }
+                SpritePrim::Outline { corners, width, alpha, .. } => {
+                    let pts: Vec<[f32; 2]> = corners.iter().map(|p| rt.to_screen(*p)).collect();
+                    shape = shape.stroke_with(pts, true, width * s, LineCap::Round, accent.alpha(alpha));
+                }
+                SpritePrim::CornerMark { a, b, width, .. } => {
+                    shape = shape.line(rt.to_screen(a), rt.to_screen(b), width * s, LineCap::Round, accent);
+                }
+                SpritePrim::Label { sprite, content, .. } => {
+                    if let Some(q) = sprite_quads.iter().find(|q| q.sprite == sprite) {
+                        for tp in crate::rune_sec::stage_text::sprite_label_boxes(q.corners, &content, SELECTION_ACCENT) {
+                            let crate::rune_sec::stage_text::TextPrim::GlyphBox { corners, color, alpha } = tp;
+                            let screen: Vec<[f32; 2]> = corners.iter().map(|p| rt.to_screen(*p)).collect();
+                            shape = shape.fill(screen, hex_color(color).unwrap_or(Color::WHITE).alpha(alpha));
+                        }
+                    }
+                }
+            }
         }
     }
 

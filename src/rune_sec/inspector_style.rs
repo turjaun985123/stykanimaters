@@ -108,6 +108,20 @@
 //!   op the segment inspector's palette swatches press —
 //!   and notes it again, moving it to the front.
 //!
+//! Wave 13 (E4) — the press compositions that lived
+//! only as builder closures are named handlers now, so
+//! a future command-palette splice can call them the
+//! way it already calls [`apply_preset`] /
+//! [`step_opacity`] / [`copy_style`]: the gradient
+//! swatch press is [`apply_gradient_swatch`] and the
+//! recent chip press is [`apply_recent_color`]. The
+//! RGB steppers needed no extraction — their presses
+//! were already the named [`step_color_channel`] /
+//! [`step_gradient_channel`], reached from the row
+//! builder through a fn pointer. Panel behaviour is
+//! unchanged: same keys, status strings and undo
+//! steps, pinned by the press-path tests below.
+//!
 //! History: Phase D shipped cap and gradient as single
 //! press targets advancing `cycle_node_cap` /
 //! `cycle_node_gradient` one step per press, because no
@@ -422,6 +436,34 @@ pub fn step_gradient_channel(core: &mut EditorCore, channel: usize, dir: i32) {
     note_recent_color(stepped);
 }
 
+/// One gradient swatch press against the core (Wave 13,
+/// E4 — extracted from the `gradient_swatch` builder,
+/// where this composition lived only as a button
+/// closure, unnamed and unreachable to any other
+/// caller): set the swatch's own gradient end colour —
+/// [`gradient_value`] of `state` — through
+/// `set_node_color2`, the op that owns the press's
+/// status line ("Gradient to #…" / "Gradient off
+/// (solid colour).") and its snapshot, so one press is
+/// exactly one undo step. A colour-applying press is
+/// then recorded via [`note_recent_color`], like the
+/// other colour-applying handlers; the Off press
+/// (state 0) applies no colour and records nothing.
+/// Like the closure it replaces, the press does not
+/// pre-check the selection — the panel renders
+/// swatches only with a selection, and without one the
+/// op itself answers "Select a joint first." (its
+/// snapshot is spent either way, exactly as before).
+pub fn apply_gradient_swatch(core: &mut EditorCore, state: usize) {
+    let value = gradient_value(state);
+    core.set_node_color2(value);
+    // A swatch press applies a colour to the node:
+    // record it (the Off state applies no colour).
+    if let Some(color) = value {
+        note_recent_color(color);
+    }
+}
+
 /// A copied segment style: exactly the fields this panel
 /// can write through a direct `EditorCore` setter (see the
 /// module docs for what is excluded and why — taper and
@@ -614,6 +656,21 @@ pub fn note_recent_color(color: u32) {
     });
 }
 
+/// One recent-colour chip press against the core (Wave
+/// 13, E4 — extracted from the `recent_chip` builder,
+/// where this composition lived only as a button
+/// closure): apply `color` as the selected node's own
+/// colour through `set_node_color` — the op the segment
+/// inspector's palette swatches press, which owns the
+/// status line and does not snapshot, so a chip press
+/// is not an undo step — then note the colour again via
+/// [`note_recent_color`], moving it to the front of the
+/// recent list.
+pub fn apply_recent_color(core: &mut EditorCore, color: u32) {
+    core.set_node_color(color);
+    note_recent_color(color);
+}
+
 /// The one RGB channel stepper row builder (Phase N
 /// merged the primary and gradient copies — plan P03:
 /// the gradient row was "a copy made for a key prefix").
@@ -741,8 +798,8 @@ fn preset_chip(index: usize, preset: StylePreset, t: &Theme) -> El {
 /// accent border). The `Off` state keeps its
 /// `control_off` fill — it is a value, not an empty
 /// slot. Each swatch is its own press target — pressing
-/// it sets exactly that gradient end colour through
-/// `EditorCore::set_node_color2` ([`gradient_value`]).
+/// it runs [`apply_gradient_swatch`], which sets
+/// exactly that swatch's gradient end colour.
 fn gradient_swatch(state: usize, current: bool, t: &Theme) -> El {
     let fill = match state {
         1 => hex_color(0xFF_FFFF).unwrap_or(Color::WHITE),
@@ -754,25 +811,16 @@ fn gradient_swatch(state: usize, current: bool, t: &Theme) -> El {
         fill,
         current,
         t,
-        move |s: &mut State| {
-            let value = gradient_value(state);
-            s.core.set_node_color2(value);
-            // A swatch press applies a colour to the node:
-            // record it (the Off state applies no colour).
-            if let Some(color) = value {
-                note_recent_color(color);
-            }
-        },
+        move |s: &mut State| apply_gradient_swatch(&mut s.core, state),
     )
 }
 
 /// One recent-colour chip: the kit's one `swatch`
 /// construction, like a gradient swatch (the two local
 /// copies collapsed onto the kit at Phase N). Pressing
-/// it applies the colour as the node's own colour
-/// through `set_node_color` — the op the segment
-/// inspector's palette swatches press — and notes it
-/// again, moving it to the front of the recent list.
+/// it runs [`apply_recent_color`], which applies the
+/// colour as the node's own colour and notes it again,
+/// moving it to the front of the recent list.
 /// Keys are `style-recent-{i}` with `i` the colour's
 /// position in the recent list.
 fn recent_chip(index: usize, color: u32, current: bool, t: &Theme) -> El {
@@ -781,10 +829,7 @@ fn recent_chip(index: usize, color: u32, current: bool, t: &Theme) -> El {
         hex_color(color).unwrap_or(Color::WHITE),
         current,
         t,
-        move |s: &mut State| {
-            s.core.set_node_color(color);
-            note_recent_color(color);
-        },
+        move |s: &mut State| apply_recent_color(&mut s.core, color),
     )
 }
 
@@ -1168,6 +1213,47 @@ mod tests {
         assert_eq!(selected_style(&core).unwrap().color2, Some(0xFF_FFFF));
         core.set_node_color2(gradient_value(0));
         assert_eq!(selected_style(&core).unwrap().color2, None);
+    }
+
+    #[test]
+    fn gradient_swatch_press_applies_and_records_in_one_undo_step() {
+        // The swatch's press path, driven without the UI
+        // through the named handler the button now calls
+        // (Wave 13, E4 — the composition was a builder
+        // closure): the swatch's own colour lands via
+        // `set_node_color2`, the op's status line stands,
+        // the colour is recorded, and the press costs
+        // exactly the one undo step that op's snapshot
+        // makes it.
+        let mut core = EditorCore::new();
+        core.selected_figure = 0;
+        core.selected_node = Some(1);
+        assert!(recent_colors().is_empty());
+
+        let depth_before = core.undo_depth();
+        apply_gradient_swatch(&mut core, 2);
+        assert_eq!(selected_style(&core).unwrap().color2, Some(0x22_2222));
+        assert_eq!(core.status, "Gradient to #222222.");
+        assert_eq!(recent_colors(), vec![0x22_2222]);
+        assert_eq!(core.undo_depth(), depth_before + 1);
+
+        // One undo reverts the press's write.
+        core.undo();
+        assert_eq!(selected_style(&core).unwrap().color2, None);
+
+        // The white swatch records ahead of the earlier
+        // colour.
+        apply_gradient_swatch(&mut core, 1);
+        assert_eq!(selected_style(&core).unwrap().color2, Some(0xFF_FFFF));
+        assert_eq!(recent_colors(), vec![0xFF_FFFF, 0x22_2222]);
+
+        // The Off press clears the end and records
+        // NOTHING — the recent list is exactly as it was,
+        // and the op's own status line stands.
+        apply_gradient_swatch(&mut core, 0);
+        assert_eq!(selected_style(&core).unwrap().color2, None);
+        assert_eq!(core.status, "Gradient off (solid colour).");
+        assert_eq!(recent_colors(), vec![0xFF_FFFF, 0x22_2222]);
     }
 
     #[test]
@@ -1698,9 +1784,10 @@ mod tests {
 
     #[test]
     fn recent_chip_press_path_applies_the_colour_and_refronts_it() {
-        // The chip's press body, driven without the UI:
-        // `set_node_color` (the palette swatch op) then
-        // `note_recent_color` again.
+        // The chip's press, driven without the UI through
+        // the named handler the button now calls (Wave
+        // 13, E4): `set_node_color` (the palette swatch
+        // op) then a re-note of the same colour.
         let mut core = EditorCore::new();
         core.selected_figure = 0;
         core.selected_node = Some(1);
@@ -1708,8 +1795,11 @@ mod tests {
         note_recent_color(0x11_1111);
         assert_eq!(recent_colors(), vec![0x11_1111, 0x22_2222]);
 
-        core.set_node_color(0x22_2222);
-        note_recent_color(0x22_2222);
+        let depth_before = core.undo_depth();
+        apply_recent_color(&mut core, 0x22_2222);
+        // `set_node_color` does not snapshot, so the
+        // press is not an undo step.
+        assert_eq!(core.undo_depth(), depth_before);
         // The colour landed as the node's own colour...
         assert_eq!(selected_color(&core), Some(0x22_2222));
         assert_eq!(

@@ -1506,8 +1506,18 @@ fn tool_set_tween_playback() -> Tool {
                 // set_camera_follow above, the MCP call takes
                 // the snapshot itself so the change is one
                 // undo step and a counted edit.
+                // Wave 13 (census D1): the write is direct,
+                // not via `toggle_tween_playback` — since
+                // B2 the toggle also marks dirty, so routing
+                // through it counted TWO edits (snapshot +
+                // mark) for one call. The status is the
+                // toggle's own text.
                 core.snapshot();
-                core.toggle_tween_playback();
+                core.project.tween_playback = enabled;
+                core.status = format!(
+                    "Tween playback {}.",
+                    if enabled { "on" } else { "off" }
+                );
             }
             Ok(json!({
                 "ok": true,

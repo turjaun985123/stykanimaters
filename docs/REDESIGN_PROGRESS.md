@@ -783,3 +783,166 @@ The wave works under two exclusions, stated plainly:
 as planned" over "answer the two decisions first",
 so both stay exactly as they are until the user
 rules on them.
+
+### 6.8 Wave 13 — sprite surface + Wave 12 remainders (2026-11-09)
+
+A seventh improvement wave, launched 2026-11-09
+(09:57 +06): the user tapped "Launch Wave 13 —
+sprite surface + Wave 12 remainders". Same shape
+as Waves 9–12: 50 agents, five squads of ten, one
+owner per file, the session integrator wiring the
+shared files (roster: `~/workspace/wave13-roster.md`).
+The scope, as offered: the **sprite GUI surface**
+headline §6.7 carried as its first remainder —
+engine ops, stage prims, a Sprites panel and MCP
+tools for the instances that today enter only via
+`.nodes` import and cannot be placed or edited in
+the app at all; the **dirty-marking fix** for
+§6.7's snapshot-coverage gap, under a census
+contract ruling every non-snapshot mutator; the
+**fidelity remainders** — SVG strokes drawing
+under figures where the raster paints them over,
+node opacity never reaching heads/rings/polys in
+either exporter, stage pressured strokes keeping
+the flat-width construction, and the figures
+panel's thumbnails ignoring per-node styles;
+**pixel-proof coverage** — a library-populated
+scene (the library thumbnails are unit-proven
+only) and a sprites-populated scene, taking scenes
+26 → 28; and **QA/parity** follow-through across
+the strip, palette, toasts and workspace gating.
+
+The squads: **A, sprite GUI surface** — engine ops
+in a new `sprite_ops.rs` (add/remove an instance,
+set/delete a transform key, exactly one snapshot
+per mutation, status-only refusals); stage prims
+and hit-testing in a new `stage_sprites.rs` (the
+honest placeholder family — Rune `Shape` has no
+bitmap primitive, consistent with Wave 12's
+segment-media outlines); a new Sprites panel
+mirroring the text tool's pattern; five MCP sprite
+handlers in `media.rs` for the integrator's
+registry splice, with a `media_items` ordering
+audit against the raster composite order; a
+`.nodes` sprite round-trip audit in
+`nodes_anim.rs`; sprite name labels in
+`stage_text.rs`; the Scene panel's placed-media
+readout becoming the panel's entry point; help
+rows rewritten to the landed truth; per-format
+sprite honesty notes in the export panel; and the
+surface doc `docs/SPRITES.md`. **B,
+dirty-marking / snapshot coverage** — a census
+(`docs/wave13/DIRTY_CENSUS.md`) ruling every
+non-snapshot mutator in the lib + bin snapshot vs
+the new `mark_dirty()` seam (dirty + autosave
+counting without an undo step, where undoability
+would be wrong); the seam in `editor.rs` beside
+`edits_since_autosave`, plus the `redo`
+`selected_figure` clamp as a parity bug fix;
+per-op fixes across `figure_ops.rs`, `fx_ops.rs`,
+`projects.rs`, `audio_ops.rs`, `graph_keys.rs`,
+`draw_ops.rs` and the handlers in `mcp_tools.rs`
+that write project state directly; and an
+end-to-end suite pinning the contract through real
+MCP dispatch. **C, fidelity remainders** — SVG
+z-order (strokes over figures, media last) and
+node `style.opacity` reaching SVG heads/rings/
+polys; the raster half of node opacity in
+`export.rs`; stage pressured strokes honouring
+baked per-point widths via a new shared
+`paint::pressured_stroke_pieces`; figure-card
+thumbnails rebuilt on `styled_segment_pieces`;
+serde pins and `InstanceKey::sample` edge tests
+in `model.rs`; the frame insert/delete audit for
+sprite/text instance keys in `frame_swap.rs`;
+live-MCP hardening follow-through against the new
+write paths; a `docs/STAGE_STYLE.md` close-out
+addendum; and a sprite MCP end-to-end suite.
+**D, pixel-proof + scenes** — library-populated
+and sprites-populated scenes (scenes 26 → 28,
+layout facts 30/31); both scenes in the headless
+tree loops and snap probes; snap tests Round 14
+(sprite panel flow, library thumbnails present);
+library viewport follow-through for the taller
+thumbnail rows; missing-file recents entries
+dimmed in `menus.rs`; gate, census and
+overflow-scan upkeep; and the wave's proof ledger
+and acceptance checklist in `docs/wave13/`. **E,
+QA + parity** — the status strip's dirty-dot and
+autosave read path verified against the B
+contract; the GUI save-path audit (every
+`after_save` path calling `note_recovery_written`);
+three palette sprite commands (palette 132 → 135);
+the style panel's closure-only controls extracted
+to named fns in `inspector_style.rs`; the
+movieclip-def media audit (`docs/wave13/CLIP_MEDIA.md`
+— clip-def media is stored and serialised but
+never rendered); the `shell.rs` root-clone test
+oddity investigated from source; toast attribution
+for the sprite and dirty families; workspace
+gating for the Sprites panel; the final honesty
+sweep (`docs/wave13/HONESTY_SWEEP.md`); and this
+section.
+
+Entering counts, as recorded at the Wave 12 close
+(§6.7) and re-stated here so the closing census
+has its baseline: MCP **283 tools** (230 registry
++ 9 io + 44 built-ins, per `scripts/mcp_census.py`);
+**3,156 tests** (CI run **42557475828** on
+`5a8403f`, GREEN — 1,256 lib + 1,838 bin + 62
+integration); **923 unique keys** (814 static +
+109 dynamic patterns), zero lost; palette **132**;
+scenes **26**; help **61**; layout facts **29**;
+i18n **99 × 28**; icons **163**; gate **9/9**
+(`scripts/phase_j_checks.py` on the closing tree);
+headless run **42557913977** (all probes 0,
+live-MCP probe PASS, overflow CLEAN on 29 trees).
+HEAD at launch: `374e873`, the Wave 12 close-out
+commit.
+
+**Delivered** — TODO-AT-CLOSE: the integrator fills
+this in at close-out with what actually landed,
+squad by squad, against the remits above.
+
+**Verification** — TODO-AT-CLOSE: run evidence only
+(gate result, CI run id and test count, headless
+run id, live-MCP probe and overflow verdicts, snap
+list) goes here at close-out.
+
+**Closing census** — TODO-AT-CLOSE: MCP, palette,
+scenes, help, i18n, icons and keys as counted by
+the gate on the closing tree, against the entering
+baseline above.
+
+**Honest remainders** — TODO-AT-CLOSE: what this
+wave did not close, named at close-out.
+
+Standing user decisions this wave carries but does
+**not** settle — none of them is in any squad's
+remit, and they are recorded here so they are not
+lost: the **project-swap undo canonical behaviour**
+(load clears undo but not redo, `.piv` import clears
+both, New/open clear neither — a product call, not
+a fix); **white-on-accent contrast** (the
+white-text carrier is upstream rune `tok::accent`
+**#4392F7 at 3.14:1** in both themes; darkening the
+accent-filled call sites to ~**#2072D5 (4.72:1)**
+fixes it, darkening the app token alone does not —
+the user's open decision since the Wave 10
+close-out); the **two "New project" results** that
+still disagree; the **C5 waveform call** (a deleted
+audio file's stale waveform vs a "(missing file)"
+badge); and **sound remains user-verified only** —
+no squad can listen to playback.
+
+The wave works under five exclusions, stated
+plainly: **no project-swap undo/redo semantics
+change**, **no accent colour change**, **no
+stored-name-after-rename divergence fix**, **no
+waveform-badge change**, and **no MCP-save
+`write_recovery` change**. (The B squad's `redo`
+`selected_figure` clamp is a parity bug fix inside
+its remit, not a swap-semantics change.) The user
+chose "launch as planned" over "answer the
+decisions first", so all five stay exactly as they
+are until the user rules on them.
