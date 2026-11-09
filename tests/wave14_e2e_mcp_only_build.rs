@@ -329,8 +329,10 @@ fn graph_channel_index(mcp: &mut Dispatch, figure: u64, node: u64) -> u64 {
             continue;
         }
         let target = &ch["target"];
-        let matches = target.as_str().map_or(false, |s| s == format!("angle:{node}"))
-            || target["angle"].as_u64() == Some(node);
+        // The handler's real shape (graph_keys::gk_target_json):
+        // { "target": "angle", "node": n, "target_label": … }.
+        let matches = target["target"].as_str() == Some("angle")
+            && target["node"].as_u64() == Some(node);
         if matches {
             return ch["index"].as_u64().unwrap_or(pos as u64);
         }
