@@ -784,7 +784,7 @@ impl EditorCore {
                 crate::model::Shape::Line => crate::model::Shape::Circle,
                 crate::model::Shape::Circle => crate::model::Shape::Polygon(3),
                 crate::model::Shape::Polygon(n) if n < 6 => crate::model::Shape::Polygon(n + 1),
-                crate::model::Shape::Polygon(_) => crate::model::Line,
+                crate::model::Shape::Polygon(_) => crate::model::Shape::Line,
             };
             (node.name.clone(), node.shape)
         };
