@@ -6579,12 +6579,16 @@ mod tests {
         // Wave 13 for the sprite surface (sprite_list,
         // sprite_add, sprite_remove, sprite_set_key,
         // sprite_delete_key); +78 in Wave 14 (47 core
-        // parity handlers, 31 live-only shell stubs).
-        assert_eq!(tools.len(), 313);
+        // parity handlers, 31 live-only shell stubs);
+        // +4 in the Focused Wave (figure_library_rename
+        // plus the shell_select_graph_channel,
+        // shell_set_timeline and shell_get_recent_colours
+        // stubs).
+        assert_eq!(tools.len(), 317);
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 313, "tool names must be unique");
+        assert_eq!(names.len(), 317, "tool names must be unique");
         for t in &tools {
             assert_eq!(t.schema["type"], "object", "tool {} schema", t.name);
         }
