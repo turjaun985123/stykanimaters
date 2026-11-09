@@ -511,8 +511,18 @@ fn bad_arguments_errors_match_on_both_paths_and_change_nothing() {
     // visible in the project snapshot).
     let state_after_stdio = stdio.request(&call(4, "get_state", json!({})));
     let state_after_live = live.request(&call(4, "get_state", json!({})));
-    assert_eq!(canonical(&state_after_stdio), canonical(&state_before_stdio));
-    assert_eq!(canonical(&state_after_live), canonical(&state_before_live));
+    // Compare the result payloads, not the envelopes: the
+    // two requests carry different ids (1 vs 4) and the
+    // echo differs with them — id echo itself is pinned
+    // separately in this suite.
+    assert_eq!(
+        canonical(&state_after_stdio["result"]),
+        canonical(&state_before_stdio["result"])
+    );
+    assert_eq!(
+        canonical(&state_after_live["result"]),
+        canonical(&state_before_live["result"])
+    );
 }
 
 /// Notifications (messages with no `id`) are never answered —
