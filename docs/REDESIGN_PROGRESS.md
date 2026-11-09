@@ -419,3 +419,99 @@ in `app_theme.rs` shows the carrying value is upstream
 token alone would fix nothing); sound remains
 user-verified only; Home project rows are still not
 pixel-proven (no populated-Home scene yet).
+
+### 6.6 Wave 11 — MCP end to end (2026-11-09)
+
+A fifth improvement wave ordered by the user on
+2026-11-09 (06:00 +06): "assign 50 agents to continue
+improving projects mcp and mcp control end to end
+point to point not miss a single things". Same shape
+as Waves 9–10: 50 agents, five squads of ten, one
+owner per file, the session integrator wiring the
+shared files. The wave's single subject is **MCP
+control, end to end**: every path by which an outside
+client drives this editor — the protocol router, the
+stdio binary, the live HTTP endpoint, the tool
+registry, and the GUI surface that turns the live
+endpoint on — audited and closed point to point, so
+that nothing the editor can do is unreachable, and
+nothing a tool claims is untrue.
+
+The squads: **A, the live path** — `live_mcp.rs`
+protocol and hardening, the `mcp.rs` dispatch and
+built-in census, the `main.rs` poll drain and redraw,
+prefs and port state, the stdio binary and
+`mcp_io.rs`, the Settings toggle's truth, toast and
+status attribution for MCP-driven edits, the
+`docs/MCP.md` rebuild and the help rows. **B,
+registry parity** — missing tools written by domain
+(handlers in the domain files; the integrator splices
+the `Tool` entries into `mcp_tools.rs::tools()`).
+**C, panel parity** — ten panel owners auditing
+panel↔MCP reachability, each producing a gap spec for
+the integrator rather than editing the registry
+itself. **D, end-to-end session tests** — ten
+integration suites under `tests/wave11_e2e_*.rs`
+driving the real dispatch through whole editing
+sessions, with `WAVE11-GAP` markers wherever a session
+step finds the surface wanting. **E, QA/tooling** —
+a gate census of the MCP surface (check 9 and
+`scripts/mcp_census.py`), a headless live-MCP probe,
+snap coverage of MCP-visible state, an MCP-
+reachability panic audit of the engine, and this
+section.
+
+Entering surface, counted at source at the wave's
+start (not carried over from §6.5's prose):
+`mcp::all_tools()` is the single registry every
+consumer goes through, and it held **140 tools — 91
+registry** (`Tool` entries in
+`mcp_tools::tools()`), **8 io** (`Tool` entries in
+`mcp_io::tools()`: save/load/import/export/render,
+frame and contact-sheet rendering, project summary)
+**and 41 built-ins** in `mcp.rs` itself (the 3 base
+tools, 29 Wave 9 parity built-ins and 9 Wave 10
+round-2 built-ins). The one named gap entering the
+wave: **`FxInfo` was blind to `hidden`** — the FX
+panel's Hide/Show toggle sets `FxClipEntry::hidden`,
+the stage and exporters honour it, but the info
+struct the MCP `fx_list` tool serves had no such
+field, so no MCP client could read the flag (Squad B
+owns the fix).
+
+**Verification**: «FILL AT CLOSE: gate result —
+checks passed / total incl. the new check 9 MCP
+census, keys lost vs the Wave 10 close commit,
+census totals». CI run «FILL AT CLOSE: run id» on
+«FILL AT CLOSE: commit»: «FILL AT CLOSE: test counts
+— lib + bin + integration = total, GREEN or the
+failures named». Headless run «FILL AT CLOSE: run
+id»: «FILL AT CLOSE: probes exit 0 / total, overflow
+scan verdict and tree count, the live-MCP probe's
+result against a running editor». End-to-end suites:
+«FILL AT CLOSE: tests/wave11_e2e_*.rs suite count and
+test count, WAVE11-GAP markers remaining and where».
+Closing census: «FILL AT CLOSE: MCP total = registry
++ io + built-ins, palette, scenes, help, i18n, icons
+— each as counted by the gate». At the time of
+writing none of this exists yet: the wave's edits are
+in flight, nothing is integrated, and no gate, CI or
+headless verdict is claimed for Wave 11. The
+placeholders above are to be replaced only with run
+evidence, never with agent reports.
+
+Honest remainders — standing items this wave does
+**not** close (checked against the five squad remits
+above; none of them covers these): the **stage style
+fidelity** gap §6.5 named as a headline candidate —
+the stage still ignores style cap/taper/opacity that
+both exporters honour — is not an MCP item and no
+squad's remit touches stage rendering, so it carries
+over untouched; **sound remains user-verified only**
+(no squad can listen to playback); **Home project
+rows and thumbnails are still not pixel-proven**
+(the home-populated scene missing since Wave 4 is
+not in any squad's remit). Also standing, from §6.5:
+the dopesheet columns' constant 124 pt gutter offset,
+and white-on-accent contrast, which remains the
+user's open decision.

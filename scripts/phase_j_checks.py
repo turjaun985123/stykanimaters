@@ -288,6 +288,36 @@ Wave 10 additions (same gate, check 8):
   headless.yml, never by unregistering the scene
   or weakening this check.
 
+Wave 11 additions (same gate, check 9):
+
+- Check 9 is the MCP SURFACE CENSUS & INTEGRITY: the
+  MCP tool surface can never silently shrink, shadow
+  or drift from its docs again. All three tool
+  families are extracted from source, in all_tools()
+  assembly order: the built-ins (the `fn tool_*() ->
+  Tool` constructors mcp.rs's `all_tools()` assembles,
+  each of which must define exactly one tool name,
+  with the defined and assembled constructor sets
+  required to be equal and the two family `extend`
+  calls required to be present), the editing registry
+  (the `Tool { name:, handler: }` literals of
+  mcp_tools.rs's `tools()`) and the IO tools (the
+  same literal shape in mcp_io.rs's `tools()`). The
+  check then proves: every registry/IO handler ident
+  resolves to exactly one `fn` definition across the
+  whole src/ production tree (handlers may live in
+  domain files, not just their family's file); every
+  tool name is unique across ALL families — dispatch
+  (`tools_call_result`) takes the FIRST match in
+  all_tools() order, so a cross-family collision
+  makes the later tool unreachable while tools/list
+  shows the name twice; and docs/MCP.md's catalogue
+  lists exactly the surface set, in both directions,
+  by name. Every extractor fails LOUDLY when its
+  declaration pattern is not found — a reshaped
+  registry must read as a broken census, never as
+  a silent zero.
+
 Approximations are deliberate and documented inline:
 block capture is brace counting over comment/string-
 blanked source (the repo's established scan idiom), and
@@ -1695,6 +1725,332 @@ def check_coverage() -> tuple[bool, list[str]]:
 
 
 # ----------------------------------------------------------------
+# Check 9 — MCP surface census & integrity (Wave 11).
+# Structure is located on comment/string-blanked text
+# (check 8's idiom: offsets identical to the raw text),
+# string contents (tool names) are read back from the
+# raw text at the same offsets. Every extractor fails
+# loudly when its declaration pattern is not found.
+# ----------------------------------------------------------------
+
+_MCP_NAME_RE = re.compile(r'\bname:\s*"([^"]+)"')
+_MCP_HANDLER_RE = re.compile(
+    r"\bhandler:\s*([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*|\|)"
+)
+_MCP_CTOR_RE = re.compile(r"fn\s+(tool_[A-Za-z0-9_]*)\s*\(\s*\)\s*->\s*Tool\s*\{")
+_MCP_DOC_ROW_RE = re.compile(r"^\|\s*`([a-z0-9_]+)`\s*\|", re.M)
+
+
+def _mcp_fn_span(blanked: str, sig_re: str) -> tuple[int, int] | None:
+    """(start, end) offsets of a fn body in blanked
+    source: the signature's `{` to just past its
+    matching `}`. None when the signature is absent."""
+    m = re.search(sig_re, blanked)
+    if not m:
+        return None
+    open_idx = blanked.index("{", m.start())
+    _, end = brace_block(blanked, open_idx)
+    return (open_idx, end)
+
+
+def _mcp_tool_literals(
+    raw: str, blanked: str, span: tuple[int, int], family: str
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """One (name, handler) per `Tool { ... }` literal
+    inside the span. A literal whose name or handler
+    cannot be read is a census problem, never a
+    skipped entry."""
+    entries: list[tuple[str, str]] = []
+    problems: list[str] = []
+    region = blanked[span[0] : span[1]]
+    for m in re.finditer(r"(?<![\w:])Tool\s*\{", region):
+        open_idx = span[0] + region.index("{", m.start())
+        _, end = brace_block(blanked, open_idx)
+        lit_raw = raw[open_idx:end]
+        lineno = raw.count("\n", 0, open_idx) + 1
+        nm = _MCP_NAME_RE.search(lit_raw)
+        hm = _MCP_HANDLER_RE.search(lit_raw)
+        if nm is None:
+            problems.append(
+                f"  {family}: a Tool literal at line {lineno} has no readable "
+                '`name: "..."` — the declaration pattern changed; update this check'
+            )
+        if hm is None:
+            problems.append(
+                f"  {family}: the Tool literal at line {lineno} has no readable "
+                "`handler:` — the declaration pattern changed; update this check"
+            )
+        if nm is not None and hm is not None:
+            entries.append((nm.group(1), hm.group(1)))
+    if not entries and not problems:
+        problems.append(
+            f"  {family}: ZERO Tool literals found inside tools() — the "
+            "declaration pattern changed; update this check (a silent zero "
+            "is exactly what this census exists to prevent)"
+        )
+    return entries, problems
+
+
+def _mcp_registry_family(
+    rel: str, family: str
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """The (name, handler) entries of a family's
+    `pub fn tools()` (mcp_tools.rs / mcp_io.rs shape)."""
+    raw = read(rel)
+    blanked = blank_code(raw)
+    span = _mcp_fn_span(blanked, r"pub fn tools\s*\(\)[^{]*\{")
+    if span is None:
+        return [], [
+            f"  {family}: `pub fn tools()` not found in {rel} — the "
+            "registration mechanism changed; update this check"
+        ]
+    return _mcp_tool_literals(raw, blanked, span, family)
+
+
+def _mcp_builtins() -> tuple[list[str], list[str]]:
+    """The built-in family (src/mcp.rs): tool names in
+    all_tools() assembly order. Built-ins are not
+    literals in a vec — each is a `fn tool_*() -> Tool`
+    constructor whose body builds one Tool with a
+    closure handler, and all_tools() assembles the
+    constructors explicitly. The census therefore
+    proves the constructor set all_tools() calls is
+    exactly the set defined, and reads each name out
+    of its constructor body."""
+    problems: list[str] = []
+    raw = read("src/mcp.rs")
+    blanked = blank_code(raw)
+    prod = production_region(blanked)
+    prod_raw = raw[: len(prod)]
+    ctors: dict[str, str] = {}
+    for m in _MCP_CTOR_RE.finditer(prod):
+        fn_name = m.group(1)
+        open_idx = prod.index("{", m.start())
+        _, end = brace_block(prod, open_idx)
+        names = _MCP_NAME_RE.findall(prod_raw[open_idx:end])
+        lineno = raw.count("\n", 0, m.start()) + 1
+        if len(names) != 1:
+            problems.append(
+                f"  built-ins: constructor {fn_name} (src/mcp.rs:{lineno}) "
+                f"defines {len(names)} tool names, expected exactly 1 — "
+                "the constructor pattern changed; update this check"
+            )
+        elif fn_name in ctors:
+            problems.append(
+                f"  built-ins: constructor {fn_name} is defined more than once in src/mcp.rs"
+            )
+        else:
+            ctors[fn_name] = names[0]
+    span = _mcp_fn_span(blanked, r"pub fn all_tools\s*\(\)[^{]*\{")
+    if span is None:
+        problems.append(
+            "  built-ins: `pub fn all_tools()` not found in src/mcp.rs — "
+            "the assembly changed; update this check"
+        )
+        return [], problems
+    body = blanked[span[0] : span[1]]
+    # The assembly must still extend BOTH other
+    # families, or their tools silently leave the
+    # surface while their own censuses stay green.
+    for ext, fam in (("mcp_tools::tools()", "registry"), ("mcp_io::tools()", "io")):
+        if ext not in body:
+            problems.append(
+                f"  built-ins: all_tools() no longer extends {ext} — the "
+                f"{fam} family would silently drop off the MCP surface"
+            )
+    called = re.findall(r"\b(tool_[A-Za-z0-9_]*)\s*\(\s*\)", body)
+    seen: set[str] = set()
+    for fn_name in called:
+        if fn_name in seen:
+            problems.append(
+                f"  built-ins: all_tools() assembles {fn_name} more than once — "
+                "its tool would appear twice in tools/list"
+            )
+        seen.add(fn_name)
+    for fn_name in sorted(set(ctors) - set(called)):
+        problems.append(
+            f"  built-ins: constructor {fn_name} (tool `{ctors[fn_name]}`) is "
+            "defined in src/mcp.rs but never assembled by all_tools() — "
+            "the tool exists in source and is unreachable at runtime"
+        )
+    for fn_name in sorted(set(called) - set(ctors)):
+        problems.append(
+            f"  built-ins: all_tools() assembles {fn_name}(), which no "
+            "`fn ... -> Tool` constructor defines in src/mcp.rs"
+        )
+    names = [ctors[fn_name] for fn_name in called if fn_name in ctors]
+    return names, problems
+
+
+def check_mcp_surface() -> tuple[bool, list[str]]:
+    lines: list[str] = []
+    ok = True
+
+    def fail(msg: str) -> None:
+        nonlocal ok
+        ok = False
+        lines.append(msg)
+
+    builtin_names, problems = _mcp_builtins()
+    for p in problems:
+        fail(p)
+    registry, problems = _mcp_registry_family("src/mcp_tools.rs", "registry (src/mcp_tools.rs)")
+    for p in problems:
+        fail(p)
+    io_tools, problems = _mcp_registry_family("src/mcp_io.rs", "io (src/mcp_io.rs)")
+    for p in problems:
+        fail(p)
+
+    lines.append(
+        f"  family census (all_tools() assembly order): built-ins {len(builtin_names)} "
+        f"(constructors in src/mcp.rs), registry {len(registry)} "
+        f"(Tool literals in mcp_tools::tools()), io {len(io_tools)} "
+        f"(Tool literals in mcp_io::tools())"
+    )
+
+    # Handler integrity: every registry / IO handler
+    # must resolve to exactly one fn definition in
+    # the src/ production tree (the handler may live
+    # in a domain file after Wave 11 — the census is
+    # tree-wide, not per-file). Built-ins carry
+    # closure handlers inside their constructors, so
+    # their resolution is the constructor census
+    # above.
+    paths = sorted(glob.glob(os.path.join(ROOT, "src", "**", "*.rs"), recursive=True))
+    prod_by_rel: dict[str, str] = {}
+    for full in paths:
+        rel = os.path.relpath(full, ROOT)
+        with open(full, encoding="utf-8") as fh:
+            prod_by_rel[rel] = production_region(blank_code(fh.read()))
+
+    def def_sites(ident: str) -> list[str]:
+        pat = re.compile(rf"fn\s+{re.escape(ident)}\s*\(")
+        sites: list[str] = []
+        for rel, prod in prod_by_rel.items():
+            for m in pat.finditer(prod):
+                lineno = prod.count("\n", 0, m.start()) + 1
+                sites.append(f"{rel}:{lineno}")
+        return sites
+
+    resolved = 0
+    for family, entries in (("registry", registry), ("io", io_tools)):
+        for name, handler in entries:
+            if handler == "|":
+                fail(
+                    f"  {family}: tool `{name}` has a closure handler — "
+                    "registry/IO handlers must be named fns so this census "
+                    "can resolve them (closures are the built-ins' shape, "
+                    "censused via their constructors)"
+                )
+                continue
+            leaf = handler.split("::")[-1]
+            sites = def_sites(leaf)
+            if len(sites) == 1:
+                resolved += 1
+            elif not sites:
+                fail(
+                    f"  {family}: tool `{name}` names handler `{handler}`, "
+                    "which no `fn` in src/ defines — the tool is registered "
+                    "but its handler does not exist"
+                )
+            else:
+                fail(
+                    f"  {family}: tool `{name}` names handler `{handler}`, "
+                    f"defined {len(sites)} times ({', '.join(sites)}) — a "
+                    "handler must resolve to exactly one definition"
+                )
+    if resolved:
+        lines.append(
+            f"  handler integrity: {resolved} registry/io handlers each resolve "
+            "to exactly one fn definition in src/"
+        )
+
+    # Name uniqueness across ALL families, in
+    # assembly order. Dispatch is first-match
+    # (tools_call_result's iter().find over
+    # all_tools()): a name claimed by two families
+    # makes the later family's tool unreachable,
+    # and tools/list would carry the name twice.
+    families: list[tuple[str, list[str]]] = [
+        ("built-ins", builtin_names),
+        ("registry", [n for n, _ in registry]),
+        ("io", [n for n, _ in io_tools]),
+    ]
+    owner: dict[str, str] = {}
+    surface: list[str] = []
+    for fam, names in families:
+        for name in names:
+            if name in owner:
+                if owner[name] == fam:
+                    fail(
+                        f"  uniqueness: tool `{name}` is registered twice in "
+                        f"the {fam} family — tools/list would carry it twice"
+                    )
+                else:
+                    fail(
+                        f"  uniqueness: tool `{name}` is claimed by both "
+                        f"{owner[name]} and {fam} — dispatch takes the first "
+                        f"match in all_tools() order, so the {fam} tool is "
+                        "unreachable and tools/list would carry the name twice"
+                    )
+            else:
+                owner[name] = fam
+            surface.append(name)
+    surface_set = set(surface)
+    lines.append(
+        f"  surface: {len(surface)} tools, {len(surface_set)} unique names "
+        "(built-ins, then registry, then io — the all_tools() order)"
+    )
+
+    # Doc sync: docs/MCP.md's catalogue (the tables
+    # under `## Catalogue`, first cell of each row)
+    # must list exactly the surface set.
+    doc_path = os.path.join(ROOT, "docs", "MCP.md")
+    if not os.path.isfile(doc_path):
+        fail("  doc sync: docs/MCP.md is missing — the MCP contract doc is gone")
+        return ok, lines
+    doc = read("docs/MCP.md")
+    if "## Catalogue" not in doc:
+        fail(
+            "  doc sync: docs/MCP.md has no `## Catalogue` section — the "
+            "catalogue pattern changed; update this check"
+        )
+        return ok, lines
+    catalogue = doc.split("## Catalogue", 1)[1].split("\n## ", 1)[0]
+    doc_names = _MCP_DOC_ROW_RE.findall(catalogue)
+    if not doc_names:
+        fail(
+            "  doc sync: the catalogue in docs/MCP.md lists ZERO tool rows "
+            "(`| `name` |` table rows) — the catalogue format changed; "
+            "update this check (a silent zero is what this census prevents)"
+        )
+        return ok, lines
+    doc_set = set(doc_names)
+    doc_dupes = sorted(n for n in doc_set if doc_names.count(n) > 1)
+    for name in doc_dupes:
+        fail(f"  doc sync: docs/MCP.md's catalogue lists `{name}` more than once")
+    for name in sorted(doc_set - surface_set):
+        fail(
+            f"  doc sync: docs/MCP.md's catalogue documents `{name}`, which "
+            "no family registers — documented-but-nonexistent (the doc's own "
+            "rule: do not document a tool that does not exist in all_tools())"
+        )
+    for name in sorted(surface_set - doc_set):
+        fail(
+            f"  doc sync: tool `{name}` ({owner.get(name, '?')} family) is "
+            "registered but missing from docs/MCP.md's catalogue — "
+            "existing-but-undocumented"
+        )
+    if doc_set == surface_set and not doc_dupes:
+        lines.append(
+            f"  doc sync: docs/MCP.md's catalogue lists exactly the "
+            f"{len(doc_set)} surface tools — no documented-but-nonexistent, "
+            "no existing-but-undocumented"
+        )
+    return ok, lines
+
+
+# ----------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------
 
@@ -1749,6 +2105,9 @@ def main() -> int:
 
     ok, lines = check_coverage()
     report("8. COVERAGE (scenes <-> headless.yml; layout-fact sequence)", ok, lines)
+
+    ok, lines = check_mcp_surface()
+    report("9. MCP SURFACE CENSUS & INTEGRITY (Wave 11)", ok, lines)
 
     print()
     if failures:

@@ -33,6 +33,15 @@ name: Headless Rune probe (snap / tree)
 #       (The audited flag set has no window-size flag, so snaps use
 #       the app's default 1440x900 size; the 1280x720 budget check
 #       stays approximate until size control is confirmed.)
+#   Q4. Does the LIVE MCP endpoint work end to end in the real
+#       binary — the running editor answering real HTTP on
+#       127.0.0.1:32117, a mutation landing on the live session?
+#       The --tree/--snap modes never start the app, so the live
+#       control path (Wave 11) gets its own probe: the editor is
+#       launched under Xvfb and driven through the full JSON-RPC
+#       chain (health, initialize, tools/list, read, mutate,
+#       re-read). Its assertions live in the step itself; the
+#       transcript is mcp-probe.txt in the artifact.
 #
 # FAIL-SOFT CONTRACT
 #   This workflow can never break the main pipeline: it is a separate
@@ -72,6 +81,11 @@ name: Headless Rune probe (snap / tree)
 #   * snap-default.png present -> Q2: yes, lavapipe renders Rune;
 #     the QA_RUNE §3 fallback (a) and CI screenshot checks unlock.
 #   * rect-probe.txt says whether the tree dump carries rects (Q3).
+#   * mcp-probe.txt is the live endpoint's assertion transcript
+#     (Q4): every line PASS, ending "MCP PROBE: PASS", means the
+#     chain held; any FAIL line names the broken link, and the
+#     step itself is marked failed with the app's log tail in the
+#     step log (mcp-live-app.log is in the artifact too).
 # =====================================================================
 
 on:
@@ -405,6 +419,250 @@ jobs:
               with open(summary, "a") as fh:
                   fh.write("\n### Tree rect probe (Q3)\n\n```\n" + text + "```\n")
           PYEOF
+
+      # Q4 (Wave 11): the LIVE control path. Every step
+      # above probes the binary's one-shot modes (--tree /
+      # --snap); nothing has ever run the actual editor and
+      # spoken to its live MCP endpoint (127.0.0.1:32117,
+      # src/live_mcp.rs) the way a real MCP client does.
+      # This step does: launch the editor under Xvfb, wait
+      # for GET /health, then run the full JSON-RPC chain
+      # over real HTTP — initialize, the initialized
+      # notification, tools/list, a read (get_state), a
+      # mutation (add_frame), the same read again proving
+      # the mutation landed, and get_editor_status proving
+      # it landed on the LIVE session (undo history +
+      # playhead), not on a side core. The exercise is one
+      # stdlib-python script (same idiom as the rect probe
+      # above; no jq or new dependencies). Fail-soft like
+      # every probe step (continue-on-error, so the upload
+      # and summary still run), but the step's own verdict
+      # is strict: any failed assertion exits 1 and the
+      # app's log tail is printed — a probe that passes
+      # vacuously would be worse than none. Outputs:
+      # mcp-probe.txt (the assertion transcript),
+      # mcp-live-app.log (the app's own output),
+      # mcp-xvfb.log, mcp-probe.exit — all ride the
+      # artifact upload below untouched.
+      - name: Live MCP probe — drive the running editor over HTTP
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 8
+        env:
+          WGPU_BACKEND: vulkan
+        run: |
+          set +e
+          BIN=./target/release/stykanimate-rs
+          mkdir -p headless-out
+          # Clean slate, the same discipline as probe()
+          # above: layout prefs live at
+          # ./projects/.layout.json relative to the CWD,
+          # and the live-MCP pref defaults ON (shell.rs
+          # LayoutPrefs::live_mcp), with main.rs init
+          # starting the bridge when the pref says so —
+          # wiping ./projects (plus a fresh HOME, like the
+          # other probes) is what makes the endpoint's
+          # presence a property of the binary, not of
+          # whatever state an earlier probe left behind.
+          rm -rf ./projects
+          export HOME="$(mktemp -d)"
+          # A windowed run needs a display (the one-shot
+          # modes above do not): Xvfb by hand rather than
+          # xvfb-run, because the app is a long-lived
+          # server here and the step needs its exact PID
+          # to kill it cleanly afterwards.
+          Xvfb :99 -screen 0 1440x900x24 > headless-out/mcp-xvfb.log 2>&1 &
+          XVFB_PID=$!
+          for i in $(seq 1 25); do
+            [ -S /tmp/.X11-unix/X99 ] && break
+            sleep 0.2
+          done
+          export DISPLAY=:99
+          "$BIN" > headless-out/mcp-live-app.log 2>&1 &
+          APP_PID=$!
+          cleanup() {
+            kill "$APP_PID" 2>/dev/null
+            wait "$APP_PID" 2>/dev/null
+            kill "$XVFB_PID" 2>/dev/null
+          }
+          trap cleanup EXIT
+          python3 - <<'PYEOF'
+          import json, os, sys, time, urllib.error, urllib.request
+
+          BASE = "http://127.0.0.1:32117"
+          # The tools/list floor, derived from source at Wave 11:
+          # mcp.rs all_tools() = 41 built-ins (3 original + 29
+          # Wave-9 parity + 9 Wave-10 round-2, the literal vec in
+          # all_tools) + mcp_tools::tools() 91 registry tools +
+          # mcp_io::tools() 8 IO tools = 140, and tools/list
+          # returns all_tools() unfiltered (tools_list_result in
+          # mcp.rs). The floor is a minimum, not an equality:
+          # later waves ADD tools. The binding invariant is the
+          # cross-check below — the health document's count and
+          # the tools/list length are read from the same registry
+          # by two different code paths (listener thread vs UI
+          # thread dispatch) and must agree.
+          TOOL_FLOOR = 140
+
+          lines = []
+          failures = []
+
+          def note(text):
+              lines.append(text)
+              print(text, flush=True)
+
+          def check(ok, label, detail=""):
+              note(("PASS  " if ok else "FAIL  ") + label + ("" if ok else f"  [{detail}]"))
+              if not ok:
+                  failures.append(label)
+
+          def get(path, timeout=10):
+              req = urllib.request.Request(BASE + path, method="GET")
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  return resp.status, resp.read().decode("utf-8", "replace")
+
+          def post(msg, timeout=30):
+              body = json.dumps(msg).encode()
+              req = urllib.request.Request(
+                  BASE + "/mcp", data=body, method="POST",
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as resp:
+                      return resp.status, resp.read().decode("utf-8", "replace")
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read().decode("utf-8", "replace")
+
+          def rpc(id_, method, params=None):
+              msg = {"jsonrpc": "2.0", "id": id_, "method": method}
+              if params is not None:
+                  msg["params"] = params
+              status, raw = post(msg)
+              if status != 200:
+                  raise RuntimeError(f"{method}: HTTP {status}: {raw[:200]}")
+              resp = json.loads(raw)
+              if resp.get("id") != id_:
+                  raise RuntimeError(f"{method}: response id {resp.get('id')!r} != {id_!r}")
+              if "error" in resp:
+                  raise RuntimeError(f"{method}: JSON-RPC error {resp['error']}")
+              return resp["result"]
+
+          def call_tool(id_, name, args=None):
+              result = rpc(id_, "tools/call", {"name": name, "arguments": args or {}})
+              text = (result.get("content") or [{}])[0].get("text", "")
+              try:
+                  payload = json.loads(text)
+              except ValueError:
+                  payload = None
+              return result.get("isError", True), payload, text
+
+          def finish():
+              verdict = "MCP PROBE: PASS" if not failures else f"MCP PROBE: FAIL ({len(failures)} assertion(s) failed)"
+              note(verdict)
+              text = "\n".join(lines) + "\n"
+              os.makedirs("headless-out", exist_ok=True)
+              with open("headless-out/mcp-probe.txt", "w") as fh:
+                  fh.write(text)
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              if summary:
+                  with open(summary, "a") as fh:
+                      fh.write("\n### Live MCP probe (Q4)\n\n```\n" + text + "```\n")
+              sys.exit(0 if not failures else 1)
+
+          def main():
+              # 0. Wait for the endpoint: poll GET /health for up
+              #    to ~90 s. The bridge binds during app init
+              #    (main.rs, before the first frame), so a healthy
+              #    app answers quickly; the budget covers a slow
+              #    runner. Silence is retried, never accepted.
+              health = None
+              deadline = time.time() + 90
+              while time.time() < deadline:
+                  try:
+                      status, raw = get("/health", timeout=5)
+                      if status == 200:
+                          health = json.loads(raw)
+                          break
+                  except Exception:
+                      pass
+                  time.sleep(2)
+              check(health is not None, "GET /health answers 200 within 90 s")
+              if health is None:
+                  return
+              check(health.get("live") is True, "health names a LIVE endpoint", str(health)[:200])
+              check(health.get("server") == "stykanimate-rs", "health server identity", repr(health.get("server")))
+              check(health.get("auth") == "none", "health states the v1 auth posture (none)", repr(health.get("auth")))
+              health_tools = health.get("tools")
+              check(isinstance(health_tools, int) and health_tools >= TOOL_FLOOR,
+                    f"health tool count >= floor {TOOL_FLOOR}", f"tools={health_tools!r}")
+
+              # 1. initialize: the handshake names the server.
+              result = rpc(1, "initialize", {
+                  "protocolVersion": "2024-11-05",
+                  "capabilities": {},
+                  "clientInfo": {"name": "headless-mcp-probe", "version": "0"},
+              })
+              name = (result.get("serverInfo") or {}).get("name")
+              check(name == "stykanimate-rs", "initialize serverInfo.name", repr(name))
+
+              # 2. The initialized notification: no id, so the
+              #    listener's fast path answers 202 with an empty
+              #    body and executes nothing.
+              status, raw = post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+              check(status == 202 and raw == "", "notification -> HTTP 202, empty body", f"{status} {raw[:80]!r}")
+
+              # 3. tools/list: the whole registry, and the same
+              #    count the health document reported.
+              result = rpc(2, "tools/list")
+              tools = result.get("tools") or []
+              names = {t.get("name") for t in tools}
+              check(len(tools) >= TOOL_FLOOR, f"tools/list count >= floor {TOOL_FLOOR}", f"count={len(tools)}")
+              check(len(tools) == health_tools, "tools/list count == health tool count",
+                    f"list={len(tools)} health={health_tools!r}")
+              for want in ("get_state", "set_frame", "get_editor_status", "add_frame"):
+                  check(want in names, f"tools/list contains {want}")
+
+              # 4-6. Read, mutate, re-read: add_frame must move
+              #    the LIVE project's frame count by exactly one,
+              #    and a fresh read must see it.
+              is_err, before, before_text = call_tool(3, "get_state")
+              check(not is_err and before is not None, "get_state answers", before_text[:200])
+              frames_before = (before or {}).get("frame_count")
+              check(isinstance(frames_before, int) and frames_before >= 1,
+                    "get_state frame_count is a positive int", repr(frames_before))
+              is_err, added, added_text = call_tool(4, "add_frame")
+              check(not is_err and (added or {}).get("ok") is True, "add_frame reports ok", added_text[:200])
+              check((added or {}).get("frames") == (frames_before or 0) + 1,
+                    "add_frame reply counts the new frame", str(added)[:200])
+              is_err, after, after_text = call_tool(5, "get_state")
+              check(not is_err and (after or {}).get("frame_count") == (frames_before or 0) + 1,
+                    "mutation visible in a fresh get_state", after_text[:200])
+
+              # 7. The edit landed on the live SESSION, not on a
+              #    side core: the session's undo history records
+              #    it, and its playhead is where the add_frame
+              #    reply left it.
+              is_err, sess, sess_text = call_tool(6, "get_editor_status")
+              check(not is_err and sess is not None, "get_editor_status answers", sess_text[:200])
+              sp = sess or {}
+              check(sp.get("can_undo") is True and (sp.get("undo_depth") or 0) >= 1,
+                    "live session undo history records the edit", str(sp)[:200])
+              check(sp.get("current_frame") == (added or {}).get("current_frame"),
+                    "live playhead matches the add_frame reply", str(sp)[:200])
+
+          try:
+              main()
+          except Exception as e:
+              check(False, "probe ran to completion without an exception", repr(e))
+          finish()
+          PYEOF
+          rc=$?
+          echo $rc > headless-out/mcp-probe.exit
+          if [ $rc -ne 0 ]; then
+            echo "Live MCP probe FAILED (exit $rc) — transcript is in headless-out/mcp-probe.txt; app log tail:"
+            tail -n 50 headless-out/mcp-live-app.log
+          fi
+          exit $rc
 
       # Whatever exists is the result — including "nothing exists".
       # if-no-files-found: ignore is load-bearing: an absent output
