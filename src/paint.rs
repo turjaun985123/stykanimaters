@@ -667,6 +667,57 @@ pub fn stroke_dab_spacing(stroke: &Stroke) -> f32 {
     (stroke.width * 0.5).max(1.0)
 }
 
+/// Expand a stroke's baked per-point widths into one
+/// `(a, b, width)` piece per segment: the shared
+/// pressured-stroke construction for renderers that draw a
+/// stroke as individually sized segments.
+///
+/// A stroke is pressured **iff** `widths.len() ==
+/// points.len()`. For segment `i`, the piece runs verbatim
+/// from `points[i]` to `points[i + 1]` and its full width
+/// is the arithmetic average of the two endpoint widths,
+/// `(widths[i] + widths[i + 1]) / 2.0`. This is exactly the
+/// predicate and arithmetic the rasterizer already uses in
+/// `src/export.rs`, and the SVG exporter mirrors it when it
+/// emits one line per segment. No points are resampled, no
+/// widths are interpolated beyond that endpoint average,
+/// and neither coordinate nor width values are clamped or
+/// scaled here: callers apply their own view transform to
+/// the endpoints and their own zoom or scale to the width.
+///
+/// The intended end state is one construction with three
+/// call sites — stage, raster and SVG. The stage is the
+/// first consumer in Wave 13; `src/export.rs` and
+/// `src/svg.rs` still keep their inline versions for now
+/// and migrate to this helper later, with no change to the
+/// rule they implement.
+///
+/// A non-parallel `widths` slice returns an empty vector,
+/// rather than guessing whether to truncate, resample or
+/// invent widths. That deliberately makes the caller's
+/// fallback simple: an empty result means "not a
+/// pressured stroke; use the ordinary flat-width
+/// construction." The same empty result naturally covers
+/// the segment-free cases — no points, or exactly one
+/// point with its one parallel width — because a single
+/// point spans no segment.
+pub fn pressured_stroke_pieces(points: &[V2], widths: &[f32]) -> Vec<(V2, V2, f32)> {
+    if widths.len() != points.len() {
+        return Vec::new();
+    }
+    points
+        .windows(2)
+        .enumerate()
+        .map(|(i, segment)| {
+            (
+                segment[0],
+                segment[1],
+                (widths[i] + widths[i + 1]) / 2.0,
+            )
+        })
+        .collect()
+}
+
 /// One uniform-width piece of a styled figure segment, as
 /// produced by [`styled_segment_pieces`]: draw the span `a`→`b`
 /// as a plain line of width `width` in colour `color`, blended
@@ -3204,5 +3255,55 @@ mod stroke_dabs_tests {
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].b, [7.0, 7.0]);
         assert!(pieces[0].b[0].is_finite() && pieces[0].b[1].is_finite());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wave 13 (C5): `pressured_stroke_pieces` — the shared
+// per-segment construction for strokes whose baked widths
+// parallel their points. These tests pin the rasterizer's
+// predicate and endpoint-averaging arithmetic by hand, so a
+// future migration of the exporters' inline versions has a
+// fixed target to land on.
+#[cfg(test)]
+mod pressured_stroke_pieces_tests {
+    use crate::paint::pressured_stroke_pieces;
+
+    #[test]
+    fn pressured_stroke_pieces_average_each_segments_endpoint_widths() {
+        let points = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]];
+        let widths = [2.0, 10.0, 4.0];
+
+        assert_eq!(
+            pressured_stroke_pieces(&points, &widths),
+            vec![
+                // (2 + 10) / 2 = 6 across the first segment.
+                ([0.0, 0.0], [10.0, 0.0], 6.0),
+                // (10 + 4) / 2 = 7 across the second segment;
+                // its start is the first segment's end verbatim.
+                ([10.0, 0.0], [10.0, 10.0], 7.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn pressured_stroke_pieces_reject_nonparallel_widths() {
+        let points = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]];
+
+        // Too few widths and too many widths are both not
+        // pressured profiles: return no pieces rather than
+        // truncating or inventing the missing correspondence.
+        assert!(pressured_stroke_pieces(&points, &[2.0, 10.0]).is_empty());
+        assert!(
+            pressured_stroke_pieces(&points, &[2.0, 10.0, 4.0, 8.0]).is_empty()
+        );
+    }
+
+    #[test]
+    fn pressured_stroke_pieces_single_point_has_no_segment() {
+        // A parallel one-point profile is valid input, but a
+        // point by itself spans no segment, so there are no
+        // pieces for a caller to draw.
+        assert!(pressured_stroke_pieces(&[[7.0, 9.0]], &[12.0]).is_empty());
     }
 }

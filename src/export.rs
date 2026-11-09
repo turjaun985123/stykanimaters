@@ -327,11 +327,13 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     let head_r = project.head_ring_radius() * zoom * ss as f32;
 
     // Collect drawables: segments (a, b, color, half-width), head
-    // rings (centre, color, half-width), shape circles and polygons.
+    // rings (centre, color, half-width, alpha), shape circles and
+    // polygons — heads/rings/polys carry the node's effective
+    // alpha (Wave 13, S10) and blend in the pixel pass.
     let mut segments: Vec<StyledSeg> = Vec::new();
-    let mut heads: Vec<([f32; 2], [u8; 3], f32)> = Vec::new();
-    let mut rings: Vec<([f32; 2], f32, [u8; 3], f32)> = Vec::new();
-    let mut polys: Vec<(Vec<[f32; 2]>, [u8; 3], f32)> = Vec::new();
+    let mut heads: Vec<([f32; 2], [u8; 3], f32, f32)> = Vec::new();
+    let mut rings: Vec<([f32; 2], f32, [u8; 3], f32, f32)> = Vec::new();
+    let mut polys: Vec<(Vec<[f32; 2]>, [u8; 3], f32, f32)> = Vec::new();
     for (fi, fig) in project.figures.iter().enumerate() {
         if fig.hidden {
             continue;
@@ -343,14 +345,23 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
         let bends = project.bends_at(frame_f, fi);
         for (i, node) in fig.def.nodes.iter().enumerate() {
             let color_hex = node.color.unwrap_or(fig.color);
-            // Figure opacity: heads/rings/polys have no alpha
-            // plumbing, so they fade toward the background (segments
-            // above use true alpha via StyledSeg.opacity).
-            let color = rgb(crate::style::lerp_color(
-                project.background,
-                color_hex,
-                fig.opacity.clamp(0.0, 1.0),
-            ));
+            // Heads/rings/polys (Wave 13, S10): the node's own
+            // colour at the node's EFFECTIVE alpha — the shared
+            // `effective_style` product (style.opacity × figure
+            // opacity), composed as true alpha in the pixel pass
+            // via `blend_over`, exactly as segments compose it
+            // via StyledSeg.opacity. Before this they
+            // hard-overwrote the pixel with the colour faded
+            // toward the background by figure opacity alone, so
+            // a node's style.opacity never reached them (and a
+            // faded head erased whatever lay beneath it toward
+            // the background instead of blending over it). At
+            // effective alpha 1.0 `blend_over` returns the
+            // colour exactly, so default-styled projects render
+            // byte-identically.
+            let color = rgb(color_hex);
+            let node_alpha =
+                crate::style::effective_style(node.style, fig.opacity).opacity;
             let half = node.thickness / 2.0 * zoom * ss as f32;
             if let Some(p) = node.parent {
                 let style = node.style;
@@ -476,11 +487,11 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                 }
             }
             if node.head {
-                heads.push((view(pos[i]), color, half));
+                heads.push((view(pos[i]), color, half, node_alpha));
             }
             match node.shape {
                 Shape::Circle => {
-                    rings.push((view(pos[i]), node.length / 2.0 * zoom * ss as f32, color, half));
+                    rings.push((view(pos[i]), node.length / 2.0 * zoom * ss as f32, color, half, node_alpha));
                 }
                 Shape::Polygon(sides) => {
                     let sides = (sides.max(3)) as usize;
@@ -491,7 +502,7 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                             view([pos[i][0] + a.cos() * r, pos[i][1] + a.sin() * r])
                         })
                         .collect();
-                    polys.push((verts, color, half));
+                    polys.push((verts, color, half, node_alpha));
                 }
                 Shape::Line => {}
             }
@@ -684,22 +695,22 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                     px = crate::style::blend_over(px, rgb(c), seg.opacity);
                 }
             }
-            for (c, color, half) in &heads {
+            for (c, color, half, alpha) in &heads {
                 let d = dist(p, *c);
                 if (d - head_r).abs() <= *half {
-                    px = *color;
+                    px = crate::style::blend_over(px, *color, *alpha);
                 }
             }
-            for (c, r, color, half) in &rings {
+            for (c, r, color, half, alpha) in &rings {
                 let d = dist(p, *c);
                 if (d - r).abs() <= *half {
-                    px = *color;
+                    px = crate::style::blend_over(px, *color, *alpha);
                 }
             }
-            for (verts, color, half) in &polys {
+            for (verts, color, half, alpha) in &polys {
                 for k in 0..verts.len() {
                     if seg_dist(p, verts[k], verts[(k + 1) % verts.len()]) <= *half {
-                        px = *color;
+                        px = crate::style::blend_over(px, *color, *alpha);
                     }
                 }
             }
@@ -3545,6 +3556,270 @@ mod tests {
         assert!(
             (120..=135).contains(&px[0]) && px[1] == 0 && px[2] == 0,
             "50% red over black should be ~(127, 0, 0), got {px:?}"
+        );
+    }
+
+    /// Wave 13 (S10, raster half): a three-figure fixture whose
+    /// only painted features near the sampled pixels are a head
+    /// ring, a Circle shape ring and a Polygon shape edge, each
+    /// on its own node carrying `node_opacity` (the figure
+    /// carries `fig_opacity`). Stage 200x200 on black, camera
+    /// cleared, so stage points map x2 onto the supersampled
+    /// buffer and each sampled output pixel's four sub-pixels
+    /// sit squarely inside the feature's band (thickness 8 ->
+    /// half-width 8 in buffer units, samples within ~1.5 of the
+    /// centreline), clear of every segment (each node's own
+    /// segment ends at least 28 buffer units away).
+    ///
+    /// Sampled output pixels: head ring (77, 100) — ring centre
+    /// (60, 100) stage, radius 17, rightmost point; Circle ring
+    /// (70, 170) — centre (70, 150), radius 20 (the node's
+    /// length 40 drives both its position and the ring radius),
+    /// bottom point; Polygon edge (170, 30) — centre (160, 40),
+    /// r 20, the midpoint of the top-right edge.
+    fn head_shape_project(node_opacity: f32, fig_opacity: f32) -> Project {
+        use crate::model::{
+            Easing, FigureDef, FigureInstance, Frame, NodeDef, NodeStyle, Pose, Shape,
+        };
+        let node = |parent: Option<usize>, length: f32| NodeDef {
+            name: "n".into(),
+            parent,
+            length,
+            rest_angle: 0.0,
+            head: false,
+            bend: 1.0,
+            thickness: 8.0,
+            color: None,
+            ik_end: false,
+            shape: Shape::Line,
+            style: NodeStyle::default(),
+            media: None,
+        };
+        let figure = |special: NodeDef| FigureInstance {
+            locked: false,
+            opacity: fig_opacity,
+            name: "F".into(),
+            color: 0xFFFFFF,
+            def: FigureDef {
+                nodes: vec![node(None, 0.0), special],
+            },
+            hidden: false,
+            clip: None,
+        };
+        let styled = NodeStyle {
+            opacity: node_opacity,
+            ..NodeStyle::default()
+        };
+        let mut head_node = node(Some(0), 30.0);
+        head_node.head = true;
+        head_node.color = Some(0xFF0000);
+        head_node.style = styled;
+        let mut circle_node = node(Some(0), 40.0);
+        circle_node.shape = Shape::Circle;
+        circle_node.color = Some(0x0000FF);
+        circle_node.style = styled;
+        let mut poly_node = node(Some(0), 40.0);
+        poly_node.shape = Shape::Polygon(4);
+        poly_node.color = Some(0x00FF00);
+        poly_node.style = styled;
+        let pose = |root: [f32; 2]| Pose {
+            root,
+            angles: vec![0.0, 90.0],
+        };
+        Project {
+            name: "s10-test".into(),
+            fps: 12.0,
+            stage: [200.0, 200.0],
+            background: 0x000000,
+            figures: vec![
+                figure(head_node),
+                figure(circle_node),
+                figure(poly_node),
+            ],
+            frames: vec![Frame {
+                poses: vec![pose([30.0, 100.0]), pose([30.0, 150.0]), pose([120.0, 40.0])],
+                duration: 1.0,
+                easing: None,
+                bends: Vec::new(),
+            }],
+            camera: Vec::new(),
+            tween_playback: false,
+            easing: Easing::Linear,
+            camera_follow: None,
+            particles: Vec::new(),
+            strokes: Vec::new(),
+            audio: Vec::new(),
+            clips: Vec::new(),
+            fx_clips: Vec::new(),
+            assets: Vec::new(),
+            channels: Vec::new(),
+            sprites: Vec::new(),
+            texts: Vec::new(),
+            weather: None,
+            head_ring_scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn head_ring_and_shape_nodes_compose_node_opacity() {
+        // Opacity 1.0: the pure node colours, exactly — and the
+        // render is byte-identical to the twin whose nodes carry
+        // the DEFAULT style (the S10 change must not move a
+        // single byte for default-styled projects).
+        let opaque = render_frame(&head_shape_project(1.0, 1.0), 0);
+        assert_eq!(opaque.get_pixel(77, 100).0, [255, 0, 0], "head ring at 1.0");
+        assert_eq!(opaque.get_pixel(70, 170).0, [0, 0, 255], "circle ring at 1.0");
+        assert_eq!(opaque.get_pixel(170, 30).0, [0, 255, 0], "polygon edge at 1.0");
+        let mut twin = head_shape_project(1.0, 1.0);
+        for fig in &mut twin.figures {
+            fig.def.nodes[1].style = crate::model::NodeStyle::default();
+        }
+        assert_eq!(
+            opaque.as_raw(),
+            render_frame(&twin, 0).as_raw(),
+            "explicit opacity 1.0 must equal the default style byte for byte"
+        );
+        // Opacity 0.5: each feature is its colour blended at 50%
+        // over the black background (~127 per lit channel — the
+        // blend truncates, so allow the house tolerance). Before
+        // S10 these pixels were the pure colours at ANY style
+        // opacity (hard overwrite of the figure-opacity fade).
+        let half = render_frame(&head_shape_project(0.5, 1.0), 0);
+        for (x, y, ch, what) in [
+            (77, 100, 0, "head ring"),
+            (70, 170, 2, "circle ring"),
+            (170, 30, 1, "polygon edge"),
+        ] {
+            let px = half.get_pixel(x, y).0;
+            assert!(
+                (125..=129).contains(&px[ch]),
+                "{what} at 0.5: lit channel {} should be ~127, got {px:?}",
+                px[ch]
+            );
+            for other in 0..3 {
+                if other != ch {
+                    assert_eq!(px[other], 0, "{what} at 0.5: channel {other} must stay 0, got {px:?}");
+                }
+            }
+        }
+        assert_ne!(
+            opaque.as_raw(),
+            half.as_raw(),
+            "non-vacuity: the 0.5 render must differ from the 1.0 render"
+        );
+        // Opacity 0.0: the features vanish exactly (true alpha
+        // over the background, not a background-coloured stamp).
+        let clear = render_frame(&head_shape_project(0.0, 1.0), 0);
+        assert_eq!(clear.get_pixel(77, 100).0, [0, 0, 0]);
+        assert_eq!(clear.get_pixel(70, 170).0, [0, 0, 0]);
+        assert_eq!(clear.get_pixel(170, 30).0, [0, 0, 0]);
+    }
+
+    #[test]
+    fn head_ring_opacity_is_the_style_times_figure_product() {
+        // style 0.5 x figure 0.5 = effective 0.25: red at 25%
+        // over black is ~63. The pre-S10 fade (figure opacity
+        // alone, hard overwrite) would paint ~128 here, and a
+        // style-only composition ~127 — 63 pins the product.
+        let img = render_frame(&head_shape_project(0.5, 0.5), 0);
+        let px = img.get_pixel(77, 100).0;
+        assert!(
+            (61..=65).contains(&px[0]) && px[1] == 0 && px[2] == 0,
+            "head ring at style 0.5 x figure 0.5 should be ~(63, 0, 0), got {px:?}"
+        );
+    }
+
+    #[test]
+    fn head_ring_blends_over_the_segment_beneath_it() {
+        use crate::model::{
+            Easing, FigureDef, FigureInstance, Frame, NodeDef, NodeStyle, Pose, Shape,
+        };
+        // Figure A: one thick white segment along y = 100.
+        // Figure B: a head node at (100, 100) whose ring's
+        // rightmost point, (117, 100), lies ON A's segment. The
+        // ring (red, style opacity 0.5) must blend over the
+        // white beneath it -> (255, ~127, ~127). The pre-S10
+        // hard overwrite painted pure red (255, 0, 0); a
+        // fade-toward-background composition would too (figure
+        // opacity is 1.0 here) — only true alpha over the
+        // actual pixel gives the pink.
+        let node = |parent: Option<usize>, length: f32, thickness: f32| NodeDef {
+            name: "n".into(),
+            parent,
+            length,
+            rest_angle: 0.0,
+            head: false,
+            bend: 1.0,
+            thickness,
+            color: None,
+            ik_end: false,
+            shape: Shape::Line,
+            style: NodeStyle::default(),
+            media: None,
+        };
+        let mut bar = node(Some(0), 170.0, 20.0);
+        bar.color = Some(0xFFFFFF);
+        let mut head_node = node(Some(0), 40.0, 8.0);
+        head_node.head = true;
+        head_node.color = Some(0xFF0000);
+        head_node.style = NodeStyle {
+            opacity: 0.5,
+            ..NodeStyle::default()
+        };
+        let figure = |nodes: Vec<NodeDef>| FigureInstance {
+            locked: false,
+            opacity: 1.0,
+            name: "F".into(),
+            color: 0xFFFFFF,
+            def: FigureDef { nodes },
+            hidden: false,
+            clip: None,
+        };
+        let project = Project {
+            name: "s10-over".into(),
+            fps: 12.0,
+            stage: [200.0, 200.0],
+            background: 0x000000,
+            figures: vec![
+                figure(vec![node(None, 0.0, 4.0), bar]),
+                figure(vec![node(None, 0.0, 4.0), head_node]),
+            ],
+            frames: vec![Frame {
+                poses: vec![
+                    Pose {
+                        root: [20.0, 100.0],
+                        angles: vec![0.0, 90.0],
+                    },
+                    Pose {
+                        root: [100.0, 60.0],
+                        angles: vec![0.0, 0.0],
+                    },
+                ],
+                duration: 1.0,
+                easing: None,
+                bends: Vec::new(),
+            }],
+            camera: Vec::new(),
+            tween_playback: false,
+            easing: Easing::Linear,
+            camera_follow: None,
+            particles: Vec::new(),
+            strokes: Vec::new(),
+            audio: Vec::new(),
+            clips: Vec::new(),
+            fx_clips: Vec::new(),
+            assets: Vec::new(),
+            channels: Vec::new(),
+            sprites: Vec::new(),
+            texts: Vec::new(),
+            weather: None,
+            head_ring_scale: 1.0,
+        };
+        let img = render_frame(&project, 0);
+        let px = img.get_pixel(117, 100).0;
+        assert!(
+            px[0] == 255 && (125..=129).contains(&px[1]) && (125..=129).contains(&px[2]),
+            "red ring at 0.5 over a white segment should be (255, ~127, ~127), got {px:?}"
         );
     }
 

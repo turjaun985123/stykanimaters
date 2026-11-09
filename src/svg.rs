@@ -9,7 +9,13 @@
 //! Wave 12 (C1) closed the remaining figure gaps the Wave 11
 //! report named — figure opacity, solid-colour taper and bent
 //! segments now emit the way the rasterizer draws them (see
-//! the figure loop below); of that list only z-order differs.
+//! the figure loop below); of that list only z-order differed.
+//! Wave 13 (C1) closed that too: the stroke block now emits
+//! AFTER the figures, matching the rasterizer's paint order
+//! (its segment pass composites strokes over figure segments;
+//! media still composites last), and node style opacity now
+//! reaches head rings and shape outlines, composed with the
+//! figure factor exactly as segments compose it.
 //!
 //! XML safety: almost no user-controlled string is
 //! interpolated into the document — every `format!` argument
@@ -137,6 +143,214 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
     svg += "<!--DEFS-->\n";
     let mut defs = String::new();
     let mut grad_n = 0usize;
+    for (fi, fig) in project.figures.iter().enumerate() {
+        if fig.hidden {
+            continue;
+        }
+        let pos = evaluate(&fig.def, &poses[fi]);
+        // Per-node bends at this frame (Wave 12, C1) — the same
+        // source the rasterizer reads; empty when the project
+        // carries no bend data.
+        let bends = project.bends_at(frame as f32, fi);
+        // Figure (layer) opacity, clamped once per figure. The
+        // rasterizer composes it multiplicatively into every
+        // segment's alpha (export.rs: style.opacity *
+        // fig.opacity) and fades heads/rings/shapes toward the
+        // background by it (they have no alpha plumbing there).
+        // SVG has real alpha, so this writer applies the figure
+        // factor as an opacity attribute instead: over the
+        // background rect the result is identical to the
+        // raster's colour fade, and over other elements it is
+        // the true composite the raster's segment pass makes.
+        // At 1.0 nothing extra is emitted, so output for
+        // existing projects stays byte-identical.
+        let fig_opacity = fig.opacity.clamp(0.0, 1.0);
+        for (i, node) in fig.def.nodes.iter().enumerate() {
+            let color_hex = node.color.unwrap_or(fig.color);
+            let color = hex(color_hex);
+            let w = node.thickness * zoom;
+            if let Some(par) = node.parent {
+                let a = view(pos[par]);
+                let b = view(pos[i]);
+                let style = node.style;
+                let half_near = w / 2.0;
+                // A point cap forces the far width to zero.
+                let half_far = if style.cap == CapKind::Point {
+                    0.0
+                } else {
+                    half_near * style.taper.max(0.0)
+                };
+                // The segment's alpha in every renderer: the
+                // node style's opacity composed with the figure
+                // (layer) opacity — the rasterizer's StyledSeg
+                // opacity is exactly this product (export.rs).
+                let seg_opacity = style.opacity * fig_opacity;
+                // Pieces: an unbent segment is a single piece;
+                // a bent one is two pieces through the arc
+                // midpoint — the rasterizer's construction
+                // (export.rs, wave 7): the mid width and colour
+                // are the t = 0.5 interpolations of the whole
+                // segment's, and the first piece's cap is Round
+                // so the arc joint stays smooth whatever the
+                // segment's own cap is. Each piece is (near
+                // point, far point, near half-width, far
+                // half-width, cap, near colour, far colour).
+                let bend = bends.get(i).copied().unwrap_or(0.0);
+                let color_far = style.color2.unwrap_or(color_hex);
+                let pieces: Vec<(V2, V2, f32, f32, CapKind, u32, u32)> = if bend == 0.0 {
+                    vec![(a, b, half_near, half_far, style.cap, color_hex, color_far)]
+                } else {
+                    let mid = view(crate::model::bend_mid(pos[par], pos[i], bend));
+                    let half_mid = (half_near + half_far) / 2.0;
+                    let color_mid = crate::style::lerp_color(color_hex, color_far, 0.5);
+                    vec![
+                        (a, mid, half_near, half_mid, CapKind::Round, color_hex, color_mid),
+                        (mid, b, half_mid, half_far, style.cap, color_mid, color_far),
+                    ]
+                };
+                for (pa, pb, p_near, p_far, p_cap, p_col_near, p_col_far) in pieces {
+                    if style.color2.is_some() || p_far != p_near {
+                        // Tapered and/or gradient piece: a
+                        // filled quad spanning its near/far
+                        // widths. The gradient fill exists only
+                        // when the style carries a second
+                        // colour; a tapered SOLID segment takes
+                        // the same quad with a solid fill.
+                        // (Before Wave 12 the quad was built
+                        // only for gradient segments, so a
+                        // tapered solid segment fell through to
+                        // a uniform-width line and lost its
+                        // taper; the rasterizer tapers from the
+                        // style regardless of colour2.)
+                        let fill = match style.color2 {
+                            Some(_) => {
+                                let id = format!("grad{grad_n}");
+                                grad_n += 1;
+                                defs += &format!(
+                                    "<linearGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\"><stop offset=\"0\" stop-color=\"{}\"/><stop offset=\"1\" stop-color=\"{}\"/></linearGradient>\n",
+                                    id, pa[0], pa[1], pb[0], pb[1], hex(p_col_near),
+                                    hex(p_col_far)
+                                );
+                                format!("url(#{id})")
+                            }
+                            None => hex(p_col_near),
+                        };
+                        let d = [pb[0] - pa[0], pb[1] - pa[1]];
+                        let len = (d[0] * d[0] + d[1] * d[1]).sqrt().max(f32::EPSILON);
+                        let n = [-d[1] / len, d[0] / len];
+                        let pts = format!(
+                            "{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} {:.1},{:.1}",
+                            pa[0] + n[0] * p_near,
+                            pa[1] + n[1] * p_near,
+                            pb[0] + n[0] * p_far,
+                            pb[1] + n[1] * p_far,
+                            pb[0] - n[0] * p_far,
+                            pb[1] - n[1] * p_far,
+                            pa[0] - n[0] * p_near,
+                            pa[1] - n[1] * p_near
+                        );
+                        let opacity = if seg_opacity < 1.0 {
+                            format!(" fill-opacity=\"{:.2}\"", seg_opacity)
+                        } else {
+                            String::new()
+                        };
+                        svg += &format!(
+                            "<polygon points=\"{}\" fill=\"{}\"{}/>\n",
+                            pts, fill, opacity
+                        );
+                    } else {
+                        let cap = match p_cap {
+                            CapKind::Round => "round",
+                            CapKind::Square => "square",
+                            // A point is not expressible as a
+                            // line cap; butt ends the stroke
+                            // flush at the joint.
+                            CapKind::Point => "butt",
+                        };
+                        let opacity = if seg_opacity < 1.0 {
+                            format!(" stroke-opacity=\"{:.2}\"", seg_opacity)
+                        } else {
+                            String::new()
+                        };
+                        svg += &format!(
+                            "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"{:.1}\" stroke-linecap=\"{}\"{}/>\n",
+                            pa[0], pa[1], pb[0], pb[1], color, p_near * 2.0, cap, opacity
+                        );
+                    }
+                }
+            }
+            // Heads, rings and shape outlines (Wave 13, C1 —
+            // the S10 SVG half): their alpha is the node's
+            // OWN style opacity composed with the figure
+            // factor, the same product the segments above
+            // use (before this wave only the figure factor
+            // was applied here, so a head or shape node
+            // styled translucent drew fully opaque in SVG
+            // whenever the figure itself was opaque). SVG
+            // carries it as a stroke-opacity attribute —
+            // identical over the background to the
+            // rasterizer's colour fade, and the true
+            // composite over other elements. At a product of
+            // 1.0 nothing is emitted, so unstyled projects
+            // stay byte-identical.
+            let node_opacity = node.style.opacity * fig_opacity;
+            let node_opacity_attr = if node_opacity < 1.0 {
+                format!(" stroke-opacity=\"{:.2}\"", node_opacity)
+            } else {
+                String::new()
+            };
+            if node.head {
+                let c = view(pos[i]);
+                svg += &format!(
+                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{:.1}\"{}/>\n",
+                    c[0], c[1], project.head_ring_radius() * zoom, color, w, node_opacity_attr
+                );
+            }
+            match node.shape {
+                Shape::Circle => {
+                    let c = view(pos[i]);
+                    svg += &format!(
+                        "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{:.1}\"{}/>\n",
+                        c[0], c[1], node.length / 2.0 * zoom, color, w, node_opacity_attr
+                    );
+                }
+                Shape::Polygon(sides) => {
+                    let sides = sides.max(3) as usize;
+                    let c = view(pos[i]);
+                    let r = node.length / 2.0 * zoom;
+                    let pts: Vec<String> = (0..sides)
+                        .map(|k| {
+                            let a = k as f32 / sides as f32 * std::f32::consts::TAU
+                                - std::f32::consts::FRAC_PI_2;
+                            format!("{:.1},{:.1}", c[0] + r * a.cos(), c[1] + r * a.sin())
+                        })
+                        .collect();
+                    svg += &format!(
+                        "<polygon points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{:.1}\"{}/>\n",
+                        pts.join(" "),
+                        color,
+                        w,
+                        node_opacity_attr
+                    );
+                }
+                Shape::Line => {}
+            }
+        }
+    }
+    // Drawing strokes (Wave 13, C1): emitted AFTER the
+    // figures, matching the rasterizer's paint order —
+    // export.rs collects the figure segments first and
+    // pushes the stroke segments into the same segment
+    // pass after them, so strokes composite OVER the
+    // figures there; this writer used to emit its stroke
+    // block first, which put every stroke UNDER the
+    // figures in an SVG renderer. The particle discs
+    // still follow (the raster blends them after the
+    // segment pass) and media still composites last
+    // (append_media, below). No element's own bytes
+    // change in the move — only the block order — so a
+    // frame with no strokes serialises byte-identically
+    // to before.
     for (index, stroke) in project.strokes.iter().enumerate() {
         if stroke.frame != frame {
             continue;
@@ -293,192 +507,6 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
                     stroke.width * zoom,
                     stroke_opacity_attr(stroke.opacity)
                 );
-            }
-        }
-    }
-    for (fi, fig) in project.figures.iter().enumerate() {
-        if fig.hidden {
-            continue;
-        }
-        let pos = evaluate(&fig.def, &poses[fi]);
-        // Per-node bends at this frame (Wave 12, C1) — the same
-        // source the rasterizer reads; empty when the project
-        // carries no bend data.
-        let bends = project.bends_at(frame as f32, fi);
-        // Figure (layer) opacity, clamped once per figure. The
-        // rasterizer composes it multiplicatively into every
-        // segment's alpha (export.rs: style.opacity *
-        // fig.opacity) and fades heads/rings/shapes toward the
-        // background by it (they have no alpha plumbing there).
-        // SVG has real alpha, so this writer applies the figure
-        // factor as an opacity attribute instead: over the
-        // background rect the result is identical to the
-        // raster's colour fade, and over other elements it is
-        // the true composite the raster's segment pass makes.
-        // At 1.0 nothing extra is emitted, so output for
-        // existing projects stays byte-identical.
-        let fig_opacity = fig.opacity.clamp(0.0, 1.0);
-        for (i, node) in fig.def.nodes.iter().enumerate() {
-            let color_hex = node.color.unwrap_or(fig.color);
-            let color = hex(color_hex);
-            let w = node.thickness * zoom;
-            if let Some(par) = node.parent {
-                let a = view(pos[par]);
-                let b = view(pos[i]);
-                let style = node.style;
-                let half_near = w / 2.0;
-                // A point cap forces the far width to zero.
-                let half_far = if style.cap == CapKind::Point {
-                    0.0
-                } else {
-                    half_near * style.taper.max(0.0)
-                };
-                // The segment's alpha in every renderer: the
-                // node style's opacity composed with the figure
-                // (layer) opacity — the rasterizer's StyledSeg
-                // opacity is exactly this product (export.rs).
-                let seg_opacity = style.opacity * fig_opacity;
-                // Pieces: an unbent segment is a single piece;
-                // a bent one is two pieces through the arc
-                // midpoint — the rasterizer's construction
-                // (export.rs, wave 7): the mid width and colour
-                // are the t = 0.5 interpolations of the whole
-                // segment's, and the first piece's cap is Round
-                // so the arc joint stays smooth whatever the
-                // segment's own cap is. Each piece is (near
-                // point, far point, near half-width, far
-                // half-width, cap, near colour, far colour).
-                let bend = bends.get(i).copied().unwrap_or(0.0);
-                let color_far = style.color2.unwrap_or(color_hex);
-                let pieces: Vec<(V2, V2, f32, f32, CapKind, u32, u32)> = if bend == 0.0 {
-                    vec![(a, b, half_near, half_far, style.cap, color_hex, color_far)]
-                } else {
-                    let mid = view(crate::model::bend_mid(pos[par], pos[i], bend));
-                    let half_mid = (half_near + half_far) / 2.0;
-                    let color_mid = crate::style::lerp_color(color_hex, color_far, 0.5);
-                    vec![
-                        (a, mid, half_near, half_mid, CapKind::Round, color_hex, color_mid),
-                        (mid, b, half_mid, half_far, style.cap, color_mid, color_far),
-                    ]
-                };
-                for (pa, pb, p_near, p_far, p_cap, p_col_near, p_col_far) in pieces {
-                    if style.color2.is_some() || p_far != p_near {
-                        // Tapered and/or gradient piece: a
-                        // filled quad spanning its near/far
-                        // widths. The gradient fill exists only
-                        // when the style carries a second
-                        // colour; a tapered SOLID segment takes
-                        // the same quad with a solid fill.
-                        // (Before Wave 12 the quad was built
-                        // only for gradient segments, so a
-                        // tapered solid segment fell through to
-                        // a uniform-width line and lost its
-                        // taper; the rasterizer tapers from the
-                        // style regardless of colour2.)
-                        let fill = match style.color2 {
-                            Some(_) => {
-                                let id = format!("grad{grad_n}");
-                                grad_n += 1;
-                                defs += &format!(
-                                    "<linearGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\"><stop offset=\"0\" stop-color=\"{}\"/><stop offset=\"1\" stop-color=\"{}\"/></linearGradient>\n",
-                                    id, pa[0], pa[1], pb[0], pb[1], hex(p_col_near),
-                                    hex(p_col_far)
-                                );
-                                format!("url(#{id})")
-                            }
-                            None => hex(p_col_near),
-                        };
-                        let d = [pb[0] - pa[0], pb[1] - pa[1]];
-                        let len = (d[0] * d[0] + d[1] * d[1]).sqrt().max(f32::EPSILON);
-                        let n = [-d[1] / len, d[0] / len];
-                        let pts = format!(
-                            "{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} {:.1},{:.1}",
-                            pa[0] + n[0] * p_near,
-                            pa[1] + n[1] * p_near,
-                            pb[0] + n[0] * p_far,
-                            pb[1] + n[1] * p_far,
-                            pb[0] - n[0] * p_far,
-                            pb[1] - n[1] * p_far,
-                            pa[0] - n[0] * p_near,
-                            pa[1] - n[1] * p_near
-                        );
-                        let opacity = if seg_opacity < 1.0 {
-                            format!(" fill-opacity=\"{:.2}\"", seg_opacity)
-                        } else {
-                            String::new()
-                        };
-                        svg += &format!(
-                            "<polygon points=\"{}\" fill=\"{}\"{}/>\n",
-                            pts, fill, opacity
-                        );
-                    } else {
-                        let cap = match p_cap {
-                            CapKind::Round => "round",
-                            CapKind::Square => "square",
-                            // A point is not expressible as a
-                            // line cap; butt ends the stroke
-                            // flush at the joint.
-                            CapKind::Point => "butt",
-                        };
-                        let opacity = if seg_opacity < 1.0 {
-                            format!(" stroke-opacity=\"{:.2}\"", seg_opacity)
-                        } else {
-                            String::new()
-                        };
-                        svg += &format!(
-                            "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"{:.1}\" stroke-linecap=\"{}\"{}/>\n",
-                            pa[0], pa[1], pb[0], pb[1], color, p_near * 2.0, cap, opacity
-                        );
-                    }
-                }
-            }
-            // Heads, rings and shape outlines carry no style
-            // opacity of their own; the rasterizer fades them
-            // toward the background by the figure opacity (it
-            // has no alpha plumbing for them). The equivalent
-            // SVG attribute is a stroke-opacity of exactly the
-            // figure factor — identical over the background,
-            // and the true composite over other elements.
-            let fig_opacity_attr = if fig_opacity < 1.0 {
-                format!(" stroke-opacity=\"{:.2}\"", fig_opacity)
-            } else {
-                String::new()
-            };
-            if node.head {
-                let c = view(pos[i]);
-                svg += &format!(
-                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{:.1}\"{}/>\n",
-                    c[0], c[1], project.head_ring_radius() * zoom, color, w, fig_opacity_attr
-                );
-            }
-            match node.shape {
-                Shape::Circle => {
-                    let c = view(pos[i]);
-                    svg += &format!(
-                        "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{:.1}\"{}/>\n",
-                        c[0], c[1], node.length / 2.0 * zoom, color, w, fig_opacity_attr
-                    );
-                }
-                Shape::Polygon(sides) => {
-                    let sides = sides.max(3) as usize;
-                    let c = view(pos[i]);
-                    let r = node.length / 2.0 * zoom;
-                    let pts: Vec<String> = (0..sides)
-                        .map(|k| {
-                            let a = k as f32 / sides as f32 * std::f32::consts::TAU
-                                - std::f32::consts::FRAC_PI_2;
-                            format!("{:.1},{:.1}", c[0] + r * a.cos(), c[1] + r * a.sin())
-                        })
-                        .collect();
-                    svg += &format!(
-                        "<polygon points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{:.1}\"{}/>\n",
-                        pts.join(" "),
-                        color,
-                        w,
-                        fig_opacity_attr
-                    );
-                }
-                Shape::Line => {}
             }
         }
     }
@@ -1707,5 +1735,145 @@ mod tests {
         assert!(!text.contains("<use"), "media-free project gained a <use>:\n{text}");
         assert!(!text.contains("asset0"), "media-free project gained an asset def:\n{text}");
         assert!(!text.contains("<text"), "media-free project gained a <text>:\n{text}");
+    }
+
+    // ---- Wave 13 (C1): z-order + S10 heads/shapes ----
+
+    #[test]
+    fn svg_strokes_emit_after_figures_and_before_media() {
+        // Z-order: the rasterizer's segment pass composites
+        // strokes OVER the figure segments and its media
+        // pass composites over everything; this writer used
+        // to emit its stroke block FIRST, putting every
+        // stroke under the figures in an SVG renderer. Pin
+        // the document order deliberately: head ring (in the
+        // figure block) < stroke polyline < media <use>.
+        let mut project = media_project();
+        project.strokes.push(crate::model::Stroke {
+            frame: 0,
+            points: vec![[100.0, 600.0], [300.0, 600.0]],
+            color: 0x123456,
+            width: 4.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: None,
+            opacity: 1.0,
+            scatter: 0.0,
+        });
+        let dir = std::path::Path::new("/tmp/styk-svg-zorder-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        let head_pos = text.find("fill=\"none\"").expect("head ring missing");
+        let stroke_pos = text.find("stroke=\"#123456\"").expect("stroke polyline missing");
+        let media_pos = text.find("<use href=\"#asset0\"").expect("media use missing");
+        assert!(
+            head_pos < stroke_pos,
+            "stroke still emits under the figures:\n{text}"
+        );
+        assert!(
+            stroke_pos < media_pos,
+            "media no longer composites last:\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_default_project_bytes_are_untouched_by_the_reorder() {
+        // The zero-styled baseline both Wave 13 changes must
+        // leave byte-identical: the demo project has NO
+        // strokes (the moved stroke block emits zero bytes)
+        // and every opacity product is 1.0 (the S10
+        // composition emits no attribute), so its frames may
+        // carry no stroke element and no opacity attribute
+        // at all. (Exact segment bytes for this project are
+        // pinned by the rotation test above.)
+        let project = Project::new_demo();
+        let dir = std::path::Path::new("/tmp/styk-svg-default-clean-test");
+        export_svg(&project, dir).unwrap();
+        for name in ["frame-0001.svg", "frame-0003.svg", "frame-0005.svg"] {
+            let text = std::fs::read_to_string(dir.join(name)).unwrap();
+            assert!(!text.contains("<polyline"), "{name} gained a stroke:\n{text}");
+            assert!(
+                !text.contains("stroke-opacity"),
+                "{name} gained a stroke-opacity:\n{text}"
+            );
+            assert!(
+                !text.contains("fill-opacity"),
+                "{name} gained a fill-opacity:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn svg_node_style_opacity_reaches_head_ring_and_shapes() {
+        // S10 SVG half: a head or shape node styled
+        // translucent used to draw at the figure factor
+        // alone (fully opaque at figure opacity 1.0). Node
+        // 2 is the demo head; node 3 becomes a Circle shape
+        // node, node 5 a Polygon — each styled to 0.5.
+        let mut project = Project::new_demo();
+        project.set_camera_key(0, 480.0, 360.0, 1.0);
+        project.figures[0].def.nodes[2].style.opacity = 0.5;
+        project.figures[0].def.nodes[3].shape = crate::model::Shape::Circle;
+        project.figures[0].def.nodes[3].style.opacity = 0.5;
+        project.figures[0].def.nodes[5].shape = crate::model::Shape::Polygon(5);
+        project.figures[0].def.nodes[5].style.opacity = 0.5;
+        let dir = std::path::Path::new("/tmp/styk-svg-s10-shapes-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        // Head ring: the fill="none" circle at the head
+        // ring's own radius (17.0 at zoom 1).
+        let head_r = format!("r=\"{:.1}\"", project.head_ring_radius());
+        let head = text
+            .lines()
+            .find(|l| l.contains("<circle") && l.contains(&head_r))
+            .expect("head ring missing");
+        assert!(
+            head.contains("stroke-opacity=\"0.50\""),
+            "head ring lost the node style opacity: {head}"
+        );
+        // Circle shape: the fill="none" circle at
+        // length / 2 = 19.0 (node 3's length is 38).
+        let ring = text
+            .lines()
+            .find(|l| l.contains("<circle") && l.contains("r=\"19.0\""))
+            .expect("circle shape missing");
+        assert!(
+            ring.contains("stroke-opacity=\"0.50\""),
+            "circle shape lost the node style opacity: {ring}"
+        );
+        // Polygon shape: the only fill="none" polygon (no
+        // segment in this project takes the polygon form).
+        let poly = text
+            .lines()
+            .find(|l| l.contains("<polygon") && l.contains("fill=\"none\""))
+            .expect("polygon shape missing");
+        assert!(
+            poly.contains("stroke-opacity=\"0.50\""),
+            "polygon shape lost the node style opacity: {poly}"
+        );
+    }
+
+    #[test]
+    fn svg_node_style_opacity_composes_with_figure_opacity_on_heads() {
+        // The product rule, the same as segments: a head
+        // node at style 0.5 under a figure at 0.5 rides at
+        // 0.25 — not at the figure factor alone (0.50, the
+        // pre-Wave-13 byte) and not at the style alone.
+        let mut project = Project::new_demo();
+        project.set_camera_key(0, 480.0, 360.0, 1.0);
+        project.figures[0].opacity = 0.5;
+        project.figures[0].def.nodes[2].style.opacity = 0.5;
+        let dir = std::path::Path::new("/tmp/styk-svg-s10-compose-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        let head_r = format!("r=\"{:.1}\"", project.head_ring_radius());
+        let head = text
+            .lines()
+            .find(|l| l.contains("<circle") && l.contains(&head_r))
+            .expect("head ring missing");
+        assert!(
+            head.contains("stroke-opacity=\"0.25\""),
+            "head ring is not the style x figure product: {head}"
+        );
     }
 }

@@ -68,6 +68,74 @@
 //!   `Frame.poses`, a frame's bend rows can never be
 //!   separated from the poses they belong to.
 //!
+//! ## Instance keys on timeline-length edits (Wave 13, C7 verdict)
+//!
+//! Sprite and text instance keys ARE frame-pinned data —
+//! they sit in the swap census above, and [`swap_frames`]
+//! remaps them like everything else pinned. The question
+//! Wave 12's C8 audit left open is whether they also track
+//! timeline-LENGTH edits — frames being inserted or
+//! deleted — and the answer, pinned by the tests
+//! `insert_frames_keep_instance_keys_and_all_pins_absolute`,
+//! `add_and_delete_frame_keep_instance_keys_absolute` and
+//! `delete_range_leaves_instance_keys_absolute_and_sample_still_resolves`,
+//! is **no — deliberately, and exactly as every other
+//! pinned collection behaves**:
+//!
+//! * Every length-changing path leaves ALL frame pins at
+//!   their stored frame numbers: `EditorCore::add_frame` /
+//!   `duplicate_frame`, `EditorCore::delete_frame`,
+//!   `EditorCore::insert_inbetween` and
+//!   `EditorCore::paste_frame` (editor.rs),
+//!   `EditorCore::delete_range` and
+//!   `EditorCore::paste_range` (whose own doc comments
+//!   state the rule outright), `shift_frames` /
+//!   `reverse_range` (frame VALUES move; pins do not), and
+//!   both copies of `insert_frames_after_current` — this
+//!   file's, and the frame-ops panel's, whose census
+//!   paragraph names `sprites` and `texts` among the
+//!   "sparse collections whose entries carry their own
+//!   absolute frame numbers". (End-appends — `add_frame`'s
+//!   zero-frame recovery, `fig3_bake_animation`'s
+//!   held-frame padding — cannot move a pin by
+//!   construction: no existing frame changes index.)
+//!   Only the editor's navigation state — `current` and
+//!   the loop range — is remapped on those paths. Frame
+//!   pins in this editor are
+//!   **timeline-absolute**: a pin names a position on the
+//!   timeline, not a frame's content. The swap is the one
+//!   operation that moves pins, because exchanging two
+//!   frames' contents is its whole purpose.
+//! * Nothing corrupts when a pin's frame stops existing.
+//!   Deleting frames never deletes pins (a stroke or a
+//!   camera key on a deleted frame survives too), and
+//!   `InstanceKey::sample` clamps at both ends of a key
+//!   list, so a sprite/text key left beyond a shortened
+//!   timeline's end keeps resolving to its stored transform
+//!   — the instance holds its keyed pose instead of
+//!   vanishing or wrapping. What the author sees after an
+//!   insert or delete is every pin — camera, particles,
+//!   strokes, audio, FX, graph, sprites, texts alike —
+//!   holding its timeline position while frame contents
+//!   move underneath it; re-timing pins after a length
+//!   edit is a manual pass today, uniformly across the
+//!   whole pinned census.
+//! * If the house rule ever flips, it must flip for the
+//!   whole pinned census at once, and the work lives outside
+//!   this file: in `EditorCore`'s frame-length paths
+//!   (editor.rs — `add_frame`, `delete_frame`,
+//!   `delete_range`, `paste_range`, `paste_frame`,
+//!   `insert_inbetween` and their `remap_after_frame_*`
+//!   helpers) and in both `insert_frames_after_current`
+//!   copies. Shifting ONLY
+//!   instance keys from here would make sprites and texts
+//!   disagree with the camera, audio and graph keys they
+//!   were authored against — a worse misalignment than the
+//!   uniform rule. The pinning tests below therefore assert
+//!   against all the collections at once: a future flip
+//!   fails them together, in the open, instead of drifting
+//!   one collection at a time.
+//!
 //! ## Undo discipline
 //!
 //! The house rules, as in `graph_keys` / `fx_ops`: a refusal
@@ -305,7 +373,10 @@ fn fs_check_figure(core: &EditorCore, fi: usize) -> Result<(), String> {
 ///   result is content-identical to N single presses and
 ///   differs only in undo granularity and in `current` staying
 ///   put. Frame-pinned collections (camera keys, particles,
-///   …) are NOT remapped, matching `add_frame`.
+///   …) are NOT remapped, matching `add_frame` — instance
+///   keys included; see the module docs' "Instance keys on
+///   timeline-length edits" section for the pinned verdict
+///   and why.
 /// * `count` is clamped to `1..=INSERT_FRAMES_MAX`, the
 ///   panel's `clamp_insert_count` range.
 ///
@@ -1206,5 +1277,129 @@ mod tests {
         assert_eq!(core.project.frames[A].bends, vec![vec![0.11], vec![0.22]]);
         assert_eq!(core.project.sprites[0].keys[0].frame, A as f32);
         assert_eq!(core.project.sprites[0].asset, 0);
+    }
+
+    // ---- Wave 13 (C7): instance keys on timeline-length edits ----
+    //
+    // The verdict pinned here (module docs, "Instance keys on
+    // timeline-length edits"): frame pins are
+    // timeline-absolute. Insert/delete paths shift NO pinned
+    // collection — instance keys behave exactly like camera
+    // keys, particles, audio and the rest. These tests assert
+    // against all the collections at once on purpose: if the
+    // house rule ever flips, it must flip for all seven
+    // together, and these tests are the tripwire that fails
+    // in the open instead of letting one collection drift.
+
+    /// The frame every pin in `core`'s staged project sits
+    /// on, collection by collection — the shared assertion
+    /// the three length-edit tests compare before and after.
+    fn all_pin_frames(
+        core: &EditorCore,
+    ) -> (Vec<usize>, Vec<usize>, Vec<usize>, Vec<f32>, Vec<f32>) {
+        let camera: Vec<usize> = core.project.camera.iter().map(|k| k.frame).collect();
+        let particles: Vec<usize> = core.project.particles.iter().map(|e| e.frame).collect();
+        let audio: Vec<usize> = core.project.audio.iter().map(|c| c.start_frame).collect();
+        let sprite: Vec<f32> = core.project.sprites[0].keys.iter().map(|k| k.frame).collect();
+        let text: Vec<f32> = core.project.texts[0].keys.iter().map(|k| k.frame).collect();
+        (camera, particles, audio, sprite, text)
+    }
+
+    #[test]
+    fn insert_frames_keep_instance_keys_and_all_pins_absolute() {
+        let mut core = staged_core();
+        let pins_before = all_pin_frames(&core);
+        // The staged pins, for the record: camera [0, A, B],
+        // particles [A, 2, B], audio [A, B], sprite keys
+        // [A, B] as f32, text keys [A, 2, B] as f32.
+        assert_eq!(
+            pins_before,
+            (
+                vec![0, A, B],
+                vec![A, 2, B],
+                vec![A, B],
+                vec![A as f32, B as f32],
+                vec![A as f32, 2.0, B as f32],
+            )
+        );
+        let undo_before = core.undo_depth();
+
+        // This file's batch insert: two frames after the
+        // current one (frame 2). Frame B's content now sits
+        // at index 5 — and every pin still names its old
+        // timeline position, instance keys included.
+        assert_eq!(insert_frames_after_current(&mut core, 2), 2);
+        assert_eq!(core.undo_depth(), undo_before + 1, "the batch is ONE snapshot");
+        assert_eq!(core.project.frames.len(), 6, "the timeline grew");
+        assert_eq!(
+            all_pin_frames(&core),
+            pins_before,
+            "no pinned collection shifted — pins are timeline-absolute"
+        );
+    }
+
+    #[test]
+    fn add_and_delete_frame_keep_instance_keys_absolute() {
+        let mut core = staged_core();
+        let pins_before = all_pin_frames(&core);
+
+        // EditorCore::add_frame (editor.rs): inserts a clone
+        // after the current frame (2) and steps onto it.
+        core.add_frame();
+        assert_eq!(core.project.frames.len(), 5);
+        assert_eq!(core.current, 3);
+        assert_eq!(
+            all_pin_frames(&core),
+            pins_before,
+            "add_frame shifted no pin, instance keys included"
+        );
+
+        // EditorCore::delete_frame removes the frame just
+        // added (the playhead sits on it), restoring the
+        // four-frame timeline — pins still exactly where
+        // they were authored.
+        core.delete_frame();
+        assert_eq!(core.project.frames.len(), 4);
+        assert_eq!(
+            all_pin_frames(&core),
+            pins_before,
+            "delete_frame shifted no pin, instance keys included"
+        );
+    }
+
+    #[test]
+    fn delete_range_leaves_instance_keys_absolute_and_sample_still_resolves() {
+        let mut core = staged_core();
+        let pins_before = all_pin_frames(&core);
+
+        // EditorCore::delete_range cuts frames 2 and 3:
+        // frame B (index 3) stops existing, so the sprite
+        // key at B and the camera key at B now sit beyond
+        // the end of a two-frame timeline. Nothing is
+        // deleted and nothing is renumbered — the pins
+        // survive at their absolute positions, uniformly.
+        assert!(core.delete_range(2, 2));
+        assert_eq!(core.project.frames.len(), 2);
+        assert_eq!(
+            all_pin_frames(&core),
+            pins_before,
+            "delete_range shifted and deleted no pin, instance keys included"
+        );
+
+        // The beyond-end sprite key still RESOLVES:
+        // InstanceKey::sample clamps at the ends of the key
+        // list, so sampling at the key's own frame returns
+        // its stored transform (x = 7), and sampling between
+        // the surviving key and the beyond-end key still
+        // interpolates across the cut (x = 6 at frame 2) —
+        // the instance holds its keyed motion instead of
+        // vanishing or wrapping.
+        let keys = &core.project.sprites[0].keys;
+        let at_last = InstanceKey::sample(keys, B as f32).expect("keys are non-empty");
+        assert_eq!(at_last.x, 7.0, "the beyond-end key resolves to its stored transform");
+        let at_first = InstanceKey::sample(keys, A as f32).expect("keys are non-empty");
+        assert_eq!(at_first.x, 5.0);
+        let midway = InstanceKey::sample(keys, 2.0).expect("keys are non-empty");
+        assert_eq!(midway.x, 6.0, "interpolation across the cut still works");
     }
 }

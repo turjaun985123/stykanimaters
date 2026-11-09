@@ -2217,3 +2217,368 @@ mod wave12_c4_serde_pins {
         assert!(demo.texts.is_empty());
     }
 }
+
+#[cfg(test)]
+mod wave13_c6_sprite_text_pins {
+    //! Wave 13 (C6): the sprite/text data layer the A squad
+    //! builds the new GUI surface on. Wave 12 pinned sprites
+    //! as passengers in an assets project (two instances, no
+    //! texts, no literal wire shapes) and Wave 11's E7 census
+    //! planted one single-key sprite + text with spot checks;
+    //! `InstanceKey::sample` — the interpolation every sprite
+    //! and text placement reads (media.rs) — had no edge pins
+    //! at all. Those are the gaps closed here.
+    //!
+    //! No shape changes: `InstanceKey`, `SpriteInstance` and
+    //! `TextInstance` derive no `PartialEq`, so equality is
+    //! proven the Wave 12 way — field-by-field asserts plus a
+    //! byte-identical second serialisation. One sampling
+    //! semantic is pinned deliberately because the A squad
+    //! will trip over it otherwise: a CLAMPED sample (before
+    //! the first key / after the last) returns the stored key
+    //! verbatim, including its stored `frame`, while an
+    //! INTERPOLATED sample carries the requested frame in
+    //! its `frame` field. Consumers read x / y / scale /
+    //! angle from the result, so the asymmetry is harmless
+    //! today — but it is current behaviour, pinned as such.
+    use super::*;
+
+    fn key(frame: f32, x: f32, y: f32, scale: f32, angle: f32) -> InstanceKey {
+        InstanceKey { frame, x, y, scale, angle }
+    }
+
+    /// Field-by-field key comparison (InstanceKey has no
+    /// PartialEq). Every value used below is exactly
+    /// representable in f32 and every interpolation factor
+    /// is a binary fraction (1/4, 1/2, 1), so plain equality
+    /// is the honest assert — no tolerance anywhere.
+    fn assert_key(actual: &InstanceKey, frame: f32, x: f32, y: f32, scale: f32, angle: f32) {
+        assert_eq!(actual.frame, frame, "frame differs in {actual:?}");
+        assert_eq!(actual.x, x, "x differs in {actual:?}");
+        assert_eq!(actual.y, y, "y differs in {actual:?}");
+        assert_eq!(actual.scale, scale, "scale differs in {actual:?}");
+        assert_eq!(actual.angle, angle, "angle differs in {actual:?}");
+    }
+
+    // ---- Serde: literal wire shapes -------------------------
+
+    #[test]
+    fn wave13_instance_key_wire_shape_is_pinned_literally() {
+        // Field names, field order and f32 rendering are the
+        // saved-file format for every sprite/text key.
+        let json = serde_json::to_string(&key(2.5, -12.75, 8.0, 0.5, -45.0)).unwrap();
+        assert_eq!(
+            json,
+            r#"{"frame":2.5,"x":-12.75,"y":8.0,"scale":0.5,"angle":-45.0}"#
+        );
+        let back: InstanceKey = serde_json::from_str(&json).unwrap();
+        assert_key(&back, 2.5, -12.75, 8.0, 0.5, -45.0);
+    }
+
+    #[test]
+    fn wave13_sprite_instance_wire_shape_is_pinned_literally() {
+        let sprite = SpriteInstance {
+            asset: 2,
+            keys: vec![key(0.0, 10.0, 20.0, 1.5, 30.0)],
+        };
+        let json = serde_json::to_string(&sprite).unwrap();
+        assert_eq!(
+            json,
+            r#"{"asset":2,"keys":[{"frame":0.0,"x":10.0,"y":20.0,"scale":1.5,"angle":30.0}]}"#
+        );
+        let back: SpriteInstance = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.asset, 2);
+        assert_eq!(back.keys.len(), 1);
+        assert_key(&back.keys[0], 0.0, 10.0, 20.0, 1.5, 30.0);
+    }
+
+    #[test]
+    fn wave13_text_instance_wire_shape_is_pinned_literally() {
+        // `color` is a plain u32 on the wire (0xFFFFFF =
+        // 16777215), fields in declaration order.
+        let text = TextInstance {
+            content: "Title".to_string(),
+            size: 28.0,
+            color: 0xFFFFFF,
+            keys: vec![key(0.0, 100.0, 80.0, 1.0, 0.0)],
+        };
+        let json = serde_json::to_string(&text).unwrap();
+        assert_eq!(
+            json,
+            r#"{"content":"Title","size":28.0,"color":16777215,"keys":[{"frame":0.0,"x":100.0,"y":80.0,"scale":1.0,"angle":0.0}]}"#
+        );
+        let back: TextInstance = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.content, "Title");
+        assert_eq!(back.size, 28.0);
+        assert_eq!(back.color, 0xFFFFFF);
+        assert_eq!(back.keys.len(), 1);
+        assert_key(&back.keys[0], 0.0, 100.0, 80.0, 1.0, 0.0);
+    }
+
+    // ---- Serde: instance tables round-trip ------------------
+
+    #[test]
+    fn wave13_sprite_and_text_tables_round_trip_field_by_field() {
+        // The degenerate members must survive alongside the
+        // rich ones: an instance with NO keys yet (the state
+        // A1's add op starts from before its first key, and a
+        // legal saved state), an empty-content text, negative
+        // and fractional values, and u32::MAX as a colour.
+        let sprites = vec![
+            SpriteInstance {
+                asset: 3,
+                keys: vec![
+                    key(0.0, 0.0, 0.0, 1.0, 0.0),
+                    key(9.5, -4.5, 12.25, 0.75, -270.0),
+                ],
+            },
+            SpriteInstance { asset: 0, keys: Vec::new() },
+        ];
+        let texts = vec![
+            TextInstance {
+                content: "líne\nbreak \"quoted\"".to_string(),
+                size: 0.5,
+                color: u32::MAX,
+                keys: vec![key(1.25, -0.5, 0.5, 2.0, 45.5)],
+            },
+            TextInstance {
+                content: String::new(),
+                size: 12.0,
+                color: 0,
+                keys: Vec::new(),
+            },
+        ];
+
+        let json = serde_json::to_string(&sprites).unwrap();
+        let back: Vec<SpriteInstance> = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].asset, 3);
+        assert_eq!(back[0].keys.len(), 2);
+        assert_key(&back[0].keys[1], 9.5, -4.5, 12.25, 0.75, -270.0);
+        assert_eq!(back[1].asset, 0);
+        assert!(back[1].keys.is_empty(), "a keyless sprite stays keyless");
+
+        let json = serde_json::to_string(&texts).unwrap();
+        let back: Vec<TextInstance> = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].content, "líne\nbreak \"quoted\"");
+        assert_eq!(back[0].size, 0.5);
+        assert_eq!(back[0].color, u32::MAX);
+        assert_key(&back[0].keys[0], 1.25, -0.5, 0.5, 2.0, 45.5);
+        assert_eq!(back[1].content, "");
+        assert!(back[1].keys.is_empty(), "a keyless text stays keyless");
+    }
+
+    #[test]
+    fn wave13_project_with_keyed_sprites_and_texts_round_trips_byte_stably() {
+        // The full save path (to_string_pretty, as
+        // projects.rs writes files): several sprites AND
+        // texts, multi-key instances in table order,
+        // fractional key frames, negative positions/angles —
+        // and a byte-identical second save as the structural
+        // equality proof (Project has no PartialEq).
+        let mut project = Project::new_demo();
+        project.assets = vec![
+            ImageAsset { name: "first.png".to_string(), png: vec![1, 2, 3] },
+            ImageAsset { name: "second.png".to_string(), png: vec![4, 5] },
+        ];
+        project.sprites = vec![
+            SpriteInstance {
+                asset: 1,
+                keys: vec![
+                    key(0.0, 480.0, 360.0, 1.0, 0.0),
+                    key(12.0, 240.5, -30.0, 2.5, 180.0),
+                    key(20.0, 0.0, 0.0, 0.5, -90.25),
+                ],
+            },
+            SpriteInstance { asset: 0, keys: Vec::new() },
+            SpriteInstance {
+                asset: 1,
+                keys: vec![key(3.5, -12.75, 8.25, 0.25, 359.5)],
+            },
+        ];
+        project.texts = vec![
+            TextInstance {
+                content: "Héllo \"sprites\"".to_string(),
+                size: 28.5,
+                color: 0xFF8800,
+                keys: vec![
+                    key(0.0, 100.0, 80.0, 1.0, 0.0),
+                    key(6.0, 110.5, 90.25, 1.25, -15.0),
+                ],
+            },
+            TextInstance {
+                content: String::new(),
+                size: 12.0,
+                color: 0,
+                keys: Vec::new(),
+            },
+        ];
+
+        let json = serde_json::to_string_pretty(&project).unwrap();
+        let back: Project = serde_json::from_str(&json).unwrap();
+        let json2 = serde_json::to_string_pretty(&back).unwrap();
+        assert_eq!(json, json2, "project changed across a save/load cycle");
+
+        // Order is semantics on both sides: instance order
+        // in each table, key order inside each instance, and
+        // asset indices still naming the same asset.
+        assert_eq!(back.sprites.len(), 3);
+        let sprite_assets: Vec<usize> = back.sprites.iter().map(|s| s.asset).collect();
+        assert_eq!(sprite_assets, [1, 0, 1]);
+        assert_eq!(back.assets[1].name, "second.png");
+        assert_eq!(back.sprites[0].keys.len(), 3);
+        assert_key(&back.sprites[0].keys[1], 12.0, 240.5, -30.0, 2.5, 180.0);
+        assert_key(&back.sprites[0].keys[2], 20.0, 0.0, 0.0, 0.5, -90.25);
+        assert!(back.sprites[1].keys.is_empty());
+        assert_key(&back.sprites[2].keys[0], 3.5, -12.75, 8.25, 0.25, 359.5);
+        assert_eq!(back.texts.len(), 2);
+        assert_eq!(back.texts[0].content, "Héllo \"sprites\"");
+        assert_eq!(back.texts[0].size, 28.5);
+        assert_eq!(back.texts[0].color, 0xFF8800);
+        assert_eq!(back.texts[0].keys.len(), 2);
+        assert_key(&back.texts[0].keys[1], 6.0, 110.5, 90.25, 1.25, -15.0);
+        assert_eq!(back.texts[1].content, "");
+        assert!(back.texts[1].keys.is_empty());
+    }
+
+    #[test]
+    fn wave13_project_file_without_sprites_or_texts_loads_them_empty() {
+        // The back-compatibility path for files saved before
+        // the fields existed (or hand-trimmed since): both
+        // Project fields carry a serde default, so a document
+        // with the two keys REMOVED loads with empty tables —
+        // while the rest of the project survives untouched.
+        // (Wave 12's bare-`{}` pin covers the all-defaults
+        // case; this pins the sprite/text defaults inside a
+        // populated document.)
+        let mut project = Project::new_demo();
+        project.sprites = vec![SpriteInstance {
+            asset: 0,
+            keys: vec![key(0.0, 1.0, 2.0, 1.0, 0.0)],
+        }];
+        project.texts = vec![TextInstance {
+            content: "gone".to_string(),
+            size: 12.0,
+            color: 0,
+            keys: Vec::new(),
+        }];
+        let mut doc = serde_json::to_value(&project).unwrap();
+        let obj = doc.as_object_mut().unwrap();
+        assert!(obj.remove("sprites").is_some(), "fixture must carry sprites");
+        assert!(obj.remove("texts").is_some(), "fixture must carry texts");
+        let back: Project = serde_json::from_value(doc).unwrap();
+        assert!(back.sprites.is_empty());
+        assert!(back.texts.is_empty());
+        assert_eq!(back.name, project.name);
+        assert_eq!(back.figures.len(), project.figures.len());
+    }
+
+    // ---- InstanceKey::sample edges --------------------------
+
+    #[test]
+    fn wave13_sample_of_empty_keys_is_none() {
+        // media_items skips an instance whose sample is None,
+        // so a keyless instance renders nothing — the A squad
+        // relies on this when an add precedes its first key.
+        assert!(InstanceKey::sample(&[], 0.0).is_none());
+        assert!(InstanceKey::sample(&[], -10.0).is_none());
+        assert!(InstanceKey::sample(&[], 123.5).is_none());
+    }
+
+    #[test]
+    fn wave13_sample_of_single_key_is_that_key_at_any_frame() {
+        // One key clamps the whole timeline to itself, and
+        // the clamped result is the STORED key verbatim —
+        // its `frame` stays 4.0 even when sampled at 999
+        // (the asymmetry pinned in the module docs).
+        let keys = [key(4.0, 50.0, 60.0, 2.0, 30.0)];
+        for frame_f in [-100.0, 0.0, 4.0, 4.5, 999.0] {
+            let got = InstanceKey::sample(&keys, frame_f).expect("one key always samples");
+            assert_key(&got, 4.0, 50.0, 60.0, 2.0, 30.0);
+        }
+    }
+
+    #[test]
+    fn wave13_sample_before_first_and_after_last_clamps_to_the_end_keys() {
+        let keys = [
+            key(2.0, 10.0, 20.0, 1.0, 0.0),
+            key(8.0, 110.0, 220.0, 3.0, 90.0),
+        ];
+        // Before (and exactly at) the first key: first key
+        // verbatim, stored frame included.
+        for frame_f in [-5.0, 0.0, 2.0] {
+            let got = InstanceKey::sample(&keys, frame_f).unwrap();
+            assert_key(&got, 2.0, 10.0, 20.0, 1.0, 0.0);
+        }
+        // After the last key: last key verbatim — NOT a
+        // key re-framed to the sampled frame.
+        let got = InstanceKey::sample(&keys, 1000.0).unwrap();
+        assert_key(&got, 8.0, 110.0, 220.0, 3.0, 90.0);
+    }
+
+    #[test]
+    fn wave13_sample_at_exact_key_frames_returns_those_keys() {
+        let keys = [
+            key(0.0, 0.0, 0.0, 1.0, 0.0),
+            key(10.0, 100.0, 50.0, 2.0, 45.0),
+            key(20.0, 300.0, 150.0, 4.0, 90.0),
+        ];
+        // First key: the early clamp branch.
+        assert_key(&InstanceKey::sample(&keys, 0.0).unwrap(), 0.0, 0.0, 0.0, 1.0, 0.0);
+        // Middle key: reached as t = 1 at the end of the
+        // first window — values land exactly on the key.
+        assert_key(&InstanceKey::sample(&keys, 10.0).unwrap(), 10.0, 100.0, 50.0, 2.0, 45.0);
+        // Last key: t = 1 at the end of the last window.
+        assert_key(&InstanceKey::sample(&keys, 20.0).unwrap(), 20.0, 300.0, 150.0, 4.0, 90.0);
+    }
+
+    #[test]
+    fn wave13_sample_interpolates_position_scale_and_angle() {
+        // Every interpolated field is pinned separately at
+        // two factors (1/2 and 1/4), so a field accidentally
+        // left un-lerped (copied from either end) fails here.
+        let keys = [
+            key(0.0, 0.0, 100.0, 1.0, 0.0),
+            key(10.0, 200.0, -100.0, 3.0, 90.0),
+        ];
+        // Midpoint: x 0->200 = 100, y 100->-100 = 0,
+        // scale 1->3 = 2, angle 0->90 = 45; the result
+        // carries the REQUESTED frame, unlike a clamp.
+        assert_key(&InstanceKey::sample(&keys, 5.0).unwrap(), 5.0, 100.0, 0.0, 2.0, 45.0);
+        // Quarter: x = 50, y = 50, scale = 1.5, angle = 22.5.
+        assert_key(&InstanceKey::sample(&keys, 2.5).unwrap(), 2.5, 50.0, 50.0, 1.5, 22.5);
+    }
+
+    #[test]
+    fn wave13_sample_second_segment_interpolates_between_its_own_keys() {
+        // A sample past the middle key must interpolate the
+        // SECOND window, not stretch the first: at 15 the
+        // values sit halfway between keys 2 and 3.
+        let keys = [
+            key(0.0, 0.0, 0.0, 1.0, 0.0),
+            key(10.0, 100.0, 0.0, 2.0, 0.0),
+            key(20.0, 300.0, 100.0, 4.0, 180.0),
+        ];
+        assert_key(&InstanceKey::sample(&keys, 15.0).unwrap(), 15.0, 200.0, 50.0, 3.0, 90.0);
+    }
+
+    #[test]
+    fn wave13_sample_handles_fractional_key_frames() {
+        // Keys need not sit on integer frames (sample takes
+        // f32 for tween playback): the factor is measured
+        // between the fractional endpoints.
+        let keys = [
+            key(2.5, 10.0, 0.0, 1.0, 0.0),
+            key(7.5, 110.0, 50.0, 2.0, 60.0),
+        ];
+        // Exactly at the fractional first key: clamp branch.
+        assert_key(&InstanceKey::sample(&keys, 2.5).unwrap(), 2.5, 10.0, 0.0, 1.0, 0.0);
+        // Frame 5 is halfway between 2.5 and 7.5.
+        assert_key(&InstanceKey::sample(&keys, 5.0).unwrap(), 5.0, 60.0, 25.0, 1.5, 30.0);
+        // Past the fractional last key: last key verbatim.
+        assert_key(&InstanceKey::sample(&keys, 8.0).unwrap(), 7.5, 110.0, 50.0, 2.0, 60.0);
+    }
+}

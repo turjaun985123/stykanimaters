@@ -51,13 +51,39 @@
 //! on its card, not one flat figure colour. Head rings keep
 //! the figure colour, exactly as the stage draws them (its
 //! ring pass uses the figure colour, never the head node's
-//! override). The miniature's geometry stays the deliberate
-//! hairline simplification — uniform [`THUMB_WIDTH`], no
-//! taper/cap/gradient/style-opacity, no bend arcs, no
-//! Circle/Polygon node glyphs; that divergence from the
-//! stage's `paint::styled_segment_pieces` construction is
-//! a recorded Wave 12 remainder (D6 report), not silently
-//! claimed as fidelity.
+//! override).
+//!
+//! Wave 13 (C4) rebuilds the miniature's geometry on the
+//! shared construction, closing the D6 remainder: every
+//! segment now goes through `paint::styled_segment_pieces`
+//! — the same generator the stage, the raster exporter
+//! and the Wave 12 library thumbnails build from — so
+//! per-node taper, cap geometry, `color2` gradients and
+//! style opacity reach the card, a bent segment arcs
+//! through its bend midpoint, and Circle/Polygon nodes
+//! draw their glyphs (the stage's shape pass). Positions
+//! stay the LIVE pose (`EditorCore::positions_f` at the
+//! display frame, with that frame's bends) — the library
+//! thumbnail's rest-pose choice is deliberately NOT
+//! imported, because a project figure has a live pose to
+//! show. The base colour each prim family resolves
+//! against is the figure's own colour: a library def
+//! carries no figure colour, so its thumbnails resolve
+//! inheritance against the theme's text colour, but a
+//! project figure HAS a live colour, and segments and
+//! shape glyphs alike resolve `node.color` else
+//! `fig.color` — the stage's own resolution. Head rings
+//! keep the D6 doctrine (the figure colour plain, never
+//! the head node's override). Prim alphas carry the
+//! node's style opacity only: the figure's layer opacity
+//! is NOT composed into the card — the thumbnail is an
+//! identity preview (above), the row's opacity readout
+//! already carries that number, and hidden/solo figures
+//! are likewise drawn undimmed. Piece and ring widths
+//! are the stage widths scaled by the fit, floored at
+//! [`THUMB_MIN_WIDTH`] so a hard taper stays visible at
+//! 44 points (the library thumbnail's floor, and the
+//! stage's own dot-floor precedent).
 //!
 //! Phase G (section 17/40) adds a name filter: a `TextEdit`
 //! in [`FiguresPanelState::filter`] (key `figures-filter`,
@@ -166,7 +192,7 @@
 use rune::tok::{type_, Theme};
 use rune::{canvas, col, el, row, text, text_input, Color, El, LineCap, ScrollSpec, Shape, TextEdit};
 use stykanimate_rs::editor::EditorCore;
-use stykanimate_rs::model::V2;
+use stykanimate_rs::model::{self, V2};
 
 use crate::rune_sec::design;
 use crate::rune_sec::icon_btn::{chip_btn, icon_btn, icon_only_btn};
@@ -288,9 +314,15 @@ pub const THUMB_SIZE: f32 = 44.0;
 /// thumbnail's edge.
 const THUMB_MARGIN: f32 = 4.0;
 
-/// Stroke width (points) of thumbnail segments and head
-/// rings — one hairline weight for the whole miniature.
-const THUMB_WIDTH: f32 = 1.5;
+/// Legibility floor (points) for thumbnail stroke
+/// widths: a hard taper's far pieces would otherwise
+/// shrink under a fifth of a point at this scale and
+/// the segment would visually detach from its joint.
+/// The library thumbnail's floor (`library_panel`'s
+/// `THUMB_MIN_WIDTH`), and the stage floors its spray
+/// dots at the same 0.8; endpoints — and every width
+/// above the floor — stay exact.
+pub const THUMB_MIN_WIDTH: f32 = 0.8;
 
 /// Base head-ring radius in stage units, re-exported under
 /// the panel's long-standing name: the single source is the
@@ -305,19 +337,47 @@ pub use stykanimate_rs::model::HEAD_RING_RADIUS as HEAD_RING_R;
 /// 24 at full size; 16 is smooth at 44 points).
 const HEAD_RING_SIDES: usize = 16;
 
-/// One piece of thumbnail geometry in canvas points: a rig
-/// segment between two mapped joints, or a head ring as a
-/// polygon around a mapped head joint. `thumb_shape` turns
-/// these into a `Shape`; keeping them separate makes the
-/// geometry unit-testable (a built `Shape`'s ops are
-/// crate-private to rune). Each prim carries the colour it
-/// paints in (`0xRRGGBB`): a segment takes its child node's
-/// resolved colour, a ring the figure colour — the stage's
-/// own two choices (Wave 12, D6).
+/// One piece of thumbnail geometry in canvas points.
+/// `thumb_shape` turns these into a `Shape`; keeping them
+/// separate makes the geometry unit-testable (a built
+/// `Shape`'s ops are crate-private to rune) — the library
+/// thumbnail's `LibraryThumbPrim` discipline, carried
+/// over verbatim (Wave 13, C4). Each prim carries the
+/// width, colour and alpha it paints at: a styled piece
+/// takes them from `paint::styled_segment_pieces` (its
+/// colour resolved against the figure colour), a shape
+/// ring/disc takes the node's resolved colour at the
+/// node's style opacity, and a head ring takes the
+/// figure colour plain — the stage's own choices, with
+/// the D6 ring doctrine (Wave 12) preserved.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ThumbPrim {
-    Segment { a: [f32; 2], b: [f32; 2], color: u32 },
-    Ring { pts: Vec<[f32; 2]>, color: u32 },
+    /// One styled segment piece: draw `a`→`b` as a
+    /// round-capped line of `width` points in `color`
+    /// at `alpha` (the piece's style opacity).
+    Piece {
+        a: [f32; 2],
+        b: [f32; 2],
+        width: f32,
+        color: Color,
+        alpha: f32,
+    },
+    /// A closed ring — a head ring or a `Circle` shape
+    /// node: stroke `pts` closed at `width` points in
+    /// `color` at `alpha`.
+    Ring {
+        pts: Vec<[f32; 2]>,
+        width: f32,
+        color: Color,
+        alpha: f32,
+    },
+    /// A filled disc — a `Polygon` shape node: fill
+    /// `pts` in `color` at `alpha`.
+    Disc {
+        pts: Vec<[f32; 2]>,
+        color: Color,
+        alpha: f32,
+    },
 }
 
 /// The bounding-box fit of a thumbnail: stage points map to
@@ -376,15 +436,19 @@ pub fn thumb_fit(positions: &[V2], has_head: bool, size: f32, head_r: f32) -> Th
 }
 
 /// The thumbnail geometry for figure `fi` at the current
-/// display frame: one segment per parented node, then one
-/// ring per head node, all fitted into the `size` box by
-/// [`thumb_fit`]. Positions come from
-/// `EditorCore::positions_f` at `EditorCore::display_frame`
-/// — the stage's own evaluation, graph channels included.
-/// Each segment carries its child node's resolved colour
-/// and each ring the figure colour (see [`ThumbPrim`]).
-/// Empty when `fi` is out of range or the figure has no
-/// nodes.
+/// display frame, fitted into the `size` box by
+/// [`thumb_fit`]: one styled piece run per parented node,
+/// then the shape-node rings/discs, then one head ring
+/// per head node — the stage's own draw order. Positions
+/// come from `EditorCore::positions_f` at
+/// `EditorCore::display_frame` — the stage's own
+/// evaluation, graph channels included — and each
+/// segment takes that frame's bend for its node
+/// (`Project::bends_at`, the stage's own fetch). The
+/// figure's hidden/solo state is never consulted: the
+/// thumbnail is an identity preview (see the module
+/// docs). Empty when `fi` is out of range or the figure
+/// has no nodes.
 pub fn thumb_prims(core: &EditorCore, fi: usize, size: f32) -> Vec<ThumbPrim> {
     let Some(fig) = core.project.figures.get(fi) else {
         return Vec::new();
@@ -392,34 +456,122 @@ pub fn thumb_prims(core: &EditorCore, fi: usize, size: f32) -> Vec<ThumbPrim> {
     if fig.def.nodes.is_empty() {
         return Vec::new();
     }
-    let pos = core.positions_f(core.display_frame(), fi);
-    let has_head = fig.def.nodes.iter().any(|n| n.head);
+    let display = core.display_frame();
+    let pos = core.positions_f(display, fi);
+    let bends = core.project.bends_at(display, fi);
     // Phase L: the ring — and the room the fit leaves for
     // it — follow the project's head scale, not the bare
     // base constant.
     let head_r = core.project.head_ring_radius();
-    let fit = thumb_fit(&pos, has_head, size, head_r);
+    thumb_prims_for(fig, &pos, &bends, head_r, size)
+}
+
+/// The prim construction behind [`thumb_prims`], split
+/// out over an explicit figure, joint positions, bends
+/// and head-ring radius so the geometry is testable
+/// without a whole editor session (the library
+/// thumbnail's `library_thumb_prims` split, mirrored).
+/// `pos` must carry one joint per node of `fig.def`
+/// (the caller's evaluation guarantees it); a node
+/// missing from `bends` takes the straight path.
+///
+/// Every segment goes through
+/// `paint::styled_segment_pieces` with the node's own
+/// thickness, style, bend and resolved colour
+/// (`node.color`, else the figure's live colour — a
+/// project figure HAS one, where a library def does
+/// not), so taper, caps, `color2` gradients and style
+/// opacity are the stage's, not a miniature's
+/// approximation of them. Piece widths are the stage's
+/// widths scaled by the fit, floored at
+/// [`THUMB_MIN_WIDTH`]. Segment media is not drawn —
+/// the stage itself can only outline it (Rune `Shape`
+/// has no bitmap primitive), and an identity card does
+/// not claim it.
+fn thumb_prims_for(
+    fig: &model::FigureInstance,
+    pos: &[V2],
+    bends: &[f32],
+    head_r: f32,
+    size: f32,
+) -> Vec<ThumbPrim> {
+    if fig.def.nodes.is_empty() {
+        return Vec::new();
+    }
+    let has_head = fig.def.nodes.iter().any(|n| n.head);
+    let fit = thumb_fit(pos, has_head, size, head_r);
+    let s = fit.scale;
+    let base = hex_color(fig.color).unwrap_or(Color::WHITE);
     let mut prims = Vec::new();
+    // Segments: the stage's construction verbatim
+    // (stage_view's figure pass) — pieces are produced
+    // in stage space from the raw joints, thickness,
+    // style and bend, then mapped; piece widths scale
+    // by the fit's scale exactly as the stage scales
+    // them by its view scale.
     for (i, node) in fig.def.nodes.iter().enumerate() {
         if let Some(p) = node.parent {
-            prims.push(ThumbPrim::Segment {
-                a: fit.map(pos[p]),
-                b: fit.map(pos[i]),
-                // The segment to node `i` takes node `i`'s
-                // resolved colour — the stage's rule
-                // (`node.color.unwrap_or(fig.color)`,
-                // stage_view's segment pass).
-                color: node.color.unwrap_or(fig.color),
-            });
+            let bend = bends.get(i).copied().unwrap_or(0.0);
+            let pieces = stykanimate_rs::paint::styled_segment_pieces(
+                pos[p],
+                pos[i],
+                bend,
+                node.thickness,
+                &node.style,
+                node.color.unwrap_or(fig.color),
+            );
+            for piece in pieces {
+                prims.push(ThumbPrim::Piece {
+                    a: fit.map(piece.a),
+                    b: fit.map(piece.b),
+                    width: (piece.width * s).max(THUMB_MIN_WIDTH),
+                    color: hex_color(piece.color).unwrap_or(Color::WHITE),
+                    alpha: piece.alpha,
+                });
+            }
         }
     }
+    // Shape nodes: the stage's shape pass — a `Circle`
+    // node rings at its own thickness, a `Polygon`
+    // fills, both centred on the node with radius half
+    // its length and both at the node's style opacity.
+    // Their base is the same live figure colour the
+    // segments resolve against.
+    for (i, node) in fig.def.nodes.iter().enumerate() {
+        let centre = fit.map(pos[i]);
+        let r = node.length / 2.0 * s;
+        let color = node
+            .color
+            .map(|hex| hex_color(hex).unwrap_or(base))
+            .unwrap_or(base);
+        match node.shape {
+            model::Shape::Circle => prims.push(ThumbPrim::Ring {
+                pts: ngon(centre, r, 24),
+                width: (node.thickness * s).max(THUMB_MIN_WIDTH),
+                color,
+                alpha: node.style.opacity,
+            }),
+            model::Shape::Polygon(sides) => prims.push(ThumbPrim::Disc {
+                pts: ngon(centre, r, sides as usize),
+                color,
+                alpha: node.style.opacity,
+            }),
+            model::Shape::Line => {}
+        }
+    }
+    // Head rings last, at the figure colour plain, as
+    // the stage draws them (no node colour, no style
+    // opacity — the D6 doctrine): the radius is the
+    // project's own head-ring radius the caller passed,
+    // and the width is the stage's 5-unit ring width
+    // scaled by the fit, floored like every other width.
     for (i, node) in fig.def.nodes.iter().enumerate() {
         if node.head {
             prims.push(ThumbPrim::Ring {
-                pts: ngon(fit.map(pos[i]), head_r * fit.scale, HEAD_RING_SIDES),
-                // The stage's ring pass paints the figure
-                // colour, never the head node's override.
-                color: fig.color,
+                pts: ngon(fit.map(pos[i]), head_r * s, HEAD_RING_SIDES),
+                width: (5.0 * s).max(THUMB_MIN_WIDTH),
+                color: base,
+                alpha: 1.0,
             });
         }
     }
@@ -428,9 +580,10 @@ pub fn thumb_prims(core: &EditorCore, fi: usize, size: f32) -> Vec<ThumbPrim> {
 
 /// Figure `fi`'s rig at the current display frame as a
 /// miniature `Shape` for a `size`-point square canvas:
-/// segments as [`THUMB_WIDTH`]-point round-capped lines,
-/// each in its own node's resolved colour, plus a head
-/// ring per head node in the figure's colour.
+/// the prims of [`thumb_prims`] folded into canvas ops
+/// — pieces as round-capped lines, rings as closed
+/// strokes, discs as fills, each at its prim's width
+/// and alpha.
 /// An out-of-range `fi` yields an empty shape.
 pub fn thumb_shape(core: &EditorCore, fi: usize, size: f32) -> Shape {
     if core.project.figures.get(fi).is_none() {
@@ -439,20 +592,20 @@ pub fn thumb_shape(core: &EditorCore, fi: usize, size: f32) -> Shape {
     let mut shape = Shape::new();
     for prim in thumb_prims(core, fi, size) {
         shape = match prim {
-            ThumbPrim::Segment { a, b, color } => shape.line(
+            ThumbPrim::Piece {
                 a,
                 b,
-                THUMB_WIDTH,
-                LineCap::Round,
-                hex_color(color).unwrap_or(Color::WHITE),
-            ),
-            ThumbPrim::Ring { pts, color } => shape.stroke_with(
+                width,
+                color,
+                alpha,
+            } => shape.line(a, b, width, LineCap::Round, color.alpha(alpha)),
+            ThumbPrim::Ring {
                 pts,
-                true,
-                THUMB_WIDTH,
-                LineCap::Round,
-                hex_color(color).unwrap_or(Color::WHITE),
-            ),
+                width,
+                color,
+                alpha,
+            } => shape.stroke_with(pts, true, width, LineCap::Round, color.alpha(alpha)),
+            ThumbPrim::Disc { pts, color, alpha } => shape.fill(pts, color.alpha(alpha)),
         };
     }
     shape
@@ -1135,25 +1288,52 @@ mod tests {
         assert!(!core.project.figures.is_empty());
         for (fi, fig) in core.project.figures.iter().enumerate() {
             let prims = thumb_prims(&core, fi, THUMB_SIZE);
-            let segments = prims
+            let pieces = prims
                 .iter()
-                .filter(|p| matches!(p, ThumbPrim::Segment { .. }))
+                .filter(|p| matches!(p, ThumbPrim::Piece { .. }))
                 .count();
             let rings = prims
                 .iter()
                 .filter(|p| matches!(p, ThumbPrim::Ring { .. }))
                 .count();
-            // One segment per parented node, one ring per
-            // head node — the stage's draw list, miniaturised.
+            let discs = prims
+                .iter()
+                .filter(|p| matches!(p, ThumbPrim::Disc { .. }))
+                .count();
+            // The demo defs are flat-styled (default
+            // NodeStyle throughout) and the demo project
+            // carries no bend data, so every parented node
+            // contributes exactly ONE styled piece; a
+            // styled or bent node would contribute more
+            // (the fixture test below pins those counts).
+            // Rings are one per head node plus one per
+            // Circle shape node, discs one per Polygon
+            // shape node — the stage's draw list,
+            // miniaturised.
             assert_eq!(
-                segments,
+                pieces,
                 fig.def.nodes.iter().filter(|n| n.parent.is_some()).count(),
-                "segment count for figure {fi}"
+                "piece count for figure {fi}"
             );
             assert_eq!(
                 rings,
-                fig.def.nodes.iter().filter(|n| n.head).count(),
+                fig.def.nodes.iter().filter(|n| n.head).count()
+                    + fig
+                        .def
+                        .nodes
+                        .iter()
+                        .filter(|n| n.shape == model::Shape::Circle)
+                        .count(),
                 "ring count for figure {fi}"
+            );
+            assert_eq!(
+                discs,
+                fig.def
+                    .nodes
+                    .iter()
+                    .filter(|n| matches!(n.shape, model::Shape::Polygon(_)))
+                    .count(),
+                "disc count for figure {fi}"
             );
             assert!(!prims.is_empty(), "demo figure {fi} draws something");
         }
@@ -1165,8 +1345,9 @@ mod tests {
         for fi in 0..core.project.figures.len() {
             for prim in thumb_prims(&core, fi, THUMB_SIZE) {
                 let pts: Vec<[f32; 2]> = match &prim {
-                    ThumbPrim::Segment { a, b, .. } => vec![*a, *b],
+                    ThumbPrim::Piece { a, b, .. } => vec![*a, *b],
                     ThumbPrim::Ring { pts, .. } => pts.clone(),
+                    ThumbPrim::Disc { pts, .. } => pts.clone(),
                 };
                 assert!(!pts.is_empty());
                 for p in pts {
@@ -1241,31 +1422,36 @@ mod tests {
         core.project.figures[fi].def.nodes[plain[1]].color = None;
         core.project.figures[fi].def.nodes[head].color = Some(0x445566);
         let prims = thumb_prims(&core, fi, THUMB_SIZE);
-        // Segment colours, in node order, mirror the def's
-        // resolution exactly.
-        let seg_colors: Vec<u32> = prims
+        // Piece colours, in node order, mirror the def's
+        // resolution exactly (every node here is
+        // flat-styled, so each parented node contributes
+        // exactly one piece, in node order).
+        let seg_colors: Vec<Color> = prims
             .iter()
             .filter_map(|p| match p {
-                ThumbPrim::Segment { color, .. } => Some(*color),
+                ThumbPrim::Piece { color, .. } => Some(*color),
                 _ => None,
             })
             .collect();
-        let expected: Vec<u32> = core.project.figures[fi]
+        let expected: Vec<Color> = core.project.figures[fi]
             .def
             .nodes
             .iter()
             .filter(|n| n.parent.is_some())
-            .map(|n| n.color.unwrap_or(fig_color))
+            .map(|n| hex_color(n.color.unwrap_or(fig_color)).unwrap())
             .collect();
         assert_eq!(seg_colors, expected);
-        assert!(seg_colors.contains(&0x112233), "the override shows");
         assert!(
-            seg_colors.contains(&fig_color),
+            seg_colors.contains(&hex_color(0x112233).unwrap()),
+            "the override shows"
+        );
+        assert!(
+            seg_colors.contains(&hex_color(fig_color).unwrap()),
             "the inheriting node shows the figure colour"
         );
         // Every ring carries the figure colour, never the
         // head node's 0x445566 override.
-        let ring_colors: Vec<u32> = prims
+        let ring_colors: Vec<Color> = prims
             .iter()
             .filter_map(|p| match p {
                 ThumbPrim::Ring { color, .. } => Some(*color),
@@ -1273,7 +1459,244 @@ mod tests {
             })
             .collect();
         assert!(!ring_colors.is_empty());
-        assert!(ring_colors.iter().all(|c| *c == fig_color));
+        assert!(ring_colors.iter().all(|c| *c == hex_color(fig_color).unwrap()));
+    }
+
+    #[test]
+    fn thumb_prims_honour_node_colour_style_and_shape() {
+        // Wave 13 (C4): the library panel's styled-fixture
+        // test, mirrored for a PROJECT figure (its
+        // `thumb_prims_honour_node_colour_style_and_shape`
+        // over `library_thumb_prims`). A hand-built def
+        // exercising every styled path: node 1 plain
+        // (inherits the figure colour) and the head;
+        // node 2 a red override tapered to a point;
+        // node 3 a colour→color2 gradient; node 4 style
+        // opacity 0.5; node 5 a Circle shape node at
+        // opacity 0.25; node 6 a Polygon shape node.
+        // Shape nodes still draw their segment (the
+        // stage's rule), so the piece run is one run per
+        // parented node, in node order. The figure's
+        // colour is white, so inheritance resolves to
+        // white exactly as the library fixture's base
+        // colour does — the prim counts and widths below
+        // are the library test's own numbers.
+        let n = |parent: Option<usize>, length: f32, rest: f32| model::NodeDef {
+            name: "n".into(),
+            parent,
+            length,
+            rest_angle: rest,
+            head: false,
+            bend: 1.0,
+            thickness: 5.0,
+            color: None,
+            ik_end: false,
+            shape: model::Shape::Line,
+            style: model::NodeStyle::default(),
+            media: None,
+        };
+        let mut nodes = vec![
+            n(None, 0.0, 0.0),       // 0 root
+            n(Some(0), 40.0, 180.0), // 1 plain, head
+            n(Some(1), 30.0, 0.0),   // 2 red point taper
+            n(Some(1), 30.0, 90.0),  // 3 gradient
+            n(Some(0), 35.0, -90.0), // 4 opacity 0.5
+            n(Some(0), 20.0, 45.0),  // 5 circle
+            n(Some(0), 20.0, -45.0), // 6 polygon
+        ];
+        nodes[1].head = true;
+        nodes[2].color = Some(0xFF0000);
+        nodes[2].style = model::NodeStyle {
+            taper: 0.0,
+            cap: model::CapKind::Point,
+            color2: None,
+            opacity: 1.0,
+        };
+        nodes[3].style = model::NodeStyle {
+            taper: 1.0,
+            cap: model::CapKind::Round,
+            color2: Some(0x0000FF),
+            opacity: 1.0,
+        };
+        nodes[4].style.opacity = 0.5;
+        nodes[5].shape = model::Shape::Circle;
+        nodes[5].style.opacity = 0.25;
+        nodes[6].shape = model::Shape::Polygon(5);
+        let def = model::FigureDef { nodes };
+        let fig = model::FigureInstance {
+            name: "Fixture".into(),
+            color: 0xFFFFFF,
+            def: def.clone(),
+            hidden: false,
+            clip: None,
+            locked: false,
+            opacity: 1.0,
+        };
+        let pos = model::evaluate(&def, &def.rest_pose([0.0, 0.0]));
+        let prims = thumb_prims_for(&fig, &pos, &[], HEAD_RING_R, THUMB_SIZE);
+        let pieces: Vec<&ThumbPrim> = prims
+            .iter()
+            .filter(|p| matches!(p, ThumbPrim::Piece { .. }))
+            .collect();
+        // Node order: 1 flat piece, 4 taper pieces, 4
+        // gradient pieces, then nodes 4, 5, 6 flat.
+        assert_eq!(pieces.len(), 12);
+        // Node 1 inherits the figure colour at full alpha.
+        match pieces[0] {
+            ThumbPrim::Piece { color, alpha, .. } => {
+                assert_eq!(*color, Color::WHITE);
+                assert_eq!(*alpha, 1.0);
+            }
+            _ => unreachable!(),
+        }
+        // Node 2: every piece pure red; widths shrink
+        // along the taper, the tail reaching the
+        // legibility floor rather than vanishing.
+        let mut widths = Vec::new();
+        for prim in &pieces[1..5] {
+            match prim {
+                ThumbPrim::Piece {
+                    width,
+                    color,
+                    alpha,
+                    ..
+                } => {
+                    assert_eq!(*color, Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 });
+                    assert_eq!(*alpha, 1.0);
+                    widths.push(*width);
+                }
+                _ => unreachable!(),
+            }
+        }
+        assert!(widths.windows(2).all(|w| w[0] >= w[1]), "widths: {widths:?}");
+        assert!(widths[0] > widths[3]);
+        assert_eq!(widths[3], THUMB_MIN_WIDTH);
+        // Node 3: the gradient actually travels — first
+        // and last piece colours differ, the last one
+        // blue-dominant (white → blue).
+        let grad: Vec<Color> = pieces[5..9]
+            .iter()
+            .map(|prim| match prim {
+                ThumbPrim::Piece { color, .. } => *color,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_ne!(grad[0], grad[3]);
+        assert!(grad[3].b > grad[3].r, "last gradient colour: {:?}", grad[3]);
+        // Node 4: the style opacity is the piece alpha.
+        match pieces[9] {
+            ThumbPrim::Piece { alpha, .. } => assert_eq!(*alpha, 0.5),
+            _ => unreachable!(),
+        }
+        // After the pieces: the Circle node's ring (24
+        // pts, at ITS style opacity), the Polygon node's
+        // disc (5 pts), and finally the head ring (16
+        // pts) at the figure colour, full alpha — the
+        // stage's head-ring rule.
+        assert_eq!(prims.len(), 15);
+        match &prims[12] {
+            ThumbPrim::Ring { pts, alpha, .. } => {
+                assert_eq!(pts.len(), 24);
+                assert_eq!(*alpha, 0.25);
+            }
+            other => panic!("expected circle ring, got {other:?}"),
+        }
+        match &prims[13] {
+            ThumbPrim::Disc { pts, .. } => assert_eq!(pts.len(), 5),
+            other => panic!("expected polygon disc, got {other:?}"),
+        }
+        match &prims[14] {
+            ThumbPrim::Ring {
+                pts,
+                color,
+                alpha,
+                ..
+            } => {
+                assert_eq!(pts.len(), 16);
+                assert_eq!(*color, Color::WHITE);
+                assert_eq!(*alpha, 1.0);
+            }
+            other => panic!("expected head ring, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thumb_prims_arc_bent_segments() {
+        // Wave 13 (C4): a nonzero bend at the display
+        // frame reaches the card — the generator splits
+        // the bent segment at its bend midpoint, so a
+        // flat-styled bent node yields TWO pieces where
+        // the straight node yields one, and the two
+        // halves meet exactly at the mapped bend
+        // midpoint (the stage's arc, miniaturised).
+        let def = model::FigureDef::simple();
+        let fig = model::FigureInstance {
+            name: "Bent".into(),
+            color: 0xFFFFFF,
+            def: def.clone(),
+            hidden: false,
+            clip: None,
+            locked: false,
+            opacity: 1.0,
+        };
+        let pos = model::evaluate(&def, &def.rest_pose([0.0, 0.0]));
+        let piece_count = |prims: &[ThumbPrim]| {
+            prims
+                .iter()
+                .filter(|p| matches!(p, ThumbPrim::Piece { .. }))
+                .count()
+        };
+        let straight = thumb_prims_for(&fig, &pos, &[], HEAD_RING_R, THUMB_SIZE);
+        // Six parented nodes, all flat and straight.
+        assert_eq!(piece_count(&straight), 6);
+        // Bend node 3 (an arm): one extra piece.
+        let mut bends = vec![0.0; def.nodes.len()];
+        bends[3] = 0.5;
+        let bent = thumb_prims_for(&fig, &pos, &bends, HEAD_RING_R, THUMB_SIZE);
+        assert_eq!(piece_count(&bent), 7);
+        // The bent node's pieces are the run's 3rd and
+        // 4th (nodes 1 and 2 contribute one piece each
+        // before it): they meet at the bend midpoint of
+        // the node's evaluated span, mapped by the same
+        // fit the straight run used.
+        let fit = thumb_fit(&pos, true, THUMB_SIZE, HEAD_RING_R);
+        let parent = def.nodes[3].parent.expect("node 3 is parented");
+        let mid = fit.map(model::bend_mid(pos[parent], pos[3], 0.5));
+        let pieces: Vec<&ThumbPrim> = bent
+            .iter()
+            .filter(|p| matches!(p, ThumbPrim::Piece { .. }))
+            .collect();
+        match (pieces[2], pieces[3]) {
+            (
+                ThumbPrim::Piece { b, .. },
+                ThumbPrim::Piece { a, .. },
+            ) => {
+                assert_eq!(*b, mid, "first half ends at the bend midpoint");
+                assert_eq!(*a, mid, "second half starts at the bend midpoint");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn thumb_prims_do_not_dim_hidden_figures() {
+        // The identity-preview doctrine, pinned (Phase F,
+        // restated Wave 13): a hidden figure's card draws
+        // EXACTLY the prims it draws while visible — same
+        // pieces, colours, widths and alphas; the row's
+        // name dimming and eye toggle carry visibility,
+        // never the thumbnail. Solo is likewise never
+        // consulted.
+        let mut core = EditorCore::new();
+        assert!(!core.project.figures.is_empty());
+        let shown = thumb_prims(&core, 0, THUMB_SIZE);
+        assert!(!shown.is_empty());
+        core.project.figures[0].hidden = true;
+        assert_eq!(thumb_prims(&core, 0, THUMB_SIZE), shown);
+        if core.project.figures.len() > 1 {
+            core.solo = Some(1);
+            assert_eq!(thumb_prims(&core, 0, THUMB_SIZE), shown);
+        }
     }
 
     #[test]

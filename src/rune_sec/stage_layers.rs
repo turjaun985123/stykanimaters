@@ -72,22 +72,34 @@
 //!   (`fill_current_stroke` itself refuses under 3 points,
 //!   `src/editor.rs:2494`), so such a stroke falls through to
 //!   the polyline rule instead of vanishing.
-//! * **Plain**: one [`StrokePrim::Polyline`] per stroke with
-//!   at least 2 points (a 1-point stroke draws nothing in
-//!   either renderer: the rasterizer iterates `windows(2)`,
-//!   `src/export.rs:416`; the SVG exporter requires
-//!   `points.len() > 1`, `src/svg.rs:80`). The width is the
-//!   stroke's uniform `width` field. The rasterizer refines
-//!   *pressured* strokes per segment —
-//!   `(widths[i] + widths[i + 1]) / 2.0`
-//!   (`src/export.rs:417`) — which a single-width polyline
-//!   cannot express; the other single-width renderer, the
-//!   SVG exporter, uses `stroke.width` flat for the whole
-//!   polyline (`src/svg.rs:93`), and that is the precedent
-//!   followed here. For unpressured strokes (empty `widths`,
-//!   the common case) the two renderers agree exactly.
-//!   Colour is `stroke.color` (`src/export.rs:425`,
-//!   `src/svg.rs:92`).
+//! * **Plain**: a stroke with at least 2 points (a 1-point
+//!   stroke draws nothing in either renderer: the
+//!   rasterizer iterates `windows(2)`; the SVG exporter
+//!   requires `points.len() > 1`). An *unpressured* stroke
+//!   — empty `widths`, or a `widths` table that does not
+//!   match the point count — is one [`StrokePrim::Polyline`]
+//!   through all its points at the uniform `width` field,
+//!   exactly as both renderers draw it. A *pressured*
+//!   stroke (`widths.len() == points.len()`, the baked
+//!   per-point width profile the pressure brushes record)
+//!   becomes **one Polyline prim per segment**, each at
+//!   the endpoint-averaged width
+//!   `(widths[i] + widths[i + 1]) / 2.0` — the rasterizer's
+//!   rule and, since Wave 12, the SVG exporter's
+//!   (per-segment lines). The pieces come from the shared
+//!   construction `paint::pressured_stroke_pieces`
+//!   (Wave 13), so all three surfaces average identically
+//!   by construction; before Wave 13 this layer drew
+//!   pressured strokes flat, the last surface to do so.
+//!   A segment whose endpoints coincide cannot be stroked
+//!   as a line: it is emitted as a [`StrokePrim::Dots`]
+//!   disc of radius `width / 2.0` — the SVG exporter's
+//!   degenerate fallback, and what the raster's round cap
+//!   paints for a zero-length segment. (Spray and scatter
+//!   dab radii still use the flat `width` field on
+//!   pressured strokes — on ALL surfaces; that is a
+//!   standing, documented divergence, not this layer's
+//!   to fix.) Colour is `stroke.color`.
 //!
 //! Spray is tested before fill, fill before plain — the
 //! renderers' own precedence (spray first:
@@ -166,6 +178,10 @@
 //!   expanded: a plain stroke becomes one [`StrokePrim::
 //!   Polyline`] through the *same points* at a grown width
 //!   (a translucent underlay — see the colour note below);
+//!   a pressured plain stroke becomes one grown Polyline
+//!   per segment piece, mirroring the base layer's
+//!   per-segment decomposition (a degenerate piece grows
+//!   as a dot, by the spray growth rule);
 //!   a spray stroke becomes one [`StrokePrim::Dots`] per
 //!   dot with the *same centres and alphas* as the base
 //!   layer and a grown radius; a filled stroke (≥ 3 points)
@@ -339,11 +355,14 @@ use stykanimate_rs::paint;
 /// as the colour's alpha (1.0 = fully opaque).
 #[derive(Clone, Debug, PartialEq)]
 pub enum StrokePrim {
-    /// A plain brush stroke: one polyline through `pts` at
-    /// uniform `width`, round caps (both renderers' choice:
-    /// `src/export.rs:61`, `src/svg.rs:90`). `opacity` is
-    /// the stroke's recorded opacity (Phase M, section
-    /// 14 — see the module docs, "Stroke opacity").
+    /// A plain brush stroke — or ONE segment of a
+    /// pressured stroke (Wave 13: pressured strokes emit
+    /// one of these per segment, at that segment's
+    /// averaged width): a polyline through `pts` at
+    /// uniform `width`, round caps (both renderers'
+    /// choice). `opacity` is the stroke's recorded
+    /// opacity (Phase M, section 14 — see the module
+    /// docs, "Stroke opacity").
     Polyline {
         pts: Vec<[f32; 2]>,
         width: f32,
@@ -406,6 +425,102 @@ fn stroke_alpha(stroke: &Stroke) -> f32 {
 /// byte-identically to before.
 fn dot_alpha(alpha: f32) -> f32 {
     alpha.clamp(0.0, 1.0)
+}
+
+/// Whether `stroke` carries a baked per-point width
+/// profile — `widths` parallel to `points`, the exact
+/// predicate both exporters test (`src/export.rs` and
+/// `src/svg.rs` both read
+/// `stroke.widths.len() == stroke.points.len()`). Any
+/// other shape — empty `widths` (the common case) or a
+/// mismatched hand-edited table — is unpressured and
+/// keeps the flat construction byte-identically.
+fn pressured(stroke: &Stroke) -> bool {
+    stroke.widths.len() == stroke.points.len()
+}
+
+/// The base-layer prims for one pressured stroke
+/// (Wave 13): one [`StrokePrim::Polyline`] per segment
+/// from the shared construction
+/// `paint::pressured_stroke_pieces` — per-segment
+/// endpoint-averaged widths, the rasterizer's and the
+/// SVG exporter's rule — each carrying the stroke's
+/// colour and clamped opacity. A piece whose endpoints
+/// coincide becomes a [`StrokePrim::Dots`] disc of
+/// radius `width / 2.0` instead: a zero-length segment
+/// cannot be stroked as a line, and the disc is what
+/// the raster's round cap paints (the SVG exporter's
+/// degenerate fallback makes the same choice).
+///
+/// WAVE 13 CONTRACT NOTE: this call was first written
+/// against the roster's naming of C5's generator; C5
+/// then landed in `src/paint.rs` with the shipped
+/// signature `pressured_stroke_pieces(points, widths)`
+/// — the two slices rather than the whole stroke — and
+/// this fn (with [`pressured_highlight_prims`]) was
+/// reconciled to it. The generator owns the parallel
+/// predicate internally (non-parallel widths yield no
+/// pieces); the branch in [`stroke_geometry`] still
+/// tests [`pressured`] itself, because it must choose
+/// between the flat polyline and this decomposition
+/// before calling.
+fn pressured_prims(stroke: &Stroke) -> Vec<StrokePrim> {
+    let opacity = stroke_alpha(stroke);
+    paint::pressured_stroke_pieces(&stroke.points, &stroke.widths)
+        .into_iter()
+        .map(|(a, b, width)| {
+            if a == b {
+                StrokePrim::Dots {
+                    pts: vec![a],
+                    radius: width / 2.0,
+                    color: stroke.color,
+                    opacity,
+                }
+            } else {
+                StrokePrim::Polyline {
+                    pts: vec![a, b],
+                    width,
+                    color: stroke.color,
+                    opacity,
+                }
+            }
+        })
+        .collect()
+}
+
+/// The highlight prims for one pressured stroke: the
+/// base layer's per-segment decomposition, grown — each
+/// piece's width by the plain highlight's width rule, a
+/// degenerate piece's disc by the spray highlight's dot
+/// rule — so the glow follows the stroke's real
+/// silhouette instead of a uniform-width tube around
+/// it. Carried opacity is the stroke's own, exactly as
+/// the base layer carries it (module docs, "Stroke
+/// opacity"). Second of the two
+/// `pressured_stroke_pieces` call sites named on
+/// [`pressured_prims`].
+fn pressured_highlight_prims(stroke: &Stroke) -> Vec<StrokePrim> {
+    let opacity = stroke_alpha(stroke);
+    paint::pressured_stroke_pieces(&stroke.points, &stroke.widths)
+        .into_iter()
+        .map(|(a, b, width)| {
+            if a == b {
+                StrokePrim::Dots {
+                    pts: vec![a],
+                    radius: (width / 2.0) * HIGHLIGHT_DOT_SCALE + HIGHLIGHT_DOT_PAD,
+                    color: stroke.color,
+                    opacity,
+                }
+            } else {
+                StrokePrim::Polyline {
+                    pts: vec![a, b],
+                    width: width * HIGHLIGHT_WIDTH_SCALE + HIGHLIGHT_WIDTH_PAD,
+                    color: stroke.color,
+                    opacity,
+                }
+            }
+        })
+        .collect()
 }
 
 /// Geometry for the current frame's drawing strokes, in
@@ -484,14 +599,22 @@ pub fn stroke_geometry(core: &EditorCore) -> Vec<StrokePrim> {
             continue;
         }
         // Plain stroke: one polyline at the uniform width,
-        // at the stroke's recorded opacity.
+        // at the stroke's recorded opacity — unless the
+        // stroke is pressured (baked per-point widths), in
+        // which case it decomposes into one prim per
+        // segment at the averaged widths, like both
+        // exporters (see pressured_prims).
         if stroke.points.len() >= 2 {
-            out.push(StrokePrim::Polyline {
-                pts: stroke.points.clone(),
-                width: stroke.width,
-                color: stroke.color,
-                opacity: stroke_alpha(stroke),
-            });
+            if pressured(stroke) {
+                out.extend(pressured_prims(stroke));
+            } else {
+                out.push(StrokePrim::Polyline {
+                    pts: stroke.points.clone(),
+                    width: stroke.width,
+                    color: stroke.color,
+                    opacity: stroke_alpha(stroke),
+                });
+            }
         }
     }
     out
@@ -615,8 +738,13 @@ pub fn highlight_geometry(core: &EditorCore, project_index: usize) -> Vec<Stroke
     // integrator draws translucent in the accent colour.
     // The carried opacity is the stroke's own, as in the
     // base layer (the spray branch above likewise keeps
-    // the mark's alphas untouched).
+    // the mark's alphas untouched). A pressured stroke
+    // decomposes per segment instead, grown piece by
+    // piece (see pressured_highlight_prims).
     if stroke.points.len() >= 2 {
+        if pressured(stroke) {
+            return pressured_highlight_prims(stroke);
+        }
         return vec![StrokePrim::Polyline {
             pts: stroke.points.clone(),
             width: stroke.width * HIGHLIGHT_WIDTH_SCALE + HIGHLIGHT_WIDTH_PAD,
@@ -841,17 +969,115 @@ mod tests {
     }
 
     #[test]
-    fn pressured_stroke_uses_the_uniform_width_field() {
-        // The documented single-width choice (the SVG
-        // exporter's precedent): per-point widths stay a
-        // rasterizer-only refinement.
+    fn pressured_stroke_emits_per_segment_averaged_widths() {
+        // Wave 13: a pressured stroke (widths parallel to
+        // points) decomposes into one Polyline prim per
+        // segment at the endpoint-averaged width — the
+        // rasterizer's and the SVG exporter's rule,
+        // (2+10)/2 = 6 and (10+4)/2 = 7 — and the uniform
+        // `width` field (4.0 here) no longer governs.
         let mut s = plain(0, &[[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]], 0x111111, 4.0);
-        s.widths = vec![2.0, 10.0, 2.0];
+        s.widths = vec![2.0, 10.0, 4.0];
         let core = core_with(vec![s]);
-        match &stroke_geometry(&core)[..] {
-            [StrokePrim::Polyline { width, .. }] => assert_eq!(*width, 4.0),
-            other => panic!("expected one polyline, got {other:?}"),
-        }
+        assert_eq!(
+            stroke_geometry(&core),
+            vec![
+                StrokePrim::Polyline {
+                    pts: vec![[0.0, 0.0], [10.0, 0.0]],
+                    width: 6.0,
+                    color: 0x111111,
+                    opacity: 1.0,
+                },
+                StrokePrim::Polyline {
+                    pts: vec![[10.0, 0.0], [20.0, 0.0]],
+                    width: 7.0,
+                    color: 0x111111,
+                    opacity: 1.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn pressured_stroke_degenerate_segment_emits_a_disc() {
+        // A zero-length segment in a pressured stroke
+        // cannot be stroked as a line: it becomes a Dots
+        // disc at radius width/2 ((4+4)/2 / 2 = 2.0) —
+        // the SVG exporter's degenerate fallback — while
+        // the real segment after it keeps the averaged
+        // rule ((4+2)/2 = 3.0).
+        let mut s = plain(0, &[[5.0, 5.0], [5.0, 5.0], [15.0, 5.0]], 0x222222, 4.0);
+        s.widths = vec![4.0, 4.0, 2.0];
+        let core = core_with(vec![s]);
+        assert_eq!(
+            stroke_geometry(&core),
+            vec![
+                StrokePrim::Dots {
+                    pts: vec![[5.0, 5.0]],
+                    radius: 2.0,
+                    color: 0x222222,
+                    opacity: 1.0,
+                },
+                StrokePrim::Polyline {
+                    pts: vec![[5.0, 5.0], [15.0, 5.0]],
+                    width: 3.0,
+                    color: 0x222222,
+                    opacity: 1.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn mismatched_widths_keep_the_flat_polyline() {
+        // A widths table that does not match the point
+        // count is NOT a pressure profile (the exporters'
+        // predicate is an exact length match): the stroke
+        // keeps the pre-Wave-13 flat construction,
+        // byte-identically — one polyline, all points,
+        // the uniform width field.
+        let pts = [[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]];
+        let mut s = plain(0, &pts, 0x111111, 4.0);
+        s.widths = vec![9.0, 9.0];
+        let core = core_with(vec![s]);
+        assert_eq!(
+            stroke_geometry(&core),
+            vec![StrokePrim::Polyline {
+                pts: pts.to_vec(),
+                width: 4.0,
+                color: 0x111111,
+                opacity: 1.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn pressured_highlight_grows_each_segment() {
+        // The highlight mirrors the base layer's
+        // per-segment decomposition, grown piece by piece
+        // by the plain highlight's width rule:
+        // 6.0 * 1.5 + 3.0 = 12.0 and 7.0 * 1.5 + 3.0 =
+        // 13.5 — not one uniform tube at the flat width.
+        let mut s = plain(0, &[[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]], 0x111111, 4.0);
+        s.widths = vec![2.0, 10.0, 4.0];
+        let core = core_with(vec![s]);
+        assert_eq!(
+            highlight_geometry(&core, 0),
+            vec![
+                StrokePrim::Polyline {
+                    pts: vec![[0.0, 0.0], [10.0, 0.0]],
+                    width: 12.0,
+                    color: 0x111111,
+                    opacity: 1.0,
+                },
+                StrokePrim::Polyline {
+                    pts: vec![[10.0, 0.0], [20.0, 0.0]],
+                    width: 13.5,
+                    color: 0x111111,
+                    opacity: 1.0,
+                },
+            ]
+        );
     }
 
     #[test]

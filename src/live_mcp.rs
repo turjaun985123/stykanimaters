@@ -95,6 +95,60 @@
 //! finishes. That is deliberate: tools must run on the UI thread
 //! because that is where the live `State` lives.
 //!
+//! ## Wave 13 audit — sprite tools + dirty-seam write paths
+//!
+//! Wave 13 added five sprite tools to the registry (A4's
+//! handlers in `media.rs`, spliced into `mcp_tools.rs` by
+//! the integrator) and changed many write paths' undo /
+//! dirty behaviour (Squad B's `mark_dirty()` seam). This
+//! module was re-audited against both changes; nothing in
+//! the transport needed to change. The three verdicts:
+//!
+//! 1. **Drain parity — SOUND.** [`drain`] never inspects
+//!    the request message: it applies the cancellation
+//!    gate, routes the message whole through
+//!    `handle_on` against the live core, and attributes
+//!    errors. A sprite mutation therefore lands on the
+//!    app's own undo stack exactly like any other
+//!    mutation (the one-snapshot-per-op discipline is the
+//!    handler/op's contract, not this module's), and its
+//!    errors surface by the one uniform rule in
+//!    [`drain_attribution_error`]: a refusal that wrote
+//!    `core.status` is toasted by the shell from the
+//!    status line; a status-silent refusal or a protocol
+//!    error is buffered for the `MCP: ` toast. The
+//!    decision takes no tool name as input, so no family
+//!    — sprites included — can drift from another. The
+//!    Squad B seam changes WHICH core methods mark dirty,
+//!    never how a request reaches the core.
+//! 2. **Health count — DERIVED, follows automatically.**
+//!    [`health_body`] reads
+//!    `stykanimate_rs::mcp::all_tools().len()` fresh on
+//!    every probe request; there is no count literal
+//!    anywhere in this module. The sprite splice takes
+//!    the registry 230 → 235 and the total 283 → 288, and
+//!    the health document — and `server_info`, which
+//!    reads the same source — report 288 with no change
+//!    here. Pinned by
+//!    `health_tool_count_is_the_served_tool_count`, which
+//!    compares the health number against the `tools/list`
+//!    the router actually serves, never against a literal.
+//! 3. **Queue fairness — SOUND, with the settled bounds
+//!    named.** The listener serves connections strictly
+//!    sequentially; the queue is a FIFO `sync_channel`;
+//!    [`drain`] processes strictly in receive order up to
+//!    the shell's per-poll batch and cannot prioritise by
+//!    tool — it never reads the message. A burst of sprite
+//!    calls is therefore served in arrival order like any
+//!    other burst. Two honest bounds, both Wave 10 / E6
+//!    settlements rather than defects: a request whose
+//!    tool runs long holds the one listener for its
+//!    duration (true of a render today, and sprite ops
+//!    are cheap core calls that do not worsen it), and a
+//!    queue full of cancelled leftovers costs at most one
+//!    drain batch of O(1) discards before live requests
+//!    proceed.
+//!
 //! ## Security — read this before enabling
 //!
 //! The listener binds `127.0.0.1` only, so nothing off this
@@ -451,28 +505,8 @@ pub fn drain(core: &mut EditorCore, router: &mut McpServer, max: usize) -> usize
         // (which writes the status and is toasted from there).
         let status_before = core.status.clone();
         let response = router.handle_on(core, &req.msg);
-        if core.status == status_before {
-            if let Some(resp) = &response {
-                if let Some(msg) = resp
-                    .get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                {
-                    record_drain_error(msg.to_string());
-                } else if resp
-                    .get("result")
-                    .and_then(|r| r.get("isError"))
-                    .and_then(|b| b.as_bool())
-                    == Some(true)
-                {
-                    if let Some(text) = resp
-                        .pointer("/result/content/0/text")
-                        .and_then(|t| t.as_str())
-                    {
-                        record_drain_error(text.to_string());
-                    }
-                }
-            }
+        if let Some(text) = drain_attribution_error(&status_before, &core.status, &response) {
+            record_drain_error(text);
         }
         // A send failure only means the client hung up while
         // waiting — the edit still happened; nothing to undo.
@@ -480,6 +514,69 @@ pub fn drain(core: &mut EditorCore, router: &mut McpServer, max: usize) -> usize
         done += 1;
     }
     done
+}
+
+/// The drain-attribution decision: given the status line
+/// before and after one routed request and the router's
+/// response, the error text (if any) that must be buffered
+/// for the shell's `MCP: ` toast because it never reached
+/// the status line.
+///
+/// Two response families qualify, and only while the status
+/// line is untouched:
+///
+/// - a **protocol error** (`error.message` — an unknown
+///   tool, a malformed call): protocol errors never write
+///   the status, so without this buffer they would vanish;
+/// - a **status-silent tool refusal** (a `tools/call`
+///   result with `isError` set): most refusals write
+///   `core.status` themselves and are toasted by the shell
+///   from there; the ones that do not are caught here by
+///   their first content text.
+///
+/// A refusal that DID write the status returns `None` —
+/// surfacing it here too would double-toast. Successes,
+/// notifications (no response) and text-less error results
+/// also return `None`.
+///
+/// The decision's whole input surface is (status changed?,
+/// response shape) — the request message is deliberately
+/// NOT an input. That is the Wave 13 audit point: no tool
+/// family can be surfaced differently from another, so the
+/// wave's new sprite tools (`sprite_add`, `sprite_set_key`,
+/// …) and the dirty-seam write paths of Squad B attribute
+/// exactly like every call before them, with no per-tool
+/// casing anywhere in this module.
+fn drain_attribution_error(
+    status_before: &str,
+    status_after: &str,
+    response: &Option<Value>,
+) -> Option<String> {
+    if status_after != status_before {
+        return None;
+    }
+    let resp = response.as_ref()?;
+    if let Some(msg) = resp
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+    {
+        return Some(msg.to_string());
+    }
+    if resp
+        .get("result")
+        .and_then(|r| r.get("isError"))
+        .and_then(|b| b.as_bool())
+        == Some(true)
+    {
+        if let Some(text) = resp
+            .pointer("/result/content/0/text")
+            .and_then(|t| t.as_str())
+        {
+            return Some(text.to_string());
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------
@@ -1166,6 +1263,150 @@ mod tests {
             "health names the live tool count"
         );
         assert!(body["tools"].as_u64().is_some_and(|n| n > 0));
+    }
+
+    // -----------------------------------------------------------------
+    // Wave 13 audit pins — drain attribution + health count.
+    //
+    // The sprite tools and the Squad B dirty-seam paths land
+    // outside this module; what this module must guarantee
+    // is that (1) a drained request's error surfaces by the
+    // one uniform rule whatever tool produced it, and (2)
+    // the health document's tool count is the served
+    // surface's count, derived — never a literal.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn drain_attribution_surfaces_protocol_errors_that_never_wrote_status() {
+        // The shape dispatch builds for an unroutable call
+        // (an unknown tool name earns -32602): no result,
+        // the problem named in `error.message`. Protocol
+        // errors never write the status line, so the drain
+        // buffer is their only route to the user.
+        let resp = Some(json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "error": { "code": -32602, "message": "unknown tool: sprite_frobnicate" },
+        }));
+        assert_eq!(
+            drain_attribution_error("Ready", "Ready", &resp).as_deref(),
+            Some("unknown tool: sprite_frobnicate"),
+            "a status-silent protocol error is buffered for the MCP toast"
+        );
+    }
+
+    #[test]
+    fn drain_attribution_surfaces_status_silent_tool_refusals() {
+        // The shape a `tools/call` refusal takes when its
+        // handler returned an error WITHOUT writing
+        // core.status (the sprite handlers' refusal shape is
+        // this same dispatch shape — dispatch builds it
+        // uniformly for every tool): isError plus the
+        // refusal text as the first content block.
+        let resp = Some(json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "result": {
+                "isError": true,
+                "content": [{ "type": "text", "text": "no sprite at index 7" }],
+            },
+        }));
+        assert_eq!(
+            drain_attribution_error("Ready", "Ready", &resp).as_deref(),
+            Some("no sprite at index 7"),
+            "a status-silent refusal is buffered with its own text"
+        );
+    }
+
+    #[test]
+    fn drain_attribution_leaves_status_writing_refusals_to_the_shell() {
+        // The SAME refusal shape, but the handler wrote the
+        // status line (the ordinary refusal): the shell
+        // toasts from the status itself, so the drain buffer
+        // must stay out of it — no double toast. This is the
+        // half of the rule that keeps behaviour identical
+        // for the write paths Squad B re-routed: whether an
+        // op writes status or not, exactly one surface
+        // reports its refusal.
+        let resp = Some(json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": {
+                "isError": true,
+                "content": [{ "type": "text", "text": "Select a sprite first." }],
+            },
+        }));
+        assert_eq!(
+            drain_attribution_error("Ready", "Select a sprite first.", &resp),
+            None,
+            "a status-writing refusal is the shell's toast, not the drain buffer's"
+        );
+        // A protocol error alongside a changed status
+        // cannot occur (protocol errors never touch the
+        // core), but the rule stays total: changed status
+        // always means hands off.
+        let err = Some(json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "error": { "code": -32601, "message": "Method not found: x" },
+        }));
+        assert_eq!(drain_attribution_error("Ready", "Busy", &err), None);
+    }
+
+    #[test]
+    fn drain_attribution_ignores_successes_notifications_and_textless_errors() {
+        // A successful call — sprite or otherwise — has
+        // nothing to attribute.
+        let ok = Some(json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "result": { "isError": false, "content": [{ "type": "text", "text": "{}" }] },
+        }));
+        assert_eq!(drain_attribution_error("Ready", "Ready", &ok), None);
+        // A notification earns no response at all (None):
+        // nothing to attribute.
+        assert_eq!(drain_attribution_error("Ready", "Ready", &None), None);
+        // An isError result whose first content block is not
+        // text carries no attributable string; the caller
+        // still gets the full result over HTTP — only the
+        // toast has nothing to say.
+        let textless = Some(json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "result": { "isError": true, "content": [] },
+        }));
+        assert_eq!(drain_attribution_error("Ready", "Ready", &textless), None);
+    }
+
+    #[test]
+    fn health_tool_count_is_the_served_tool_count() {
+        // The Wave 13 pin for the health document: its
+        // `tools` number must equal the number of tools a
+        // `tools/list` through the REAL dispatch actually
+        // serves — so when the integrator's splice adds the
+        // five sprite registry entries, the health body
+        // follows with no edit here. No count literal is
+        // asserted anywhere: the registry is the only
+        // source, read three ways that must agree.
+        let mut core = EditorCore::new();
+        let mut router = McpServer::new();
+        let resp = router
+            .handle_on(
+                &mut core,
+                &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }),
+            )
+            .expect("tools/list is always answered");
+        let served = resp["result"]["tools"]
+            .as_array()
+            .expect("tools/list carries a tools array")
+            .len();
+        assert!(served > 0);
+        assert_eq!(
+            health_body()["tools"],
+            json!(served),
+            "health reports the served surface, not a stored number"
+        );
+        assert_eq!(served, stykanimate_rs::mcp::all_tools().len());
     }
 
     #[test]

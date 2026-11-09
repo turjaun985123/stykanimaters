@@ -372,3 +372,243 @@ gate 9/9, CI 42557475828 (3,156 tests) and headless
   widths); spray/scatter dab radius uses the flat stroke
   width everywhere; SVG z-order and text-glyph
   divergences as recorded in ACCEPTANCE §7.
+- **Wave 13 pointer (S10):** the heads/rings/polys item
+  above is `docs/wave12/ACCEPTANCE.md`'s **S10**. Wave 13
+  addresses it on both exporters — C1 is its SVG half,
+  C2 its raster half; its stage half is not in Wave 13's
+  scope (the stage has no per-element alpha for heads
+  either). See the Wave 13 section below.
+- **Wave 13 pointer (S21):** the SVG z-order item above
+  is ACCEPTANCE's **S21**. Wave 13 addresses the z-order
+  in SVG only (C1) — the raster already paints strokes
+  over figures, so no raster change is contracted. See
+  the Wave 13 section below.
+
+---
+
+## Wave 13 — in flight (2026-11-09)
+
+> **Planned, not verified.** This section is the close-out
+> checklist for the C-squad fidelity flips, written at
+> launch in the same form as the Wave 12 close-out above
+> so the integrator can verify each flip against the
+> evidence named here — and only then mark it landed. A
+> squad report claiming a flip is NOT evidence; the
+> greps, tests and snaps below are. If any check fails,
+> the flip stays a remainder and this section must say
+> so at close-out rather than being quietly edited.
+
+Entering state for all five items is the Wave 12 closing
+tree (gate 9/9, CI 42557475828, 3,156 tests).
+
+### C1 — SVG z-order (ACCEPTANCE S21, SVG half)
+
+- **Launch-state cell:** SVG × z-order — **divergent**.
+  `write_frame_svg` emits the drawing-stroke block first
+  (stroke loop at `src/svg.rs:~140`), then the figure
+  loop (`src/svg.rs:~299`), so strokes paint UNDER the
+  figures; the raster paints strokes over figures.
+  `append_media` is called last (`src/svg.rs:~573`) and
+  media-last is correct on both surfaces. The svg.rs
+  module doc itself names z-order as the one remaining
+  difference of its Wave 12 list (`src/svg.rs:9-12`).
+- **Contracted behaviour:** the stroke block emits AFTER
+  the figure loop and BEFORE `append_media` — raster
+  order (figures, then strokes, media last). Nothing
+  else in the document changes: same elements, same
+  attributes, only their order in the file. Byte changes
+  in existing SVG output are deliberate, confined to
+  element order, and pinned by updated tests.
+- **Evidence the integrator must check:**
+  1. Grep order in `src/svg.rs` production code: the
+     stroke-emission loop's line number is now GREATER
+     than the figure loop's and SMALLER than the
+     `append_media(` call site's.
+  2. A test in `src/svg.rs`'s tests asserts document
+     order on a project carrying both a figure and a
+     stroke (stroke element byte offset > figure element
+     byte offset, media after both if present) — find it
+     by `grep -n "fn .*order\|fn .*over\|fn .*z" src/svg.rs`
+     in the test module; C1's report must name it, and it
+     must pass in the closing CI run.
+  3. The determinism tests still pass unchanged in
+     spirit: the same project serialised twice is
+     byte-identical (order is fixed, not incidental).
+
+### C1 — S10, SVG half: node opacity on heads/rings/polys
+
+- **Launch-state cell:** SVG × opacity for heads, rings
+  and shape nodes — **figure factor only**. The head /
+  Circle / Polygon emission carries `fig_opacity_attr` =
+  `fig.opacity` alone, under the source's own comment
+  "Heads, rings and shape outlines carry no style
+  opacity of their own" (`src/svg.rs:~437-446`).
+  `node.style.opacity` reaches segments (composed with
+  the figure factor since Wave 12) but never these
+  elements.
+- **Contracted behaviour:** the opacity attribute on a
+  head ring, Circle ring and Polygon becomes the product
+  `fig.opacity × node.style.opacity` (each clamped to
+  0..=1), emitted under the same `< 1.0` rule as today;
+  at both factors 1.0 the bytes are unchanged. Segment
+  emission is untouched.
+- **Evidence the integrator must check:**
+  1. The pre-existing test
+     `svg_figure_opacity_composes_into_segment_and_head_alpha`
+     (`src/svg.rs:~1290`) still passes — the figure half
+     of the product is not regressed.
+  2. A NEW test sets a head/shape node's
+     `style.opacity = 0.5` on a figure at
+     `opacity = 0.5` and asserts the emitted head/shape
+     element carries `stroke-opacity="0.25"` (and/or the
+     fill equivalent for polygons) — find it via
+     `grep -n "0.25" src/svg.rs` in the test module and
+     confirm the assert is on a head/ring/polygon
+     element, not a segment.
+  3. Grep: the "carry no style opacity of their own"
+     comment is gone or rewritten — a tree that still
+     carries it verbatim has not landed this flip.
+
+### C2 — S10, raster half: node opacity on heads/rings/polys
+
+- **Launch-state cell:** Raster × opacity for heads,
+  rings and polygons — **figure factor only, by colour
+  fade**. Their colour is
+  `lerp_color(background, color_hex, fig.opacity)`
+  (`src/export.rs:~346-355`), collected at
+  `src/export.rs:~479,483,494`, and the pixel pass
+  hard-overwrites covered pixels with that colour
+  (`src/export.rs:~687-704`) — `node.style.opacity`
+  has no reader on this path.
+- **Contracted behaviour:** the node's `style.opacity`
+  composes into the same fade: the effective factor
+  becomes `fig.opacity × node.style.opacity` (clamped),
+  so a shape/head at style opacity 0.5 on an opaque
+  figure renders exactly as today's figure-opacity-0.5
+  fade. No alpha plumbing is added (the fade mechanism
+  itself is the standing design, §Figure opacity);
+  segments are untouched.
+- **Evidence the integrator must check:**
+  1. Grep: the heads/rings/polys collection sites in
+     `src/export.rs` now read `style.opacity` (or an
+     effective-style helper that does) —
+     `grep -n "style.opacity\|effective_style" src/export.rs`
+     must hit on the head/ring/poly path, not only in
+     the segment construction.
+  2. A NEW export test renders a head or shape node at
+     `style.opacity = 0.5` (figure opacity 1.0) and
+     asserts the covered pixel equals
+     `lerp_color(background, colour, 0.5)` — i.e. the
+     same pixel today's figure-opacity fade produces.
+     C2's report must name it; it must pass in the
+     closing CI run.
+  3. Existing export tests for the figure-opacity fade
+     at style opacity 1.0 still pass (the product at
+     1.0 is the old factor — no collateral byte change).
+
+### C3 + C5 — stage pressured strokes honour baked widths
+
+- **Launch-state cell:** Stage × pressured strokes —
+  **flat width**. `stage_layers.rs` strokes every
+  segment of a plain stroke at `stroke.width`
+  (`src/rune_sec/stage_layers.rs:~491`), and its own
+  module doc records the divergence: the raster
+  averages per-point widths per segment
+  (`(widths[i] + widths[i + 1]) / 2.0`), the stage
+  "uses `stroke.width` flat for the whole stroke"
+  (`src/rune_sec/stage_layers.rs:81-87`). Two tests pin
+  the OLD behaviour by name:
+  `pressured_stroke_uses_the_uniform_width_field`
+  (:~844) and `pressured_stroke_scales_every_prim`
+  (:~1146), both on the fixture `widths = [2.0, 10.0, 2.0]`.
+- **Contracted behaviour:** C5 adds
+  `paint::pressured_stroke_pieces` — the ONE shared
+  per-segment (a, b, width) construction for baked-width
+  strokes, width = the endpoint average, the raster's
+  rule — and C3's stage stroke pass builds from it.
+  On the [2.0, 10.0, 2.0] fixture the two stage segments
+  come out at width 6.0 and 6.0 (before view scaling).
+  Unpressured strokes (empty `widths`, or `widths.len()
+  != points.len()`) keep today's flat construction
+  byte-for-byte in behaviour; spray / fill / scatter
+  precedence is unchanged. (SVG already averages and
+  the raster already averages; neither is in scope.)
+- **Evidence the integrator must check:**
+  1. Grep: `pressured_stroke_pieces` is DEFINED in
+     `src/paint.rs` (pub) and CALLED from
+     `src/rune_sec/stage_layers.rs` production code —
+     one hit each minimum; a stage-local re-implementation
+     instead of the shared fn fails this flip's contract.
+  2. `pressured_stroke_uses_the_uniform_width_field`
+     returns ZERO grep hits anywhere in `src/` — the
+     old-behaviour pin must be deleted or renamed, never
+     left asserting flat widths.
+  3. paint.rs tests pin the averaging rule against the
+     raster's (a widths fixture whose segment widths are
+     the endpoint averages), and a stage_layers test on
+     [2.0, 10.0, 2.0] asserts both segment widths are
+     6.0 × the view scale. Both named in C5's / C3's
+     reports and green in the closing CI run.
+  4. The stage_layers module doc's "uses `stroke.width`
+     flat" passage is rewritten — if it still describes
+     flat width as the current behaviour, the flip's
+     documentation half has not landed.
+
+### C4 — figure-card thumbnails on the shared generator
+
+- **Launch-state cell:** Figures panel × thumbnails —
+  **per-node colour only, flat geometry**.
+  `thumb_prims` (`src/rune_sec/figures_panel.rs:~388`)
+  emits one `ThumbPrim::Segment` per parented node at
+  the uniform `THUMB_WIDTH`, coloured by the node's
+  resolved colour, with no taper, cap, gradient or
+  opacity — while the library panel's thumbnails
+  (Wave 12, `library_thumb_prims` in
+  `src/rune_sec/library_panel.rs`) already build from
+  `paint::styled_segment_pieces`. The figure cards are
+  the last thumbnail surface on hand-rolled geometry.
+- **Contracted behaviour:** figure-card segment prims
+  are built from `paint::styled_segment_pieces`,
+  exactly as the library thumbnails are — per-node
+  taper, cap, gradient and style opacity visible in the
+  card. Two documented doctrines STAY: ring prims carry
+  `fig.color` (never the head node's override — the
+  stage's ring rule, pinned in the `thumb_prims` doc),
+  and positions still come from `positions_f` at the
+  current display frame (figure cards show the live
+  pose; the library's rest-pose choice is NOT imported).
+- **Evidence the integrator must check:**
+  1. Grep: `styled_segment_pieces` hits in
+     `src/rune_sec/figures_panel.rs` production code
+     (zero hits entering Wave 13).
+  2. A NEW figures_panel test mirrors the library's
+     `thumb_prims_honour_node_colour_style_and_shape`:
+     a fixture def with a tapered Point node, a gradient
+     node and an opacity node yields styled piece counts
+     (4 pieces per styled node) and non-uniform widths —
+     find it via `grep -n "fn thumb" src/rune_sec/figures_panel.rs`
+     and confirm a taper/gradient fixture exists, not
+     only a piece-count smoke test.
+  3. The ring-doctrine pin still passes: the test
+     asserting ring prims carry the figure colour (not
+     the head node's override) is present and green.
+  4. Pixel side: in the closing headless run,
+     `snap-default.png` (Figures panel cards visible)
+     is pixel-read and the selected figure's card
+     thumbnail still renders — no blank or missing
+     thumbnail after the rebuild. (The library side's
+     own pixel proof is D-squad's library-populated
+     scene, tracked in `docs/wave13/PIXEL_PROOF.md`,
+     not here.)
+
+### What Wave 13 does NOT flip here
+
+Recorded so close-out cannot overclaim: the stage's
+figure-opacity background fade vs the raster's true
+alpha (standing divergence, §Figure opacity);
+spray/scatter dab radius using the flat `stroke.width`
+on pressured strokes (all surfaces alike); SVG text as
+a font run vs the raster's bitmap glyphs (ACCEPTANCE
+§7); and the stage half of S10 (heads on stage have no
+per-element alpha path — C1/C2 cover the two exporters
+only, per the roster).
