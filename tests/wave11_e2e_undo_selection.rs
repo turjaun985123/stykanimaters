@@ -344,8 +344,16 @@ fn status_selection_and_playback_track_each_mcp_mutation() {
     assert_status(&mut server, false, 0, 0, 0, 0);
 
     // Mutation 1 — add a figure. The core op selects the new
-    // figure (clearing the node selection), exactly as the
-    // figures panel's add does, and records one undo step.
+    // figure, exactly as the figures panel's add does, and
+    // records one undo step. It does NOT clear the node
+    // selection (that is `select_figure`'s contract, via
+    // set_selection): the node index carries over and now
+    // addresses the NEW figure's node 0. (This suite's first
+    // CI execution was this run — cargo's fail-fast had
+    // skipped the binary behind earlier suites' failures —
+    // and the entering expectation of a cleared node was
+    // wrong about the shared op; the real contract is
+    // pinned here.)
     let out = call_ok(
         &mut server,
         "add_figure",
@@ -354,7 +362,7 @@ fn status_selection_and_playback_track_each_mcp_mutation() {
     assert_eq!(out["figure"], json!(1));
     assert_eq!(out["name"], json!("Second"));
     assert_status(&mut server, false, 0, 1, 1, 0);
-    assert_selection(&mut server, 1, Some("Second"), None);
+    assert_selection(&mut server, 1, Some("Second"), Some(0));
     assert_eq!(project_state(&mut server)["figures"][1]["name"], json!("Second"));
 
     // Select the new figure with its root node, then mutate
