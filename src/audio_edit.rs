@@ -62,6 +62,13 @@ fn parse_wav(bytes: &[u8]) -> Result<WavData, String> {
                 if size < 16 {
                     return Err("fmt chunk too small".into());
                 }
+                // Wave 11 (B6 B-C): the declared size can pass
+                // the check above while the FILE is truncated —
+                // the clamped body is then shorter than 16 and
+                // the field reads below would panic.
+                if body_end - body_start < 16 {
+                    return Err("truncated fmt chunk".into());
+                }
                 let b = &bytes[body_start..body_end];
                 let format = u16::from_le_bytes(b[0..2].try_into().unwrap());
                 if format != 1 {
@@ -795,13 +802,15 @@ pub fn split_clip(
             path: clip.path.clone(),
             start_frame: clip.start_frame,
             gain: clip.gain,
-            muted: false,
+            // Wave 11 (B6 B-B): both halves carry the source
+            // clip's mute flag — a split must not unmute.
+            muted: clip.muted,
         },
         crate::model::AudioClip {
             path: clip.path.clone(),
             start_frame: at_frame,
             gain: clip.gain,
-            muted: false,
+            muted: clip.muted,
         },
     ))
 }

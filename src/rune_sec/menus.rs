@@ -586,6 +586,10 @@ fn open_recent(s: &mut State, name: &str, path: Option<&Path>) {
             crate::rune_sec::home_panel::dispatch_open(&mut s.core, path, name);
             crate::rune_sec::project_tools::clear_stale_solo(&mut s.core);
             crate::rune_sec::project_tools::sync_name_edit(s);
+            // Wave 11 (E9): the stroke selection indexes the
+            // old project's strokes — clear it on every swap,
+            // as Home's open does (this path missed it).
+            s.stroke_selected = None;
         }
         None => {
             s.core.status = format!("Recent project not found: {name}");

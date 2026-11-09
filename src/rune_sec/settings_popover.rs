@@ -143,9 +143,21 @@
 //!   row shows the endpoint and says plainly that while on,
 //!   any program on this computer can drive the editor —
 //!   the endpoint has no password in this version (the
-//!   bridge module's own docs carry the full warning). The
-//!   bridge starts at launch when the persisted preference
-//!   is on; this toggle is its runtime switch.
+//!   bridge module's own docs carry the full warning).
+//!   At launch the shell attempts the start when the
+//!   persisted preference is on (`main.rs` `init`); the
+//!   attempt is live, not deferred — and this toggle is
+//!   its runtime switch either way (a press starts or
+//!   stops the listener immediately, no restart).
+//!   One honest gap (Wave 11 audit): a launch attempt
+//!   that fails — the port already held — is silently
+//!   dropped by `init`, and no surface records why; the
+//!   card then truthfully shows the pill off, but the
+//!   reason reaches the user only when they press the
+//!   toggle and the press's own start fails the same
+//!   way. Closing that needs the bridge to remember
+//!   its last start failure (`live_mcp`'s file, not
+//!   this one) — see the Wave 11 report.
 //! * **Startup workspace (Phase G)** — a compact picker
 //!   (eight buttons, the language grid's 4-wide layout)
 //!   naming the workspace the shell opens in. Picking one
@@ -256,8 +268,8 @@
 //! hygiene audit disproved it against the source). The
 //! Live MCP toggle is the one control with its own field:
 //! `LayoutPrefs.live_mcp` (serde-defaulted on, so a prefs
-//! file written before the field existed starts the
-//! bridge at launch), written by [`toggle_live_mcp`]
+//! file written before the field existed gets a launch
+//! start attempt), written by [`toggle_live_mcp`]
 //! through the same load-modify-save `poll` uses for the
 //! theme.
 //!
@@ -627,6 +639,18 @@ pub fn set_playback_speed(s: &mut State, speed: f32) {
 pub fn toggle_live_mcp(s: &mut State) {
     let want_on = !crate::live_mcp::is_enabled();
     let on = crate::live_mcp::set_enabled(want_on);
+    // Wave 11 (A4): record the attempt's outcome — the
+    // section below reads it to show a persistent failure
+    // note after a failed start (the status line alone fades).
+    stykanimate_rs::shell::note_live_mcp_start(
+        if on {
+            stykanimate_rs::shell::LiveMcpStartOutcome::Listening
+        } else if want_on {
+            stykanimate_rs::shell::LiveMcpStartOutcome::FailedToStart
+        } else {
+            stykanimate_rs::shell::LiveMcpStartOutcome::Stopped
+        },
+    );
     let mut prefs = stykanimate_rs::shell::load_layout();
     prefs.live_mcp = on;
     stykanimate_rs::shell::save_layout(&prefs);
@@ -916,6 +940,24 @@ pub fn settings_popover(s: &State, t: &Theme) -> El {
                 },
             ))
             .child(note_line(t, &live_mcp_note()));
+
+        // Wave 11 (A4): a failed start leaves a persistent
+        // note under the section — the toggle reads off and
+        // the status line has faded by the time the user comes
+        // back to this card, so without it a dead bridge was
+        // indistinguishable from a stopped one.
+        if stykanimate_rs::shell::live_mcp_start_outcome()
+            == stykanimate_rs::shell::LiveMcpStartOutcome::FailedToStart
+            && !crate::live_mcp::is_enabled()
+        {
+            card = card.child(note_line(
+                t,
+                &format!(
+                    "Live MCP did not start — port {} may be in use. Turn it off and on to retry.",
+                    crate::live_mcp::PORT
+                ),
+            ));
+        }
 
         // Theme: each button sets its own value outright.
         // The glyphs mirror the labels (Phase H): `moon`
@@ -1554,7 +1596,6 @@ playback_speed: 1.0,
         let _ = settings_popover(&state, &t);
     }
 
-    #[test]
     #[test]
     fn live_mcp_note_names_the_endpoint_and_the_warning() {
         let note = live_mcp_note();

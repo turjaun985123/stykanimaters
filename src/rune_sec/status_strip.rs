@@ -717,6 +717,28 @@
 //! strip takes the light roles (`#171A21` /
 //! `#5B6577` / tinted hairline / `#4666D8`) and is
 //! legible on the light background.
+//!
+//! ## Wave 11 — the counters under live MCP control
+//!
+//! Every value above is read live from the core at
+//! build time — this module caches nothing, derives
+//! nothing from side channels, and holds no per-frame
+//! state (the module docs' first section is the
+//! inventory). That is exactly what live MCP control
+//! needs: `McpServer::handle_on` mutates the SAME
+//! `EditorCore` the strip reads, through the same ops
+//! the GUI calls, so a tool's `snapshot()` lands on
+//! the same undo stack and edit counter the undo
+//! segment and the dirty dot read. The strip cannot
+//! say `Undo 0` after an MCP edit because there is
+//! no second counter for it to read instead — the
+//! claim is pinned end to end by
+//! `strip_counters_follow_a_live_mcp_edit`, which
+//! drives a real `tools/call` through `handle_on`
+//! and reads the segments back. Wave 11 touches no
+//! segment, floor or yielding rung here: the Wave 10
+//! yield ladder and its 555 pt proven bound stand
+//! exactly as derived.
 
 use std::time::{Duration, SystemTime};
 
@@ -1837,6 +1859,59 @@ mod tests {
         // the redo depth joins the same segment.
         core.undo();
         assert_eq!(undo_text(&core), "Undo 0 · Redo 1");
+    }
+
+    #[test]
+    fn strip_counters_follow_a_live_mcp_edit() {
+        // Wave 11 (MCP end-to-end): the strip's undo
+        // and dirty readings must follow an edit made
+        // through the LIVE MCP path, not only GUI ops.
+        // This drives the real route the shell's poll
+        // hook drains — `McpServer::handle_on` against
+        // a caller-owned core (the router's own core is
+        // not the target) — with a real `tools/call`
+        // for the registry's `add_frame` tool, whose
+        // handler calls the same `EditorCore::add_frame`
+        // the timeline's + Frame button calls. The
+        // segments are then read back through this
+        // module's own fns: there is no second counter
+        // for the strip to be stale on.
+        let mut core = EditorCore::new();
+        assert_eq!(undo_text(&core), "Undo 0");
+        assert_eq!(core.edits_since_autosave(), 0);
+        let (name, suffix) = project_parts(&core);
+        assert_eq!(format!("{name}{suffix}"), project_text(&core));
+        assert!(!suffix.contains('●'), "a fresh core is not dirty");
+
+        let mut router = stykanimate_rs::mcp::McpServer::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "add_frame", "arguments": {} }
+        });
+        let reply = router
+            .handle_on(&mut core, &msg)
+            .expect("a tools/call carrying an id always replies");
+        assert_eq!(
+            reply["result"]["isError"], false,
+            "the add_frame call succeeded: {reply}"
+        );
+        // The op's own status is the one the poll hook
+        // toasts and the strip's tail shows.
+        assert_eq!(core.status, "Frame 2 added.");
+        assert_eq!(frame_text(&core), "Frame 2/6");
+        // The counters the strip renders moved with
+        // the MCP edit: one undo step deep, and the
+        // project segment's suffix carries the dirty
+        // dot (the runtime ticks to 0:01 at six
+        // frames, as in the GUI edit test above).
+        assert_eq!(undo_text(&core), "Undo 1");
+        let (_, suffix) = project_parts(&core);
+        assert_eq!(suffix, " · 0:01 ●");
+        // And the strip builds whole in the post-MCP
+        // state, tail included.
+        let _ = status_strip(&core);
     }
 
     // ---- Width discipline (Phase F) ----

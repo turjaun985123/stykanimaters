@@ -90,7 +90,7 @@
 //!   library is a fixed table that `paint::brush_library()`
 //!   (paint.rs:335) constructs fresh on every call, the core
 //!   stores only `brush_index` (editor.rs:73), and
-//!   `EditorCore::active_brush` (editor.rs:2735) returns a
+//!   `EditorCore::active_brush` (editor.rs:3094) returns a
 //!   copy out of a fresh library. A stepper here would write
 //!   into a throwaway copy and change nothing, so the panel
 //!   shows the active preset's smoothing as a readout
@@ -99,7 +99,7 @@
 //!   preset — the brush row above does that (and the stroke
 //!   inspector's Smoothing steppers work the same way, by
 //!   stepping the selection through the library). The value
-//!   is consulted by `EditorCore::end_draw` (editor.rs:2537)
+//!   is consulted by `EditorCore::end_draw` (editor.rs:2867)
 //!   at the moment each stroke is finished, so it governs
 //!   strokes drawn afterwards; strokes already on the canvas
 //!   are never re-smoothed by a selection change (the Smooth
@@ -109,7 +109,7 @@
 //!   *preset* (`paint::Brush::width`, paint.rs:307 — "base
 //!   stroke width"), not writable core state — the core
 //!   stores only `brush_index`, and `active_brush`
-//!   (editor.rs:2797) returns a copy out of the freshly
+//!   (editor.rs:3094) returns a copy out of the freshly
 //!   built library, so a width stepper would write into a
 //!   throwaway copy and change nothing. The panel shows
 //!   the active preset's width as a readout
@@ -118,32 +118,34 @@
 //!   choosing another preset in the brush row. The value
 //!   is real, not decorative: `begin_draw` seeds each new
 //!   stroke's `width` and per-point `widths` from the
-//!   active brush (editor.rs:2539), and the eraser's
-//!   radius is twice it (editor.rs:2805). Every preset in
+//!   active brush (editor.rs:2769), and the eraser's
+//!   radius is twice it (editor.rs:3101). Every preset in
 //!   the library carries a positive whole-number width —
 //!   2.0 (Pencil, paint.rs:346) up to 20.0 (Broad Brush,
 //!   paint.rs:430) — so [`width_label`]'s fractional and
 //!   fallback arms exist only so a future preset can
 //!   never make the readout print nonsense.
-//! * **Brush scatter readout (Wave 10).** Scatter has the
-//!   same shape as smoothing and width — a field of the
-//!   brush *preset* (`paint::Brush::scatter`, paint.rs:324)
-//!   — with one extra twist: unlike the other two it has
-//!   no per-stroke home a control could write either. A
-//!   stroke's scatter exists only inside its `SprayMark`,
-//!   whose radius `EditorCore::begin_draw` copies from the
-//!   active preset at the moment drawing starts (that is
-//!   the field's one consumer; `paint::scatter_dabs`
-//!   remains uncalled by any renderer — the renderers
-//!   expand spray marks through `paint::spray_dots`). So
-//!   the panel adds the third readout ([`scatter_readout`],
-//!   key `draw-scatter-readout`) under the width one: it
-//!   names the property that makes the Spray preset what
-//!   it is, which the smoothing ("off") and width lines
-//!   left invisible. A scatter *stepper* waits on a
-//!   writable field — a `Stroke::scatter` the renderer
-//!   reads, or per-preset overrides — and lands only when
-//!   the engine grows one.
+//! * **Brush scatter readout (Wave 10; corrected Wave 11).**
+//!   Scatter has the same shape as smoothing and width — a
+//!   field of the brush *preset* (`paint::Brush::scatter`,
+//!   paint.rs:327) — so the panel shows it as a readout
+//!   ([`scatter_readout`], key `draw-scatter-readout`) and
+//!   changing it means choosing another preset (Spray, the
+//!   only scattered one, radius 12). What the value DOES
+//!   depends on the path that records the stroke, and the
+//!   Wave 10 text here predates the wiring it asked for:
+//!   a hand-drawn stroke with a scatter brush records a
+//!   `SprayMark` carrying the radius (`EditorCore::begin_draw`,
+//!   editor.rs:2791), which the renderers expand through
+//!   `paint::spray_dots`; a stamp records the brush's
+//!   scatter on the stroke itself (`Stroke::scatter`,
+//!   written by [`push_stamp_stroke`] below), which the
+//!   renderers expand through `paint::stroke_dabs`
+//!   (paint.rs:646). MCP's `draw_stroke` takes scatter as
+//!   an explicit argument (default 0) and never consults
+//!   the active brush for it — so this readout describes
+//!   what the PANEL's drawing and stamps will do, not
+//!   what an MCP client gets by default (Wave 11 audit).
 //! * **Panel card (Phase N).** The section is a kit panel
 //!   card now, not a loose column of rows (P16: "a row
 //!   pretending to be a panel"): the root is
@@ -339,17 +341,14 @@ pub fn width_readout(core: &EditorCore) -> String {
 /// The active brush preset's scatter radius, in stage
 /// units (`paint::Brush::scatter` via
 /// `EditorCore::active_brush`). Read-only by construction,
-/// exactly like smoothing and width: the value that
-/// governs new strokes is the preset's, and
-/// `EditorCore::begin_draw` is its consumer — a brush with
-/// scatter above zero makes it record a `SprayMark` with
-/// this radius on the stroke, which the renderers expand
-/// via `paint::spray_dots`. There is no per-stroke scatter
-/// field a panel control could write (a stroke's scatter
-/// lives only in its spray mark, written by the engine at
-/// draw time), so — as with smoothing and width — the
-/// panel shows the value as a readout and changing it
-/// means choosing another preset.
+/// exactly like smoothing and width: the PRESET's value is
+/// a fixed library table entry, so there is nothing a
+/// panel control could write. Where the value lands
+/// depends on the recording path — `EditorCore::begin_draw`
+/// copies it onto the stroke's `SprayMark` (and keeps the
+/// stroke's own `scatter` at 0.0), while stamps record it
+/// on the stroke itself (`Stroke::scatter`, see
+/// [`push_stamp_stroke`]).
 pub fn active_brush_scatter(core: &EditorCore) -> f32 {
     core.active_brush().scatter
 }
@@ -1618,6 +1617,29 @@ mod tests {
             assert_eq!(active_brush_scatter(&core), 0.0, "preset {i} is unscattered");
             assert_eq!(scatter_readout(&core), "Scatter: off");
         }
+    }
+
+    #[test]
+    fn stamp_records_the_active_brushs_scatter_and_opacity() {
+        // Wave 11 parity pin: a stamp is never a spray
+        // stroke, so the brush's scatter lives on the
+        // stroke itself (`Stroke::scatter`, rendered via
+        // paint::stroke_dabs) and its opacity is the
+        // brush's, clamped. With Spray active (scatter
+        // 12, opacity 0.5 — paint.rs:450) the stamped
+        // stroke must carry both; this is the behaviour
+        // the scatter readout's docs describe, and the
+        // exact opposite of MCP draw_stroke's defaults
+        // (scatter 0, opacity 1.0, active brush ignored).
+        let mut core = EditorCore::new();
+        select_brush(&mut core, 9);
+        let params = DrawToolsState::default();
+        stamp_polygon_button(&mut core, &params);
+        let stroke = core.project.strokes.last().unwrap();
+        assert!(stroke.spray.is_none(), "stamps never carry a spray mark");
+        assert_eq!(stroke.scatter, 12.0);
+        assert_eq!(stroke.opacity, 0.5);
+        assert_eq!(stroke.width, 14.0, "the Spray preset's width");
     }
 
     #[test]

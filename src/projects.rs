@@ -12,11 +12,19 @@
 //! - A name that cannot identify a file — blank, or with no
 //!   alphanumeric character at all, so its slug would be nothing
 //!   but dashes — is refused by every write path ([`file_stem_for`]).
+//!   The slug also *is* the path-safety rule: it maps every
+//!   non-alphanumeric character — path separators and `.`
+//!   included — to `-`, so no name can produce a file outside
+//!   the library directory or a `..` component.
 //! - The operations that must never overwrite ([`save_copy`],
 //!   [`duplicate_project`], [`rename_project`]) claim their target
-//!   atomically (`create_new` / the rename itself), so the
-//!   refusal and the write cannot be split by a file appearing
-//!   in between.
+//!   atomically (`create_new`, or a hard-link claim for the
+//!   rename), so the refusal and the write cannot be split by a
+//!   file appearing in between. And [`save`], which overwrites
+//!   by design, replaces atomically (temp file + rename, the
+//!   shell recovery writer's pattern — see [`write_file_atomic`]):
+//!   a crash mid-save leaves the old complete file or the new
+//!   one, never a torn one where a good project stood.
 //!
 //! [`scan`] caches each file's parsed summary keyed by the
 //! file's (mtime, length) stamp, so rescanning a directory of
@@ -31,7 +39,45 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
+
+/// Monotonic counter making each atomic write's temp name
+/// unique within the process (combined with the process id,
+/// it is unique across processes too).
+static WRITE_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Replace `path` with `text` atomically: the bytes go to a
+/// temp file in the same directory first, which is then
+/// renamed over `path`, so a reader only ever sees the old
+/// complete contents or the new ones — a crash mid-write
+/// cannot leave a half-written file where a good one stood.
+/// The temp name is dot-prefixed (hidden) and does not end
+/// in `.json`, so [`scan`] never lists it. The same pattern
+/// as the shell's recovery writer (`shell::write_file_atomic`,
+/// private to that module); deliberately no `fsync` — this
+/// buys untorn reads, not power-loss durability.
+pub(crate) fn write_file_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("write");
+    let seq = WRITE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{seq}",
+        std::process::id()
+    ));
+    let written = std::fs::File::create(&tmp).and_then(|mut f| f.write_all(text.as_bytes()));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
 
 /// Summary of one saved project file, for library/home listings.
 #[derive(Clone, Debug)]
@@ -227,7 +273,9 @@ pub fn load(path: &Path) -> std::io::Result<Project> {
 /// overwrites the project's own file by design; a project
 /// whose name cannot name a file ([`file_stem_for`]) is
 /// refused with an `InvalidInput` error instead of writing a
-/// hidden `.json`.
+/// hidden `.json`. The replace itself is atomic
+/// ([`write_file_atomic`]): a crash mid-save leaves the old
+/// complete file or the new one, never a torn one.
 pub fn save(project: &Project, dir: &Path) -> std::io::Result<PathBuf> {
     let Some(stem) = file_stem_for(&project.name) else {
         return Err(std::io::Error::new(
@@ -238,7 +286,7 @@ pub fn save(project: &Project, dir: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(format!("{stem}.json"));
     let text = serde_json::to_string_pretty(project).map_err(std::io::Error::other)?;
-    std::fs::write(&path, text)?;
+    write_file_atomic(&path, &text)?;
     Ok(path)
 }
 
@@ -292,7 +340,17 @@ fn save_copy_to(core: &EditorCore, new_name: &str, dir: &Path) -> Result<PathBuf
                 e.to_string()
             }
         })?;
-    file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    // If the write itself fails, remove the file this call
+    // claimed: a half-written project must not be left
+    // squatting on the name, refusing every later save of it
+    // while never parsing. The claim was this call's alone
+    // (`create_new`), so removing it restores the exact
+    // pre-call state.
+    if let Err(e) = file.write_all(text.as_bytes()) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(e.to_string());
+    }
     Ok(path)
 }
 
@@ -305,6 +363,15 @@ fn save_copy_to(core: &EditorCore, new_name: &str, dir: &Path) -> Result<PathBuf
 /// success. This renames the file on disk only — the `name`
 /// stored inside the JSON is unchanged, so a later [`scan`]
 /// still reports the stored name until the project is re-saved.
+///
+/// The no-overwrite refusal is atomic, not an exists-check
+/// followed by a rename: a Unix `rename` silently replaces an
+/// existing destination, so that pair could be split by a file
+/// appearing in between. Instead the target is claimed with a
+/// hard link (which fails with `AlreadyExists` if anything is
+/// there — same directory, so always the same filesystem) and
+/// the old directory entry is then removed; if that removal
+/// fails, the claim is rolled back and the error reported.
 pub fn rename_project(path: &Path, new_name: &str) -> std::io::Result<PathBuf> {
     let Some(stem) = file_stem_for(new_name) else {
         return Err(std::io::Error::new(
@@ -317,13 +384,22 @@ pub fn rename_project(path: &Path, new_name: &str) -> std::io::Result<PathBuf> {
     if new_path == path.to_path_buf() {
         return Ok(new_path);
     }
-    if new_path.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("project file already exists: {}", new_path.display()),
-        ));
+    std::fs::hard_link(path, &new_path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("project file already exists: {}", new_path.display()),
+            )
+        } else {
+            e
+        }
+    })?;
+    if let Err(e) = std::fs::remove_file(path) {
+        // Roll the claim back: the rename did not happen, so
+        // the new entry must not survive it.
+        let _ = std::fs::remove_file(&new_path);
+        return Err(e);
     }
-    std::fs::rename(path, &new_path)?;
     Ok(new_path)
 }
 
@@ -361,7 +437,15 @@ pub fn duplicate_project(path: &Path) -> std::io::Result<PathBuf> {
             .open(&candidate)
         {
             Ok(mut dest) => {
-                std::io::copy(&mut source, &mut dest)?;
+                // A failed copy removes the file this call
+                // claimed, like `save_copy_to`: no
+                // half-written duplicate left behind (the
+                // source is never touched either way).
+                if let Err(e) = std::io::copy(&mut source, &mut dest) {
+                    drop(dest);
+                    let _ = std::fs::remove_file(&candidate);
+                    return Err(e);
+                }
                 return Ok(candidate);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -865,6 +949,106 @@ mod tests {
         let infos = scan(&dir);
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "Fixed Again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_stem_for_neutralises_path_separators_and_dots() {
+        // The slug is the path-safety rule: every
+        // non-alphanumeric character — separators and dots
+        // included — becomes a dash, so no name yields a
+        // path outside the library directory or a `..`
+        // component.
+        assert_eq!(file_stem_for(".."), None, "no alphanumeric at all");
+        assert_eq!(file_stem_for("../.."), None);
+        assert_eq!(file_stem_for("a/b").as_deref(), Some("a-b"));
+        assert_eq!(file_stem_for("a\\b").as_deref(), Some("a-b"));
+        assert_eq!(file_stem_for("../../etc/passwd").as_deref(), Some("------etc-passwd"));
+        // For every adversarial name that maps at all, the
+        // stem is a single safe component.
+        for name in ["../x", "..\\x", "/abs/path", "a/../b", ".hidden"] {
+            let stem = file_stem_for(name).expect("these names carry letters");
+            assert!(
+                !stem.chars().any(|c| c == '/' || c == '\\') && stem != ".." && !stem.starts_with('.'),
+                "name {name:?} produced an unsafe stem {stem:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_with_a_traversal_name_stays_inside_the_dir() {
+        let dir = temp_dir("traversal-name");
+        let mut project = Project::new_demo();
+        project.name = "../../Escape Attempt".into();
+        let path = save(&project, &dir).unwrap();
+        // The written file is a direct child of the library
+        // dir, under the slugged name — nothing was written
+        // anywhere else.
+        assert_eq!(path.parent(), Some(dir.as_path()));
+        assert_eq!(path, dir.join("------escape-attempt.json"));
+        assert!(path.exists());
+        let infos = scan(&dir);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "../../Escape Attempt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_replaces_atomically_and_leaves_no_temp_files() {
+        let dir = temp_dir("atomic-save");
+        let mut project = Project::new_demo();
+        project.name = "Atomic".into();
+        let path = save(&project, &dir).unwrap();
+
+        // A second save of changed state fully replaces the
+        // first — the overwrite `save` promises by design.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        project.fps = 24.0;
+        let again = save(&project, &dir).unwrap();
+        assert_eq!(again, path);
+        let back = load(&path).unwrap();
+        assert!((back.fps - 24.0).abs() < f32::EPSILON);
+        assert_eq!(scan(&dir).len(), 1, "scan sees the replaced save");
+
+        // The temp file the atomic replace wrote through is
+        // renamed away, not left as litter for a later scan
+        // or listing to trip over.
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["atomic.json"], "directory holds {names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_repicks_a_same_length_rewrite_by_another_writer() {
+        let dir = temp_dir("scan-cache-same-length");
+        let mut project = Project::new_demo();
+        project.name = "Alpha".into();
+        let path = save(&project, &dir).unwrap();
+        assert_eq!(scan(&dir)[0].name, "Alpha");
+
+        // Another process (an MCP server driving the same
+        // library directory) rewrites the file in place with
+        // the SAME byte length — only the mtime moves. The
+        // stamp's mtime half must carry the invalidation:
+        // the next scan shows the new contents, never the
+        // cached summary.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let mut other = Project::new_demo();
+        other.name = "Betta".into(); // same length as "Alpha"
+        let text = serde_json::to_string_pretty(&other).unwrap();
+        assert_eq!(
+            text.len(),
+            std::fs::read_to_string(&path).unwrap().len(),
+            "the rewrite really is the same length"
+        );
+        std::fs::write(&path, text).unwrap();
+        let infos = scan(&dir);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "Betta");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -50,6 +50,12 @@ pub struct EditorCore {
     edit_count: u64,
     /// Wave 9: `edit_count` at the last successful autosave.
     last_autosave_count: u64,
+    /// Wave 11 (E9): bumped on every wholesale project swap
+    /// (`note_project_swapped` and the MCP io replace path) so
+    /// the shell's poll can tell "the project under the session
+    /// state changed" and clear index-based panel selections
+    /// that would otherwise point into the new project.
+    project_swaps: usize,
     clipboard: Option<crate::model::Frame>,
     /// Wave 9: deep-copied frames held by `copy_range` for
     /// `paste_range`. Distinct from the single-frame `clipboard`.
@@ -125,6 +131,37 @@ fn recorded_stroke_opacity(brush_opacity: f32) -> f32 {
     }
 }
 
+/// Where a tracked clip index (a figure's `clip` reference,
+/// the clip-edit session's clip) lands when clip `deleted`
+/// is removed: before the gap untouched, after it shifted
+/// down by one, the deleted clip itself mapped to `None` —
+/// tracking ends. The clips panel keeps the same mapping
+/// for its own tracked indices (Wave 11 port, C6 §5).
+fn clip_target_after_delete(target: Option<usize>, deleted: usize) -> Option<usize> {
+    let t = target?;
+    if t < deleted {
+        Some(t)
+    } else if t > deleted {
+        Some(t - 1)
+    } else {
+        None
+    }
+}
+
+/// Where a tracked clip index lands when clips `a` and `b`
+/// trade places: the two swap, every other index untouched.
+fn clip_target_after_swap(target: Option<usize>, a: usize, b: usize) -> Option<usize> {
+    target.map(|t| {
+        if t == a {
+            b
+        } else if t == b {
+            a
+        } else {
+            t
+        }
+    })
+}
+
 impl EditorCore {
     pub fn new() -> Self {
         EditorCore {
@@ -142,6 +179,7 @@ impl EditorCore {
             redo: Vec::new(),
             edit_count: 0,
             last_autosave_count: 0,
+            project_swaps: 0,
             clipboard: None,
             frame_clipboard: Vec::new(),
             playhead: 0.0,
@@ -637,7 +675,15 @@ impl EditorCore {
             media: None,
         });
         for frame in &mut self.project.frames {
-            frame.poses[fi].angles.push(0.0);
+            // Wave 11 (E6): frames where the figure is
+            // absent hold no pose for it (the row is
+            // shorter) — indexing `poses[fi]` there
+            // panicked when a segment was added via MCP
+            // (`add_node`) on such a project. Absent rows
+            // have no angle vec to grow; skip them.
+            if let Some(pose) = frame.poses.get_mut(fi) {
+                pose.angles.push(0.0);
+            }
         }
         self.selected_node = Some(ni);
         self.status = format!("Segment {ni} added. Drag it to pose.");
@@ -671,7 +717,19 @@ impl EditorCore {
             }
         }
         for frame in &mut self.project.frames {
-            frame.poses[fi].angles.remove(ni);
+            // Wave 11 (E6): same absence guard as
+            // `add_segment`, plus the angle row itself: a
+            // pose whose angle vec is shorter than the
+            // definition (a stale or hand-authored row)
+            // has no slot `ni` to remove — `Vec::remove`
+            // panicked on both. The MCP `delete_node`
+            // handler validates against the definition,
+            // not the per-frame pose rows.
+            if let Some(pose) = frame.poses.get_mut(fi) {
+                if ni < pose.angles.len() {
+                    pose.angles.remove(ni);
+                }
+            }
         }
         self.selected_node = None;
         self.status = "Segment deleted.".into();
@@ -1012,7 +1070,18 @@ impl EditorCore {
     /// outside the timeline (or the move is empty).
     pub fn shift_frames(&mut self, from: usize, count: usize, delta: i32) -> bool {
         let n = self.project.frames.len();
-        if count == 0 || delta == 0 || from >= n || from + count > n {
+        // Wave 11 (E6): `from + count` must not be computed
+        // unchecked — `count` arrives from MCP arguments
+        // (`shift_frames`), where a huge count wrapped the
+        // sum in release builds, passed this guard, and
+        // panicked in the `drain` below (start > end). A
+        // sum that cannot be represented is an out-of-range
+        // block: refuse it like any other.
+        let block_fits = from
+            .checked_add(count)
+            .map(|end| end <= n)
+            .unwrap_or(false);
+        if count == 0 || delta == 0 || from >= n || !block_fits {
             return false;
         }
         let target = from as i32 + delta;
@@ -1183,6 +1252,19 @@ impl EditorCore {
             .any(|frame| frame.poses.len() != self.project.figures.len())
         {
             self.status = "Copied frames have a different figure count.".into();
+            return false;
+        }
+        // Wave 11 (E6): the same stale-rig refusal as
+        // `paste_frame` — a clipboard frame copied before
+        // a segment edit carries fewer angles than the
+        // grown definition, and pasting it would plant a
+        // render panic in `model::evaluate`.
+        if self
+            .frame_clipboard
+            .iter()
+            .any(|frame| !self.frame_poses_match(frame))
+        {
+            self.status = "Copied frames' poses no longer match the figures' rigs.".into();
             return false;
         }
         let at = at.min(self.project.frames.len());
@@ -1436,6 +1518,11 @@ impl EditorCore {
             .and_then(|f| f.poses.get(fi))
             .and_then(|p| p.angles.get(ni).copied())
             .unwrap_or(0.0);
+        // Wave 11 (C3): this is the graph panel's primary Key
+        // button — it must be an undo step like every other
+        // mutation; previously it neither snapshotted nor
+        // counted toward the autosave cadence.
+        self.snapshot();
         let ch = crate::graph::channel_mut(
             &mut self.project.channels,
             fi,
@@ -1448,6 +1535,14 @@ impl EditorCore {
     /// Remove all graph channels (the Graph panel edits them in a
     /// later pass; clearing must always be possible).
     pub fn clear_graph(&mut self) {
+        // Wave 11 (C3): an undo step like every other mutation
+        // (previously not undoable at all), with the house
+        // empty-guard so an empty clear records nothing.
+        if self.project.channels.is_empty() {
+            self.status = "No graph channels to clear.".into();
+            return;
+        }
+        self.snapshot();
         self.project.channels.clear();
         self.status = "Graph channels cleared.".into();
     }
@@ -1852,7 +1947,14 @@ impl EditorCore {
         let fi = self.selected_figure.min(self.project.figures.len() - 1);
         self.project.figures.remove(fi);
         for frame in &mut self.project.frames {
-            frame.poses.remove(fi);
+            // Wave 11 (E6): a frame where the figure never
+            // appeared holds a shorter pose row (no slot for
+            // `fi`) — `Vec::remove` there panicked. The MCP
+            // `delete_figure` handler validates the figure
+            // index, not per-frame pose presence.
+            if fi < frame.poses.len() {
+                frame.poses.remove(fi);
+            }
         }
         // Every figure-indexed reference follows the removal
         // (Phase F figure_ops census: particles, FX clips,
@@ -1882,7 +1984,13 @@ impl EditorCore {
         let target = target as usize;
         self.project.figures.swap(fi, target);
         for frame in &mut self.project.frames {
-            frame.poses.swap(fi, target);
+            // Wave 11 (E6 residual): swap pose rows only where
+            // both exist — Vec::swap panics on a short row (a
+            // frame missing a figure's pose), the same absence
+            // class as the bend rows guarded below.
+            if fi < frame.poses.len() && target < frame.poses.len() {
+                frame.poses.swap(fi, target);
+            }
             // Bend rows are per-figure like pose rows;
             // swap them where both rows exist (the table
             // is sparse — a missing row reads as 0.0).
@@ -1917,8 +2025,35 @@ impl EditorCore {
 
     // ---- Frame clipboard, timing, project settings ----
 
+    /// True when every pose row in `frame` lines up with
+    /// the project's figures: one pose per figure, and
+    /// each pose's angle count equal to its figure's node
+    /// count — the alignment `model::evaluate` assumes
+    /// when it indexes `pose.angles[i]`. The paste ops
+    /// refuse clipboard frames that fail this (a frame
+    /// copied before a figure or segment edit), instead
+    /// of planting a pose the next render would panic on
+    /// (Wave 11, E6).
+    fn frame_poses_match(&self, frame: &crate::model::Frame) -> bool {
+        frame.poses.len() == self.project.figures.len()
+            && frame
+                .poses
+                .iter()
+                .zip(self.project.figures.iter())
+                .all(|(pose, fig)| pose.angles.len() == fig.def.nodes.len())
+    }
+
     pub fn copy_frame(&mut self) {
-        self.clipboard = Some(self.project.frames[self.current].clone());
+        // Wave 11 (E6): a project can legitimately hold
+        // zero frames (it loads that way via MCP
+        // `load_project`), and indexing `frames[current]`
+        // then panicked — the MCP `copy_frame` tool takes
+        // no arguments, so no handler check can cover it.
+        let Some(frame) = self.project.frames.get(self.current).cloned() else {
+            self.status = "No frame to copy.".into();
+            return;
+        };
+        self.clipboard = Some(frame);
         self.status = format!("Frame {} copied.", self.current + 1);
     }
 
@@ -1931,10 +2066,31 @@ impl EditorCore {
             self.status = "Copied frame has a different figure count.".into();
             return;
         }
+        // Wave 11 (E6): the copied frame's poses must also
+        // still match the figures' rigs — a segment added
+        // after the copy grew the definition and every live
+        // frame's angle vec, but not the clipboard's, and
+        // `model::evaluate` indexes `pose.angles[i]`
+        // directly, so pasting the stale frame would plant
+        // a render panic (the same class the Wave 10 D7
+        // guard closed in `copy_pose_between`).
+        if !self.frame_poses_match(&frame) {
+            self.status = "Copied frame's poses no longer match the figures' rigs.".into();
+            return;
+        }
         self.snapshot();
-        self.project.frames.insert(self.current + 1, frame);
-        self.current += 1;
-        self.status = format!("Frame pasted at {}.", self.current + 1);
+        // Wave 11 (E6): an empty timeline has no current
+        // frame to insert after — `insert(current + 1)`
+        // panicked on it — so the pasted frame becomes
+        // frame 1 there.
+        let at = if self.project.frames.is_empty() {
+            0
+        } else {
+            self.current + 1
+        };
+        self.project.frames.insert(at, frame);
+        self.current = at;
+        self.status = format!("Frame pasted at {}.", at + 1);
     }
 
     pub fn adjust_frame_duration(&mut self, factor: f32) {
@@ -2075,7 +2231,12 @@ impl EditorCore {
             Some(self.selected_figure)
         };
         self.status = match self.project.camera_follow {
-            Some(fi) => format!("Camera follows {}.", self.project.figures[fi].name),
+            // Wave 11 (C2 flag): resolve the name fallibly — a
+            // stale selection must not panic the status line.
+            Some(fi) => match self.project.figures.get(fi) {
+                Some(f) => format!("Camera follows {}.", f.name),
+                None => format!("Camera follows figure {}.", fi + 1),
+            },
             None => "Camera follow off.".into(),
         };
     }
@@ -2348,6 +2509,11 @@ impl EditorCore {
             .project
             .audio
             .iter()
+            // Wave 11 (B6 B-A): muted clips are silent in
+            // playback and in the export mux — the mixdown
+            // must exclude them too, or a muted clip sounds
+            // in the mix the user renders from here.
+            .filter(|c| !c.muted)
             .map(|c| crate::audio_edit::MixClip {
                 path: c.path.clone(),
                 start_secs: c.start_frame as f32 / fps,
@@ -3712,7 +3878,9 @@ impl EditorCore {
                 path: out.to_string_lossy().into_owned(),
                 start_frame: clip.start_frame.saturating_add(shift),
                 gain: clip.gain,
-                muted: false,
+                // Wave 11 (B6 B-B): a split must not unmute —
+                // the segments carry the source clip's flag.
+                muted: clip.muted,
             });
         }
         let n = segments.len();
@@ -3735,14 +3903,29 @@ impl EditorCore {
     // ---- Movieclips ----
 
     pub fn make_clip_from_figure(&mut self) {
-        self.snapshot();
         let fi = self.selected_figure;
+        // Wave 11 (E6 residual): guard the selection and the
+        // per-frame pose reads — on a project where a frame
+        // lacks this figure's pose row (an import mid-repair)
+        // the direct indexing panicked. The fallback chain is
+        // create_clip_from_figure's idiom.
+        if fi >= self.project.figures.len() {
+            self.status = "No figure selected to make a clip from.".into();
+            return;
+        }
+        self.snapshot();
         let fig = &self.project.figures[fi];
+        let mut fallback =
+            fig.def.rest_pose([self.project.stage[0] / 2.0, self.project.stage[1] / 2.0]);
         let frames: Vec<crate::model::Pose> = self
             .project
             .frames
             .iter()
-            .map(|f| f.poses[fi].clone())
+            .map(|f| {
+                let pose = f.poses.get(fi).cloned().unwrap_or_else(|| fallback.clone());
+                fallback = pose.clone();
+                pose
+            })
             .collect();
         let name = format!("{} clip", fig.name);
         self.project.clips.push(crate::model::ClipDef {
@@ -4030,6 +4213,209 @@ impl EditorCore {
         );
     }
 
+    /// Wave 11 (C6): set a clip's loop mode directly — one
+    /// undo step, the direct setter `cycle_clip_loop` never
+    /// had (the panel reaches a target in up to two cycles
+    /// via `apply_loop_mode`). Setting the current mode is a
+    /// no-op in the `apply_loop_mode` discipline: no snapshot,
+    /// no status churn.
+    pub fn set_clip_loop_mode(&mut self, index: usize, mode: crate::model::ClipLoop) {
+        let Some(clip) = self.project.clips.get(index) else {
+            self.status = "No such clip.".into();
+            return;
+        };
+        if clip.loop_mode == mode {
+            return;
+        }
+        self.snapshot();
+        self.project.clips[index].loop_mode = mode;
+        self.status = format!(
+            "Clip loop: {}.",
+            match mode {
+                crate::model::ClipLoop::Loop => "loop",
+                crate::model::ClipLoop::PingPong => "ping-pong",
+                crate::model::ClipLoop::Once => "once",
+            }
+        );
+    }
+
+    /// Wave 11 (C2 GAP-3): hold the camera over frames
+    /// `from..=to` — the camera panel's Hold, lifted from
+    /// clips of panel code into the core so the panel and MCP
+    /// run the identical write: the camera in effect at the
+    /// current frame (position/zoom via `camera_here`, the
+    /// angle wrapped via `norm_deg`) is stamped onto every
+    /// frame of the span under ONE snapshot.
+    pub fn hold_camera(&mut self, from: usize, to: usize) {
+        if from > to || to >= self.project.frames.len() {
+            self.status = "No frames to hold the camera over.".into();
+            return;
+        }
+        let (x, y, zoom) = self.camera_here();
+        // The held angle is stamped wrapped, like a paste:
+        // `camera_angle_at` can return an unwrapped stored
+        // angle at the end keys (see `angle_deg`), and the
+        // hold writes it onto every frame of the span.
+        let angle = crate::model::norm_deg(self.project.camera_angle_at(self.current as f32));
+        self.snapshot();
+        for frame in from..=to {
+            self.project.set_camera_key(frame, x, y, zoom);
+            if let Some(k) = self.project.camera.iter_mut().find(|k| k.frame == frame) {
+                k.angle = angle;
+            }
+        }
+        self.status = format!("Camera held over frames {}–{}.", from + 1, to + 1);
+    }
+
+    // ---- Movieclip list ops (Wave 11 port of the clips
+    // panel's field-write dispatches, C6 §5: the panel fns in
+    // clips_panel.rs now delegate here so the panel and MCP
+    // run one implementation. Discipline is the panel's own:
+    // an out-of-range index only sets the status ("No such
+    // clip.", no snapshot); a real change is exactly one
+    // snapshot, the write, and the panel's status line.)
+
+    /// Duplicate clip `clip_idx`: the clone is APPENDED
+    /// (named `"<name> copy"`), so no stored clip index
+    /// shifts. Returns the copy's index.
+    pub fn duplicate_clip(&mut self, clip_idx: usize) -> Option<usize> {
+        let Some(clip) = self.project.clips.get(clip_idx) else {
+            self.status = "No such clip.".into();
+            return None;
+        };
+        let mut copy = clip.clone();
+        copy.name = format!("{} copy", copy.name);
+        self.snapshot();
+        self.project.clips.push(copy);
+        let new_index = self.project.clips.len() - 1;
+        self.status = format!(
+            "Duplicated clip {} as clip {}.",
+            clip_idx + 1,
+            new_index + 1
+        );
+        Some(new_index)
+    }
+
+    /// Rename clip `clip_idx` to the resolved field text
+    /// (trimmed; the current name when nothing usable was
+    /// typed). A rename resolving to the current name is a
+    /// no-op — no snapshot, no status churn. A live session's
+    /// identity follows its clip. Returns true on a change.
+    pub fn rename_clip(&mut self, clip_idx: usize, field_text: &str) -> bool {
+        let Some(current) = self.project.clips.get(clip_idx).map(|c| c.name.clone()) else {
+            self.status = "No such clip.".into();
+            return false;
+        };
+        let trimmed = field_text.trim();
+        let name = if trimmed.is_empty() {
+            current.clone()
+        } else {
+            trimmed.to_string()
+        };
+        if name == current {
+            return false;
+        }
+        self.snapshot();
+        self.project.clips[clip_idx].name = name.clone();
+        if let Some(session) = self.clip_edit.as_mut() {
+            if session.clip == clip_idx {
+                session.name = name.clone();
+            }
+        }
+        self.status = format!("Clip {} renamed to {name}.", clip_idx + 1);
+        true
+    }
+
+    /// Delete clip `clip_idx`: removal shifts later indices,
+    /// so figure `clip` references and the clip-edit session
+    /// are remapped through the delete mapping in the same
+    /// write (a figure whose clip is deleted falls back to
+    /// its timeline poses; a session whose clip is deleted
+    /// ends). Returns true when a clip was removed.
+    pub fn delete_clip(&mut self, clip_idx: usize) -> bool {
+        let Some(name) = self.project.clips.get(clip_idx).map(|c| c.name.clone()) else {
+            self.status = "No such clip.".into();
+            return false;
+        };
+        self.snapshot();
+        self.project.clips.remove(clip_idx);
+        for fig in &mut self.project.figures {
+            fig.clip = clip_target_after_delete(fig.clip, clip_idx);
+        }
+        if let Some(session) = self.clip_edit.clone() {
+            self.clip_edit = clip_target_after_delete(Some(session.clip), clip_idx)
+                .map(|clip| ClipEditSession { clip, ..session });
+        }
+        self.status = format!("Clip {} ({name}) deleted.", clip_idx + 1);
+        true
+    }
+
+    /// Move clip `clip_idx` one slot up or down; stored clip
+    /// indices (figures, the session) follow through the swap
+    /// mapping. Returns true when the swap happened.
+    pub fn move_clip(&mut self, clip_idx: usize, up: bool) -> bool {
+        if clip_idx >= self.project.clips.len() {
+            self.status = "No such clip.".into();
+            return false;
+        }
+        let other = if up {
+            if clip_idx == 0 {
+                self.status = format!("Clip {} is already first.", clip_idx + 1);
+                return false;
+            }
+            clip_idx - 1
+        } else if clip_idx + 1 >= self.project.clips.len() {
+            self.status = format!("Clip {} is already last.", clip_idx + 1);
+            return false;
+        } else {
+            clip_idx + 1
+        };
+        self.snapshot();
+        self.project.clips.swap(clip_idx, other);
+        for fig in &mut self.project.figures {
+            fig.clip = clip_target_after_swap(fig.clip, clip_idx, other);
+        }
+        if let Some(session) = self.clip_edit.clone() {
+            if let Some(clip) = clip_target_after_swap(Some(session.clip), clip_idx, other) {
+                self.clip_edit = Some(ClipEditSession { clip, ..session });
+            }
+        }
+        let name = self.project.clips[other].name.clone();
+        self.status = format!(
+            "Clip {} ({name}) moved {}.",
+            other + 1,
+            if up { "up" } else { "down" }
+        );
+        true
+    }
+
+    /// Insert a figure playing clip `clip_idx` — the
+    /// parameterised form of `insert_clip_figure` (which
+    /// always inserts the FIRST clip): a figure built from
+    /// the clip's def and name, coloured
+    /// `FIGURE_COLORS[(idx + 3) % 6]` where `idx` is the
+    /// pre-insert figure count, pointed at the clip and
+    /// selected. Returns true when a figure was inserted.
+    pub fn insert_clip_figure_at(&mut self, clip_idx: usize) -> bool {
+        let Some(clip) = self.project.clips.get(clip_idx).cloned() else {
+            self.status = "No such clip.".into();
+            return false;
+        };
+        self.snapshot();
+        let idx = self.project.figures.len();
+        let color = FIGURE_COLORS[(idx + 3) % FIGURE_COLORS.len()];
+        self.project.add_figure_with(
+            clip.def.clone(),
+            &clip.name,
+            color,
+            [380.0 + 40.0 * idx as f32, 450.0],
+        );
+        self.project.figures[idx].clip = Some(clip_idx);
+        self.selected_figure = idx;
+        self.status = format!("Inserted movieclip {}.", clip.name);
+        true
+    }
+
     // ---- Named projects ----
 
     /// Save the project under its (slugified) name in
@@ -4057,6 +4443,56 @@ impl EditorCore {
     pub fn note_project_swapped(&mut self) {
         self.edit_count = 0;
         self.last_autosave_count = 0;
+        // Wave 11 (E9): record the swap for the shell's poll.
+        self.project_swaps += 1;
+        // Wave 11 (C6): a clip-edit session must settle against
+        // the NEW project exactly as it does after undo/redo —
+        // every swap path funnels through here, so the session
+        // can never keep editing a same-index different clip.
+        self.repair_clip_session_after_history();
+    }
+
+    /// Wave 11 (E9): how many wholesale project swaps this core
+    /// has seen; the shell snapshots it around the live-MCP
+    /// drain and clears stale panel selections when it moves.
+    pub fn project_swaps(&self) -> usize {
+        self.project_swaps
+    }
+
+    /// Wave 11 (E9): record a wholesale project replacement
+    /// that is NOT a baseline restart (the MCP io Nodes/.stk
+    /// import path swaps the project snapshot-first, so undo
+    /// survives — but panel selections must still settle).
+    pub fn note_project_replaced(&mut self) {
+        self.project_swaps += 1;
+        self.repair_clip_session_after_history();
+    }
+
+    /// Wave 11 (A5): drop both history stacks without touching
+    /// the project — the `.piv` import contract (`import_piv`
+    /// clears both), exposed so the MCP io import path can
+    /// mirror the GUI exactly.
+    pub fn clear_history(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
+
+    /// Wave 11 (E9): after an MCP-driven open or import, point
+    /// the project-file selector at the loaded file — the
+    /// insert-or-select rule the Home panel's open applies —
+    /// so the selector, Home's "current project" marking and
+    /// Reopen suppression name the project actually open
+    /// (previously they kept naming the previous file).
+    pub fn note_project_loaded(&mut self, path: &std::path::Path) {
+        if self.project_files.is_empty() {
+            self.project_files = Self::list_project_files();
+        }
+        if let Some(pos) = self.project_files.iter().position(|p| p == path) {
+            self.project_index = pos;
+        } else {
+            self.project_files.push(path.to_path_buf());
+            self.project_index = self.project_files.len() - 1;
+        }
     }
 
     /// `save_named_project` against an explicit projects
@@ -4076,12 +4512,24 @@ impl EditorCore {
             return false;
         };
         let path = dir.join(format!("{slug}.json"));
+        // Wave 11 (A10): write atomically (temp sibling +
+        // rename) like projects::save — a crash mid-write must
+        // not tear the only copy of the project.
         let result = std::fs::create_dir_all(dir)
             .and_then(|_| serde_json::to_string_pretty(&self.project).map_err(std::io::Error::other))
-            .and_then(|text| std::fs::write(&path, text));
+            .and_then(|text| crate::projects::write_file_atomic(&path, &text));
         match result {
             Ok(()) => {
                 self.project_files = Self::list_project_files();
+                // Wave 11 (E9): the refresh replaces the list
+                // wholesale; re-resolve the index onto the file
+                // just saved, or the selector can silently land
+                // on a different project after a slug change.
+                if let Some(pos) = self.project_files.iter().position(|p| p == &path) {
+                    self.project_index = pos;
+                } else if self.project_index >= self.project_files.len() {
+                    self.project_index = self.project_files.len().saturating_sub(1);
+                }
                 // Wave 10 (D10 I1): a successful save IS
                 // the baseline — the session no longer
                 // reads dirty for work that is on disk
@@ -4566,7 +5014,20 @@ impl EditorCore {
             });
         }
         for (f, pose) in poses.into_iter().enumerate() {
-            self.project.frames[f].poses[idx] = pose;
+            // Wave 11 (E6): `add_figure_with` APPENDS the
+            // new figure's held pose to each frame's pose
+            // row, so on a frame whose row was short (a
+            // figure absent there — pose rows may be
+            // truncated) the appended slot is the row's
+            // last entry, not `idx`, and indexing
+            // `poses[idx]` panicked. Write the slot that
+            // was actually appended: `idx` when the row is
+            // figure-wide (the normal case, unchanged),
+            // the last entry otherwise.
+            let row = &mut self.project.frames[f].poses;
+            if let Some(slot) = row.get_mut(idx).or_else(|| row.last_mut()) {
+                *slot = pose;
+            }
         }
         self.selected_figure = idx;
         self.selected_node = None;
@@ -5233,6 +5694,179 @@ mod tests {
         core.copy_frame();
         core.paste_frame();
         assert_eq!(core.frame_count(), 6);
+    }
+
+    // ---- Wave 11 (E6): MCP-reachability panic regressions ----
+    //
+    // Each test below drives an EditorCore op with an
+    // adversarial-but-type-valid state or argument that an
+    // MCP client can produce (a loaded project with
+    // figure-absent pose rows, a zero-frame project, a huge
+    // range count, a clipboard frame that predates a rig
+    // edit). Every one of these panicked before the fix;
+    // each now refuses or skips and leaves the state
+    // consistent.
+
+    #[test]
+    fn wave11_shift_frames_huge_count_is_refused_not_a_panic() {
+        // MCP `shift_frames` (mcp.rs): `count` is a raw
+        // usize argument; usize::MAX wrapped `from + count`
+        // in release builds, passed the guard, and the
+        // frame drain panicked on the inverted range.
+        let mut core = EditorCore::new();
+        assert!(!core.shift_frames(1, usize::MAX, 1));
+        assert_eq!(core.frame_count(), 5, "nothing moved");
+        // A merely-too-big count is refused the same way.
+        assert!(!core.shift_frames(1, 999, 1));
+        assert_eq!(core.frame_count(), 5);
+    }
+
+    #[test]
+    fn wave11_delete_figure_skips_frames_where_it_is_absent() {
+        // MCP `delete_figure` (mcp.rs): a loaded project
+        // may hold frames whose pose row is truncated
+        // (the figure appears later); `Vec::remove(fi)`
+        // on those rows panicked.
+        let mut core = EditorCore::new();
+        core.add_figure();
+        assert_eq!(core.project.figures.len(), 2);
+        core.project.frames[0].poses.truncate(1);
+        core.selected_figure = 1;
+        core.delete_figure();
+        assert_eq!(core.project.figures.len(), 1);
+        assert_eq!(core.project.frames[0].poses.len(), 1, "absent row untouched");
+        assert_eq!(core.project.frames[1].poses.len(), 1, "present row removed");
+    }
+
+    #[test]
+    fn wave11_add_segment_skips_frames_where_the_figure_is_absent() {
+        // MCP `add_node` (mcp_tools.rs) -> add_segment:
+        // the handler validates the figure's definition,
+        // not per-frame pose presence; indexing
+        // `poses[fi]` on an absent row panicked.
+        let mut core = EditorCore::new();
+        core.add_figure();
+        core.project.frames[0].poses.truncate(1);
+        core.selected_figure = 1;
+        core.selected_node = Some(0);
+        let nodes_before = core.project.figures[1].def.nodes.len();
+        core.add_segment();
+        assert_eq!(core.project.figures[1].def.nodes.len(), nodes_before + 1);
+        assert_eq!(core.project.frames[0].poses.len(), 1, "absent row skipped");
+        assert_eq!(
+            core.project.frames[1].poses[1].angles.len(),
+            nodes_before + 1,
+            "present rows grew with the definition"
+        );
+    }
+
+    #[test]
+    fn wave11_delete_segment_skips_absent_and_short_pose_rows() {
+        // MCP `delete_node` (mcp_tools.rs) ->
+        // delete_segment: both an absent pose row and a
+        // pose whose angle vec is shorter than the
+        // definition panicked in the per-frame cleanup.
+        let mut core = EditorCore::new();
+        core.add_figure();
+        core.selected_figure = 1;
+        core.selected_node = Some(0);
+        core.add_segment(); // appends a leaf node to figure 1
+        let nodes_before = core.project.figures[1].def.nodes.len();
+        core.project.frames[0].poses.truncate(1);
+        core.project.frames[1].poses[1].angles.truncate(1);
+        // add_segment left the new leaf selected.
+        core.delete_segment();
+        assert_eq!(core.project.figures[1].def.nodes.len(), nodes_before - 1);
+        assert_eq!(
+            core.project.frames[1].poses[1].angles.len(),
+            1,
+            "short row skipped, not removed from"
+        );
+        assert_eq!(
+            core.project.frames[2].poses[1].angles.len(),
+            nodes_before - 1,
+            "well-formed rows lost the angle"
+        );
+    }
+
+    #[test]
+    fn wave11_copy_and_paste_frame_on_a_zero_frame_project() {
+        // MCP `copy_frame` / `paste_frame` (mcp.rs) take
+        // no index arguments, so no handler check exists:
+        // a zero-frame project (loadable via
+        // `load_project`) panicked both — copy indexed
+        // `frames[current]`, paste inserted at
+        // `current + 1` into an empty vec.
+        let mut core = EditorCore::new();
+        core.project.frames.clear();
+        core.current = 0;
+        core.copy_frame();
+        assert!(core.clipboard.is_none(), "nothing to copy");
+        assert_eq!(core.status, "No frame to copy.");
+
+        let mut donor = EditorCore::new();
+        donor.copy_frame();
+        core.clipboard = donor.clipboard.clone();
+        core.paste_frame();
+        assert_eq!(core.frame_count(), 1, "the paste became frame 1");
+        assert_eq!(core.current, 0);
+        assert_eq!(core.status, "Frame pasted at 1.");
+    }
+
+    #[test]
+    fn wave11_paste_frame_refuses_a_clipboard_frame_with_stale_angles() {
+        // MCP sequence copy_frame -> add_node ->
+        // paste_frame: the segment edit grows the rig and
+        // every live frame, but not the clipboard frame;
+        // pasting it would plant a pose whose angle count
+        // the renderer indexes past.
+        let mut core = EditorCore::new();
+        core.copy_frame();
+        core.selected_node = Some(0);
+        core.add_segment();
+        let before = core.frame_count();
+        core.paste_frame();
+        assert_eq!(core.frame_count(), before, "stale frame refused");
+        assert!(core.status.contains("no longer match"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn wave11_paste_range_refuses_a_stale_angle_clipboard() {
+        // The range twin of the paste_frame refusal:
+        // copy_range -> add_node -> paste_range.
+        let mut core = EditorCore::new();
+        assert!(core.copy_range(0, 1));
+        core.selected_node = Some(0);
+        core.add_segment();
+        assert!(!core.paste_range(0), "stale range refused");
+        assert_eq!(core.frame_count(), 5, "nothing inserted");
+        assert!(core.status.contains("no longer match"), "status: {}", core.status);
+    }
+
+    #[test]
+    fn wave11_fig3_bake_animation_writes_appended_slots_on_short_pose_rows() {
+        // MCP `fig3_bake_animation` (mcp_tools.rs): on a
+        // project with a figure-absent (truncated) pose
+        // row, `add_figure_with` appends the baked
+        // figure's pose at the row's end — indexing it
+        // back at the figure index panicked.
+        let mut core = EditorCore::new();
+        core.add_figure();
+        core.project.frames[0].poses.truncate(1);
+        core.enter_3d();
+        core.fig3_mark_pose_b();
+        core.fig3_bake_animation(3);
+        assert_eq!(core.project.figures.len(), 3, "the bake landed");
+        assert_eq!(
+            core.project.frames[0].poses.len(),
+            2,
+            "short row keeps its shape; the appended slot took the pose"
+        );
+        assert_eq!(
+            core.project.frames[1].poses.len(),
+            3,
+            "full rows are figure-wide"
+        );
     }
 
     #[test]

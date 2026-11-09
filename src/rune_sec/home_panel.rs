@@ -349,6 +349,55 @@
 //!   touches no file, recent or list entry — exactly
 //!   its label.
 //!
+//! ## Wave 11 — state sync when the project changes outside the GUI
+//!
+//! A live MCP client drives the same `EditorCore` the
+//! GUI renders (the `live_mcp` drain in `main.rs::poll`),
+//! and a stdio MCP server shares the `./projects`
+//! directory. Audited step by step against the GUI's
+//! own swap paths, the panel's side of that sync is:
+//!
+//! - **Baseline / session reset** — core-side, and the
+//!   MCP swap paths already call them
+//!   (`note_project_swapped` in `mcp_tools::tool_new_project`
+//!   and `mcp_io::replace_project_open` /
+//!   `replace_project_import`). Nothing panel-side.
+//! - **The library listing** — sound for every MCP
+//!   write that creates or replaces a directory entry
+//!   (stdio and live `save_project` write atomically,
+//!   temp + rename: the directory mtime moves and the
+//!   scan refills). The one blind spot was an *in-place*
+//!   rewrite of the open project's file — the shape of
+//!   `save_named_project` (GUI and live MCP alike) —
+//!   which moves no directory mtime: the row kept its
+//!   pre-save thumbnail indefinitely (the light metadata
+//!   already re-stats per file, so counts were never
+//!   the stale part). [`HomePanelState::sync_open_file`]
+//!   now watches that one file's mtime per render and
+//!   drops the caches when it moves.
+//! - **The recovery banner** — the offer is a verdict
+//!   about the session it was captured in; a swap
+//!   behind the panel (no panel code runs on the MCP
+//!   path) now suppresses it via the captured
+//!   [`CoreMark`] ([`HomePanelState::recovery_offer_live`])
+//!   instead of offering the old session's snapshot over
+//!   the MCP-loaded project — a press the dirty gate
+//!   cannot guard, because the swap itself restarted
+//!   the baseline the gate reads.
+//! - **What the panel cannot fix** (integrator items,
+//!   E9's Wave 11 report): the core's `project_files` /
+//!   `project_index` after an MCP load (so
+//!   [`current_project_path`] — and with it the rows'
+//!   current marking and the reopen suppression — names
+//!   the loaded file), the recents list on MCP
+//!   loads/saves (no MCP path calls
+//!   `shell::touch_recent`, so Reopen and the File menu
+//!   keep pointing at the last GUI-touched project), and
+//!   the shell-side index selections (`State::
+//!   stroke_selected` and its siblings) after a live
+//!   drain swaps the project — the C6 clear lives in
+//!   GUI press handlers the drain never runs.
+//!
 //! ## Integrator wiring (main.rs)
 //!
 //! ```ignore
@@ -451,6 +500,115 @@ pub struct HomePanelState {
     /// via [`sort_entries`]. Flipped by the `home-sort`
     /// toggle in the search row.
     pub sort_by_name: bool,
+    /// The open project's file stamp (Wave 11, E9):
+    /// `(path, mtime)` of the file the core's selector
+    /// points at, as last seen by the panel builder
+    /// ([`HomePanelState::sync_open_file`]). The scan
+    /// cache is keyed on the projects *directory's*
+    /// mtime, which an in-place rewrite of an existing
+    /// file does not move — and an in-place rewrite is
+    /// exactly what a save is (`save_named_project_to`
+    /// writes with `fs::write`, no directory entry
+    /// changes), whether the press was the GUI's or a
+    /// live MCP client's `save_named_project`. Without
+    /// this stamp the panel kept serving the pre-save
+    /// scan entry for that file: its row's thumbnail —
+    /// keyed on the scan entry's mtime, which never
+    /// moved — showed frame 0 as it stood *before* the
+    /// save, indefinitely. Interior mutability for the
+    /// same reason as the caches.
+    open_file_stamp: RefCell<Option<(PathBuf, SystemTime)>>,
+    /// The core-project identity the current recovery
+    /// offer was captured for (Wave 11, E9):
+    /// [`core_mark`] of the project that was current
+    /// when [`toggle_open`] (or the first render of a
+    /// boot offer) captured the verdict. The banner's
+    /// offer is a statement about *that* session — "the
+    /// snapshot holds unsaved work newer than your last
+    /// save" — so when the core's project is replaced
+    /// behind the panel's back (a live MCP `load_project`
+    /// / `new_project` drain in `main.rs::poll` calls no
+    /// panel code at all) the offer must stop rendering:
+    /// its Recover press would install the snapshot over
+    /// the MCP-loaded project, and the discard gate
+    /// cannot save the user — the swap restarted the
+    /// dirty baseline, so the session reads clean and
+    /// the first press runs. `None` until the first
+    /// render records it. Interior mutability for the
+    /// same reason as the caches.
+    offer_mark: RefCell<Option<CoreMark>>,
+}
+
+/// A cheap identity for the core's current project
+/// (Wave 11, E9): the stored name, the shape counts and
+/// the file the core's selector points at. Two renders
+/// of the same project — however much posing, drawing
+/// or FX editing happened between them — produce the
+/// same mark; every project *swap* path (GUI open / New
+/// / Recover, MCP `load_project` / `import_file` /
+/// `new_project`) replaces the project wholesale and
+/// moves at least one component in practice. This is a
+/// staleness guard for the panel's session claims (the
+/// recovery offer), not a content hash: a swap to a
+/// project with the same name, the same counts and the
+/// same selector file is indistinguishable from no swap
+/// — and leaves the panel showing an equivalent session,
+/// so nothing it renders is a lie about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoreMark {
+    name: String,
+    figures: usize,
+    frames: usize,
+    strokes: usize,
+    file: Option<std::ffi::OsString>,
+}
+
+/// The [`CoreMark`] of the project the core currently
+/// holds: pure reads, no disk access beyond the
+/// selector's file *name* (no stat — the name is read
+/// off the path the core already carries).
+pub fn core_mark(core: &EditorCore) -> CoreMark {
+    CoreMark {
+        name: core.project.name.clone(),
+        figures: core.project.figures.len(),
+        frames: core.project.frames.len(),
+        strokes: core.project.strokes.len(),
+        file: current_project_path(core)
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_os_string()),
+    }
+}
+
+/// Whether a recovery offer captured for `mark` still
+/// describes the session the core holds now (Wave 11,
+/// E9): an offer with no recorded mark (a boot offer on
+/// its first render) matches — the caller records the
+/// current mark in that case; a recorded mark matches
+/// only itself.
+fn offer_matches(mark: Option<&CoreMark>, current: &CoreMark) -> bool {
+    match mark {
+        None => true,
+        Some(m) => m == current,
+    }
+}
+
+/// The open-file stamp transition (Wave 11, E9), pure
+/// so it is testable without the filesystem: the caches
+/// are dropped only when the *same* file's mtime moved
+/// — an in-place rewrite of the open project. A
+/// different path is a swap, which changes no file and
+/// invalidates nothing; a missing stamp on either side
+/// (first sight, an unstat'able file) learns silently.
+fn stamp_action(
+    old: Option<&(PathBuf, SystemTime)>,
+    new: Option<&(PathBuf, SystemTime)>,
+) -> bool {
+    match (old, new) {
+        (Some((old_path, old_time)), Some((new_path, new_time))) => {
+            old_path == new_path && old_time != new_time
+        }
+        _ => false,
+    }
 }
 
 impl HomePanelState {
@@ -583,6 +741,72 @@ impl HomePanelState {
         *self.scan_cache.borrow_mut() = None;
         self.meta_cache.borrow_mut().clear();
         self.thumb_cache.borrow_mut().clear();
+    }
+
+    /// Watch the open project's file for an in-place
+    /// rewrite (Wave 11, E9): one `stat` of the file the
+    /// core's selector points at, per render — the same
+    /// cost class as the directory stat the scan cache
+    /// already pays. When the same file's mtime has
+    /// moved since the last render, the file was
+    /// rewritten in place (a save: the GUI's Save press
+    /// and a live MCP `save_named_project` both write
+    /// with `fs::write`, which moves no directory mtime,
+    /// so the scan cache's key cannot see it), and all
+    /// three caches are dropped: the next
+    /// [`HomePanelState::projects`] call rescans, and the
+    /// row for the saved project re-reads its counts and
+    /// re-renders its thumbnail at the new mtime instead
+    /// of serving the pre-save frame 0 indefinitely.
+    /// Called from the panel builder before the scan is
+    /// read, open or closed — dropping the caches while
+    /// closed costs nothing (the refill waits for the
+    /// next open). Saves that create or replace a
+    /// directory entry (MCP `save_project`'s atomic
+    /// temp+rename, a duplicate, a delete) move the
+    /// directory mtime and never needed this watch.
+    pub fn sync_open_file(&self, current: Option<&Path>) {
+        let stamp = current.and_then(|path| {
+            std::fs::metadata(path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|mtime| (path.to_path_buf(), mtime))
+        });
+        let invalidate = stamp_action(self.open_file_stamp.borrow().as_ref(), stamp.as_ref());
+        if invalidate {
+            self.invalidate_caches();
+        }
+        *self.open_file_stamp.borrow_mut() = stamp;
+    }
+
+    /// Whether the recovery banner may render for the
+    /// project the core holds *now* (Wave 11, E9): the
+    /// stored verdict ([`HomePanelState::recovery_offer`])
+    /// and the identity it was captured for. The first
+    /// render of an offer records the current
+    /// [`CoreMark`] (a boot offer's mark is unrecorded —
+    /// [`initial_state`] has no core to read); once a
+    /// mark is recorded, a core whose mark no longer
+    /// matches — the project was swapped behind the
+    /// panel, the live-MCP case — suppresses the banner
+    /// instead of offering to recover a snapshot over a
+    /// project it was never captured about. The stored
+    /// verdict itself is left untouched: closing and
+    /// reopening Home re-captures it against the
+    /// then-current project ([`toggle_open`]).
+    pub fn recovery_offer_live(&self, core: &EditorCore) -> bool {
+        if !self.recovery_offer {
+            return false;
+        }
+        let current = core_mark(core);
+        let mut recorded = self.offer_mark.borrow_mut();
+        match recorded.as_ref() {
+            None => {
+                *recorded = Some(current);
+                true
+            }
+            Some(mark) => offer_matches(Some(mark), &current),
+        }
     }
 }
 
@@ -1665,6 +1889,19 @@ pub fn toggle_open(s: &mut State) {
     s.home_panel.open = !s.home_panel.open;
     if s.home_panel.open {
         s.home_panel.recovery_offer = shell::recovery_is_newer_than_last_project();
+        // Wave 11 (E9): the verdict just captured is a
+        // statement about the project current *now* —
+        // record its identity, so a later swap behind
+        // the panel (live MCP) stops the banner instead
+        // of letting it offer this session's snapshot
+        // over a different project (see
+        // `recovery_offer_live`).
+        let mark = if s.home_panel.recovery_offer {
+            Some(core_mark(&s.core))
+        } else {
+            None
+        };
+        *s.home_panel.offer_mark.borrow_mut() = mark;
         let _ = shell::write_recovery(&s.core.project);
     }
 }
@@ -2104,6 +2341,12 @@ fn project_row_marked(
 /// field, New project, and the project rows.
 pub fn home_panel(s: &State, t: &Theme) -> El {
     let home = &s.home_panel;
+    // Wave 11 (E9): watch the open project's file for an
+    // in-place rewrite (a save the directory mtime
+    // cannot see) before anything reads the caches —
+    // every frame, open or closed, so a closed panel
+    // never opens onto a pre-save scan either.
+    home.sync_open_file(current_project_path(&s.core));
     let mut panel = design::panel_col("home-panel", t);
     panel = panel.child(btn("home", "Home", home.open, t, |s: &mut State| {
         toggle_open(s);
@@ -2185,7 +2428,7 @@ pub fn home_panel(s: &State, t: &Theme) -> El {
             }),
     );
     card = card.child(design::divider(t));
-    if home.recovery_offer {
+    if home.recovery_offer_live(&s.core) {
         card = card.child(recovery_banner(s, t));
     }
     card = card.child(
@@ -2351,6 +2594,72 @@ mod tests {
         assert!(!state.open);
         assert!(state.search.text.is_empty());
         assert!(!state.recovery_offer);
+    }
+
+    // ---- Wave 11 (E9): MCP-direction state sync ----
+
+    #[test]
+    fn stamp_action_fires_only_on_an_in_place_rewrite() {
+        let path = PathBuf::from("projects/demo.json");
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100);
+        let t1 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(200);
+        let seen = (path.clone(), t0);
+        // First sight and unstat'able files learn
+        // silently — no invalidation.
+        assert!(!stamp_action(None, Some(&seen)));
+        assert!(!stamp_action(Some(&seen), None));
+        assert!(!stamp_action(None, None));
+        // The same file at the same mtime: no rewrite.
+        assert!(!stamp_action(Some(&seen), Some(&seen)));
+        // A swap to a different file changes no file.
+        let other = (PathBuf::from("projects/other.json"), t1);
+        assert!(!stamp_action(Some(&seen), Some(&other)));
+        // The same file, a moved mtime: the in-place
+        // rewrite (a save) the directory mtime cannot
+        // see — drop the caches.
+        assert!(stamp_action(Some(&seen), Some(&(path, t1))));
+    }
+
+    #[test]
+    fn core_mark_tracks_the_project_not_its_edits() {
+        let mut core = EditorCore::new();
+        let before = core_mark(&core);
+        // A pure pose edit moves no mark component:
+        // the mark is a swap guard, not a content hash.
+        core.project.frames[0].poses[0].root = [1.0, 2.0];
+        assert_eq!(core_mark(&core), before);
+        // A wholesale replacement — the shape every
+        // MCP swap takes — moves it.
+        dispatch_new(&mut core);
+        core.project.name = "Agent Film".into();
+        assert_ne!(core_mark(&core), before);
+    }
+
+    #[test]
+    fn recovery_offer_stops_rendering_after_an_outside_swap() {
+        let mut core = EditorCore::new();
+        let mut panel = HomePanelState::default();
+        // No offer: never live.
+        assert!(!panel.recovery_offer_live(&core));
+        panel.recovery_offer = true;
+        // The first live render records the identity
+        // the offer was captured for — the boot-offer
+        // path (initial_state has no core to read).
+        assert!(panel.recovery_offer_live(&core));
+        // Renders of the same session stay live.
+        assert!(panel.recovery_offer_live(&core));
+        // The project is replaced behind the panel —
+        // the live-MCP drain: no panel code runs, the
+        // core simply holds a different project. The
+        // offer was about the old session and must stop
+        // rendering (its Recover press would install
+        // the old snapshot over this project).
+        dispatch_new(&mut core);
+        core.project.name = "Loaded By MCP".into();
+        assert!(!panel.recovery_offer_live(&core));
+        // The stored verdict itself is untouched —
+        // reopening Home re-captures it (toggle_open).
+        assert!(panel.recovery_offer);
     }
 
     #[test]

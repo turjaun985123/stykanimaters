@@ -1,6 +1,21 @@
 //! SVG export: one vector file per authored frame, drawn with the
 //! same camera, shapes, strokes and particles as the rasterizer.
 //!
+//! Wave 11 (E8) parity pass: filled strokes, FX-clip particles
+//! (including Trail segments) and weather particles now emit
+//! here too — previously this writer silently dropped all
+//! three, so an MCP client exporting SVG got a different
+//! picture from the rasterizer/stage for the same project.
+//! See the module's fidelity notes in the Wave 11 report for
+//! what still differs (figure opacity, bends, z-order).
+//!
+//! XML safety: no user-controlled string is interpolated into
+//! the document — every `format!` argument below is a number,
+//! a `hex()` colour (u32-masked), or a fixed literal — so a
+//! hostile figure/project name cannot break the markup today.
+//! [`xml_escape`] is the pinned helper any future text
+//! emission (text instances, names) MUST route through.
+//!
 //! Camera rotation (wave 6) is applied by rotating points inside
 //! the `view` closure — the same `export::camera_rotate_offset`
 //! helper the rasterizer uses — rather than wrapping the scene in
@@ -11,12 +26,35 @@
 //! exporter emits is positioned through `view`, so nothing can be
 //! left unrotated by accident.
 
-use crate::export::{camera_rotate_offset, particles_at};
+use crate::export::{camera_rotate_offset, node_trail, particles_at};
 use crate::model::{evaluate, CapKind, Project, Shape, V2};
 use std::path::Path;
 
 fn hex(c: u32) -> String {
     format!("#{:06X}", c & 0xFF_FFFF)
+}
+
+/// Escape the five XML-significant characters for safe
+/// interpolation into SVG text content or a quoted attribute
+/// value: `&` first (it introduces every other entity), then
+/// `<`, `>`, `"` and `'`. Nothing in `write_frame_svg`
+/// interpolates user text today (see the module docs), but
+/// text instances and figure names are user-controlled —
+/// any future emission of them MUST pass through here, and
+/// the tests below pin the mapping so that day is safe.
+pub fn xml_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out += "&amp;",
+            '<' => out += "&lt;",
+            '>' => out += "&gt;",
+            '"' => out += "&quot;",
+            '\'' => out += "&apos;",
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// The ` stroke-opacity="…"` attribute for a drawing stroke
@@ -101,8 +139,12 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
             // geometry from the single spray source
             // (paint::spray_dots), so every renderer agrees on
             // where the dots land. Centres go through `view`
-            // exactly like polyline points do.
-            let r = (stroke.width * 0.5).max(1.0);
+            // exactly like polyline points do. The radius is
+            // scaled by the camera zoom, as the rasterizer
+            // scales it (Wave 11 E8: this was emitted raw,
+            // so dots shrank relative to the scene whenever
+            // the camera zoomed in).
+            let r = (stroke.width * 0.5).max(1.0) * zoom;
             for (centre, alpha) in crate::paint::spray_dots(&stroke.points, mark) {
                 let q = view(centre);
                 svg += &format!(
@@ -114,14 +156,50 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
                     alpha
                 );
             }
+        } else if stroke.fill.is_some() && stroke.points.len() >= 3 {
+            // Filled closed shape (Wave 11 E8): the stage
+            // draws `stroke.fill` as a filled polygon and —
+            // per its precedence in stage_layers.rs (spray,
+            // then fill, then scatter, then the plain
+            // polyline) — nothing else for this stroke: no
+            // outline, and scatter does NOT texture a filled
+            // stroke. This branch mirrors that precedence so
+            // SVG and stage agree; the rasterizer paints the
+            // same region in its pixel pass (Wave 11, E8).
+            // The fill alpha is the stroke's recorded
+            // opacity, uniform across the region, exactly as
+            // the stage's Filled prim carries it.
+            let fill = stroke.fill.unwrap();
+            let alpha = stroke.opacity.clamp(0.0, 1.0);
+            let opacity = if alpha < 1.0 {
+                format!(" fill-opacity=\"{alpha:.2}\"")
+            } else {
+                String::new()
+            };
+            let pts: Vec<String> = stroke
+                .points
+                .iter()
+                .map(|p| {
+                    let q = view(*p);
+                    format!("{:.1},{:.1}", q[0], q[1])
+                })
+                .collect();
+            svg += &format!(
+                "<polygon points=\"{}\" fill=\"{}\"{}/>\n",
+                pts.join(" "),
+                hex(fill),
+                opacity
+            );
         } else if stroke.scatter > 0.0 && !stroke.points.is_empty() {
             // Scattered stroke (Wave 10 adoption): dabs,
             // not a polyline — the same placements the
             // stage and the rasterizer compute
             // (paint::stroke_dabs at the shared spacing),
             // one circle per dab at the stroke's recorded
-            // opacity, uniform across dabs.
-            let r = (stroke.width * 0.5).max(1.0);
+            // opacity, uniform across dabs. The radius is
+            // zoom-scaled like the spray radius above (and
+            // like the rasterizer's disc pass).
+            let r = (stroke.width * 0.5).max(1.0) * zoom;
             let alpha = stroke.opacity.clamp(0.0, 1.0);
             for centre in crate::paint::stroke_dabs(
                 stroke,
@@ -183,7 +261,7 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
                         let id = format!("grad{grad_n}");
                         grad_n += 1;
                         defs += &format!(
-                            "<linearGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\"><stop offset=\"0\" stop-color=\"{}\"><stop offset=\"1\" stop-color=\"{}\"/></linearGradient>\n",
+                            "<linearGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\"><stop offset=\"0\" stop-color=\"{}\"/><stop offset=\"1\" stop-color=\"{}\"/></linearGradient>\n",
                             id, a[0], a[1], b[0], b[1], color,
                             hex(color2)
                         );
@@ -269,7 +347,82 @@ pub fn write_frame_svg(project: &Project, frame: usize, path: &Path) -> std::io:
             }
         }
     }
-    for (p, r, c, a) in particles_at(project, frame as f32) {
+    // Particle discs, in the rasterizer's own draw order:
+    // authored particle events first, then FX clips, then
+    // weather (export.rs `render_frame_at` appends them to
+    // one disc pass in exactly this order; the stage's
+    // stage_fx layer evaluates the same sources). Wave 11
+    // E8: this writer used to emit ONLY `particles_at`, so
+    // FX clips and weather vanished from SVG exports.
+    let mut discs: Vec<(V2, f32, [u8; 3], f32)> = particles_at(project, frame as f32);
+    for entry in &project.fx_clips {
+        // Hidden clips render nothing (the rasterizer's
+        // skip at its render source, mirrored here).
+        if entry.hidden {
+            continue;
+        }
+        let Some(fig) = project.figures.get(entry.figure) else {
+            continue;
+        };
+        if fig.hidden {
+            continue;
+        }
+        // `poses.get` where the rasterizer indexes directly:
+        // a figure absent from this frame has no anchor and
+        // its clip cannot emit — identical output wherever
+        // the rasterizer itself survives.
+        let Some(pose) = poses.get(entry.figure) else {
+            continue;
+        };
+        let pos = evaluate(&fig.def, pose);
+        let Some(&anchor) = pos.get(entry.node) else {
+            continue;
+        };
+        for (p, r, c, a) in crate::vfx::clip_particles(&entry.clip, frame as f32, anchor) {
+            discs.push((p, r, c, a));
+        }
+        // A live Trail clip also draws the node's real
+        // recent path as thin fading segments UNDER the
+        // particles (the rasterizer pushes them into its
+        // segment pass with half-width 1.6 * zoom, i.e. a
+        // 3.2 * zoom line here, at the trail alpha).
+        if entry.clip.kind == crate::vfx::ClipKind::Trail
+            && (frame as f32) >= entry.clip.start
+            && (frame as f32) < entry.clip.start + entry.clip.duration
+        {
+            let span = (entry.clip.duration * 0.5).clamp(2.0, 12.0);
+            for (a, b, c, alpha) in node_trail(project, frame as f32, entry.figure, entry.node, 8, span)
+            {
+                let qa = view(a);
+                let qb = view(b);
+                let opacity = if alpha < 1.0 {
+                    format!(" stroke-opacity=\"{alpha:.2}\"")
+                } else {
+                    String::new()
+                };
+                svg += &format!(
+                    "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"#{:02X}{:02X}{:02X}\" stroke-width=\"{:.1}\" stroke-linecap=\"round\"{}/>\n",
+                    qa[0],
+                    qa[1],
+                    qb[0],
+                    qb[1],
+                    c[0],
+                    c[1],
+                    c[2],
+                    3.2 * zoom,
+                    opacity
+                );
+            }
+        }
+    }
+    if let Some(weather) = &project.weather {
+        for (p, r, c, a) in
+            crate::vfx::weather_particles(weather, frame as f32, project.stage, project.fps)
+        {
+            discs.push((p, r, c, a));
+        }
+    }
+    for (p, r, c, a) in discs {
         let q = view(p);
         svg += &format!(
             "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{:.1}\" fill=\"#{:02X}{:02X}{:02X}\" fill-opacity=\"{:.2}\"/>\n",
@@ -588,6 +741,257 @@ mod tests {
             // output stays byte-identical.
             assert!(!line.contains("stroke-opacity"), "{line}");
             assert!(line.ends_with("stroke-linecap=\"round\"/>"), "{line}");
+        }
+    }
+
+    #[test]
+    fn xml_escape_escapes_the_five_significant_characters() {
+        assert_eq!(xml_escape("plain text 123"), "plain text 123");
+        assert_eq!(
+            xml_escape("a<b>c&d\"e'f"),
+            "a&lt;b&gt;c&amp;d&quot;e&apos;f"
+        );
+        // `&` escapes first: a pre-written entity double-escapes
+        // rather than passing through as markup.
+        assert_eq!(xml_escape("&lt;"), "&amp;lt;");
+        assert_eq!(xml_escape(""), "");
+    }
+
+    #[test]
+    fn svg_user_names_cannot_break_the_markup() {
+        // MCP clients can set arbitrary project/figure names.
+        // No name is interpolated into the SVG document (every
+        // format argument is numeric or a hex colour), so a
+        // hostile name can neither appear nor break the XML —
+        // this pins that audit result against regressions.
+        let mut project = Project::new_demo();
+        project.name = "x</svg><script>alert(1)</script>".into();
+        project.figures[0].name = "evil<name> & \"friends\"".into();
+        let dir = std::path::Path::new("/tmp/styk-svg-xml-names-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert!(!text.contains("<script"), "{text}");
+        assert!(!text.contains("evil"), "{text}");
+        assert!(text.ends_with("</svg>\n"), "{text}");
+    }
+
+    #[test]
+    fn svg_gradient_stops_are_both_self_closed() {
+        // The first <stop> used to be left unclosed, making
+        // every gradient-bearing SVG malformed XML (strict
+        // parsers — resvg, browsers in XML mode — reject it).
+        let mut project = Project::new_demo();
+        project.figures[0].def.nodes[2].style.color2 = Some(0x0000FF);
+        let dir = std::path::Path::new("/tmp/styk-svg-stop-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert!(
+            text.contains("/><stop offset=\"1\""),
+            "first stop not self-closed:\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_spray_radius_scales_with_camera_zoom() {
+        // The rasterizer scales spray/scatter dot radii by the
+        // camera zoom; the SVG writer emitted the raw radius,
+        // so at zoom 2 the dots rendered half their true size.
+        let mut project = Project::new_demo();
+        project.set_camera_key(0, 480.0, 360.0, 2.0);
+        let mark = crate::model::SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        };
+        project.strokes.push(crate::model::Stroke {
+            frame: 0,
+            points: vec![[100.0, 100.0], [200.0, 120.0]],
+            color: 0xC0FFEE,
+            width: 14.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: Some(mark),
+            opacity: 1.0,
+            scatter: 0.0,
+        });
+        let dir = std::path::Path::new("/tmp/styk-svg-spray-zoom-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert!(
+            text.contains("r=\"14.0\""),
+            "spray radius not zoom-scaled (7.0 * 2):\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_filled_stroke_exports_a_polygon_and_beats_scatter() {
+        // Stage precedence (stage_layers.rs): spray, then
+        // fill, then scatter, then the plain polyline. A
+        // filled stroke draws as its filled polygon ONLY —
+        // scatter must not turn it into dabs, and no polyline
+        // outline is drawn for it.
+        let mut project = Project::new_demo();
+        project.strokes.push(crate::model::Stroke {
+            frame: 0,
+            points: vec![[100.0, 100.0], [300.0, 100.0], [200.0, 300.0]],
+            color: 0x123456,
+            width: 4.0,
+            widths: Vec::new(),
+            fill: Some(0x112233),
+            spray: None,
+            opacity: 0.5,
+            scatter: 9.0,
+        });
+        let dir = std::path::Path::new("/tmp/styk-svg-fill-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        let poly = text
+            .lines()
+            .find(|l| l.contains("fill=\"#112233\""))
+            .expect("filled stroke polygon missing");
+        assert!(poly.starts_with("<polygon"), "{poly}");
+        assert!(poly.contains("fill-opacity=\"0.50\""), "{poly}");
+        // No polyline and no dab circles carry this stroke's
+        // outline colour: fill won over scatter and plain.
+        assert!(
+            !text.contains("stroke=\"#123456\""),
+            "filled stroke also drew its outline:\n{text}"
+        );
+        assert!(
+            !text.contains("fill=\"#123456\""),
+            "filled stroke also drew scatter dabs:\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_fx_clip_and_weather_discs_are_emitted() {
+        // Wave 11 E8: FX clips and weather used to vanish
+        // from SVG exports entirely. The disc count must grow
+        // by exactly what the shared vfx sources produce.
+        let plain = Project::new_demo();
+        let plain_dir = std::path::Path::new("/tmp/styk-svg-fx-plain-test");
+        export_svg(&plain, plain_dir).unwrap();
+        let plain_text = std::fs::read_to_string(plain_dir.join("frame-0001.svg")).unwrap();
+        let plain_circles = plain_text.matches("<circle").count();
+
+        let mut project = Project::new_demo();
+        let clip = crate::vfx::ParticleClip {
+            start: 0.0,
+            duration: 3.0,
+            kind: crate::vfx::ClipKind::Burst,
+            color: 0xFFC65D,
+            color2: None,
+            seed: 7,
+            angle: 0.0,
+            length: 130.0,
+        };
+        project.fx_clips.push(crate::model::FxClipEntry {
+            clip,
+            figure: 0,
+            node: 0,
+            hidden: false,
+        });
+        let weather = crate::vfx::Weather {
+            kind: crate::vfx::WeatherKind::Snow,
+            amount: 10.0,
+            wind: 0.0,
+        };
+        project.weather = Some(weather);
+
+        let poses = project.poses_at(0.0);
+        let pos = crate::model::evaluate(&project.figures[0].def, &poses[0]);
+        let clip_n = crate::vfx::clip_particles(&clip, 0.0, pos[0]).len();
+        let weather_n =
+            crate::vfx::weather_particles(&weather, 0.0, project.stage, project.fps).len();
+        assert!(clip_n > 0, "burst emits discs at frame 0");
+        assert!(weather_n > 0, "snow emits discs at frame 0");
+
+        let dir = std::path::Path::new("/tmp/styk-svg-fx-test");
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert_eq!(
+            text.matches("<circle").count(),
+            plain_circles + clip_n + weather_n,
+            "fx + weather discs missing or duplicated:\n{text}"
+        );
+        // A hidden clip emits nothing.
+        project.fx_clips[0].hidden = true;
+        export_svg(&project, dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("frame-0001.svg")).unwrap();
+        assert_eq!(
+            text.matches("<circle").count(),
+            plain_circles + weather_n,
+            "hidden fx clip emitted discs:\n{text}"
+        );
+    }
+
+    #[test]
+    fn svg_rich_project_serialises_byte_identically_twice() {
+        // Determinism across every branch of the writer at
+        // once (gradient defs, spray, scatter, fill, fx,
+        // weather): the same project serialised twice must
+        // produce the same bytes — no hash-order, clock or
+        // RNG state may leak into the document. (The crate
+        // integration suite pins the same for the demo
+        // project; this pins it for the rich one.)
+        let mut project = Project::new_demo();
+        project.figures[0].def.nodes[2].style.color2 = Some(0x0000FF);
+        project.strokes.push(crate::model::Stroke {
+            frame: 0,
+            points: vec![[100.0, 100.0], [200.0, 120.0]],
+            color: 0xC0FFEE,
+            width: 14.0,
+            widths: Vec::new(),
+            fill: None,
+            spray: Some(crate::model::SprayMark {
+                seed: 7,
+                radius: 12.0,
+                opacity: 0.5,
+            }),
+            opacity: 1.0,
+            scatter: 0.0,
+        });
+        project.strokes.push(crate::model::Stroke {
+            frame: 0,
+            points: vec![[100.0, 100.0], [300.0, 100.0], [200.0, 300.0]],
+            color: 0x123456,
+            width: 4.0,
+            widths: Vec::new(),
+            fill: Some(0x112233),
+            spray: None,
+            opacity: 0.5,
+            scatter: 0.0,
+        });
+        project.fx_clips.push(crate::model::FxClipEntry {
+            clip: crate::vfx::ParticleClip {
+                start: 0.0,
+                duration: 3.0,
+                kind: crate::vfx::ClipKind::Burst,
+                color: 0xFFC65D,
+                color2: None,
+                seed: 7,
+                angle: 0.0,
+                length: 130.0,
+            },
+            figure: 0,
+            node: 0,
+            hidden: false,
+        });
+        project.weather = Some(crate::vfx::Weather {
+            kind: crate::vfx::WeatherKind::Snow,
+            amount: 10.0,
+            wind: 3.0,
+        });
+        let dir_a = std::path::Path::new("/tmp/styk-svg-rich-det-a");
+        let dir_b = std::path::Path::new("/tmp/styk-svg-rich-det-b");
+        export_svg(&project, dir_a).unwrap();
+        export_svg(&project, dir_b).unwrap();
+        for name in ["frame-0001.svg", "frame-0003.svg", "frame-0005.svg"] {
+            assert_eq!(
+                std::fs::read(dir_a.join(name)).unwrap(),
+                std::fs::read(dir_b.join(name)).unwrap(),
+                "{name} differs between two serialisations"
+            );
         }
     }
 }

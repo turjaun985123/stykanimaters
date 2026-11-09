@@ -282,6 +282,42 @@
 //! transport's Prev key / Next key buttons remain
 //! the keyframe-jump route, as the Keyframe jump row
 //! already says. The panel now holds 57 rows.
+//!
+//! Wave 11 refresh, 2026-11-09: MCP end-to-end. The
+//! wave brief claimed Help did not explain MCP control
+//! at all — the census corrects that: the Live MCP
+//! control row has documented the live endpoint since
+//! the UI mission Wave 9 refresh above. What was
+//! actually missing is the OTHER transport and the
+//! discovery framing, and this refresh adds exactly
+//! those, verified against source. The new MCP stdio
+//! server row names the standalone `mcp_server`
+//! program (`src/bin/mcp_server.rs` — Cargo.toml has
+//! no `[[bin]]` rename, so the file stem is the binary
+//! name): JSON-RPC over stdio, one message per line,
+//! the same tool dispatch (`McpServer`), and the
+//! distinction a user must not miss — it works on its
+//! own private `EditorCore` and never sees or drives
+//! the open editor window (the framing is
+//! `src/live_mcp.rs`' own module docs). The Live MCP
+//! control row is improved in place rather than
+//! duplicated: it now states that live control is on
+//! by default and started at launch
+//! (`LayoutPrefs.live_mcp` defaults to `true` in
+//! `src/shell.rs`, and the settings census records
+//! the bridge starting at launch when the preference
+//! is on), and it carries the security truth in the
+//! bridge's own terms — no password, any program on
+//! this computer can drive the editor while it is on,
+//! turn it off in Settings when you do not want that
+//! (`src/live_mcp.rs`' "Security — read this before
+//! enabling" docs; the health identity states
+//! `"auth": "none"`). No shortcut row was added for
+//! the toggle: no key binding for it exists, and the
+//! Features label discipline forbids inventing one —
+//! the Settings toggle (`settings-live-mcp` in
+//! `settings_popover`) is the only path, and the row
+//! says Settings. The panel now holds 58 rows.
 
 use rune::tok::{type_, Theme};
 use rune::{col, row, text, El};
@@ -469,8 +505,12 @@ pub fn section_rows(section: &str) -> Vec<(&'static str, &'static str)> {
                 "Export panel — SVG and Spritesheet now take the loop range too",
             ),
             (
+                "MCP stdio server",
+                "The mcp_server program serves the same MCP (Model Context Protocol) tools over stdio (JSON-RPC, one message per line) to clients that launch it — it works on its own copy of a project and never sees or drives this editor window",
+            ),
+            (
                 "Live MCP control",
-                "Settings — the Live MCP control toggle lets other programs on this computer drive the editor at http://127.0.0.1:32117/mcp; no password in this version",
+                "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor at http://127.0.0.1:32117/mcp — no password, so turn it off here when you do not want that",
             ),
         ],
         _ => vec![],
@@ -633,9 +673,9 @@ mod tests {
     use super::{group_rows, section_note, section_rows, shortcut_rows};
 
     #[test]
-    fn shortcut_rows_has_exactly_57_rows() {
+    fn shortcut_rows_has_exactly_58_rows() {
         // 10 Shortcuts + 8 Workspaces + 2 Posing + 5 Timeline
-        // + 32 Features; Drawing contributes none (see the
+        // + 33 Features; Drawing contributes none (see the
         // module docs for which GPUI-era rows were dropped
         // and why). Phase G added the four palette/menu rows
         // to Shortcuts; Phase I added the Features section;
@@ -648,8 +688,9 @@ mod tests {
         // a Ctrl+S row — one row each way, total stands.
         // The UI mission Wave 9 refresh added two Features
         // rows (View zoom, Live MCP control). The Wave 10
-        // refresh added one more (Dopesheet).
-        assert_eq!(shortcut_rows().len(), 57);
+        // refresh added one more (Dopesheet). The Wave 11
+        // refresh added one more (MCP stdio server).
+        assert_eq!(shortcut_rows().len(), 58);
     }
 
     #[test]
@@ -702,7 +743,7 @@ mod tests {
         // this order, and nowhere else. (The count covers
         // the Phase J, Phase K, Phase L and Phase M rows
         // too — see those tests.)
-        assert_eq!(section_rows("Features").len(), 32);
+        assert_eq!(section_rows("Features").len(), 33);
     }
 
     #[test]
@@ -744,9 +785,11 @@ mod tests {
         // mission Wave 9 refresh added View zoom and Live
         // MCP control, so thirty-one stood then; the
         // Wave 10 refresh added the Dopesheet row, so
-        // thirty-two stand now.
+        // thirty-two stood then; the Wave 11 refresh
+        // added the MCP stdio server row, so thirty-three
+        // stand now.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 32);
+        assert_eq!(features.len(), 33);
         let jump = features
             .iter()
             .position(|(label, _)| *label == "Keyframe jump")
@@ -817,7 +860,7 @@ mod tests {
         // Placement: Playback speed sits with the
         // transport rows directly after Loop playback.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 32);
+        assert_eq!(features.len(), 33);
         let loop_row = features
             .iter()
             .position(|(label, _)| *label == "Loop playback")
@@ -889,7 +932,7 @@ mod tests {
         // Palette recents sits with the project rows,
         // directly after Reload from disk.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 32);
+        assert_eq!(features.len(), 33);
         let channel_row = features
             .iter()
             .position(|(label, _)| *label == "Delete graph channel")
@@ -989,7 +1032,7 @@ mod tests {
         // after Split FX clip. No earlier phase's pinned
         // adjacency is disturbed by any of these.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 32);
+        assert_eq!(features.len(), 33);
         let clear_row = features
             .iter()
             .position(|(label, _)| *label == "Clear keys in loop range")
@@ -1052,15 +1095,17 @@ mod tests {
         )));
         assert!(rows.contains(&(
             "Live MCP control",
-            "Settings — the Live MCP control toggle lets other programs on this computer drive the editor at http://127.0.0.1:32117/mcp; no password in this version"
+            "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor at http://127.0.0.1:32117/mcp — no password, so turn it off here when you do not want that"
         )));
         // Placement: View zoom sits with the stage /
         // camera rows, directly after Swap frames; Live
-        // MCP control closes the Features section, after
-        // Range export. No earlier phase's pinned
-        // adjacency is disturbed by either.
+        // MCP control closes the Features section (the
+        // Wave 11 refresh inserted the MCP stdio server
+        // row directly before it and reworded this row —
+        // see the Wave 11 test). No earlier phase's
+        // pinned adjacency is disturbed by either.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 32);
+        assert_eq!(features.len(), 33);
         let swap_row = features
             .iter()
             .position(|(label, _)| *label == "Swap frames")
@@ -1094,12 +1139,58 @@ mod tests {
         // ruler. No earlier phase's pinned adjacency is
         // disturbed by the insertion.
         let features = section_rows("Features");
-        assert_eq!(features.len(), 32);
+        assert_eq!(features.len(), 33);
         let ruler_row = features
             .iter()
             .position(|(label, _)| *label == "Timeline ruler")
             .expect("Timeline ruler row");
         assert_eq!(features[ruler_row + 1].0, "Dopesheet");
+    }
+
+    #[test]
+    fn wave_11_feature_rows_are_listed() {
+        // The Wave 11 refresh — MCP end-to-end (see the
+        // module docs). The census corrects the wave
+        // brief: Help already documented the live
+        // endpoint (the Wave 9 Live MCP control row);
+        // what was missing is the stdio transport and
+        // the default-on framing. MCP stdio server —
+        // `src/bin/mcp_server.rs`: JSON-RPC 2.0 over
+        // stdio, one JSON object per line, dispatching
+        // through the same `stykanimate_rs::mcp::
+        // McpServer` as the live bridge; its core is
+        // private, so its edits never reach the open
+        // editor window (`src/live_mcp.rs`' module docs
+        // state the distinction). Live MCP control —
+        // reworded in place, not duplicated: on by
+        // default (`LayoutPrefs.live_mcp` defaults to
+        // `true` in `src/shell.rs`), started at launch,
+        // toggled only from Settings (no key binding
+        // exists, so no shortcut row), and the security
+        // truth in the bridge's own terms (no
+        // authentication in v1; `GET /health` states
+        // `"auth": "none"`).
+        let rows = shortcut_rows();
+        assert!(rows.contains(&(
+            "MCP stdio server",
+            "The mcp_server program serves the same MCP (Model Context Protocol) tools over stdio (JSON-RPC, one message per line) to clients that launch it — it works on its own copy of a project and never sees or drives this editor window"
+        )));
+        assert!(rows.contains(&(
+            "Live MCP control",
+            "Settings — on by default, started at launch; the Live MCP control toggle lets MCP clients and other programs on this computer drive this running editor at http://127.0.0.1:32117/mcp — no password, so turn it off here when you do not want that"
+        )));
+        // Placement: the two MCP rows close the
+        // Features section as a pair — the stdio row
+        // directly before Live MCP control, which stays
+        // last (the Wave 9 test's pin). No earlier
+        // phase's pinned adjacency is disturbed.
+        let features = section_rows("Features");
+        assert_eq!(features.len(), 33);
+        assert_eq!(
+            features[features.len() - 2].0,
+            "MCP stdio server"
+        );
+        assert_eq!(features.last().map(|(label, _)| *label), Some("Live MCP control"));
     }
 
     #[test]

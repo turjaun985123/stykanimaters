@@ -1035,13 +1035,23 @@ pub fn end_delta(start: f32, duration: f32, current: usize) -> f32 {
 /// selection needs no repair; the op's status line
 /// reports the landing frame. With no valid
 /// selection the handler returns before any op
-/// call, exactly like [`split_selected`].
+/// call, exactly like [`split_selected`]. A clip
+/// already starting on the playhead (rounded delta
+/// zero) is likewise refused before the call
+/// (Wave 11): the op would only snapshot and report
+/// a move that did not happen — the no-op refusal
+/// every neighbouring handler already makes
+/// ([`nudge_clip_start`]'s frame-0 guard,
+/// [`nudge_duration`]'s floor guard).
 fn move_selected_to_playhead(s: &mut State) {
     let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return;
     };
     let start = s.core.project.fx_clips[i].clip.start;
     let delta = move_delta(start, s.core.current).round() as i32;
+    if delta == 0 {
+        return;
+    }
     s.core.fx_move_clip(i, delta);
 }
 
@@ -1055,13 +1065,19 @@ fn move_selected_to_playhead(s: &mut State) {
 /// the floor length, never nothing. The op edits
 /// in place, so the selection needs no repair;
 /// with no valid selection the handler returns
-/// before any op call.
+/// before any op call. A zero delta — the clip
+/// already ends on the playhead frame — is refused
+/// the same way (Wave 11; see
+/// [`move_selected_to_playhead`]).
 fn end_selected_at_playhead(s: &mut State) {
     let Some(i) = valid_selection(s.fx_selected, s.core.project.fx_clips.len()) else {
         return;
     };
     let clip = s.core.project.fx_clips[i].clip;
     let delta = end_delta(clip.start, clip.duration, s.core.current);
+    if delta == 0.0 {
+        return;
+    }
     s.core.fx_resize_clip(i, delta);
 }
 
@@ -2723,6 +2739,39 @@ mod tests {
         let clip = state.core.project.fx_clips[0].clip;
         assert_eq!(clip.start, 4.0);
         assert_eq!(clip.duration, 10.0);
+    }
+
+    #[test]
+    fn playhead_buttons_at_zero_delta_spend_no_snapshot() {
+        // Wave 11: the clip already starts on the
+        // playhead frame (start 9, playhead 9), so To
+        // playhead is a no-op — the handler refuses it
+        // before the op, exactly like the nudge
+        // handlers' no-op guards: no snapshot, no
+        // status claiming a move.
+        let core = core_with(vec![entry(9.0, 10.0, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, Some(0));
+        state.core.current = 9;
+        let depth = state.core.undo_depth();
+        let status_before = state.core.status.clone();
+        move_selected_to_playhead(&mut state);
+        assert_eq!(state.core.undo_depth(), depth, "no snapshot for a no-op");
+        assert_eq!(state.core.status, status_before, "no move reported");
+        assert_eq!(state.core.project.fx_clips[0].clip.start, 9.0);
+        // Same for End at playhead when the playhead
+        // frame is already the last covered one:
+        // start 4 + duration 6 ends at 10, so frame 9
+        // is the last covered frame and the delta
+        // is zero.
+        let core = core_with(vec![entry(4.0, 6.0, ClipKind::Burst, 0xFF5D5D)]);
+        let mut state = state_with(core, Some(0));
+        state.core.current = 9;
+        let depth = state.core.undo_depth();
+        let status_before = state.core.status.clone();
+        end_selected_at_playhead(&mut state);
+        assert_eq!(state.core.undo_depth(), depth, "no snapshot for a no-op");
+        assert_eq!(state.core.status, status_before, "no resize reported");
+        assert_eq!(state.core.project.fx_clips[0].clip.duration, 6.0);
     }
 
     // --------------------------------------------------

@@ -82,6 +82,44 @@
 //! stores and dedupes the full text, and the full string
 //! stays readable in the status line.
 //!
+//! Wave 11 (MCP end-to-end) traces what a live MCP call
+//! leaves visible in this stack, and adds the attribution
+//! form. The trace (all lines at wave start): the poll
+//! hook drains up to 8 queued live-MCP requests against
+//! the LIVE core (`main.rs`'s `live_mcp::drain` call)
+//! BEFORE its status check, so an MCP mutation whose op
+//! writes `core.status` toasts in the same tick through
+//! the very same `push_status` a GUI op uses — visible,
+//! but byte-identical to a GUI toast: nothing in the
+//! text said an external client did it. MCP failures
+//! split the same way: a tool error returned as
+//! `Err(core.status)` (the `mcp.rs` handlers' shape)
+//! reaches the stack with the op's wording, while
+//! MCP-layer errors that never write `core.status` —
+//! `unknown tool: {name}` and the JSON-RPC
+//! `-32600/-32601/-32602` family — reach only the
+//! caller and are invisible here. The fix inside this
+//! file is the grammar: [`classify_status`] reads
+//! through the [`MCP_STATUS_PREFIX`] attribution prefix,
+//! so text stamped `MCP: …` at the push site keeps its
+//! body's severity (a prefixed refusal was the defect:
+//! every prefix rule missed it and it fell through to
+//! Info) and MCP-layer failure shapes classify Error.
+//! Stamping the prefix at the poll site — and forwarding
+//! the never-status errors in the prefixed form — is
+//! the integrator's wiring in `main.rs` / `live_mcp.rs`;
+//! the prefix deliberately does NOT go into
+//! `core.status` itself, because `core.status` is also
+//! an MCP API return value (the handlers' `"status"`
+//! field), so attribution belongs to the display layer.
+//! Flooding needs no new guard: a script issuing
+//! hundreds of calls meets the poll's change-only push
+//! (at most one toast per tick, of the latest status),
+//! the (text, severity) dedupe, the [`MAX_TOASTS`] cap
+//! and the [`MAX_TOAST_LINES`] clamp — the stack's size
+//! and height are bounded by construction, pinned by
+//! the flood tests below.
+//!
 //! Why hand-rolled instead of rune-kit's `Toast` /
 //! `ToastRegion` (read at `crates/rune-kit/src/toast.rs` in the
 //! pinned Rune tree):
@@ -280,6 +318,19 @@ impl Severity {
     }
 }
 
+/// The attribution prefix for a status echo that
+/// originated from a live MCP call (Wave 11): the push
+/// site stamps it onto the toast text — never onto
+/// `core.status`, which is also an MCP API return
+/// value — so the card (and a copied status line) says
+/// an external client acted, while
+/// [`classify_status`] reads through it to the body's
+/// own shape. No engine status begins with this prefix
+/// (grep census, 2026-11-09: the only `"MCP` strings in
+/// the tree are project names in tests, none of them
+/// statuses), so the strip is invisible to GUI text.
+pub const MCP_STATUS_PREFIX: &str = "MCP: ";
+
 /// Classify a status line by its shape alone — the Phase N
 /// replacement for the push site's old hardcoded
 /// `Severity::Info`. The patterns are the engine's own
@@ -290,6 +341,23 @@ impl Severity {
 /// Rules, in order (order matters — a refusal-shaped
 /// failure is a failure):
 ///
+/// 0. **MCP attribution** (Wave 11) — a leading
+///    [`MCP_STATUS_PREFIX`] is attribution, not wording:
+///    it is stripped and the body is classified by the
+///    rules below, unchanged. Without this rule every
+///    prefix-shaped rule (2, 3, 4) misses a stamped
+///    string — `"MCP: No camera key on this frame."`
+///    fell through to Info, a refusal wearing the info
+///    tint. Two MCP-layer failure shapes have no body
+///    grammar of their own and are Error outright: the
+///    dispatcher's `unknown tool: {name}` and its
+///    protocol errors (`"Invalid Request: …"`,
+///    `"Invalid params: …"`, `"Method not found: …"` —
+///    the literal shapes `mcp.rs`'s dispatch returns).
+///    A stamped success or neutral fact
+///    (`"MCP: Frame 2 added."`) classifies exactly as
+///    its body does — Info — with the prefix left in
+///    the text the card shows.
 /// 1. **Error** — contains `" failed"`: the engine's
 ///    failure shape (`"Audio fade failed: no clip 1."`,
 ///    `"Audio compress failed: output would overwrite
@@ -336,6 +404,21 @@ impl Severity {
 ///    which the push site never sends but which must
 ///    still classify without panicking.
 pub fn classify_status(status: &str) -> Severity {
+    // Wave 11, rule 0: the MCP attribution prefix reads
+    // through to the body (see the rules above). The
+    // MCP-layer failure shapes are checked here, inside
+    // the prefix branch only: bare GUI text is never
+    // re-read by them, and every unprefixed string takes
+    // exactly the path it took before this rule existed.
+    if let Some(body) = status.strip_prefix(MCP_STATUS_PREFIX) {
+        if body.starts_with("unknown tool")
+            || body.starts_with("Invalid ")
+            || body.starts_with("Method not found")
+        {
+            return Severity::Error;
+        }
+        return classify_status(body);
+    }
     if status.contains(" failed") {
         Severity::Error
     } else if status.starts_with("No ") && status.contains(" needed ") {
@@ -1352,6 +1435,180 @@ mod tests {
         // failure wins over the refusal — a thing that
         // failed is not a mere "did not happen".
         assert_eq!(classify_status("No frames failed to render."), Severity::Error);
+    }
+
+    // --- MCP attribution (Wave 11) ---------------------------
+    // The stamped form the push site produces for a
+    // status a live MCP call wrote: the prefix is
+    // attribution, the body keeps its own severity.
+    // Bodies are real statuses / real MCP-layer error
+    // strings (`mcp.rs` dispatch), rendered in.
+
+    #[test]
+    fn classify_mcp_prefix_reads_through_to_the_body() {
+        // A successful MCP edit: Info, exactly as its
+        // body classifies — the attribution rides in
+        // the shown text, not in a changed severity.
+        assert_eq!(classify_status("MCP: Frame 2 added."), Severity::Info);
+        assert_eq!(classify_status("MCP: Undone."), Severity::Info);
+        // The defect this rule fixes: a stamped refusal
+        // matched NO prefix rule (it does not start
+        // with `"No "`) and fell through to Info. The
+        // refusal grammar inside the body must still
+        // not rescue every shape — `"No camera key…"`
+        // carries no grammar word — so only reading
+        // through the prefix gets this to Warn.
+        assert_eq!(
+            classify_status("MCP: No camera key on this frame."),
+            Severity::Warn
+        );
+        assert_eq!(
+            classify_status("MCP: Nothing copied yet."),
+            Severity::Warn
+        );
+        assert_eq!(
+            classify_status("MCP: Frame 2 cannot be swapped with itself."),
+            Severity::Warn
+        );
+        // Confirmations keep Success through the stamp.
+        assert_eq!(
+            classify_status("MCP: Exported 5 PNG frames to ./export"),
+            Severity::Success
+        );
+        assert_eq!(
+            classify_status("MCP: Saved Styk to the library."),
+            Severity::Success
+        );
+        // And a failure keeps Error (the `" failed"`
+        // rule fires on the body, refusal words or not).
+        assert_eq!(
+            classify_status("MCP: Audio fade failed: no clip 1."),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: Audio crossfade failed: a clip is empty."),
+            Severity::Error
+        );
+        // The sweep carve-out survives the stamp too.
+        assert_eq!(
+            classify_status("MCP: No audio clips needed normalising to peak 0.90."),
+            Severity::Info
+        );
+        // A bare stamp with an empty body classifies
+        // like the empty string: Info, no panic.
+        assert_eq!(classify_status("MCP: "), Severity::Info);
+    }
+
+    #[test]
+    fn classify_mcp_layer_failures_are_error_never_info() {
+        // The failures the MCP layer itself produces —
+        // they never pass through an op, so no body
+        // grammar exists for them; in stamped form they
+        // must still never read as a neutral Info. The
+        // strings are `mcp.rs`'s own: the tool router's
+        // miss and the dispatcher's protocol errors.
+        assert_eq!(
+            classify_status("MCP: unknown tool: frobnicate"),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: Invalid params: missing tool name"),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: Invalid Request: missing method"),
+            Severity::Error
+        );
+        assert_eq!(
+            classify_status("MCP: Method not found: tools/frobnicate"),
+            Severity::Error
+        );
+        // The same words UNSTAMPED keep their old
+        // reading: the MCP arms live inside the prefix
+        // branch, so no GUI string's classification
+        // moved. (Bare, these strings never reach the
+        // classifier at all — the MCP layer returns
+        // them to its caller; the pin is that the new
+        // rule is prefix-scoped, not global.)
+        assert_eq!(classify_status("unknown tool: frobnicate"), Severity::Info);
+    }
+
+    #[test]
+    fn push_status_keeps_mcp_attribution_distinct_from_gui_text() {
+        // Dedupe keys on the full text: a stamped MCP
+        // status and the same words from a GUI op are
+        // two statuses, not twins — attribution must not
+        // be deduped away, and a repeat of the stamped
+        // form refreshes its own toast as usual.
+        let mut s = ToastsState::new();
+        s.push_status("Frame 2 added.", 0.0);
+        s.push_status("MCP: Frame 2 added.", 0.0);
+        assert_eq!(s.items.len(), 2);
+        s.push_status("MCP: Frame 2 added.", 2.0);
+        assert_eq!(s.items.len(), 2);
+        assert_eq!(s.items[1].text, "MCP: Frame 2 added.");
+        assert_eq!(s.items[1].born, 2.0);
+        assert_eq!(s.items[1].severity, Severity::Info);
+        assert_eq!(s.items[0].born, 0.0, "the GUI toast was not refreshed");
+    }
+
+    // --- flood behaviour (Wave 11) ---------------------------
+    // A script driving the live endpoint can issue
+    // hundreds of calls between polls. The model-level
+    // guarantee, pinned: however many distinct statuses
+    // arrive, the stack never holds more than
+    // MAX_TOASTS, the newest always survives, and a
+    // repeated status never multiplies.
+
+    #[test]
+    fn flood_of_distinct_statuses_stays_capped_at_max_toasts() {
+        let mut s = ToastsState::new();
+        for n in 0..200 {
+            s.push_status(format!("Frame {} added.", n + 2), 0.0);
+        }
+        assert_eq!(s.items.len(), MAX_TOASTS);
+        assert_eq!(s.live_count(0.0), MAX_TOASTS);
+        // Only the newest three survive, in order; the
+        // 200th push is the newest toast.
+        let texts: Vec<&str> = s.items.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["Frame 199 added.", "Frame 200 added.", "Frame 201 added."]
+        );
+    }
+
+    #[test]
+    fn flood_of_identical_and_alternating_statuses_never_multiplies() {
+        let mut s = ToastsState::new();
+        for _ in 0..200 {
+            s.push_status("MCP: Frame 2 added.", 0.0);
+        }
+        assert_eq!(s.items.len(), 1, "one distinct status, one toast");
+        let mut alt = ToastsState::new();
+        for n in 0..200 {
+            alt.push_status(if n % 2 == 0 { "Undone." } else { "Redone." }, 0.0);
+        }
+        assert_eq!(alt.items.len(), 2, "alternation refreshes, never stacks");
+        assert_eq!(alt.live_count(0.0), 2);
+    }
+
+    #[test]
+    fn flood_of_distinct_failures_stays_capped_and_stays_error() {
+        // The failure flood is the case the height
+        // budget exists for: every card an Error, every
+        // text distinct — the cap still holds, so the
+        // MAX_TOAST_LINES arithmetic (three clamped
+        // cards clear of the camera pill) is the whole
+        // story at any call rate.
+        let mut s = ToastsState::new();
+        for n in 0..200 {
+            s.push_status(format!("Audio fade failed: no clip {n}."), 0.0);
+        }
+        assert_eq!(s.items.len(), MAX_TOASTS);
+        assert!(
+            s.items.iter().all(|t| t.severity == Severity::Error),
+            "every surviving flood toast keeps its classified severity"
+        );
     }
 
     #[test]

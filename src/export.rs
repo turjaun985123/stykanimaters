@@ -17,6 +17,31 @@ fn rgb(hex: u32) -> [u8; 3] {
     ]
 }
 
+/// Even-odd point-in-polygon test (ray cast toward +x) —
+/// the filled-stroke pass's coverage test. Points exactly on
+/// an edge may fall either way; at render scale that is a
+/// sub-pixel ambiguity, and the supersample pass averages it.
+fn point_in_polygon(p: [f32; 2], verts: &[[f32; 2]]) -> bool {
+    let mut inside = false;
+    let n = verts.len();
+    if n < 3 {
+        return false;
+    }
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = (verts[i][0], verts[i][1]);
+        let (xj, yj) = (verts[j][0], verts[j][1]);
+        if (yi > p[1]) != (yj > p[1]) {
+            let x_cross = xi + (p[1] - yi) / (yj - yi) * (xj - xi);
+            if p[0] < x_cross {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
 fn seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     let ab = [b[0] - a[0], b[1] - a[1]];
     let t = {
@@ -410,6 +435,10 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
     // geometry comes only from `paint::spray_dots`.
     let authored = (frame_f.floor() as usize).min(project.frames.len().saturating_sub(1));
     let mut spray: Vec<([f32; 2], f32, [u8; 3], f32)> = Vec::new();
+    // Filled strokes (Wave 11, E8): screen-space polygon,
+    // fill colour, opacity — painted by the pixel pass under
+    // the linework. Collected in stroke order.
+    let mut fills: Vec<(Vec<[f32; 2]>, [u8; 3], f32)> = Vec::new();
     for (index, stroke) in project.strokes.iter().enumerate() {
         if stroke.frame == authored {
             if let Some(mark) = &stroke.spray {
@@ -420,15 +449,33 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
                 }
                 continue;
             }
+            // Filled stroke (Wave 11, E8): a stroke with a
+            // fill and at least 3 points draws as a filled
+            // polygon and NOTHING else — no outline, and
+            // scatter does not texture it. That is the stage's
+            // precedence (stage_layers: spray, then fill, then
+            // scatter, then the plain polyline), which the SVG
+            // exporter already mirrors; the rasterizer used to
+            // drop fills entirely and draw the outline only.
+            // The region paints in the pixel pass UNDER the
+            // linework, at the stroke's recorded opacity.
+            if let Some(fill) = stroke.fill {
+                if stroke.points.len() >= 3 {
+                    fills.push((
+                        stroke.points.iter().map(|p| view(*p)).collect(),
+                        rgb(fill),
+                        stroke.opacity.clamp(0.0, 1.0),
+                    ));
+                    continue;
+                }
+            }
             // Scattered stroke (Wave 10 adoption): a
-            // non-spray stroke with scatter > 0 draws as
-            // dabs, not segments — the same placements the
-            // stage and the SVG exporter compute
+            // non-spray, non-filled stroke with scatter > 0
+            // draws as dabs, not segments — the same placements
+            // the stage and the SVG exporter compute
             // (paint::stroke_dabs at the shared spacing),
             // riding this same disc pass at the stroke's
-            // recorded opacity. A filled stroke's fill
-            // (collected in its own pass) is unaffected:
-            // scatter textures the marks, not the region.
+            // recorded opacity.
             if stroke.scatter > 0.0 && !stroke.points.is_empty() {
                 let radius = (stroke.width * 0.5).max(1.0);
                 let color = rgb(stroke.color);
@@ -549,6 +596,11 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
         for x in 0..w {
             let p = [x as f32, y as f32];
             let mut px = bg;
+            for (verts, color, opacity) in &fills {
+                if point_in_polygon(p, verts) {
+                    px = crate::style::blend_over(px, *color, *opacity);
+                }
+            }
             for seg in &segments {
                 if let Some(c) = styled_seg_color(p, seg) {
                     px = crate::style::blend_over(px, rgb(c), seg.opacity);
@@ -612,10 +664,17 @@ pub fn render_frame_at(project: &Project, frame_f: f32) -> ImageBuffer<Rgb<u8>, 
         }
     }
     // Media segments (sprites / text) composite on the final image.
-    let has_media = project
-        .figures
-        .iter()
-        .any(|f| f.def.nodes.iter().any(|n| n.media.is_some()));
+    // Wave 11 (E8): the gate used to check node media only, so a
+    // project whose only media was a FREE-STANDING text or sprite
+    // instance never composited at all — `media_items` has always
+    // included those; the gate just never let them through. Load-
+    // bearing now that MCP's text tools author stage texts.
+    let has_media = !project.sprites.is_empty()
+        || !project.texts.is_empty()
+        || project
+            .figures
+            .iter()
+            .any(|f| f.def.nodes.iter().any(|n| n.media.is_some()));
     if has_media {
         let mut rgba = image::DynamicImage::ImageRgb8(out).to_rgba8();
         let ssf = ss as f32;
@@ -834,10 +893,17 @@ pub fn export_gif_range(
 /// the project has an audio clip whose file exists, it is muxed in
 /// at its start frame. Errors if ffmpeg is missing.
 pub fn export_mp4(project: &Project, path: &Path) -> std::io::Result<usize> {
+    // Audible = unmuted with an existing file — the same
+    // exclusion `mux_plan` applies. This check used to count
+    // muted clips too, so an all-muted project took the mux
+    // path, the plan came back None, and the export failed
+    // with "audio mux failed" instead of writing the silent
+    // video (Wave 11, C9). The range export already treats
+    // its None plan as silent success.
     let has_audio = project
         .audio
         .iter()
-        .any(|c| std::path::Path::new(&c.path).exists());
+        .any(|c| !c.muted && std::path::Path::new(&c.path).exists());
     if !has_audio {
         return ffmpeg_encode(project, path, &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
     }

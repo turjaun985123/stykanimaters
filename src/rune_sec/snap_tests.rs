@@ -427,6 +427,52 @@
 //!   `menu-edit-sep` (menus.rs) — the charter §9
 //!   divider in its keyed form, asserted presented
 //!   while the Edit dropdown is open.
+//!
+//! Round 12 (Wave 11, MCP end-to-end) adds four tests
+//! over the live-MCP-visible shell surface — the facts
+//! an external MCP client's session depends on, pinned
+//! at the Runtime level (the socket hop itself is
+//! `live_mcp`'s own e2e proof in the lib; this file
+//! proves what the SHELL does with what the bridge
+//! delivers). Facts they rest on, verified against the
+//! tree:
+//! * `live_mcp::drain` runs a queued request as
+//!   `McpServer::handle_on(&mut core, &msg)`
+//!   (live_mcp.rs:346) — so calling `handle_on` against
+//!   `rt.state.core` is the exact mutation a live call
+//!   makes, minus the TCP hop. Direct state writes
+//!   follow the file's discipline: `rt.invalidate()`
+//!   plus a frame before any tree assert.
+//! * `poll` (main.rs) toasts a status the DRAIN wrote
+//!   with the toasts module's `MCP: ` attribution
+//!   prefix stamped at the push site only — never into
+//!   `core.status`, which stays the bare engine text
+//!   (it is also an MCP API return value). A status
+//!   written any other way — including a bare
+//!   `handle_on` in these tests — toasts UNSTAMPED;
+//!   the stamped forms are pinned here through
+//!   `push_status`, the exact call `poll` makes with
+//!   them, against `classify_status`'s rule 0
+//!   (toasts.rs): the prefix reads through to the
+//!   body's own severity, and the MCP-layer failure
+//!   shapes (`unknown tool: …`) are Error outright.
+//! * The Settings card's Live MCP row
+//!   (`settings-live-mcp`, settings_popover.rs) reads
+//!   the bridge itself — `live_mcp::is_enabled()`, no
+//!   mirrored bool — and `init` (main.rs) starts the
+//!   bridge from the persisted `LayoutPrefs.live_mcp`.
+//!   This suite has NO prefs-seeding pattern (scenes
+//!   set state through handlers, never the file), so
+//!   the settings test seeds `./projects/.layout.json`
+//!   through `shell::save_layout` — load-modify-save,
+//!   the app's own write path — and restores the file
+//!   and the bridge afterwards. The toggle's state is
+//!   observable in the tree only as its pill's knob
+//!   (design.rs `toggle_pill`: a 12×12 knob at inset 2
+//!   in a 28 pt pill — centre 20 pt from the row's
+//!   right edge when off, 8 pt when on; the gap is
+//!   translation-invariant, so the card's entrance
+//!   transition cannot move the reading).
 
 use std::collections::BTreeSet;
 
@@ -4161,4 +4207,407 @@ fn help_panel_renders_via_help_menu() {
         !presented_keys(&rt).contains("help-panel"),
         "the help card unmounts"
     );
+}
+
+// Round 12 (Wave 11, MCP end-to-end): the live-MCP-visible
+// shell surface. See the file header's round 12 note for
+// the facts these tests rest on; each test names the
+// Wave 11 guarantee it pins and the agent change it
+// depends on, so a failure triages to one owner.
+
+/// Run one MCP `tools/call` against the runtime's LIVE
+/// core through the real dispatcher — the exact call
+/// `live_mcp::drain` makes for a queued request
+/// (live_mcp.rs:346), minus the TCP hop. Returns the
+/// JSON-RPC response.
+fn mcp_call(
+    rt: &mut Runtime<State>,
+    name: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    let mut server = stykanimate_rs::mcp::McpServer::new();
+    let msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": args },
+    });
+    server
+        .handle_on(&mut rt.state.core, &msg)
+        .expect("tools/call is a request and must be answered")
+}
+
+/// The parsed JSON document a `tools/call` result carries
+/// in its single text content block (the `mcp.rs` test
+/// suite's own extraction, `call_payload_on`).
+fn mcp_payload(resp: &serde_json::Value) -> serde_json::Value {
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("content block carries text");
+    serde_json::from_str(text).unwrap_or(serde_json::Value::String(text.to_string()))
+}
+
+/// The (items index, severity) of the live toast whose
+/// text is exactly `text`, if the shell is showing one.
+fn toast_with_text(
+    rt: &Runtime<State>,
+    text: &str,
+) -> Option<(usize, crate::rune_sec::toasts::Severity)> {
+    rt.state
+        .toasts
+        .items
+        .iter()
+        .position(|t| t.text == text)
+        .map(|i| (i, rt.state.toasts.items[i].severity))
+}
+
+/// Every text the last frame's elements carry (the round
+/// 7 technique: `Runtime::elements` reports text the key
+/// set cannot see).
+fn element_texts(rt: &Runtime<State>) -> Vec<String> {
+    rt.elements()
+        .iter()
+        .filter_map(|e| e.text.clone())
+        .collect()
+}
+
+#[test]
+fn live_mcp_handle_on_add_figure_renders_in_the_figures_panel() {
+    // Wave 11 guarantee: a mutation an MCP client makes
+    // against the live core — no GUI handler involved —
+    // is what the shell renders on its next frame: the
+    // figures panel gains the row and the count, and the
+    // stage's shell names the new figure. Depends on:
+    // A3 (main.rs poll/redraw — the frame must re-run the
+    // view over the mutated core) and the dispatcher's
+    // `handle_on` contract (mcp.rs:161, live_mcp.rs:346).
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+    assert_eq!(
+        rt.state.core.project.figures.len(),
+        1,
+        "the demo project starts with one figure"
+    );
+    assert!(
+        !presented_keys(&rt).contains("fig-row-1"),
+        "no second figure row before the call"
+    );
+
+    // The client's call, verbatim: the registry's
+    // add_figure tool (mcp_tools.rs) against the live
+    // core, behind the shell's back.
+    let resp = mcp_call(&mut rt, "add_figure", serde_json::json!({ "kind": "humanoid" }));
+    let payload = mcp_payload(&resp);
+    assert_eq!(payload["ok"], true, "the tool reports success: {payload}");
+    assert_eq!(
+        rt.state.core.project.figures.len(),
+        2,
+        "the live core gained the figure"
+    );
+    assert_eq!(
+        rt.state.core.status, "Figure 2 added.",
+        "the core's status is the bare engine text — the MCP attribution \
+         prefix is a toast-site stamp, never written here (main.rs, A3)"
+    );
+
+    // Direct state writes need the invalidate discipline
+    // (the file's standing rule) before a tree assert.
+    rt.invalidate();
+    rt.frame(DT);
+
+    let keys = presented_keys(&rt);
+    assert!(
+        keys.contains("fig-row-1"),
+        "the figures panel renders the MCP-added figure's row"
+    );
+    assert!(
+        keys.contains("stage"),
+        "the stage stays mounted over the mutated project"
+    );
+    let texts = element_texts(&rt);
+    assert!(
+        texts.iter().any(|t| t == "Styk 2"),
+        "the new figure's name is on screen (panel row / status strip): {texts:?}"
+    );
+    // The panel header count: the bare total ("2",
+    // figures_panel::count_line) as a text element in
+    // the "Figures" title's own band, right of the title.
+    let title = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.text.as_deref() == Some("Figures"))
+        .expect("the figures panel title is presented");
+    let title_cy = title.rect[1] + title.rect[3] / 2.0;
+    let count_shown = rt.elements().iter().any(|e| {
+        e.text.as_deref() == Some("2")
+            && e.rect[0] > title.rect[0]
+            && ((e.rect[1] + e.rect[3] / 2.0) - title_cy).abs() < 8.0
+    });
+    assert!(
+        count_shown,
+        "the figures panel header count reads 2 after the MCP add"
+    );
+}
+
+#[test]
+fn live_mcp_refusal_status_toasts_through_poll_unstamped() {
+    // Wave 11 guarantee: a status an MCP call writes on
+    // the live core reaches the user as a toast through
+    // the ordinary poll path, classified by its body —
+    // and a bare `handle_on` (this test's simulation)
+    // does NOT earn the `MCP: ` stamp: the stamp is
+    // applied only when the drain inside poll wrote the
+    // status (A3, main.rs). Depends on: A3 (poll's
+    // status-to-toast wiring + the drain-window stamp
+    // boundary) and A7 (classify_status's grammar,
+    // toasts.rs — a "No …" refusal body is Warn).
+    let mut rt = editor();
+    tap(&mut rt, "ws-animate");
+    rt.frame(DT);
+
+    // Build a frame with no keyframe for figure 0: the
+    // duplicate holds the previous pose, so by the
+    // dopesheet's definition (a key is a pose CHANGE)
+    // frame 2 (1-based) is not keyed.
+    let dup = mcp_call(&mut rt, "duplicate_frame", serde_json::json!({}));
+    assert_eq!(mcp_payload(&dup)["ok"], true, "the duplicate lands");
+    assert_eq!(rt.state.core.project.frames.len(), 6);
+
+    // The refusal: deleting a keyframe that is not
+    // there. The tool returns an error result carrying
+    // the status, AND the op leaves that status on the
+    // core (editor.rs delete_keyframe) — the line poll
+    // will toast.
+    let resp = mcp_call(
+        &mut rt,
+        "delete_keyframe",
+        serde_json::json!({ "figure": 0, "frame": 1 }),
+    );
+    assert_eq!(
+        resp["result"]["isError"], true,
+        "the refusal is an error result: {resp}"
+    );
+    assert_eq!(
+        rt.state.core.status, "No keyframe for figure 1 at frame 2.",
+        "the refusal status sits on the live core"
+    );
+
+    rt.invalidate();
+    rt.frame(DT);
+
+    let (index, severity) =
+        toast_with_text(&rt, "No keyframe for figure 1 at frame 2.")
+            .expect("poll toasted the MCP-written status");
+    assert_eq!(
+        severity,
+        crate::rune_sec::toasts::Severity::Warn,
+        "a \"No …\" refusal body classifies as Warn"
+    );
+    assert!(
+        presented_keys(&rt).contains(&format!("toast-{index}")),
+        "the toast card is in the tree under its items-index key"
+    );
+    assert!(
+        rt.state
+            .toasts
+            .items
+            .iter()
+            .all(|t| !t.text.starts_with(crate::rune_sec::toasts::MCP_STATUS_PREFIX)),
+        "no toast is MCP-stamped: the stamp belongs to the drain in poll, \
+         not to the dispatch (A3's boundary, main.rs)"
+    );
+}
+
+#[test]
+fn mcp_stamped_statuses_classify_by_their_body_at_the_shell_surface() {
+    // Wave 11 guarantee: when poll DOES stamp a status
+    // (the drain wrote it — main.rs, A3), the stamped
+    // text the user sees classifies by its BODY, not by
+    // the prefix: `"MCP: No …"` is the refusal it names
+    // (Warn — the unstamped grammar alone would fall
+    // through to Info, because the string no longer
+    // starts with "No "), a `"… failed"` body is Error,
+    // and the MCP-layer's own failure shape
+    // (`unknown tool: …`) is Error outright. Pinned here
+    // through `push_status` — the exact call poll makes
+    // with the stamped string — against the CURRENT
+    // contract of A7's grammar (toasts.rs rule 0 +
+    // MCP_STATUS_PREFIX). DEPENDENCY: if A7 changes the
+    // prefix or rule 0, this test is the reconciliation
+    // point — its strings are built from the module's
+    // own constant, so a prefix change fails HERE, by
+    // design, for the integrator to reconcile.
+    use crate::rune_sec::toasts::{Severity, MCP_STATUS_PREFIX};
+
+    let mut rt = editor();
+    rt.frame(DT);
+    let now = rt.state.toast_now;
+
+    let refusal = format!("{MCP_STATUS_PREFIX}No keyframe for figure 1 at frame 2.");
+    let failure = format!("{MCP_STATUS_PREFIX}Audio fade failed: no clip 1.");
+    let unknown = format!("{MCP_STATUS_PREFIX}unknown tool: frobnicate");
+    rt.state.toasts.push_status(refusal.clone(), now);
+    rt.state.toasts.push_status(failure.clone(), now);
+    rt.state.toasts.push_status(unknown.clone(), now);
+    rt.invalidate();
+    rt.frame(DT);
+
+    for (text, want) in [
+        (refusal.as_str(), Severity::Warn),
+        (failure.as_str(), Severity::Error),
+        (unknown.as_str(), Severity::Error),
+    ] {
+        let (index, severity) =
+            toast_with_text(&rt, text).expect("the stamped status is a live toast");
+        assert_eq!(
+            severity, want,
+            "stamped status {text:?} classifies by its body"
+        );
+        assert!(
+            presented_keys(&rt).contains(&format!("toast-{index}")),
+            "the stamped toast's card is in the tree: {text:?}"
+        );
+    }
+    let texts = element_texts(&rt);
+    assert!(
+        texts.iter().any(|t| t == &refusal),
+        "the card shows the stamped text verbatim, prefix included: {texts:?}"
+    );
+}
+
+/// The settings Live MCP toggle's knob, measured as the
+/// distance from the toggle row's right edge to the
+/// knob's centre: the kit pill is 28 pt wide with a
+/// 12 pt knob at a 2 pt inset (design.rs `toggle_pill`),
+/// so OFF reads ≈ 20 pt and ON reads ≈ 8 pt. The gap is
+/// translation-invariant — the settings card's entrance
+/// transition shifts row and knob together.
+fn live_mcp_knob_gap(rt: &Runtime<State>) -> Option<f32> {
+    let (row, _) = rt.presented("settings-live-mcp")?;
+    let row_right = row[0] + row[2];
+    let knob = rt.elements().into_iter().find(|e| {
+        let cx = e.rect[0] + e.rect[2] / 2.0;
+        let cy = e.rect[1] + e.rect[3] / 2.0;
+        (e.rect[2] - 12.0).abs() < 1.0
+            && (e.rect[3] - 12.0).abs() < 1.0
+            && cx > row[0]
+            && cx < row_right
+            && cy > row[1]
+            && cy < row[1] + row[3]
+    })?;
+    Some(row_right - (knob.rect[0] + knob.rect[2] / 2.0))
+}
+
+/// Open the settings card and wait (bounded) for the
+/// Live MCP row to be presented; returns the knob gap.
+fn open_settings_and_read_knob(rt: &mut Runtime<State>) -> f32 {
+    tap(rt, "settings-toggle");
+    assert!(rt.state.settings.open, "Settings toggle opens the card");
+    for _ in 0..30 {
+        if presented_keys(rt).contains("settings-live-mcp") {
+            break;
+        }
+        rt.frame(DT);
+    }
+    assert!(
+        presented_keys(rt).contains("settings-live-mcp"),
+        "the Live MCP row is presented in the open card"
+    );
+    live_mcp_knob_gap(rt).expect("the toggle pill's knob is in the tree")
+}
+
+#[test]
+fn settings_live_mcp_toggle_shows_the_persisted_state_for_both_prefs_values() {
+    // Wave 11 guarantee: the Settings card's Live MCP
+    // toggle SHOWS the persisted preference — prefs
+    // `live_mcp: false` starts the editor with the
+    // bridge off and the pill off; `true` starts it on
+    // with the pill on — and a press flips the bridge,
+    // persists the RESULT, and says so. Depends on: A4
+    // (init's prefs-to-bridge start, main.rs) and A6
+    // (the settings row reading the bridge itself,
+    // settings_popover.rs — no mirrored bool to drift).
+    //
+    // Seeding: this suite has no prefs-seeding pattern
+    // (scenes drive handlers, never the file), so the
+    // test writes ./projects/.layout.json through
+    // `shell::save_layout` — the app's own load-modify-
+    // save path, cloned from the live prefs so ONLY
+    // `live_mcp` differs — and restores the file and
+    // the bridge at the end. One asymmetry the seeding
+    // must respect: `init` only ever switches the
+    // bridge ON from prefs (main.rs), so the off phase
+    // also calls `set_enabled(false)` — the state a
+    // fresh process would hold.
+    use stykanimate_rs::shell::{load_layout, save_layout};
+
+    let orig_prefs = load_layout();
+    let orig_bridge = crate::live_mcp::is_enabled();
+
+    // --- Phase 1: persisted OFF. ---
+    let mut prefs = orig_prefs.clone();
+    prefs.live_mcp = false;
+    save_layout(&prefs);
+    let _ = crate::live_mcp::set_enabled(false);
+    let mut rt = editor();
+    assert!(
+        !crate::live_mcp::is_enabled(),
+        "prefs live_mcp=false starts the editor with the bridge off"
+    );
+    let gap = open_settings_and_read_knob(&mut rt);
+    assert!(
+        gap > 14.0,
+        "the toggle pill reads OFF (knob gap {gap:.1}, off ≈ 20, on ≈ 8)"
+    );
+
+    // A press flips the bridge, persists the result and
+    // repaints the pill — the row reads the bridge, so
+    // the same card now shows ON.
+    tap(&mut rt, "settings-live-mcp");
+    assert!(
+        crate::live_mcp::is_enabled(),
+        "the press started the bridge"
+    );
+    assert!(
+        load_layout().live_mcp,
+        "the press persisted the resulting state to the prefs"
+    );
+    assert!(
+        rt.state.core.status.starts_with("Live MCP on"),
+        "the press reports itself on the status line: {}",
+        rt.state.core.status
+    );
+    for _ in 0..30 {
+        if let Some(g) = live_mcp_knob_gap(&rt) {
+            if g < 14.0 {
+                break;
+            }
+        }
+        rt.frame(DT);
+    }
+    let gap = live_mcp_knob_gap(&rt).expect("the knob is still in the tree");
+    assert!(
+        gap < 14.0,
+        "the toggle pill now reads ON (knob gap {gap:.1})"
+    );
+
+    // --- Phase 2: persisted ON, a fresh editor. ---
+    let mut prefs = orig_prefs.clone();
+    prefs.live_mcp = true;
+    save_layout(&prefs);
+    let mut rt2 = editor();
+    assert!(
+        crate::live_mcp::is_enabled(),
+        "prefs live_mcp=true starts the bridge in init (A4)"
+    );
+    let gap = open_settings_and_read_knob(&mut rt2);
+    assert!(
+        gap < 14.0,
+        "the toggle pill reads ON from the persisted pref (knob gap {gap:.1})"
+    );
+
+    // Leave the process as the test found it.
+    save_layout(&orig_prefs);
+    let _ = crate::live_mcp::set_enabled(orig_bridge);
 }

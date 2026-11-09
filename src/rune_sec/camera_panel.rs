@@ -149,8 +149,10 @@
 //!   shift; it now never pretends a stranded key is
 //!   reachable either. (3) Angle readouts are wrapped via
 //!   `model::norm_deg` (see [`angle_deg`]): stored angles
-//!   are written verbatim by the MCP `set_camera` tool
-//!   and by project import, and `camera_angle_at` returns
+//!   can arrive unwrapped via project import (and, until
+//!   Wave 11, via the MCP `set_camera` tool, which now
+//!   wraps on write like every panel write), and
+//!   `camera_angle_at` returns
 //!   them raw at the end keys — an imported 725° key read
 //!   "725°" while its dial marker clamped to the stop.
 //!   Paste and Hold stamp the wrapped angle so the panel
@@ -166,6 +168,32 @@
 //!   360° sensitivity with the ±15° steppers for fine
 //!   work; key-row widths (worst realistic label ≈22
 //!   chars ≈150 pt + Delete inside the 316 pt column).
+//!
+//! * UI mission Wave 11 (MCP end-to-end re-audit): the
+//!   Wave 10 "audited clean" above holds for the four
+//!   built-ins it named, but the full sweep found the
+//!   registry side thinner — handed to the integrator as
+//!   exact specs, not fixed here: no MCP read lists the
+//!   camera keys or the follow target at all (`get_state`
+//!   has no camera section; `project_summary` reports
+//!   only a key count, stale keys included silently);
+//!   `set_camera` stores its angle verbatim where every
+//!   panel write stores it wrapped, states no unit for
+//!   `zoom` (a scale factor — 1.0 = 100% — where the
+//!   panel steppers clamp results to 0.3–4.0), and takes
+//!   no snapshot, so its writes are invisible to undo
+//!   and to the autosave edit counter where the panel's
+//!   Set key and the MCP delete are both one undo step;
+//!   and the panel's Set-key-here and Hold have no MCP
+//!   counterpart. Panel-side, this wave fixes the two
+//!   defects in this file: [`PANEL_NOTE`] no longer
+//!   claims the navigation/clipboard/Follow rows write
+//!   keys, and the 1:1 press at 100% reports instead of
+//!   silently doing nothing. Integrator's close (same
+//!   wave): all three registry findings are fixed — the
+//!   `get_camera`, `set_camera_key_here` and `hold_camera`
+//!   built-ins landed; `set_camera` wraps its angle,
+//!   documents zoom's unit and snapshots like the panel.
 //!
 //! Engine facts this panel lives with (verified, not worked
 //! around silently): `camera_clear_key` does NOT snapshot, so
@@ -266,10 +294,22 @@ pub fn actual_factor(zoom: f32) -> Option<f32> {
 }
 
 /// 1:1 button handler: zoom to exactly 1.0 via
-/// `camera_zoom_by`, unless already there.
+/// `camera_zoom_by`, unless already there. Already there
+/// is a status-only press (Wave 11): the skip itself is
+/// deliberate — a no-op `camera_zoom_by` would push a
+/// dead undo entry — but the press should not be silent
+/// when every other refused press in this panel reports.
 fn zoom_actual(s: &mut State) {
-    if let Some(f) = actual_factor(s.core.camera_here().2) {
-        s.core.camera_zoom_by(f);
+    let zoom = s.core.camera_here().2;
+    match actual_factor(zoom) {
+        Some(f) => s.core.camera_zoom_by(f),
+        None if zoom > 0.0 => {
+            s.core.status = format!(
+                "Camera zoom is already 100% at frame {}.",
+                s.core.current + 1
+            );
+        }
+        None => {}
     }
 }
 
@@ -562,22 +602,9 @@ pub fn hold_camera(core: &mut EditorCore) {
         core.status = "No frames to hold the camera over.".into();
         return;
     };
-    let (x, y, zoom) = core.camera_here();
-    // The held angle is stamped wrapped, like a paste:
-    // `camera_angle_at` can return an unwrapped stored
-    // angle at the end keys (see `angle_deg`), and the
-    // hold writes it onto every frame of the span.
-    let angle = stykanimate_rs::model::norm_deg(
-        core.project.camera_angle_at(core.current as f32),
-    );
-    core.snapshot();
-    for frame in a..=b {
-        core.project.set_camera_key(frame, x, y, zoom);
-        if let Some(k) = core.project.camera.iter_mut().find(|k| k.frame == frame) {
-            k.angle = angle;
-        }
-    }
-    core.status = format!("Camera held over frames {}–{}.", a + 1, b + 1);
+    // Wave 11 (C2 GAP-3): the write itself lives on EditorCore
+    // now, so the panel and MCP run the identical stamped hold.
+    core.hold_camera(a, b);
 }
 
 // ----------------------------------------------------------------
@@ -910,16 +937,22 @@ fn angle_readout(core: &EditorCore, t: &Theme) -> El {
 
 /// The note under the panel's header (Wave 10): the
 /// view/authored distinction, stated where the confusion
-/// happens. Every control in this panel upserts a camera
-/// KEY at the current frame — Fit, Centre, 1:1 and the
-/// zoom steppers included (`frame_all_figures`,
-/// `centre_on_selection`, `camera_zoom_by` all snapshot
-/// and set a key) — while the stage pill carries the same
-/// Fit / Centre / 1:1 labels for VIEW-only navigation
-/// (Wave 5). Before this note, nothing in the panel said
-/// which side of that line its controls were on, and the
-/// panel's own docs called the first row "the view row".
-pub const PANEL_NOTE: &str = "Everything here writes camera keys at the current frame — the stage pill's Fit, Centre and zoom change only the view.";
+/// happens. The framing, zoom and rotation controls in
+/// this panel upsert a camera KEY at the current frame —
+/// Fit, Centre, 1:1, the zoom steppers and the dial
+/// included (`frame_all_figures`, `centre_on_selection`,
+/// `camera_zoom_by` all snapshot and set a key) — while
+/// the stage pill carries the same Fit / Centre / 1:1
+/// labels for VIEW-only navigation (Wave 5). Before this
+/// note, nothing in the panel said which side of that
+/// line its controls were on, and the panel's own docs
+/// called the first row "the view row". Wave 11 scoped
+/// the wording to those controls: the key navigation,
+/// clipboard and Follow rows further down write no key
+/// (they move the playhead, hold panel-local state, or
+/// set the follow target), and the old "Everything here"
+/// phrasing claimed they did.
+pub const PANEL_NOTE: &str = "Framing, zoom and rotation here write camera keys at the current frame — the stage pill's Fit, Centre and zoom change only the view.";
 
 /// A sentence-long prose note inside the card, rendered
 /// the way the settings card's notes are (muted LABEL,
@@ -1954,14 +1987,14 @@ playback_speed: 1.0,
         // copy edit has to make the change on purpose.
         assert_eq!(
             PANEL_NOTE,
-            "Everything here writes camera keys at the current frame — the stage pill's Fit, Centre and zoom change only the view."
+            "Framing, zoom and rotation here write camera keys at the current frame — the stage pill's Fit, Centre and zoom change only the view."
         );
     }
 
     #[test]
     fn angle_readouts_wrap_unwrapped_stored_angles() {
-        // A stored angle written verbatim (MCP set_camera,
-        // project import) can be unwrapped; camera_angle_at
+        // A stored angle written verbatim (project import)
+        // can be unwrapped; camera_angle_at
         // returns it raw at the end keys. The readouts wrap
         // it — the 3D yaw bug's camera-panel twin.
         let mut core = EditorCore::new();

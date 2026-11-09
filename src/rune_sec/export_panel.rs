@@ -21,9 +21,12 @@
 //! full ops' wording. Only the project formats have no
 //! range variant, so they always export in full — the
 //! toggle line says so rather than pretending
-//! otherwise. MP4 range exports mux the audio of WAV
-//! clips that intersect the range (Wave 9, `export::
-//! export_mp4_range`); WebM
+//! otherwise. MP4 range exports mux the audio of the
+//! clips that intersect the range (Wave 9 for WAV,
+//! `export::export_mp4_range`; Wave 10 extended it to
+//! any ffmpeg-readable format, and a clip whose file
+//! cannot be probed or decoded fails the export rather
+//! than being dropped silently); WebM
 //! is video-only in every mode — the WebM path has no
 //! audio support at all (`export::export_webm` never
 //! muxes) — and the notes say both.
@@ -218,12 +221,14 @@ pub fn range_target(core: &EditorCore, use_range: bool) -> Option<(usize, usize)
 /// The muted note shown when a loop range is set — the same
 /// facts the GPUI centre printed (frames are 1-based in the
 /// UI), updated for this panel: here the range exports are
-/// one toggle away, and a range MP4 keeps the audio of WAV
-/// clips inside the range while WebM stays silent.
+/// one toggle away, and a range MP4 keeps the audio of the
+/// clips inside the range (WAV, and since Wave 10 any
+/// ffmpeg-readable format; an unprobeable clip file fails
+/// the export) while WebM stays silent.
 pub fn loop_note(core: &EditorCore) -> Option<String> {
     let (a, b) = range_target(core, true)?;
     Some(format!(
-        "Loop range: frames {}–{} — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (a range MP4 includes audio from WAV clips inside the range; WebM is video-only in every mode).",
+        "Loop range: frames {}–{} — with \"Loop range\" selected below, the PNG/JPEG/SVG/spritesheet/contact sheet/GIF/APNG/MP4/WebM exports write only those frames (a range MP4 includes audio from WAV and other ffmpeg-readable clips inside the range — a clip whose file cannot be probed or decoded fails the export; WebM is video-only in every mode).",
         a + 1,
         b + 1
     ))
@@ -463,7 +468,8 @@ pub fn failure_recap(status: &str, name: &str) -> String {
 /// range WebM carries its video-only marker — WebM drops
 /// the project's audio in every mode. A range MP4 no
 /// longer takes the marker: since Wave 9 it muxes the
-/// WAV clips inside its range.
+/// clips inside its range (any ffmpeg-readable format
+/// since Wave 10).
 pub fn single_recap_range(name: &str, dest: &str, range: (usize, usize), video_only: bool) -> String {
     let (a, b) = range;
     if video_only {
@@ -780,8 +786,12 @@ fn export_mp4_action(s: &mut State) {
             let _ = std::fs::create_dir_all(&dir);
             let path = dir.join("animation.mp4");
             // Since Wave 9 the range path muxes the audio
-            // of WAV clips intersecting the range, like the
-            // full op (see `export::export_mp4_range` docs).
+            // of clips intersecting the range, like the
+            // full op (see `export::export_mp4_range`
+            // docs); since Wave 10 that covers any
+            // ffmpeg-readable format, and a clip whose
+            // file cannot be probed or decoded fails the
+            // export instead of being dropped silently.
             match stykanimate_rs::export::export_mp4_range(&s.core.project, a, b, &path) {
                 Ok(()) => {
                     s.core.status = format!(
@@ -1468,7 +1478,7 @@ pub fn export_panel(s: &State, t: &Theme) -> El {
             "xc-mp4",
             "video",
             "MP4",
-            "MP4 video via ffmpeg — ./export/animation.mp4 (full export includes audio; range export includes audio from WAV clips inside the range)",
+            "MP4 video via ffmpeg — ./export/animation.mp4 (full export includes audio; range export includes audio from clips inside the range — WAV or any other ffmpeg-readable format; a clip file that cannot be probed or decoded fails the range export)",
             t,
             export_mp4_action,
         ))
@@ -1691,6 +1701,18 @@ mod tests {
         let note = loop_note(&core).expect("note with a loop range set");
         assert!(note.contains("frames 2–3"), "unexpected note: {note}");
         assert!(note.contains("video-only"), "video caveat missing: {note}");
+        // Wave 11 (C9): the audio clause must state the
+        // Wave 10 truth, not the Wave 9 WAV-only version —
+        // non-WAV clips sound in a range MP4, and an
+        // unprobeable clip file fails the export.
+        assert!(
+            note.contains("WAV and other ffmpeg-readable clips"),
+            "range audio formats misstated: {note}"
+        );
+        assert!(
+            note.contains("cannot be probed or decoded fails the export"),
+            "unprobeable-clip failure missing: {note}"
+        );
     }
 
     #[test]
@@ -1784,7 +1806,8 @@ mod tests {
             "Exported WebM (frames 1–5, video only) → ./export/animation.webm"
         );
         // A range MP4 no longer takes the marker (Wave 9:
-        // it muxes the WAV clips inside its range).
+        // it muxes the clips inside its range — any
+        // ffmpeg-readable format since Wave 10).
         assert_eq!(
             single_recap_range("MP4", "./export/animation.mp4", (0, 4), false),
             "Exported MP4 (frames 1–5) → ./export/animation.mp4"

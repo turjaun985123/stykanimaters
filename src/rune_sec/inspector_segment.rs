@@ -234,6 +234,20 @@ pub struct InspectorSegmentState {
     /// it agrees with the pose angles the stage solver
     /// writes. For the root (no segment) it is the node's
     /// pose angle at the frame.
+    ///
+    /// Wave 11 (C10) precision note: this is the WORLD
+    /// angle, not the stored pose angle. Pose angles are
+    /// parent-relative (`model::evaluate` accumulates
+    /// them down the tree), so for a node deeper than a
+    /// root child this readout differs from
+    /// `frames[current].poses[fi].angles[ni]` by the
+    /// ancestors' accumulated angle — and that stored
+    /// relative value, raw and unnormalised, is what
+    /// MCP's `get_pose` returns. The two surfaces also
+    /// differ when an `Angle(ni)` graph channel overrides
+    /// the sampled pose: this readout is graph-aware
+    /// (`positions_f`), `get_pose` is not. Same
+    /// convention, same unit — different quantity.
     pub angle_deg: f32,
     /// Current frame's bend for this node, degrees (0 when
     /// the frame stores no bend for it — the same read
