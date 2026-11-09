@@ -174,6 +174,33 @@
 //! scene's unit test pins the resulting census through
 //! `stats::figure_keyframes` itself — the lane's own
 //! input.
+//!
+//! The Wave 12 scenes close the two populated-state
+//! blind spots the Wave 10 round-2 audits named —
+//! surfaces no headless tree had ever contained with
+//! live data in them:
+//!
+//! - `home-populated` seeds the Home library by
+//!   SAVING three projects through the core's own
+//!   save op (with the save press's recents
+//!   follow-up), then switches workspace and opens
+//!   the panel by its pub `open` field. The rows and
+//!   their thumbnails are then the panel's real scan
+//!   of real files — there is no in-process row state
+//!   to fake, and none is: the panel reads the
+//!   directory, so the scene writes the directory,
+//!   through the app's own op and nothing else.
+//! - `strokes-populated` plants its four strokes by
+//!   direct `project.strokes` writes — the
+//!   `graph-duplicates` exception again, because no
+//!   op records a stroke with chosen fill / scatter /
+//!   opacity — and selects one through the pub
+//!   `stroke_selected` field the panel's own presses
+//!   write. It lands on Draw, the one workspace whose
+//!   section list carries the stroke inspector; an
+//!   Animate landing is unreachable state for that
+//!   panel (Animate's list has no stroke section),
+//!   recorded here so the scene is not "fixed" back.
 
 use crate::State;
 
@@ -754,6 +781,207 @@ fn scene_dopesheet_keys(s: &mut State) {
     s.core.goto(2);
 }
 
+/// `"home-populated"` — the Home workspace with the
+/// library OPEN over three real saved projects, so a
+/// `--tree` dump contains populated project rows
+/// (`home-row-{i}`) and the totals footer for the
+/// first time: the `home` scene renders this panel
+/// closed, and the CI library is otherwise empty, so
+/// no earlier tree has ever contained a row (the
+/// Wave 10 round-2 audit of this panel worked blind
+/// for exactly that reason). The library is seeded
+/// the way the app itself seeds it — by SAVING: each
+/// project goes through `EditorCore::save_named_
+/// project`, the Project section's Save op, which
+/// writes `./projects/<slug>.json`, refreshes the
+/// core's `project_files` wholesale and re-points
+/// the selector at the file just saved; on each
+/// success the scene makes the save press's own
+/// follow-up call, `shell::touch_recent` with the
+/// stored name (project_tools' `after_save` gates
+/// exactly that call on the op's `true`), so the
+/// recents list heads with the last save — which is
+/// also the current project, so the panel's reopen
+/// quick action stays suppressed, as it would for a
+/// user who just saved. Between saves the session
+/// evolves the way a user's would: the stored name
+/// changes (a pub-field write — the name is what the
+/// save op slugs) and a figure is added through
+/// `EditorCore::add_figure`, so the three rows
+/// differ in name and figure count, not just in
+/// file. A refused save (a name that cannot name a
+/// file) simply leaves that row unseeded — the scene
+/// stays total. The panel is then opened by writing
+/// the pub `HomePanelState::open` field — NOT
+/// through `home_panel::toggle_open`: the toggle is
+/// a session action (it captures a recovery verdict
+/// and snapshots the current work as the recovery
+/// file), and neither belongs in a library fixture;
+/// the field write is the `selected_node` class of
+/// scene write, and the verdict the panel renders
+/// with is the one `init` already captured.
+///
+/// Thumbnails are NOT seeded, because there is
+/// nothing in-process to seed: the panel generates
+/// each row's frame-0 render from the file on disk
+/// at scan time (`HomePanelState::fill_thumbnails`)
+/// and serves it on an exact mtime match — with real
+/// files saved by the real op, that mechanism runs
+/// exactly as it does for a user, and the rows lead
+/// with real renders in the `--snap`. (The files'
+/// mtimes are the saves' own moments — the one clock
+/// reading in the scene, inherent to real files; the
+/// tree facts are keys and counts, which no mtime
+/// can move.)
+fn scene_home_populated(s: &mut State) {
+    // Three saves through the real op, each followed
+    // by the save press's own recents follow-up,
+    // gated on success exactly as `after_save` gates
+    // it (see the doc comment).
+    s.core.project.name = "Harbour Lights".to_string();
+    if s.core.save_named_project() {
+        let name = s.core.project.name.clone();
+        stykanimate_rs::shell::touch_recent(&name);
+    }
+    s.core.add_figure();
+    s.core.project.name = "Night Train".to_string();
+    if s.core.save_named_project() {
+        let name = s.core.project.name.clone();
+        stykanimate_rs::shell::touch_recent(&name);
+    }
+    s.core.project.name = "First Steps".to_string();
+    if s.core.save_named_project() {
+        let name = s.core.project.name.clone();
+        stykanimate_rs::shell::touch_recent(&name);
+    }
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Home,
+    );
+    s.home_panel.open = true;
+}
+
+/// `"strokes-populated"` — the Draw workspace with
+/// four strokes planted on the current frame and the
+/// last of them selected, so a `--tree` dump contains
+/// the stroke inspector's populated state for the
+/// first time (its selection readout, measure line,
+/// Width / Opacity rows and per-stroke list rows):
+/// no earlier scene gives the project strokes, so
+/// every one of those rows has only ever rendered
+/// empty in CI (the Wave 10 round-2 audit of this
+/// panel worked blind for the same reason as Home's).
+/// The workspace is Draw, NOT Animate:
+/// `Section::StrokeInspector` gates to Draw alone
+/// (workspaces.rs' DRAW_SECTIONS; the Animate list
+/// has no stroke section), so in Animate the panel
+/// never mounts and the state would prove nothing —
+/// the stage canvas itself mounts in both.
+///
+/// The strokes are planted by direct
+/// `project.strokes` writes — the module's
+/// named-exception pattern, for the
+/// `graph-duplicates` reason: no core op records a
+/// stroke with chosen properties. The draw path
+/// derives every field from the active brush and
+/// pointer motion a scene cannot replay — fill from
+/// the fill setting, scatter and the spray mark from
+/// the Spray preset, opacity from the brush — so
+/// chosen kinds cannot be authored through ops. The
+/// planted values are ordinary stroke data the
+/// inspector and the stage then read through their
+/// normal paths: a plain polyline, a filled stroke,
+/// a scatter stroke (the `scatter` radius AND the
+/// spray mark a Spray-preset stroke records, its
+/// seed fixed at 7 — the draw path's per-stroke seed
+/// is the one value a replay could never reproduce,
+/// so the fixture fixes it), and a low-opacity
+/// stroke at 0.35. The selection is the pub
+/// `State::stroke_selected` field — the field the
+/// panel's own stepping presses write — pointed at
+/// the low-opacity stroke: a non-spray selection is
+/// what mounts the Opacity row beside the Width row
+/// (a spray selection suppresses it, because a spray
+/// stroke's opacity lives on its mark).
+fn scene_strokes_populated(s: &mut State) {
+    use stykanimate_rs::model::{SprayMark, Stroke};
+    crate::rune_sec::workspaces::select_workspace(
+        s,
+        crate::rune_sec::workspaces::Workspace::Draw,
+    );
+    let frame = s.core.current;
+    let base = s.core.project.strokes.len();
+    s.core.project.strokes.push(Stroke {
+        frame,
+        points: vec![
+            [120.0, 520.0],
+            [260.0, 470.0],
+            [400.0, 520.0],
+            [540.0, 460.0],
+        ],
+        color: 0x33_66_CC,
+        width: 5.0,
+        widths: Vec::new(),
+        fill: None,
+        spray: None,
+        opacity: 1.0,
+        scatter: 0.0,
+    });
+    s.core.project.strokes.push(Stroke {
+        frame,
+        points: vec![
+            [620.0, 180.0],
+            [760.0, 180.0],
+            [760.0, 300.0],
+            [620.0, 300.0],
+        ],
+        color: 0xCC_55_33,
+        width: 4.0,
+        widths: Vec::new(),
+        fill: Some(0xFF_CC_66),
+        spray: None,
+        opacity: 1.0,
+        scatter: 0.0,
+    });
+    s.core.project.strokes.push(Stroke {
+        frame,
+        points: vec![
+            [140.0, 180.0],
+            [240.0, 240.0],
+            [340.0, 180.0],
+            [440.0, 240.0],
+        ],
+        color: 0x22_88_55,
+        width: 4.0,
+        widths: Vec::new(),
+        fill: None,
+        spray: Some(SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        }),
+        opacity: 1.0,
+        scatter: 12.0,
+    });
+    s.core.project.strokes.push(Stroke {
+        frame,
+        points: vec![
+            [560.0, 470.0],
+            [660.0, 420.0],
+            [760.0, 470.0],
+            [860.0, 420.0],
+        ],
+        color: 0x77_33_AA,
+        width: 6.0,
+        widths: Vec::new(),
+        fill: None,
+        spray: None,
+        opacity: 0.35,
+        scatter: 0.0,
+    });
+    s.stroke_selected = Some(base + 3);
+}
+
 /// The scene table for `AppSpec::scenes`, in `--list-scenes`
 /// display order. Element type is Rune's own, verbatim:
 /// `(&'static str, fn(&mut State))` (tooling.rs:25).
@@ -783,6 +1011,8 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
         ("audio-open", scene_audio_open),
         ("clips-populated", scene_clips_populated),
         ("dopesheet-keys", scene_dopesheet_keys),
+        ("home-populated", scene_home_populated),
+        ("strokes-populated", scene_strokes_populated),
     ]
 }
 
@@ -985,6 +1215,33 @@ pub fn scenes() -> Vec<(&'static str, fn(&mut State))> {
 ///    census the lane renders from. (The playhead's
 ///    park on frame 2 is chip styling — drawn, not
 ///    keyed — so it is a `--snap` fact, as in fact 11.)
+/// 28. Under `--scene home-populated` (Wave 12):
+///    elements keyed `home-row-0`, `home-row-1` and
+///    `home-row-2` exist — three real project rows in
+///    the open library, the surface no earlier scene
+///    populated (the `home` scene renders the panel
+///    closed and the CI library is otherwise empty) —
+///    and an element keyed `home-totals` exists (the
+///    totals footer, which a non-empty list mounts).
+///    The rows' thumbnails are unkeyed image
+///    elements, so their presence is a `--snap` fact:
+///    each row leads with the frame-0 render the
+///    panel generated from the saved file at scan
+///    time.
+/// 29. Under `--scene strokes-populated` (Wave 12):
+///    elements keyed `stroke-measure`,
+///    `stroke-width-row` and `stroke-opacity-row`
+///    exist — the selected-stroke rows the inspector
+///    mounts only for a valid selection on a
+///    non-spray stroke — and elements keyed
+///    `stroke-del-0` through `stroke-del-3` exist
+///    (the four planted strokes' list rows on the
+///    current frame, keyed by project index). The
+///    scene lands on Draw, the one workspace whose
+///    section list carries the stroke inspector
+///    (workspaces.rs); the strokes themselves are
+///    stage-canvas drawings, so their shapes are a
+///    `--snap` fact.
 pub fn layout_assertions() -> Vec<&'static str> {
     vec![
         "exactly one element keyed \"stage\"",
@@ -1014,6 +1271,8 @@ pub fn layout_assertions() -> Vec<&'static str> {
         "under --scene audio-open: an element keyed \"audio-panel\" exists and an element is keyed \"figures-panel\" (the audio panel — see fact 25)",
         "under --scene clips-populated: elements keyed \"clip-dup-0\" and \"clip-dup-1\" exist (two real clip rows — see fact 26)",
         "under --scene dopesheet-keys: the dopesheet lane shows two figure rows, figure 0 keyed at frames 0, 2, 4 (3 keys) and figure 1 keyed at frames 1, 3 (2 keys), no other cell keyed (the stats::figure_keyframes census — see fact 27)",
+        "under --scene home-populated: elements keyed \"home-row-0\", \"home-row-1\" and \"home-row-2\" exist and an element keyed \"home-totals\" exists (three real library rows and the totals footer — see fact 28)",
+        "under --scene strokes-populated: elements keyed \"stroke-measure\", \"stroke-width-row\" and \"stroke-opacity-row\" exist and elements keyed \"stroke-del-0\" through \"stroke-del-3\" exist (the selected-stroke rows and the four strokes' list rows — see fact 29)",
     ]
 }
 
@@ -1023,15 +1282,16 @@ mod tests {
         scene_audio_open, scene_build_open, scene_clips_populated, scene_default_light,
         scene_dopesheet_keys, scene_draw_open,
         scene_effects_open, scene_export_open, scene_fx_selected, scene_fx_split_mid,
-        scene_graph_duplicates, scene_graph_open, scene_home, scene_loop_range,
-        scene_menu_open, scene_palette_open, scene_settings_open,
-        scene_settings_open_light, scene_three_d, scene_three_d_stage, scenes,
+        scene_graph_duplicates, scene_graph_open, scene_home, scene_home_populated,
+        scene_loop_range, scene_menu_open, scene_palette_open, scene_settings_open,
+        scene_settings_open_light, scene_strokes_populated, scene_three_d,
+        scene_three_d_stage, scenes,
     };
     use crate::init;
     use crate::rune_sec::workspaces::Workspace;
 
     /// The scene table is the headless contract:
-    /// twenty-four scenes, each name unique (a duplicate
+    /// twenty-six scenes, each name unique (a duplicate
     /// would shadow the later entry in `with_scene`'s
     /// lookup), with the Phase J scenes in their display
     /// positions, the two Phase K scenes appended after
@@ -1042,11 +1302,13 @@ mod tests {
     /// those, the five UI-mission Wave 9 workspace
     /// scenes appended after those, the Wave 9
     /// integration clips-populated scene appended after
-    /// those, and the Wave 10 dopesheet-keys scene last.
+    /// those, the Wave 10 dopesheet-keys scene appended
+    /// after those, and the two Wave 12 populated-state
+    /// scenes (home-populated, strokes-populated) last.
     #[test]
-    fn scene_table_has_twentyfour_uniquely_named_scenes() {
+    fn scene_table_has_twentysix_uniquely_named_scenes() {
         let table = scenes();
-        assert_eq!(table.len(), 24, "twenty-four scenes are registered");
+        assert_eq!(table.len(), 26, "twenty-six scenes are registered");
         let mut names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
         let total = names.len();
         names.sort_unstable();
@@ -1072,6 +1334,8 @@ mod tests {
         assert_eq!(table[21].0, "audio-open");
         assert_eq!(table[22].0, "clips-populated");
         assert_eq!(table[23].0, "dopesheet-keys");
+        assert_eq!(table[24].0, "home-populated");
+        assert_eq!(table[25].0, "strokes-populated");
     }
 
     /// The export scene reaches the Export workspace through
@@ -1520,5 +1784,114 @@ mod tests {
         scene_settings_open_light(&mut s);
         assert!(s.core.light_theme, "the light theme is set");
         assert!(s.settings.open, "the settings card is expanded");
+    }
+
+    /// The home-populated scene (Wave 12) lands on the
+    /// Home workspace with the library open over three
+    /// projects the scene saved through the core's own
+    /// save op: the core's file list — refreshed by the
+    /// op itself — names all three files with the
+    /// selector pointing at the last save, and the scan
+    /// the panel reads (the same `projects::scan` the
+    /// scan cache wraps) lists all three stored names
+    /// through the panel's own library filter. This is
+    /// the state behind layout fact 28. Presence, not
+    /// totals, is pinned: the suite shares the real
+    /// `./projects` with the layout prefs, as every
+    /// scene test does, and the three names are this
+    /// scene's alone.
+    #[test]
+    fn home_populated_scene_saves_three_projects_and_opens_the_library() {
+        let mut s = init();
+        scene_home_populated(&mut s);
+        assert_eq!(s.workspace, Workspace::Home);
+        assert!(s.home_panel.open, "the library is open");
+        let listed: Vec<String> = s
+            .core
+            .project_files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        for slug in ["harbour-lights.json", "night-train.json", "first-steps.json"] {
+            assert!(
+                listed.iter().any(|f| f == slug),
+                "the core's file list names {slug}"
+            );
+        }
+        let current = s.core.project_files[s.core.project_index]
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+        assert_eq!(
+            current.as_deref(),
+            Some("first-steps.json"),
+            "the selector points at the last save"
+        );
+        let entries =
+            stykanimate_rs::projects::scan(&crate::rune_sec::home_panel::projects_dir());
+        let visible = crate::rune_sec::home_panel::visible_projects(&entries, "");
+        let names: Vec<&str> = visible.iter().map(|info| info.name.as_str()).collect();
+        for name in ["Harbour Lights", "Night Train", "First Steps"] {
+            assert!(names.contains(&name), "the library lists {name}");
+        }
+    }
+
+    /// The strokes-populated scene (Wave 12) lands on
+    /// the Draw workspace — the one workspace whose
+    /// section list carries the stroke inspector — with
+    /// four strokes planted on the current frame and
+    /// the low-opacity one selected, proven through the
+    /// inspector's own readers: its frame filter lists
+    /// all four, its row summaries name the filled and
+    /// spray kinds, and its selection gates (measure,
+    /// width, opacity) all open on the selection. This
+    /// is the state behind layout fact 29.
+    #[test]
+    fn strokes_populated_scene_plants_four_kinds_and_selects_the_faded_one() {
+        use crate::rune_sec::stroke_inspector;
+        let mut s = init();
+        let len_before = s.core.project.strokes.len();
+        let rows_before = stroke_inspector::frame_stroke_indices(&s.core).len();
+        scene_strokes_populated(&mut s);
+        assert_eq!(s.workspace, Workspace::Draw);
+        assert_eq!(
+            s.core.project.strokes.len(),
+            len_before + 4,
+            "four strokes were planted"
+        );
+        let rows = stroke_inspector::stroke_rows(&s.core);
+        assert_eq!(
+            rows.len(),
+            rows_before + 4,
+            "all four sit on the current frame"
+        );
+        assert!(
+            rows[rows_before + 1].summary.contains("filled"),
+            "the second planted stroke reads as filled: {}",
+            rows[rows_before + 1].summary
+        );
+        assert!(
+            rows[rows_before + 2].summary.contains("spray r12 · 50%"),
+            "the third planted stroke reads as the scatter/spray kind: {}",
+            rows[rows_before + 2].summary
+        );
+        assert_eq!(
+            s.stroke_selected,
+            Some(len_before + 3),
+            "the low-opacity stroke is the selection"
+        );
+        assert_eq!(
+            stroke_inspector::selected_stroke_opacity(&s.core, s.stroke_selected),
+            Some(0.35),
+            "the opacity row's gate opens on the selection"
+        );
+        assert_eq!(
+            stroke_inspector::selected_stroke_width(&s.core, s.stroke_selected),
+            Some(6.0),
+            "the width row's gate opens on the selection"
+        );
+        assert!(
+            stroke_inspector::measure_readout(&s.core, s.stroke_selected).is_some(),
+            "the measure line renders for the selection"
+        );
     }
 }

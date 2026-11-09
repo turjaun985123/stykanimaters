@@ -53,6 +53,16 @@
 //! with the group it divided) and the File arm
 //! (menu-file-sep now sits between recents and
 //! Export, where the division actually is).
+//! Wave 12 (D7, recents audit): the File menu's Open
+//! recent resolution gained the file-stem fallback
+//! Home ▸ Reopen last has had since Wave 10 — see
+//! [`resolve_recent`] — closing the one divergence the
+//! audit found between the two readers of
+//! `recents.json` (after a Home rename the menu entry
+//! for the renamed project reported "not found" while
+//! Reopen resolved it). Cap (5 of the writer's 10),
+//! order, dedup (the writer's job, shell.rs) and the
+//! empty state audited clean; no keys added or changed.
 //! Declared from `main.rs` by the integrator; bin-crate
 //! code, not part of the engine library.
 //!
@@ -511,9 +521,63 @@ fn item(
 /// the whole history.
 pub const MAX_RECENT_ITEMS: usize = 5;
 
-/// The File menu's Open recent resolution (Phase J): pair
-/// each of the first [`MAX_RECENT_ITEMS`] recent display
-/// names with the project file that carries it.
+/// The file-name slug for a project name — lowercased,
+/// every non-alphanumeric character replaced by '-':
+/// the crate-wide naming convention. Each owner keeps a
+/// private copy (`shell::project_file_slug`,
+/// `home_panel::name_file_slug`, `projects::slug`); keep
+/// this one in sync with them.
+fn recent_name_slug(name: &str) -> String {
+    name.to_lowercase()
+        .replace(|c: char| !c.is_alphanumeric(), "-")
+}
+
+/// One recent name's file (Wave 12, D7): the two-pass
+/// resolution Home ▸ Reopen last runs
+/// (`home_panel::reopen_target`), over the (stored name,
+/// path) pairs.
+///
+/// Pass 1 is the exact stored-name match. Pass 2 — the
+/// fallback `reopen_target` gained in Wave 10 and this
+/// menu lacked until Wave 12 — matches the name's slug
+/// against the files' stems: a Home rename is file-only
+/// (the stored name inside the file updates only when
+/// the project is saved again), yet `confirm_rename`
+/// re-touches recents with the typed name, so after a
+/// rename NO stored name matches the recents entry while
+/// the renamed file sits right there under the name's
+/// slug. Without this pass the menu showed that entry
+/// but its press reported "Recent project not found"
+/// for a project Home could reopen fine — the two
+/// readers of `recents.json` disagreed. The exact match
+/// keeps precedence (the stem pass runs only when no
+/// stored name matches), and both passes search the
+/// same pre-filtered pairs, so the recovery snapshot
+/// and shell-owned entries stay excluded from both.
+fn resolve_recent(name: &str, files: &[(String, PathBuf)]) -> Option<PathBuf> {
+    if let Some(path) = files
+        .iter()
+        .find(|(file_name, _)| file_name == name)
+        .map(|(_, path)| path.clone())
+    {
+        return Some(path);
+    }
+    let stem = recent_name_slug(name);
+    if stem.is_empty() {
+        return None;
+    }
+    files
+        .iter()
+        .find(|(_, path)| {
+            path.file_stem().and_then(|s| s.to_str()) == Some(stem.as_str())
+        })
+        .map(|(_, path)| path.clone())
+}
+
+/// The File menu's Open recent resolution (Phase J;
+/// Wave 12, D7: the stem fallback): pair each of the
+/// first [`MAX_RECENT_ITEMS`] recent display names with
+/// the project file that carries it.
 ///
 /// `recents` are display names, most recent first
 /// (`stykanimate_rs::shell::recents` — recents store
@@ -522,7 +586,8 @@ pub const MAX_RECENT_ITEMS: usize = 5;
 /// panel's cached library scan, filtered the way its rows
 /// are (`home_panel::visible_projects`), so a name
 /// resolves exactly the way Home ▸ Reopen last resolves
-/// it — by exact stored-name match, with the recovery
+/// it — exact stored-name match first, file-stem match
+/// second (see [`resolve_recent`]), with the recovery
 /// snapshot and shell-owned entries already excluded.
 ///
 /// A name with no matching file comes back as
@@ -542,13 +607,7 @@ pub fn recent_items(
     recents
         .iter()
         .take(MAX_RECENT_ITEMS)
-        .map(|name| {
-            let path = files
-                .iter()
-                .find(|(file_name, _)| file_name == name)
-                .map(|(_, path)| path.clone());
-            (name.clone(), path)
-        })
+        .map(|name| (name.clone(), resolve_recent(name, files)))
         .collect()
 }
 
@@ -1367,6 +1426,66 @@ mod tests {
             recent_items(&lower, &files),
             vec![("alpha".to_string(), None)],
             "a differently-cased name must not resolve"
+        );
+    }
+
+    #[test]
+    fn recent_items_resolves_a_renamed_recent_by_file_stem() {
+        // Wave 12 (D7): the Home-rename case. The rename
+        // is file-only — the file moved to the typed
+        // name's slug while the name stored inside it is
+        // still the old one — and `confirm_rename`
+        // re-touched recents with the typed name, so no
+        // stored name matches the entry. Home ▸ Reopen
+        // last resolves it by file stem
+        // (`home_panel::reopen_target`'s second pass);
+        // the menu must resolve the same entry to the
+        // same file instead of reporting it not found.
+        let recents: Vec<String> = vec!["New Name".to_string()];
+        let files = vec![(
+            "Old Name".to_string(),
+            std::path::PathBuf::from("projects/new-name.json"),
+        )];
+        assert_eq!(
+            recent_items(&recents, &files),
+            vec![(
+                "New Name".to_string(),
+                Some(std::path::PathBuf::from("projects/new-name.json")),
+            )]
+        );
+        // A name whose slug matches no stem stays
+        // unresolved — the fallback invents nothing.
+        let other: Vec<String> = vec!["Something Else".to_string()];
+        assert_eq!(
+            recent_items(&other, &files),
+            vec![("Something Else".to_string(), None)]
+        );
+    }
+
+    #[test]
+    fn recent_items_exact_match_beats_the_stem_fallback() {
+        // Wave 12 (D7): precedence, mirroring
+        // `reopen_target` — when a stored name matches
+        // exactly, that file wins even if another file's
+        // stem would match the name's slug and the stem
+        // candidate sits earlier in the list.
+        let recents: Vec<String> = vec!["Foo Bar".to_string()];
+        let files = vec![
+            (
+                "Unrelated".to_string(),
+                std::path::PathBuf::from("projects/foo-bar.json"),
+            ),
+            (
+                "Foo Bar".to_string(),
+                std::path::PathBuf::from("projects/kept.json"),
+            ),
+        ];
+        assert_eq!(
+            recent_items(&recents, &files),
+            vec![(
+                "Foo Bar".to_string(),
+                Some(std::path::PathBuf::from("projects/kept.json")),
+            )]
         );
     }
 

@@ -288,6 +288,65 @@
 //! press read it (the press restates the same guard
 //! inline, as the width pair does).
 //!
+//! ## Selected stroke scatter (Wave 12, agent D3)
+//!
+//! The audit that opened this section: every `Stroke`
+//! field (model.rs:495) against what this panel shows.
+//! Points, frame, colour, width, fill presence and the
+//! spray mark were all visible (measure line, list
+//! swatch, Width row, summary clauses) and the Width /
+//! Opacity rows read the stroke's stored values, never
+//! the brush's — but `Stroke.scatter` (model.rs:525,
+//! recorded from the brush by the stamp path,
+//! editor.rs:3247) appeared NOWHERE for a selected
+//! stroke: no row, no summary clause. The value is
+//! real — every renderer spreads an ordinary stroke's
+//! dabs by it (`paint::stroke_dabs`) — and MCP could
+//! already rewrite it (`draw_ops::tool_set_stroke_style`),
+//! so the panel was the only surface that could neither
+//! see nor change it. A row under the opacity row (key
+//! `stroke-scatter-row`) closes that, following the
+//! opacity row's pattern and discipline exactly: the
+//! pure [`scatter_after`] steps by [`SCATTER_STEP`]
+//! (1.0) clamped to [[`MIN_STROKE_SCATTER`],
+//! [`MAX_STROKE_SCATTER`]]; the press
+//! ([`set_selected_stroke_scatter`]) is one
+//! `core.snapshot()` then a direct `project.strokes`
+//! write — one undo step — and the status names the
+//! stroke and its new scatter in the measure voice
+//! (`Stroke {n} scatter {v}.`, `{v}` rendered by
+//! [`scatter_text`], so 0 reads `Off`).
+//!
+//! Spray strokes are refused, on the MCP op's own
+//! reasoning (`tool_set_stroke_style` refuses scatter
+//! writes to spray strokes in the same words): a spray
+//! stroke renders from its spray mark and never reaches
+//! the scatter dab path, so its stored `scatter` —
+//! whatever a loaded file carries there — moves nothing
+//! on screen, and stepping it here would be a fake
+//! control. The row is therefore absent for a spray
+//! selection and the press refuses silently too.
+//! [`selected_stroke_scatter`] is the shared gate, in
+//! [`selected_stroke_opacity`]'s shape. The maximum,
+//! 24.0, is twice the broadest scatter any brush records
+//! (Spray, 12.0) — the width row's reasoning (its 40.0
+//! cap sits above the broadest brush width) applied to
+//! scatter — so an existing stroke can always be
+//! scattered more broadly than any brush draws it,
+//! without runaway values from a corrupt file; a
+//! non-finite stored scatter recovers from
+//! [`DEFAULT_STROKE_SCATTER`] (0.0, the model's serde
+//! default for the field) before the step applies.
+//!
+//! The same audit gave the per-point `widths` taper a
+//! summary clause ([`stroke_summary`] now reports
+//! `taper` when the vec is non-empty): the taper is
+//! real model data the nib profiling writes at draw
+//! time, and until now nothing in this panel admitted
+//! it existed. It stays display-only here — no op
+//! edits a taper directly; the Width press rescales it
+//! (Phase K) and Simplify re-gathers it (Phase L).
+//!
 //! `State` access: the brush and stroke data read
 //! `s.core` (active brush, `brush_index`,
 //! `project.strokes`, `current`) and writes go through
@@ -766,15 +825,25 @@ pub fn strokes_header(core: &EditorCore) -> String {
 }
 
 /// One stroke row's summary: point count and base width,
-/// plus `filled` when the stroke carries a fill colour and
-/// the spray mark's radius/opacity when it carries one
-/// (`Stroke`, model.rs:481).
+/// plus `taper` when the stroke carries a per-point
+/// `widths` profile, `filled` when it carries a fill
+/// colour, and either the spray mark's radius/opacity
+/// when it carries one or — for an ordinary stroke —
+/// its `scatter` radius when scatter is on (`Stroke`,
+/// model.rs:495). The two radius clauses never appear
+/// together: a spray stroke renders from its mark and
+/// never reaches the scatter dab path, so its stored
+/// `scatter` is not reported (Wave 12, agent D3 — the
+/// same refusal [`selected_stroke_scatter`] applies).
 pub fn stroke_summary(stroke: &Stroke) -> String {
     let mut out = format!(
         "{} pts · w {}",
         stroke.points.len(),
         width_text(stroke.width)
     );
+    if !stroke.widths.is_empty() {
+        out.push_str(" · taper");
+    }
     if stroke.fill.is_some() {
         out.push_str(" · filled");
     }
@@ -784,6 +853,8 @@ pub fn stroke_summary(stroke: &Stroke) -> String {
             width_text(mark.radius),
             opacity_text(mark.opacity)
         ));
+    } else if stroke.scatter > 0.0 {
+        out.push_str(&format!(" · scatter r{}", width_text(stroke.scatter)));
     }
     out
 }
@@ -1239,6 +1310,118 @@ pub fn set_selected_stroke_opacity(
     core.snapshot();
     core.project.strokes[i].opacity = new;
     core.status = format!("Stroke {} opacity {}.", i + 1, opacity_label(new));
+    true
+}
+
+/// One scatter-stepper press moves a stroke's
+/// scatter radius by this much: one stage unit —
+/// scatter radii are coarse spatial spreads (the
+/// library's only scattering brush records 12.0), so
+/// the width step's half unit would make crossing
+/// the useful range a chore of presses.
+pub const SCATTER_STEP: f32 = 1.0;
+
+/// The smallest scatter the stepper writes: 0.0,
+/// scatter off — the stroke draws exactly on its
+/// path, the model's own floor and serde default.
+pub const MIN_STROKE_SCATTER: f32 = 0.0;
+
+/// The largest scatter the stepper writes: twice the
+/// broadest scatter any brush records (Spray, 12.0) —
+/// the width cap's reasoning (its 40.0 sits above the
+/// broadest brush width) applied to scatter — so an
+/// existing stroke can always be spread more broadly
+/// than any brush draws it, without runaway values
+/// from a corrupt file. (The MCP op
+/// `draw_ops::tool_set_stroke_style` sets scatter
+/// with no upper bound; the panel's stepper range is
+/// deliberately narrower, as its width range is the
+/// same values the op validates against.)
+pub const MAX_STROKE_SCATTER: f32 = 24.0;
+
+/// The scatter a non-finite stored scatter is
+/// recovered to before a step applies: 0.0, the
+/// model's serde default for the field
+/// (`Stroke.scatter`, model.rs:525) — a corrupt value
+/// steps from scatter-off, never from itself.
+pub const DEFAULT_STROKE_SCATTER: f32 = 0.0;
+
+/// The scatter after one stepper press in direction
+/// `dir` (−1 / +1; larger magnitudes step further):
+/// `current` moved by `dir` × [`SCATTER_STEP`] and
+/// clamped to [[`MIN_STROKE_SCATTER`],
+/// [`MAX_STROKE_SCATTER`]] — [`opacity_after`]'s shape
+/// applied to scatter. A non-finite `current` (a
+/// corrupt or hand-edited project file) is first
+/// recovered to [`DEFAULT_STROKE_SCATTER`], so the
+/// press always lands on a real, usable radius. A
+/// negative stored value clamps up to 0.0 on the
+/// first press in either direction. Pure.
+pub fn scatter_after(current: f32, dir: i32) -> f32 {
+    let base = if current.is_finite() {
+        current
+    } else {
+        DEFAULT_STROKE_SCATTER
+    };
+    (base + dir as f32 * SCATTER_STEP).clamp(MIN_STROKE_SCATTER, MAX_STROKE_SCATTER)
+}
+
+/// The selected stroke's current scatter, or `None`
+/// when there is nothing the scatter steppers may act
+/// on: no (or a stale) selection — the width row's
+/// render condition, in [`selected_stroke_width`]'s
+/// guard shape — or the selected stroke is a **spray**
+/// stroke. A spray stroke renders from its spray mark
+/// and never reaches the scatter dab path
+/// (`paint::stroke_dabs` — spray precedence is the
+/// caller's, and every renderer replaces a marked
+/// stroke with its spray dots), so its stored
+/// `scatter` moves nothing on screen and stepping it
+/// would be a fake control — the refusal the MCP op
+/// `draw_ops::tool_set_stroke_style` makes in the same
+/// case. This is the scatter row's render condition
+/// and value source; the press restates the same
+/// guard inline, as the opacity pair does, so the row
+/// and the press can never disagree.
+pub fn selected_stroke_scatter(core: &EditorCore, selected: Option<usize>) -> Option<f32> {
+    let i = selected.filter(|&i| i < core.project.strokes.len())?;
+    let stroke = &core.project.strokes[i];
+    if stroke.spray.is_some() {
+        return None;
+    }
+    Some(stroke.scatter)
+}
+
+/// Scatter stepper press: step the selected stroke's
+/// recorded `scatter` by [`scatter_after`]. The write
+/// is the opacity press's composition — exactly one
+/// `core.snapshot()`, then a direct `project.strokes`
+/// write — so the press is one undo step; like
+/// opacity, scatter is a single scalar on the stroke,
+/// so there is no taper to rescale. With no selection,
+/// a stale one, or a spray stroke selected, the press
+/// is a silent no-op: `false`, no snapshot, no status
+/// (see [`selected_stroke_scatter`] for the spray
+/// rule). On success the status names the stroke and
+/// its new scatter, in the measure line's voice:
+/// `Stroke {n} scatter {v}.`, with `{v}` from
+/// [`scatter_text`] (0 reads `Off`, as the Preset
+/// scatter row renders it).
+pub fn set_selected_stroke_scatter(
+    core: &mut EditorCore,
+    selected: Option<usize>,
+    dir: i32,
+) -> bool {
+    let Some(i) = selected.filter(|&i| i < core.project.strokes.len()) else {
+        return false;
+    };
+    if core.project.strokes[i].spray.is_some() {
+        return false;
+    }
+    let new = scatter_after(core.project.strokes[i].scatter, dir);
+    core.snapshot();
+    core.project.strokes[i].scatter = new;
+    core.status = format!("Stroke {} scatter {}.", i + 1, scatter_text(new));
     true
 }
 
@@ -1836,8 +2019,58 @@ pub fn stroke_panel(s: &State, t: &Theme) -> El {
         );
     }
 
+    // Selected stroke scatter (Wave 12, agent D3):
+    // steppers under the opacity row, rendered while
+    // the selection is valid and the stroke is not a
+    // spray stroke (`selected_stroke_scatter` is the
+    // gate — a spray stroke never reaches the scatter
+    // dab path, so its stored scatter moves nothing;
+    // see the module docs). The value renders through
+    // `scatter_text`, the Preset scatter row's own
+    // formatter (0 reads "Off"). Each press is one
+    // undo step (see `set_selected_stroke_scatter`).
+    // Same construction as the Width / Opacity rows,
+    // so the fixed parts stay at the same ≈110 pt.
+    if let Some(sc) = selected_stroke_scatter(core, s.stroke_selected) {
+        panel = panel.child(
+            row()
+                .key("stroke-scatter-row")
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text("Scatter")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .grow(1.0),
+                )
+                .child(icon_only_btn(
+                    "stroke-scatter-dn",
+                    "chevron-down",
+                    "Decrease scatter",
+                    26.0, false,
+                    t,
+                    |s| {
+                        let sel = s.stroke_selected;
+                        set_selected_stroke_scatter(&mut s.core, sel, -1);
+                    },
+                ))
+                .child(design::stepper_value(&scatter_text(sc), t))
+                .child(icon_only_btn(
+                    "stroke-scatter-up",
+                    "chevron-up",
+                    "Increase scatter",
+                    26.0, false,
+                    t,
+                    |s| {
+                        let sel = s.stroke_selected;
+                        set_selected_stroke_scatter(&mut s.core, sel, 1);
+                    },
+                )),
+        );
+    }
+
     // Selected stroke simplify (Phase L): a Simplify
-    // button under the opacity row, under the same
+    // button under the scatter row, under the same
     // valid-selection condition — Douglas-Peucker over
     // the one selected stroke, one undo step when it
     // changes anything (see `simplify_selected`).
@@ -3415,6 +3648,181 @@ mod tests {
         // Valid selection: the branch is taken and the
         // panel builds with the button.
         let s = state_with(core_with_strokes(), Some(0));
+        let _ = stroke_panel(&s, &t);
+    }
+
+    // ---- Wave 12 (agent D3): selected stroke scatter ----
+
+    #[test]
+    fn scatter_after_steps_by_one_and_clamps() {
+        // Mid-range: exactly one step of 1.0 each way,
+        // and a magnitude-2 dir steps twice.
+        assert_eq!(scatter_after(5.0, 1), 6.0);
+        assert_eq!(scatter_after(5.0, -1), 4.0);
+        assert_eq!(scatter_after(5.0, 2), 7.0);
+        // The floor is 0.0 — scatter off — reachable
+        // from the smallest positive value and held.
+        assert_eq!(scatter_after(0.0, -1), 0.0);
+        assert_eq!(scatter_after(0.5, -1), 0.0);
+        // The cap is 24.0, twice the Spray preset's
+        // 12.0; both edges hold at and beyond it.
+        assert_eq!(scatter_after(24.0, 1), 24.0);
+        assert_eq!(scatter_after(23.5, 1), 24.0);
+        // A negative stored value (a corrupt file)
+        // clamps up to the floor on the first press.
+        assert_eq!(scatter_after(-2.0, -1), 0.0);
+    }
+
+    #[test]
+    fn scatter_after_recovers_a_non_finite_scatter_to_off() {
+        // A corrupt stored scatter steps from 0.0 (the
+        // model's serde default), never from itself.
+        assert_eq!(scatter_after(f32::NAN, 1), 1.0);
+        assert_eq!(scatter_after(f32::NAN, -1), 0.0);
+        assert_eq!(scatter_after(f32::INFINITY, 1), 1.0);
+        assert_eq!(scatter_after(f32::NEG_INFINITY, -1), 0.0);
+    }
+
+    #[test]
+    fn selected_stroke_scatter_reads_only_a_steppable_selection() {
+        let mut core = core_with_strokes();
+        core.project.strokes[0].scatter = 5.0;
+        assert_eq!(selected_stroke_scatter(&core, None), None);
+        assert_eq!(selected_stroke_scatter(&core, Some(0)), Some(5.0));
+        assert_eq!(selected_stroke_scatter(&core, Some(99)), None);
+        // A spray stroke yields nothing: it renders
+        // from its mark and never reaches the scatter
+        // dab path, so its stored scatter — even a
+        // non-zero one from a loaded file — is not a
+        // value the steppers may present as live.
+        core.project.strokes[1].spray = Some(SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        });
+        core.project.strokes[1].scatter = 9.0;
+        assert_eq!(selected_stroke_scatter(&core, Some(1)), None);
+        core.project.strokes.clear();
+        assert_eq!(selected_stroke_scatter(&core, Some(0)), None);
+    }
+
+    #[test]
+    fn set_selected_stroke_scatter_writes_the_field_as_one_undo_step() {
+        let mut core = EditorCore::new();
+        // plain_stroke carries scatter 0.0: the first
+        // press turns scatter on at radius 1.
+        core.project.strokes.push(plain_stroke(0, 3));
+        let depth = core.undo_depth();
+        assert!(set_selected_stroke_scatter(&mut core, Some(0), 1));
+        assert_eq!(core.project.strokes[0].scatter, 1.0);
+        assert_eq!(core.undo_depth(), depth + 1, "exactly one snapshot");
+        assert_eq!(core.status, "Stroke 1 scatter 1.");
+        // Stepping back down to 0 renders "Off" in the
+        // status, the Preset scatter row's vocabulary.
+        assert!(set_selected_stroke_scatter(&mut core, Some(0), -1));
+        assert_eq!(core.project.strokes[0].scatter, 0.0);
+        assert_eq!(core.status, "Stroke 1 scatter Off.");
+        // Each press was exactly one undo step.
+        core.undo();
+        assert_eq!(core.project.strokes[0].scatter, 1.0);
+        core.undo();
+        assert_eq!(core.project.strokes[0].scatter, 0.0);
+    }
+
+    #[test]
+    fn set_selected_stroke_scatter_without_a_selection_is_a_silent_no_op() {
+        let mut core = core_with_strokes();
+        core.project.strokes[0].scatter = 5.0;
+        let depth = core.undo_depth();
+        let status_before = core.status.clone();
+        // No selection, and a stale one past the end:
+        // both refuse silently — no write, no snapshot,
+        // no status.
+        assert!(!set_selected_stroke_scatter(&mut core, None, 1));
+        assert!(!set_selected_stroke_scatter(&mut core, Some(99), -1));
+        assert_eq!(core.undo_depth(), depth, "no snapshot taken");
+        assert_eq!(core.status, status_before, "no status written");
+        assert_eq!(core.project.strokes[0].scatter, 5.0, "scatter untouched");
+    }
+
+    #[test]
+    fn set_selected_stroke_scatter_refuses_a_spray_stroke() {
+        let mut core = EditorCore::new();
+        let mut s = plain_stroke(0, 3);
+        s.spray = Some(SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        });
+        core.project.strokes.push(s);
+        let depth = core.undo_depth();
+        let status_before = core.status.clone();
+        // Both directions refuse silently: the stored
+        // scatter is not written, no snapshot, no
+        // status — the MCP op's refusal, in panel form.
+        assert!(!set_selected_stroke_scatter(&mut core, Some(0), 1));
+        assert!(!set_selected_stroke_scatter(&mut core, Some(0), -1));
+        assert_eq!(core.undo_depth(), depth, "no snapshot taken");
+        assert_eq!(core.status, status_before, "no status written");
+        assert_eq!(
+            core.project.strokes[0].scatter, 0.0,
+            "the stored scatter is not written"
+        );
+    }
+
+    #[test]
+    fn stroke_summary_reports_taper_and_scatter() {
+        // A per-point taper is admitted in the summary
+        // (Wave 12, D3): before this, nothing in the
+        // panel showed the `widths` vec existed.
+        let mut tapered = plain_stroke(0, 3);
+        tapered.widths = vec![2.0, 4.0, 2.0];
+        assert_eq!(stroke_summary(&tapered), "3 pts · w 4 · taper");
+        // An ordinary stroke with scatter on reports
+        // its radius, in the spray clause's format.
+        let mut scattered = plain_stroke(0, 6);
+        scattered.scatter = 5.0;
+        assert_eq!(stroke_summary(&scattered), "6 pts · w 4 · scatter r5");
+        // Scatter off (the serde default): no clause.
+        assert_eq!(stroke_summary(&plain_stroke(0, 6)), "6 pts · w 4");
+        // A spray stroke reports its mark, never its
+        // stored scatter — even a non-zero one.
+        let mut sprayed = plain_stroke(0, 20);
+        sprayed.scatter = 9.0;
+        sprayed.spray = Some(SprayMark {
+            seed: 42,
+            radius: 12.0,
+            opacity: 0.5,
+        });
+        assert_eq!(
+            stroke_summary(&sprayed),
+            "20 pts · w 4 · spray r12 · 50%"
+        );
+    }
+
+    #[test]
+    fn stroke_panel_builds_with_the_scatter_row_branches() {
+        let t = rune::tok::theme(true);
+        // Plain selection: the scatter row's render
+        // branch (the `selected_stroke_scatter` gate)
+        // is taken and the panel builds with the row.
+        let s = state_with(core_with_strokes(), Some(0));
+        let _ = stroke_panel(&s, &t);
+        // Spray selection: the branch is not taken, so
+        // the row is absent — the panel builds without
+        // it, like the opacity row's spray branch.
+        let mut core = core_with_strokes();
+        core.project.strokes[0].spray = Some(SprayMark {
+            seed: 7,
+            radius: 12.0,
+            opacity: 0.5,
+        });
+        let s = state_with(core, Some(0));
+        let _ = stroke_panel(&s, &t);
+        // No selection: neither selected-stroke row
+        // renders — the panel builds in its compact
+        // unselected form.
+        let s = state_with(core_with_strokes(), None);
         let _ = stroke_panel(&s, &t);
     }
 }

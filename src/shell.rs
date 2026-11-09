@@ -67,6 +67,30 @@ fn default_dir() -> PathBuf {
     PathBuf::from("projects")
 }
 
+/// The projects directory every shell store lives in:
+/// `./projects`, relative to the process working
+/// directory — the directory [`write_recovery`],
+/// [`recents`], [`load_layout`] and their siblings read
+/// and write when no explicit directory is given.
+///
+/// This is the public handle on [`default_dir`], which
+/// stays the private engine so the value cannot drift:
+/// code that must agree with the stores about *where*
+/// projects live — the Home panel's scan root
+/// (`home_panel::projects_dir`, which restates this
+/// same literal today), and headless scenes or tests
+/// seeding a populated projects directory for the
+/// shell to read back — takes the path from here
+/// instead of spelling `"projects"` again. The path is
+/// deliberately the bare relative one, exactly as the
+/// stores resolve it: an absolutised variant would
+/// name the same directory only while the working
+/// directory never changes, and would silently stop
+/// matching the stores if it ever did.
+pub fn projects_dir() -> PathBuf {
+    default_dir()
+}
+
 /// Sequence number for atomic-write temp files (see
 /// [`write_file_atomic`]): combined with the process id
 /// it makes every temp name unique, so two threads of
@@ -687,6 +711,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn projects_dir_is_the_default_store_dir() {
+        // The public accessor is the stores' own default,
+        // not a second opinion: it is the bare relative
+        // `./projects` the no-directory entry points
+        // resolve against the working directory.
+        assert_eq!(projects_dir(), PathBuf::from("projects"));
+        assert_eq!(projects_dir(), default_dir());
+        // Behavioural pin (read-only): the recents list
+        // read through the accessor is the recents list
+        // the no-directory entry point reads — same file,
+        // whichever directory the test process runs in.
+        assert_eq!(recents_in(&projects_dir()), recents());
     }
 
     #[test]

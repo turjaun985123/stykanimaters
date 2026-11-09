@@ -9,8 +9,10 @@
 //! never empty in practice; `load_library` at editor.rs:162):
 //!
 //! - A vertically scrolling list of every library figure:
-//!   its name and its segment count (`FigureDef::nodes`,
-//!   model.rs:164). Entries whose name carries the core's own
+//!   a live thumbnail of its def (Wave 12 — see
+//!   [`library_thumb_shape`]), its name and its segment
+//!   count (`FigureDef::nodes`, model.rs:164). Entries
+//!   whose name carries the core's own
 //!   `Built-in: ` prefix (the three `load_library` built-ins)
 //!   are grouped under a **Built-in** heading; the rest —
 //!   figures saved from the editor — under **Saved**.
@@ -215,6 +217,62 @@
 //!   one-to-one, so no constructible figure type is
 //!   missing from the library.
 //!
+//! ## Wave 12 (D5 — row thumbnails)
+//!
+//! - **Thumbnails**: until this wave a row was text
+//!   only — name, segment count, buttons; no card drew
+//!   its figure at all (the codebase's only figure
+//!   miniature was the figures panel's, over PROJECT
+//!   figures). Each row now leads with a
+//!   [`THUMB_SIZE`] canvas (key `library-thumb-{i}`)
+//!   drawing the entry's OWN def, derived fresh from
+//!   `core.library[i]` on every render — there is no
+//!   cached or stored image anywhere in the path, so
+//!   a renamed, duplicated or re-saved entry's
+//!   thumbnail can never go stale, and built-in and
+//!   saved entries render by exactly one rule (the
+//!   same [`library_thumb_prims`] over their defs).
+//! - **Fidelity**: the thumbnail is the stage's own
+//!   construction shrunk, not a glyph: the def is
+//!   evaluated at its rest pose
+//!   (`FigureDef::rest_pose` + `model::evaluate`),
+//!   fitted by the figures panel's [`thumb_fit`], and
+//!   every segment goes through
+//!   `paint::styled_segment_pieces` — the shared
+//!   styled-segment source the stage itself adopted
+//!   this wave — so per-node colours, taper, cap
+//!   geometry, `color2` gradients and style opacity
+//!   all reach the miniature; shape nodes and head
+//!   rings follow the stage's passes (ring/disc at
+//!   the node's style opacity; head rings at the
+//!   base colour, unscaled [`HEAD_RING_RADIUS`] — a
+//!   def has no project to scale it by, which is the
+//!   constant's documented default).
+//! - **Named divergences from the stage** (accepted,
+//!   by the nature of a library entry): the pose is
+//!   the REST pose — an entry has no project pose to
+//!   show; the bend is 0 — bends live in project
+//!   frames, not in a def; segment media is NOT drawn
+//!   — a def's asset indices belong to the project it
+//!   was saved from and may not resolve in this one,
+//!   so drawing them could show the wrong image; and
+//!   stroke widths floor at [`THUMB_MIN_WIDTH`] so a
+//!   hard taper stays visible at 44 points (the
+//!   stage's own 0.8-point dot floor is the precedent;
+//!   endpoints and every width above the floor are
+//!   exact).
+//! - **Base colour**: a def carries no figure colour
+//!   — `insert_library_figure` assigns one from the
+//!   core's palette by the project's figure count at
+//!   insert time, so no colour is intrinsic to an
+//!   entry. Segments that inherit (node colour
+//!   `None`) are drawn in the theme's text colour;
+//!   every colour the def itself carries (per-node
+//!   overrides, gradient ends) is drawn as authored.
+//!
+//! [`thumb_fit`]: crate::rune_sec::figures_panel::thumb_fit
+//! [`HEAD_RING_RADIUS`]: stykanimate_rs::model::HEAD_RING_RADIUS
+//!
 //! The successful-rename fs dispatch (a real file moved
 //! under `./library`) is deliberately **untested**, for
 //! exactly the delete reason given below: test binaries
@@ -273,13 +331,16 @@
 use std::path::PathBuf;
 
 use rune::tok::{type_, Theme};
-use rune::{col, row, text, text_input, El, ScrollSpec, TextEdit, Tx};
+use rune::{canvas, col, row, text, text_input, Color, El, LineCap, ScrollSpec, Shape, TextEdit, Tx};
 use stykanimate_rs::editor::EditorCore;
+use stykanimate_rs::model::{self, FigureDef};
 
 use crate::chrome_view::btn;
 use crate::rune_sec::design;
+use crate::rune_sec::figures_panel;
 use crate::rune_sec::icon_btn::{icon_btn, icon_only_btn};
 use crate::rune_sec::icons::icon_el;
+use crate::stage_view::{hex_color, ngon};
 use crate::State;
 
 /// The name prefix `load_library` gives its three built-in
@@ -882,6 +943,213 @@ pub fn cancel_rename(s: &mut State) {
     s.library_panel.rename = TextEdit::default();
 }
 
+/// Edge length (points) of a row thumbnail's canvas:
+/// the figures panel's own thumbnail size, shared so
+/// every figure miniature in the shell is one size.
+pub const THUMB_SIZE: f32 = figures_panel::THUMB_SIZE;
+
+/// Legibility floor (points) for thumbnail stroke
+/// widths: a hard taper's far pieces would otherwise
+/// shrink under a fifth of a point at this scale and
+/// the segment would visually detach from its joint.
+/// The stage floors its spray dots at the same 0.8
+/// (stage_view's `Dots` pass); endpoints — and every
+/// width above the floor — stay exact.
+pub const THUMB_MIN_WIDTH: f32 = 0.8;
+
+/// Sides of the thumbnail head-ring polygon (the
+/// figures panel's thumbnail choice at this size; the
+/// full stage uses 24). Circle shape nodes keep the
+/// stage's 24 — see [`library_thumb_prims`].
+const THUMB_RING_SIDES: usize = 16;
+
+/// One piece of library-thumbnail geometry in canvas
+/// points. [`library_thumb_shape`] turns these into a
+/// `Shape`; keeping them separate makes the geometry
+/// unit-testable (a built `Shape`'s ops are
+/// crate-private to rune) — the figures panel's
+/// `ThumbPrim` discipline, extended with the width,
+/// colour and alpha a styled piece carries.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LibraryThumbPrim {
+    /// One styled segment piece: draw `a`→`b` as a
+    /// round-capped line of `width` points in `color`
+    /// at `alpha` (the piece's style opacity).
+    Piece {
+        a: [f32; 2],
+        b: [f32; 2],
+        width: f32,
+        color: Color,
+        alpha: f32,
+    },
+    /// A closed ring — a head ring or a `Circle` shape
+    /// node: stroke `pts` closed at `width` points in
+    /// `color` at `alpha`.
+    Ring {
+        pts: Vec<[f32; 2]>,
+        width: f32,
+        color: Color,
+        alpha: f32,
+    },
+    /// A filled disc — a `Polygon` shape node: fill
+    /// `pts` in `color` at `alpha`.
+    Disc {
+        pts: Vec<[f32; 2]>,
+        color: Color,
+        alpha: f32,
+    },
+}
+
+/// A rune `Color` as the `0xRRGGBB` hex the engine's
+/// colour math speaks: through the colour's own sRGB
+/// encoding (`Color::hex` is `#rrggbbaa` in sRGB), so
+/// the round trip `hex_color(color_hex_u32(c))` lands
+/// back on `c`'s hue. Used to hand the theme's text
+/// colour to `paint::styled_segment_pieces` as the
+/// inherited-segment base (see the module docs for why
+/// the base is the theme ink, not a figure colour).
+fn color_hex_u32(c: Color) -> u32 {
+    let hex = c.hex();
+    u32::from_str_radix(hex.get(1..7).unwrap_or(""), 16).unwrap_or(0xFF_FFFF)
+}
+
+/// The thumbnail geometry for one library entry's def:
+/// the def at its REST pose, fitted into a `size`
+/// square by the figures panel's [`thumb_fit`] (the
+/// box grows by the head-ring radius exactly as the
+/// project-figure thumbnails grow it), then — in the
+/// stage's own draw order — one styled piece run per
+/// parented node, the shape-node rings/discs, and one
+/// head ring per head node.
+///
+/// Every segment goes through
+/// `paint::styled_segment_pieces` with the node's own
+/// thickness, style and resolved colour
+/// (`node.color`, else the `base` colour the caller
+/// passes — the panel passes the theme's text colour,
+/// a def carrying no figure colour of its own), so
+/// taper, caps, `color2` gradients and style opacity
+/// are the stage's, not a miniature's approximation of
+/// them. The bend argument is 0.0: bends are per-frame
+/// project data and a def carries none. Segment media
+/// is deliberately not drawn (module docs: a def's
+/// asset indices belong to the project it was saved
+/// from). Piece widths are the stage's widths scaled
+/// by the fit, floored at [`THUMB_MIN_WIDTH`].
+///
+/// An empty def (no nodes) yields no prims.
+///
+/// [`thumb_fit`]: crate::rune_sec::figures_panel::thumb_fit
+pub fn library_thumb_prims(def: &FigureDef, size: f32, base: Color) -> Vec<LibraryThumbPrim> {
+    if def.nodes.is_empty() {
+        return Vec::new();
+    }
+    let pos = model::evaluate(def, &def.rest_pose([0.0, 0.0]));
+    let has_head = def.nodes.iter().any(|n| n.head);
+    let fit = figures_panel::thumb_fit(&pos, has_head, size, model::HEAD_RING_RADIUS);
+    let s = fit.scale;
+    let base_hex = color_hex_u32(base);
+    let mut prims = Vec::new();
+    // Segments: the stage's construction verbatim
+    // (stage_view's figure pass) — pieces are produced
+    // in stage space from the raw joints, thickness and
+    // style, then mapped; piece widths scale by the
+    // fit's scale exactly as the stage scales them by
+    // its view scale.
+    for (i, node) in def.nodes.iter().enumerate() {
+        if let Some(p) = node.parent {
+            let pieces = stykanimate_rs::paint::styled_segment_pieces(
+                pos[p],
+                pos[i],
+                0.0,
+                node.thickness,
+                &node.style,
+                node.color.unwrap_or(base_hex),
+            );
+            for piece in pieces {
+                prims.push(LibraryThumbPrim::Piece {
+                    a: fit.map(piece.a),
+                    b: fit.map(piece.b),
+                    width: (piece.width * s).max(THUMB_MIN_WIDTH),
+                    color: hex_color(piece.color).unwrap_or(Color::WHITE),
+                    alpha: piece.alpha,
+                });
+            }
+        }
+    }
+    // Shape nodes: the stage's shape pass — a `Circle`
+    // node rings at its own thickness, a `Polygon`
+    // fills, both centred on the node with radius half
+    // its length and both at the node's style opacity.
+    for (i, node) in def.nodes.iter().enumerate() {
+        let centre = fit.map(pos[i]);
+        let r = node.length / 2.0 * s;
+        let color = node
+            .color
+            .map(|hex| hex_color(hex).unwrap_or(base))
+            .unwrap_or(base);
+        match node.shape {
+            model::Shape::Circle => prims.push(LibraryThumbPrim::Ring {
+                pts: ngon(centre, r, 24),
+                width: (node.thickness * s).max(THUMB_MIN_WIDTH),
+                color,
+                alpha: node.style.opacity,
+            }),
+            model::Shape::Polygon(sides) => prims.push(LibraryThumbPrim::Disc {
+                pts: ngon(centre, r, sides as usize),
+                color,
+                alpha: node.style.opacity,
+            }),
+            model::Shape::Line => {}
+        }
+    }
+    // Head rings last, at the base colour plain, as the
+    // stage draws them (no node colour, no style
+    // opacity): radius is the model's unscaled
+    // HEAD_RING_RADIUS — a def has no project's head
+    // scale, and the constant is the documented default
+    // the project's scale multiplies.
+    for (i, node) in def.nodes.iter().enumerate() {
+        if node.head {
+            prims.push(LibraryThumbPrim::Ring {
+                pts: ngon(fit.map(pos[i]), model::HEAD_RING_RADIUS * s, THUMB_RING_SIDES),
+                width: (5.0 * s).max(THUMB_MIN_WIDTH),
+                color: base,
+                alpha: 1.0,
+            });
+        }
+    }
+    prims
+}
+
+/// Library def `def` as a miniature `Shape` for a
+/// `size`-point square canvas: the prims of
+/// [`library_thumb_prims`] folded into canvas ops —
+/// pieces as round-capped lines, rings as closed
+/// strokes, discs as fills, each at its prim's alpha.
+pub fn library_thumb_shape(def: &FigureDef, size: f32, base: Color) -> Shape {
+    let mut shape = Shape::new();
+    for prim in library_thumb_prims(def, size, base) {
+        shape = match prim {
+            LibraryThumbPrim::Piece {
+                a,
+                b,
+                width,
+                color,
+                alpha,
+            } => shape.line(a, b, width, LineCap::Round, color.alpha(alpha)),
+            LibraryThumbPrim::Ring {
+                pts,
+                width,
+                color,
+                alpha,
+            } => shape.stroke_with(pts, true, width, LineCap::Round, color.alpha(alpha)),
+            LibraryThumbPrim::Disc { pts, color, alpha } => shape.fill(pts, color.alpha(alpha)),
+        };
+    }
+    shape
+}
+
 /// The rename editor row rendered under the row being
 /// renamed: the name field plus Apply and Cancel. Only
 /// one rename session can be open, so the keys are
@@ -948,6 +1216,22 @@ fn rename_editor_row(s: &State, t: &Theme) -> El {
 /// one-line elision, so an unbounded file-stem name
 /// elides instead of forcing the line wide), and the
 /// button line fits at ≈ 208 pt worst case.
+///
+/// Wave 12 (D5): the first line now leads with the
+/// entry's thumbnail canvas ([`THUMB_SIZE`] square,
+/// key `library-thumb-{i}` — the figures panel's
+/// `fig-thumb-{fi}` key discipline), drawn from the
+/// entry's def in `core.library` at this very render
+/// ([`library_thumb_shape`], base colour the theme's
+/// text — a def carries no figure colour, see the
+/// module docs). The button line keeps the full
+/// 236 pt it was measured against above (the canvas
+/// rides the FIRST line only), and the name's share
+/// of the first line narrows to ≈ 184 pt (236 −
+/// 44 canvas − 8 gap), still behind `.truncate()`, so
+/// the Wave 10 width verdicts stand: the fixed
+/// children that cannot shrink — the canvas and the
+/// segment count — total ≈ 83 pt of that line.
 fn entry_row(entry: &LibraryRow, s: &State, t: &Theme) -> El {
     let i = entry.index;
     let mut buttons = row()
@@ -981,6 +1265,18 @@ fn entry_row(entry: &LibraryRow, s: &State, t: &Theme) -> El {
             move |s: &mut State| delete_entry(s, i),
         ));
     }
+    // The thumbnail: this entry's own def, drawn at
+    // this render from the same `core.library` the row
+    // was derived from — no cache, no stored image, so
+    // it cannot show another entry's figure or a stale
+    // one. The slot lookup cannot miss (rows derive
+    // from this library in this same pass, in
+    // `library_panel` below); the empty-shape fallback
+    // is defensive only.
+    let thumb = match s.core.library.get(i) {
+        Some((_, def)) => library_thumb_shape(def, THUMB_SIZE, t.text),
+        None => Shape::new(),
+    };
     let body = col()
         .grow(1.0)
         .gap(4.0)
@@ -990,16 +1286,27 @@ fn entry_row(entry: &LibraryRow, s: &State, t: &Theme) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(
-                    text(entry.name.clone())
-                        .font(type_::LABEL)
-                        .color(t.text)
-                        .grow(1.0)
-                        .truncate(),
+                    canvas(thumb)
+                        .key(format!("library-thumb-{i}"))
+                        .size(THUMB_SIZE, THUMB_SIZE),
                 )
                 .child(
-                    text(format!("{} seg", entry.segments))
-                        .font(type_::LABEL)
-                        .color(t.text_secondary),
+                    row()
+                        .grow(1.0)
+                        .gap(8.0)
+                        .center_y()
+                        .child(
+                            text(entry.name.clone())
+                                .font(type_::LABEL)
+                                .color(t.text)
+                                .grow(1.0)
+                                .truncate(),
+                        )
+                        .child(
+                            text(format!("{} seg", entry.segments))
+                                .font(type_::LABEL)
+                                .color(t.text_secondary),
+                        ),
                 ),
         )
         .child(buttons);
@@ -1924,5 +2231,248 @@ mod tests {
             stykanimate_rs::model::FigureDef::simple(),
         ));
         let _ = library_panel(&s, &t);
+    }
+
+    #[test]
+    fn color_hex_u32_round_trips_through_srgb() {
+        assert_eq!(color_hex_u32(Color::WHITE), 0xFF_FFFF);
+        assert_eq!(color_hex_u32(Color::BLACK), 0x00_0000);
+        // Pure linear red encodes to full sRGB red.
+        let red = Color {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        assert_eq!(color_hex_u32(red), 0xFF_0000);
+        // Alpha is not part of the hex the engine speaks.
+        assert_eq!(color_hex_u32(Color::WHITE.alpha(0.25)), 0xFF_FFFF);
+    }
+
+    fn piece_count(prims: &[LibraryThumbPrim]) -> usize {
+        prims
+            .iter()
+            .filter(|p| matches!(p, LibraryThumbPrim::Piece { .. }))
+            .count()
+    }
+
+    fn ring_count(prims: &[LibraryThumbPrim]) -> usize {
+        prims
+            .iter()
+            .filter(|p| matches!(p, LibraryThumbPrim::Ring { .. }))
+            .count()
+    }
+
+    #[test]
+    fn thumb_prims_draw_each_builtins_own_def() {
+        // One piece per parented node at the built-ins'
+        // flat default styles, plus exactly one head
+        // ring — and the counts differ per def, so a
+        // thumbnail can never be a shared glyph or
+        // another entry's figure: humanoid has 11 nodes,
+        // quadruped 13, simple 7, one root each.
+        let base = Color::WHITE;
+        let humanoid = library_thumb_prims(&FigureDef::humanoid(), THUMB_SIZE, base);
+        assert_eq!(piece_count(&humanoid), 10);
+        assert_eq!(ring_count(&humanoid), 1);
+        let quadruped = library_thumb_prims(&FigureDef::quadruped(), THUMB_SIZE, base);
+        assert_eq!(piece_count(&quadruped), 12);
+        assert_eq!(ring_count(&quadruped), 1);
+        let simple = library_thumb_prims(&FigureDef::simple(), THUMB_SIZE, base);
+        assert_eq!(piece_count(&simple), 6);
+        assert_eq!(ring_count(&simple), 1);
+        // The geometry itself differs, not just counts.
+        assert_ne!(humanoid, quadruped);
+        assert_ne!(humanoid, simple);
+        // Built-ins carry no per-node colours or styles:
+        // every piece is the base colour at full alpha.
+        for prim in humanoid.iter().chain(quadruped.iter()).chain(simple.iter()) {
+            if let LibraryThumbPrim::Piece { color, alpha, .. } = prim {
+                assert_eq!(*color, base);
+                assert_eq!(*alpha, 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn thumb_prims_fit_inside_the_canvas() {
+        // The fit grows the box by the head radius, so
+        // every mapped point — ring points included —
+        // lands inside the size square.
+        for def in [
+            FigureDef::humanoid(),
+            FigureDef::quadruped(),
+            FigureDef::simple(),
+        ] {
+            let prims = library_thumb_prims(&def, THUMB_SIZE, Color::WHITE);
+            assert!(!prims.is_empty());
+            for prim in &prims {
+                let pts: Vec<[f32; 2]> = match prim {
+                    LibraryThumbPrim::Piece { a, b, .. } => vec![*a, *b],
+                    LibraryThumbPrim::Ring { pts, .. } => pts.clone(),
+                    LibraryThumbPrim::Disc { pts, .. } => pts.clone(),
+                };
+                for p in pts {
+                    assert!(
+                        (-0.01..=THUMB_SIZE + 0.01).contains(&p[0]),
+                        "x {} out of box",
+                        p[0]
+                    );
+                    assert!(
+                        (-0.01..=THUMB_SIZE + 0.01).contains(&p[1]),
+                        "y {} out of box",
+                        p[1]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn thumb_prims_honour_node_colour_style_and_shape() {
+        // A hand-built def exercising every styled path:
+        // node 1 plain (inherits the base) and the head;
+        // node 2 a red override tapered to a point;
+        // node 3 a colour→color2 gradient; node 4 style
+        // opacity 0.5; node 5 a Circle shape node at
+        // opacity 0.25; node 6 a Polygon shape node.
+        // Shape nodes still draw their segment (the
+        // stage's rule), so the piece run is one run per
+        // parented node, in node order.
+        let n = |parent: Option<usize>, length: f32, rest: f32| model::NodeDef {
+            name: "n".into(),
+            parent,
+            length,
+            rest_angle: rest,
+            head: false,
+            bend: 1.0,
+            thickness: 5.0,
+            color: None,
+            ik_end: false,
+            shape: model::Shape::Line,
+            style: model::NodeStyle::default(),
+            media: None,
+        };
+        let mut nodes = vec![
+            n(None, 0.0, 0.0),       // 0 root
+            n(Some(0), 40.0, 180.0), // 1 plain, head
+            n(Some(1), 30.0, 0.0),   // 2 red point taper
+            n(Some(1), 30.0, 90.0),  // 3 gradient
+            n(Some(0), 35.0, -90.0), // 4 opacity 0.5
+            n(Some(0), 20.0, 45.0),  // 5 circle
+            n(Some(0), 20.0, -45.0), // 6 polygon
+        ];
+        nodes[1].head = true;
+        nodes[2].color = Some(0xFF0000);
+        nodes[2].style = model::NodeStyle {
+            taper: 0.0,
+            cap: model::CapKind::Point,
+            color2: None,
+            opacity: 1.0,
+        };
+        nodes[3].style = model::NodeStyle {
+            taper: 1.0,
+            cap: model::CapKind::Round,
+            color2: Some(0x0000FF),
+            opacity: 1.0,
+        };
+        nodes[4].style.opacity = 0.5;
+        nodes[5].shape = model::Shape::Circle;
+        nodes[5].style.opacity = 0.25;
+        nodes[6].shape = model::Shape::Polygon(5);
+        let def = FigureDef { nodes };
+        let prims = library_thumb_prims(&def, THUMB_SIZE, Color::WHITE);
+        let pieces: Vec<&LibraryThumbPrim> = prims
+            .iter()
+            .filter(|p| matches!(p, LibraryThumbPrim::Piece { .. }))
+            .collect();
+        // Node order: 1 flat piece, 4 taper pieces, 4
+        // gradient pieces, then nodes 4, 5, 6 flat.
+        assert_eq!(pieces.len(), 12);
+        // Node 1 inherits the base at full alpha.
+        match pieces[0] {
+            LibraryThumbPrim::Piece { color, alpha, .. } => {
+                assert_eq!(*color, Color::WHITE);
+                assert_eq!(*alpha, 1.0);
+            }
+            _ => unreachable!(),
+        }
+        // Node 2: every piece pure red; widths shrink
+        // along the taper, the tail reaching the
+        // legibility floor rather than vanishing.
+        let mut widths = Vec::new();
+        for prim in &pieces[1..5] {
+            match prim {
+                LibraryThumbPrim::Piece {
+                    width,
+                    color,
+                    alpha,
+                    ..
+                } => {
+                    assert_eq!(*color, Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 });
+                    assert_eq!(*alpha, 1.0);
+                    widths.push(*width);
+                }
+                _ => unreachable!(),
+            }
+        }
+        assert!(widths.windows(2).all(|w| w[0] >= w[1]), "widths: {widths:?}");
+        assert!(widths[0] > widths[3]);
+        assert_eq!(widths[3], THUMB_MIN_WIDTH);
+        // Node 3: the gradient actually travels — first
+        // and last piece colours differ, the last one
+        // blue-dominant (white → blue).
+        let grad: Vec<Color> = pieces[5..9]
+            .iter()
+            .map(|prim| match prim {
+                LibraryThumbPrim::Piece { color, .. } => *color,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_ne!(grad[0], grad[3]);
+        assert!(grad[3].b > grad[3].r, "last gradient colour: {:?}", grad[3]);
+        // Node 4: the style opacity is the piece alpha.
+        match pieces[9] {
+            LibraryThumbPrim::Piece { alpha, .. } => assert_eq!(*alpha, 0.5),
+            _ => unreachable!(),
+        }
+        // After the pieces: the Circle node's ring (24
+        // pts, at ITS style opacity), the Polygon node's
+        // disc (5 pts), and finally the head ring (16
+        // pts) at the base colour, full alpha — the
+        // stage's head-ring rule.
+        assert_eq!(prims.len(), 15);
+        match &prims[12] {
+            LibraryThumbPrim::Ring { pts, alpha, .. } => {
+                assert_eq!(pts.len(), 24);
+                assert_eq!(*alpha, 0.25);
+            }
+            other => panic!("expected circle ring, got {other:?}"),
+        }
+        match &prims[13] {
+            LibraryThumbPrim::Disc { pts, .. } => assert_eq!(pts.len(), 5),
+            other => panic!("expected polygon disc, got {other:?}"),
+        }
+        match &prims[14] {
+            LibraryThumbPrim::Ring {
+                pts,
+                color,
+                alpha,
+                ..
+            } => {
+                assert_eq!(pts.len(), 16);
+                assert_eq!(*color, Color::WHITE);
+                assert_eq!(*alpha, 1.0);
+            }
+            other => panic!("expected head ring, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thumb_shape_empty_only_for_an_empty_def() {
+        let empty = FigureDef { nodes: Vec::new() };
+        assert!(library_thumb_prims(&empty, THUMB_SIZE, Color::WHITE).is_empty());
+        assert!(library_thumb_shape(&empty, THUMB_SIZE, Color::WHITE).is_empty());
+        assert!(!library_thumb_shape(&FigureDef::humanoid(), THUMB_SIZE, Color::WHITE).is_empty());
     }
 }

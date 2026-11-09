@@ -43,6 +43,22 @@
 //! regardless of hidden/solo state (the row's name dimming
 //! and eye toggle already carry visibility).
 //!
+//! Wave 12 (D6 audit) makes the miniature's SEGMENT colours
+//! per-node: each segment carries its child node's resolved
+//! colour (`NodeDef::color` else the figure colour — the
+//! stage's own resolution in `stage_view`), so a figure
+//! whose def styles individual segments shows those colours
+//! on its card, not one flat figure colour. Head rings keep
+//! the figure colour, exactly as the stage draws them (its
+//! ring pass uses the figure colour, never the head node's
+//! override). The miniature's geometry stays the deliberate
+//! hairline simplification — uniform [`THUMB_WIDTH`], no
+//! taper/cap/gradient/style-opacity, no bend arcs, no
+//! Circle/Polygon node glyphs; that divergence from the
+//! stage's `paint::styled_segment_pieces` construction is
+//! a recorded Wave 12 remainder (D6 report), not silently
+//! claimed as fidelity.
+//!
 //! Phase G (section 17/40) adds a name filter: a `TextEdit`
 //! in [`FiguresPanelState::filter`] (key `figures-filter`,
 //! directly under the header) narrows the list through the
@@ -294,11 +310,14 @@ const HEAD_RING_SIDES: usize = 16;
 /// polygon around a mapped head joint. `thumb_shape` turns
 /// these into a `Shape`; keeping them separate makes the
 /// geometry unit-testable (a built `Shape`'s ops are
-/// crate-private to rune).
+/// crate-private to rune). Each prim carries the colour it
+/// paints in (`0xRRGGBB`): a segment takes its child node's
+/// resolved colour, a ring the figure colour — the stage's
+/// own two choices (Wave 12, D6).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ThumbPrim {
-    Segment { a: [f32; 2], b: [f32; 2] },
-    Ring { pts: Vec<[f32; 2]> },
+    Segment { a: [f32; 2], b: [f32; 2], color: u32 },
+    Ring { pts: Vec<[f32; 2]>, color: u32 },
 }
 
 /// The bounding-box fit of a thumbnail: stage points map to
@@ -362,6 +381,8 @@ pub fn thumb_fit(positions: &[V2], has_head: bool, size: f32, head_r: f32) -> Th
 /// [`thumb_fit`]. Positions come from
 /// `EditorCore::positions_f` at `EditorCore::display_frame`
 /// — the stage's own evaluation, graph channels included.
+/// Each segment carries its child node's resolved colour
+/// and each ring the figure colour (see [`ThumbPrim`]).
 /// Empty when `fi` is out of range or the figure has no
 /// nodes.
 pub fn thumb_prims(core: &EditorCore, fi: usize, size: f32) -> Vec<ThumbPrim> {
@@ -384,6 +405,11 @@ pub fn thumb_prims(core: &EditorCore, fi: usize, size: f32) -> Vec<ThumbPrim> {
             prims.push(ThumbPrim::Segment {
                 a: fit.map(pos[p]),
                 b: fit.map(pos[i]),
+                // The segment to node `i` takes node `i`'s
+                // resolved colour — the stage's rule
+                // (`node.color.unwrap_or(fig.color)`,
+                // stage_view's segment pass).
+                color: node.color.unwrap_or(fig.color),
             });
         }
     }
@@ -391,6 +417,9 @@ pub fn thumb_prims(core: &EditorCore, fi: usize, size: f32) -> Vec<ThumbPrim> {
         if node.head {
             prims.push(ThumbPrim::Ring {
                 pts: ngon(fit.map(pos[i]), head_r * fit.scale, HEAD_RING_SIDES),
+                // The stage's ring pass paints the figure
+                // colour, never the head node's override.
+                color: fig.color,
             });
         }
     }
@@ -399,21 +428,31 @@ pub fn thumb_prims(core: &EditorCore, fi: usize, size: f32) -> Vec<ThumbPrim> {
 
 /// Figure `fi`'s rig at the current display frame as a
 /// miniature `Shape` for a `size`-point square canvas:
-/// segments as [`THUMB_WIDTH`]-point round-capped lines in
-/// the figure's colour, plus a head ring per head node.
+/// segments as [`THUMB_WIDTH`]-point round-capped lines,
+/// each in its own node's resolved colour, plus a head
+/// ring per head node in the figure's colour.
 /// An out-of-range `fi` yields an empty shape.
 pub fn thumb_shape(core: &EditorCore, fi: usize, size: f32) -> Shape {
-    let Some(fig) = core.project.figures.get(fi) else {
+    if core.project.figures.get(fi).is_none() {
         return Shape::new();
-    };
-    let color = hex_color(fig.color).unwrap_or(Color::WHITE);
+    }
     let mut shape = Shape::new();
     for prim in thumb_prims(core, fi, size) {
         shape = match prim {
-            ThumbPrim::Segment { a, b } => shape.line(a, b, THUMB_WIDTH, LineCap::Round, color),
-            ThumbPrim::Ring { pts } => {
-                shape.stroke_with(pts, true, THUMB_WIDTH, LineCap::Round, color)
-            }
+            ThumbPrim::Segment { a, b, color } => shape.line(
+                a,
+                b,
+                THUMB_WIDTH,
+                LineCap::Round,
+                hex_color(color).unwrap_or(Color::WHITE),
+            ),
+            ThumbPrim::Ring { pts, color } => shape.stroke_with(
+                pts,
+                true,
+                THUMB_WIDTH,
+                LineCap::Round,
+                hex_color(color).unwrap_or(Color::WHITE),
+            ),
         };
     }
     shape
@@ -1126,8 +1165,8 @@ mod tests {
         for fi in 0..core.project.figures.len() {
             for prim in thumb_prims(&core, fi, THUMB_SIZE) {
                 let pts: Vec<[f32; 2]> = match &prim {
-                    ThumbPrim::Segment { a, b } => vec![*a, *b],
-                    ThumbPrim::Ring { pts } => pts.clone(),
+                    ThumbPrim::Segment { a, b, .. } => vec![*a, *b],
+                    ThumbPrim::Ring { pts, .. } => pts.clone(),
                 };
                 assert!(!pts.is_empty());
                 for p in pts {
@@ -1154,6 +1193,87 @@ mod tests {
         // Out-of-range figure: empty results, no panic.
         assert!(thumb_shape(&core, 999, THUMB_SIZE).is_empty());
         assert!(thumb_prims(&core, 999, THUMB_SIZE).is_empty());
+    }
+
+    #[test]
+    fn thumb_prims_carry_each_nodes_resolved_colour() {
+        // Wave 12 (D6): a segment paints in its child node's
+        // resolved colour — the node's own override when it
+        // has one, else the figure colour (the stage's rule);
+        // a head ring paints in the figure colour even when
+        // the head node carries an override (the stage's ring
+        // pass never reads the node colour).
+        let mut core = EditorCore::new();
+        let fi = core
+            .project
+            .figures
+            .iter()
+            .position(|f| {
+                f.def.nodes.iter().any(|n| n.head)
+                    && f.def
+                        .nodes
+                        .iter()
+                        .filter(|n| n.parent.is_some() && !n.head)
+                        .count()
+                        >= 2
+            })
+            .expect("a demo figure with a head and 2+ plain segments");
+        let fig_color = core.project.figures[fi].color;
+        let head = core.project.figures[fi]
+            .def
+            .nodes
+            .iter()
+            .position(|n| n.head)
+            .expect("a head node");
+        let plain: Vec<usize> = core.project.figures[fi]
+            .def
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.parent.is_some() && !n.head)
+            .map(|(i, _)| i)
+            .take(2)
+            .collect();
+        // One plain segment gets an explicit colour, the
+        // other is pinned to inheriting, and the head node
+        // gets an override its ring must ignore.
+        core.project.figures[fi].def.nodes[plain[0]].color = Some(0x112233);
+        core.project.figures[fi].def.nodes[plain[1]].color = None;
+        core.project.figures[fi].def.nodes[head].color = Some(0x445566);
+        let prims = thumb_prims(&core, fi, THUMB_SIZE);
+        // Segment colours, in node order, mirror the def's
+        // resolution exactly.
+        let seg_colors: Vec<u32> = prims
+            .iter()
+            .filter_map(|p| match p {
+                ThumbPrim::Segment { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<u32> = core.project.figures[fi]
+            .def
+            .nodes
+            .iter()
+            .filter(|n| n.parent.is_some())
+            .map(|n| n.color.unwrap_or(fig_color))
+            .collect();
+        assert_eq!(seg_colors, expected);
+        assert!(seg_colors.contains(&0x112233), "the override shows");
+        assert!(
+            seg_colors.contains(&fig_color),
+            "the inheriting node shows the figure colour"
+        );
+        // Every ring carries the figure colour, never the
+        // head node's 0x445566 override.
+        let ring_colors: Vec<u32> = prims
+            .iter()
+            .filter_map(|p| match p {
+                ThumbPrim::Ring { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert!(!ring_colors.is_empty());
+        assert!(ring_colors.iter().all(|c| *c == fig_color));
     }
 
     #[test]
@@ -1236,7 +1356,7 @@ mod tests {
         let ring = prims
             .iter()
             .find_map(|p| match p {
-                ThumbPrim::Ring { pts } => Some(pts),
+                ThumbPrim::Ring { pts, .. } => Some(pts),
                 _ => None,
             })
             .expect("a head ring prim");
@@ -1276,7 +1396,7 @@ mod tests {
         let ring = prims
             .iter()
             .find_map(|p| match p {
-                ThumbPrim::Ring { pts } => Some(pts),
+                ThumbPrim::Ring { pts, .. } => Some(pts),
                 _ => None,
             })
             .expect("a head ring prim");
