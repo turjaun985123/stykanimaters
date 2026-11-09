@@ -120,7 +120,9 @@ pub enum SegmentMedia {
 }
 
 /// A named image in the project's asset table (PNG bytes).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// (PartialEq derived in Wave 12 so the save/load round-trip
+/// tests can compare whole asset tables directly.)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ImageAsset {
     pub name: String,
     pub png: Vec<u8>,
